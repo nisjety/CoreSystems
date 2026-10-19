@@ -58,6 +58,17 @@ describe('blockedStateFor', () => {
     expect(blockedStateFor({ kind, strength, block_reason: 'captcha_widget' })).toBeNull()
   })
 
+  // The other half of "strength alone decides": whatever Quarry calls the kind, a strong
+  // verdict is a blocked page. A regression that special-cased one kind (say, hiding a
+  // strong login or consent signal) would pass every row above and fail here.
+  it.each(['captcha', 'waf', 'login', 'consent', 'paywall', 'rate_limit', 'access_denied', 'geo_blocked', 'unknown'])(
+    'shows the notice for a strong %s signal',
+    (kind) => {
+      expect(blockedStateFor(strong({ kind }))).toEqual({ reason: 'captcha_widget' })
+      expect(blockedStateFor(strong({ kind, block_reason: null }))).toEqual({ reason: null })
+    },
+  )
+
   it('shows nothing for a signal with no strength, or one it does not know', () => {
     expect(blockedStateFor({ kind: 'captcha', requires_escalation: true })).toBeNull()
     expect(blockedStateFor(strong({ strength: undefined }))).toBeNull()

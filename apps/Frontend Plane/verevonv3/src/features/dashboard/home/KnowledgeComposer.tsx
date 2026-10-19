@@ -238,9 +238,11 @@ export function KnowledgeComposer(props: {
   // One `Idempotency-Key` per logical AI-run start: kept across a retry of the
   // same start after an ambiguous failure, dropped on any definite answer.
   const aiRunStartKeys = createAiRunStartKeyring()
-  // The run the last start created, so leaving a blocked site can stop it (the
-  // server treats a run that already ended as stopped). Dropped with the preview.
-  let lastAiRunId: string | null = null
+  // The run the last start created, with the session it was started on, so leaving a
+  // blocked site can stop it (the server treats a run that already ended as nothing
+  // left to stop). Only ever used for that same session, and dropped wherever the
+  // preview goes away (Discard, leaving a blocked site, adding to the knowledge base).
+  let lastAiRun: { sessionId: string; runId: string } | null = null
   const [preview, setPreview] = createSignal<ScrapePreview | null>(null)
   const [discovery, setDiscovery] = createSignal<CrawlDiscovery | null>(null)
   const [discovering, setDiscovering] = createSignal(false)
@@ -885,7 +887,7 @@ export function KnowledgeComposer(props: {
 
   const clearPreview = () => {
     const current = preview()
-    lastAiRunId = null
+    lastAiRun = null
     browserLoop.requestStop()
     aiRunAbort?.abort()
     setAiRunRationale(null)
@@ -947,7 +949,7 @@ export function KnowledgeComposer(props: {
       await executeAction(
         'browser.blocked.try_other_source',
         { orgId: id, type: 'human', userId: ctx()?.userId ?? '' },
-        lastAiRunId ? { sessionId, runId: lastAiRunId } : { sessionId },
+        lastAiRun?.sessionId === sessionId ? { sessionId, runId: lastAiRun.runId } : { sessionId },
       )
     } catch (reason) {
       setFormError(browserErrorMessage(reason, i18n.tr, { no: 'Kunne ikke forlate nettstedet.', en: 'Could not leave the site.' }))
@@ -1088,7 +1090,7 @@ export function KnowledgeComposer(props: {
         throw startFailure
       }
       browserLoop.attachRun({ orgId: id, runId: run.runId })
-      lastAiRunId = run.runId
+      lastAiRun = { sessionId, runId: run.runId }
       await streamRunEvents(run.runId, {
         onBrowserAction: (event) => {
           dispatchCount += 1
@@ -1258,6 +1260,7 @@ export function KnowledgeComposer(props: {
       })
       updateJob(key, { status: 'completed' })
       browserLoop.requestStop()
+      lastAiRun = null
       closePreviewBrowserSession(current)
       clearStoredBrowserPreview()
       setBrowserRationales([])

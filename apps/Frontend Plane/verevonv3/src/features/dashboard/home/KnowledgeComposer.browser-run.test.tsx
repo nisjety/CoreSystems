@@ -22,14 +22,14 @@ function json(status: number, body: unknown, headers: Record<string, string> = {
 
 const STRONG_CHALLENGE = { block_reason: 'waf_interstitial', kind: 'waf', recovery: 'available', strength: 'strong' }
 
-function liveSession(challenge?: unknown) {
+function liveSession(challenge?: unknown, id = 'sess-1') {
   return {
     data: {
-      observation: { challenge, run_id: 'sess-1', step: 0, title: 'Example', url: 'https://example.test/' },
+      observation: { challenge, run_id: id, step: 0, title: 'Example', url: 'https://example.test/' },
       session: {
         capabilities: ['navigate'],
         control: { mode: 'agent_control' },
-        id: 'sess-1',
+        id,
         profile: { scope: 'run_scoped', storage: 'isolated' },
         renderMode: 'chromium',
         status: 'live',
@@ -234,6 +234,28 @@ describe('KnowledgeComposer blocked notice', () => {
 
     await waitFor(() => expect(actionCalls(calls)).toHaveLength(1))
     expect(actionCalls(calls)[0]!.body).toMatchObject({ input: { runId: 'run-1', sessionId: 'sess-1' } })
+  })
+
+  async function startRunOn(container: HTMLElement, calls: Call[]) {
+    await waitFor(() => expect(loopButton(container).disabled).toBe(false))
+    fireEvent.click(loopButton(container))
+    await waitFor(() => expect(aiRunStarts(calls)).toHaveLength(1))
+    await waitFor(() => expect(calls.some((call) => call.path.endsWith('/runs/run-1/events'))).toBe(true))
+  }
+
+  it('does not name the run of an earlier preview after Discard and a new preview', async () => {
+    const calls = gateway({ challenge: STRONG_CHALLENGE })
+    const view = render(() => <KnowledgeComposer />)
+    await openPreview(view.container)
+    await startRunOn(view.container, calls)
+
+    fireEvent.click(view.container.querySelector<HTMLButtonElement>('.knowledge-browser-close')!)
+    await waitFor(() => expect(view.container.querySelector('.knowledge-browser-chrome')).toBeNull())
+    await openPreview(view.container)
+    fireEvent.click(leaveButton(view.container))
+
+    await waitFor(() => expect(actionCalls(calls)).toHaveLength(1))
+    expect((actionCalls(calls)[0]!.body as { input: Record<string, unknown> }).input).toEqual({ sessionId: 'sess-1' })
   })
 
   it('keeps the preview and says why when the action fails, so Discard still works', async () => {
