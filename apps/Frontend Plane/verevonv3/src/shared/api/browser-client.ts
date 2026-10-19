@@ -30,7 +30,29 @@ export type BrowserDomSummary = {
   text_snippet?: string | null
 }
 
+/**
+ * Quarry's `ChallengeSignal` as it arrives on an observation (snake_case: the gateway
+ * passes the observation through). Only `strength === 'strong'` is a verdict that a bot
+ * wall stands in front of the page; `weak` and `non_signal` (a login form, a cookie
+ * banner, a paywall, a rate limit, a bare status) are ordinary access states. A signal
+ * from before the taxonomy has no `strength`. `evidence` is deliberately not typed:
+ * it is never shown.
+ */
+export type BrowserChallengeStrength = 'strong' | 'weak' | 'non_signal'
+
+export type BrowserChallenge = {
+  /** Why a strong signal is strong: `captcha_widget`, `waf_interstitial`, `challenge_loop` or `unexpected_bot_error`. */
+  block_reason?: string | null
+  confidence?: number
+  kind: string
+  /** `available` while one wait or reload is still allowed, `exhausted` once it is spent. */
+  recovery?: string
+  requires_escalation?: boolean
+  strength?: BrowserChallengeStrength | string
+}
+
 export type BrowserObservation = {
+  challenge?: BrowserChallenge | null
   console_summary?: Array<{ level: string; text: string }>
   dom_summary?: BrowserDomSummary | null
   network_summary?: Array<{ content_type?: string | null; method: string; status: number; url: string }>

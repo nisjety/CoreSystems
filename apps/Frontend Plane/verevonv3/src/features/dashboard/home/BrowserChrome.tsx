@@ -61,6 +61,7 @@ import type {
 import type { ApprovalDecision } from '@/shared/api/orchestration-client'
 import { ERROR_COPY } from '@/shared/i18n/errors'
 import { isBrowserLoopRunning, type BrowserLoopState } from './browser-loop'
+import { BrowserBlockedNotice } from './BrowserBlockedNotice'
 import {
   closeBrowserChromePopover,
   evidenceIsEphemeral,
@@ -437,6 +438,8 @@ export function BrowserChrome(props: {
   onBrowserSelectTab?: (tabId: string) => Promise<void> | void
   onBrowserSuggestAction?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
   onBrowserSocketObservation?: (observation: BrowserObservation, session?: BrowserSession) => void
+  /** "Try another source" in the blocked notice: leave the site the observation says blocks automation. */
+  onBrowserTryOtherSource?: () => void
   /** Phase 5 HITL gate: approve or reject a pending browser-action approval. */
   onDecideBrowserApproval?: (approvalKey: string, decision: ApprovalDecision) => void
   /** Phase 3 continuation: full profile CRUD surfaced in the popover. Omit
@@ -1765,6 +1768,17 @@ export function BrowserChrome(props: {
             </button>
           </div>
         </div>
+      </Show>
+
+      <Show when={isLive()}>
+        <BrowserBlockedNotice
+          challenge={session().observation?.challenge}
+          humanTakeoverActive={humanTakeoverActive()}
+          takeoverDisabled={browserControlModeDisabled()}
+          tryAnotherSourceDisabled={props.browserBusy === true || !props.onBrowserTryOtherSource}
+          onTakeOver={toggleBrowserControlMode}
+          onTryAnotherSource={() => props.onBrowserTryOtherSource?.()}
+        />
       </Show>
 
       <div

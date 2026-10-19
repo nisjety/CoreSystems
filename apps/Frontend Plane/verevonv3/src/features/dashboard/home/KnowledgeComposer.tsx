@@ -238,6 +238,9 @@ export function KnowledgeComposer(props: {
   // One `Idempotency-Key` per logical AI-run start: kept across a retry of the
   // same start after an ambiguous failure, dropped on any definite answer.
   const aiRunStartKeys = createAiRunStartKeyring()
+  // The run the last start created, so leaving a blocked site can stop it (the
+  // server treats a run that already ended as stopped). Dropped with the preview.
+  let lastAiRunId: string | null = null
   const [preview, setPreview] = createSignal<ScrapePreview | null>(null)
   const [discovery, setDiscovery] = createSignal<CrawlDiscovery | null>(null)
   const [discovering, setDiscovering] = createSignal(false)
@@ -882,6 +885,7 @@ export function KnowledgeComposer(props: {
 
   const clearPreview = () => {
     const current = preview()
+    lastAiRunId = null
     browserLoop.requestStop()
     aiRunAbort?.abort()
     setAiRunRationale(null)
@@ -926,6 +930,32 @@ export function KnowledgeComposer(props: {
     } finally {
       setBrowserBusy(false)
     }
+  }
+
+  // "Try another source" in the blocked notice. The action stops the AI run (if
+  // there was one) and closes the session on the server; only when it succeeds does the
+  // preview go the way Discard sends it, back to the link field. A failure keeps the
+  // preview, so Discard still works, and says why.
+  const tryOtherSourceAfterBlock = async () => {
+    const current = preview()
+    const sessionId = current?.browserSession?.session.id
+    const id = orgId()
+    if (!current || !sessionId || !id || browserBusy()) return
+    setBrowserBusy(true)
+    setFormError(null)
+    try {
+      await executeAction(
+        'browser.blocked.try_other_source',
+        { orgId: id, type: 'human', userId: ctx()?.userId ?? '' },
+        lastAiRunId ? { sessionId, runId: lastAiRunId } : { sessionId },
+      )
+    } catch (reason) {
+      setFormError(browserErrorMessage(reason, i18n.tr, { no: 'Kunne ikke forlate nettstedet.', en: 'Could not leave the site.' }))
+      return
+    } finally {
+      setBrowserBusy(false)
+    }
+    clearPreview()
   }
 
   const createPreviewBrowserTab = async () => {
@@ -1058,6 +1088,7 @@ export function KnowledgeComposer(props: {
         throw startFailure
       }
       browserLoop.attachRun({ orgId: id, runId: run.runId })
+      lastAiRunId = run.runId
       await streamRunEvents(run.runId, {
         onBrowserAction: (event) => {
           dispatchCount += 1
@@ -1601,6 +1632,7 @@ export function KnowledgeComposer(props: {
             onBrowserSelectTab={selectPreviewBrowserTab}
             onBrowserSuggestAction={performBrowserSuggestedAction}
             onBrowserSocketObservation={handleBrowserSocketObservation}
+            onBrowserTryOtherSource={() => void tryOtherSourceAfterBlock()}
             onAdd={(markdown, allSelected) => void addToKnowledge(markdown, allSelected)}
             onDiscard={clearPreview}
             preview={current}

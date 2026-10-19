@@ -221,6 +221,7 @@ function BrowserSessionSurface(props: {
   onBrowserSelectTab?: (tabId: string) => Promise<void> | void
   onBrowserSuggestAction?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
   onBrowserSocketObservation?: (observation: BrowserObservation) => void
+  onBrowserTryOtherSource?: () => void
   onDecideBrowserApproval?: (approvalKey: string, decision: ApprovalDecision) => void
   onEnter: (index: number) => void
   onLeave: (index: number) => void
@@ -289,6 +290,7 @@ function BrowserSessionSurface(props: {
         onBrowserSelectTab={props.onBrowserSelectTab}
         onBrowserSuggestAction={props.onBrowserSuggestAction}
         onBrowserSocketObservation={props.onBrowserSocketObservation}
+        onBrowserTryOtherSource={props.onBrowserTryOtherSource}
         onDecideBrowserApproval={props.onDecideBrowserApproval}
         profileManager={props.profileManager}
         profileProbe={props.profileProbe}
@@ -418,6 +420,7 @@ export function ScrapePreviewPanel(props: {
   onBrowserSelectTab?: (tabId: string) => Promise<void> | void
   onBrowserSuggestAction?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
   onBrowserSocketObservation?: (observation: BrowserObservation) => void
+  onBrowserTryOtherSource?: () => void
   onDecideBrowserApproval?: (approvalKey: string, decision: ApprovalDecision) => void
   onAdd: (selectedMarkdown: string, allSelected: boolean) => void
   onDiscard: () => void
@@ -475,6 +478,7 @@ export function ScrapePreviewPanel(props: {
         onBrowserSelectTab={props.onBrowserSelectTab}
         onBrowserSuggestAction={props.onBrowserSuggestAction}
         onBrowserSocketObservation={props.onBrowserSocketObservation}
+        onBrowserTryOtherSource={props.onBrowserTryOtherSource}
         onDecideBrowserApproval={props.onDecideBrowserApproval}
         onEnter={enter}
         onLeave={leave}
