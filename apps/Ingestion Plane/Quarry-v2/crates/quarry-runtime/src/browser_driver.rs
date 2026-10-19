@@ -13,7 +13,7 @@ use quarry_core::output::DriverKind;
 use quarry_core::{
     ids::kinds,
     lease::{BrowserLease, ProxyAffinity},
-    QuarryResult,
+    ErrorCode, QuarryError, QuarryResult,
 };
 
 use crate::{
@@ -97,17 +97,35 @@ impl HeldSession {
 
     /// Release the session and give the slot back. `failed` (or a failed
     /// release) poisons the lease so the pool does not hand it out again.
+    ///
+    /// The release runs on its own task and this future only awaits the
+    /// join handle: a fetch cancelled WHILE the release is running (the
+    /// release can take seconds in Chromium) cannot abort it half way, and
+    /// the slot comes back only once the release is over. The guard has
+    /// already handed session and lease to that task, so its own drop has
+    /// nothing left to do.
     async fn finish(mut self, failed: bool) -> QuarryResult<()> {
         let session = self.session.take().expect("held until finish");
-        let mut lease = self.lease.take();
-        let released = self.inner.release(session).await;
-        if failed || released.is_err() {
-            if let Some(lease) = lease.as_mut() {
-                lease.poison();
+        let lease = self.lease.take();
+        let inner = self.inner.clone();
+        let release = tokio::spawn(async move {
+            let mut lease = lease;
+            let released = inner.release(session).await;
+            if failed || released.is_err() {
+                if let Some(lease) = lease.as_mut() {
+                    lease.poison();
+                }
             }
+            drop(lease);
+            released
+        });
+        match release.await {
+            Ok(released) => released,
+            Err(_) => Err(QuarryError::new(
+                ErrorCode::Internal,
+                "browser session release task failed",
+            )),
         }
-        drop(lease);
-        released
     }
 }
 
@@ -716,6 +734,116 @@ mod tests {
             *driver.free_slots_at_release.lock().unwrap(),
             vec![0],
             "the slot was still held while the session was released"
+        );
+        assert_eq!(pool.available(), 1);
+    }
+
+    /// A driver whose `release` takes a while (closing a Chromium context
+    /// can): the fetch itself is quick, so the only place to cancel it is
+    /// inside the release.
+    struct SlowReleaseDriver {
+        release_started: tokio::sync::Notify,
+        release_gate: tokio::sync::Notify,
+        completed: AtomicUsize,
+        free_slots_at_completion: std::sync::Mutex<Vec<usize>>,
+        pool: std::sync::OnceLock<Arc<RuntimeLeasePool>>,
+    }
+
+    #[async_trait]
+    impl BrowserDriverTrait for SlowReleaseDriver {
+        async fn configure_egress_policy(
+            &self,
+            _session: &BrowserSession,
+            _policy: BrowserEgressPolicy,
+        ) -> QuarryResult<()> {
+            Ok(())
+        }
+        async fn acquire(&self, lease: &BrowserLease) -> QuarryResult<BrowserSession> {
+            Ok(BrowserSession {
+                lease: lease.clone(),
+                inner: Arc::new(TokioMutex::new(SessionInner::default())),
+            })
+        }
+        async fn release(&self, _session: BrowserSession) -> QuarryResult<()> {
+            self.release_started.notify_one();
+            self.release_gate.notified().await;
+            let free = self.pool.get().map(|pool| pool.available()).unwrap_or(usize::MAX);
+            self.free_slots_at_completion.lock().unwrap().push(free);
+            self.completed.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        async fn goto(&self, _session: &BrowserSession, _url: &str) -> QuarryResult<()> {
+            Ok(())
+        }
+        async fn content(&self, _session: &BrowserSession) -> QuarryResult<Bytes> {
+            Ok(Bytes::from_static(b"<html>ok</html>"))
+        }
+        async fn screenshot(
+            &self,
+            _session: &BrowserSession,
+            _full_page: bool,
+        ) -> QuarryResult<Bytes> {
+            Ok(Bytes::new())
+        }
+        async fn pdf(&self, _session: &BrowserSession) -> QuarryResult<Bytes> {
+            Ok(Bytes::new())
+        }
+        async fn wait_for(
+            &self,
+            _session: &BrowserSession,
+            _selector: &str,
+            _timeout_ms: u32,
+        ) -> QuarryResult<()> {
+            Ok(())
+        }
+    }
+
+    /// A fetch cancelled while its final release is running does not abort
+    /// that release: it runs to completion, and the pool slot comes back
+    /// only after it.
+    #[tokio::test]
+    async fn a_fetch_cancelled_during_release_still_completes_the_release() {
+        let driver = Arc::new(SlowReleaseDriver {
+            release_started: tokio::sync::Notify::new(),
+            release_gate: tokio::sync::Notify::new(),
+            completed: AtomicUsize::new(0),
+            free_slots_at_completion: std::sync::Mutex::new(Vec::new()),
+            pool: std::sync::OnceLock::new(),
+        });
+        let pool = Arc::new(RuntimeLeasePool::new(1));
+        driver.pool.set(pool.clone()).ok().expect("set once");
+        let adapter = Arc::new(BrowserDriverAdapter::new(driver.clone(), pool.clone()));
+        let fetching = {
+            let adapter = adapter.clone();
+            tokio::spawn(async move {
+                let url = Url::parse("https://example.com/").unwrap();
+                adapter.fetch(&url).await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(5), driver.release_started.notified())
+            .await
+            .expect("the fetch reached its release");
+
+        fetching.abort();
+        assert!(fetching.await.expect_err("aborted").is_cancelled());
+        // Cancelled in the middle of the release: the release is unfinished
+        // and the slot is still held.
+        assert_eq!(driver.completed.load(Ordering::SeqCst), 0);
+        assert_eq!(pool.available(), 0, "the slot is held until the release is over");
+
+        driver.release_gate.notify_one();
+        let finished = tokio::time::timeout(Duration::from_secs(5), async {
+            while driver.completed.load(Ordering::SeqCst) == 0 || pool.available() == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(finished.is_ok(), "the release ran to completion after the cancel");
+        assert_eq!(driver.completed.load(Ordering::SeqCst), 1, "released exactly once");
+        assert_eq!(
+            *driver.free_slots_at_completion.lock().unwrap(),
+            vec![0],
+            "the slot was held until the release finished"
         );
         assert_eq!(pool.available(), 1);
     }
