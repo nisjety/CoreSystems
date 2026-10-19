@@ -4,8 +4,11 @@
 //! persisted. The fixture is the contract: change it only with a version bump.
 
 use mp_contracts::loop_fold::{
-    assert_no_credentials, contains_credential_shape, prompt_digest, FoldRefusal, LoopFoldV1,
-    PauseKind, EXT_EFFECT_LEDGER, EXT_NOT_RESUMABLE,
+    assert_no_credentials, child_ceiling_in, contains_credential_shape, park_ref, parks_in,
+    prompt_digest, route_connection_in, route_model_in, FoldRefusal, LoopFoldV1, PauseKind,
+    PendingPause, EXT_CHILD_CEILING, EXT_EFFECT_LEDGER, EXT_NOT_RESUMABLE, EXT_PARKS,
+    EXT_ROUTE_CONNECTION, EXT_ROUTE_MODEL, LOOP_PARKING_ENV, MAX_PARKS_PER_RUN,
+    PARK_DEFAULT_WAIT_SECS, PARK_SHORT_WAIT_SECS,
 };
 
 const GOLDEN: &str = include_str!("fixtures/loop-fold-v1.json");
@@ -288,4 +291,101 @@ fn contains_credential_shape_agrees_with_assert_no_credentials() {
         assert_eq!(contains_credential_shape(text), shaped, "{text:?}");
         assert_eq!(assert_no_credentials(&fold).is_err(), shaped, "{text:?}");
     }
+}
+
+// ---- The park fold (build plan WS03 S8-A) ----
+//
+// A park is a fold written at a round boundary with `pending` of kind `park` and four
+// extension keys that make it restorable without the original request: the count of
+// parks the run has taken, the model and connection id of the pinned route, and the
+// child ceiling. The keys are written ONLY on a park fold, and only identifiers and
+// counts, never a credential. The writer (execution-core), the store validation
+// (session-core) and the resume read them through the helpers pinned here, so a rename
+// or a change of the reference's shape fails this test before it strands a live park.
+
+/// The golden round fold, turned into the park fold the executor writes: the same
+/// boundary, plus the park marker and the four keys.
+fn park_fold(run_id: &str, parks: u32) -> LoopFoldV1 {
+    let mut fold = parse(WRITER_ROUND);
+    run_id.clone_into(&mut fold.run_id);
+    fold.pending = Some(PendingPause {
+        kind: PauseKind::Park,
+        pause_ref: park_ref(run_id, parks),
+        step_id: String::new(),
+        call: String::new(),
+        action_fingerprint: String::new(),
+    });
+    fold.extensions.insert(EXT_PARKS.to_owned(), serde_json::json!(parks));
+    fold.extensions.insert(EXT_ROUTE_MODEL.to_owned(), serde_json::json!("model-golden"));
+    fold.extensions
+        .insert(EXT_ROUTE_CONNECTION.to_owned(), serde_json::json!("conn-golden"));
+    fold.extensions.insert(EXT_CHILD_CEILING.to_owned(), serde_json::json!(2));
+    fold
+}
+
+#[test]
+fn park_extension_keys_and_park_ref_are_pinned() {
+    // The wire names of the four keys, and of the switch that turns the writer on.
+    assert_eq!(EXT_PARKS, "parks");
+    assert_eq!(EXT_ROUTE_MODEL, "route_model");
+    assert_eq!(EXT_ROUTE_CONNECTION, "route_connection_id");
+    assert_eq!(EXT_CHILD_CEILING, "child_ceiling");
+    assert_eq!(LOOP_PARKING_ENV, "EXECUTION_LOOP_PARKING_ENABLED");
+    // The bounds the store enforces and the executor stays inside.
+    assert_eq!(MAX_PARKS_PER_RUN, 5);
+    assert_eq!(PARK_DEFAULT_WAIT_SECS, 300);
+    assert_eq!(PARK_SHORT_WAIT_SECS, 60);
+    // The reference shape: the executor writes it, session-core's save validates it and
+    // the resume derives it again from the fold's own count.
+    assert_eq!(park_ref("run-golden-w", 1), "park:run-golden-w:1");
+    assert_eq!(park_ref("run-golden-w", MAX_PARKS_PER_RUN), "park:run-golden-w:5");
+
+    // The committed round golden is a fold that never parked: none of the keys.
+    let committed = parse(WRITER_ROUND);
+    assert_eq!(parks_in(&committed), 0);
+    assert_eq!(route_model_in(&committed), None);
+    assert_eq!(route_connection_in(&committed), None);
+    assert_eq!(child_ceiling_in(&committed), None);
+    for key in [EXT_PARKS, EXT_ROUTE_MODEL, EXT_ROUTE_CONNECTION, EXT_CHILD_CEILING] {
+        assert!(!committed.extensions.contains_key(key), "{key}");
+    }
+
+    // A park fold: the exact extension object the writer must produce, ledger marker
+    // included, and nothing else added.
+    let fold = park_fold("run-golden-w", 2);
+    assert_eq!(
+        serde_json::to_value(&fold.extensions).expect("serialize"),
+        serde_json::json!({
+            "effect_ledger": true,
+            "parks": 2,
+            "route_model": "model-golden",
+            "route_connection_id": "conn-golden",
+            "child_ceiling": 2,
+        })
+    );
+    assert_eq!(
+        fold.pending.as_ref().map(|p| (p.kind, p.pause_ref.as_str())),
+        Some((PauseKind::Park, "park:run-golden-w:2"))
+    );
+    assert!(fold.is_resumable());
+    assert_eq!(fold.extensions.get(EXT_EFFECT_LEDGER), Some(&serde_json::json!(true)));
+    assert_eq!(assert_no_credentials(&fold), Ok(()), "a park fold holds no credential");
+
+    // Through the wire the readers still see the values, and the reference still equals
+    // the one derived from the fold's own count.
+    let back = LoopFoldV1::from_bytes(&fold.to_bytes().expect("a park fold serializes"))
+        .expect("a park fold is a valid v1 fold");
+    assert_eq!(back, fold);
+    assert_eq!(parks_in(&back), 2);
+    assert_eq!(route_model_in(&back), Some("model-golden"));
+    assert_eq!(route_connection_in(&back), Some("conn-golden"));
+    assert_eq!(child_ceiling_in(&back), Some(2));
+    let pending = back.pending.as_ref().expect("a park names its pause");
+    assert_eq!(pending.pause_ref, park_ref(&back.run_id, parks_in(&back)));
+
+    // An older reader that does not know the keys keeps them: they ride in `extensions`.
+    let mut value = serde_json::to_value(&fold).expect("serialize");
+    value["a_later_field"] = serde_json::json!(true);
+    let kept = LoopFoldV1::from_bytes(&serde_json::to_vec(&value).unwrap()).expect("parses");
+    assert_eq!(parks_in(&kept), 2);
 }

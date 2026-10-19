@@ -366,6 +366,106 @@ pub fn loop_resume_enabled() -> bool {
     switch_from(std::env::var(LOOP_RESUME_ENV).ok().as_deref())
 }
 
+/// The most parks one run may take (build plan WS03 S8-A). The count rides in the park
+/// fold ([`EXT_PARKS`]); a store refuses a park beyond it and the executor stops asking.
+pub const MAX_PARKS_PER_RUN: u32 = 5;
+
+/// The extension key of a park fold's count of parks the run has taken, this one
+/// included (a number, 1..=[`MAX_PARKS_PER_RUN`]). The park's `pause_ref` is
+/// [`park_ref`] of the same count, so a stale fold's reference never matches a later
+/// park of the same run.
+///
+/// The four park keys are written ONLY on a park fold, by the executor after it builds
+/// the fold. They are identifiers and counts, never a credential.
+pub const EXT_PARKS: &str = "parks";
+
+/// The extension key of the model a pinned run was routed to (a non-empty string), so a
+/// park resume rebuilds the same route and never falls back to a default one.
+pub const EXT_ROUTE_MODEL: &str = "route_model";
+
+/// The extension key of the provider connection id a pinned run was routed through (a
+/// non-empty string): an identifier, never the connection's secret.
+pub const EXT_ROUTE_CONNECTION: &str = "route_connection_id";
+
+/// The extension key of the ceiling on the sub-agents the run may start (a number): a
+/// park resume may use a narrower ceiling than this, never a wider one.
+pub const EXT_CHILD_CEILING: &str = "child_ceiling";
+
+/// How long, in seconds, a park waits when the stop carried no better hint (a provider
+/// that is out of quota and named no reset).
+pub const PARK_DEFAULT_WAIT_SECS: i64 = 300;
+
+/// How long, in seconds, a park waits when an upstream was merely unavailable and named
+/// no retry time.
+pub const PARK_SHORT_WAIT_SECS: i64 = 60;
+
+/// The environment switch for parking a recoverable stop of a pinned Do loop (build plan
+/// WS03 S8-A). Default off; parsed by [`switch_from`] (`true` and nothing else).
+///
+/// Two services read it, each through [`loop_parking_enabled`] and never by this name,
+/// and with different meanings under the one name: execution-core WRITES parks (it also
+/// needs the resume switches, so a park is always resumable), and model-gateway ACCEPTS
+/// the park form of `/continue` (an empty approval id with a claim token). A park
+/// RESUME is never gated by this switch in the executor: with it off, existing parks
+/// stay resumable and no new one is written.
+pub const LOOP_PARKING_ENV: &str = "EXECUTION_LOOP_PARKING_ENABLED";
+
+/// Whether the parking switch is on in this process.
+#[must_use]
+pub fn loop_parking_enabled() -> bool {
+    switch_from(std::env::var(LOOP_PARKING_ENV).ok().as_deref())
+}
+
+/// The `pause_ref` of a run's `n`th park: `park:{run_id}:{n}`. The executor writes it,
+/// session-core's save checks it against [`parks_in`], and the resume derives it again.
+#[must_use]
+pub fn park_ref(run_id: &str, n: u32) -> String {
+    format!("park:{run_id}:{n}")
+}
+
+/// How many parks a fold records ([`EXT_PARKS`]): 0 when the key is absent or is not a
+/// whole number, and `u32::MAX` for a number too large for `u32`, so a check against
+/// [`MAX_PARKS_PER_RUN`] refuses a huge count instead of reading it as "none yet".
+#[must_use]
+pub fn parks_in(fold: &LoopFoldV1) -> u32 {
+    fold.extensions
+        .get(EXT_PARKS)
+        .and_then(serde_json::Value::as_u64)
+        .map_or(0, |n| u32::try_from(n).unwrap_or(u32::MAX))
+}
+
+/// A non-empty string extension, or `None`.
+fn non_empty_extension<'a>(fold: &'a LoopFoldV1, key: &str) -> Option<&'a str> {
+    fold.extensions
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+}
+
+/// The model a park fold was routed to ([`EXT_ROUTE_MODEL`]); `None` when absent, empty
+/// or not a string.
+#[must_use]
+pub fn route_model_in(fold: &LoopFoldV1) -> Option<&str> {
+    non_empty_extension(fold, EXT_ROUTE_MODEL)
+}
+
+/// The connection id a park fold was routed through ([`EXT_ROUTE_CONNECTION`]); `None`
+/// when absent, empty or not a string.
+#[must_use]
+pub fn route_connection_in(fold: &LoopFoldV1) -> Option<&str> {
+    non_empty_extension(fold, EXT_ROUTE_CONNECTION)
+}
+
+/// The sub-agent ceiling a park fold recorded ([`EXT_CHILD_CEILING`]); `None` when
+/// absent, not a whole number, or out of `u32` range. `Some(0)` is a real ceiling.
+#[must_use]
+pub fn child_ceiling_in(fold: &LoopFoldV1) -> Option<u32> {
+    fold.extensions
+        .get(EXT_CHILD_CEILING)
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
+}
+
 /// Domain tag of [`prompt_digest`].
 const PROMPT_DIGEST_DOMAIN: &str = "mp.prompt.v1";
 
@@ -1140,5 +1240,132 @@ mod tests {
             loop_resume_enabled(),
             switch_from(std::env::var(LOOP_RESUME_ENV).ok().as_deref())
         );
+    }
+
+    #[test]
+    fn the_parking_switch_is_strict() {
+        // The name is a contract: compose, the executor and the gateway all name the
+        // variable through this const, never as a literal.
+        assert_eq!(LOOP_PARKING_ENV, "EXECUTION_LOOP_PARKING_ENABLED");
+        // `true` in any case, and nothing else: `1`, `on` and `yes` never turn a park
+        // writer on.
+        for not_on in [
+            None,
+            Some(""),
+            Some(" "),
+            Some("1"),
+            Some("on"),
+            Some("yes"),
+            Some("ON"),
+            Some("maybe"),
+            Some("false"),
+            Some("truee"),
+        ] {
+            assert!(!switch_from(not_on), "{not_on:?} must stay off");
+        }
+        for on in [Some("true"), Some(" TRUE "), Some("True")] {
+            assert!(switch_from(on), "{on:?}");
+        }
+        // The reader of the process environment is that parser applied to the one
+        // variable. A test process does not set it, so the default is off.
+        assert_eq!(
+            loop_parking_enabled(),
+            switch_from(std::env::var(LOOP_PARKING_ENV).ok().as_deref())
+        );
+        // It is its own switch, not the resume switch under another name.
+        assert_ne!(LOOP_PARKING_ENV, LOOP_RESUME_ENV);
+    }
+
+    #[test]
+    fn the_park_bounds_and_waits_are_pinned() {
+        assert_eq!(MAX_PARKS_PER_RUN, 5);
+        assert_eq!(PARK_DEFAULT_WAIT_SECS, 300);
+        assert_eq!(PARK_SHORT_WAIT_SECS, 60);
+        const { assert!(PARK_SHORT_WAIT_SECS < PARK_DEFAULT_WAIT_SECS) };
+    }
+
+    #[test]
+    fn park_ref_is_the_run_id_and_the_park_count() {
+        assert_eq!(park_ref("run-1", 1), "park:run-1:1");
+        assert_eq!(park_ref("run-1", MAX_PARKS_PER_RUN), "park:run-1:5");
+        // A different count or run is a different reference: a stale fold's ref never
+        // matches a later park of the same run.
+        assert_ne!(park_ref("run-1", 1), park_ref("run-1", 2));
+        assert_ne!(park_ref("run-1", 1), park_ref("run-2", 1));
+    }
+
+    #[test]
+    fn the_park_readers_return_nothing_for_a_fold_that_never_parked() {
+        let fold = fold();
+        assert_eq!(parks_in(&fold), 0);
+        assert_eq!(route_model_in(&fold), None);
+        assert_eq!(route_connection_in(&fold), None);
+        assert_eq!(child_ceiling_in(&fold), None);
+    }
+
+    #[test]
+    fn the_park_readers_read_the_keys_a_park_fold_carries() {
+        let mut fold = fold();
+        fold.extensions.insert(EXT_PARKS.to_owned(), serde_json::json!(2));
+        fold.extensions.insert(EXT_ROUTE_MODEL.to_owned(), serde_json::json!("model-x"));
+        fold.extensions.insert(EXT_ROUTE_CONNECTION.to_owned(), serde_json::json!("conn-1"));
+        fold.extensions.insert(EXT_CHILD_CEILING.to_owned(), serde_json::json!(3));
+        assert_eq!(parks_in(&fold), 2);
+        assert_eq!(route_model_in(&fold), Some("model-x"));
+        assert_eq!(route_connection_in(&fold), Some("conn-1"));
+        assert_eq!(child_ceiling_in(&fold), Some(3));
+        // Zero is a real ceiling (no delegation), not an absent one.
+        fold.extensions.insert(EXT_CHILD_CEILING.to_owned(), serde_json::json!(0));
+        assert_eq!(child_ceiling_in(&fold), Some(0));
+        // The readers survive the wire.
+        let back = LoopFoldV1::from_bytes(&fold.to_bytes().expect("serialize")).expect("parse");
+        assert_eq!(parks_in(&back), 2);
+        assert_eq!(route_model_in(&back), Some("model-x"));
+        assert_eq!(route_connection_in(&back), Some("conn-1"));
+        assert_eq!(child_ceiling_in(&back), Some(0));
+    }
+
+    #[test]
+    fn a_malformed_park_key_reads_as_absent_and_a_huge_count_as_over_the_cap() {
+        let mut fold = fold();
+        // An empty identifier is absent: a park with no route is not restorable.
+        fold.extensions.insert(EXT_ROUTE_MODEL.to_owned(), serde_json::json!(""));
+        fold.extensions.insert(EXT_ROUTE_CONNECTION.to_owned(), serde_json::json!(""));
+        assert_eq!(route_model_in(&fold), None);
+        assert_eq!(route_connection_in(&fold), None);
+        // The wrong JSON type is absent, never coerced.
+        for wrong in [
+            serde_json::json!(true),
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!(null),
+            serde_json::json!([1]),
+            serde_json::json!({"n": 1}),
+        ] {
+            fold.extensions.insert(EXT_PARKS.to_owned(), wrong.clone());
+            fold.extensions.insert(EXT_CHILD_CEILING.to_owned(), wrong.clone());
+            fold.extensions.insert(EXT_ROUTE_MODEL.to_owned(), wrong.clone());
+            fold.extensions.insert(EXT_ROUTE_CONNECTION.to_owned(), wrong.clone());
+            assert_eq!(parks_in(&fold), 0, "{wrong}");
+            assert_eq!(child_ceiling_in(&fold), None, "{wrong}");
+            assert_eq!(route_model_in(&fold), None, "{wrong}");
+            assert_eq!(route_connection_in(&fold), None, "{wrong}");
+        }
+        // A numeric string is not a number, and a number is not an identifier.
+        fold.extensions.insert(EXT_PARKS.to_owned(), serde_json::json!("3"));
+        fold.extensions.insert(EXT_CHILD_CEILING.to_owned(), serde_json::json!("3"));
+        fold.extensions.insert(EXT_ROUTE_MODEL.to_owned(), serde_json::json!(3));
+        fold.extensions.insert(EXT_ROUTE_CONNECTION.to_owned(), serde_json::json!(3));
+        assert_eq!(parks_in(&fold), 0);
+        assert_eq!(child_ceiling_in(&fold), None);
+        assert_eq!(route_model_in(&fold), None);
+        assert_eq!(route_connection_in(&fold), None);
+        // A count that does not fit u32 is saturated, so a validator comparing it with
+        // the cap refuses it instead of reading it as "no park yet".
+        fold.extensions.insert(EXT_PARKS.to_owned(), serde_json::json!(u64::MAX));
+        assert_eq!(parks_in(&fold), u32::MAX);
+        assert!(parks_in(&fold) > MAX_PARKS_PER_RUN);
+        fold.extensions.insert(EXT_CHILD_CEILING.to_owned(), serde_json::json!(u64::MAX));
+        assert_eq!(child_ceiling_in(&fold), None, "an out-of-range ceiling is not a ceiling");
     }
 }
