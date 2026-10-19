@@ -818,8 +818,10 @@ impl PageRunner {
         }
 
         // WS3.J: a page that is itself a bot wall (a CAPTCHA widget, a WAF
-        // interstitial, two independent block markers) is not content. It is not
-        // extracted, stored, indexed or ingested; the scrape fails with a typed
+        // interstitial, two independent block markers) is not content. Its
+        // markdown, links and metadata are computed above (the title for the
+        // classifier comes from the metadata pass) and dropped here: nothing of
+        // the wall is stored, indexed, ingested or returned, and the scrape fails with a typed
         // `CHALLENGE_DETECTED` whose details carry the block reason and nothing of
         // the page. A status alone never gets here (see `classify_fetched`), and a
         // run under `QUARRY_CHALLENGE_CLASSIFIER=legacy` is not classified at all.
@@ -2702,7 +2704,7 @@ mod scrape_challenge_tests {
 
     #[tokio::test]
     async fn a_strong_block_page_fails_the_scrape_with_its_block_reason() {
-        let _config = Installed::new(ChallengeConfig::default());
+        let _config = Installed::new(ChallengeConfig::enforcing());
         // (what the driver served, status, expected block reason)
         let cases = [
             ("cloudflare interstitial", 403, CF_INTERSTITIAL, "waf_interstitial"),
@@ -2745,7 +2747,7 @@ mod scrape_challenge_tests {
 
     #[tokio::test]
     async fn a_refused_wall_stores_no_artifact() {
-        let _config = Installed::new(ChallengeConfig::default());
+        let _config = Installed::new(ChallengeConfig::enforcing());
         let (runner, _rx, artifacts) = runner_for(ZdrMode::Off, 403, Some("text/html"), CF_INTERSTITIAL);
         let run_id: RunKind = quarry_core::ids::Id::new();
         assert!(runner.run(&run_id, &target(), None).await.is_err());
@@ -2758,7 +2760,7 @@ mod scrape_challenge_tests {
 
     #[tokio::test]
     async fn pages_that_are_not_walls_still_scrape() {
-        let _config = Installed::new(ChallengeConfig::default());
+        let _config = Installed::new(ChallengeConfig::enforcing());
         let cases = [
             ("an ordinary article about captchas", 200, ARTICLE),
             ("a login page", 200, LOGIN_PAGE),
@@ -2775,7 +2777,7 @@ mod scrape_challenge_tests {
 
     #[tokio::test]
     async fn only_markup_is_classified() {
-        let _config = Installed::new(ChallengeConfig::default());
+        let _config = Installed::new(ChallengeConfig::enforcing());
         // The same bytes under a binary or JSON type are not a page to classify.
         for content_type in ["application/json", "application/octet-stream", "image/png"] {
             let (result, _) = scrape(ZdrMode::Off, 200, Some(content_type), CF_INTERSTITIAL).await;
@@ -2793,8 +2795,98 @@ mod scrape_challenge_tests {
         assert_eq!(result.expect("legacy scrapes the wall as before").status, 403);
     }
 
+    /// Collects tracing events as text for the thread that installs it.
+    #[derive(Clone, Default)]
+    struct EventLog(Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl EventLog {
+        fn lines(&self) -> Vec<String> {
+            self.0.lock().unwrap().clone()
+        }
+        fn matching(&self, message: &str) -> Vec<String> {
+            self.lines().into_iter().filter(|line| line.contains(message)).collect()
+        }
+    }
+
+    impl tracing::Subscriber for EventLog {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct Fields(String);
+            impl tracing::field::Visit for Fields {
+                fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                    if !self.0.is_empty() {
+                        self.0.push(' ');
+                    }
+                    self.0.push_str(&format!("{}={:?}", field.name(), value));
+                }
+            }
+            let mut fields = Fields(String::new());
+            event.record(&mut fields);
+            self.0.lock().unwrap().push(format!("{} {}", event.metadata().level(), fields.0));
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
     #[tokio::test]
-    async fn the_log_phase_counts_the_wall_and_lets_it_through() {
+    async fn the_scrape_path_logs_the_reason_and_the_status_and_never_the_host() {
+        for zdr in [ZdrMode::Off, ZdrMode::On] {
+            // Enforce: one refusal line.
+            let events = EventLog::default();
+            {
+                let _log = tracing::subscriber::set_default(events.clone());
+                let _config = Installed::new(ChallengeConfig::enforcing());
+                let (result, _) = scrape(zdr, 403, Some("text/html"), CF_INTERSTITIAL).await;
+                assert!(result.is_err(), "{zdr:?}");
+            }
+            let refused = events.matching("quarry.challenge.scrape_refused");
+            assert_eq!(refused.len(), 1, "{:?}", events.lines());
+            assert!(refused[0].contains("reason=\"waf_interstitial\""), "{refused:?}");
+            assert!(refused[0].contains("status=403"), "{refused:?}");
+            assert!(events.matching("would_refuse_scrape").is_empty(), "{:?}", events.lines());
+
+            // Log: one would-refuse line, the page goes through.
+            let events = EventLog::default();
+            {
+                let _log = tracing::subscriber::set_default(events.clone());
+                let _config = Installed::new(ChallengeConfig::from_values(None, Some("log")));
+                let (result, _) = scrape(zdr, 403, Some("text/html"), CF_INTERSTITIAL).await;
+                assert!(result.is_ok(), "{zdr:?}");
+            }
+            let would = events.matching("quarry.challenge.would_refuse_scrape");
+            assert_eq!(would.len(), 1, "{:?}", events.lines());
+            assert!(would[0].contains("reason=\"waf_interstitial\""), "{would:?}");
+            assert!(would[0].contains("status=403"), "{would:?}");
+            assert!(events.matching("scrape_refused").is_empty(), "{:?}", events.lines());
+
+            // Neither the host nor anything of the page is in a challenge line. (The
+            // generic "page extracted" line of a page that goes through is not
+            // part of this contract.)
+            for line in events.matching("quarry.challenge") {
+                assert!(!line.contains("walled.example"), "{line}");
+                assert!(!line.contains("Just a moment"), "{line}");
+            }
+        }
+        // A page that is not a wall logs nothing about challenges.
+        let events = EventLog::default();
+        {
+            let _log = tracing::subscriber::set_default(events.clone());
+            let _config = Installed::new(ChallengeConfig::enforcing());
+            let (result, _) = scrape(ZdrMode::Off, 200, Some("text/html"), ARTICLE).await;
+            assert!(result.is_ok());
+        }
+        assert!(events.matching("quarry.challenge").is_empty(), "{:?}", events.lines());
+    }
+
+    #[tokio::test]
+    async fn the_log_phase_lets_the_wall_through_and_emits_no_page_blocked() {
         let config = ChallengeConfig::from_values(None, Some("log"));
         assert_eq!(config.enforce, EnforceMode::Log);
         let _config = Installed::new(config);
@@ -2808,7 +2900,7 @@ mod scrape_challenge_tests {
 
     #[tokio::test]
     async fn a_zdr_scrape_is_refused_the_same_and_the_error_has_no_host() {
-        let _config = Installed::new(ChallengeConfig::default());
+        let _config = Installed::new(ChallengeConfig::enforcing());
         let (result, _events) = scrape(ZdrMode::On, 403, Some("text/html"), CF_INTERSTITIAL).await;
         let error = result.expect_err("refused under ZDR as well");
         assert_eq!(error.code, ErrorCode::ChallengeDetected);
@@ -2819,7 +2911,7 @@ mod scrape_challenge_tests {
 
     #[test]
     fn classify_fetched_reads_at_most_the_scan_window_and_never_returns_a_hint() {
-        let config = ChallengeConfig::default();
+        let config = ChallengeConfig::enforcing();
         let signal = crate::challenge::classify_fetched(
             config,
             "https://walled.example.test/page",

@@ -2713,7 +2713,7 @@ mod tests {
         let runner = challenge_runner(&driver);
         let lease = challenge_lease();
         let session = driver.acquire(&lease).await.unwrap();
-        let mut ctx = challenge_ctx(ChallengeConfig::default());
+        let mut ctx = challenge_ctx(ChallengeConfig::enforcing());
         let go = |url: &str| challenge_request(&lease, AgentAction::Navigate { url: url.into() }, ZdrMode::Off);
 
         let first = runner
@@ -2743,6 +2743,59 @@ mod tests {
             assert_eq!(error.code, ErrorCode::ChallengeDetected);
         }
         assert_eq!(driver.calls(), reached_before);
+    }
+
+    /// The runner, not the episode table, decides which host a step is on: after
+    /// `Back` it is the landing page's host (read from the page), so an exhausted
+    /// host stays refused when the history step lands on it.
+    #[tokio::test]
+    async fn a_history_step_onto_an_exhausted_host_leaves_every_interaction_refused() {
+        async fn run(landing: &'static str) -> (usize, usize, Result<(), ErrorCode>) {
+            let driver = Arc::new(ContentDriver {
+                html: TURNSTILE_HTML,
+                atomic_targets: true,
+                back_lands_on: Some(landing),
+                ..Default::default()
+            });
+            let runner = challenge_runner(&driver);
+            let lease = challenge_lease();
+            let session = driver.acquire(&lease).await.unwrap();
+            let mut ctx = challenge_ctx(ChallengeConfig::enforcing());
+            let step = |action: AgentAction| challenge_request(&lease, action, ZdrMode::Off);
+            // blocked.example: a wall, then the one reload that is still a wall.
+            for url in ["https://blocked.example/page", "https://blocked.example/page#again"] {
+                runner
+                    .execute(&step(AgentAction::Navigate { url: url.into() }), &session, &mut ctx)
+                    .await
+                    .unwrap();
+            }
+            // Leave it for another host, then step back in history.
+            runner
+                .execute(&step(AgentAction::Navigate { url: "https://elsewhere.example/".into() }), &session, &mut ctx)
+                .await
+                .expect("another host is still reachable");
+            runner
+                .execute(&step(AgentAction::Back), &session, &mut ctx)
+                .await
+                .expect("a history step is the way off a wall and is never refused");
+            let before = driver.calls();
+            let click = runner
+                .execute(&step(AgentAction::Click { selector: "#go".into() }), &session, &mut ctx)
+                .await;
+            let after = driver.calls();
+            (before, after, click.map(|_| ()).map_err(|e| e.code))
+        }
+
+        // Landing on the exhausted host: refused, and the browser never saw the click.
+        let (before, after, click) = run("https://blocked.example/page").await;
+        assert_eq!(click, Err(ErrorCode::ChallengeDetected));
+        assert_eq!(after, before, "a refused click never reaches the browser");
+
+        // Landing on a host that is not exhausted: the click reaches the browser
+        // (the test driver then reports the click as unsupported, which is not a refusal).
+        let (before, after, click) = run("https://elsewhere.example/").await;
+        assert_eq!(click, Err(ErrorCode::Unsupported));
+        assert_eq!(after, before + 1, "a click on an open host reaches the browser");
     }
 
     #[tokio::test]
@@ -2781,7 +2834,7 @@ mod tests {
 
         // Enforce mode refuses the very same sequence, before the browser, and
         // logs no would_reject.
-        let mut enforce_ctx = challenge_ctx(ChallengeConfig::default());
+        let mut enforce_ctx = challenge_ctx(ChallengeConfig::enforcing());
         runner.execute(&go, &session, &mut enforce_ctx).await.unwrap();
         runner.execute(&wait, &session, &mut enforce_ctx).await.unwrap();
         let reached_before = driver.calls();
@@ -2800,7 +2853,7 @@ mod tests {
         let runner = challenge_runner(&driver);
         let lease = challenge_lease();
         let session = driver.acquire(&lease).await.unwrap();
-        let mut ctx = challenge_ctx(ChallengeConfig::default());
+        let mut ctx = challenge_ctx(ChallengeConfig::enforcing());
         let go = |url: &str| challenge_request(&lease, AgentAction::Navigate { url: url.into() }, ZdrMode::Off);
 
         // First hit: a strong signal, and the one recovery is still there.
@@ -2892,7 +2945,7 @@ mod tests {
         let runner = challenge_runner(&driver);
         let lease = challenge_lease();
         let session = driver.acquire(&lease).await.unwrap();
-        let mut ctx = challenge_ctx(ChallengeConfig::default());
+        let mut ctx = challenge_ctx(ChallengeConfig::enforcing());
         let request = challenge_request(&lease, AgentAction::Navigate { url: "https://example.com/login".into() }, ZdrMode::Off);
         let observation = runner.execute(&request, &session, &mut ctx).await.unwrap();
         let signal = observation.challenge.expect("a login page is named");
@@ -2913,7 +2966,7 @@ mod tests {
         let runner = challenge_runner(&driver);
         let lease = challenge_lease();
         let session = driver.acquire(&lease).await.unwrap();
-        let mut ctx = challenge_ctx(ChallengeConfig::default());
+        let mut ctx = challenge_ctx(ChallengeConfig::enforcing());
         let go = challenge_request(&lease, AgentAction::Navigate { url: "https://blocked.example/page".into() }, ZdrMode::On);
         runner.execute(&go, &session, &mut ctx).await.unwrap();
         runner
@@ -3222,6 +3275,9 @@ mod tests {
         /// Claims atomic snapshot-target actions, so that ref and semantic
         /// actions get past the capability gate and reach what a test is about.
         atomic_targets: bool,
+        /// When set, `back` succeeds and the page then reports this URL.
+        back_lands_on: Option<&'static str>,
+        landed: std::sync::atomic::AtomicBool,
     }
 
     impl ContentDriver {
@@ -3326,6 +3382,27 @@ mod tests {
         }
         async fn pdf(&self, _session: &quarry_browser::BrowserSession) -> QuarryResult<Bytes> {
             Ok(Bytes::new())
+        }
+        async fn back(&self, _session: &quarry_browser::BrowserSession) -> QuarryResult<()> {
+            match self.back_lands_on {
+                Some(_) => {
+                    self.landed.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                }
+                None => Err(QuarryError::unsupported_action("back")),
+            }
+        }
+        async fn evaluate(
+            &self,
+            _session: &quarry_browser::BrowserSession,
+            _script: &str,
+        ) -> QuarryResult<serde_json::Value> {
+            match self.back_lands_on {
+                Some(url) if self.landed.load(std::sync::atomic::Ordering::SeqCst) => {
+                    Ok(serde_json::json!({ "url": url, "title": null }))
+                }
+                _ => Err(QuarryError::unsupported_action("evaluate")),
+            }
         }
     }
 

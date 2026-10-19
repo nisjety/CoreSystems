@@ -93,7 +93,9 @@ pub enum ClassifierMode {
 
 /// What happens when the one-recovery rule says no. `Log` records a
 /// `would_reject` line and lets the action through, for the period in which the
-/// corpus is still being validated.
+/// corpus is still being validated (the plan's WS3.H contract: `log` while the
+/// corpus validates). It is the default until a captured corpus has passed;
+/// `Enforce` is switched on per environment with `QUARRY_CHALLENGE_ENFORCE=enforce`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnforceMode {
     Enforce,
@@ -110,14 +112,24 @@ impl Default for ChallengeConfig {
     fn default() -> Self {
         Self {
             classifier: ClassifierMode::V2,
-            enforce: EnforceMode::Enforce,
+            enforce: EnforceMode::Log,
         }
     }
 }
 
 impl ChallengeConfig {
+    /// The v2 classifier with refusals on: what an environment gets with
+    /// `QUARRY_CHALLENGE_ENFORCE=enforce`. The tests of the refusals use it.
+    pub fn enforcing() -> Self {
+        Self {
+            classifier: ClassifierMode::V2,
+            enforce: EnforceMode::Enforce,
+        }
+    }
+
     /// `QUARRY_CHALLENGE_CLASSIFIER=v2|legacy` and `QUARRY_CHALLENGE_ENFORCE=
-    /// enforce|log`. Anything else is the default.
+    /// enforce|log`. Anything else is the default (`v2`, `log`): a typo never
+    /// turns refusals on.
     pub fn from_env() -> Self {
         Self::from_values(
             std::env::var("QUARRY_CHALLENGE_CLASSIFIER").ok().as_deref(),
@@ -133,8 +145,8 @@ impl ChallengeConfig {
             _ => ClassifierMode::V2,
         };
         let enforce = match enforce.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
-            Some("log") => EnforceMode::Log,
-            _ => EnforceMode::Enforce,
+            Some("enforce") => EnforceMode::Enforce,
+            _ => EnforceMode::Log,
         };
         Self {
             classifier,
@@ -1932,10 +1944,16 @@ mod tests {
         let default = ChallengeConfig::from_values(None, None);
         assert_eq!(default, ChallengeConfig::default());
         assert_eq!(default.classifier, ClassifierMode::V2);
-        assert_eq!(default.enforce, EnforceMode::Enforce);
+        // The plan: `log` while the corpus validates. Refusals are opt-in.
+        assert_eq!(default.enforce, EnforceMode::Log);
         let legacy = ChallengeConfig::from_values(Some(" Legacy "), Some("LOG"));
         assert_eq!(legacy.classifier, ClassifierMode::Legacy);
         assert_eq!(legacy.enforce, EnforceMode::Log);
+        let on = ChallengeConfig::from_values(None, Some(" Enforce "));
+        assert_eq!(on, ChallengeConfig::enforcing());
+        assert_eq!(on.enforce, EnforceMode::Enforce);
+        // A typo does not turn refusals on.
+        assert_eq!(ChallengeConfig::from_values(None, Some("enforcing")).enforce, EnforceMode::Log);
         let junk = ChallengeConfig::from_values(Some("v3"), Some("maybe"));
         assert_eq!(junk, ChallengeConfig::default());
     }
@@ -2013,7 +2031,7 @@ mod tests {
     const PAGE: &str = "https://blocked.example/page";
 
     fn episodes() -> BlockEpisodes {
-        BlockEpisodes::new(ChallengeConfig::default())
+        BlockEpisodes::new(ChallengeConfig::enforcing())
     }
 
     /// An episode that has used its recovery and challenged again.
@@ -2378,7 +2396,7 @@ mod tests {
     }
 
     #[test]
-    fn a_step_back_onto_the_exhausted_host_leaves_every_interaction_refused() {
+    fn the_table_keeps_the_exhausted_host_closed_for_the_host_it_is_told_about() {
         // Back and Forward are allowed because the history target is unknown.
         // What the planner finds there is judged by its own host: still the
         // wall, so still closed; a page that is not a challenge reopens it.
