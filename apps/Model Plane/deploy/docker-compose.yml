@@ -797,6 +797,14 @@ services:
       # parked, as `unknown_outcome` (WS03 S5). Off by default: turning it on changes
       # what audit sees for such rows, so it is a deliberate rollout step.
       SESSION_CORE_TOOL_LEDGER_SWEEP_ENABLED: ${SESSION_CORE_TOOL_LEDGER_SWEEP_ENABLED:-false}
+      # An approval that has run past its expires_at no longer holds the recovery worker back
+      # from its run (WS03 S8-0). Off by default, and only the literal `true` turns it on: any
+      # requested or granted, unconsumed approval then spares its run only until it expires, or
+      # while a delivery worker holds a live lease on it. An expired, never-consumed one lets the
+      # run end outcome_unknown at its deadline (about 15 minutes after the last heartbeat) and
+      # its fold is purged with it. Independent of the other durable-loop switches: flip and
+      # roll back on its own.
+      SESSION_CORE_RECOVERY_APPROVAL_EXPIRY_ENABLED: ${SESSION_CORE_RECOVERY_APPROVAL_EXPIRY_ENABLED:-false}
       # Dreaming's LLM memory extraction (dream_extractor.rs). Unset this
       # address, or set DREAMING_LLM_EXTRACTION=0, and Dreaming falls back to
       # the deterministic phrase matcher alone.

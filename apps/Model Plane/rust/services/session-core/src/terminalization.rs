@@ -33,6 +33,9 @@ const TERMINALIZE_SCOPE: &str = "session:terminalize";
 const HEARTBEAT_SCOPE: &str = "session:heartbeat";
 const MODEL_GATEWAY_PRINCIPAL: &str = "service:model-gateway";
 const EXECUTION_CORE_PRINCIPAL: &str = "service:execution-core";
+/// Build plan WS03 S8-0. Off by default; only the literal `true` turns it on (the strict
+/// parser the other durable-loop switches share). See [`approval_expiry_enabled`].
+const APPROVAL_EXPIRY_ENV: &str = "SESSION_CORE_RECOVERY_APPROVAL_EXPIRY_ENABLED";
 
 /// The only run-start values that may cross the durable boundary. For a ZDR
 /// caller every requester-controlled content field is replaced before SQL or
@@ -1696,6 +1699,55 @@ async fn supersede_terminalized_obligations(pool: &PgPool) -> Result<u64, sqlx::
     Ok(result.rows_affected())
 }
 
+/// Whether an approval that has run past its `expires_at` stops sparing its run from
+/// recovery (build plan WS03 S8-0). Off by default.
+///
+/// Off: any `requested` or `granted`, unconsumed approval holds the recovery worker back from
+/// its run whatever `expires_at` says, exactly as committed. On: such an approval holds the run
+/// back only until it expires (one with no `expires_at` never does), or while a delivery worker
+/// holds a live lease on it; an expired, never-consumed one no longer does, so the run ends `outcome_unknown` at its deadline and its
+/// fold is purged by the unchanged terminal path. The one answer is bound into both copies of
+/// the clause (`claim_due_recovery` and `has_pending_approval`), so they cannot disagree.
+pub(crate) fn approval_expiry_enabled() -> bool {
+    // A test forces the answer for its own thread, so it does not race the tests that set the
+    // process environment. Compiled out of the binary.
+    #[cfg(test)]
+    if let Some(forced) = expiry_test_switch::forced() {
+        return forced;
+    }
+    mp_contracts::loop_fold::switch_from(std::env::var(APPROVAL_EXPIRY_ENV).ok().as_deref())
+}
+
+/// A per-thread override of [`approval_expiry_enabled`] for tests. It holds only for a test that
+/// runs its calls on its own thread (a `#[tokio::test]` is single-threaded), and restores the
+/// earlier value when the guard drops.
+#[cfg(test)]
+pub(crate) mod expiry_test_switch {
+    use std::cell::Cell;
+
+    thread_local! {
+        static FORCED: Cell<Option<bool>> = const { Cell::new(None) };
+    }
+
+    pub(crate) fn forced() -> Option<bool> {
+        FORCED.with(Cell::get)
+    }
+
+    pub(crate) struct Forced(Option<bool>);
+
+    impl Forced {
+        pub(crate) fn set(on: bool) -> Self {
+            Self(FORCED.with(|cell| cell.replace(Some(on))))
+        }
+    }
+
+    impl Drop for Forced {
+        fn drop(&mut self) {
+            FORCED.with(|cell| cell.set(self.0));
+        }
+    }
+}
+
 async fn claim_due_recovery(pool: &PgPool) -> Result<Option<ClaimedRecovery>, sqlx::Error> {
     let lease_token = new_lease_token();
     let lease_token_hash = hash_lease_token(&lease_token);
@@ -1719,6 +1771,10 @@ async fn claim_due_recovery(pool: &PgPool) -> Result<Option<ClaimedRecovery>, sq
                       AND a.user_id = o.user_id
                       AND a.status IN ('requested', 'granted')
                       AND a.consumed_at IS NULL
+                      AND (NOT $3::bool OR a.expires_at IS NULL OR a.expires_at > now()
+                           OR EXISTS (SELECT 1 FROM approval_delivery_outbox AS d
+                                      WHERE d.approval_id = a.id AND d.state = 'processing'
+                                        AND d.lease_expires_at > now()))
                )
              ORDER BY o.deadline_at ASC, o.created_at ASC
              FOR UPDATE SKIP LOCKED
@@ -1736,6 +1792,7 @@ async fn claim_due_recovery(pool: &PgPool) -> Result<Option<ClaimedRecovery>, sq
     )
     .bind(lease_token_hash)
     .bind(MANAGED_RECOVERY_LEASE_SECS)
+    .bind(approval_expiry_enabled())
     .fetch_optional(pool)
     .await?;
     Ok(row.map(|row| ClaimedRecovery { row, lease_token }))
@@ -1747,12 +1804,17 @@ async fn has_pending_approval(
 ) -> Result<bool, Status> {
     sqlx::query_scalar(
         "SELECT EXISTS(
-             SELECT 1 FROM approvals
-             WHERE run_id = $1 AND status IN ('requested', 'granted')
-               AND consumed_at IS NULL
+             SELECT 1 FROM approvals AS a
+             WHERE a.run_id = $1 AND a.status IN ('requested', 'granted')
+               AND a.consumed_at IS NULL
+               AND (NOT $2::bool OR a.expires_at IS NULL OR a.expires_at > now()
+                    OR EXISTS (SELECT 1 FROM approval_delivery_outbox AS d
+                               WHERE d.approval_id = a.id AND d.state = 'processing'
+                                 AND d.lease_expires_at > now()))
          )",
     )
     .bind(run_id)
+    .bind(approval_expiry_enabled())
     .fetch_one(&mut **transaction)
     .await
     .map_err(database_error)
@@ -1873,11 +1935,163 @@ pub(crate) async fn run_recovery_worker(pool: PgPool) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::{approval_expiry_enabled, expiry_test_switch, APPROVAL_EXPIRY_ENV};
     use super::{
         authorize_direct_completion, authorize_terminalization_source, canonical_terminal_step,
         is_startable_source, validate_terminal_outcome, ManagedOutcome,
     };
     use mp_contracts::model_plane::v1 as pb;
+
+    /// The production text of this file (everything before its own `mod tests`), with LF line
+    /// endings whatever the working tree has.
+    fn production_source() -> String {
+        let all = include_str!("terminalization.rs").replace("\r\n", "\n");
+        let marker = concat!("#[cfg(test)]\n", "mod tests {");
+        let end = all.find(marker).expect("the unit test module");
+        all[..end].to_owned()
+    }
+
+    /// One whole top-level `async fn` of `source`: from its signature to the next closing brace
+    /// at column zero.
+    fn function_text<'a>(source: &'a str, signature: &str) -> Option<&'a str> {
+        let start = source.find(signature)?;
+        let end = source[start..].find("\n}\n")?;
+        Some(&source[start..start + end + 2])
+    }
+
+    /// `text` with every run of whitespace collapsed to one space.
+    fn squash(text: &str) -> String {
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// The clause both copies of the approval spare carry, for the bind position `n`.
+    fn expiry_clause(n: u32) -> String {
+        format!(
+            "AND (NOT ${n}::bool OR a.expires_at IS NULL OR a.expires_at > now() \
+             OR EXISTS (SELECT 1 FROM approval_delivery_outbox AS d \
+             WHERE d.approval_id = a.id AND d.state = 'processing' \
+             AND d.lease_expires_at > now()))"
+        )
+    }
+
+    /// What is wrong with how `source` carries the S8-0 expiry clause: each of the two copies of
+    /// the approval spare (the due-recovery candidate query, bind 3, and the in-transaction
+    /// re-check, bind 2) holds the whole clause, and binds the one switch read.
+    fn expiry_clause_violations(source: &str) -> Vec<String> {
+        let mut violations = Vec::new();
+        for (signature, n) in [
+            ("async fn claim_due_recovery(", 3_u32),
+            ("async fn has_pending_approval(", 2_u32),
+        ] {
+            let Some(body) = function_text(source, signature) else {
+                violations.push(format!("{signature} is not in the source"));
+                continue;
+            };
+            if !squash(body).contains(&expiry_clause(n)) {
+                violations.push(format!(
+                    "{signature} does not carry the expiry and live-delivery clause bound as ${n}"
+                ));
+            }
+            if body.matches(".bind(approval_expiry_enabled())").count() != 1 {
+                violations.push(format!(
+                    "{signature} must bind approval_expiry_enabled() exactly once"
+                ));
+            }
+        }
+        // The variable is named once, and read once, by the one switch fn.
+        if source.matches(APPROVAL_EXPIRY_ENV).count() != 1
+            || source.matches("std::env::var(APPROVAL_EXPIRY_ENV)").count() != 1
+        {
+            violations.push("the switch's variable is not named and read exactly once".to_owned());
+        }
+        violations
+    }
+
+    #[test]
+    fn the_expiry_clause_is_bound_in_both_copies() {
+        let source = production_source();
+        assert_eq!(
+            expiry_clause_violations(&source),
+            Vec::<String>::new(),
+            "both copies of the approval spare must carry the same bound clause"
+        );
+
+        // The control: each mutation takes the clause out of ONE copy and must be seen.
+        let claim = function_text(&source, "async fn claim_due_recovery(").expect("claim copy");
+        let recheck =
+            function_text(&source, "async fn has_pending_approval(").expect("re-check copy");
+        for (what, mutated) in [
+            (
+                "the clause is dropped from the candidate query",
+                source.replacen(claim, &claim.replacen("NOT $3::bool", "NOT FALSE", 1), 1),
+            ),
+            (
+                "the clause is dropped from the re-check",
+                source.replacen(
+                    recheck,
+                    &recheck.replacen("NOT $2::bool", "NOT FALSE", 1),
+                    1,
+                ),
+            ),
+            (
+                "the live-delivery lease is dropped from the re-check",
+                source.replacen(
+                    recheck,
+                    &recheck.replacen("d.lease_expires_at > now()", "FALSE", 1),
+                    1,
+                ),
+            ),
+            (
+                "the candidate query stops binding the switch",
+                source.replacen(
+                    claim,
+                    &claim.replacen(".bind(approval_expiry_enabled())", "", 1),
+                    1,
+                ),
+            ),
+            (
+                "the re-check stops binding the switch",
+                source.replacen(
+                    recheck,
+                    &recheck.replacen(".bind(approval_expiry_enabled())", "", 1),
+                    1,
+                ),
+            ),
+        ] {
+            assert_ne!(mutated, source, "{what}: the mutation changed nothing");
+            assert!(
+                !expiry_clause_violations(&mutated).is_empty(),
+                "{what}: the guard did not flag it"
+            );
+        }
+    }
+
+    /// The switch is off unless the process says `true`, and a test's forced answer is
+    /// restored when its guard drops, so one test cannot leak its choice into another.
+    #[test]
+    fn the_expiry_switch_is_off_by_default_and_a_forced_answer_is_restored() {
+        if std::env::var_os(APPROVAL_EXPIRY_ENV).is_none() {
+            assert!(!approval_expiry_enabled(), "off by default");
+        }
+        let before = approval_expiry_enabled();
+        {
+            let _on = expiry_test_switch::Forced::set(true);
+            assert!(approval_expiry_enabled());
+            {
+                let _off = expiry_test_switch::Forced::set(false);
+                assert!(!approval_expiry_enabled());
+            }
+            assert!(
+                approval_expiry_enabled(),
+                "the inner guard restored the outer one"
+            );
+        }
+        assert_eq!(
+            approval_expiry_enabled(),
+            before,
+            "the outer guard restored it"
+        );
+    }
 
     #[test]
     fn source_selects_a_server_owned_canonical_terminal_step() {
@@ -2390,5 +2604,443 @@ mod spent_click_db_tests {
             .expect("claim")
             .expect("a full consume leaves the run recoverable");
         assert_eq!(claimed.row.run_id, control.run_id);
+    }
+}
+
+/// Build plan WS03 S8-0: an approval that has run past its `expires_at` no longer holds the
+/// recovery worker back from its run, behind SESSION_CORE_RECOVERY_APPROVAL_EXPIRY_ENABLED.
+/// WRITTEN, NOT RUN by the author: it needs the disposable-Postgres harness
+/// (scripts/tests/session-core-db-tests.sh), which the lead runs. Its path starts with
+/// `terminalization::park_recovery_db_tests::`, so the harness filter `terminalization`
+/// selects it.
+///
+/// Each test forces the switch for its own thread (`expiry_test_switch`), so none of them
+/// depends on, or sets, the process environment. The database is shared, so each scenario
+/// first pushes every other live obligation a day out (`isolate`): the answer is then about
+/// the run under test alone. Scratch database only.
+#[cfg(test)]
+mod park_recovery_db_tests {
+    use super::*;
+    use crate::loop_checkpoint::test_support::{fold_rows, seed_fold};
+    use crate::orchestration_store as approvals;
+
+    async fn scratch_pool() -> Option<PgPool> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            assert!(
+                std::env::var_os("REQUIRE_CONTRACT").is_none() && std::env::var_os("CI").is_none(),
+                "DATABASE_URL must name a scratch Postgres when REQUIRE_CONTRACT or CI is set"
+            );
+            eprintln!("skipping: DATABASE_URL unset");
+            return None;
+        };
+        let database = url
+            .rsplit('/')
+            .next()
+            .and_then(|tail| tail.split('?').next())
+            .unwrap_or_default();
+        assert!(
+            database.contains("test"),
+            "these tests write rows: DATABASE_URL must name a scratch database whose name contains \"test\""
+        );
+        let pool = PgPool::connect(&url)
+            .await
+            .expect("scratch Postgres is reachable");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("session-core migrations apply in order");
+        Some(pool)
+    }
+
+    /// Push every other live obligation (and every other expired lease) a day out.
+    async fn isolate(pool: &PgPool, keep_run_id: &str) {
+        sqlx::query(
+            "UPDATE managed_run_terminalization_outbox
+             SET deadline_at = now() + interval '1 day',
+                 next_attempt_at = now() + interval '1 day',
+                 lease_expires_at = CASE WHEN lease_expires_at IS NULL THEN NULL
+                                         ELSE now() + interval '1 day' END
+             WHERE run_id <> $1 AND state IN ('open', 'processing')",
+        )
+        .bind(keep_run_id)
+        .execute(pool)
+        .await
+        .expect("isolate the other obligations");
+    }
+
+    struct Seeded {
+        run_id: String,
+    }
+
+    /// A persistent managed run (started through the real start path, so its obligation is the
+    /// real one) that holds a paused fold and ONE unconsumed `requested` approval whose
+    /// `expires_at` is `expires_in_secs` from now (negative: already past; `None`: no expiry),
+    /// with its obligation overdue by an hour.
+    async fn paused_with_approval(
+        pool: &PgPool,
+        tag: &str,
+        expires_in_secs: Option<i64>,
+    ) -> Seeded {
+        let sfx = new_ulid();
+        let (org, user, thread) = (
+            format!("pr-org-{tag}-{sfx}"),
+            "u1".to_owned(),
+            format!("pr-t-{tag}-{sfx}"),
+        );
+        sqlx::query(
+            "INSERT INTO threads (id, session_key, org_id, user_id, created_at)
+             VALUES ($1, $1, $2, $3, now())",
+        )
+        .bind(&thread)
+        .bind(&org)
+        .bind(&user)
+        .execute(pool)
+        .await
+        .expect("thread seeded");
+        let run_id = start_managed_run_with_retention_inner(
+            pool,
+            pb::StartManagedRunRequest {
+                thread_id: thread,
+                parent_run_id: String::new(),
+                agent_id: "general-v1".to_owned(),
+                goal: "approval expiry goal".to_owned(),
+                mode: "execute".to_owned(),
+                org_id: org.clone(),
+                user_id: user.clone(),
+                start_key: format!("pr-{tag}-{sfx}"),
+                terminal_source: pb::ManagedRunSource::ExecutionAgent as i32,
+            },
+            RunRetention::persistent(),
+        )
+        .await
+        .expect("the run starts")
+        .run_id;
+
+        let approval_id = format!("appr_{}", new_ulid());
+        // A cold approval (no continuation mode, no descriptor): this test is about the
+        // recovery worker's reading of `expires_at`, not about how the approval is resumed.
+        approvals::request_approval(
+            pool,
+            &approval_id,
+            &run_id,
+            None,
+            "tool_call",
+            &user,
+            &org,
+            &user,
+            "",
+            &serde_json::json!({}),
+            None,
+            expires_in_secs.map(|secs| Utc::now() + chrono::Duration::seconds(secs)),
+            "",
+        )
+        .await
+        .expect("request approval")
+        .expect("inserted");
+        seed_fold(pool, &run_id, "pause", &approval_id, "", None)
+            .await
+            .expect("the paused fold is stored");
+        make_due(pool, &run_id).await;
+        Seeded { run_id }
+    }
+
+    /// The obligation fell due an hour ago.
+    async fn make_due(pool: &PgPool, run_id: &str) {
+        sqlx::query(
+            "UPDATE managed_run_terminalization_outbox
+             SET deadline_at = now() - interval '1 hour', next_attempt_at = now() - interval '1 hour'
+             WHERE run_id = $1",
+        )
+        .bind(run_id)
+        .execute(pool)
+        .await
+        .expect("age the obligation");
+    }
+
+    /// A delivery worker holds (or held) a lease on the run's approval: `lease_secs` from now,
+    /// negative for a lease that has already lapsed.
+    async fn delivery_lease(pool: &PgPool, run_id: &str, lease_secs: i64) {
+        sqlx::query(
+            "INSERT INTO approval_delivery_outbox
+                 (delivery_id, approval_id, run_id, org_id, user_id, state, attempts,
+                  lease_owner, lease_token_hash, lease_expires_at, processing_at)
+             SELECT $2, a.id, a.run_id, a.org_id, a.user_id, 'processing', 1,
+                    'approval-delivery-worker', repeat('0', 64),
+                    now() + make_interval(secs => $3), now()
+               FROM approvals AS a WHERE a.run_id = $1",
+        )
+        .bind(run_id)
+        .bind(format!("approval_delivery_{}", new_ulid()))
+        .bind(lease_secs as f64)
+        .execute(pool)
+        .await
+        .expect("delivery lease seeded");
+    }
+
+    async fn run_status(pool: &PgPool, run_id: &str) -> String {
+        sqlx::query_scalar("SELECT status FROM runs WHERE id = $1")
+            .bind(run_id)
+            .fetch_one(pool)
+            .await
+            .expect("run status")
+    }
+
+    /// `(state, failure_code)` of the run's terminalization obligation.
+    async fn obligation(pool: &PgPool, run_id: &str) -> (String, Option<String>) {
+        sqlx::query_as(
+            "SELECT state, failure_code FROM managed_run_terminalization_outbox WHERE run_id = $1",
+        )
+        .bind(run_id)
+        .fetch_one(pool)
+        .await
+        .expect("obligation")
+    }
+
+    /// How many RUN_TERMINAL receipts the run holds in the event log (the run's own terminal
+    /// event, whichever outcome it carries): the assertion that a run has at most one.
+    async fn terminal_receipts(pool: &PgPool, run_id: &str) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM events WHERE run_id = $1 AND type_url = $2")
+            .bind(run_id)
+            .bind(RUN_TERMINAL_TYPE_URL)
+            .fetch_one(pool)
+            .await
+            .expect("count the terminal receipts")
+    }
+
+    /// The `receipt_id` the obligation points at (`None` until a terminal receipt is written).
+    async fn obligation_receipt(pool: &PgPool, run_id: &str) -> Option<String> {
+        sqlx::query_scalar(
+            "SELECT receipt_id FROM managed_run_terminalization_outbox WHERE run_id = $1",
+        )
+        .bind(run_id)
+        .fetch_one(pool)
+        .await
+        .expect("obligation receipt")
+    }
+
+    /// Grant the run's one (cold) approval, as production does while it is still unexpired
+    /// (which queues its delivery row), then let it run past its `expires_at`.
+    async fn grant_then_expire(pool: &PgPool, run_id: &str) {
+        let (approval_id, org, user): (String, String, String) =
+            sqlx::query_as("SELECT id, org_id, user_id FROM approvals WHERE run_id = $1")
+                .bind(run_id)
+                .fetch_one(pool)
+                .await
+                .expect("the run's approval");
+        approvals::decide_approval(pool, &approval_id, &org, Some(&user), "granted", &user, "ok")
+            .await
+            .expect("grant");
+        sqlx::query("UPDATE approvals SET expires_at = now() - interval '1 hour' WHERE id = $1")
+            .bind(&approval_id)
+            .execute(pool)
+            .await
+            .expect("let the granted approval expire");
+    }
+
+    /// The delivery row a grant queued is claimed by a delivery worker: its lease runs
+    /// `lease_secs` from now (negative: it has already lapsed).
+    async fn set_delivery_lease(pool: &PgPool, run_id: &str, lease_secs: i64) {
+        let updated = sqlx::query(
+            "UPDATE approval_delivery_outbox
+             SET state = 'processing', attempts = 1,
+                 lease_owner = 'approval-delivery-worker', lease_token_hash = repeat('0', 64),
+                 lease_expires_at = now() + make_interval(secs => $2), processing_at = now()
+             WHERE run_id = $1",
+        )
+        .bind(run_id)
+        .bind(lease_secs as f64)
+        .execute(pool)
+        .await
+        .expect("delivery lease set");
+        assert_eq!(updated.rows_affected(), 1, "premise: one queued delivery row");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres whose name contains \"test\""]
+    async fn an_expired_never_consumed_approval_no_longer_spares_the_run() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let seeded = paused_with_approval(&pool, "expired", Some(-3600)).await;
+        isolate(&pool, &seeded.run_id).await;
+        assert_eq!(fold_rows(&pool, &seeded.run_id).await, 1, "premise: a fold");
+
+        // Switch off (the default): the committed sparing. The expired approval holds the
+        // run back from the candidate query, and the worker's whole pass leaves it alone.
+        {
+            let _off = expiry_test_switch::Forced::set(false);
+            assert!(
+                claim_due_recovery(&pool).await.expect("claim").is_none(),
+                "off: an expired approval still spares the run, as committed"
+            );
+            assert_eq!(recover_due_terminalizations(&pool).await.expect("pass"), 0);
+            assert_eq!(fold_rows(&pool, &seeded.run_id).await, 1);
+            assert!(!is_terminal_run_status(
+                &run_status(&pool, &seeded.run_id).await
+            ));
+            assert_eq!(
+                terminal_receipts(&pool, &seeded.run_id).await,
+                0,
+                "off: no terminal receipt is written"
+            );
+        }
+
+        // Switch on, but the re-check (the second copy of the clause) read with the switch
+        // off: the run is claimed (the candidate query lets it through), then spared by the
+        // re-check and handed back to its obligation. Each copy answers on its own.
+        {
+            let _on = expiry_test_switch::Forced::set(true);
+            let claim = claim_due_recovery(&pool)
+                .await
+                .expect("claim")
+                .expect("on: the expired approval no longer holds the run back");
+            assert_eq!(claim.row.run_id, seeded.run_id);
+            let _off = expiry_test_switch::Forced::set(false);
+            assert!(
+                !recover_claimed_terminalization(&pool, claim)
+                    .await
+                    .expect("recheck"),
+                "the re-check with the switch off still spares the run"
+            );
+            assert_eq!(obligation(&pool, &seeded.run_id).await.0, "open");
+            assert_eq!(fold_rows(&pool, &seeded.run_id).await, 1);
+            assert_eq!(terminal_receipts(&pool, &seeded.run_id).await, 0);
+        }
+
+        // Switch on: the run ends outcome_unknown at its deadline and its fold is purged by
+        // the unchanged terminal path.
+        make_due(&pool, &seeded.run_id).await;
+        isolate(&pool, &seeded.run_id).await;
+        {
+            let _on = expiry_test_switch::Forced::set(true);
+            assert_eq!(
+                recover_due_terminalizations(&pool).await.expect("pass"),
+                1,
+                "on: exactly this run is recovered"
+            );
+        }
+        assert_eq!(run_status(&pool, &seeded.run_id).await, "failed");
+        let (state, failure) = obligation(&pool, &seeded.run_id).await;
+        assert_eq!(state, "reconciliation_required");
+        assert_eq!(failure.as_deref(), Some(RECOVERY_FAILURE_CODE));
+        assert_eq!(
+            fold_rows(&pool, &seeded.run_id).await,
+            0,
+            "the fold is purged with the run"
+        );
+        assert!(
+            obligation_receipt(&pool, &seeded.run_id).await.is_some(),
+            "the obligation records the receipt it wrote"
+        );
+        assert_eq!(
+            terminal_receipts(&pool, &seeded.run_id).await,
+            1,
+            "exactly one RUN_TERMINAL receipt"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres whose name contains \"test\""]
+    async fn an_unexpired_or_live_delivery_approval_still_spares() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let _on = expiry_test_switch::Forced::set(true);
+
+        // An approval that has not expired yet, an approval with no expiry at all, and an
+        // expired one a delivery worker holds a live lease on: each still holds its run back,
+        // both at the candidate query and across the worker's whole pass.
+        for (tag, expires_in, lease) in [
+            ("future", Some(3600), None),
+            ("noexpiry", None, None),
+            ("leased", Some(-3600), Some(600)),
+        ] {
+            let seeded = paused_with_approval(&pool, tag, expires_in).await;
+            if let Some(lease_secs) = lease {
+                delivery_lease(&pool, &seeded.run_id, lease_secs).await;
+            }
+            isolate(&pool, &seeded.run_id).await;
+            assert!(
+                claim_due_recovery(&pool).await.expect("claim").is_none(),
+                "{tag}: the approval still spares the run"
+            );
+            assert_eq!(recover_due_terminalizations(&pool).await.expect("pass"), 0);
+            assert!(!is_terminal_run_status(
+                &run_status(&pool, &seeded.run_id).await
+            ));
+            assert_eq!(
+                fold_rows(&pool, &seeded.run_id).await,
+                1,
+                "{tag}: fold kept"
+            );
+        }
+
+        // The control: the same expired approval whose delivery lease has LAPSED no longer
+        // spares its run, so the three assertions above are the clause's doing.
+        let lapsed = paused_with_approval(&pool, "lapsed", Some(-3600)).await;
+        delivery_lease(&pool, &lapsed.run_id, -600).await;
+        isolate(&pool, &lapsed.run_id).await;
+        let claimed = claim_due_recovery(&pool)
+            .await
+            .expect("claim")
+            .expect("an expired approval with a lapsed delivery lease is recoverable");
+        assert_eq!(claimed.row.run_id, lapsed.run_id);
+    }
+
+    /// The live-delivery-lease branch of the SECOND copy of the clause (`has_pending_approval`,
+    /// the re-check inside `recover_claimed_terminalization`). Every sparing case in the test
+    /// above is stopped by `claim_due_recovery`'s candidate query first, so none reaches it.
+    /// Here the worker WINS the claim while the delivery lease has lapsed, and a delivery
+    /// worker then takes a live lease before the re-check reads: only the re-check can spare
+    /// the run now.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres whose name contains \"test\""]
+    async fn a_delivery_lease_taken_after_the_claim_spares_the_run_at_the_recheck() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let _on = expiry_test_switch::Forced::set(true);
+        // A granted approval (so its delivery row exists, as in production) that has since
+        // expired, whose delivery lease has lapsed: the candidate query lets the run through.
+        let seeded = paused_with_approval(&pool, "racelease", Some(3600)).await;
+        grant_then_expire(&pool, &seeded.run_id).await;
+        set_delivery_lease(&pool, &seeded.run_id, -600).await;
+        isolate(&pool, &seeded.run_id).await;
+        let claim = claim_due_recovery(&pool)
+            .await
+            .expect("claim")
+            .expect("an expired approval with a lapsed delivery lease does not hold the run back");
+        assert_eq!(claim.row.run_id, seeded.run_id);
+
+        // The race: a delivery worker takes a live lease after the claim.
+        set_delivery_lease(&pool, &seeded.run_id, 600).await;
+        assert!(
+            !recover_claimed_terminalization(&pool, claim)
+                .await
+                .expect("recheck"),
+            "the re-check sees the live delivery lease and spares the run"
+        );
+        assert_eq!(
+            obligation(&pool, &seeded.run_id).await,
+            ("open".to_owned(), None),
+            "the obligation is handed back to its retry"
+        );
+        assert!(!is_terminal_run_status(
+            &run_status(&pool, &seeded.run_id).await
+        ));
+        assert_eq!(fold_rows(&pool, &seeded.run_id).await, 1, "fold kept");
+        assert_eq!(terminal_receipts(&pool, &seeded.run_id).await, 0);
+
+        // The control: once that lease lapses too, the same run is recovered, so the sparing
+        // above was the live lease's doing and not a stuck obligation.
+        set_delivery_lease(&pool, &seeded.run_id, -600).await;
+        make_due(&pool, &seeded.run_id).await;
+        isolate(&pool, &seeded.run_id).await;
+        assert_eq!(
+            recover_due_terminalizations(&pool).await.expect("pass"),
+            1,
+            "with the lease lapsed the run is recovered"
+        );
+        assert_eq!(terminal_receipts(&pool, &seeded.run_id).await, 1);
     }
 }

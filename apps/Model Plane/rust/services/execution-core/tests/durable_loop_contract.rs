@@ -881,6 +881,11 @@ fn switch_table() -> Vec<(&'static str, String, &'static str)> {
             const_str(&read(SESSION_LEDGER), "ENABLED_ENV"),
             "the ledger sweep",
         ),
+        (
+            "session-core",
+            const_str(&read(SESSION_TERMINALIZATION), "APPROVAL_EXPIRY_ENV"),
+            "the recovery worker's reading of an expired approval (WS03 S8-0; independent of the coupled flip)",
+        ),
     ]
 }
 
