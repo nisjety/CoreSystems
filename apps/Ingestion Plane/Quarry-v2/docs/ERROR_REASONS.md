@@ -40,7 +40,7 @@ A browser operation that did not finish inside its deadline (`crates/quarry-brow
 
 | field | values | meaning |
 |---|---|---|
-| `op` | `launch`, `tab_attach`, `navigate`, `content`, `ax_snapshot`, `screenshot`, `pdf`, `evaluate`, `input`, `native_action`, `wait_for_poll`, `wait_for`, `page_close`, `context_close`, `health_probe`, `profile_capture`, `download_begin`, `download_complete` | what timed out |
+| `op` | `launch`, `tab_attach`, `navigate`, `content`, `ax_snapshot`, `screenshot`, `pdf`, `evaluate`, `input`, `native_action`, `wait_for_poll`, `wait_for`, `page_close`, `context_close`, `profile_capture`, `download_begin`, `download_complete` | what timed out. `health_probe` is also an `Op` (`deadlines.rs`) but only the background prober runs under it, so it is not a value a client sees (see the paragraph above the table) |
 | `deadline_ms` | number | the bound that expired, after `QUARRY_BROWSER_DEADLINE_SCALE` |
 | `effect` | `none` | the operation cannot have changed the page: a read or a teardown. `retryable` is true |
 | `effect` | `unknown` | the operation may have changed the page (`navigate`, `evaluate`, `input`, `native_action`): look at the page before repeating it. `retryable` is false |
@@ -88,4 +88,4 @@ All of these are `retryable: false`: repeating the call cannot help, the caller 
 
 ## 503 on `GET /ready`: `browser_unhealthy` (WS3.F)
 
-Not an error envelope: `/ready` answers `{"status": "not_ready", "durable": true, "reason": "browser_unhealthy", "browser": {...}}` when every launched browser is dead or failed two health probes in a row. A browser that was never launched is ready. `/health` does not change. The prober's own `health_probe` timeouts stay inside the driver and never reach a client.
+Not an error envelope: `/ready` answers `{"status": "not_ready", "durable": true, "reason": "browser_unhealthy", "browser": {...}, "scrape_browser": {...}}` when, for the agent driver's browser (`browser`) or the scrape driver's (`scrape_browser`), every launched browser is dead or failed two health probes in a row. The edge runs two local Chromium drivers, and each object is present only when that driver runs a local browser. A browser that was never launched is ready. The body is documented in `docs/openapi.yaml` (`GET /ready`, 200 and 503). `/health` does not change. The prober's own `health_probe` timeouts stay inside the driver and never reach a client.
