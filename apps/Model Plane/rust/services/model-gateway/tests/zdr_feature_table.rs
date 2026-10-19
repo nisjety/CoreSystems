@@ -208,6 +208,20 @@ fn cases() -> Vec<(&'static str, Value, Expect)> {
             with("plan_mode", json!(true)),
             refused("plan_mode"),
         ),
+        // An execute turn runs an executing loop under a plan grant: no plan or grant
+        // exists on a ZDR turn, so it is refused through the `agentic` key, on its own
+        // (the request carries no `agentic` feature here) and with it.
+        (
+            "execute_granted",
+            with("execute_granted", json!(true)),
+            refused("agentic"),
+        ),
+        (
+            "execute_granted",
+            with("executeGranted", json!(true)),
+            refused("agentic"),
+        ),
+        ("execute_granted", with("execute_granted", json!(false)), None),
         (
             "tools",
             with(

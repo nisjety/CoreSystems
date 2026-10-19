@@ -5106,6 +5106,264 @@ async fn invoke_stream_agentic_terminalizes_on_confirmed_dispatch_rejection() {
     assert_eq!(receipt.failure_code, "dispatch_rejected");
 }
 
+// ---------------------------------------------------------------------------
+// WS14 S2a, "run the approved plan": the model-gateway half. An execute turn
+// (`execute_granted`) takes the rung of the thread's live grant, or is refused
+// typed with no RunAgent call; at the widest rung it runs under the ASK posture;
+// and `MODEL_GATEWAY_PLAN_EXECUTE_ENABLED` (the plan store's switch) refuses it
+// before any run exists. Every ordinary turn above is the unchanged evidence.
+// ---------------------------------------------------------------------------
+
+/// What an execute-turn scenario leaves behind: the stream, what execution-core
+/// received, and the durable side effects of the session mock.
+struct ExecuteTurnOutcome {
+    body: String,
+    run_agent: Vec<mpv1::RunAgentRequest>,
+    session: MockSessionHandles,
+}
+
+/// POST `body` to `/v1/invoke/stream` on a gateway whose execute switch is `enabled` and
+/// whose plan store `seed` has filled (the store is shared with the router's state).
+async fn execute_turn(
+    enabled: bool,
+    seed: impl FnOnce(&model_gateway::coordinator::PlanModeStore),
+    body: &'static str,
+) -> ExecuteTurnOutcome {
+    execute_turn_with_resume(enabled, true, seed, body).await
+}
+
+/// [`execute_turn`] with the approval-resume switch stated too (the plan store's, like the
+/// execute switch): an execute turn only runs when a per-call approval can resume it.
+async fn execute_turn_with_resume(
+    enabled: bool,
+    approval_resume: bool,
+    seed: impl FnOnce(&model_gateway::coordinator::PlanModeStore),
+    body: &'static str,
+) -> ExecuteTurnOutcome {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+    let _floor = EnvGuard::set("HARNESS_POSTURE_FLOOR", None);
+    let client = spawn_mock(MockOk::default()).await;
+    let (mock_session, session_handles) = MockSessionCore::new();
+    let session_client = spawn_session_mock(mock_session).await;
+    let (mut state, _publisher) = make_state(client, session_client).await;
+    let captured: CapturedRunAgentRequests = Arc::new(Mutex::new(Vec::new()));
+    state.execution_client = spawn_capturing_execution_mock(captured.clone()).await;
+    // The switch is the plan store's, stated here and never read from the environment.
+    state.plan_mode = state
+        .plan_mode
+        .clone()
+        .with_execute_enabled(enabled)
+        .with_approval_resume_enabled(approval_resume);
+    seed(&state.plan_mode);
+    let (app, _delegated_jwks) = authenticated_user_router(
+        build_router(state, None),
+        "org_placeholder",
+        "user_placeholder",
+    )
+    .await;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/invoke/stream")
+        .header(AUTHORIZATION, "Bearer dev")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(body))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let run_agent = captured.lock().unwrap().clone();
+    ExecuteTurnOutcome {
+        body: String::from_utf8(body.to_vec()).unwrap(),
+        run_agent,
+        session: session_handles,
+    }
+}
+
+const EXECUTE_BODY: &str = r#"{"content":"Run the approved plan","model":"m","thread_id":"thread-1","features":["agentic"],"execute_granted":true}"#;
+
+#[tokio::test]
+#[serial_test::serial]
+async fn invoke_stream_execute_granted_without_a_grant_is_refused_before_execution_core() {
+    let out = execute_turn(true, |_| {}, EXECUTE_BODY).await;
+    assert!(out.body.contains("event: connected"), "{}", out.body);
+    assert!(out.body.contains("plan_grant_unavailable"), "{}", out.body);
+    assert!(
+        !out.body.contains("agent_dispatch_rejected") && !out.body.contains("event: done"),
+        "the typed refusal replaces the generic one and the run does not complete: {}",
+        out.body
+    );
+    // Not an UNSPECIFIED run: execution-core was never called.
+    assert!(out.run_agent.is_empty(), "no RunAgent call: {:?}", out.run_agent.len());
+    // The run existed (the rung is resolved at dispatch, after the connected frame) and is
+    // closed as a rejected dispatch, with the scoped workload token, not left running.
+    assert_eq!(managed_start_count(&out.session), 1);
+    let receipts = out.session.terminal_outcome_captures.lock().unwrap();
+    assert_eq!(receipts.len(), 1, "the prepared run is closed, not stranded");
+    let (authorization, receipt) = &receipts[0];
+    assert_eq!(authorization, "Bearer gateway-terminalizer-token");
+    assert_eq!(receipt.outcome, TerminalOutcome::Failed as i32);
+    assert_eq!(receipt.source, ManagedRunSource::GatewayAgentDispatchRejected as i32);
+    assert_eq!(receipt.failure_code, "dispatch_rejected");
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn invoke_stream_execute_granted_with_a_grant_sends_the_granted_rung() {
+    use mp_contracts::model_plane::v1::AutonomyRung;
+    let out = execute_turn(
+        true,
+        |store| store.record_grant("org_placeholder", "thread-1", AutonomyRung::WorkspaceWrite, ""),
+        EXECUTE_BODY,
+    )
+    .await;
+    assert!(!out.body.contains("plan_grant_unavailable"), "{}", out.body);
+    assert_eq!(out.run_agent.len(), 1, "exactly one RunAgent dispatch");
+    let sent = &out.run_agent[0];
+    assert_eq!(sent.autonomy_rung, AutonomyRung::WorkspaceWrite as i32);
+    assert!(!sent.plan_mode, "an execute turn is an executing run, never plan mode");
+    assert_eq!(sent.mode, "auto", "below the widest rung the posture is the committed one");
+    assert_eq!(sent.thread_id, "thread-1");
+}
+
+/// The posture ratchet, end to end: the widest rung runs under ASK, and the same grant on a
+/// turn that is NOT an execute turn keeps the committed posture and the legacy rung rule.
+#[tokio::test]
+#[serial_test::serial]
+async fn invoke_stream_execute_granted_at_the_widest_rung_runs_under_the_ask_posture() {
+    use mp_contracts::model_plane::v1::AutonomyRung;
+    let grant = |store: &model_gateway::coordinator::PlanModeStore| {
+        store.record_grant("org_placeholder", "thread-1", AutonomyRung::DangerFullAccess, "");
+    };
+    let out = execute_turn(true, grant, EXECUTE_BODY).await;
+    assert_eq!(out.run_agent.len(), 1, "{}", out.body);
+    assert_eq!(out.run_agent[0].autonomy_rung, AutonomyRung::DangerFullAccess as i32);
+    assert_eq!(out.run_agent[0].mode, "ask", "every effectful call pauses for an approval");
+
+    let ordinary = execute_turn(
+        true,
+        grant,
+        r#"{"content":"keep going","model":"m","thread_id":"thread-1","features":["agentic"]}"#,
+    )
+    .await;
+    assert_eq!(ordinary.run_agent.len(), 1, "{}", ordinary.body);
+    assert_eq!(
+        ordinary.run_agent[0].mode, "auto",
+        "a turn without execute_granted is never ratcheted"
+    );
+    assert_eq!(
+        ordinary.run_agent[0].autonomy_rung,
+        AutonomyRung::DangerFullAccess as i32,
+        "and keeps the legacy rule: the thread's grant states its rung"
+    );
+}
+
+/// The kill switch: refused typed, before any run side effect, whatever grant exists.
+#[tokio::test]
+#[serial_test::serial]
+async fn invoke_stream_execute_granted_is_refused_typed_when_the_switch_is_off() {
+    use mp_contracts::model_plane::v1::AutonomyRung;
+    let out = execute_turn(
+        false,
+        |store| store.record_grant("org_placeholder", "thread-1", AutonomyRung::WorkspaceWrite, ""),
+        EXECUTE_BODY,
+    )
+    .await;
+    assert!(out.body.contains("event: error"), "{}", out.body);
+    assert!(out.body.contains("plan_execute_disabled"), "{}", out.body);
+    assert!(
+        !out.body.contains("event: connected") && !out.body.contains("plan_grant_unavailable"),
+        "refused before any run exists: {}",
+        out.body
+    );
+    assert!(out.run_agent.is_empty(), "nothing was dispatched");
+    assert_eq!(managed_start_count(&out.session), 0, "no run was prepared");
+    assert_eq!(out.session.create_thread_count.load(Ordering::SeqCst), 0);
+    assert_eq!(out.session.append_message_count.load(Ordering::SeqCst), 0, "no user turn was written");
+    assert!(
+        out.session.terminal_outcome_captures.lock().unwrap().is_empty(),
+        "no run, so nothing to terminalize"
+    );
+}
+
+/// The execute switch is coupled to the approval-resume switch: an execute turn at the widest
+/// rung runs under `ask` and pauses at its first risky call, and a click on that approval
+/// resumes nothing when the gateway's `/continue` is off (`continue_disabled`). Refused the
+/// same way as the kill switch, typed and before any run side effect, at every rung and
+/// whatever grant exists; the same request with the resume switch on is dispatched.
+#[tokio::test]
+#[serial_test::serial]
+async fn invoke_stream_execute_granted_is_refused_typed_when_approvals_cannot_resume() {
+    use mp_contracts::model_plane::v1::AutonomyRung;
+    for rung in [AutonomyRung::DangerFullAccess, AutonomyRung::WorkspaceWrite] {
+        let out = execute_turn_with_resume(
+            true,
+            false,
+            move |store| store.record_grant("org_placeholder", "thread-1", rung, ""),
+            EXECUTE_BODY,
+        )
+        .await;
+        assert!(out.body.contains("event: error"), "{rung:?}: {}", out.body);
+        assert!(out.body.contains("plan_execute_disabled"), "{rung:?}: {}", out.body);
+        assert!(
+            !out.body.contains("event: connected") && !out.body.contains("plan_grant_unavailable"),
+            "refused before any run exists: {}",
+            out.body
+        );
+        assert!(out.run_agent.is_empty(), "{rung:?}: nothing was dispatched");
+        assert_eq!(managed_start_count(&out.session), 0, "{rung:?}: no run was prepared");
+        assert_eq!(out.session.create_thread_count.load(Ordering::SeqCst), 0);
+        assert_eq!(out.session.append_message_count.load(Ordering::SeqCst), 0);
+        assert!(out.session.terminal_outcome_captures.lock().unwrap().is_empty());
+    }
+    // The coupling takes nothing from a turn that is not an execute turn: the same grant, the
+    // same switches, an ordinary agentic turn is dispatched as it always was.
+    let ordinary = execute_turn_with_resume(
+        true,
+        false,
+        |store| {
+            store.record_grant("org_placeholder", "thread-1", AutonomyRung::DangerFullAccess, "");
+        },
+        r#"{"content":"keep going","model":"m","thread_id":"thread-1","features":["agentic"]}"#,
+    )
+    .await;
+    assert_eq!(ordinary.run_agent.len(), 1, "{}", ordinary.body);
+    assert_eq!(ordinary.run_agent[0].mode, "auto");
+    // With the resume switch on the execute turn runs (and under ask at the widest rung).
+    let on = execute_turn_with_resume(
+        true,
+        true,
+        |store| {
+            store.record_grant("org_placeholder", "thread-1", AutonomyRung::DangerFullAccess, "");
+        },
+        EXECUTE_BODY,
+    )
+    .await;
+    assert_eq!(on.run_agent.len(), 1, "{}", on.body);
+    assert_eq!(on.run_agent[0].mode, "ask");
+}
+
+/// A malformed execute request never prepares a run either.
+#[tokio::test]
+#[serial_test::serial]
+async fn invoke_stream_execute_granted_invalid_combinations_never_prepare_a_run() {
+    for body in [
+        // no thread
+        r#"{"content":"go","model":"m","features":["agentic"],"execute_granted":true}"#,
+        // plan mode
+        r#"{"content":"go","model":"m","thread_id":"thread-1","features":["agentic"],"plan_mode":true,"execute_granted":true}"#,
+        // not agentic
+        r#"{"content":"go","model":"m","thread_id":"thread-1","execute_granted":true}"#,
+    ] {
+        let out = execute_turn(true, |_| {}, body).await;
+        assert!(out.body.contains("invalid_request"), "{body}: {}", out.body);
+        assert!(out.run_agent.is_empty(), "{body}");
+        assert_eq!(managed_start_count(&out.session), 0, "{body}");
+        assert_eq!(out.session.create_thread_count.load(Ordering::SeqCst), 0, "{body}");
+        assert!(out.session.terminal_outcome_captures.lock().unwrap().is_empty(), "{body}");
+    }
+}
+
 #[tokio::test]
 #[serial_test::serial]
 async fn invoke_stream_recovers_when_client_thread_id_is_not_durable_yet() {

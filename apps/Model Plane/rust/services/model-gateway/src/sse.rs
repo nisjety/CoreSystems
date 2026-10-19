@@ -971,9 +971,13 @@ pub async fn invoke_stream_sse(
     };
     // A waiver names one connection. Deep research, image generation and a vision turn (AnalyzeImage)
     // call the platform chain, which a waived turn must never reach, so they are refused before any run.
+    // An execute turn (WS14 S2a) runs an executing loop under a stored plan grant; a waived turn keeps
+    // no such state to run under, so it is refused the same way (the ZDR token is refused by
+    // `zdr_features::refusal`).
     if turn_posture.is_waived()
         && (req.deep_research
             || req.generate_image
+            || req.execute_granted
             || crate::vision::select_image(&req.attachments).is_some())
     {
         return zdr_refusal_stream(&request_id, mp_contracts::zdr_refusal::Refusal::WAIVER_ROUTE_MISMATCH);
@@ -1306,6 +1310,20 @@ pub async fn invoke_stream_sse(
             );
         }
     }
+    // An execute turn (WS14 S2a) is refused here, before any durable run exists, when the
+    // gateway's execute switch, or the approval-resume switch it is coupled to, is off
+    // (`plan_execute_disabled`) or its own shape is wrong
+    // (`invalid_request`). Nothing below has run: no run is prepared and nothing is dispatched.
+    // Whether a live grant exists is decided later, for the run's own thread
+    // (`resolve_autonomy_rung` in `spawn_run_dispatch`).
+    if let Some((code, message)) = execute_refusal(
+        &req,
+        agentic_requested,
+        state.plan_mode.execute_enabled(),
+        state.plan_mode.approval_resume_enabled(),
+    ) {
+        return error_stream(&request_id, code, message, false);
+    }
 
     // Start keys are durable Session Core metadata. Keep the raw browser/API
     // retry identifier in the in-memory idempotency guard only; persist its
@@ -1504,6 +1522,7 @@ pub async fn invoke_stream_sse(
             min_privacy_tier_wire,
             posture.to_owned(),
             req.plan_mode,
+            req.execute_granted,
             execution_bearer,
             data_plane_bearer,
             model_bearer,
@@ -8987,6 +9006,142 @@ fn latest_proposed_plan(
         .find(|p| p.state == PlanState::Proposed as i32)
 }
 
+/// The typed code of an execute turn (`execute_granted`) that has no live plan grant to run
+/// under: the run is refused and terminalized (`dispatch_rejected`), and execution-core is
+/// never called (WS14 S2a). It travels as the message of the `failed_precondition` status
+/// [`resolve_autonomy_rung`] returns, and as the code of the SSE `error` event.
+const PLAN_GRANT_UNAVAILABLE: &str = "plan_grant_unavailable";
+
+/// The typed code of an execute turn refused because the gateway's execute switch is off
+/// (`MODEL_GATEWAY_PLAN_EXECUTE_ENABLED`, read once by the plan store). Refused before any
+/// run exists, so there is nothing to terminalize.
+const PLAN_EXECUTE_DISABLED: &str = "plan_execute_disabled";
+
+/// The rung a dispatched run states, resolved in ONE place for every non-resume dispatch
+/// (WS14 S2a). Pure over the grant store.
+///
+/// * Plan mode is READ_ONLY, whatever grant exists and whatever else the request says: plan
+///   mode always wins.
+/// * An EXECUTE turn (`execute_granted`) fails closed: it takes the rung of the thread's live
+///   grant, and without one (none recorded, expired, another org's, another thread's) it is
+///   `failed_precondition` with [`PLAN_GRANT_UNAVAILABLE`]. It is never run with no stated
+///   rung: an unstated rung is the least constrained a chat run can have, and a gateway
+///   restart (the grant lives in memory) must not turn "run the plan I approved" into that.
+/// * Every other run keeps the legacy rule exactly: the thread's grant when there is one,
+///   else UNSPECIFIED ("no graded constraint stated"), so eval-lab and every existing
+///   agentic caller are unchanged.
+///
+/// The key is `(verified org, run.thread_id)`: the thread session-core resolved and
+/// owner-verified for this run, never the request's own thread id, so a request cannot ask
+/// whether a grant exists for a thread it does not own.
+#[allow(clippy::result_large_err)]
+fn resolve_autonomy_rung(
+    store: &crate::coordinator::PlanModeStore,
+    org_id: &str,
+    thread_id: &str,
+    plan_mode: bool,
+    execute_granted: bool,
+) -> Result<i32, tonic::Status> {
+    use mp_contracts::model_plane::v1::AutonomyRung;
+    if plan_mode {
+        return Ok(AutonomyRung::ReadOnly as i32);
+    }
+    let granted = store.granted_rung(org_id, thread_id);
+    if execute_granted {
+        return granted
+            .map(|rung| rung as i32)
+            .ok_or_else(|| tonic::Status::failed_precondition(PLAN_GRANT_UNAVAILABLE));
+    }
+    Ok(dispatch_autonomy_rung(false, false, granted))
+}
+
+/// The approval posture an execute turn runs under (WS14 S2a, the posture ratchet). Pure.
+///
+/// An execute turn whose live grant is `danger_full_access` runs under the ASK posture: every
+/// effectful call pauses for a per-call approval, so the widest rung is never also an
+/// unattended one. Any lower rung keeps the posture the turn already had, and any other turn
+/// (not an execute turn) is untouched whatever rung its thread holds. It only ever TIGHTENS:
+/// a posture that is already `ask` stays `ask`.
+fn execute_permission_mode(permission_mode: &str, execute_granted: bool, rung: i32) -> &str {
+    use mp_contracts::model_plane::v1::AutonomyRung;
+    if execute_granted && rung == AutonomyRung::DangerFullAccess as i32 {
+        crate::profile::ApprovalPosture::Ask.as_permission_mode()
+    } else {
+        permission_mode
+    }
+}
+
+/// What is wrong with an execute request's own shape, or `None`. Pure; checked before any run
+/// exists. An execute turn needs the `agentic` feature (it is an executing run), no
+/// `plan_mode` (plan mode is read-only and the two are exclusive) and a `thread_id` (the
+/// grant is the thread's; a new thread has none). A request without `execute_granted` has
+/// no problem here whatever else it says.
+fn execute_request_problem(req: &InvokeRequest, agentic: bool) -> Option<&'static str> {
+    if !req.execute_granted {
+        return None;
+    }
+    if !agentic {
+        return Some("execute_granted needs the agentic feature");
+    }
+    if req.plan_mode {
+        return Some("execute_granted and plan_mode are mutually exclusive");
+    }
+    if req.thread_id.as_deref().map_or(true, |id| id.trim().is_empty()) {
+        return Some("execute_granted needs the thread of the approved plan (thread_id)");
+    }
+    None
+}
+
+/// Why an execute turn is refused before any run exists, as the `(code, message)` of the SSE
+/// `error` event (never retryable), or `None`. Pure. The switches come first: with the execute
+/// switch off, or with the approval-resume switch off, every execute turn gets the same code
+/// whatever its shape; with both on, a malformed request is `invalid_request`.
+///
+/// The approval-resume switch (`/continue` on) is a prerequisite because the posture ratchet
+/// runs the widest rung under `ask`: its first risky call pauses for a per-call approval, and
+/// with `/continue` off that click resumes nothing (`continue_disabled`) while spending the
+/// approval, so the run would strand. Turn the execute switch on after the approval-resume
+/// flip, off before rolling it back.
+fn execute_refusal(
+    req: &InvokeRequest,
+    agentic: bool,
+    execute_enabled: bool,
+    approval_resume_enabled: bool,
+) -> Option<(&'static str, &'static str)> {
+    if !req.execute_granted {
+        return None;
+    }
+    if !execute_enabled {
+        return Some((
+            PLAN_EXECUTE_DISABLED,
+            "Running an approved plan is switched off on this server.",
+        ));
+    }
+    if !approval_resume_enabled {
+        return Some((
+            PLAN_EXECUTE_DISABLED,
+            "Running an approved plan needs approvals to resume, which is switched off on this server.",
+        ));
+    }
+    execute_request_problem(req, agentic).map(|problem| ("invalid_request", problem))
+}
+
+/// The `(code, message)` of the SSE `error` event for a dispatch the gateway rejected before
+/// calling execution-core. An execute turn without a live grant is the typed
+/// [`PLAN_GRANT_UNAVAILABLE`]; every other rejection keeps the generic `agent_dispatch_rejected`
+/// it always had. Content-free: the message states no plan, thread or run.
+fn dispatch_rejection_event(status: &tonic::Status) -> (&'static str, &'static str) {
+    if status.code() == tonic::Code::FailedPrecondition && status.message() == PLAN_GRANT_UNAVAILABLE
+    {
+        (
+            PLAN_GRANT_UNAVAILABLE,
+            "No live plan grant exists for this conversation: it expired or the service restarted. Plan again and approve the plan.",
+        )
+    } else {
+        ("agent_dispatch_rejected", "The agent run could not be accepted.")
+    }
+}
+
 /// Start dispatch of a prepared run to Execution Core's governed agent driver.
 ///
 /// A successfully created task only proves that the client RPC has been
@@ -9008,6 +9163,10 @@ fn spawn_run_dispatch(
     min_privacy_tier_wire: i32,
     permission_mode: &str,
     plan_mode: bool,
+    // WS14 S2a: this is an execute turn. It takes its rung from the thread's live grant or
+    // is refused (`resolve_autonomy_rung`); `false` for every other dispatch, a resume's
+    // included.
+    execute_granted: bool,
     execution_bearer: &VerifiedExecutionBearer,
     data_plane_bearer: &VerifiedBearer,
     session_bearer: &VerifiedModelBearer,
@@ -9043,11 +9202,35 @@ fn spawn_run_dispatch(
     // rung only after it has consumed the single-use approval. The thread's grant
     // may have widened since the pause, so it is not read for a resume
     // (`dispatch_autonomy_rung`).
-    let granted = if plan_mode {
-        None
-    } else {
-        state.plan_mode.granted_rung(org_id, &run.thread_id)
-    };
+    //
+    // An EXECUTE turn (`execute_granted`, WS14 S2a) is resolved through the same function and
+    // fails closed: no live grant means `plan_grant_unavailable` and no `RunAgent` call at
+    // all, never an unstated rung. The grant is read here, for `run.thread_id`: the thread
+    // session-core resolved and owner-verified for this run.
+    let rung = resolve_autonomy_rung(
+        &state.plan_mode,
+        org_id,
+        &run.thread_id,
+        plan_mode,
+        execute_granted,
+    )?;
+    // The granted rung as `resolved_run_agent_request` takes it: the rung the store held
+    // (UNSPECIFIED is "none"). Plan mode and a resume still decide the rung that is sent
+    // (`dispatch_autonomy_rung`), so every request but an execute turn is byte-identical.
+    let granted = mp_contracts::model_plane::v1::AutonomyRung::try_from(rung)
+        .ok()
+        .filter(|rung| *rung != mp_contracts::model_plane::v1::AutonomyRung::Unspecified);
+    // The posture ratchet: an execute turn at the widest rung asks for a per-call approval.
+    let ratcheted = execute_permission_mode(permission_mode, execute_granted, rung);
+    if ratcheted != permission_mode {
+        tracing::info!(
+            run_id = %run.run_id,
+            from = permission_mode,
+            to = ratcheted,
+            "execute turn at the widest rung runs under the ask posture"
+        );
+    }
+    let permission_mode = ratcheted;
     // The run's round and delegation budget, resolved here from the server's
     // own environment and the route the gateway pinned (never from the
     // request). Defaults to the 4 rounds and unspecified subagents this site
@@ -9636,6 +9819,9 @@ fn agentic_run_stream(
     min_privacy_tier_wire: i32,
     permission_mode: String,
     plan_mode: bool,
+    // An execute turn (WS14 S2a): the run takes the thread's live plan grant or is refused,
+    // typed, before execution-core is called. `false` for a continuation and every other turn.
+    execute_granted: bool,
     execution_bearer: VerifiedExecutionBearer,
     data_plane_bearer: VerifiedBearer,
     model_bearer: VerifiedModelBearer,
@@ -9703,6 +9889,7 @@ fn agentic_run_stream(
             min_privacy_tier_wire,
             &permission_mode,
             plan_mode,
+            execute_granted,
             &execution_bearer,
             &data_plane_bearer,
             &model_bearer,
@@ -9751,9 +9938,12 @@ fn agentic_run_stream(
                             .publisher
                             .publish(&subjects::run_event_subject(&run.run_id), &failed)
                             .await;
+                        // An execute turn with no live grant is the typed
+                        // `plan_grant_unavailable`; any other rejection keeps its generic code.
+                        let (code, message) = dispatch_rejection_event(&error);
                         let event = crate::sse_events::ChatEvent::Error {
-                            code: "agent_dispatch_rejected".to_owned(),
-                            message: "The agent run could not be accepted.".to_owned(),
+                            code: code.to_owned(),
+                            message: message.to_owned(),
                             retryable: false,
                         };
                         let _ = tx.send(Ok(event.to_sse(&request_id))).await;
@@ -14433,6 +14623,8 @@ pub(crate) async fn continue_run(
             0,
             CONTINUE_PERMISSION_MODE.to_owned(),
             false,
+            // A continuation is never an execute turn: its authority is the pause's.
+            false,
             execution_bearer,
             data_plane_bearer,
             model_bearer,
@@ -16260,6 +16452,7 @@ mod continue_run_tests {
             0,
             CONTINUE_PERMISSION_MODE.to_owned(),
             false,
+            false,
             execution,
             data_plane,
             session,
@@ -17024,5 +17217,391 @@ mod continue_run_tests {
             }
         }
         assert!(statements >= 5, "the scan found only {statements} log statements");
+    }
+}
+
+/// WS14 S2a, "run the approved plan": the gateway half. An execute turn (`execute_granted`)
+/// takes its rung from the thread's live grant or is refused; it runs under the ASK posture at
+/// the widest rung; a kill switch refuses it before any run exists. The pure decisions are
+/// tested directly; the wiring is pinned by name here and driven end to end in
+/// `tests/e2e_invoke_chain_test.rs`.
+#[cfg(test)]
+mod execute_turn_tests {
+    use super::*;
+    use mp_contracts::model_plane::v1::AutonomyRung as Rung;
+
+    fn store_with(org: &str, thread: &str, rung: Rung) -> crate::coordinator::PlanModeStore {
+        let store = crate::coordinator::PlanModeStore::new();
+        store.record_grant(org, thread, rung, "");
+        store
+    }
+
+    /// The rung a dispatch states, for a store that is known to resolve.
+    fn rung_of(
+        store: &crate::coordinator::PlanModeStore,
+        org: &str,
+        thread: &str,
+        plan_mode: bool,
+        execute: bool,
+    ) -> i32 {
+        resolve_autonomy_rung(store, org, thread, plan_mode, execute).expect("the rung resolves")
+    }
+
+    fn request(extra: serde_json::Value) -> InvokeRequest {
+        let mut body = serde_json::json!({ "content": "run the plan" });
+        body.as_object_mut()
+            .expect("object")
+            .extend(extra.as_object().expect("object").clone());
+        serde_json::from_value(body).expect("a wire body parses")
+    }
+
+    /// Plan mode is READ_ONLY whatever else is true: a grant that exists and an execute flag
+    /// that is also set do not widen it.
+    #[test]
+    fn plan_mode_wins_over_a_grant_and_over_execute() {
+        let store = store_with("org-1", "thread-1", Rung::DangerFullAccess);
+        for execute in [false, true] {
+            assert_eq!(
+                rung_of(&store, "org-1", "thread-1", true, execute),
+                Rung::ReadOnly as i32,
+                "execute_granted {execute}"
+            );
+        }
+        // And with no grant at all, plan mode still resolves (it never reads the store).
+        let empty = crate::coordinator::PlanModeStore::new();
+        assert_eq!(
+            rung_of(&empty, "org-1", "thread-1", true, true),
+            Rung::ReadOnly as i32
+        );
+    }
+
+    /// The compatibility pin for eval-lab and every existing agentic caller: without
+    /// `execute_granted` the rule is the legacy one, the grant's rung or UNSPECIFIED.
+    #[test]
+    fn the_legacy_path_is_unchanged_without_execute() {
+        let store = store_with("org-1", "thread-1", Rung::WorkspaceWrite);
+        assert_eq!(
+            rung_of(&store, "org-1", "thread-1", false, false),
+            Rung::WorkspaceWrite as i32,
+            "a grant states its rung"
+        );
+        for (org, thread) in [("org-1", "thread-2"), ("org-2", "thread-1")] {
+            assert_eq!(
+                rung_of(&store, org, thread, false, false),
+                Rung::Unspecified as i32,
+                "no grant for ({org}, {thread}) is UNSPECIFIED, the legacy fail-open that is kept for non-execute runs"
+            );
+        }
+    }
+
+    /// An execute turn without a live grant never runs with no stated rung.
+    #[test]
+    fn an_execute_turn_fails_closed_without_a_live_grant() {
+        let store = store_with("org-1", "thread-1", Rung::WorkspaceWrite);
+        // Another thread, another org, nothing recorded at all.
+        for (org, thread) in [
+            ("org-1", "thread-2"),
+            ("org-2", "thread-1"),
+            ("org-1", ""),
+        ] {
+            let error = resolve_autonomy_rung(&store, org, thread, false, true)
+                .expect_err("no live grant for this org and thread");
+            assert_eq!(error.code(), tonic::Code::FailedPrecondition, "({org}, {thread})");
+            assert_eq!(error.message(), PLAN_GRANT_UNAVAILABLE);
+        }
+        let none = resolve_autonomy_rung(
+            &crate::coordinator::PlanModeStore::new(),
+            "org-1",
+            "thread-1",
+            false,
+            true,
+        )
+        .expect_err("a gateway that restarted holds no grant");
+        assert_eq!(none.message(), PLAN_GRANT_UNAVAILABLE);
+    }
+
+    /// A grant past its expiry is no grant.
+    #[test]
+    fn an_expired_grant_is_refused_and_a_live_one_gives_its_rung() {
+        let store = store_with("org-1", "thread-1", Rung::DangerFullAccess);
+        assert_eq!(
+            rung_of(&store, "org-1", "thread-1", false, true),
+            Rung::DangerFullAccess as i32,
+            "a live grant gives its own rung, the one the human approved"
+        );
+        let workspace = store_with("org-1", "thread-9", Rung::WorkspaceWrite);
+        assert_eq!(
+            rung_of(&workspace, "org-1", "thread-9", false, true),
+            Rung::WorkspaceWrite as i32
+        );
+        // Expired: planted already past its expiry, as `granted_rung` sees it.
+        let lapsed = crate::coordinator::PlanModeStore::new();
+        lapsed.plant_grant_for_test("org-1", "thread-1", Rung::DangerFullAccess, 1);
+        assert_eq!(
+            rung_of(&lapsed, "org-1", "thread-1", false, false),
+            Rung::Unspecified as i32,
+            "the legacy path sees an expired grant as none"
+        );
+        assert!(resolve_autonomy_rung(&lapsed, "org-1", "thread-1", false, true).is_err());
+    }
+
+    /// The ratchet: only an execute turn, only at the widest rung, and only ever stricter.
+    #[test]
+    fn the_widest_rung_of_an_execute_turn_runs_under_the_ask_posture() {
+        let widest = Rung::DangerFullAccess as i32;
+        let workspace = Rung::WorkspaceWrite as i32;
+        // An execute turn at the widest rung: ask, from either starting posture.
+        assert_eq!(execute_permission_mode("auto", true, widest), "ask");
+        assert_eq!(execute_permission_mode("ask", true, widest), "ask");
+        // Lower rungs keep the posture the turn had (no ratchet, no loosening).
+        for rung in [
+            Rung::Unspecified as i32,
+            Rung::ReadOnly as i32,
+            workspace,
+        ] {
+            assert_eq!(execute_permission_mode("auto", true, rung), "auto", "rung {rung}");
+            assert_eq!(execute_permission_mode("ask", true, rung), "ask", "rung {rung}");
+        }
+        // A turn that is not an execute turn is never ratcheted, whatever rung its thread holds.
+        assert_eq!(execute_permission_mode("auto", false, widest), "auto");
+        assert_eq!(execute_permission_mode("ask", false, widest), "ask");
+    }
+
+    #[test]
+    fn execute_request_problem_names_each_malformed_shape() {
+        // The default and every ordinary request have no problem, whatever else they say.
+        assert_eq!(execute_request_problem(&request(serde_json::json!({})), false), None);
+        assert_eq!(
+            execute_request_problem(
+                &request(serde_json::json!({"plan_mode": true, "thread_id": ""})),
+                false
+            ),
+            None,
+            "without execute_granted nothing is a problem here"
+        );
+        let valid = serde_json::json!({"execute_granted": true, "thread_id": "thread-1"});
+        assert_eq!(execute_request_problem(&request(valid.clone()), true), None);
+        // The camelCase alias the BFF may pass is the same field.
+        assert_eq!(
+            execute_request_problem(
+                &request(serde_json::json!({"executeGranted": true, "thread_id": "thread-1"})),
+                true
+            ),
+            None
+        );
+        assert!(
+            execute_request_problem(&request(valid.clone()), false).is_some(),
+            "no agentic feature"
+        );
+        let mut plan = valid.clone();
+        plan["plan_mode"] = serde_json::json!(true);
+        assert!(execute_request_problem(&request(plan), true).is_some(), "plan_mode");
+        for thread in [serde_json::json!(null), serde_json::json!(""), serde_json::json!("  ")] {
+            let mut body = valid.clone();
+            body["thread_id"] = thread.clone();
+            assert!(
+                execute_request_problem(&request(body), true).is_some(),
+                "a blank thread {thread}"
+            );
+        }
+        assert!(
+            execute_request_problem(&request(serde_json::json!({"execute_granted": true})), true)
+                .is_some(),
+            "no thread_id at all"
+        );
+    }
+
+    /// The switch comes first and decides alone; a request that is not an execute turn is
+    /// never touched by it.
+    #[test]
+    fn the_switch_refuses_every_execute_turn_and_no_other() {
+        let valid = request(serde_json::json!({"execute_granted": true, "thread_id": "t-1"}));
+        let malformed = request(serde_json::json!({"execute_granted": true}));
+        let ordinary = request(serde_json::json!({"thread_id": "t-1"}));
+        assert_eq!(
+            execute_refusal(&valid, true, false, true).map(|(code, _)| code),
+            Some("plan_execute_disabled")
+        );
+        assert_eq!(
+            execute_refusal(&malformed, false, false, true).map(|(code, _)| code),
+            Some("plan_execute_disabled"),
+            "with the switch off every execute turn gets the same answer, shape aside"
+        );
+        assert_eq!(execute_refusal(&valid, true, true, true), None, "switch on, valid shape");
+        assert_eq!(
+            execute_refusal(&malformed, true, true, true).map(|(code, _)| code),
+            Some("invalid_request")
+        );
+        for enabled in [false, true] {
+            for resume in [false, true] {
+                assert_eq!(
+                    execute_refusal(&ordinary, true, enabled, resume),
+                    None,
+                    "an ordinary turn is untouched whatever the switches say (enabled {enabled}, resume {resume})"
+                );
+            }
+        }
+        // No message carries a plan, thread or run: content-free.
+        let (_, message) = execute_refusal(&valid, true, false, true).expect("refused");
+        assert!(!message.contains("t-1"), "{message}");
+    }
+
+    /// An execute turn needs the approval-resume switch (`/continue` on): without it the ratcheted
+    /// widest rung would pause at its first risky call for an approval nothing resumes. It is the
+    /// same typed refusal as the kill switch and, like it, decides before the request's shape.
+    #[test]
+    fn an_execute_turn_needs_approvals_to_be_resumable() {
+        let valid = request(serde_json::json!({"execute_granted": true, "thread_id": "t-1"}));
+        let malformed = request(serde_json::json!({"execute_granted": true}));
+        let ordinary = request(serde_json::json!({"thread_id": "t-1"}));
+        for req in [&valid, &malformed] {
+            let (code, message) =
+                execute_refusal(req, true, true, false).expect("refused with resume off");
+            assert_eq!(code, "plan_execute_disabled");
+            assert!(!message.contains("t-1"), "content-free: {message}");
+        }
+        assert_eq!(
+            execute_refusal(&valid, true, true, true),
+            None,
+            "both switches on and a valid shape run"
+        );
+        assert_eq!(execute_refusal(&ordinary, true, true, false), None, "only execute turns");
+        // The reason is stated: the resume switch's message is not the kill switch's, so an
+        // operator who sees `plan_execute_disabled` with the execute switch on can tell why.
+        let (_, kill) = execute_refusal(&valid, true, false, true).expect("kill switch");
+        let (_, resume) = execute_refusal(&valid, true, true, false).expect("resume switch");
+        assert_ne!(kill, resume);
+        assert!(resume.to_lowercase().contains("approv"), "{resume}");
+    }
+
+    #[test]
+    fn a_missing_grant_is_the_typed_rejection_and_every_other_status_keeps_its_code() {
+        let (code, message) = dispatch_rejection_event(&tonic::Status::failed_precondition(
+            PLAN_GRANT_UNAVAILABLE,
+        ));
+        assert_eq!(code, "plan_grant_unavailable");
+        assert!(!message.is_empty());
+        // The same status code with another message, and another code with the same message,
+        // are the generic rejection: the typed code needs both.
+        for status in [
+            tonic::Status::failed_precondition("something else"),
+            tonic::Status::invalid_argument(PLAN_GRANT_UNAVAILABLE),
+            tonic::Status::unauthenticated("missing credential"),
+        ] {
+            assert_eq!(
+                dispatch_rejection_event(&status),
+                ("agent_dispatch_rejected", "The agent run could not be accepted."),
+                "{status:?}"
+            );
+        }
+    }
+
+    // ---- the wiring, by name (the end-to-end proof is in tests/e2e_invoke_chain_test.rs) ----
+
+    fn code_of(header: &str, terminator: &str) -> String {
+        let source = include_str!("sse.rs").replace("\r\n", "\n");
+        let production = source
+            .split("\n#[cfg(test)]\nmod continue_run_tests {")
+            .next()
+            .expect("the test modules are in this file");
+        let from = production
+            .find(header)
+            .unwrap_or_else(|| panic!("`{header}` is in the production text"));
+        let rest = &production[from..];
+        let to = rest
+            .find(terminator)
+            .unwrap_or_else(|| panic!("`{header}` ends with {terminator:?}"));
+        rest[..to]
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The dispatch reads the thread's grant through `resolve_autonomy_rung` and no other
+    /// way, for the run's own thread, and sends the ratcheted posture.
+    #[test]
+    fn the_dispatch_resolves_the_rung_in_one_place_for_the_runs_own_thread() {
+        let body = code_of("fn spawn_run_dispatch(", "\n}\n");
+        assert_eq!(body.matches("resolve_autonomy_rung(").count(), 1, "{body}");
+        assert!(
+            !body.contains("granted_rung("),
+            "the grant is not read a second way: {body}"
+        );
+        let call = &body[body.find("resolve_autonomy_rung(").expect("the call")..];
+        let args: String = call.chars().take(160).collect();
+        assert!(
+            args.contains("&run.thread_id") && !args.contains("req."),
+            "keyed by the run's own, owner-verified thread: {args}"
+        );
+        assert!(args.contains("execute_granted"), "{args}");
+        // The `?` propagates the refusal before the request is built or sent.
+        assert!(call.trim_start_matches("resolve_autonomy_rung(").contains(")?;"), "{call}");
+        let resolved = body.find("resolve_autonomy_rung(").expect("resolved");
+        let built = body.find("resolved_run_agent_request(").expect("the request is built");
+        let sent = body.find(".run_agent(").expect("the request is sent");
+        assert!(resolved < built && built < sent, "resolve, build, then send");
+        assert!(body.contains("execute_permission_mode(permission_mode, execute_granted, rung)"));
+        // The request is built from the ratcheted posture, not the one the function was given.
+        let ratcheted = body.find("let permission_mode = ratcheted;").expect("the shadow");
+        assert!(ratcheted < built, "the posture is ratcheted before the request is built");
+    }
+
+    /// Only an ordinary request's flag reaches the stream; a continuation passes false; and the
+    /// refusal of an unavailable grant keeps the run's terminalization (`dispatch_rejected`).
+    #[test]
+    fn the_flag_is_passed_by_the_invoke_and_never_by_a_continuation() {
+        let invoke = code_of("pub async fn invoke_stream_sse(", "\n}\n");
+        assert_eq!(
+            invoke.matches("req.execute_granted").count(),
+            // the waiver refusal, and the one stream call
+            2,
+            "{invoke}"
+        );
+        let stream_call = &invoke[invoke.find("agentic_run_stream(").expect("the stream call")..];
+        assert!(
+            stream_call.contains("req.plan_mode,\n            req.execute_granted,\n"),
+            "the flag follows plan_mode in the call: {stream_call}"
+        );
+        let continuation = code_of("pub(crate) async fn continue_run(", "\n}\n");
+        assert!(
+            !continuation.contains("execute_granted"),
+            "a continuation never names the flag; its slot is a literal false"
+        );
+        assert!(
+            continuation.contains("CONTINUE_PERMISSION_MODE.to_owned(),\n            false,\n            false,\n"),
+            "plan_mode false, execute_granted false: {continuation}"
+        );
+        let stream = code_of("fn agentic_run_stream(", "\n}\n");
+        assert!(stream.contains("dispatch_rejection_event(&error)"), "the typed mapping");
+        // The mapping sits in the branch that terminalizes the run, not a new one.
+        let terminalize = stream
+            .find("AgentDispatchFailure::Rejected")
+            .expect("the rejection terminalizes");
+        assert!(terminalize < stream.find("dispatch_rejection_event(&error)").unwrap());
+    }
+
+    /// The gate is between the credential preflight and the first durable side effect.
+    #[test]
+    fn the_execute_gate_runs_before_any_run_exists() {
+        let invoke = code_of("pub async fn invoke_stream_sse(", "\n}\n");
+        let credentials = invoke
+            .find("Agentic execution requires a dedicated Execution Core credential")
+            .expect("the agentic credential preflight");
+        let gate = invoke.find("execute_refusal(").expect("the execute gate");
+        let prepared = invoke
+            .find("prepare_managed_run_authenticated(")
+            .expect("the run is prepared");
+        assert!(credentials < gate && gate < prepared, "preflight, then the gate, then the run");
+        assert_eq!(invoke.matches("execute_refusal(").count(), 1);
+        assert!(invoke.contains("state.plan_mode.execute_enabled()"), "the switch is the store's");
+        assert!(
+            invoke.contains("state.plan_mode.approval_resume_enabled()"),
+            "and so is the approval-resume switch it is coupled to"
+        );
+        assert!(
+            !invoke.contains("env::var"),
+            "the handler reads no environment: the switch is the plan store's, read once"
+        );
     }
 }

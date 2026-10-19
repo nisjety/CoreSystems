@@ -6856,6 +6856,16 @@ pub struct InvokeRequest {
     /// it here is what connects the switch to the machinery.
     #[serde(default, alias = "planMode")]
     pub plan_mode: bool,
+    /// Run this turn as an EXECUTING run under the thread's live plan grant (WS14 S2a, "run
+    /// the approved plan"). Fail closed: without a live grant for the verified org and the
+    /// run's own thread the turn is refused, typed (`plan_grant_unavailable`), and never runs
+    /// with no stated rung. It needs the `agentic` feature, no `plan_mode` and a `thread_id`
+    /// (`sse::execute_request_problem`), and the whole feature sits behind
+    /// `MODEL_GATEWAY_PLAN_EXECUTE_ENABLED` (typed `plan_execute_disabled` when off). It
+    /// carries NO rung: the rung is the one `plan_approval` recorded, and a rung supplied by a
+    /// client is never read. A ZDR token is refused through the `agentic` row.
+    #[serde(default, alias = "executeGranted")]
+    pub execute_granted: bool,
     /// chat-parity §2 function-calling: tool definitions the model may call.
     /// Empty → no tools. With the `tools` feature opted in, the stream path runs
     /// the tool loop (`tool_call`/`tool_result` events) before the final answer.
@@ -7380,7 +7390,7 @@ async fn plan_approval(
             request_id: format!("plan-approval-{run_id}"),
             org_id: claims.org_id.clone(),
             run_id: run_id.clone(),
-            session_id: thread_id,
+            session_id: thread_id.clone(),
             granted_rung: escalation.to() as i32,
             justification: escalation.justification().to_owned(),
         },
@@ -7418,6 +7428,11 @@ async fn plan_approval(
         "justification": escalation.justification(),
         "persisted": persisted.is_ok(),
         "plan": approved_plan.map(|plan| plan_value(&plan)),
+        // WS14 S2a, additive: when the grant just recorded lapses (unix seconds; the
+        // gateway keeps it in memory for this long and no longer), so the client can say
+        // so and refuse to offer a rung that has run out. `null` when no grant is held
+        // (a rung the store does not record).
+        "grant_expires_at_unix": state.plan_mode.grant_expires_at(&claims.org_id, &thread_id),
     })))
 }
 

@@ -83,6 +83,41 @@ pub struct PlanModeStore {
     /// are unaffected; the durable thread-scoped carrier belongs in
     /// session-core and is recorded as follow-up in the decisions ledger.
     grants: Arc<DashMap<String, GrantEntry>>,
+    /// Whether an execute turn (`execute_granted`, WS14 S2a "run the approved plan") may
+    /// run on this gateway. Decided once, when the store is built from the process
+    /// environment ([`PlanModeStore::new`]); a store built any other way has it off.
+    /// Held here rather than read per request so every handler agrees and a test can
+    /// state it without touching the process environment.
+    execute_enabled: bool,
+    /// Whether a per-call approval of a paused run can resume it on this gateway: the
+    /// approval-resume switch (`AGENT_CONTINUE_AFTER_APPROVAL_ENABLED`, read through
+    /// `mp_contracts::loop_fold::continue_after_approval_enabled`, the same reader
+    /// `continue_run` uses), decided once with the store. An execute turn is only ever run
+    /// when this is on: the posture ratchet runs the widest rung under `ask`, and an `ask`
+    /// run that pauses for an approval nothing can resume strands the run and spends the
+    /// user's click. A store built any other way has it off.
+    approval_resume_enabled: bool,
+}
+
+/// The environment variable of the execute-turn kill switch. Named and read here and
+/// nowhere else (`nothing_outside_the_one_parser_reads_the_execute_switch`).
+///
+/// Default off: with it off an execute turn is refused, typed (`plan_execute_disabled`,
+/// not retryable), before any run exists, and every other turn is untouched. No other
+/// service reads it, but it is coupled to the approval-resume switch of the WS03 flip
+/// (`AGENT_CONTINUE_AFTER_APPROVAL_ENABLED`, [`PlanModeStore::approval_resume_enabled`]): an
+/// execute turn is refused the same way while that one is off, because the widest rung runs
+/// under `ask` and an approval nothing can resume strands the run. It deploys with the
+/// gateway first, then the BFF, then the SPA, after the WS03 flip; turn it off before that
+/// flip is rolled back.
+pub const PLAN_EXECUTE_ENV: &str = "MODEL_GATEWAY_PLAN_EXECUTE_ENABLED";
+
+/// The one strict parser of the execute switch: the shared durable-loop parser, `true`
+/// in any case with surrounding whitespace and nothing else, so a typo or a
+/// half-recognised value never enables execute turns.
+#[must_use]
+pub fn plan_execute_from(value: Option<&str>) -> bool {
+    mp_contracts::loop_fold::switch_from(value)
 }
 
 #[derive(Debug)]
@@ -99,9 +134,44 @@ struct GrantEntry {
 }
 
 impl PlanModeStore {
+    /// The store the gateway runs with: empty, with the execute switch read ONCE from the
+    /// process environment ([`PLAN_EXECUTE_ENV`], through [`plan_execute_from`]).
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            execute_enabled: plan_execute_from(std::env::var(PLAN_EXECUTE_ENV).ok().as_deref()),
+            approval_resume_enabled: mp_contracts::loop_fold::continue_after_approval_enabled(),
+            ..Self::default()
+        }
+    }
+
+    /// Whether a paused run's approval can be resumed on this gateway (the approval-resume
+    /// switch the `/continue` route is gated by). Off by default. An execute turn needs it.
+    #[must_use]
+    pub fn approval_resume_enabled(&self) -> bool {
+        self.approval_resume_enabled
+    }
+
+    /// This store with the approval-resume switch set to `enabled`; the grants stay shared
+    /// with every clone. For a test that states the switch without the process environment.
+    #[must_use]
+    pub fn with_approval_resume_enabled(mut self, enabled: bool) -> Self {
+        self.approval_resume_enabled = enabled;
+        self
+    }
+
+    /// Whether an execute turn may run on this gateway (the kill switch). Off by default.
+    #[must_use]
+    pub fn execute_enabled(&self) -> bool {
+        self.execute_enabled
+    }
+
+    /// This store with the execute switch set to `enabled`; the grants stay shared with
+    /// every clone. For a test that states the switch without the process environment.
+    #[must_use]
+    pub fn with_execute_enabled(mut self, enabled: bool) -> Self {
+        self.execute_enabled = enabled;
+        self
     }
 
     /// Set or refresh the plan-mode flag for `run_id`. Returns the new
@@ -220,7 +290,54 @@ impl PlanModeStore {
             }
             let key = thread_id.to_owned();
             drop(entry);
-            self.grants.remove(&key);
+            // Remove only the entry that was seen expired: a grant recorded for the thread
+            // in the meantime (a fresh approval) must survive this sweep.
+            self.grants.remove_if(&key, |_, held| held.expires_at_unix <= now);
+        }
+        None
+    }
+
+    /// Plant a grant with an explicit expiry, for a test that needs a lapsed one
+    /// (`record_grant` always stamps the full TTL from now).
+    #[cfg(test)]
+    pub(crate) fn plant_grant_for_test(
+        &self,
+        org_id: &str,
+        thread_id: &str,
+        rung: mp_contracts::model_plane::v1::AutonomyRung,
+        expires_at_unix: i64,
+    ) {
+        self.grants.insert(
+            thread_id.to_owned(),
+            GrantEntry {
+                org_id: org_id.to_owned(),
+                rung,
+                expires_at_unix,
+                approved_plan_id: None,
+            },
+        );
+    }
+
+    /// The unix second the thread's live grant lapses, if there is one: the same
+    /// org-check and expiry-check as [`granted_rung`](Self::granted_rung) (an expired entry
+    /// is swept and reports nothing, another org's reports nothing). Read-only: it neither
+    /// spends nor extends the grant. `plan_approval` states it so the client knows how long
+    /// the rung it just granted lasts.
+    #[must_use]
+    pub fn grant_expires_at(&self, org_id: &str, thread_id: &str) -> Option<i64> {
+        let now = now_unix();
+        if let Some(entry) = self.grants.get(thread_id) {
+            if entry.org_id != org_id {
+                return None;
+            }
+            if entry.expires_at_unix > now {
+                return Some(entry.expires_at_unix);
+            }
+            let key = thread_id.to_owned();
+            drop(entry);
+            // Remove only the entry that was seen expired: a grant recorded for the thread
+            // in the meantime (a fresh approval) must survive this sweep.
+            self.grants.remove_if(&key, |_, held| held.expires_at_unix <= now);
         }
         None
     }
@@ -653,6 +770,175 @@ mod tests {
         let exp = s.enter("org-1", "run-1", String::new(), 999_999_999);
         // 999M secs → caps to MAX_PLAN_TTL_SECS=86_400.
         assert!(exp <= now_unix() + MAX_PLAN_TTL_SECS + 5);
+    }
+
+    /// The grant reports the instant it lapses, for the org and thread that own it and
+    /// for nobody else: the plan-approval answer states it, so the client knows how long
+    /// the rung lasts without a second read.
+    #[test]
+    fn a_grant_reports_when_it_expires() {
+        use mp_contracts::model_plane::v1::AutonomyRung;
+        let s = PlanModeStore::new();
+        assert_eq!(s.grant_expires_at("org-1", "thread-1"), None, "no grant yet");
+        let before = now_unix();
+        s.record_grant("org-1", "thread-1", AutonomyRung::WorkspaceWrite, "");
+        let after = now_unix();
+        let expires = s
+            .grant_expires_at("org-1", "thread-1")
+            .expect("the grant just recorded reports its expiry");
+        assert!(
+            (before + MAX_PLAN_TTL_SECS..=after + MAX_PLAN_TTL_SECS).contains(&expires),
+            "the expiry is the grant's hard TTL from now: {expires}"
+        );
+        assert_eq!(
+            s.grant_expires_at("org-2", "thread-1"),
+            None,
+            "another org never learns a grant exists"
+        );
+        assert_eq!(
+            s.grant_expires_at("org-1", "thread-2"),
+            None,
+            "another thread has no grant"
+        );
+        // An expired entry reports nothing (and is swept, exactly like `granted_rung`).
+        s.grants.insert(
+            "thread-old".to_owned(),
+            GrantEntry {
+                org_id: "org-1".to_owned(),
+                rung: AutonomyRung::WorkspaceWrite,
+                expires_at_unix: now_unix() - 1,
+                approved_plan_id: None,
+            },
+        );
+        assert_eq!(s.grant_expires_at("org-1", "thread-old"), None);
+        assert!(s.grants.get("thread-old").is_none(), "the expired entry is swept");
+        // Reading the expiry never spends or alters the grant.
+        assert_eq!(
+            s.granted_rung("org-1", "thread-1"),
+            Some(AutonomyRung::WorkspaceWrite)
+        );
+        assert_eq!(s.grant_expires_at("org-1", "thread-1"), Some(expires));
+    }
+
+    /// The execute switch is the shared strict parser: `true` in any case with
+    /// surrounding whitespace, and nothing else. A store built any other way than
+    /// from the environment is off.
+    #[test]
+    fn the_plan_execute_switch_is_strict_and_defaults_off() {
+        assert!(plan_execute_from(Some("true")));
+        assert!(plan_execute_from(Some("  TRUE ")));
+        assert!(plan_execute_from(Some("True")));
+        for not_on in [
+            None,
+            Some(""),
+            Some("false"),
+            Some("0"),
+            Some("1"),
+            Some("on"),
+            Some("yes"),
+            Some("enabled"),
+            Some("truee"),
+        ] {
+            assert!(!plan_execute_from(not_on), "{not_on:?} must stay off");
+        }
+        assert!(
+            !PlanModeStore::default().execute_enabled(),
+            "a store nobody configured has execute turns off"
+        );
+        let on = PlanModeStore::default().with_execute_enabled(true);
+        assert!(on.execute_enabled());
+        assert!(
+            on.clone().execute_enabled(),
+            "a clone (the store AppState hands every handler) keeps the switch"
+        );
+        assert!(!on.with_execute_enabled(false).execute_enabled());
+    }
+
+    /// The approval-resume switch the execute switch is coupled to: off for a store nobody
+    /// configured, kept by every clone, independent of the execute switch, and read in
+    /// production code once, in `new()`, through the one reader `/continue` also uses.
+    #[test]
+    fn the_approval_resume_switch_defaults_off_and_is_read_once_by_the_store() {
+        assert!(!PlanModeStore::default().approval_resume_enabled());
+        let on = PlanModeStore::default().with_approval_resume_enabled(true);
+        assert!(on.approval_resume_enabled());
+        assert!(on.clone().approval_resume_enabled(), "a clone keeps it");
+        assert!(!on.execute_enabled(), "the two switches are separate");
+        assert!(!on.with_approval_resume_enabled(false).approval_resume_enabled());
+
+        let text = include_str!("coordinator.rs").replace("\r\n", "\n");
+        let production = text.split("#[cfg(test)]").next().expect("split yields a first part");
+        let code: String = production
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            code.matches("mp_contracts::loop_fold::continue_after_approval_enabled()").count(),
+            1,
+            "read once, through the shared reader"
+        );
+        assert!(
+            !code.contains("AGENT_CONTINUE_AFTER_APPROVAL_ENABLED")
+                && !code.contains("CONTINUE_AFTER_APPROVAL_ENV"),
+            "the variable is the shared reader's, not named here"
+        );
+    }
+
+    /// The execute switch's variable is named and read in this file alone, once, through
+    /// the one parser: no handler reads it, so no code path can disagree with another
+    /// about whether execute turns are on, and a typo'd spelling is not a second reader.
+    #[test]
+    fn nothing_outside_the_one_parser_reads_the_execute_switch() {
+        // The names are built from parts so this test is not itself a reader of them.
+        let variable = ["MODEL_GATEWAY", "PLAN_EXECUTE", "ENABLED"].join("_");
+        let constant = ["PLAN_EXECUTE", "ENV"].join("_");
+        let code_of = |text: &str| -> String {
+            text.lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut scanned = 0;
+        for entry in std::fs::read_dir(&src).expect("the crate's src directory is readable") {
+            let path = entry.expect("a directory entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            scanned += 1;
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            let text = std::fs::read_to_string(&path).expect("a source file is readable");
+            if name == "coordinator.rs" {
+                // Production code (above the test module): the variable is named once, as the
+                // constant, and the constant is read once, by the one function that parses it.
+                // Everything above the test MODULE (line-ending independent): a `#[cfg(test)]`
+                // helper inside an impl (plant_grant_for_test) stays in scope.
+                let production = text
+                    .split("mod tests {")
+                    .next()
+                    .expect("split yields a first part");
+                let code = code_of(production);
+                assert_eq!(code.matches(&variable).count(), 1, "the variable is named once");
+                assert_eq!(
+                    code.matches(&format!("std::env::var({constant})")).count(),
+                    1,
+                    "the constant is read once"
+                );
+                assert_eq!(
+                    code.matches("switch_from(").count(),
+                    1,
+                    "through the shared strict parser alone"
+                );
+            } else {
+                let code = code_of(&text);
+                assert!(
+                    !code.contains(&variable) && !code.contains(&constant),
+                    "{name} reads or names the execute switch's variable; only coordinator.rs may"
+                );
+            }
+        }
+        assert!(scanned > 20, "the scan saw the crate's sources ({scanned} files)");
     }
 
     #[tokio::test]

@@ -1781,6 +1781,25 @@ async fn approving_a_plan_checks_it_decides_it_with_the_edits_and_only_then_gran
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["granted_rung"], "workspace_write");
     assert_eq!(body["plan"]["id"], "plan-7");
+    // The grant states when it lapses (WS14 S2a), so the client knows how long the rung it
+    // just granted lasts: exactly what the store holds for this org and thread, within the
+    // grant's 24 hour ceiling and not in the past.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the clock is after the epoch")
+        .as_secs() as i64;
+    let expires = body["grant_expires_at_unix"]
+        .as_i64()
+        .expect("grant_expires_at_unix is an integer");
+    assert!(
+        expires > now && expires <= now + 86_400,
+        "the expiry is within the grant's ceiling: {expires} vs now {now}"
+    );
+    assert_eq!(
+        Some(expires),
+        harness.plan_mode.grant_expires_at("org-owner", "thread-1"),
+        "it is exactly what the store holds"
+    );
 
     // The plan was looked at BEFORE it was decided.
     assert_eq!(

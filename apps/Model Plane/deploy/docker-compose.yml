@@ -268,6 +268,20 @@ services:
       # user's click and has the executor refuse it: the click is lost and the run waits out
       # the renewed recovery window (see the execution-core entry for what each mismatch does).
       EXECUTION_LOOP_RESUME_ENABLED: ${EXECUTION_LOOP_RESUME_ENABLED:-false}
+      # WS14 S2a, "run the approved plan": the kill switch of the execute turn (the request
+      # field `execute_granted`, sent by the SPA after a plan approval). OFF by default; only
+      # the literal `true` turns it on. With it off such a turn is refused typed
+      # (`plan_execute_disabled`, not retryable) before any run exists, and every other turn
+      # is untouched. No other service reads it, but it is COUPLED to the WS03 approval-resume
+      # flip: the widest rung of an execute turn runs under the `ask` posture, whose per-call
+      # approval is resumed through /continue, so while AGENT_CONTINUE_AFTER_APPROVAL_ENABLED
+      # (above, read by this service) is off an execute turn is refused with the same typed
+      # `plan_execute_disabled` whatever this switch says. Turn it on AFTER the coupled WS03
+      # flip, and off BEFORE rolling that flip back. Deploy the gateway first, then the BFF,
+      # then the SPA, and turn it off here to roll back. The
+      # grant an execute turn runs under lives in this process's memory for 24 hours at most;
+      # a restart drops it and the turn is then refused typed (`plan_grant_unavailable`).
+      MODEL_GATEWAY_PLAN_EXECUTE_ENABLED: ${MODEL_GATEWAY_PLAN_EXECUTE_ENABLED:-false}
       # Kill-switches for the review-latency levers. Empty keeps a lever ON;
       # 0/off/false/no/disabled turns it off at the next restart, no rebuild.
       MODEL_GATEWAY_SOLE_NOTE_PREFETCH: ${MODEL_GATEWAY_SOLE_NOTE_PREFETCH:-}

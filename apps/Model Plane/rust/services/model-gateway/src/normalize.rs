@@ -473,6 +473,7 @@ mod tests {
             attachments: Vec::new(),
             generate_image: false,
             plan_mode: false,
+            execute_granted: false,
             tools: Vec::new(),
             org_name: None,
             user_name: None,
