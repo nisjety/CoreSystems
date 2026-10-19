@@ -74,6 +74,31 @@ fn deflated_zeros(bytes: u64) -> Vec<u8> {
     encoder.finish().unwrap()
 }
 
+/// `bytes` as ASCII85 (with the `~>` end marker): a filter chain the inflate
+/// pre-scan of `quarry_transform::pdf` does not look inside.
+fn ascii85(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 5 + 8);
+    for chunk in bytes.chunks(4) {
+        let mut word = [0u8; 4];
+        word[..chunk.len()].copy_from_slice(chunk);
+        let mut value = u32::from_be_bytes(word);
+        let mut digits = [0u8; 5];
+        for digit in digits.iter_mut().rev() {
+            *digit = (value % 85) as u8 + b'!';
+            value /= 85;
+        }
+        out.extend_from_slice(&digits[..chunk.len() + 1]);
+    }
+    out.extend_from_slice(b"~>");
+    out
+}
+
+fn deflate(bytes: &[u8]) -> Vec<u8> {
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(bytes).unwrap();
+    encoder.finish().unwrap()
+}
+
 #[tokio::test]
 async fn a_normal_pdf_round_trips_through_the_child_with_the_same_text() {
     let pdf = plain_pdf("Hemmelig dokument");
@@ -94,7 +119,67 @@ async fn a_normal_pdf_round_trips_through_the_child_with_the_same_text() {
 }
 
 #[tokio::test]
-async fn a_flate_bomb_is_stopped_by_the_address_space_limit_and_answered_as_415() {
+async fn a_normal_flate_compressed_pdf_still_parses_through_the_child() {
+    // The inflate budget reads the same stream the parser then reads: an ordinary
+    // compressed page must pass it with the default limits.
+    let content = deflate(b"BT /F1 24 Tf 100 700 Td (Komprimert side) Tj ET");
+    let pdf = pdf_with_stream(&content, "/Filter /FlateDecode");
+    let parsed = parse_document_with(
+        &child_backend(ChildLimits::default()),
+        ContentKind::Pdf,
+        pdf,
+        Duration::from_secs(15),
+    )
+    .await
+    .expect("a compressed PDF parses");
+    assert!(parsed.text.contains("Komprimert side"), "{}", parsed.text);
+}
+
+#[tokio::test]
+async fn a_flate_bomb_is_refused_by_the_inflate_budget_under_the_default_limits_as_415() {
+    // 1 GiB of zeros in about a megabyte, the construction of the rebuilt-edge
+    // evidence run (WS5.C, F7), which answered 504 at the 15 s deadline because the
+    // parser was still inflating when the clock ran out. The limits are the
+    // production ones (768 MiB address space, 20 s CPU) and so is the deadline:
+    // quarry_transform::pdf::check_inflate_budget stops the document at 256 MiB of
+    // inflated stream data, before lopdf allocates anything, and the answer is the
+    // typed 415 with the reason the DOCX bomb gets (the parser's own size limit).
+    let compressed = deflated_zeros(1024 * 1024 * 1024);
+    assert!(compressed.len() < 4 * 1024 * 1024, "the bomb is small: {}", compressed.len());
+    let bomb = pdf_with_stream(&compressed, "/Filter /FlateDecode");
+
+    let started = Instant::now();
+    let error = parse_document_with(
+        &child_backend(ChildLimits::default()),
+        ContentKind::Pdf,
+        bomb,
+        Duration::from_secs(15),
+    )
+    .await
+    .expect_err("the bomb must not parse");
+    let took = started.elapsed();
+    assert_eq!(error.code, ErrorCode::UnsupportedMedia, "{error:?} after {took:?}");
+    assert_eq!(error.details.as_ref().unwrap()["reason"], "too_large", "{error:?}");
+    assert!(took < Duration::from_secs(10), "stopped by the budget, not by the deadline: {took:?}");
+
+    let after = parse_document_with(
+        &child_backend(ChildLimits::default()),
+        ContentKind::Pdf,
+        plain_pdf("Etter budsjettet"),
+        Duration::from_secs(15),
+    )
+    .await
+    .expect("a normal document still parses");
+    assert!(after.text.contains("Etter budsjettet"));
+}
+
+#[tokio::test]
+async fn a_bomb_behind_a_filter_chain_is_still_stopped_by_the_address_space_limit_and_answered_as_415() {
+    // The inflate budget (quarry_transform::pdf) reads a /FlateDecode stream
+    // directly; a stream behind an ASCII85 filter is not looked inside, so this
+    // bomb reaches lopdf and only the address-space limit stops it: the backstop
+    // behind the budget, kept under test.
+    //
     // 1 GiB of zeros in about a megabyte. Inflating it needs more address space
     // than the child is allowed, so the allocation fails in the child. The test
     // narrows the production limit (768 MiB) to 256 MiB: lopdf inflates at roughly
@@ -106,7 +191,7 @@ async fn a_flate_bomb_is_stopped_by_the_address_space_limit_and_answered_as_415(
     };
     let compressed = deflated_zeros(1024 * 1024 * 1024);
     assert!(compressed.len() < 4 * 1024 * 1024, "the bomb is small: {}", compressed.len());
-    let bomb = pdf_with_stream(&compressed, "/Filter /FlateDecode");
+    let bomb = pdf_with_stream(&ascii85(&compressed), "/Filter [/ASCII85Decode /FlateDecode]");
 
     let started = Instant::now();
     let error = parse_document_with(

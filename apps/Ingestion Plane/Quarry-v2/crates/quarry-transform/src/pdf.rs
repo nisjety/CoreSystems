@@ -213,6 +213,122 @@ pub fn extract_headings(body: &[u8]) -> QuarryResult<Vec<PdfHeading>> {
         .collect())
 }
 
+/// Most bytes the `/FlateDecode` streams of one PDF may inflate to, together.
+///
+/// `lopdf` 0.42 inflates a stream with no output cap and slowly (a 1 GiB bomb in
+/// a 1 MB file was still inflating when the 15 s deadline fired, which answered
+/// 504 instead of a typed 415). [`check_inflate_budget`] inflates the same
+/// streams first, into nothing, and refuses the document as soon as the total
+/// passes this. Image streams are not counted: text extraction never inflates
+/// them.
+pub const INFLATE_BUDGET_BYTES: u64 = 256 * 1024 * 1024;
+
+/// How far back from the `stream` keyword the dictionary is looked for.
+const STREAM_DICT_LOOKBACK: usize = 8 * 1024;
+
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|window| window == needle)
+}
+
+fn rfind(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).rposition(|window| window == needle)
+}
+
+/// Inflates `input` into `scratch`, over and over, and adds what it produced to
+/// `total`. Returns what this stream produced, or `Err` as soon as `total` passes
+/// the budget. A corrupt or truncated stream just ends (the parser copes with it).
+fn inflate_counted(
+    decoder: &mut flate2::Decompress,
+    zlib_header: bool,
+    input: &[u8],
+    scratch: &mut [u8],
+    total: &mut u64,
+) -> Result<u64, ()> {
+    use flate2::{FlushDecompress, Status};
+
+    decoder.reset(zlib_header);
+    let mut consumed = 0usize;
+    let mut produced_here = 0u64;
+    loop {
+        let (in_before, out_before) = (decoder.total_in(), decoder.total_out());
+        let status = decoder.decompress(&input[consumed..], scratch, FlushDecompress::None);
+        let took = (decoder.total_in() - in_before) as usize;
+        let produced = decoder.total_out() - out_before;
+        consumed += took;
+        produced_here += produced;
+        *total += produced;
+        if *total > INFLATE_BUDGET_BYTES {
+            return Err(());
+        }
+        match status {
+            Ok(Status::Ok) if took > 0 || produced > 0 => {}
+            _ => return Ok(produced_here),
+        }
+    }
+}
+
+/// Refuses a PDF whose `/FlateDecode` streams would inflate past
+/// [`INFLATE_BUDGET_BYTES`], before `lopdf` gets to inflate anything.
+///
+/// A bounded pre-scan of the raw bytes: every `stream` keyword that follows a
+/// dictionary naming `/FlateDecode` starts a zlib stream, which is inflated into a
+/// scratch buffer that is thrown away, and counted. The work is bounded by the
+/// budget (a stream is abandoned the moment the total passes it), not by what the
+/// file claims, so a bomb costs a few hundred megabytes of inflate time, not
+/// gigabytes of memory.
+///
+/// This is a guard for the common shape of the attack, not a proof: a stream
+/// that hides its dictionary (a filter chain such as ASCII85 then Flate, an
+/// encrypted stream, a dictionary further than [`STREAM_DICT_LOOKBACK`] back)
+/// is not counted. The address-space and CPU limits of the parser child and the
+/// deadline stay behind it.
+pub fn check_inflate_budget(body: &[u8]) -> QuarryResult<()> {
+    let mut total: u64 = 0;
+    let mut scratch = vec![0u8; 64 * 1024];
+    let mut decoder = flate2::Decompress::new(true);
+    let mut from = 0usize;
+    while let Some(found) = find(&body[from..], b"stream") {
+        let keyword = from + found;
+        from = keyword + b"stream".len();
+        if body[..keyword].ends_with(b"end") {
+            continue;
+        }
+        // `stream` is followed by CRLF or LF (a lone CR is tolerated by readers).
+        let start = if body[from..].starts_with(b"\r\n") {
+            from + 2
+        } else if matches!(body.get(from), Some(b'\n' | b'\r')) {
+            from + 1
+        } else {
+            continue;
+        };
+        let before = &body[keyword.saturating_sub(STREAM_DICT_LOOKBACK)..keyword];
+        let dict = &before[rfind(before, b"obj").map_or(0, |at| at + 3)..];
+        if find(dict, b"/FlateDecode").is_none() || find(dict, b"/Image").is_some() {
+            continue;
+        }
+        let data = &body[start..];
+        let counted = inflate_counted(&mut decoder, true, data, &mut scratch, &mut total).and_then(|produced| {
+            // Like lopdf: raw deflate behind the two header bytes is the fallback,
+            // and only when the zlib reading produced nothing.
+            if produced == 0 && data.len() > 2 {
+                inflate_counted(&mut decoder, false, &data[2..], &mut scratch, &mut total).map(|_| ())
+            } else {
+                Ok(())
+            }
+        });
+        if counted.is_err() {
+            return Err(QuarryError::new(
+                ErrorCode::BadRequest,
+                format!(
+                    "PDF decompressed size exceeds the {} MiB budget",
+                    INFLATE_BUDGET_BYTES / (1024 * 1024)
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn load_doc(body: &[u8]) -> QuarryResult<Document> {
     if body.len() > MAX_PDF_BYTES {
         return Err(QuarryError::new(
@@ -220,6 +336,7 @@ fn load_doc(body: &[u8]) -> QuarryResult<Document> {
             "PDF is too large to parse in-process",
         ));
     }
+    check_inflate_budget(body)?;
     Document::load_mem(body).map_err(|error| {
         QuarryError::new(ErrorCode::DriverFailed, "PDF parse failed")
             .with_details(serde_json::json!({ "error": error.to_string() }))
@@ -348,6 +465,125 @@ mod tests {
             !text.chars().any(char::is_control),
             "no raw glyph codes in the output: {text:?}"
         );
+    }
+
+    // ---- the inflate budget (R7, WS5.C) -------------------------------------
+
+    /// `bytes` zeros, zlib-deflated: about a thousandth of the size.
+    fn deflated_zeros(bytes: usize) -> Vec<u8> {
+        use std::io::Write;
+        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+        let chunk = vec![0u8; 1024 * 1024];
+        for _ in 0..(bytes / chunk.len()) {
+            encoder.write_all(&chunk).unwrap();
+        }
+        encoder.finish().unwrap()
+    }
+
+    /// Indirect objects holding `stream` under the dictionary entries `dict`, one
+    /// after the other. Not a loadable PDF: the pre-scan reads raw bytes only.
+    fn raw_streams(dict: &str, streams: &[&[u8]]) -> Vec<u8> {
+        let mut out = b"%PDF-1.4\n".to_vec();
+        for (index, stream) in streams.iter().enumerate() {
+            out.extend_from_slice(format!("{} 0 obj\n<< /Length {} {dict} >>\nstream\n", index + 1, stream.len()).as_bytes());
+            out.extend_from_slice(stream);
+            out.extend_from_slice(b"\nendstream\nendobj\n");
+        }
+        out
+    }
+
+    /// A one-page PDF whose content stream is `stream` with the dictionary entry `filter`.
+    fn pdf_with_stream(stream: &[u8], filter: &str) -> Vec<u8> {
+        let mut out = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        let mut object = |out: &mut Vec<u8>, body: &[u8]| {
+            offsets.push(out.len());
+            out.extend_from_slice(format!("{} 0 obj\n", offsets.len()).as_bytes());
+            out.extend_from_slice(body);
+            out.extend_from_slice(b"\nendobj\n");
+        };
+        object(&mut out, b"<< /Type /Catalog /Pages 2 0 R >>");
+        object(&mut out, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
+        object(
+            &mut out,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+        );
+        let mut content = format!("<< /Length {} {filter} >>\nstream\n", stream.len()).into_bytes();
+        content.extend_from_slice(stream);
+        content.extend_from_slice(b"\nendstream");
+        object(&mut out, &content);
+        object(&mut out, b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
+        let xref_at = out.len();
+        out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", offsets.len() + 1).as_bytes());
+        for offset in &offsets {
+            out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(
+            format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_at}\n%%EOF\n", offsets.len() + 1).as_bytes(),
+        );
+        out
+    }
+
+    fn deflate(bytes: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(bytes).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    #[test]
+    fn a_normal_compressed_pdf_is_within_the_budget_and_still_parses() {
+        let content = deflate(b"BT /F1 24 Tf 100 700 Td (Komprimert tekst) Tj ET");
+        let pdf = pdf_with_stream(&content, "/Filter /FlateDecode");
+        check_inflate_budget(&pdf).expect("a small compressed stream is within the budget");
+        let text = extract_text(&pdf).expect("parse");
+        assert!(text.contains("Komprimert tekst"), "{text:?}");
+    }
+
+    #[test]
+    fn a_flate_bomb_is_refused_before_lopdf_inflates_it() {
+        // 1 GiB of zeros in about a megabyte.
+        let bomb = pdf_with_stream(&deflated_zeros(1024 * 1024 * 1024), "/Filter /FlateDecode");
+        assert!(bomb.len() < 4 * 1024 * 1024, "the bomb is small: {}", bomb.len());
+        let started = std::time::Instant::now();
+        let error = extract_text(&bomb).expect_err("the bomb must not parse");
+        assert_eq!(error.code, ErrorCode::BadRequest);
+        assert!(error.message.contains("exceeds"), "{}", error.message);
+        // It stops at the budget (256 MiB), well before the whole gigabyte.
+        assert!(started.elapsed().as_secs() < 10, "{:?}", started.elapsed());
+        assert!(extract_headings(&bomb).is_err(), "the heading entry point has the same guard");
+    }
+
+    #[test]
+    fn the_budget_counts_every_stream_together() {
+        let part = deflated_zeros(100 * 1024 * 1024);
+        let two = raw_streams("/Filter /FlateDecode", &[&part, &part]);
+        check_inflate_budget(&two).expect("200 MiB in two streams fits 256 MiB");
+        let three = raw_streams("/Filter /FlateDecode", &[&part, &part, &part]);
+        let error = check_inflate_budget(&three).expect_err("300 MiB in three streams does not");
+        assert!(error.message.contains("exceeds"), "{}", error.message);
+    }
+
+    #[test]
+    fn image_and_uncompressed_streams_are_not_counted() {
+        let big = deflated_zeros(300 * 1024 * 1024);
+        // Text extraction never inflates an image, so a large one is not a bomb here.
+        let image = raw_streams("/Type /XObject /Subtype /Image /Filter /FlateDecode", &[&big]);
+        check_inflate_budget(&image).expect("an image stream is skipped");
+        // No /FlateDecode in the dictionary: nothing to inflate.
+        let plain = raw_streams("", &[&big]);
+        check_inflate_budget(&plain).expect("an unfiltered stream is skipped");
+        // `endstream` is not the start of a stream.
+        check_inflate_budget(b"%PDF-1.4\nendstream\nendobj\n").unwrap();
+    }
+
+    #[test]
+    fn a_corrupt_or_truncated_flate_stream_is_not_a_budget_error() {
+        let mut half = deflate(&vec![b'a'; 100_000]);
+        half.truncate(half.len() / 2);
+        check_inflate_budget(&raw_streams("/Filter /FlateDecode", &[&half])).unwrap();
+        check_inflate_budget(&raw_streams("/Filter /FlateDecode", &[b"not deflate data at all"])).unwrap();
+        check_inflate_budget(&raw_streams("/Filter /FlateDecode", &[b""])).unwrap();
     }
 
     #[test]
