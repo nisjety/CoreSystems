@@ -836,6 +836,47 @@ async fn a_resumed_agent_run_keeps_the_agent_lifetime() {
     );
 }
 
+/// The other direction of `resumed_run_class`: a run checkpointed as interactive that
+/// is resumed with the `initiated_by: "agent"` hint is swept as an agent run, because
+/// the derived class is the stricter. Keeping only the stored class would leave it on
+/// the interactive 900 s idle limit.
+#[tokio::test]
+async fn a_stored_interactive_run_resumed_by_an_agent_is_swept_as_an_agent_run() {
+    let limits = RunLimits {
+        agent_idle_ttl_s: 60,
+        interactive_idle_ttl_s: 900,
+        max_concurrent_runs: 0,
+        max_runs_per_org: 0,
+        max_interactive_runs_per_org: 0,
+        ..RunLimits::default()
+    };
+    let edge = Edge::start(limits).await;
+    let person = member_token();
+    let run = edge.start_run(&person, json!({})).await;
+    let step = edge.step(&person, &run, wait_action(), None).await;
+    assert_eq!(step.status, 200, "{}", step.body);
+    let idle_past_interactive = sweep_once(&edge.state, later(1_000_000)).await;
+    assert_eq!(
+        idle_past_interactive.expired, 1,
+        "the interactive run is released at 900 s idle"
+    );
+
+    let resumed = edge
+        .post(
+            &person,
+            "/v1/agent/runs",
+            json!({ "resume_run_id": run, "initiated_by": "agent" }),
+        )
+        .await;
+    assert_eq!(resumed.status, 200, "{}", resumed.body);
+
+    let swept = sweep_once(&edge.state, later(120_000)).await;
+    assert_eq!(
+        swept.expired, 1,
+        "the resume is an agent's, so the agent's 60 s idle limit applies, not the interactive 900 s"
+    );
+}
+
 /// A step that is past the registry lookup and waiting for the run's lock when the
 /// sweeper releases the run gets the 404 `run_not_live` with the `resumable` hint a step
 /// on a run already gone carries (finding F5-3: it used to get the reason alone). The

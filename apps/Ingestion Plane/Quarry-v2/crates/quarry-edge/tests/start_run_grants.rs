@@ -316,3 +316,36 @@ async fn validated_grant_overrides_client_domains_in_every_mode() {
         "a grant without hosts does not rewrite the caller's constraints"
     );
 }
+
+/// A service principal acts for the run's owner, so the user-owner rule does not
+/// apply to it: it starts a run under a grant issued to a user, and the run is its own.
+///
+/// KNOWN GAP, pinned here so it is visible rather than assumed away: Quarry cannot
+/// check the grant's organization, because the broker's `ValidateGrantResponse` carries
+/// no `org_id` (only the broker's own caller-org scoping, keyed to Quarry's static
+/// bearer, applies). Closing it needs an `org_id` on the broker's response and on
+/// `GrantValidation` (Model Plane proto and the Go broker), then a check against the
+/// caller's org for every principal; when that lands this test must flip to a 403 for a
+/// grant of another organization.
+#[tokio::test]
+async fn a_service_principal_is_not_bound_to_the_grants_owner() {
+    for require in [false, true] {
+        let edge = edge_with(
+            vec![grant("grant-of-user", |fields| {
+                fields.insert("owner_id".into(), json!("user-other"));
+                fields.insert("allowed_domains".into(), json!(["example.com"]));
+            })],
+            require,
+        )
+        .await;
+        let started = edge
+            .post(
+                &service_token(),
+                "/v1/agent/runs",
+                start_body("grant-of-user", None),
+            )
+            .await;
+        assert_eq!(started.status, 200, "require={require}: {}", started.body);
+        assert_eq!(edge.driver.acquired().len(), 1, "require={require}");
+    }
+}
