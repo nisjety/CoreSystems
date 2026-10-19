@@ -93,6 +93,7 @@ impl ProfileStore for CachedProfileStore {
             Err(e) => {
                 // Failing to cache is non-fatal — the inner write
                 // already succeeded. Log + return Ok.
+                // zdr-log-ok: the profile cache only ever holds persistent profiles, which a ZDR request is refused (agent_persistent_profile); this is a Redis or serde error, not page content
                 tracing::warn!(error = %e, "profile snapshot encode for Redis failed");
                 return Ok(());
             }
@@ -196,16 +197,19 @@ pub async fn maybe_cache(
     let client = match redis::Client::open(url) {
         Ok(c) => c,
         Err(e) => {
+            // zdr-log-ok: boot-time Redis configuration error, no request span exists
             tracing::warn!(error = %e, "Redis client init failed; profile cache disabled");
             return inner;
         }
     };
     match ConnectionManager::new(client).await {
         Ok(manager) => {
+            // zdr-log-ok: boot-time log of the operator-configured Redis URL (credentials redacted), no request span exists
             tracing::info!(url = %redact_credentials(url), "ProfileStore Redis cache attached");
             Arc::new(CachedProfileStore::new(inner, manager))
         }
         Err(e) => {
+            // zdr-log-ok: boot-time Redis connection error, no request span exists
             tracing::warn!(error = %e, "Redis ConnectionManager failed; profile cache disabled");
             inner
         }

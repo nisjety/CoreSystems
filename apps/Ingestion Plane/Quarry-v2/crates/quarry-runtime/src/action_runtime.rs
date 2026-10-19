@@ -217,7 +217,7 @@ impl ActionRuntime {
                 {
                     driver.goto(session, url).await?;
                 } else {
-                    trace!(action_index = index, url = %url, "navigate (dry-run)");
+                    trace!(action_index = index, "navigate (dry-run)");
                 }
                 None
             }
@@ -284,7 +284,7 @@ impl ActionRuntime {
                 {
                     driver.wait_for(session, selector, *timeout_ms).await?;
                 } else {
-                    trace!(action_index = index, selector = %selector, timeout_ms = *timeout_ms, "wait_for (dry-run)");
+                    trace!(action_index = index, timeout_ms = *timeout_ms, "wait_for (dry-run)");
                 }
                 None
             }
@@ -294,7 +294,7 @@ impl ActionRuntime {
                 {
                     driver.click(session, selector).await?;
                 } else {
-                    trace!(action_index = index, selector = %selector, "click (dry-run)");
+                    trace!(action_index = index, "click (dry-run)");
                 }
                 None
             }
@@ -319,7 +319,7 @@ impl ActionRuntime {
                 {
                     driver.type_text(session, selector, text).await?;
                 } else {
-                    trace!(action_index = index, selector = %selector, chars = text.len(), "type (dry-run)");
+                    trace!(action_index = index, chars = text.len(), "type (dry-run)");
                 }
                 None
             }
@@ -331,13 +331,13 @@ impl ActionRuntime {
                 } else {
                     match to {
                         ScrollTarget::Top => {
-                            trace!(action_index = index, target = "top", "scroll (dry-run)")
+                            trace!(action_index = index, to = "top", "scroll (dry-run)")
                         }
                         ScrollTarget::Bottom => {
-                            trace!(action_index = index, target = "bottom", "scroll (dry-run)")
+                            trace!(action_index = index, to = "bottom", "scroll (dry-run)")
                         }
-                        ScrollTarget::Selector(sel) => {
-                            trace!(action_index = index, target = %sel, "scroll (dry-run)")
+                        ScrollTarget::Selector(_) => {
+                            trace!(action_index = index, to = "selector", "scroll (dry-run)")
                         }
                     }
                 }
@@ -390,7 +390,7 @@ impl ActionRuntime {
                 {
                     driver.select(session, selector, value).await?;
                 } else {
-                    trace!(action_index = index, selector = %selector, value = %value, "select (dry-run)");
+                    trace!(action_index = index, "select (dry-run)");
                 }
                 None
             }

@@ -13,6 +13,7 @@ pub struct SweepReport {
 /// (`QUARRY_EDGE__RUN_SWEEPER=0`). Abort the returned handle on shutdown.
 pub fn spawn_run_sweeper(state: AppState) -> tokio::task::JoinHandle<()> {
     let limits = state.agent_runs.limits().clone();
+    // zdr-log-ok: a periodic background sweep started at boot; no request is in flight, and its events carry run ids, classes and numbers only
     tokio::spawn(async move {
         if !limits.sweeper {
             tracing::info!("run sweeper: off");

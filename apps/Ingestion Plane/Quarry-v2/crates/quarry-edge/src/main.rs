@@ -82,6 +82,7 @@ const LOCAL_INDEX_RETENTION_INTERVAL: Duration = Duration::from_secs(3_600);
 /// Upper bound on how long shutdown waits for the final commit.
 const LOCAL_INDEX_SHUTDOWN_FLUSH_TIMEOUT: Duration = Duration::from_secs(20);
 
+// zdr-log-ok-begin: process boot and shutdown (shutdown_signal, main, run): no request span exists here; every url field is an operator-configured upstream and every error text is a startup or background failure, never a caller's data
 /// Resolves when the process is asked to stop: Ctrl-C anywhere, or SIGTERM on
 /// unix (what Kubernetes and `docker stop` send).
 ///
@@ -202,6 +203,16 @@ async fn run() -> anyhow::Result<()> {
     tracing::info!("run limits: {run_limit_config}");
     for warning in run_limit_config.ordering_warnings(3600, 21_600) {
         tracing::warn!("run limits: {warning}");
+    }
+    // R-26 (WARN-only until the Chromium RSS is recorded): the driver's session
+    // cap must exceed the run cap plus the heavy lane.
+    #[cfg(feature = "browser-agent")]
+    for warning in quarry_browser::slots::session_cap_warnings(
+        quarry_browser::slots::BrowserPoolConfig::from_env().max_sessions,
+        run_limit_config.max_concurrent_runs as usize,
+        quarry_browser::slots::HEAVY_LANE_BUDGET,
+    ) {
+        tracing::warn!("browser capacity: {warning}");
     }
     // Agent-run budgets: an unreadable mode or limit stops the edge here, naming
     // the variable, rather than silently becoming "no budget".
@@ -1615,6 +1626,7 @@ async fn run() -> anyhow::Result<()> {
     }
     Ok(())
 }
+// zdr-log-ok-end
 
 fn env_flag(name: &str) -> bool {
     std::env::var(name)

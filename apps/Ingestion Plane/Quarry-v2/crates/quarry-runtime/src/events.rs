@@ -98,6 +98,7 @@ impl EventSink {
                     .publish(run_id, event_type, payload, idempotency_key)
                     .await
                 {
+                // zdr-log-ok: a NATS client error (subject, connection state) from a spawned fire-and-forget task; it never includes the event payload, which is passed to publish() and not echoed in the error
                     tracing::warn!(error = %e, "nats event publish failed");
                 }
             });

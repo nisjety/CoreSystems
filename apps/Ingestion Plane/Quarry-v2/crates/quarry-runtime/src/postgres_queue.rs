@@ -226,6 +226,7 @@ impl PostgresRequestQueue {
         .execute(&self.pool)
         .await;
         if let Err(e) = result {
+            // zdr-log-ok: the Postgres queue backs crawl and batch, which a ZDR request is refused (durable_jobs); a database error here cannot concern a ZDR request
             tracing::warn!(error = %e, request_id, "record_retry failed");
         }
     }

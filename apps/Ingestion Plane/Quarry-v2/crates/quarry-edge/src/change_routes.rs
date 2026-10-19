@@ -21,6 +21,7 @@ use axum::{
     Extension, Json,
 };
 use serde::{Deserialize, Serialize};
+use tracing::Instrument;
 
 use quarry_core::change_history::{BaselineSnapshot, ChangeRecord};
 use quarry_core::envelope::Envelope;
@@ -697,7 +698,7 @@ async fn emit_change_side_effects(
                                 )
                             }
                         }
-                    });
+                    }.in_current_span());
                 }
                 Err(e) => tracing::warn!(error_class = crate::zdr_log::class(&e), "change webhook signing failed"),
             }

@@ -199,7 +199,6 @@ impl FallbackDriver {
                             let shell_text = visible_text_len(&shell.body);
                             if rendered <= shell_text {
                                 warn!(
-                                    url = %url,
                                     rendered_text_chars = rendered,
                                     shell_text_chars = shell_text,
                                     rendered_bytes = resp.body.len(),
@@ -208,7 +207,6 @@ impl FallbackDriver {
                                 return Ok(shell);
                             }
                             info!(
-                                url = %url,
                                 served_by = ?resp.served_by,
                                 rendered_text_chars = rendered,
                                 shell_text_chars = shell_text,
@@ -261,9 +259,10 @@ impl FallbackDriver {
             return Ok(resp);
         }
         if let Some(shell) = best_shell {
+            // A count, not `attempts` itself: each entry carries a driver's error
+            // text, which can name the URL.
             warn!(
-                url = %url,
-                attempts = ?attempts,
+                attempts = attempts.len(),
                 "no driver improved on the JS shell; returning the static shell response"
             );
             return Ok(shell);

@@ -187,9 +187,12 @@ impl PageRenderer {
                     png = processed.clean_png;
                 }
                 Err(e) => {
-                    // zdr-log-ok: render_and_emit returns early when page_image_persistence_allowed(zdr) is false, so a ZDR request never reaches the visual processor
+                    // A class, not the error text: the sidecar's error can name the
+                    // page. This is also unreachable under ZDR (render_and_emit
+                    // returns before the browser is touched when ZDR is on), but
+                    // the log no longer relies on that staying true.
                     tracing::warn!(
-                        error = %e,
+                        error_class = e.code.wire_name(),
                         document_id,
                         "page image cleanup failed; storing original screenshot"
                     );

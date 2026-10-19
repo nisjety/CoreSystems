@@ -115,6 +115,7 @@ impl EventPublisher {
         }
     }
 
+    // zdr-log-ok-begin: the event publisher is a long-lived background task with no request span; `url` is the operator's control-plane origin plus a run id, and the error texts are transport errors for that endpoint, never an event's content
     /// POST `events` to `url` with exponential back-off until success.
     async fn post_with_backoff(&self, url: &str, events: Vec<Event>) {
         let body = match serde_json::to_vec(&events) {
@@ -181,6 +182,7 @@ impl EventPublisher {
             backoff = (backoff * 2).min(MAX_BACKOFF);
         }
     }
+    // zdr-log-ok-end
 }
 
 // ---------------------------------------------------------------------------

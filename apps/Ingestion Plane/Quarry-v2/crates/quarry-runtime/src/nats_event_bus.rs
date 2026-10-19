@@ -248,6 +248,7 @@ impl EventBus for NatsEventBus {
         match (primary_err, aggregate_err) {
             (None, None) => Ok(()),
             (Some(p_err), None) => {
+                // zdr-log-ok: a NATS client error (subject, connection state); the event payload is not part of it
                 tracing::warn!(error = %p_err, subject = %primary_subject, "primary subject failed; aggregate ok");
                 Err(QuarryError::new(
                     ErrorCode::DriverFailed,
@@ -255,6 +256,7 @@ impl EventBus for NatsEventBus {
                 ))
             }
             (None, Some(a_err)) => {
+                // zdr-log-ok: a NATS client error (subject, connection state); the event payload is not part of it
                 tracing::warn!(error = %a_err, subject = %aggregate_subject, "aggregate subject failed; primary ok");
                 // Per-run consumers got the event; degrade gracefully.
                 Ok(())
@@ -297,6 +299,7 @@ impl EventBus for NatsEventBus {
             let mut messages = match consumer_clone.messages().await {
                 Ok(m) => m,
                 Err(e) => {
+                    // zdr-log-ok: a NATS client error (subject, connection state); the event payload is not part of it; spawned consumer task, no request span
                     tracing::error!(error = %e, "nats consumer messages stream failed");
                     return;
                 }
@@ -321,8 +324,12 @@ impl EventBus for NatsEventBus {
                                 // and eventually push the message to the
                                 // configured DLQ. A spike in this log line
                                 // means a producer is emitting bad payloads.
+                                // The serde category and position, not its text: a data
+                                // error quotes the offending value, which can be a URL.
                                 tracing::warn!(
-                                    error = %e,
+                                    error_class = ?e.classify(),
+                                    line = e.line(),
+                                    column = e.column(),
                                     payload_bytes = msg.payload.len(),
                                     "nats event deserialize failed; not acking, JetStream will retry"
                                 );
@@ -330,6 +337,7 @@ impl EventBus for NatsEventBus {
                         }
                     }
                     Err(e) => {
+                        // zdr-log-ok: a NATS client error (subject, connection state); the event payload is not part of it; spawned consumer task, no request span
                         tracing::warn!(error = %e, "nats consumer error");
                         break;
                     }

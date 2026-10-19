@@ -209,9 +209,9 @@ impl StaticDriver {
                     // Same public-address policy as the entry URL; the pinned
                     // resolver then connects only to these vetted addresses.
                     let target = resolve_public_url(&location).await?;
+                    // Neither URL: both are the caller's, and `from`/`to` are names the
+                    // ZDR event filter does not know.
                     tracing::debug!(
-                        from = %current_url,
-                        to = %location,
                         status,
                         hop,
                         "following redirect after target re-validation"
@@ -260,7 +260,6 @@ impl StaticDriver {
                         ));
                         if idx + 1 < plan.len() {
                             tracing::warn!(
-                                host = %host,
                                 status = resp.status,
                                 attempt = idx,
                                 egress = decision.identity.label(),

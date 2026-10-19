@@ -767,7 +767,8 @@ impl MarkdownFetcher for SimpleHttpMarkdownFetcher {
         match self.fetch_source(url, zdr).await {
             Ok(md) => Some(md),
             Err(reason) => {
-                tracing::debug!(url, %reason, "fetch_markdown: no usable content");
+                // `reason` is a closed `FetchFailure` label; the URL is the caller's.
+                tracing::debug!(%reason, "fetch_markdown: no usable content");
                 None
             }
         }

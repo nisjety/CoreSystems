@@ -31,6 +31,14 @@
 //! A line is exempt with `// zdr-log-ok: <reason>` on the macro's first line or
 //! the line above it. The reason is mandatory.
 //!
+//! A stretch of code is exempt with `// zdr-log-ok-begin: <reason>` ... `//
+//! zdr-log-ok-end`: for code that provably never runs inside a request, such as
+//! the boot and shutdown sequence in `main.rs` (about 46 sites, every one an
+//! operator-configured URL or a startup error). The reason is mandatory, a
+//! region that is never closed, and an end with no begin, are R0 violations.
+//! Use it for a stretch where no request span can exist; use the per-line comment
+//! for a single value that is not caller data.
+//!
 //! The baseline may only shrink. The test fails when a count rises, when a new
 //! `file::rule` appears, and when a count falls without the baseline being
 //! lowered, so a fix cannot be silently undone. Regenerate it after a fix with
@@ -208,17 +216,34 @@ fn line_of(source: &str, offset: usize) -> usize {
         + 1
 }
 
-/// The non-test part of a file: everything before a top-level `#[cfg(test)] mod`.
+/// Whether `line` opens an inline module (`mod tests {`, `pub(crate) mod x {`),
+/// as opposed to declaring a file module (`mod test_support;`).
+fn opens_inline_mod(line: &str) -> bool {
+    let line = line.trim();
+    let line = line
+        .strip_prefix("pub(crate) ")
+        .or_else(|| line.strip_prefix("pub(super) "))
+        .or_else(|| line.strip_prefix("pub "))
+        .unwrap_or(line);
+    line.starts_with("mod ") && !line.trim_end().ends_with(';')
+}
+
+/// The non-test part of a file: everything before the first `#[cfg(test)]`
+/// that opens an inline `mod` block. A `#[cfg(test)] mod name;` declaration (a
+/// test-only file module, as in `main.rs`) or a `#[cfg(test)]` item (a `use`, a
+/// `fn`) does NOT end production code: cutting there hid every site after it.
+/// Further attributes between the `cfg(test)` and the `mod` are skipped.
 fn production_part(source: &str) -> &str {
     let mut offset = 0;
     let lines: Vec<&str> = source.split('\n').collect();
     for (index, line) in lines.iter().enumerate() {
-        if line.trim() == "#[cfg(test)]"
-            && lines
-                .get(index + 1)
-                .is_some_and(|next| next.trim_start().starts_with("mod "))
-        {
-            return &source[..offset];
+        if line.trim() == "#[cfg(test)]" {
+            let following = lines[index + 1..]
+                .iter()
+                .find(|next| !next.trim_start().starts_with("#["));
+            if following.is_some_and(|next| opens_inline_mod(next)) {
+                return &source[..offset];
+            }
         }
         offset += line.len() + 1;
     }
@@ -241,6 +266,40 @@ fn exemption(source: &str, line: usize) -> Result<bool, ()> {
         }
     }
     Ok(false)
+}
+
+/// Line ranges (1-based, inclusive) covered by `// zdr-log-ok-begin: <reason>` ...
+/// `// zdr-log-ok-end`, and the lines of any malformed marker (no reason, a
+/// begin inside a region, an end with no begin, a region never closed). A begin
+/// with no reason does not open a region, so its sites stay visible.
+fn exempt_regions(source: &str) -> (Vec<(usize, usize)>, Vec<usize>) {
+    let mut regions = Vec::new();
+    let mut malformed = Vec::new();
+    let mut open: Option<usize> = None;
+    for (index, text) in source.split('\n').enumerate() {
+        let line = index + 1;
+        let trimmed = text.trim_start();
+        if !trimmed.starts_with("//") || trimmed.starts_with("///") || trimmed.starts_with("//!") {
+            continue;
+        }
+        if let Some(position) = trimmed.find("zdr-log-ok-begin:") {
+            let reason = trimmed[position + "zdr-log-ok-begin:".len()..].trim();
+            if reason.is_empty() || open.is_some() {
+                malformed.push(line);
+            } else {
+                open = Some(line);
+            }
+        } else if trimmed.contains("zdr-log-ok-end") {
+            match open.take() {
+                Some(start) => regions.push((start, line)),
+                None => malformed.push(line),
+            }
+        }
+    }
+    if let Some(start) = open {
+        malformed.push(start);
+    }
+    (regions, malformed)
 }
 
 /// Whether an `error_class` value (masked: string contents are blanked, the
@@ -267,8 +326,23 @@ fn scan_source(rel: &str, source: &str) -> Vec<Violation> {
     let masked_text = mask(source);
     let masked = masked_text.as_bytes();
     let mut found = Vec::new();
+    let (regions, malformed) = exempt_regions(source);
+    for line in malformed {
+        found.push(Violation {
+            key: format!("{rel}::R0"),
+            line,
+            text: "zdr-log-ok-begin/end region without a reason, unbalanced or never closed".to_owned(),
+        });
+    }
     let push = |rule: &str, offset: usize, anchor: usize, found: &mut Vec<Violation>| {
         let line = line_of(source, offset);
+        let anchor_line = line_of(source, anchor);
+        if regions
+            .iter()
+            .any(|(start, end)| (*start..=*end).contains(&anchor_line) || (*start..=*end).contains(&line))
+        {
+            return;
+        }
         // An exemption on the macro's first line (or above it) covers every field
         // in the macro; one on the field's own line (or above) covers that field.
         let verdict = match exemption(source, line_of(source, anchor)) {
@@ -673,10 +747,85 @@ fn log_field_lint_exemption_on_the_macro_line_covers_all_its_fields() {
 }
 
 #[test]
+fn log_field_lint_exempts_a_region_and_nothing_outside_it() {
+    let source = "fn before(u: &str) { tracing::info!(url = %u, \"before\"); }\n// zdr-log-ok-begin: boot sequence, no request span exists\nfn boot(u: &str, e: E) {\n    tracing::info!(url = %u, \"configured\");\n    tracing::warn!(error = %e, \"failed\");\n}\n// zdr-log-ok-end\nfn after(u: &str) { tracing::info!(url = %u, \"after\"); }\n";
+    let found = scan_source("quarry-edge/src/search_routes.rs", source);
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert!(found[0].text.contains("before") && found[1].text.contains("after"), "{found:?}");
+}
+
+#[test]
+fn log_field_lint_region_markers_must_be_well_formed() {
+    // No reason: R0, and the region is not opened, so its site is still counted.
+    let no_reason = "// zdr-log-ok-begin:\nfn f(u: &str) { tracing::info!(url = %u, \"x\"); }\n// zdr-log-ok-end\n";
+    let mut found = keys(no_reason);
+    found.sort();
+    assert_eq!(
+        found,
+        vec![
+            "quarry-edge/src/search_routes.rs::R0",
+            "quarry-edge/src/search_routes.rs::R0",
+            "quarry-edge/src/search_routes.rs::R1",
+        ],
+        "{no_reason}"
+    );
+    // Never closed.
+    let unclosed = "// zdr-log-ok-begin: boot\nfn f() {}\n";
+    assert_eq!(keys(unclosed), vec!["quarry-edge/src/search_routes.rs::R0"]);
+    // An end with no begin.
+    assert_eq!(keys("fn f() {}\n// zdr-log-ok-end\n"), vec!["quarry-edge/src/search_routes.rs::R0"]);
+    // A begin inside a region.
+    let nested = "// zdr-log-ok-begin: a\n// zdr-log-ok-begin: b\nfn f() {}\n// zdr-log-ok-end\n";
+    assert_eq!(keys(nested), vec!["quarry-edge/src/search_routes.rs::R0"]);
+    // Doc comments that merely mention the markers are not markers.
+    assert!(keys("/// say zdr-log-ok-begin: x\n//! and zdr-log-ok-end\nfn f() {}\n").is_empty());
+}
+
+#[test]
 fn log_field_lint_rejects_an_empty_reason() {
     let source =
         "fn f(u: &str) {\n    // zdr-log-ok:\n    tracing::info!(url = %u, \"probe\");\n}\n";
     assert_eq!(keys(source), vec!["quarry-edge/src/search_routes.rs::R0"]);
+}
+
+/// The defect this pins: `quarry-edge/src/main.rs` has `#[cfg(test)]` then
+/// `mod test_support;` near its top, and the scanner treated that as the start of
+/// the test code, so every macro after it (about 46 sites) was never scanned.
+#[test]
+fn log_field_lint_keeps_scanning_past_a_cfg_test_file_module_declaration() {
+    let source = "mod a;\n#[cfg(test)]\nmod test_support;\n#[cfg(test)]\nuse x::y;\n#[cfg(test)]\n#[allow(dead_code)]\nfn helper() {}\nfn f(u: &str) { tracing::info!(url = %u, \"fetched\"); }\n";
+    assert_eq!(keys(source), vec!["quarry-edge/src/search_routes.rs::R1"]);
+    assert_eq!(production_part(source), source);
+}
+
+#[test]
+fn log_field_lint_stops_at_the_first_inline_cfg_test_module_even_after_a_declaration() {
+    let source = "#[cfg(test)]\nmod test_support;\nfn f(u: &str) { tracing::info!(url = %u, \"before\"); }\n#[cfg(test)]\n#[allow(clippy::all)]\nmod tests {\n    fn t(u: &str) { tracing::info!(url = %u, \"inside\"); }\n}\nfn g(u: &str) { tracing::info!(url = %u, \"after\"); }\n";
+    let found = scan_source("quarry-edge/src/search_routes.rs", source);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].text.contains("before"), "{found:?}");
+    for opener in ["mod tests {", "pub(crate) mod tests {", "pub mod t{", "mod t\n{"] {
+        let line = opener.lines().next().unwrap();
+        assert!(opens_inline_mod(line), "{opener}");
+    }
+    assert!(!opens_inline_mod("mod test_support;"));
+    assert!(!opens_inline_mod("pub(crate) mod test_support;"));
+    assert!(!opens_inline_mod("fn mod_x() {"));
+}
+
+/// The real file the defect hid: `main.rs` must be scanned to its last function,
+/// not cut at the `#[cfg(test)] mod test_support;` declaration near its top.
+#[test]
+fn the_edge_main_is_scanned_past_its_test_support_declaration() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs");
+    let source = std::fs::read_to_string(path).expect("main.rs").replace("\r\n", "\n");
+    assert!(source.contains("#[cfg(test)]\nmod test_support;"), "premise: main.rs still declares test_support");
+    let scanned = production_part(&source);
+    assert!(scanned.contains("async fn run("), "the boot sequence is scanned");
+    assert!(
+        scanned.contains("pub fn routes_for_test"),
+        "the scan reaches the end of main.rs, not the first cfg(test) item"
+    );
 }
 
 #[test]

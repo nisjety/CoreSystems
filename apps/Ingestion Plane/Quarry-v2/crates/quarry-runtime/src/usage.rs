@@ -151,6 +151,7 @@ impl UsageMeter for NatsUsageMeter {
             let bytes = match serde_json::to_vec(&event) {
                 Ok(b) => Bytes::from(b),
                 Err(e) => {
+                    // zdr-log-ok: a serde serialisation error for the closed UsageEvent struct (metric, quantity, ids), which carries no caller content; spawned task, no request span
                     tracing::warn!(error = %e, "usage event serialize failed");
                     return;
                 }
@@ -168,6 +169,7 @@ impl UsageMeter for NatsUsageMeter {
                     );
                 }
                 Err(e) => {
+                    // zdr-log-ok: a NATS client error plus the usage subject; the usage event is a count (metric, quantity), never page content; spawned task, no request span
                     tracing::warn!(
                         error = %e,
                         %subject,

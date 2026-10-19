@@ -115,6 +115,7 @@ impl PinnedBrowserEgressProxy {
                 let (stream, _) = match accepted {
                     Ok(accepted) => accepted,
                     Err(error) => {
+                        // zdr-log-ok: a TCP accept() I/O error on the local proxy listener; no peer or caller data in it
                         tracing::warn!(error = %error, "browser egress proxy accept failed");
                         continue;
                     }

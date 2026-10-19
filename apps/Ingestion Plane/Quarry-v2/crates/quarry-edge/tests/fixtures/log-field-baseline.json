@@ -1,20 +1,3 @@
 {
-  "quarry-edge/src/agent_routes/run_sweeper.rs::R4": 1,
-  "quarry-edge/src/change_routes.rs::R4": 1,
-  "quarry-runtime/src/action_runtime.rs::R1": 8,
-  "quarry-runtime/src/answer.rs::R1": 1,
-  "quarry-runtime/src/browser_driver.rs::R1": 1,
-  "quarry-runtime/src/browser_egress_proxy.rs::R2": 1,
-  "quarry-runtime/src/cached_profile_store.rs::R1": 1,
-  "quarry-runtime/src/cached_profile_store.rs::R2": 3,
-  "quarry-runtime/src/events.rs::R2": 1,
-  "quarry-runtime/src/fallback_driver.rs::R1": 3,
-  "quarry-runtime/src/fetch.rs::R1": 1,
-  "quarry-runtime/src/nats_event_bus.rs::R2": 5,
-  "quarry-runtime/src/page_extract.rs::R1": 5,
-  "quarry-runtime/src/postgres_queue.rs::R2": 1,
-  "quarry-runtime/src/publisher.rs::R1": 6,
-  "quarry-runtime/src/publisher.rs::R2": 2,
-  "quarry-runtime/src/publisher.rs::R3": 1,
-  "quarry-runtime/src/usage.rs::R2": 2
+  "quarry-runtime/src/browser_driver.rs::R1": 1
 }
