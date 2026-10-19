@@ -791,7 +791,11 @@ pub(crate) async fn run_action(
         &state,
         Method::POST,
         &format!("/v1/agent/runs/{}/step", urlencoding::encode(&session_id)),
-        Some(step_request_body(action, actor)),
+        Some(step_request_body(
+            action,
+            actor,
+            &AgentAdvisory::from_headers(&headers).for_actor(actor),
+        )),
         token.as_deref(),
         &user.user_id,
     )
@@ -934,7 +938,11 @@ pub(crate) async fn new_tab(
         &state,
         Method::POST,
         &format!("/v1/agent/runs/{}/tabs", urlencoding::encode(&session_id)),
-        Some(new_tab_request_body(url, body.actor)),
+        Some(new_tab_request_body(
+            url,
+            body.actor,
+            &AgentAdvisory::from_headers(&headers).for_actor(body.actor),
+        )),
         token.as_deref(),
         &user.user_id,
     )
@@ -1012,19 +1020,96 @@ pub(crate) async fn close_tab(
 /// The body of a tab-open call. An open the model proposed carries
 /// `initiatedBy: "agent"`, so Quarry can refuse it while the person has taken over;
 /// a person's own carries no hint. Only the enum is forwarded, never a client string.
-fn new_tab_request_body(url: Option<String>, actor: BrowserActionActor) -> Value {
+fn new_tab_request_body(
+    url: Option<String>,
+    actor: BrowserActionActor,
+    advisory: &AgentAdvisory,
+) -> Value {
     match actor {
-        BrowserActionActor::Agent => json!({ "url": url, "initiatedBy": "agent" }),
+        BrowserActionActor::Agent => {
+            let mut body = json!({ "url": url, "initiatedBy": "agent" });
+            advisory.put_in(&mut body);
+            body
+        }
         BrowserActionActor::Human => json!({ "url": url }),
     }
 }
 
 /// The query suffix of a tab select or close (neither has a body): the same hint as
 /// `new_tab_request_body`, for the same reason.
-fn tab_call_query(actor: BrowserActionActor) -> &'static str {
+fn tab_call_query(actor: BrowserActionActor, advisory: &AgentAdvisory) -> String {
     match actor {
-        BrowserActionActor::Agent => "?initiatedBy=agent",
-        BrowserActionActor::Human => "",
+        // The advisory values are identifier-shaped (see `AgentAdvisory`), so they
+        // need no percent-encoding.
+        BrowserActionActor::Agent => {
+            let mut query = String::from("?initiatedBy=agent");
+            if let Some(run) = &advisory.ai_run_id {
+                query.push_str("&aiRunId=");
+                query.push_str(run);
+            }
+            if let Some(label) = &advisory.label {
+                query.push_str("&agentLabel=");
+                query.push_str(label);
+            }
+            query
+        }
+        BrowserActionActor::Human => String::new(),
+    }
+}
+
+/// The header an agent's caller may send to say which AI run it acts for.
+const AGENT_RUN_ID_HEADER: &str = "x-agent-run-id";
+/// The header an agent's caller may send to label its agent.
+const AGENT_LABEL_HEADER: &str = "x-agent-label";
+
+/// What a caller says about *which* agent made a browser call, from the two headers
+/// above (the Model Plane's gateway calls and the action surface set them; the
+/// action surface forwards the caller's headers to these handlers unchanged).
+///
+/// Advisory only: Quarry stores it next to the identity its own token check
+/// derived and marks it as the caller's word, and nothing decides on it. Values are
+/// identifier-shaped (`[A-Za-z0-9._:-]`, 1 to 64 characters) or dropped, so a URL or
+/// a page title cannot be smuggled into a record a ZDR run keeps. It rides along only
+/// on a call that is already an agent's (`actor: agent`): a person's own call carries
+/// none.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct AgentAdvisory {
+    ai_run_id: Option<String>,
+    label: Option<String>,
+}
+
+impl AgentAdvisory {
+    fn from_headers(headers: &HeaderMap) -> Self {
+        let read = |name: &str| {
+            let value = headers.get(name)?.to_str().ok()?.trim();
+            let shaped = !value.is_empty()
+                && value.len() <= 64
+                && value
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'));
+            shaped.then(|| value.to_owned())
+        };
+        Self {
+            ai_run_id: read(AGENT_RUN_ID_HEADER),
+            label: read(AGENT_LABEL_HEADER),
+        }
+    }
+
+    fn for_actor(self, actor: BrowserActionActor) -> Self {
+        match actor {
+            BrowserActionActor::Agent => self,
+            BrowserActionActor::Human => Self::default(),
+        }
+    }
+
+    /// Add the fields to a JSON object body, under the names Quarry reads.
+    fn put_in(&self, body: &mut Value) {
+        if let Some(run) = &self.ai_run_id {
+            body["aiRunId"] = json!(run);
+        }
+        if let Some(label) = &self.label {
+            body["agentLabel"] = json!(label);
+        }
     }
 }
 
@@ -1112,7 +1197,7 @@ async fn tab_mutation(
         urlencoding::encode(&session_id),
         urlencoding::encode(&tab_id),
         suffix,
-        tab_call_query(actor)
+        tab_call_query(actor, &AgentAdvisory::from_headers(&headers).for_actor(actor))
     );
     let cookie = cookie_header(&headers);
     let token = quarry_token(&state, &user, &cookie).await;
@@ -4443,9 +4528,13 @@ impl BrowserArtifactAbsence {
 /// action the model proposed carries `initiated_by: "agent"`, so Quarry (which owns
 /// the browser) can refuse it while the person has taken over. A person's own action
 /// carries no hint: Quarry already takes it for the person's.
-fn step_request_body(action: Value, actor: BrowserActionActor) -> Value {
+fn step_request_body(action: Value, actor: BrowserActionActor, advisory: &AgentAdvisory) -> Value {
     match actor {
-        BrowserActionActor::Agent => json!({ "action": action, "initiated_by": "agent" }),
+        BrowserActionActor::Agent => {
+            let mut body = json!({ "action": action, "initiated_by": "agent" });
+            advisory.put_in(&mut body);
+            body
+        }
         BrowserActionActor::Human => json!({ "action": action }),
     }
 }
@@ -4687,11 +4776,11 @@ mod tests {
     fn run_action_forwards_agent_initiator_to_quarry() {
         let action = json!({ "type": "back" });
         assert_eq!(
-            step_request_body(action.clone(), BrowserActionActor::Agent),
+            step_request_body(action.clone(), BrowserActionActor::Agent, &AgentAdvisory::default()),
             json!({ "action": { "type": "back" }, "initiated_by": "agent" })
         );
         assert_eq!(
-            step_request_body(action, BrowserActionActor::Human),
+            step_request_body(action, BrowserActionActor::Human, &AgentAdvisory::default()),
             json!({ "action": { "type": "back" } }),
             "a person's own action carries no hint"
         );
@@ -4700,20 +4789,115 @@ mod tests {
     #[test]
     fn tab_calls_forward_only_the_fixed_agent_hint_to_quarry() {
         assert_eq!(
-            new_tab_request_body(Some("https://example.test/".to_owned()), BrowserActionActor::Agent),
+            new_tab_request_body(
+                Some("https://example.test/".to_owned()),
+                BrowserActionActor::Agent,
+                &AgentAdvisory::default()
+            ),
             json!({ "url": "https://example.test/", "initiatedBy": "agent" })
         );
         assert_eq!(
-            new_tab_request_body(None, BrowserActionActor::Human),
+            new_tab_request_body(None, BrowserActionActor::Human, &AgentAdvisory::default()),
             json!({ "url": null }),
             "a person's own tab open carries no hint"
         );
-        assert_eq!(tab_call_query(BrowserActionActor::Agent), "?initiatedBy=agent");
         assert_eq!(
-            tab_call_query(BrowserActionActor::Human),
+            tab_call_query(BrowserActionActor::Agent, &AgentAdvisory::default()),
+            "?initiatedBy=agent"
+        );
+        assert_eq!(
+            tab_call_query(BrowserActionActor::Human, &AgentAdvisory::default()),
             "",
             "a person's own select or close carries no hint"
         );
+    }
+
+    fn headers_with(pairs: &[(&'static str, &str)]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for (name, value) in pairs {
+            headers.insert(*name, HeaderValue::from_str(value).expect("a header value"));
+        }
+        headers
+    }
+
+    #[test]
+    fn an_agents_tab_and_step_calls_forward_the_advisory_identity_to_quarry() {
+        let headers = headers_with(&[
+            (AGENT_RUN_ID_HEADER, "run_01J9"),
+            (AGENT_LABEL_HEADER, "research-planner"),
+        ]);
+        let advisory = AgentAdvisory::from_headers(&headers).for_actor(BrowserActionActor::Agent);
+        assert_eq!(
+            new_tab_request_body(None, BrowserActionActor::Agent, &advisory),
+            json!({
+                "url": null,
+                "initiatedBy": "agent",
+                "aiRunId": "run_01J9",
+                "agentLabel": "research-planner"
+            })
+        );
+        assert_eq!(
+            tab_call_query(BrowserActionActor::Agent, &advisory),
+            "?initiatedBy=agent&aiRunId=run_01J9&agentLabel=research-planner"
+        );
+        assert_eq!(
+            step_request_body(json!({ "type": "back" }), BrowserActionActor::Agent, &advisory),
+            json!({
+                "action": { "type": "back" },
+                "initiated_by": "agent",
+                "aiRunId": "run_01J9",
+                "agentLabel": "research-planner"
+            })
+        );
+    }
+
+    #[test]
+    fn a_persons_own_call_never_carries_the_advisory_identity() {
+        let headers = headers_with(&[(AGENT_RUN_ID_HEADER, "run_01J9"), (AGENT_LABEL_HEADER, "x")]);
+        let advisory = AgentAdvisory::from_headers(&headers).for_actor(BrowserActionActor::Human);
+        assert_eq!(advisory, AgentAdvisory::default());
+        assert_eq!(
+            new_tab_request_body(None, BrowserActionActor::Human, &advisory),
+            json!({ "url": null })
+        );
+        assert_eq!(tab_call_query(BrowserActionActor::Human, &advisory), "");
+        assert_eq!(
+            step_request_body(json!({ "type": "back" }), BrowserActionActor::Human, &advisory),
+            json!({ "action": { "type": "back" } })
+        );
+    }
+
+    #[test]
+    fn the_advisory_identity_is_identifier_shaped_or_dropped() {
+        let long = "a".repeat(65);
+        for rejected in [
+            "",
+            "has space",
+            "https://example.test/x",
+            "a/b",
+            "a&aiRunId=forged",
+            "a?b",
+            "tab\tname",
+            long.as_str(),
+        ] {
+            // A header value cannot hold every one of these; those that it can are dropped.
+            let Ok(value) = HeaderValue::from_str(rejected) else { continue };
+            let mut headers = HeaderMap::new();
+            headers.insert(AGENT_RUN_ID_HEADER, value.clone());
+            headers.insert(AGENT_LABEL_HEADER, value);
+            assert_eq!(
+                AgentAdvisory::from_headers(&headers),
+                AgentAdvisory::default(),
+                "{rejected:?}"
+            );
+        }
+        // A non-ASCII value is a header the gateway cannot read as text: dropped too.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AGENT_LABEL_HEADER,
+            HeaderValue::from_bytes("caf\u{e9}".as_bytes()).expect("opaque bytes"),
+        );
+        assert_eq!(AgentAdvisory::from_headers(&headers), AgentAdvisory::default());
     }
 
     #[test]
@@ -4789,11 +4973,19 @@ mod tests {
         state: &AppState,
         actor: BrowserActionActor,
     ) -> [StatusCode; 3] {
+        call_tab_routes_with(state, actor, HeaderMap::new()).await
+    }
+
+    async fn call_tab_routes_with(
+        state: &AppState,
+        actor: BrowserActionActor,
+        headers: HeaderMap,
+    ) -> [StatusCode; 3] {
         let user = test_user("user-owner", "org-owner");
         let select = select_tab(
             State(state.clone()),
             Extension(user.clone()),
-            HeaderMap::new(),
+            headers.clone(),
             Path(("run-1".to_owned(), "tab-1".to_owned())),
             Query(TabActorQuery { actor }),
         )
@@ -4801,7 +4993,7 @@ mod tests {
         let close = close_tab(
             State(state.clone()),
             Extension(user.clone()),
-            HeaderMap::new(),
+            headers.clone(),
             Path(("run-1".to_owned(), "tab-1".to_owned())),
             Query(TabActorQuery { actor }),
         )
@@ -4809,7 +5001,7 @@ mod tests {
         let open = new_tab(
             State(state.clone()),
             Extension(user),
-            HeaderMap::new(),
+            headers,
             Path("run-1".to_owned()),
             Json(NewTabBody { url: None, actor }),
         )
@@ -4841,6 +5033,68 @@ mod tests {
             ]
         );
         assert_eq!(mutations[2].2["initiatedBy"], "agent", "{:?}", mutations[2]);
+    }
+
+    /// The agent identity the caller states in its headers reaches Quarry on an agent's
+    /// tab open, select and close as the advisory fields, and only there: a person's own
+    /// calls carry none, and a value that is not identifier-shaped is dropped.
+    #[tokio::test]
+    async fn an_agents_tab_calls_forward_its_advisory_identity_and_a_persons_do_not() {
+        let headers = headers_with(&[
+            (AGENT_RUN_ID_HEADER, "run_01J9"),
+            (AGENT_LABEL_HEADER, "research-planner"),
+        ]);
+        let quarry = wiremock::MockServer::start().await;
+        mount_tab_run(&quarry, "agent_control").await;
+        let mut state = test_app_state();
+        state.quarry_edge_url = quarry.uri();
+        assert_eq!(
+            call_tab_routes_with(&state, BrowserActionActor::Agent, headers.clone()).await,
+            [StatusCode::OK; 3]
+        );
+        let mutations = quarry_mutations(&quarry).await;
+        assert_eq!(
+            mutations
+                .iter()
+                .map(|(method, target, _)| (method.as_str(), target.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "POST",
+                    "/v1/agent/runs/run-1/tabs/tab-1/select?initiatedBy=agent&aiRunId=run_01J9&agentLabel=research-planner"
+                ),
+                (
+                    "DELETE",
+                    "/v1/agent/runs/run-1/tabs/tab-1?initiatedBy=agent&aiRunId=run_01J9&agentLabel=research-planner"
+                ),
+                ("POST", "/v1/agent/runs/run-1/tabs"),
+            ]
+        );
+        assert_eq!(mutations[2].2["initiatedBy"], "agent");
+        assert_eq!(mutations[2].2["aiRunId"], "run_01J9");
+        assert_eq!(mutations[2].2["agentLabel"], "research-planner");
+
+        let person = wiremock::MockServer::start().await;
+        mount_tab_run(&person, "human_takeover").await;
+        let mut state = test_app_state();
+        state.quarry_edge_url = person.uri();
+        assert_eq!(
+            call_tab_routes_with(&state, BrowserActionActor::Human, headers).await,
+            [StatusCode::OK; 3]
+        );
+        let mutations = quarry_mutations(&person).await;
+        assert_eq!(
+            mutations
+                .iter()
+                .map(|(method, target, _)| (method.as_str(), target.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("POST", "/v1/agent/runs/run-1/tabs/tab-1/select"),
+                ("DELETE", "/v1/agent/runs/run-1/tabs/tab-1"),
+                ("POST", "/v1/agent/runs/run-1/tabs"),
+            ]
+        );
+        assert!(mutations[2].2.get("aiRunId").is_none() && mutations[2].2.get("agentLabel").is_none());
     }
 
     #[tokio::test]
