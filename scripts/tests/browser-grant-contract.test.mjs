@@ -145,6 +145,80 @@ function trackedFiles(pattern) {
   return out.split('\0').filter(Boolean);
 }
 
+/**
+ * End of the Rust item that starts at `from` (after its attributes): the index
+ * just past its closing `}` or its terminating `;`. Skips comments, string,
+ * raw-string and char literals so braces inside them do not count.
+ */
+function rustItemEnd(text, from) {
+  let depth = 0; // () and [] nesting: a `;` inside them does not end the item
+  let braces = 0;
+  let i = from;
+  while (i < text.length) {
+    const c = text[i];
+    const next = text[i + 1];
+    if (c === '/' && next === '/') {
+      const eol = text.indexOf('\n', i);
+      i = eol < 0 ? text.length : eol;
+    } else if (c === '/' && next === '*') {
+      let nest = 1;
+      i += 2;
+      while (i < text.length && nest > 0) {
+        if (text[i] === '/' && text[i + 1] === '*') (nest += 1), (i += 2);
+        else if (text[i] === '*' && text[i + 1] === '/') (nest -= 1), (i += 2);
+        else i += 1;
+      }
+    } else if (c === 'r' && /^r#*"/.test(text.slice(i, i + 40)) && !/[\w]/.test(text[i - 1] ?? ' ')) {
+      const hashes = /^r(#*)"/.exec(text.slice(i, i + 40))[1];
+      const close = text.indexOf('"' + hashes, i + 2 + hashes.length);
+      i = close < 0 ? text.length : close + 1 + hashes.length;
+    } else if (c === '"') {
+      i += 1;
+      while (i < text.length && text[i] !== '"') i += text[i] === '\\' ? 2 : 1;
+      i += 1;
+    } else if (c === "'") {
+      if (next === '\\') {
+        const close = text.indexOf("'", i + 3);
+        i = close < 0 ? text.length : close + 1;
+      } else if (text[i + 2] === "'") {
+        i += 3; // a char literal such as '{'
+      } else {
+        i += 1; // a lifetime
+      }
+    } else {
+      if (c === '(' || c === '[') depth += 1;
+      else if (c === ')' || c === ']') depth -= 1;
+      else if (c === '{') braces += 1;
+      else if (c === '}') {
+        braces -= 1;
+        if (braces === 0 && depth === 0) return i + 1;
+      } else if (c === ';' && braces === 0 && depth === 0) return i + 1;
+      i += 1;
+    }
+  }
+  return text.length;
+}
+
+/**
+ * The file without its `#[cfg(test)]` items (a `mod tests` block, a test-only
+ * `use`, a test helper fn), found by brace matching. Production code after a
+ * test module, or after a test-only import near the top, stays in.
+ */
+function stripTestCode(text) {
+  const attribute = /^[ \t]*#\[cfg\(test\)\][ \t]*\n/gm;
+  let out = '';
+  let last = 0;
+  let match;
+  while ((match = attribute.exec(text)) !== null) {
+    if (match.index < last) continue;
+    out += text.slice(last, match.index);
+    const end = rustItemEnd(text, match.index + match[0].length);
+    last = end;
+    attribute.lastIndex = end;
+  }
+  return out + text.slice(last);
+}
+
 const isTestPath = (path) =>
   /(^|\/)tests?\//.test(path) || /_test\.(go|rs)$/.test(path) || /(^|\/)testdata\//.test(path);
 
@@ -155,10 +229,7 @@ test('single minting path: only the model-gateway grant route calls AcquireGrant
   const rustHits = [];
   for (const path of trackedFiles('*.rs')) {
     if (isTestPath(path) || path.includes('/.claude/') || path.includes('/target/')) continue;
-    let text = read(path);
-    const testsAt = text.indexOf('#[cfg(test)]');
-    if (testsAt >= 0) text = text.slice(0, testsAt);
-    if (/\.acquire_grant\s*\(/.test(text)) rustHits.push(path);
+    if (/\.acquire_grant\s*\(/.test(stripTestCode(read(path)))) rustHits.push(path);
   }
   assert.deepEqual(
     rustHits.filter((path) => !allowedRust.has(path)),
@@ -218,11 +289,42 @@ test('the broker defaults in compose match the Go defaults', () => {
   assert.match(read('apps/Model Plane/go/services/browser-broker/internal/grant/policy.go'), /DefaultMaxSessionDomains = 8/);
 });
 
-/** The file without its trailing `#[cfg(test)] mod tests` (test-only imports earlier in a file stay in). */
-const productionPart = (text) => {
-  const at = text.search(/\n#\[cfg\(test\)\]\s*\n\s*mod tests\b/);
-  return at < 0 ? text : text.slice(0, at);
-};
+/** The file's production code: every `#[cfg(test)]` item removed by brace matching. */
+const productionPart = stripTestCode;
+
+test('the test-code stripper removes only cfg(test) items and keeps production code after them', () => {
+  const planted = 'self.broker.derive_run_grant(request).await';
+  const early = `#[cfg(test)]
+use crate::fixtures::Thing;
+
+fn production_a() {}
+
+#[cfg(test)]
+mod tests {
+    fn helper() { let s = "}"; let c = '}'; /* } */ let r = r#"}"#; let l: &'static str = "x"; }
+    #[test]
+    fn t() { assert_eq!(1, 1); }
+}
+
+pub async fn production_after_the_test_module() {
+    ${planted};
+}
+`;
+  const stripped = stripTestCode(early);
+  assert.match(stripped, /production_a/);
+  assert.ok(stripped.includes(planted), 'production code after an early cfg(test) item and after the test module is kept');
+  assert.doesNotMatch(stripped, /mod tests|fixtures::Thing|helper|assert_eq/);
+
+  // A call inside the test module is not production code.
+  const inTests = `fn p() {}\n#[cfg(test)]\nmod tests {\n    fn t() { ${planted}; }\n}\n`;
+  assert.ok(!stripTestCode(inTests).includes(planted));
+
+  // A test-only fn with a `;` inside its signature and a gated impl.
+  const gatedFn = `#[cfg(test)]\nfn fixture(x: [u8; 3]) -> u8 { x[0] }\nfn q() { ${planted}; }\n`;
+  const stripped2 = stripTestCode(gatedFn);
+  assert.ok(stripped2.includes(planted) && !stripped2.includes('fixture'));
+  assert.equal(stripTestCode('fn r() {}\n'), 'fn r() {}\n');
+});
 
 test('the legacy Quarry acquire is gone and Quarry has no grant-minting client call', () => {
   const quarry = read('apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/grpc/browser_broker.rs');
@@ -234,10 +336,7 @@ test('DeriveRunGrant has one caller: the model-gateway browser run route', () =>
   const hits = [];
   for (const path of trackedFiles('*.rs')) {
     if (isTestPath(path) || path.includes('/.claude/') || path.includes('/target/')) continue;
-    let text = read(path);
-    const testsAt = text.indexOf('#[cfg(test)]');
-    if (testsAt >= 0) text = text.slice(0, testsAt);
-    if (/\.derive_run_grant\s*\(/.test(text)) hits.push(path);
+    if (/\.derive_run_grant\s*\(/.test(stripTestCode(read(path)))) hits.push(path);
   }
   assert.deepEqual(hits, ['apps/Model Plane/rust/services/model-gateway/src/browser_run.rs']);
   const goHits = [];
@@ -260,4 +359,28 @@ test('the Verevon gateway never mints or invents a browser grant', () => {
   const production = productionPart(browser);
   assert.match(production, /browser_broker_token\(/, 'browser.rs no longer mints the browser-broker audience token');
   assert.match(production, /"x-browser-authorization"/, 'browser.rs no longer forwards x-browser-authorization');
+});
+
+test('the gateway and model-gateway spell the Idempotency-Key header the same way', () => {
+  const gateway = productionPart(read('apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs'));
+  const modelGateway = productionPart(
+    read('apps/Model Plane/rust/services/model-gateway/src/browser_run.rs'),
+  );
+  // The gateway forwards the header under a literal; model-gateway reads it
+  // through one constant. A rename on either side makes retries silently
+  // create new runs, so both must name the same lowercase header.
+  assert.match(gateway, /\("idempotency-key", key\)/, 'the gateway no longer forwards idempotency-key');
+  assert.match(
+    modelGateway,
+    /const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";/,
+    'model-gateway reads a different header than the gateway forwards',
+  );
+});
+
+test('the test-code stripper keeps real production code in the files the reviewers found cut short', () => {
+  const upstream = stripTestCode(read('apps/Frontend Plane/verevonv3/apps/gateway/src/upstream.rs'));
+  assert.match(upstream, /fn proxy_artifact_bytes/);
+  assert.doesNotMatch(upstream, /\nmod tests\b/);
+  const browser = stripTestCode(read('apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs'));
+  assert.ok(browser.length > 100_000, 'browser.rs is scanned past its first cfg(test) item');
 });
