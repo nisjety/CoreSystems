@@ -1,0 +1,318 @@
+//! What `POST /v1/agent/runs` does with a BrowserBroker grant, through the real router
+//! and real token verification (the harness is in `support/agent_harness.rs`), with a
+//! fake grant validator in place of the broker.
+//!
+//! Three rules, each in both enforcement modes where the mode matters (the edge
+//! requires a grant for every run in production; elsewhere a grant is optional):
+//!
+//! - a user's grant is theirs: another user's grant is refused and no browser is
+//!   acquired for it;
+//! - a ZDR grant may only back a ZDR run;
+//! - the broker's hosts, not the caller's, are the run's hosts whenever the grant
+//!   carries a host policy, in every mode.
+//!
+//! The pure binding rules are unit-tested in `agent_routes/tests.rs`
+//! (`bind_validated_grant`, `zdr_grant_may_back_run`); these tests pin that the route
+//! applies them before it acquires a browser, and that what they decide reaches the run.
+
+#![cfg(feature = "browser-agent")]
+
+#[path = "support/agent_harness.rs"]
+mod agent_harness;
+mod support;
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use agent_harness::*;
+use async_trait::async_trait;
+use quarry_core::error::{ErrorCode, QuarryError};
+use quarry_core::QuarryResult;
+use quarry_edge::run_limits::RunLimits;
+use quarry_runtime::{GrantValidation, GrantValidator};
+use serde_json::{json, Value};
+
+/// The broker, from memory: it knows the grants it was given and nothing else.
+struct FakeBroker(HashMap<String, GrantValidation>);
+
+#[async_trait]
+impl GrantValidator for FakeBroker {
+    async fn validate(&self, grant_id: &str) -> QuarryResult<GrantValidation> {
+        self.0
+            .get(grant_id)
+            .cloned()
+            .ok_or_else(|| QuarryError::new(ErrorCode::NotFound, "unknown browser grant"))
+    }
+}
+
+/// A usable grant. Every field not named here is the broker's default (empty).
+fn grant(id: &str, tweak: impl FnOnce(&mut serde_json::Map<String, Value>)) -> GrantValidation {
+    let mut fields = json!({ "grant_id": id, "active": true })
+        .as_object()
+        .cloned()
+        .expect("an object");
+    tweak(&mut fields);
+    serde_json::from_value(Value::Object(fields)).expect("a grant validation")
+}
+
+/// An edge whose broker knows `grants`; `require` is the edge's
+/// `require_browser_grants` (the production posture).
+async fn edge_with(grants: Vec<GrantValidation>, require: bool) -> Edge {
+    let broker = FakeBroker(
+        grants
+            .into_iter()
+            .map(|grant| (grant.grant_id.clone(), grant))
+            .collect(),
+    );
+    Edge::start_with(RunLimits::default(), move |state| {
+        let mut state = state;
+        state.grant_validator = Arc::new(broker);
+        state.require_browser_grants = require;
+        state
+    })
+    .await
+}
+
+/// A start body that names `grant_id` and, when given, the client's own domains.
+fn start_body(grant_id: &str, client_domains: Option<&[&str]>) -> Value {
+    let mut body = json!({ "grant_id": grant_id });
+    if let Some(domains) = client_domains {
+        body["constraints"] = json!({ "max_steps": 0, "allowed_domains": domains });
+    }
+    body
+}
+
+/// The hosts the live run is confined to.
+async fn run_domains(edge: &Edge, run: &str) -> Vec<String> {
+    let handle = edge.live(run).expect("the run is live");
+    let entry = handle.entry.lock().await;
+    entry.constraints.allowed_domains.clone()
+}
+
+/// A person's grant is theirs. Another user of the same organization who presents it
+/// is refused with 403 and no browser is acquired for them; the owner is served and
+/// reads their own grant id back on the run's projection. Both modes.
+#[tokio::test]
+async fn user_cannot_use_another_users_grant() {
+    for require in [false, true] {
+        let edge = edge_with(
+            vec![grant("grant-of-other", |fields| {
+                fields.insert("owner_id".into(), json!("user-other"));
+                fields.insert("allowed_domains".into(), json!(["example.com"]));
+            })],
+            require,
+        )
+        .await;
+
+        let stolen = edge
+            .post(
+                &member_token(),
+                "/v1/agent/runs",
+                start_body("grant-of-other", None),
+            )
+            .await;
+        assert_eq!(stolen.status, 403, "require={require}: {}", stolen.body);
+        assert_eq!(
+            stolen.message(),
+            "browser grant belongs to another user",
+            "require={require}"
+        );
+        assert!(
+            edge.driver.acquired().is_empty(),
+            "require={require}: no browser is acquired for a refused grant"
+        );
+
+        let own = edge
+            .post(
+                &other_member_token(),
+                "/v1/agent/runs",
+                start_body("grant-of-other", None),
+            )
+            .await;
+        assert_eq!(own.status, 200, "require={require}: {}", own.body);
+        let run = own.data()["run_id"].as_str().expect("a run id").to_owned();
+        let projection = edge.projection(&other_member_token(), &run).await;
+        assert_eq!(
+            projection.data()["grantId"],
+            "grant-of-other",
+            "require={require}: the owner is served the grant id"
+        );
+    }
+}
+
+/// A grant with no owner (a broker that predates owners) is admitted when grants are
+/// optional and refused when they are required; either way it is not another user's
+/// grant to take on trust in production.
+#[tokio::test]
+async fn an_ownerless_grant_is_refused_to_a_user_only_when_grants_are_required() {
+    let ownerless = || {
+        grant("grant-ownerless", |fields| {
+            fields.insert("allowed_domains".into(), json!(["example.com"]));
+        })
+    };
+
+    let optional = edge_with(vec![ownerless()], false).await;
+    let admitted = optional
+        .post(
+            &member_token(),
+            "/v1/agent/runs",
+            start_body("grant-ownerless", None),
+        )
+        .await;
+    assert_eq!(admitted.status, 200, "{}", admitted.body);
+
+    let required = edge_with(vec![ownerless()], true).await;
+    let refused = required
+        .post(
+            &member_token(),
+            "/v1/agent/runs",
+            start_body("grant-ownerless", None),
+        )
+        .await;
+    assert_eq!(refused.status, 403, "{}", refused.body);
+    assert_eq!(refused.message(), "browser grant belongs to another user");
+    assert!(required.driver.acquired().is_empty());
+}
+
+/// A ZDR grant may only back a ZDR run: a run that is not ZDR would persist what the
+/// grant's owner asked never to keep. Refused with 403 before any browser is acquired;
+/// the same grant backs a run that asks for ZDR and a run whose organization is under
+/// ZDR, and a non-ZDR grant backs a ZDR run (the run's posture can only raise ZDR).
+#[tokio::test]
+async fn zdr_grant_cannot_back_a_non_zdr_run() {
+    for require in [false, true] {
+        let edge = edge_with(
+            vec![
+                grant("grant-zdr", |fields| {
+                    fields.insert("owner_id".into(), json!("user-golden"));
+                    fields.insert("zdr".into(), json!(true));
+                    fields.insert("allowed_domains".into(), json!(["example.com"]));
+                }),
+                grant("grant-plain", |fields| {
+                    fields.insert("owner_id".into(), json!("user-golden"));
+                    fields.insert("allowed_domains".into(), json!(["example.com"]));
+                }),
+            ],
+            require,
+        )
+        .await;
+
+        let refused = edge
+            .post(
+                &member_token(),
+                "/v1/agent/runs",
+                start_body("grant-zdr", None),
+            )
+            .await;
+        assert_eq!(refused.status, 403, "require={require}: {}", refused.body);
+        assert_eq!(
+            refused.message(),
+            "a ZDR browser grant cannot back a non-ZDR run",
+            "require={require}"
+        );
+        assert!(
+            edge.driver.acquired().is_empty(),
+            "require={require}: no browser is acquired for a refused grant"
+        );
+
+        // The run that asks for ZDR is backed.
+        let mut zdr_body = start_body("grant-zdr", None);
+        zdr_body["zdr"] = json!(true);
+        let asked = edge.post(&member_token(), "/v1/agent/runs", zdr_body).await;
+        assert_eq!(asked.status, 200, "require={require}: {}", asked.body);
+
+        // So is a run in an organization under ZDR (the token's floor), with no flag.
+        let floored = edge
+            .post(
+                &zdr_member_token(),
+                "/v1/agent/runs",
+                start_body("grant-zdr", None),
+            )
+            .await;
+        assert_eq!(floored.status, 200, "require={require}: {}", floored.body);
+
+        // A non-ZDR grant may back a ZDR run.
+        let mut raised = start_body("grant-plain", None);
+        raised["zdr"] = json!(true);
+        let raised = edge.post(&member_token(), "/v1/agent/runs", raised).await;
+        assert_eq!(raised.status, 200, "require={require}: {}", raised.body);
+    }
+}
+
+/// When the grant carries a host policy it is the run's hosts, whatever the caller
+/// asked for and whether or not grants are required: the caller's wider list is
+/// dropped, and a navigation to a host outside the broker's list is refused before it
+/// reaches the browser. A grant with no host policy leaves the caller's constraints
+/// alone when grants are optional (the contrast that shows the override is the
+/// grant's, not a blanket rewrite).
+#[tokio::test]
+async fn validated_grant_overrides_client_domains_in_every_mode() {
+    for require in [false, true] {
+        let edge = edge_with(
+            vec![grant("grant-hosts", |fields| {
+                fields.insert("owner_id".into(), json!("user-golden"));
+                fields.insert("allowed_domains".into(), json!(["example.com"]));
+            })],
+            require,
+        )
+        .await;
+        let person = member_token();
+
+        // The caller names a wider list, and one that does not include the broker's.
+        for client in [
+            Some(&["example.com", "evil.test"][..]),
+            Some(&["evil.test"][..]),
+            None,
+        ] {
+            let run = edge
+                .start_run(&person, start_body("grant-hosts", client))
+                .await;
+            assert_eq!(
+                run_domains(&edge, &run).await,
+                vec!["example.com".to_owned()],
+                "require={require}, client {client:?}: the broker's hosts are the run's"
+            );
+
+            let blocked = edge
+                .step(
+                    &person,
+                    &run,
+                    json!({ "type": "navigate", "url": "https://evil.test/" }),
+                    None,
+                )
+                .await;
+            assert_eq!(
+                blocked.status, 403,
+                "require={require}, client {client:?}: {}",
+                blocked.body
+            );
+            assert!(
+                blocked
+                    .message()
+                    .contains("outside the run's allowed domains"),
+                "require={require}, client {client:?}: {}",
+                blocked.body
+            );
+        }
+    }
+
+    // No host policy on the grant, grants optional: the caller's own list stands.
+    let edge = edge_with(
+        vec![grant("grant-no-hosts", |fields| {
+            fields.insert("owner_id".into(), json!("user-golden"));
+        })],
+        false,
+    )
+    .await;
+    let run = edge
+        .start_run(
+            &member_token(),
+            start_body("grant-no-hosts", Some(&["client.example"])),
+        )
+        .await;
+    assert_eq!(
+        run_domains(&edge, &run).await,
+        vec!["client.example".to_owned()],
+        "a grant without hosts does not rewrite the caller's constraints"
+    );
+}
