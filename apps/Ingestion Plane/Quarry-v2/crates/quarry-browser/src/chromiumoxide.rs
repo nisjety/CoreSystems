@@ -2989,6 +2989,13 @@ impl BrowserDriver for ChromiumoxideDriver {
 
         let session_key = Self::session_key(session);
         self.update_tab_metadata(&session_key, &tab_id, &page).await;
+        #[cfg(test)]
+        {
+            if self.hooks.goto_hold.load(Ordering::SeqCst) {
+                self.hooks.goto_reached.notify_one();
+                self.hooks.goto_resume.notified().await;
+            }
+        }
         self.invalidate_live_frame_cache(session, owner).await;
 
         let mut inner = session.inner.lock().await;
@@ -3618,6 +3625,13 @@ impl BrowserDriver for ChromiumoxideDriver {
             };
             (removed, empty_context)
         };
+        #[cfg(test)]
+        {
+            if self.hooks.close_tab_hold.load(Ordering::SeqCst) {
+                self.hooks.close_tab_reached.notify_one();
+                self.hooks.close_tab_resume.notified().await;
+            }
+        }
         self.book().page_closed(&session_key, removed.admission);
 
         if let Err(err) = best_effort(Op::PageClose, removed.page.close()).await {
@@ -4281,6 +4295,17 @@ struct TestHooks {
     /// Hold `live_frame` this long after it found the page.
     live_frame_stall: std::sync::Mutex<Option<Duration>>,
     live_frame_stalled: AtomicBool,
+    /// Hold `goto` after the page navigated and before it reports the page
+    /// change: set `goto_hold`, wait for `goto_reached`, then let it go with
+    /// `goto_resume`.
+    goto_hold: AtomicBool,
+    goto_reached: tokio::sync::Notify,
+    goto_resume: tokio::sync::Notify,
+    /// The same for `close_tab`, between taking the tab out of the session's
+    /// pages and giving its page back to the slot book.
+    close_tab_hold: AtomicBool,
+    close_tab_reached: tokio::sync::Notify,
+    close_tab_resume: tokio::sync::Notify,
     /// The next `content` read's first attempt evaluates in this execution
     /// context (one from before a navigation), as the race does.
     content_stale_context:
@@ -5767,6 +5792,128 @@ mod tests {
         let error = captured.expect_err("no frame for a released session");
         assert_eq!(loss_reason(&error), "session_not_open", "{error:?}");
         assert!(!driver.live_frames.lock().await.contains_key("frame-release"));
+    }
+
+    /// A `goto` of a session that was released and replaced under the same
+    /// key while it navigated reports its page change to the entry it started
+    /// under: the newer session's cached frame stays.
+    #[tokio::test]
+    async fn a_late_goto_of_a_released_session_leaves_the_next_sessions_frame_alone() {
+        if !live_enabled() {
+            return;
+        }
+        let driver = Arc::new(live_driver().with_pool_config(quiet_pool()));
+        let old = live_session_sized(&driver, "goto-reuse", None, "old").await;
+        driver.hooks.goto_hold.store(true, Ordering::SeqCst);
+        let navigating = {
+            let driver = driver.clone();
+            let old = old.clone();
+            tokio::spawn(async move { driver.goto(&old, "about:blank").await })
+        };
+        tokio::time::timeout(Duration::from_secs(30), driver.hooks.goto_reached.notified())
+            .await
+            .expect("the goto navigated and holds");
+        driver.hooks.goto_hold.store(false, Ordering::SeqCst);
+
+        driver.release(old).await.expect("release");
+        let new = live_session_sized(&driver, "goto-reuse", None, "new").await;
+        driver
+            .live_frame(&new, LiveFrameOptions::default())
+            .await
+            .expect("the new session's frame");
+        let cached = |frames: &LiveFrameCache| {
+            frames
+                .slots
+                .get("goto-reuse")
+                .is_some_and(|slot| slot.cached.is_some())
+        };
+        assert!(cached(&*driver.live_frames.lock().await), "the new frame is cached");
+
+        driver.hooks.goto_resume.notify_one();
+        navigating.await.expect("join").expect("the old goto ends");
+        assert!(
+            cached(&*driver.live_frames.lock().await),
+            "the old session's late page change dropped the new session's frame"
+        );
+        driver.release(new).await.expect("release");
+    }
+
+    /// `close_tab` gives the page back to the book entry that reserved it:
+    /// an ordinary close frees one page, and a close that runs after the
+    /// session was released and the key admitted again frees nothing of the
+    /// newer session's.
+    #[tokio::test]
+    async fn close_tab_gives_the_page_back_to_the_entry_that_opened_it() {
+        if !live_enabled() {
+            return;
+        }
+        let driver = Arc::new(live_driver().with_pool_config(quiet_pool()));
+        let pages = |driver: &ChromiumoxideDriver| driver.book().slot(SLOT).unwrap().pages;
+        let old = live_session_sized(&driver, "close-reuse", None, "old").await;
+        assert_eq!(pages(&driver), 1);
+        let second = driver.new_tab(&old, None).await.expect("second tab");
+        assert_eq!(pages(&driver), 2);
+        driver
+            .close_tab(&old, &second.tab_id)
+            .await
+            .expect("an ordinary close");
+        assert_eq!(pages(&driver), 1, "the close freed its own page");
+
+        let first = driver
+            .list_tabs(&old)
+            .await
+            .expect("tabs")
+            .into_iter()
+            .next()
+            .expect("the first tab");
+        driver.hooks.close_tab_hold.store(true, Ordering::SeqCst);
+        let closing = {
+            let driver = driver.clone();
+            let old = old.clone();
+            tokio::spawn(async move { driver.close_tab(&old, &first.tab_id).await })
+        };
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            driver.hooks.close_tab_reached.notified(),
+        )
+        .await
+        .expect("the close took the tab and holds");
+        driver.hooks.close_tab_hold.store(false, Ordering::SeqCst);
+
+        driver.release(old).await.expect("release");
+        let new = live_session_sized(&driver, "close-reuse", None, "new").await;
+        assert_eq!(pages(&driver), 1, "the new session's page");
+        driver.hooks.close_tab_resume.notify_one();
+        closing.await.expect("join").expect("the old close ends");
+        assert_eq!(
+            pages(&driver),
+            1,
+            "the old session's late close freed the new session's page"
+        );
+        driver.release(new).await.expect("release");
+    }
+
+    /// A page is reserved for the entry the key is admitted under now, and
+    /// the attach guard that gives it back names that entry: a guard of an
+    /// attach that outlived its session frees nothing of the next one's.
+    #[tokio::test]
+    async fn a_page_reservation_and_its_attach_guard_belong_to_one_entry_of_the_key() {
+        let driver = ChromiumoxideDriver::new().with_pool_config(quiet_pool());
+        let ttl = Duration::from_secs(30);
+        let pages = |driver: &ChromiumoxideDriver| driver.book().slot(SLOT).unwrap().pages;
+        driver.book().admit("res-reuse", ttl, Instant::now());
+        let old = driver.reserve_page("res-reuse").expect("a page");
+        assert_eq!(Some(old), driver.book().admission_id("res-reuse"));
+        driver.book().release("res-reuse");
+        driver.book().admit("res-reuse", ttl, Instant::now());
+        let new = driver.reserve_page("res-reuse").expect("a page");
+        assert_ne!(old, new, "a key admitted again is a new entry");
+        assert_eq!(pages(&driver), 1);
+
+        drop(AttachGuard::new(&driver, "res-reuse".into(), Some(old)));
+        assert_eq!(pages(&driver), 1, "the old attach freed the new page");
+        drop(AttachGuard::new(&driver, "res-reuse".into(), Some(new)));
+        assert_eq!(pages(&driver), 0, "the guard gives back its own entry's page");
     }
 
     /// An acquire dropped during the cold launch (a scrape's own timeout does
