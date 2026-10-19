@@ -376,6 +376,22 @@ export async function scrapeUrl(
   })
 }
 
+/**
+ * The typed `error.code`s a failed scrape preview can carry (gateway
+ * `classify_scrape_failure`). `site_blocked` is only a Quarry-confirmed bot
+ * wall and then also carries `blockReason`; a plain 403 is `scrape_refused`; a
+ * 429 is `scrape_rate_limited` with `retryAfterSeconds`. Each has end-user copy
+ * in `shared/i18n/errors.ts`; any other code gets the caller's fallback.
+ */
+export const SCRAPE_PREVIEW_FAILURE_CODES = [
+  'site_blocked',
+  'scrape_refused',
+  'scrape_rate_limited',
+  'scrape_timeout',
+  'scrape_failed',
+  'unsupported_media',
+] as const
+
 export async function scrapePreview(
   orgId: string,
   body: ScrapeRequest,

@@ -10,16 +10,30 @@
 // Convention: NEW codes get added here as they're identified as user-facing.
 // This is the seam — not a claim that every gateway code is covered yet.
 
-type ErrorCopy = { no: string; en: string }
+type ErrorCopy = {
+  no: string
+  en: string
+  /** A "try again in N seconds" sentence (from the error's retry hint) is appended to the text. */
+  retryable?: boolean
+}
 
-type ApiErrorLike = { code?: string | null } | null | undefined
+type ApiErrorLike =
+  | {
+      code?: string | null
+      status?: number
+      retryAfterSeconds?: number | null
+      blockReason?: string | null
+      resumable?: boolean
+    }
+  | null
+  | undefined
 
 const GENERIC_FALLBACK: ErrorCopy = {
   no: 'Noe gikk galt. Prøv igjen, eller kontakt support hvis problemet vedvarer.',
   en: 'Something went wrong. Try again, or contact support if the problem persists.',
 }
 
-const ERROR_COPY: Record<string, ErrorCopy> = {
+export const ERROR_COPY: Record<string, ErrorCopy> = {
   // Cross-cutting / structural
   validation_error: { no: 'Noen av feltene er ikke gyldige. Sjekk og prøv igjen.', en: 'Some fields are invalid. Check and try again.' },
   invalid_input: { no: 'Forespørselen inneholder ugyldige data.', en: 'The request contains invalid data.' },
@@ -124,7 +138,7 @@ const ERROR_COPY: Record<string, ErrorCopy> = {
 
   // Browser control (advanced/internal surfaces — low pilot exposure, still safe to map)
   browser_human_takeover_active: { no: 'En person har overtatt styringen av denne nettleserøkten.', en: 'Human takeover is active for this browser session.' },
-  browser_capacity_reached: { no: 'Det er for mange nettleserøkter i gang akkurat nå. Prøv igjen om litt.', en: 'There are too many browser sessions running right now. Try again shortly.' },
+  browser_capacity_reached: { no: 'Det er for mange nettleserøkter i gang akkurat nå.', en: 'There are too many browser sessions running right now.', retryable: true },
   browser_session_not_found: { no: 'Fant ikke nettleserøkten.', en: 'Browser session not found.' },
   browser_session_failed: { no: 'Nettleserøkten feilet. Prøv igjen.', en: 'The browser session failed. Try again.' },
   browser_session_invalid: { no: 'Denne nettleserøkten er ugyldig.', en: 'This browser session is invalid.' },
@@ -147,6 +161,105 @@ const ERROR_COPY: Record<string, ErrorCopy> = {
   invalid_browser_session: { no: 'Ugyldig nettleserøkt.', en: 'Invalid browser session.' },
   invalid_browser_tab: { no: 'Ugyldig fane.', en: 'Invalid tab.' },
   invalid_browser_control_mode: { no: 'Ugyldig styringsmodus for nettleseren.', en: 'Browser control mode must be agent_control or human_takeover.' },
+
+  // Browser sessions and agent runs (Quarry caps, grants, lost sessions, bot walls).
+  // Written for the person at the screen: what happened and what they can do. A
+  // `retryable` entry gets a "try again in N seconds" sentence appended from the
+  // error's retry hint (or "try again shortly" without one), so its text does not
+  // carry one itself. Raw Quarry codes (`browser_session_cap`, `session_reaped`,
+  // `USER_TOOK_OVER`, `CHALLENGE_DETECTED`) are mapped as well as the gateway's own,
+  // so a passthrough body never falls through to the generic message.
+  browser_session_cap: { no: 'Alle nettleserplassene er i bruk akkurat nå.', en: 'All browser slots are in use right now.', retryable: true },
+  browser_tab_limit_reached: { no: 'Nettleseren har for mange faner åpne. Lukk en fane du ikke trenger.', en: 'The browser has too many tabs open. Close a tab you do not need.', retryable: true },
+  browser_page_cap: { no: 'Nettleseren har for mange faner åpne. Lukk en fane du ikke trenger.', en: 'The browser has too many tabs open. Close a tab you do not need.', retryable: true },
+  browser_session_grant_inactive: {
+    no: 'Tilgangen til denne nettleserøkten har utløpt eller er trukket tilbake, så AI-kjøringen kunne ikke starte. Åpne økten på nytt og prøv igjen.',
+    en: 'Access for this browser session has expired or been withdrawn, so the AI run could not start. Reopen the session and try again.',
+  },
+  browser_session_grant_expired: {
+    no: 'Tilgangen til denne nettleserøkten har utløpt. Åpne økten på nytt og prøv igjen.',
+    en: 'Access for this browser session has expired. Reopen the session and try again.',
+  },
+  browser_session_grant_missing: {
+    no: 'Denne nettleserøkten har ikke tilgang til AI-kjøring. Åpne økten på nytt for å starte en.',
+    en: 'This browser session has no access for an AI run. Reopen the session to start one.',
+  },
+  browser_grant_not_derivable: {
+    no: 'Tilgangen til denne nettleserøkten har utløpt eller er trukket tilbake, så AI-kjøringen kunne ikke starte. Åpne økten på nytt og prøv igjen.',
+    en: 'Access for this browser session has expired or been withdrawn, so the AI run could not start. Reopen the session and try again.',
+  },
+  browser_host_not_grantable: {
+    no: 'Denne adressen kan ikke åpnes i nettleseren i appen. Sjekk lenken, eller prøv en annen kilde.',
+    en: 'This address cannot be opened in the in-app browser. Check the link, or try another source.',
+  },
+  browser_grant_denied: {
+    no: 'Du har ikke tilgang til å åpne nettleseren for denne økten. Be en administrator om tilgang.',
+    en: 'You do not have access to open the browser for this session. Ask an administrator for access.',
+  },
+  browser_grant_limit_reached: {
+    no: 'For mange nettleserøkter er åpne. Lukk en du ikke bruker, og prøv igjen.',
+    en: 'Too many browser sessions are open. Close one you are not using and try again.',
+  },
+  browser_grant_unavailable: { no: 'Nettlesertilgang er midlertidig utilgjengelig.', en: 'Browser access is temporarily unavailable.', retryable: true },
+  browser_process_lost: {
+    no: 'Nettleseren bak denne økten stoppet uventet. Start en ny økt for å fortsette.',
+    en: 'The browser behind this session stopped unexpectedly. Start a new session to continue.',
+  },
+  browser_session_reaped: {
+    no: 'Denne nettleserøkten ble lukket fordi den var inaktiv. Start en ny økt for å fortsette.',
+    en: 'This browser session was closed because it was idle. Start a new session to continue.',
+  },
+  session_reaped: {
+    no: 'Denne nettleserøkten ble lukket fordi den var inaktiv. Start en ny økt for å fortsette.',
+    en: 'This browser session was closed because it was idle. Start a new session to continue.',
+  },
+  browser_action_denied: { no: 'Denne handlingen er ikke tillatt i nettleseren i appen.', en: 'This action is not allowed in the in-app browser.' },
+  browser_artifact_withheld: {
+    no: 'Zero Data Retention er på for denne kjøringen, så det ble ikke tatt noe skjermbilde.',
+    en: 'Zero Data Retention is on for this run, so no screenshot was captured.',
+  },
+  browser_artifact_missing: { no: 'Skjermbildet er ikke lenger tilgjengelig.', en: 'The screenshot is no longer available.' },
+  browser_unhealthy: {
+    no: 'Nettleseren er midlertidig utilgjengelig fordi den ikke svarer som den skal. Prøv igjen om litt, og kontakt en administrator hvis det vedvarer.',
+    en: 'The browser is temporarily unavailable because it is not responding properly. Try again shortly, and contact an administrator if it persists.',
+  },
+  USER_TOOK_OVER: {
+    no: 'En person har overtatt nettleseren, så agenten kan ikke handle akkurat nå. Vent til styringen er gitt tilbake.',
+    en: 'A person has taken over the browser, so the agent cannot act right now. Wait until control is handed back.',
+  },
+  browser_site_blocked: {
+    no: 'Nettstedet stopper automatisk nettlesing. Ta over nettleseren selv, eller prøv en annen kilde.',
+    en: 'The site blocks automated browsing. Take over the browser yourself, or try another source.',
+  },
+  challenge_detected: {
+    no: 'Nettstedet stopper automatisk nettlesing. Ta over nettleseren selv, eller prøv en annen kilde.',
+    en: 'The site blocks automated browsing. Take over the browser yourself, or try another source.',
+  },
+  CHALLENGE_DETECTED: {
+    no: 'Nettstedet stopper automatisk nettlesing. Ta over nettleseren selv, eller prøv en annen kilde.',
+    en: 'The site blocks automated browsing. Take over the browser yourself, or try another source.',
+  },
+
+  // Scrape preview refusals (gateway `knowledge/quarry.rs`, `classify_scrape_failure`).
+  // `site_blocked` is only a Quarry-confirmed bot wall; a plain refusal is
+  // `scrape_refused`. None of them offers a proxy.
+  site_blocked: {
+    no: 'Dette nettstedet stopper automatisert henting. Prøv en annen kilde, eller åpne siden selv i nettleseren.',
+    en: 'This site blocks automated fetching. Try another source, or open the page yourself in the browser.',
+  },
+  scrape_refused: {
+    no: 'Nettstedet avviste forespørselen om å hente siden. Siden kan kreve innlogging eller være stengt for automatisk henting. Prøv en annen kilde.',
+    en: 'The site refused the request to fetch the page. It may require a sign-in or be closed to automatic fetching. Try another source.',
+  },
+  scrape_rate_limited: { no: 'Nettstedet mottar for mange forespørsler akkurat nå.', en: 'The site is receiving too many requests right now.', retryable: true },
+  scrape_timeout: {
+    no: 'Siden brukte for lang tid på å svare. Prøv en mer spesifikk underside, eller en annen kilde.',
+    en: 'The page took too long to respond. Try a more specific sub-page, or another source.',
+  },
+
+  // Status-class messages for a code with no entry of its own.
+  rate_limited: { no: 'Det kommer for mange forespørsler akkurat nå.', en: 'There are too many requests right now.', retryable: true },
+  unauthorized: { no: 'Du må logge inn på nytt.', en: 'You need to sign in again.' },
 
   // Better Auth passthrough (proxied verbatim by the gateway; UPPER_SNAKE_CASE per Better Auth's own convention)
   EMAIL_NOT_VERIFIED: { no: 'Bekreft e-postadressen din for å fortsette.', en: 'Verify your email address to continue.' },
@@ -173,17 +286,153 @@ const ERROR_COPY: Record<string, ErrorCopy> = {
 }
 
 /**
+ * Why a bot wall stands in front of a page: the closed `BlockReason` set Quarry
+ * sends (`block_reason` on a scrape, `reason` on an agent run), keyed by the
+ * wire value. Used instead of the generic site-blocked copy when a refusal
+ * carries one; a value that is not here is ignored, never shown.
+ */
+export const BLOCK_REASON_COPY: Record<string, ErrorCopy> = {
+  captcha_widget: {
+    no: 'Siden krever at du bekrefter at du er et menneske, og agenten kan ikke gjøre det for deg. Ta over nettleseren selv, eller prøv en annen kilde.',
+    en: 'The page asks you to prove you are a person, and the agent cannot do that for you. Take over the browser yourself, or try another source.',
+  },
+  waf_interstitial: {
+    no: 'Nettstedet viser en sikkerhetskontroll i stedet for siden. Ta over nettleseren selv, eller prøv en annen kilde.',
+    en: 'The site shows a security check instead of the page. Take over the browser yourself, or try another source.',
+  },
+  unexpected_bot_error: {
+    no: 'Nettstedet tok den automatiske hentingen for en robot og avviste den. Ta over nettleseren selv, eller prøv en annen kilde.',
+    en: 'The site took the automatic fetch for a robot and turned it away. Take over the browser yourself, or try another source.',
+  },
+  challenge_loop: {
+    no: 'Nettstedet stoppet agenten igjen etter ett nytt forsøk, så den ga opp. Ta over nettleseren selv, eller prøv en annen kilde.',
+    en: 'The site stopped the agent again after one more try, so it gave up. Take over the browser yourself, or try another source.',
+  },
+}
+
+const BLOCKED_CODES = new Set(['site_blocked', 'browser_site_blocked', 'challenge_detected', 'CHALLENGE_DETECTED'])
+const TAKEOVER_CODES = new Set(['USER_TOOK_OVER', 'browser_human_takeover_active'])
+const SESSION_LOST_CODES = new Set(['browser_process_lost', 'browser_session_reaped', 'session_reaped'])
+
+const NETWORK_COPY: ErrorCopy = {
+  no: 'Fikk ikke kontakt med tjenesten. Sjekk nettverket ditt og prøv igjen.',
+  en: 'Could not reach the service. Check your network and try again.',
+}
+
+/**
+ * What a caller needs to react to an error, beyond its text:
+ *  - `unauthenticated` (401): sign in again.
+ *  - `forbidden` (403): not allowed; ask an administrator.
+ *  - `takeover` (409 `USER_TOOK_OVER` / `browser_human_takeover_active`): a person
+ *    holds the browser; wait, do not retry the agent step.
+ *  - `blocked`: the site refuses automation; take over or use another source.
+ *  - `rate_limited` (429): wait `retryAfterSeconds`, then retry.
+ *  - `session_lost` (410 or a reaped/lost session): start a new session.
+ *  - `server` (5xx): a backing service failed; retry later.
+ *  - `network`: no response at all (fetch failed).
+ *  - `client`: any other 4xx, or an error with no HTTP status.
+ */
+export type ApiErrorKind =
+  | 'unauthenticated'
+  | 'forbidden'
+  | 'takeover'
+  | 'blocked'
+  | 'rate_limited'
+  | 'session_lost'
+  | 'server'
+  | 'network'
+  | 'client'
+
+export type ApiErrorDescription = {
+  code: string | null
+  kind: ApiErrorKind
+  message: string
+  resumable: boolean
+  retryAfterSeconds: number | null
+}
+
+function errorKind(err: ApiErrorLike, code: string | null): ApiErrorKind {
+  if (code && TAKEOVER_CODES.has(code)) return 'takeover'
+  if (code && BLOCKED_CODES.has(code)) return 'blocked'
+  const status = typeof err?.status === 'number' ? err.status : null
+  if ((code && SESSION_LOST_CODES.has(code)) || status === 410) return 'session_lost'
+  if (status === 401) return 'unauthenticated'
+  if (status === 403) return 'forbidden'
+  if (status === 429) return 'rate_limited'
+  if (status !== null && status >= 500) return 'server'
+  if (status === null && err instanceof TypeError) return 'network'
+  return 'client'
+}
+
+function retrySentence(seconds: number | null, tr: (noText: string, enText: string) => string): string {
+  if (seconds === null) return tr('Prøv igjen om litt.', 'Try again shortly.')
+  return seconds === 1
+    ? tr('Prøv igjen om 1 sekund.', 'Try again in 1 second.')
+    : tr(`Prøv igjen om ${seconds} sekunder.`, `Try again in ${seconds} seconds.`)
+}
+
+function describe(
+  err: unknown,
+  tr: (noText: string, enText: string) => string,
+  fallback: ErrorCopy | undefined,
+  statusCopy: boolean,
+): ApiErrorDescription {
+  const like = (err && typeof err === 'object' ? err : null) as ApiErrorLike
+  const code = typeof like?.code === 'string' ? like.code : null
+  const kind = errorKind(like, code)
+  const retryAfterSeconds =
+    typeof like?.retryAfterSeconds === 'number' && like.retryAfterSeconds >= 1 ? Math.ceil(like.retryAfterSeconds) : null
+
+  let copy: ErrorCopy | undefined
+  // A refusal that names why the wall is up gets the sentence for that reason.
+  if (kind === 'blocked' && typeof like?.blockReason === 'string') copy = BLOCK_REASON_COPY[like.blockReason]
+  copy ??= code ? ERROR_COPY[code] : undefined
+  if (!copy && statusCopy) {
+    if (kind === 'unauthenticated') copy = ERROR_COPY.unauthenticated
+    else if (kind === 'forbidden') copy = ERROR_COPY.forbidden
+    else if (kind === 'rate_limited') copy = ERROR_COPY.rate_limited
+    else if (kind === 'network') copy = NETWORK_COPY
+  }
+  copy ??= fallback ?? GENERIC_FALLBACK
+
+  const base = tr(copy.no, copy.en)
+  return {
+    code,
+    kind,
+    message: copy.retryable === true ? `${base} ${retrySentence(retryAfterSeconds, tr)}` : base,
+    resumable: like?.resumable === true,
+    retryAfterSeconds,
+  }
+}
+
+/**
  * Translate a caught error into safe, locale-aware copy. Looks the error's
  * `code` up in {@link ERROR_COPY}; unknown/missing codes use `fallback` if the
  * caller supplied one, otherwise a generic Norwegian/English message — never
- * the raw `message` from the gateway, which is always English ops text.
+ * the raw `message` from the gateway, which is always English ops text. A
+ * retryable entry gets a "try again in N seconds" sentence from the error's own
+ * retry hint.
  */
 export function translateApiError(
   err: unknown,
   tr: (noText: string, enText: string) => string,
   fallback?: ErrorCopy,
 ): string {
-  const code = typeof (err as ApiErrorLike)?.code === 'string' ? (err as { code: string }).code : null
-  const copy = (code && ERROR_COPY[code]) || fallback || GENERIC_FALLBACK
-  return tr(copy.no, copy.en)
+  return describe(err, tr, fallback, false).message
+}
+
+/**
+ * {@link translateApiError} plus what the caller needs to react: the `kind`
+ * (401, 403, takeover, bot wall, 429, lost session, 5xx, no network), the retry
+ * hint and `resumable`. For an error whose code has no copy it answers by status
+ * class (401, 403, 429, no network) before the caller's `fallback`, so a
+ * session that expired or a rate limit is never reported as the fallback's
+ * "could not do X". Still never the raw `message`.
+ */
+export function describeApiError(
+  err: unknown,
+  tr: (noText: string, enText: string) => string,
+  fallback?: ErrorCopy,
+): ApiErrorDescription {
+  return describe(err, tr, fallback, true)
 }
