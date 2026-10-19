@@ -108,9 +108,19 @@ impl HeldSession {
         let session = self.session.take().expect("held until finish");
         let lease = self.lease.take();
         let inner = self.inner.clone();
+        // The driver's release runs on a task of its own inside the outer
+        // task, so that a driver that panics is seen here as a join error
+        // (the release failed) and not as an unwind through the lease guard,
+        // which would give the slot back unpoisoned.
         let release = tokio::spawn(async move {
             let mut lease = lease;
-            let released = inner.release(session).await;
+            let released = match tokio::spawn(async move { inner.release(session).await }).await {
+                Ok(released) => released,
+                Err(_) => Err(QuarryError::new(
+                    ErrorCode::Internal,
+                    "browser session release panicked",
+                )),
+            };
             if failed || released.is_err() {
                 if let Some(lease) = lease.as_mut() {
                     lease.poison();
@@ -846,6 +856,74 @@ mod tests {
             "the slot was held until the release finished"
         );
         assert_eq!(pool.available(), 1);
+    }
+
+    /// A driver whose release panics.
+    struct PanicReleaseDriver;
+
+    #[async_trait]
+    impl BrowserDriverTrait for PanicReleaseDriver {
+        async fn configure_egress_policy(
+            &self,
+            _session: &BrowserSession,
+            _policy: BrowserEgressPolicy,
+        ) -> QuarryResult<()> {
+            Ok(())
+        }
+        async fn acquire(&self, lease: &BrowserLease) -> QuarryResult<BrowserSession> {
+            Ok(BrowserSession {
+                lease: lease.clone(),
+                inner: Arc::new(TokioMutex::new(SessionInner::default())),
+            })
+        }
+        async fn release(&self, _session: BrowserSession) -> QuarryResult<()> {
+            panic!("release exploded");
+        }
+        async fn goto(&self, _session: &BrowserSession, _url: &str) -> QuarryResult<()> {
+            Ok(())
+        }
+        async fn content(&self, _session: &BrowserSession) -> QuarryResult<Bytes> {
+            Ok(Bytes::from_static(b"<html>ok</html>"))
+        }
+        async fn screenshot(
+            &self,
+            _session: &BrowserSession,
+            _full_page: bool,
+        ) -> QuarryResult<Bytes> {
+            Ok(Bytes::new())
+        }
+        async fn pdf(&self, _session: &BrowserSession) -> QuarryResult<Bytes> {
+            Ok(Bytes::new())
+        }
+        async fn wait_for(
+            &self,
+            _session: &BrowserSession,
+            _selector: &str,
+            _timeout_ms: u32,
+        ) -> QuarryResult<()> {
+            Ok(())
+        }
+    }
+
+    /// A driver whose release panics fails the fetch with an internal error,
+    /// frees the slot, and evicts the lease: the slot does not go back to
+    /// the pool as if the release had worked.
+    #[tokio::test]
+    async fn a_panicking_release_poisons_the_lease_and_frees_the_slot() {
+        let pool = Arc::new(RuntimeLeasePool::new(1));
+        let adapter = BrowserDriverAdapter::new(Arc::new(PanicReleaseDriver), pool.clone());
+        let url = Url::parse("https://example.com/").unwrap();
+        let err = adapter.fetch(&url).await.expect_err("the release panicked");
+        assert_eq!(err.code, ErrorCode::Internal);
+        let freed = tokio::time::timeout(Duration::from_secs(5), async {
+            while pool.available() == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(freed.is_ok(), "the slot came back");
+        let next = pool.try_acquire("example.com").expect("slot free");
+        assert!(!next.has_lease(), "the lease was evicted, not returned to the pool");
     }
 
     /// A fetch that ends normally releases once and is not released again by
