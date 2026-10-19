@@ -389,7 +389,6 @@ export const SCRAPE_PREVIEW_FAILURE_CODES = [
   'scrape_rate_limited',
   'scrape_timeout',
   'scrape_failed',
-  'unsupported_media',
 ] as const
 
 export async function scrapePreview(
