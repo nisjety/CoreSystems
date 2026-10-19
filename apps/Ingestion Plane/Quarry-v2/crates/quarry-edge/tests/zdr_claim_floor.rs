@@ -1295,14 +1295,27 @@ async fn a_zdr_org_user_never_reads_or_writes_a_cache_and_a_registry_zdr_service
         .as_str()
         .expect("fingerprint")
         .to_owned();
-    let written: bool = conn
-        .exists(format!("quarry:page:{zdr_fingerprint}"))
-        .await
-        .expect("redis EXISTS");
-    assert!(!written, "a ZDR scrape must not write the page cache");
+    // Probe the page cache through its public get, which reads the key PageCache
+    // writes: quarry:page:{org}:{fingerprint}. The positive control comes first:
+    // the standard org's first scrape must be visible to the probe, or the
+    // negative answer for the ZDR org proves nothing.
+    let page_cache = quarry_edge::cache::PageCache::new(conn.clone(), Duration::from_secs(300));
+    assert!(
+        page_cache.get(&standard_org, &cached_fingerprint).await.is_some(),
+        "the standard org's scrape must be in the page cache, or the ZDR check below proves nothing"
+    );
+    assert!(
+        page_cache.get(&zdr_org, &zdr_fingerprint).await.is_none(),
+        "a ZDR scrape must not write the page cache"
+    );
 
+    // Delete both entries under the keys PageCache writes, so that neither
+    // outlives the run.
     let _: i64 = conn
-        .del(format!("quarry:page:{cached_fingerprint}"))
+        .del(vec![
+            format!("quarry:page:{zdr_org}:{zdr_fingerprint}"),
+            format!("quarry:page:{standard_org}:{cached_fingerprint}"),
+        ])
         .await
         .expect("cleanup");
 }
