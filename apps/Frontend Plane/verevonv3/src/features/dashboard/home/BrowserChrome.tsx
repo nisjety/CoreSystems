@@ -59,6 +59,7 @@ import type {
   CreatableBrowserProfileScope,
 } from '@/shared/api/browser-client'
 import type { ApprovalDecision } from '@/shared/api/orchestration-client'
+import { ERROR_COPY } from '@/shared/i18n/errors'
 import { isBrowserLoopRunning, type BrowserLoopState } from './browser-loop'
 import {
   closeBrowserChromePopover,
@@ -278,7 +279,7 @@ function ownerTimelineEventLabel(event: BrowserOwnerTimelineItem): string {
 function ownerTimelineEventMeta(event: BrowserOwnerTimelineItem): string {
   const parts = [
     event.outcome,
-    event.errorCode ?? null,
+    event.errorCode ? (ERROR_COPY[event.errorCode]?.no ?? 'Feil') : null,
     event.initiatedBy ?? null,
     event.tabId ?? event.activeTabId ?? null,
     event.eventCount !== undefined ? `${event.eventCount} hendelser` : null,

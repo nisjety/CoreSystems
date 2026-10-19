@@ -1,3 +1,4 @@
+import { describeApiError, type ApiErrorDescription } from '@/shared/i18n/errors'
 import { requestJson } from './http'
 
 export type BrowserAction =
@@ -310,6 +311,42 @@ export type CreateBrowserSessionRequest = {
    * that sets `zdr: true` together with `profileId` or `persistentProfile`.
    */
   zdr?: boolean
+}
+
+/**
+ * A failed browser call as the person should see it and as the caller should
+ * react to it. The gateway's typed envelope (`{ error: { code, message,
+ * details } }`) survives the client as an `ApiError` (`code`, `status`,
+ * `retryAfterSeconds`, `resumable`, `blockReason`); this turns it into copy
+ * by `code` and tells the cases apart by `kind`:
+ *
+ * - 401 `unauthenticated`: sign in again (the transport already signals session expiry).
+ * - 403 `forbidden`: not allowed; ask an administrator.
+ * - 409 `USER_TOOK_OVER` / `browser_human_takeover_active` -> `takeover`: a person
+ *   holds the browser, the agent step is not retried.
+ * - 403 `browser_site_blocked` / `site_blocked` -> `blocked`: take over or use another source.
+ * - 429 `rate_limited`: wait `retryAfterSeconds` (from `Retry-After`), then retry.
+ * - 410 / a reaped or lost session -> `session_lost`: start a new session.
+ * - 5xx `server`: a backing service failed; retry later.
+ *
+ * An unknown code is never shown: it falls back to `fallback`, then to a
+ * generic message. The raw `message` of the response is never used.
+ */
+export function describeBrowserError(
+  err: unknown,
+  tr: (noText: string, enText: string) => string,
+  fallback?: { no: string; en: string },
+): ApiErrorDescription {
+  return describeApiError(err, tr, fallback)
+}
+
+/** The text of {@link describeBrowserError}, for a toast or an inline notice. */
+export function browserErrorMessage(
+  err: unknown,
+  tr: (noText: string, enText: string) => string,
+  fallback?: { no: string; en: string },
+): string {
+  return describeBrowserError(err, tr, fallback).message
 }
 
 function orgHeaders(orgId: string): Record<string, string> {

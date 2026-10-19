@@ -24,6 +24,7 @@ import {
   createBrowserTab,
   createBrowserSession,
   createBrowserProfile,
+  browserErrorMessage,
   deleteBrowserProfile,
   getBrowserOwnerTimeline,
   listBrowserProfiles,
@@ -633,7 +634,7 @@ export function KnowledgeComposer(props: {
         setBrowserProfileProbe(null)
       }
     } catch (reason) {
-      setBrowserProfileError(reason instanceof Error ? reason.message : i18n.tr('Nettleserprofiler kunne ikke hentes.', 'Browser profiles could not be loaded.'))
+      setBrowserProfileError(browserErrorMessage(reason, i18n.tr, { no: 'Nettleserprofiler kunne ikke hentes.', en: 'Browser profiles could not be loaded.' }))
     } finally {
       setBrowserProfilesLoading(false)
     }
@@ -650,7 +651,7 @@ export function KnowledgeComposer(props: {
       setBrowserProfileProbe(await probeBrowserProfile(id, profileId, target))
     } catch (reason) {
       setBrowserProfileProbe(null)
-      setBrowserProfileError(reason instanceof Error ? reason.message : i18n.tr('Profilen kunne ikke sjekkes.', 'The profile could not be checked.'))
+      setBrowserProfileError(browserErrorMessage(reason, i18n.tr, { no: 'Profilen kunne ikke sjekkes.', en: 'The profile could not be checked.' }))
     } finally {
       setBrowserProfileProbing(false)
     }
@@ -679,7 +680,7 @@ export function KnowledgeComposer(props: {
       selectBrowserProfile(created.profile_id)
       setNewProfileName('')
     } catch (reason) {
-      setBrowserProfileError(reason instanceof Error ? reason.message : i18n.tr('Profilen kunne ikke opprettes.', 'The profile could not be created.'))
+      setBrowserProfileError(browserErrorMessage(reason, i18n.tr, { no: 'Profilen kunne ikke opprettes.', en: 'The profile could not be created.' }))
     } finally {
       setBrowserProfileCreating(false)
     }
@@ -710,7 +711,7 @@ export function KnowledgeComposer(props: {
       setBrowserProfiles((current) => current.map((profile) => (profile.profile_id === updated.profile_id ? updated : profile)))
       cancelRenamingBrowserProfile()
     } catch (reason) {
-      setBrowserProfileError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke gi profilen nytt navn.', 'Could not rename the profile.'))
+      setBrowserProfileError(browserErrorMessage(reason, i18n.tr, { no: 'Kunne ikke gi profilen nytt navn.', en: 'Could not rename the profile.' }))
     } finally {
       setBrowserProfileMutating(false)
     }
@@ -736,7 +737,7 @@ export function KnowledgeComposer(props: {
       setBrowserProfileProbe(null)
       cancelRenamingBrowserProfile()
     } catch (reason) {
-      setBrowserProfileError(reason instanceof Error ? reason.message : i18n.tr('Profilen kunne ikke slettes.', 'The profile could not be deleted.'))
+      setBrowserProfileError(browserErrorMessage(reason, i18n.tr, { no: 'Profilen kunne ikke slettes.', en: 'The profile could not be deleted.' }))
     } finally {
       setBrowserProfileDeleteArmed(false)
       setBrowserProfileMutating(false)
@@ -794,7 +795,7 @@ export function KnowledgeComposer(props: {
       void browserSessionPromise?.then((attempt) => {
         closeBrowserSessionById(attempt.session?.session.id)
       })
-      setFormError(reason instanceof Error ? reason.message : i18n.tr('Skraping kunne ikke fullføres.', 'Scraping could not be completed.'))
+      setFormError(browserErrorMessage(reason, i18n.tr, { no: 'Skraping kunne ikke fullføres.', en: 'Scraping could not be completed.' }))
     }
   }
 
@@ -829,7 +830,7 @@ export function KnowledgeComposer(props: {
       return { error: null, session }
     } catch (reason) {
       return {
-        error: reason instanceof Error ? reason.message : i18n.tr('Nettleserøkt kunne ikke startes.', 'Browser session could not be started.'),
+        error: browserErrorMessage(reason, i18n.tr, { no: 'Nettleserøkt kunne ikke startes.', en: 'Browser session could not be started.' }),
         session: null,
       }
     } finally {
@@ -860,9 +861,10 @@ export function KnowledgeComposer(props: {
         return attachBrowserOwnerTimeline(current, timeline)
       })
     } catch (reason) {
-      const message = reason instanceof Error
-        ? reason.message
-        : i18n.tr('Den varige nettleseraktiviteten kunne ikke lastes.', 'The durable browser activity could not be loaded.')
+      const message = browserErrorMessage(reason, i18n.tr, {
+        no: 'Den varige nettleseraktiviteten kunne ikke lastes.',
+        en: 'The durable browser activity could not be loaded.',
+      })
       setPreview((current) => {
         if (current?.browserSession?.session.id !== sessionId) return current
         return withBrowserOwnerTimelineError(current, message)
@@ -898,7 +900,7 @@ export function KnowledgeComposer(props: {
       setPreview(attachBrowserSession(current, nextSession))
       void refreshBrowserOwnerTimeline(sessionId)
     } catch (reason) {
-      setFormError(reason instanceof Error ? reason.message : i18n.tr('Nettleserhandlingen kunne ikke fullføres.', 'The browser action could not be completed.'))
+      setFormError(browserErrorMessage(reason, i18n.tr, { no: 'Nettleserhandlingen kunne ikke fullføres.', en: 'The browser action could not be completed.' }))
     } finally {
       setBrowserBusy(false)
     }
@@ -917,7 +919,7 @@ export function KnowledgeComposer(props: {
       setPreview(attachBrowserSession(current, nextSession))
       void refreshBrowserOwnerTimeline(sessionId)
     } catch (reason) {
-      setFormError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke endre nettleserkontroll.', 'Could not change browser control.'))
+      setFormError(browserErrorMessage(reason, i18n.tr, { no: 'Kunne ikke endre nettleserkontroll.', en: 'Could not change browser control.' }))
     } finally {
       setBrowserBusy(false)
     }
@@ -935,7 +937,7 @@ export function KnowledgeComposer(props: {
       setPreview(attachBrowserTabs(current, nextTabs))
       void refreshBrowserOwnerTimeline(sessionId)
     } catch (reason) {
-      setFormError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke opprette ny nettleserfane.', 'Could not create a new browser tab.'))
+      setFormError(browserErrorMessage(reason, i18n.tr, { no: 'Kunne ikke opprette ny nettleserfane.', en: 'Could not create a new browser tab.' }))
     } finally {
       setBrowserBusy(false)
     }
@@ -953,7 +955,7 @@ export function KnowledgeComposer(props: {
       setPreview(attachBrowserTabs(current, nextTabs))
       void refreshBrowserOwnerTimeline(sessionId)
     } catch (reason) {
-      setFormError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke bytte nettleserfane.', 'Could not switch browser tab.'))
+      setFormError(browserErrorMessage(reason, i18n.tr, { no: 'Kunne ikke bytte nettleserfane.', en: 'Could not switch browser tab.' }))
     } finally {
       setBrowserBusy(false)
     }
@@ -1010,7 +1012,7 @@ export function KnowledgeComposer(props: {
       }
       return suggestion
     } catch (reason) {
-      setFormError(reason instanceof Error ? reason.message : i18n.tr('AI-steget kunne ikke fullføres.', 'The AI browser step could not be completed.'))
+      setFormError(browserErrorMessage(reason, i18n.tr, { no: 'AI-steget kunne ikke fullføres.', en: 'The AI browser step could not be completed.' }))
       return null
     } finally {
       setBrowserBusy(false)
@@ -1086,9 +1088,10 @@ export function KnowledgeComposer(props: {
             browserLoop.finish('stopped')
             return
           }
-          const message = streamError instanceof Error
-            ? streamError.message
-            : i18n.tr('AI-loopen mistet forbindelsen til kjøringen.', 'The AI browser loop lost its run connection.')
+          const message = browserErrorMessage(streamError, i18n.tr, {
+            no: 'AI-loopen mistet forbindelsen til kjøringen.',
+            en: 'The AI browser loop lost its run connection.',
+          })
           browserLoop.finish('stopped', message)
           setFormError(message)
         },
@@ -1102,7 +1105,7 @@ export function KnowledgeComposer(props: {
         browserLoop.finish('stopped')
         return null
       }
-      const message = reason instanceof Error ? reason.message : i18n.tr('AI-loopen kunne ikke startes.', 'The AI browser loop could not be started.')
+      const message = browserErrorMessage(reason, i18n.tr, { no: 'AI-loopen kunne ikke startes.', en: 'The AI browser loop could not be started.' })
       browserLoop.finish('stopped', message)
       setFormError(message)
       return null
@@ -1155,7 +1158,7 @@ export function KnowledgeComposer(props: {
       }))
       browserLoop.onApprovalDecided(resolved)
     } catch (reason) {
-      const message = reason instanceof Error ? reason.message : i18n.tr('Kunne ikke registrere beslutningen.', 'Could not record the decision.')
+      const message = browserErrorMessage(reason, i18n.tr, { no: 'Kunne ikke registrere beslutningen.', en: 'Could not record the decision.' })
       setFormError(message)
     } finally {
       setDecidingApprovalKeys((keys) => keys.filter((key) => key !== entryKey))
