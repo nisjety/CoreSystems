@@ -4515,6 +4515,56 @@ fn browser_session_lost_response(body: &Value) -> Option<Response> {
     Some((StatusCode::GONE, Json(error(code, message))).into_response())
 }
 
+/// Quarry's `403 CHALLENGE_DETECTED` on a browser call (WS3.H/WS3.J): the host
+/// stands behind a bot wall, or the one recovery the run was allowed is spent
+/// and Quarry refuses to act on it. The upstream body names the host and carries
+/// Quarry's own message, so it is never forwarded: the SPA gets the gateway's
+/// own `browser_site_blocked` with the two typed hints it has copy for.
+///
+/// - `blockReason`: `details.block_reason` (scrape path) or `details.reason`
+///   (agent path, where it is `challenge_loop`), only when it is one of the
+///   closed `BlockReason` strings; otherwise absent.
+/// - `recovery`: `details.recovery`, only when it is one of the closed
+///   `ChallengeRecovery` strings; otherwise absent.
+///
+/// `None` for any other code, so a 403 that is not a challenge (`FORBIDDEN`,
+/// `SECURITY_BLOCKED`) passes through as before.
+fn browser_site_blocked_response(body: &Value) -> Option<Response> {
+    if body.pointer("/error/code").and_then(Value::as_str) != Some("CHALLENGE_DETECTED") {
+        return None;
+    }
+    let typed = |pointers: &[&str], known: &[&'static str]| -> Option<&'static str> {
+        pointers.iter().find_map(|pointer| {
+            let value = body.pointer(pointer)?.as_str()?;
+            known.iter().copied().find(|candidate| *candidate == value)
+        })
+    };
+    let block_reason = typed(
+        &["/error/details/block_reason", "/error/details/reason"],
+        &[
+            "captcha_widget",
+            "waf_interstitial",
+            "unexpected_bot_error",
+            "challenge_loop",
+        ],
+    );
+    let recovery = typed(
+        &["/error/details/recovery"],
+        &["available", "exhausted", "not_applicable"],
+    );
+    let mut response = error(
+        "browser_site_blocked",
+        "This site blocks automated browsing. Take over the browser yourself or try another source.",
+    );
+    if let Some(reason) = block_reason {
+        response["error"]["blockReason"] = json!(reason);
+    }
+    if let Some(recovery) = recovery {
+        response["error"]["recovery"] = json!(recovery);
+    }
+    Some((StatusCode::FORBIDDEN, Json(response)).into_response())
+}
+
 fn forward_quarry_failure(status: StatusCode, body: Value) -> Response {
     if status == StatusCode::TOO_MANY_REQUESTS {
         if let Some(response) = browser_capacity_response(&body) {
@@ -4523,6 +4573,11 @@ fn forward_quarry_failure(status: StatusCode, body: Value) -> Response {
     }
     if let Some(response) = browser_session_lost_response(&body) {
         return response;
+    }
+    if status == StatusCode::FORBIDDEN {
+        if let Some(response) = browser_site_blocked_response(&body) {
+            return response;
+        }
     }
     // Quarry enforces the takeover itself; the SPA only knows the gateway's own
     // code for it, so translate (and keep the control epoch for the caller).
@@ -4995,6 +5050,72 @@ mod tests {
         assert_eq!(body["error"]["code"], "browser_human_takeover_active");
         assert_eq!(body["error"]["details"]["control_epoch"], 3);
         assert!(!body.to_string().contains("USER_TOOK_OVER"));
+    }
+
+    #[tokio::test]
+    async fn a_challenge_403_is_browser_site_blocked_with_typed_hints_and_nothing_else() {
+        // The scrape path names the reason in `block_reason`, the agent path in
+        // `reason` (with the host and `recovery: exhausted`).
+        let scrape = json!({ "error": {
+            "code": "CHALLENGE_DETECTED",
+            "message": "blocked https://secret.example/private <html>wall</html>",
+            "details": { "reason": "waf_interstitial", "block_reason": "waf_interstitial", "recovery": "not_applicable", "next": "other_source" },
+            "retryable": false
+        }});
+        let agent = json!({ "error": {
+            "code": "CHALLENGE_DETECTED",
+            "message": "secret.example refused after the recovery",
+            "details": { "reason": "challenge_loop", "host": "secret.example", "recovery": "exhausted" },
+            "retryable": false
+        }});
+        for (quarry, reason, recovery) in [
+            (scrape, "waf_interstitial", "not_applicable"),
+            (agent, "challenge_loop", "exhausted"),
+        ] {
+            let response = forward_quarry_failure(StatusCode::FORBIDDEN, quarry);
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert!(response.headers().get("retry-after").is_none());
+            let body = body_of(response).await;
+            assert_eq!(body["error"]["code"], "browser_site_blocked");
+            assert_eq!(body["error"]["blockReason"], reason);
+            assert_eq!(body["error"]["recovery"], recovery);
+            let text = body.to_string();
+            assert!(
+                !text.contains("secret.example")
+                    && !text.contains("CHALLENGE_DETECTED")
+                    && !text.contains("<html")
+                    && !text.contains("\"host\""),
+                "{text}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unknown_challenge_reason_or_recovery_is_dropped_not_echoed() {
+        let quarry = json!({ "error": {
+            "code": "CHALLENGE_DETECTED",
+            "details": { "reason": "https://secret.example/x", "block_reason": 7, "recovery": "go_around" }
+        }});
+        let response = forward_quarry_failure(StatusCode::FORBIDDEN, quarry);
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = body_of(response).await;
+        assert_eq!(body["error"]["code"], "browser_site_blocked");
+        assert!(body["error"].get("blockReason").is_none());
+        assert!(body["error"].get("recovery").is_none());
+        assert!(!body.to_string().contains("secret.example"));
+        assert!(!body.to_string().contains("go_around"));
+    }
+
+    #[tokio::test]
+    async fn a_403_that_is_not_a_challenge_passes_through_untouched() {
+        for quarry in [
+            json!({ "error": { "code": "FORBIDDEN", "details": { "reason": "waf_interstitial" } } }),
+            json!({ "error": { "code": "SECURITY_BLOCKED", "message": "policy" } }),
+        ] {
+            let response = forward_quarry_failure(StatusCode::FORBIDDEN, quarry.clone());
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert_eq!(body_of(response).await, quarry);
+        }
     }
 
     #[test]
