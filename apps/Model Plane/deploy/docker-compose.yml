@@ -805,6 +805,19 @@ services:
       # its fold is purged with it. Independent of the other durable-loop switches: flip and
       # roll back on its own.
       SESSION_CORE_RECOVERY_APPROVAL_EXPIRY_ENABLED: ${SESSION_CORE_RECOVERY_APPROVAL_EXPIRY_ENABLED:-false}
+      # Session-core's side of parking a pinned run's recoverable stop (WS03 S8-4). Off by default,
+      # and only the literal `true` turns it on; it also needs SESSION_CORE_LOOP_CHECKPOINT_ENABLED.
+      # On: the fold store takes a park fold under the park rules and says so (park_accepted), an
+      # empty pause reference claims the run's due parked fold, and the recovery worker spares a
+      # parked fold until the wait below has passed since the park save, then ends the run
+      # outcome_unknown through the unchanged receipt path. Off: a park is stored and claimed as
+      # before, nothing says park_accepted, and every park is ended at the ordinary deadline
+      # (about 15 minutes), so the executor never parks against it. Roll it back AFTER executor
+      # parking is off, and before any gateway or BFF park switch (see the flip order).
+      SESSION_CORE_PARK_RECOVERY_ENABLED: ${SESSION_CORE_PARK_RECOVERY_ENABLED:-false}
+      # How long a parked run waits for its continuation, in seconds, counted from the park save
+      # (WS03 S8-4). Default one day, clamped to 60..2592000. Only read while park recovery is on.
+      SESSION_CORE_PARK_TTL_SECONDS: ${SESSION_CORE_PARK_TTL_SECONDS:-86400}
       # Dreaming's LLM memory extraction (dream_extractor.rs). Unset this
       # address, or set DREAMING_LLM_EXTRACTION=0, and Dreaming falls back to
       # the deterministic phrase matcher alone.
@@ -1122,6 +1135,20 @@ services:
       # warn line continue_replay_refused_ledger_off. Deploy this service first, then
       # session-core, then model-gateway, then the BFF.
       EXECUTION_LOOP_RESUME_ENABLED: ${EXECUTION_LOOP_RESUME_ENABLED:-false}
+      # Parking a recoverable stop of a pinned Do loop (WS03 S8-A): instead of ending in a failed
+      # run, a pinned, persistent, root run that meets a spent usage limit, a transient upstream
+      # failure, an expired sign-in or its credential deadline at a round boundary saves a `park`
+      # fold, returns `parked` and stays open, to be resumed through the one /continue route
+      # (the resume ships in a later step: do not turn this on before it is deployed). OFF by
+      # default: with it off no park is written and runs end exactly as before. Only the
+      # literal `true` turns it on, and it takes effect only with EXECUTION_LOOP_RESUME_ENABLED,
+      # AGENT_CONTINUE_AFTER_APPROVAL_ENABLED, EXECUTION_LOOP_CHECKPOINT_ENABLED and
+      # EXECUTION_EFFECT_LEDGER_ENABLED also on (a park nothing can resume is never written).
+      # A park resume is NOT gated by this switch: with it off, existing parks stay resumable.
+      # This service WRITES parks; model-gateway reads the same name to ACCEPT the park form of
+      # /continue. Needs session-core's SESSION_CORE_PARK_RECOVERY_ENABLED (a store that does
+      # not accept the park leaves the run with its committed outcome). Flip it last.
+      EXECUTION_LOOP_PARKING_ENABLED: ${EXECUTION_LOOP_PARKING_ENABLED:-false}
       # Autonomous tool-using runs route through Azure's model-router deployment,
       # which selects the best model per turn (tool-calling model selection is
       # handled by the router, cost-aware). Overridable per deployment; empty →

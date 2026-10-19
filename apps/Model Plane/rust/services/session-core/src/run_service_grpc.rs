@@ -2265,6 +2265,286 @@ mod tests {
         // `loop_checkpoint_park_reason_is_read_only_by_the_owner_or_a_service` unit test.
     }
 
+    // -- Build plan WS03 S8-4 (tests only): RunDetail of a park row, and cancel (P9) --------------
+    //
+    // `RunDetail` and `CancelRun` are NOT changed by S8-4: these tests pin what they already do
+    // with a park row under the park rules. The database ones are WRITTEN, NOT RUN by the author
+    // (the lead runs them through the disposable-Postgres harness; `--test-threads=1`).
+
+    /// A park row reads the same through `RunDetail` whatever the park switch says: it is
+    /// resumable while its fold is claimable (before it is due as well), and the reason follows
+    /// the viewer rule. Nothing in the row projection reads the park-recovery switch.
+    #[test]
+    fn a_park_row_reads_the_same_whatever_the_park_switch_says() {
+        use crate::terminalization::park_test_switch;
+        let read = |state: &str, claim_expired: Option<bool>, viewer: &VerifiedIdentity| {
+            let row = fold_row(
+                "running",
+                "persistent",
+                Some(state),
+                Some("park"),
+                claim_expired,
+                Some("provider_exhausted"),
+            );
+            let detail = row_to_detail(row, true, viewer);
+            (detail.resumable, detail.park_reason)
+        };
+        let peer = VerifiedIdentity::user_for_test("org_1", "someone_else");
+        let rows = |on: bool| {
+            let _park = park_test_switch::Forced::set(on);
+            [
+                read("parked", Some(false), &owner_viewer()),
+                read("parked", Some(false), &peer),
+                read("resuming", Some(false), &owner_viewer()),
+                read("resuming", Some(true), &owner_viewer()),
+                read("closed", Some(false), &owner_viewer()),
+            ]
+        };
+        let on = rows(true);
+        assert_eq!(on, rows(false), "the park switch changes nothing in the projection");
+        assert_eq!(
+            on,
+            [
+                (true, "provider_exhausted".to_owned()),
+                (true, String::new()),
+                (false, String::new()),
+                (true, "provider_exhausted".to_owned()),
+                (false, String::new()),
+            ]
+        );
+    }
+
+    /// A managed (obligation-carrying) persistent run for a fresh owner: its run id, org and user.
+    async fn started_managed_run(pool: &PgPool, tag: &str) -> (String, String, String) {
+        let sfx = new_ulid();
+        let (thread_id, org, user) = (
+            format!("pk-t-{tag}-{sfx}"),
+            format!("pk-org-{tag}-{sfx}"),
+            "u1".to_owned(),
+        );
+        sqlx::query("INSERT INTO threads (id, session_key, org_id, user_id) VALUES ($1, $1, $2, $3)")
+            .bind(&thread_id)
+            .bind(&org)
+            .bind(&user)
+            .execute(pool)
+            .await
+            .expect("seed thread");
+        let started = crate::terminalization::start_managed_run_inner(
+            pool,
+            pb::StartManagedRunRequest {
+                thread_id,
+                agent_id: "managed-agent".to_owned(),
+                goal: "g".to_owned(),
+                mode: "execute".to_owned(),
+                org_id: org.clone(),
+                user_id: user.clone(),
+                start_key: format!("pk-start-{tag}-{sfx}"),
+                terminal_source: pb::ManagedRunSource::ExecutionAgent as i32,
+                ..Default::default()
+            },
+            false,
+        )
+        .await
+        .expect("start managed run");
+        (started.run_id, org, user)
+    }
+
+    async fn cancel_as_owner(
+        pool: &PgPool,
+        run_id: &str,
+        org: &str,
+        user: &str,
+    ) -> pb::CancelRunResponse {
+        RunServiceImpl::new(pool.clone())
+            .cancel_run(identity_request(
+                pb::CancelRunRequest {
+                    run_id: run_id.to_owned(),
+                    reason: "test".to_owned(),
+                },
+                VerifiedIdentity::user_for_test(org, user),
+            ))
+            .await
+            .expect("cancel run")
+            .into_inner()
+    }
+
+    async fn count_events(pool: &PgPool, run_id: &str, event_type: &str) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE run_id = $1 AND event_type = $2")
+            .bind(run_id)
+            .bind(event_type)
+            .fetch_one(pool)
+            .await
+            .expect("count events")
+    }
+
+    async fn obligation_state(pool: &PgPool, run_id: &str) -> String {
+        sqlx::query_scalar(
+            "SELECT state FROM managed_run_terminalization_outbox WHERE run_id = $1",
+        )
+        .bind(run_id)
+        .fetch_one(pool)
+        .await
+        .expect("obligation state")
+    }
+
+    /// A park stored through the real save under the park rules, then made due.
+    async fn due_park(pool: &PgPool, run_id: &str) {
+        use crate::loop_checkpoint::test_support::seed_fold;
+        seed_fold(
+            pool,
+            run_id,
+            "park",
+            &mp_contracts::loop_fold::park_ref(run_id, 1),
+            "provider_exhausted",
+            Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+        )
+        .await
+        .expect("a park under the park rules");
+        sqlx::query(
+            "UPDATE run_loop_checkpoints SET park_until = now() - interval '1 second' WHERE run_id = $1",
+        )
+        .bind(run_id)
+        .execute(pool)
+        .await
+        .expect("make the park due");
+    }
+
+    /// P9: a cancel ends a parked run in its own transaction (status, purge and receipt), the
+    /// obligation is superseded by the next worker pass, and nothing ends the run twice.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres; sets the fold store switch, so run with --test-threads=1"]
+    async fn cancel_purges_a_parked_fold_and_the_worker_supersedes_its_obligation() {
+        use crate::loop_checkpoint::test_support::{cipher, fold_rows, scratch_pool};
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let _store = crate::loop_checkpoint::test_switch::Forced::set(true);
+        let _park = crate::terminalization::park_test_switch::Forced::set(true);
+        let (run_id, org, user) = started_managed_run(&pool, "cancel-park").await;
+        due_park(&pool, &run_id).await;
+        assert_eq!(fold_rows(&pool, &run_id).await, 1, "premise: a parked fold");
+        assert_eq!(obligation_state(&pool, &run_id).await, "open", "premise: an open obligation");
+        let before = get_run_as(&pool, &run_id, &org, &user).await;
+        assert!(before.resumable, "premise: the park is resumable");
+        assert_eq!(before.park_reason, "provider_exhausted");
+
+        let cancelled = cancel_as_owner(&pool, &run_id, &org, &user).await;
+        assert!(cancelled.cancelled);
+
+        // One transaction: the status, the purge and the receipt are all there.
+        let status: String = sqlx::query_scalar("SELECT status FROM runs WHERE id = $1")
+            .bind(&run_id)
+            .fetch_one(&pool)
+            .await
+            .expect("status");
+        assert_eq!(status, "cancelled");
+        assert_eq!(fold_rows(&pool, &run_id).await, 0, "the park went with the run");
+        assert_eq!(count_events(&pool, &run_id, "RUN_CANCELLED").await, 1);
+        let receipt_row: Option<(String,)> =
+            sqlx::query_as("SELECT id FROM events WHERE run_id = $1 AND event_type = 'RUN_CANCELLED'")
+                .bind(&run_id)
+                .fetch_optional(&pool)
+                .await
+                .expect("receipt");
+        assert_eq!(receipt_row.map(|(id,)| id), Some(cancelled.receipt_id.clone()));
+
+        // The cancel does not touch the obligation: the next worker pass supersedes it, and
+        // writes no terminal receipt of its own.
+        assert_eq!(obligation_state(&pool, &run_id).await, "open");
+        crate::terminalization::recover_due_terminalizations(&pool)
+            .await
+            .expect("a worker pass");
+        assert_eq!(obligation_state(&pool, &run_id).await, "superseded");
+        assert_eq!(
+            count_events(&pool, &run_id, "RUN_TERMINAL").await,
+            0,
+            "a cancelled run has no terminal receipt from recovery"
+        );
+
+        // A later continue finds no park and no run to resume; a later cancel is idempotent.
+        let claim = crate::loop_checkpoint::claim(&pool, &cipher(), &run_id, "", "token-a")
+            .await
+            .expect_err("a cancelled run is not claimable");
+        assert_eq!(claim.message(), "loop_checkpoint_run_ended");
+        let after = get_run_as(&pool, &run_id, &org, &user).await;
+        assert!(!after.resumable);
+        assert_eq!(after.park_reason, "");
+        let again = cancel_as_owner(&pool, &run_id, &org, &user).await;
+        assert!(!again.cancelled);
+        assert_eq!(again.receipt_id, cancelled.receipt_id);
+        assert_eq!(count_events(&pool, &run_id, "RUN_CANCELLED").await, 1);
+    }
+
+    /// A cancel that arrives while a continuation holds the park (it has claimed it, or has
+    /// fenced it): the run ends, the fold goes, and the continuation's next write is refused.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres; sets the fold store switch, so run with --test-threads=1"]
+    async fn cancel_during_a_park_resume_ends_the_run_and_its_fence_is_refused() {
+        use crate::loop_checkpoint::test_support::{cipher, fold_for, fold_rows, fold_state, scratch_pool};
+        use crate::loop_checkpoint::{claim, save, SaveInput};
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let _store = crate::loop_checkpoint::test_switch::Forced::set(true);
+        let _park = crate::terminalization::park_test_switch::Forced::set(true);
+        let write = |kind: &'static str, expected_seq: i64, run_id: String| {
+            let pool = pool.clone();
+            async move {
+                let fold = fold_for(&run_id);
+                save(
+                    &pool,
+                    &cipher(),
+                    SaveInput {
+                        run_id: &run_id,
+                        expected_seq,
+                        kind,
+                        fold: &fold,
+                        authority_digest: "auth-1",
+                        pause_ref: "",
+                        park_reason: "",
+                        park_until: None,
+                    },
+                )
+                .await
+            }
+        };
+
+        // Before the fence: the resume has claimed the park, and the run is cancelled.
+        let (run_id, org, user) = started_managed_run(&pool, "cancel-claimed").await;
+        due_park(&pool, &run_id).await;
+        let claimed = claim(&pool, &cipher(), &run_id, "", "token-a")
+            .await
+            .expect("the resume claims the due park");
+        assert_eq!(fold_state(&pool, &run_id).await.as_deref(), Some("resuming"));
+        assert!(cancel_as_owner(&pool, &run_id, &org, &user).await.cancelled);
+        assert_eq!(fold_rows(&pool, &run_id).await, 0, "the claimed park went with the run");
+        let fence = write("pre_effect", claimed.seq, run_id.clone())
+            .await
+            .expect_err("the fence of a cancelled run is refused");
+        assert_eq!(fence.message(), "loop_checkpoint_run_ended");
+        assert_eq!(fold_rows(&pool, &run_id).await, 0, "the refused fence wrote nothing");
+
+        // After the fence: the fold is active (no longer a park), and the cancel still ends the run.
+        let (run_id, org, user) = started_managed_run(&pool, "cancel-fenced").await;
+        due_park(&pool, &run_id).await;
+        let claimed = claim(&pool, &cipher(), &run_id, "", "token-a")
+            .await
+            .expect("the resume claims the due park");
+        let fenced = write("pre_effect", claimed.seq, run_id.clone())
+            .await
+            .expect("the fence at the claimed seq wins");
+        assert_eq!(fenced.seq, claimed.seq + 1);
+        assert!(!fenced.park_accepted, "a fence is not a park");
+        assert_eq!(fold_state(&pool, &run_id).await.as_deref(), Some("active"));
+        assert!(cancel_as_owner(&pool, &run_id, &org, &user).await.cancelled);
+        assert_eq!(fold_rows(&pool, &run_id).await, 0);
+        let round = write("round", fenced.seq, run_id.clone())
+            .await
+            .expect_err("the loop's next fold on a cancelled run is refused");
+        assert_eq!(round.message(), "loop_checkpoint_run_ended");
+        assert_eq!(count_events(&pool, &run_id, "RUN_CANCELLED").await, 1);
+    }
+
     // -- resolve_thread_owner ------------------------------------------------
     //
     // MEM-2: `resolve_thread_owner` is what capability-core's memory

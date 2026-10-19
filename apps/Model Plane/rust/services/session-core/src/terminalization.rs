@@ -36,6 +36,9 @@ const EXECUTION_CORE_PRINCIPAL: &str = "service:execution-core";
 /// Build plan WS03 S8-0. Off by default; only the literal `true` turns it on (the strict
 /// parser the other durable-loop switches share). See [`approval_expiry_enabled`].
 const APPROVAL_EXPIRY_ENV: &str = "SESSION_CORE_RECOVERY_APPROVAL_EXPIRY_ENABLED";
+/// Build plan WS03 S8-4. Off by default; only the literal `true` turns it on. See
+/// [`park_recovery_enabled`] and [`park_recovery_active`].
+const PARK_RECOVERY_ENV: &str = "SESSION_CORE_PARK_RECOVERY_ENABLED";
 
 /// The only run-start values that may cross the durable boundary. For a ZDR
 /// caller every requester-controlled content field is replaced before SQL or
@@ -1748,6 +1751,60 @@ pub(crate) mod expiry_test_switch {
     }
 }
 
+/// Whether session-core's side of parking is switched on (build plan WS03 S8-4). Off by
+/// default; only the literal `true` turns it on (the strict parser the other durable-loop
+/// switches share). Read it through [`park_recovery_active`], never by itself.
+pub(crate) fn park_recovery_enabled() -> bool {
+    // A test forces the answer for its own thread, so it does not race the tests that set the
+    // process environment. Compiled out of the binary.
+    #[cfg(test)]
+    if let Some(forced) = park_test_switch::forced() {
+        return forced;
+    }
+    mp_contracts::loop_fold::switch_from(std::env::var(PARK_RECOVERY_ENV).ok().as_deref())
+}
+
+/// Whether the park rules apply: the fold store is on AND park recovery is on. It is the one
+/// answer the store's park save and park claim and the recovery worker's spare of a parked fold
+/// all read. It is deliberately not coupled to [`approval_expiry_enabled`] (S8-0 is independent).
+///
+/// With it off, a park is stored and claimed exactly as committed, the store reports
+/// `park_accepted` false for every save, and the worker treats a parked fold like any other fold:
+/// it terminalizes the run at its ordinary deadline.
+pub(crate) fn park_recovery_active() -> bool {
+    crate::loop_checkpoint::enabled() && park_recovery_enabled()
+}
+
+/// A per-thread override of [`park_recovery_enabled`] for tests. It holds only for a test that
+/// runs its calls on its own thread (a `#[tokio::test]` is single-threaded), and restores the
+/// earlier value when the guard drops.
+#[cfg(test)]
+pub(crate) mod park_test_switch {
+    use std::cell::Cell;
+
+    thread_local! {
+        static FORCED: Cell<Option<bool>> = const { Cell::new(None) };
+    }
+
+    pub(crate) fn forced() -> Option<bool> {
+        FORCED.with(Cell::get)
+    }
+
+    pub(crate) struct Forced(Option<bool>);
+
+    impl Forced {
+        pub(crate) fn set(on: bool) -> Self {
+            Self(FORCED.with(|cell| cell.replace(Some(on))))
+        }
+    }
+
+    impl Drop for Forced {
+        fn drop(&mut self) {
+            FORCED.with(|cell| cell.set(self.0));
+        }
+    }
+}
+
 async fn claim_due_recovery(pool: &PgPool) -> Result<Option<ClaimedRecovery>, sqlx::Error> {
     let lease_token = new_lease_token();
     let lease_token_hash = hash_lease_token(&lease_token);
@@ -1841,6 +1898,60 @@ async fn release_recovery_for_activity(
     Ok(())
 }
 
+/// The moment a parked fold's recovery obligation is next due (build plan WS03 S8-4): the earlier
+/// of the end of the park's wait (`updated_at`, the park save's age, plus the wait `$2`) and
+/// `$3` seconds from now, so a long wait is looked at again every deadline period and a wait that
+/// ends sooner is not overshot. A row only when the fold is a park (`parked`, or `resuming` under
+/// a continuation's claim) whose wait has NOT run out; `FOR UPDATE` takes the fold's lock after
+/// the run's and the obligation's, the order every other writer takes them in.
+const PARK_SPARE_HORIZON_SQL: &str =
+    "SELECT LEAST(updated_at + make_interval(secs => $2), now() + make_interval(secs => $3))
+       FROM run_loop_checkpoints
+      WHERE run_id = $1 AND kind = 'park' AND state IN ('parked','resuming')
+        AND updated_at + make_interval(secs => $2) > now()
+      FOR UPDATE";
+
+/// Hand a spared run's obligation back, open and due at the horizon, its lease cleared.
+const PARK_SPARE_SQL: &str = "UPDATE managed_run_terminalization_outbox
+        SET state = 'open', deadline_at = $2, next_attempt_at = $2,
+            lease_owner = NULL, lease_token_hash = NULL, lease_expires_at = NULL,
+            updated_at = now()
+      WHERE run_id = $1 AND state = 'processing'";
+
+/// Whether the run's fold is a park, whatever its wait (read after [`spare_parked_run`] spared
+/// nothing, to tell a run that is ended because its park ran out from any other recovery).
+const PARK_HELD_SQL: &str = "SELECT EXISTS (
+        SELECT 1 FROM run_loop_checkpoints
+         WHERE run_id = $1 AND kind = 'park' AND state IN ('parked','resuming'))";
+
+/// Spare a run whose fold is a park still inside its wait: its obligation goes back to `open`,
+/// due at the horizon, and the caller commits and ends the pass without a terminal write.
+/// `Ok(false)` leaves everything as it was.
+#[allow(clippy::cast_precision_loss)]
+async fn spare_parked_run(
+    transaction: &mut Transaction<'_, Postgres>,
+    run_id: &str,
+    ttl_secs: i64,
+) -> Result<bool, Status> {
+    let horizon: Option<DateTime<Utc>> = sqlx::query_scalar(PARK_SPARE_HORIZON_SQL)
+        .bind(run_id)
+        .bind(ttl_secs as f64)
+        .bind(MANAGED_DEADLINE_SECS as f64)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(database_error)?;
+    let Some(horizon) = horizon else {
+        return Ok(false);
+    };
+    sqlx::query(PARK_SPARE_SQL)
+        .bind(run_id)
+        .bind(horizon)
+        .execute(&mut **transaction)
+        .await
+        .map_err(database_error)?;
+    Ok(true)
+}
+
 async fn recover_claimed_terminalization(
     pool: &PgPool,
     claim: ClaimedRecovery,
@@ -1869,6 +1980,30 @@ async fn recover_claimed_terminalization(
         transaction.commit().await.map_err(database_error)?;
         return Ok(false);
     }
+    // A run parked for a continuation (WS03 S8-4) is not an abandoned run: it is spared until
+    // its wait runs out, counted from the park save, and then ended through the path below, the
+    // same one any lost producer takes. Only a `park` fold is spared; an active, paused or
+    // closed one takes the path below at once, as committed.
+    let mut park_ran_out = false;
+    if park_recovery_active() {
+        if spare_parked_run(
+            &mut transaction,
+            &claim.row.run_id,
+            crate::loop_checkpoint::park_ttl_seconds(),
+        )
+        .await?
+        {
+            transaction.commit().await.map_err(database_error)?;
+            metrics::counter!("mp_session_managed_terminalizations_spared_parked_total")
+                .increment(1);
+            return Ok(false);
+        }
+        park_ran_out = sqlx::query_scalar(PARK_HELD_SQL)
+            .bind(&claim.row.run_id)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(database_error)?;
+    }
     let source = source_from_storage(&obligation.configured_source)?;
     let step_id = canonical_terminal_step(source)
         .ok_or_else(|| Status::internal("managed terminalization source is invalid"))?;
@@ -1889,6 +2024,9 @@ async fn recover_claimed_terminalization(
     .await?;
     transaction.commit().await.map_err(database_error)?;
     metrics::counter!("mp_session_managed_terminalizations_recovered_total").increment(1);
+    if park_ran_out {
+        metrics::counter!("mp_session_managed_parks_expired_total").increment(1);
+    }
     tracing::warn!(
         run_id = %receipt.run_id,
         receipt_id = %receipt.receipt_id,
@@ -1936,6 +2074,9 @@ pub(crate) async fn run_recovery_worker(pool: PgPool) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{approval_expiry_enabled, expiry_test_switch, APPROVAL_EXPIRY_ENV};
+    use super::{
+        park_recovery_active, park_recovery_enabled, park_test_switch, PARK_RECOVERY_ENV,
+    };
     use super::{
         authorize_direct_completion, authorize_terminalization_source, canonical_terminal_step,
         is_startable_source, validate_terminal_outcome, ManagedOutcome,
@@ -2091,6 +2232,174 @@ mod tests {
             before,
             "the outer guard restored it"
         );
+    }
+
+    /// Park recovery is off unless the process says `true`, it is ACTIVE only with the fold store
+    /// on as well, and a test's forced answer is restored when its guard drops (WS03 S8-4).
+    #[test]
+    fn park_recovery_is_off_by_default_and_active_only_with_the_store_on() {
+        use crate::loop_checkpoint::test_switch as store_switch;
+        if std::env::var_os(PARK_RECOVERY_ENV).is_none() {
+            assert!(!park_recovery_enabled(), "off by default");
+        }
+        let before = park_recovery_enabled();
+        let _store_off = store_switch::Forced::set(false);
+        {
+            let _on = park_test_switch::Forced::set(true);
+            assert!(park_recovery_enabled());
+            assert!(!park_recovery_active(), "the fold store is off");
+        }
+        let _store_on = store_switch::Forced::set(true);
+        {
+            let _on = park_test_switch::Forced::set(true);
+            assert!(park_recovery_active());
+            {
+                let _off = park_test_switch::Forced::set(false);
+                assert!(!park_recovery_enabled());
+                assert!(!park_recovery_active(), "park recovery is off");
+            }
+            assert!(park_recovery_active(), "the inner guard restored the outer one");
+        }
+        assert_eq!(park_recovery_enabled(), before, "the outer guard restored it");
+        // Not coupled to the approval-expiry switch (S8-0): that one changes nothing here.
+        let _park = park_test_switch::Forced::set(true);
+        for expiry in [false, true] {
+            let _expiry = expiry_test_switch::Forced::set(expiry);
+            assert!(park_recovery_active(), "expiry forced {expiry}");
+        }
+    }
+
+    /// The text of the `const NAME: &str = "..";` item of `source` that starts at `head`, from
+    /// the head to its closing `";`; empty when it is not there.
+    fn const_text(source: &str, head: &str) -> String {
+        source.find(head).map_or_else(String::new, |start| {
+            let rest = &source[start..];
+            rest[..rest.find("\";").map_or(rest.len(), |end| end + 2)].to_owned()
+        })
+    }
+
+    /// What is wrong with how `source` carries the S8-4 park spare: the switch is read in one
+    /// place, the spare sits after the approval spare and before the terminal write, it is gated
+    /// on the active switch, and its two statements keep their predicates.
+    fn park_spare_violations(source: &str) -> Vec<String> {
+        let mut violations = Vec::new();
+        let flat = squash(source);
+        if source.matches("PARK_RECOVERY_ENV").count() != 2
+            || source.matches("std::env::var(PARK_RECOVERY_ENV)").count() != 1
+        {
+            violations.push("the park switch's variable is not named and read exactly once".to_owned());
+        }
+        if !flat.contains(
+            "pub(crate) fn park_recovery_active() -> bool { crate::loop_checkpoint::enabled() && park_recovery_enabled() }",
+        ) {
+            violations.push("park_recovery_active is not the store switch AND park recovery".to_owned());
+        }
+        let Some(body) = function_text(source, "async fn recover_claimed_terminalization(") else {
+            violations.push("the recovery worker is not in the source".to_owned());
+            return violations;
+        };
+        let place = |needle: &str| body.find(needle);
+        match (
+            place("has_pending_approval("),
+            place("if park_recovery_active() {"),
+            place("spare_parked_run("),
+            place("apply_managed_terminal_outcome("),
+        ) {
+            (Some(approval), Some(gate), Some(spare), Some(terminal))
+                if approval < gate && gate < spare && spare < terminal => {}
+            _ => violations.push(
+                "the park spare must follow the approval spare, sit behind `if park_recovery_active() {` and come before apply_managed_terminal_outcome".to_owned(),
+            ),
+        }
+        for (what, needle) in [
+            ("the spare is called once", "spare_parked_run("),
+            ("the gate is read once", "park_recovery_active()"),
+        ] {
+            if body.matches(needle).count() != 1 {
+                violations.push(format!("{what}: {needle} must appear exactly once in the worker"));
+            }
+        }
+        let horizon = squash(&const_text(source, "const PARK_SPARE_HORIZON_SQL"));
+        for needed in [
+            "SELECT LEAST(updated_at + make_interval(secs => $2), now() + make_interval(secs => $3))",
+            "WHERE run_id = $1 AND kind = 'park' AND state IN ('parked','resuming')",
+            "AND updated_at + make_interval(secs => $2) > now()",
+            "FOR UPDATE",
+        ] {
+            if !horizon.contains(needed) {
+                violations.push(format!("the horizon statement lost `{needed}`"));
+            }
+        }
+        let spare = squash(&const_text(source, "const PARK_SPARE_SQL"));
+        for needed in [
+            "SET state = 'open', deadline_at = $2, next_attempt_at = $2,",
+            "lease_owner = NULL, lease_token_hash = NULL, lease_expires_at = NULL",
+            "WHERE run_id = $1 AND state = 'processing'",
+        ] {
+            if !spare.contains(needed) {
+                violations.push(format!("the spare statement lost `{needed}`"));
+            }
+        }
+        violations
+    }
+
+    #[test]
+    fn the_park_spare_follows_the_approval_spare_and_precedes_the_terminal_write() {
+        let source = production_source();
+        assert_eq!(
+            park_spare_violations(&source),
+            Vec::<String>::new(),
+            "the park spare is wired as designed"
+        );
+        let worker = function_text(&source, "async fn recover_claimed_terminalization(")
+            .expect("the worker");
+        let reorder = |worker: &str| {
+            let spare_at = worker.find("    // A run parked for a continuation").expect("the park block");
+            let end = worker.find("    let source = source_from_storage(").expect("the terminal path");
+            let block = &worker[spare_at..end];
+            let mut moved = worker.replacen(block, "", 1);
+            let tail_at = moved
+                .find("    transaction.commit().await.map_err(database_error)?;\n    metrics::counter!(\"mp_session_managed_terminalizations_recovered_total\")")
+                .expect("the commit after the write");
+            moved.insert_str(tail_at, block);
+            moved
+        };
+        for (what, mutated) in [
+            (
+                "the spare moved after the terminal write",
+                source.replacen(worker, &reorder(worker), 1),
+            ),
+            (
+                "the gate dropped",
+                source.replacen(
+                    worker,
+                    &worker.replacen("if park_recovery_active() {", "if true {", 1),
+                    1,
+                ),
+            ),
+            (
+                "the horizon statement spares a paused fold too",
+                source.replacen("AND kind = 'park' AND state IN ('parked','resuming')\n        AND updated_at", "AND state IN ('parked','resuming')\n        AND updated_at", 1),
+            ),
+            (
+                "the horizon statement spares a park whose wait ran out",
+                source.replacen("AND updated_at + make_interval(secs => $2) > now()\n      FOR UPDATE", "FOR UPDATE", 1),
+            ),
+            (
+                "the switch is read twice",
+                source.replacen(
+                    "mp_contracts::loop_fold::switch_from(std::env::var(PARK_RECOVERY_ENV).ok().as_deref())",
+                    "mp_contracts::loop_fold::switch_from(std::env::var(PARK_RECOVERY_ENV).ok().as_deref()) || std::env::var(PARK_RECOVERY_ENV).is_ok()",
+                    1,
+                ),
+            ),
+        ] {
+            assert_ne!(mutated, source, "{what}: the mutation changed nothing");
+            assert!(
+                !park_spare_violations(&mutated).is_empty(),
+                "{what}: the guard did not flag it"
+            );
+        }
     }
 
     #[test]
@@ -3042,5 +3351,374 @@ mod park_recovery_db_tests {
             "with the lease lapsed the run is recovered"
         );
         assert_eq!(terminal_receipts(&pool, &seeded.run_id).await, 1);
+    }
+
+    // -- Build plan WS03 S8-4: the worker spares a parked fold until its wait runs out ---------
+    //
+    // WRITTEN, NOT RUN by the author (the lead runs them through the disposable-Postgres
+    // harness). They force the fold store and park recovery for their own thread, read the wait
+    // from `park_ttl_seconds()` rather than assuming it, and age a park by rewriting its
+    // `updated_at` (the park's age, the anchor of its wait).
+
+    use crate::loop_checkpoint::test_support::cipher;
+    use crate::loop_checkpoint::test_switch as store_switch;
+    use mp_contracts::loop_fold::park_ref;
+
+    /// A persistent managed run, started through the real start path (so its obligation is the
+    /// real one), with no fold yet. Returns the run id.
+    async fn started_run(pool: &PgPool, tag: &str) -> String {
+        let sfx = new_ulid();
+        let (org, user, thread) = (
+            format!("pk-org-{tag}-{sfx}"),
+            "u1".to_owned(),
+            format!("pk-t-{tag}-{sfx}"),
+        );
+        sqlx::query(
+            "INSERT INTO threads (id, session_key, org_id, user_id, created_at)
+             VALUES ($1, $1, $2, $3, now())",
+        )
+        .bind(&thread)
+        .bind(&org)
+        .bind(&user)
+        .execute(pool)
+        .await
+        .expect("thread seeded");
+        start_managed_run_with_retention_inner(
+            pool,
+            pb::StartManagedRunRequest {
+                thread_id: thread,
+                parent_run_id: String::new(),
+                agent_id: "general-v1".to_owned(),
+                goal: "park recovery goal".to_owned(),
+                mode: "execute".to_owned(),
+                org_id: org.clone(),
+                user_id: user.clone(),
+                start_key: format!("pk-{tag}-{sfx}"),
+                terminal_source: pb::ManagedRunSource::ExecutionAgent as i32,
+            },
+            RunRetention::persistent(),
+        )
+        .await
+        .expect("the run starts")
+        .run_id
+    }
+
+    /// A started run holding a PARK fold, saved through the real store under the park rules
+    /// (their switches forced on for this call only), whose age is `age_secs` and whose
+    /// obligation fell due an hour ago.
+    #[allow(clippy::cast_precision_loss)]
+    async fn parked(pool: &PgPool, tag: &str, age_secs: i64) -> Seeded {
+        let run_id = started_run(pool, tag).await;
+        {
+            let _store = store_switch::Forced::set(true);
+            let _park = park_test_switch::Forced::set(true);
+            let until = Utc::now() + chrono::Duration::seconds(3600);
+            seed_fold(
+                pool,
+                &run_id,
+                "park",
+                &park_ref(&run_id, 1),
+                "provider_exhausted",
+                Some(until),
+            )
+            .await
+            .expect("the park is stored under the park rules");
+        }
+        sqlx::query(
+            "UPDATE run_loop_checkpoints SET updated_at = now() - make_interval(secs => $2)
+              WHERE run_id = $1",
+        )
+        .bind(&run_id)
+        .bind(age_secs as f64)
+        .execute(pool)
+        .await
+        .expect("age the park");
+        make_due(pool, &run_id).await;
+        Seeded { run_id }
+    }
+
+    /// `(state, deadline in seconds from now, next attempt in seconds from now, lease cleared)`
+    /// of the run's obligation.
+    async fn obligation_timing(pool: &PgPool, run_id: &str) -> (String, f64, f64, bool) {
+        sqlx::query_as(
+            "SELECT state,
+                    EXTRACT(EPOCH FROM (deadline_at - now()))::float8,
+                    EXTRACT(EPOCH FROM (next_attempt_at - now()))::float8,
+                    lease_owner IS NULL AND lease_token_hash IS NULL AND lease_expires_at IS NULL
+               FROM managed_run_terminalization_outbox WHERE run_id = $1",
+        )
+        .bind(run_id)
+        .fetch_one(pool)
+        .await
+        .expect("obligation timing")
+    }
+
+    async fn fold_state_of(pool: &PgPool, run_id: &str) -> Option<String> {
+        crate::loop_checkpoint::test_support::fold_state(pool, run_id).await
+    }
+
+    /// The worker claims the run's obligation and runs its recheck: `Ok(true)` when it ended the
+    /// run, `Ok(false)` when it spared it.
+    async fn worker_pass_on(pool: &PgPool, run_id: &str) -> bool {
+        make_due(pool, run_id).await;
+        isolate(pool, run_id).await;
+        let claim = claim_due_recovery(pool)
+            .await
+            .expect("claim")
+            .expect("the run's obligation is due");
+        assert_eq!(claim.row.run_id, run_id);
+        recover_claimed_terminalization(pool, claim)
+            .await
+            .expect("the recheck")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres whose name contains \"test\""]
+    async fn a_parked_fold_is_spared_until_the_ttl_then_terminalized_once() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let _store = store_switch::Forced::set(true);
+        let _park = park_test_switch::Forced::set(true);
+        let ttl = crate::loop_checkpoint::park_ttl_seconds();
+
+        // Early in its wait: spared, and the obligation is handed back due at `now + 900 s`
+        // (the deadline period), the nearer of the two ends.
+        let early = parked(&pool, "early", 600).await;
+        assert!(
+            !worker_pass_on(&pool, &early.run_id).await,
+            "a park inside its wait is spared"
+        );
+        let (state, deadline, next, lease_cleared) = obligation_timing(&pool, &early.run_id).await;
+        assert_eq!(state, "open");
+        assert!(lease_cleared, "the lease is cleared");
+        let period = MANAGED_DEADLINE_SECS as f64;
+        for (what, secs) in [("deadline", deadline), ("next attempt", next)] {
+            assert!(
+                secs > period - 60.0 && secs <= period,
+                "{what} is a deadline period from now, not the wait's end: {secs}"
+            );
+        }
+        assert!(!is_terminal_run_status(&run_status(&pool, &early.run_id).await));
+        assert_eq!(fold_rows(&pool, &early.run_id).await, 1, "the park is kept");
+        assert_eq!(terminal_receipts(&pool, &early.run_id).await, 0);
+        // Not due again yet: a whole pass leaves it alone.
+        assert_eq!(recover_due_terminalizations(&pool).await.expect("pass"), 0);
+
+        // Near the end of its wait: the horizon is the wait's end, which is sooner than a
+        // deadline period, so the obligation is not parked past it.
+        let near = parked(&pool, "near", ttl - 120).await;
+        assert!(!worker_pass_on(&pool, &near.run_id).await);
+        let (state, deadline, next, _cleared) = obligation_timing(&pool, &near.run_id).await;
+        assert_eq!(state, "open");
+        for (what, secs) in [("deadline", deadline), ("next attempt", next)] {
+            assert!(
+                secs > 60.0 && secs <= 120.0,
+                "{what} is the end of the wait, about two minutes away: {secs}"
+            );
+        }
+        assert_eq!(fold_rows(&pool, &near.run_id).await, 1);
+
+        // A park a continuation has claimed (resuming) is spared inside its wait too.
+        let resuming = parked(&pool, "resuming", 600).await;
+        sqlx::query(
+            "UPDATE run_loop_checkpoints SET park_until = now() - interval '1 second' WHERE run_id = $1",
+        )
+        .bind(&resuming.run_id)
+        .execute(&pool)
+        .await
+        .expect("make the park due");
+        crate::loop_checkpoint::claim(&pool, &cipher(), &resuming.run_id, "", "token-a")
+            .await
+            .expect("a continuation claims the due park");
+        assert_eq!(fold_state_of(&pool, &resuming.run_id).await.as_deref(), Some("resuming"));
+        assert!(!worker_pass_on(&pool, &resuming.run_id).await);
+        assert_eq!(obligation_timing(&pool, &resuming.run_id).await.0, "open");
+        assert_eq!(fold_rows(&pool, &resuming.run_id).await, 1);
+        assert_eq!(terminal_receipts(&pool, &resuming.run_id).await, 0);
+
+        // Past its wait: the run ends outcome_unknown through the unchanged path, the fold is
+        // purged with it, and the run has exactly one terminal receipt.
+        let over = parked(&pool, "over", ttl + 60).await;
+        isolate(&pool, &over.run_id).await;
+        assert_eq!(
+            recover_due_terminalizations(&pool).await.expect("pass"),
+            1,
+            "exactly this run is recovered"
+        );
+        assert_eq!(run_status(&pool, &over.run_id).await, "failed");
+        let (state, failure) = obligation(&pool, &over.run_id).await;
+        assert_eq!(state, "reconciliation_required");
+        assert_eq!(failure.as_deref(), Some(RECOVERY_FAILURE_CODE));
+        assert_eq!(fold_rows(&pool, &over.run_id).await, 0, "the fold is purged");
+        assert!(obligation_receipt(&pool, &over.run_id).await.is_some());
+        assert_eq!(terminal_receipts(&pool, &over.run_id).await, 1);
+        // A second pass finds nothing to end: still one receipt.
+        isolate(&pool, &over.run_id).await;
+        assert_eq!(recover_due_terminalizations(&pool).await.expect("pass"), 0);
+        assert_eq!(terminal_receipts(&pool, &over.run_id).await, 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres whose name contains \"test\""]
+    async fn park_recovery_off_is_the_committed_worker() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let ttl = crate::loop_checkpoint::park_ttl_seconds();
+
+        // Park recovery off, the store on: a park inside its wait is an ordinary overdue run.
+        // Store off, park recovery on: the same (the rules need both).
+        for (what, store_on, park_on) in [
+            ("park recovery off", true, false),
+            ("the fold store off", false, true),
+            ("both off", false, false),
+        ] {
+            let seeded = parked(&pool, "off", 600).await;
+            isolate(&pool, &seeded.run_id).await;
+            let _store = store_switch::Forced::set(store_on);
+            let _park = park_test_switch::Forced::set(park_on);
+            assert!(
+                worker_pass_on(&pool, &seeded.run_id).await,
+                "{what}: a park inside its wait is not spared"
+            );
+            assert_eq!(run_status(&pool, &seeded.run_id).await, "failed", "{what}");
+            assert_eq!(obligation(&pool, &seeded.run_id).await.0, "reconciliation_required", "{what}");
+            assert_eq!(fold_rows(&pool, &seeded.run_id).await, 0, "{what}: the fold is purged");
+            assert_eq!(terminal_receipts(&pool, &seeded.run_id).await, 1, "{what}");
+        }
+
+        // With both on, the control: the same park IS spared, so the three above are the
+        // switches' doing.
+        let _store = store_switch::Forced::set(true);
+        let _park = park_test_switch::Forced::set(true);
+        let spared = parked(&pool, "control", 600).await;
+        assert!(!worker_pass_on(&pool, &spared.run_id).await);
+        assert_eq!(fold_rows(&pool, &spared.run_id).await, 1);
+        assert!(ttl > 600, "premise: the wait is longer than the park's age");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres whose name contains \"test\""]
+    async fn an_active_or_paused_fold_is_never_spared_by_the_park_branch() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let _store = store_switch::Forced::set(true);
+        let _park = park_test_switch::Forced::set(true);
+
+        for kind in ["round", "pre_effect", "pause", "closed park"] {
+            let run_id = started_run(&pool, "kinds").await;
+            match kind {
+                "closed park" => {
+                    seed_fold(
+                        &pool,
+                        &run_id,
+                        "park",
+                        &park_ref(&run_id, 1),
+                        "provider_exhausted",
+                        Some(Utc::now() + chrono::Duration::seconds(3600)),
+                    )
+                    .await
+                    .expect("a park");
+                    crate::loop_checkpoint::close(&pool, &run_id, 1, "park_not_taken")
+                        .await
+                        .expect("close");
+                }
+                "pause" => {
+                    seed_fold(&pool, &run_id, "pause", "appr_never", "", None)
+                        .await
+                        .expect("a pause fold with no approval row");
+                }
+                other => {
+                    seed_fold(&pool, &run_id, other, "", "", None)
+                        .await
+                        .expect("an active fold");
+                }
+            }
+            assert_eq!(fold_rows(&pool, &run_id).await, 1, "{kind}: premise: a fold");
+            assert!(
+                worker_pass_on(&pool, &run_id).await,
+                "{kind}: the park branch leaves it to the committed path"
+            );
+            assert_eq!(run_status(&pool, &run_id).await, "failed", "{kind}");
+            assert_eq!(fold_rows(&pool, &run_id).await, 0, "{kind}: purged by the unchanged path");
+            assert_eq!(terminal_receipts(&pool, &run_id).await, 1, "{kind}");
+        }
+    }
+
+    /// A continuation claims the park while the worker holds the run's obligation, at both ends
+    /// of the wait. The run row's lock orders them: inside the wait the park is spared whoever is
+    /// first, and past it the run ends exactly once and the claimant's fence is refused.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres whose name contains \"test\""]
+    async fn a_claim_racing_the_worker_never_double_terminalizes() {
+        use crate::loop_checkpoint::test_support::fold_for;
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let _store = store_switch::Forced::set(true);
+        let _park = park_test_switch::Forced::set(true);
+        let ttl = crate::loop_checkpoint::park_ttl_seconds();
+
+        for (what, age_secs, wait_over) in [("inside the wait", 600, false), ("past the wait", ttl + 60, true)] {
+            let seeded = parked(&pool, "race", age_secs).await;
+            sqlx::query(
+                "UPDATE run_loop_checkpoints SET park_until = now() - interval '1 second' WHERE run_id = $1",
+            )
+            .bind(&seeded.run_id)
+            .execute(&pool)
+            .await
+            .expect("make the park due");
+            isolate(&pool, &seeded.run_id).await;
+            let claim = claim_due_recovery(&pool)
+                .await
+                .expect("claim")
+                .expect("the obligation is due");
+            assert_eq!(claim.row.run_id, seeded.run_id);
+
+            let key = cipher();
+            let (worker, claimed) = tokio::join!(
+                recover_claimed_terminalization(&pool, claim),
+                crate::loop_checkpoint::claim(&pool, &key, &seeded.run_id, "", "token-a"),
+            );
+            let ended = worker.expect("the worker's pass");
+            assert_eq!(ended, wait_over, "{what}");
+            if wait_over {
+                // Exactly one end. The claimant either won before it (and its fold went with the
+                // run) or lost to it; either way the run is over and its fence is refused.
+                match claimed {
+                    Ok(won) => assert_eq!(won.kind, "park", "{what}"),
+                    Err(lost) => assert_eq!(lost.message(), "loop_checkpoint_run_ended", "{what}"),
+                }
+                assert_eq!(run_status(&pool, &seeded.run_id).await, "failed", "{what}");
+                assert_eq!(fold_rows(&pool, &seeded.run_id).await, 0, "{what}");
+                let fold = fold_for(&seeded.run_id);
+                let fence = crate::loop_checkpoint::save(
+                    &pool,
+                    &cipher(),
+                    crate::loop_checkpoint::SaveInput {
+                        run_id: &seeded.run_id,
+                        expected_seq: 1,
+                        kind: "pre_effect",
+                        fold: &fold,
+                        authority_digest: "auth-1",
+                        pause_ref: "",
+                        park_reason: "",
+                        park_until: None,
+                    },
+                )
+                .await
+                .expect_err("a fence on an ended run");
+                assert_eq!(fence.message(), "loop_checkpoint_run_ended", "{what}");
+            } else {
+                // Inside the wait the claim wins (the park is due) and the park is spared.
+                assert_eq!(claimed.expect("the due park is claimed").kind, "park", "{what}");
+                assert!(!is_terminal_run_status(&run_status(&pool, &seeded.run_id).await), "{what}");
+                assert_eq!(fold_state_of(&pool, &seeded.run_id).await.as_deref(), Some("resuming"));
+                assert_eq!(fold_rows(&pool, &seeded.run_id).await, 1, "{what}");
+            }
+            assert_eq!(terminal_receipts(&pool, &seeded.run_id).await, i64::from(wait_over), "{what}");
+        }
     }
 }

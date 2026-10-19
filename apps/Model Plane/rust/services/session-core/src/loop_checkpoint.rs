@@ -12,7 +12,9 @@
 //! `SESSION_CORE_LOOP_CHECKPOINT_ENABLED` is `true`.
 
 use chrono::{DateTime, Utc};
-use mp_contracts::loop_fold::{LoopFoldV1, ParkReason, FOLD_VERSION};
+use mp_contracts::loop_fold::{
+    park_ref, parks_in, LoopFoldV1, ParkReason, PauseKind, FOLD_VERSION, MAX_PARKS_PER_RUN,
+};
 use mp_contracts::zdr_refusal::Refusal;
 use mp_events::idempotency::derive_idempotency_hash;
 use mp_ids::new_ulid;
@@ -31,6 +33,31 @@ const CLAIM_LEASE_SECONDS: f64 = 120.0;
 
 const ENABLED_ENV: &str = "SESSION_CORE_LOOP_CHECKPOINT_ENABLED";
 const CHECKPOINT_RESTORED_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.CheckpointRestored";
+
+/// How long a parked run waits for its continuation, in seconds, when the process names no
+/// other (build plan WS03 S8-4): one day.
+const PARK_TTL_DEFAULT_SECONDS: i64 = 86_400;
+/// The shortest and the longest wait the process may name: a minute and thirty days.
+const PARK_TTL_MIN_SECONDS: i64 = 60;
+const PARK_TTL_MAX_SECONDS: i64 = 2_592_000;
+const PARK_TTL_ENV: &str = "SESSION_CORE_PARK_TTL_SECONDS";
+
+/// The wait in `value`, a whole number of seconds clamped to
+/// `[PARK_TTL_MIN_SECONDS, PARK_TTL_MAX_SECONDS]`; the default when it is absent or is not one.
+fn park_ttl_from(value: Option<&str>) -> i64 {
+    value
+        .and_then(|text| text.trim().parse::<i64>().ok())
+        .map_or(PARK_TTL_DEFAULT_SECONDS, |seconds| {
+            seconds.clamp(PARK_TTL_MIN_SECONDS, PARK_TTL_MAX_SECONDS)
+        })
+}
+
+/// How long a parked run waits for a continuation before the recovery worker ends it
+/// (`outcome_unknown`), counted from the park save: `SESSION_CORE_PARK_TTL_SECONDS`, one day
+/// by default, clamped to a minute..thirty days. Only read while park recovery is active.
+pub(crate) fn park_ttl_seconds() -> i64 {
+    park_ttl_from(std::env::var(PARK_TTL_ENV).ok().as_deref())
+}
 
 /// Whether the fold store is switched on. Off by default: a loop keeps its fold in
 /// memory and a pause cannot be resumed from the store.
@@ -212,12 +239,65 @@ pub(crate) struct SaveInput<'a> {
     pub park_until: Option<DateTime<Utc>>,
 }
 
-/// Store a run's fold, latest wins. Returns the seq the fold was stored under.
+/// What a save stored: the seq the fold was stored under, and whether the store took it as a
+/// park under the park rules (build plan WS03 S8-4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Saved {
+    pub seq: i64,
+    /// True for exactly one path: a `park` fold saved while [`park_recovery_active`], after every
+    /// park rule held. False for every other save, including a park stored under the committed
+    /// rules while park recovery is off. The executor parks a run only on a true echo, so a store
+    /// that does not know the park rules (or has them off) leaves the run its committed outcome.
+    pub park_accepted: bool,
+}
+
+/// The park rules of a save, checked before the store is touched (build plan WS03 S8-4).
+///
+/// `until` is the park's resume time, `now` and `ttl` (seconds) the clock and the park wait. A
+/// park is a fold the loop wrote at a round boundary (no call in flight, a pending park), under
+/// the reference of the run's own next park, within the park cap and the wait. `crash_interrupted`
+/// is reserved: no executor writes it, so a store that takes it would be taking a forgery.
+fn validate_park_save(
+    run_id: &str,
+    fold: &LoopFoldV1,
+    input: &SaveInput<'_>,
+    reason: ParkReason,
+    until: DateTime<Utc>,
+    now: DateTime<Utc>,
+    ttl: i64,
+) -> Result<(), Status> {
+    if reason == ParkReason::CrashInterrupted {
+        return Err(Status::invalid_argument("park_reason_reserved"));
+    }
+    let at_a_round_boundary = fold.round_in_flight.is_none()
+        && fold.pending.as_ref().is_some_and(|pending| {
+            pending.kind == PauseKind::Park && pending.pause_ref == input.pause_ref
+        });
+    if !at_a_round_boundary {
+        return Err(Status::invalid_argument("park_not_at_round_boundary"));
+    }
+    let parks = parks_in(fold);
+    if parks > MAX_PARKS_PER_RUN {
+        return Err(Status::failed_precondition("park_limit_reached"));
+    }
+    if parks == 0 || input.pause_ref != park_ref(run_id, parks) {
+        return Err(Status::invalid_argument("park_ref_mismatch"));
+    }
+    // A wait longer than half the park's own life would have the worker end the run before it
+    // could be continued, so such a park is refused and the run takes its committed outcome.
+    if until > now + chrono::Duration::seconds(ttl / 2) {
+        return Err(Status::failed_precondition("park_until_beyond_ttl"));
+    }
+    Ok(())
+}
+
+/// Store a run's fold, latest wins. Returns the seq the fold was stored under and whether it was
+/// accepted as a park.
 pub(crate) async fn save(
     pool: &PgPool,
     cipher: &DescriptorCipher,
     input: SaveInput<'_>,
-) -> Result<i64, Status> {
+) -> Result<Saved, Status> {
     let fold = check_fold(input.run_id, input.fold)?;
     if input.authority_digest.trim().is_empty() {
         return Err(Status::invalid_argument("authority digest is required"));
@@ -229,6 +309,7 @@ pub(crate) async fn save(
 
     // The state and the pause fields follow from the kind. A round or pre-effect
     // fold holds no pause, so its pause fields are cleared.
+    let mut park_accepted = false;
     let (state, pause_ref, park_reason, park_until) = match input.kind {
         "round" | "pre_effect" => ("active", None, None, None),
         "pause" => {
@@ -250,6 +331,23 @@ pub(crate) async fn save(
             // run's read model and must not carry content.
             let reason = ParkReason::parse(input.park_reason)
                 .ok_or_else(|| Status::invalid_argument("park reason is not recognised"))?;
+            // The park rules apply only while park recovery is on, and they run before the run
+            // row is locked or anything is written. With them off a park is stored exactly as it
+            // always was, and the store does not say it accepted it.
+            if crate::terminalization::park_recovery_active() {
+                if let Some(until) = input.park_until {
+                    validate_park_save(
+                        input.run_id,
+                        &fold,
+                        &input,
+                        reason,
+                        until,
+                        Utc::now(),
+                        park_ttl_seconds(),
+                    )?;
+                    park_accepted = true;
+                }
+            }
             (
                 "parked",
                 Some(input.pause_ref),
@@ -336,7 +434,10 @@ pub(crate) async fn save(
         .await?;
     }
     tx.commit().await.map_err(internal)?;
-    Ok(next_seq)
+    Ok(Saved {
+        seq: next_seq,
+        park_accepted,
+    })
 }
 
 /// A fold a continuation has claimed.
@@ -347,6 +448,50 @@ pub(crate) struct Claimed {
     pub segment_no: i32,
     pub authority_digest: String,
     pub kind: String,
+}
+
+/// The claim of a run's CURRENT parked fold, by an empty pause reference (build plan WS03 S8-4,
+/// only while [`crate::terminalization::park_recovery_active`]). It takes a `kind = 'park'` row
+/// only, in state `parked` or `resuming` under a lapsed lease, and only once `park_until` has
+/// come: a paused fold is never claimed by it. It deliberately does NOT set `updated_at`: that
+/// column is the park's age, the anchor the recovery worker counts the park's wait from, and a
+/// claim is not a new park.
+const CLAIM_PARK_SQL: &str = "UPDATE run_loop_checkpoints
+            SET state = 'resuming',
+                claim_token_hash = $2,
+                claim_expires_at = now() + make_interval(secs => $3)
+          WHERE run_id = $1
+            AND kind = 'park'
+            AND (state = 'parked'
+                 OR (state = 'resuming' AND claim_expires_at < now()))
+            AND park_until <= now()
+          RETURNING seq, ciphertext, segment_no, authority_digest, kind";
+
+/// Why an empty-reference claim found nothing to take, as the one diagnostic read after it:
+/// `park_not_due` for a park that is claimable but whose `park_until` has not come, a held lease
+/// (ANY token's: an empty reference names no pause to compare a token against) for a park that
+/// is being resumed, and the committed `not_claimable` for everything else (no fold, a paused or
+/// active or closed one). Nothing is written, so a refused claim leaves the park exactly as it was.
+async fn park_claim_refusal(
+    tx: &mut Transaction<'_, Postgres>,
+    run_id: &str,
+) -> Result<Status, Status> {
+    let row: Option<(bool, bool)> = sqlx::query_as(
+        "SELECT COALESCE(kind = 'park' AND park_until > now()
+                         AND (state = 'parked'
+                              OR (state = 'resuming' AND claim_expires_at < now())), false),
+                COALESCE(kind = 'park' AND state = 'resuming' AND claim_expires_at > now(), false)
+           FROM run_loop_checkpoints WHERE run_id = $1",
+    )
+    .bind(run_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(internal)?;
+    Ok(match row {
+        Some((true, _)) => Status::failed_precondition("park_not_due"),
+        Some((_, true)) => Status::aborted("loop_checkpoint_claim_held"),
+        _ => Status::failed_precondition("loop_checkpoint_not_claimable"),
+    })
 }
 
 /// Claim a paused or parked run's fold. Exactly one caller wins a given pause: the
@@ -369,10 +514,45 @@ pub(crate) async fn claim(
     }
     let (org_id, user_id) = (owner.org_id, owner.user_id);
 
+    // An empty reference names no pause: under the park rules it asks for the run's current
+    // parked fold (build plan WS03 S8-4). With them off it is the committed statement below,
+    // which an empty reference matches no row of.
+    let park_claim = pause_ref.is_empty() && crate::terminalization::park_recovery_active();
+
+    // Under the park rules a park is claimed by the empty reference and by nothing else. Its own
+    // reference (`park:{run_id}:{n}`) is computable by anyone from the run id, and the committed
+    // statement below ignores `park_until` and sets `updated_at`, the anchor of the park's TTL: a
+    // caller holding this RPC could re-claim whenever the lease lapses, move the anchor and read
+    // the fold each time, and the park would never reach its TTL. So a named reference against a
+    // run whose current fold is a park is refused as not claimable. The kind is read under the
+    // run row's lock (taken above, and by every save), so it cannot change before the statement.
+    // A pause fold, which an approval resume claims by its reference, is untouched, and with the
+    // park rules off nothing here runs.
+    if !park_claim && !pause_ref.is_empty() && crate::terminalization::park_recovery_active() {
+        let current: Option<(String,)> =
+            sqlx::query_as("SELECT kind FROM run_loop_checkpoints WHERE run_id = $1")
+                .bind(run_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(internal)?;
+        if current.is_some_and(|(kind,)| kind == "park") {
+            return Err(Status::failed_precondition("loop_checkpoint_not_claimable"));
+        }
+    }
+
     // Claimable: a paused or parked fold, or a resuming fold whose lease lapsed.
     // An `active` fold is never claimable: its loop may still be running, and only
     // a worker that parks it after a crash makes it resumable.
-    let row: Option<(i64, String, i32, String, String)> = sqlx::query_as(
+    let row: Option<(i64, String, i32, String, String)> = if park_claim {
+        sqlx::query_as(CLAIM_PARK_SQL)
+            .bind(run_id)
+            .bind(&token_hash)
+            .bind(CLAIM_LEASE_SECONDS)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(internal)?
+    } else {
+        sqlx::query_as(
         "UPDATE run_loop_checkpoints
             SET state = 'resuming',
                 claim_token_hash = $2,
@@ -383,15 +563,19 @@ pub(crate) async fn claim(
             AND (state IN ('paused', 'parked')
                  OR (state = 'resuming' AND claim_expires_at < now()))
           RETURNING seq, ciphertext, segment_no, authority_digest, kind",
-    )
-    .bind(run_id)
-    .bind(&token_hash)
-    .bind(CLAIM_LEASE_SECONDS)
-    .bind(pause_ref)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(internal)?;
+        )
+        .bind(run_id)
+        .bind(&token_hash)
+        .bind(CLAIM_LEASE_SECONDS)
+        .bind(pause_ref)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(internal)?
+    };
     let Some((seq, ciphertext, segment_no, authority_digest, kind)) = row else {
+        if park_claim {
+            return Err(park_claim_refusal(&mut tx, run_id).await?);
+        }
         // The same continuation asking again, for the same pause, while its own lease
         // is live is told so, which is not the same as losing the pause to someone
         // else. The pause reference is part of the question: a holder of the token who
@@ -577,8 +761,30 @@ pub(crate) mod test_support {
         serde_json::to_vec(&value).expect("fold json")
     }
 
+    /// The golden fold turned into a park fold the way the executor writes one (WS03 S8-4): at a
+    /// round boundary (no call in flight), pending a `park` under `pause_ref`, and carrying the
+    /// run's park count `parks`. Its reference satisfies the park rules when `pause_ref` is
+    /// `park_ref(run_id, parks)`.
+    pub(crate) fn park_fold_for(run_id: &str, pause_ref: &str, parks: u32) -> Vec<u8> {
+        let mut value: Value = serde_json::from_str(FIXTURE).expect("fixture json");
+        value["run_id"] = json!(run_id);
+        value["round_in_flight"] = Value::Null;
+        value["pending"] = json!({
+            "kind": "park",
+            "pause_ref": pause_ref,
+            "step_id": "",
+            "call": "",
+            "action_fingerprint": ""
+        });
+        value["extensions"]["parks"] = json!(parks);
+        serde_json::to_vec(&value).expect("fold json")
+    }
+
     /// Store a fold through the real `save`, the way a loop does. `kind` is
-    /// `round`, `pre_effect`, `pause` or `park`; the pause fields follow from it.
+    /// `round`, `pre_effect`, `pause` or `park`; the pause fields follow from it. A `park` is a
+    /// park-shaped fold (see [`park_fold_for`]) naming `pause_ref` and a park count of one, so it
+    /// stands under the park rules too when `pause_ref` is `park_ref(run_id, 1)`; with park
+    /// recovery off it is stored as it always was, whatever the reference.
     pub(crate) async fn seed_fold(
         pool: &PgPool,
         run_id: &str,
@@ -587,7 +793,11 @@ pub(crate) mod test_support {
         park_reason: &str,
         park_until: Option<DateTime<Utc>>,
     ) -> Result<i64, Status> {
-        let fold = fold_for(run_id);
+        let fold = if kind == "park" {
+            park_fold_for(run_id, pause_ref, 1)
+        } else {
+            fold_for(run_id)
+        };
         save(
             pool,
             &cipher(),
@@ -603,6 +813,7 @@ pub(crate) mod test_support {
             },
         )
         .await
+        .map(|saved| saved.seq)
     }
 
     /// Place a run inside a Space, with the authority context the table requires.
@@ -799,6 +1010,412 @@ mod tests {
             _ => "other",
         };
         (code, status.message())
+    }
+
+    // -- Build plan WS03 S8-4: the park rules of a save, the park claim and the park wait ----
+
+    #[test]
+    fn the_park_wait_is_a_day_by_default_and_is_clamped() {
+        assert_eq!(PARK_TTL_DEFAULT_SECONDS, 86_400);
+        for unset in [None, Some(""), Some("soon"), Some("1.5"), Some("99999999999999999999")] {
+            assert_eq!(park_ttl_from(unset), 86_400, "{unset:?}");
+        }
+        for (value, want) in [
+            ("-5", 60),
+            ("0", 60),
+            ("59", 60),
+            ("60", 60),
+            (" 3600 ", 3600),
+            ("2592000", 2_592_000),
+            ("2592001", 2_592_000),
+        ] {
+            assert_eq!(park_ttl_from(Some(value)), want, "{value:?}");
+        }
+        if std::env::var_os(PARK_TTL_ENV).is_none() {
+            assert_eq!(park_ttl_seconds(), 86_400, "the process default");
+        }
+    }
+
+    /// A park fold of `run_id` as the executor writes one, parsed, after `edit` changed its JSON.
+    fn park_fold_edited(
+        run_id: &str,
+        pause_ref: &str,
+        parks: u32,
+        edit: impl FnOnce(&mut Value),
+    ) -> (Vec<u8>, LoopFoldV1) {
+        let mut value: Value =
+            serde_json::from_slice(&super::test_support::park_fold_for(run_id, pause_ref, parks))
+                .expect("park fold json");
+        edit(&mut value);
+        let bytes = serde_json::to_vec(&value).expect("fold json");
+        let fold = check_fold(run_id, &bytes).expect("a fold of this run");
+        (bytes, fold)
+    }
+
+    fn park_save_input<'a>(
+        run_id: &'a str,
+        fold: &'a [u8],
+        pause_ref: &'a str,
+        reason: &'a str,
+    ) -> SaveInput<'a> {
+        SaveInput {
+            run_id,
+            expected_seq: 0,
+            kind: "park",
+            fold,
+            authority_digest: "auth-1",
+            pause_ref,
+            park_reason: reason,
+            park_until: Some(Utc::now()),
+        }
+    }
+
+    /// The park rules for one fold, the ref the fold was built with named by the save.
+    fn park_rules(
+        run_id: &str,
+        parks: u32,
+        pause_ref: &str,
+        reason: ParkReason,
+        until_after_secs: i64,
+        edit: impl FnOnce(&mut Value),
+    ) -> Result<(), Status> {
+        let (bytes, fold) = park_fold_edited(run_id, pause_ref, parks, edit);
+        let now = Utc::now();
+        validate_park_save(
+            run_id,
+            &fold,
+            &park_save_input(run_id, &bytes, pause_ref, reason.as_str()),
+            reason,
+            now + chrono::Duration::seconds(until_after_secs),
+            now,
+            86_400,
+        )
+    }
+
+    #[test]
+    fn a_park_that_obeys_the_park_rules_is_accepted_and_each_rule_refuses_with_its_own_token() {
+        let run = "run-park-rules";
+        let ref_n = |n: u32| park_ref(run, n);
+        let keep = |_: &mut Value| {};
+        let reason = ParkReason::ProviderExhausted;
+
+        // The control: a park at a round boundary, under the run's own reference, within the cap
+        // and the wait, passes, for every reason an executor may write.
+        for reason in ParkReason::ALL {
+            if reason == ParkReason::CrashInterrupted {
+                continue;
+            }
+            assert!(park_rules(run, 1, &ref_n(1), reason, 3600, keep).is_ok(), "{reason:?}");
+        }
+        // The fifth park is the last one the cap allows.
+        assert!(park_rules(run, 5, &ref_n(5), reason, 3600, keep).is_ok());
+
+        // Reserved: no executor writes it.
+        assert_eq!(
+            refusal_pair(
+                &park_rules(run, 1, &ref_n(1), ParkReason::CrashInterrupted, 3600, keep)
+                    .expect_err("crash_interrupted is reserved")
+            ),
+            ("invalid_argument", "park_reason_reserved")
+        );
+
+        // Not at a round boundary: a call in flight, no pending pause, a pause of another kind,
+        // or a pending reference other than the one the save names.
+        let boundary = ("invalid_argument", "park_not_at_round_boundary");
+        let in_flight = |value: &mut Value| {
+            value["round_in_flight"] = json!({
+                "assistant_content": "x", "calls": [], "completed": []
+            });
+        };
+        let no_pending = |value: &mut Value| value["pending"] = Value::Null;
+        let approval = |value: &mut Value| value["pending"]["kind"] = json!("approval");
+        let other_ref = |value: &mut Value| value["pending"]["pause_ref"] = json!("park:other:1");
+        for (what, edit) in [
+            ("a call in flight", &in_flight as &dyn Fn(&mut Value)),
+            ("no pending pause", &no_pending),
+            ("a pending approval", &approval),
+            ("another pending reference", &other_ref),
+        ] {
+            assert_eq!(
+                refusal_pair(
+                    &park_rules(run, 1, &ref_n(1), reason, 3600, edit)
+                        .expect_err(what)
+                ),
+                boundary,
+                "{what}"
+            );
+        }
+
+        // The cap: a sixth park, or a count too large to read, is refused as a precondition.
+        let limit = ("failed_precondition", "park_limit_reached");
+        assert_eq!(
+            refusal_pair(&park_rules(run, 6, &ref_n(6), reason, 3600, keep).expect_err("six")),
+            limit
+        );
+        assert_eq!(
+            refusal_pair(
+                &park_rules(run, 1, &ref_n(1), reason, 3600, |value| {
+                    value["extensions"]["parks"] = json!(u64::MAX);
+                })
+                .expect_err("a huge count")
+            ),
+            limit
+        );
+
+        // The reference: no count at all, or a reference that is not the run's own `n`th.
+        let mismatch = ("invalid_argument", "park_ref_mismatch");
+        assert_eq!(
+            refusal_pair(
+                &park_rules(run, 1, &ref_n(1), reason, 3600, |value| {
+                    value["extensions"].as_object_mut().expect("extensions").remove("parks");
+                })
+                .expect_err("no count")
+            ),
+            mismatch
+        );
+        assert_eq!(
+            refusal_pair(&park_rules(run, 2, &ref_n(1), reason, 3600, keep).expect_err("stale ref")),
+            mismatch
+        );
+        assert_eq!(
+            refusal_pair(
+                &park_rules(run, 1, &park_ref("another-run", 1), reason, 3600, keep)
+                    .expect_err("another run's reference")
+            ),
+            mismatch
+        );
+
+        // The wait: up to half the park's own life is fine; one second more is refused.
+        assert!(park_rules(run, 1, &ref_n(1), reason, 43_200 - 1, keep).is_ok());
+        assert_eq!(
+            refusal_pair(
+                &park_rules(run, 1, &ref_n(1), reason, 43_200 + 60, keep).expect_err("too long")
+            ),
+            ("failed_precondition", "park_until_beyond_ttl")
+        );
+
+        // The order the rules are asked in: reserved, then the boundary, then the cap, then the
+        // reference, then the wait.
+        assert_eq!(
+            park_rules(run, 9, &ref_n(1), ParkReason::CrashInterrupted, 999_999, in_flight)
+                .expect_err("first")
+                .message(),
+            "park_reason_reserved"
+        );
+        assert_eq!(
+            park_rules(run, 9, &ref_n(1), reason, 999_999, in_flight)
+                .expect_err("second")
+                .message(),
+            "park_not_at_round_boundary"
+        );
+        assert_eq!(
+            park_rules(run, 9, &ref_n(9), reason, 999_999, keep)
+                .expect_err("third")
+                .message(),
+            "park_limit_reached"
+        );
+        assert_eq!(
+            park_rules(run, 2, &ref_n(1), reason, 999_999, keep)
+                .expect_err("fourth")
+                .message(),
+            "park_ref_mismatch"
+        );
+    }
+
+    /// The park rules are asked by `save` itself, before it touches the store, and only while
+    /// park recovery is active: a lazy pool that cannot connect proves each refusal came first.
+    #[tokio::test]
+    async fn save_asks_the_park_rules_before_the_store_and_only_under_park_recovery() {
+        use crate::terminalization::park_test_switch;
+        let run = fixture_run_id();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://unreachable.invalid/session")
+            .expect("lazy pool");
+        let key = DescriptorCipher::from_key_bytes_for_test(&[7_u8; 32]).expect("test key");
+        let attempt = |pause_ref: String, parks: u32, reason: &'static str, edit: fn(&mut Value)| {
+            let (bytes, _fold) = park_fold_edited(&run, &pause_ref, parks, edit);
+            (bytes, pause_ref, reason)
+        };
+        let cases = [
+            (
+                "a reserved reason",
+                attempt(park_ref(&run, 1), 1, "crash_interrupted", |_| {}),
+                "park_reason_reserved",
+            ),
+            (
+                "a call in flight",
+                attempt(park_ref(&run, 1), 1, "provider_exhausted", |value| {
+                    value["round_in_flight"] =
+                        json!({"assistant_content": "x", "calls": [], "completed": []});
+                }),
+                "park_not_at_round_boundary",
+            ),
+            (
+                "a sixth park",
+                attempt(park_ref(&run, 6), 6, "provider_exhausted", |_| {}),
+                "park_limit_reached",
+            ),
+            (
+                "another run's reference",
+                attempt(park_ref("another-run", 1), 1, "provider_exhausted", |_| {}),
+                "park_ref_mismatch",
+            ),
+        ];
+        let _store = test_switch::Forced::set(true);
+        let _park = park_test_switch::Forced::set(true);
+        for (what, (bytes, pause_ref, reason), token) in cases {
+            let refused = save(
+                &pool,
+                &key,
+                SaveInput {
+                    park_until: Some(Utc::now() + chrono::Duration::seconds(3600)),
+                    ..park_save_input(&run, &bytes, &pause_ref, reason)
+                },
+            )
+            .await
+            .expect_err(what);
+            assert_eq!(refused.message(), token, "{what}");
+        }
+        // A wait past half the park's life, through `save` and the real clock.
+        let (bytes, _fold) = park_fold_edited(&run, &park_ref(&run, 1), 1, |_| {});
+        let refused = save(
+            &pool,
+            &key,
+            SaveInput {
+                park_until: Some(Utc::now() + chrono::Duration::seconds(park_ttl_seconds())),
+                ..park_save_input(&run, &bytes, &park_ref(&run, 1), "provider_exhausted")
+            },
+        )
+        .await
+        .expect_err("a wait as long as the park's whole life");
+        assert_eq!(refused.message(), "park_until_beyond_ttl");
+
+        // Off: with either switch off the rules are not asked (`park_recovery_active` is false),
+        // so the store is reached. That is proven by the database tests, which store the park as
+        // committed with `park_accepted` false; here only the gate is read.
+        drop(_park);
+        let _park_off = park_test_switch::Forced::set(false);
+        assert!(!crate::terminalization::park_recovery_active());
+        drop(_park_off);
+        let _park_on = park_test_switch::Forced::set(true);
+        let _store_off = test_switch::Forced::set(false);
+        assert!(!crate::terminalization::park_recovery_active());
+    }
+
+    #[test]
+    fn the_park_claim_statement_never_touches_the_parks_age() {
+        let sql = CLAIM_PARK_SQL.split_whitespace().collect::<Vec<_>>().join(" ");
+        // The park's age is the anchor of the worker's wait: a claim is not a new park.
+        assert!(!sql.contains("updated_at"), "{sql}");
+        // It takes a park row only, in a claimable state, and only once the park is due.
+        for needed in [
+            "WHERE run_id = $1 AND kind = 'park'",
+            "(state = 'parked' OR (state = 'resuming' AND claim_expires_at < now()))",
+            "AND park_until <= now()",
+            "SET state = 'resuming'",
+            "RETURNING seq, ciphertext, segment_no, authority_digest, kind",
+        ] {
+            assert!(sql.contains(needed), "{needed}: {sql}");
+        }
+        // It names no reference: an empty reference is how a caller asks for it.
+        assert!(!sql.contains("pause_ref"), "{sql}");
+
+        // The committed claim statement is still in the source, untouched, and the committed
+        // save's upsert still sets the age on every write.
+        let source = include_str!("loop_checkpoint.rs").replace("\r\n", "\n");
+        let production = &source[..source
+            .find("\n#[cfg(test)]\npub(crate) mod test_support")
+            .expect("test support")];
+        let flat: String = production.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            flat.contains(
+                "SET state = 'resuming', claim_token_hash = $2, claim_expires_at = now() + make_interval(secs => $3), updated_at = now() WHERE run_id = $1 AND pause_ref = $4 AND (state IN ('paused', 'parked') OR (state = 'resuming' AND claim_expires_at < now())) RETURNING seq, ciphertext, segment_no, authority_digest, kind"
+            ),
+            "the committed claim statement changed"
+        );
+        assert!(
+            flat.contains("claim_token_hash = NULL, claim_expires_at = NULL, updated_at = now()"),
+            "the committed save's upsert changed"
+        );
+        // The empty-reference claim is taken only under the park rules.
+        assert!(
+            flat.contains("let park_claim = pause_ref.is_empty() && crate::terminalization::park_recovery_active();"),
+            "the park claim is not gated on park recovery"
+        );
+    }
+
+    /// Under park recovery a park is claimed by the empty reference only: its own reference is
+    /// computable from the run id, and the committed statement would take it before `park_until`
+    /// and move `updated_at`, the anchor of its TTL. The refusal sits behind the park-recovery
+    /// gate (so with the rules off the committed claim is untouched), before the committed
+    /// statement, and reads the kind of the run's current fold.
+    #[test]
+    fn a_named_reference_never_claims_a_park_under_park_recovery() {
+        let source = include_str!("loop_checkpoint.rs").replace("\r\n", "\n");
+        let production = &source[..source
+            .find("\n#[cfg(test)]\npub(crate) mod test_support")
+            .expect("test support")];
+        let flat: String = production.split_whitespace().collect::<Vec<_>>().join(" ");
+        let gate = "if !park_claim && !pause_ref.is_empty() && crate::terminalization::park_recovery_active() {";
+        let read = "SELECT kind FROM run_loop_checkpoints WHERE run_id = $1";
+        let refusal = "if current.is_some_and(|(kind,)| kind == \"park\") { return Err(Status::failed_precondition(\"loop_checkpoint_not_claimable\")); }";
+        let committed = "SET state = 'resuming', claim_token_hash = $2, claim_expires_at = now() + make_interval(secs => $3), updated_at = now() WHERE run_id = $1 AND pause_ref = $4";
+        for needle in [gate, read, refusal, committed] {
+            assert_eq!(flat.matches(needle).count(), 1, "{needle}");
+        }
+        let (gate_at, read_at, refusal_at, committed_at) = (
+            flat.find(gate).expect("gate"),
+            flat.find(read).expect("read"),
+            flat.find(refusal).expect("refusal"),
+            flat.find(committed).expect("committed"),
+        );
+        // The read and the refusal are inside the gate, and the gate is before the statement.
+        assert!(gate_at < read_at && read_at < refusal_at, "the refusal is not behind its gate");
+        assert!(refusal_at < committed_at, "the refusal is not before the committed claim");
+        // Inside the gate means before its closing brace: the refusal ends the gate's body.
+        let after_refusal = &flat[refusal_at + refusal.len()..];
+        assert!(after_refusal.trim_start().starts_with('}'), "the gate holds more than the refusal");
+        // The gate's body is the one read and the refusal, nothing that writes.
+        let body = &flat[gate_at + gate.len()..refusal_at + refusal.len()];
+        for write in ["UPDATE", "INSERT", "DELETE"] {
+            assert!(!body.contains(write), "{write} inside the park-reference refusal");
+        }
+    }
+
+    /// The save RPC echoes the store's own answer for `park_accepted`, never a literal: with a
+    /// literal an old or switched-off store would tell the executor a park was accepted.
+    #[test]
+    fn the_save_rpc_echoes_the_stores_park_answer_and_never_a_literal() {
+        let source = include_str!("grpc.rs").replace("\r\n", "\n");
+        let start = source
+            .find("pub(crate) async fn save_loop_checkpoint_inner(")
+            .expect("the save handler");
+        let body = &source[start..start + source[start..].find("\n}\n").expect("its end")];
+        assert!(body.contains("park_accepted: saved.park_accepted,"), "{body}");
+        for literal in ["park_accepted: true", "park_accepted: false"] {
+            assert!(!body.contains(literal), "{literal}");
+        }
+    }
+
+    #[test]
+    fn a_park_seed_fold_is_park_shaped_and_obeys_the_park_rules_for_its_own_reference() {
+        let run = "run-park-seed";
+        let bytes = super::test_support::park_fold_for(run, &park_ref(run, 1), 1);
+        let fold = check_fold(run, &bytes).expect("a fold of this run");
+        assert!(fold.round_in_flight.is_none());
+        let pending = fold.pending.as_ref().expect("a pending pause");
+        assert_eq!(pending.kind, PauseKind::Park);
+        assert_eq!(pending.pause_ref, park_ref(run, 1));
+        assert_eq!(parks_in(&fold), 1);
+        assert!(park_rules(run, 1, &park_ref(run, 1), ParkReason::ReauthRequired, 60, |_| {}).is_ok());
+        // The committed park seeds name `appr_1`: judged by the park rules they are refused, so
+        // they are stored only while park recovery is off, as they always were.
+        assert_eq!(
+            park_rules(run, 1, "appr_1", ParkReason::ReauthRequired, 60, |_| {})
+                .expect_err("a seed reference is not the run's park reference")
+                .message(),
+            "park_ref_mismatch"
+        );
     }
 
     /// The source scan the tripwire below is built on. It is a text heuristic over
@@ -1261,7 +1878,8 @@ fn after() { WRITE }
     /// against a scratch Postgres (the database name must say it is a test database).
     mod db {
         use super::super::test_support::{
-            cipher, fold_for, fold_rows, fold_state, scratch_pool, seed_fold, seed_run,
+            cipher, fold_for, fold_rows, fold_state, park_fold_for, scratch_pool, seed_fold,
+            seed_run,
         };
         use super::*;
 
@@ -1282,6 +1900,7 @@ fn after() { WRITE }
                 },
             )
             .await
+            .map(|saved| saved.seq)
         }
 
         #[tokio::test]
@@ -1781,6 +2400,7 @@ fn after() { WRITE }
                 },
             )
             .await
+            .map(|saved| saved.seq)
         }
 
         async fn claim_columns(pool: &PgPool, run_id: &str) -> (Option<String>, bool) {
@@ -1909,6 +2529,700 @@ fn after() { WRITE }
                 assert_eq!(stored.as_deref(), Some(reason.as_str()));
                 assert_eq!(fold_state(&pool, &run_id).await.as_deref(), Some("parked"));
             }
+        }
+
+        // -- Build plan WS03 S8-4: the park rules at the store ----------------------------------
+        //
+        // WRITTEN, NOT RUN by the author: each needs the disposable-Postgres harness
+        // (scripts/tests/session-core-db-tests.sh), which the lead runs. The park switches are
+        // forced for the test's own thread (`ParkRules`), so no test sets the process
+        // environment, and the park wait is read from `park_ttl_seconds()` rather than assumed.
+
+        use crate::terminalization::park_test_switch;
+
+        /// The fold store and park recovery forced on or off for this thread, restored on drop.
+        struct ParkRules {
+            _store: test_switch::Forced,
+            _park: park_test_switch::Forced,
+        }
+
+        fn forced_rules(on: bool) -> ParkRules {
+            ParkRules {
+                _store: test_switch::Forced::set(true),
+                _park: park_test_switch::Forced::set(on),
+            }
+        }
+
+        async fn save_park_fold(
+            pool: &PgPool,
+            run_id: &str,
+            expected_seq: i64,
+            fold: &[u8],
+            pause_ref: &str,
+            reason: &str,
+            until: DateTime<Utc>,
+        ) -> Result<Saved, Status> {
+            save(
+                pool,
+                &cipher(),
+                SaveInput {
+                    run_id,
+                    expected_seq,
+                    kind: "park",
+                    fold,
+                    authority_digest: "auth-1",
+                    pause_ref,
+                    park_reason: reason,
+                    park_until: Some(until),
+                },
+            )
+            .await
+        }
+
+        /// A save of any kind of the golden fold (not a park-shaped one).
+        async fn save_kind(
+            pool: &PgPool,
+            run_id: &str,
+            expected_seq: i64,
+            kind: &str,
+            pause_ref: &str,
+        ) -> Result<Saved, Status> {
+            let fold = fold_for(run_id);
+            save(
+                pool,
+                &cipher(),
+                SaveInput {
+                    run_id,
+                    expected_seq,
+                    kind,
+                    fold: &fold,
+                    authority_digest: "auth-1",
+                    pause_ref,
+                    park_reason: "",
+                    park_until: None,
+                },
+            )
+            .await
+        }
+
+        async fn updated_at(pool: &PgPool, run_id: &str) -> DateTime<Utc> {
+            sqlx::query_scalar("SELECT updated_at FROM run_loop_checkpoints WHERE run_id = $1")
+                .bind(run_id)
+                .fetch_one(pool)
+                .await
+                .expect("read the fold's age")
+        }
+
+        async fn events_of(pool: &PgPool, run_id: &str, event_type: &str) -> i64 {
+            sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE run_id = $1 AND event_type = $2")
+                .bind(run_id)
+                .bind(event_type)
+                .fetch_one(pool)
+                .await
+                .expect("count events")
+        }
+
+        /// Make the park due: its `park_until` moved into the past.
+        async fn make_park_due(pool: &PgPool, run_id: &str) {
+            sqlx::query(
+                "UPDATE run_loop_checkpoints SET park_until = now() - interval '1 second' WHERE run_id = $1",
+            )
+            .bind(run_id)
+            .execute(pool)
+            .await
+            .expect("make the park due");
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+        async fn loop_checkpoint_a_park_save_is_validated_and_echoed_only_under_park_recovery() {
+            let Some(pool) = scratch_pool().await else { return };
+            let soon = Utc::now() + chrono::Duration::seconds(3600);
+
+            // Park recovery OFF: a park is stored exactly as it always was, whatever its fold and
+            // reference say, and the store does not say it accepted it.
+            {
+                let _off = forced_rules(false);
+                let (run_id, _org, _user) = seed_run(&pool, "persistent").await;
+                let golden = fold_for(&run_id);
+                let saved =
+                    save_park_fold(&pool, &run_id, 0, &golden, "appr_1", "provider_exhausted", soon)
+                        .await
+                        .expect("committed: a park with a call in flight is stored");
+                assert_eq!(saved, Saved { seq: 1, park_accepted: false });
+                assert_eq!(fold_state(&pool, &run_id).await.as_deref(), Some("parked"));
+                // Not even a reserved reason or a wait past the cap is refused.
+                let (run_id, _org, _user) = seed_run(&pool, "persistent").await;
+                let far = Utc::now() + chrono::Duration::seconds(park_ttl_seconds() * 2);
+                let saved = save_park_fold(
+                    &pool,
+                    &run_id,
+                    0,
+                    &fold_for(&run_id),
+                    "appr_1",
+                    "crash_interrupted",
+                    far,
+                )
+                .await
+                .expect("committed: no park rule is asked");
+                assert!(!saved.park_accepted);
+            }
+
+            let _on = forced_rules(true);
+            let wait_cap = park_ttl_seconds();
+
+            // Each rule refuses with its own token, and a refused park writes nothing.
+            let (run_id, _org, _user) = seed_run(&pool, "persistent").await;
+            let good_ref = park_ref(&run_id, 1);
+            let good = park_fold_for(&run_id, &good_ref, 1);
+            let cases: Vec<(&str, Vec<u8>, String, &str, i64, (&str, &str))> = vec![
+                (
+                    "a reserved reason",
+                    good.clone(),
+                    good_ref.clone(),
+                    "crash_interrupted",
+                    3600,
+                    ("invalid_argument", "park_reason_reserved"),
+                ),
+                (
+                    "a call in flight and an approval pending",
+                    fold_for(&run_id),
+                    good_ref.clone(),
+                    "provider_exhausted",
+                    3600,
+                    ("invalid_argument", "park_not_at_round_boundary"),
+                ),
+                (
+                    "a sixth park",
+                    park_fold_for(&run_id, &park_ref(&run_id, 6), 6),
+                    park_ref(&run_id, 6),
+                    "provider_exhausted",
+                    3600,
+                    ("failed_precondition", "park_limit_reached"),
+                ),
+                (
+                    "a reference that is not the run's own park",
+                    park_fold_for(&run_id, "appr_1", 1),
+                    "appr_1".to_owned(),
+                    "provider_exhausted",
+                    3600,
+                    ("invalid_argument", "park_ref_mismatch"),
+                ),
+                (
+                    "a wait past half the park's life",
+                    good.clone(),
+                    good_ref.clone(),
+                    "provider_exhausted",
+                    wait_cap,
+                    ("failed_precondition", "park_until_beyond_ttl"),
+                ),
+            ];
+            for (what, fold, pause_ref, reason, wait_secs, want) in cases {
+                let until = Utc::now() + chrono::Duration::seconds(wait_secs);
+                let refused = save_park_fold(&pool, &run_id, 0, &fold, &pause_ref, reason, until)
+                    .await
+                    .expect_err(what);
+                assert_eq!(refusal_pair(&refused), want, "{what}");
+                assert_eq!(fold_rows(&pool, &run_id).await, 0, "{what}: nothing was written");
+            }
+
+            // A park that obeys them is stored, and the store says so.
+            let saved = save_park_fold(&pool, &run_id, 0, &good, &good_ref, "provider_exhausted", soon)
+                .await
+                .expect("a park at a round boundary under the run's own reference");
+            assert_eq!(saved, Saved { seq: 1, park_accepted: true });
+            assert_eq!(fold_state(&pool, &run_id).await.as_deref(), Some("parked"));
+            let stored: (Option<String>, Option<String>) = sqlx::query_as(
+                "SELECT pause_ref, park_reason FROM run_loop_checkpoints WHERE run_id = $1",
+            )
+            .bind(&run_id)
+            .fetch_one(&pool)
+            .await
+            .expect("stored park fields");
+            assert_eq!(
+                stored,
+                (Some(good_ref.clone()), Some("provider_exhausted".to_owned()))
+            );
+            assert_eq!(events_of(&pool, &run_id, "CHECKPOINT_SAVED").await, 1);
+
+            // The compare-and-set is unchanged: a stale writer is refused even with a good park.
+            let stale = save_park_fold(&pool, &run_id, 0, &good, &good_ref, "provider_exhausted", soon)
+                .await
+                .expect_err("a writer that still expects 0 is stale");
+            assert_eq!(refusal_pair(&stale), ("aborted", "loop_checkpoint_stale"));
+
+            // The second park of the run takes the next reference and replaces the first.
+            let second_ref = park_ref(&run_id, 2);
+            let second = park_fold_for(&run_id, &second_ref, 2);
+            let saved = save_park_fold(&pool, &run_id, 1, &second, &second_ref, "upstream_unavailable", soon)
+                .await
+                .expect("the run's second park");
+            assert_eq!(saved, Saved { seq: 2, park_accepted: true });
+            // The count and the reference must agree: a fold that counts the run's second park
+            // under the first park's reference is refused.
+            let reused = save_park_fold(
+                &pool,
+                &run_id,
+                2,
+                &park_fold_for(&run_id, &good_ref, 2),
+                &good_ref,
+                "provider_exhausted",
+                soon,
+            )
+            .await
+            .expect_err("the count says the second park, the reference says the first");
+            assert_eq!(refusal_pair(&reused), ("invalid_argument", "park_ref_mismatch"));
+
+            // Every other save is never accepted as a park, park recovery on or off.
+            for rules_on in [true, false] {
+                let _rules = forced_rules(rules_on);
+                let (other, _org, _user) = seed_run(&pool, "persistent").await;
+                let mut seq = 0;
+                for kind in ["round", "pre_effect", "pause"] {
+                    let pause_ref = if kind == "pause" { "appr_1" } else { "" };
+                    let saved = save_kind(&pool, &other, seq, kind, pause_ref)
+                        .await
+                        .expect("a non-park save");
+                    assert!(!saved.park_accepted, "{kind} with park recovery {rules_on}");
+                    seq = saved.seq;
+                }
+            }
+        }
+
+        /// A zero-retention or waived run never keeps a park, under the park rules or without
+        /// them: the refusal is the one `run_owner_tx` gives every durable fold. (Park StoreProof.)
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+        async fn loop_checkpoint_a_park_save_is_refused_for_a_zdr_or_waived_run() {
+            let Some(pool) = scratch_pool().await else { return };
+            let soon = Utc::now() + chrono::Duration::seconds(3600);
+            let refusal = Refusal::DURABLE_MUTATION_FORBIDDEN.grpc_status(Code::FailedPrecondition);
+            for on in [true, false] {
+                let _rules = forced_rules(on);
+                for retention in ["zdr", "zdr_waived"] {
+                    let (run_id, _org, _user) = seed_run(&pool, retention).await;
+                    let pause_ref = park_ref(&run_id, 1);
+                    let fold = park_fold_for(&run_id, &pause_ref, 1);
+                    let refused =
+                        save_park_fold(&pool, &run_id, 0, &fold, &pause_ref, "provider_exhausted", soon)
+                            .await
+                            .expect_err("a non-persistent run keeps no park");
+                    assert_eq!(refused.code(), tonic::Code::FailedPrecondition, "{retention} {on}");
+                    assert_eq!(refused.message(), refusal.message(), "{retention} {on}");
+                    assert_eq!(fold_rows(&pool, &run_id).await, 0, "{retention} {on}: nothing stored");
+                }
+            }
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+        async fn loop_checkpoint_an_empty_ref_claims_only_a_due_park() {
+            let Some(pool) = scratch_pool().await else { return };
+            let _on = forced_rules(true);
+            let not_claimable = ("failed_precondition", "loop_checkpoint_not_claimable");
+            let far = Utc::now() + chrono::Duration::seconds(3600);
+
+            // A pause fold, an active fold and a closed one are never claimed by an empty ref.
+            let (paused, _org, _user) = seed_run(&pool, "persistent").await;
+            seed_fold(&pool, &paused, "pause", "appr_1", "", None).await.expect("pause fold");
+            let (active, _org, _user) = seed_run(&pool, "persistent").await;
+            save_kind(&pool, &active, 0, "round", "").await.expect("active fold");
+            let (closed, _org, _user) = seed_run(&pool, "persistent").await;
+            seed_fold(&pool, &closed, "park", &park_ref(&closed, 1), "provider_exhausted", Some(far))
+                .await
+                .expect("a park");
+            make_park_due(&pool, &closed).await;
+            close(&pool, &closed, 1, "park_not_taken").await.expect("close");
+            for (what, run_id, state) in [
+                ("a pause fold", &paused, "paused"),
+                ("an active fold", &active, "active"),
+                ("a closed park", &closed, "closed"),
+            ] {
+                let refused = claim(&pool, &cipher(), run_id, "", "token-a")
+                    .await
+                    .expect_err(what);
+                assert_eq!(refusal_pair(&refused), not_claimable, "{what}");
+                assert_eq!(fold_state(&pool, run_id).await.as_deref(), Some(state), "{what}");
+            }
+            // No fold at all.
+            let (bare, _org, _user) = seed_run(&pool, "persistent").await;
+            assert_eq!(
+                refusal_pair(&claim(&pool, &cipher(), &bare, "", "token-a").await.expect_err("no fold")),
+                not_claimable
+            );
+
+            // A park whose time has not come: park_not_due, and NOTHING is written.
+            let (run_id, _org, _user) = seed_run(&pool, "persistent").await;
+            let park = park_ref(&run_id, 1);
+            seed_fold(&pool, &run_id, "park", &park, "provider_exhausted", Some(far))
+                .await
+                .expect("a park");
+            // Age the park: its age is the anchor of the worker's wait, and a claim must not move it.
+            sqlx::query(
+                "UPDATE run_loop_checkpoints SET updated_at = now() - interval '10 minutes' WHERE run_id = $1",
+            )
+            .bind(&run_id)
+            .execute(&pool)
+            .await
+            .expect("age the park");
+            let aged = updated_at(&pool, &run_id).await;
+            let not_due = claim(&pool, &cipher(), &run_id, "", "token-a")
+                .await
+                .expect_err("the park is not due");
+            assert_eq!(refusal_pair(&not_due), ("failed_precondition", "park_not_due"));
+            assert_eq!(fold_state(&pool, &run_id).await.as_deref(), Some("parked"));
+            assert_eq!(claim_columns(&pool, &run_id).await, (None, true), "no lease taken");
+            assert_eq!(updated_at(&pool, &run_id).await, aged);
+            assert_eq!(events_of(&pool, &run_id, "CHECKPOINT_RESTORED").await, 0);
+
+            // Due: the claim wins, returns the park fold, and leaves the park's age alone.
+            make_park_due(&pool, &run_id).await;
+            let claimed = claim(&pool, &cipher(), &run_id, "", "token-a")
+                .await
+                .expect("a due park is claimed by an empty ref");
+            assert_eq!((claimed.seq, claimed.kind.as_str(), claimed.segment_no), (1, "park", 1));
+            let restored: Value = serde_json::from_slice(&claimed.fold).expect("the park fold");
+            assert_eq!(restored["pending"]["kind"], "park");
+            assert_eq!(restored["pending"]["pause_ref"], park.as_str());
+            assert_eq!(fold_state(&pool, &run_id).await.as_deref(), Some("resuming"));
+            assert_eq!(updated_at(&pool, &run_id).await, aged, "a claim is not a new park");
+            assert_eq!(events_of(&pool, &run_id, "CHECKPOINT_RESTORED").await, 1);
+
+            // A live lease gives claim_held, for the same token and for another one.
+            for token in ["token-a", "token-b"] {
+                let held = claim(&pool, &cipher(), &run_id, "", token)
+                    .await
+                    .expect_err("the lease is live");
+                assert_eq!(refusal_pair(&held), ("aborted", "loop_checkpoint_claim_held"), "{token}");
+            }
+            assert_eq!(events_of(&pool, &run_id, "CHECKPOINT_RESTORED").await, 1);
+
+            // A lapsed lease is claimed again, by anyone, at the same seq.
+            sqlx::query(
+                "UPDATE run_loop_checkpoints SET claim_expires_at = now() - interval '1 second' WHERE run_id = $1",
+            )
+            .bind(&run_id)
+            .execute(&pool)
+            .await
+            .expect("lapse the lease");
+            let again = claim(&pool, &cipher(), &run_id, "", "token-b")
+                .await
+                .expect("a lapsed resume lease of a park is re-claimable by an empty ref");
+            assert_eq!(again.seq, 1);
+            assert_eq!(updated_at(&pool, &run_id).await, aged, "still the park's own age");
+            let held = claim(&pool, &cipher(), &run_id, "", "token-a")
+                .await
+                .expect_err("token-b holds it now");
+            assert_eq!(refusal_pair(&held), ("aborted", "loop_checkpoint_claim_held"));
+
+            // A fence at the claimed seq wins once and makes the row active: no longer a park.
+            assert_eq!(save_fence_at(&pool, &run_id, again.seq).await.expect("the fence"), 2);
+            assert_eq!(fold_state(&pool, &run_id).await.as_deref(), Some("active"));
+            let late = claim(&pool, &cipher(), &run_id, "", "token-c")
+                .await
+                .expect_err("after the fence there is no park");
+            assert_eq!(refusal_pair(&late), not_claimable);
+
+            // An ended run is refused as it is for every claim.
+            let (ended, _org, _user) = seed_run(&pool, "persistent").await;
+            seed_fold(&pool, &ended, "park", &park_ref(&ended, 1), "provider_exhausted", Some(far))
+                .await
+                .expect("a park");
+            make_park_due(&pool, &ended).await;
+            super::super::test_support::end_run_without_purge(&pool, &ended).await;
+            let refused = claim(&pool, &cipher(), &ended, "", "token-a")
+                .await
+                .expect_err("an ended run");
+            assert_eq!(refusal_pair(&refused), ("failed_precondition", "loop_checkpoint_run_ended"));
+
+            // Park recovery OFF: the empty reference is the committed statement, which it
+            // matches no row of, so even a due park is not claimable.
+            drop(_on);
+            let _off = forced_rules(false);
+            let (off_run, _org, _user) = seed_run(&pool, "persistent").await;
+            seed_fold(&pool, &off_run, "park", "appr_1", "provider_exhausted", Some(far))
+                .await
+                .expect("committed park");
+            make_park_due(&pool, &off_run).await;
+            let refused = claim(&pool, &cipher(), &off_run, "", "token-a")
+                .await
+                .expect_err("off: an empty ref names nothing");
+            assert_eq!(refusal_pair(&refused), not_claimable);
+            assert_eq!(fold_state(&pool, &off_run).await.as_deref(), Some("parked"));
+        }
+
+        /// A claim by a NON-empty reference. With park recovery OFF it is the committed statement:
+        /// it does not wait for `park_until`, it moves the row's age, and the claim_held probe
+        /// compares the token and the reference. With park recovery ON the park's own reference
+        /// (`park:{run_id}:{n}`, which anyone can compute) claims NOTHING: the committed statement
+        /// would take the park before `park_until` and set `updated_at`, the anchor of its TTL, so
+        /// a caller could re-claim each time the lease lapses and the park would never expire. A
+        /// pause fold is claimed by its reference either way.
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+        async fn loop_checkpoint_a_non_empty_ref_claim_is_the_committed_statement() {
+            let Some(pool) = scratch_pool().await else { return };
+            let far = Utc::now() + chrono::Duration::seconds(3600);
+            let not_claimable = ("failed_precondition", "loop_checkpoint_not_claimable");
+
+            // OFF: the committed statement, exactly as it was.
+            {
+                let _off = forced_rules(false);
+                let (run_id, _org, _user) = seed_run(&pool, "persistent").await;
+                let park = park_ref(&run_id, 1);
+                seed_fold(&pool, &run_id, "park", &park, "provider_exhausted", Some(far))
+                    .await
+                    .expect("a park that is not due");
+                sqlx::query(
+                    "UPDATE run_loop_checkpoints SET updated_at = now() - interval '10 minutes' WHERE run_id = $1",
+                )
+                .bind(&run_id)
+                .execute(&pool)
+                .await
+                .expect("age the park");
+                let aged = updated_at(&pool, &run_id).await;
+
+                // The wrong reference matches nothing; the right one claims the park at once, due or not.
+                let wrong = claim(&pool, &cipher(), &run_id, "park:other:1", "token-a")
+                    .await
+                    .expect_err("another reference");
+                assert_eq!(wrong.message(), "loop_checkpoint_not_claimable");
+                let claimed = claim(&pool, &cipher(), &run_id, &park, "token-a")
+                    .await
+                    .expect("the committed statement does not read park_until");
+                assert_eq!((claimed.seq, claimed.kind.as_str()), (1, "park"));
+                assert!(
+                    updated_at(&pool, &run_id).await > aged,
+                    "the committed claim sets the row's age"
+                );
+
+                // The committed held probe: the same token and reference is held, another is lost.
+                let held = claim(&pool, &cipher(), &run_id, &park, "token-a")
+                    .await
+                    .expect_err("held");
+                assert_eq!(held.message(), "loop_checkpoint_claim_held");
+                let lost = claim(&pool, &cipher(), &run_id, &park, "token-b")
+                    .await
+                    .expect_err("lost");
+                assert_eq!(lost.message(), "loop_checkpoint_not_claimable");
+            }
+
+            // ON: a pause fold is claimed by its reference as it always was ...
+            let _on = forced_rules(true);
+            let (paused, _org, _user) = seed_run(&pool, "persistent").await;
+            seed_fold(&pool, &paused, "pause", "appr_1", "", None).await.expect("pause fold");
+            assert_eq!(
+                claim(&pool, &cipher(), &paused, "appr_1", "token-a").await.expect("pause claim").kind,
+                "pause"
+            );
+
+            // ... and a park is not claimed by its own reference, due or not, parked or with a
+            // lapsed lease, and the refusal writes nothing: the park keeps its age and its lease.
+            let (run_id, _org, _user) = seed_run(&pool, "persistent").await;
+            let park = park_ref(&run_id, 1);
+            seed_fold(&pool, &run_id, "park", &park, "provider_exhausted", Some(far))
+                .await
+                .expect("a park that is not due");
+            sqlx::query(
+                "UPDATE run_loop_checkpoints SET updated_at = now() - interval '10 minutes' WHERE run_id = $1",
+            )
+            .bind(&run_id)
+            .execute(&pool)
+            .await
+            .expect("age the park");
+            let aged = updated_at(&pool, &run_id).await;
+            for (what, named) in [("the park's own reference", park.as_str()), ("another reference", "park:other:1")] {
+                let refused = claim(&pool, &cipher(), &run_id, named, "token-a")
+                    .await
+                    .expect_err(what);
+                assert_eq!(refusal_pair(&refused), not_claimable, "{what}");
+            }
+            assert_eq!(fold_state(&pool, &run_id).await.as_deref(), Some("parked"));
+            assert_eq!(claim_columns(&pool, &run_id).await, (None, true), "no lease taken");
+            assert_eq!(updated_at(&pool, &run_id).await, aged, "the refusal did not move the TTL anchor");
+            assert_eq!(events_of(&pool, &run_id, "CHECKPOINT_RESTORED").await, 0);
+
+            // Due, and then resumed by the empty reference (the legitimate claim): a named
+            // reference cannot re-claim it once the lease has lapsed, and the anchor stays put.
+            make_park_due(&pool, &run_id).await;
+            let refused = claim(&pool, &cipher(), &run_id, &park, "token-a")
+                .await
+                .expect_err("a due park is still not claimed by its reference");
+            assert_eq!(refusal_pair(&refused), not_claimable);
+            assert_eq!(updated_at(&pool, &run_id).await, aged);
+            let claimed = claim(&pool, &cipher(), &run_id, "", "token-a")
+                .await
+                .expect("the empty reference claims the due park");
+            assert_eq!((claimed.seq, claimed.kind.as_str()), (1, "park"));
+            sqlx::query(
+                "UPDATE run_loop_checkpoints SET claim_expires_at = now() - interval '1 second' WHERE run_id = $1",
+            )
+            .bind(&run_id)
+            .execute(&pool)
+            .await
+            .expect("lapse the lease");
+            for token in ["token-a", "token-b"] {
+                let refused = claim(&pool, &cipher(), &run_id, &park, token)
+                    .await
+                    .expect_err("a lapsed lease is not re-claimed through the park's reference");
+                assert_eq!(refusal_pair(&refused), not_claimable, "{token}");
+            }
+            assert_eq!(fold_state(&pool, &run_id).await.as_deref(), Some("resuming"));
+            assert_eq!(updated_at(&pool, &run_id).await, aged, "the park's TTL anchor never moved");
+            assert_eq!(events_of(&pool, &run_id, "CHECKPOINT_RESTORED").await, 1);
+            // The empty reference still takes it.
+            let again = claim(&pool, &cipher(), &run_id, "", "token-b")
+                .await
+                .expect("the lapsed lease is claimed by the empty reference");
+            assert_eq!(again.seq, 1);
+            assert_eq!(updated_at(&pool, &run_id).await, aged);
+        }
+
+        /// `SaveLoopCheckpoint` served through its handler function: the response carries the
+        /// store's own `park_accepted`.
+        async fn save_rpc_response(
+            pool: &PgPool,
+            owner: &crate::auth::VerifiedIdentity,
+            run_id: &str,
+            expected_seq: u64,
+            kind: &str,
+            fold: Vec<u8>,
+            pause_ref: &str,
+            park: Option<(&str, DateTime<Utc>)>,
+        ) -> Result<pb::SaveLoopCheckpointResponse, Status> {
+            crate::grpc::save_loop_checkpoint_inner(
+                pool,
+                owner,
+                pb::SaveLoopCheckpointRequest {
+                    run_id: run_id.to_owned(),
+                    expected_seq,
+                    kind: kind.to_owned(),
+                    fold,
+                    authority_digest: "auth-1".to_owned(),
+                    pause_ref: pause_ref.to_owned(),
+                    park_reason: park.map_or_else(String::new, |(reason, _)| reason.to_owned()),
+                    park_until: park.map(|(_, until)| prost_types::Timestamp {
+                        seconds: until.timestamp(),
+                        nanos: i32::try_from(until.timestamp_subsec_nanos()).expect("nanos"),
+                    }),
+                },
+                true,
+                || Ok(cipher()),
+            )
+            .await
+            .map(tonic::Response::into_inner)
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+        async fn loop_checkpoint_the_save_rpc_echoes_park_accepted_from_the_store() {
+            let Some(pool) = scratch_pool().await else { return };
+            let soon = Utc::now() + chrono::Duration::seconds(3600);
+
+            // Park recovery on: a park under the park rules is echoed true; every other save
+            // (a round, a pause) false; a refused park is an error and no echo at all.
+            {
+                let _on = forced_rules(true);
+                let (run_id, org, _user) = seed_run(&pool, "persistent").await;
+                let owner = crate::auth::VerifiedIdentity::user_for_test(&org, "u1");
+                let refused = save_rpc_response(
+                    &pool,
+                    &owner,
+                    &run_id,
+                    0,
+                    "park",
+                    fold_for(&run_id),
+                    "appr_1",
+                    Some(("provider_exhausted", soon)),
+                )
+                .await
+                .expect_err("not a park under the run's reference");
+                assert_eq!(refused.message(), "park_not_at_round_boundary");
+                let pause_ref = park_ref(&run_id, 1);
+                let parked = save_rpc_response(
+                    &pool,
+                    &owner,
+                    &run_id,
+                    0,
+                    "park",
+                    park_fold_for(&run_id, &pause_ref, 1),
+                    &pause_ref,
+                    Some(("provider_exhausted", soon)),
+                )
+                .await
+                .expect("a park under the park rules");
+                assert_eq!((parked.seq, parked.park_accepted), (1, true));
+                let round = save_rpc_response(&pool, &owner, &run_id, 1, "round", fold_for(&run_id), "", None)
+                    .await
+                    .expect("a round");
+                assert_eq!((round.seq, round.park_accepted), (2, false));
+                let pause = save_rpc_response(&pool, &owner, &run_id, 2, "pause", fold_for(&run_id), "appr_1", None)
+                    .await
+                    .expect("a pause");
+                assert_eq!((pause.seq, pause.park_accepted), (3, false));
+            }
+
+            // Park recovery off: the committed store takes the same park and does not echo it.
+            {
+                let _off = forced_rules(false);
+                let (run_id, org, _user) = seed_run(&pool, "persistent").await;
+                let owner = crate::auth::VerifiedIdentity::user_for_test(&org, "u1");
+                let pause_ref = park_ref(&run_id, 1);
+                let parked = save_rpc_response(
+                    &pool,
+                    &owner,
+                    &run_id,
+                    0,
+                    "park",
+                    park_fold_for(&run_id, &pause_ref, 1),
+                    &pause_ref,
+                    Some(("provider_exhausted", soon)),
+                )
+                .await
+                .expect("a park stored as committed");
+                assert_eq!((parked.seq, parked.park_accepted), (1, false));
+            }
+        }
+
+        /// The committed park-seeding tests name the reference `appr_1` and use the golden fold's
+        /// shape. They run with park recovery off (the harness scrubs the switch), where the park
+        /// rules are not asked; `seed_fold` now writes a park-SHAPED fold, so the same helper also
+        /// stands under the park rules when it is given the run's own reference.
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+        async fn loop_checkpoint_the_committed_park_seeding_tests_pass_through_the_amended_seed_fold() {
+            let Some(pool) = scratch_pool().await else { return };
+            let until = Utc::now() + chrono::Duration::seconds(3600);
+
+            {
+                let _off = forced_rules(false);
+                for reason in mp_contracts::loop_fold::ParkReason::ALL {
+                    let (run_id, _org, _user) = seed_run(&pool, "persistent").await;
+                    seed_fold(&pool, &run_id, "park", "appr_1", reason.as_str(), Some(until))
+                        .await
+                        .expect("committed: a park seeded under `appr_1`");
+                    assert_eq!(fold_state(&pool, &run_id).await.as_deref(), Some("parked"));
+                    // It opens and parses, and it is a park fold under the seeded reference.
+                    let claimed = claim(&pool, &cipher(), &run_id, "appr_1", "token-a")
+                        .await
+                        .expect("the committed claim by reference");
+                    let fold = check_fold(&run_id, &claimed.fold).expect("a fold of this run");
+                    let pending = fold.pending.expect("a pending park");
+                    assert_eq!((pending.kind, pending.pause_ref.as_str()), (PauseKind::Park, "appr_1"));
+                    assert!(fold.round_in_flight.is_none());
+                }
+            }
+
+            let _on = forced_rules(true);
+            let (run_id, _org, _user) = seed_run(&pool, "persistent").await;
+            let refused = seed_fold(&pool, &run_id, "park", "appr_1", "provider_exhausted", Some(until))
+                .await
+                .expect_err("under the park rules `appr_1` is not the run's park reference");
+            assert_eq!(refused.message(), "park_ref_mismatch");
+            seed_fold(&pool, &run_id, "park", &park_ref(&run_id, 1), "provider_exhausted", Some(until))
+                .await
+                .expect("the run's own reference stands under the park rules");
+            assert_eq!(fold_state(&pool, &run_id).await.as_deref(), Some("parked"));
         }
     }
 }

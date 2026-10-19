@@ -4226,7 +4226,7 @@ pub(crate) async fn save_loop_checkpoint_inner(
                 .ok_or_else(|| Status::invalid_argument("park_until is out of range"))
         })
         .transpose()?;
-    let seq = loop_checkpoint::save(
+    let saved = loop_checkpoint::save(
         pool,
         &cipher,
         loop_checkpoint::SaveInput {
@@ -4242,10 +4242,11 @@ pub(crate) async fn save_loop_checkpoint_inner(
     )
     .await?;
     Ok(Response::new(pb::SaveLoopCheckpointResponse {
-        seq: u64::try_from(seq).map_err(|_| Status::internal("loop checkpoint seq is negative"))?,
-        // No store path accepts a park under the park rules yet (WS03 S8-4
-        // fills this from the store's answer): every save reports false.
-        park_accepted: false,
+        seq: u64::try_from(saved.seq)
+            .map_err(|_| Status::internal("loop checkpoint seq is negative"))?,
+        // True only for a park the store took under the park rules (WS03 S8-4); false for
+        // every other save, and for every save while park recovery is off.
+        park_accepted: saved.park_accepted,
     }))
 }
 

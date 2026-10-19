@@ -27,13 +27,14 @@ set -euo pipefail
 # Every docker call runs under timeout, so a wedged engine ends the run as BLOCKED
 # instead of hanging. Cargo is not bounded, because a full run takes a long time.
 # The run clears the variables that change what these tests do: DATABASE_URL, the
-# SESSION_CORE_*_ENABLED switches, EXECUTION_*, AGENT_CONTINUE_*, NATS_*, REQUIRE_CONTRACT,
+# SESSION_CORE_*_ENABLED switches, SESSION_CORE_PARK_TTL_SECONDS (the park DB tests assume
+# its default), EXECUTION_*, AGENT_CONTINUE_*, NATS_*, REQUIRE_CONTRACT,
 # CI, MODEL_PLANE_RESIDENCY and UPDATE_AUDIT_CORE_FIXTURES. Other environment reads are not
 # cleared. The block is marked, and the contract test runs it under an empty environment.
 # An unfiltered run prints its pass count in a banner. The last full run recorded for
-# this harness, through a disposable Postgres, passed 658 tests with 0 failed (2026-10-19;
-# it was 648 before the S8-0 recovery-expiry tests, 642 before the descriptor-reaper tests,
-# and 588 before the Build 1b, 2 and 2b rounds).
+# this harness, through a disposable Postgres, passed 680 tests with 0 failed (2026-10-20;
+# it was 658 before the S8-4 park store tests, 648 before the S8-0 recovery-expiry tests,
+# 642 before the descriptor-reaper tests, and 588 before the Build 1b, 2 and 2b rounds).
 #
 # Needs a responding Docker engine and the image below present locally.
 # If the engine is wedged, see apps/Model Plane/docs/runbooks/docker-desktop-recovery.md.
@@ -49,7 +50,7 @@ export MSYS_NO_PATHCONV=1
 unset DATABASE_URL
 while IFS= read -r name; do
   unset "$name"
-done < <(compgen -e | grep -E '^(SESSION_CORE_.*_ENABLED|EXECUTION_.*|AGENT_CONTINUE_.*|NATS_.*|REQUIRE_CONTRACT|CI|MODEL_PLANE_RESIDENCY|UPDATE_AUDIT_CORE_FIXTURES)$' || true)
+done < <(compgen -e | grep -E '^(SESSION_CORE_.*_ENABLED|SESSION_CORE_PARK_TTL_SECONDS|EXECUTION_.*|AGENT_CONTINUE_.*|NATS_.*|REQUIRE_CONTRACT|CI|MODEL_PLANE_RESIDENCY|UPDATE_AUDIT_CORE_FIXTURES)$' || true)
 # END env scrub
 
 # Must match the image the stack runs (apps/Model Plane/deploy/docker-compose.yml).
@@ -238,7 +239,7 @@ run_selection() {
     # The unfiltered run is the whole suite, so its count goes where a person will read it.
     printf '\n============================================================\n'
     printf 'session-core DB tests, FULL RUN: %s passed, 0 failed\n' "$(count_passed "$LOG")"
-    printf 'last full run recorded for this harness: 658 passed, 0 failed; a different count means a test was added, removed or skipped\n'
+    printf 'last full run recorded for this harness: 680 passed, 0 failed; a different count means a test was added, removed or skipped\n'
     printf '============================================================\n\n'
   fi
   return 0

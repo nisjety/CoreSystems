@@ -82,7 +82,7 @@ done
 unbounded="$(grep -nE '(^|[^[:alnum:]_-])docker [a-z]' "$HARNESS" | grep -v 'timeout' | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
 [[ -z "$unbounded" ]] || fail "a docker call is not bounded by timeout: $unbounded"
 
-grep -qF '658' "$HARNESS" || fail 'the harness must record the last full run count, 658 passed'
+grep -qF '680' "$HARNESS" || fail 'the harness must record the last full run count, 680 passed'
 
 # The env scrub: run the block the harness marks, under an environment that carries
 # every name the block must clear, and check what survives. Nothing here starts Docker.
@@ -93,6 +93,7 @@ env -i PATH="$PATH" \
   DATABASE_URL=postgres://leak \
   SESSION_CORE_LOOP_CHECKPOINT_ENABLED=true \
   SESSION_CORE_TOOL_LEDGER_SWEEP_ENABLED=true \
+  SESSION_CORE_PARK_TTL_SECONDS=60 \
   EXECUTION_EFFECT_LEDGER_ENABLED=true \
   AGENT_CONTINUE_AFTER_APPROVAL_ENABLED=true \
   NATS_URL=nats://leak \
@@ -106,7 +107,7 @@ env -i PATH="$PATH" \
   bash -c 'set -euo pipefail; source "$1"; compgen -e' _ "$WORK/scrub.sh" >"$WORK/scrub.names" 2>"$WORK/scrub.err" \
   || fail "the env scrub block failed: $(cat "$WORK/scrub.err")"
 for leaked in DATABASE_URL SESSION_CORE_LOOP_CHECKPOINT_ENABLED SESSION_CORE_TOOL_LEDGER_SWEEP_ENABLED \
-  EXECUTION_EFFECT_LEDGER_ENABLED AGENT_CONTINUE_AFTER_APPROVAL_ENABLED NATS_URL NATS_USER \
+  SESSION_CORE_PARK_TTL_SECONDS EXECUTION_EFFECT_LEDGER_ENABLED AGENT_CONTINUE_AFTER_APPROVAL_ENABLED NATS_URL NATS_USER \
   REQUIRE_CONTRACT CI MODEL_PLANE_RESIDENCY UPDATE_AUDIT_CORE_FIXTURES; do
   grep -qxF "$leaked" "$WORK/scrub.names" && fail "the env scrub left $leaked set"
 done

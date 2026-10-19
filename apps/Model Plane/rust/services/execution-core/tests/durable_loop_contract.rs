@@ -72,6 +72,7 @@ const EXECUTOR_GRPC: &str = "src/grpc.rs";
 const EXECUTOR_LOOP: &str = "src/runtime_loop/agent.rs";
 const EXECUTOR_EFFECT: &str = "src/runtime_loop/effect.rs";
 const EXECUTOR_FOLD: &str = "src/runtime_loop/fold.rs";
+const EXECUTOR_PARK: &str = "src/runtime_loop/park.rs";
 const SESSION_APPROVALS: &str = "../session-core/src/orchestration_store.rs";
 const SESSION_APPROVAL_RPC: &str = "../session-core/src/orchestration_grpc.rs";
 const SESSION_CHECKPOINT: &str = "../session-core/src/loop_checkpoint.rs";
@@ -872,6 +873,11 @@ fn switch_table() -> Vec<(&'static str, String, &'static str)> {
             "the /continue pre-consume and the loop stage (read once in sse.rs continue_run through loop_resume_enabled; gateway_resume_reader_violations ties this row to that reader)",
         ),
         (
+            "execution-core",
+            mp_contracts::loop_fold::LOOP_PARKING_ENV.to_owned(),
+            "the park write (WS03 S8-A S8-5; read through park::parking_active, which also needs the resume switches above; a park resume is never gated by it)",
+        ),
+        (
             "session-core",
             const_str(&read(SESSION_CHECKPOINT), "ENABLED_ENV"),
             "the fold store",
@@ -885,6 +891,11 @@ fn switch_table() -> Vec<(&'static str, String, &'static str)> {
             "session-core",
             const_str(&read(SESSION_TERMINALIZATION), "APPROVAL_EXPIRY_ENV"),
             "the recovery worker's reading of an expired approval (WS03 S8-0; independent of the coupled flip)",
+        ),
+        (
+            "session-core",
+            const_str(&read(SESSION_TERMINALIZATION), "PARK_RECOVERY_ENV"),
+            "the park rules of the fold store and the recovery worker's spare of a parked fold (WS03 S8-4; needs the fold store; read through park_recovery_active)",
         ),
     ]
 }
@@ -1315,6 +1326,607 @@ fn resume_parser_strictness_violations(loop_fold_source: &str) -> Vec<String> {
             "loop_resume_enabled must parse with the strict `switch_from` alone (`true` and nothing else), not {calls:?}"
         )]
     }
+}
+
+// ---- WS03 S8-A S8-5: the park write -----------------------------------------------------------
+
+/// What the production constant `park::PARK_RESUME_BUILT` must be. `false` until the park RESUME
+/// (WS03 S8-6) is built: the executor still refuses `AgentResume.mode` `park`, so a park written
+/// by such a binary could not be continued. The S8-6 unit flips this and the constant together.
+const PARK_RESUME_BUILT_EXPECTED: bool = false;
+
+/// The executor's park (a typed, recoverable stop of a pinned root run saved as a durable
+/// `park` fold, the run left open) is written by ONE function, behind ONE decision, from three
+/// places in the loop, and a parked run returns before it is finalized. Each claim below is what
+/// a careless edit would break without turning a lib test red:
+///
+/// * `save_park(` is called once in the executor, by `park::try_park`, after `parkable(` and
+///   `park_reason_for(`; the RPC under it (`park_rpc`) is private to the writer, and the writer's
+///   park save has no probe and no tombstone;
+/// * a park that was not accepted, or that may have committed, is closed (`close_stray_park(`
+///   twice in `try_park`), so no stray resumable park outlives the committed fallback;
+/// * the four park keys (`EXT_PARKS` and its three siblings) are written by `park_fold` and
+///   nowhere else, and the executor never writes `crash_interrupted`;
+/// * the loop parks from exactly three stops, in the order the loop meets them (a latched
+///   refusal, the deadline, a failed round), each through `park_at_boundary`, the only caller of
+///   `try_park`; `run_parkable` is decided once, before the loop starts, from the run's own
+///   facts (zero-retention, waived, Space, depth, release, derivable tools, route);
+/// * a parked outcome returns from `run_agent_with_route_parkable` BEFORE `finalize`, and its
+///   arm names no receipt, no append and no lease release;
+/// * the tool set a run offers is derivable only for a fresh request, never for an approval
+///   continuation, never for a delegated child;
+/// * the parking switch has one parser, and a park is written only with the resume switches on.
+///
+/// `sources` are the executor's production files (for the "only here" claims); the three named
+/// files are read separately because the guard reads their functions. The parking switch's one
+/// parser is [`one_parking_parser_violations`], over every service's sources.
+fn park_writer_violations(
+    sources: &[(String, String)],
+    executor_loop: &str,
+    executor_fold: &str,
+    executor_park: &str,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    let agent = Code::new(executor_loop).without_tests();
+    let fold = Code::new(executor_fold).without_tests();
+    let park = Code::new(executor_park).without_tests();
+    let is_file = |path: &str, suffix: &str| path.replace('\\', "/").ends_with(suffix);
+    // Every executor file's production code, cleaned once.
+    let produced: Vec<(&String, Code)> = sources
+        .iter()
+        .map(|(path, source)| (path, Code::new(source).without_tests()))
+        .collect();
+
+    // One writer call: `try_park`.
+    let save_call = r"\.\s*save_park\s*\(";
+    for (path, code) in &produced {
+        if !is_file(path, "runtime_loop/park.rs") && matches_of(&code.skel, save_call) > 0 {
+            violations.push(format!(
+                "{path} calls `.save_park(`: only park::try_park writes a park"
+            ));
+        }
+    }
+    match park.fn_body_skel("try_park") {
+        None => violations.push("park.rs has no `fn try_park`: re-point this guard".into()),
+        Some(body) => {
+            let first = |pattern: &str| {
+                Regex::new(pattern)
+                    .expect("pattern")
+                    .find(&body)
+                    .map(|found| found.start())
+            };
+            match (matches_of(&body, save_call), first(save_call)) {
+                (1, Some(save_at)) => {
+                    for (what, pattern) in [
+                        ("the park decision (`parkable(`)", r"\bparkable\s*\("),
+                        ("the decision table (`park_reason_for(`)", r"\bpark_reason_for\s*\("),
+                    ] {
+                        if first(pattern).is_none_or(|at| at >= save_at) {
+                            violations.push(format!(
+                                "try_park does not decide with {what} before it saves"
+                            ));
+                        }
+                    }
+                }
+                (calls, _) => violations.push(format!(
+                    "try_park calls `.save_park(` {calls} times, expected exactly one"
+                )),
+            }
+            if matches_of(&body, r"\bclose_stray_park\s*\(") < 2 {
+                violations.push(
+                    "try_park does not close the row of a park that was not accepted and of one that may have committed (`close_stray_park(` twice)"
+                        .into(),
+                );
+            }
+            if !body.contains("NotAccepted") {
+                violations.push("try_park does not handle `ParkSaveError::NotAccepted`".into());
+            }
+            if matches_of(&body, r"\bpark_fold\s*\(") != 1 {
+                violations.push("try_park does not build the park fold through `park_fold(`".into());
+            }
+        }
+    }
+    if !park.text.contains("\"park_not_taken\"") {
+        violations.push("park.rs no longer closes a stray park with the reason `park_not_taken`".into());
+    }
+
+    // The RPC is private to the writer's park save, which has no probe and no tombstone.
+    if Regex::new(r"\bpub(?:\([^)]*\))?\s+(?:async\s+)?fn\s+park_rpc\b")
+        .expect("pattern")
+        .is_match(&fold.skel)
+    {
+        violations.push("fold.rs `park_rpc` must stay private to FoldWriter::save_park".into());
+    }
+    let rpc_calls = matches_of(&fold.skel, r"\bpark_rpc\s*\(")
+        .saturating_sub(matches_of(&fold.skel, r"\bfn\s+park_rpc\b"));
+    let in_save_park = fold
+        .fn_body_skel("save_park")
+        .is_some_and(|body| matches_of(&body, r"\bpark_rpc\s*\(") == 1);
+    if rpc_calls != 1 || !in_save_park {
+        violations.push(format!(
+            "fold.rs calls `park_rpc(` {rpc_calls} times (in save_park: {in_save_park}); the park RPC is called once, by save_park"
+        ));
+    }
+    for writer_fn in ["save_park", "park_with"] {
+        match fold.fn_body_skel(writer_fn) {
+            None => violations.push(format!("fold.rs has no `fn {writer_fn}`")),
+            Some(body) => {
+                for forbidden in ["save_tombstone", "save_bytes", "save_fold", "probe"] {
+                    if word_count(&body, forbidden) > 0 {
+                        violations.push(format!(
+                            "{writer_fn} names `{forbidden}`: a park save is one RPC, no probe and no tombstone"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    for (path, code) in &produced {
+        if !is_file(path, "runtime_loop/fold.rs")
+            && matches_of(&code.skel, r"\bSaveKind\s*::\s*Park\b") > 0
+        {
+            violations.push(format!("{path} names `SaveKind::Park`: only the writer saves a park"));
+        }
+    }
+
+    // The park keys are written by `park_fold` and nowhere else; the executor never writes a crash.
+    for key in ["EXT_PARKS", "EXT_ROUTE_MODEL", "EXT_ROUTE_CONNECTION", "EXT_CHILD_CEILING"] {
+        for (path, code) in &produced {
+            if !is_file(path, "runtime_loop/park.rs") && word_count(&code.skel, key) > 0 {
+                violations.push(format!(
+                    "{path} names {key}: a park key is written only by park::park_fold"
+                ));
+            }
+        }
+        let in_fold = park
+            .fn_body_skel("park_fold")
+            .map_or(0, |body| word_count(&body, key));
+        if in_fold != 1 || word_count(&park.skel, key) != 1 {
+            violations.push(format!(
+                "park.rs names {key} {} times ({in_fold} in park_fold), expected exactly once, in park_fold",
+                word_count(&park.skel, key)
+            ));
+        }
+    }
+    for (path, code) in &produced {
+        if !is_file(path, "runtime_loop/park.rs")
+            && word_count(&code.skel, "CrashInterrupted") > 0
+        {
+            violations.push(format!("{path} names CrashInterrupted: the executor never writes a crash park"));
+        }
+    }
+    if park
+        .fn_body_skel("park_reason_for")
+        .is_none_or(|body| word_count(&body, "CrashInterrupted") > 0)
+    {
+        violations.push("park_reason_for names CrashInterrupted (or is gone): the table never produces a crash".into());
+    }
+
+    // The loop: three stops, one door, one decision.
+    match agent.fn_body_skel("run_rounds") {
+        None => violations.push("agent.rs has no `fn run_rounds`: re-point this guard".into()),
+        Some(rounds) => {
+            let boundary = r"\bpark_at_boundary\s*\(";
+            let calls_in_rounds = matches_of(&rounds, boundary);
+            let calls_total = matches_of(&agent.skel, boundary)
+                .saturating_sub(matches_of(&agent.skel, r"\bfn\s+park_at_boundary\b"));
+            if calls_in_rounds != 3 || calls_total != 3 {
+                violations.push(format!(
+                    "agent.rs calls `park_at_boundary(` {calls_total} times ({calls_in_rounds} inside run_rounds); the loop parks from exactly three stops"
+                ));
+            }
+            let mut at = Vec::new();
+            for stop in ["LatchedRefusal", "Deadline", "FailedRound"] {
+                let found: Vec<usize> = Regex::new(&format!(r"\bParkStop\s*::\s*{stop}\s*\("))
+                    .expect("pattern")
+                    .find_iter(&rounds)
+                    .map(|found| found.start())
+                    .collect();
+                match found.as_slice() {
+                    [one] => at.push(*one),
+                    other => violations.push(format!(
+                        "run_rounds names `ParkStop::{stop}(` {} times, expected exactly once",
+                        other.len()
+                    )),
+                }
+            }
+            if at.len() == 3 && !(at[0] < at[1] && at[1] < at[2]) {
+                violations.push(
+                    "the park stops are not in the order the loop meets them: a latched refusal, the deadline, a failed round"
+                        .into(),
+                );
+            }
+            let built = r"\boutcome\s*:\s*RoundsOutcome\s*::\s*Parked\s*\(";
+            if matches_of(&rounds, built) != 3 || matches_of(&agent.skel, built) != 3 {
+                violations.push(
+                    "agent.rs builds `RoundsOutcome::Parked(` other than three times, all in run_rounds"
+                        .into(),
+                );
+            }
+            if matches_of(&rounds, r"\bpark\s*::\s*run_parkable\s*\(") != 1
+                || matches_of(&agent.skel, r"\bpark\s*::\s*run_parkable\s*\(") != 1
+            {
+                violations.push(
+                    "agent.rs decides `run_parkable(` other than once, in run_rounds".into(),
+                );
+            } else if let (Some(gate_at), Some(loop_at)) = (
+                Regex::new(r"\bpark\s*::\s*run_parkable\s*\(")
+                    .expect("pattern")
+                    .find(&rounds)
+                    .map(|found| found.start()),
+                Regex::new(r"\bwhile\s+rounds_executed\b")
+                    .expect("pattern")
+                    .find(&rounds)
+                    .map(|found| found.start()),
+            ) {
+                if gate_at > loop_at {
+                    violations.push(
+                        "run_rounds decides `run_parkable(` after its loop starts: it is read once, before the first round"
+                            .into(),
+                    );
+                }
+            }
+            for (stop, anchor) in [
+                ("LatchedRefusal", r"\.\s*refusal\s*\.\s*latched\s*\("),
+                ("Deadline", r"\.\s*deadline\s*\.\s*expired\s*\("),
+                ("FailedRound", r"\brefusal_for_failed_round\s*\("),
+            ] {
+                let stop_at = Regex::new(&format!(r"\bParkStop\s*::\s*{stop}\s*\("))
+                    .expect("pattern")
+                    .find(&rounds)
+                    .map(|found| found.start());
+                let anchor_at = Regex::new(anchor)
+                    .expect("pattern")
+                    .find(&rounds)
+                    .map(|found| found.start());
+                if let (Some(stop_at), Some(anchor_at)) = (stop_at, anchor_at) {
+                    if stop_at < anchor_at {
+                        violations.push(format!(
+                            "the `{stop}` park stop comes before the check it follows (`{anchor}`)"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    match agent.fn_body_skel("park_at_boundary") {
+        None => violations.push("agent.rs has no `fn park_at_boundary`".into()),
+        Some(body) => {
+            if matches_of(&body, r"\bpark\s*::\s*try_park\s*\(") != 1
+                || matches_of(&agent.skel, r"\btry_park\s*\(") != 1
+            {
+                violations.push(
+                    "agent.rs reaches `try_park(` other than once, from park_at_boundary".into(),
+                );
+            }
+            // A resume must have a round left: the decision is fed the rounds the run has
+            // CHARGED (its own, the failed one included, and its delegates') against its OWN
+            // budget, and the three stops hand it exactly those.
+            let flat: String = body.split_whitespace().collect();
+            let need = "rounds_used:point.rounds_executed.saturating_add(point.delegated_rounds),max_rounds,";
+            if !flat.contains(need) {
+                violations.push(format!(
+                    "park_at_boundary no longer builds ParkFacts with `{need}`: a resume must have a round left"
+                ));
+            }
+            for (index, found) in Regex::new(r"\bpark_at_boundary\s*\(")
+                .expect("pattern")
+                .find_iter(&agent.skel)
+                .filter(|found| !agent.skel[..found.start()].trim_end().ends_with("fn"))
+                .enumerate()
+            {
+                let arguments = call_arguments(&agent, found.end() - 1);
+                let argument = |at: usize| -> String {
+                    arguments
+                        .get(at)
+                        .map(|text| text.split_whitespace().collect())
+                        .unwrap_or_default()
+                };
+                if argument(5) != "max_rounds" {
+                    violations.push(format!(
+                        "park_at_boundary call {index} is not handed the run's `max_rounds` as its budget"
+                    ));
+                }
+                if !argument(6).starts_with("ParkPoint{rounds_executed,delegated_rounds,") {
+                    violations.push(format!(
+                        "park_at_boundary call {index} does not hand the loop's own `rounds_executed` and `delegated_rounds` to the decision"
+                    ));
+                }
+            }
+        }
+    }
+
+    // The run's own facts feed the decision.
+    let literals: Vec<usize> = Regex::new(r"\bStaticFacts\s*\{")
+        .expect("pattern")
+        .find_iter(&agent.skel)
+        .map(|found| found.end() - 1)
+        .collect();
+    match literals.as_slice() {
+        [open] => {
+            let body = matching_brace(&agent.skel, *open)
+                .map_or("", |close| &agent.text[*open..=close])
+                .split_whitespace()
+                .collect::<String>();
+            for (field, want) in [
+                ("depth", "ctx.depth"),
+                ("zdr", "req.zdr"),
+                ("waived", "ctx.route.is_waived()"),
+                ("space", "!req.space_id.is_empty()"),
+                ("tools_derivable", "ctx.tools_derivable"),
+                ("holds_release", "ctx.release.is_some()"),
+                ("pinned", "ctx.route.is_pinned()"),
+            ] {
+                if !body.contains(&format!("{field}:{want},")) {
+                    violations.push(format!(
+                        "the run's StaticFacts do not read `{field}: {want}`: the park decision must be fed the run's own facts"
+                    ));
+                }
+            }
+        }
+        other => violations.push(format!(
+            "agent.rs builds StaticFacts {} times, expected the one place the loop decides run_parkable",
+            other.len()
+        )),
+    }
+    match park.fn_body_skel("run_parkable") {
+        None => violations.push("park.rs has no `fn run_parkable`".into()),
+        Some(body) => {
+            let body = body.split_whitespace().collect::<String>();
+            for need in [
+                "parking_active()",
+                "facts.depth==0",
+                "!facts.zdr",
+                "!facts.waived",
+                "!facts.space",
+                "facts.tools_derivable",
+                "!facts.holds_release",
+                "SeedKind::Fresh|SeedKind::Parked",
+                "facts.pinned",
+            ] {
+                if !body.contains(need) {
+                    violations.push(format!("run_parkable no longer requires `{need}`"));
+                }
+            }
+        }
+    }
+
+    // A parked outcome returns before finalize, and says nothing of a terminal outcome.
+    match agent.fn_body_skel("run_agent_with_route_parkable") {
+        None => violations.push("agent.rs has no `fn run_agent_with_route_parkable`".into()),
+        Some(body) => {
+            let parked = Regex::new(r"\bRoundsOutcome\s*::\s*Parked\s*\(").expect("pattern");
+            let finalize = Regex::new(r"\bfinalize\s*\(").expect("pattern");
+            let release = Regex::new(r"\brelease_sandbox_lease_if_any\s*\(").expect("pattern");
+            match (parked.find(&body), finalize.find(&body), release.find(&body)) {
+                (Some(arm), Some(fin), Some(rel)) => {
+                    // Every mention of the parked outcome comes before both, not only the first.
+                    if parked
+                        .find_iter(&body)
+                        .any(|at| at.start() > fin.start() || at.start() > rel.start())
+                    {
+                        violations.push(
+                            "the parked outcome is matched after `finalize(` or the lease release: a parked run returns before both"
+                                .into(),
+                        );
+                    }
+                    let rest = &body[arm.end()..];
+                    let arm_text = rest
+                        .find("RoundsOutcome")
+                        .map_or(rest, |next| &rest[..next]);
+                    if !arm_text.contains("return") {
+                        violations.push("the parked outcome's arm does not return".into());
+                    }
+                    for forbidden in [
+                        "finalize",
+                        "record_managed_agent_terminal_outcome",
+                        "release_sandbox_lease_if_any",
+                        "append_message",
+                        "AppendMessage",
+                        "RecordTerminalOutcome",
+                    ] {
+                        if word_count(arm_text, forbidden) > 0 {
+                            violations.push(format!(
+                                "the parked outcome's arm names `{forbidden}`: a parked run writes no receipt, no message and releases no lease"
+                            ));
+                        }
+                    }
+                }
+                _ => violations.push(
+                    "run_agent_with_route_parkable no longer matches the parked outcome before finalize and the lease release"
+                        .into(),
+                ),
+            }
+        }
+    }
+    match park.fn_body_skel("parked_response") {
+        None => violations.push("park.rs has no `fn parked_response`".into()),
+        Some(body) => {
+            for forbidden in [
+                "finalize",
+                "append_message",
+                "AppendMessage",
+                "RecordTerminalOutcome",
+            ] {
+                if word_count(&body, forbidden) > 0 {
+                    violations.push(format!("parked_response names `{forbidden}`"));
+                }
+            }
+        }
+    }
+
+    // Derivability: fresh only.
+    let derivable_root =
+        r"\btools_derivable\s*:\s*derivable\s*&&\s*resumed\s*\.\s*is_none\s*\(\s*\)";
+    let derivable_child = r"\btools_derivable\s*:\s*false\b";
+    if matches_of(&agent.skel, derivable_root) != 1 || matches_of(&agent.skel, derivable_child) != 1
+    {
+        violations.push(
+            "the loop's contexts do not read `tools_derivable: derivable && resumed.is_none()` (root) and `tools_derivable: false` (child), once each"
+                .into(),
+        );
+    }
+    match agent.fn_body_skel("offered_tools") {
+        None => violations.push("agent.rs has no `fn offered_tools`".into()),
+        Some(body) => {
+            if !Regex::new(r"\.\s*resume\s*\.\s*is_some\s*\(")
+                .expect("pattern")
+                .is_match(&body)
+                || !Regex::new(r"\bderivable\s*:\s*false\b")
+                    .expect("pattern")
+                    .is_match(&body)
+            {
+                violations.push(
+                    "offered_tools no longer reports an approval continuation's tool set as not derivable"
+                        .into(),
+                );
+            }
+        }
+    }
+
+    // The switch: a park is written only when it can be resumed.
+    let needs = |name: &str, needles: &[&str], violations: &mut Vec<String>| {
+        match park.fn_body_skel(name) {
+            None => violations.push(format!("park.rs has no `fn {name}`")),
+            Some(body) => {
+                let body = body.split_whitespace().collect::<String>();
+                for needle in needles {
+                    if !body.contains(needle) {
+                        violations.push(format!("{name} no longer reads `{needle}`"));
+                    }
+                }
+            }
+        }
+    };
+    needs(
+        "parking_active",
+        &[
+            "loop_parking_enabled()",
+            "park_resume_built()",
+            "park_resume_active()",
+        ],
+        &mut violations,
+    );
+    // The resume half is not built (S8-6): a park nothing can resume is a run held for the whole
+    // park TTL, so parking is structurally off until `PARK_RESUME_BUILT` is flipped. The ONE
+    // reader of the constant is `park_resume_built`, which `parking_active` reads; the expected
+    // production value is `PARK_RESUME_BUILT_EXPECTED`, which the S8-6 unit flips together with
+    // the constant, in the same commit as the resume half.
+    needs("park_resume_built", &["PARK_RESUME_BUILT"], &mut violations);
+    let declared: Vec<String> =
+        Regex::new(r"\bconst\s+PARK_RESUME_BUILT\s*:\s*bool\s*=\s*(true|false)\s*;")
+            .expect("pattern")
+            .captures_iter(&park.skel)
+            .map(|captured| captured[1].to_owned())
+            .collect();
+    match declared.as_slice() {
+        [value] => {
+            if value != &PARK_RESUME_BUILT_EXPECTED.to_string() {
+                violations.push(format!(
+                    "park.rs declares PARK_RESUME_BUILT = {value}, expected {PARK_RESUME_BUILT_EXPECTED}: the resume half (S8-6) and this guard flip together"
+                ));
+            }
+        }
+        other => violations.push(format!(
+            "park.rs declares `const PARK_RESUME_BUILT: bool` {} times, expected exactly once",
+            other.len()
+        )),
+    }
+    if word_count(&park.skel, "PARK_RESUME_BUILT") != 2 {
+        violations.push(
+            "PARK_RESUME_BUILT is named other than in its declaration and in `park_resume_built`: it has one reader"
+                .into(),
+        );
+    }
+    for (path, code) in &produced {
+        if !is_file(path, "runtime_loop/park.rs") && word_count(&code.skel, "PARK_RESUME_BUILT") > 0 {
+            violations.push(format!("{path} names PARK_RESUME_BUILT: only park.rs reads it"));
+        }
+    }
+    needs(
+        "park_resume_active",
+        &[
+            "loop_resume_enabled()",
+            "continue_enabled()",
+            "checkpoint_enabled()",
+            "ledger_enabled()",
+        ],
+        &mut violations,
+    );
+    needs("loop_parking_enabled", &["lf::loop_parking_enabled()"], &mut violations);
+    violations
+}
+
+/// The parking switch has one parser (`mp_contracts::loop_fold::loop_parking_enabled`, strict:
+/// `true` and nothing else): no production code outside mp-contracts names the variable, so the
+/// executor that writes parks and the gateway that accepts them can never disagree about it.
+fn one_parking_parser_violations(sources: &[(String, String)]) -> Vec<String> {
+    parser_violations(
+        mp_contracts::loop_fold::LOOP_PARKING_ENV,
+        "loop_parking_enabled",
+        sources,
+    )
+}
+
+/// The park rules of session-core's `save` are asked, and `park_accepted` is set, ONLY while
+/// park recovery is active (WS03 S8-4). The store echoes `park_accepted = true` only for a park
+/// that passed every rule under the switch; a `validate_park_save(` call or a `park_accepted =
+/// true;` outside that gate would have a switched-off or old-shaped store tell the executor that
+/// a park was accepted, and the executor would then leave the run open with nothing to resume it.
+/// So each appears exactly once in `save`, and both sit inside the one
+/// `if crate::terminalization::park_recovery_active() {` block, the rules first and the flag
+/// after them.
+fn park_save_gate_violations(checkpoint: &str) -> Vec<String> {
+    let mut violations = Vec::new();
+    let code = Code::new(checkpoint).without_tests();
+    let Some((open, close)) = code.fn_span("save") else {
+        return vec!["loop_checkpoint.rs has no `fn save`: re-point this guard".into()];
+    };
+    let body = &code.skel[open..=close];
+    let gate_pattern = r"\bif\s+crate\s*::\s*terminalization\s*::\s*park_recovery_active\s*\(\s*\)\s*\{";
+    let gates: Vec<_> = Regex::new(gate_pattern)
+        .expect("pattern")
+        .find_iter(body)
+        .collect();
+    if gates.len() != 1 {
+        violations.push(format!(
+            "save has {} `if crate::terminalization::park_recovery_active() {{` gates, expected exactly one (the park rules are not behind the park-recovery switch)",
+            gates.len()
+        ));
+        return violations;
+    }
+    let gate_open = open + gates[0].end() - 1;
+    let Some(gate_close) = matching_brace(&code.skel, gate_open) else {
+        return vec!["the park-recovery gate of save has no closing brace".into()];
+    };
+    let gate_body = &code.skel[gate_open..=gate_close];
+    let mut validate_at = None;
+    let mut accepted_at = None;
+    for (what, pattern, at) in [
+        ("`validate_park_save(`", r"\bvalidate_park_save\s*\(", &mut validate_at),
+        ("`park_accepted = true;`", r"\bpark_accepted\s*=\s*true\s*;", &mut accepted_at),
+    ] {
+        let in_save = matches_of(body, pattern);
+        let in_gate = matches_of(gate_body, pattern);
+        if in_save != 1 {
+            violations.push(format!(
+                "save has {in_save} occurrences of {what}, expected exactly one"
+            ));
+        }
+        if in_gate != 1 || in_save > in_gate {
+            violations.push(format!(
+                "{what} is not inside the `park_recovery_active()` gate of save: a store with park recovery off would answer as a park-aware one"
+            ));
+        }
+        *at = Regex::new(pattern).expect("pattern").find(gate_body).map(|found| found.start());
+    }
+    // The flag is set after the rules were asked, never before.
+    if let (Some(validate), Some(accepted)) = (validate_at, accepted_at) {
+        if accepted < validate {
+            violations.push("save sets `park_accepted = true;` before it asks `validate_park_save(`".into());
+        }
+    }
+    violations
 }
 
 // ---- WS03 S7c-B2: the gateway's pre-consume, the frames of a continuation, the coupled flip --
@@ -3349,6 +3961,381 @@ fn the_in_place_resume_is_seeded_fenced_and_reserved_in_order() {
     ));
 }
 
+/// The park is written by one function, behind one decision, from three stops, and a parked run
+/// returns before it is finalized (WS03 S8-A, S8-5).
+#[test]
+fn the_park_is_written_by_one_function_from_three_stops_and_returns_before_finalize() {
+    let mut every = Vec::new();
+    for tree in SOURCE_TREES {
+        every.extend(rust_files(tree));
+    }
+    assert_green(&park_writer_violations(
+        &rust_files("src"),
+        &read(EXECUTOR_LOOP),
+        &read(EXECUTOR_FOLD),
+        &read(EXECUTOR_PARK),
+    ));
+    assert_green(&one_parking_parser_violations(&every));
+    // The shared parser exists where the const says it does, and is the strict one.
+    let loop_fold = read("../../crates/mp-contracts/src/loop_fold.rs");
+    assert!(Code::new(&loop_fold)
+        .text
+        .contains("pub fn loop_parking_enabled()"));
+}
+
+/// session-core's `save` asks the park rules, and echoes `park_accepted`, only under park recovery
+/// (WS03 S8-4): the store of an executor's park must be able to say "not accepted".
+#[test]
+fn the_store_asks_the_park_rules_and_accepts_a_park_only_under_park_recovery() {
+    assert_green(&park_save_gate_violations(&read(SESSION_CHECKPOINT)));
+}
+
+/// Each claim of `park_writer_violations` goes red when the code it guards regresses. Kept apart
+/// from `every_guard_goes_red_when_the_code_it_guards_regresses` (whose rows the later S8 steps
+/// leave unchanged), and built the same way: a broken copy of the text, never a production file.
+#[test]
+fn the_park_writer_guard_goes_red_when_the_code_it_guards_regresses() {
+    let mut every = Vec::new();
+    for tree in SOURCE_TREES {
+        every.extend(rust_files(tree));
+    }
+    let executor = rust_files("src");
+    let agent = read(EXECUTOR_LOOP);
+    let fold = read(EXECUTOR_FOLD);
+    let park = read(EXECUTOR_PARK);
+    assert_green(&park_writer_violations(&executor, &agent, &fold, &park));
+
+    // A mutated copy of one of the three files, judged with the rest as they are.
+    let judge = |suffix: &str, text: &str, agent: &str, fold: &str, park: &str| {
+        park_writer_violations(&replace_source(&executor, suffix, text), agent, fold, park)
+    };
+    let broken_agent =
+        |text: String| judge("runtime_loop/agent.rs", &text, &text, &fold, &park);
+    let broken_fold =
+        |text: String| judge("runtime_loop/fold.rs", &text, &agent, &text, &park);
+    let broken_park =
+        |text: String| judge("runtime_loop/park.rs", &text, &agent, &fold, &text);
+
+    // A second writer of a park.
+    must_flag(
+        broken_agent(format!(
+            "{agent}\nfn rogue(mut folds: Folds) {{ let _ = folds.save_park(fold, reason, until); }}"
+        )),
+        "only park::try_park writes a park",
+    );
+    // try_park stops deciding before it saves, or stops closing what it did not take.
+    must_flag(
+        broken_park(mutate(&park, "if !parkable(facts) {", "if false {")),
+        "does not decide with the park decision",
+    );
+    must_flag(
+        broken_park(mutate(&park, "let reason = park_reason_for(stop)?;", "let reason = ParkReason::ProviderExhausted;")),
+        "does not decide with the decision table",
+    );
+    must_flag(
+        broken_park(mutate_in(&park, "async fn try_park", "close_stray_park(site, seq).await;", "")),
+        "does not close the row of a park that was not accepted",
+    );
+    must_flag(
+        broken_park(mutate_in(
+            &park,
+            "async fn try_park",
+            "Err(ParkSaveError::NotAccepted { seq }) =>",
+            "Err(ParkSaveError::Save(SaveError::Stale)) =>",
+        )),
+        "does not handle `ParkSaveError::NotAccepted`",
+    );
+    must_flag(
+        broken_park(mutate(&park, "\"park_not_taken\"", "\"closed\"")),
+        "park_not_taken",
+    );
+    // The park RPC leaks out of the writer, or the writer's park save grows a probe or a tombstone.
+    must_flag(
+        broken_fold(mutate(&fold, "async fn park_rpc(", "pub(crate) async fn park_rpc(")),
+        "must stay private",
+    );
+    must_flag(
+        broken_fold(format!("{fold}\nfn rogue() {{ let _ = park_rpc(c, b, r, &s); }}")),
+        "the park RPC is called once",
+    );
+    must_flag(
+        broken_fold(mutate_in(
+            &fold,
+            "async fn park_with",
+            "let pause_ref = match",
+            "let _ = self.save_tombstone(&Header::of(&fold), \"x\"); let pause_ref = match",
+        )),
+        "no probe and no tombstone",
+    );
+    must_flag(
+        broken_agent(format!("{agent}\nfn rogue() -> SaveKind {{ SaveKind::Park }}")),
+        "only the writer saves a park",
+    );
+    // A park key written anywhere but park_fold, or by the agent, or a crash from the executor.
+    must_flag(
+        broken_agent(format!("{agent}\nfn rogue() {{ let _ = EXT_PARKS; }}")),
+        "a park key is written only by park::park_fold",
+    );
+    must_flag(
+        broken_park(mutate_in(
+            &park,
+            "pub(crate) fn park_fold",
+            "serde_json::Value::from(site.child_ceiling),",
+            "serde_json::Value::from(site.child_ceiling),\n    );\n    fold.extensions.insert(\n        lf::EXT_PARKS.to_owned(),\n        serde_json::Value::from(7),",
+        )),
+        "expected exactly once, in park_fold",
+    );
+    must_flag(
+        broken_park(mutate_in(
+            &park,
+            "pub(crate) fn park_reason_for",
+            "ParkStop::Deadline(DeadlineCause::WallClock) => None,",
+            "ParkStop::Deadline(DeadlineCause::WallClock) => Some(ParkReason::CrashInterrupted),",
+        )),
+        "never produces a crash",
+    );
+    must_flag(
+        broken_agent(format!("{agent}\nfn rogue() {{ let _ = ParkReason::CrashInterrupted; }}")),
+        "never writes a crash park",
+    );
+    // The loop parks from a fourth place, or from the stops in another order, or decides late.
+    must_flag(
+        broken_agent(mutate(
+            &agent,
+            "&super::park::ParkStop::Deadline(cause),",
+            "&super::park::ParkStop::Deadline(cause),\n            )\n            .await;\n            let _ = park_at_boundary(\n                ctx,\n                &mut folds,\n                fold_authority.as_ref(),\n                &fold_prompt_digest,\n                &park_gate,\n                max_rounds,\n                ParkPoint {\n                    rounds_executed,\n                    delegated_rounds,\n                    step_seq,\n                    children_started: 0,\n                    grounded,\n                    compaction_triggered,\n                    attempted_retrievals: &attempted_retrievals,\n                    messages: &messages,\n                },\n                &super::park::ParkStop::Deadline(cause),",
+        )),
+        "the loop parks from exactly three stops",
+    );
+    must_flag(
+        broken_agent(mutate(
+            &agent,
+            "&super::park::ParkStop::LatchedRefusal(&refusal),",
+            "&super::park::ParkStop::FailedRound(&refusal),",
+        )),
+        "`ParkStop::LatchedRefusal(` 0 times",
+    );
+    must_flag(
+        broken_agent(mutate(
+            &agent,
+            "let park_gate = ParkGate {",
+            "let _again = super::park::run_parkable(&facts_again);\n    let park_gate = ParkGate {",
+        )),
+        "other than once, in run_rounds",
+    );
+    must_flag(
+        broken_agent(mutate(&agent, "outcome: RoundsOutcome::Parked(parked),", "outcome: RoundsOutcome::Exhausted,")),
+        "other than three times",
+    );
+    // A site that reaches try_park another way.
+    must_flag(
+        broken_agent(mutate_in(
+            &agent,
+            "async fn park_at_boundary",
+            "super::park::try_park(&site, folds, &snapshot, &facts, stop).await",
+            "{ let _ = super::park::try_park(&site, folds, &snapshot, &facts, stop).await; super::park::try_park(&site, folds, &snapshot, &facts, stop).await }",
+        )),
+        "other than once, from park_at_boundary",
+    );
+    // The decision is fed something other than the run's own facts.
+    for (from, to, field) in [
+        ("zdr: req.zdr,", "zdr: false,", "zdr: req.zdr"),
+        ("waived: ctx.route.is_waived(),", "waived: false,", "waived: ctx.route.is_waived()"),
+        ("space: !req.space_id.is_empty(),", "space: false,", "space: !req.space_id.is_empty()"),
+        ("depth: ctx.depth,", "depth: 0,", "depth: ctx.depth"),
+        ("holds_release: ctx.release.is_some(),", "holds_release: false,", "holds_release: ctx.release.is_some()"),
+        ("tools_derivable: ctx.tools_derivable,", "tools_derivable: true,", "tools_derivable: ctx.tools_derivable"),
+        ("pinned: ctx.route.is_pinned(),", "pinned: true,", "pinned: ctx.route.is_pinned()"),
+    ] {
+        must_flag(
+            broken_agent(mutate_in(&agent, "park::StaticFacts {", from, to)),
+            &format!("do not read `{field}`"),
+        );
+    }
+    for need in ["!facts.holds_release", "!facts.zdr", "!facts.waived", "!facts.space", "facts.depth == 0"] {
+        must_flag(
+            broken_park(mutate_in(&park, "pub(crate) fn run_parkable", need, "true")),
+            "run_parkable no longer requires",
+        );
+    }
+    // A parked run is finalized, or releases its lease, or is matched too late.
+    must_flag(
+        broken_agent(mutate(
+            &agent,
+            "return Ok(super::park::parked_response(",
+            "let _ = finalize(); return Ok(super::park::parked_response(",
+        )),
+        "the parked outcome's arm names `finalize`",
+    );
+    must_flag(
+        broken_agent(mutate(
+            &agent,
+            "return Ok(super::park::parked_response(",
+            "crate::sandbox_lease::release_sandbox_lease_if_any(); return Ok(super::park::parked_response(",
+        )),
+        "releases no lease",
+    );
+    must_flag(
+        broken_agent(mutate(
+            &agent,
+            "crate::sandbox_lease::release_sandbox_lease_if_any(",
+            "if let RoundsOutcome::Parked(p) = x { let _ = p; }\n    crate::sandbox_lease::release_sandbox_lease_if_any(",
+        )),
+        "matched after `finalize(`",
+    );
+    must_flag(
+        broken_park(mutate_in(
+            &park,
+            "pub(crate) fn parked_response",
+            "status: PARKED_STATUS.to_owned(),",
+            "status: PARKED_STATUS.to_owned(), final_output: append_message(),",
+        )),
+        "parked_response names `append_message`",
+    );
+    // Derivability: a continuation or a child that may park.
+    must_flag(
+        broken_agent(mutate(
+            &agent,
+            "tools_derivable: derivable && resumed.is_none(),",
+            "tools_derivable: derivable,",
+        )),
+        "do not read `tools_derivable: derivable && resumed.is_none()`",
+    );
+    must_flag(
+        broken_agent(mutate(&agent, "tools_derivable: false,", "tools_derivable: true,")),
+        "do not read `tools_derivable: derivable && resumed.is_none()`",
+    );
+    must_flag(
+        broken_agent(mutate_in(&agent, "async fn offered_tools", "derivable: false,", "derivable: true,")),
+        "offered_tools no longer reports an approval continuation's tool set as not derivable",
+    );
+    // The switch: a second parser, or a park that does not need the resume switches.
+    // The parking switch's one parser: a second reader of the variable, here or in the gateway.
+    assert_green(&one_parking_parser_violations(&every));
+    must_flag(
+        one_parking_parser_violations(&replace_source(
+            &every,
+            "runtime_loop/park.rs",
+            &format!(
+                "{park}\nfn rogue() -> bool {{ std::env::var(\"EXECUTION_LOOP_PARKING_ENABLED\").is_ok() }}"
+            ),
+        )),
+        "names EXECUTION_LOOP_PARKING_ENABLED itself",
+    );
+    must_flag(
+        one_parking_parser_violations(&replace_source(
+            &every,
+            "model-gateway/src/sse.rs",
+            &format!(
+                "{}\nfn rogue() -> bool {{ std::env::var(\"EXECUTION_LOOP_PARKING_ENABLED\").is_ok() }}",
+                read(GATEWAY_SSE)
+            ),
+        )),
+        "names EXECUTION_LOOP_PARKING_ENABLED itself",
+    );
+    must_flag(
+        broken_park(mutate_in(
+            &park,
+            "pub(crate) fn parking_active",
+            "loop_parking_enabled() && park_resume_built() && park_resume_active()",
+            "loop_parking_enabled() && park_resume_built()",
+        )),
+        "parking_active no longer reads `park_resume_active()`",
+    );
+    must_flag(
+        broken_park(mutate_in(
+            &park,
+            "pub(crate) fn parking_active",
+            "loop_parking_enabled() && park_resume_built() && park_resume_active()",
+            "loop_parking_enabled() && park_resume_active()",
+        )),
+        "parking_active no longer reads `park_resume_built()`",
+    );
+    // The resume half is flagged built before it is (parking switches on with nothing to resume
+    // it), the constant is no longer read, a second reader appears, or the constant is gone.
+    must_flag(
+        broken_park(mutate(
+            &park,
+            "const PARK_RESUME_BUILT: bool = false;",
+            "const PARK_RESUME_BUILT: bool = true;",
+        )),
+        "declares PARK_RESUME_BUILT = true",
+    );
+    must_flag(
+        broken_park(mutate_in(
+            &park,
+            "fn park_resume_built",
+            "    PARK_RESUME_BUILT\n",
+            "    false\n",
+        )),
+        "park_resume_built no longer reads `PARK_RESUME_BUILT`",
+    );
+    must_flag(
+        broken_park(format!("{park}\nfn rogue() -> bool {{ PARK_RESUME_BUILT }}")),
+        "it has one reader",
+    );
+    must_flag(
+        broken_park(mutate(
+            &park,
+            "const PARK_RESUME_BUILT: bool = false;",
+            "const PARK_RESUME_BUILT_GONE: bool = false;",
+        )),
+        "declares `const PARK_RESUME_BUILT: bool` 0 times",
+    );
+    // The park decision's budget: how park_at_boundary builds ParkFacts, and what the stops feed it.
+    must_flag(
+        broken_agent(mutate_in(
+            &agent,
+            "async fn park_at_boundary",
+            "rounds_used: point.rounds_executed.saturating_add(point.delegated_rounds),",
+            "rounds_used: point.rounds_executed,",
+        )),
+        "park_at_boundary no longer builds ParkFacts",
+    );
+    must_flag(
+        broken_agent(mutate_in(
+            &agent,
+            "async fn park_at_boundary",
+            "        max_rounds,\n        parks_so_far: gate.parks_so_far,",
+            "        max_rounds: u32::MAX,\n        parks_so_far: gate.parks_so_far,",
+        )),
+        "park_at_boundary no longer builds ParkFacts",
+    );
+    must_flag(
+        broken_agent(mutate_in(
+            &agent,
+            "Site A of the park (WS03 S8-A)",
+            "                max_rounds,\n",
+            "                max_rounds.saturating_add(1),\n",
+        )),
+        "is not handed the run's `max_rounds`",
+    );
+    must_flag(
+        broken_agent(mutate_in(
+            &agent,
+            "Site B of the park (WS03 S8-A)",
+            "ParkPoint {\n                    rounds_executed,",
+            "ParkPoint {\n                    rounds_executed: 0,",
+        )),
+        "does not hand the loop's own `rounds_executed`",
+    );
+    for needle in [
+        "super::resume::loop_resume_enabled()",
+        "super::resume::continue_enabled()",
+        "fold::checkpoint_enabled()",
+        "super::effect::ledger_enabled()",
+    ] {
+        must_flag(
+            broken_park(mutate_in(&park, "pub(crate) fn park_resume_active", needle, "true")),
+            "park_resume_active no longer reads",
+        );
+    }
+    must_flag(
+        broken_park(mutate_in(&park, "fn loop_parking_enabled", "lf::loop_parking_enabled()", "false")),
+        "loop_parking_enabled no longer reads `lf::loop_parking_enabled()`",
+    );
+}
+
 #[test]
 fn the_continue_switch_has_one_parser() {
     let mut every = Vec::new();
@@ -3810,6 +4797,36 @@ fn every_guard_goes_red_when_the_code_it_guards_regresses() {
             ),
         ),
         "the fold store refuses every class but",
+    );
+
+    // The store's save asks the park rules, and echoes park_accepted, only under park recovery.
+    assert_green(&park_save_gate_violations(&checkpoint));
+    must_flag(
+        park_save_gate_violations(&mutate_in(
+            &checkpoint,
+            "pub(crate) async fn save(",
+            "if crate::terminalization::park_recovery_active() {",
+            "if true {",
+        )),
+        "expected exactly one",
+    );
+    must_flag(
+        park_save_gate_violations(&mutate_in(
+            &checkpoint,
+            "pub(crate) async fn save(",
+            "let mut park_accepted = false;",
+            "let mut park_accepted = false; park_accepted = true;",
+        )),
+        "is not inside the `park_recovery_active()` gate",
+    );
+    must_flag(
+        park_save_gate_violations(&mutate_in(
+            &checkpoint,
+            "pub(crate) async fn save(",
+            "let mut park_accepted = false;",
+            "let mut park_accepted = false; let _ = validate_park_save(input.run_id, &fold, &input, ParkReason::CrashInterrupted, Utc::now(), Utc::now(), 0);",
+        )),
+        "`validate_park_save(`",
     );
 
     // Compose: a switch missing from a service, defaulting on, or a new switch defaulting on.

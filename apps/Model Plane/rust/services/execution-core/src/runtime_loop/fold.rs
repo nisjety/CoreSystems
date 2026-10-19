@@ -41,8 +41,9 @@
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Utc};
 use mp_contracts::loop_fold::{
-    self as lf, Authority, FoldCall, FoldCompleted, FoldMessage, LoopFoldV1, PauseKind,
+    self as lf, Authority, FoldCall, FoldCompleted, FoldMessage, LoopFoldV1, ParkReason, PauseKind,
     PendingPause, RoundInFlight, EXT_EFFECT_LEDGER, FOLD_VERSION,
 };
 use mp_contracts::model_plane::v1::{self as pb, session_core_client::SessionCoreClient};
@@ -207,6 +208,8 @@ pub(crate) enum SaveKind {
     Round,
     PreEffect,
     Pause,
+    /// A park at a round boundary (WS03 S8-A): written only by [`FoldWriter::save_park`].
+    Park,
 }
 
 impl SaveKind {
@@ -215,13 +218,14 @@ impl SaveKind {
             Self::Round => "round",
             Self::PreEffect => "pre_effect",
             Self::Pause => "pause",
+            Self::Park => "park",
         }
     }
 
     const fn timeout(self) -> Duration {
         match self {
             Self::Round => ROUND_SAVE_TIMEOUT,
-            Self::PreEffect | Self::Pause => GATED_SAVE_TIMEOUT,
+            Self::PreEffect | Self::Pause | Self::Park => GATED_SAVE_TIMEOUT,
         }
     }
 }
@@ -298,6 +302,20 @@ impl SaveError {
             _ => "",
         }
     }
+}
+
+/// How a park save failed (WS03 S8-A). [`SaveError`] stays what it was: a park adds one
+/// outcome of its own, so it is a second type instead of a new variant every other match
+/// on [`SaveError`] would have to learn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ParkSaveError {
+    /// The save failed as any other save does.
+    Save(SaveError),
+    /// The save was stored under `seq` but the store did not say it accepted a park (a
+    /// session-core that predates the park, or one with park recovery off, stores the fold
+    /// as an ordinary row and echoes no `park_accepted`). The park was NOT taken: the run
+    /// takes its committed outcome, and the caller closes the row it left behind.
+    NotAccepted { seq: u64 },
 }
 
 /// Classify a session-core status. Only the closed `loop_checkpoint_*` tokens and
@@ -784,6 +802,83 @@ pub(crate) async fn close_rpc(
     );
 }
 
+/// One park save, as the RPC sees it ([`FoldWriter::save_park`]).
+struct ParkSave {
+    expected_seq: u64,
+    bytes: Vec<u8>,
+    authority_digest: String,
+    pause_ref: String,
+    reason: ParkReason,
+    park_until: DateTime<Utc>,
+}
+
+/// Save one park fold through `SaveLoopCheckpoint` (kind `park`): [`save_rpc`]'s shape with
+/// the park's reason and due time, and the one answer a park needs that no other save does.
+///
+/// `Ok((seq, accepted))`: `accepted` is session-core's `park_accepted`, true only when a
+/// park-aware store durably accepted this save under its park rules. A store that predates
+/// the field answers false, so a park it merely stored is never mistaken for a taken one.
+/// One structured, content-free event per call, like [`save_rpc`].
+async fn park_rpc(
+    channel: &Channel,
+    bearer: &str,
+    run_id: &str,
+    save: &ParkSave,
+) -> Result<(u64, bool), SaveError> {
+    let mut request = tonic::Request::new(pb::SaveLoopCheckpointRequest {
+        run_id: run_id.to_owned(),
+        expected_seq: save.expected_seq,
+        kind: SaveKind::Park.as_str().to_owned(),
+        fold: save.bytes.clone(),
+        authority_digest: save.authority_digest.clone(),
+        pause_ref: save.pause_ref.clone(),
+        park_reason: save.reason.as_str().to_owned(),
+        park_until: Some(prost_types::Timestamp::from(std::time::SystemTime::from(
+            save.park_until,
+        ))),
+    });
+    let Ok(header) = format!("Bearer {bearer}").parse() else {
+        return Err(SaveError::Unavailable { ambiguous: false });
+    };
+    request.metadata_mut().insert("authorization", header);
+
+    let started = Instant::now();
+    let result = tokio::time::timeout(
+        SaveKind::Park.timeout(),
+        SessionCoreClient::new(channel.clone()).save_loop_checkpoint(request),
+    )
+    .await;
+    let elapsed = started.elapsed();
+    let outcome: Result<(u64, bool), SaveError> = match result {
+        Err(_elapsed) => Err(SaveError::Unavailable { ambiguous: true }),
+        Ok(Err(status)) => Err(classify_status(&status)),
+        Ok(Ok(response)) => {
+            let response = response.into_inner();
+            Ok((response.seq, response.park_accepted))
+        }
+    };
+    let token = match &outcome {
+        Ok((_, true)) => "saved",
+        Ok((_, false)) => "not_accepted",
+        Err(error) => error.as_str(),
+    };
+    info!(
+        target: "loop_fold",
+        run_id = %run_id,
+        kind = SaveKind::Park.as_str(),
+        expected_seq = save.expected_seq,
+        seq = ?outcome.as_ref().ok().map(|(seq, _)| seq),
+        park_reason = save.reason.as_str(),
+        bytes = save.bytes.len(),
+        elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+        outcome = token,
+        cause = outcome.as_ref().err().map_or("", |error| error.cause()),
+        "loop fold save"
+    );
+    record_metrics(SaveKind::Park, token, save.bytes.len(), elapsed);
+    outcome
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
     Active,
@@ -922,8 +1017,9 @@ impl<'a> FoldWriter<'a> {
         }
     }
 
-    /// The seq the next save will expect.
-    #[cfg(test)] // read by the tests: the fence is written at the seq the claim returned
+    /// The seq the next save will expect. Read by the tests (the fence is written at the seq
+    /// the claim returned) and by a failed park (`park::try_park` closes the row a park save
+    /// that may have committed would sit at, `expected + 1`).
     pub(crate) fn expected_seq(&self) -> u64 {
         self.tracker.expected()
     }
@@ -1193,6 +1289,113 @@ impl<'a> FoldWriter<'a> {
             }
         }
         result
+    }
+
+    /// The park (WS03 S8-A): ONE `park` save at the expected seq, at a round boundary,
+    /// naming why the run waits and when a resume is first due. `fold` carries the park's
+    /// own `pending` (kind park, its `pause_ref`) and `park_until` is the earliest resume.
+    ///
+    /// Like the fence, and unlike a round save, it is deliberately plain:
+    ///
+    /// * it makes exactly one RPC, with no probe: a park whose save may have committed is
+    ///   not retried at `expected + 1`, the caller closes that row instead
+    ///   (`park::try_park`);
+    /// * a content refusal is an error, never a tombstone: a tombstone saved as the park
+    ///   would be a park nothing can resume;
+    /// * a writer that is not active (off, or failed) makes no call and fails;
+    /// * the seq moves only when the store accepted the park. A save it merely stored
+    ///   ([`ParkSaveError::NotAccepted`]) leaves the writer as it was.
+    ///
+    /// # Errors
+    ///
+    /// [`ParkSaveError::Save`] with the failed save's [`SaveError`], or
+    /// `Unavailable { ambiguous: false }` (no RPC was made) when the writer is not active or
+    /// the fold does not name a park; [`ParkSaveError::NotAccepted`] when the store stored
+    /// the fold without accepting it as a park.
+    pub(crate) async fn save_park(
+        &mut self,
+        fold: LoopFoldV1,
+        reason: ParkReason,
+        park_until: DateTime<Utc>,
+    ) -> Result<u64, ParkSaveError> {
+        let (channel, run_id) = (self.channel, self.run_id);
+        let Some(bearer) = self.bearer else {
+            return Err(ParkSaveError::Save(SaveError::Unavailable {
+                ambiguous: false,
+            }));
+        };
+        self.park_with(fold, reason, park_until, |save| async move {
+            park_rpc(channel, bearer, run_id, &save).await
+        })
+        .await
+    }
+
+    /// [`FoldWriter::save_park`] with the RPC passed in, so the one-call rule and the
+    /// failure handling are testable without a gRPC server.
+    async fn park_with<F, Fut>(
+        &mut self,
+        fold: LoopFoldV1,
+        reason: ParkReason,
+        park_until: DateTime<Utc>,
+        rpc: F,
+    ) -> Result<u64, ParkSaveError>
+    where
+        F: FnOnce(ParkSave) -> Fut,
+        Fut: std::future::Future<Output = Result<(u64, bool), SaveError>>,
+    {
+        if !self.is_active() {
+            return Err(ParkSaveError::Save(SaveError::Unavailable {
+                ambiguous: false,
+            }));
+        }
+        // A park fold names its own reference: the claim of a park matches on it.
+        let pause_ref = match fold.pending.as_ref() {
+            Some(pending) if pending.kind == PauseKind::Park && !pending.pause_ref.is_empty() => {
+                pending.pause_ref.clone()
+            }
+            _ => {
+                return Err(ParkSaveError::Save(SaveError::ContentRefused {
+                    reason: "malformed",
+                }))
+            }
+        };
+        let authority_digest = fold.authority.digest();
+        let bytes = match fit(fold) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                info!(
+                    target: "loop_fold",
+                    run_id = %self.run_id,
+                    kind = SaveKind::Park.as_str(),
+                    outcome = error.as_str(),
+                    reason = error.cause(),
+                    "loop fold not saved"
+                );
+                record_metrics(SaveKind::Park, error.as_str(), 0, Duration::ZERO);
+                return Err(ParkSaveError::Save(error));
+            }
+        };
+        let result = rpc(ParkSave {
+            expected_seq: self.tracker.expected(),
+            bytes,
+            authority_digest,
+            pause_ref,
+            reason,
+            park_until,
+        })
+        .await;
+        match result {
+            Ok((seq, true)) => {
+                self.tracker.on_saved(seq);
+                Ok(seq)
+            }
+            Ok((seq, false)) => Err(ParkSaveError::NotAccepted { seq }),
+            Err(error) => {
+                self.tracker.on_failed(&error);
+                self.apply(error);
+                Err(ParkSaveError::Save(error))
+            }
+        }
     }
 
     /// The pause fold, ready to be saved just before the approval is created. `None`
@@ -2670,6 +2873,238 @@ mod tests {
         assert_eq!(calls.len(), 1, "no tombstone follow-up");
         assert_eq!(writer.expected_seq(), 12);
         assert!(writer.is_active());
+    }
+
+    // ---- the park (WS03 S8-A, S8-5) ----
+
+    /// What the injected park RPC saw, in order: (expected seq, `pause_ref`, reason, due, bytes).
+    type ParkCalls =
+        std::sync::Arc<std::sync::Mutex<Vec<(u64, String, ParkReason, DateTime<Utc>, usize)>>>;
+
+    fn due() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-10-19T12:00:00Z")
+            .expect("a timestamp")
+            .with_timezone(&Utc)
+    }
+
+    /// A fold that names its park, as `park::try_park` builds it.
+    fn parkable_fold() -> LoopFoldV1 {
+        let mut fold = fenceable_fold();
+        fold.pending = Some(PendingPause {
+            kind: PauseKind::Park,
+            pause_ref: "park:run-1:1".to_owned(),
+            step_id: String::new(),
+            call: String::new(),
+            action_fingerprint: String::new(),
+        });
+        fold
+    }
+
+    /// Run `park_with` against an RPC that answers each call from `answers` in order, and
+    /// report what it was asked.
+    async fn park_through(
+        writer: &mut FoldWriter<'_>,
+        fold: LoopFoldV1,
+        answers: Vec<Result<(u64, bool), SaveError>>,
+    ) -> (Result<u64, ParkSaveError>, Vec<(u64, String, ParkReason, DateTime<Utc>, usize)>) {
+        let calls: ParkCalls = ParkCalls::default();
+        let recorder = std::sync::Arc::clone(&calls);
+        let mut answers = answers.into_iter();
+        let result = writer
+            .park_with(fold, ParkReason::ProviderExhausted, due(), |save| {
+                recorder.lock().unwrap().push((
+                    save.expected_seq,
+                    save.pause_ref.clone(),
+                    save.reason,
+                    save.park_until,
+                    save.bytes.len(),
+                ));
+                let answer = answers.next().expect("the park made a call nobody answered");
+                async move { answer }
+            })
+            .await;
+        let calls = calls.lock().unwrap().clone();
+        (result, calls)
+    }
+
+    #[test]
+    fn a_park_is_its_own_save_kind_with_the_park_word_and_the_gated_timeout() {
+        assert_eq!(SaveKind::Park.as_str(), "park");
+        assert_eq!(SaveKind::Park.timeout(), GATED_SAVE_TIMEOUT);
+    }
+
+    /// A park is ONE save at the expected seq, no probe: a probe after an ambiguous failure
+    /// would write at `expected + 1`, and a park that may have committed is closed by its
+    /// caller instead. The seq moves only on an accepted park.
+    #[tokio::test]
+    async fn save_park_is_one_rpc_at_the_expected_seq_with_no_probe() {
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
+        let mut writer = FoldWriter::seeded(&channel, Some("b"), "run-1", all_good(), 4, 2);
+
+        let (result, calls) = park_through(&mut writer, parkable_fold(), vec![Ok((5, true))]).await;
+        assert_eq!(result, Ok(5));
+        assert_eq!(calls.len(), 1, "exactly one RPC");
+        let (expected, pause_ref, reason, until, bytes) = &calls[0];
+        assert_eq!(*expected, 4, "at the expected seq");
+        assert_eq!(pause_ref, "park:run-1:1", "the fold's own park reference");
+        assert_eq!(*reason, ParkReason::ProviderExhausted);
+        assert_eq!(*until, due());
+        assert!(*bytes > 0);
+        assert_eq!(writer.expected_seq(), 5, "an accepted park moves the seq");
+        assert!(writer.is_active());
+
+        // The probe case: an ambiguous failure makes a round save retry a stale answer once
+        // with `expected + 1`. A park never does: one call, and the stale answer is final.
+        writer.tracker.on_failed(&SaveError::Unavailable { ambiguous: true });
+        let (stale, calls) =
+            park_through(&mut writer, parkable_fold(), vec![Err(SaveError::Stale)]).await;
+        assert_eq!(stale, Err(ParkSaveError::Save(SaveError::Stale)));
+        assert_eq!(
+            calls.iter().map(|call| call.0).collect::<Vec<_>>(),
+            vec![5],
+            "one call, at the expected seq, and no retry at 6"
+        );
+        assert!(writer.is_failed(), "a stale answer stops the writer, as for any save");
+
+        // An ambiguous failure leaves the writer active and the seq where it was: the
+        // caller closes `expected + 1`.
+        let mut writer = FoldWriter::seeded(&channel, Some("b"), "run-1", all_good(), 4, 2);
+        let (lost, calls) = park_through(
+            &mut writer,
+            parkable_fold(),
+            vec![Err(SaveError::Unavailable { ambiguous: true })],
+        )
+        .await;
+        assert_eq!(
+            lost,
+            Err(ParkSaveError::Save(SaveError::Unavailable { ambiguous: true }))
+        );
+        assert_eq!(calls.len(), 1);
+        assert_eq!(writer.expected_seq(), 4);
+        assert!(writer.is_active());
+    }
+
+    /// A store that stored the fold but did not say it took a park (one that predates the
+    /// echo, or has park recovery off) has NOT taken it: the caller is told which row to
+    /// close, and the writer is left as it was.
+    #[tokio::test]
+    async fn a_park_save_without_park_accepted_is_not_accepted() {
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
+        let mut writer = FoldWriter::seeded(&channel, Some("b"), "run-1", all_good(), 4, 2);
+        let (result, calls) =
+            park_through(&mut writer, parkable_fold(), vec![Ok((5, false))]).await;
+        assert_eq!(result, Err(ParkSaveError::NotAccepted { seq: 5 }));
+        assert_eq!(calls.len(), 1);
+        assert_eq!(writer.expected_seq(), 4, "the seq moves only on an accepted park");
+        assert!(writer.is_active());
+    }
+
+    /// A round or pre-effect save degrades a refused fold to a tombstone. A park must not: a
+    /// tombstone saved as the park is a park nothing can resume.
+    #[tokio::test]
+    async fn a_content_refused_park_is_an_error_never_a_tombstone() {
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
+        let mut writer = FoldWriter::seeded(&channel, Some("b"), "run-1", all_good(), 4, 2);
+        // Refused here, by the scrub and the credential gate: no RPC at all.
+        let mut credential = parkable_fold();
+        credential.messages.push(FoldMessage {
+            role: "user".to_owned(),
+            content: "send an Authorization: header".to_owned(),
+            name: String::new(),
+            compaction_summary: String::new(),
+        });
+        let (result, calls) = park_through(&mut writer, credential, Vec::new()).await;
+        assert_eq!(
+            result,
+            Err(ParkSaveError::Save(SaveError::ContentRefused {
+                reason: "credential"
+            }))
+        );
+        assert!(calls.is_empty(), "a refused fold is not saved, and no tombstone replaces it");
+        assert_eq!(writer.expected_seq(), 4);
+        assert!(writer.is_active(), "a refused park leaves the writer as it was");
+
+        // Refused there, by session-core as invalid: ONE call and no tombstone call after it.
+        let (rejected, calls) = park_through(
+            &mut writer,
+            parkable_fold(),
+            vec![Err(SaveError::ContentRefused { reason: "rejected" })],
+        )
+        .await;
+        assert_eq!(
+            rejected,
+            Err(ParkSaveError::Save(SaveError::ContentRefused {
+                reason: "rejected"
+            }))
+        );
+        assert_eq!(calls.len(), 1, "no tombstone follow-up");
+        assert!(writer.is_active());
+
+        // A fold that does not name its park is refused before any call.
+        for fold in [fenceable_fold(), {
+            let mut approval = parkable_fold();
+            approval.pending.as_mut().expect("pending").kind = PauseKind::Approval;
+            approval
+        }, {
+            let mut blank = parkable_fold();
+            blank.pending.as_mut().expect("pending").pause_ref.clear();
+            blank
+        }] {
+            let (result, calls) = park_through(&mut writer, fold, Vec::new()).await;
+            assert_eq!(
+                result,
+                Err(ParkSaveError::Save(SaveError::ContentRefused {
+                    reason: "malformed"
+                }))
+            );
+            assert!(calls.is_empty());
+        }
+    }
+
+    /// A writer that is off or failed makes no park call, and says so with the closed
+    /// "no RPC was made" answer.
+    #[tokio::test]
+    async fn a_park_on_a_writer_that_is_off_or_failed_makes_no_call() {
+        let probe = Probe::bind();
+        let channel = probe.channel();
+        for (gate, bearer) in [
+            (WriterGate { switch: false, ..all_good() }, Some("b")),
+            (WriterGate { ledger: false, ..all_good() }, Some("b")),
+            (WriterGate { zdr: true, ..all_good() }, Some("b")),
+            (WriterGate { waived: true, ..all_good() }, Some("b")),
+            (WriterGate { space: true, ..all_good() }, Some("b")),
+            (WriterGate { depth: 1, ..all_good() }, Some("b")),
+            (all_good(), None),
+        ] {
+            let mut writer = FoldWriter::seeded(&channel, bearer, "run-1", gate, 4, 2);
+            let (result, calls) = park_through(&mut writer, parkable_fold(), Vec::new()).await;
+            assert_eq!(
+                result,
+                Err(ParkSaveError::Save(SaveError::Unavailable { ambiguous: false })),
+                "{gate:?}"
+            );
+            assert!(calls.is_empty(), "{gate:?}");
+            // The real entry point makes no connection either.
+            let result = writer
+                .save_park(parkable_fold(), ParkReason::ProviderExhausted, due())
+                .await;
+            assert_eq!(
+                result,
+                Err(ParkSaveError::Save(SaveError::Unavailable { ambiguous: false }))
+            );
+            assert_eq!(writer.expected_seq(), 4, "nothing moved");
+        }
+        let mut failed = FoldWriter::seeded(&channel, Some("b"), "run-1", all_good(), 4, 2);
+        failed.apply(SaveError::Closed);
+        assert!(failed.is_failed());
+        let result = failed
+            .save_park(parkable_fold(), ParkReason::ProviderExhausted, due())
+            .await;
+        assert_eq!(
+            result,
+            Err(ParkSaveError::Save(SaveError::Unavailable { ambiguous: false }))
+        );
+        assert_eq!(probe.connections(), 0, "no writer that is not active reached the store");
     }
 
     #[test]
