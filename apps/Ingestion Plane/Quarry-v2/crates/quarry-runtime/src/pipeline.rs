@@ -237,6 +237,33 @@ pub struct PageRunner {
     pub doc_routing: DocRouting,
 }
 
+/// The challenge settings the scrape path runs under (`QUARRY_CHALLENGE_*`),
+/// read per run like the agent path reads them per run. A test installs its own
+/// for the thread it runs on instead of touching the process environment.
+fn scrape_challenge_config() -> crate::challenge::ChallengeConfig {
+    #[cfg(test)]
+    if let Some(config) = TEST_CHALLENGE_CONFIG.with(|slot| slot.get()) {
+        return config;
+    }
+    crate::challenge::ChallengeConfig::from_env()
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_CHALLENGE_CONFIG: std::cell::Cell<Option<crate::challenge::ChallengeConfig>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Whether the body is something a bot wall can be: HTML, XML or text. An
+/// image, a PDF or a JSON answer is not classified. No content type is read as
+/// HTML, as everywhere else on this path.
+fn is_markup_content_type(content_type: Option<&str>) -> bool {
+    content_type.is_none_or(|ct| {
+        let ct = ct.to_ascii_lowercase();
+        ct.contains("html") || ct.contains("xml") || ct.starts_with("text/")
+    })
+}
+
 #[cfg(test)]
 fn page_event_persistence_allowed(zdr_mode: ZdrMode) -> bool {
     zdr::guard(zdr_mode, WriteKind::Event).is_ok()
@@ -788,6 +815,47 @@ impl PageRunner {
         if let Some(found) = detected {
             meta.content_kind = Some(found.kind.label().to_owned());
             meta.content_kind_source = Some(found.source.label().to_owned());
+        }
+
+        // WS3.J: a page that is itself a bot wall (a CAPTCHA widget, a WAF
+        // interstitial, two independent block markers) is not content. It is not
+        // extracted, stored, indexed or ingested; the scrape fails with a typed
+        // `CHALLENGE_DETECTED` whose details carry the block reason and nothing of
+        // the page. A status alone never gets here (see `classify_fetched`), and a
+        // run under `QUARRY_CHALLENGE_CLASSIFIER=legacy` is not classified at all.
+        // `QUARRY_CHALLENGE_ENFORCE=log` counts the page by reason and lets it
+        // through. Nothing here logs the URL or the host, ZDR or not.
+        if !is_doc && is_markup_content_type(ct.as_deref()) {
+            let challenge_config = scrape_challenge_config();
+            if let Some(reason) = crate::challenge::classify_fetched(
+                challenge_config,
+                resp.final_url.as_str(),
+                resp.status,
+                meta.title.as_deref(),
+                &resp.body,
+            )
+            .and_then(|signal| signal.block_reason)
+            {
+                let reason = reason.as_str();
+                if challenge_config.enforce == crate::challenge::EnforceMode::Enforce {
+                    tracing::info!(reason, status = resp.status, "quarry.challenge.scrape_refused");
+                    self.emit_page_event(
+                        run_id.clone(),
+                        EventType::PageBlocked,
+                        json!({
+                            "url": resp.final_url.to_string(),
+                            "reason": "challenge_detected",
+                            "block_reason": reason,
+                            "status": resp.status,
+                        }),
+                        format!("{}:{}:challenge_detected", run_id, resp.final_url),
+                    )
+                    .await;
+                    return Err(QuarryError::challenge_detected_on_fetch(reason));
+                }
+                // Validation period: say what would have happened.
+                tracing::warn!(reason, status = resp.status, "quarry.challenge.would_refuse_scrape");
+            }
         }
 
         // Body-content language detection when the HTML lang
@@ -2513,4 +2581,268 @@ mod content_routing_tests {
         );
     }
 
+}
+
+#[cfg(test)]
+mod scrape_challenge_tests {
+    use super::*;
+    use crate::artifact_store::InMemoryStore;
+    use crate::challenge::{ChallengeConfig, EnforceMode};
+    use crate::driver::Driver;
+    use crate::fetch::FetchResponse;
+    use async_trait::async_trait;
+    use quarry_core::output::DriverKind;
+    use tokio::sync::mpsc;
+
+    struct BodyDriver {
+        status: u16,
+        content_type: Option<&'static str>,
+        body: Vec<u8>,
+    }
+
+    #[async_trait]
+    impl Driver for BodyDriver {
+        fn kind(&self) -> DriverKind {
+            DriverKind::Static
+        }
+        async fn fetch(&self, url: &Url) -> QuarryResult<FetchResponse> {
+            Ok(FetchResponse {
+                status: self.status,
+                final_url: url.clone(),
+                headers: self
+                    .content_type
+                    .map(|ct| vec![("content-type".into(), ct.into())])
+                    .unwrap_or_default(),
+                body: self.body.clone(),
+                duration_ms: 1,
+                served_by: DriverKind::Static,
+            })
+        }
+    }
+
+    const CF_INTERSTITIAL: &str = r#"<!DOCTYPE html><html lang="en-US"><head><title>Just a moment...</title></head><body class="no-js"><h2 id="challenge-running">Checking if the site connection is secure</h2><div id="challenge-stage"></div><script>window._cf_chl_opt={cvId:'3'};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1?ray=8abc';</script><script src="https://challenges.cloudflare.com/turnstile/v0/g/abc/api.js"></script></body></html>"#;
+    const TURNSTILE_PAGE: &str = r#"<html><head><title>Turnstile Test</title></head><body><h1>Demo</h1><div class="cf-turnstile" data-sitekey="1x00000000000000000000AA"></div><script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script></body></html>"#;
+    const NGINX_403: &str = "<html>\r\n<head><title>403 Forbidden</title></head>\r\n<body>\r\n<center><h1>403 Forbidden</h1></center>\r\n<hr><center>nginx</center>\r\n</body>\r\n</html>";
+    const LOGIN_PAGE: &str = r#"<html><head><title>Sign in</title></head><body><form action="/session" method="post"><label>Email <input type="email" name="email"></label><label>Password <input type="password" name="password"></label><button>Sign in</button></form></body></html>"#;
+    const ARTICLE: &str = "<html><head><title>How CAPTCHAs work</title></head><body><main><h1>How CAPTCHAs work</h1><p>A CAPTCHA is a test that tells computers and humans apart. This article explains what a CAPTCHA is and why access to a page is sometimes forbidden to a bot.</p></main></body></html>";
+    const CONTACT_WITH_WIDGET: &str = r#"<html><head><title>Contact us</title></head><body><form action="/send" method="post"><label>Name <input type="text" name="n"></label><label>Email <input type="email" name="e"></label><textarea name="m"></textarea><div class="g-recaptcha" data-sitekey="k"></div><button>Send</button></form><script src="https://www.google.com/recaptcha/api.js"></script></body></html>"#;
+
+    /// Installs a challenge config for the current thread and removes it again.
+    /// `#[tokio::test]` runs on the current thread, so the scrape sees it.
+    struct Installed;
+    impl Installed {
+        fn new(config: ChallengeConfig) -> Self {
+            TEST_CHALLENGE_CONFIG.with(|slot| slot.set(Some(config)));
+            Installed
+        }
+    }
+    impl Drop for Installed {
+        fn drop(&mut self) {
+            TEST_CHALLENGE_CONFIG.with(|slot| slot.set(None));
+        }
+    }
+
+    fn runner_for(
+        zdr: ZdrMode,
+        status: u16,
+        content_type: Option<&'static str>,
+        body: &str,
+    ) -> (PageRunner, mpsc::Receiver<quarry_core::event::Event>, Arc<InMemoryStore>) {
+        let (tx, rx) = mpsc::channel(64);
+        let artifacts = Arc::new(InMemoryStore::new());
+        let runner = PageRunner {
+            driver: Arc::new(BodyDriver { status, content_type, body: body.as_bytes().to_vec() }),
+            security: Arc::new(
+                quarry_security::preflight::DefaultEngine::new().with_allow_private_hosts(true),
+            ),
+            artifacts: artifacts.clone(),
+            event_sink: EventSink::new(tx),
+            zdr,
+            ingest: None,
+            org_id: Some("org_test".into()),
+            user_id: None,
+            privacy: PrivacyPolicy::default(),
+            cancel_token: None,
+            local_index: None,
+            policy: RunPolicy::default(),
+            scheduler: None,
+            autoscale: None,
+            render: RenderHints::default(),
+            page_renderer: None,
+            source_registrar: None,
+            title_enricher: None,
+            doc_routing: DocRouting::Off,
+        };
+        (runner, rx, artifacts)
+    }
+
+    fn target() -> Url {
+        "https://walled.example.test/page".parse().unwrap()
+    }
+
+    fn drain(rx: &mut mpsc::Receiver<quarry_core::event::Event>) -> Vec<quarry_core::event::Event> {
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        events
+    }
+
+    async fn scrape(
+        zdr: ZdrMode,
+        status: u16,
+        content_type: Option<&'static str>,
+        body: &str,
+    ) -> (QuarryResult<NormalizedOutput>, Vec<quarry_core::event::Event>) {
+        let (runner, mut rx, _) = runner_for(zdr, status, content_type, body);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let result = runner.run(&run_id, &target(), None).await;
+        (result, drain(&mut rx))
+    }
+
+    #[tokio::test]
+    async fn a_strong_block_page_fails_the_scrape_with_its_block_reason() {
+        let _config = Installed::new(ChallengeConfig::default());
+        // (what the driver served, status, expected block reason)
+        let cases = [
+            ("cloudflare interstitial", 403, CF_INTERSTITIAL, "waf_interstitial"),
+            ("cloudflare interstitial served as 200", 200, CF_INTERSTITIAL, "waf_interstitial"),
+            ("a turnstile page", 200, TURNSTILE_PAGE, "captcha_widget"),
+        ];
+        for (name, status, body, reason) in cases {
+            let (result, events) = scrape(ZdrMode::Off, status, Some("text/html"), body).await;
+            let error = result.expect_err(name);
+            assert_eq!(error.code, ErrorCode::ChallengeDetected, "{name}");
+            assert_eq!(error.code.http_status(), 403, "{name}");
+            let details = error.details.as_ref().expect("details");
+            assert_eq!(details["block_reason"], reason, "{name}");
+            assert_eq!(details["recovery"], "not_applicable", "{name}");
+            assert_eq!(details["next"], "other_source", "{name}");
+            // Nothing of the page, the host or the URL in the error.
+            let wire = serde_json::to_string(&error).unwrap();
+            for secret in ["walled.example", "cloudflare", "turnstile", "Just a moment"] {
+                assert!(!wire.contains(secret), "{name}: {secret} in {wire}");
+            }
+            let blocked = events
+                .iter()
+                .find(|e| e.event_type == EventType::PageBlocked)
+                .unwrap_or_else(|| panic!("{name}: page_blocked emitted"));
+            assert_eq!(blocked.payload["reason"], "challenge_detected", "{name}");
+            assert_eq!(blocked.payload["block_reason"], reason, "{name}");
+            // The wall is not content: nothing past the fetch event was emitted.
+            for event in &events {
+                assert!(
+                    !matches!(
+                        event.event_type,
+                        EventType::ChangeDetected | EventType::BrandingExtracted | EventType::ArtifactWritten
+                    ),
+                    "{name}: {:?}",
+                    event.event_type
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_wall_stores_no_artifact() {
+        let _config = Installed::new(ChallengeConfig::default());
+        let (runner, _rx, artifacts) = runner_for(ZdrMode::Off, 403, Some("text/html"), CF_INTERSTITIAL);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        assert!(runner.run(&run_id, &target(), None).await.is_err());
+        assert_eq!(
+            artifacts.count("org_test").await.unwrap(),
+            Some(0),
+            "a refused wall must not be stored"
+        );
+    }
+
+    #[tokio::test]
+    async fn pages_that_are_not_walls_still_scrape() {
+        let _config = Installed::new(ChallengeConfig::default());
+        let cases = [
+            ("an ordinary article about captchas", 200, ARTICLE),
+            ("a login page", 200, LOGIN_PAGE),
+            ("a bare nginx 403 (a status alone is no verdict)", 403, NGINX_403),
+            ("a 429 page", 429, "<html><head><title>Too many requests</title></head><body>Slow down.</body></html>"),
+            ("a contact form with a recaptcha", 200, CONTACT_WITH_WIDGET),
+        ];
+        for (name, status, body) in cases {
+            let (result, _events) = scrape(ZdrMode::Off, status, Some("text/html"), body).await;
+            let out = result.unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!(out.status, status, "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn only_markup_is_classified() {
+        let _config = Installed::new(ChallengeConfig::default());
+        // The same bytes under a binary or JSON type are not a page to classify.
+        for content_type in ["application/json", "application/octet-stream", "image/png"] {
+            let (result, _) = scrape(ZdrMode::Off, 200, Some(content_type), CF_INTERSTITIAL).await;
+            assert!(result.is_ok(), "{content_type}: {:?}", result.err());
+        }
+        // No content type reads as HTML.
+        let (result, _) = scrape(ZdrMode::Off, 200, None, CF_INTERSTITIAL).await;
+        assert_eq!(result.expect_err("html").code, ErrorCode::ChallengeDetected);
+    }
+
+    #[tokio::test]
+    async fn the_legacy_classifier_leaves_the_scrape_path_as_it_was() {
+        let _config = Installed::new(ChallengeConfig::from_values(Some("legacy"), None));
+        let (result, _) = scrape(ZdrMode::Off, 403, Some("text/html"), CF_INTERSTITIAL).await;
+        assert_eq!(result.expect("legacy scrapes the wall as before").status, 403);
+    }
+
+    #[tokio::test]
+    async fn the_log_phase_counts_the_wall_and_lets_it_through() {
+        let config = ChallengeConfig::from_values(None, Some("log"));
+        assert_eq!(config.enforce, EnforceMode::Log);
+        let _config = Installed::new(config);
+        let (result, events) = scrape(ZdrMode::Off, 403, Some("text/html"), CF_INTERSTITIAL).await;
+        assert_eq!(result.expect("log mode refuses nothing").status, 403);
+        assert!(
+            events.iter().all(|e| e.event_type != EventType::PageBlocked),
+            "no page_blocked in log mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_zdr_scrape_is_refused_the_same_and_the_error_has_no_host() {
+        let _config = Installed::new(ChallengeConfig::default());
+        let (result, _events) = scrape(ZdrMode::On, 403, Some("text/html"), CF_INTERSTITIAL).await;
+        let error = result.expect_err("refused under ZDR as well");
+        assert_eq!(error.code, ErrorCode::ChallengeDetected);
+        let wire = serde_json::to_string(&error).unwrap();
+        assert!(!wire.contains("walled.example"), "{wire}");
+        assert_eq!(error.details.unwrap()["block_reason"], "waf_interstitial");
+    }
+
+    #[test]
+    fn classify_fetched_reads_at_most_the_scan_window_and_never_returns_a_hint() {
+        let config = ChallengeConfig::default();
+        let signal = crate::challenge::classify_fetched(
+            config,
+            "https://walled.example.test/page",
+            403,
+            Some("Just a moment..."),
+            CF_INTERSTITIAL.as_bytes(),
+        )
+        .expect("strong");
+        assert!(signal.requires_escalation);
+        // A wall past the scan window is not seen.
+        let mut padded = vec![b' '; crate::challenge::MAX_SCANNED_BYTES + 10];
+        padded.extend_from_slice(CF_INTERSTITIAL.as_bytes());
+        assert!(crate::challenge::classify_fetched(config, "https://walled.example.test/page", 200, None, &padded).is_none());
+        // A hint is not a verdict.
+        assert!(crate::challenge::classify_fetched(
+            config,
+            "https://x.example/contact",
+            200,
+            Some("Contact us"),
+            CONTACT_WITH_WIDGET.as_bytes()
+        )
+        .is_none());
+        // Bytes that are not UTF-8 do not panic.
+        assert!(crate::challenge::classify_fetched(config, "https://x.example/", 200, None, &[0xff, 0xfe, 0x00, 0xc3]).is_none());
+    }
 }

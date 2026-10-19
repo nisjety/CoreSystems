@@ -178,10 +178,18 @@ recovery: a wait, or a reload of the same URL. Quarry never reloads on its own
 still challenges afterwards, or shows a third strong signal in the run, the
 signal becomes `challenge_loop` with `recovery: exhausted`, and Quarry
 answers navigation to that host and click, type, press and select on its page
-(and upload or download of one of its nodes, and the snapshot-ref and semantic
-forms of each) with `403 CHALLENGE_DETECTED` (`details`: `reason`, `host`,
+(and upload or download of one of its nodes, `evaluate`, and the snapshot-ref
+and semantic forms of each) with `403 CHALLENGE_DETECTED` (`details`: `reason`, `host`,
 `recovery: "exhausted"`, `next: "user_takeover_or_other_source"`). Screenshots,
-reads, waits, scrolling and navigation to another host stay allowed. A later
+reads, waits, scrolling (the mouse wheel too), answering a dialog the page has
+already opened, back and forward, and navigation to another host stay allowed.
+The rule stops further attempts at the wall; it does not stop a person taking
+over or a planner reporting the block. `evaluate` is refused because a script
+can do everything the refused actions do (it is also denied outright before the
+driver, so this is a second lock). A dialog is answered so the page is not
+wedged behind it. Back and forward stay open because Quarry does not know where
+the history step lands; what it lands on is judged by its own host, so a step
+back onto the exhausted host leaves every interaction refused. A later
 observation that is not strong clears the episode. The state is per run and in
 memory only; under Zero Data Retention the host is held as a hash, only reason
 counts are kept and the error leaves the host out. The host is never logged.
@@ -191,6 +199,21 @@ substring classifier for one release and is not subject to the rule) and
 `QUARRY_CHALLENGE_ENFORCE=enforce|log` (default `enforce`; `log` records a
 `quarry.challenge.would_reject` line and lets the action through while the
 corpus is validated).
+
+**The scrape path (WS3.J).** `/v1/scrape` is one shot: no wait, no reload, no
+person to hand over to. `PageRunner` classifies the fetched page with the same
+`classify` (markup bodies only, the first 512 KiB, with the response status),
+and only a strong signal counts. A page that is a bot wall is not extracted,
+stored, indexed or ingested; the scrape fails with `403 CHALLENGE_DETECTED` and
+`details.block_reason` (`captcha_widget`, `waf_interstitial` or
+`unexpected_bot_error`, never `challenge_loop`), `recovery: "not_applicable"`,
+`next: "other_source"`. No host, URL or page text is in the error. A status alone
+(a bare 403, a 429, a 5xx), a login page, a paywall and a CAPTCHA on an ordinary
+form are not walls and scrape as before. `QUARRY_CHALLENGE_CLASSIFIER=legacy`
+turns the scrape-path classification off; `QUARRY_CHALLENGE_ENFORCE=log` logs
+`quarry.challenge.would_refuse_scrape` with the reason and the status, and
+returns the page. ZDR runs are classified and refused the same way and log only
+the reason.
 
 **Evidence.** The classification table (about 60 rows) and the runner tests use
 hand-written HTML, modelled on the shape of each vendor's page. None of it is a

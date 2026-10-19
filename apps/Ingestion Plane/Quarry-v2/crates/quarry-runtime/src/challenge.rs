@@ -63,7 +63,7 @@ pub const NON_SIGNAL_LABELS: [&str; 8] = [
 const THIN_PAGE_CHARS: usize = 3000;
 /// HTML scanned for markers. A challenge page is small; anything past this is
 /// not looked at.
-const MAX_SCANNED_BYTES: usize = 512 * 1024;
+pub(crate) const MAX_SCANNED_BYTES: usize = 512 * 1024;
 /// A host that shows this many strong signals in one run is looping even if
 /// every one of them was followed by a recovery that "worked".
 const MAX_STRONG_PER_HOST: u32 = 3;
@@ -1031,6 +1031,41 @@ fn classify_weak(page: &Page, hits: &[GroupHit]) -> Option<ChallengeSignal> {
         ));
     }
     None
+}
+
+/// What the scrape path makes of a page it fetched (WS3.J): the strong signal
+/// it carries, or `None`. Only a strong signal counts: a weak hint, a
+/// non-signal (a login page, a paywall, a rate limit, a bare 403) and a page
+/// that says nothing about access all come back as `None`, so a status alone
+/// never refuses a scrape. `ChallengeLoop` cannot come out of this: it needs the
+/// episode of an agent run, and a scrape is one shot.
+///
+/// Behind `QUARRY_CHALLENGE_CLASSIFIER`: under `legacy` the scrape path
+/// classifies nothing, which is what it did before this existed. `title` is the
+/// page's own `<title>` (the caller already extracted it); `status` is the
+/// status of the response that carried `body`. Only the first
+/// [`MAX_SCANNED_BYTES`] of `body` are read. Nothing of the page leaves this
+/// function except the signal, whose evidence is marker ids and the status.
+pub fn classify_fetched(
+    config: ChallengeConfig,
+    url: &str,
+    status: u16,
+    title: Option<&str>,
+    body: &[u8],
+) -> Option<ChallengeSignal> {
+    if config.classifier != ClassifierMode::V2 {
+        return None;
+    }
+    let head = &body[..body.len().min(MAX_SCANNED_BYTES)];
+    let html = String::from_utf8_lossy(head);
+    classify(&ChallengeInput {
+        url,
+        title,
+        html: Some(&html),
+        text_snippet: None,
+        main_doc_status: Some(status),
+    })
+    .filter(|signal| signal.strength == ChallengeStrength::Strong)
 }
 
 /// The classifier that shipped before WS3.H: any of a handful of substrings

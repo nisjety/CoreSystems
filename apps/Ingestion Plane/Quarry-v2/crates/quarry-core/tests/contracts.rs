@@ -691,6 +691,28 @@ fn challenge_detected_is_a_403_with_the_exhausted_recovery_details() {
 }
 
 #[test]
+fn a_scrape_challenge_is_a_403_with_the_block_reason_and_no_recovery() {
+    for reason in ["captcha_widget", "waf_interstitial", "unexpected_bot_error"] {
+        let error = QuarryError::challenge_detected_on_fetch(reason);
+        assert_eq!(error.code, ErrorCode::ChallengeDetected);
+        assert_eq!(error.code.http_status(), 403);
+        assert!(!error.retryable);
+        let details = error.details.clone().expect("details");
+        assert_eq!(details["block_reason"], reason);
+        assert_eq!(details["reason"], reason);
+        assert_eq!(details["recovery"], "not_applicable");
+        assert_eq!(details["next"], "other_source");
+        // No host, no URL: a scrape error is stored and returned to the caller.
+        assert!(details.get("host").is_none() && details.get("url").is_none());
+        assert_eq!(details.as_object().unwrap().len(), 4, "{details}");
+        let wire = serde_json::to_string(&error).unwrap();
+        assert!(!wire.contains("http"), "{wire}");
+        // The reason is a name the closed set knows.
+        assert!(serde_json::from_value::<quarry_core::contracts::BlockReason>(json!(reason)).is_ok());
+    }
+}
+
+#[test]
 fn challenge_detected_leaves_the_host_out_when_it_is_empty() {
     let error = QuarryError::challenge_detected("", "challenge_loop");
     let details = error.details.expect("details");

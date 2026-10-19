@@ -165,6 +165,28 @@ impl QuarryError {
         .with_details(details)
     }
 
+    /// A scrape fetched a page that is itself a bot wall (a CAPTCHA widget, a
+    /// WAF interstitial, two independent block markers). 403, not retryable by the
+    /// same caller. A scrape is one shot: it has no recovery to spend and no
+    /// browser to hand to a person, so `recovery` is `not_applicable` and `next`
+    /// is `other_source`. `block_reason` is one of `captcha_widget`,
+    /// `waf_interstitial`, `unexpected_bot_error` (never `challenge_loop`, which
+    /// only an agent run can reach) and is also given as `reason`, the key the
+    /// agent path's `CHALLENGE_DETECTED` uses. Neither the message nor the details
+    /// carry the host, the URL or any page text.
+    pub fn challenge_detected_on_fetch(block_reason: &str) -> Self {
+        Self::new(
+            ErrorCode::ChallengeDetected,
+            "the page is a bot challenge that Quarry does not get past; use another source",
+        )
+        .with_details(serde_json::json!({
+            "reason": block_reason,
+            "block_reason": block_reason,
+            "recovery": "not_applicable",
+            "next": "other_source",
+        }))
+    }
+
     pub fn unsupported_action(action: &str) -> Self {
         Self::new(
             ErrorCode::Unsupported,
