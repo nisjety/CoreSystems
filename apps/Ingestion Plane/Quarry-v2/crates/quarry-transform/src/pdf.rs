@@ -219,30 +219,144 @@ pub fn extract_headings(body: &[u8]) -> QuarryResult<Vec<PdfHeading>> {
 /// a 1 MB file was still inflating when the 15 s deadline fired, which answered
 /// 504 instead of a typed 415). [`check_inflate_budget`] inflates the same
 /// streams first, into nothing, and refuses the document as soon as the total
-/// passes this. Image streams are not counted: text extraction never inflates
-/// them.
+/// passes this.
 pub const INFLATE_BUDGET_BYTES: u64 = 256 * 1024 * 1024;
 
-/// How far back from the `stream` keyword the dictionary is looked for.
-const STREAM_DICT_LOOKBACK: usize = 8 * 1024;
+/// Most bytes the `/FlateDecode` streams that call themselves images may inflate
+/// to, together. Text extraction does not read a real image, so a large scan is
+/// allowed more room, but the label is the file's own claim and a content stream
+/// can wear it too, so it is capped (lower than the 768 MiB address-space limit
+/// of the parser child, which stays behind it).
+pub const IMAGE_INFLATE_BUDGET_BYTES: u64 = 384 * 1024 * 1024;
+
+fn is_pdf_space(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\r' | b'\n' | 0x0c | 0)
+}
 
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|window| window == needle)
 }
 
-fn rfind(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack.windows(needle.len()).rposition(|window| window == needle)
+/// The length of the `endobj` or `N G obj` keyword at `at`, if one starts there.
+/// Nothing a string or a dictionary left open reaches past one of these.
+fn object_boundary(body: &[u8], at: usize) -> Option<usize> {
+    match body[at] {
+        b'e' if body[at..].starts_with(b"endobj") && (at == 0 || is_pdf_space(body[at - 1])) => Some(6),
+        b'o' if body[at..].starts_with(b"obj")
+            && at > 0
+            && is_pdf_space(body[at - 1])
+            && body.get(at + 3).is_none_or(|b| is_pdf_space(*b) || matches!(b, b'<' | b'[')) =>
+        {
+            Some(3)
+        }
+        _ => None,
+    }
+}
+
+/// The entries of a stream dictionary that sit directly in it: strings are
+/// blanked and nested dictionaries are left out, so that a `/Subtype /Image`, a
+/// `/FlateDecode` or a `/Length` that is only text inside a string or another
+/// dictionary neither counts nor hides anything.
+fn top_level_entries(dict: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(dict.len());
+    let mut depth = 0u32;
+    let mut i = 0usize;
+    while i < dict.len() {
+        match dict[i] {
+            b'(' => {
+                let mut nesting = 0u32;
+                while i < dict.len() {
+                    match dict[i] {
+                        b'\\' => i += 1,
+                        b'(' => nesting += 1,
+                        b')' => {
+                            nesting -= 1;
+                            if nesting == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                i += 1;
+                out.push(b' ');
+            }
+            b'<' if dict.get(i + 1) == Some(&b'<') => {
+                depth += 1;
+                i += 2;
+                out.push(b' ');
+            }
+            b'<' => {
+                i += dict[i..].iter().position(|b| *b == b'>').unwrap_or(dict.len() - i) + 1;
+                out.push(b' ');
+            }
+            b'>' if dict.get(i + 1) == Some(&b'>') => {
+                depth = depth.saturating_sub(1);
+                i += 2;
+                out.push(b' ');
+            }
+            byte => {
+                if depth == 1 {
+                    out.push(byte);
+                }
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// True when `dict` has `/Subtype /Image` (spacing between the two names is free).
+fn dict_is_image(dict: &[u8]) -> bool {
+    const KEY: &[u8] = b"/Subtype";
+    let mut from = 0usize;
+    while let Some(found) = find(&dict[from..], KEY) {
+        let mut at = from + found + KEY.len();
+        while dict.get(at).is_some_and(|b| is_pdf_space(*b)) {
+            at += 1;
+        }
+        if dict[at..].starts_with(b"/Image")
+            && !dict.get(at + 6).is_some_and(|b| b.is_ascii_alphanumeric())
+        {
+            return true;
+        }
+        from += found + KEY.len();
+    }
+    false
+}
+
+/// The direct `/Length N` of a stream dictionary (not an indirect `N G R`).
+fn direct_length(dict: &[u8]) -> Option<usize> {
+    let at = find(dict, b"/Length")? + b"/Length".len();
+    let rest = &dict[at..];
+    let rest = &rest[rest.iter().take_while(|b| is_pdf_space(**b)).count()..];
+    let digits = rest.iter().take_while(|b| b.is_ascii_digit()).count();
+    if digits == 0 || digits > 12 {
+        return None;
+    }
+    let value: usize = std::str::from_utf8(&rest[..digits]).ok()?.parse().ok()?;
+    let after = &rest[digits..];
+    let after = &after[after.iter().take_while(|b| is_pdf_space(**b)).count()..];
+    // `12 0 R` is a reference to a length stored elsewhere.
+    if after.first().is_some_and(u8::is_ascii_digit) {
+        return None;
+    }
+    Some(value)
 }
 
 /// Inflates `input` into `scratch`, over and over, and adds what it produced to
 /// `total`. Returns what this stream produced, or `Err` as soon as `total` passes
-/// the budget. A corrupt or truncated stream just ends (the parser copes with it).
+/// `budget`. A corrupt or truncated stream just ends (the parser copes with it);
+/// what a truncated stream inflated before it ended is counted, because the
+/// parser would inflate the same bytes.
 fn inflate_counted(
     decoder: &mut flate2::Decompress,
     zlib_header: bool,
     input: &[u8],
     scratch: &mut [u8],
     total: &mut u64,
+    budget: u64,
 ) -> Result<u64, ()> {
     use flate2::{FlushDecompress, Status};
 
@@ -257,7 +371,7 @@ fn inflate_counted(
         consumed += took;
         produced_here += produced;
         *total += produced;
-        if *total > INFLATE_BUDGET_BYTES {
+        if *total > budget {
             return Err(());
         }
         match status {
@@ -268,62 +382,147 @@ fn inflate_counted(
 }
 
 /// Refuses a PDF whose `/FlateDecode` streams would inflate past
-/// [`INFLATE_BUDGET_BYTES`], before `lopdf` gets to inflate anything.
+/// [`INFLATE_BUDGET_BYTES`] (or, for streams labelled images,
+/// [`IMAGE_INFLATE_BUDGET_BYTES`]), before `lopdf` gets to inflate anything.
 ///
-/// A bounded pre-scan of the raw bytes: every `stream` keyword that follows a
-/// dictionary naming `/FlateDecode` starts a zlib stream, which is inflated into a
-/// scratch buffer that is thrown away, and counted. The work is bounded by the
-/// budget (a stream is abandoned the moment the total passes it), not by what the
-/// file claims, so a bomb costs a few hundred megabytes of inflate time, not
-/// gigabytes of memory.
+/// One forward pass over the raw bytes, linear in the file size: it follows the
+/// `<< >>` nesting, strings and comments, remembers the last top-level
+/// dictionary, and when the `stream` keyword follows one directly and the
+/// dictionary names `/FlateDecode`, inflates the stream's bytes (the direct
+/// `/Length` when it is sane, else up to the next `endstream`) into a scratch
+/// buffer that is thrown away, counting what came out. Each stream's bytes are
+/// read once and the stream's data is skipped by the pass, so a file full of
+/// `stream` keywords costs the file's size and nothing more; the inflate work is
+/// bounded by the budgets (a stream is abandoned the moment a total passes its
+/// budget), not by what the file claims.
 ///
 /// This is a guard for the common shape of the attack, not a proof: a stream
-/// that hides its dictionary (a filter chain such as ASCII85 then Flate, an
-/// encrypted stream, a dictionary further than [`STREAM_DICT_LOOKBACK`] back)
-/// is not counted. The address-space and CPU limits of the parser child and the
-/// deadline stay behind it.
+/// behind a filter chain (ASCII85 then Flate), an encrypted stream, or a
+/// dictionary this pass cannot read is not counted, and a stream that lies about
+/// where it ends is cut at the place the pass found. The address-space and CPU
+/// limits of the parser child and the deadline stay behind it.
 pub fn check_inflate_budget(body: &[u8]) -> QuarryResult<()> {
     let mut total: u64 = 0;
+    let mut image_total: u64 = 0;
     let mut scratch = vec![0u8; 64 * 1024];
     let mut decoder = flate2::Decompress::new(true);
-    let mut from = 0usize;
-    while let Some(found) = find(&body[from..], b"stream") {
-        let keyword = from + found;
-        from = keyword + b"stream".len();
-        if body[..keyword].ends_with(b"end") {
+    let mut depth = 0u32;
+    let mut dict_start = 0usize;
+    // The last dictionary closed at depth zero, as (start, end).
+    let mut last_dict: Option<(usize, usize)> = None;
+    let mut i = 0usize;
+    while i < body.len() {
+        // Whatever a stray `<<` or `(` left open does not reach into the next object.
+        if let Some(length) = object_boundary(body, i) {
+            depth = 0;
+            last_dict = None;
+            i += length;
             continue;
         }
-        // `stream` is followed by CRLF or LF (a lone CR is tolerated by readers).
-        let start = if body[from..].starts_with(b"\r\n") {
-            from + 2
-        } else if matches!(body.get(from), Some(b'\n' | b'\r')) {
-            from + 1
-        } else {
-            continue;
-        };
-        let before = &body[keyword.saturating_sub(STREAM_DICT_LOOKBACK)..keyword];
-        let dict = &before[rfind(before, b"obj").map_or(0, |at| at + 3)..];
-        if find(dict, b"/FlateDecode").is_none() || find(dict, b"/Image").is_some() {
-            continue;
-        }
-        let data = &body[start..];
-        let counted = inflate_counted(&mut decoder, true, data, &mut scratch, &mut total).and_then(|produced| {
-            // Like lopdf: raw deflate behind the two header bytes is the fallback,
-            // and only when the zlib reading produced nothing.
-            if produced == 0 && data.len() > 2 {
-                inflate_counted(&mut decoder, false, &data[2..], &mut scratch, &mut total).map(|_| ())
-            } else {
-                Ok(())
+        match body[i] {
+            b'%' => {
+                i += body[i..].iter().position(|b| matches!(b, b'\r' | b'\n')).unwrap_or(body.len() - i);
             }
-        });
-        if counted.is_err() {
-            return Err(QuarryError::new(
-                ErrorCode::BadRequest,
-                format!(
-                    "PDF decompressed size exceeds the {} MiB budget",
-                    INFLATE_BUDGET_BYTES / (1024 * 1024)
-                ),
-            ));
+            b'(' => {
+                // A literal string: balanced parentheses, backslash escapes.
+                let mut nesting = 0u32;
+                while i < body.len() {
+                    match body[i] {
+                        b'\\' => i += 1,
+                        b'(' => nesting += 1,
+                        b')' => {
+                            nesting -= 1;
+                            if nesting == 0 {
+                                i += 1;
+                                break;
+                            }
+                        }
+                        // An unterminated string ends where its object does.
+                        _ if object_boundary(body, i).is_some() => break,
+                        _ => {}
+                    }
+                    i += 1;
+                }
+            }
+            b'<' if body.get(i + 1) == Some(&b'<') => {
+                if depth == 0 {
+                    dict_start = i;
+                }
+                depth += 1;
+                i += 2;
+            }
+            b'<' => {
+                // A hex string (an unterminated one ends where its object does).
+                i += 1;
+                while i < body.len() && body[i] != b'>' && object_boundary(body, i).is_none() {
+                    i += 1;
+                }
+                i += usize::from(body.get(i) == Some(&b'>'));
+            }
+            b'>' if body.get(i + 1) == Some(&b'>') => {
+                i += 2;
+                if depth > 0 {
+                    depth -= 1;
+                    if depth == 0 {
+                        last_dict = Some((dict_start, i));
+                    }
+                }
+            }
+            b's' if depth == 0 && body[i..].starts_with(b"stream") => {
+                let keyword = i;
+                i += b"stream".len();
+                let Some((dict_start, dict_end)) = last_dict.take() else { continue };
+                if !body[dict_end..keyword].iter().all(|b| is_pdf_space(*b)) {
+                    continue;
+                }
+                // `stream` is followed by CRLF or LF (a lone CR is tolerated by readers).
+                let start = if body[i..].starts_with(b"\r\n") {
+                    i + 2
+                } else if matches!(body.get(i), Some(b'\n' | b'\r')) {
+                    i + 1
+                } else {
+                    continue;
+                };
+                let entries = top_level_entries(&body[dict_start..dict_end]);
+                let dict = entries.as_slice();
+                // Where the data ends: the declared length when `endstream` follows
+                // it, else the next `endstream`, else the end of the file.
+                let declared_end = direct_length(dict)
+                    .and_then(|length| start.checked_add(length))
+                    .filter(|end| {
+                        *end <= body.len()
+                            && body[*end..].iter().skip_while(|b| is_pdf_space(**b)).take(9).copied().eq(*b"endstream")
+                    });
+                let end = declared_end
+                    .or_else(|| find(&body[start..], b"endstream").map(|at| start + at))
+                    .unwrap_or(body.len());
+                i = end;
+                if find(dict, b"/FlateDecode").is_none() {
+                    continue;
+                }
+                let (counter, budget) = if dict_is_image(dict) {
+                    (&mut image_total, IMAGE_INFLATE_BUDGET_BYTES)
+                } else {
+                    (&mut total, INFLATE_BUDGET_BYTES)
+                };
+                let data = &body[start..end];
+                let counted = inflate_counted(&mut decoder, true, data, &mut scratch, counter, budget).and_then(|produced| {
+                    // Like lopdf: raw deflate behind the two header bytes is the fallback,
+                    // and only when the zlib reading produced nothing.
+                    if produced == 0 && data.len() > 2 {
+                        inflate_counted(&mut decoder, false, &data[2..], &mut scratch, counter, budget).map(|_| ())
+                    } else {
+                        Ok(())
+                    }
+                });
+                if counted.is_err() {
+                    return Err(QuarryError::new(
+                        ErrorCode::BadRequest,
+                        format!("PDF decompressed size exceeds the {} MiB budget", budget / (1024 * 1024)),
+                    ));
+                }
+            }
+            _ => i += 1,
         }
     }
     Ok(())
@@ -565,11 +764,20 @@ mod tests {
     }
 
     #[test]
-    fn image_and_uncompressed_streams_are_not_counted() {
+    fn image_streams_have_their_own_larger_budget_and_unfiltered_streams_are_not_counted() {
         let big = deflated_zeros(300 * 1024 * 1024);
-        // Text extraction never inflates an image, so a large one is not a bomb here.
+        // Text extraction does not read a real image, so 300 MiB of it is not a bomb here
+        // (it would be, as a content stream: the 256 MiB budget).
         let image = raw_streams("/Type /XObject /Subtype /Image /Filter /FlateDecode", &[&big]);
-        check_inflate_budget(&image).expect("an image stream is skipped");
+        check_inflate_budget(&image).expect("an image stream is held to the image budget");
+        // Spacing between the two names is free.
+        let image = raw_streams("/Subtype/Image /Filter /FlateDecode", &[&big]);
+        check_inflate_budget(&image).expect("same, written without a space");
+        // But the image budget is a cap, not an exemption.
+        let huge = deflated_zeros(500 * 1024 * 1024);
+        let error = check_inflate_budget(&raw_streams("/Subtype /Image /Filter /FlateDecode", &[&huge]))
+            .expect_err("500 MiB of image is past the 384 MiB image budget");
+        assert!(error.message.contains("384 MiB"), "{}", error.message);
         // No /FlateDecode in the dictionary: nothing to inflate.
         let plain = raw_streams("", &[&big]);
         check_inflate_budget(&plain).expect("an unfiltered stream is skipped");
@@ -578,12 +786,85 @@ mod tests {
     }
 
     #[test]
-    fn a_corrupt_or_truncated_flate_stream_is_not_a_budget_error() {
+    fn a_content_stream_that_only_names_image_is_still_counted() {
+        // lopdf reads a stream as page content whatever its dictionary claims, so
+        // the word /Image anywhere but as a /Subtype value buys nothing.
+        let big = deflated_zeros(300 * 1024 * 1024);
+        for dict in [
+            "/Filter /FlateDecode /Note /Image",
+            "/Filter /FlateDecode /Note (/Subtype /Image)",
+            "/Filter /FlateDecode /Subtype /ImageMask",
+        ] {
+            let error = check_inflate_budget(&raw_streams(dict, &[&big])).expect_err(dict);
+            assert!(error.message.contains("256 MiB"), "{dict}: {}", error.message);
+        }
+    }
+
+    #[test]
+    fn obj_text_after_the_filter_does_not_hide_a_bomb() {
+        let big = deflated_zeros(300 * 1024 * 1024);
+        for dict in [
+            "/Filter /FlateDecode /Note (obj)",
+            "/Filter /FlateDecode /Note (1 0 obj) /Other <6f626a>",
+            "/Filter /FlateDecode /Note /obj",
+            "/Filter /FlateDecode /Nested << /A (>>) /B << /C 1 >> >>",
+        ] {
+            check_inflate_budget(&raw_streams(dict, &[&big])).expect_err(dict);
+        }
+        // Junk that opens a dictionary and never closes it ahead of the object does not
+        // swallow the object.
+        let mut junk = b"%PDF-1.4\n<< (unfinished\n".to_vec();
+        junk.extend_from_slice(&raw_streams("/Filter /FlateDecode", &[&big])[9..]);
+        check_inflate_budget(&junk).expect_err("the bomb behind junk is still found");
+    }
+
+    #[test]
+    fn a_truncated_stream_counts_what_it_inflated() {
+        // The parser would inflate the same bytes, so they are counted; a corrupt or
+        // short stream below the budget is simply not an error.
+        let mut cut = deflated_zeros(600 * 1024 * 1024);
+        cut.truncate(cut.len() * 3 / 4);
+        let error = check_inflate_budget(&raw_streams("/Filter /FlateDecode", &[&cut]))
+            .expect_err("about 450 MiB inflated before the cut");
+        assert!(error.message.contains("exceeds"), "{}", error.message);
         let mut half = deflate(&vec![b'a'; 100_000]);
         half.truncate(half.len() / 2);
         check_inflate_budget(&raw_streams("/Filter /FlateDecode", &[&half])).unwrap();
         check_inflate_budget(&raw_streams("/Filter /FlateDecode", &[b"not deflate data at all"])).unwrap();
         check_inflate_budget(&raw_streams("/Filter /FlateDecode", &[b""])).unwrap();
+    }
+
+    #[test]
+    fn the_scan_is_linear_on_hostile_input() {
+        // Dense `stream` keywords, with and without dictionaries, and unbalanced
+        // brackets: the cost is the size of the file, not a lookback per keyword.
+        let started = std::time::Instant::now();
+        let dense = b"stream\n".repeat(600_000); // 4.2 MB
+        check_inflate_budget(&dense).unwrap();
+        let mut with_filter = b"1 0 obj\n<< /Filter /FlateDecode >>\n".to_vec();
+        with_filter.extend_from_slice(&dense);
+        check_inflate_budget(&with_filter).unwrap();
+        let dicts = b"<< /Filter /FlateDecode >>\nstream\n".repeat(120_000); // 4 MB
+        check_inflate_budget(&dicts).unwrap();
+        let open = b"<<(".repeat(1_400_000);
+        check_inflate_budget(&open).unwrap();
+        let mixed = b"1 0 obj << /Length 4 /Filter /FlateDecode >> stream\nabcd\nendstream endobj ".repeat(60_000);
+        check_inflate_budget(&mixed).unwrap();
+        assert!(started.elapsed().as_secs() < 5, "{:?}", started.elapsed());
+    }
+
+    #[test]
+    fn the_declared_length_and_endstream_both_bound_a_stream() {
+        // Two streams back to back, the first with a direct /Length: the second is
+        // still seen (and the first is not read past its end).
+        let part = deflated_zeros(200 * 1024 * 1024);
+        let two = raw_streams("/Filter /FlateDecode", &[&part, &part]);
+        check_inflate_budget(&two).expect_err("400 MiB in two streams");
+        // An indirect /Length falls back to endstream.
+        let mut out = b"%PDF-1.4\n1 0 obj\n<< /Length 9 0 R /Filter /FlateDecode >>\nstream\n".to_vec();
+        out.extend_from_slice(&deflated_zeros(300 * 1024 * 1024));
+        out.extend_from_slice(b"\nendstream\nendobj\n");
+        check_inflate_budget(&out).expect_err("a bomb with an indirect length");
     }
 
     #[test]

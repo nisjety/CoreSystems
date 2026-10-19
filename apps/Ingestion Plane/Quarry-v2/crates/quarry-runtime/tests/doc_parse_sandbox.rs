@@ -204,6 +204,13 @@ async fn a_bomb_behind_a_filter_chain_is_still_stopped_by_the_address_space_limi
     .expect_err("the bomb must not parse");
     assert_eq!(error.code, ErrorCode::UnsupportedMedia, "{error:?}");
     assert_eq!(error.details.as_ref().unwrap()["reason"], "pdf_parse_failed");
+    // A kill by the address-space limit says so; a plain rejection of the filter chain by
+    // lopdf would carry no limit, and would not be the backstop this test keeps.
+    assert_eq!(
+        error.details.as_ref().unwrap()["limit"],
+        "parser_stopped",
+        "the address-space limit stopped it: {error:?}"
+    );
     assert!(started.elapsed() < Duration::from_secs(14), "stopped by the limit, not by the deadline");
 
     // The service is fine afterwards: the next document parses.
