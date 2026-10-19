@@ -203,7 +203,7 @@ Firecrawl self-hosting explicitly lacks the full managed Fire Engine advantage. 
 | Suite                                | Count | Status |
 |--------------------------------------|-------|--------|
 | `quarry-core::ids` unit              | 2     | ✅     |
-| `quarry-core` integration (contracts) | 11    | ✅     |
+| `quarry-core` integration (contracts) | 30    | ✅ 2026-10-19 run (R8b; 11 when added) |
 | `quarry-security` integration        | 11    | ✅     |
 | `quarry-transform` integration       | 10    | ✅     |
 | `pkg/quarrycontracts` Go             | ~6    | ✅     |
@@ -214,7 +214,7 @@ Firecrawl self-hosting explicitly lacks the full managed Fire Engine advantage. 
 | `quarry-edge` sse_stream             | 1     | ✅     |
 | `control/internal/dispatcher` Go     | 7     | ✅     |
 | `quarry-edge` cache_policy           | 9     | Needs a live Redis (`REDIS_URL`, default 127.0.0.1:6379). Without one each case prints `skip: REDIS_URL unreachable` and passes, so a bare `cargo test` asserts nothing here. With `REQUIRE_CONTRACT=1` an unreachable Redis fails each case. CI runs it in the `cargo-check` gate step "Page-cache and ZDR cache gates (Redis)" against a `redis:7-alpine` service on port 6380, with `REQUIRE_CONTRACT=1` (R8a). 2026-10-19: 9 passed with Redis; 9 passed with no env (all skip); 9 failed with `REQUIRE_CONTRACT=1` and no Redis |
-| `quarry-browser` (pool + browserless + session/profiles) | 21 | ✅     |
+| `quarry-browser` (pool + browserless + session/profiles, slot book, deadlines, live-gated driver tests) | 129 (4 ignored) | ✅ 2026-10-19 run (R8b) without Chromium: the live-gated cases skip unless `CHROMIUMOXIDE_TEST=1`. With Chromium (the advisory `quarry-browser-live` CI job, `--features chromiumoxide --lib`) it was 129 passed, 4 ignored in each of 10 runs at `46157832` |
 | `quarry-transform::readability` unit | 4     | ✅ added 2026-04-29 |
 | `quarry-transform::diff` unit (semantic) | 6 | ✅ added 2026-04-29 |
 | `quarry-security::urlsig` unit       | 10    | ✅ added 2026-04-29 |
@@ -238,24 +238,30 @@ Firecrawl self-hosting explicitly lacks the full managed Fire Engine advantage. 
 | `quarry-edge::firecrawl_adapter`     | 5     | ✅ added 2026-05-08 |
 | `quarry-edge::audio_routes`          | 1     | ✅ added 2026-05-08 |
 | `quarry-edge` zdr_claim_floor | 22 | ✅ 2026-10-19: 22 passed with no env, and 22 passed with Redis and `REQUIRE_CONTRACT=1`. Its Redis case skips without Redis, and with `REQUIRE_CONTRACT=1` and no Redis 21 passed and 1 failed (`zdr_claim_floor.rs:1036`) |
-| `quarry-edge` unit tests, `src/lib.rs` | 362 | ✅ 2026-10-19 run |
-| `quarry-edge` unit tests, `src/main.rs` (same modules compiled again) | 356 | ✅ 2026-10-19 run |
+| `quarry-edge` unit tests, `src/lib.rs` | 364 | ✅ 2026-10-19 run (R8b; 362 in R8a) |
+| `quarry-edge` unit tests, `src/main.rs` (same modules compiled again) | 358 | ✅ 2026-10-19 run (R8b; 356 in R8a) |
 | `quarry-edge` agent_run_control | 17 | ✅ 2026-10-19 run |
-| `quarry-edge` run_sweeper_integration | 22 | ✅ 2026-10-19 run |
+| `quarry-edge` run_sweeper_integration | 23 | ✅ 2026-10-19 run (R8b; 22 in R8a) |
 | `quarry-edge` scrape_records_durable | 4 | ✅ 2026-10-19 run |
 | `quarry-edge` zdr_gap_rows | 9 | ✅ 2026-10-19 run |
 | `quarry-edge` zdr_feature_matrix | 12 | ✅ 2026-10-19 run |
 | `quarry-edge` ready_browser | 6 | ✅ 2026-10-19 run |
-| `quarry-edge` log_field_discipline (log-field lint) | 20 | ✅ 2026-10-19 run |
-| `quarry-edge` other integration binaries: artifacts_fs_list 5, change_webhook_proptest 4, crawl_limits 5, drain 2, job_admission 2, metrics_recorder 7, properties 6, start_run_grants 4, zdr_behavior 4, zdr_log_capture 12 | 51 | ✅ 2026-10-19 run |
+| `quarry-edge` log_field_discipline (log-field lint) | 22 | ✅ 2026-10-19 run (R8b; 20 in R8a) |
+| `quarry-edge` other integration binaries: artifacts_fs_list 5, change_webhook_proptest 4, crawl_limits 5, drain 2, job_admission 2, metrics_recorder 7, properties 6, start_run_grants 5, zdr_behavior 4, zdr_log_capture 12 | 52 | ✅ 2026-10-19 run (R8b; 51 in R8a, start_run_grants was 4) |
 | `quarry-transform` clean_html_selectors | 16 | ✅ 2026-10-19 run |
 | `quarry-transform` clean_html_cost | 0 (1 ignored) | Measurement, not a check: `cargo test -p quarry-transform --test clean_html_cost -- --ignored --nocapture` prints `MEASURE` lines. Not run in R8a |
 | verevon gateway `log_field_discipline` (`apps/Frontend Plane/verevonv3/apps/gateway`, includes `the_gateway_stays_within_the_log_field_baseline`) | 13 | ✅ 2026-10-19 run, native `cargo test --test log_field_discipline` |
-| **Total** | not recomputed | `cargo test --no-fail-fast -p quarry-edge` on 2026-10-19, no Redis: 902 passed, 0 failed, 23 targets (lib 362, bin 356, 21 integration targets with 184 tests). The other rows were not re-run in R8a, so the workspace total is not recomputed |
+| `quarry-core` lib, properties, change_history_proptest | 119, 10, 4 | ✅ 2026-10-19 run (R8b) |
+| `quarry-runtime` lib | 734 | 2026-10-19 (R8b): 733 passed and 1 failed in the workspace run, then 734 passed in each of two reruns of the lib. The failing test is `pipeline::scrape_challenge_tests::the_scrape_path_logs_the_reason_and_the_status_and_never_the_host` (assertion at `pipeline.rs:2869`); it passes alone, so it is flaky under the parallel suite (cause not diagnosed) |
+| `quarry-runtime` doc_parse_sandbox (Linux, parser child) | 10 | ✅ 2026-10-19 run (R8b) |
+| `quarry-transform` lib, clean_html, markdown_blowup, transform | 156, 16, 10, 11 | ✅ 2026-10-19 run (R8b) |
+| Node: openapi route-coverage, scrape-parity and challenge-parity; browser-grant-contract; zdr-contract-schema | 23; 15; 65 | ✅ 2026-10-19 run (R8b), native `node --test` |
+| `scripts/tests/zdr-contract-sync.test.sh` | 50 | ✅ 2026-10-19 (R8b) after `13c6f5ac`; it was 48 passed and 1 failed before that commit (stale digest of the ZDR matrix golden) |
+| **Total** | 2230 passed, 1 failed, 11 ignored | `cargo test --workspace --no-fail-fast` on 2026-10-19 (R8b), no Redis, in the quarry-rust-env:1 image: 57 test binaries, one failure (the flaky `quarry-runtime` lib test in its row above, which passed on rerun). `quarry-edge` alone is 910 (lib 364, bin 358, 21 integration binaries with 188 tests); in R8a it was 902 on an earlier tree. The Go rows, the gateway and the Node rows are not part of this sum, and rows without a date were not re-run |
 
 Coverage floor target 80% not yet enforced in CI.
 
-Rows dated 2026-10-19 were re-read from the R8a round-3 runs: the quarry-edge and quarry-transform runs (in the quarry-rust-env:1 image, under the docker lock) on HEAD 23e1ad7f plus comment-only edits, and the gateway lint natively on its working tree. Rows without a date were not re-run in R8a.
+Rows dated 2026-10-19 come from two runs. R8a re-ran quarry-edge and quarry-transform (quarry-rust-env:1, under the docker lock) on HEAD 23e1ad7f plus comment-only edits, and the gateway lint natively. R8b re-ran the whole Quarry workspace on the code of `e78b562c` (rows marked R8b, which also carry the R8a figure where it moved) and the Node scripts natively. Rows without a date were not re-run.
 
 ---
 
