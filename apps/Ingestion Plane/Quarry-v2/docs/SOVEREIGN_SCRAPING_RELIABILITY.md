@@ -196,9 +196,10 @@ counts are kept and the error leaves the host out. The host is never logged.
 
 `QUARRY_CHALLENGE_CLASSIFIER=v2|legacy` (default `v2`; `legacy` is the old
 substring classifier for one release and is not subject to the rule) and
-`QUARRY_CHALLENGE_ENFORCE=enforce|log` (default `enforce`; `log` records a
-`quarry.challenge.would_reject` line and lets the action through while the
-corpus is validated).
+`QUARRY_CHALLENGE_ENFORCE=log|enforce` (default `log`, the plan's setting while
+the corpus validates: classification and the signals stay, `quarry.challenge.would_reject`
+is logged and the action goes through; `enforce` turns the refusals above on
+and is set per environment once a captured corpus has passed).
 
 **The scrape path (WS3.J).** `/v1/scrape` is one shot: no wait, no reload, no
 person to hand over to. `PageRunner` classifies the fetched page with the same
@@ -210,10 +211,11 @@ stored, indexed or ingested; the scrape fails with `403 CHALLENGE_DETECTED` and
 `next: "other_source"`. No host, URL or page text is in the error. A status alone
 (a bare 403, a 429, a 5xx), a login page, a paywall and a CAPTCHA on an ordinary
 form are not walls and scrape as before. `QUARRY_CHALLENGE_CLASSIFIER=legacy`
-turns the scrape-path classification off; `QUARRY_CHALLENGE_ENFORCE=log` logs
-`quarry.challenge.would_refuse_scrape` with the reason and the status, and
-returns the page. ZDR runs are classified and refused the same way and log only
-the reason.
+turns the scrape-path classification off. Under the default
+`QUARRY_CHALLENGE_ENFORCE=log` the wall is returned as before and
+`quarry.challenge.would_refuse_scrape` logs the reason and the status; under
+`enforce` it is refused as described. ZDR runs are classified the same way and
+log only the reason.
 
 **Evidence.** The classification table (about 60 rows) and the runner tests use
 hand-written HTML, modelled on the shape of each vendor's page. None of it is a

@@ -213,8 +213,9 @@ paths:
             details.reason), details.recovery not_applicable and details.next other_source. It
             carries no host, URL or page text. A status alone (a bare 403, a 429, a login page) is
             never a challenge, and a page that is not a challenge scrapes as before. Classified by
-            QUARRY_CHALLENGE_CLASSIFIER=v2 (the default; legacy does not classify a scrape) and
-            refused unless QUARRY_CHALLENGE_ENFORCE=log, which only counts the page by reason.
+            QUARRY_CHALLENGE_CLASSIFIER=v2 (the default; legacy does not classify a scrape). The
+            refusal itself is switched on with QUARRY_CHALLENGE_ENFORCE=enforce; under the default
+            log the page is returned as before and only counted by reason in a log line.
           content:
             application/json:
               schema:
@@ -4000,10 +4001,11 @@ components:
         front of the page; strength=non_signal names an ordinary access state (a login form, a consent
         banner, a paywall, a rate limit, a bare status) so it is not mistaken for one. A strong signal
         gets one recovery per host and run, a wait or a reload of the same URL; if the host still
-        challenges, block_reason becomes challenge_loop, recovery becomes exhausted and Quarry answers
-        further navigation to that host and interaction with its page with 403 CHALLENGE_DETECTED
-        (details: reason, host, recovery=exhausted, next=user_takeover_or_other_source; host is left
-        out under Zero Data Retention). Screenshots, reads, waits, scrolling, answering a dialog the page
+        challenges, block_reason becomes challenge_loop, recovery becomes exhausted and, when the edge
+        runs with QUARRY_CHALLENGE_ENFORCE=enforce (the default is log, which only logs what it would
+        refuse), Quarry answers further navigation to that host and interaction with its page with
+        403 CHALLENGE_DETECTED (details: reason, host, recovery=exhausted,
+        next=user_takeover_or_other_source; host is left out under Zero Data Retention). Screenshots, reads, waits, scrolling, answering a dialog the page
         already opened, back and forward, and navigation to another host stay allowed; raw script
         (evaluate) is refused with the interaction.
       properties:
