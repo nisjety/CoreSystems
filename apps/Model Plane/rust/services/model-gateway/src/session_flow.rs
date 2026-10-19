@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 use mp_contracts::model_plane::v1::{
     AppendMessageRequest, CancelRunRequest, CompleteDirectRunWithMessageRequest,
-    CompleteDirectRunWithMessageResponse, CreateThreadRequest, HeartbeatManagedRunRequest,
-    ManagedRunSource, RecordTerminalOutcomeRequest, ResolveRunOwnerRequest, StartManagedRunRequest,
-    StartRunRequest, TerminalOutcome,
+    CompleteDirectRunWithMessageResponse, CreateThreadRequest, GetRunRequest,
+    HeartbeatManagedRunRequest, ManagedRunSource, RecordTerminalOutcomeRequest,
+    ResolveRunOwnerRequest, StartManagedRunRequest, StartRunRequest, TerminalOutcome,
 };
 use mp_ids::new_ulid;
 use std::time::Duration;
@@ -911,6 +911,45 @@ pub async fn ensure_browser_agent_run_liveness(state: &AppState, run: &SessionRu
         anyhow::bail!("managed browser run is already terminal");
     }
     Ok(())
+}
+
+/// Read-only liveness of a standalone-browser managed run, for the replay of
+/// a keyed start. Unlike `heartbeat_browser_agent_run` it does NOT renew the
+/// run's terminalization lease: a replay must not keep alive a run whose
+/// dispatch task is gone (a process that died after the managed start), or the
+/// client's retries would extend the lease for ever and the run would never be
+/// terminalized. `true` = queued, running or awaiting approval; `false` = in a
+/// terminal state. A status this code does not know is an error (the replay is
+/// then refused as unverified), not a guess.
+///
+/// # Errors
+/// Returns an error when Session Core cannot be reached within the heartbeat
+/// timeout, refuses the read, or reports an unrecognised status.
+pub(crate) async fn browser_agent_run_is_live(
+    state: &AppState,
+    run: &SessionRun,
+    bearer: &VerifiedSessionBearer,
+) -> Result<bool> {
+    require_gateway_owned_source(run, ManagedRunSource::GatewayBrowser)?;
+    let mut client = state.run_client.clone();
+    let detail = tokio::time::timeout(
+        MANAGED_RUN_HEARTBEAT_TIMEOUT,
+        client.get_run(authenticated_request(
+            GetRunRequest {
+                run_id: run.run_id.clone(),
+            },
+            Some(bearer.as_str()),
+        )?),
+    )
+    .await
+    .context("session-core get_run timed out")?
+    .context("session-core get_run failed")?
+    .into_inner();
+    match detail.status.as_str() {
+        "queued" | "running" | "awaiting_approval" | "paused" => Ok(true),
+        "completed" | "failed" | "cancelled" | "timed_out" | "interrupted" => Ok(false),
+        _ => anyhow::bail!("session-core reported an unrecognised run status"),
+    }
 }
 
 fn direct_terminal_outcome(terminal: DirectInferenceTerminal) -> (TerminalOutcome, &'static str) {

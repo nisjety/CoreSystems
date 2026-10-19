@@ -150,16 +150,25 @@ fn keyed_plan_id(run_key: &str) -> String {
 }
 
 /// The answer to a replayed keyed start. Session Core says the run exists;
-/// before answering 200 the run must still be live (its lease is renewed, as
-/// the first start did), because a run that ended or was cancelled before it
-/// was dispatched would otherwise read as a run that is working. If liveness
-/// cannot be checked the replay is refused rather than guessed.
+/// before answering 200 the run must still be live, because a run that ended
+/// or was cancelled before it was dispatched would otherwise read as a run
+/// that is working. Liveness is a read (`GetRun`), never a heartbeat: a replay
+/// that renewed the run's 15-minute terminalization lease would keep a run
+/// whose dispatch task is gone (its process died after the managed start)
+/// alive for as long as the client keeps retrying, instead of letting Session
+/// Core terminalize it so a new key can start fresh. If liveness cannot be
+/// checked the replay is refused rather than guessed.
+///
+/// Known limit: a run that is live but was never dispatched (the process died
+/// between the managed start and the dispatch spawn) still reads as live until
+/// its lease expires, because no durable dispatch marker exists yet.
 async fn browser_run_replay(
     state: &AppState,
     run: &crate::session_flow::SessionRun,
     plan_id: &str,
+    session_bearer: &VerifiedSessionBearer,
 ) -> Result<Json<Value>, ApiError> {
-    match crate::session_flow::heartbeat_browser_agent_run(state, run).await {
+    match crate::session_flow::browser_agent_run_is_live(state, run, session_bearer).await {
         Ok(true) => Ok(Json(json!({
             "run_id": run.run_id,
             "thread_id": run.thread_id,
@@ -607,10 +616,57 @@ fn host_within_policy(host: &str, allowed_domains: &[String]) -> bool {
 /// `browser_grant_not_derivable`: use a new key. A start that fails earlier
 /// (Session Core unreachable) keeps the grant, so the same key can retry.
 /// Without the header every POST is a new run, as before.
+///
+/// A keyed start runs as a detached task that this handler awaits, so a client
+/// that disconnects (a timeout, the retry the key exists for) cannot drop the
+/// future between the managed start and the dispatch and leave a live run that
+/// was never dispatched. An unkeyed start is not detached, as before. A
+/// replay's liveness is a read, not a lease renewal (see
+/// `browser_run_replay`). Remaining window: a process that dies after the
+/// managed start and before the dispatch leaves a live, undispatched run until
+/// its lease expires; no durable dispatch marker exists to tell a replay.
+async fn browser_run_start(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    data_plane_bearer: Option<Extension<VerifiedBearer>>,
+    execution_bearer: VerifiedExecutionBearer,
+    session_bearer: VerifiedSessionBearer,
+    inference_bearer: VerifiedInferenceBearer,
+    browser_bearer: VerifiedBrowserBearer,
+    headers: HeaderMap,
+    Json(req): Json<BrowserRunStartRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let keyed = headers.contains_key(IDEMPOTENCY_KEY_HEADER);
+    let start = browser_run_start_inner(
+        State(state),
+        Extension(claims),
+        data_plane_bearer,
+        execution_bearer,
+        session_bearer,
+        inference_bearer,
+        browser_bearer,
+        headers,
+        Json(req),
+    );
+    if !keyed {
+        return start.await;
+    }
+    match tokio::spawn(start).await {
+        Ok(result) => result,
+        Err(error) => {
+            warn!(%error, "keyed browser run start task did not finish");
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "browser_run_start_interrupted" })),
+            ))
+        }
+    }
+}
+
 // Cohesive single-flow handler (validate → thread → run → dispatch); splitting
 // it would obscure the linear session-core/execution-core sequencing.
 #[allow(clippy::too_many_lines)]
-async fn browser_run_start(
+async fn browser_run_start_inner(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     data_plane_bearer: Option<Extension<VerifiedBearer>>,
@@ -748,7 +804,7 @@ async fn browser_run_start(
         if idempotency_key.is_some() {
             // A retry of a keyed start: the same run, no second dispatch, and
             // the grant it shares with the live run is left alone.
-            return browser_run_replay(&state, &run, &plan_id).await;
+            return browser_run_replay(&state, &run, &plan_id, &session_bearer).await;
         }
         revoke_derived_run_grant(
             &state,
@@ -2213,12 +2269,31 @@ mod tests {
     fn key_headers(values: &[&str]) -> HeaderMap {
         let mut headers = HeaderMap::new();
         for value in values {
+            // The literal, not the constant: the wire name is the contract.
             headers.append(
-                IDEMPOTENCY_KEY_HEADER,
+                "idempotency-key",
                 axum::http::HeaderValue::from_bytes(value.as_bytes()).expect("header value"),
             );
         }
         headers
+    }
+
+    #[test]
+    fn the_idempotency_key_wire_name_is_the_one_the_gateway_forwards() {
+        // The Verevon gateway forwards the literal "idempotency-key" (its own
+        // test pins it, and scripts/tests/browser-grant-contract.test.mjs
+        // checks both spellings agree). A rename here would make every retry a
+        // new run with no failing test.
+        assert_eq!(IDEMPOTENCY_KEY_HEADER, "idempotency-key");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "idempotency-key",
+            axum::http::HeaderValue::from_static("retry-1"),
+        );
+        assert_eq!(
+            parse_idempotency_key(&headers).unwrap().as_deref(),
+            Some("retry-1")
+        );
     }
 
     #[test]
@@ -2289,7 +2364,7 @@ mod tests {
         use super::*;
         use std::collections::HashMap;
         use std::future::Future;
-        use std::sync::atomic::AtomicBool;
+        use std::sync::atomic::{AtomicBool, AtomicU64};
         use std::time::Duration;
 
         use mp_contracts::model_plane::v1::{
@@ -2299,9 +2374,9 @@ mod tests {
             session_core_client::SessionCoreClient,
             AppendMessageRequest, AppendMessageResponse, CompleteDirectRunWithMessageRequest,
             CompleteDirectRunWithMessageResponse, CreateThreadRequest, CreateThreadResponse,
-            HeartbeatManagedRunRequest, HeartbeatManagedRunResponse, RecordRunOutputRequest,
+            GetRunRequest, HeartbeatManagedRunRequest, HeartbeatManagedRunResponse, RecordRunOutputRequest,
             RecordRunOutputResponse, RecordTerminalOutcomeRequest, RecordTerminalOutcomeResponse,
-            StartManagedRunRequest, StartManagedRunResponse,
+            RunDetail, StartManagedRunRequest, StartManagedRunResponse,
         };
         use tonic::codegen::{http, Body, BoxFuture, Service, StdError};
 
@@ -2353,6 +2428,9 @@ mod tests {
             creates: Arc<Mutex<Vec<CreateThreadRequest>>>,
             appends: Arc<Mutex<Vec<AppendMessageRequest>>>,
             append_fails: Arc<AtomicBool>,
+            /// Milliseconds AppendMessage waits before answering: holds a
+            /// request inside the start sequence so a test can drop it there.
+            append_delay_ms: Arc<AtomicU64>,
         }
 
         impl tonic::server::NamedService for FakeSession {
@@ -2394,6 +2472,10 @@ mod tests {
                     }),
                     "/model_plane.v1.SessionCore/AppendMessage" => Box::pin(async move {
                         Ok(serve_unary(request, move |r: tonic::Request<AppendMessageRequest>| async move {
+                            let delay = this.append_delay_ms.load(Ordering::SeqCst);
+                            if delay > 0 {
+                                tokio::time::sleep(Duration::from_millis(delay)).await;
+                            }
                             if this.append_fails.load(Ordering::SeqCst) {
                                 return Err(Status::unavailable("append is down"));
                             }
@@ -2410,6 +2492,10 @@ mod tests {
         #[derive(Clone, Default)]
         struct FakeRuns {
             cancels: Arc<Mutex<Vec<CancelRunRequest>>>,
+            /// The status GetRun reports; empty means "running".
+            status: Arc<Mutex<String>>,
+            get_fails: Arc<AtomicBool>,
+            gets: Arc<AtomicUsize>,
         }
 
         impl tonic::server::NamedService for FakeRuns {
@@ -2445,6 +2531,24 @@ mod tests {
                         })
                         .await)
                     }),
+                    "/model_plane.v1.RunService/GetRun" => Box::pin(async move {
+                        Ok(serve_unary(request, move |r: tonic::Request<GetRunRequest>| async move {
+                            this.gets.fetch_add(1, Ordering::SeqCst);
+                            if this.get_fails.load(Ordering::SeqCst) {
+                                return Err(Status::unavailable("get_run is down"));
+                            }
+                            let mut status = this.status.lock().expect("status").clone();
+                            if status.is_empty() {
+                                status = "running".to_owned();
+                            }
+                            Ok(tonic::Response::new(RunDetail {
+                                run_id: r.into_inner().run_id,
+                                status,
+                                ..Default::default()
+                            }))
+                        })
+                        .await)
+                    }),
                     _ => Box::pin(async move { Ok(unimplemented_rpc()) }),
                 }
             }
@@ -2459,6 +2563,8 @@ mod tests {
             starts: Arc<Mutex<Vec<StartManagedRunRequest>>>,
             terminal: Arc<AtomicBool>,
             heartbeats: Arc<AtomicUsize>,
+            /// StartManagedRun answers unavailable (Session Core down).
+            start_fails: Arc<AtomicBool>,
         }
 
         #[tonic::async_trait]
@@ -2468,6 +2574,9 @@ mod tests {
                 request: tonic::Request<StartManagedRunRequest>,
             ) -> Result<Response<StartManagedRunResponse>, Status> {
                 let start = request.into_inner();
+                if self.start_fails.load(Ordering::SeqCst) {
+                    return Err(Status::unavailable("start is down"));
+                }
                 self.starts.lock().expect("starts").push(start.clone());
                 let mut runs = self.runs.lock().expect("runs");
                 if let Some((run_id, thread_id, goal)) = runs.get(&start.start_key) {
@@ -2675,15 +2784,18 @@ mod tests {
                 }
             }
 
-            async fn start(
+            /// The request as an owned future, so a test can spawn it and
+            /// abort it the way a client disconnect drops the handler.
+            fn start_future(
                 &self,
                 key: Option<&str>,
                 request: BrowserRunStartRequest,
-            ) -> Result<Json<Value>, ApiError> {
+            ) -> impl Future<Output = Result<Json<Value>, ApiError>> + Send + 'static {
                 let mut headers = HeaderMap::new();
                 if let Some(key) = key {
+                    // The literal wire name, not IDEMPOTENCY_KEY_HEADER.
                     headers.insert(
-                        IDEMPOTENCY_KEY_HEADER,
+                        "idempotency-key",
                         axum::http::HeaderValue::from_str(key).expect("key header"),
                     );
                 }
@@ -2698,7 +2810,14 @@ mod tests {
                     headers,
                     Json(request),
                 )
-                .await
+            }
+
+            async fn start(
+                &self,
+                key: Option<&str>,
+                request: BrowserRunStartRequest,
+            ) -> Result<Json<Value>, ApiError> {
+                self.start_future(key, request).await
             }
 
             fn derive_keys(&self) -> Vec<String> {
@@ -2799,7 +2918,14 @@ mod tests {
             assert_eq!(h.dispatches().len(), 1, "a replay never dispatches");
             assert_eq!(h.revokes(), 0);
             assert_eq!(h.lifecycle.starts.lock().expect("starts").len(), 2);
-            assert!(h.lifecycle.heartbeats.load(Ordering::SeqCst) >= 2);
+            // The replay read the run and did not renew its lease: the only
+            // heartbeat is the first start's own.
+            assert_eq!(h.runs.gets.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                h.lifecycle.heartbeats.load(Ordering::SeqCst),
+                1,
+                "a replay never renews the run's lease"
+            );
         }
 
         #[tokio::test]
@@ -2855,7 +2981,7 @@ mod tests {
             let _ = h.start(Some("retry-1"), browser_request("session-1"))
                 .await
                 .expect("first");
-            h.lifecycle.terminal.store(true, Ordering::SeqCst);
+            *h.runs.status.lock().expect("status") = "cancelled".to_owned();
             let error = h
                 .start(Some("retry-1"), browser_request("session-1"))
                 .await
@@ -2868,16 +2994,25 @@ mod tests {
 
         #[tokio::test]
         async fn a_replay_whose_liveness_cannot_be_checked_is_503_and_dispatches_nothing() {
-            let mut h = Harness::new(true).await;
+            let h = Harness::new(true).await;
             let _ = h.start(Some("retry-1"), browser_request("session-1"))
                 .await
                 .expect("first");
             assert!(eventually(|| h.dispatches().len() == 1).await);
-            h.state.session_terminal_tokens = None;
+            h.runs.get_fails.store(true, Ordering::SeqCst);
             let error = h
                 .start(Some("retry-1"), browser_request("session-1"))
                 .await
                 .expect_err("liveness unknown");
+            assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(error.1 .0["error"], "idempotency_replay_unverified");
+            // A status this code does not know is not guessed either.
+            h.runs.get_fails.store(false, Ordering::SeqCst);
+            *h.runs.status.lock().expect("status") = "some_new_status".to_owned();
+            let error = h
+                .start(Some("retry-1"), browser_request("session-1"))
+                .await
+                .expect_err("unknown status");
             assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
             assert_eq!(error.1 .0["error"], "idempotency_replay_unverified");
             tokio::time::sleep(Duration::from_millis(300)).await;
@@ -2920,6 +3055,70 @@ mod tests {
             assert_eq!(h.revokes(), 0);
             tokio::time::sleep(Duration::from_millis(200)).await;
             assert!(h.dispatches().is_empty());
+        }
+
+        #[tokio::test]
+        async fn a_client_that_disconnects_mid_start_still_gets_its_run_dispatched() {
+            let h = Harness::new(true).await;
+            // Hold the start inside the prompt append, after the managed run exists.
+            h.session.append_delay_ms.store(400, Ordering::SeqCst);
+            let task = tokio::spawn(h.start_future(Some("retry-1"), browser_request("session-1")));
+            assert!(
+                eventually(|| !h.lifecycle.starts.lock().expect("starts").is_empty()).await,
+                "the managed run was started"
+            );
+            // The client disconnects: axum drops the handler future here.
+            task.abort();
+            assert!(task.await.expect_err("aborted").is_cancelled());
+
+            assert!(
+                eventually(|| h.dispatches().len() == 1).await,
+                "the detached start ran on to its dispatch"
+            );
+            assert_eq!(h.session.appends.lock().expect("appends").len(), 1);
+
+            // The client's retry is a replay of a run that really is working.
+            h.session.append_delay_ms.store(0, Ordering::SeqCst);
+            let Json(retry) = h
+                .start(Some("retry-1"), browser_request("session-1"))
+                .await
+                .expect("retry");
+            assert_eq!(retry["idempotent_replay"], true);
+            assert_eq!(retry["run_id"], "managed-run-1");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert_eq!(h.dispatches().len(), 1);
+            assert_eq!(h.session.appends.lock().expect("appends").len(), 1);
+            assert_eq!(h.revokes(), 0);
+        }
+
+        #[tokio::test]
+        async fn a_keyed_start_session_core_cannot_begin_keeps_the_grant_and_the_retry_starts_the_run() {
+            let h = Harness::new(true).await;
+            h.lifecycle.start_fails.store(true, Ordering::SeqCst);
+            let error = h
+                .start(Some("retry-1"), browser_request("session-1"))
+                .await
+                .expect_err("session core is down");
+            assert_eq!(error.0, StatusCode::BAD_GATEWAY);
+            // The run is not known to exist, so nothing is cancelled or
+            // appended, and the grant is kept for the same key's retry.
+            assert_eq!(h.revokes(), 0);
+            assert!(h.runs.cancels.lock().expect("cancels").is_empty());
+            assert!(h.session.appends.lock().expect("appends").is_empty());
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert!(h.dispatches().is_empty());
+
+            h.lifecycle.start_fails.store(false, Ordering::SeqCst);
+            let Json(body) = h
+                .start(Some("retry-1"), browser_request("session-1"))
+                .await
+                .expect("the retry starts the run");
+            assert_eq!(body["run_id"], "managed-run-1");
+            assert!(body.get("idempotent_replay").is_none(), "a new run, not a replay");
+            assert_eq!(h.derive_keys(), [run_key(), run_key()], "the same derived grant");
+            assert!(eventually(|| h.dispatches().len() == 1).await);
+            assert_eq!(h.session.appends.lock().expect("appends").len(), 1);
+            assert_eq!(h.revokes(), 0);
         }
 
         #[tokio::test]
