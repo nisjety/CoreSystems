@@ -1128,19 +1128,25 @@ const browserCloseSessionInput = z.object({
   sessionId: z.string().min(1),
 })
 
+// `actor` is who is asking, as on `browser_action.run`: `agent` marks a tab call the
+// model proposed, which the owner refuses while the person holds the browser. Absent
+// is the person; it can only tighten.
 const browserCreateTabInput = z.object({
   sessionId: z.string().min(1),
   url: z.string().trim().min(1).optional(),
+  actor: z.enum(['human', 'agent']).optional(),
 })
 
 const browserSelectTabInput = z.object({
   sessionId: z.string().min(1),
   tabId: z.string().min(1),
+  actor: z.enum(['human', 'agent']).optional(),
 })
 
 const browserCloseTabInput = z.object({
   sessionId: z.string().min(1),
   tabId: z.string().min(1),
+  actor: z.enum(['human', 'agent']).optional(),
 })
 
 // `action` is passed through as a raw object: `sanitize_action` in browser.rs

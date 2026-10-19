@@ -290,11 +290,24 @@ pub(crate) struct ControlBody {
     pub(crate) mode: BrowserControlMode,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct NewTabBody {
     #[serde(default)]
     pub(crate) url: Option<String>,
+    /// Who is opening the tab. `agent` is what a model's call carries; Quarry
+    /// refuses it while the person has taken over. Like `ActionBody.actor` it can
+    /// only tighten, and it is never forwarded as anything but the fixed hint.
+    #[serde(default)]
+    pub(crate) actor: BrowserActionActor,
+}
+
+/// The query of a tab select or close: who is asking (`?actor=agent`). Absent is
+/// the person. An unknown value is a 400 here, not read as the person's.
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct TabActorQuery {
+    #[serde(default)]
+    pub(crate) actor: BrowserActionActor,
 }
 
 #[derive(Debug, Deserialize)]
@@ -911,11 +924,17 @@ pub(crate) async fn new_tab(
 
     let cookie = cookie_header(&headers);
     let token = quarry_token(&state, &user, &cookie).await;
+    if let Some(refusal) =
+        refuse_agent_tab_call_during_takeover(&state, &user, token.as_deref(), &session_id, body.actor)
+            .await
+    {
+        return refusal;
+    }
     let (status, body) = quarry_call(
         &state,
         Method::POST,
         &format!("/v1/agent/runs/{}/tabs", urlencoding::encode(&session_id)),
-        Some(json!({ "url": url })),
+        Some(new_tab_request_body(url, body.actor)),
         token.as_deref(),
         &user.user_id,
     )
@@ -953,6 +972,7 @@ pub(crate) async fn select_tab(
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Path((session_id, tab_id)): Path<(String, String)>,
+    Query(call): Query<TabActorQuery>,
 ) -> Response {
     tab_mutation(
         state,
@@ -962,6 +982,7 @@ pub(crate) async fn select_tab(
         Some(tab_id),
         Method::POST,
         "select",
+        call.actor,
         None,
     )
     .await
@@ -972,6 +993,7 @@ pub(crate) async fn close_tab(
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Path((session_id, tab_id)): Path<(String, String)>,
+    Query(call): Query<TabActorQuery>,
 ) -> Response {
     tab_mutation(
         state,
@@ -981,9 +1003,62 @@ pub(crate) async fn close_tab(
         Some(tab_id),
         Method::DELETE,
         "close",
+        call.actor,
         None,
     )
     .await
+}
+
+/// The body of a tab-open call. An open the model proposed carries
+/// `initiatedBy: "agent"`, so Quarry can refuse it while the person has taken over;
+/// a person's own carries no hint. Only the enum is forwarded, never a client string.
+fn new_tab_request_body(url: Option<String>, actor: BrowserActionActor) -> Value {
+    match actor {
+        BrowserActionActor::Agent => json!({ "url": url, "initiatedBy": "agent" }),
+        BrowserActionActor::Human => json!({ "url": url }),
+    }
+}
+
+/// The query suffix of a tab select or close (neither has a body): the same hint as
+/// `new_tab_request_body`, for the same reason.
+fn tab_call_query(actor: BrowserActionActor) -> &'static str {
+    match actor {
+        BrowserActionActor::Agent => "?initiatedBy=agent",
+        BrowserActionActor::Human => "",
+    }
+}
+
+/// A tab call the model proposed is refused while the person holds the browser,
+/// the same 409 `run_action` answers, so the rule does not depend on Quarry's
+/// take-over enforcement switch (off by default). Quarry still gets the hint and
+/// stays the authority. `None` lets the call through (always for a person's own).
+async fn refuse_agent_tab_call_during_takeover(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    token: Option<&str>,
+    session_id: &str,
+    actor: BrowserActionActor,
+) -> Option<Response> {
+    if actor != BrowserActionActor::Agent {
+        return None;
+    }
+    let projection = match owner_browser_session_projection(state, user, token, session_id).await {
+        Ok(projection) => projection,
+        Err(response) => return Some(response),
+    };
+    let mode = BrowserControlMode::from_owner_value(
+        projection.get("controlMode").and_then(Value::as_str),
+    );
+    (mode == BrowserControlMode::HumanTakeover).then(|| {
+        (
+            StatusCode::CONFLICT,
+            Json(error(
+                "browser_human_takeover_active",
+                "Human takeover is active for this browser session.",
+            )),
+        )
+            .into_response()
+    })
 }
 
 // reason: shared select/close tab route glue — every argument is a distinct
@@ -998,6 +1073,7 @@ async fn tab_mutation(
     tab_id: Option<String>,
     method: Method,
     operation: &str,
+    actor: BrowserActionActor,
     body: Option<Value>,
 ) -> Response {
     if !is_valid_path_segment(&session_id) {
@@ -1032,13 +1108,20 @@ async fn tab_mutation(
     }
     let suffix = if operation == "select" { "/select" } else { "" };
     let path = format!(
-        "/v1/agent/runs/{}/tabs/{}{}",
+        "/v1/agent/runs/{}/tabs/{}{}{}",
         urlencoding::encode(&session_id),
         urlencoding::encode(&tab_id),
-        suffix
+        suffix,
+        tab_call_query(actor)
     );
     let cookie = cookie_header(&headers);
     let token = quarry_token(&state, &user, &cookie).await;
+    if let Some(refusal) =
+        refuse_agent_tab_call_during_takeover(&state, &user, token.as_deref(), &session_id, actor)
+            .await
+    {
+        return refusal;
+    }
     let (status, body) =
         quarry_call(&state, method, &path, body, token.as_deref(), &user.user_id).await;
     if !status.is_success() {
@@ -4559,6 +4642,200 @@ mod tests {
         );
     }
 
+    #[test]
+    fn tab_calls_forward_only_the_fixed_agent_hint_to_quarry() {
+        assert_eq!(
+            new_tab_request_body(Some("https://example.test/".to_owned()), BrowserActionActor::Agent),
+            json!({ "url": "https://example.test/", "initiatedBy": "agent" })
+        );
+        assert_eq!(
+            new_tab_request_body(None, BrowserActionActor::Human),
+            json!({ "url": null }),
+            "a person's own tab open carries no hint"
+        );
+        assert_eq!(tab_call_query(BrowserActionActor::Agent), "?initiatedBy=agent");
+        assert_eq!(
+            tab_call_query(BrowserActionActor::Human),
+            "",
+            "a person's own select or close carries no hint"
+        );
+    }
+
+    #[test]
+    fn the_tab_actor_query_takes_human_or_agent_and_nothing_else() {
+        let parse = |query: &str| {
+            let uri: Uri = format!("/select{query}").parse().expect("a valid uri");
+            Query::<TabActorQuery>::try_from_uri(&uri).map(|Query(parsed)| parsed.actor)
+        };
+        assert_eq!(parse("").expect("absent"), BrowserActionActor::Human);
+        assert_eq!(parse("?actor=human").expect("human"), BrowserActionActor::Human);
+        assert_eq!(parse("?actor=agent").expect("agent"), BrowserActionActor::Agent);
+        assert!(parse("?actor=system").is_err(), "an unknown actor is refused");
+        assert!(parse("?actor=").is_err(), "an empty actor is refused");
+    }
+
+    /// A Quarry that knows one run (\`run-1\`, one tab \`tab-1\`) in the given control
+    /// mode, answering every tab route.
+    async fn mount_tab_run(quarry: &wiremock::MockServer, control_mode: &str) {
+        use wiremock::{
+            matchers::{method as wm_method, path as wm_path},
+            Mock, ResponseTemplate,
+        };
+
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/agent/runs/run-1/browser-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "runId": "run-1", "controlMode": control_mode, "tabs": [] }
+            })))
+            .mount(quarry)
+            .await;
+        let tabs = ResponseTemplate::new(200).set_body_json(json!({ "data": { "tabs": [] } }));
+        let opened = ResponseTemplate::new(200).set_body_json(json!({
+            "data": { "tab": { "tabId": "tab-2" }, "tabs": [] }
+        }));
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/agent/runs/run-1/tabs/tab-1/select"))
+            .respond_with(tabs.clone())
+            .mount(quarry)
+            .await;
+        Mock::given(wm_method("DELETE"))
+            .and(wm_path("/v1/agent/runs/run-1/tabs/tab-1"))
+            .respond_with(tabs)
+            .mount(quarry)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/agent/runs/run-1/tabs"))
+            .respond_with(opened)
+            .mount(quarry)
+            .await;
+    }
+
+    async fn quarry_mutations(quarry: &wiremock::MockServer) -> Vec<(String, String, Value)> {
+        quarry
+            .received_requests()
+            .await
+            .expect("recorded Quarry requests")
+            .into_iter()
+            .filter(|request| request.method.as_str() != "GET")
+            .map(|request| {
+                (
+                    request.method.to_string(),
+                    match request.url.query() {
+                        Some(query) => format!("{}?{query}", request.url.path()),
+                        None => request.url.path().to_owned(),
+                    },
+                    serde_json::from_slice(&request.body).unwrap_or(Value::Null),
+                )
+            })
+            .collect()
+    }
+
+    async fn call_tab_routes(
+        state: &AppState,
+        actor: BrowserActionActor,
+    ) -> [StatusCode; 3] {
+        let user = test_user("user-owner", "org-owner");
+        let select = select_tab(
+            State(state.clone()),
+            Extension(user.clone()),
+            HeaderMap::new(),
+            Path(("run-1".to_owned(), "tab-1".to_owned())),
+            Query(TabActorQuery { actor }),
+        )
+        .await;
+        let close = close_tab(
+            State(state.clone()),
+            Extension(user.clone()),
+            HeaderMap::new(),
+            Path(("run-1".to_owned(), "tab-1".to_owned())),
+            Query(TabActorQuery { actor }),
+        )
+        .await;
+        let open = new_tab(
+            State(state.clone()),
+            Extension(user),
+            HeaderMap::new(),
+            Path("run-1".to_owned()),
+            Json(NewTabBody { url: None, actor }),
+        )
+        .await;
+        [select.status(), close.status(), open.status()]
+    }
+
+    #[tokio::test]
+    async fn a_models_tab_calls_reach_quarry_labelled_agent() {
+        let quarry = wiremock::MockServer::start().await;
+        mount_tab_run(&quarry, "agent_control").await;
+        let mut state = test_app_state();
+        state.quarry_edge_url = quarry.uri();
+
+        assert_eq!(
+            call_tab_routes(&state, BrowserActionActor::Agent).await,
+            [StatusCode::OK; 3]
+        );
+        let mutations = quarry_mutations(&quarry).await;
+        assert_eq!(
+            mutations
+                .iter()
+                .map(|(method, target, _)| (method.as_str(), target.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("POST", "/v1/agent/runs/run-1/tabs/tab-1/select?initiatedBy=agent"),
+                ("DELETE", "/v1/agent/runs/run-1/tabs/tab-1?initiatedBy=agent"),
+                ("POST", "/v1/agent/runs/run-1/tabs"),
+            ]
+        );
+        assert_eq!(mutations[2].2["initiatedBy"], "agent", "{:?}", mutations[2]);
+    }
+
+    #[tokio::test]
+    async fn a_persons_tab_calls_carry_no_initiator_hint() {
+        let quarry = wiremock::MockServer::start().await;
+        mount_tab_run(&quarry, "human_takeover").await;
+        let mut state = test_app_state();
+        state.quarry_edge_url = quarry.uri();
+
+        // The person's own calls are admitted during their take-over, with no hint:
+        // Quarry reads a person's token as the person's.
+        assert_eq!(
+            call_tab_routes(&state, BrowserActionActor::Human).await,
+            [StatusCode::OK; 3]
+        );
+        let mutations = quarry_mutations(&quarry).await;
+        assert_eq!(
+            mutations
+                .iter()
+                .map(|(method, target, _)| (method.as_str(), target.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("POST", "/v1/agent/runs/run-1/tabs/tab-1/select"),
+                ("DELETE", "/v1/agent/runs/run-1/tabs/tab-1"),
+                ("POST", "/v1/agent/runs/run-1/tabs"),
+            ]
+        );
+        assert!(mutations[2].2.get("initiatedBy").is_none(), "{:?}", mutations[2]);
+    }
+
+    /// With Quarry's take-over enforcement off (its default) Quarry only logs a
+    /// refusable call, so the gateway refuses a model's tab call itself, as it does a
+    /// model's action: the same 409, and nothing reaches Quarry.
+    #[tokio::test]
+    async fn a_models_tab_call_is_refused_during_a_takeover_before_it_reaches_quarry() {
+        let quarry = wiremock::MockServer::start().await;
+        mount_tab_run(&quarry, "human_takeover").await;
+        let mut state = test_app_state();
+        state.quarry_edge_url = quarry.uri();
+
+        assert_eq!(
+            call_tab_routes(&state, BrowserActionActor::Agent).await,
+            [StatusCode::CONFLICT; 3]
+        );
+        assert!(
+            quarry_mutations(&quarry).await.is_empty(),
+            "a refused tab call never reaches Quarry"
+        );
+    }
+
     #[tokio::test]
     async fn forward_quarry_failure_maps_cap_denial_to_browser_capacity_reached() {
         for reason in ["global_run_cap", "org_run_cap", "org_interactive_run_cap"] {
@@ -5576,7 +5853,7 @@ mod tests {
                 Extension(attacker.clone()),
                 headers.clone(),
                 Path("run-owned".to_owned()),
-                Json(NewTabBody { url: None }),
+                Json(NewTabBody::default()),
             )
             .await,
             tab_mutation(
@@ -5587,6 +5864,7 @@ mod tests {
                 Some("tab-owned".to_owned()),
                 Method::POST,
                 "select",
+                BrowserActionActor::Human,
                 None,
             )
             .await,

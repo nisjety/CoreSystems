@@ -1,5 +1,8 @@
 use axum::{
-    extract::{Extension as ExtensionExtractor, Path as PathExtractor, State as StateExtractor},
+    extract::{
+        Extension as ExtensionExtractor, Path as PathExtractor, Query as QueryExtractor,
+        State as StateExtractor,
+    },
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -19,7 +22,7 @@ use crate::domains::browser::{
     start_ai_run as start_browser_ai_run, suggest_action as suggest_browser_action,
     ActionBody as BrowserActionBody, BrowserActionActor, BrowserProfileScope,
     ControlBody as BrowserControlBody, CreateProfileBody, CreateSessionBody, NewTabBody,
-    RenameProfileBody, RestoreProbeBody, StartAiRunBody, SuggestActionBody,
+    RenameProfileBody, RestoreProbeBody, StartAiRunBody, SuggestActionBody, TabActorQuery,
     Viewport as BrowserViewport,
 };
 use crate::domains::chat::documents::upload_chat_document;
@@ -5096,6 +5099,19 @@ pub(super) async fn dispatch_browser_close_session(
     owner_json_response_to_envelope("browser_session.close", user, status, payload)
 }
 
+/// The optional `actor` of a browser tab action (`human` when absent). Same two
+/// values as `browser_action.run`; anything else is refused here, never read as
+/// the person's.
+fn ticket_tab_actor(input: &Value, action: &str) -> Result<BrowserActionActor, Response> {
+    match input.get("actor").and_then(Value::as_str) {
+        None | Some("human") => Ok(BrowserActionActor::Human),
+        Some("agent") => Ok(BrowserActionActor::Agent),
+        Some(_) => Err(ticket_bad_request(&format!(
+            "{action} 'actor' must be 'human' or 'agent'"
+        ))),
+    }
+}
+
 pub(super) async fn dispatch_browser_create_tab(
     state: &AppState,
     user: &AuthenticatedUser,
@@ -5106,8 +5122,13 @@ pub(super) async fn dispatch_browser_create_tab(
     if session_id.is_empty() {
         return ticket_bad_request("browser_tab.create requires a non-empty 'sessionId'");
     }
+    let actor = match ticket_tab_actor(input, "browser_tab.create") {
+        Ok(actor) => actor,
+        Err(response) => return response,
+    };
     let body = NewTabBody {
         url: input.get("url").and_then(Value::as_str).map(str::to_owned),
+        actor,
     };
     let response = new_browser_tab(
         StateExtractor(state.clone()),
@@ -5132,11 +5153,16 @@ pub(super) async fn dispatch_browser_select_tab(
     if session_id.is_empty() || tab_id.is_empty() {
         return ticket_bad_request("browser_tab.select requires 'sessionId' and 'tabId'");
     }
+    let actor = match ticket_tab_actor(input, "browser_tab.select") {
+        Ok(actor) => actor,
+        Err(response) => return response,
+    };
     let response = select_browser_tab(
         StateExtractor(state.clone()),
         ExtensionExtractor(user.clone()),
         headers.clone(),
         PathExtractor((session_id.to_owned(), tab_id.to_owned())),
+        QueryExtractor(TabActorQuery { actor }),
     )
     .await;
     let (status, payload) = response_to_status_and_json(response).await;
@@ -5154,11 +5180,16 @@ pub(super) async fn dispatch_browser_close_tab(
     if session_id.is_empty() || tab_id.is_empty() {
         return ticket_bad_request("browser_tab.close requires 'sessionId' and 'tabId'");
     }
+    let actor = match ticket_tab_actor(input, "browser_tab.close") {
+        Ok(actor) => actor,
+        Err(response) => return response,
+    };
     let response = close_browser_tab(
         StateExtractor(state.clone()),
         ExtensionExtractor(user.clone()),
         headers.clone(),
         PathExtractor((session_id.to_owned(), tab_id.to_owned())),
+        QueryExtractor(TabActorQuery { actor }),
     )
     .await;
     let (status, payload) = response_to_status_and_json(response).await;
@@ -5949,6 +5980,24 @@ fn social_execution(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tab_action_takes_human_or_agent_as_its_actor_and_nothing_else() {
+        let actor = |input: Value| ticket_tab_actor(&input, "browser_tab.select");
+        assert_eq!(actor(json!({})).ok(), Some(BrowserActionActor::Human));
+        assert_eq!(
+            actor(json!({ "actor": "human" })).ok(),
+            Some(BrowserActionActor::Human)
+        );
+        assert_eq!(
+            actor(json!({ "actor": "agent" })).ok(),
+            Some(BrowserActionActor::Agent)
+        );
+        for refused in [json!({ "actor": "system" }), json!({ "actor": "" })] {
+            let response = actor(refused).expect_err("an unknown actor is refused");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+    }
 
     #[test]
     fn audio_dictate_forwards_safari_recordings_and_the_retention_flag() {
