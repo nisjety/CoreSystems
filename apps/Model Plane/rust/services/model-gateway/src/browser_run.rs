@@ -21,7 +21,7 @@ use std::net::IpAddr;
 
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     routing::post,
     Extension, Json, Router,
 };
@@ -32,6 +32,7 @@ use mp_contracts::model_plane::v1::{
 use mp_ids::new_ulid;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
 use crate::{
@@ -82,6 +83,104 @@ fn reject_unsupported_browser_approval(request: &BrowserRunStartRequest) -> Resu
 
 fn non_empty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+/// Request header that makes `POST /v1/browser/runs` safe to retry.
+const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
+const IDEMPOTENCY_KEY_MAX_LEN: usize = 128;
+
+/// The client's `Idempotency-Key`, or `None` when the header is absent. One
+/// header, 1 to 128 characters of `A-Z a-z 0-9 - _ . :` (a UUID or ULID fits);
+/// anything else is refused before any broker or Session Core call, so a key
+/// can never carry text into a log line, a grant key or a thread key.
+fn parse_idempotency_key(headers: &HeaderMap) -> Result<Option<String>, ApiError> {
+    let mut values = headers.get_all(IDEMPOTENCY_KEY_HEADER).iter();
+    let Some(first) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(bad_request("idempotency_key_invalid"));
+    }
+    let key = first
+        .to_str()
+        .map_err(|_| bad_request("idempotency_key_invalid"))?
+        .trim();
+    if key.is_empty()
+        || key.len() > IDEMPOTENCY_KEY_MAX_LEN
+        || !key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+    {
+        return Err(bad_request("idempotency_key_invalid"));
+    }
+    Ok(Some(key.to_owned()))
+}
+
+/// The run key of a keyed start: one stable name for the managed run, its
+/// thread and its derived run grant. It is scoped to the verified org and
+/// user and to the session grant the run derives from, so the same client key
+/// under another grant (or from another user) is a different run, and the raw
+/// key never leaves this function. Parts are length-prefixed, so `("a","bc")`
+/// and `("ab","c")` cannot collide.
+fn keyed_run_key(org_id: &str, user_id: &str, parent_grant_id: &str, key: &str) -> String {
+    use std::fmt::Write as _;
+    let mut hasher = Sha256::new();
+    for part in [
+        "model-gateway/browser-run/v1",
+        org_id,
+        user_id,
+        parent_grant_id,
+        key,
+    ] {
+        hasher.update((part.len() as u64).to_be_bytes());
+        hasher.update(part.as_bytes());
+    }
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(32);
+    for byte in &digest[..16] {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    format!("browser-idem-{hex}")
+}
+
+/// The plan id of a keyed start whose body names none, so a replay answers
+/// with the plan the first attempt reported.
+fn keyed_plan_id(run_key: &str) -> String {
+    format!("plan-idem-{}", run_key.trim_start_matches("browser-idem-"))
+}
+
+/// The answer to a replayed keyed start. Session Core says the run exists;
+/// before answering 200 the run must still be live (its lease is renewed, as
+/// the first start did), because a run that ended or was cancelled before it
+/// was dispatched would otherwise read as a run that is working. If liveness
+/// cannot be checked the replay is refused rather than guessed.
+async fn browser_run_replay(
+    state: &AppState,
+    run: &crate::session_flow::SessionRun,
+    plan_id: &str,
+) -> Result<Json<Value>, ApiError> {
+    match crate::session_flow::heartbeat_browser_agent_run(state, run).await {
+        Ok(true) => Ok(Json(json!({
+            "run_id": run.run_id,
+            "thread_id": run.thread_id,
+            "plan_id": plan_id,
+            "idempotent_replay": true,
+        }))),
+        Ok(false) => Err((
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "idempotency_key_run_ended",
+                "run_id": run.run_id,
+            })),
+        )),
+        Err(error) => {
+            warn!(%error, run_id = %run.run_id, "idempotent browser run replay could not be verified");
+            Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "idempotency_replay_unverified" })),
+            ))
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -144,11 +243,14 @@ const DERIVE_PURPOSE_AI_RUN: &str = "ai_run";
 
 /// Resolves the caller's grant into the run grant the browser run executes
 /// under. `run_key` names both the managed run and the derived grant, so the
-/// broker's (parent, session_key) idempotency is keyed on this run. It is
-/// minted per start request: a client that retries the POST starts a second
-/// run with a second run grant (bounded per session grant by the broker).
-/// `browser_run_start` revokes the derived grant when the start fails after
-/// the derive, and when the run reaches a terminal state.
+/// broker's (parent, session_key) idempotency is keyed on this run. Without a
+/// client `Idempotency-Key` it is minted per start request: a client that
+/// retries the POST starts a second run with a second run grant (bounded per
+/// session grant by the broker). With one it is derived from the key (see
+/// `keyed_run_key`), so a retry derives the same grant and finds the same
+/// run. `browser_run_start` revokes an unkeyed derived grant when the start
+/// fails after the derive, and every derived grant when the run reaches a
+/// terminal state.
 async fn resolve_browser_grant(
     state: &AppState,
     request: &BrowserRunStartRequest,
@@ -487,6 +589,24 @@ fn host_within_policy(host: &str, allowed_domains: &[String]) -> bool {
 ///    plan doc's "Permission mode" section for the full rationale.
 /// 4. Returns immediately; the caller streams progress from the existing
 ///    `GET /v1/runs/:run_id/events`.
+///
+/// **`Idempotency-Key`** (optional header, see `parse_idempotency_key`). With
+/// it, a retry of the same POST returns the same run: the key (scoped to the
+/// verified org and user and to the session grant) names the run grant, the
+/// thread and the managed run, so the broker, Session Core and this route each
+/// answer a retry from what the first attempt made. A replay answers 200 with
+/// the original `run_id`, `thread_id` and `plan_id` and
+/// `"idempotent_replay": true`, dispatches nothing, appends nothing and does
+/// not touch the grant. Refusals: 400 `idempotency_key_invalid`; 400
+/// `idempotency_key_requires_a_new_thread` (a keyed start owns its thread, so
+/// `thread_id` is refused); 409 `idempotency_key_reused` (the same key with a
+/// different goal); 409 `idempotency_key_run_ended` (the run is terminal; use
+/// a new key); 503 `idempotency_replay_unverified` (liveness could not be
+/// checked). A key whose first attempt ended its own run (the liveness check
+/// failed) also ended its grant, so its retry is 409
+/// `browser_grant_not_derivable`: use a new key. A start that fails earlier
+/// (Session Core unreachable) keeps the grant, so the same key can retry.
+/// Without the header every POST is a new run, as before.
 // Cohesive single-flow handler (validate → thread → run → dispatch); splitting
 // it would obscure the linear session-core/execution-core sequencing.
 #[allow(clippy::too_many_lines)]
@@ -498,6 +618,7 @@ async fn browser_run_start(
     session_bearer: VerifiedSessionBearer,
     inference_bearer: VerifiedInferenceBearer,
     browser_bearer: VerifiedBrowserBearer,
+    headers: HeaderMap,
     Json(req): Json<BrowserRunStartRequest>,
 ) -> Result<Json<Value>, ApiError> {
     if browser_run_zdr_blocked(&claims, req.zdr) {
@@ -520,6 +641,10 @@ async fn browser_run_start(
         return Err(bad_request("goal must not be empty"));
     }
     reject_unsupported_browser_approval(&req)?;
+    let idempotency_key = parse_idempotency_key(&headers)?;
+    if idempotency_key.is_some() && non_empty(req.thread_id.as_deref()).is_some() {
+        return Err(bad_request("idempotency_key_requires_a_new_thread"));
+    }
     // Tenant/user identity is always server-derived from the verified bearer
     // claims — never trusted from the request body (the same IDOR-safety
     // rule the rest of model-gateway follows, e.g. `browser_suggest_action`).
@@ -528,8 +653,23 @@ async fn browser_run_start(
 
     // One key names both the managed run and its derived run grant, so the
     // broker's (parent, session_key) idempotency lines up with this run. It is
-    // fresh per request: a retried POST is a new run with a new run grant.
-    let run_key = format!("browser-{}", new_ulid());
+    // fresh per request unless the client sent an `Idempotency-Key`: then it
+    // is derived from that key, and a retried POST finds the same run and the
+    // same run grant.
+    let run_key = match idempotency_key.as_deref() {
+        Some(key) => keyed_run_key(&org_id, &user_id, req.grant_id.trim(), key),
+        None => format!("browser-{}", new_ulid()),
+    };
+    let plan_id = non_empty(req.plan_id.as_deref()).map_or_else(
+        || {
+            if idempotency_key.is_some() {
+                keyed_plan_id(&run_key)
+            } else {
+                new_ulid()
+            }
+        },
+        str::to_owned,
+    );
 
     // Validate the opaque caller-provided id before *any* thread/run write.
     // A cross-tenant/forged/missing policy grant must not create a durable run
@@ -537,36 +677,67 @@ async fn browser_run_start(
     let browser_grant =
         resolve_browser_grant(&state, &req, &browser_bearer, &org_id, &run_key).await?;
 
-    let run = crate::session_flow::prepare_managed_run_authenticated(
-        &state,
-        req.thread_id.as_deref(),
-        None,
-        &org_id,
-        &user_id,
-        &req.goal,
-        "browser-agent",
-        "execute",
-        &run_key,
-        mp_contracts::model_plane::v1::ManagedRunSource::GatewayBrowser,
-        false,
-        &session_bearer,
-        None,
-        None,
-        false,
-        None,
-    )
-    .await;
+    let run = match idempotency_key {
+        Some(_) => {
+            crate::session_flow::prepare_idempotent_browser_run(
+                &state,
+                &org_id,
+                &user_id,
+                &req.goal,
+                &run_key,
+                &session_bearer,
+            )
+            .await
+        }
+        None => {
+            crate::session_flow::prepare_managed_run_authenticated(
+                &state,
+                req.thread_id.as_deref(),
+                None,
+                &org_id,
+                &user_id,
+                &req.goal,
+                "browser-agent",
+                "execute",
+                &run_key,
+                mp_contracts::model_plane::v1::ManagedRunSource::GatewayBrowser,
+                false,
+                &session_bearer,
+                None,
+                None,
+                false,
+                None,
+            )
+            .await
+        }
+    };
     let run = match run {
         Ok(run) => run,
         Err(error) => {
-            // The run grant was derived for a run that does not exist.
-            revoke_derived_run_grant(
-                &state,
-                &browser_bearer,
-                &browser_grant,
-                REVOKE_REASON_START_FAILED,
-            )
-            .await;
+            if idempotency_key.is_some() {
+                // The derived grant stays. This request may be a retry of a
+                // start whose run is live, and a same-key retry needs the
+                // grant back; the broker bounds it by its parent's lifetime
+                // and its per-parent cap.
+                let reused = error
+                    .downcast_ref::<tonic::Status>()
+                    .is_some_and(|status| status.code() == tonic::Code::AlreadyExists);
+                if reused {
+                    return Err((
+                        StatusCode::CONFLICT,
+                        Json(json!({ "error": "idempotency_key_reused" })),
+                    ));
+                }
+            } else {
+                // The run grant was derived for a run that does not exist.
+                revoke_derived_run_grant(
+                    &state,
+                    &browser_bearer,
+                    &browser_grant,
+                    REVOKE_REASON_START_FAILED,
+                )
+                .await;
+            }
             return Err((
                 StatusCode::BAD_GATEWAY,
                 Json(json!({ "error": format!("session-core managed start failed: {error}") })),
@@ -574,6 +745,11 @@ async fn browser_run_start(
         }
     };
     if run.already_started {
+        if idempotency_key.is_some() {
+            // A retry of a keyed start: the same run, no second dispatch, and
+            // the grant it shares with the live run is left alone.
+            return browser_run_replay(&state, &run, &plan_id).await;
+        }
         revoke_derived_run_grant(
             &state,
             &browser_bearer,
@@ -596,6 +772,22 @@ async fn browser_run_start(
     if let Err(error) = crate::session_flow::ensure_browser_agent_run_liveness(&state, &run).await
     {
         warn!(%error, run_id = %run.run_id, "initial browser managed-run liveness heartbeat failed");
+        if idempotency_key.is_some() {
+            // This request created the run and cannot dispatch it. End it, so
+            // a replay of the key finds a terminal run (and the revoke below
+            // ends the grant) instead of a live run that never started.
+            if let Err(cancel_error) =
+                crate::session_flow::cancel_browser_agent_run_authenticated(
+                    &state,
+                    &run.run_id,
+                    "browser_run_start_failed",
+                    &session_bearer,
+                )
+                .await
+            {
+                warn!(%cancel_error, run_id = %run.run_id, "undispatched browser run could not be cancelled");
+            }
+        }
         revoke_derived_run_grant(
             &state,
             &browser_bearer,
@@ -611,7 +803,6 @@ async fn browser_run_start(
     let terminal_run = run.clone();
     let thread_id = run.thread_id;
     let run_id = run.run_id;
-    let plan_id = non_empty(req.plan_id.as_deref()).map_or_else(new_ulid, str::to_owned);
     // Whether the run executes under a grant derived here (session parent) or
     // one the caller presented. Never the hosts.
     info!(
@@ -1933,6 +2124,7 @@ mod tests {
             VerifiedSessionBearer::for_test("session-token"),
             VerifiedInferenceBearer::for_test("inference-token"),
             VerifiedBrowserBearer::for_test("browser-user-token"),
+            HeaderMap::new(),
             Json(request),
         )
         .await;
@@ -2014,5 +2206,744 @@ mod tests {
         assert_eq!(result.expect_err("session-core is down").0, StatusCode::BAD_GATEWAY);
         assert!(session_connections > 0);
         assert!(broker.revoke_requests.lock().expect("recorder").is_empty());
+    }
+
+    // ---- Idempotency-Key -------------------------------------------------
+
+    fn key_headers(values: &[&str]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for value in values {
+            headers.append(
+                IDEMPOTENCY_KEY_HEADER,
+                axum::http::HeaderValue::from_bytes(value.as_bytes()).expect("header value"),
+            );
+        }
+        headers
+    }
+
+    #[test]
+    fn the_idempotency_key_header_is_optional_and_strictly_shaped() {
+        assert_eq!(parse_idempotency_key(&HeaderMap::new()).unwrap(), None);
+        for ok in [
+            "a",
+            "retry-1",
+            "01J00000000000000000000000",
+            "2f1c0c0e-9d3a-4f7e-8d0b-5a1f7b0c9a11",
+            "a.b_c:d-e",
+            "  padded  ",
+        ] {
+            let parsed = parse_idempotency_key(&key_headers(&[ok])).expect(ok);
+            assert_eq!(parsed.as_deref(), Some(ok.trim()), "{ok}");
+        }
+        let too_long = "k".repeat(IDEMPOTENCY_KEY_MAX_LEN + 1);
+        let at_limit = "k".repeat(IDEMPOTENCY_KEY_MAX_LEN);
+        assert!(parse_idempotency_key(&key_headers(&[&at_limit])).is_ok());
+        for bad in [
+            "",
+            "   ",
+            "has space",
+            "semi;colon",
+            "quote\"d",
+            "slash/y",
+            "new\tline",
+            "ünicode",
+            too_long.as_str(),
+        ] {
+            let error = parse_idempotency_key(&key_headers(&[bad]))
+                .expect_err(&format!("{bad:?} must be refused"));
+            assert_eq!(error.0, StatusCode::BAD_REQUEST);
+            assert_eq!(error.1 .0["error"], "idempotency_key_invalid");
+        }
+        // Two headers are ambiguous, not "the first one".
+        assert!(parse_idempotency_key(&key_headers(&["one", "two"])).is_err());
+    }
+
+    #[test]
+    fn a_keyed_run_key_is_stable_scoped_and_never_carries_the_raw_key() {
+        let base = keyed_run_key("org-a", "user-a", "session-1", "retry-1");
+        assert_eq!(base, keyed_run_key("org-a", "user-a", "session-1", "retry-1"));
+        assert!(base.starts_with("browser-idem-"));
+        assert_eq!(base.len(), "browser-idem-".len() + 32);
+        assert!(!base.contains("retry-1") && !base.contains("session-1"));
+        for other in [
+            keyed_run_key("org-b", "user-a", "session-1", "retry-1"),
+            keyed_run_key("org-a", "user-b", "session-1", "retry-1"),
+            keyed_run_key("org-a", "user-a", "session-2", "retry-1"),
+            keyed_run_key("org-a", "user-a", "session-1", "retry-2"),
+        ] {
+            assert_ne!(other, base, "each scope part changes the run key");
+        }
+        // Length-prefixed parts: moving a character across a boundary differs.
+        assert_ne!(
+            keyed_run_key("org", "a", "bc", "k"),
+            keyed_run_key("org", "ab", "c", "k")
+        );
+        assert_eq!(
+            keyed_plan_id(&base),
+            format!("plan-idem-{}", &base["browser-idem-".len()..])
+        );
+        assert!(keyed_plan_id(&base).len() < 64);
+    }
+
+    mod keyed_start {
+        use super::*;
+        use std::collections::HashMap;
+        use std::future::Future;
+        use std::sync::atomic::AtomicBool;
+        use std::time::Duration;
+
+        use mp_contracts::model_plane::v1::{
+            managed_run_lifecycle_client::ManagedRunLifecycleClient,
+            managed_run_lifecycle_server::{ManagedRunLifecycle, ManagedRunLifecycleServer},
+            run_service_client::RunServiceClient,
+            session_core_client::SessionCoreClient,
+            AppendMessageRequest, AppendMessageResponse, CompleteDirectRunWithMessageRequest,
+            CompleteDirectRunWithMessageResponse, CreateThreadRequest, CreateThreadResponse,
+            HeartbeatManagedRunRequest, HeartbeatManagedRunResponse, RecordRunOutputRequest,
+            RecordRunOutputResponse, RecordTerminalOutcomeRequest, RecordTerminalOutcomeResponse,
+            StartManagedRunRequest, StartManagedRunResponse,
+        };
+        use tonic::codegen::{http, Body, BoxFuture, Service, StdError};
+
+        /// One unary call answered by `handler`, framed the way tonic's own
+        /// generated servers do. Lets the fakes below serve just the calls a
+        /// test needs instead of every method of `SessionCore`.
+        async fn serve_unary<Req, Resp, F, Fut, B>(
+            request: http::Request<B>,
+            handler: F,
+        ) -> http::Response<tonic::body::BoxBody>
+        where
+            Req: prost::Message + Default + Send + 'static,
+            Resp: prost::Message + Send + 'static,
+            F: FnOnce(tonic::Request<Req>) -> Fut + Send + 'static,
+            Fut: Future<Output = Result<tonic::Response<Resp>, Status>> + Send + 'static,
+            B: Body + Send + 'static,
+            B::Error: Into<StdError> + Send + 'static,
+        {
+            struct Once<F>(Option<F>);
+            impl<Req, Resp, F, Fut> tonic::server::UnaryService<Req> for Once<F>
+            where
+                Req: prost::Message + Default + Send + 'static,
+                Resp: prost::Message + Send + 'static,
+                F: FnOnce(tonic::Request<Req>) -> Fut + Send + 'static,
+                Fut: Future<Output = Result<tonic::Response<Resp>, Status>> + Send + 'static,
+            {
+                type Response = Resp;
+                type Future = BoxFuture<tonic::Response<Resp>, Status>;
+                fn call(&mut self, request: tonic::Request<Req>) -> Self::Future {
+                    let handler = self.0.take().expect("one handler call per request");
+                    Box::pin(handler(request))
+                }
+            }
+            let mut grpc = tonic::server::Grpc::new(tonic::codec::ProstCodec::default());
+            grpc.unary(Once(Some(handler)), request).await
+        }
+
+        fn unimplemented_rpc() -> http::Response<tonic::body::BoxBody> {
+            http::Response::builder()
+                .status(200)
+                .header("grpc-status", tonic::Code::Unimplemented as i32)
+                .header("content-type", "application/grpc")
+                .body(tonic::codegen::empty_body())
+                .expect("unimplemented response")
+        }
+
+        #[derive(Clone, Default)]
+        struct FakeSession {
+            creates: Arc<Mutex<Vec<CreateThreadRequest>>>,
+            appends: Arc<Mutex<Vec<AppendMessageRequest>>>,
+            append_fails: Arc<AtomicBool>,
+        }
+
+        impl tonic::server::NamedService for FakeSession {
+            const NAME: &'static str = "model_plane.v1.SessionCore";
+        }
+
+        impl<B> Service<http::Request<B>> for FakeSession
+        where
+            B: Body + Send + 'static,
+            B::Error: Into<StdError> + Send + 'static,
+        {
+            type Response = http::Response<tonic::body::BoxBody>;
+            type Error = std::convert::Infallible;
+            type Future = BoxFuture<Self::Response, Self::Error>;
+
+            fn poll_ready(
+                &mut self,
+                _: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<Result<(), Self::Error>> {
+                std::task::Poll::Ready(Ok(()))
+            }
+
+            fn call(&mut self, request: http::Request<B>) -> Self::Future {
+                let this = self.clone();
+                match request.uri().path() {
+                    // Idempotent like Session Core's: the same session key is
+                    // the same thread.
+                    "/model_plane.v1.SessionCore/CreateThread" => Box::pin(async move {
+                        Ok(serve_unary(request, move |r: tonic::Request<CreateThreadRequest>| async move {
+                            let r = r.into_inner();
+                            let thread_id = format!("thread-{}", r.session_key);
+                            this.creates.lock().expect("creates").push(r);
+                            Ok(tonic::Response::new(CreateThreadResponse {
+                                thread_id,
+                                created_at: None,
+                            }))
+                        })
+                        .await)
+                    }),
+                    "/model_plane.v1.SessionCore/AppendMessage" => Box::pin(async move {
+                        Ok(serve_unary(request, move |r: tonic::Request<AppendMessageRequest>| async move {
+                            if this.append_fails.load(Ordering::SeqCst) {
+                                return Err(Status::unavailable("append is down"));
+                            }
+                            this.appends.lock().expect("appends").push(r.into_inner());
+                            Ok(tonic::Response::new(AppendMessageResponse { sequence: 1 }))
+                        })
+                        .await)
+                    }),
+                    _ => Box::pin(async move { Ok(unimplemented_rpc()) }),
+                }
+            }
+        }
+
+        #[derive(Clone, Default)]
+        struct FakeRuns {
+            cancels: Arc<Mutex<Vec<CancelRunRequest>>>,
+        }
+
+        impl tonic::server::NamedService for FakeRuns {
+            const NAME: &'static str = "model_plane.v1.RunService";
+        }
+
+        impl<B> Service<http::Request<B>> for FakeRuns
+        where
+            B: Body + Send + 'static,
+            B::Error: Into<StdError> + Send + 'static,
+        {
+            type Response = http::Response<tonic::body::BoxBody>;
+            type Error = std::convert::Infallible;
+            type Future = BoxFuture<Self::Response, Self::Error>;
+
+            fn poll_ready(
+                &mut self,
+                _: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<Result<(), Self::Error>> {
+                std::task::Poll::Ready(Ok(()))
+            }
+
+            fn call(&mut self, request: http::Request<B>) -> Self::Future {
+                let this = self.clone();
+                match request.uri().path() {
+                    "/model_plane.v1.RunService/CancelRun" => Box::pin(async move {
+                        Ok(serve_unary(request, move |r: tonic::Request<CancelRunRequest>| async move {
+                            this.cancels.lock().expect("cancels").push(r.into_inner());
+                            Ok(tonic::Response::new(CancelRunResponse {
+                                cancelled: true,
+                                ..Default::default()
+                            }))
+                        })
+                        .await)
+                    }),
+                    _ => Box::pin(async move { Ok(unimplemented_rpc()) }),
+                }
+            }
+        }
+
+        /// Session Core's managed-run contract as far as this route uses it:
+        /// idempotent on `start_key`, `AlreadyExists` when the immutable input
+        /// (thread, goal) differs, a heartbeat that reports a terminal run.
+        #[derive(Clone, Default)]
+        struct FakeLifecycle {
+            runs: Arc<Mutex<HashMap<String, (String, String, String)>>>,
+            starts: Arc<Mutex<Vec<StartManagedRunRequest>>>,
+            terminal: Arc<AtomicBool>,
+            heartbeats: Arc<AtomicUsize>,
+        }
+
+        #[tonic::async_trait]
+        impl ManagedRunLifecycle for FakeLifecycle {
+            async fn start_managed_run(
+                &self,
+                request: tonic::Request<StartManagedRunRequest>,
+            ) -> Result<Response<StartManagedRunResponse>, Status> {
+                let start = request.into_inner();
+                self.starts.lock().expect("starts").push(start.clone());
+                let mut runs = self.runs.lock().expect("runs");
+                if let Some((run_id, thread_id, goal)) = runs.get(&start.start_key) {
+                    if *goal != start.goal || *thread_id != start.thread_id {
+                        return Err(Status::already_exists(
+                            "managed start key is bound to different immutable input",
+                        ));
+                    }
+                    return Ok(Response::new(StartManagedRunResponse {
+                        run_id: run_id.clone(),
+                        created_at: None,
+                        terminal_step_id: "model-gateway-browser-final".to_owned(),
+                        already_started: true,
+                        thread_id: thread_id.clone(),
+                    }));
+                }
+                let run_id = format!("managed-run-{}", runs.len() + 1);
+                runs.insert(
+                    start.start_key.clone(),
+                    (run_id.clone(), start.thread_id.clone(), start.goal.clone()),
+                );
+                Ok(Response::new(StartManagedRunResponse {
+                    run_id,
+                    created_at: None,
+                    terminal_step_id: "model-gateway-browser-final".to_owned(),
+                    already_started: false,
+                    thread_id: start.thread_id,
+                }))
+            }
+
+            async fn record_terminal_outcome(
+                &self,
+                _: tonic::Request<RecordTerminalOutcomeRequest>,
+            ) -> Result<Response<RecordTerminalOutcomeResponse>, Status> {
+                Err(Status::unimplemented("not used"))
+            }
+
+            async fn heartbeat_managed_run(
+                &self,
+                _: tonic::Request<HeartbeatManagedRunRequest>,
+            ) -> Result<Response<HeartbeatManagedRunResponse>, Status> {
+                self.heartbeats.fetch_add(1, Ordering::SeqCst);
+                Ok(Response::new(HeartbeatManagedRunResponse {
+                    renewed_until: None,
+                    already_terminal: self.terminal.load(Ordering::SeqCst),
+                }))
+            }
+
+            async fn record_run_output(
+                &self,
+                _: tonic::Request<RecordRunOutputRequest>,
+            ) -> Result<Response<RecordRunOutputResponse>, Status> {
+                Err(Status::unimplemented("not used"))
+            }
+
+            async fn complete_direct_run_with_message(
+                &self,
+                _: tonic::Request<CompleteDirectRunWithMessageRequest>,
+            ) -> Result<Response<CompleteDirectRunWithMessageResponse>, Status> {
+                Err(Status::unimplemented("not used"))
+            }
+        }
+
+        /// Counts the dispatches that reach Execution Core.
+        #[derive(Clone, Default)]
+        struct FakeExecution {
+            executes: Arc<Mutex<Vec<ExecuteStepRequest>>>,
+        }
+
+        #[tonic::async_trait]
+        impl ExecutionCore for FakeExecution {
+            async fn execute_step(
+                &self,
+                request: tonic::Request<ExecuteStepRequest>,
+            ) -> Result<Response<ExecuteStepResponse>, Status> {
+                self.executes
+                    .lock()
+                    .expect("executes")
+                    .push(request.into_inner());
+                Err(Status::unavailable("the fake executes nothing"))
+            }
+
+            async fn execute_scheduled_step(
+                &self,
+                _: tonic::Request<mp_contracts::model_plane::v1::ExecuteScheduledStepRequest>,
+            ) -> Result<
+                Response<mp_contracts::model_plane::v1::ExecuteScheduledStepResponse>,
+                Status,
+            > {
+                Err(Status::unimplemented("not used"))
+            }
+
+            async fn resume_run(
+                &self,
+                _: tonic::Request<ResumeRunRequest>,
+            ) -> Result<Response<ResumeRunResponse>, Status> {
+                Err(Status::unimplemented("not used"))
+            }
+
+            async fn cancel_run(
+                &self,
+                _: tonic::Request<CancelRunRequest>,
+            ) -> Result<Response<CancelRunResponse>, Status> {
+                Err(Status::unimplemented("not used"))
+            }
+
+            async fn pause_run(
+                &self,
+                _: tonic::Request<PauseRunRequest>,
+            ) -> Result<Response<PauseRunResponse>, Status> {
+                Err(Status::unimplemented("not used"))
+            }
+
+            async fn run_agent(
+                &self,
+                _: tonic::Request<RunAgentRequest>,
+            ) -> Result<Response<RunAgentResponse>, Status> {
+                Err(Status::unimplemented("not used"))
+            }
+        }
+
+        struct Harness {
+            state: AppState,
+            broker: TestBrowserBroker,
+            session: FakeSession,
+            runs: FakeRuns,
+            lifecycle: FakeLifecycle,
+            execution: FakeExecution,
+            _tasks: Vec<tokio::task::JoinHandle<()>>,
+            _auth: wiremock::MockServer,
+        }
+
+        impl Harness {
+            /// `with_tokens`: the gateway's service credential for the managed
+            /// heartbeat is configured (a fake Auth Core mints it).
+            async fn new(with_tokens: bool) -> Self {
+                let broker = session_broker(
+                    &["example.com"],
+                    Ok(derived_run("run-1", "session-1", &["example.com"])),
+                );
+                let (mut state, broker_task) = state_with_browser_broker(broker.clone()).await;
+
+                let session = FakeSession::default();
+                let runs = FakeRuns::default();
+                let lifecycle = FakeLifecycle::default();
+                let execution = FakeExecution::default();
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("bind fake session core");
+                let address = listener.local_addr().expect("fake session core address");
+                let (s, r, l, e) = (
+                    session.clone(),
+                    runs.clone(),
+                    lifecycle.clone(),
+                    execution.clone(),
+                );
+                let server = tokio::spawn(async move {
+                    let _ = tonic::transport::Server::builder()
+                        .add_service(s)
+                        .add_service(r)
+                        .add_service(ManagedRunLifecycleServer::new(l))
+                        .add_service(ExecutionCoreServer::new(e))
+                        .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(
+                            listener,
+                        ))
+                        .await;
+                });
+                let channel = tonic::transport::Endpoint::from_shared(format!("http://{address}"))
+                    .expect("fake endpoint")
+                    .connect_lazy();
+                state.session_client = SessionCoreClient::new(channel.clone());
+                state.managed_run_client = ManagedRunLifecycleClient::new(channel.clone());
+                state.run_client = RunServiceClient::new(channel.clone());
+                state.execution_client = ExecutionCoreClient::new(channel);
+
+                let auth = wiremock::MockServer::start().await;
+                wiremock::Mock::given(wiremock::matchers::method("POST"))
+                    .and(wiremock::matchers::path("/api/session-core/internal-token"))
+                    .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({
+                        "token": "heartbeat-token",
+                        "expiresInSeconds": 300,
+                        "audience": "session-core",
+                    })))
+                    .mount(&auth)
+                    .await;
+                if with_tokens {
+                    state.session_terminal_tokens = Some(Arc::new(
+                        crate::session_terminal_auth::SessionTerminalTokenProvider::from_service_credential(
+                            &auth.uri(),
+                            "model-gateway".to_owned(),
+                            "secret".to_owned(),
+                        )
+                        .expect("token provider"),
+                    ));
+                }
+                Self {
+                    state,
+                    broker,
+                    session,
+                    runs,
+                    lifecycle,
+                    execution,
+                    _tasks: vec![broker_task, server],
+                    _auth: auth,
+                }
+            }
+
+            async fn start(
+                &self,
+                key: Option<&str>,
+                request: BrowserRunStartRequest,
+            ) -> Result<Json<Value>, ApiError> {
+                let mut headers = HeaderMap::new();
+                if let Some(key) = key {
+                    headers.insert(
+                        IDEMPOTENCY_KEY_HEADER,
+                        axum::http::HeaderValue::from_str(key).expect("key header"),
+                    );
+                }
+                browser_run_start(
+                    State(self.state.clone()),
+                    Extension(browser_claims(false)),
+                    Some(Extension(VerifiedBearer::for_test("data-plane-token"))),
+                    VerifiedExecutionBearer::for_test("execution-token"),
+                    VerifiedSessionBearer::for_test("session-token"),
+                    VerifiedInferenceBearer::for_test("inference-token"),
+                    VerifiedBrowserBearer::for_test("browser-user-token"),
+                    headers,
+                    Json(request),
+                )
+                .await
+            }
+
+            fn derive_keys(&self) -> Vec<String> {
+                self.broker
+                    .derive_requests
+                    .lock()
+                    .expect("derives")
+                    .iter()
+                    .map(|derive| derive.session_key.clone())
+                    .collect()
+            }
+
+            fn dispatches(&self) -> Vec<ExecuteStepRequest> {
+                self.execution.executes.lock().expect("executes").clone()
+            }
+
+            fn revokes(&self) -> usize {
+                self.broker.revoke_requests.lock().expect("revokes").len()
+            }
+        }
+
+        async fn eventually(mut condition: impl FnMut() -> bool) -> bool {
+            for _ in 0..80 {
+                if condition() {
+                    return true;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            false
+        }
+
+        fn run_key() -> String {
+            keyed_run_key("org-a", "user-a", "session-1", "retry-1")
+        }
+
+        #[tokio::test]
+        async fn a_keyed_start_names_the_grant_thread_and_run_by_one_key_and_dispatches_once() {
+            let h = Harness::new(true).await;
+            let Json(body) = h
+                .start(Some("retry-1"), browser_request("session-1"))
+                .await
+                .expect("keyed start");
+
+            assert_eq!(body["run_id"], "managed-run-1");
+            assert_eq!(body["thread_id"], format!("thread-{}", run_key()));
+            assert_eq!(body["plan_id"], keyed_plan_id(&run_key()));
+            assert!(body.get("idempotent_replay").is_none());
+
+            // One key, three places: the broker's session_key, the thread's
+            // session key and the managed run's start key.
+            assert_eq!(h.derive_keys(), [run_key()]);
+            let creates = h.session.creates.lock().expect("creates").clone();
+            assert_eq!(creates.len(), 1);
+            assert_eq!(creates[0].session_key, run_key());
+            let starts = h.lifecycle.starts.lock().expect("starts").clone();
+            assert_eq!(starts.len(), 1);
+            assert_eq!(starts[0].start_key, run_key());
+            assert!(!run_key().contains("retry-1"), "the raw key is never forwarded");
+            assert_eq!(
+                h.session.appends.lock().expect("appends").len(),
+                1,
+                "the prompt is appended once, after the run exists"
+            );
+
+            assert!(eventually(|| h.dispatches().len() == 1).await, "one dispatch");
+            let dispatched = h.dispatches();
+            let tool_input: Value = serde_json::from_str(&dispatched[0].tool_input).unwrap();
+            assert_eq!(tool_input["grant_id"], "run-1");
+            assert_eq!(tool_input["plan_id"], body["plan_id"]);
+            assert_eq!(dispatched[0].run_id, "managed-run-1");
+            assert_eq!(h.revokes(), 0);
+        }
+
+        #[tokio::test]
+        async fn a_retry_with_the_same_key_returns_the_same_run_and_grant_and_does_nothing_else() {
+            let h = Harness::new(true).await;
+            let Json(first) = h
+                .start(Some("retry-1"), browser_request("session-1"))
+                .await
+                .expect("first start");
+            assert!(eventually(|| h.dispatches().len() == 1).await);
+
+            let Json(retry) = h
+                .start(Some("retry-1"), browser_request("session-1"))
+                .await
+                .expect("the retry answers the same run");
+            assert_eq!(retry["run_id"], first["run_id"]);
+            assert_eq!(retry["thread_id"], first["thread_id"]);
+            assert_eq!(retry["plan_id"], first["plan_id"]);
+            assert_eq!(retry["idempotent_replay"], true);
+
+            // The same derived grant: the broker saw the same key twice.
+            assert_eq!(h.derive_keys(), [run_key(), run_key()]);
+            // Nothing else happened: no second prompt, no second dispatch, and
+            // the grant the live run uses was not revoked.
+            assert_eq!(h.session.appends.lock().expect("appends").len(), 1);
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            assert_eq!(h.dispatches().len(), 1, "a replay never dispatches");
+            assert_eq!(h.revokes(), 0);
+            assert_eq!(h.lifecycle.starts.lock().expect("starts").len(), 2);
+            assert!(h.lifecycle.heartbeats.load(Ordering::SeqCst) >= 2);
+        }
+
+        #[tokio::test]
+        async fn another_key_or_no_key_is_another_run() {
+            let h = Harness::new(true).await;
+            let Json(first) = h
+                .start(Some("retry-1"), browser_request("session-1"))
+                .await
+                .expect("first");
+            let Json(second) = h
+                .start(Some("retry-2"), browser_request("session-1"))
+                .await
+                .expect("second key");
+            let Json(unkeyed) = h
+                .start(None, browser_request("session-1"))
+                .await
+                .expect("no key");
+            let ids = [&first, &second, &unkeyed].map(|body| body["run_id"].clone());
+            assert_eq!(ids, ["managed-run-1", "managed-run-2", "managed-run-3"]);
+            let keys = h.derive_keys();
+            assert_eq!(keys.len(), 3);
+            assert_eq!(
+                keys.iter().collect::<std::collections::BTreeSet<_>>().len(),
+                3,
+                "three starts, three grant keys"
+            );
+            assert!(keys[2].starts_with("browser-") && !keys[2].starts_with("browser-idem-"));
+            assert!(eventually(|| h.dispatches().len() == 3).await);
+        }
+
+        #[tokio::test]
+        async fn the_same_key_with_a_different_goal_is_refused_and_leaves_the_live_run_alone() {
+            let h = Harness::new(true).await;
+            let _ = h.start(Some("retry-1"), browser_request("session-1"))
+                .await
+                .expect("first");
+            let mut other = browser_request("session-1");
+            other.goal = "a different goal".to_owned();
+            let error = h
+                .start(Some("retry-1"), other)
+                .await
+                .expect_err("a reused key");
+            assert_eq!(error.0, StatusCode::CONFLICT);
+            assert_eq!(error.1 .0["error"], "idempotency_key_reused");
+            assert_eq!(h.revokes(), 0, "the first run's grant is untouched");
+            assert_eq!(h.session.appends.lock().expect("appends").len(), 1);
+            assert!(eventually(|| h.dispatches().len() == 1).await);
+        }
+
+        #[tokio::test]
+        async fn a_replay_of_a_run_that_ended_is_409_not_a_working_run() {
+            let h = Harness::new(true).await;
+            let _ = h.start(Some("retry-1"), browser_request("session-1"))
+                .await
+                .expect("first");
+            h.lifecycle.terminal.store(true, Ordering::SeqCst);
+            let error = h
+                .start(Some("retry-1"), browser_request("session-1"))
+                .await
+                .expect_err("the run has ended");
+            assert_eq!(error.0, StatusCode::CONFLICT);
+            assert_eq!(error.1 .0["error"], "idempotency_key_run_ended");
+            assert_eq!(error.1 .0["run_id"], "managed-run-1");
+            assert_eq!(h.revokes(), 0);
+        }
+
+        #[tokio::test]
+        async fn a_replay_whose_liveness_cannot_be_checked_is_503_and_dispatches_nothing() {
+            let mut h = Harness::new(true).await;
+            let _ = h.start(Some("retry-1"), browser_request("session-1"))
+                .await
+                .expect("first");
+            assert!(eventually(|| h.dispatches().len() == 1).await);
+            h.state.session_terminal_tokens = None;
+            let error = h
+                .start(Some("retry-1"), browser_request("session-1"))
+                .await
+                .expect_err("liveness unknown");
+            assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(error.1 .0["error"], "idempotency_replay_unverified");
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            assert_eq!(h.dispatches().len(), 1);
+            assert_eq!(h.revokes(), 0);
+        }
+
+        #[tokio::test]
+        async fn a_keyed_start_that_cannot_be_dispatched_ends_its_own_run_and_grant() {
+            // No service credential: the first liveness heartbeat fails.
+            let h = Harness::new(false).await;
+            let error = h
+                .start(Some("retry-1"), browser_request("session-1"))
+                .await
+                .expect_err("no liveness");
+            assert_eq!(error.0, StatusCode::BAD_GATEWAY);
+            let cancels = h.runs.cancels.lock().expect("cancels").clone();
+            assert_eq!(cancels.len(), 1, "the undispatched run is cancelled");
+            assert_eq!(cancels[0].run_id, "managed-run-1");
+            assert_eq!(cancels[0].reason, "browser_run_start_failed");
+            assert_eq!(h.revokes(), 1, "and its grant is ended");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert!(h.dispatches().is_empty());
+        }
+
+        #[tokio::test]
+        async fn a_keyed_start_whose_prompt_cannot_be_saved_cancels_the_new_run_and_keeps_the_grant() {
+            let h = Harness::new(true).await;
+            h.session.append_fails.store(true, Ordering::SeqCst);
+            let error = h
+                .start(Some("retry-1"), browser_request("session-1"))
+                .await
+                .expect_err("append down");
+            assert_eq!(error.0, StatusCode::BAD_GATEWAY);
+            let cancels = h.runs.cancels.lock().expect("cancels").clone();
+            assert_eq!(cancels.len(), 1);
+            assert_eq!(cancels[0].run_id, "managed-run-1");
+            // The grant stays: this could be a retry of a live run, and a
+            // same-key retry needs it. The broker bounds it per parent.
+            assert_eq!(h.revokes(), 0);
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert!(h.dispatches().is_empty());
+        }
+
+        #[tokio::test]
+        async fn a_malformed_key_or_a_thread_id_is_refused_before_any_broker_or_session_call() {
+            let h = Harness::new(true).await;
+            let error = h
+                .start(Some("bad key!"), browser_request("session-1"))
+                .await
+                .expect_err("malformed key");
+            assert_eq!(error.0, StatusCode::BAD_REQUEST);
+            assert_eq!(error.1 .0["error"], "idempotency_key_invalid");
+
+            let mut with_thread = browser_request("session-1");
+            with_thread.thread_id = Some("thread-existing".to_owned());
+            let error = h
+                .start(Some("retry-1"), with_thread)
+                .await
+                .expect_err("keyed start owns its thread");
+            assert_eq!(error.0, StatusCode::BAD_REQUEST);
+            assert_eq!(error.1 .0["error"], "idempotency_key_requires_a_new_thread");
+
+            assert!(h.derive_keys().is_empty(), "no broker call");
+            assert!(h.session.creates.lock().expect("creates").is_empty());
+            assert!(h.lifecycle.starts.lock().expect("starts").is_empty());
+        }
     }
 }
