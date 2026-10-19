@@ -8,7 +8,7 @@ use super::*;
 /// the grant's organization for either kind of caller: the broker's
 /// `ValidateGrantResponse` carries no `org_id`, so the only organization scoping
 /// is the broker's own, keyed to Quarry's static bearer (see the known-gap test
-/// `a_service_principal_is_not_bound_to_the_grants_owner`).
+/// `known_gap_a_service_principal_is_not_bound_to_the_grants_owner`).
 /// An empty `owner_id` (a broker that predates owners, or the no-op
 /// validator) is refused only when grants are required.
 ///

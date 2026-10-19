@@ -328,7 +328,7 @@ async fn validated_grant_overrides_client_domains_in_every_mode() {
 /// caller's org for every principal; when that lands this test must flip to a 403 for a
 /// grant of another organization.
 #[tokio::test]
-async fn a_service_principal_is_not_bound_to_the_grants_owner() {
+async fn known_gap_a_service_principal_is_not_bound_to_the_grants_owner() {
     for require in [false, true] {
         let edge = edge_with(
             vec![grant("grant-of-user", |fields| {
