@@ -2835,7 +2835,12 @@ mod scrape_challenge_tests {
         fn exit(&self, _: &tracing::span::Id) {}
     }
 
-    #[tokio::test]
+    // The EventLog is installed with `set_default`, which is per THREAD, so this test
+    // needs the scrape to run on the test's own thread: a current-thread runtime
+    // (spelled out here, not left to the default) guarantees that. If the scrape work
+    // were ever spawned elsewhere the `len() == 1` assertions below would fail loudly
+    // (zero lines), never pass vacuously.
+    #[tokio::test(flavor = "current_thread")]
     async fn the_scrape_path_logs_the_reason_and_the_status_and_never_the_host() {
         for zdr in [ZdrMode::Off, ZdrMode::On] {
             // Enforce: one refusal line.
@@ -2867,11 +2872,19 @@ mod scrape_challenge_tests {
             assert!(events.matching("scrape_refused").is_empty(), "{:?}", events.lines());
 
             // Neither the host nor anything of the page is in a challenge line. (The
-            // generic "page extracted" line of a page that goes through is not
-            // part of this contract.)
+            // generic "page extracted" line of a page that goes through logs its URL
+            // on a non-ZDR run like every other page does; that is the existing
+            // behaviour of the scrape path and not part of this contract.)
             for line in events.matching("quarry.challenge") {
                 assert!(!line.contains("walled.example"), "{line}");
                 assert!(!line.contains("Just a moment"), "{line}");
+            }
+            // Under ZDR the walled page that goes through in log mode leaves no
+            // host in ANY line, the generic "page extracted" line included.
+            if zdr == ZdrMode::On {
+                for line in events.lines() {
+                    assert!(!line.contains("walled.example"), "{line}");
+                }
             }
         }
         // A page that is not a wall logs nothing about challenges.
