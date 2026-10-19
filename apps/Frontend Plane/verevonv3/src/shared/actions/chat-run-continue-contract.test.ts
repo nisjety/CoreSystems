@@ -5,6 +5,9 @@ import {
   CHAT_RUN_CONTINUE_FRAME_REFUSALS,
   CHAT_RUN_CONTINUE_HTTP_EFFECTS,
   CHAT_RUN_CONTINUE_HTTP_REFUSALS,
+  CHAT_RUN_CONTINUE_PARK_EFFECT,
+  CHAT_RUN_CONTINUE_PARK_NOT_PARKED_CODES,
+  CHAT_RUN_CONTINUE_PARK_UNKNOWN_CODES,
   CHAT_RUN_CONTINUE_PRE_CONSUME_ONLY_HTTP_REFUSALS,
   CHAT_RUN_CONTINUE_RECOVERY_WINDOW_MINUTES,
   CHAT_RUN_CONTINUE_SPENT_EFFECT,
@@ -14,6 +17,9 @@ import {
   CHAT_RUN_CONTINUE_TRANSPORT_EFFECT,
   chatRunContinueFrameRefusalOf,
   chatRunContinueHttpRefusalOf,
+  chatRunContinueParkDispatchUnavailableOf,
+  chatRunContinueParkFailureOf,
+  chatRunContinueParkRefusalOf,
   chatRunContinueSpentConnected,
   chatRunContinueSpentRunEndOf,
   chatRunContinueSpentSubscriptionFailureOf,
@@ -521,6 +527,334 @@ describe('chatRunContinueSpentConnected', () => {
     for (const input of [null, undefined, 'x', 1, []]) {
       expect(chatRunContinueSpentConnected(input)).toBeNull()
     }
+  })
+})
+
+// WS03 S8-3: the resume of a PARKED run. It carries an empty approval id, so there is no
+// approval and nothing to spend: its failure frames say `park_continue: true` and never
+// `approval_spent`, and only the park guards read them. The park stream's bare
+// `agent_dispatch_unavailable` (a follow deadline, a join error) has no marker; it is read
+// only when the caller says the stream is a park stream.
+const PARK_NOT_PARKED = ['not_resumable', 'park_not_restorable'] as const
+const PARK_UNKNOWN = ['continue_outcome_unknown', 'continue_in_progress', 'agent_dispatch_unavailable'] as const
+const DISPATCH_FRAMES = [
+  'agent_dispatch_unavailable',
+  'agent_dispatch_rejected',
+  'agent_dispatch_unreachable',
+  'session_terminalization_failed',
+] as const
+
+const parkFrame = (code: string, extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+  code,
+  message: code.replaceAll('_', ' '),
+  retryable: false,
+  request_id: 'r',
+  run_id: 'run_1',
+  park_continue: true,
+  ...extra,
+})
+
+const staysParkedOf = (code: string) =>
+  (PARK_NOT_PARKED as readonly string[]).includes(code)
+    ? 'no'
+    : (PARK_UNKNOWN as readonly string[]).includes(code)
+      ? 'unknown'
+      : 'yes'
+
+describe('the park effect (regime P: the resume of a parked run)', () => {
+  it('says nothing is spent and the run is followed, and is not the spent effect or the unknown one', () => {
+    expect(CHAT_RUN_CONTINUE_PARK_EFFECT).toEqual({ approvalSpent: 'no', follow: true })
+    expect(CHAT_RUN_CONTINUE_PARK_EFFECT.approvalSpent).not.toBe(CHAT_RUN_CONTINUE_SPENT_EFFECT.approvalSpent)
+  })
+
+  it('pins which codes end the park, and which leave it unknown', () => {
+    expect([...CHAT_RUN_CONTINUE_PARK_NOT_PARKED_CODES].sort()).toEqual([...PARK_NOT_PARKED].sort())
+    expect([...CHAT_RUN_CONTINUE_PARK_UNKNOWN_CODES].sort()).toEqual([...PARK_UNKNOWN].sort())
+    // Every code the park reader can read is in the tuple, except the one bare dispatch frame.
+    for (const code of [...CHAT_RUN_CONTINUE_PARK_NOT_PARKED_CODES, ...CHAT_RUN_CONTINUE_PARK_UNKNOWN_CODES]) {
+      expect(code === 'agent_dispatch_unavailable' || (CHAT_RUN_CONTINUE_FRAME_REFUSALS as readonly string[]).includes(code)).toBe(true)
+    }
+  })
+})
+
+describe('chatRunContinueParkRefusalOf (the frames of a park continue)', () => {
+  it('reads every one of the 25 codes with the marker: nothing spent, follow the run, and whether the park stays', () => {
+    for (const code of CHAT_RUN_CONTINUE_FRAME_REFUSALS) {
+      const read = chatRunContinueParkRefusalOf(parkFrame(code))
+      expect(read).toEqual({
+        regime: 'park',
+        code,
+        approvalSpent: 'no',
+        follow: true,
+        runStaysParked: staysParkedOf(code),
+      })
+      expect(read).toMatchObject(CHAT_RUN_CONTINUE_PARK_EFFECT)
+      // Its own shape: no retryable and no followRun, which belong to the approval regimes.
+      expect(Object.keys(read ?? {}).sort()).toEqual(['approvalSpent', 'code', 'follow', 'regime', 'runStaysParked'])
+    }
+  })
+
+  it('pins the runStaysParked table: no for not_resumable and park_not_restorable, unknown for the in-flight and unknown outcomes, yes for the rest', () => {
+    const rows = CHAT_RUN_CONTINUE_FRAME_REFUSALS.map((code) => [code, chatRunContinueParkRefusalOf(parkFrame(code))?.runStaysParked])
+    expect(rows.filter(([, stays]) => stays === 'no').map(([code]) => code).sort()).toEqual(['not_resumable', 'park_not_restorable'])
+    expect(rows.filter(([, stays]) => stays === 'unknown').map(([code]) => code).sort()).toEqual([
+      'continue_in_progress',
+      'continue_outcome_unknown',
+    ])
+    expect(rows.filter(([, stays]) => stays === 'yes')).toHaveLength(CHAT_RUN_CONTINUE_FRAME_REFUSALS.length - 4)
+    for (const code of ['park_not_due', 'park_route_unavailable', 'continue_disabled', 'continue_unreachable', 'continue_refused', 'durable_mutation_forbidden']) {
+      expect(chatRunContinueParkRefusalOf(parkFrame(code))?.runStaysParked).toBe('yes')
+    }
+  })
+
+  it('needs the marker to be exactly true: any other value is not a park frame', () => {
+    for (const marker of [undefined, false, 'true', 1, null, [], {}]) {
+      const frame = parkFrame('park_not_due')
+      if (marker === undefined) delete frame.park_continue
+      else frame.park_continue = marker
+      expect(chatRunContinueParkRefusalOf(frame)).toBeNull()
+      expect(chatRunContinueParkFailureOf(frame)).toBeNull()
+    }
+  })
+
+  it('never reads a frame that carries approval_spent, whatever its value: a park spends nothing', () => {
+    for (const flag of [true, false, 'true', 1, null]) {
+      for (const code of ['park_not_due', 'continue_unreachable', 'continue_outcome_unknown']) {
+        const frame = parkFrame(code, { approval_spent: flag })
+        expect(chatRunContinueParkRefusalOf(frame)).toBeNull()
+        expect(chatRunContinueParkFailureOf(frame)).toBeNull()
+        expect(chatRunContinueParkFailureOf(frame, { parkStream: true })).toBeNull()
+        // The regime 2 reader never reads the contradiction either.
+        expect(chatRunContinueUnflaggedRefusalOf(frame)).toBeNull()
+        // Only the exact claim `approval_spent === true` is read, and then by the SPENT reader
+        // (a click spent is never forgotten); any other value is read by nobody.
+        if (flag === true) expect(chatRunContinueFrameRefusalOf(frame)).toMatchObject({ regime: 1, code })
+        else expect(chatRunContinueFrameRefusalOf(frame)).toBeNull()
+      }
+    }
+  })
+
+  it('trusts nothing outside the closed vocabulary: a code outside the tuple is not read, marked or not', () => {
+    const outside = [
+      ...DISPATCH_FRAMES,
+      ...CHAT_RUN_CONTINUE_SPENT_RUN_END_FRAMES,
+      ...CHAT_RUN_CONTINUE_SPENT_SUBSCRIPTION_FRAMES,
+      'park_not_due ',
+      'PARK_NOT_DUE',
+      'park_',
+      'park_something_new',
+      'nope',
+      '',
+    ]
+    for (const code of outside) {
+      expect(chatRunContinueParkRefusalOf(parkFrame(code))).toBeNull()
+      expect(chatRunContinueParkFailureOf(parkFrame(code))).toBeNull()
+      expect(chatRunContinueParkFailureOf(parkFrame(code), { parkStream: true })).toBeNull()
+    }
+    for (const code of [7, null, undefined, {}, ['park_not_due']]) {
+      expect(chatRunContinueParkRefusalOf(parkFrame('x', { code }))).toBeNull()
+    }
+  })
+
+  it('gives null for anything that is not a frame object', () => {
+    for (const input of [null, undefined, 'park_not_due', 7, [], { park_continue: true }, { code: 'park_not_due' }]) {
+      expect(chatRunContinueParkRefusalOf(input)).toBeNull()
+      expect(chatRunContinueParkFailureOf(input)).toBeNull()
+      expect(chatRunContinueParkFailureOf(input, { parkStream: true })).toBeNull()
+    }
+  })
+})
+
+describe('chatRunContinueParkDispatchUnavailableOf (the bare frame of a park stream)', () => {
+  // The committed frame, as the gateway sends it for a follow deadline or a join error.
+  const bare = (): Record<string, unknown> => ({
+    code: 'agent_dispatch_unavailable',
+    message: 'The agent dispatch outcome is unknown; the run remains retriable.',
+    retryable: true,
+    request_id: 'r',
+    run_id: 'run_1',
+  })
+
+  it('reads it as unknown, followed and nothing spent, but only when the caller says the stream is a park stream', () => {
+    const expected = {
+      regime: 'park',
+      code: 'agent_dispatch_unavailable',
+      approvalSpent: 'no',
+      follow: true,
+      runStaysParked: 'unknown',
+    }
+    expect(chatRunContinueParkDispatchUnavailableOf(bare(), true)).toEqual(expected)
+    expect(chatRunContinueParkFailureOf(bare(), { parkStream: true })).toEqual(expected)
+    for (const parkStream of [false, undefined, 'true', 1, null]) {
+      expect(chatRunContinueParkDispatchUnavailableOf(bare(), parkStream as unknown as boolean)).toBeNull()
+      expect(chatRunContinueParkFailureOf(bare(), { parkStream: parkStream as unknown as boolean })).toBeNull()
+    }
+    // Without a stream context it is the committed frame of an ordinary run: read by no guard here.
+    expect(chatRunContinueParkFailureOf(bare())).toBeNull()
+    expect(chatRunContinueParkFailureOf(bare(), {})).toBeNull()
+  })
+
+  it('reads only that one code, and only without either marker', () => {
+    for (const code of [...DISPATCH_FRAMES.filter((c) => c !== 'agent_dispatch_unavailable'), ...CHAT_RUN_CONTINUE_FRAME_REFUSALS, 'nope', '']) {
+      expect(chatRunContinueParkDispatchUnavailableOf({ ...bare(), code }, true)).toBeNull()
+    }
+    expect(chatRunContinueParkDispatchUnavailableOf({ ...bare(), park_continue: true }, true)).toBeNull()
+    expect(chatRunContinueParkDispatchUnavailableOf({ ...bare(), park_continue: false }, true)).toBeNull()
+    for (const flag of [true, false, 'true', null]) {
+      expect(chatRunContinueParkDispatchUnavailableOf({ ...bare(), approval_spent: flag }, true)).toBeNull()
+    }
+  })
+
+  it('is not read by any approval-regime guard, with or without the stream context', () => {
+    expect(chatRunContinueFrameRefusalOf(bare())).toBeNull()
+    expect(chatRunContinueUnflaggedRefusalOf(bare())).toBeNull()
+    expect(chatRunContinueSpentRunEndOf(bare())).toBeNull()
+    expect(chatRunContinueSpentSubscriptionFailureOf(bare())).toBeNull()
+  })
+
+  it('gives null for anything that is not a frame object', () => {
+    for (const input of [null, undefined, 'agent_dispatch_unavailable', 7, [], {}]) {
+      expect(chatRunContinueParkDispatchUnavailableOf(input, true)).toBeNull()
+    }
+  })
+})
+
+describe('the park regime against the other regimes', () => {
+  const approvalGuards = (frame: unknown) => [
+    chatRunContinueFrameRefusalOf(frame),
+    chatRunContinueUnflaggedRefusalOf(frame),
+    chatRunContinueSpentRunEndOf(frame),
+    chatRunContinueSpentSubscriptionFailureOf(frame),
+    chatRunContinueSpentConnected(frame),
+  ]
+
+  it('is null in regime 1 and regime 2 and in the spent readers for every park_continue frame without approval_spent === true', () => {
+    const codes = [
+      ...CHAT_RUN_CONTINUE_FRAME_REFUSALS,
+      ...CHAT_RUN_CONTINUE_SPENT_RUN_END_FRAMES,
+      ...CHAT_RUN_CONTINUE_SPENT_SUBSCRIPTION_FRAMES,
+      ...DISPATCH_FRAMES,
+    ]
+    for (const code of codes) {
+      for (const flag of [undefined, false, 'true', 1, null]) {
+        const extra: Record<string, unknown> = flag === undefined ? {} : { approval_spent: flag }
+        expect(approvalGuards(parkFrame(code, extra)).filter((read) => read !== null)).toEqual([])
+      }
+    }
+    // The connected frame, too: a marked one that does not say it spent is not a spent connect.
+    expect(chatRunContinueSpentConnected({ ok: true, park_continue: true })).toBeNull()
+    expect(chatRunContinueSpentConnected({ ok: true, approval_spent: false, park_continue: true })).toBeNull()
+    expect(chatRunContinueSpentConnected({ ok: true, approval_spent: true })).toEqual(CHAT_RUN_CONTINUE_SPENT_EFFECT)
+  })
+
+  it('reads a contradictory frame (park_continue and approval_spent both true) as SPENT, final and never retried, never as a park frame', () => {
+    // The stronger claim wins: a click spent is never forgotten, and a retry with a new token
+    // (regime 3) is never offered for it, as it was not before the park marker existed.
+    const spentRead = (code: string) => {
+      const frame = parkFrame(code, { approval_spent: true })
+      const reads = approvalGuards(frame).filter((read) => read !== null)
+      expect(reads).toHaveLength(1)
+      // Never a park reading, in either stream context.
+      expect(chatRunContinueParkRefusalOf(frame)).toBeNull()
+      expect(chatRunContinueParkFailureOf(frame)).toBeNull()
+      expect(chatRunContinueParkFailureOf(frame, { parkStream: true })).toBeNull()
+      return reads[0]
+    }
+    for (const code of CHAT_RUN_CONTINUE_FRAME_REFUSALS) {
+      expect(spentRead(code)).toEqual({ regime: 1, code, ...CHAT_RUN_CONTINUE_SPENT_EFFECT })
+    }
+    for (const code of CHAT_RUN_CONTINUE_SPENT_RUN_END_FRAMES) {
+      expect(spentRead(code)).toEqual({ regime: 1, code, ...CHAT_RUN_CONTINUE_SPENT_EFFECT })
+    }
+    for (const code of CHAT_RUN_CONTINUE_SPENT_SUBSCRIPTION_FRAMES) {
+      expect(spentRead(code)).toEqual({ regime: 1, code, ...CHAT_RUN_CONTINUE_SPENT_EFFECT })
+    }
+    for (const code of CHAT_RUN_CONTINUE_FRAME_REFUSALS) {
+      const read = chatRunContinueFrameRefusalOf(parkFrame(code, { approval_spent: true }))
+      expect(read?.retryable).toBe(false)
+      expect(read?.approvalSpent).toBe('yes')
+    }
+    // The closed vocabulary still rules: a code outside it is read by nobody, spent flag or not.
+    for (const code of [...DISPATCH_FRAMES, 'nope', '']) {
+      expect(approvalGuards(parkFrame(code, { approval_spent: true })).filter((read) => read !== null)).toEqual([])
+    }
+    // The contradictory connected frame is a spent connect.
+    expect(chatRunContinueSpentConnected({ ok: true, approval_spent: true, park_continue: true })).toEqual(
+      CHAT_RUN_CONTINUE_SPENT_EFFECT,
+    )
+    // Only an exact approval_spent: true is the stronger claim.
+    for (const flag of [false, 'true', 1, null]) {
+      expect(chatRunContinueSpentConnected({ ok: true, approval_spent: flag, park_continue: true })).toBeNull()
+    }
+  })
+
+  it('leaves a pure park frame (the marker, no approval_spent) to the park reader alone', () => {
+    for (const code of CHAT_RUN_CONTINUE_FRAME_REFUSALS) {
+      const frame = parkFrame(code)
+      expect(approvalGuards(frame).filter((read) => read !== null)).toEqual([])
+      expect(chatRunContinueParkRefusalOf(frame)).toMatchObject({ regime: 'park', code })
+    }
+  })
+
+  it('leaves the committed readers as they were for an unmarked frame', () => {
+    expect(chatRunContinueFrameRefusalOf({ code: 'park_not_due', approval_spent: true })).toMatchObject({ regime: 1 })
+    expect(chatRunContinueUnflaggedRefusalOf({ code: 'park_not_due' })).toMatchObject({ regime: 2 })
+    expect(chatRunContinueSpentRunEndOf({ code: 'agent_run_failed', approval_spent: true })).toMatchObject({ regime: 1 })
+    expect(chatRunContinueSpentSubscriptionFailureOf({ code: 'rate_limited', approval_spent: true })).toMatchObject({ regime: 1 })
+    // Only an exact true is the marker; anything else keeps the committed reading.
+    for (const marker of [false, 'true', 1, null]) {
+      expect(chatRunContinueUnflaggedRefusalOf({ code: 'park_not_due', park_continue: marker })).toMatchObject({ regime: 2 })
+    }
+  })
+
+  it('does not read a bare continue_unreachable or continue_outcome_unknown, with no park_continue, as a park frame or as any frame', () => {
+    // Without approval_spent these two codes cannot occur on an approval continuation (regime 2
+    // never reads them), and without the marker they are not a park frame either.
+    for (const code of CHAT_RUN_CONTINUE_SPENT_ONLY_FRAME_REFUSALS) {
+      for (const flag of [undefined, false]) {
+        const frame: Record<string, unknown> = { code, message: code, retryable: false, request_id: 'r', run_id: 'run_1' }
+        if (flag !== undefined) frame.approval_spent = flag
+        expect(chatRunContinueParkRefusalOf(frame)).toBeNull()
+        expect(chatRunContinueParkFailureOf(frame)).toBeNull()
+        expect(chatRunContinueParkFailureOf(frame, { parkStream: true })).toBeNull()
+        expect(chatRunContinueParkDispatchUnavailableOf(frame, true)).toBeNull()
+        expect(approvalGuards(frame).filter((read) => read !== null)).toEqual([])
+      }
+    }
+  })
+
+  it('reads no frame with more than one guard, in either stream context', () => {
+    const codes = [
+      ...CHAT_RUN_CONTINUE_FRAME_REFUSALS,
+      ...CHAT_RUN_CONTINUE_SPENT_RUN_END_FRAMES,
+      ...CHAT_RUN_CONTINUE_SPENT_SUBSCRIPTION_FRAMES,
+      ...DISPATCH_FRAMES,
+      'nope',
+    ]
+    for (const code of codes) {
+      for (const flag of [undefined, false, true]) {
+        for (const marker of [undefined, false, true]) {
+          for (const parkStream of [false, true]) {
+            const frame: Record<string, unknown> = { code }
+            if (flag !== undefined) frame.approval_spent = flag
+            if (marker !== undefined) frame.park_continue = marker
+            const reads = [...approvalGuards(frame), chatRunContinueParkFailureOf(frame, { parkStream })].filter(
+              (read) => read !== null,
+            )
+            expect(reads.length).toBeLessThanOrEqual(1)
+          }
+        }
+      }
+    }
+  })
+
+  it('says in its own header that regime P exists, which guard reads it, and that it never spends', () => {
+    expect(contractSource).toContain('P. A PARK continue')
+    expect(contractSource).toContain('park_continue: true')
+    expect(contractSource).toContain('chatRunContinueParkFailureOf')
+    expect(contractSource).toContain('never `approval_spent`')
+    // And that the stronger claim wins when a frame carries both.
+    expect(contractSource).toContain('a click spent is never forgotten')
   })
 })
 

@@ -138,6 +138,50 @@ describe('action registry', () => {
     expect(description).toContain('the approved call runs once under the authority the pause recorded')
   })
 
+  it('lets a parked run be continued with no approval: approvalId is optional, never blank, and the description says what the park form is', () => {
+    const continueRun = getActionDescriptor('chat.run.continue')
+    const schema = continueRun?.inputSchema
+
+    // The park form: a run id and the claim token, no approval.
+    expect(schema?.safeParse({ runId: 'run_1', claimToken: 'claim_1' }).success).toBe(true)
+    // The approval form is unchanged.
+    expect(schema?.safeParse({ runId: 'run_1', approvalId: 'appr_1', claimToken: 'claim_1' }).success).toBe(true)
+    // An approval id that is present is never blank: the wire's empty approval id is what the
+    // client writes for the park form, never something a caller supplies.
+    expect(schema?.safeParse({ runId: 'run_1', approvalId: '', claimToken: 'claim_1' }).success).toBe(false)
+    expect(schema?.safeParse({ runId: 'run_1', approvalId: undefined, claimToken: 'claim_1' }).success).toBe(true)
+    // The run and the claim token are still required, and never blank.
+    expect(schema?.safeParse({ runId: 'run_1' }).success).toBe(false)
+    expect(schema?.safeParse({ claimToken: 'claim_1' }).success).toBe(false)
+    expect(schema?.safeParse({ runId: '', claimToken: 'claim_1' }).success).toBe(false)
+    expect(schema?.safeParse({ runId: 'run_1', claimToken: '' }).success).toBe(false)
+    expect(schema?.safeParse({ runId: 'run_1', approvalId: 'appr_1' }).success).toBe(false)
+
+    // The wire still names only the three identifiers, and the action keeps its standing.
+    expect(Object.keys((schema as unknown as { shape: Record<string, unknown> }).shape).sort())
+      .toEqual(['approvalId', 'claimToken', 'runId'])
+    expect(continueRun?.risk).toBe('high')
+    expect(continueRun?.requiresApproval).toBe(false)
+    expect(isModelExecutableAction('chat.run.continue')).toBe(false)
+
+    const description = continueRun?.description ?? ''
+    expect(description).toContain('park form')
+    expect(description).toContain('omit approvalId')
+    expect(description).toContain('send only runId and claimToken')
+    expect(description).toContain('nothing is spent')
+    // A park failure frame is marked, and never says an approval was spent.
+    expect(description).toContain('park_continue true never says approval_spent')
+    for (const code of ['park_not_restorable', 'park_route_unavailable', 'park_not_due']) {
+      expect(description).toContain(code)
+    }
+    // The client follows the run; the run read says whether it stays parked.
+    expect(description).toContain('the client follows the run by its id with the existing run read')
+    expect(description).toContain('not_resumable and park_not_restorable say it does not')
+    expect(description).toContain('a bare agent_dispatch_unavailable on a park stream leave that unknown')
+    expect(description).not.toMatch(/re-?read\s+the\s+approval/i)
+    expect(description).not.toMatch(/reread/i)
+  })
+
   it('registers chat.execute_approved_plan as a high-risk model-plane action the model cannot execute', () => {
     const execute = getActionDescriptor('chat.execute_approved_plan')
 

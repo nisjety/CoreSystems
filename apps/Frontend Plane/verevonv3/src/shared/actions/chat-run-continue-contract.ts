@@ -15,7 +15,8 @@
 //
 // Stream. The 200 response is an SSE stream. Its `connected` frame and its
 // `error` frames can carry `approval_spent: true`, and `error` frames carry a code
-// from CHAT_RUN_CONTINUE_FRAME_REFUSALS. Three regimes say what a frame means:
+// from CHAT_RUN_CONTINUE_FRAME_REFUSALS. Four regimes say what a frame means (the
+// fourth, P, belongs to a different kind of continue, the resume of a parked run):
 //
 //   1. `approval_spent: true` (any frame of a continuation the gateway
 //      pre-consumed, the `connected` frame included): the approval is spent, the
@@ -35,9 +36,30 @@
 //      `agent_dispatch_rejected`, `agent_dispatch_unreachable`,
 //      `session_terminalization_failed`): they say nothing about the approval,
 //      so they are not in this vocabulary and every guard here returns null for
-//      them. A retry with a new token is what the committed rules permit. The
+//      them (but for the one exception of regime P below). A retry with a new token is
+//      what the committed rules permit. The
 //      run-end and subscription frames above are of this regime too, whenever they
 //      do NOT carry `approval_spent: true`: their own `retryable` flag stands.
+//   P. A PARK continue (WS03 S8): the resume of a run the executor PARKED at a round
+//      boundary. Its request carries an empty `approval_id`, so there is no approval and
+//      nothing to spend, and the gateway never ends the run because of it. A refused or
+//      failed park continue answers with an `error` frame that carries `park_continue: true`
+//      and a code from the tuple, and never `approval_spent`. The client follows the run by
+//      its id, and [chatRunContinueParkFailureOf] says whether the run stays parked
+//      (`runStaysParked`: `no` for not_resumable and park_not_restorable, `unknown` for
+//      continue_outcome_unknown, continue_in_progress and the bare
+//      `agent_dispatch_unavailable` of a park stream, `yes` for every other code). That
+//      guard is the ONLY one that reads a `park_continue: true` frame, and the only one that
+//      reads the bare `agent_dispatch_unavailable` (a follow deadline or a join error), and
+//      then only when the caller says the stream is a park stream: without a marker or that
+//      statement the frame is regime 3. The unflagged reader of regime 2 returns null for a
+//      marked frame. Nothing is trusted outside the closed vocabulary: the marker must be
+//      exactly `true` and a code outside the tuple is read by no guard. A marked frame that
+//      also says `approval_spent` contradicts itself, and the stronger claim wins: a frame
+//      with `approval_spent === true` is read by the SPENT readers of regime 1 whether or not
+//      it carries the marker (a click spent is never forgotten, and it is never offered the
+//      retry of regime 3), and the park readers read none of it. A marked frame whose
+//      `approval_spent` is anything but exactly `true` is read by no guard.
 //
 // What the spend flag can honestly say. `no` is claimed only for a refusal that
 // cannot be produced after a consume. Most refusals can: the gateway checks the
@@ -148,7 +170,8 @@ export type ChatRunContinueFrameRefusalCode = (typeof CHAT_RUN_CONTINUE_FRAME_RE
  * is no unflagged form of them on an approval continuation, so regime 2 never reads
  * them. A PARK continue (WS03 S8: the resume of a parked run, which has no approval to
  * spend) says the same two codes WITHOUT `approval_spent`, under `park_continue: true`;
- * that regime is read only by its own guard (WS03 S8-3), never by regime 1 or 2.
+ * that regime is read only by its own guard ([chatRunContinueParkFailureOf], WS03 S8-3),
+ * never by regime 1 or 2.
  */
 export const CHAT_RUN_CONTINUE_SPENT_ONLY_FRAME_REFUSALS = [
   'continue_unreachable',
@@ -292,6 +315,45 @@ export const CHAT_RUN_CONTINUE_SPENT_EFFECT: ChatRunContinueEffect = {
 export const CHAT_RUN_CONTINUE_UNFLAGGED_EFFECT: ChatRunContinueEffect = UNKNOWN_FOLLOW
 
 /**
+ * Regime P (WS03 S8): a failure of the resume of a PARKED run. There is no approval, so
+ * nothing was spent (`approvalSpent: 'no'`, which here means "there was nothing to spend",
+ * not "a retry is safe"), and the client follows the run by its id (`follow`). It carries no
+ * `retryable` and no `followRun`: those fields belong to the approval regimes, so a caller
+ * cannot read this effect as one of theirs by accident.
+ */
+export type ChatRunContinueParkEffect = {
+  readonly approvalSpent: 'no'
+  readonly follow: true
+}
+
+export const CHAT_RUN_CONTINUE_PARK_EFFECT: ChatRunContinueParkEffect = {
+  approvalSpent: 'no',
+  follow: true,
+}
+
+/**
+ * The park codes after which the run no longer stays parked: the run has ended
+ * (`not_resumable`) or the executor closed the park fold as structurally unrestorable
+ * (`park_not_restorable`).
+ */
+export const CHAT_RUN_CONTINUE_PARK_NOT_PARKED_CODES = ['not_resumable', 'park_not_restorable'] as const
+
+/**
+ * The park codes after which it is unknown whether the run stays parked: the continue may
+ * have been claimed and be in flight (`continue_in_progress`), or its outcome is not known
+ * (`continue_outcome_unknown`, and the bare `agent_dispatch_unavailable` of a park stream,
+ * a follow deadline or a join error). The run read says.
+ */
+export const CHAT_RUN_CONTINUE_PARK_UNKNOWN_CODES = [
+  'continue_outcome_unknown',
+  'continue_in_progress',
+  'agent_dispatch_unavailable',
+] as const
+
+/** Whether the park holds after a failed park continue: `yes`, `no` or `unknown`. */
+export type ChatRunContinueRunStaysParked = 'yes' | 'no' | 'unknown'
+
+/**
  * A transport failure: a 502 `upstream_unavailable`, a 504, a network error, an
  * unlisted body. The request may or may not have reached the gateway, and the
  * gateway may have consumed the approval before it failed. A retry with the same
@@ -324,6 +386,13 @@ export type ChatRunContinueSpentSubscriptionFailure = ChatRunContinueEffect & {
   readonly code: ChatRunContinueSpentSubscriptionCode
 }
 
+/** A failed park continue, as [chatRunContinueParkFailureOf] reads it (regime P). */
+export type ChatRunContinueParkFailure = ChatRunContinueParkEffect & {
+  readonly regime: 'park'
+  readonly code: ChatRunContinueFrameRefusalCode | 'agent_dispatch_unavailable'
+  readonly runStaysParked: ChatRunContinueRunStaysParked
+}
+
 /** Why a failure is a transport failure (see [chatRunContinueTransportFailureOf]). */
 export type ChatRunContinueTransportReason =
   | 'upstream_unavailable'
@@ -344,6 +413,17 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 
 function isFrameRefusalCode(value: unknown): value is ChatRunContinueFrameRefusalCode {
   return typeof value === 'string' && (CHAT_RUN_CONTINUE_FRAME_REFUSALS as readonly string[]).includes(value)
+}
+
+/**
+ * Whether a frame is marked as a frame of a park continue (regime P). Only an exact `true`
+ * is the marker. The regime 2 reader returns null for such a frame, and
+ * [chatRunContinueParkFailureOf] is the one that reads it, unless the frame also says
+ * `approval_spent === true`: that stronger claim is read by the spent readers of regime 1,
+ * which therefore do NOT consult the marker (a click spent is never forgotten).
+ */
+function isParkMarked(record: Record<string, unknown>): boolean {
+  return record.park_continue === true
 }
 
 /**
@@ -463,7 +543,7 @@ export function chatRunContinueSpentSubscriptionFailureOf(
  */
 export function chatRunContinueUnflaggedRefusalOf(frame: unknown): ChatRunContinueFrameRefusal | null {
   const record = asRecord(frame)
-  if (!record || record.approval_spent === true || !isFrameRefusalCode(record.code)) return null
+  if (!record || record.approval_spent === true || isParkMarked(record) || !isFrameRefusalCode(record.code)) return null
   if ((CHAT_RUN_CONTINUE_SPENT_ONLY_FRAME_REFUSALS as readonly string[]).includes(record.code)) return null
   return { regime: 2, code: record.code, ...CHAT_RUN_CONTINUE_UNFLAGGED_EFFECT }
 }
@@ -478,4 +558,74 @@ export function chatRunContinueSpentConnected(frame: unknown): ChatRunContinueEf
   const record = asRecord(frame)
   if (!record || record.ok !== true || record.approval_spent !== true) return null
   return CHAT_RUN_CONTINUE_SPENT_EFFECT
+}
+
+/**
+ * Whether the run stays parked after a failed park continue with this code. `no` for
+ * [CHAT_RUN_CONTINUE_PARK_NOT_PARKED_CODES], `unknown` for
+ * [CHAT_RUN_CONTINUE_PARK_UNKNOWN_CODES], `yes` for every other code of the tuple: nothing
+ * in such a refusal ends the park, which is held until its own expiry. It is what the code
+ * says, never a promise: the run read is the arbiter.
+ */
+function runStaysParkedAfter(code: string): ChatRunContinueRunStaysParked {
+  if ((CHAT_RUN_CONTINUE_PARK_NOT_PARKED_CODES as readonly string[]).includes(code)) return 'no'
+  if ((CHAT_RUN_CONTINUE_PARK_UNKNOWN_CODES as readonly string[]).includes(code)) return 'unknown'
+  return 'yes'
+}
+
+/**
+ * Regime P, the marked frames: an `error` frame of a park continue. It carries
+ * `park_continue === true` exactly, a code from [CHAT_RUN_CONTINUE_FRAME_REFUSALS] and no
+ * `approval_spent` at all, whatever the value (a park spends nothing, so a frame that says
+ * otherwise contradicts itself and is not trusted). Anything else is null: an unmarked
+ * `continue_unreachable` or `continue_outcome_unknown` is not a park frame, and a code outside
+ * the closed vocabulary is never read, marked or not.
+ */
+export function chatRunContinueParkRefusalOf(frame: unknown): ChatRunContinueParkFailure | null {
+  const record = asRecord(frame)
+  if (!record || !isParkMarked(record) || 'approval_spent' in record || !isFrameRefusalCode(record.code)) return null
+  return {
+    regime: 'park',
+    code: record.code,
+    ...CHAT_RUN_CONTINUE_PARK_EFFECT,
+    runStaysParked: runStaysParkedAfter(record.code),
+  }
+}
+
+/**
+ * Regime P, the bare frame: the committed `agent_dispatch_unavailable` a park stream ends on
+ * when its follow deadline passes or its dispatch task is lost. It has no marker, and on an
+ * approval continuation it is regime 3, which no other guard here reads. It is read only when
+ * the caller says the stream is a park stream (`parkStream === true`, known from the request
+ * it sent): then nothing was spent, the run is followed, and whether it stays parked is
+ * unknown. A frame with either marker is not this frame.
+ */
+export function chatRunContinueParkDispatchUnavailableOf(
+  frame: unknown,
+  parkStream: boolean,
+): ChatRunContinueParkFailure | null {
+  if (parkStream !== true) return null
+  const record = asRecord(frame)
+  if (!record || record.code !== 'agent_dispatch_unavailable') return null
+  if ('park_continue' in record || 'approval_spent' in record) return null
+  return {
+    regime: 'park',
+    code: 'agent_dispatch_unavailable',
+    ...CHAT_RUN_CONTINUE_PARK_EFFECT,
+    runStaysParked: runStaysParkedAfter('agent_dispatch_unavailable'),
+  }
+}
+
+/**
+ * The ONLY reader of the frames of a park continue (regime P): the marked frames
+ * ([chatRunContinueParkRefusalOf]) and, when `options.parkStream` is true, the bare
+ * `agent_dispatch_unavailable` ([chatRunContinueParkDispatchUnavailableOf]). Every other value
+ * is null, which says nothing about a park; the guards of regimes 1 and 2 read the frames of
+ * an approval continuation and are null for these.
+ */
+export function chatRunContinueParkFailureOf(
+  frame: unknown,
+  options?: { readonly parkStream?: boolean },
+): ChatRunContinueParkFailure | null {
+  return chatRunContinueParkRefusalOf(frame) ?? chatRunContinueParkDispatchUnavailableOf(frame, options?.parkStream === true)
 }
