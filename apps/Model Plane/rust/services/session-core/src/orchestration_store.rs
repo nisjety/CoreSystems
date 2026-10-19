@@ -1063,13 +1063,16 @@ async fn consume_approval_with(
     if consumed_at.is_some() {
         let same_claim = stored_hash.as_deref() == Some(claim_hash);
         // A replay never consults expires_at: while the descriptor stands, it is
-        // answered. When the reaper (it clears the descriptor of every approval
-        // whose expires_at has passed, consumed or not) or a purge removed the
-        // descriptor, there is no call to hand back and the replay is answered with
-        // `call: None`, exactly as before the spend-only consume existed; the
-        // executor turns a call-less replay into its own closed refusal. This
-        // branch adds no refusal of its own, so a full consume is byte-identical
-        // with every switch off.
+        // answered. The descriptor reaper keeps the descriptor of a consumed
+        // approval past its expiry for as long as its run has not ended (it deletes
+        // it at the first sweep after the run is completed, failed or cancelled, and
+        // that case never reaches here: the ended-run gate above answers NotFound).
+        // So on a live run only a purge, or a row that was never written, leaves
+        // no descriptor; there is then no call to hand back and the replay is
+        // answered with `call: None`, exactly as before the spend-only consume
+        // existed, and the executor turns a call-less replay into its own closed
+        // refusal. This branch adds no refusal of its own, so a full consume is
+        // byte-identical with every switch off.
         // The call is handed back only to the claim that consumed it.
         let call = if same_claim && intent.returns_call() {
             read_consumed_call(&mut transaction, id, org_id, run_id, user_id).await?
@@ -2192,10 +2195,11 @@ mod tests {
         );
     }
 
-    // The descriptor reaper (approval_delivery) deletes the descriptor of any
-    // approval whose expires_at has passed, consumed or not. A replay therefore
-    // never needs the approval to be unexpired. A same-claim FULL replay whose
-    // descriptor has gone is answered exactly as the committed code answered it:
+    // The descriptor reaper (approval_delivery) deletes the descriptor of an
+    // approval whose expires_at has passed unless the approval is consumed and its
+    // run has not ended. A replay never needs the approval to be unexpired. A
+    // same-claim FULL replay whose descriptor has gone (a purge) is answered
+    // exactly as the committed code answered it:
     // already consumed, same claim, no call (the executor turns that into its own
     // closed refusal). The replay branch adds no refusal of its own, so a
     // switches-off executor sees the same wire result as before this change.
@@ -3053,17 +3057,38 @@ mod approval_consume_db_tests {
 
     /// Makes the approval expired, then runs the real descriptor reaper for its org.
     /// The reaper (`approval_delivery::reap_undeliverable_deliveries`) deletes the
-    /// retained descriptor of every approval whose `expires_at` has passed, consumed
-    /// or not.
+    /// retained descriptor of an approval whose `expires_at` has passed, unless the
+    /// approval is consumed and its run has not ended (then the executor's same-claim
+    /// replay may still need the call).
     async fn expire_and_reap(pool: &Pool, seed: &Seed, id: &str) {
+        expire(pool, id).await;
+        reap(pool, seed).await;
+    }
+
+    async fn expire(pool: &Pool, id: &str) {
         sqlx::query("UPDATE approvals SET expires_at = now() - interval '1 minute' WHERE id = $1")
             .bind(id)
             .execute(pool)
             .await
             .expect("expire the approval");
+    }
+
+    /// One sweep of the real descriptor reaper for the seed's org.
+    async fn reap(pool: &Pool, seed: &Seed) {
         crate::approval_delivery::reap_undeliverable_deliveries(pool, &seed.org)
             .await
             .expect("reap");
+    }
+
+    /// Seeds a run status in a scratch database; not a product write (the
+    /// status-write tripwire in `loop_checkpoint` skips `#[cfg(test)]` modules).
+    async fn set_run_status(pool: &Pool, seed: &Seed, status: &str) {
+        sqlx::query("UPDATE runs SET status = $2 WHERE id = $1")
+            .bind(&seed.run_id)
+            .bind(status)
+            .execute(pool)
+            .await
+            .expect("set the run status");
     }
 
     async fn descriptor_rows(pool: &Pool, id: &str) -> i64 {
@@ -3077,14 +3102,20 @@ mod approval_consume_db_tests {
     // The expiry race the design review found (finding 6). The gateway's spend-only
     // consume wins; the executor's own consume replays later, in another
     // transaction. If expires_at passes in between:
-    //   - before the reaper runs, the replay still gets the call: a replay never
-    //     consults expires_at;
-    //   - after the reaper ran, the descriptor is gone. The same-claim replay is
-    //     answered exactly as the committed code answered it: already consumed, same
-    //     claim, no call. session-core adds no refusal of its own here (that would
-    //     change the wire result of a switches-off executor); the executor turns a
-    //     call-less replay into its own closed refusal. The click is spent either
-    //     way and the run is left to the renewed recovery window.
+    //   - a replay never consults expires_at, so before any sweep it still gets the
+    //     call;
+    //   - the descriptor reaper keeps the descriptor of a consumed approval while
+    //     its run has not ended, so a sweep in between does not take it either
+    //     (the next two tests; the sweep itself is pinned further down);
+    //   - once the run ended the next sweep deletes it, and the replay is answered
+    //     NotFound by the ended-run gate before any descriptor is looked at;
+    //   - a descriptor removed by another path while the run is live (a thread
+    //     purge) leaves the same-claim replay answered exactly
+    //     as the committed code answered it: already consumed, same claim, no call.
+    //     session-core adds no refusal of its own here (that would change the wire
+    //     result of a switches-off executor); the executor turns a call-less replay
+    //     into its own closed refusal, the click is spent and the run is left to the
+    //     renewed recovery window.
     #[tokio::test]
     #[ignore = "requires DATABASE_URL to a scratch Postgres"]
     async fn a_replay_after_the_approval_expired_is_answered_while_the_descriptor_stands() {
@@ -3114,9 +3145,9 @@ mod approval_consume_db_tests {
 
     #[tokio::test]
     #[ignore = "requires DATABASE_URL to a scratch Postgres"]
-    async fn a_replay_after_the_reaper_removed_the_descriptor_is_answered_with_no_call() {
+    async fn a_replay_whose_descriptor_was_removed_by_another_path_is_answered_with_no_call() {
         let Some(pool) = scratch_pool().await else { return };
-        let seed = seed_run(&pool, "expiry-reaped").await;
+        let seed = seed_run(&pool, "expiry-removed").await;
         let id = granted(&pool, &seed).await;
         assert!(
             consume_approval_spend_only(&pool, &id, &seed.org, &seed.run_id, &seed.user, "", "a")
@@ -3126,8 +3157,17 @@ mod approval_consume_db_tests {
                 .consumed
         );
         assert_eq!(descriptor_rows(&pool, &id).await, 1);
+        // The reaper no longer takes the descriptor of a consumed approval whose run
+        // is live; a thread purge still can, and is stood in for by a delete. The run
+        // stays live, so the replay is answered rather than refused.
         expire_and_reap(&pool, &seed, &id).await;
-        assert_eq!(descriptor_rows(&pool, &id).await, 0, "the reaper cleared the consumed approval's descriptor");
+        assert_eq!(descriptor_rows(&pool, &id).await, 1, "the sweep kept it: the run is live");
+        sqlx::query("DELETE FROM approval_continuation_descriptors WHERE approval_id = $1")
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .expect("remove the descriptor as a purge would");
+        assert_eq!(descriptor_rows(&pool, &id).await, 0);
 
         // The executor's own (full) replay is answered as the committed code answered
         // it: already consumed, the same claim, and no call. The executor (ledger on)
@@ -3151,5 +3191,163 @@ mod approval_consume_db_tests {
             .unwrap()
             .unwrap();
         assert!(other.already_consumed && !other.same_claim && other.call.is_none());
+    }
+
+    // The descriptor reaper (build plan WS03 S7 follow-up). Unchanged: an expired
+    // approval that was never consumed loses its descriptor at the next sweep, and
+    // an approval that has not expired keeps it.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn the_reaper_still_deletes_the_descriptor_of_an_expired_unconsumed_approval() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "reap-unconsumed").await;
+        let expired = granted(&pool, &seed).await;
+        let live = granted(&pool, &seed).await;
+        assert_eq!(descriptor_rows(&pool, &expired).await, 1);
+        expire_and_reap(&pool, &seed, &expired).await;
+        assert_eq!(descriptor_rows(&pool, &expired).await, 0, "expired and unconsumed: deleted");
+        assert_eq!(descriptor_rows(&pool, &live).await, 1, "not expired: kept");
+        assert!(consumed_at_of(&pool, &expired).await.is_none());
+    }
+
+    // The new guard: an expired CONSUMED approval of a run that has not ended keeps
+    // its descriptor through any number of sweeps, whatever the run's live status.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn the_reaper_keeps_the_descriptor_of_an_expired_consumed_approval_while_its_run_is_live() {
+        let Some(pool) = scratch_pool().await else { return };
+        for status in ["queued", "running", "awaiting_approval"] {
+            let seed = seed_run(&pool, "reap-live").await;
+            set_run_status(&pool, &seed, status).await;
+            let id = granted(&pool, &seed).await;
+            assert!(
+                consume_approval_spend_only(&pool, &id, &seed.org, &seed.run_id, &seed.user, "", "a")
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .consumed
+            );
+            expire_and_reap(&pool, &seed, &id).await;
+            reap(&pool, &seed).await;
+            assert_eq!(
+                descriptor_rows(&pool, &id).await,
+                1,
+                "{status}: a consumed approval's descriptor outlives its expiry while the run lives"
+            );
+        }
+    }
+
+    // ... and the first sweep after the run ends deletes it, for each end state.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn the_next_sweep_after_the_run_ends_deletes_a_consumed_approvals_descriptor() {
+        let Some(pool) = scratch_pool().await else { return };
+        for status in ["completed", "failed", "cancelled"] {
+            let seed = seed_run(&pool, "reap-ended").await;
+            let id = granted(&pool, &seed).await;
+            assert!(
+                consume_approval_spend_only(&pool, &id, &seed.org, &seed.run_id, &seed.user, "", "a")
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .consumed
+            );
+            expire_and_reap(&pool, &seed, &id).await;
+            assert_eq!(descriptor_rows(&pool, &id).await, 1, "{status}: kept while the run is live");
+
+            set_run_status(&pool, &seed, status).await;
+            assert_eq!(
+                descriptor_rows(&pool, &id).await,
+                1,
+                "{status}: nothing deletes it until a sweep runs"
+            );
+            reap(&pool, &seed).await;
+            assert_eq!(descriptor_rows(&pool, &id).await, 0, "{status}: the next sweep deleted it");
+
+            // The ended run withholds any continuation: the replay is answered NotFound
+            // before a descriptor is looked at, so nothing is lost by the deletion.
+            let replay = consume_approval(&pool, &id, &seed.org, &seed.run_id, &seed.user, "", "a")
+                .await
+                .unwrap();
+            assert!(matches!(replay, Err(ConsumeRefusal::NotFound)), "{status}: {replay:?}");
+        }
+    }
+
+    // A consumed approval with no expiry at all is never touched by the sweep (the
+    // expiry test is the first condition), nor is a neighbour run's.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn the_sweep_ignores_a_consumed_approval_that_has_not_expired_and_other_orgs() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "reap-scope").await;
+        let id = granted(&pool, &seed).await;
+        assert!(
+            consume_approval_spend_only(&pool, &id, &seed.org, &seed.run_id, &seed.user, "", "a")
+                .await
+                .unwrap()
+                .unwrap()
+                .consumed
+        );
+        set_run_status(&pool, &seed, "completed").await;
+        reap(&pool, &seed).await;
+        assert_eq!(descriptor_rows(&pool, &id).await, 1, "not expired: kept even on an ended run");
+
+        // An expired approval of an ended run in another org is not swept by this org's sweep.
+        let other = seed_run(&pool, "reap-scope-other").await;
+        let other_id = granted(&pool, &other).await;
+        assert!(
+            consume_approval_spend_only(&pool, &other_id, &other.org, &other.run_id, &other.user, "", "a")
+                .await
+                .unwrap()
+                .unwrap()
+                .consumed
+        );
+        expire(&pool, &other_id).await;
+        set_run_status(&pool, &other, "failed").await;
+        reap(&pool, &seed).await;
+        assert_eq!(descriptor_rows(&pool, &other_id).await, 1, "the sweep is tenant-scoped");
+        reap(&pool, &other).await;
+        assert_eq!(descriptor_rows(&pool, &other_id).await, 0, "its own org's sweep deletes it");
+    }
+
+    // The race this fixes: the gateway's spend-only consume wins, the approval
+    // expires, a sweep runs, and only then does the executor's own consume replay
+    // with the same claim. The run is live, so the replay still gets its call.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn a_same_claim_replay_after_expiry_and_a_sweep_on_a_live_run_still_gets_its_call() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "expiry-swept-live").await;
+        set_run_status(&pool, &seed, "running").await;
+        let id = granted(&pool, &seed).await;
+        assert!(
+            consume_approval_spend_only(&pool, &id, &seed.org, &seed.run_id, &seed.user, "", "a")
+                .await
+                .unwrap()
+                .unwrap()
+                .consumed
+        );
+        expire_and_reap(&pool, &seed, &id).await;
+
+        let replay = consume_approval(&pool, &id, &seed.org, &seed.run_id, &seed.user, "", "a")
+            .await
+            .unwrap()
+            .expect("a same-claim replay on a live run is answered");
+        assert!(!replay.consumed && replay.already_consumed && replay.same_claim);
+        let call = replay.call.expect("the descriptor survived the sweep, so the claim holder gets the call");
+        assert_eq!(call.tool_name, "shell");
+
+        // The call goes only to the claim that consumed the approval, and a spend-only
+        // replay never asks for it.
+        let other = consume_approval(&pool, &id, &seed.org, &seed.run_id, &seed.user, "", "b")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(other.already_consumed && !other.same_claim && other.call.is_none());
+        let spend = consume_approval_spend_only(&pool, &id, &seed.org, &seed.run_id, &seed.user, "", "a")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(spend.already_consumed && spend.same_claim && spend.call.is_none());
     }
 }
