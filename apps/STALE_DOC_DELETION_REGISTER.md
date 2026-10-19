@@ -138,3 +138,13 @@ The remaining candidates should stay for now because they still have planning, h
 ## WS3.E: stealth claims removed (2026-10-16)
 
 - `apps/Ingestion Plane/Quarry-v2/docs/GAP.md` (stealth rows and bullets), `Features.md` (headless browser and TLS sections), `ARCHITECTURE.md` ("browser CDP + stealth"), `PARITY_IMPLEMENTATION_PLAN.md` (2D rotation). They described `quarry-browser/src/stealth.rs` and `FingerprintRotator`, neither of which was ever wired; both were deleted.
+
+## Round 4: statements replaced (2026-10-20)
+
+Statements that were true when written and are not true of the code or history today. Each was replaced in place; nothing was deleted.
+
+- `apps/Ingestion Plane/Quarry-v2/docs/RUNBOOKS.md`, "Browser grant expiry / unauthorized", items 2 and 4: "the SPA has no translation for it yet" (copy exists since `8b6a71df`) and "`apps/Model Plane/deploy/docker-compose.yml` does not set `DATABASE_URL` for `browser-broker` yet" (it does since `1c5f000a`; nothing is applied to the live stack).
+- `RUNBOOKS.md`, "Page and frame ownership": "the `quarry-browser-live` CI job, which is `continue-on-error`; promoting it to required is a CI-owner decision" (the job has no `continue-on-error` since `bf2e7882`). The heading of the later "Live Chromium CI lane" paragraph now says it replaces that remark instead of superseding it.
+- `PROGRESS.md`, Tests snapshot: the `quarry-browser` row's "the advisory `quarry-browser-live` CI job" and its count of 129 (now 135 with the feature, measured on 2026-10-20), and the Node row's browser-grant-contract count of 15 (now 16).
+- `docs/plans/quarry-browser-build-plan-2026-10-14.md`, build ledger: the "Not done" cells of WS1.C (the compose without `DATABASE_URL`, a missing dedicated database and role) and WS3.B (the advisory job) now point at the round-4 rows; and the "State on the branch" paragraph's count of modified files points at the "Round 4 state" paragraph. Two draft rows that were in the working tree but never committed (WS6.E, which named commits that do not exist, and WS3.J, which said the SPA notice was not built) were replaced by the round-4 rows.
+- `apps/Ingestion Plane/Quarry-v2/docs/ERROR_REASONS.md`: its first sentence listed the statuses that carry a `details.reason`; 403 is added with the bot-wall reasons.
