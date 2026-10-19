@@ -1,6 +1,6 @@
 # `details.reason` values
 
-One closed list of the machine-readable reasons the edge puts in `error.details.reason` for a 404, a 415, a 429, a 502 or a 504. A client keys on the `reason`, never on the message. A design that adds a reason appends it here in the same change.
+One closed list of the machine-readable reasons the edge puts in `error.details.reason` for a 403 (bot wall), a 404, a 415, a 429, a 502 or a 504. A client keys on the `reason`, never on the message. A design that adds a reason appends it here in the same change.
 
 ## 429 `RATE_LIMITED` on `POST /v1/agent/runs` (run caps)
 
@@ -89,3 +89,21 @@ All of these are `retryable: false`: repeating the call cannot help, the caller 
 ## 503 on `GET /ready`: `browser_unhealthy` (WS3.F)
 
 Not an error envelope: `/ready` answers `{"status": "not_ready", "durable": true, "reason": "browser_unhealthy", "browser": {...}, "scrape_browser": {...}}` when, for the agent driver's browser (`browser`) or the scrape driver's (`scrape_browser`), every launched browser is dead or failed two health probes in a row. The edge runs two local Chromium drivers, and each object is present only when that driver runs a local browser. A browser that was never launched is ready. The body is documented in `docs/openapi.yaml` (`GET /ready`, 200 and 503). `/health` does not change. The prober's own `health_probe` timeouts stay inside the driver and never reach a client.
+
+## 403 `CHALLENGE_DETECTED`: a bot wall (WS3.H, WS3.J)
+
+Not retryable by the same caller, and only when `QUARRY_CHALLENGE_ENFORCE=enforce` (`docs/RUNBOOKS.md`, "Challenge classifier and the one-recovery rule"). Neither the message nor the details carry a URL or page text; `host` appears only on an agent step that is not Zero Data Retention. The gateway reads `reason` and `block_reason` and shows them as a typed `blockReason` on `site_blocked` (scrape) or `browser_site_blocked` (browser calls); a value outside the closed lists is dropped there, never echoed.
+
+| where | `details` | meaning |
+|---|---|---|
+| `POST /v1/scrape` | `reason` and `block_reason` (the same value), `recovery: "not_applicable"`, `next: "other_source"` | the fetched page is itself a bot wall; a scrape has no recovery to spend and no browser to hand to a person. `block_reason` is never `challenge_loop` here |
+| an agent step | `reason`, `recovery: "exhausted"`, `next: "user_takeover_or_other_source"`, `host` | the host kept challenging after its one allowed recovery; `reason` is the block reason, `challenge_loop` for a host that keeps challenging after the recovery |
+
+| `block_reason` | what the classifier saw |
+|---|---|
+| `captcha_widget` | a CAPTCHA widget on a page that is itself the challenge |
+| `waf_interstitial` | a WAF interstitial page |
+| `unexpected_bot_error` | two independent block markers |
+| `challenge_loop` | agent path only: the host challenged again after the one recovery |
+
+Observations carry the same closed values in `challenge.block_reason` and a `recovery` of `available`, `exhausted` or `not_applicable`.
