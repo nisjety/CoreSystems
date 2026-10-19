@@ -256,13 +256,20 @@ fn object_boundary(body: &[u8], at: usize) -> Option<usize> {
 /// The entries of a stream dictionary that sit directly in it: strings are
 /// blanked and nested dictionaries are left out, so that a `/Subtype /Image`, a
 /// `/FlateDecode` or a `/Length` that is only text inside a string or another
-/// dictionary neither counts nor hides anything.
+/// dictionary neither counts nor hides anything. Comments are skipped (a `(`,
+/// `<<` or `<` inside one is not syntax: the reader treats a comment as white
+/// space), and `#xx` escapes in names are decoded, as the reader does, so that
+/// `/Flate#44ecode` is `/FlateDecode`.
 fn top_level_entries(dict: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(dict.len());
     let mut depth = 0u32;
     let mut i = 0usize;
     while i < dict.len() {
         match dict[i] {
+            b'%' => {
+                i += dict[i..].iter().position(|b| matches!(b, b'\r' | b'\n')).unwrap_or(dict.len() - i);
+                out.push(b' ');
+            }
             b'(' => {
                 let mut nesting = 0u32;
                 while i < dict.len() {
@@ -296,6 +303,11 @@ fn top_level_entries(dict: &[u8]) -> Vec<u8> {
                 i += 2;
                 out.push(b' ');
             }
+            b'#' if depth == 1 && dict.len() > i + 2 && dict[i + 1].is_ascii_hexdigit() && dict[i + 2].is_ascii_hexdigit() => {
+                let hex = std::str::from_utf8(&dict[i + 1..i + 3]).unwrap_or("00");
+                out.push(u8::from_str_radix(hex, 16).unwrap_or(b'#'));
+                i += 3;
+            }
             byte => {
                 if depth == 1 {
                     out.push(byte);
@@ -305,6 +317,22 @@ fn top_level_entries(dict: &[u8]) -> Vec<u8> {
         }
     }
     out
+}
+
+/// True when `gap` holds nothing but white space and comments, which is all the
+/// reader allows between a stream dictionary's `>>` and the `stream` keyword.
+fn is_blank_or_comments(gap: &[u8]) -> bool {
+    let mut i = 0usize;
+    while i < gap.len() {
+        if gap[i] == b'%' {
+            i += gap[i..].iter().position(|b| matches!(b, b'\r' | b'\n')).unwrap_or(gap.len() - i);
+        } else if is_pdf_space(gap[i]) {
+            i += 1;
+        } else {
+            return false;
+        }
+    }
+    true
 }
 
 /// True when `dict` has `/Subtype /Image` (spacing between the two names is free).
@@ -472,14 +500,19 @@ pub fn check_inflate_budget(body: &[u8]) -> QuarryResult<()> {
                 let keyword = i;
                 i += b"stream".len();
                 let Some((dict_start, dict_end)) = last_dict.take() else { continue };
-                if !body[dict_end..keyword].iter().all(|b| is_pdf_space(*b)) {
+                if !is_blank_or_comments(&body[dict_end..keyword]) {
                     continue;
                 }
-                // `stream` is followed by CRLF or LF (a lone CR is tolerated by readers).
-                let start = if body[i..].starts_with(b"\r\n") {
-                    i + 2
-                } else if matches!(body.get(i), Some(b'\n' | b'\r')) {
-                    i + 1
+                // `stream` is followed by spaces or tabs (the reader allows them) and then
+                // CRLF, LF or a lone CR.
+                let mut data_at = i;
+                while matches!(body.get(data_at), Some(b' ' | b'\t')) {
+                    data_at += 1;
+                }
+                let start = if body[data_at..].starts_with(b"\r\n") {
+                    data_at + 2
+                } else if matches!(body.get(data_at), Some(b'\n' | b'\r')) {
+                    data_at + 1
                 } else {
                     continue;
                 };
@@ -693,6 +726,13 @@ mod tests {
 
     /// A one-page PDF whose content stream is `stream` with the dictionary entry `filter`.
     fn pdf_with_stream(stream: &[u8], filter: &str) -> Vec<u8> {
+        pdf_with_stream_syntax(stream, filter, "\n", "\n")
+    }
+
+    /// Like [`pdf_with_stream`], with the text between the dictionary's `>>` and
+    /// the `stream` keyword (`gap`) and the text between the keyword and the data
+    /// (`tail`) chosen by the caller.
+    fn pdf_with_stream_syntax(stream: &[u8], filter: &str, gap: &str, tail: &str) -> Vec<u8> {
         let mut out = b"%PDF-1.4\n".to_vec();
         let mut offsets = Vec::new();
         let mut object = |out: &mut Vec<u8>, body: &[u8]| {
@@ -707,7 +747,7 @@ mod tests {
             &mut out,
             b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
         );
-        let mut content = format!("<< /Length {} {filter} >>\nstream\n", stream.len()).into_bytes();
+        let mut content = format!("<< /Length {} {filter} >>{gap}stream{tail}", stream.len()).into_bytes();
         content.extend_from_slice(stream);
         content.extend_from_slice(b"\nendstream");
         object(&mut out, &content);
@@ -816,6 +856,67 @@ mod tests {
         let mut junk = b"%PDF-1.4\n<< (unfinished\n".to_vec();
         junk.extend_from_slice(&raw_streams("/Filter /FlateDecode", &[&big])[9..]);
         check_inflate_budget(&junk).expect_err("the bomb behind junk is still found");
+    }
+
+    /// Spellings the reader (`lopdf`) accepts for a Flate stream that the first pre-scan
+    /// did not see through: (dictionary entries, gap before `stream`, text after it).
+    const READABLE_SPELLINGS: &[(&str, &str, &str)] = &[
+        // A comment inside the dictionary, before the filter, with the brackets
+        // the scan tracks in it.
+        ("% (\n/Filter /FlateDecode", "\n", "\n"),
+        ("% <<\n/Filter /FlateDecode", "\n", "\n"),
+        ("% <\r/Filter /FlateDecode", "\n", "\n"),
+        ("/Filter /FlateDecode % )\n/Note 1", "\n", "\n"),
+        // A comment between `>>` and `stream`.
+        ("/Filter /FlateDecode", " % note\n", "\n"),
+        ("/Filter /FlateDecode", "\n% a (\n% b <<\n", "\n"),
+        // Spaces or tabs between `stream` and the line end.
+        ("/Filter /FlateDecode", "\n", " \n"),
+        ("/Filter /FlateDecode", "\n", "\t \r\n"),
+        ("/Filter /FlateDecode", "\n", "  \r"),
+        // An escaped name.
+        ("/Filter /Flate#44ecode", "\n", "\n"),
+        ("/Fil#74er /FlateDecode", "\n", "\n"),
+        ("/Filter [/Flate#44ecode]", "\n", "\n"),
+        // All of them at once.
+        ("% (\n/Fil#74er /Flate#44ecode", "\n%c\n", " \r\n"),
+    ];
+
+    #[test]
+    fn the_reader_accepts_every_spelling_the_scan_must_see_through() {
+        // The control: a small compressed page written each way is read by lopdf, so
+        // a bomb written the same way is one the parser would inflate.
+        let content = deflate(b"BT /F1 24 Tf 100 700 Td (Skjult tekst) Tj ET");
+        for (entries, gap, tail) in READABLE_SPELLINGS {
+            let pdf = pdf_with_stream_syntax(&content, entries, gap, tail);
+            let text = extract_text(&pdf).unwrap_or_else(|e| panic!("{entries:?} {gap:?} {tail:?}: {e:?}"));
+            assert!(text.contains("Skjult tekst"), "{entries:?} {gap:?} {tail:?}: {text:?}");
+        }
+    }
+
+    #[test]
+    fn a_bomb_written_in_any_readable_spelling_is_still_counted() {
+        let big = deflated_zeros(300 * 1024 * 1024);
+        for (entries, gap, tail) in READABLE_SPELLINGS {
+            let pdf = pdf_with_stream_syntax(&big, entries, gap, tail);
+            let error = check_inflate_budget(&pdf).expect_err(&format!("{entries:?} {gap:?} {tail:?}"));
+            assert!(error.message.contains("256 MiB"), "{entries:?} {gap:?} {tail:?}: {}", error.message);
+        }
+    }
+
+    #[test]
+    fn comments_and_escapes_do_not_make_a_stream_an_image_or_hide_its_length() {
+        // /Subtype /Image written inside a comment is not an image (the 256 MiB budget
+        // applies), and one written with an escape is (the larger one).
+        let big = deflated_zeros(300 * 1024 * 1024);
+        let commented = raw_streams("/Filter /FlateDecode % /Subtype /Image\n", &[&big]);
+        assert!(check_inflate_budget(&commented).is_err());
+        let escaped = raw_streams("/Filter /FlateDecode /Subtype /Ima#67e", &[&big]);
+        check_inflate_budget(&escaped).expect("an escaped /Image is an image");
+        // A comment does not hide the /Length either: both streams are seen.
+        let part = deflated_zeros(200 * 1024 * 1024);
+        let two = raw_streams("% (\n/Filter /FlateDecode", &[&part, &part]);
+        assert!(check_inflate_budget(&two).is_err());
     }
 
     #[test]

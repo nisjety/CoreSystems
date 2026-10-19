@@ -25,6 +25,12 @@ fn child_backend(limits: ChildLimits) -> ParseBackend {
 
 /// A one-page PDF whose content stream is `stream` under `filter` (empty for none).
 fn pdf_with_stream(stream: &[u8], filter: &str) -> Vec<u8> {
+    pdf_with_stream_syntax(stream, filter, "\n", "\n")
+}
+
+/// As [`pdf_with_stream`], with the text between `>>` and `stream` (`gap`) and
+/// between `stream` and the data (`tail`) chosen by the caller.
+fn pdf_with_stream_syntax(stream: &[u8], filter: &str, gap: &str, tail: &str) -> Vec<u8> {
     let mut out = b"%PDF-1.4\n".to_vec();
     let mut offsets = Vec::new();
     let mut object = |out: &mut Vec<u8>, body: &[u8]| {
@@ -40,7 +46,7 @@ fn pdf_with_stream(stream: &[u8], filter: &str) -> Vec<u8> {
         &mut out,
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
     );
-    let mut content = format!("<< /Length {} {filter} >>\nstream\n", stream.len()).into_bytes();
+    let mut content = format!("<< /Length {} {filter} >>{gap}stream{tail}", stream.len()).into_bytes();
     content.extend_from_slice(stream);
     content.extend_from_slice(b"\nendstream");
     object(&mut out, &content);
@@ -171,6 +177,48 @@ async fn a_flate_bomb_is_refused_by_the_inflate_budget_under_the_default_limits_
     .await
     .expect("a normal document still parses");
     assert!(after.text.contains("Etter budsjettet"));
+}
+
+#[tokio::test]
+async fn a_bomb_in_a_spelling_the_first_pre_scan_missed_is_still_a_typed_415() {
+    // Each of these is read by the parser (the control below parses a normal page
+    // written the same way) and each answered 504 at the deadline before the
+    // pre-scan learned to see through it: a comment inside the dictionary holding a
+    // bracket, a comment between `>>` and `stream`, spaces after `stream`, and a
+    // #-escaped filter name. 300 MiB is past the 256 MiB budget and cheap to build.
+    let spellings: [(&str, &str, &str); 4] = [
+        ("% (\n/Filter /FlateDecode", "\n", "\n"),
+        ("/Filter /FlateDecode", " % note\n", "\n"),
+        ("/Filter /FlateDecode", "\n", " \n"),
+        ("/Filter /Flate#44ecode", "\n", "\n"),
+    ];
+    let normal = deflate(b"BT /F1 24 Tf 100 700 Td (Skjult side) Tj ET");
+    let bomb_stream = deflated_zeros(300 * 1024 * 1024);
+    for (entries, gap, tail) in spellings {
+        let control = parse_document_with(
+            &child_backend(ChildLimits::default()),
+            ContentKind::Pdf,
+            pdf_with_stream_syntax(&normal, entries, gap, tail),
+            Duration::from_secs(15),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("control {entries:?} {gap:?} {tail:?}: {e:?}"));
+        assert!(control.text.contains("Skjult side"), "{entries:?}: {}", control.text);
+
+        let started = Instant::now();
+        let error = parse_document_with(
+            &child_backend(ChildLimits::default()),
+            ContentKind::Pdf,
+            pdf_with_stream_syntax(&bomb_stream, entries, gap, tail),
+            Duration::from_secs(15),
+        )
+        .await
+        .expect_err("the bomb must not parse");
+        let took = started.elapsed();
+        assert_eq!(error.code, ErrorCode::UnsupportedMedia, "{entries:?} {gap:?} {tail:?}: {error:?} after {took:?}");
+        assert_eq!(error.details.as_ref().unwrap()["reason"], "too_large", "{error:?}");
+        assert!(took < Duration::from_secs(10), "{entries:?}: stopped by the budget, not the deadline: {took:?}");
+    }
 }
 
 #[tokio::test]
