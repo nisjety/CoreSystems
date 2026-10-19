@@ -124,6 +124,12 @@ pub struct AppState {
     /// server, so it reuses the session endpoint/channel.
     pub run_client: RunServiceClient<Channel>,
     pub orchestration_client: OrchestrationCoreServiceClient<Channel>,
+    /// The `OrchestrationCoreService` hosted by session-core itself, on the session endpoint.
+    /// Only `ConsumeApproval` goes through it: orchestrator-core (Go), behind
+    /// `orchestration_client`, proxies the approval reads and decisions but does not serve the
+    /// consume (it answers Unimplemented), and the executor makes its own consume against
+    /// session-core too. Found by the first live /continue (2026-10-19).
+    pub consume_client: OrchestrationCoreServiceClient<Channel>,
     /// execution-core (:9093). Used to resume a run after an approval is
     /// granted — the gateway is the approval decision point but does not drive
     /// the execution loop, so it signals execution-core directly.
@@ -379,6 +385,7 @@ impl AppState {
         let finetune_channel = session_channel.clone();
         let run_channel = session_channel.clone();
         let managed_run_channel = session_channel.clone();
+        let consume_channel = session_channel.clone();
         let orchestration_channel = lazy_static_channel("http://localhost:9080");
         let execution_channel = lazy_static_channel("http://localhost:9093");
         let sandbox_channel = lazy_static_channel("http://localhost:9094");
@@ -401,6 +408,7 @@ impl AppState {
             managed_start_keys: ManagedStartKeyDeriver::test_only(),
             run_client: RunServiceClient::new(run_channel),
             orchestration_client: OrchestrationCoreServiceClient::new(orchestration_channel),
+            consume_client: OrchestrationCoreServiceClient::new(consume_channel),
             execution_client: ExecutionCoreClient::new(execution_channel),
             sandbox_client: SandboxManagerClient::new(sandbox_channel),
             browser_client: BrowserBrokerClient::new(browser_channel),
@@ -558,6 +566,11 @@ impl AppState {
         );
         let managed_start_keys = ManagedStartKeyDeriver::from_env()
             .context("managed-run start-key credential configuration failed")?;
+        let consume_client = OrchestrationCoreServiceClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
         let orchestration_client = OrchestrationCoreServiceClient::new(Self::lazy_channel(
             "ORCHESTRATOR_CORE_URL",
             "ORCHESTRATOR_CORE_ADDR",
@@ -747,6 +760,7 @@ impl AppState {
             state.managed_start_keys = managed_start_keys;
             state.run_client = run_client;
             state.orchestration_client = orchestration_client;
+            state.consume_client = consume_client.clone();
             state.execution_client = execution_client.clone();
             state.sandbox_client = sandbox_client;
             state.browser_client = browser_client;
@@ -795,6 +809,7 @@ impl AppState {
             state.managed_start_keys = managed_start_keys;
             state.run_client = run_client;
             state.orchestration_client = orchestration_client;
+            state.consume_client = consume_client.clone();
             state.execution_client = execution_client;
             state.sandbox_client = sandbox_client;
             state.browser_client = browser_client;

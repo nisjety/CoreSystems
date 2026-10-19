@@ -742,6 +742,10 @@ pub async fn request_approval(
 pub struct ApprovalDecisionWrite {
     pub updated: bool,
     pub delivery_id: Option<String>,
+    /// The approval is resumed by the durable Do loop (`continuation_mode` is set), so it
+    /// has no delivery record by design: a missing `delivery_id` is not a missing durable
+    /// state for it.
+    pub loop_owned: bool,
 }
 
 /// Decide an approval (granted/denied/expired). Stamps `decided_at = now()`.
@@ -800,7 +804,10 @@ pub async fn decide_approval(
     // A loop-mode approval is resumed by the durable Do loop through
     // ConsumeApproval, never by the cold delivery worker: a delivery row for it
     // would let the worker run the call a second time.
-    let loop_owned = if status == "granted" && updated {
+    //
+    // Read for an idempotent retry of the grant as well (`updated` false): the retry
+    // must not be told the delivery state is missing for an approval that never has one.
+    let loop_owned = if status == "granted" {
         sqlx::query_scalar::<_, String>(
             "SELECT continuation_mode FROM approvals WHERE id = $1 AND org_id = $2",
         )
@@ -841,6 +848,7 @@ pub async fn decide_approval(
     Ok(ApprovalDecisionWrite {
         updated,
         delivery_id,
+        loop_owned,
     })
 }
 
@@ -2371,8 +2379,18 @@ mod approval_consume_db_tests {
         let seed = seed_run(&pool, "outbox").await;
         let cold = approval(&pool, &seed, "").await;
         let looped = approval(&pool, &seed, "loop").await;
-        assert!(grant(&pool, &seed, &cold).await.delivery_id.is_some());
-        assert!(grant(&pool, &seed, &looped).await.delivery_id.is_none());
+        let cold_write = grant(&pool, &seed, &cold).await;
+        assert!(cold_write.delivery_id.is_some());
+        assert!(!cold_write.loop_owned, "a cold approval is not loop-owned");
+        let loop_write = grant(&pool, &seed, &looped).await;
+        assert!(loop_write.delivery_id.is_none());
+        assert!(loop_write.updated && loop_write.loop_owned, "the grant says the loop owns it");
+        // An idempotent retry of the grant (the BFF retries decide once) must say the same,
+        // or the handler reads the missing delivery record as lost durable state: live
+        // proof 2026-10-19 answered 502 "approval is granted but durable delivery state is
+        // unavailable" for a loop approval that was granted correctly.
+        let retry = grant(&pool, &seed, &looped).await;
+        assert!(!retry.updated && retry.delivery_id.is_none() && retry.loop_owned);
         assert_eq!(outbox_rows(&pool, &cold).await, 1, "cold approvals are unchanged");
         assert_eq!(outbox_rows(&pool, &looped).await, 0, "a loop approval never reaches the worker");
     }

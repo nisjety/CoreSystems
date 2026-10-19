@@ -13981,7 +13981,12 @@ fn preconsume_refusal(outcome: Result<bool, tonic::Status>) -> Result<(), Precon
         Err(status) if mp_contracts::zdr_refusal::Refusal::from_status(&status).is_some() => {
             Err(PreconsumeRefusal::Status(status))
         }
-        Err(status) => Err(match status.code() {
+        Err(status) => {
+            // The closed status code only (never the message): the mapped refusal below
+            // folds every ambiguous code into one 503, and an operator needs to tell them
+            // apart (the first live /continue was refused with no way to see why).
+            tracing::warn!(grpc_code = ?status.code(), "the approval consume answered an error");
+            Err(match status.code() {
             tonic::Code::NotFound => {
                 PreconsumeRefusal::Closed(StatusCode::NOT_FOUND, "approval_not_found")
             }
@@ -14001,7 +14006,8 @@ fn preconsume_refusal(outcome: Result<bool, tonic::Status>) -> Result<(), Precon
                 PreconsumeRefusal::Status(status)
             }
             _ => PreconsumeRefusal::Closed(StatusCode::SERVICE_UNAVAILABLE, "continue_unavailable"),
-        }),
+            })
+        }
     }
 }
 
@@ -14398,7 +14404,7 @@ pub(crate) async fn continue_run(
     // What the pre-consume needs, built from clones BEFORE the launch closure takes
     // ownership of the state and the bearers.
     let consumer =
-        GrpcApprovalConsumer::new(state.orchestration_client.clone(), model_bearer.clone());
+        GrpcApprovalConsumer::new(state.consume_client.clone(), model_bearer.clone());
     let preconsume = preconsume_request(
         &claims.org_id,
         &run_id,
@@ -15024,6 +15030,36 @@ mod continue_run_tests {
     fn assert_distinct(items: &[&str]) {
         let set: std::collections::BTreeSet<&str> = items.iter().copied().collect();
         assert_eq!(set.len(), items.len(), "a duplicate in {items:?}");
+    }
+
+    /// The gateway's pre-consume must go to session-core's own `OrchestrationCoreService`
+    /// (`consume_client`): the client behind `orchestration_client` is orchestrator-core (Go),
+    /// which proxies the approval reads and decisions but answers ConsumeApproval with
+    /// Unimplemented. The first live /continue (2026-10-19) was refused as continue_unavailable
+    /// for exactly that reason, and every double used in the tests answered the consume, so no
+    /// test could have seen it.
+    #[test]
+    fn the_pre_consume_uses_the_session_core_client_not_orchestrator_core() {
+        let source = production_text();
+        let build = source
+            .split("GrpcApprovalConsumer::new(")
+            .nth(1)
+            .expect("continue_run builds the consumer");
+        let args: String = build.chars().take(80).collect();
+        assert!(
+            args.contains("state.consume_client"),
+            "the consumer is built from state.consume_client, found: {args}"
+        );
+        assert!(!args.contains("orchestration_client"));
+        let state = include_str!("state.rs").replace("\r\n", "\n");
+        assert!(
+            state.matches("consume_client").count() >= 5,
+            "AppState declares, builds and overrides consume_client in new() and in both from_env branches"
+        );
+        assert!(
+            state.contains("\"SESSION_CORE_URL\",\n            \"SESSION_CORE_ADDR\",\n            \"http://localhost:9091\",\n        )?);\n        let orchestration_client"),
+            "from_env points consume_client at the session endpoint"
+        );
     }
 
     #[test]

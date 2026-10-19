@@ -691,6 +691,9 @@ async fn rig(case: Case) -> Rig {
         behaviour: case.consume,
         consumes: consumes.clone(),
     }));
+    // The consume goes to session-core's own endpoint, not through orchestrator-core (which does
+    // not serve it): one double stands for both here.
+    state.consume_client = state.orchestration_client.clone();
     state.run_client = RunServiceClient::new(serve!(Runs {
         resumable: case.resumable,
     }));

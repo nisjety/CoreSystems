@@ -2930,7 +2930,12 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                     None => return Err(Status::not_found("approval not found")),
                 }
             }
-            if new_status == "granted" && decision_write.delivery_id.is_none() {
+            // A loop-owned approval has no delivery record by design (the durable loop
+            // consumes it); only a cold approval without one is a missing durable state.
+            if new_status == "granted"
+                && decision_write.delivery_id.is_none()
+                && !decision_write.loop_owned
+            {
                 return Err(Status::unavailable(
                     "approval is granted but durable delivery state is unavailable",
                 ));
