@@ -372,6 +372,32 @@ where
         .with(log_layer(writer, env))
 }
 
+/// The subscriber the edge runs with an OTLP exporter: the sticky ZDR mark, the
+/// JSON log on `writer` and `exporter` (the OpenTelemetry layer), each output
+/// layer behind its own [`ZdrLogFilter`] and nothing level-filtered on the
+/// registry. `telemetry::init_telemetry` installs it with the real exporter; a
+/// test installs it with a recording layer, so the OTLP wiring is held to the
+/// same rules as [`production_subscriber`]. Two level filters because an
+/// `EnvFilter` is not `Clone`.
+pub fn otel_subscriber<W, E>(
+    writer: W,
+    log_env: EnvFilter,
+    export_env: EnvFilter,
+    exporter: E,
+) -> impl Subscriber + Send + Sync + 'static
+where
+    W: for<'w> MakeWriter<'w> + Send + Sync + 'static,
+    E: Layer<tracing_subscriber::layer::Layered<ZdrMarkLayer, tracing_subscriber::Registry>>
+        + Send
+        + Sync
+        + 'static,
+{
+    tracing_subscriber::registry()
+        .with(ZdrMarkLayer)
+        .with(exporter.with_filter(export_filter(export_env)))
+        .with(log_layer(writer, log_env))
+}
+
 /// The span for one HTTP request: method and path only. tower-http's default
 /// span records the full request URI, query string included, and a query string
 /// can hold the very URL a ZDR caller asked about. `zdr` starts empty and is
@@ -948,6 +974,66 @@ mod tests {
         }
         let plain = exported("error", false);
         assert!(plain.iter().any(|m| m.contains("EXPORT-SENSITIVE")), "{plain:?}");
+    }
+
+    /// The OTLP stack exactly as `telemetry::init_telemetry` composes it
+    /// (`otel_subscriber`), with a recording layer where the exporter goes.
+    /// Returns what the exporter layer saw and what the JSON log wrote.
+    fn otlp_stack(env: &str, zdr: bool) -> (Vec<String>, String) {
+        let recorder = Recorder::default();
+        let capture = Capture::default();
+        let subscriber = otel_subscriber(
+            capture.clone(),
+            harden(EnvFilter::new(env)),
+            harden(EnvFilter::new(env)),
+            recorder.clone(),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            let request = HttpRequest::builder().uri("/v1/scrape").body(()).unwrap();
+            let span = make_request_span(&request);
+            if zdr {
+                span.record(ZDR_SPAN_FIELD, true);
+            }
+            let _guard = span.enter();
+            tracing::error!(error = "SECRET-ERROR-TEXT", "EXPORT-SENSITIVE");
+            tracing::error!(status = 500, "EXPORT-SAFE");
+            tracing::debug!(target: "reqwest::connect", "EXPORT-CAPPED");
+        });
+        let seen = recorder.0.lock().unwrap().clone();
+        (seen, capture.text())
+    }
+
+    /// The defect 9a2bc002 fixed, pinned on the OTLP wiring too: with the
+    /// operator's level filter set to `error` (or anything), a ZDR request's
+    /// sensitive events reach neither the exporter nor the log, its safe events
+    /// do, and the third-party caps hold.
+    #[test]
+    fn the_otlp_stack_drops_sensitive_events_for_a_zdr_request_at_every_level() {
+        for env in ["error", "warn", "info", "trace,reqwest::connect=trace"] {
+            let (seen, log) = otlp_stack(env, true);
+            assert!(!seen.iter().any(|m| m.contains("EXPORT-SENSITIVE")), "RUST_LOG={env}: {seen:?}");
+            assert!(!log.contains("EXPORT-SENSITIVE") && !log.contains("SECRET-ERROR-TEXT"), "RUST_LOG={env}: {log}");
+            assert!(!seen.iter().any(|m| m.contains("EXPORT-CAPPED")), "RUST_LOG={env}: {seen:?}");
+            assert!(seen.iter().any(|m| m.contains("EXPORT-SAFE")), "RUST_LOG={env}: {seen:?}");
+            assert!(log.contains("EXPORT-SAFE"), "RUST_LOG={env}: {log}");
+        }
+        let (plain, plain_log) = otlp_stack("error", false);
+        assert!(plain.iter().any(|m| m.contains("EXPORT-SENSITIVE")), "{plain:?}");
+        assert!(plain_log.contains("EXPORT-SENSITIVE"), "{plain_log}");
+    }
+
+    /// The rule the declares-mark exception states: the request span passes the
+    /// level filter at every level, `RUST_LOG=off` included, so the mark always
+    /// has a span to live on (and the exporter shows the request span), while
+    /// every event still follows the level filter.
+    #[test]
+    fn the_otlp_stack_passes_the_request_span_even_at_rust_log_off() {
+        for zdr in [true, false] {
+            let (seen, log) = otlp_stack("off", zdr);
+            assert!(seen.iter().any(|m| m == "span:request"), "zdr={zdr}: {seen:?}");
+            assert!(!seen.iter().any(|m| m.starts_with("EXPORT-")), "zdr={zdr}: {seen:?}");
+            assert!(!log.contains("EXPORT-"), "zdr={zdr}: {log}");
+        }
     }
 
     // ---- spawned tasks -----------------------------------------------------

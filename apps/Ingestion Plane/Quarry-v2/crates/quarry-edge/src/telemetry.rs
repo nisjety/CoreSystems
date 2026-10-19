@@ -22,7 +22,7 @@
 use opentelemetry::trace::TracerProvider;
 use opentelemetry_otlp::SpanExporter;
 use opentelemetry_sdk::trace::SdkTracerProvider;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
+use tracing_subscriber::{util::SubscriberInitExt, EnvFilter};
 
 /// `RUST_LOG` (default `info`), with the dependencies that print page content or
 /// URLs at debug capped regardless (see `crate::zdr_log::harden`).
@@ -47,18 +47,18 @@ pub fn init_telemetry() {
         match try_init_otel() {
             Ok(provider) => {
                 let tracer = provider.tracer("quarry-edge");
-                // The exporter gets the same filter as the log writer (level
-                // filter, caps and ZDR rule), as its own per-layer filter.
-                let otel_layer = tracing_opentelemetry::layer()
-                    .with_tracer(tracer)
-                    .with_filter(crate::zdr_log::export_filter(env_filter()));
-                // ZdrMarkLayer makes the mark on a request span sticky (see
-                // `crate::zdr_log`); it carries no filter.
-                tracing_subscriber::registry()
-                    .with(crate::zdr_log::ZdrMarkLayer)
-                    .with(crate::zdr_log::log_layer(std::io::stdout, env_filter()))
-                    .with(otel_layer)
-                    .init();
+                // `otel_subscriber` is the whole stack: the sticky ZDR mark, the
+                // JSON log and the exporter, the last two each behind their own
+                // filter (level filter, caps, ZDR rule) and nothing level-filtered
+                // on the registry. It lives in `crate::zdr_log` so a test builds
+                // the same stack with a recording layer in place of the exporter.
+                crate::zdr_log::otel_subscriber(
+                    std::io::stdout,
+                    env_filter(),
+                    env_filter(),
+                    tracing_opentelemetry::layer().with_tracer(tracer),
+                )
+                .init();
                 tracing::info!("OTEL tracing enabled");
                 return;
             }

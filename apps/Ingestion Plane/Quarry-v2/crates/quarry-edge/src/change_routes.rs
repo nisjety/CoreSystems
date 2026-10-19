@@ -21,6 +21,7 @@ use axum::{
     Extension, Json,
 };
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "postgres-queue")]
 use tracing::Instrument;
 
 use quarry_core::change_history::{BaselineSnapshot, ChangeRecord};

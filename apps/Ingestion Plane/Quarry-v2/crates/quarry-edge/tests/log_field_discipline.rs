@@ -228,26 +228,43 @@ fn opens_inline_mod(line: &str) -> bool {
     line.starts_with("mod ") && !line.trim_end().ends_with(';')
 }
 
-/// The non-test part of a file: everything before the first `#[cfg(test)]`
-/// that opens an inline `mod` block. A `#[cfg(test)] mod name;` declaration (a
-/// test-only file module, as in `main.rs`) or a `#[cfg(test)]` item (a `use`, a
-/// `fn`) does NOT end production code: cutting there hid every site after it.
-/// Further attributes between the `cfg(test)` and the `mod` are skipped.
-fn production_part(source: &str) -> &str {
-    let mut offset = 0;
+/// The production code of a file: the source with every `#[cfg(test)] mod name { .. }`
+/// block (attributes between the cfg and the mod included) blanked out, newlines
+/// kept so line numbers still match the file. Cutting the file at the first test
+/// module hid every site below it: `budget.rs`, `crawl_frontier.rs` and
+/// `local_index.rs` all have production code after an inline test module. A
+/// `#[cfg(test)] mod name;` declaration (a test-only file module, as in
+/// `main.rs`) or a `#[cfg(test)]` item (a `use`, a `fn`) is not a block and
+/// blanks nothing here.
+fn production_part(source: &str) -> String {
+    let masked = mask(source);
+    let mut out = source.as_bytes().to_vec();
     let lines: Vec<&str> = source.split('\n').collect();
+    let mut offset = 0;
+    let mut blanked_until = 0;
     for (index, line) in lines.iter().enumerate() {
-        if line.trim() == "#[cfg(test)]" {
+        if offset >= blanked_until && line.trim() == "#[cfg(test)]" {
             let following = lines[index + 1..]
                 .iter()
                 .find(|next| !next.trim_start().starts_with("#["));
             if following.is_some_and(|next| opens_inline_mod(next)) {
-                return &source[..offset];
+                // An unbalanced block blanks to the end of the file rather
+                // than leaving test code to be scanned as production.
+                let close = masked[offset..]
+                    .find('{')
+                    .and_then(|relative| matching_paren(masked.as_bytes(), offset + relative))
+                    .unwrap_or(source.len() - 1);
+                for byte in &mut out[offset..=close] {
+                    if *byte != b'\n' {
+                        *byte = b' ';
+                    }
+                }
+                blanked_until = close + 1;
             }
         }
         offset += line.len() + 1;
     }
-    source
+    String::from_utf8(out).expect("blanking keeps utf-8 boundaries")
 }
 
 /// Exemption on this line or the one above: `Ok(true)` exempt with a reason,
@@ -323,6 +340,7 @@ fn request_path_file(rel: &str) -> bool {
 
 fn scan_source(rel: &str, source: &str) -> Vec<Violation> {
     let source = production_part(source);
+    let source = source.as_str();
     let masked_text = mask(source);
     let masked = masked_text.as_bytes();
     let mut found = Vec::new();
@@ -799,11 +817,15 @@ fn log_field_lint_keeps_scanning_past_a_cfg_test_file_module_declaration() {
 }
 
 #[test]
-fn log_field_lint_stops_at_the_first_inline_cfg_test_module_even_after_a_declaration() {
+fn log_field_lint_blanks_an_inline_cfg_test_module_and_scans_the_production_code_after_it() {
     let source = "#[cfg(test)]\nmod test_support;\nfn f(u: &str) { tracing::info!(url = %u, \"before\"); }\n#[cfg(test)]\n#[allow(clippy::all)]\nmod tests {\n    fn t(u: &str) { tracing::info!(url = %u, \"inside\"); }\n}\nfn g(u: &str) { tracing::info!(url = %u, \"after\"); }\n";
     let found = scan_source("quarry-edge/src/search_routes.rs", source);
-    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found.len(), 2, "{found:?}");
     assert!(found[0].text.contains("before"), "{found:?}");
+    assert!(found[1].text.contains("after"), "{found:?}");
+    assert_eq!(found[1].line, 9, "blanking keeps line numbers: {found:?}");
+    assert!(!production_part(source).contains("inside"));
+    assert_eq!(production_part(source).len(), source.len());
     for opener in ["mod tests {", "pub(crate) mod tests {", "pub mod t{", "mod t\n{"] {
         let line = opener.lines().next().unwrap();
         assert!(opens_inline_mod(line), "{opener}");
@@ -811,6 +833,32 @@ fn log_field_lint_stops_at_the_first_inline_cfg_test_module_even_after_a_declara
     assert!(!opens_inline_mod("mod test_support;"));
     assert!(!opens_inline_mod("pub(crate) mod test_support;"));
     assert!(!opens_inline_mod("fn mod_x() {"));
+}
+
+#[test]
+fn log_field_lint_blanks_an_unbalanced_test_module_to_the_end_of_the_file() {
+    let source = "#[cfg(test)]\nmod tests {\n    fn t(u: &str) { tracing::info!(url = %u, \"inside\"); }\n";
+    assert!(keys(source).is_empty());
+}
+
+/// The three files that have production code below an inline test module.
+#[test]
+fn the_files_with_production_code_below_a_test_module_are_scanned_below_it() {
+    for (file, test_module, marker) in [
+        ("quarry-edge/src/budget.rs", "#[cfg(test)]\npub mod test_mode", "tracing::warn!"),
+        ("quarry-runtime/src/crawl_frontier.rs", "#[cfg(test)]\nmod pattern_tests", "pub fn "),
+        ("quarry-runtime/src/local_index.rs", "#[cfg(test)]\nmod recency_tests", "impl SearchProvider for TantivyLocalIndex"),
+    ] {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(file);
+        let source = std::fs::read_to_string(path).expect(file).replace("\r\n", "\n");
+        let cut = source.find(test_module).expect("premise: an inline test module");
+        let scanned = production_part(&source);
+        assert!(
+            scanned[cut..].contains(marker),
+            "{file}: the scan reaches the production code below its test module"
+        );
+        assert_eq!(scanned.len(), source.len(), "{file}");
+    }
 }
 
 /// The real file the defect hid: `main.rs` must be scanned to its last function,
