@@ -22,6 +22,18 @@ with a pointer forward. Newest first.
 
 ---
 
+## 2026-10-19 - S7 live proof on the dev stack: two defects found and fixed, the chain verified end to end
+
+**Status: the 2026-10-18 S7 entry is now live-verified on a developer stack (not production), behind switches that were turned on for the proof and are all off again.** Evidence: `docs/compliance/evidence/live-proof-ws03-s7-in-place-resume-2026-10-19.txt` (identifiers only). The 2026-10-16 entry (the chain as a whole) stays proposed until the owner flips it.
+
+**What was shown.** Refusals reach the client as codes (409 approval_not_granted, 404 approval_not_found); an in-place resume ran the released step once (fence, round, pre_effect and pause folds in order, resume_stage in_place) and the second pause in the same run created a new approval; two simultaneous continues gave one winner and one 409 continuation_already_consumed, with one consumed claim per approval; a stage-1 cold resume ran with the fold store off, with no fold call; a continue while the executor was down spent the click, answered the typed `approval_spent` frame, renewed the obligation deadline to consume + 15:00 in the consume transaction, and recovery ended the run honestly; a kill between reservation and finalize ended in `continue_outcome_unknown` (never a replay), the retries answered 409, recovery ended the run, the fold was purged and the sweep closed the open ledger row as `unknown_outcome`.
+
+**Two defects no unit test could see (fixed, committed as e22befde).** (1) session-core DecideApproval answered 502 for the first decide of a loop approval: loop approvals have no delivery-outbox row by design, and the guard read "granted without a delivery id" as a lost delivery; the write now reports `loop_owned`. (2) The gateway's pre-consume went through the orchestration client, which targets the Go orchestrator-core; that service proxies GetApproval and DecideApproval but does not serve ConsumeApproval; a separate `consume_client` now targets session-core. The pre-consume refusal arm logs the gRPC code. Lesson recorded: a client that talks to two services which both expose one gRPC service name needs its target pinned by a test that names the environment variable, and a decide of a loop approval is a case the contract tests did not exercise.
+
+**What the proof does not show.** A countable provider-side effect (`shell` has no executor in this stack: a released call ends failed with no external trace); resume of a parked run (S8 is not built); the app's own plan-approval path (WS14 S2a, a separate unit); the descriptor-reaper window. The stage-1 same-claim window (b) of the 2026-10-18 entry was not exercised.
+
+**Accepted.** The first decide of a loop approval from the BFF is retried once by the BFF; a retry of an already granted approval answers 503 approval_delivery_unknown. That is the committed behaviour for retries; the first click now succeeds, so the user-visible error is gone.
+
 ## 2026-10-18 - In-place resume and the gateway pre-consume, as built (S7b, S7c-0, S7c-A, S7c-A5, S7c-B)
 
 **Status: implemented behind default-off switches, source-verified, not live-verified. The 2026-10-16 entry stays proposed.** Hashes are in the plan's Build ledger.
