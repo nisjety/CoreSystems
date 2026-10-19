@@ -5023,6 +5023,88 @@ pub(super) async fn dispatch_browser_run_control(
     owner_json_response_to_envelope("browser_run.control", user, status, payload)
 }
 
+/// How a request to stop an AI browser run came out, for
+/// [`dispatch_browser_blocked_try_other_source`].
+#[derive(Debug, PartialEq, Eq)]
+enum RunStopOutcome {
+    /// The owner stopped it.
+    Stopped,
+    /// Nothing was left to stop: no run of this person's has that id (404), or it
+    /// is no longer running (409). Leaving a site after the agent already gave up
+    /// on it is the usual case, so this is not a failure.
+    AlreadyEnded,
+    /// The owner refused or failed (ZDR controls, an outage, a 5xx): the run may
+    /// still be going, so the action fails rather than report a clean exit.
+    Refused,
+}
+
+fn run_stop_outcome(status: StatusCode) -> RunStopOutcome {
+    match status {
+        status if status.is_success() => RunStopOutcome::Stopped,
+        StatusCode::NOT_FOUND | StatusCode::CONFLICT => RunStopOutcome::AlreadyEnded,
+        _ => RunStopOutcome::Refused,
+    }
+}
+
+/// `browser.blocked.try_other_source`: the person chose another source after a site
+/// blocked automated browsing. The owner paths already exist, so this only joins
+/// them: stop the AI run on the session when a `runId` is given, then close the
+/// session. It never reads or keeps page content and never tries to get past the
+/// block. A failure to stop the run (other than "it already ended") aborts before
+/// the close, so a run that may still be going is never reported as left behind.
+pub(super) async fn dispatch_browser_blocked_try_other_source(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    const ACTION: &str = "browser.blocked.try_other_source";
+    const RUN_ID_REFUSAL: &str =
+        "browser.blocked.try_other_source 'runId' must be a non-empty string when given";
+    let session_id = ticket_string(input, "sessionId");
+    if session_id.is_empty() {
+        return ticket_bad_request(
+            "browser.blocked.try_other_source requires a non-empty 'sessionId'",
+        );
+    }
+    let run_id = match input.get("runId") {
+        None | Some(Value::Null) => "",
+        Some(Value::String(run_id)) if !run_id.trim().is_empty() => run_id.trim(),
+        Some(_) => return ticket_bad_request(RUN_ID_REFUSAL),
+    };
+    let mut run_stopped = false;
+    if !run_id.is_empty() {
+        let response = control_ai_run(
+            StateExtractor(state.clone()),
+            ExtensionExtractor(user.clone()),
+            headers.clone(),
+            PathExtractor(run_id.to_owned()),
+            Json(json!({ "action": "stop" })),
+        )
+        .await;
+        let (status, payload) = response_to_status_and_json(response).await;
+        match run_stop_outcome(status) {
+            RunStopOutcome::Stopped => run_stopped = true,
+            RunStopOutcome::AlreadyEnded => {}
+            RunStopOutcome::Refused => {
+                return owner_json_response_to_envelope(ACTION, user, status, payload)
+            }
+        }
+    }
+    let response = close_browser_session(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        PathExtractor(session_id.to_owned()),
+    )
+    .await;
+    let (status, mut payload) = response_to_status_and_json(response).await;
+    if status.is_success() {
+        payload = json!({ "data": { "closed": true, "runStopped": run_stopped } });
+    }
+    owner_json_response_to_envelope(ACTION, user, status, payload)
+}
+
 fn parse_browser_profile_scope(value: &str) -> Option<BrowserProfileScope> {
     serde_json::from_value(Value::String(value.to_owned())).ok()
 }
@@ -6255,6 +6337,155 @@ mod tests {
         assert!(
             quarry.received_requests().await.expect("recorded").is_empty(),
             "a malformed actor is refused before Quarry is asked anything"
+        );
+    }
+
+    #[test]
+    fn a_failed_stop_is_only_fine_when_the_run_is_gone() {
+        for status in [StatusCode::OK, StatusCode::ACCEPTED, StatusCode::NO_CONTENT] {
+            assert_eq!(
+                run_stop_outcome(status),
+                RunStopOutcome::Stopped,
+                "{status}"
+            );
+        }
+        for status in [StatusCode::NOT_FOUND, StatusCode::CONFLICT] {
+            assert_eq!(
+                run_stop_outcome(status),
+                RunStopOutcome::AlreadyEnded,
+                "{status}"
+            );
+        }
+        // Everything else may leave the run going, including ZDR's refusal of run
+        // controls (412), a missing grant (403), a missing sign-in (401) and every 5xx.
+        for status in [
+            StatusCode::BAD_REQUEST,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+            StatusCode::PRECONDITION_FAILED,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ] {
+            assert_eq!(
+                run_stop_outcome(status),
+                RunStopOutcome::Refused,
+                "{status}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn leaving_a_blocked_site_refuses_a_malformed_request_before_anything_upstream() {
+        let quarry = wiremock::MockServer::start().await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+        let user = tab_dispatch_user();
+        let headers = HeaderMap::new();
+
+        for input in [
+            json!({}),
+            json!({ "sessionId": "" }),
+            json!({ "sessionId": "   " }),
+            json!({ "sessionId": 7 }),
+            json!({ "runId": "run-1" }),
+            json!({ "sessionId": "run-1", "runId": "" }),
+            json!({ "sessionId": "run-1", "runId": 7 }),
+            json!({ "sessionId": "run-1", "runId": ["run-1"] }),
+        ] {
+            let response =
+                dispatch_browser_blocked_try_other_source(&state, &user, &headers, &input).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{input}");
+        }
+        assert!(
+            quarry
+                .received_requests()
+                .await
+                .expect("recorded")
+                .is_empty(),
+            "a malformed request is refused before Quarry is asked anything"
+        );
+    }
+
+    #[tokio::test]
+    async fn leaving_a_blocked_site_with_no_run_closes_the_session_and_says_no_run_was_stopped() {
+        use wiremock::{
+            matchers::{method as wm_method, path as wm_path},
+            Mock, ResponseTemplate,
+        };
+        let quarry = wiremock::MockServer::start().await;
+        mount_tab_run(&quarry, "agent_control").await;
+        Mock::given(wm_method("DELETE"))
+            .and(wm_path("/v1/agent/runs/run-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": {} })))
+            .mount(&quarry)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+        let user = tab_dispatch_user();
+
+        let response = dispatch_browser_blocked_try_other_source(
+            &state,
+            &user,
+            &HeaderMap::new(),
+            &json!({ "sessionId": "run-1" }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let (_, body) = response_to_status_and_json(response).await;
+        assert_eq!(body["data"]["actionId"], "browser.blocked.try_other_source");
+        assert_eq!(body["data"]["status"], "completed");
+        assert_eq!(
+            body["data"]["result"],
+            json!({ "closed": true, "runStopped": false })
+        );
+        let deletes: Vec<String> = quarry
+            .received_requests()
+            .await
+            .expect("recorded")
+            .into_iter()
+            .filter(|request| request.method.as_str() == "DELETE")
+            .map(|request| request.url.path().to_owned())
+            .collect();
+        assert_eq!(
+            deletes,
+            ["/v1/agent/runs/run-1"],
+            "the session, and only it, is closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn leaving_a_blocked_site_reports_a_session_that_would_not_close() {
+        use wiremock::{
+            matchers::{method as wm_method, path as wm_path},
+            Mock, ResponseTemplate,
+        };
+        let quarry = wiremock::MockServer::start().await;
+        mount_tab_run(&quarry, "agent_control").await;
+        Mock::given(wm_method("DELETE"))
+            .and(wm_path("/v1/agent/runs/run-1"))
+            .respond_with(ResponseTemplate::new(503).set_body_json(json!({
+                "error": { "code": "unavailable", "message": "closing is down" }
+            })))
+            .mount(&quarry)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+
+        let response = dispatch_browser_blocked_try_other_source(
+            &state,
+            &tab_dispatch_user(),
+            &HeaderMap::new(),
+            &json!({ "sessionId": "run-1" }),
+        )
+        .await;
+
+        assert_eq!(
+            response.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "a close that failed is not reported as left"
         );
     }
 

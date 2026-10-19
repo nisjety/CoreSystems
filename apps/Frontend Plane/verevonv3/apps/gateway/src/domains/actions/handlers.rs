@@ -10,7 +10,8 @@ use serde_json::Value;
 use crate::{config::AppState, envelope::error, middleware::AuthenticatedUser};
 
 use super::dispatchers::{
-    dispatch_audio_dictate, dispatch_audio_transcribe, dispatch_browser_close_session,
+    dispatch_audio_dictate, dispatch_audio_transcribe, dispatch_browser_blocked_try_other_source,
+    dispatch_browser_close_session,
     dispatch_browser_close_tab, dispatch_browser_create_profile, dispatch_browser_create_session,
     dispatch_browser_create_tab, dispatch_browser_delete_profile,
     dispatch_browser_probe_profile_restore, dispatch_browser_rename_profile,
@@ -364,6 +365,9 @@ pub(super) async fn execute_action(
         }
         "browser_run.control" => {
             dispatch_browser_run_control(&state, &user, &headers, &body.input).await
+        }
+        "browser.blocked.try_other_source" => {
+            dispatch_browser_blocked_try_other_source(&state, &user, &headers, &body.input).await
         }
         "router_policy.update" => dispatch_router_policy_update(&state, &user, &body.input).await,
         "browser_session.create" => {

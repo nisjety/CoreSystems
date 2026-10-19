@@ -1191,6 +1191,13 @@ const browserProbeProfileRestoreInput = z.object({
   url: z.string().trim().min(1),
 })
 
+// `runId` is the AI run on the session, when there is one. Nothing about the page
+// travels: the owner needs only which session to close and which run to stop.
+const browserBlockedTryOtherSourceInput = z.object({
+  sessionId: z.string().min(1),
+  runId: z.string().min(1).optional(),
+})
+
 const routerPolicyModeTableInput = z.object({
   simple: z.string().min(1),
   moderate: z.string().min(1),
@@ -3135,6 +3142,17 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: true,
     inputSchema: browserProbeProfileRestoreInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'browser.blocked.try_other_source',
+    label: 'Leave a site that blocks automation',
+    description: 'The person chose another source after a site blocked automated browsing (a strong bot-wall signal): stops the browser-agent run on the session when one is given, counting a run that already ended as stopped, and closes the session. No page content is read or kept, and nothing tries to get past the block.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: browserBlockedTryOtherSourceInput,
     outputSchema: envelopeStatusOutput,
   },
   {

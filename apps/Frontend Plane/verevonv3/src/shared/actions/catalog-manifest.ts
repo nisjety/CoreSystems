@@ -68,13 +68,14 @@ function entryFor(action: ActionDescriptor): ActionCatalogEntry {
 /**
  * The release artifact is sorted by immutable action id rather than source
  * order. This makes catalog review, hashing, and owner-plane code generation
- * deterministic. It is deliberately marked provisional until owner planes
+ * deterministic: ids are compared by code unit, never with `localeCompare`, whose
+ * order of '.' and '_' depends on the host's locale data. It is deliberately marked provisional until owner planes
  * contribute signatures and runtime availability attestations.
  */
 export function buildActionCatalogManifest(
   actions: readonly ActionDescriptor[] = actionRegistry,
 ): ActionCatalogManifest {
-  const entries = actions.map(entryFor).sort((left, right) => left.id.localeCompare(right.id))
+  const entries = actions.map(entryFor).sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0))
   const duplicate = entries.find((entry, index) => entry.id === entries[index - 1]?.id)
   if (duplicate) throw new Error(`Action catalog contains duplicate id: ${duplicate.id}`)
   return {
