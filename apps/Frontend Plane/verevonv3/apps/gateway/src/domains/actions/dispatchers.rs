@@ -5033,7 +5033,12 @@ enum RunStopOutcome {
     /// is no longer running (409). Leaving a site after the agent already gave up
     /// on it is the usual case, so this is not a failure.
     AlreadyEnded,
-    /// The owner refused or failed (ZDR controls, an outage, a 5xx): the run may
+    /// The owner answered 412: run controls are disabled for this organization
+    /// (zero data retention). Nobody can stop the run, so refusing would leave the
+    /// person with no way off the blocked site; the session is still closed, which
+    /// ends the run's browsing, and the result says the run was not stopped.
+    ControlsDisabled,
+    /// The owner refused or failed (a missing grant, an outage, a 5xx): the run may
     /// still be going, so the action fails rather than report a clean exit.
     Refused,
 }
@@ -5042,16 +5047,27 @@ fn run_stop_outcome(status: StatusCode) -> RunStopOutcome {
     match status {
         status if status.is_success() => RunStopOutcome::Stopped,
         StatusCode::NOT_FOUND | StatusCode::CONFLICT => RunStopOutcome::AlreadyEnded,
+        StatusCode::PRECONDITION_FAILED => RunStopOutcome::ControlsDisabled,
         _ => RunStopOutcome::Refused,
     }
 }
 
 /// `browser.blocked.try_other_source`: the person chose another source after a site
 /// blocked automated browsing. The owner paths already exist, so this only joins
-/// them: stop the AI run on the session when a `runId` is given, then close the
+/// them: stop the named AI run when a `runId` is given, then close the named
 /// session. It never reads or keeps page content and never tries to get past the
-/// block. A failure to stop the run (other than "it already ended") aborts before
-/// the close, so a run that may still be going is never reported as left behind.
+/// block.
+///
+/// The two ids are authorized separately and are NOT checked against each other:
+/// the run must be one of the caller's own (same user and organization, see
+/// `owned_orchestration_run`) and the session one of the caller's own, which are
+/// the same two checks the existing stop and close routes make, so this joins two
+/// things the person may already do and grants nothing new.
+///
+/// A failure to stop the run aborts before the close, so a run that may still be
+/// going is never reported as left behind, with two exceptions: "it already ended"
+/// (404, 409) and "run controls are disabled" (412, zero data retention), where
+/// stopping is impossible and the close is the only way off the site.
 pub(super) async fn dispatch_browser_blocked_try_other_source(
     state: &AppState,
     user: &AuthenticatedUser,
@@ -5073,6 +5089,7 @@ pub(super) async fn dispatch_browser_blocked_try_other_source(
         Some(_) => return ticket_bad_request(RUN_ID_REFUSAL),
     };
     let mut run_stopped = false;
+    let mut run_controls_disabled = false;
     if !run_id.is_empty() {
         let response = control_ai_run(
             StateExtractor(state.clone()),
@@ -5086,6 +5103,7 @@ pub(super) async fn dispatch_browser_blocked_try_other_source(
         match run_stop_outcome(status) {
             RunStopOutcome::Stopped => run_stopped = true,
             RunStopOutcome::AlreadyEnded => {}
+            RunStopOutcome::ControlsDisabled => run_controls_disabled = true,
             RunStopOutcome::Refused => {
                 return owner_json_response_to_envelope(ACTION, user, status, payload)
             }
@@ -5101,6 +5119,9 @@ pub(super) async fn dispatch_browser_blocked_try_other_source(
     let (status, mut payload) = response_to_status_and_json(response).await;
     if status.is_success() {
         payload = json!({ "data": { "closed": true, "runStopped": run_stopped } });
+        if run_controls_disabled {
+            payload["data"]["runControlsDisabled"] = Value::Bool(true);
+        }
     }
     owner_json_response_to_envelope(ACTION, user, status, payload)
 }
@@ -6356,13 +6377,17 @@ mod tests {
                 "{status}"
             );
         }
-        // Everything else may leave the run going, including ZDR's refusal of run
-        // controls (412), a missing grant (403), a missing sign-in (401) and every 5xx.
+        // ZDR's refusal of run controls: nobody can stop the run, so the close goes ahead.
+        assert_eq!(
+            run_stop_outcome(StatusCode::PRECONDITION_FAILED),
+            RunStopOutcome::ControlsDisabled
+        );
+        // Everything else may leave the run going, including a missing grant (403),
+        // a missing sign-in (401) and every 5xx.
         for status in [
             StatusCode::BAD_REQUEST,
             StatusCode::UNAUTHORIZED,
             StatusCode::FORBIDDEN,
-            StatusCode::PRECONDITION_FAILED,
             StatusCode::TOO_MANY_REQUESTS,
             StatusCode::INTERNAL_SERVER_ERROR,
             StatusCode::BAD_GATEWAY,
@@ -6487,6 +6512,181 @@ mod tests {
             StatusCode::SERVICE_UNAVAILABLE,
             "a close that failed is not reported as left"
         );
+    }
+
+    /// Everything the stop path talks to, with the run-control endpoint answering
+    /// `control_status`: auth-core's plane-token endpoints, model-gateway's run read
+    /// model (the ownership check) for `run_id` and its run-control endpoint, and
+    /// Quarry's session close for `run-1`. Returns the state to dispatch with plus the
+    /// three servers, so a test can read what each was asked.
+    async fn stop_path_upstreams(
+        run_id: &str,
+        control_status: u16,
+    ) -> (
+        AppState,
+        wiremock::MockServer,
+        wiremock::MockServer,
+        wiremock::MockServer,
+    ) {
+        use wiremock::{
+            matchers::{method as wm_method, path as wm_path, path_regex},
+            Mock, MockServer, ResponseTemplate,
+        };
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(path_regex(r"^/api/[a-z-]+/token$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "token": "t" })))
+            .mount(&auth)
+            .await;
+        let model = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path(format!("/v1/runs/{run_id}")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({ "run": { "run_id": run_id, "status": "running" } })),
+            )
+            .mount(&model)
+            .await;
+        let control = if (200..300).contains(&control_status) {
+            ResponseTemplate::new(control_status).set_body_json(json!({ "data": { "ok": true } }))
+        } else {
+            ResponseTemplate::new(control_status).set_body_json(json!({
+                "error": { "code": "run_control_refused", "message": "refused" }
+            }))
+        };
+        Mock::given(wm_method("POST"))
+            .and(wm_path(format!("/v1/browser/runs/{run_id}/control")))
+            .respond_with(control)
+            .mount(&model)
+            .await;
+        let quarry = MockServer::start().await;
+        mount_tab_run(&quarry, "agent_control").await;
+        Mock::given(wm_method("DELETE"))
+            .and(wm_path("/v1/agent/runs/run-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": {} })))
+            .mount(&quarry)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.auth_core_url = auth.uri();
+        state.model_gateway_url = model.uri();
+        state.quarry_edge_url = quarry.uri();
+        (state, auth, model, quarry)
+    }
+
+    async fn requests_of(server: &wiremock::MockServer, method: &str) -> Vec<String> {
+        server
+            .received_requests()
+            .await
+            .expect("recorded")
+            .into_iter()
+            .filter(|request| request.method.as_str() == method)
+            .map(|request| request.url.path().to_owned())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn leaving_a_blocked_site_stops_the_named_run_then_closes_the_named_session() {
+        // The run id and the session id differ on purpose: the two are authorized
+        // separately and not matched against each other, each acts on its own id.
+        let (state, _auth, model, quarry) = stop_path_upstreams("run-2", 200).await;
+
+        let response = dispatch_browser_blocked_try_other_source(
+            &state,
+            &tab_dispatch_user(),
+            &HeaderMap::new(),
+            &json!({ "sessionId": "run-1", "runId": "run-2" }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let (_, body) = response_to_status_and_json(response).await;
+        assert_eq!(
+            body["data"]["result"],
+            json!({ "closed": true, "runStopped": true })
+        );
+        assert_eq!(
+            requests_of(&model, "POST").await,
+            ["/v1/browser/runs/run-2/control"]
+        );
+        let stop = model
+            .received_requests()
+            .await
+            .expect("recorded")
+            .into_iter()
+            .find(|request| request.method.as_str() == "POST")
+            .expect("a stop was sent");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&stop.body).expect("json body"),
+            json!({ "action": "stop" })
+        );
+        assert_eq!(requests_of(&quarry, "DELETE").await, ["/v1/agent/runs/run-1"]);
+    }
+
+    #[tokio::test]
+    async fn leaving_a_blocked_site_closes_when_the_run_is_gone_or_its_controls_are_off() {
+        // 404 and 409: the run already ended. 412: zero data retention turns every
+        // run control off, so nobody can stop it and the close is the only way off.
+        for (control_status, run_stopped, controls_disabled) in
+            [(404, false, false), (409, false, false), (412, false, true)]
+        {
+            let (state, _auth, model, quarry) = stop_path_upstreams("run-2", control_status).await;
+
+            let response = dispatch_browser_blocked_try_other_source(
+                &state,
+                &tab_dispatch_user(),
+                &HeaderMap::new(),
+                &json!({ "sessionId": "run-1", "runId": "run-2" }),
+            )
+            .await;
+
+            assert_eq!(response.status(), StatusCode::OK, "{control_status}");
+            let (_, body) = response_to_status_and_json(response).await;
+            let mut expected = json!({ "closed": true, "runStopped": run_stopped });
+            if controls_disabled {
+                expected["runControlsDisabled"] = json!(true);
+            }
+            assert_eq!(body["data"]["result"], expected, "{control_status}");
+            assert_eq!(
+                requests_of(&model, "POST").await,
+                ["/v1/browser/runs/run-2/control"],
+                "{control_status}: the stop was tried once"
+            );
+            assert_eq!(
+                requests_of(&quarry, "DELETE").await,
+                ["/v1/agent/runs/run-1"],
+                "{control_status}: the session was closed"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn leaving_a_blocked_site_does_not_close_when_a_run_that_may_still_go_cannot_be_stopped() {
+        for control_status in [401, 403, 500, 502, 503] {
+            let (state, _auth, model, quarry) = stop_path_upstreams("run-2", control_status).await;
+
+            let response = dispatch_browser_blocked_try_other_source(
+                &state,
+                &tab_dispatch_user(),
+                &HeaderMap::new(),
+                &json!({ "sessionId": "run-1", "runId": "run-2" }),
+            )
+            .await;
+
+            assert!(
+                !response.status().is_success(),
+                "{control_status}: reported as {}",
+                response.status()
+            );
+            assert_eq!(
+                requests_of(&model, "POST").await,
+                ["/v1/browser/runs/run-2/control"],
+                "{control_status}: the stop was tried"
+            );
+            assert!(
+                requests_of(&quarry, "DELETE").await.is_empty(),
+                "{control_status}: the session stays open so the run is not left unattended"
+            );
+        }
     }
 
     #[test]

@@ -3147,7 +3147,7 @@ export const actionRegistry = [
   {
     id: 'browser.blocked.try_other_source',
     label: 'Leave a site that blocks automation',
-    description: 'The person chose another source after a site blocked automated browsing (a strong bot-wall signal): stops the browser-agent run on the session when one is given, counting a run that already ended as stopped, and closes the session. No page content is read or kept, and nothing tries to get past the block.',
+    description: 'The person chose another source after a site blocked automated browsing (a strong bot-wall signal): stops the given browser-agent run when one is named (it must be one of the caller own runs; it is not checked against the session), treating a run that already ended as nothing left to stop, and closes the session. Where run controls are disabled (zero data retention) the run cannot be stopped, so the session is closed anyway and the result says runControlsDisabled. Any other failure to stop the run fails the action before the session is closed. No page content is read or kept, and nothing tries to get past the block.',
     ownerPlane: 'model',
     risk: 'low',
     requiresApproval: false,
