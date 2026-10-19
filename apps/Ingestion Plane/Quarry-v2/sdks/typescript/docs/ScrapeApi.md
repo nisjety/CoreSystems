@@ -144,7 +144,7 @@ No authorization required
 | **200** | Successful scrape |  -  |
 | **415** | The page is a kind of file Quarry cannot extract text from (image, archive, spreadsheet, ...), or a PDF/DOCX that could not be read. Code UNSUPPORTED_MEDIA; details name the kind and, for a document that failed to parse, a reason (pdf_parse_failed, docx_parse_failed, too_large). Only returned when QUARRY_EDGE__DOC_ROUTING is skip or on. |  -  |
 | **400** | Invalid request (bad URL, missing fields) |  -  |
-| **403** | Security blocked (SSRF, blocklist, policy) |  -  |
+| **403** | Security blocked (SSRF, blocklist, policy), or the fetched page is itself a bot challenge. A challenge is code CHALLENGE_DETECTED with details.block_reason (captcha_widget, waf_interstitial or unexpected_bot_error; the same value is given as details.reason), details.recovery not_applicable and details.next other_source. It carries no host, URL or page text. A status alone (a bare 403, a 429, a login page) is never a challenge, and a page that is not a challenge scrapes as before. Classified by QUARRY_CHALLENGE_CLASSIFIER&#x3D;v2 (the default; legacy does not classify a scrape) and refused unless QUARRY_CHALLENGE_ENFORCE&#x3D;log, which only counts the page by reason. |  -  |
 | **429** | Rate limited |  -  |
 | **502** | Upstream fetch failed |  -  |
 
