@@ -44,7 +44,7 @@ import {
   type BrowserSessionResponse,
   type CreatableBrowserProfileScope,
 } from '@/shared/api/browser-client'
-import { startBrowserAiRun } from '@/shared/api/browser-run-client'
+import { createAiRunStartKeyring, startBrowserAiRun } from '@/shared/api/browser-run-client'
 import { streamRunEvents } from '@/shared/api/run-console-client'
 import { decideApproval, listApprovals, type ApprovalDecision } from '@/shared/api/orchestration-client'
 import {
@@ -235,6 +235,9 @@ export function KnowledgeComposer(props: {
   const [decidingApprovalKeys, setDecidingApprovalKeys] = createSignal<string[]>([])
   let aiRunAbort: AbortController | null = null
   onCleanup(() => aiRunAbort?.abort())
+  // One `Idempotency-Key` per logical AI-run start: kept across a retry of the
+  // same start after an ambiguous failure, dropped on any definite answer.
+  const aiRunStartKeys = createAiRunStartKeyring()
   const [preview, setPreview] = createSignal<ScrapePreview | null>(null)
   const [discovery, setDiscovery] = createSignal<CrawlDiscovery | null>(null)
   const [discovering, setDiscovering] = createSignal(false)
@@ -1043,12 +1046,17 @@ export function KnowledgeComposer(props: {
     aiRunAbort = controller
     let dispatchCount = 0
     try {
-      const run = await startBrowserAiRun(
-        id,
-        sessionId,
-        { goal, maxSteps: BROWSER_AI_LOOP_MAX_STEPS },
-        controller.signal,
-      )
+      const startParams = { goal, maxSteps: BROWSER_AI_LOOP_MAX_STEPS }
+      let run: Awaited<ReturnType<typeof startBrowserAiRun>>
+      try {
+        run = await startBrowserAiRun(id, sessionId, startParams, controller.signal, {
+          idempotencyKey: aiRunStartKeys.keyFor(sessionId, startParams),
+        })
+        aiRunStartKeys.succeeded()
+      } catch (startFailure) {
+        aiRunStartKeys.failed(startFailure)
+        throw startFailure
+      }
       browserLoop.attachRun({ orgId: id, runId: run.runId })
       await streamRunEvents(run.runId, {
         onBrowserAction: (event) => {

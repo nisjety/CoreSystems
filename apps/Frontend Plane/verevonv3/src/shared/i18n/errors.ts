@@ -240,6 +240,25 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
     en: 'The site blocks automated browsing. Take over the browser yourself, or try another source.',
   },
 
+  // A keyed AI-run start (`Idempotency-Key`): the gateway's refusals of the key itself.
+  invalid_idempotency_key: {
+    no: 'Forespørselen om å starte kjøringen kunne ikke gjentas trygt. Prøv å starte den på nytt.',
+    en: 'The request to start the run could not be repeated safely. Try starting it again.',
+  },
+  browser_idempotency_key_reused: {
+    no: 'Denne forespørselen ble allerede brukt til en annen oppgave. Start kjøringen på nytt med den nye oppgaven.',
+    en: 'This request was already used for a different task. Start the run again with the new task.',
+  },
+  browser_idempotency_key_run_ended: {
+    no: 'Kjøringen fra denne forespørselen er allerede avsluttet. Start en ny kjøring hvis du vil gjøre det om igjen.',
+    en: 'The run from this request has already ended. Start a new run if you want to do it again.',
+  },
+  browser_idempotency_unverified: {
+    no: 'Vi fikk ikke bekreftet om kjøringen allerede er startet.',
+    en: 'We could not confirm whether the run has already started.',
+    retryable: true,
+  },
+
   // Scrape preview refusals (gateway `knowledge/quarry.rs`, `classify_scrape_failure`).
   // `site_blocked` is only a Quarry-confirmed bot wall; a plain refusal is
   // `scrape_refused`. None of them offers a proxy.

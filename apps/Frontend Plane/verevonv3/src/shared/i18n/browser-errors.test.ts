@@ -41,15 +41,12 @@ const BROWSER_ERROR_CODES = [
   'scrape_timeout',
   'rate_limited',
   'unauthorized',
-] as const
-
-// Gateway refusals of an `Idempotency-Key` retry. The SPA sends no such header (no UI
-// for it is wired), so these cannot reach a person; copy is added with the UI.
-const UNREACHABLE_FROM_THE_SPA = new Set([
+  // The refusals of a keyed AI-run start (the SPA sends an Idempotency-Key now).
+  'invalid_idempotency_key',
   'browser_idempotency_key_reused',
   'browser_idempotency_key_run_ended',
   'browser_idempotency_unverified',
-])
+] as const
 
 const BLOCK_REASONS = ['captcha_widget', 'waf_interstitial', 'unexpected_bot_error', 'challenge_loop'] as const
 
@@ -130,7 +127,7 @@ describe('browser error copy', () => {
       expect(emitted.has(code), `the scan found ${code}`).toBe(true)
     }
     const withoutCopy = [...emitted].filter(
-      (code) => /^(browser_|scrape_)|^site_blocked$/.test(code) && !ERROR_COPY[code] && !UNREACHABLE_FROM_THE_SPA.has(code),
+      (code) => /^(browser_|scrape_)|^site_blocked$/.test(code) && !ERROR_COPY[code],
     )
     expect(withoutCopy).toEqual([])
   })
