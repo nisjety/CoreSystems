@@ -35,6 +35,11 @@
 //! * the frames of a continuation are gated on the gateway's own spend knowledge
 //!   (`ApprovalSpend`), the five dispatch arms of `agentic_run_stream` keep their order, and
 //!   every refusal the executor can send is a word of the gateway's closed vocabulary;
+//! * a spent continuation's attempt is closed on the run subject by one attempt-level event
+//!   (`RUN_CONTINUE_REFUSED`, for an executor refusal; unreachable and unknown keep
+//!   `RUN_DISPATCH_DEGRADED`) that ends nothing, and every error frame after the executor's
+//!   answer (the three run-end codes and the seven typed subscription failures) is final once
+//!   the click is spent, with the lists the SPA mirrors pinned to what the stream sends;
 //! * a delegated child never writes a fold: `run_rounds` hands the writer gate `ctx.depth`.
 //!
 //! # How the guards are written
@@ -60,6 +65,7 @@ use regex::Regex;
 /// Relative to this crate root; `services/` holds the three Rust services side by side.
 const TOOL_LOOP: &str = "../model-gateway/src/tool_loop.rs";
 const GATEWAY_SSE: &str = "../model-gateway/src/sse.rs";
+const GATEWAY_SUBSCRIPTION: &str = "../model-gateway/src/subscription_failure.rs";
 const GATEWAY_ROUTES: &str = "../model-gateway/src/http_routes.rs";
 const GATEWAY_POSTURE: &str = "../model-gateway/src/zdr_posture.rs";
 const EXECUTOR_GRPC: &str = "src/grpc.rs";
@@ -2055,6 +2061,277 @@ fn refusal_arm_violations(gateway_sse: &str) -> Vec<String> {
     violations
 }
 
+/// The run subject (`mp.v1.run.{run_id}.event`) is told how the attempt of a SPENT continuation
+/// ended without starting a segment, and nothing more (WS03, the spent-frames unit).
+///
+/// `RUN_STARTED` is published before the dispatch result, so an executor refusal would leave a
+/// started run with no closing event until session-core recovery ends it, about 15 minutes after
+/// the spend. The gateway must close the ATTEMPT without ending the RUN: a refusal can be
+/// `continuation_already_consumed` while another segment of the run is live, which is why the
+/// run-level `RUN_DISPATCH_DEGRADED` is wrong for it and why a terminal event is out of the
+/// question. So:
+///
+/// * `spent_dispatch_run_event` maps `Refused(_)` to `RUN_CONTINUE_REFUSED` and `Unreachable` and
+///   `Unknown` to `RUN_DISPATCH_DEGRADED`, and nothing else;
+/// * `RUN_CONTINUE_REFUSED` is written in one place (that map) and the map is asked in one place
+///   (the spent dispatch arm), so it is published for a spent continuation alone, never for an
+///   ordinary turn or for an unspent continuation's refusal, and a request that cannot be built
+///   (which publishes nothing, `RUN_STARTED` included) cannot publish it either;
+/// * the spent arm publishes exactly one run-subject event, before its frame, ignoring the
+///   publisher's answer (a failed publish changes nothing the client sees), and names no
+///   terminal type (`RUN_FAILED`, `RUN_COMPLETED`, `RUN_CANCELLED`), no `RUN_DISPATCH_DEGRADED`
+///   and no `RUN_CONTINUE_REFUSED` of its own: the type comes from the map.
+///
+/// Every consumer of the subject (capability-core's run watch, task completion and session
+/// review, insight-core's agent metrics, the Convex agent-run projection) reads the type string
+/// and ignores one it does not know, so the new type breaks none of them and ends nothing.
+fn spent_closing_violations(gateway_sse: &str) -> Vec<String> {
+    let mut violations = Vec::new();
+    let sse = Code::new(gateway_sse).without_tests();
+    let arms = dispatch_arms(&sse);
+    let spent: Vec<&DispatchArm> = arms
+        .iter()
+        .filter(|arm| arm_role(&arm.guard) == ArmRole::Spent)
+        .collect();
+    match spent.as_slice() {
+        [arm] => {
+            let asked = matches_of(&arm.body, r"\bspent_dispatch_run_event\s*\(");
+            if asked != 1 {
+                violations.push(format!(
+                    "the spent arm asks spent_dispatch_run_event(..) {asked} times, expected once: the closing event of a spent attempt is the pure map's alone"
+                ));
+            }
+            let published = matches_of(&arm.body, r"\.\s*publish\s*\(");
+            if published != 1 {
+                violations.push(format!(
+                    "the spent arm publishes {published} run-subject events, expected exactly one per attempt"
+                ));
+            }
+            for word in [
+                "RUN_FAILED",
+                "RUN_COMPLETED",
+                "RUN_CANCELLED",
+                "RUN_DISPATCH_DEGRADED",
+                "RUN_CONTINUE_REFUSED",
+            ] {
+                if arm.body.contains(word) {
+                    violations.push(format!(
+                        "the spent arm names `{word}` itself: the gateway never ends the run it spent the click of, and the type of the closing event comes from spent_dispatch_run_event"
+                    ));
+                }
+            }
+            match (arm.body.find(".publish("), arm.body.find("continue_failure_event(")) {
+                (Some(published), Some(frame)) if published < frame => {}
+                _ => violations.push(
+                    "the spent arm does not publish before it sends its frame (or has no frame): the closing event stands after the click is known spent and before the client is told"
+                        .into(),
+                ),
+            }
+            if !Regex::new(r"let\s+_\s*=\s*state\s*\.\s*publisher\s*\.\s*publish\s*\(")
+                .expect("pattern")
+                .is_match(&arm.body)
+            {
+                violations.push(
+                    "the spent arm does not ignore the publisher's answer (`let _ = state.publisher.publish(..)`): a failed publish must not change what the client sees"
+                        .into(),
+                );
+            }
+        }
+        other => violations.push(format!(
+            "agentic_run_stream has {} spent dispatch arms, expected exactly one",
+            other.len()
+        )),
+    }
+    for arm in arms.iter().filter(|arm| arm_role(&arm.guard) != ArmRole::Spent) {
+        if arm.body.contains("RUN_CONTINUE_REFUSED")
+            || Regex::new(r"\bspent_dispatch_run_event\s*\(")
+                .expect("pattern")
+                .is_match(&arm.body)
+        {
+            violations.push(format!(
+                "a dispatch arm other than the spent one (guard `{}`) publishes the closing event of a spent attempt: a continuation nobody pre-consumed spent nothing",
+                arm.guard.trim()
+            ));
+        }
+    }
+    match sse.fn_body("spent_dispatch_run_event") {
+        None => violations.push("sse.rs has no `fn spent_dispatch_run_event`: re-point this guard".into()),
+        Some(body) => {
+            let refused = Regex::new(r#"Refused\(_\)\s*=>\s*"RUN_CONTINUE_REFUSED""#).expect("pattern");
+            let other = Regex::new(
+                r#"Unreachable\s*\|\s*ContinueDispatchFailure::Unknown\s*=>\s*\{?\s*"RUN_DISPATCH_DEGRADED""#,
+            )
+            .expect("pattern");
+            if !refused.is_match(&body) {
+                violations.push(
+                    "spent_dispatch_run_event does not map `Refused(_)` to RUN_CONTINUE_REFUSED: an executor refusal would leave a started run with no closing event"
+                        .into(),
+                );
+            }
+            if !other.is_match(&body) {
+                violations.push(
+                    "spent_dispatch_run_event does not map `Unreachable` and `Unknown` to RUN_DISPATCH_DEGRADED: those two keep their run-level mark exactly"
+                        .into(),
+                );
+            }
+            let literals = matches_of(&body, r#""[A-Z_]+""#);
+            if literals != 2 {
+                violations.push(format!(
+                    "spent_dispatch_run_event names {literals} event types, expected the two"
+                ));
+            }
+        }
+    }
+    let written = matches_of(&sse.text, r#""RUN_CONTINUE_REFUSED""#);
+    if written != 1 {
+        violations.push(format!(
+            "sse.rs writes \"RUN_CONTINUE_REFUSED\" {written} times, expected once (in spent_dispatch_run_event)"
+        ));
+    }
+    let asked = matches_of(&sse.text, r"\bspent_dispatch_run_event\s*\(");
+    if asked != 2 {
+        violations.push(format!(
+            "sse.rs mentions spent_dispatch_run_event( {asked} times, expected its definition and the one call of the spent arm"
+        ));
+    }
+    violations
+}
+
+/// Every `error` frame `agentic_run_stream` can send after the executor's ANSWER is built by a
+/// builder that takes the spend, and every code a spent continuation can send there is in a
+/// closed list both ends pin (WS03, the spent-frames unit).
+///
+/// Three run-end frames (`agent_run_failed`, `agent_run_state_unknown`,
+/// `agent_run_output_unavailable`) go through `run_end_error_event(.., spend)`; the typed
+/// ChatGPT-subscription failure goes through `subscription_run_end_event(.., spend)`, which keeps
+/// its code and text and changes only `retryable`, `run_id` and `approval_spent`. The stream
+/// hand-builds neither a `ChatEvent::Error` nor a `subscription_error` after the answer (it would
+/// say `retryable: true` of a click that is gone). The lists the SPA mirrors are the codes the
+/// stream sends (`CONTINUE_SPENT_RUN_END_FRAMES`) and the codes `subscription_failure.rs`
+/// defines (`CONTINUE_SPENT_SUBSCRIPTION_FRAMES`), so a code added on one side alone fails here
+/// before it fails in the BFF test that pins the SPA to the gateway.
+fn after_answer_frame_violations(gateway_sse: &str, subscription_failure: &str) -> Vec<String> {
+    let mut violations = Vec::new();
+    let sse = Code::new(gateway_sse).without_tests();
+    let run_end = const_words(&sse, "CONTINUE_SPENT_RUN_END_FRAMES");
+    let subscription = const_words(&sse, "CONTINUE_SPENT_SUBSCRIPTION_FRAMES");
+    if run_end.is_empty() || subscription.is_empty() {
+        return vec!["sse.rs has no CONTINUE_SPENT_RUN_END_FRAMES or CONTINUE_SPENT_SUBSCRIPTION_FRAMES: re-point this guard".into()];
+    }
+    for (name, list) in [
+        ("CONTINUE_SPENT_RUN_END_FRAMES", &run_end),
+        ("CONTINUE_SPENT_SUBSCRIPTION_FRAMES", &subscription),
+    ] {
+        let unique: BTreeSet<&String> = list.iter().collect();
+        if unique.len() != list.len() {
+            violations.push(format!("{name} lists a code twice"));
+        }
+    }
+    let Some(stream) = sse.fn_body("agentic_run_stream") else {
+        violations.push("sse.rs has no agentic_run_stream".into());
+        return violations;
+    };
+    let Some(answered) = stream.find("Ok(Ok(Ok(response))) => response") else {
+        violations.push("agentic_run_stream has no `Ok(Ok(Ok(response))) => response` arm: re-point this guard".into());
+        return violations;
+    };
+    let after = &stream[answered..];
+
+    // The run-end codes the stream sends are the closed list.
+    let sent: BTreeSet<String> = Regex::new(
+        r#"run_end_error_event\s*\(\s*&request_id\s*,\s*&run\.run_id\s*,\s*"([a-z_]+)""#,
+    )
+    .expect("pattern")
+    .captures_iter(after)
+    .map(|captured| captured[1].to_owned())
+    .collect();
+    let listed: BTreeSet<String> = run_end.iter().cloned().collect();
+    if sent != listed {
+        violations.push(format!(
+            "the run-end codes agentic_run_stream sends after the answer ({sent:?}) differ from CONTINUE_SPENT_RUN_END_FRAMES ({listed:?}): a code added on one side alone is a frame that stays retryable after a spend, or a dead entry"
+        ));
+    }
+    let calls = matches_of(after, r"\brun_end_error_event\s*\(");
+    if calls != run_end.len() {
+        violations.push(format!(
+            "agentic_run_stream asks run_end_error_event(..) {calls} times after the answer, expected once per code ({})",
+            run_end.len()
+        ));
+    }
+    let spent_flag = Regex::new(r"run_end_error_event\s*\([^)]*\bspend\s*,?\s*\)").expect("pattern");
+    if matches_of(after, r"\brun_end_error_event\s*\(") != spent_flag.find_iter(after).count() {
+        violations.push(
+            "a run_end_error_event(..) call after the answer does not pass `spend` last: the frame would not know whether the click is gone"
+                .into(),
+        );
+    }
+
+    // Nothing after the answer builds an error frame by hand.
+    for needle in ["ChatEvent::Error", "subscription_error("] {
+        if after.contains(needle) {
+            violations.push(format!(
+                "agentic_run_stream names `{needle}` after the executor's answer: a hand-built error frame says `retryable` of a click the gateway spent"
+            ));
+        }
+    }
+    let site = matches_of(
+        after,
+        r"\bsubscription_run_end_event\s*\(\s*&request_id\s*,\s*&run\.run_id\s*,\s*&failure\s*,\s*message\s*,\s*spend\s*,?\s*\)",
+    );
+    if site != 1 {
+        violations.push(format!(
+            "agentic_run_stream builds the typed subscription failure frame through subscription_run_end_event(&request_id, &run.run_id, &failure, message, spend) {site} times, expected once"
+        ));
+    }
+
+    // The builders apply the spend.
+    match sse.fn_body("run_end_error_event") {
+        Some(body) if body.contains("retryable: !spend.is_spent()") => {}
+        _ => violations.push(
+            "run_end_error_event does not say `retryable: !spend.is_spent()`: a run-end frame of a spent continuation would stay retryable"
+                .into(),
+        ),
+    }
+    match sse.fn_body("subscription_run_end_event") {
+        Some(body)
+            if body.contains("spend.is_spent()")
+                && Regex::new(r#"payload\["retryable"\]\s*=\s*json!\(false\)"#)
+                    .expect("pattern")
+                    .is_match(&body)
+                && body.contains("payload[\"approval_spent\"]")
+                && body.contains("payload[\"run_id\"]") => {}
+        _ => violations.push(
+            "subscription_run_end_event does not withdraw the retry, name the run and say approval_spent for a spent continuation"
+                .into(),
+        ),
+    }
+
+    // The subscription list is the codes the failure module defines.
+    let production = &subscription_failure[..subscription_failure
+        .find("#[cfg(test)]")
+        .unwrap_or(subscription_failure.len())];
+    let defined: BTreeSet<String> =
+        Regex::new(r#"(?m)^\s*pub const [A-Z_]+: &str = "([a-z_]+)";"#)
+            .expect("pattern")
+            .captures_iter(production)
+            .map(|captured| captured[1].to_owned())
+            .collect();
+    let listed: BTreeSet<String> = subscription.iter().cloned().collect();
+    if defined.is_empty() {
+        violations.push("subscription_failure.rs defines no code: re-point this guard".into());
+    } else if defined != listed {
+        violations.push(format!(
+            "CONTINUE_SPENT_SUBSCRIPTION_FRAMES ({listed:?}) differs from the codes subscription_failure.rs defines ({defined:?}): a typed failure added there alone stays a retryable frame after a spend"
+        ));
+    }
+    for code in &subscription {
+        if run_end.contains(code) {
+            violations.push(format!("`{code}` is in both closed lists: a frame is read by one guard"));
+        }
+    }
+    violations
+}
+
 /// The words of the continue vocabulary agree with what the executor can send (WS03 S7c).
 ///
 /// The gateway names a refusal of a continuation by the message the executor sends it with
@@ -3133,6 +3410,16 @@ fn the_frames_of_a_continuation_are_gated_on_the_gateways_own_spend_knowledge() 
     let sse = read(GATEWAY_SSE);
     assert_green(&spend_gate_violations(&sse));
     assert_green(&refusal_arm_violations(&sse));
+}
+
+/// A spent continuation's attempt is closed on the run subject by one attempt-level event that
+/// ends nothing, and every error frame after the executor's answer is final once the click is
+/// spent.
+#[test]
+fn a_spent_attempt_is_closed_on_the_run_subject_and_every_frame_after_the_answer_is_final() {
+    let sse = read(GATEWAY_SSE);
+    assert_green(&spent_closing_violations(&sse));
+    assert_green(&after_answer_frame_violations(&sse, &read(GATEWAY_SUBSCRIPTION)));
 }
 
 /// Every refusal the executor can send is a word of the gateway's closed vocabulary, and every
@@ -4298,8 +4585,8 @@ fn every_guard_goes_red_when_the_code_it_guards_regresses() {
         spend_gate_violations(&mutate_in(
             &sse,
             "RunAgent of a pre-consumed continuation did not start",
-            "if !matches!(failure, ContinueDispatchFailure::Refused(_)) {",
-            "let _ = crate::session_flow::terminalize_agent_dispatch_rejection_authenticated(&state, &run, crate::session_flow::AgentDispatchFailure::Rejected, &model_bearer).await;\n                if !matches!(failure, ContinueDispatchFailure::Refused(_)) {",
+            "let closing = build_stream_envelope(",
+            "let _ = crate::session_flow::terminalize_agent_dispatch_rejection_authenticated(&state, &run, crate::session_flow::AgentDispatchFailure::Rejected, &model_bearer).await;\n                let closing = build_stream_envelope(",
         )),
         "the spent arm terminalizes the run",
     );
@@ -4913,4 +5200,160 @@ fn every_guard_goes_red_when_the_code_it_guards_regresses() {
             &format!("has no test `{name}`"),
         );
     }
+
+    // The attempt of a spent continuation is closed on the run subject, and nothing after the
+    // executor's answer stays retryable once the click is spent.
+    let subscription_src = read(GATEWAY_SUBSCRIPTION);
+    assert_green(&spent_closing_violations(&sse));
+    assert_green(&after_answer_frame_violations(&sse, &subscription_src));
+    // The spent arm stops asking the pure map, or names a type of its own.
+    must_flag(
+        spent_closing_violations(&mutate_re(
+            &sse,
+            r"spent_dispatch_run_event\(&failure\)",
+            "\"RUN_DISPATCH_DEGRADED\"",
+        )),
+        "asks spent_dispatch_run_event(..) 0 times",
+    );
+    must_flag(
+        spent_closing_violations(&mutate_in(
+            &sse,
+            "let closing = build_stream_envelope(",
+            "let closing = build_stream_envelope(",
+            "let _ = \"RUN_COMPLETED\";\n                let closing = build_stream_envelope(",
+        )),
+        "names `RUN_COMPLETED` itself",
+    );
+    // It publishes twice (a second event per attempt), or lets a failed publish through.
+    must_flag(
+        spent_closing_violations(&mutate_in(
+            &sse,
+            "RunAgent of a pre-consumed continuation did not start",
+            "let _ = tx",
+            "let _ = state.publisher.publish(&subjects::run_event_subject(&run.run_id), &closing).await;\n                let _ = tx",
+        )),
+        "publishes 2 run-subject events",
+    );
+    must_flag(
+        spent_closing_violations(&mutate_re(
+            &sse,
+            r"let _ = state\s*\.publisher\s*\.publish\(&subjects::run_event_subject\(&run\.run_id\), &closing\)",
+            "state.publisher.publish(&subjects::run_event_subject(&run.run_id), &closing)",
+        )),
+        "does not ignore the publisher's answer",
+    );
+    // The map sends a refusal to the wrong type, or the ambiguous cases to the new one.
+    must_flag(
+        spent_closing_violations(&mutate_in(
+            &sse,
+            "fn spent_dispatch_run_event(",
+            "\"RUN_CONTINUE_REFUSED\"",
+            "\"RUN_FAILED\"",
+        )),
+        "does not map `Refused(_)` to RUN_CONTINUE_REFUSED",
+    );
+    must_flag(
+        spent_closing_violations(&mutate_in(
+            &sse,
+            "fn spent_dispatch_run_event(",
+            "\"RUN_DISPATCH_DEGRADED\"",
+            "\"RUN_CONTINUE_REFUSED\"",
+        )),
+        "does not map `Unreachable` and `Unknown` to RUN_DISPATCH_DEGRADED",
+    );
+    // An unspent continuation's refusal publishes the closing event too.
+    must_flag(
+        spent_closing_violations(&mutate(
+            &sse,
+            typed_log,
+            &format!(
+                "{typed_log}\n                let _ = spent_dispatch_run_event(&ContinueDispatchFailure::Unknown);"
+            ),
+        )),
+        "a dispatch arm other than the spent one",
+    );
+
+    // A frame after the answer built by hand, or a list widened on one side alone.
+    must_flag(
+        after_answer_frame_violations(
+            &mutate_re(
+                &sse,
+                r"subscription_run_end_event\(\s*&request_id,\s*&run\.run_id,\s*&failure,\s*message,\s*spend,\s*\)",
+                "crate::sse_events::ChatEvent::subscription_error(&failure, message).to_sse(&request_id)",
+            ),
+            &subscription_src,
+        ),
+        "names `subscription_error(` after the executor's answer",
+    );
+    must_flag(
+        after_answer_frame_violations(
+            &mutate_re(
+                &sse,
+                r#"run_end_error_event\(\s*&request_id,\s*&run\.run_id,\s*"agent_run_output_unavailable",\s*"The completed agent run did not provide an answer\.",\s*spend,\s*\)"#,
+                "crate::sse_events::ChatEvent::Error { code: \"agent_run_output_unavailable\".to_owned(), message: String::new(), retryable: true }.to_sse(&request_id)",
+            ),
+            &subscription_src,
+        ),
+        "names `ChatEvent::Error` after the executor's answer",
+    );
+    must_flag(
+        after_answer_frame_violations(
+            &mutate_in(
+                &sse,
+                "const CONTINUE_SPENT_RUN_END_FRAMES",
+                "\"agent_run_output_unavailable\",",
+                "\"agent_run_output_unavailable\",\n    \"agent_run_new\",",
+            ),
+            &subscription_src,
+        ),
+        "differ from CONTINUE_SPENT_RUN_END_FRAMES",
+    );
+    must_flag(
+        after_answer_frame_violations(
+            &mutate_in(
+                &sse,
+                "const CONTINUE_SPENT_SUBSCRIPTION_FRAMES",
+                "\"prompt_too_long\",",
+                "",
+            ),
+            &subscription_src,
+        ),
+        "differs from the codes subscription_failure.rs defines",
+    );
+    must_flag(
+        after_answer_frame_violations(
+            &sse,
+            &mutate(
+                &subscription_src,
+                "pub const PROMPT_TOO_LONG: &str = \"prompt_too_long\";",
+                "pub const PROMPT_TOO_LONG: &str = \"prompt_too_long\";\npub const SUBSCRIPTION_NEW: &str = \"subscription_new\";",
+            ),
+        ),
+        "differs from the codes subscription_failure.rs defines",
+    );
+    // The builders stop applying the spend.
+    must_flag(
+        after_answer_frame_violations(
+            &mutate_in(
+                &sse,
+                "fn run_end_error_event(",
+                "retryable: !spend.is_spent(),",
+                "retryable: true,",
+            ),
+            &subscription_src,
+        ),
+        "run_end_error_event does not say `retryable: !spend.is_spent()`",
+    );
+    must_flag(
+        after_answer_frame_violations(
+            &mutate_in(
+                &sse,
+                "fn subscription_run_end_event(",
+                "payload[\"retryable\"] = json!(false);",
+                "",
+            ),
+            &subscription_src,
+        ),
+        "subscription_run_end_event does not withdraw the retry",
+    );
 }

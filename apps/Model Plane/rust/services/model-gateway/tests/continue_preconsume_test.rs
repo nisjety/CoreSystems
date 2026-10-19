@@ -19,7 +19,14 @@
 //!   executor's refusals are typed frames WITHOUT `approval_spent` and without
 //!   `RUN_DISPATCH_DEGRADED`;
 //! - a client that disconnects while the consume is in flight still gets exactly one
-//!   `RunAgent` sent.
+//!   `RunAgent` sent;
+//! - the run subject of a spent continuation is closed: an executor refusal publishes the
+//!   attempt-level `RUN_CONTINUE_REFUSED` once after `RUN_STARTED` (no terminal event, no
+//!   receipt, the frame unchanged), an unreachable or ambiguous outcome keeps
+//!   `RUN_DISPATCH_DEGRADED`, and with the switch off every outcome publishes what it always did;
+//! - `agent_run_output_unavailable`, the last error frame after the executor's answer, is final
+//!   only after a spend (the typed subscription failure frame cannot be reached from this route,
+//!   which launches every continuation on an unpinned route, so `sse.rs` unit tests drive it).
 //!
 //! The environment switches are process-global, so every test is `serial`.
 
@@ -822,6 +829,11 @@ impl Rig {
             .iter()
             .any(|(_, envelope)| envelope.event_type == "RUN_DISPATCH_DEGRADED")
     }
+
+    /// Everything the stream published, in order. Draining: call it once per rig.
+    fn published(&self) -> Vec<(String, mp_events::envelope::Envelope)> {
+        self.publisher.drain()
+    }
 }
 
 struct Answer {
@@ -1230,4 +1242,159 @@ async fn the_frames_after_the_executors_answer_are_the_committed_ones_unless_the
         );
         assert_eq!(rig_on.receipt_count(), 0, "a spent click is never terminalized by the gateway");
     }
+}
+
+/// What the observers of the run subject (`mp.v1.run.{run_id}.event`) see of a continuation
+/// attempt (build plan WS03, the spent-frames unit). `RUN_STARTED` goes out before the dispatch
+/// result, so a refusal the executor gives a SPENT continuation would otherwise leave a started
+/// run with no closing event. The gateway closes the ATTEMPT, never the run: a refusal can be
+/// `continuation_already_consumed` while another segment of the run is live, so there is no
+/// terminal event and no `RUN_DISPATCH_DEGRADED` (a run-level mark) for it, and no receipt.
+///
+/// - a spent refusal publishes exactly `RUN_CONTINUE_REFUSED` after `RUN_STARTED`, once, with
+///   the frame unchanged;
+/// - a spent unreachable or ambiguous outcome keeps `RUN_DISPATCH_DEGRADED`, nothing else;
+/// - with the switch off (nothing spent) every outcome publishes what it always did, and never
+///   the closing event.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_spent_refusal_closes_the_attempt_on_the_run_subject_and_nothing_else_changes() {
+    const STARTED: &str = "RUN_STARTED";
+    const CLOSED: &str = "RUN_CONTINUE_REFUSED";
+    const DEGRADED: &str = "RUN_DISPATCH_DEGRADED";
+    const FAILED: &str = "RUN_FAILED";
+
+    // (name, switch, what the executor does, what follows RUN_STARTED, the frame's code)
+    #[allow(clippy::type_complexity)]
+    let cases: Vec<(&str, bool, ExecutionKind, Vec<&str>, &str)> = vec![
+        // --- switch ON: spent. A deterministic refusal closes the attempt.
+        ("on / FailedPrecondition", true, refusing(Status::failed_precondition("continuation_already_consumed")), vec![CLOSED], "continuation_already_consumed"),
+        ("on / Aborted", true, refusing(Status::aborted("continue_in_progress")), vec![CLOSED], "continue_in_progress"),
+        ("on / NotFound", true, refusing(Status::not_found("approval not found")), vec![CLOSED], "approval_not_found"),
+        ("on / InvalidArgument", true, refusing(Status::invalid_argument("resume_incomplete")), vec![CLOSED], "resume_incomplete"),
+        ("on / PermissionDenied", true, refusing(Status::permission_denied("resume_forbidden")), vec![CLOSED], "resume_forbidden"),
+        ("on / Unauthenticated", true, refusing(Status::unauthenticated("a credential sentence")), vec![CLOSED], "continue_refused"),
+        ("on / unlisted refusal", true, refusing(Status::failed_precondition("a sentence nobody listed")), vec![CLOSED], "continue_refused"),
+        ("on / zero-retention trailer", true, zero_retention_refusal(tonic::Code::FailedPrecondition), vec![CLOSED], "durable_mutation_forbidden"),
+        // --- switch ON: spent. Unreachable and ambiguous outcomes keep their run-level mark.
+        ("on / DeadlineExceeded", true, refusing(Status::deadline_exceeded("slow")), vec![DEGRADED], "continue_outcome_unknown"),
+        ("on / unreachable", true, ExecutionKind::Unreachable, vec![DEGRADED], "continue_unreachable"),
+        ("on / dropped", true, ExecutionKind::Dropping, vec![DEGRADED], "continue_outcome_unknown"),
+        // --- switch OFF: nothing spent, the committed behaviour, never the closing event.
+        ("off / FailedPrecondition", false, refusing(Status::failed_precondition("continue_disabled")), vec![], "continue_disabled"),
+        ("off / Aborted", false, refusing(Status::aborted("continue_in_progress")), vec![], "continue_in_progress"),
+        ("off / NotFound", false, refusing(Status::not_found("approval not found")), vec![], "approval_not_found"),
+        ("off / zero-retention trailer", false, zero_retention_refusal(tonic::Code::FailedPrecondition), vec![], "durable_mutation_forbidden"),
+        ("off / InvalidArgument", false, refusing(Status::invalid_argument("resume_incomplete")), vec![FAILED], "agent_dispatch_rejected"),
+        ("off / PermissionDenied", false, refusing(Status::permission_denied("resume_forbidden")), vec![FAILED], "agent_dispatch_rejected"),
+        ("off / unreachable", false, ExecutionKind::Unreachable, vec![FAILED], "agent_dispatch_unreachable"),
+        ("off / DeadlineExceeded", false, refusing(Status::deadline_exceeded("slow")), vec![DEGRADED], "agent_dispatch_unavailable"),
+        ("off / dropped", false, ExecutionKind::Dropping, vec![DEGRADED], "agent_dispatch_unavailable"),
+    ];
+    for (name, switch, execution, after_started, code) in cases {
+        let rig = rig(Case::new(switch, execution)).await;
+        let answer = rig.post("claim-1").await;
+        assert_eq!(answer.status, StatusCode::OK, "{name}: {}", answer.body);
+        let error = answer.error_frame().unwrap_or_else(|| panic!("{name}: an error frame: {}", answer.body));
+        assert_eq!(error["code"], code, "{name}: {}", answer.body);
+        let published = rig.published();
+        let types: Vec<&str> = published.iter().map(|(_, envelope)| envelope.event_type.as_str()).collect();
+        let mut expected = vec![STARTED];
+        expected.extend(&after_started);
+        assert_eq!(types, expected, "{name}: what the run subject saw");
+        for (subject, _) in &published {
+            assert_eq!(subject, &format!("mp.v1.run.{RUN}.event"), "{name}: the run's own subject");
+        }
+        let closing: Vec<_> = published.iter().filter(|(_, e)| e.event_type == CLOSED).collect();
+        if after_started == [CLOSED] {
+            // Exactly one closing event, and it is an ATTEMPT-level, content-free envelope: it
+            // carries this attempt's request id (the frame's), never the run's, no content, no
+            // token, no approval id.
+            assert_eq!(closing.len(), 1, "{name}: published at most once per attempt");
+            let envelope = &closing[0].1;
+            assert_eq!(envelope.correlation_id, error["request_id"], "{name}: the attempt's id");
+            assert_eq!(
+                envelope.resource_ref,
+                format!("request/{}", error["request_id"].as_str().expect("request id")),
+                "{name}: attempt-level, not run-level"
+            );
+            assert_eq!(envelope.org_id, ORG, "{name}");
+            assert_eq!(envelope.user_id, USER, "{name}");
+            assert_eq!(envelope.payload, json!({ "model": "" }), "{name}: content-free");
+            assert!(!envelope.zdr, "{name}");
+            // The frame the client reads is the one it always was.
+            assert_eq!(
+                error,
+                json!({
+                    "code": code,
+                    "message": code.replace('_', " "),
+                    "retryable": false,
+                    "request_id": error["request_id"].clone(),
+                    "run_id": RUN,
+                    "approval_spent": true,
+                }),
+                "{name}: the frame is unchanged by the closing event"
+            );
+        } else {
+            assert!(closing.is_empty(), "{name}: the closing event is for a spent refusal alone");
+        }
+        if switch {
+            // The gateway never ends the run it spent the click of: no terminal event, no receipt.
+            for (_, envelope) in &published {
+                assert!(
+                    !["RUN_FAILED", "RUN_COMPLETED", "RUN_CANCELLED"].contains(&envelope.event_type.as_str()),
+                    "{name}: the gateway published a terminal event for a spent continuation"
+                );
+            }
+            assert_eq!(rig.receipt_count(), 0, "{name}");
+        }
+    }
+}
+
+/// `agent_run_output_unavailable`, the last error frame the stream can send after the executor
+/// answered: the run completed and no answer could be read. With nothing spent it is the
+/// committed frame, retryable, no run id. After a pre-consume a retry is a 409, so the same
+/// code and text are final, name the run and say `approval_spent`; the run subject sees
+/// `RUN_OUTPUT_UNAVAILABLE` either way.
+#[tokio::test]
+#[serial_test::serial]
+async fn the_output_unavailable_frame_is_final_only_after_a_spend() {
+    let message = "The completed agent run did not provide an answer.";
+    let rig_off = rig(Case::new(false, ending_as("completed"))).await;
+    let off = rig_off.post("claim-1").await;
+    let frame = off.error_frame().expect("an error frame");
+    assert_eq!(
+        frame,
+        json!({
+            "code": "agent_run_output_unavailable",
+            "message": message,
+            "retryable": true,
+            "request_id": frame["request_id"].clone(),
+        }),
+        "off: the committed frame, unchanged: {}",
+        off.body
+    );
+    let types: Vec<String> = rig_off.published().into_iter().map(|(_, e)| e.event_type).collect();
+    assert_eq!(types, ["RUN_STARTED", "RUN_OUTPUT_UNAVAILABLE"]);
+    drop(rig_off);
+
+    let rig_on = rig(Case::new(true, ending_as("completed"))).await;
+    let on = rig_on.post("claim-1").await;
+    let frame = on.error_frame().expect("an error frame");
+    assert_eq!(
+        frame,
+        json!({
+            "code": "agent_run_output_unavailable",
+            "message": message,
+            "retryable": false,
+            "request_id": frame["request_id"].clone(),
+            "run_id": RUN,
+            "approval_spent": true,
+        }),
+        "on: the same code and text, final and spent: {}",
+        on.body
+    );
+    let types: Vec<String> = rig_on.published().into_iter().map(|(_, e)| e.event_type).collect();
+    assert_eq!(types, ["RUN_STARTED", "RUN_OUTPUT_UNAVAILABLE"], "the closing event of a refusal is not published for it");
+    assert_eq!(rig_on.receipt_count(), 0);
 }

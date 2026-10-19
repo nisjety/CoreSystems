@@ -10052,6 +10052,15 @@ fn agentic_run_stream(
             // still live, and an executor that cannot be reached is left to the run's
             // renewed recovery window. Every frame is final (not retryable), names the
             // run and says `approval_spent`; the client follows the run.
+            //
+            // RUN_STARTED is already on the run subject, so the attempt is closed there
+            // too, by an event that says what happened and nothing more
+            // ([`spent_dispatch_run_event`]): an executor refusal is the attempt-level
+            // `RUN_CONTINUE_REFUSED` (this attempt started no segment; the run itself is
+            // not marked), an unreachable or unknown outcome keeps the run-level
+            // `RUN_DISPATCH_DEGRADED`. Published once, after the click is known spent
+            // (this arm is the spent regime), and a failed publish changes nothing the
+            // client sees.
             Ok(Ok(Err(status))) if spend.is_spent() => {
                 let failure = classify_continue_dispatch_failure(&status);
                 tracing::warn!(
@@ -10060,19 +10069,17 @@ fn agentic_run_stream(
                     run_id = %run.run_id,
                     "RunAgent of a pre-consumed continuation did not start; the approval is spent"
                 );
-                if !matches!(failure, ContinueDispatchFailure::Refused(_)) {
-                    let degraded = build_stream_envelope(
-                        &request_id,
-                        "RUN_DISPATCH_DEGRADED",
-                        &org_id,
-                        &user_id,
-                        &model,
-                    );
-                    let _ = state
-                        .publisher
-                        .publish(&subjects::run_event_subject(&run.run_id), &degraded)
-                        .await;
-                }
+                let closing = build_stream_envelope(
+                    &request_id,
+                    spent_dispatch_run_event(&failure),
+                    &org_id,
+                    &user_id,
+                    &model,
+                );
+                let _ = state
+                    .publisher
+                    .publish(&subjects::run_event_subject(&run.run_id), &closing)
+                    .await;
                 let _ = tx
                     .send(Ok(continue_failure_event(
                         &request_id,
@@ -10320,8 +10327,15 @@ fn agentic_run_stream(
                                 );
                             }
                         }
-                        crate::sse_events::ChatEvent::subscription_error(&failure, message)
-                            .to_sse(&request_id)
+                        // The failure keeps its code and text after a spend; only the retry
+                        // the frame offers is withdrawn ([`subscription_run_end_event`]).
+                        subscription_run_end_event(
+                            &request_id,
+                            &run.run_id,
+                            &failure,
+                            message,
+                            spend,
+                        )
                     }
                     None => run_end_error_event(
                         &request_id,
@@ -10409,12 +10423,14 @@ fn agentic_run_stream(
                 .publisher
                 .publish(&subjects::run_event_subject(&run.run_id), &degraded)
                 .await;
-            let event = crate::sse_events::ChatEvent::Error {
-                code: "agent_run_output_unavailable".to_owned(),
-                message: "The completed agent run did not provide an answer.".to_owned(),
-                retryable: true,
-            };
-            let _ = tx.send(Ok(event.to_sse(&request_id))).await;
+            let event = run_end_error_event(
+                &request_id,
+                &run.run_id,
+                "agent_run_output_unavailable",
+                "The completed agent run did not provide an answer.",
+                spend,
+            );
+            let _ = tx.send(Ok(event)).await;
             return;
         };
 
@@ -14247,7 +14263,9 @@ where
 /// frames the client reads. The gateway never terminalizes on any of them: a refused
 /// continuation can be `continuation_already_consumed` while another segment of the
 /// same run is still live, and an unreachable or unknown outcome is left to the
-/// run's recovery deadline.
+/// run's recovery deadline. A spent continuation says so on the run subject too
+/// ([`spent_dispatch_run_event`]): a refusal closes its attempt there with
+/// `RUN_CONTINUE_REFUSED`, the other two keep `RUN_DISPATCH_DEGRADED`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ContinueDispatchFailure {
     /// The executor refused, with this closed token ([`CONTINUE_FRAME_REFUSALS`]).
@@ -14383,18 +14401,44 @@ fn dispatch_unknown_event(spend: ApprovalSpend, request_id: &str, run_id: &str) 
     }
 }
 
-/// The codes of the two `error` frames that follow the executor's ANSWER to a
-/// dispatch (not its refusal): the run ended failed, or it ended in a status the
-/// gateway does not know. After a pre-consume they are final and say `approval_spent`
-/// ([`run_end_error_event`]); the SPA contract lists the same two
+/// The codes of the `error` frames of one run-end family, the ones that follow the
+/// executor's ANSWER to a dispatch (not its refusal): the run ended failed
+/// (`agent_run_failed`), it ended in a status the gateway does not know
+/// (`agent_run_state_unknown`), or it completed and no answer could be read
+/// (`agent_run_output_unavailable`). After a pre-consume they are final and say
+/// `approval_spent` ([`run_end_error_event`]); the SPA contract lists the same three
 /// (`CHAT_RUN_CONTINUE_SPENT_RUN_END_FRAMES`) and the BFF test pins the lists equal.
+///
+/// The typed subscription failures of a run that ended on one are the other family
+/// ([`CONTINUE_SPENT_SUBSCRIPTION_FRAMES`]); between them they are every `error` frame
+/// `agentic_run_stream` can send after the executor's answer.
 pub(crate) const CONTINUE_SPENT_RUN_END_FRAMES: &[&str] = &[
     "agent_run_failed",
     "agent_run_state_unknown",
+    "agent_run_output_unavailable",
 ];
 
-/// The `error` frame of a run the executor answered with a failure: `agent_run_failed`
-/// (the run ended failed) or `agent_run_state_unknown` (an unsupported status).
+/// The codes of the typed ChatGPT-subscription failure frame of a run that ended on one
+/// (`agent_subscription_failure`): a spent usage limit, an expired sign-in, and the rest
+/// of the closed set `subscription_failure::known_code` admits. After a pre-consume the
+/// frame keeps its code and text and becomes final ([`subscription_run_end_event`]); the
+/// SPA contract lists the same seven (`CHAT_RUN_CONTINUE_SPENT_SUBSCRIPTION_FRAMES`) and
+/// the BFF test pins the lists equal. A test below pins this list to the codes of
+/// `subscription_failure.rs`, so a code added there is not left a retryable frame after
+/// a spend.
+pub(crate) const CONTINUE_SPENT_SUBSCRIPTION_FRAMES: &[&str] = &[
+    "subscription_usage_limit",
+    "subscription_reauth_required",
+    "subscription_upstream_unavailable",
+    "subscription_bad_request",
+    "rate_limited",
+    "subscription_route_unavailable",
+    "prompt_too_long",
+];
+
+/// The `error` frame of a run the executor answered with a failure or without an answer:
+/// `agent_run_failed` (the run ended failed), `agent_run_state_unknown` (an unsupported
+/// status) or `agent_run_output_unavailable` (completed, nothing to say).
 ///
 /// With nothing spent by the gateway it is exactly the committed frame: retryable, no
 /// run id, no `approval_spent`; so are the frames of every ordinary run. After a
@@ -14427,6 +14471,70 @@ fn run_end_error_event(
     Event::default()
         .event(event.name())
         .data(payload.to_string())
+}
+
+/// The `error` frame of a run that ended on a typed ChatGPT-subscription failure (a spent
+/// usage limit, an expired sign-in): the committed frame, built by the one constructor every
+/// path uses, so its code, its text and its timing fields (`retry_after_ms`, `resets_at`,
+/// `retry_at`) are the failure's own.
+///
+/// With nothing spent by the gateway it is that frame BYTE for byte: retryable as the code
+/// says, no run id, no `approval_spent`. After a pre-consume the click is gone and a retry
+/// of the continue would be a 409, so only three fields change: `retryable` is false, the
+/// run is named and `approval_spent` is true. The code and the text stay, because they
+/// explain WHY the run ended and a person still needs that; what the frame no longer says
+/// is that trying the same click again is the way out. The gateway never terminalizes the
+/// run either way: execution-core ended it with its own receipt.
+fn subscription_run_end_event(
+    request_id: &str,
+    run_id: &str,
+    failure: &crate::subscription_failure::SubscriptionFailure,
+    message: String,
+    spend: ApprovalSpend,
+) -> Event {
+    debug_assert!(
+        CONTINUE_SPENT_SUBSCRIPTION_FRAMES.contains(&failure.code),
+        "{} is not one of the subscription failure frames of a continuation",
+        failure.code
+    );
+    let event = crate::sse_events::ChatEvent::subscription_error(failure, message);
+    if !spend.is_spent() {
+        return event.to_sse(request_id);
+    }
+    let mut payload = event.payload(request_id);
+    payload["retryable"] = json!(false);
+    payload["run_id"] = json!(run_id);
+    payload["approval_spent"] = json!(true);
+    Event::default()
+        .event(event.name())
+        .data(payload.to_string())
+}
+
+/// The run-subject event type that closes the attempt of a SPENT continuation whose
+/// `RunAgent` did not start a segment. `RUN_STARTED` is published before the dispatch
+/// result, so without it observers of `mp.v1.run.{run_id}.event` would see a started run
+/// that nothing closes until session-core recovery ends it, about 15 minutes after the
+/// spend.
+///
+/// - An executor refusal is `RUN_CONTINUE_REFUSED`: this ATTEMPT started no segment. It is
+///   attempt-level and not terminal, and it is NOT `RUN_DISPATCH_DEGRADED`: a refusal can
+///   be `continuation_already_consumed` while another segment of the run is live, and a
+///   run-level mark would call that live run degraded. Nor is it `RUN_FAILED` or
+///   `RUN_COMPLETED`: the gateway never ends the run it spent the click of.
+/// - An unreachable executor or an unknown outcome keeps `RUN_DISPATCH_DEGRADED`, as it
+///   always did: the continuation may be running, and degraded is the honest run-level
+///   word for "outcome unknown".
+///
+/// Every consumer of the run subject reads the type string and ignores one it does not
+/// know, so the new type changes no metric and ends nothing; it exists for an observer who
+/// reads the subject and wants to know the attempt is over.
+fn spent_dispatch_run_event(failure: &ContinueDispatchFailure) -> &'static str {
+    match failure {
+        ContinueDispatchFailure::Refused(_) => "RUN_CONTINUE_REFUSED",
+        ContinueDispatchFailure::Unreachable | ContinueDispatchFailure::Unknown => {
+            "RUN_DISPATCH_DEGRADED"
+        }
+    }
 }
 
 /// The payload of the `connected` frame: the ids of the prepared run, so a client can
@@ -16237,7 +16345,7 @@ mod continue_run_tests {
         assert_eq!(spent["ok"], true, "the SPA reads ok on the connected frame");
     }
 
-    /// The two frames after the executor's answer. With nothing spent they are the
+    /// The run-end frames after the executor's answer. With nothing spent they are the
     /// committed frames BYTE for byte (the very `ChatEvent::Error` the code built before:
     /// retryable, no run id, no `approval_spent`); after a pre-consume the same code and
     /// text are final, name the run and say `approval_spent`.
@@ -16248,6 +16356,10 @@ mod continue_run_tests {
             (
                 "agent_run_state_unknown",
                 "The agent returned an unsupported lifecycle state.",
+            ),
+            (
+                "agent_run_output_unavailable",
+                "The completed agent run did not provide an answer.",
             ),
         ] {
             let committed = crate::sse_events::ChatEvent::Error {
@@ -16479,14 +16591,18 @@ mod continue_run_tests {
         );
     }
 
-    /// The run-end frames are a closed pair, and the stream builds each of them through
+    /// The run-end frames are a closed trio, and the stream builds each of them through
     /// `run_end_error_event(.., spend)` and nowhere else: a hand-built `ChatEvent::Error`
     /// with one of these codes would say `retryable: true` after a spend.
     #[test]
     fn the_run_end_frames_are_closed_and_only_built_with_the_spend() {
         assert_eq!(
             CONTINUE_SPENT_RUN_END_FRAMES,
-            ["agent_run_failed", "agent_run_state_unknown"]
+            [
+                "agent_run_failed",
+                "agent_run_state_unknown",
+                "agent_run_output_unavailable"
+            ]
         );
         // Not part of the refusal vocabulary: they are the run's own end, and an unspent
         // continuation's frame of this code is the committed one.
@@ -16507,8 +16623,200 @@ mod continue_run_tests {
         }
         assert!(
             !stream.contains("code: \"agent_run_failed\"")
-                && !stream.contains("code: \"agent_run_state_unknown\""),
+                && !stream.contains("code: \"agent_run_state_unknown\"")
+                && !stream.contains("code: \"agent_run_output_unavailable\""),
             "a hand-built ChatEvent::Error with a run-end code ignores the spend"
+        );
+    }
+
+    /// The typed subscription failure of a run that ended on one keeps its code, its text and
+    /// its timing fields; after a pre-consume ONLY `retryable`, `run_id` and `approval_spent`
+    /// change. With nothing spent it is the committed frame byte for byte, for every code.
+    #[tokio::test]
+    async fn a_subscription_failure_frame_keeps_its_code_and_text_and_is_final_only_after_a_spend() {
+        let resets_at = chrono::DateTime::parse_from_rfc3339("2026-10-19T12:00:00Z")
+            .expect("a date")
+            .with_timezone(&Utc);
+        // The one clock-dependent field (`retry_at`, dated from now) is taken out of both sides.
+        let strip = |mut payload: Value| {
+            payload.as_object_mut().expect("an object").remove("retry_at");
+            payload
+        };
+        for code in CONTINUE_SPENT_SUBSCRIPTION_FRAMES {
+            let code: &'static str = code;
+            for (retry_after_ms, resets) in [(None, None), (Some(90_000_u64), Some(resets_at))] {
+                let failure = crate::subscription_failure::SubscriptionFailure {
+                    code,
+                    retry_after_ms,
+                    resets_at: resets,
+                };
+                let message = format!("the words of {code}");
+                let (committed_name, committed) = frame_of(
+                    crate::sse_events::ChatEvent::subscription_error(&failure, message.clone())
+                        .to_sse("req-1"),
+                )
+                .await;
+
+                let (name, unspent) = frame_of(subscription_run_end_event(
+                    "req-1",
+                    "run-42",
+                    &failure,
+                    message.clone(),
+                    ApprovalSpend::NotSpent,
+                ))
+                .await;
+                assert_eq!(
+                    (name.as_str(), strip(unspent.clone())),
+                    (committed_name.as_str(), strip(committed.clone())),
+                    "{code}"
+                );
+                assert!(
+                    unspent.get("run_id").is_none() && unspent.get("approval_spent").is_none(),
+                    "{code}: an unspent continuation keeps the committed frame: {unspent}"
+                );
+
+                let (name, spent) = frame_of(subscription_run_end_event(
+                    "req-1",
+                    "run-42",
+                    &failure,
+                    message.clone(),
+                    ApprovalSpend::SpentByGateway,
+                ))
+                .await;
+                assert_eq!(name, "error", "{code}");
+                // Exactly the committed payload with three fields changed or added.
+                let mut expected = strip(committed.clone());
+                expected["retryable"] = json!(false);
+                expected["run_id"] = json!("run-42");
+                expected["approval_spent"] = json!(true);
+                assert_eq!(strip(spent.clone()), expected, "{code}");
+                assert_eq!(spent["code"], code);
+                assert_eq!(spent["message"], message.as_str());
+                assert_eq!(spent["request_id"], "req-1");
+                if retry_after_ms.is_some() {
+                    assert_eq!(spent["retry_after_ms"], 90_000, "{code}: the timing is kept");
+                    assert_eq!(spent["resets_at"], "2026-10-19T12:00:00Z", "{code}");
+                }
+            }
+        }
+    }
+
+    /// The seven subscription codes the SPA reads as spent are exactly the codes
+    /// `subscription_failure.rs` defines, and every one of them is a typed failure the run
+    /// path can produce (`known_code`). A code added there and not here would leave that
+    /// failure a retryable frame after a spend; a code listed here and not there is dead.
+    #[test]
+    fn the_subscription_frame_list_is_the_codes_subscription_failure_defines() {
+        let source = include_str!("subscription_failure.rs");
+        let production = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
+        let mut defined: Vec<&str> = production
+            .lines()
+            .filter(|line| line.trim_start().starts_with("pub const "))
+            .filter_map(|line| {
+                let value = line.split_once("&str = \"")?.1.split('"').next()?;
+                (!value.is_empty() && value.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'))
+                    .then_some(value)
+            })
+            .collect();
+        defined.sort_unstable();
+        let mut listed: Vec<&str> = CONTINUE_SPENT_SUBSCRIPTION_FRAMES.to_vec();
+        listed.sort_unstable();
+        assert_eq!(
+            listed, defined,
+            "CONTINUE_SPENT_SUBSCRIPTION_FRAMES vs the codes of subscription_failure.rs"
+        );
+        for code in CONTINUE_SPENT_SUBSCRIPTION_FRAMES {
+            assert_eq!(
+                crate::subscription_failure::known_code(code),
+                Some(*code),
+                "{code} is not a code a run can end on"
+            );
+            assert!(
+                !CONTINUE_SPENT_RUN_END_FRAMES.contains(code) && !CONTINUE_FRAME_REFUSALS.contains(code),
+                "{code}: one vocabulary per frame"
+            );
+        }
+    }
+
+    /// Every `error` frame `agentic_run_stream` can send after the executor's answer is built
+    /// by a builder that takes the spend: the run-end frames through `run_end_error_event`, the
+    /// typed subscription failure through `subscription_run_end_event`. The stream hand-builds
+    /// no `ChatEvent::Error` and no `subscription_error` after the answer; the frames before it
+    /// (the dispatch rejections, which terminalize and are never spent) keep their literals.
+    #[test]
+    fn every_error_frame_after_the_executors_answer_is_built_with_the_spend() {
+        let stream = squash(&stream_code());
+        let answered = position(&stream, "Ok(Ok(Ok(response))) => response");
+        let after = &stream[answered..];
+        assert!(
+            !after.contains("ChatEvent::Error {") && !after.contains("subscription_error("),
+            "a hand-built error frame after the executor's answer ignores the spend: {after}"
+        );
+        let call = "subscription_run_end_event( &request_id, &run.run_id, &failure, message, spend, )";
+        assert_eq!(after.matches(call).count(), 1, "one site, the spend passed last");
+        assert_eq!(
+            after.matches("run_end_error_event(").count(),
+            CONTINUE_SPENT_RUN_END_FRAMES.len(),
+            "one run_end_error_event per run-end code"
+        );
+        assert!(
+            !stream[..answered].contains("subscription_run_end_event("),
+            "the frames before the answer are the dispatch's, never a subscription failure"
+        );
+    }
+
+    /// The run-subject event that closes the attempt of a spent continuation whose dispatch did
+    /// not start a segment: a refusal is `RUN_CONTINUE_REFUSED` (attempt-level, not terminal,
+    /// not a degraded mark), an unreachable or unknown outcome keeps `RUN_DISPATCH_DEGRADED`.
+    #[test]
+    fn a_spent_refusal_closes_the_attempt_and_the_other_failures_keep_their_run_level_mark() {
+        for token in CONTINUE_FRAME_REFUSALS {
+            assert_eq!(
+                spent_dispatch_run_event(&ContinueDispatchFailure::Refused(token)),
+                "RUN_CONTINUE_REFUSED",
+                "{token}"
+            );
+        }
+        for failure in [ContinueDispatchFailure::Unreachable, ContinueDispatchFailure::Unknown] {
+            assert_eq!(spent_dispatch_run_event(&failure), "RUN_DISPATCH_DEGRADED", "{failure:?}");
+        }
+    }
+
+    /// The spent arm publishes ONE run-subject event, chosen by `spent_dispatch_run_event`, and
+    /// no terminal one: no `RUN_FAILED`, `RUN_COMPLETED` or `RUN_CANCELLED`, and no hand-written
+    /// `RUN_DISPATCH_DEGRADED` or `RUN_CONTINUE_REFUSED` (the type comes from the pure map, so
+    /// the arm cannot publish the wrong one for a failure). The new type is written in one
+    /// place of the production text: not in the typed-refusal arm (an unspent continuation spent
+    /// nothing) and not in any committed arm.
+    #[test]
+    fn the_spent_arm_closes_the_attempt_once_and_never_ends_the_run() {
+        let code = squash(&stream_code());
+        let spent = "Ok(Ok(Err(status))) if spend.is_spent() =>";
+        let confirmed = "Ok(Ok(Err(status))) if is_confirmed_agent_dispatch_rejection(&status) =>";
+        let arm = arm_text(&code, spent, confirmed);
+        assert_eq!(arm.matches(".publish(").count(), 1, "published once per attempt: {arm}");
+        assert_eq!(arm.matches("spent_dispatch_run_event(&failure)").count(), 1, "{arm}");
+        for named in [
+            "RUN_FAILED",
+            "RUN_COMPLETED",
+            "RUN_CANCELLED",
+            "RUN_DISPATCH_DEGRADED",
+            "RUN_CONTINUE_REFUSED",
+        ] {
+            assert!(!arm.contains(named), "the spent arm names {named} itself: {arm}");
+        }
+        // The publish is after the click is known spent (the arm's guard) and before the frame,
+        // and its answer is ignored: the frame is sent whatever it says.
+        assert!(arm.contains("let _ = state .publisher .publish("), "{arm}");
+        assert!(position(arm, ".publish(") < position(arm, "continue_failure_event("), "{arm}");
+        // The type name is written in the one function that maps a failure to it.
+        let production = without_comments(&production_text());
+        assert_eq!(production.matches("\"RUN_CONTINUE_REFUSED\"").count(), 1);
+        assert_eq!(
+            without_comments(&item_text("fn spent_dispatch_run_event(", "\n}\n"))
+                .matches("\"RUN_CONTINUE_REFUSED\"")
+                .count(),
+            1
         );
     }
 

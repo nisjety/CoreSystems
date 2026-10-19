@@ -10,11 +10,13 @@ import {
   CHAT_RUN_CONTINUE_SPENT_EFFECT,
   CHAT_RUN_CONTINUE_SPENT_ONLY_FRAME_REFUSALS,
   CHAT_RUN_CONTINUE_SPENT_RUN_END_FRAMES,
+  CHAT_RUN_CONTINUE_SPENT_SUBSCRIPTION_FRAMES,
   CHAT_RUN_CONTINUE_TRANSPORT_EFFECT,
   chatRunContinueFrameRefusalOf,
   chatRunContinueHttpRefusalOf,
   chatRunContinueSpentConnected,
   chatRunContinueSpentRunEndOf,
+  chatRunContinueSpentSubscriptionFailureOf,
   chatRunContinueTransportFailureOf,
   chatRunContinueUnflaggedRefusalOf,
 } from './chat-run-continue-contract'
@@ -26,8 +28,9 @@ import contractSource from './chat-run-continue-contract.ts?raw'
 // byte. The HTTP list is pinned to the BFF's list on the Rust side
 // (apps/gateway/tests/continue_error_vocabulary.rs), which also pins the HTTP list
 // and the 22 stream tokens to model-gateway's own constants
-// (CONTINUE_HTTP_REFUSALS, CONTINUE_FRAME_REFUSALS) and the two run-end frames
-// to CONTINUE_SPENT_RUN_END_FRAMES.
+// (CONTINUE_HTTP_REFUSALS, CONTINUE_FRAME_REFUSALS), the three run-end frames
+// to CONTINUE_SPENT_RUN_END_FRAMES and the seven typed subscription failures to
+// CONTINUE_SPENT_SUBSCRIPTION_FRAMES.
 
 const HTTP_PAIRS = [
   ['continue_disabled', 409],
@@ -317,7 +320,7 @@ describe('chatRunContinueUnflaggedRefusalOf (regime 2: refused by the executor, 
   })
 })
 
-describe('chatRunContinueSpentRunEndOf (regime 1 for the two frames after the executor answered)', () => {
+describe('chatRunContinueSpentRunEndOf (regime 1 for the run-end frames after the executor answered)', () => {
   const spentFrame = (code: string) => ({
     code,
     message: 'x',
@@ -327,8 +330,12 @@ describe('chatRunContinueSpentRunEndOf (regime 1 for the two frames after the ex
     approval_spent: true,
   })
 
-  it('lists exactly the two codes, outside the refusal tuple', () => {
-    expect([...CHAT_RUN_CONTINUE_SPENT_RUN_END_FRAMES]).toEqual(['agent_run_failed', 'agent_run_state_unknown'])
+  it('lists exactly the three codes, outside the refusal tuple', () => {
+    expect([...CHAT_RUN_CONTINUE_SPENT_RUN_END_FRAMES]).toEqual([
+      'agent_run_failed',
+      'agent_run_state_unknown',
+      'agent_run_output_unavailable',
+    ])
     for (const code of CHAT_RUN_CONTINUE_SPENT_RUN_END_FRAMES) {
       expect((CHAT_RUN_CONTINUE_FRAME_REFUSALS as readonly string[]).includes(code)).toBe(false)
     }
@@ -361,7 +368,7 @@ describe('chatRunContinueSpentRunEndOf (regime 1 for the two frames after the ex
   })
 
   it('does not read the refusal codes or the committed dispatch frames, flagged or not', () => {
-    for (const code of [...CHAT_RUN_CONTINUE_FRAME_REFUSALS, 'agent_dispatch_unavailable', 'agent_dispatch_rejected', 'agent_run_output_unavailable', 'nope', '']) {
+    for (const code of [...CHAT_RUN_CONTINUE_FRAME_REFUSALS, 'agent_dispatch_unavailable', 'agent_dispatch_rejected', ...CHAT_RUN_CONTINUE_SPENT_SUBSCRIPTION_FRAMES, 'nope', '']) {
       expect(chatRunContinueSpentRunEndOf({ code, approval_spent: true })).toBeNull()
     }
   })
@@ -378,6 +385,103 @@ describe('chatRunContinueSpentRunEndOf (regime 1 for the two frames after the ex
   it('gives null for anything that is not a frame object', () => {
     for (const input of [null, undefined, 'agent_run_failed', 7, [], { approval_spent: true }, { code: 7, approval_spent: true }]) {
       expect(chatRunContinueSpentRunEndOf(input)).toBeNull()
+    }
+  })
+})
+
+describe('chatRunContinueSpentSubscriptionFailureOf (regime 1 for the typed subscription failure of a spent run)', () => {
+  // The frame keeps its own code and text, and its timing fields; only retryable, run_id and
+  // approval_spent are the gateway's after a spend.
+  const spentFrame = (code: string) => ({
+    code,
+    message: 'The usage limit is reached.',
+    retryable: false,
+    retry_after_ms: 90_000,
+    resets_at: '2026-10-19T12:00:00Z',
+    retry_at: '2026-10-19T12:00:00Z',
+    request_id: 'r',
+    run_id: 'run_1',
+    approval_spent: true,
+  })
+
+  it('lists exactly the seven typed failures, outside every other vocabulary here', () => {
+    expect([...CHAT_RUN_CONTINUE_SPENT_SUBSCRIPTION_FRAMES]).toEqual([
+      'subscription_usage_limit',
+      'subscription_reauth_required',
+      'subscription_upstream_unavailable',
+      'subscription_bad_request',
+      'rate_limited',
+      'subscription_route_unavailable',
+      'prompt_too_long',
+    ])
+    for (const code of CHAT_RUN_CONTINUE_SPENT_SUBSCRIPTION_FRAMES) {
+      expect((CHAT_RUN_CONTINUE_FRAME_REFUSALS as readonly string[]).includes(code)).toBe(false)
+      expect((CHAT_RUN_CONTINUE_SPENT_RUN_END_FRAMES as readonly string[]).includes(code)).toBe(false)
+    }
+  })
+
+  it('reads each as spent, final and to be followed when approval_spent is true', () => {
+    for (const code of CHAT_RUN_CONTINUE_SPENT_SUBSCRIPTION_FRAMES) {
+      expect(chatRunContinueSpentSubscriptionFailureOf(spentFrame(code))).toEqual({
+        regime: 1,
+        code,
+        approvalSpent: 'yes',
+        retryable: false,
+        followRun: true,
+      })
+      expect(chatRunContinueSpentSubscriptionFailureOf(spentFrame(code))).toMatchObject(CHAT_RUN_CONTINUE_SPENT_EFFECT)
+    }
+  })
+
+  it('says final even for a code whose ordinary frame is retryable: the click, not the code, decides', () => {
+    // subscription_upstream_unavailable, rate_limited and subscription_route_unavailable are
+    // retryable on an ordinary run; the spent frame says retryable false and so does the effect.
+    for (const code of ['subscription_upstream_unavailable', 'rate_limited', 'subscription_route_unavailable']) {
+      expect(chatRunContinueSpentSubscriptionFailureOf(spentFrame(code))?.retryable).toBe(false)
+    }
+  })
+
+  it('never reads them without approval_spent === true: those are the committed frames of every ordinary run', () => {
+    for (const code of CHAT_RUN_CONTINUE_SPENT_SUBSCRIPTION_FRAMES) {
+      for (const flag of [undefined, false, 'true', 1, null]) {
+        const frame: Record<string, unknown> = { code, retryable: true }
+        if (flag !== undefined) frame.approval_spent = flag
+        expect(chatRunContinueSpentSubscriptionFailureOf(frame)).toBeNull()
+        expect(chatRunContinueUnflaggedRefusalOf(frame)).toBeNull()
+        expect(chatRunContinueSpentRunEndOf(frame)).toBeNull()
+      }
+    }
+  })
+
+  it('fails closed: a code outside the seven is never trusted as spent, flagged or not', () => {
+    for (const code of [
+      ...CHAT_RUN_CONTINUE_FRAME_REFUSALS,
+      ...CHAT_RUN_CONTINUE_SPENT_RUN_END_FRAMES,
+      'agent_dispatch_unavailable',
+      'agent_dispatch_rejected',
+      'subscription_something_new',
+      'subscription_',
+      'SUBSCRIPTION_USAGE_LIMIT',
+      'nope',
+      '',
+    ]) {
+      expect(chatRunContinueSpentSubscriptionFailureOf({ code, approval_spent: true })).toBeNull()
+    }
+  })
+
+  it('is read by this guard alone: one guard per vocabulary, never two', () => {
+    for (const code of CHAT_RUN_CONTINUE_SPENT_SUBSCRIPTION_FRAMES) {
+      expect(chatRunContinueFrameRefusalOf(spentFrame(code))).toBeNull()
+      expect(chatRunContinueSpentRunEndOf(spentFrame(code))).toBeNull()
+    }
+    for (const code of [...CHAT_RUN_CONTINUE_FRAME_REFUSALS, ...CHAT_RUN_CONTINUE_SPENT_RUN_END_FRAMES]) {
+      expect(chatRunContinueSpentSubscriptionFailureOf(spentFrame(code))).toBeNull()
+    }
+  })
+
+  it('gives null for anything that is not a frame object', () => {
+    for (const input of [null, undefined, 'rate_limited', 7, [], { approval_spent: true }, { code: 7, approval_spent: true }]) {
+      expect(chatRunContinueSpentSubscriptionFailureOf(input)).toBeNull()
     }
   })
 })

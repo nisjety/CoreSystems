@@ -19,9 +19,13 @@
 //!   own blank check answers first) and `missing_bearer` (a 401, which stays
 //!   `unauthorized`);
 //! * the SPA's stream-frame tuple = model-gateway's `CONTINUE_FRAME_REFUSALS`, in order;
-//! * the SPA's run-end pair (`CHAT_RUN_CONTINUE_SPENT_RUN_END_FRAMES`, the two frames that
+//! * the SPA's run-end list (`CHAT_RUN_CONTINUE_SPENT_RUN_END_FRAMES`, the three frames that
 //!   follow the executor's answer and are final after a pre-consume) = model-gateway's
 //!   `CONTINUE_SPENT_RUN_END_FRAMES`, and neither refusal list holds them;
+//! * the SPA's subscription list (`CHAT_RUN_CONTINUE_SPENT_SUBSCRIPTION_FRAMES`, the seven
+//!   typed ChatGPT-subscription failures a spent run can end on, final after a pre-consume)
+//!   = model-gateway's `CONTINUE_SPENT_SUBSCRIPTION_FRAMES`, disjoint from the run-end list
+//!   and from both refusal lists;
 //! * every `proxy_sse_stream_with_data_plane` caller other than `continue_run` passes `&[]`.
 //!
 //! The model-gateway source is read across the plane boundary as a TEST only, the way
@@ -344,13 +348,14 @@ fn spa_run_end_frames() -> Vec<String> {
     string_literals(&code_lines, '\'')
 }
 
-/// The two frames that follow the executor's ANSWER (the run ended failed, or in a status the
-/// gateway does not know) are final and say `approval_spent` after a gateway pre-consume. The
-/// SPA reads them only with the flag (`chatRunContinueSpentRunEndOf`), so the SPA's pair is the
-/// gateway's pair: a code only the gateway makes final is a frame the SPA would read as an
-/// ordinary retryable failure of a click that is gone. They are NOT refusal-vocabulary codes:
-/// neither list may hold them (an unspent continuation's frame of this code is the committed
-/// one, read by nobody here).
+/// The frames that follow the executor's ANSWER (the run ended failed, in a status the gateway
+/// does not know, or completed with no answer to read) are final and say `approval_spent`
+/// after a gateway pre-consume. The SPA reads them only with the flag
+/// (`chatRunContinueSpentRunEndOf`), so the SPA's list is the gateway's list: a code only the
+/// gateway makes final is a frame the SPA would read as an ordinary retryable failure of a click
+/// that is gone, and a code only the SPA lists is one the gateway never sends final. They are
+/// NOT refusal-vocabulary codes: neither list may hold them (an unspent continuation's frame of
+/// this code is the committed one, read by nobody here).
 #[test]
 fn the_spa_run_end_frames_are_the_gateways_and_stay_out_of_the_refusal_lists() {
     let gateway = string_literals(
@@ -360,8 +365,12 @@ fn the_spa_run_end_frames_are_the_gateways_and_stay_out_of_the_refusal_lists() {
     let spa = spa_run_end_frames();
     assert_eq!(
         gateway,
-        ["agent_run_failed", "agent_run_state_unknown"],
-        "model-gateway's CONTINUE_SPENT_RUN_END_FRAMES is the closed pair; parsed {gateway:?}"
+        [
+            "agent_run_failed",
+            "agent_run_state_unknown",
+            "agent_run_output_unavailable"
+        ],
+        "model-gateway's CONTINUE_SPENT_RUN_END_FRAMES is the closed trio; parsed {gateway:?}"
     );
     assert_eq!(
         spa, gateway,
@@ -377,8 +386,85 @@ fn the_spa_run_end_frames_are_the_gateways_and_stay_out_of_the_refusal_lists() {
         assert!(
             !gateway_refusals.contains(code) && !spa_refusals.contains(code),
             "`{code}` is a run-end frame, not a refusal: it would be read as an executor refusal \
-             (spend unknown) when the gateway did not flag it"
+         (spend unknown) when the gateway did not flag it"
         );
+    }
+}
+
+/// The SPA's typed subscription failure codes, from `CHAT_RUN_CONTINUE_SPENT_SUBSCRIPTION_FRAMES`.
+fn spa_subscription_frames() -> Vec<String> {
+    let source = spa_contract_source();
+    let list = delimited(
+        &source,
+        "export const CHAT_RUN_CONTINUE_SPENT_SUBSCRIPTION_FRAMES",
+        '[',
+        ']',
+    );
+    let code_lines = list
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    string_literals(&code_lines, '\'')
+}
+
+/// A run pinned to the ChatGPT subscription that ended on a typed refusal says why (a spent usage
+/// limit, an expired sign-in) in a frame of its own code. After a gateway pre-consume that frame
+/// keeps its code and text and becomes final (`retryable: false`, the run named,
+/// `approval_spent: true`). The SPA reads it through the closed list
+/// (`chatRunContinueSpentSubscriptionFailureOf`), not by shape: so the list is the gateway's,
+/// code for code and in order, and it shares no code with the run-end list or either refusal
+/// list (one guard per vocabulary).
+#[test]
+fn the_spa_subscription_frames_are_the_gateways_and_stay_out_of_every_other_list() {
+    let gateway = string_literals(
+        &gateway_const_list(
+            &model_gateway_sse_source(),
+            "CONTINUE_SPENT_SUBSCRIPTION_FRAMES",
+        ),
+        '"',
+    );
+    let spa = spa_subscription_frames();
+    assert_eq!(
+        gateway.len(),
+        7,
+        "model-gateway's CONTINUE_SPENT_SUBSCRIPTION_FRAMES has seven codes; parsed {gateway:?}"
+    );
+    no_duplicates("model-gateway's CONTINUE_SPENT_SUBSCRIPTION_FRAMES", &gateway);
+    no_duplicates("the SPA's CHAT_RUN_CONTINUE_SPENT_SUBSCRIPTION_FRAMES", &spa);
+    assert_eq!(
+        spa, gateway,
+        "the SPA's CHAT_RUN_CONTINUE_SPENT_SUBSCRIPTION_FRAMES and model-gateway's \
+         CONTINUE_SPENT_SUBSCRIPTION_FRAMES must list the same codes in the same order: a code \
+         only the gateway makes final is a spent run the SPA would not recognise, and a code \
+         only the SPA lists is one the gateway never sends final"
+    );
+    let others: Vec<(&str, Vec<String>)> = vec![
+        (
+            "model-gateway's CONTINUE_FRAME_REFUSALS",
+            string_literals(
+                &gateway_const_list(&model_gateway_sse_source(), "CONTINUE_FRAME_REFUSALS"),
+                '"',
+            ),
+        ),
+        ("the SPA's CHAT_RUN_CONTINUE_FRAME_REFUSALS", spa_frame_refusals()),
+        (
+            "model-gateway's CONTINUE_SPENT_RUN_END_FRAMES",
+            string_literals(
+                &gateway_const_list(&model_gateway_sse_source(), "CONTINUE_SPENT_RUN_END_FRAMES"),
+                '"',
+            ),
+        ),
+        ("the SPA's CHAT_RUN_CONTINUE_SPENT_RUN_END_FRAMES", spa_run_end_frames()),
+    ];
+    for code in &gateway {
+        for (name, list) in &others {
+            assert!(
+                !list.contains(code),
+                "`{code}` is a typed subscription failure, and {name} lists it too: a frame must be \
+         read by one guard"
+            );
+        }
     }
 }
 
