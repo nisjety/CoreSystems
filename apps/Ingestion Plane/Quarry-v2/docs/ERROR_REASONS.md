@@ -54,7 +54,7 @@ A body refused by its content kind (`QUARRY_EDGE__DOC_ROUTING`, `docs/RUNBOOKS.m
 | `unsupported_media` | `subtype`, `content_type`, `bytes`, `source`, `supported` | `skip` or `on` refused a body that has no extractor (an image, an archive, a spreadsheet) |
 | `pdf_parse_failed` | `limit`, only when the parser was stopped | the PDF could not be read. With `limit` `parser_stopped`, the parser child was killed by a resource limit, crashed or answered nothing usable |
 | `docx_parse_failed` | as `pdf_parse_failed` | the same for DOCX |
-| `too_large` | | the document is over a limit of the parser itself: the DOCX entry count (4096) or the unpacked WordML (32 MiB). The 25 MiB input cap sits behind the 16 MiB body cap, so HTTP does not reach it |
+| `too_large` | | the document is over a limit of the parser itself: the DOCX entry count (4096) or the unpacked WordML (32 MiB), or, for PDF, 256 MiB of total inflated `/FlateDecode` output (the inflate budget, checked before lopdf inflates anything). The 25 MiB input cap sits behind the 16 MiB body cap, so HTTP does not reach it |
 
 `limit` is `parser_stopped` only in the child-process mode (`QUARRY_EDGE__DOC_PARSE_ISOLATION=process`). A PDF with no text layer is not an error: it returns the warning `document_has_no_text_layer`.
 
