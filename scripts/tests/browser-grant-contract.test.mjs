@@ -205,7 +205,8 @@ function rustItemEnd(text, from) {
  * test module, or after a test-only import near the top, stays in.
  */
 function stripTestCode(text) {
-  const attribute = /^[ \t]*#\[cfg\(test\)\][ \t]*\n/gm;
+  // `#[cfg(test)]` and `#[cfg(all(test, ...))]`, alone on a line or followed by its item on the same line.
+  const attribute = /^[ \t]*#\[cfg\((?:test|all\(test,[^\]\n]*\))\)\][ \t]*/gm;
   let out = '';
   let last = 0;
   let match;
@@ -324,6 +325,13 @@ pub async fn production_after_the_test_module() {
   const stripped2 = stripTestCode(gatedFn);
   assert.ok(stripped2.includes(planted) && !stripped2.includes('fixture'));
   assert.equal(stripTestCode('fn r() {}\n'), 'fn r() {}\n');
+
+  // A same-line gated item and a cfg(all(test, ...)) item are stripped as well.
+  const sameLine = `#[cfg(test)] mod helpers;\nfn a() { ${planted}; }\n#[cfg(all(test, feature = "x"))]\nmod gated { fn t() { ${planted}; } }\nfn b() {}\n`;
+  const stripped3 = stripTestCode(sameLine);
+  assert.ok(stripped3.includes('fn a()') && stripped3.includes('fn b()'));
+  assert.ok(!stripped3.includes('helpers') && !stripped3.includes('gated'));
+  assert.equal(stripped3.split(planted).length - 1, 1, 'only the production call is left');
 });
 
 test('the legacy Quarry acquire is gone and Quarry has no grant-minting client call', () => {
