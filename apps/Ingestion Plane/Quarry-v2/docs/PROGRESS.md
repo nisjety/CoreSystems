@@ -213,7 +213,7 @@ Firecrawl self-hosting explicitly lacks the full managed Fire Engine advantage. 
 | `quarry-runtime` publisher wiremock  | 1     | ✅     |
 | `quarry-edge` sse_stream             | 1     | ✅     |
 | `control/internal/dispatcher` Go     | 7     | ✅     |
-| `quarry-edge` cache_policy           | 8     | Needs a live Redis (REDIS_URL, default 127.0.0.1:6379). Without one each case prints a skip and passes, and CI has no Redis, so CI runs none of its assertions |
+| `quarry-edge` cache_policy           | 9     | Needs a live Redis (`REDIS_URL`, default 127.0.0.1:6379). Without one each case prints `skip: REDIS_URL unreachable` and passes, so a bare `cargo test` asserts nothing here. With `REQUIRE_CONTRACT=1` an unreachable Redis fails each case. CI runs it in the `cargo-check` gate step "Page-cache and ZDR cache gates (Redis)" against a `redis:7-alpine` service on port 6380, with `REQUIRE_CONTRACT=1` (R8a). 2026-10-19: 9 passed with Redis; 9 passed with no env (all skip); 9 failed with `REQUIRE_CONTRACT=1` and no Redis |
 | `quarry-browser` (pool + browserless + session/profiles) | 21 | ✅     |
 | `quarry-transform::readability` unit | 4     | ✅ added 2026-04-29 |
 | `quarry-transform::diff` unit (semantic) | 6 | ✅ added 2026-04-29 |
@@ -226,7 +226,7 @@ Firecrawl self-hosting explicitly lacks the full managed Fire Engine advantage. 
 | `quarry-runtime::event_bus` InProcessEventBus | 2   | ✅ added 2026-05-07 |
 | `quarry-runtime::mp_client` ModelPlanePlanner | 9   | ✅ added 2026-05-07 |
 | `quarry-runtime::grant_validator` GrantValidator | 9 | ✅ added 2026-05-07 |
-| `quarry-edge` profile_roundtrip integration | 5     | ✅ added 2026-05-07 |
+| `quarry-edge` profile_roundtrip integration | 11    | ✅ 2026-10-19 run: 11 passed (5 when added 2026-05-07) |
 | `quarry-runtime::crawl_frontier`     | 11    | ✅ added 2026-05-08 |
 | `quarry-runtime::structured_extract` | 6     | ✅ added 2026-05-08 |
 | `quarry-runtime::s3_profile_store` keys | 2  | ✅ added 2026-05-08 |
@@ -237,9 +237,25 @@ Firecrawl self-hosting explicitly lacks the full managed Fire Engine advantage. 
 | `quarry-transform::source_trace`     | 5     | ✅ added 2026-05-08 |
 | `quarry-edge::firecrawl_adapter`     | 5     | ✅ added 2026-05-08 |
 | `quarry-edge::audio_routes`          | 1     | ✅ added 2026-05-08 |
-| **Total**                            | **~283** | ✅ all green |
+| `quarry-edge` zdr_claim_floor | 22 | ✅ 2026-10-19: 22 passed with no env, and 22 passed with Redis and `REQUIRE_CONTRACT=1`. Its Redis case skips without Redis, and with `REQUIRE_CONTRACT=1` and no Redis 21 passed and 1 failed (`zdr_claim_floor.rs:1036`) |
+| `quarry-edge` unit tests, `src/lib.rs` | 362 | ✅ 2026-10-19 run |
+| `quarry-edge` unit tests, `src/main.rs` (same modules compiled again) | 356 | ✅ 2026-10-19 run |
+| `quarry-edge` agent_run_control | 17 | ✅ 2026-10-19 run |
+| `quarry-edge` run_sweeper_integration | 22 | ✅ 2026-10-19 run |
+| `quarry-edge` scrape_records_durable | 4 | ✅ 2026-10-19 run |
+| `quarry-edge` zdr_gap_rows | 9 | ✅ 2026-10-19 run |
+| `quarry-edge` zdr_feature_matrix | 12 | ✅ 2026-10-19 run |
+| `quarry-edge` ready_browser | 6 | ✅ 2026-10-19 run |
+| `quarry-edge` log_field_discipline (log-field lint) | 20 | ✅ 2026-10-19 run |
+| `quarry-edge` other integration binaries: artifacts_fs_list 5, change_webhook_proptest 4, crawl_limits 5, drain 2, job_admission 2, metrics_recorder 7, properties 6, start_run_grants 4, zdr_behavior 4, zdr_log_capture 12 | 51 | ✅ 2026-10-19 run |
+| `quarry-transform` clean_html_selectors | 16 | ✅ 2026-10-19 run |
+| `quarry-transform` clean_html_cost | 0 (1 ignored) | Measurement, not a check: `cargo test -p quarry-transform --test clean_html_cost -- --ignored --nocapture` prints `MEASURE` lines. Not run in R8a |
+| verevon gateway `log_field_discipline` (`apps/Frontend Plane/verevonv3/apps/gateway`, includes `the_gateway_stays_within_the_log_field_baseline`) | 13 | ✅ 2026-10-19 run, native `cargo test --test log_field_discipline` |
+| **Total** | not recomputed | `cargo test --no-fail-fast -p quarry-edge` on 2026-10-19, no Redis: 902 passed, 0 failed, 23 targets (lib 362, bin 356, 21 integration targets with 184 tests). The other rows were not re-run in R8a, so the workspace total is not recomputed |
 
 Coverage floor target 80% not yet enforced in CI.
+
+Rows dated 2026-10-19 were re-read from the R8a round-3 runs: the quarry-edge and quarry-transform runs (in the quarry-rust-env:1 image, under the docker lock) on HEAD 23e1ad7f plus comment-only edits, and the gateway lint natively on its working tree. Rows without a date were not re-run in R8a.
 
 ---
 

@@ -1018,9 +1018,10 @@ async fn audio_transcription_forwards_the_floored_posture_to_the_model_plane() {
 /// Without one it skips on a developer machine, but never under
 /// `REQUIRE_CONTRACT`: a contract that quietly skips is not a contract. `CI` is
 /// deliberately NOT a trigger: GitHub Actions sets it on every job, and
-/// `quarry-v2-ci.yml` runs `cargo test --workspace` without a Redis service, so
-/// keying on it turned that job red. A job that provides a Redis opts in with
-/// `REQUIRE_CONTRACT=1`, as the other contract tests of this repo do.
+/// `quarry-v2-ci.yml` runs `cargo test --workspace` with no Redis at the default
+/// address, so keying on it turned that job red. The job's gate step provides a
+/// Redis and opts in with `REQUIRE_CONTRACT=1`, as the other contract tests of this
+/// repo do.
 async fn redis_connection() -> Option<redis::aio::ConnectionManager> {
     let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
     let connected = async {

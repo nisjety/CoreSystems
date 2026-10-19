@@ -362,6 +362,10 @@ An image built from 89c67974 (`docker build -f deploy/compose/Dockerfile.edge`, 
 
 Traps met while doing it: a docker named volume is root-owned and the edge runs as uid 65532, so the filesystem backend answers 500 `Permission denied` until the volume is chowned; Git Bash rewrites absolute container paths unless `MSYS_NO_PATHCONV=1`; full-page markdown (`only_main_content:false`) of a large Wikipedia article is 30.9 MB from a 1.05 MB page because table lines are padded to over a million characters, so even an 8 MB `max_inline_bytes` omits it. Not run: the typed 415 of the flate bomb on the image, the Sunset header, the S3 backend.
 
+## Correction to the Redis gate paragraph of the WS5.D section (R8a): CI runs the gate
+
+The paragraph of the section "Page cache bypass and the Redis-gated cache tests (WS5.D)" says `quarry-v2-ci.yml` provides no Redis and does not set `REQUIRE_CONTRACT`. That was true before the R8a change to the workflow and is no longer true. The `cargo-check` job runs a `redis:7-alpine` service, published on host port 6380, and its step "Page-cache and ZDR cache gates (Redis)" runs `cargo test -p quarry-edge --test cache_policy --test zdr_claim_floor` with `REDIS_URL=redis://127.0.0.1:6380` and `REQUIRE_CONTRACT=1`. In that step an unreachable Redis is a failure, so the nine `cache_policy` cases and the Redis case of `zdr_claim_floor` assert in CI. The `Test workspace` step of the same job keeps the default address (`127.0.0.1:6379`), where nothing listens, so its cache cases still skip there; that step is unchanged on purpose. The rest of the paragraph (the skip without Redis, and why `CI` is not a trigger) still holds.
+
 ## Challenge classifier and the one-recovery rule: `QUARRY_CHALLENGE_*` (WS3.H, WS3.J)
 
 Two switches, both read from the edge's environment when a run (an agent run, or one scrape) starts; a change needs an edge restart. Anything but the listed values is the default. Quarry classifies what a page says about access; it never tries to get past a challenge, and neither switch changes that.

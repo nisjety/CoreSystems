@@ -4,9 +4,10 @@
 //! `redis://127.0.0.1:6379`). When Redis is unavailable the tests print a
 //! skip notice and return success, so a job without Redis still passes. A job
 //! that provides a Redis sets `REQUIRE_CONTRACT=1`; then an unreachable Redis is
-//! a failure, as in `zdr_claim_floor.rs`. `quarry-v2-ci.yml` provides no Redis and
-//! does not set `REQUIRE_CONTRACT`, so in that job these cases skip and the ZDR and
-//! non-default guards are not gated.
+//! a failure, as in `zdr_claim_floor.rs`. `quarry-v2-ci.yml` runs these cases with
+//! a Redis service and `REQUIRE_CONTRACT=1` in its "Page-cache and ZDR cache gates"
+//! step. Its `Test workspace` step has no Redis at the default address, so there they
+//! skip.
 //!
 //! The origin is a loopback wiremock server. The production static driver refuses
 //! loopback targets, so these tests fetch through `LoopbackDriver` instead.
