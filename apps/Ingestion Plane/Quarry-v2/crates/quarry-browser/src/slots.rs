@@ -251,6 +251,43 @@ impl BrowserPoolConfig {
     }
 }
 
+/// The heavy lane's session budget (WS13): scrape renders that may take a
+/// session besides the agent runs. One until the heavy lane is built and its
+/// RSS is recorded.
+pub const HEAVY_LANE_BUDGET: usize = 1;
+
+/// R-26: `QUARRY_BROWSER_MAX_SESSIONS` must exceed the concurrent-run cap plus
+/// the heavy lane, or the run cap is never the first limit a caller meets and
+/// the (cap+1)th concurrent context answers `browser_session_cap` instead of
+/// the run cap's typed 429. Pure; the edge logs each line as a warning at boot.
+/// WARN-only until the Chromium RSS at 8, 16 and 32 contexts is recorded and
+/// the numbers are final, then it should fail the boot.
+///
+/// `max_sessions == 0` disables the session cap and `max_concurrent_runs == 0`
+/// means runs are unlimited: the first leaves nothing to order, the second
+/// can never fit under a finite cap.
+pub fn session_cap_warnings(
+    max_sessions: usize,
+    max_concurrent_runs: usize,
+    heavy_lane: usize,
+) -> Vec<String> {
+    if max_sessions == 0 {
+        return Vec::new();
+    }
+    if max_concurrent_runs == 0 {
+        return vec![format!(
+            "QUARRY_BROWSER_MAX_SESSIONS ({max_sessions}) caps the browser while the concurrent-run cap is unlimited: runs can exhaust it and answer browser_session_cap instead of the run cap"
+        )];
+    }
+    let needed = max_concurrent_runs.saturating_add(heavy_lane);
+    if max_sessions <= needed {
+        return vec![format!(
+            "QUARRY_BROWSER_MAX_SESSIONS ({max_sessions}) must exceed the concurrent-run cap ({max_concurrent_runs}) plus the heavy lane ({heavy_lane}); at {needed} concurrent contexts the driver cap answers first"
+        )];
+    }
+    Vec::new()
+}
+
 /// Why the book let go of a session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReapReason {
@@ -516,9 +553,12 @@ impl SlotBook {
         Ok(slot)
     }
 
-    /// Give a page back. A session that is already gone took its pages with it.
-    pub fn page_closed(&mut self, key: &str) {
-        if let Some(entry) = self.sessions.get_mut(key) {
+    /// Give back a page that entry `id` reserved. A session that is already
+    /// gone took its pages with it, and a key released and admitted again is
+    /// a new entry: a late close of the old session's page (an attach guard
+    /// dropping, a tab closed through the old handle) changes nothing there.
+    pub fn page_closed(&mut self, key: &str, id: u64) {
+        if let Some(entry) = self.sessions.get_mut(key).filter(|entry| entry.id == id) {
             if entry.pages > 0 {
                 entry.pages -= 1;
                 let slot = &mut self.slots[entry.slot];
@@ -717,6 +757,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn session_cap_must_exceed_runs_plus_the_heavy_lane() {
+        // The shipped pair: 40 sessions against 32 runs and a heavy lane of 1.
+        assert!(session_cap_warnings(40, 32, HEAVY_LANE_BUDGET).is_empty());
+        // The exact boundary: 33 sessions hold 32 runs and the heavy lane.
+        assert!(session_cap_warnings(34, 32, 1).is_empty());
+        assert_eq!(session_cap_warnings(33, 32, 1).len(), 1, "33 = 32 + 1 leaves no headroom");
+        // The WS3.F design's old default: 12 sessions against 32 runs.
+        let warnings = session_cap_warnings(12, 32, 1);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("QUARRY_BROWSER_MAX_SESSIONS (12)"));
+        assert!(warnings[0].contains("(32)"));
+        // The RSS runs' override of 48 is fine.
+        assert!(session_cap_warnings(48, 32, 1).is_empty());
+        // No session cap: nothing to order.
+        assert!(session_cap_warnings(0, 32, 1).is_empty());
+        // Unlimited runs under a finite cap is its own warning.
+        let unlimited = session_cap_warnings(40, 0, 1);
+        assert_eq!(unlimited.len(), 1);
+        assert!(unlimited[0].contains("unlimited"));
+        // Never overflows.
+        assert!(!session_cap_warnings(usize::MAX, usize::MAX, usize::MAX).is_empty());
+    }
+
+    #[test]
     fn reap_if_due_reaps_one_key_and_skips_a_touched_or_new_one() {
         let mut book = SlotBook::new(cfg(1, 0, 0));
         let start = Instant::now();
@@ -911,7 +975,8 @@ mod tests {
         // Slot 1 is not.
         assert_eq!(book.page_opened("b", now), Ok(1));
         assert_eq!(book.page_opened("b", now), Ok(1));
-        book.page_closed("c");
+        let c = book.admission_id("c").unwrap();
+        book.page_closed("c", c);
         assert_eq!(book.page_opened("a", now), Ok(0));
         // A released session takes its pages with it.
         book.release("a");
@@ -1043,6 +1108,37 @@ mod tests {
         assert_eq!(book.loss("a", now), None);
     }
 
+    /// A late close of a released session's page (its attach guard dropping,
+    /// or a tab closed through the old handle) does not give back a page of
+    /// the session admitted next under the same key.
+    #[test]
+    fn a_late_page_close_of_a_released_session_leaves_the_next_session_alone() {
+        let now = Instant::now();
+        let mut book = SlotBook::new(cfg(1, 0, 4));
+        book.launched(0);
+        book.admit("k", TTL, now);
+        book.page_opened("k", now).unwrap();
+        let old = book.admission_id("k").unwrap();
+        book.release("k");
+        book.admit("k", TTL, now);
+        book.page_opened("k", now).unwrap();
+        let new = book.admission_id("k").unwrap();
+        assert_ne!(old, new);
+
+        book.page_closed("k", old);
+        assert_eq!(book.slot(0).unwrap().pages, 1, "the new session's page still counts");
+        book.page_opened("k", now).unwrap();
+        book.page_opened("k", now).unwrap();
+        book.page_opened("k", now).unwrap();
+        assert!(
+            matches!(book.page_opened("k", now), Err(PageRefusal::Cap { limit: 4, active: 4 })),
+            "the page cap still sees all four pages"
+        );
+        book.page_closed("k", new);
+        assert_eq!(book.slot(0).unwrap().pages, 3);
+    }
+
+
     #[test]
     fn release_is_idempotent() {
         let now = Instant::now();
@@ -1054,7 +1150,7 @@ mod tests {
         assert_eq!(book.release("a"), None);
         assert_eq!(book.slot(0).unwrap().sessions, 0);
         assert_eq!(book.slot(0).unwrap().pages, 0);
-        book.page_closed("a");
+        book.page_closed("a", 1);
         assert_eq!(book.slot(0).unwrap().pages, 0);
         // The cap counted it once and freed it once.
         assert!(matches!(

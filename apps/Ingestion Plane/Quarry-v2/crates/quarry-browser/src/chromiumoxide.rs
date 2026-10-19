@@ -100,16 +100,135 @@ struct CachedLiveFrame {
 
 /// One session's live-frame cache. The epoch changes whenever the session's
 /// page changes, so a capture that started before the change is not stored.
+/// `owner` is the book entry the slot belongs to: a key that is released and
+/// admitted again is a different session, and nothing of the old one
+/// reaches the new one's slot.
 #[derive(Debug)]
 struct LiveFrameSlot {
+    owner: u64,
     epoch: u64,
     cached: Option<CachedLiveFrame>,
+}
+
+/// What [`LiveFrameCache::begin`] found.
+#[derive(Debug)]
+enum FrameLookup {
+    /// A fresh cached frame of this entry, tab and options.
+    Hit(LiveFrame),
+    /// Capture, then [`LiveFrameCache::store`] under this owner and epoch.
+    Capture { owner: u64, epoch: u64 },
+    /// The call's entry is not the key's current one (released, or released
+    /// and admitted again): no slot is read or made.
+    NotOwner,
+}
+
+/// Every session's live-frame cache, by session key. Pure bookkeeping; the
+/// driver keeps it under one async mutex.
+#[derive(Debug, Default)]
+struct LiveFrameCache {
+    slots: HashMap<String, LiveFrameSlot>,
+}
+
+impl LiveFrameCache {
+    /// A capture for entry `owner` starts; `current` is the entry the key is
+    /// admitted under now. A slot left by an earlier entry is dropped.
+    fn begin(
+        &mut self,
+        key: &str,
+        owner: Option<u64>,
+        current: Option<u64>,
+        tab_id: &str,
+        options: LiveFrameOptions,
+        fresh_epoch: impl FnOnce() -> u64,
+    ) -> FrameLookup {
+        let (Some(owner), Some(current)) = (owner, current) else {
+            return FrameLookup::NotOwner;
+        };
+        if owner != current {
+            return FrameLookup::NotOwner;
+        }
+        if self.slots.get(key).is_some_and(|slot| slot.owner != owner) {
+            self.slots.remove(key);
+        }
+        let slot = self
+            .slots
+            .entry(key.to_owned())
+            .or_insert_with(|| LiveFrameSlot {
+                owner,
+                epoch: fresh_epoch(),
+                cached: None,
+            });
+        if let Some(cached) = slot.cached.as_ref() {
+            if cached.tab_id == tab_id
+                && cached.page_epoch == slot.epoch
+                && cached.options == options
+                && cached.captured_at.elapsed() <= Duration::from_millis(LIVE_FRAME_CACHE_TTL_MS)
+            {
+                return FrameLookup::Hit(cached.frame.clone());
+            }
+        }
+        FrameLookup::Capture {
+            owner,
+            epoch: slot.epoch,
+        }
+    }
+
+    /// Keep a frame captured under `owner` for the page at `frame.page_epoch`,
+    /// only while that slot is still the entry's and its page did not change.
+    fn store(&mut self, key: &str, owner: u64, frame: CachedLiveFrame) -> bool {
+        match self.slots.get_mut(key) {
+            Some(slot) if slot.owner == owner && slot.epoch == frame.page_epoch => {
+                slot.cached = Some(frame);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// An operation that started under entry `owner` changed the page.
+    fn invalidate(&mut self, key: &str, owner: Option<u64>, current: Option<u64>, epoch: u64) {
+        match current {
+            // A released session gets no slot back (its teardown removed it).
+            None => {
+                self.slots.remove(key);
+            }
+            Some(current) if Some(current) == owner => {
+                self.slots.insert(
+                    key.to_owned(),
+                    LiveFrameSlot {
+                        owner: current,
+                        epoch,
+                        cached: None,
+                    },
+                );
+            }
+            // Released and admitted again while the operation ran: the slot
+            // is the newer session's, and this late call leaves it alone.
+            Some(_) => {}
+        }
+    }
+
+    fn remove(&mut self, key: &str) -> Option<LiveFrameSlot> {
+        self.slots.remove(key)
+    }
+
+    fn clear(&mut self) {
+        self.slots.clear();
+    }
+
+    #[cfg(test)]
+    fn contains_key(&self, key: &str) -> bool {
+        self.slots.contains_key(key)
+    }
 }
 
 #[derive(Debug, Clone)]
 struct TabPage {
     tab_id: String,
     page: Page,
+    /// The book entry that reserved this page; closing it gives the page
+    /// back to that entry only.
+    admission: u64,
     title_hint: Option<String>,
     url_hint: Option<String>,
 }
@@ -169,7 +288,7 @@ pub struct ChromiumoxideDriver {
     #[cfg(test)]
     hooks: Arc<TestHooks>,
     frame_epochs: Arc<AtomicU64>,
-    live_frames: Arc<Mutex<HashMap<String, LiveFrameSlot>>>,
+    live_frames: Arc<Mutex<LiveFrameCache>>,
     devtools_events: Arc<Mutex<HashMap<String, Vec<BrowserDevtoolsEvent>>>>,
     devtools_sequence: Arc<Mutex<u64>>,
     egress_receipts: Arc<Mutex<HashMap<String, Vec<BrowserEgressReceipt>>>>,
@@ -219,7 +338,7 @@ impl ChromiumoxideDriver {
             #[cfg(test)]
             hooks: Arc::new(TestHooks::default()),
             frame_epochs: Arc::new(AtomicU64::new(0)),
-            live_frames: Arc::new(Mutex::new(HashMap::new())),
+            live_frames: Arc::new(Mutex::new(LiveFrameCache::default())),
             devtools_events: Arc::new(Mutex::new(HashMap::new())),
             devtools_sequence: Arc::new(Mutex::new(0)),
             egress_receipts: Arc::new(Mutex::new(HashMap::new())),
@@ -489,7 +608,7 @@ impl ChromiumoxideDriver {
     /// receipts.
     async fn run_probe(&self, slot: SlotId) -> QuarryResult<()> {
         let probe_key = format!("probe:{slot}");
-        let mut guard = AttachGuard::new(self, probe_key.clone(), false);
+        let mut guard = AttachGuard::new(self, probe_key.clone(), None);
         let outcome = with_deadline(Op::HealthProbe, async {
             if let Some(provider) = &self.pinned_egress_proxy {
                 provider
@@ -994,8 +1113,8 @@ impl ChromiumoxideDriver {
         // The page counts against the slot from here; the guard gives it back,
         // and closes whatever this call created, on every early return, on a
         // timeout and when the caller drops this future.
-        self.reserve_page(&session_key)?;
-        let mut attach = AttachGuard::new(self, session_key.clone(), true);
+        let admission = self.reserve_page(&session_key)?;
+        let mut attach = AttachGuard::new(self, session_key.clone(), Some(admission));
         self.ensure_browser().await?;
 
         let (tab_id, existing_context_id) = {
@@ -1190,6 +1309,7 @@ impl ChromiumoxideDriver {
         session_pages.tabs.push(TabPage {
             tab_id: tab_id.clone(),
             page: page.clone(),
+            admission,
             title_hint: None,
             url_hint: Some(initial_url.to_owned()),
         });
@@ -1199,11 +1319,16 @@ impl ChromiumoxideDriver {
     }
 
     /// Count a page against the session's slot, or say why it cannot open:
-    /// `browser_page_cap` (429), or the session is gone.
-    fn reserve_page(&self, session_key: &str) -> QuarryResult<()> {
-        let refusal = self.book().page_opened(session_key, Instant::now());
+    /// `browser_page_cap` (429), or the session is gone. Returns the book
+    /// entry the page counts against, which the close has to name.
+    fn reserve_page(&self, session_key: &str) -> QuarryResult<u64> {
+        let (refusal, admission) = {
+            let mut book = self.book();
+            let refusal = book.page_opened(session_key, Instant::now());
+            (refusal, book.admission_id(session_key))
+        };
         match refusal {
-            Ok(_) => Ok(()),
+            Ok(_) => Ok(admission.expect("a page was just reserved for this entry")),
             Err(PageRefusal::Cap { limit, active }) => Err(QuarryError::new(
                 ErrorCode::RateLimited,
                 "browser page capacity exhausted",
@@ -1328,24 +1453,24 @@ impl ChromiumoxideDriver {
         }
     }
 
+    /// The book entry `session`'s key is admitted under now. A call reads it
+    /// first and passes it to `invalidate_live_frame_cache`, so a call that
+    /// outlives its session never touches the session admitted after it.
+    fn admission(&self, session: &BrowserSession) -> Option<u64> {
+        self.book().admission_id(&Self::session_key(session))
+    }
+
     /// The session's page changed: drop its cached frame, and make a capture
     /// that is still running for the old page unable to store itself.
-    async fn invalidate_live_frame_cache(&self, session: &BrowserSession) {
+    /// `owner` is the entry the calling operation started under.
+    async fn invalidate_live_frame_cache(&self, session: &BrowserSession, owner: Option<u64>) {
         let session_key = Self::session_key(session);
         let epoch = self.frame_epochs.fetch_add(1, Ordering::SeqCst) + 1;
         let mut frames = self.live_frames.lock().await;
-        // A released session gets no slot back (its teardown removed it).
-        if !self.book().is_admitted(&session_key) {
-            frames.remove(&session_key);
-            return;
-        }
-        frames.insert(
-            session_key,
-            LiveFrameSlot {
-                epoch,
-                cached: None,
-            },
-        );
+        // Read under the frames lock: a teardown releases the entry before it
+        // removes the slot, so a slot made here is removed after.
+        let current = self.book().admission_id(&session_key);
+        frames.invalidate(&session_key, owner, current, epoch);
     }
 
     async fn load_snapshot(&self, lease: &BrowserLease) -> Option<SessionSnapshot> {
@@ -2839,6 +2964,7 @@ impl BrowserDriver for ChromiumoxideDriver {
     }
 
     async fn goto(&self, session: &BrowserSession, url: &str) -> QuarryResult<()> {
+        let owner = self.admission(session);
         self.refuse_lost(session)?;
         guard_navigation_target(url).await?;
         self.require_configured_egress(session).await?;
@@ -2863,7 +2989,7 @@ impl BrowserDriver for ChromiumoxideDriver {
 
         let session_key = Self::session_key(session);
         self.update_tab_metadata(&session_key, &tab_id, &page).await;
-        self.invalidate_live_frame_cache(session).await;
+        self.invalidate_live_frame_cache(session, owner).await;
 
         let mut inner = session.inner.lock().await;
         inner.pages_served = inner.pages_served.saturating_add(1);
@@ -3305,6 +3431,9 @@ impl BrowserDriver for ChromiumoxideDriver {
     ) -> QuarryResult<LiveFrame> {
         let options = normalize_live_frame_options(options);
         let session_key = Self::session_key(session);
+        // The entry this capture serves, read before its page is: a frame of
+        // this page may only ever be cached for this entry.
+        let owner = self.admission(session);
         let (tab_id, page) = self.current_tab_page(session).await?;
         #[cfg(test)]
         {
@@ -3319,44 +3448,37 @@ impl BrowserDriver for ChromiumoxideDriver {
             }
         }
         // Per session: one viewer's capture never waits for another session's.
-        let page_epoch = {
+        let (owner, page_epoch) = {
             let mut frames = self.live_frames.lock().await;
             // Released while this call looked for its page: its teardown has
             // removed the slot (or will, after this lock), so none is made.
             if let Some(error) = self.not_admitted_error(&session_key) {
                 return Err(error);
             }
-            let slot = frames.entry(session_key.clone()).or_insert_with(|| LiveFrameSlot {
-                epoch: self.frame_epochs.fetch_add(1, Ordering::SeqCst) + 1,
-                cached: None,
-            });
-            if let Some(cached) = slot.cached.as_ref() {
-                if cached.tab_id == tab_id
-                    && cached.page_epoch == slot.epoch
-                    && cached.options == options
-                    && cached.captured_at.elapsed()
-                        <= Duration::from_millis(LIVE_FRAME_CACHE_TTL_MS)
-                {
-                    return Ok(cached.frame.clone());
-                }
+            // Released and admitted again: the key is a newer session's now.
+            let current = self.book().admission_id(&session_key);
+            let fresh_epoch = || self.frame_epochs.fetch_add(1, Ordering::SeqCst) + 1;
+            match frames.begin(&session_key, owner, current, &tab_id, options, fresh_epoch) {
+                FrameLookup::Hit(frame) => return Ok(frame),
+                FrameLookup::Capture { owner, epoch } => (owner, epoch),
+                FrameLookup::NotOwner => return Err(not_open_error()),
             }
-            slot.epoch
         };
 
         let frame = capture_live_frame(&page, options).await?;
-        // Stored only if the page did not change (and the session was not
-        // released) while the frame was being captured.
-        if let Some(slot) = self.live_frames.lock().await.get_mut(&session_key) {
-            if slot.epoch == page_epoch {
-                slot.cached = Some(CachedLiveFrame {
-                    tab_id,
-                    page_epoch,
-                    options,
-                    captured_at: Instant::now(),
-                    frame: frame.clone(),
-                });
-            }
-        }
+        // Stored only if the page did not change and the entry is the one
+        // that started: never into a released session's slot or a newer one.
+        self.live_frames.lock().await.store(
+            &session_key,
+            owner,
+            CachedLiveFrame {
+                tab_id,
+                page_epoch,
+                options,
+                captured_at: Instant::now(),
+                frame: frame.clone(),
+            },
+        );
         Ok(frame)
     }
 
@@ -3422,12 +3544,13 @@ impl BrowserDriver for ChromiumoxideDriver {
         session: &BrowserSession,
         url: Option<&str>,
     ) -> QuarryResult<BrowserTab> {
+        let owner = self.admission(session);
         self.refuse_lost(session)?;
         self.require_configured_egress(session).await?;
         let (tab_id, page) = self.open_tab_page(session, url).await?;
         let session_key = Self::session_key(session);
         self.update_tab_metadata(&session_key, &tab_id, &page).await;
-        self.invalidate_live_frame_cache(session).await;
+        self.invalidate_live_frame_cache(session, owner).await;
         let tabs = self.list_tabs(session).await?;
         tabs.into_iter()
             .find(|tab| tab.tab_id == tab_id)
@@ -3440,6 +3563,7 @@ impl BrowserDriver for ChromiumoxideDriver {
     }
 
     async fn select_tab(&self, session: &BrowserSession, tab_id: &str) -> QuarryResult<()> {
+        let owner = self.admission(session);
         let session_key = Self::session_key(session);
         let mut pages = self.pages.lock().await;
         let session_pages = pages.get_mut(&session_key).ok_or_else(|| {
@@ -3457,11 +3581,12 @@ impl BrowserDriver for ChromiumoxideDriver {
         }
         session_pages.active_tab_id = Some(tab_id.to_owned());
         drop(pages);
-        self.invalidate_live_frame_cache(session).await;
+        self.invalidate_live_frame_cache(session, owner).await;
         Ok(())
     }
 
     async fn close_tab(&self, session: &BrowserSession, tab_id: &str) -> QuarryResult<()> {
+        let owner = self.admission(session);
         let session_key = Self::session_key(session);
         let (removed, empty_context) = {
             let mut pages = self.pages.lock().await;
@@ -3493,7 +3618,7 @@ impl BrowserDriver for ChromiumoxideDriver {
             };
             (removed, empty_context)
         };
-        self.book().page_closed(&session_key);
+        self.book().page_closed(&session_key, removed.admission);
 
         if let Err(err) = best_effort(Op::PageClose, removed.page.close()).await {
             tracing::debug!(
@@ -3519,7 +3644,7 @@ impl BrowserDriver for ChromiumoxideDriver {
                 }
             }
         }
-        self.invalidate_live_frame_cache(session).await;
+        self.invalidate_live_frame_cache(session, owner).await;
         Ok(())
     }
 
@@ -4245,8 +4370,8 @@ struct AttachGuard {
     book: Arc<std::sync::Mutex<SlotBook>>,
     browser: Arc<RwLock<Option<Browser>>>,
     session_key: String,
-    /// Holds a page reservation in the book that has to be given back.
-    reserved: bool,
+    /// The book entry whose page reservation this guard gives back.
+    reservation: Option<u64>,
     page: Option<Page>,
     context: Option<BrowserContextId>,
     download_dir: Option<Arc<tempfile::TempDir>>,
@@ -4254,12 +4379,12 @@ struct AttachGuard {
 }
 
 impl AttachGuard {
-    fn new(driver: &ChromiumoxideDriver, session_key: String, reserved: bool) -> Self {
+    fn new(driver: &ChromiumoxideDriver, session_key: String, reservation: Option<u64>) -> Self {
         Self {
             book: driver.book.clone(),
             browser: driver.browser.clone(),
             session_key,
-            reserved,
+            reservation,
             page: None,
             context: None,
             download_dir: None,
@@ -4287,11 +4412,11 @@ impl AttachGuard {
                 .await;
             }
         }
-        if self.reserved {
+        if let Some(id) = self.reservation {
             self.book
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .page_closed(&self.session_key);
+                .page_closed(&self.session_key, id);
         }
         self.armed = false;
     }
@@ -4302,11 +4427,11 @@ impl Drop for AttachGuard {
         if !self.armed {
             return;
         }
-        if self.reserved {
+        if let Some(id) = self.reservation {
             self.book
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .page_closed(&self.session_key);
+                .page_closed(&self.session_key, id);
         }
         let page = self.page.take();
         let context = self.context.take();
@@ -4761,6 +4886,96 @@ mod tests {
             driver.release(session).await.expect("release");
         }
     }
+
+    // ---- live-frame cache ownership (no browser needed) ----
+
+    fn cached_frame(page_epoch: u64, data: &str) -> CachedLiveFrame {
+        CachedLiveFrame {
+            tab_id: "tab-1".into(),
+            page_epoch,
+            options: LiveFrameOptions::default(),
+            captured_at: Instant::now(),
+            frame: LiveFrame {
+                mime_type: "image/jpeg".into(),
+                data_base64: data.into(),
+            },
+        }
+    }
+
+    fn capture(lookup: FrameLookup) -> (u64, u64) {
+        match lookup {
+            FrameLookup::Capture { owner, epoch } => (owner, epoch),
+            other => panic!("expected a capture, got {other:?}"),
+        }
+    }
+
+    /// A key released and admitted again is a different session. A capture
+    /// of the old session's page (its call read its entry before the
+    /// release) can neither read nor fill the new session's slot, so the old
+    /// session's frame never outlives it under the reused key.
+    #[test]
+    fn live_frame_cache_keeps_a_released_sessions_frame_out_of_the_next_session() {
+        let options = LiveFrameOptions::default();
+        let mut cache = LiveFrameCache::default();
+        // Entry 1 caches a frame; its release removes the slot.
+        let (owner, epoch) = capture(cache.begin("k", Some(1), Some(1), "tab-1", options, || 10));
+        assert!(cache.store("k", owner, cached_frame(epoch, "old-session")));
+        cache.remove("k");
+        // Entry 2 is admitted under the same key and starts a capture.
+        let (_, new_epoch) = capture(cache.begin("k", Some(2), Some(2), "tab-1", options, || 20));
+        // A late call of entry 1 is refused...
+        assert!(matches!(
+            cache.begin("k", Some(1), Some(2), "tab-1", options, || 21),
+            FrameLookup::NotOwner
+        ));
+        // ...and its frame is not stored under entry 2, even at the new epoch.
+        assert!(!cache.store("k", 1, cached_frame(new_epoch, "old-session")));
+        assert!(matches!(
+            cache.begin("k", Some(2), Some(2), "tab-1", options, || 22),
+            FrameLookup::Capture { owner: 2, .. }
+        ));
+        // A slot an earlier entry left behind is never served to a newer one.
+        let mut cache = LiveFrameCache::default();
+        let (owner, epoch) = capture(cache.begin("k", Some(1), Some(1), "tab-1", options, || 30));
+        assert!(cache.store("k", owner, cached_frame(epoch, "old-session")));
+        assert!(matches!(
+            cache.begin("k", Some(2), Some(2), "tab-1", options, || 31),
+            FrameLookup::Capture { owner: 2, epoch: 31 }
+        ));
+    }
+
+    /// A page change that an operation of the old session reports late (its
+    /// goto finished after the release and the next admission) leaves the
+    /// newer session's slot alone; the session's own change drops its frame;
+    /// a released key gets no slot back.
+    #[test]
+    fn live_frame_cache_invalidation_is_owned_by_the_entry_that_changed_the_page() {
+        let options = LiveFrameOptions::default();
+        let mut cache = LiveFrameCache::default();
+        let (owner, epoch) = capture(cache.begin("k", Some(2), Some(2), "tab-1", options, || 40));
+        assert!(cache.store("k", owner, cached_frame(epoch, "new-session")));
+
+        cache.invalidate("k", Some(1), Some(2), 41);
+        match cache.begin("k", Some(2), Some(2), "tab-1", options, || 42) {
+            FrameLookup::Hit(frame) => assert_eq!(frame.data_base64, "new-session"),
+            other => panic!("the newer session's frame was dropped: {other:?}"),
+        }
+
+        cache.invalidate("k", Some(2), Some(2), 43);
+        assert!(matches!(
+            cache.begin("k", Some(2), Some(2), "tab-1", options, || 44),
+            FrameLookup::Capture { owner: 2, epoch: 43 }
+        ));
+
+        cache.invalidate("k", Some(2), None, 45);
+        assert!(!cache.contains_key("k"), "a released key gets no slot back");
+        assert!(matches!(
+            cache.begin("k", Some(2), None, "tab-1", options, || 46),
+            FrameLookup::NotOwner
+        ));
+        assert!(!cache.contains_key("k"));
+    }
+
 
     // ---- WS3.F: slot book, crash, reaper, probe; WS3.D: attach cleanup ----
 

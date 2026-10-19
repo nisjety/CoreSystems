@@ -100,6 +100,11 @@ pub trait Driver: Send + Sync {
     fn browser_meta(&self) -> Option<BrowserMeta> {
         None
     }
+    /// The health of the local browser this driver fetches through (WS3.F),
+    /// for `/ready`. `None`: the driver has no browser.
+    async fn browser_health(&self) -> Option<quarry_browser::BrowserHealth> {
+        None
+    }
 }
 
 /// Select driver by url + hints. Simple rule for scaffold:

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use url::Url;
 
-use quarry_browser::{BrowserDriver as BrowserDriverTrait, BrowserEgressPolicy};
+use quarry_browser::{BrowserDriver as BrowserDriverTrait, BrowserEgressPolicy, BrowserSession};
 use quarry_core::output::DriverKind;
 use quarry_core::{
     ids::kinds,
@@ -19,7 +19,7 @@ use quarry_core::{
 use crate::{
     driver::{Driver, FetchHints},
     fetch::FetchResponse,
-    lease_pool::RuntimeLeasePool,
+    lease_pool::{LeaseGuard, RuntimeLeasePool},
 };
 
 const LEASE_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -78,6 +78,70 @@ pub struct BrowserDriverAdapter {
     managed_processor_id: Option<String>,
 }
 
+/// The browser session and pool slot of one fetch, held until the fetch
+/// gives them back. A fetch that is cancelled (the HTTP request was dropped,
+/// or a caller's timeout dropped the future) never reaches its own release,
+/// so the drop releases the session on the runtime and keeps the pool slot
+/// until that release has run: the page, the context and the slot never
+/// outlive the fetch.
+struct HeldSession {
+    inner: Arc<dyn BrowserDriverTrait + Send + Sync>,
+    session: Option<BrowserSession>,
+    lease: Option<LeaseGuard>,
+}
+
+impl HeldSession {
+    fn session(&self) -> &BrowserSession {
+        self.session.as_ref().expect("held until finish")
+    }
+
+    /// Release the session and give the slot back. `failed` (or a failed
+    /// release) poisons the lease so the pool does not hand it out again.
+    async fn finish(mut self, failed: bool) -> QuarryResult<()> {
+        let session = self.session.take().expect("held until finish");
+        let mut lease = self.lease.take();
+        let released = self.inner.release(session).await;
+        if failed || released.is_err() {
+            if let Some(lease) = lease.as_mut() {
+                lease.poison();
+            }
+        }
+        drop(lease);
+        released
+    }
+}
+
+impl Drop for HeldSession {
+    fn drop(&mut self) {
+        let Some(session) = self.session.take() else {
+            return;
+        };
+        // Cancelled mid-fetch: the session's state is unknown, so the lease
+        // is not reused.
+        let mut lease = self.lease.take();
+        if let Some(lease) = lease.as_mut() {
+            lease.poison();
+        }
+        let inner = self.inner.clone();
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn(async move {
+                    if let Err(error) = inner.release(session).await {
+                        tracing::debug!(
+                            error_class = error.code.wire_name(),
+                            "browser fetch cancelled: session release failed"
+                        );
+                    }
+                    drop(lease);
+                });
+            }
+            Err(_) => {
+                tracing::warn!("browser fetch dropped outside a runtime: session not released");
+            }
+        }
+    }
+}
+
 impl BrowserDriverAdapter {
     pub fn new(
         inner: Arc<dyn BrowserDriverTrait + Send + Sync>,
@@ -119,6 +183,10 @@ impl Driver for BrowserDriverAdapter {
         hints: &FetchHints,
     ) -> QuarryResult<FetchResponse> {
         self.do_fetch(url, hints).await
+    }
+
+    async fn browser_health(&self) -> Option<quarry_browser::BrowserHealth> {
+        Some(self.inner.health().await)
     }
 }
 
@@ -181,6 +249,14 @@ impl BrowserDriverAdapter {
                 return Err(e);
             }
         };
+        // From here on the session and the slot are released on every path,
+        // a cancelled fetch included.
+        let held = HeldSession {
+            inner: self.inner.clone(),
+            session: Some(session),
+            lease: Some(guard),
+        };
+        let session = held.session();
 
         // The ordinary scrape pipeline is not an exemption from Quarry's
         // browser egress authority. A fresh Chromium context begins deny-all;
@@ -194,19 +270,17 @@ impl BrowserDriverAdapter {
         if let Err(e) = self
             .inner
             .configure_egress_policy(
-                &session,
+                session,
                 BrowserEgressPolicy::from_allowed_domains(&allowed_domains),
             )
             .await
         {
-            guard.poison();
-            let _ = self.inner.release(session).await;
+            let _ = held.finish(true).await;
             return Err(e);
         }
 
-        if let Err(e) = self.inner.goto(&session, url.as_str()).await {
-            guard.poison();
-            let _ = self.inner.release(session).await;
+        if let Err(e) = self.inner.goto(session, url.as_str()).await {
+            let _ = held.finish(true).await;
             return Err(e);
         }
 
@@ -220,18 +294,16 @@ impl BrowserDriverAdapter {
                 .render
                 .wait_for_timeout_ms
                 .unwrap_or(DEFAULT_WAIT_FOR_TIMEOUT_MS);
-            if let Err(e) = self.inner.wait_for(&session, selector, timeout).await {
-                guard.poison();
-                let _ = self.inner.release(session).await;
+            if let Err(e) = self.inner.wait_for(session, selector, timeout).await {
+                let _ = held.finish(true).await;
                 return Err(e);
             }
         }
 
-        let mut body_bytes = match self.inner.content(&session).await {
+        let mut body_bytes = match self.inner.content(session).await {
             Ok(b) => b,
             Err(e) => {
-                guard.poison();
-                let _ = self.inner.release(session).await;
+                let _ = held.finish(true).await;
                 return Err(e);
             }
         };
@@ -249,7 +321,7 @@ impl BrowserDriverAdapter {
             while Instant::now() < deadline {
                 tokio::time::sleep(SETTLE_POLL).await;
                 polls += 1;
-                let Ok(next) = self.inner.content(&session).await else {
+                let Ok(next) = self.inner.content(session).await else {
                     break;
                 };
                 let text = crate::fallback_driver::visible_text_len(&next);
@@ -292,10 +364,7 @@ impl BrowserDriverAdapter {
             served_by: DriverKind::Browser,
         };
 
-        if let Err(e) = self.inner.release(session).await {
-            guard.poison();
-            return Err(e);
-        }
+        held.finish(false).await?;
 
         Ok(response)
     }
@@ -545,6 +614,124 @@ mod tests {
             last,
             Some((".ready".to_string(), DEFAULT_WAIT_FOR_TIMEOUT_MS))
         );
+    }
+
+    /// A driver whose `goto` never returns: the fetch can only end by being
+    /// dropped. It records each release and how many pool slots were free
+    /// when the release ran.
+    struct StallingDriver {
+        entered: tokio::sync::Notify,
+        releases: AtomicUsize,
+        free_slots_at_release: std::sync::Mutex<Vec<usize>>,
+        pool: std::sync::OnceLock<Arc<RuntimeLeasePool>>,
+    }
+
+    #[async_trait]
+    impl BrowserDriverTrait for StallingDriver {
+        async fn configure_egress_policy(
+            &self,
+            _session: &BrowserSession,
+            _policy: BrowserEgressPolicy,
+        ) -> QuarryResult<()> {
+            Ok(())
+        }
+        async fn acquire(&self, lease: &BrowserLease) -> QuarryResult<BrowserSession> {
+            Ok(BrowserSession {
+                lease: lease.clone(),
+                inner: Arc::new(TokioMutex::new(SessionInner::default())),
+            })
+        }
+        async fn release(&self, _session: BrowserSession) -> QuarryResult<()> {
+            let free = self.pool.get().map(|pool| pool.available()).unwrap_or(usize::MAX);
+            self.free_slots_at_release.lock().unwrap().push(free);
+            self.releases.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        async fn goto(&self, _session: &BrowserSession, _url: &str) -> QuarryResult<()> {
+            self.entered.notify_one();
+            std::future::pending::<()>().await;
+            Ok(())
+        }
+        async fn content(&self, _session: &BrowserSession) -> QuarryResult<Bytes> {
+            Ok(Bytes::new())
+        }
+        async fn screenshot(
+            &self,
+            _session: &BrowserSession,
+            _full_page: bool,
+        ) -> QuarryResult<Bytes> {
+            Ok(Bytes::new())
+        }
+        async fn pdf(&self, _session: &BrowserSession) -> QuarryResult<Bytes> {
+            Ok(Bytes::new())
+        }
+        async fn wait_for(
+            &self,
+            _session: &BrowserSession,
+            _selector: &str,
+            _timeout_ms: u32,
+        ) -> QuarryResult<()> {
+            Ok(())
+        }
+    }
+
+    /// A fetch cancelled mid-navigation (the HTTP request was dropped, or a
+    /// caller's timeout dropped the future) releases its browser session,
+    /// and its pool slot comes back only after that release ran.
+    #[tokio::test]
+    async fn cancelled_fetch_releases_the_session_and_the_slot() {
+        let driver = Arc::new(StallingDriver {
+            entered: tokio::sync::Notify::new(),
+            releases: AtomicUsize::new(0),
+            free_slots_at_release: std::sync::Mutex::new(Vec::new()),
+            pool: std::sync::OnceLock::new(),
+        });
+        let pool = Arc::new(RuntimeLeasePool::new(1));
+        driver.pool.set(pool.clone()).ok().expect("set once");
+        let adapter = Arc::new(BrowserDriverAdapter::new(driver.clone(), pool.clone()));
+        let fetching = {
+            let adapter = adapter.clone();
+            tokio::spawn(async move {
+                let url = Url::parse("https://example.com/").unwrap();
+                adapter.fetch(&url).await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(5), driver.entered.notified())
+            .await
+            .expect("the fetch reached goto");
+        assert_eq!(pool.available(), 0, "the fetch holds the only slot");
+
+        fetching.abort();
+        assert!(fetching.await.expect_err("aborted").is_cancelled());
+
+        let released = tokio::time::timeout(Duration::from_secs(5), async {
+            while driver.releases.load(Ordering::SeqCst) == 0 || pool.available() == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(released.is_ok(), "the cancelled fetch released its session and slot");
+        assert_eq!(driver.releases.load(Ordering::SeqCst), 1, "released exactly once");
+        assert_eq!(
+            *driver.free_slots_at_release.lock().unwrap(),
+            vec![0],
+            "the slot was still held while the session was released"
+        );
+        assert_eq!(pool.available(), 1);
+    }
+
+    /// A fetch that ends normally releases once and is not released again by
+    /// the guard.
+    #[tokio::test]
+    async fn finished_fetch_releases_exactly_once() {
+        let mock = Arc::new(MockBrowserDriver::new(b"x"));
+        let pool = Arc::new(RuntimeLeasePool::new(1));
+        let adapter = BrowserDriverAdapter::new(mock.clone(), pool.clone());
+        let url = Url::parse("https://example.com/").unwrap();
+        adapter.fetch(&url).await.unwrap();
+        tokio::task::yield_now().await;
+        assert_eq!(mock.release_count.load(Ordering::SeqCst), 1);
+        assert_eq!(pool.available(), 1);
     }
 
     #[tokio::test]
