@@ -31,6 +31,9 @@
 //!    emits the request, the CDP Fetch boundary aborts it, and the refusal is
 //!    read back from the driver's receipts, once per layer: the domain grant, and
 //!    (with a grant that wrongly names the loopback address) the SSRF guard.
+//!    The proxy can write the same policy string for the same request, so the
+//!    tests also read the pinned proxy's OWN receipts and require none for the
+//!    listener: that is what shows the CDP boundary, not the proxy, refused it.
 //!    Needs Chromium, so it is gated on `CHROMIUMOXIDE_TEST=1`.
 //! 3. `the_pinned_proxy_refuses_loopback_*` — a genuine HTTP request through the
 //!    proxy's own endpoint to a live loopback listener, once per layer, with the
@@ -236,7 +239,7 @@ async fn chromium_page_request_to_loopback_is_refused(
 ) {
     let target = MockServer::start().await;
     let proxy = Arc::new(PinnedBrowserEgressProxy::new());
-    let driver = ChromiumoxideDriver::new().with_pinned_egress_proxy(proxy);
+    let driver = ChromiumoxideDriver::new().with_pinned_egress_proxy(proxy.clone());
 
     let session = driver
         .acquire(&lease(session_key))
@@ -316,6 +319,30 @@ async fn chromium_page_request_to_loopback_is_refused(
             "blocked, but by the wrong layer: {receipt:?}"
         );
     }
+
+    // Which layer refused. The driver merges the proxy's receipts into the
+    // stream read above, and both layers can write the same policy string for
+    // the same request (`domain_grant_blocked`), so the receipts alone cannot
+    // tell a CDP refusal from a proxy refusal. A CDP refusal happens before
+    // Chromium routes anything, so the proxy must hold NO receipt for the
+    // listener; if the CDP interception were removed, the request would reach
+    // the proxy, which would record (and refuse) it, and this fails. That the
+    // proxy does record loopback refusals is proven by the
+    // `the_pinned_proxy_refuses_loopback_*` tests, so an empty list is
+    // meaningful. The proxy is read straight from the provider, not through
+    // the driver, so nothing is merged in.
+    let proxy_receipts = proxy
+        .receipts_after(session_key, 0, 100)
+        .await
+        .expect("read the pinned proxy's own receipts");
+    let proxy_for_listener: Vec<_> = proxy_receipts
+        .iter()
+        .filter(|receipt| receipt.url.contains(&host))
+        .collect();
+    assert!(
+        proxy_for_listener.is_empty(),
+        "the request reached the pinned proxy, so the CDP boundary did not refuse it first:          {proxy_for_listener:?}"
+    );
 
     assert_listener_saw_nothing(&target, "page-initiated request").await;
     require_witness_records(&target).await;

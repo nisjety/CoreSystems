@@ -285,7 +285,8 @@ jobs:
   #    browser_egress_boundary (compiled out entirely without
   #    `--features chromiumoxide`, so `cargo test --workspace` never ran it; it
   #    has a real Chromium whose PAGE requests a loopback listener and is refused
-  #    by the CDP boundary, once by the domain grant and once by the SSRF guard,
+  #    by the CDP boundary (the pinned proxy holding no receipt for it, so the
+  #    refusal is the CDP layer's), once by the domain grant and once by the SSRF guard,
   #    plus the real pinned proxy refusing loopback over a real connection, once
   #    per layer, each read back from the receipts) and quarry-edge's
   #    zdr_behavior (needs no Chromium, only the default browser-agent feature,
