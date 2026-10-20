@@ -220,6 +220,9 @@ async fn run() -> anyhow::Result<()> {
     budget::BudgetLimits::from_env(|name| std::env::var(name).ok())
         .map_err(|e| anyhow::anyhow!("budget: {e}"))?;
     tracing::info!(mode = budget_mode.label(), "agent run budget enforcement");
+    // Whether a broker grant's budget claim tightens the run it backs (WS6.E).
+    let claim_mode = budget::ClaimMode::from_env().map_err(|e| anyhow::anyhow!("budget: {e}"))?;
+    tracing::info!(mode = claim_mode.label(), "grant budget claim");
     // How much of a browser pool one organization may hold (0 = no cap).
     let pool_org_max = quarry_runtime::lease_pool::org_max_permits_from_env(|name| {
         std::env::var(name).ok()
