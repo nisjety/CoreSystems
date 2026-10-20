@@ -22,6 +22,14 @@ with a pointer forward. Newest first.
 
 ---
 
+## 2026-10-20 - WS14 S2a live-verified on the dev stack: the approved plan runs, the widest rung under the ask posture, and the UI arms exactly one execute turn
+
+**Status: the 2026-10-19 S2a entry is now live-verified on a developer stack (not production); the switches were turned on for the proof and are all off again.** Evidence: `docs/compliance/evidence/live-proof-ws14-s2a-run-the-approved-plan-2026-10-20.txt` (identifiers only). It closes the 2026-10-17 finding in practice: a chat-UI path now reaches an effectful tool.
+
+**What was shown.** With the switch off an execute turn is one typed error frame (`plan_execute_disabled`) before any run exists (database counts unchanged); with the execute switch on but approval-resume off it is refused with the coupling message; with everything on and no grant it is `plan_grant_unavailable` after the connected frame, the run is terminalized and execution-core is never called; after a real plan, approval at `danger_full_access` and an execute turn, a NEW run started under the grant, the gateway logged the ratchet (auto to ask), execution-core ran it in ask mode, its risky call paused and resumed in place through the S7 chain; approval at `workspace_write` gave an execute run in auto mode with no ratchet and the executor held the narrower rung; through the real UI (a worktree dev server) the approval showed the third "Kjør plan" pill and the prefilled draft, the send ran the plan's step in the sandbox ("Output: s2a-ui-proof"), and the pill was gone afterwards.
+
+**Accepted, as recorded before.** The ask posture gates only the risky-call list, so the sandboxed code interpreter ran without a click at the widest rung; the shell tool (offered as a client tool in the API stages) has no executor in this stack, so no effect left the sandbox; a grant expiry or gateway restart, the 24-hour server-side reuse of a rung and the SPA flag-off path were not exercised live. No defect needed a code change: the proof found none in S2a. Pre-existing observations: the plan turn shows the committed "completed agent run did not provide an answer" banner beside the plan card, and the worktree composer logs four `STRICT_READ_UNTRACKED` warnings from effects of commit f5b8e1c7.
+
 ## 2026-10-20 - S8-A: the executor's park and its resume are built behind default-off switches; crash-park (S8-B) is split off and deferred
 
 **Status: implemented (steps S8-0 to S8-8), source-verified, NOT live-verified. The 2026-10-16 entry stays proposed; this is an addendum to it.** Commits are in the plan's Build ledger. Nothing here changes behaviour with every switch off (a source guard and the unit tests pin it).
