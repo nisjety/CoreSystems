@@ -42,7 +42,9 @@
 //!    the TRANSPORT half, which CDP interception is only defence in depth for:
 //!    Chromium would otherwise re-resolve an approved hostname when it opens a
 //!    socket, and this is the thing that stops the socket. Needs no browser, so
-//!    it runs everywhere.
+//!    it needs neither Chromium nor `CHROMIUMOXIDE_TEST`. It is still compiled
+//!    only with the `chromiumoxide` feature (the `#![cfg]` below covers the whole
+//!    file), so a plain `cargo test --workspace` neither builds nor runs it.
 //!
 //! Why a grant that names `127.0.0.1` is used: `canonical_broker_domains`
 //! rejects IP literals, so a governed run can never hold such a grant. The
@@ -51,6 +53,14 @@
 //! layer stands between the page and the listener, so removing that check turns
 //! the test red. With a restricted grant naming an unrelated domain the grant
 //! layer refuses first and the SSRF check would never be reached.
+//!
+//! Checked by mutation (2026-10-20, a copy of the workspace, Chromium 155): with
+//! `guard_page_request_target` returning `Ok` the `..._ssrf_guard` test fails (the
+//! listener's receipt is an `Allow`); with the CDP interception not installed
+//! (`install_network_guard` returning before `Fetch.enable`) both page tests fail,
+//! the domain-grant one at the assertion that the pinned proxy holds no receipt for
+//! the listener; with the grant layer of the CDP guard forced open the domain-grant
+//! test fails on the policy string. The unmutated file passes.
 //!
 //! Every test that asserts an empty listener log also contacts the listener
 //! directly afterwards and requires that it DOES log (`require_witness_records`),
@@ -341,7 +351,7 @@ async fn chromium_page_request_to_loopback_is_refused(
         .collect();
     assert!(
         proxy_for_listener.is_empty(),
-        "the request reached the pinned proxy, so the CDP boundary did not refuse it first:          {proxy_for_listener:?}"
+        "the request reached the pinned proxy, so the CDP boundary did not refuse it first: {proxy_for_listener:?}"
     );
 
     assert_listener_saw_nothing(&target, "page-initiated request").await;
