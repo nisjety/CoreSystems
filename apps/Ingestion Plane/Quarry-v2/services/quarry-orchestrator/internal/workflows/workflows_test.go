@@ -408,7 +408,8 @@ func TestChangeMonitorWF_ActivityFailureEmitsRunFailed(t *testing.T) {
 
 // A probe the edge refused under Zero Data Retention (a baseline would be a
 // durable resource) ends the run cleanly: one run_failed event whose reason is
-// zdr_refused and which carries no URL, no change event, and a workflow that
+// zdr_refused and which carries no URL (the run_started before it still does: see the
+// known-gap comment below), no change event, and a workflow that
 // completes WITHOUT an error (so nothing retries it).
 func TestChangeMonitorWF_ZDRRefusalEndsTheRunCleanly(t *testing.T) {
 	env, a := newEnv(t)
@@ -440,6 +441,13 @@ func TestChangeMonitorWF_ZDRRefusalEndsTheRunCleanly(t *testing.T) {
 	}
 	require.Equal(t, []quarrycontracts.EventType{quarrycontracts.EvtRunStarted, quarrycontracts.EvtRunFailed}, types,
 		"no change_detected, change_unchanged or run_completed for a refused probe")
+
+	// KNOWN GAP, pinned so it cannot change unnoticed: run_started is emitted BEFORE the
+	// record call (the orchestrator cannot know the refusal beforehand), so a refused
+	// run's first event still carries the monitored URL. Only the run_failed event is
+	// URL-free. See docs/RUNBOOKS.md "What the orchestrator lacks".
+	require.Equal(t, "https://example.com/secret-path", emitted[0].Payload["url"],
+		"run_started carries the URL of a run that is refused afterwards")
 
 	failed := emitted[1]
 	require.Equal(t, "zdr_refused", failed.Payload["reason"])

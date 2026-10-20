@@ -125,8 +125,8 @@ Reads and deletes (schedule list, pause and delete; profile list, load, delete a
 | matrix row | status and `error.code` | `details.zdr_refusal.action` | request |
 |---|---|---|---|
 | `durable_jobs` | 403 `FORBIDDEN` | `crawl`, `batch` | `POST /v1/crawl`, `POST /v1/batch` (a ZDR organization's user, or a body with `zdr: true`) |
-| `agent_persistent_profile` | 400 `BAD_REQUEST`, message `zdr_persistent_profile_forbidden: ...` | `profile` | `POST /v1/agent/runs` under ZDR with `persist_profile` or a `profile_id` |
-| `agent_resume` | 403 `BAD_REQUEST`, message `ZDR runs cannot be resumed from durable state` | `resume` | `POST /v1/agent/runs` with a `resume_run_id` whose checkpoint is ZDR |
+| `agent_persistent_profile` | 400 `BAD_REQUEST`, message `zdr_persistent_profile_forbidden: ...`; `details.legacy_code` is `zdr_persistent_profile_forbidden` (the token the message has always started with, now also a field) | `profile` | `POST /v1/agent/runs` under ZDR with `persist_profile` or a `profile_id` |
+| `agent_resume` | 403 `BAD_REQUEST`, message `ZDR runs cannot be resumed from durable state`; no `legacy_code` (the message never carried a token, so none is invented) | `resume` | `POST /v1/agent/runs` with a `resume_run_id` whose checkpoint is ZDR |
 
 The orchestrator treats a 403 with this code from `/v1/internal/change/record` as a clean terminal outcome of the change-monitor run (`run_failed`, `reason: zdr_refused`, no retry), not as an auth failure; any other 403 stays an auth failure there (`docs/RUNBOOKS.md`, "A ZDR organization and durable resources").
 
