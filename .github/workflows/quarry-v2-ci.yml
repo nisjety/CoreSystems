@@ -178,6 +178,23 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 10
+      # The Postgres store tests of quarry-runtime (postgres_*: queue, profile,
+      # baseline, event history, step receipts with migration 0011) skip without a
+      # DATABASE_URL, and `cargo test --workspace` neither enables the
+      # postgres-queue feature nor provides a database. The "Postgres store gates"
+      # step below runs them against this service with REQUIRE_CONTRACT=1.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: quarry
+          POSTGRES_DB: quarry_test
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d quarry_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v7
 
@@ -229,6 +246,17 @@ jobs:
           REDIS_URL: redis://127.0.0.1:6380
           REQUIRE_CONTRACT: "1"
         run: cargo test -p quarry-edge --test cache_policy --test zdr_claim_floor
+
+      - name: Postgres store gates
+        # The postgres_* tests of quarry-runtime (incl. the step receipt round trips
+        # that prove migration 0011 and the agent identity column) skip without a
+        # database. With REQUIRE_CONTRACT=1 an unreachable Postgres fails the step
+        # (postgres_step_receipts.rs). --test-threads=1: the stores share tables in
+        # one database, so parallel tests of different stores race on each other.
+        env:
+          DATABASE_URL: postgres://postgres:quarry@127.0.0.1:5433/quarry_test
+          REQUIRE_CONTRACT: "1"
+        run: cargo test -p quarry-runtime --features postgres-queue --lib postgres_ -- --test-threads=1
 
       # The scrape options schema is a golden generated from the Rust type, and
       # the OpenAPI file is checked against it and against the routes the edge
