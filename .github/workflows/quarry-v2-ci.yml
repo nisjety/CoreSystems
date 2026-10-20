@@ -271,22 +271,32 @@ jobs:
   #    version the local evidence matched (Chromium 155.0.8059.79); bump it on
   #    purpose, not by drift.
   #  - A missing browser cannot pass by skipping. With CHROMIUMOXIDE_TEST=1 every
-  #    live test goes through quarry_browser::live_gate, which FAILS when no
-  #    Chromium is found or when CHROME names a file that does not exist
-  #    (chromiumoxide itself would fall back silently to any chromium on the PATH).
+  #    live test that starts a browser goes through quarry_browser::live_gate
+  #    (the driver's own tests, tests/ssrf.rs and browser_egress_boundary), which
+  #    FAILS when no Chromium is found or when CHROME names a file that does not
+  #    exist (chromiumoxide itself would fall back silently to any chromium on the
+  #    PATH). The fail-instead-of-skip mapping is pinned by unit tests of
+  #    live_gate::enforce (#[should_panic]); this job cannot reach that branch
+  #    itself, because the install step above must yield an executable.
   #  - It runs all three sets that are gated on the live feature or flag:
-  #    quarry-browser (the live driver tests), quarry-runtime's
-  #    browser_egress_boundary (a real Chromium refusing a loopback navigation
-  #    through the real pinned proxy; it is compiled out entirely without
-  #    `--features chromiumoxide`, so `cargo test --workspace` never ran it) and
-  #    quarry-edge's zdr_behavior (needs no Chromium, only the default
-  #    browser-agent feature, and is listed here so a lane that proves ZDR for the
-  #    agent routes runs it next to the browser tests).
+  #    quarry-browser (the live driver tests, and tests/ssrf.rs: the driver
+  #    refuses loopback, metadata and RFC1918 URLs in Rust, with a real browser
+  #    launched but never asked to navigate), quarry-runtime's
+  #    browser_egress_boundary (compiled out entirely without
+  #    `--features chromiumoxide`, so `cargo test --workspace` never ran it; it
+  #    has a real Chromium whose PAGE requests a loopback listener and is refused
+  #    by the CDP boundary, once by the domain grant and once by the SSRF guard,
+  #    plus the real pinned proxy refusing loopback over a real connection, once
+  #    per layer, each read back from the receipts) and quarry-edge's
+  #    zdr_behavior (needs no Chromium, only the default browser-agent feature,
+  #    and is listed here so a lane that proves ZDR for the agent routes runs it
+  #    next to the browser tests).
   #  - One test at a time (--test-threads=1): each launches its own Chromium, and
   #    the parallel suite was the cause of the lock-timeout flake fixed in
   #    7420d3a6.
-  # The tests that need a public origin are #[ignore]d with the reason
-  # (`cargo test ... -- --ignored --list` shows them).
+  # What is NOT run, on purpose: tests/ssrf.rs test_valid_public_url is #[ignore]d
+  # because it needs DNS for a public host (and, with no pinned proxy in that
+  # test, can only assert a negative). The last step lists every ignored test.
   quarry-browser-live:
     name: Live browser tests (Chromium)
     if: github.event_name != 'schedule'
