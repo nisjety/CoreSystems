@@ -542,6 +542,166 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Envelope_Error'
+  /v1/agent/runs/{run_id}/tabs:
+    get:
+      operationId: listAgentTabs
+      summary: List the live browser tabs of a run
+      description: >-
+        The driver's current tabs for the run. A tab carries no opener here; the owner
+        projection (`GET .../browser-session`, see CONTRACTS.md) names who opened
+        each tab as `openedBy`.
+      tags:
+      - agent
+      parameters:
+      - $ref: '#/components/parameters/AgentRunId'
+      responses:
+        '200':
+          description: The run's tabs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_AgentTabs'
+        '404':
+          description: Run not found or not owned by the caller
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+    post:
+      operationId: openAgentTab
+      summary: Open a browser tab on a run
+      description: >-
+        Opens a tab (optionally navigated to `url`) and records who did it. Subject
+        to the same gates as a step: the run's domains, its grant, and the take-over
+        rule. Who is calling comes from the token (a service principal is an agent
+        whatever it sends; a person is a person unless `initiatedBy` says `agent`),
+        so the hint only tightens. The recorded identity of an agent is on the
+        timeline item and the owner projection; see CONTRACTS.md.
+      tags:
+      - agent
+      parameters:
+      - $ref: '#/components/parameters/AgentRunId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OpenAgentTabRequest'
+      responses:
+        '200':
+          description: The new tab and the run's tabs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_AgentTab'
+        '403':
+          description: Domain (including a `url` outside the run's allowed domains), SSRF, grant or tier refusal
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '404':
+          description: Run not found, not owned by the caller, or no longer live
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '409':
+          description: >-
+            USER_TOOK_OVER: the person using the browser has taken it over and this
+            call is an agent's. `error.details` is
+            `{control_mode: "human_takeover", control_epoch}`. Enforced only when
+            QUARRY_EDGE__TAKEOVER_ENFORCEMENT is on.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '422':
+          description: >-
+            The body does not parse: both spellings of the hint in one body, or a hint
+            that is neither `human` nor `agent`. The answer is the HTTP framework's
+            plain-text rejection, not an error envelope.
+  /v1/agent/runs/{run_id}/tabs/{tab_id}/select:
+    post:
+      operationId: selectAgentTab
+      summary: Make a tab the active one
+      description: >-
+        Has no body, so the hint and the advisory fields are query parameters. Same
+        take-over rule and recording as opening a tab.
+      tags:
+      - agent
+      parameters:
+      - $ref: '#/components/parameters/AgentRunId'
+      - $ref: '#/components/parameters/AgentTabId'
+      - $ref: '#/components/parameters/TabInitiatedBy'
+      - $ref: '#/components/parameters/TabAiRunId'
+      - $ref: '#/components/parameters/TabAgentLabel'
+      responses:
+        '200':
+          description: The run's tabs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_AgentTabs'
+        '400':
+          description: A hint that is not `human` or `agent`
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '404':
+          description: Run not found, not owned by the caller, or no longer live
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '409':
+          description: USER_TOOK_OVER, as for opening a tab
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+  /v1/agent/runs/{run_id}/tabs/{tab_id}:
+    delete:
+      operationId: closeAgentTab
+      summary: Close a tab
+      description: >-
+        Has no body, so the hint and the advisory fields are query parameters. Same
+        take-over rule and recording as opening a tab; the tab's opener record is
+        dropped.
+      tags:
+      - agent
+      parameters:
+      - $ref: '#/components/parameters/AgentRunId'
+      - $ref: '#/components/parameters/AgentTabId'
+      - $ref: '#/components/parameters/TabInitiatedBy'
+      - $ref: '#/components/parameters/TabAiRunId'
+      - $ref: '#/components/parameters/TabAgentLabel'
+      responses:
+        '200':
+          description: The run's tabs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_AgentTabs'
+        '400':
+          description: A hint that is not `human` or `agent`
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '404':
+          description: Run not found, not owned by the caller, or no longer live
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '409':
+          description: USER_TOOK_OVER, as for opening a tab
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
   /v1/agent/runs/{run_id}/interact:
     post:
       operationId: agentInteract
@@ -1899,6 +2059,40 @@ components:
       schema:
         type: string
       description: Tenant-owned Quarry run identifier
+    AgentTabId:
+      name: tab_id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: A tab id from the run's tab list
+    TabInitiatedBy:
+      name: initiatedBy
+      in: query
+      required: false
+      schema:
+        type: string
+        enum:
+        - human
+        - agent
+      description: >-
+        Who is making the call. Can only tighten: `agent` on a person's token makes it an
+        agent's, and a service principal is always an agent. `initiated_by` is accepted
+        too (both in one request is an error).
+    TabAiRunId:
+      name: aiRunId
+      in: query
+      required: false
+      schema:
+        $ref: '#/components/schemas/AdvisoryIdentifier'
+      description: ADVISORY. The AI run the caller says it acts for. Recorded, never trusted. `ai_run_id` is accepted too.
+    TabAgentLabel:
+      name: agentLabel
+      in: query
+      required: false
+      schema:
+        $ref: '#/components/schemas/AdvisoryIdentifier'
+      description: ADVISORY. A short label the caller gave its agent. Recorded, never trusted. `agent_label` is accepted too.
   schemas:
     ResponseMeta:
       type: object
@@ -2631,6 +2825,7 @@ components:
             attempts, active runtime, estimated cost) when it is an agent run:
             a service principal is one whatever it sends. The hint can only
             tighten: it never turns an agent run into an interactive one.
+            `initiatedBy` is accepted too.
         execution_tier:
           type: string
           enum:
@@ -2776,6 +2971,132 @@ components:
                     enum:
                     - default
                     - ceiling
+    AdvisoryIdentifier:
+      type: string
+      minLength: 1
+      maxLength: 64
+      pattern: '^[A-Za-z0-9._:-]+$'
+      description: >-
+        An identifier-shaped value the caller chose. A value of any other shape is
+        dropped, not rejected, so it can never carry a URL or a page title into a
+        stored record.
+    AgentIdentity:
+      type: object
+      required:
+      - basis
+      description: >-
+        Which agent was behind an operation an agent initiated. Ids and classes only.
+        Only `principalId` of a `service_principal` basis is verified (it is the
+        calling token's signed service id); `aiRunId` and `label` are what the caller
+        said, advisory, and never used to decide anything.
+      properties:
+        basis:
+          type: string
+          enum:
+          - service_principal
+          - user_session
+          description: >-
+            `service_principal`: the call carried a service principal's own token.
+            `user_session`: it carried a person's token with an `agent` hint, so the
+            token proves the person, not which agent.
+        principalId:
+          type: string
+          description: The signed service id of the caller. Present only for `service_principal`.
+        aiRunId:
+          $ref: '#/components/schemas/AdvisoryIdentifier'
+        label:
+          $ref: '#/components/schemas/AdvisoryIdentifier'
+    TabOpener:
+      type: object
+      required:
+      - initiatedBy
+      description: Who opened a tab (`openedBy` on a tab of the owner projection).
+      properties:
+        initiatedBy:
+          type: string
+          enum:
+          - human
+          - agent
+        agent:
+          $ref: '#/components/schemas/AgentIdentity'
+    AgentTab:
+      type: object
+      required:
+      - tabId
+      - active
+      properties:
+        tabId:
+          type: string
+        title:
+          type: string
+          nullable: true
+        url:
+          type: string
+          nullable: true
+        active:
+          type: boolean
+    OpenAgentTabRequest:
+      type: object
+      properties:
+        url:
+          type: string
+          nullable: true
+          description: Navigate the new tab here; it must be inside the run's allowed domains.
+        initiatedBy:
+          type: string
+          enum:
+          - human
+          - agent
+          description: >-
+            Who is opening the tab. Can only tighten (see `TabInitiatedBy`).
+            `initiated_by` is accepted too; both in one body, or any other value, is a 422.
+        aiRunId:
+          $ref: '#/components/schemas/AdvisoryIdentifier'
+        agentLabel:
+          $ref: '#/components/schemas/AdvisoryIdentifier'
+    Envelope_AgentTabs:
+      type: object
+      required:
+      - request_id
+      - success
+      - data
+      properties:
+        request_id:
+          type: string
+        success:
+          type: boolean
+        data:
+          type: object
+          required:
+          - tabs
+          properties:
+            tabs:
+              type: array
+              items:
+                $ref: '#/components/schemas/AgentTab'
+    Envelope_AgentTab:
+      type: object
+      required:
+      - request_id
+      - success
+      - data
+      properties:
+        request_id:
+          type: string
+        success:
+          type: boolean
+        data:
+          type: object
+          required:
+          - tab
+          - tabs
+          properties:
+            tab:
+              $ref: '#/components/schemas/AgentTab'
+            tabs:
+              type: array
+              items:
+                $ref: '#/components/schemas/AgentTab'
     AgentStepRequest:
       type: object
       required:
@@ -2792,7 +3113,13 @@ components:
           description: >-
             Who proposed the action. It can only tighten: `agent` on a person's
             token makes the call an agent's, and a service principal is always an
-            agent. Receipts record the derived initiator and the control epoch.
+            agent. Receipts record the derived initiator and the control epoch, and
+            for an agent which one (`agent` on the receipt). `initiatedBy` is
+            accepted too; both in one body is a 422.
+        aiRunId:
+          $ref: '#/components/schemas/AdvisoryIdentifier'
+        agentLabel:
+          $ref: '#/components/schemas/AdvisoryIdentifier'
         instruction:
           type: string
           nullable: true
@@ -4142,6 +4469,19 @@ components:
         cost_micro_usd:
           type: integer
           format: int64
+        initiated_by:
+          type: string
+          enum:
+          - human
+          - agent
+          - system
+          description: Who drove the step. Absent on a receipt written before initiators were recorded.
+        control_epoch:
+          type: integer
+          format: int64
+          description: The control epoch the step was admitted under. Absent on older receipts.
+        agent:
+          $ref: '#/components/schemas/AgentIdentity'
     CompileProcedureRequest:
       type: object
       properties:

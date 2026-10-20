@@ -51,18 +51,6 @@
       "reason": "Browser session surface used by the Verevon browser and the Model Plane; its contract lives in docs/CONTRACTS.md and is documented with the browser slices (WS8, WS9)."
     },
     {
-      "path": "/v1/agent/runs/{}/tabs",
-      "reason": "Browser session surface used by the Verevon browser and the Model Plane; its contract lives in docs/CONTRACTS.md and is documented with the browser slices (WS8, WS9)."
-    },
-    {
-      "path": "/v1/agent/runs/{}/tabs/{}",
-      "reason": "Browser session surface used by the Verevon browser and the Model Plane; its contract lives in docs/CONTRACTS.md and is documented with the browser slices (WS8, WS9)."
-    },
-    {
-      "path": "/v1/agent/runs/{}/tabs/{}/select",
-      "reason": "Browser session surface used by the Verevon browser and the Model Plane; its contract lives in docs/CONTRACTS.md and is documented with the browser slices (WS8, WS9)."
-    },
-    {
       "path": "/v1/answer",
       "reason": "Public route not yet described in openapi.yaml; allowlisted so a new undocumented route cannot slip in unnoticed, to be documented in a follow-up."
     },
