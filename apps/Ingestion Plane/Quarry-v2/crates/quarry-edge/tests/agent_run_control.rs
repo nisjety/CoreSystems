@@ -1661,3 +1661,65 @@ async fn tabs_opened_past_the_opener_cap_are_marked_unattributed_in_the_projecti
         "the browser's own tab still has no opener, which is what the marker tells apart"
     );
 }
+
+/// A tab that goes away with no close call (the page closes itself, or the user closes
+/// it in the browser) must not keep its opener: the next listing of the run's tabs,
+/// the projection or any other route that lists them drops it, and so does the next
+/// open, so the record never holds an entry for a tab the browser no longer has. Its
+/// opener never reaches the projection either.
+#[tokio::test]
+#[serial]
+async fn a_tab_that_disappears_without_a_close_call_loses_its_opener() {
+    set_takeover_enforcement(None);
+
+    let edge = Edge::start(RunLimits::default()).await;
+    let person = zdr_member_token();
+    let run = edge.start_run(&person, json!({})).await;
+    let open = |label: &'static str| {
+        let (edge, person, run) = (&edge, &person, &run);
+        async move {
+            let opened = edge
+                .post(
+                    person,
+                    &format!("/v1/agent/runs/{run}/tabs"),
+                    json!({ "initiated_by": "agent", "aiRunId": "run_x", "agentLabel": label }),
+                )
+                .await;
+            assert_eq!(opened.status, 200, "{}", opened.body);
+            opened.data()["tab"]["tabId"].as_str().unwrap().to_owned()
+        }
+    };
+    let gone = open("opener-a").await;
+    let kept = open("opener-b").await;
+    let handle = edge.live(&run).expect("the run is live");
+    let recorded = || async {
+        let entry = handle.entry.lock().await;
+        let mut ids: Vec<String> = entry.tab_origins.keys().cloned().collect();
+        ids.sort();
+        ids
+    };
+    let mut both = vec![gone.clone(), kept.clone()];
+    both.sort();
+    assert_eq!(recorded().await, both);
+
+    // The browser drops the tab; nobody called close.
+    edge.driver.vanish_tab(&gone);
+    assert!(edge.driver.closed_tabs().is_empty());
+
+    // The projection does not show it, and the read that listed the tabs pruned it.
+    let projection = edge.projection(&person, &run).await;
+    assert_eq!(projection.status, 200, "{}", projection.body);
+    let tabs = projection.data()["tabs"].as_array().unwrap().clone();
+    assert!(tabs.iter().all(|tab| tab["tabId"] != gone.as_str()), "{tabs:?}");
+    assert_eq!(recorded().await, vec![kept.clone()]);
+
+    // The same through the tab list and through the next open.
+    let third = open("opener-c").await;
+    edge.driver.vanish_tab(&kept);
+    let listed = edge.get(&person, &format!("/v1/agent/runs/{run}/tabs")).await;
+    assert_eq!(listed.status, 200, "{}", listed.body);
+    assert_eq!(recorded().await, vec![third.clone()]);
+    edge.driver.vanish_tab(&third);
+    let fourth = open("opener-d").await;
+    assert_eq!(recorded().await, vec![fourth]);
+}

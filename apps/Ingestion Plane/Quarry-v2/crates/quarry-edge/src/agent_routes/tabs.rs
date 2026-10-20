@@ -24,7 +24,7 @@ pub async fn list_tabs(
         ));
     };
 
-    let entry = entry_arc.lock().await;
+    let mut entry = entry_arc.lock().await;
     if !caller_owns_live_run(&entry, &claims) {
         return Err(status_err(
             StatusCode::NOT_FOUND,
@@ -38,6 +38,7 @@ pub async fn list_tabs(
         .list_tabs(&entry.session)
         .await
         .map_err(|e| driver_err(&request_id, e))?;
+    prune_tab_openers(&mut entry, &tabs);
 
     Ok(Json(Envelope::ok(request_id, BrowserTabsData { tabs })))
 }
@@ -45,9 +46,20 @@ pub async fn list_tabs(
 /// The most full opener records (class and the agent's ids) a run keeps.
 const MAX_TAB_ORIGINS: usize = 256;
 
+/// Drop the openers of tabs that no longer exist. `live_tabs` is the list the driver
+/// just returned; every route that lists the tabs calls this with it (the tab list,
+/// open, select, close, the control change and the projection), so a tab that went
+/// away without a close call (the page closed itself, or the user closed it in the
+/// browser) loses its record at the next of those calls, and the record never
+/// holds more entries than the browser had tabs at the last one.
+pub(super) fn prune_tab_openers(entry: &mut RunEntry, live_tabs: &[BrowserTab]) {
+    entry
+        .tab_origins
+        .retain(|id, _| live_tabs.iter().any(|tab| tab.tab_id == *id));
+}
+
 /// Remember who opened `tab_id`, after dropping the openers of tabs that no
-/// longer exist (`live_tabs` is the list the driver just returned), so the record
-/// never holds more entries than the browser has tabs.
+/// longer exist (see `prune_tab_openers`).
 ///
 /// Past `MAX_TAB_ORIGINS` full records, which takes that many tabs open at once,
 /// a new tab is kept as a class-only entry marked `unattributed` instead of being
@@ -61,9 +73,7 @@ pub(super) fn remember_tab_opener(
     origin: TabOrigin,
     live_tabs: &[BrowserTab],
 ) {
-    entry
-        .tab_origins
-        .retain(|id, _| live_tabs.iter().any(|tab| tab.tab_id == *id));
+    prune_tab_openers(entry, live_tabs);
     // A tab id is opened once; if it is somehow here again, the new record replaces it.
     entry.tab_origins.remove(tab_id);
     let full_records = entry
@@ -228,7 +238,7 @@ pub async fn select_tab(
     // Counts as in flight from before it waits for the run lock, as a step does, so
     // the sweeper never releases a run a tab call is queued on.
     let _in_flight = handle.live.in_flight_guard();
-    let entry = handle.entry.lock().await;
+    let mut entry = handle.entry.lock().await;
     if !caller_owns_live_run(&entry, &claims) {
         return Err(status_err(
             StatusCode::NOT_FOUND,
@@ -259,6 +269,7 @@ pub async fn select_tab(
         .list_tabs(&entry.session)
         .await
         .map_err(|e| driver_err(&request_id, e))?;
+    prune_tab_openers(&mut entry, &tabs);
     record_browser_timeline_event(
         &state,
         &entry,
@@ -325,6 +336,7 @@ pub async fn close_tab(
         .await
         .map_err(|e| driver_err(&request_id, e))?;
     entry.tab_origins.remove(&tab_id);
+    prune_tab_openers(&mut entry, &tabs);
     record_browser_timeline_event(
         &state,
         &entry,

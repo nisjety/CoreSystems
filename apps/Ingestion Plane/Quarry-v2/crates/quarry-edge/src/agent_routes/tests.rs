@@ -1067,6 +1067,34 @@ fn the_tab_opener_record_is_bounded_and_prunes_gone_tabs() {
     assert_eq!(entry.tab_origins["t0"], origin(true));
 }
 
+/// A tab that goes away without a close call (the page closed itself, or the user
+/// closed it in the browser) loses its opener the next time the tabs are listed, so the
+/// record never keeps an entry for a tab the browser no longer has.
+#[test]
+fn prune_tab_openers_drops_the_openers_of_tabs_that_are_gone() {
+    let mut entry = entry_with_budget(None);
+    let origin = TabOrigin {
+        initiated_by: StepInitiator::Agent,
+        agent: None,
+        unattributed: false,
+    };
+    let tab = |id: &str| BrowserTab { tab_id: id.into(), title: None, url: None, active: false };
+    let both = vec![tab("a"), tab("b")];
+    remember_tab_opener(&mut entry, "a", origin.clone(), &both);
+    remember_tab_opener(&mut entry, "b", origin.clone(), &both);
+    assert_eq!(entry.tab_origins.len(), 2);
+
+    // "a" vanished with no close call: the listing no longer has it.
+    prune_tab_openers(&mut entry, &[tab("b"), tab("tab_home")]);
+    assert_eq!(entry.tab_origins.len(), 1);
+    assert!(entry.tab_origins.contains_key("b"));
+    // Listing again changes nothing, and an empty listing empties the record.
+    prune_tab_openers(&mut entry, &[tab("b")]);
+    assert_eq!(entry.tab_origins.len(), 1);
+    prune_tab_openers(&mut entry, &[]);
+    assert!(entry.tab_origins.is_empty());
+}
+
 #[test]
 fn control_epoch_increments_only_on_change() {
     let live = RunLive::new("org", "user", BrowserControlMode::AgentControl, 0);

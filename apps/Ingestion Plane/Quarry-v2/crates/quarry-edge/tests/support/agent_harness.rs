@@ -229,6 +229,13 @@ impl RecordingDriver {
         self.tab_closes.lock().unwrap().clone()
     }
 
+    /// Make a tab disappear the way a page closing itself or the user closing it in the
+    /// browser does: it is no longer listed and no close call was made, so `closed_tabs`
+    /// does not record it.
+    pub fn vanish_tab(&self, tab_id: &str) {
+        self.tab_ids.lock().unwrap().retain(|id| id != tab_id);
+    }
+
     /// Make the next `acquire` fail as a driver would.
     pub fn refuse_next_acquire(&self) {
         self.refuse_next_acquire.store(true, Ordering::SeqCst);

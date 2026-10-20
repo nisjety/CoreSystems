@@ -187,7 +187,7 @@ pub async fn browser_session(
         })
     };
     if let Some(entry_arc) = entry_arc {
-        let entry = entry_arc.lock().await;
+        let mut entry = entry_arc.lock().await;
         if !caller_owns_live_run(&entry, &claims) {
             return Err(status_err(
                 StatusCode::NOT_FOUND,
@@ -200,6 +200,7 @@ pub async fn browser_session(
             .list_tabs(&entry.session)
             .await
             .map_err(|error| driver_err(&request_id, error))?;
+        prune_tab_openers(&mut entry, &tabs);
         return Ok(Json(Envelope::ok(
             request_id,
             live_browser_session_projection(&entry, tabs),
