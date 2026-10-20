@@ -245,10 +245,14 @@ struct ResolvedBrowserGrant {
     /// The session grant a run grant was derived from (WS1.B); `None` when
     /// the caller already presented a run grant.
     parent_grant_id: Option<String>,
-    /// The budget claim on the grant as the broker returned it (WS6.E), when
-    /// `MODEL_GATEWAY_BROWSER_BUDGET_CLAIM` is on and the grant carries one.
-    /// It is what the broker stored, so it includes any bound inherited from
-    /// the parent session grant.
+    /// The bound the run executes under (WS6.E), when
+    /// `MODEL_GATEWAY_BROWSER_BUDGET_CLAIM` is on. For a run grant derived
+    /// here it is the claim the broker stored, so it includes any bound
+    /// inherited from the parent session grant. For a run grant the caller
+    /// presented it is the tighter of the claim that grant carries and what
+    /// this request mints (the organization's per-run ceiling and the request's
+    /// own values), because a presented grant is never re-minted and a member
+    /// can derive one with no claim at all.
     budget: Option<BudgetClaim>,
 }
 
@@ -365,8 +369,11 @@ fn mint_budget_from(
 /// `org_quota::fetch_org_limits`: Quarry's own ceiling still applies) and
 /// decides what to ask the broker for. Off by default.
 async fn mint_budget(state: &AppState, req: &BrowserRunStartRequest, org_id: &str) -> BudgetMint {
-    let flag = std::env::var("MODEL_GATEWAY_BROWSER_BUDGET_CLAIM").ok();
-    mint_budget_with(state, req, org_id, budget_claim_flag(flag.as_deref())).await
+    let enabled = state.browser_budget_claim.unwrap_or_else(|| {
+        let flag = std::env::var("MODEL_GATEWAY_BROWSER_BUDGET_CLAIM").ok();
+        budget_claim_flag(flag.as_deref())
+    });
+    mint_budget_with(state, req, org_id, enabled).await
 }
 
 async fn mint_budget_with(
@@ -421,6 +428,19 @@ fn bounded_run_params(
         tighten_i32(req.max_runtime_s, claim.max_runtime_s),
         cost,
     )
+}
+
+/// The bound a presented run grant's run executes under: the tighter of the
+/// claim the grant carries and the claim this request mints. Either alone when
+/// the other is absent; never wider than either.
+fn presented_run_budget(
+    granted: Option<BudgetClaim>,
+    minted: Option<BudgetClaim>,
+) -> Option<BudgetClaim> {
+    match (granted, minted) {
+        (Some(granted), Some(minted)) => Some(granted.tighter(minted)),
+        (granted, minted) => granted.or(minted),
+    }
 }
 
 /// The only `DeriveRunGrant` purpose this route asks for.
@@ -536,17 +556,22 @@ async fn resolve_browser_grant(
         grant_id: grant_id.to_owned(),
         allowed_domains,
         parent_grant_id: None,
-        // A run grant the caller presented keeps the claim it was issued with.
-        budget: mint
-            .enabled
-            .then(|| {
+        // A run grant the caller presented keeps the claim it was issued with and
+        // is not re-minted, but the run is still bounded by the organization's
+        // ceiling: a member can derive a run grant at the broker with no claim,
+        // and this is where it would otherwise slip past the ceiling.
+        budget: if mint.enabled {
+            presented_run_budget(
                 BudgetClaim::from_wire(
                     response.budget_micro_usd,
                     response.budget_max_steps,
                     response.budget_max_runtime_s,
-                )
-            })
-            .flatten(),
+                ),
+                mint.minted.map(|(claim, _)| claim),
+            )
+        } else {
+            None
+        },
     })
 }
 
@@ -589,27 +614,55 @@ async fn derive_run_grant(
         None
     };
     let (ask_claim, ask_source) = asked.unzip();
+    let derive_request = |claim: Option<BudgetClaim>, source: Option<&'static str>| {
+        DeriveRunGrantRequest {
+            parent_grant_id: parent_grant_id.to_owned(),
+            session_key: run_key.to_owned(),
+            org_id: org_id.to_owned(),
+            allowed_domains: requested.clone(),
+            purpose: DERIVE_PURPOSE_AI_RUN.to_owned(),
+            ttl_seconds: 0,
+            budget_micro_usd: claim.map_or(0, |claim| claim.micro_usd),
+            budget_max_steps: claim.map_or(0, |claim| claim.max_steps),
+            budget_max_runtime_s: claim.map_or(0, |claim| claim.max_runtime_s),
+            budget_source: source.unwrap_or_default().to_owned(),
+            budget_minted_at_unix: 0,
+        }
+    };
     let mut broker = state.browser_client.clone();
-    let derived = broker
+    let first = broker
         .derive_run_grant(authenticated_browser_request(
-            DeriveRunGrantRequest {
-                parent_grant_id: parent_grant_id.to_owned(),
-                session_key: run_key.to_owned(),
-                org_id: org_id.to_owned(),
-                allowed_domains: requested,
-                purpose: DERIVE_PURPOSE_AI_RUN.to_owned(),
-                ttl_seconds: 0,
-                budget_micro_usd: ask_claim.map_or(0, |claim| claim.micro_usd),
-                budget_max_steps: ask_claim.map_or(0, |claim| claim.max_steps),
-                budget_max_runtime_s: ask_claim.map_or(0, |claim| claim.max_runtime_s),
-                budget_source: ask_source.unwrap_or_default().to_owned(),
-                budget_minted_at_unix: 0,
-            },
+            derive_request(ask_claim, ask_source),
             browser_bearer,
         )?)
-        .await
-        .map_err(|status| browser_derive_status_to_http(&status))?
-        .into_inner();
+        .await;
+    // The claim is recomputed on every attempt (from the request and from the
+    // organization's ceiling, which org-core can fail to answer), and the broker
+    // answers a replay that asks for a different claim than the one issued with
+    // `AlreadyExists`. A retry of a keyed start must still find its grant, so
+    // when a claim was asked for and the broker says the key is already used,
+    // ask once more for no claim: that is a lookup, and the broker returns the
+    // grant it issued with the claim it carries. A second `AlreadyExists` is a
+    // real conflict (a different host list) and is reported as one.
+    let (derived, replayed) = match first {
+        Err(status) if status.code() == tonic::Code::AlreadyExists && ask_claim.is_some() => {
+            let lookup = broker
+                .derive_run_grant(authenticated_browser_request(
+                    derive_request(None, None),
+                    browser_bearer,
+                )?)
+                .await
+                .map_err(|status| browser_derive_status_to_http(&status))?
+                .into_inner();
+            (lookup, true)
+        }
+        first => (
+            first
+                .map_err(|status| browser_derive_status_to_http(&status))?
+                .into_inner(),
+            false,
+        ),
+    };
 
     let grant_id = derived.grant_id.trim();
     if grant_id.is_empty()
@@ -632,14 +685,18 @@ async fn derive_run_grant(
         return Err(browser_grant_forbidden());
     }
     // The claim the broker stored. It must be no wider than what was asked for
-    // (a broker cannot hand back a looser bound), and than the parent's.
+    // (a broker cannot hand back a looser bound), and than the parent's. A grant
+    // found by the lookup above was issued under an earlier attempt's claim, so
+    // only the parent's bound can be checked against it; nothing is dispatched
+    // for a replay, and a first attempt's claim was checked when it was issued.
     let returned = BudgetClaim::from_wire(
         derived.budget_micro_usd,
         derived.budget_max_steps,
         derived.budget_max_runtime_s,
     );
     if mint.enabled {
-        for ceiling in [ask_claim, parent_budget].into_iter().flatten() {
+        let asked_ceiling = if replayed { None } else { ask_claim };
+        for ceiling in [asked_ceiling, parent_budget].into_iter().flatten() {
             if !returned.is_some_and(|claim| claim.within(ceiling)) {
                 return Err(browser_grant_forbidden());
             }
@@ -1542,6 +1599,13 @@ mod tests {
         derive: Option<Result<DeriveRunGrantResponse, tonic::Code>>,
         derive_requests: Arc<Mutex<Vec<DeriveRunGrantRequest>>>,
         revoke_requests: Arc<Mutex<Vec<RevokeGrantRequest>>>,
+        /// Models the broker's replay rule for `derive` (see `sameDeriveBudget`
+        /// in the broker): the first derive of a session_key issues the grant with
+        /// the claim it asked for; a replay that asks for a claim must ask for the
+        /// issued one (else `AlreadyExists`); a replay that asks for none gets the
+        /// issued grant back. `derive` is the template of the grant.
+        stateful_derive: bool,
+        issued: Arc<Mutex<std::collections::HashMap<String, DeriveRunGrantResponse>>>,
     }
 
     impl TestBrowserBroker {
@@ -1552,6 +1616,8 @@ mod tests {
                 derive: None,
                 derive_requests: Arc::new(Mutex::new(Vec::new())),
                 revoke_requests: Arc::new(Mutex::new(Vec::new())),
+                stateful_derive: false,
+                issued: Arc::new(Mutex::new(std::collections::HashMap::new())),
             }
         }
     }
@@ -1610,10 +1676,49 @@ mod tests {
                     .expect("authorization recorder")
                     .push(value.to_owned());
             }
+            let message = request.into_inner();
             self.derive_requests
                 .lock()
                 .expect("derive recorder")
-                .push(request.into_inner());
+                .push(message.clone());
+            if let (true, Some(Ok(template))) = (self.stateful_derive, &self.derive) {
+                let claim_of = |m: &DeriveRunGrantRequest| {
+                    (
+                        m.budget_micro_usd,
+                        m.budget_max_steps,
+                        m.budget_max_runtime_s,
+                        m.budget_source.clone(),
+                    )
+                };
+                let asks = message.budget_micro_usd > 0
+                    || message.budget_max_steps > 0
+                    || message.budget_max_runtime_s > 0;
+                let mut issued = self.issued.lock().expect("issued grants");
+                return match issued.get(&message.session_key) {
+                    Some(stored)
+                        if asks
+                            && (
+                                stored.budget_micro_usd,
+                                stored.budget_max_steps,
+                                stored.budget_max_runtime_s,
+                                stored.budget_source.clone(),
+                            ) != claim_of(&message) =>
+                    {
+                        Err(Status::already_exists("run grant already derived with a different policy"))
+                    }
+                    Some(stored) => Ok(Response::new(stored.clone())),
+                    None => {
+                        let mut response = template.clone();
+                        response.budget_micro_usd = message.budget_micro_usd;
+                        response.budget_max_steps = message.budget_max_steps;
+                        response.budget_max_runtime_s = message.budget_max_runtime_s;
+                        response.budget_source = message.budget_source.clone();
+                        response.budget_minted_at_unix = if asks { 1_760_000_000 } else { 0 };
+                        issued.insert(message.session_key.clone(), response.clone());
+                        Ok(Response::new(response))
+                    }
+                };
+            }
             match &self.derive {
                 None => Err(Status::unimplemented("not used by validation test")),
                 Some(Ok(response)) => Ok(Response::new(response.clone())),
@@ -2552,6 +2657,241 @@ mod tests {
         assert_eq!(result.expect("a presented run grant").budget, None);
     }
 
+    /// The parent's own claim is the second ceiling on what the broker may return
+    /// (the first is what was asked for). With nothing minted nothing is asked for,
+    /// so the parent's is the only one in play and this is the test that reaches it.
+    #[tokio::test]
+    async fn the_returned_claim_is_checked_against_the_parents_own_when_the_request_asks_for_none() {
+        let parent = ValidateGrantResponse {
+            budget_micro_usd: 1_000_000,
+            budget_max_steps: 20,
+            budget_source: "org_default".to_owned(),
+            budget_minted_at_unix: 1_760_000_000,
+            ..session_validation("session-1", &["example.com"])
+        };
+        let nothing_minted = BudgetMint {
+            enabled: true,
+            minted: None,
+        };
+        let run = || derived_run("run-1", "session-1", &["example.com"]);
+        for (name, response, accepted) in [
+            ("equal to the parent's", with_claim(run(), 1_000_000, 20, 0), true),
+            ("tighter than the parent's", with_claim(run(), 400_000, 10, 60), true),
+            ("a wider cost", with_claim(run(), 2_000_000, 20, 0), false),
+            ("wider steps", with_claim(run(), 1_000_000, 21, 0), false),
+            ("a dropped cost bound", with_claim(run(), 0, 20, 0), false),
+            ("a dropped step bound", with_claim(run(), 1_000_000, 0, 0), false),
+            ("no claim at all", run(), false),
+        ] {
+            let broker = TestBrowserBroker {
+                derive: Some(Ok(response)),
+                ..TestBrowserBroker::validating(Ok(parent.clone()))
+            };
+            let (result, broker) =
+                resolve_with_mint(broker, browser_request("session-1"), nothing_minted.clone())
+                    .await;
+            if accepted {
+                result.unwrap_or_else(|_| panic!("{name}: must be accepted"));
+            } else {
+                let error = result.expect_err(name);
+                assert_eq!(error.0, StatusCode::FORBIDDEN, "{name}");
+            }
+            let derives = broker.derive_requests.lock().expect("derive recorder");
+            assert_eq!(
+                (derives[0].budget_micro_usd, derives[0].budget_max_steps),
+                (0, 0),
+                "{name}: nothing was asked for, so only the parent's bound is in play"
+            );
+        }
+    }
+
+    /// A keyed retry recomputes its claim (a different request, a ceiling that
+    /// moved, an org-core that did not answer). The broker refuses a derive replay
+    /// that asks for a different claim, so the route asks once more for none, which
+    /// the broker answers with the grant it issued.
+    #[tokio::test]
+    async fn a_derive_replay_whose_claim_moved_looks_up_the_issued_grant() {
+        let mut broker = session_broker(
+            &["example.com"],
+            Ok(derived_run("run-1", "session-1", &["example.com"])),
+        );
+        broker.stateful_derive = true;
+        // Attempt 1: the organization's ceiling binds the cost.
+        let (first, _) = resolve_with_mint(
+            broker.clone(),
+            browser_request("session-1"),
+            minted(500_000, 30, 0, "org_default"),
+        )
+        .await;
+        let issued = first.expect("the first derive").budget;
+        assert_eq!(
+            issued,
+            Some(BudgetClaim {
+                micro_usd: 500_000,
+                max_steps: 30,
+                max_runtime_s: 0
+            })
+        );
+        // Attempt 2 (org-core down: the request's own, looser, cost) and attempt 3 (a
+        // lower ceiling): each finds the same grant with the claim it was issued with.
+        for (name, mint) in [
+            ("looser", minted(2_000_000, 30, 0, "request")),
+            ("tighter", minted(250_000, 30, 0, "org_default")),
+        ] {
+            let (again, _) =
+                resolve_with_mint(broker.clone(), browser_request("session-1"), mint).await;
+            let again = again.unwrap_or_else(|_| panic!("{name}: the retry must find its grant"));
+            assert_eq!(again.grant_id, "run-1", "{name}");
+            assert_eq!(again.budget, issued, "{name}: the issued claim stands");
+        }
+        let derives = broker.derive_requests.lock().expect("derive recorder");
+        // first, then (ask, lookup) twice
+        assert_eq!(derives.len(), 5);
+        for lookup in [&derives[2], &derives[4]] {
+            assert_eq!(
+                (
+                    lookup.budget_micro_usd,
+                    lookup.budget_max_steps,
+                    lookup.budget_max_runtime_s,
+                    lookup.budget_source.as_str()
+                ),
+                (0, 0, 0, ""),
+                "the lookup asks for no claim"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_derive_conflict_that_is_not_about_the_claim_is_still_a_conflict() {
+        // The broker says AlreadyExists to the lookup too (a different host list).
+        let (result, broker) = resolve_with_mint(
+            session_broker(&["example.com"], Err(tonic::Code::AlreadyExists)),
+            browser_request("session-1"),
+            minted(500_000, 30, 0, "org_default"),
+        )
+        .await;
+        let error = result.expect_err("a real conflict");
+        assert_eq!(error.0, StatusCode::CONFLICT);
+        assert_eq!(broker.derive_requests.lock().expect("recorder").len(), 2);
+
+        // Nothing was asked for, so there is nothing to look up.
+        let (result, broker) = resolve_with_mint(
+            session_broker(&["example.com"], Err(tonic::Code::AlreadyExists)),
+            browser_request("session-1"),
+            BudgetMint {
+                enabled: true,
+                minted: None,
+            },
+        )
+        .await;
+        assert_eq!(result.expect_err("a conflict").0, StatusCode::CONFLICT);
+        assert_eq!(broker.derive_requests.lock().expect("recorder").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_looked_up_grant_is_still_checked_against_the_parents_bound() {
+        // The broker hands back a grant wider than the parent's claim (it should
+        // never be able to): the lookup path does not waive that check.
+        let parent = ValidateGrantResponse {
+            budget_micro_usd: 1_000_000,
+            budget_source: "org_default".to_owned(),
+            budget_minted_at_unix: 1_760_000_000,
+            ..session_validation("session-1", &["example.com"])
+        };
+        let broker = TestBrowserBroker {
+            derive: Some(Ok(derived_run("run-1", "session-1", &["example.com"]))),
+            stateful_derive: true,
+            ..TestBrowserBroker::validating(Ok(parent))
+        };
+        broker.issued.lock().expect("issued").insert(
+            "browser-run-key".to_owned(),
+            with_claim(derived_run("run-1", "session-1", &["example.com"]), 2_000_000, 0, 0),
+        );
+        let (result, _) = resolve_with_mint(
+            broker,
+            browser_request("session-1"),
+            minted(500_000, 0, 0, "org_default"),
+        )
+        .await;
+        assert_eq!(result.expect_err("wider than the parent").0, StatusCode::FORBIDDEN);
+    }
+
+    /// The organization's ceiling must reach a run that presents its own run grant.
+    /// A member can derive a run grant at the broker with no claim, and that grant is
+    /// never re-minted here, so the ceiling is applied to the run's parameters.
+    #[tokio::test]
+    async fn a_presented_run_grant_is_bounded_by_the_organizations_ceiling() {
+        let run_grant = |claim_micro: i64, claim_steps: i32| ValidateGrantResponse {
+            kind: "run".to_owned(),
+            budget_micro_usd: claim_micro,
+            budget_max_steps: claim_steps,
+            budget_source: if claim_micro > 0 || claim_steps > 0 {
+                "request".to_owned()
+            } else {
+                String::new()
+            },
+            ..session_validation("run-9", &["example.com"])
+        };
+        let ceiling = minted(500_000, 30, 0, "org_default");
+        let request = || {
+            let mut request = browser_request("run-9");
+            request.max_cost_usd = Some(2.0);
+            request.max_steps = Some(100);
+            request
+        };
+
+        // A grant with no claim at all: the ceiling is the bound.
+        let (result, broker) = resolve_with_mint(
+            TestBrowserBroker::validating(Ok(run_grant(0, 0))),
+            request(),
+            ceiling.clone(),
+        )
+        .await;
+        let grant = result.expect("a presented run grant");
+        assert_eq!(
+            grant.budget,
+            Some(BudgetClaim {
+                micro_usd: 500_000,
+                max_steps: 30,
+                max_runtime_s: 0
+            })
+        );
+        assert_eq!(
+            bounded_run_params(&request(), grant.budget.as_ref()),
+            (Some(30), None, Some(0.5)),
+            "the request's $2 and 100 steps are clipped to the ceiling"
+        );
+        assert!(
+            broker.derive_requests.lock().expect("recorder").is_empty(),
+            "a presented run grant is never re-minted"
+        );
+
+        // A grant whose own claim is tighter keeps it; where it is looser, the ceiling wins.
+        let (result, _) = resolve_with_mint(
+            TestBrowserBroker::validating(Ok(run_grant(100_000, 50))),
+            request(),
+            ceiling,
+        )
+        .await;
+        assert_eq!(
+            result.expect("a presented run grant").budget,
+            Some(BudgetClaim {
+                micro_usd: 100_000,
+                max_steps: 30,
+                max_runtime_s: 0
+            })
+        );
+
+        // Flag off: nothing is applied, as before.
+        let (result, _) = resolve_with_mint(
+            TestBrowserBroker::validating(Ok(run_grant(0, 0))),
+            request(),
+            BudgetMint::default(),
+        )
+        .await;
+        assert_eq!(result.expect("a presented run grant").budget, None);
+    }
+
     #[tokio::test]
     async fn derive_refusals_map_to_403_409_400_429_502_and_503() {
         for (code, want_status, want_error) in [
@@ -3310,6 +3650,10 @@ mod tests {
                     &["example.com"],
                     Ok(derived_run("run-1", "session-1", &["example.com"])),
                 );
+                Self::with_broker(with_tokens, broker).await
+            }
+
+            async fn with_broker(with_tokens: bool, broker: TestBrowserBroker) -> Self {
                 let (mut state, broker_task) = state_with_browser_broker(broker.clone()).await;
 
                 let session = FakeSession::default();
@@ -3482,6 +3826,86 @@ mod tests {
             assert_eq!(tool_input["plan_id"], body["plan_id"]);
             assert_eq!(dispatched[0].run_id, "managed-run-1");
             assert_eq!(h.revokes(), 0);
+        }
+
+        /// WS6.E: with the claim on, the numbers in the dispatched tool input are
+        /// the request's tightened by the grant's claim; with it off they are the
+        /// request's own. (The unit test of `bounded_run_params` does not show the
+        /// handler passes its answer on.)
+        #[tokio::test]
+        async fn the_claim_tightens_the_numbers_in_the_dispatched_tool_input() {
+            let parent = ValidateGrantResponse {
+                budget_micro_usd: 1_000_000,
+                budget_max_steps: 10,
+                budget_max_runtime_s: 120,
+                budget_source: "org_default".to_owned(),
+                budget_minted_at_unix: 1_760_000_000,
+                ..session_validation("session-1", &["example.com"])
+            };
+            let broker = TestBrowserBroker {
+                derive: Some(Ok(with_claim(
+                    derived_run("run-1", "session-1", &["example.com"]),
+                    1_000_000,
+                    10,
+                    120,
+                ))),
+                ..TestBrowserBroker::validating(Ok(parent))
+            };
+            for (flag, want) in [
+                (true, (json!(10), json!(120), json!(1.0))),
+                (false, (json!(50), json!(900), json!(5.0))),
+            ] {
+                let mut h = Harness::with_broker(true, broker.clone()).await;
+                h.state.browser_budget_claim = Some(flag);
+                let mut request = browser_request("session-1");
+                request.max_steps = Some(50);
+                request.max_runtime_s = Some(900);
+                request.max_cost_usd = Some(5.0);
+                let Json(_) = h.start(Some("retry-1"), request).await.expect("a start");
+                assert!(eventually(|| h.dispatches().len() == 1).await, "one dispatch");
+                let tool_input: Value =
+                    serde_json::from_str(&h.dispatches()[0].tool_input).unwrap();
+                assert_eq!(
+                    (
+                        tool_input["max_steps"].clone(),
+                        tool_input["max_runtime_s"].clone(),
+                        tool_input["max_cost_usd"].clone()
+                    ),
+                    want,
+                    "claim flag {flag}"
+                );
+            }
+        }
+
+        /// A keyed retry whose claim moved (the request now names a different cost)
+        /// still answers the same run: the derive replay is looked up, not refused.
+        #[tokio::test]
+        async fn a_keyed_retry_whose_claim_moved_still_answers_the_same_run() {
+            let mut broker = session_broker(
+                &["example.com"],
+                Ok(derived_run("run-1", "session-1", &["example.com"])),
+            );
+            broker.stateful_derive = true;
+            let mut h = Harness::with_broker(true, broker).await;
+            h.state.browser_budget_claim = Some(true);
+            let mut first = browser_request("session-1");
+            first.max_cost_usd = Some(0.5);
+            let Json(started) = h.start(Some("retry-1"), first).await.expect("first start");
+            assert!(eventually(|| h.dispatches().len() == 1).await);
+
+            let mut retry = browser_request("session-1");
+            retry.max_cost_usd = Some(2.0);
+            let Json(replay) = h
+                .start(Some("retry-1"), retry)
+                .await
+                .expect("the retry must find its run, not 409 on the grant");
+            assert_eq!(replay["run_id"], started["run_id"]);
+            assert_eq!(replay["idempotent_replay"], true);
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            assert_eq!(h.dispatches().len(), 1, "a replay never dispatches");
+            assert_eq!(h.revokes(), 0);
+            // first derive, the retry's derive (refused as a different claim), the lookup
+            assert_eq!(h.derive_keys(), [run_key(), run_key(), run_key()]);
         }
 
         #[tokio::test]
