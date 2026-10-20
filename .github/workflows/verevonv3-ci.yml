@@ -16,6 +16,7 @@ on:
       # alters the very client the SPA compiles against.
       - 'apps/Ingestion Plane/Quarry-v2/docs/openapi.yaml'
       - 'apps/Ingestion Plane/Quarry-v2/sdks/generate.sh'
+      - 'apps/Ingestion Plane/Quarry-v2/sdks/typescript/docs/**'
       - '.github/workflows/verevonv3-ci.yml'
   push:
     branches: [main]
@@ -25,6 +26,7 @@ on:
       # alters the very client the SPA compiles against.
       - 'apps/Ingestion Plane/Quarry-v2/docs/openapi.yaml'
       - 'apps/Ingestion Plane/Quarry-v2/sdks/generate.sh'
+      - 'apps/Ingestion Plane/Quarry-v2/sdks/typescript/docs/**'
       - '.github/workflows/verevonv3-ci.yml'
 
 permissions:
@@ -168,11 +170,31 @@ jobs:
       # exists -- and its `types` field points at dist/, so it must also be
       # compiled before tsc can see a single one of its types. Without this
       # step a clean checkout fails at INSTALL, not at a legible type error.
-      - name: Generate and build the Quarry TypeScript SDK
+      - name: Generate the Quarry SDKs
         working-directory: 'apps/Ingestion Plane/Quarry-v2/sdks'
+        run: ./generate.sh
+
+      # The markdown docs of the TypeScript SDK (sdks/typescript/docs) are the one
+      # part of the generated SDK that is committed. generate.sh just rewrote them
+      # from docs/openapi.yaml with the pinned generator image (7.22.0, byte-identical
+      # across runs), so any difference from the committed copy means the spec
+      # changed and the docs were not regenerated. `git status` (not `git diff`)
+      # so that a page the spec added and nobody committed fails too. Costs no
+      # extra generation: this reuses the step above and only compares files.
+      - name: Check the committed SDK docs match the spec
         run: |
-          ./generate.sh
-          cd typescript
+          drift="$(git status --porcelain -- 'apps/Ingestion Plane/Quarry-v2/sdks')"
+          if [ -n "$drift" ]; then
+            echo "::error::The committed Quarry SDK docs differ from a regeneration of docs/openapi.yaml."
+            echo "Run apps/Ingestion Plane/Quarry-v2/sdks/generate.sh and commit the changed pages of sdks/typescript/docs:"
+            echo "$drift"
+            git diff --stat -- 'apps/Ingestion Plane/Quarry-v2/sdks'
+            exit 1
+          fi
+
+      - name: Build the Quarry TypeScript SDK
+        working-directory: 'apps/Ingestion Plane/Quarry-v2/sdks/typescript'
+        run: |
           pnpm install --ignore-scripts
           pnpm run build
 
