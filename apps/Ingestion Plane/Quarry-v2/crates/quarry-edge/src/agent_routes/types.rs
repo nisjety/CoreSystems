@@ -38,7 +38,9 @@ pub struct RunEntry {
     /// `skipped` receipt (one per takeover, not one per refused call).
     pub last_rejected_epoch: Option<u64>,
     /// Who opened each tab a call through the tab routes opened (tab id to opener).
-    /// Process-local, ids and classes only, bounded (see `tabs::remember_tab_opener`).
+    /// Process-local, ids and classes only, bounded by the live tabs and, for the
+    /// full records, by a cap that degrades to a class-only `unattributed` entry
+    /// instead of dropping the tab (see `tabs::remember_tab_opener`).
     /// A tab the browser opened itself (the first one, a popup) has no entry.
     pub tab_origins: HashMap<String, TabOrigin>,
 }
@@ -51,6 +53,11 @@ pub struct TabOrigin {
     pub initiated_by: BrowserTimelineInitiator,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent: Option<AgentIdentity>,
+    /// True when the run already held the most full records it keeps, so only the
+    /// class was kept and the agent's ids were dropped. The tab did have an opener
+    /// through the tab routes; which agent it was is not recorded.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub unattributed: bool,
 }
 
 /// run_id → handle. Outer std-Mutex guards the map (held only for the O(1)

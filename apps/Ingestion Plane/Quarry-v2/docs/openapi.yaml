@@ -3024,6 +3024,13 @@ components:
           - agent
         agent:
           $ref: '#/components/schemas/AgentIdentity'
+        unattributed:
+          type: boolean
+          description: >-
+            Present (true) when the run already held the most full opener records it
+            keeps (256), so only `initiatedBy` was kept for this tab and an agent's ids
+            were dropped. The tab was opened through the tab routes; which agent did it
+            is not recorded. Absent on a full record.
     AgentTab:
       type: object
       required:

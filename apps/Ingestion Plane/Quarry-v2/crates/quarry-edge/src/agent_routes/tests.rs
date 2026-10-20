@@ -996,14 +996,16 @@ fn every_request_body_takes_the_hint_under_both_spellings() {
     }
 }
 
-/// The tab record keeps only as many openers as it can verify exist, drops the ones
-/// whose tab is gone first, and never grows past its cap.
+/// The tab record keeps only openers of tabs that still exist, drops the ones whose tab
+/// is gone first, and past its cap of full records keeps a class-only entry marked
+/// `unattributed` rather than letting the tab look like one the browser opened itself.
 #[test]
 fn the_tab_opener_record_is_bounded_and_prunes_gone_tabs() {
     let mut entry = entry_with_budget(None);
     let origin = |agent: bool| TabOrigin {
         initiated_by: if agent { StepInitiator::Agent } else { StepInitiator::Human },
         agent: None,
+        unattributed: false,
     };
     let tab = |id: String| BrowserTab { tab_id: id, title: None, url: None, active: false };
 
@@ -1013,18 +1015,56 @@ fn the_tab_opener_record_is_bounded_and_prunes_gone_tabs() {
     }
     assert_eq!(entry.tab_origins.len(), 256);
 
-    // At the cap with every tab still open: a new opener is not recorded.
+    // At the cap with every tab still open: the new tab is kept with its class only, and
+    // is marked, so the projection does not show it as a tab nobody opened. The ids of
+    // an agent are not kept for it; nothing else is added.
+    let service_agent = TabOrigin {
+        initiated_by: StepInitiator::Agent,
+        agent: Some(AgentIdentity {
+            basis: AgentIdentityBasis::ServicePrincipal,
+            principal_id: Some("service:execution-core".into()),
+            ai_run_id: Some("run_01J9".into()),
+            label: Some("planner".into()),
+        }),
+        unattributed: false,
+    };
     let mut crowded = first.clone();
     crowded.push(tab("extra".into()));
     remember_tab_opener(&mut entry, "extra", origin(false), &crowded);
-    assert_eq!(entry.tab_origins.len(), 256);
-    assert!(!entry.tab_origins.contains_key("extra"));
+    crowded.push(tab("extra_agent".into()));
+    remember_tab_opener(&mut entry, "extra_agent", service_agent, &crowded);
+    assert_eq!(entry.tab_origins.len(), 258);
+    let marker = |entry: &RunEntry, id: &str| entry.tab_origins[id].clone();
+    assert_eq!(
+        marker(&entry, "extra"),
+        TabOrigin { initiated_by: StepInitiator::Human, agent: None, unattributed: true }
+    );
+    assert_eq!(
+        marker(&entry, "extra_agent"),
+        TabOrigin { initiated_by: StepInitiator::Agent, agent: None, unattributed: true }
+    );
+    assert!(
+        entry.tab_origins["t0"] == origin(true),
+        "the 256 full records are untouched by the overflow"
+    );
+    // What the projection shows: the class and the marker, no ids.
+    assert_eq!(
+        serde_json::to_value(marker(&entry, "extra_agent")).unwrap(),
+        serde_json::json!({ "initiatedBy": "agent", "unattributed": true })
+    );
+    assert_eq!(
+        serde_json::to_value(origin(false)).unwrap(),
+        serde_json::json!({ "initiatedBy": "human" }),
+        "a full record carries no marker"
+    );
 
-    // Once tabs are gone their openers are pruned and the new one fits.
+    // Once tabs are gone their openers are pruned (so open tabs keep their records) and
+    // the room that frees makes the next opener a full record again.
     let remaining: Vec<BrowserTab> = vec![tab("t0".into()), tab("extra".into())];
     remember_tab_opener(&mut entry, "extra", origin(false), &remaining);
     assert_eq!(entry.tab_origins.len(), 2);
-    assert_eq!(entry.tab_origins["extra"].initiated_by, StepInitiator::Human);
+    assert_eq!(entry.tab_origins["extra"], origin(false));
+    assert_eq!(entry.tab_origins["t0"], origin(true));
 }
 
 #[test]

@@ -1588,3 +1588,76 @@ async fn a_zdr_runs_tab_calls_persist_nothing_but_the_projection_names_the_opene
         "the closed tab is gone from the projection: {tabs:?}"
     );
 }
+
+/// A run that holds the most full opener records still says, for a tab opened after
+/// that, whether a person or an agent opened it, and marks it `unattributed` instead of
+/// leaving it looking like a tab the browser opened itself. A ZDR run has no other
+/// record of who opened its tabs. No URL or title is stored, and the 256 earlier
+/// records keep their agent ids.
+#[tokio::test]
+#[serial]
+async fn tabs_opened_past_the_opener_cap_are_marked_unattributed_in_the_projection() {
+    set_takeover_enforcement(None);
+
+    let edge = Edge::start(RunLimits::default()).await;
+    let person = zdr_member_token();
+    let run = edge.start_run(&person, json!({})).await;
+
+    let mut first = String::new();
+    for n in 0..256 {
+        let opened = edge
+            .post(
+                &person,
+                &format!("/v1/agent/runs/{run}/tabs"),
+                json!({ "initiated_by": "agent", "aiRunId": format!("run_{n}"), "agentLabel": "planner" }),
+            )
+            .await;
+        assert_eq!(opened.status, 200, "tab {n}: {}", opened.body);
+        if n == 0 {
+            first = opened.data()["tab"]["tabId"].as_str().unwrap().to_owned();
+        }
+    }
+    let late_agent = edge
+        .post(
+            &person,
+            &format!("/v1/agent/runs/{run}/tabs"),
+            json!({ "initiated_by": "agent", "aiRunId": "run_late", "agentLabel": "late-planner" }),
+        )
+        .await;
+    assert_eq!(late_agent.status, 200, "{}", late_agent.body);
+    let late_agent = late_agent.data()["tab"]["tabId"].as_str().unwrap().to_owned();
+    let late_person = edge.new_tab(&person, &run, None).await;
+    assert_eq!(late_person.status, 200, "{}", late_person.body);
+    let late_person = late_person.data()["tab"]["tabId"].as_str().unwrap().to_owned();
+
+    let projection = edge.projection(&person, &run).await;
+    assert_eq!(projection.status, 200, "{}", projection.body);
+    let tabs = projection.data()["tabs"].as_array().unwrap().clone();
+    let opened_by = |tab_id: &str| {
+        tabs.iter()
+            .find(|tab| tab["tabId"] == tab_id)
+            .map(|tab| tab["openedBy"].clone())
+    };
+    assert_eq!(
+        opened_by(&late_agent),
+        Some(json!({ "initiatedBy": "agent", "unattributed": true })),
+        "the class is kept, the agent's ids are not"
+    );
+    assert_eq!(
+        opened_by(&late_person),
+        Some(json!({ "initiatedBy": "human", "unattributed": true }))
+    );
+    assert_eq!(
+        opened_by(&first),
+        Some(json!({
+            "initiatedBy": "agent",
+            "agent": { "basis": "user_session", "aiRunId": "run_0", "label": "planner" }
+        })),
+        "a record taken before the cap is complete"
+    );
+    assert_eq!(
+        opened_by("tab_home"),
+        Some(Value::Null),
+        "the browser's own tab still has no opener, which is what the marker tells apart"
+    );
+}

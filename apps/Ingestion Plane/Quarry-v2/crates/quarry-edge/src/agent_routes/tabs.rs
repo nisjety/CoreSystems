@@ -42,12 +42,19 @@ pub async fn list_tabs(
     Ok(Json(Envelope::ok(request_id, BrowserTabsData { tabs })))
 }
 
-/// The most tab openers a run remembers. Entries for tabs that are gone are dropped
-/// first, so only a run with this many tabs open at once stops recording openers.
+/// The most full opener records (class and the agent's ids) a run keeps.
 const MAX_TAB_ORIGINS: usize = 256;
 
 /// Remember who opened `tab_id`, after dropping the openers of tabs that no
-/// longer exist (`live_tabs` is the list the driver just returned).
+/// longer exist (`live_tabs` is the list the driver just returned), so the record
+/// never holds more entries than the browser has tabs.
+///
+/// Past `MAX_TAB_ORIGINS` full records, which takes that many tabs open at once,
+/// a new tab is kept as a class-only entry marked `unattributed` instead of being
+/// dropped: the owner projection then still says a person or an agent opened it
+/// (a ZDR run has no other record), and says the agent's ids were not kept, rather
+/// than showing the tab as one the browser opened itself. Nothing but ids and
+/// classes is ever stored; never a URL or a title.
 pub(super) fn remember_tab_opener(
     entry: &mut RunEntry,
     tab_id: &str,
@@ -57,9 +64,23 @@ pub(super) fn remember_tab_opener(
     entry
         .tab_origins
         .retain(|id, _| live_tabs.iter().any(|tab| tab.tab_id == *id));
-    if entry.tab_origins.len() < MAX_TAB_ORIGINS || entry.tab_origins.contains_key(tab_id) {
-        entry.tab_origins.insert(tab_id.to_owned(), origin);
-    }
+    // A tab id is opened once; if it is somehow here again, the new record replaces it.
+    entry.tab_origins.remove(tab_id);
+    let full_records = entry
+        .tab_origins
+        .values()
+        .filter(|kept| !kept.unattributed)
+        .count();
+    let origin = if full_records < MAX_TAB_ORIGINS {
+        origin
+    } else {
+        TabOrigin {
+            initiated_by: origin.initiated_by,
+            agent: None,
+            unattributed: true,
+        }
+    };
+    entry.tab_origins.insert(tab_id.to_owned(), origin);
 }
 
 /// `POST /v1/agent/runs/{run_id}/tabs` — open a new live browser tab.
@@ -169,6 +190,7 @@ pub async fn new_tab(
         TabOrigin {
             initiated_by: admitted.initiator,
             agent: admitted.agent.clone(),
+            unattributed: false,
         },
         &tabs,
     );

@@ -9,6 +9,7 @@ Name | Type
 ------------ | -------------
 `initiatedBy` | string
 `agent` | [AgentIdentity](AgentIdentity.md)
+`unattributed` | boolean
 
 ## Example
 
@@ -19,6 +20,7 @@ import type { TabOpener } from '@quarry/client'
 const example = {
   "initiatedBy": null,
   "agent": null,
+  "unattributed": null,
 } satisfies TabOpener
 
 console.log(example)
