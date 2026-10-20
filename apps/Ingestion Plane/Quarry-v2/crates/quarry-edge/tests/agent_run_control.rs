@@ -962,6 +962,19 @@ async fn a_tab_open_takes_the_hint_under_either_spelling() {
     assert_eq!(both.status, 422, "{}", both.body);
     assert_eq!(edge.driver.tabs_opened(), 0);
 
+    // A value that is neither human nor agent is a 422 in a body (a 400 in the select
+    // and close query: an_unknown_tab_label_is_refused_and_runs_nothing).
+    for body in [
+        json!({ "initiated_by": "system" }),
+        json!({ "initiatedBy": "AGENT" }),
+    ] {
+        let unknown = edge
+            .post(&person, &format!("/v1/agent/runs/{run}/tabs"), body.clone())
+            .await;
+        assert_eq!(unknown.status, 422, "{body}: {}", unknown.body);
+    }
+    assert_eq!(edge.driver.tabs_opened(), 0);
+
     // The person's own open, under either spelling, is admitted.
     for body in [
         json!({ "initiated_by": "human" }),
