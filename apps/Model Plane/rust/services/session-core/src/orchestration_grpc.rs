@@ -1730,8 +1730,9 @@ async fn assemble_plan(pool: &Pool, plan: &store::PlanRow) -> Result<proto::Plan
 /// Before those tags existed prost skipped them, so any caller that sent one got
 /// `InvalidArgument("event payload is required")`; with the park store off a caller
 /// still gets exactly that answer, so the new tags open no new write path by default:
-/// nothing is persisted or broadcast for them on this gRPC path (the NATS ingress, which only
-/// platform credentials can publish to, takes events without this check).
+/// nothing is persisted or broadcast for them on this gRPC path. The two NATS ingresses
+/// (`nats.rs`, `orchestration_nats.rs`) refuse the park events outright, so this handler is the
+/// only way in.
 ///
 /// Not a principal check. The executor records every run event under the RUN OWNER'S
 /// delegated bearer (as it does for `SubagentStopped`), never as `service:execution-core`,
