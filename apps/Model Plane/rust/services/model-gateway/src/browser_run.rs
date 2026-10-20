@@ -430,9 +430,10 @@ fn bounded_run_params(
     )
 }
 
-/// The bound a presented run grant's run executes under: the tighter of the
-/// claim the grant carries and the claim this request mints. Either alone when
-/// the other is absent; never wider than either.
+/// The bound a run executes under when its run grant was issued before this
+/// request (a presented run grant, or the grant a keyed retry looked up): the
+/// tighter of the claim the grant carries and the claim this request mints.
+/// Either alone when the other is absent; never wider than either.
 fn presented_run_budget(
     granted: Option<BudgetClaim>,
     minted: Option<BudgetClaim>,
@@ -715,7 +716,18 @@ async fn derive_run_grant(
         grant_id: grant_id.to_owned(),
         allowed_domains,
         parent_grant_id: Some(parent_grant_id.to_owned()),
-        budget: if mint.enabled { returned } else { None },
+        // The run is bounded by this attempt's claim as well as the grant's own.
+        // A grant found by the lookup keeps the claim it was issued with, which
+        // can be none (the first attempt ran with the flag off) or looser than
+        // the organization's ceiling now (it was lowered since); the retry
+        // dispatches a fresh run under it, so the minted claim is applied again.
+        // For a first derive the broker's claim is already within the asked one
+        // and this changes nothing.
+        budget: if mint.enabled {
+            presented_run_budget(returned, mint.minted.map(|(claim, _)| claim))
+        } else {
+            None
+        },
     })
 }
 
@@ -2733,16 +2745,25 @@ mod tests {
             })
         );
         // Attempt 2 (org-core down: the request's own, looser, cost) and attempt 3 (a
-        // lower ceiling): each finds the same grant with the claim it was issued with.
-        for (name, mint) in [
-            ("looser", minted(2_000_000, 30, 0, "request")),
-            ("tighter", minted(250_000, 30, 0, "org_default")),
+        // lower ceiling): each finds the same grant. The run it dispatches is held to
+        // the tighter of the issued claim and this attempt's own, never the looser.
+        for (name, mint, expected) in [
+            ("looser", minted(2_000_000, 30, 0, "request"), issued),
+            (
+                "tighter",
+                minted(250_000, 30, 0, "org_default"),
+                Some(BudgetClaim {
+                    micro_usd: 250_000,
+                    max_steps: 30,
+                    max_runtime_s: 0,
+                }),
+            ),
         ] {
             let (again, _) =
                 resolve_with_mint(broker.clone(), browser_request("session-1"), mint).await;
             let again = again.unwrap_or_else(|_| panic!("{name}: the retry must find its grant"));
             assert_eq!(again.grant_id, "run-1", "{name}");
-            assert_eq!(again.budget, issued, "{name}: the issued claim stands");
+            assert_eq!(again.budget, expected, "{name}");
         }
         let derives = broker.derive_requests.lock().expect("derive recorder");
         // first, then (ask, lookup) twice
@@ -2759,6 +2780,48 @@ mod tests {
                 "the lookup asks for no claim"
             );
         }
+    }
+
+    /// A keyed start whose first attempt derived the grant and then failed before the
+    /// run existed is retried, and the retry dispatches a fresh run under the grant it
+    /// finds. If the first attempt had the flag off (or the organization's ceiling was
+    /// higher) that grant carries no claim, or a looser one: the retry's own claim must
+    /// still bound the run.
+    #[tokio::test]
+    async fn a_retry_that_finds_an_unclaimed_grant_still_meets_the_organizations_ceiling() {
+        let mut broker = session_broker(
+            &["example.com"],
+            Ok(derived_run("run-1", "session-1", &["example.com"])),
+        );
+        broker.stateful_derive = true;
+        // Attempt 1: flag off, so the grant is issued with no claim.
+        let (first, _) = resolve_with_mint(
+            broker.clone(),
+            browser_request("session-1"),
+            BudgetMint::default(),
+        )
+        .await;
+        assert_eq!(first.expect("the first derive").budget, None);
+        // Attempt 2: flag on, the organization's ceiling binds.
+        let (retry, broker) = resolve_with_mint(
+            broker,
+            browser_request("session-1"),
+            minted(500_000, 30, 0, "org_default"),
+        )
+        .await;
+        let retry = retry.expect("the retry must find its grant");
+        assert_eq!(retry.grant_id, "run-1");
+        assert_eq!(
+            retry.budget,
+            Some(BudgetClaim {
+                micro_usd: 500_000,
+                max_steps: 30,
+                max_runtime_s: 0
+            }),
+            "the run is bounded although the grant it found carries no claim"
+        );
+        // It was a lookup: the second ask was refused, the third asked for none.
+        assert_eq!(broker.derive_requests.lock().expect("recorder").len(), 3);
     }
 
     #[tokio::test]
