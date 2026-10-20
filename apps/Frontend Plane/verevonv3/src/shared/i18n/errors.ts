@@ -276,6 +276,29 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
     en: 'The page took too long to respond. Try a more specific sub-page, or another source.',
   },
 
+  // Refusals the gateway answers before any upstream call: the address or the
+  // request itself is wrong, so the person fixes it rather than retries.
+  invalid_url: {
+    no: 'Adressen ser ikke ut som en offentlig nettside. Sjekk lenken og prøv igjen.',
+    en: 'The address does not look like a public web page. Check the link and try again.',
+  },
+  invalid_crawl_request: {
+    no: 'Gjennomgangen kunne ikke startes med disse innstillingene. Sjekk adressen og innstillingene, og prøv igjen.',
+    en: 'The crawl could not be started with these settings. Check the address and the settings, and try again.',
+  },
+  invalid_browser_action: {
+    no: 'Nettleseren kunne ikke utføre denne handlingen. Sjekk adressen eller handlingen, og prøv igjen.',
+    en: 'The browser could not carry out this action. Check the address or the action, and try again.',
+  },
+  zdr_persistent_profile_forbidden: {
+    no: 'Denne organisasjonen lagrer ikke data, så nettleseren kan ikke bruke en varig profil. Bruk en midlertidig profil.',
+    en: 'This organization does not retain data, so the browser cannot use a persistent profile. Use a temporary profile.',
+  },
+  model_gateway_unreachable: {
+    no: 'Agenten er midlertidig utilgjengelig. Prøv igjen om litt, og kontakt en administrator hvis det vedvarer.',
+    en: 'The agent is temporarily unavailable. Try again shortly, and contact an administrator if it persists.',
+  },
+
   // Status-class messages for a code with no entry of its own.
   rate_limited: { no: 'Det kommer for mange forespørsler akkurat nå.', en: 'There are too many requests right now.', retryable: true },
   unauthorized: { no: 'Du må logge inn på nytt.', en: 'You need to sign in again.' },
