@@ -177,6 +177,11 @@ pub async fn start_run(
         ));
     }
     let mut grant_is_zdr = false;
+    // What the grant says about the run's budget (WS6.E). Snapshotted here, at
+    // start, and never read again: per-action grant revalidation does not
+    // touch it, so a later validate cannot widen the run.
+    let mut grant_budget: Option<quarry_runtime::grant_validator::GrantBudget> = None;
+    let mut grant_is_run_kind = false;
     if let Some(grant_id) = grant_id.as_deref() {
         let grant = state
             .grant_validator
@@ -191,6 +196,8 @@ pub async fn start_run(
             ));
         }
         grant_is_zdr = grant.zdr;
+        grant_budget = grant.budget.clone().filter(|claim| claim.is_set());
+        grant_is_run_kind = grant.kind == "run";
         if let Some(broker_domains) =
             bind_validated_grant(&grant, &claims, state.require_browser_grants)
                 .map_err(|reason| status_err(StatusCode::FORBIDDEN, &request_id, &reason))?
@@ -314,9 +321,16 @@ pub async fn start_run(
 
     // The run caps come first (R-26: run cap, then the driver's own cap). The slot
     // counts against them from here and frees itself on every early return below.
+    // With claims enforced, a run grant is minted for an AI run (R-8), so a
+    // person's token holding one is not an uncapped interactive run. Without
+    // `enforce` the class is what it always was.
+    let enforce_claim = crate::budget::current_claim_mode() == crate::budget::ClaimMode::Enforce;
     let run_class = resumed_run_class(
         resume_checkpoint.as_ref(),
-        crate::budget::classify(claims.is_service(), body.initiated_by.as_deref()),
+        crate::budget::classify(
+            claims.is_service() || (enforce_claim && grant_is_run_kind),
+            body.initiated_by.as_deref(),
+        ),
     );
     let slot = state
         .agent_runs
@@ -380,10 +394,11 @@ pub async fn start_run(
 
     let budget_mode = crate::budget::current_mode();
     let budget = (budget_mode != crate::budget::BudgetMode::Off).then(|| {
-        crate::budget::RunBudget::start(
+        crate::budget::RunBudget::start_with_claim(
             crate::budget::BudgetLimits::cached(),
             run_class,
             &constraints,
+            grant_budget.as_ref().filter(|_| enforce_claim),
             resume_checkpoint
                 .as_ref()
                 .and_then(|checkpoint| checkpoint.budget.as_ref()),

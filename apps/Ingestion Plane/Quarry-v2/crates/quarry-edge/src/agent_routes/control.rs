@@ -22,7 +22,7 @@ pub(super) fn checkpoint_for_entry(entry: &RunEntry) -> AgentRunCheckpoint {
         budget: entry
             .budget
             .as_ref()
-            .map(|budget| budget.ledger.snapshot(std::time::Instant::now())),
+            .map(|budget| budget.snapshot(std::time::Instant::now())),
     }
 }
 

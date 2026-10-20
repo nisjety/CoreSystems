@@ -2968,9 +2968,14 @@ components:
                     type: number
                   by:
                     type: string
+                    description: >-
+                      What replaced the requested value: the agent default, the
+                      ceiling, or a tighter budget claim carried by the broker grant
+                      (QUARRY_EDGE__GRANT_BUDGET_CLAIM=enforce).
                     enum:
                     - default
                     - ceiling
+                    - grant
     AdvisoryIdentifier:
       type: string
       minLength: 1

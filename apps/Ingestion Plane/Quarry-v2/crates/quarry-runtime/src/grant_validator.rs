@@ -54,6 +54,60 @@ pub struct GrantValidation {
     /// A Zero Data Retention grant. It may only back a ZDR run.
     #[serde(default)]
     pub zdr: bool,
+    /// The grant's budget claim (WS6.E): an upper bound a run under it may
+    /// spend. `None` from a broker that predates it, or for a grant minted
+    /// without one. Carried verbatim; whether it is applied is the edge's
+    /// `QUARRY_EDGE__GRANT_BUDGET_CLAIM`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<GrantBudget>,
+}
+
+/// A grant's budget claim, as the broker stored it. A bound of 0 means that
+/// dimension is not bounded. The claim can only tighten what a run would
+/// otherwise get; Quarry takes the smaller of it and its own value.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GrantBudget {
+    /// Estimated spend, in millionths of a dollar.
+    #[serde(default)]
+    pub micro_usd: u64,
+    #[serde(default)]
+    pub max_steps: u32,
+    /// Active run time, in seconds.
+    #[serde(default)]
+    pub max_runtime_s: u32,
+    /// `request`, `org_default` or `entitlement`: who set the numbers.
+    #[serde(default)]
+    pub source: String,
+    /// When the broker stored the claim (unix seconds); 0 when unknown.
+    #[serde(default)]
+    pub minted_at_unix: i64,
+}
+
+impl GrantBudget {
+    /// Whether any dimension is bounded.
+    pub fn is_set(&self) -> bool {
+        self.micro_usd > 0 || self.max_steps > 0 || self.max_runtime_s > 0
+    }
+
+    /// Read the five wire fields of a `ValidateGrantResponse`. A negative
+    /// number is not a bound (the broker never sends one), and a response
+    /// that bounds nothing is no claim at all.
+    pub fn from_wire(
+        micro_usd: i64,
+        max_steps: i32,
+        max_runtime_s: i32,
+        source: String,
+        minted_at_unix: i64,
+    ) -> Option<Self> {
+        let claim = Self {
+            micro_usd: u64::try_from(micro_usd).unwrap_or(0),
+            max_steps: u32::try_from(max_steps).unwrap_or(0),
+            max_runtime_s: u32::try_from(max_runtime_s).unwrap_or(0),
+            source,
+            minted_at_unix,
+        };
+        claim.is_set().then_some(claim)
+    }
 }
 
 impl GrantValidation {
@@ -146,6 +200,7 @@ impl GrantValidator for NoopGrantValidator {
             kind: String::new(),
             owner_id: String::new(),
             zdr: false,
+            budget: None,
         })
     }
 }
@@ -228,6 +283,7 @@ impl GrantValidator for HttpGrantValidator {
                 kind: String::new(),
                 owner_id: String::new(),
                 zdr: false,
+                budget: None,
             });
         }
         if !status.is_success() {
@@ -270,6 +326,7 @@ mod tests {
             kind: String::new(),
             owner_id: String::new(),
             zdr: false,
+            budget: None,
         };
         assert!(!g.is_usable());
     }
@@ -289,6 +346,7 @@ mod tests {
             kind: String::new(),
             owner_id: String::new(),
             zdr: false,
+            budget: None,
         };
         assert!(!g.is_usable());
     }
@@ -308,6 +366,7 @@ mod tests {
             kind: String::new(),
             owner_id: String::new(),
             zdr: false,
+            budget: None,
         };
         assert!(g.is_usable());
     }
@@ -327,6 +386,7 @@ mod tests {
             kind: String::new(),
             owner_id: String::new(),
             zdr: false,
+            budget: None,
         };
         assert!(g.is_usable());
     }
@@ -386,6 +446,32 @@ mod tests {
         let v = HttpGrantValidator::new(server.uri()).unwrap();
         let result = v.validate("g").await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn a_wire_claim_with_no_bound_is_no_claim_and_negative_bounds_are_dropped() {
+        assert_eq!(GrantBudget::from_wire(0, 0, 0, "request".into(), 5), None);
+        assert_eq!(GrantBudget::from_wire(-1, -1, -1, String::new(), 0), None);
+        let claim = GrantBudget::from_wire(-3, 7, 0, "request".into(), 9).expect("one bound is a claim");
+        assert_eq!((claim.micro_usd, claim.max_steps, claim.max_runtime_s), (0, 7, 0));
+        assert!(claim.is_set());
+    }
+
+    #[test]
+    fn the_http_shim_json_may_omit_the_claim_and_may_carry_it() {
+        let old: GrantValidation =
+            serde_json::from_value(json!({ "grant_id": "g", "active": true })).unwrap();
+        assert_eq!(old.budget, None);
+        let new: GrantValidation = serde_json::from_value(json!({
+            "grant_id": "g",
+            "active": true,
+            "budget": { "micro_usd": 250000, "max_steps": 10, "source": "request" },
+        }))
+        .unwrap();
+        let claim = new.budget.expect("a claim");
+        assert_eq!((claim.micro_usd, claim.max_steps, claim.max_runtime_s), (250_000, 10, 0));
+        // And an absent claim is not written back out.
+        assert!(serde_json::to_value(&old).unwrap().get("budget").is_none());
     }
 
     #[tokio::test]

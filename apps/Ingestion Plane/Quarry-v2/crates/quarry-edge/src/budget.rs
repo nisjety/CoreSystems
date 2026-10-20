@@ -22,6 +22,12 @@
 //!   browser-time term, and is labelled estimated.
 //! - **Exhaustion latches**, and a resume restores the ledger, so neither a
 //!   repeat call nor a resume refills a spent budget.
+//! - **A grant may carry a tighter claim** (WS6.E). When `QUARRY_EDGE__GRANT_BUDGET_CLAIM`
+//!   is `enforce`, the broker grant's claim is applied once, at start: each
+//!   dimension takes the smaller of what the request, default and ceiling give
+//!   and what the claim says, and a claim that is not smaller changes nothing,
+//!   so a claim can never raise a bound. The applied claim is stored with the
+//!   ledger, so a resume cannot drop it.
 //!
 //! Everything numeric here is a placeholder pending the ratified budget numbers
 //! (plan decision X-12), which is why enforcement ships as `shadow`: it records
@@ -33,6 +39,7 @@ use std::time::Instant;
 
 use quarry_core::contracts::AgentConstraints;
 use quarry_core::error::{ErrorCode, QuarryError};
+use quarry_runtime::grant_validator::GrantBudget;
 use quarry_runtime::step_receipts::BudgetCheckpoint;
 
 pub const ENV_MODE: &str = "QUARRY_EDGE__BUDGET_ENFORCEMENT";
@@ -84,6 +91,54 @@ impl BudgetMode {
             Self::On => "on",
         }
     }
+}
+
+pub const ENV_CLAIM_MODE: &str = "QUARRY_EDGE__GRANT_BUDGET_CLAIM";
+
+/// Whether a grant's budget claim is applied to the run it backs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimMode {
+    /// The claim is read and carried, and changes nothing. The default: the
+    /// broker has no production grants until Quarry holds its service
+    /// credential, and a claim must not bind before the minter is deployed.
+    Ignore,
+    /// A claim tightens the run's bounds, and a grant of kind `run` makes the
+    /// run an agent run (R-8).
+    Enforce,
+}
+
+impl ClaimMode {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "" | "ignore" => Ok(Self::Ignore),
+            "enforce" => Ok(Self::Enforce),
+            other => Err(format!(
+                "{ENV_CLAIM_MODE} must be ignore or enforce, got {other:?}"
+            )),
+        }
+    }
+
+    pub fn from_env() -> Result<Self, String> {
+        match std::env::var(ENV_CLAIM_MODE) {
+            Ok(value) => Self::parse(&value),
+            Err(_) => Ok(Self::Ignore),
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ignore => "ignore",
+            Self::Enforce => "enforce",
+        }
+    }
+}
+
+/// The claim mode the start path uses. Read from the environment on each run
+/// start (one variable lookup, like the take-over switch), so a test can
+/// change it; an unreadable value is rejected at boot (`from_env` in `main`),
+/// and falls back to `ignore` for code that runs without that check.
+pub fn current_claim_mode() -> ClaimMode {
+    ClaimMode::from_env().unwrap_or(ClaimMode::Ignore)
 }
 
 /// The mode the gate uses: the process's cached mode, except that a test can
@@ -285,6 +340,16 @@ pub struct BudgetCaps {
     pub max_cost_usd: f64,
     /// One second of browser time, in micro-USD.
     pub browser_second_micro_usd: u64,
+    /// Which bounds a grant's claim set (so a refusal can name its source).
+    pub grant_bound: GrantBound,
+}
+
+/// The bounds that a grant's claim, not the request or the default, set.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GrantBound {
+    pub steps: bool,
+    pub runtime: bool,
+    pub cost: bool,
 }
 
 /// A request value that was replaced, and why.
@@ -307,18 +372,45 @@ fn usd_to_micro(usd: f64) -> u64 {
 
 /// Resolve the bounds for a run. `None` for an interactive run: it is never
 /// capped here (a request's own `max_steps` is still enforced by the existing
-/// step check).
+/// step check). Without a grant claim; the route resolves through
+/// [`resolve_caps_with_claim`], so only the tests call this one.
+#[cfg(test)]
 pub fn resolve_caps(
     limits: &BudgetLimits,
     class: RunClass,
     requested: &AgentConstraints,
+) -> Option<(BudgetCaps, Vec<Clamp>)> {
+    resolve_caps_with_claim(limits, class, requested, None)
+}
+
+/// Replace the clamp recorded for `field` (if any) with one that says the
+/// grant bound it. `requested` stays what the caller asked for.
+fn grant_clamp(clamps: &mut Vec<Clamp>, field: &'static str, requested: Option<f64>, effective: f64) {
+    clamps.retain(|clamp| clamp.field != field);
+    clamps.push(Clamp {
+        field,
+        requested,
+        effective,
+        by: "grant",
+    });
+}
+
+/// [`resolve_caps`] with a grant's budget claim (WS6.E). A claim only
+/// tightens: a dimension it bounds below the value the request, default and
+/// ceiling gave becomes the claim's (reported as `by: "grant"`); a claim at or
+/// above that value, or a dimension it leaves at 0, changes nothing.
+pub fn resolve_caps_with_claim(
+    limits: &BudgetLimits,
+    class: RunClass,
+    requested: &AgentConstraints,
+    claim: Option<&GrantBudget>,
 ) -> Option<(BudgetCaps, Vec<Clamp>)> {
     if class == RunClass::Interactive {
         return None;
     }
     let mut clamps = Vec::new();
 
-    let max_steps = match requested.max_steps {
+    let mut max_steps = match requested.max_steps {
         0 => {
             clamps.push(Clamp {
                 field: "max_steps",
@@ -340,7 +432,7 @@ pub fn resolve_caps(
         value => value,
     };
 
-    let max_runtime_s = match requested.max_runtime_s {
+    let mut max_runtime_s = match requested.max_runtime_s {
         None | Some(0) => {
             clamps.push(Clamp {
                 field: "max_runtime_s",
@@ -362,7 +454,7 @@ pub fn resolve_caps(
         Some(value) => value,
     };
 
-    let max_cost_usd = match requested.max_cost_usd {
+    let mut max_cost_usd = match requested.max_cost_usd {
         Some(value) if value.is_finite() && value > 0.0 => {
             if value > limits.ceiling_max_cost_usd {
                 clamps.push(Clamp {
@@ -387,6 +479,34 @@ pub fn resolve_caps(
         }
     };
 
+    let mut grant_bound = GrantBound::default();
+    if let Some(claim) = claim {
+        if claim.max_steps > 0 && claim.max_steps < max_steps {
+            let asked = (requested.max_steps > 0).then(|| f64::from(requested.max_steps));
+            grant_clamp(&mut clamps, "max_steps", asked, f64::from(claim.max_steps));
+            max_steps = claim.max_steps;
+            grant_bound.steps = true;
+        }
+        if claim.max_runtime_s > 0 && claim.max_runtime_s < max_runtime_s {
+            let asked = requested
+                .max_runtime_s
+                .filter(|value| *value > 0)
+                .map(f64::from);
+            grant_clamp(&mut clamps, "max_runtime_s", asked, f64::from(claim.max_runtime_s));
+            max_runtime_s = claim.max_runtime_s;
+            grant_bound.runtime = true;
+        }
+        if claim.micro_usd > 0 && claim.micro_usd < usd_to_micro(max_cost_usd) {
+            let asked = requested
+                .max_cost_usd
+                .filter(|value| value.is_finite() && *value > 0.0);
+            let effective = claim.micro_usd as f64 / MICRO;
+            grant_clamp(&mut clamps, "max_cost_usd", asked, effective);
+            max_cost_usd = effective;
+            grant_bound.cost = true;
+        }
+    }
+
     Some((
         BudgetCaps {
             max_steps,
@@ -394,9 +514,36 @@ pub fn resolve_caps(
             max_runtime_s,
             max_cost_usd,
             browser_second_micro_usd: usd_to_micro(limits.browser_second_usd),
+            grant_bound,
         },
         clamps,
     ))
+}
+
+/// The tighter of two claims, dimension by dimension (0 is "no bound", so the
+/// other side's bound stands). The result keeps the first claim's label and
+/// stamp when there is one: a run's claim is what it started under.
+pub fn tighter_claim(first: Option<&GrantBudget>, second: Option<&GrantBudget>) -> Option<GrantBudget> {
+    fn min_bound<T: Ord + Copy + Default>(a: T, b: T) -> T {
+        let zero = T::default();
+        match (a == zero, b == zero) {
+            (true, _) => b,
+            (_, true) => a,
+            _ => a.min(b),
+        }
+    }
+    let merged = match (first, second) {
+        (None, None) => return None,
+        (Some(only), None) | (None, Some(only)) => only.clone(),
+        (Some(a), Some(b)) => GrantBudget {
+            micro_usd: min_bound(a.micro_usd, b.micro_usd),
+            max_steps: min_bound(a.max_steps, b.max_steps),
+            max_runtime_s: min_bound(a.max_runtime_s, b.max_runtime_s),
+            source: a.source.clone(),
+            minted_at_unix: a.minted_at_unix,
+        },
+    };
+    merged.is_set().then_some(merged)
 }
 
 /// Which bound was reached.
@@ -492,6 +639,7 @@ impl BudgetLedger {
             spent_micro_usd: self.spent_micro_usd,
             active_ms: self.active_ms(now),
             exhausted: self.exhausted.map(|dimension| dimension.label().to_owned()),
+            claim: None,
         }
     }
 
@@ -555,6 +703,9 @@ pub struct Exhausted {
     pub limit: f64,
     pub spent: f64,
     pub unit: &'static str,
+    /// `run_budget` (the request, default or ceiling set the bound) or
+    /// `grant` (the broker grant's claim did).
+    pub limit_source: &'static str,
 }
 
 impl Exhausted {
@@ -576,7 +727,7 @@ impl Exhausted {
             "spent": self.spent,
             "unit": self.unit,
             "estimated": self.dimension == Dimension::Cost,
-            "limit_source": "run_budget",
+            "limit_source": self.limit_source,
             "resumable": false,
         }))
     }
@@ -618,11 +769,17 @@ pub fn check(
         Dimension::Runtime => (f64::from(caps.max_runtime_s), active_s.floor()),
         Dimension::Cost => (caps.max_cost_usd, cost_now as f64 / MICRO),
     };
+    let grant_bound = match dimension {
+        Dimension::Steps | Dimension::Attempts => caps.grant_bound.steps,
+        Dimension::Runtime => caps.grant_bound.runtime,
+        Dimension::Cost => caps.grant_bound.cost,
+    };
     Err(Exhausted {
         dimension,
         limit,
         spent,
         unit: dimension.unit(),
+        limit_source: if grant_bound { "grant" } else { "run_budget" },
     })
 }
 
@@ -660,6 +817,10 @@ pub struct RunBudget {
     pub caps: Option<BudgetCaps>,
     pub clamps: Vec<Clamp>,
     pub ledger: BudgetLedger,
+    /// The grant claim this run's bounds were tightened by, if any: stored
+    /// with the ledger so a resume cannot drop it. Always `None` for an
+    /// interactive run.
+    pub claim: Option<GrantBudget>,
 }
 
 impl RunBudget {
@@ -673,10 +834,31 @@ impl RunBudget {
         resumed: Option<&BudgetCheckpoint>,
         now: Instant,
     ) -> Self {
+        Self::start_with_claim(limits, class, requested, None, resumed, now)
+    }
+
+    /// [`start`](Self::start) under a grant's budget claim. `claim` is what
+    /// this start applies (the caller passes `None` unless claims are enforced);
+    /// a resumed run also keeps the claim it started under, and the tighter of
+    /// the two wins, so neither a resume nor a different grant presented with
+    /// it can widen the run.
+    pub fn start_with_claim(
+        limits: &BudgetLimits,
+        class: RunClass,
+        requested: &AgentConstraints,
+        claim: Option<&GrantBudget>,
+        resumed: Option<&BudgetCheckpoint>,
+        now: Instant,
+    ) -> Self {
         let class = resumed
             .and_then(|checkpoint| RunClass::from_label(&checkpoint.class))
             .map_or(class, |stored| stored.stricter(class));
-        let (caps, clamps) = match resolve_caps(limits, class, requested) {
+        let claim = if class == RunClass::Interactive {
+            None
+        } else {
+            tighter_claim(resumed.and_then(|checkpoint| checkpoint.claim.as_ref()), claim)
+        };
+        let (caps, clamps) = match resolve_caps_with_claim(limits, class, requested, claim.as_ref()) {
             Some((caps, clamps)) => (Some(caps), clamps),
             None => (None, Vec::new()),
         };
@@ -689,7 +871,15 @@ impl RunBudget {
             caps,
             clamps,
             ledger,
+            claim,
         }
+    }
+
+    /// The ledger and the claim, as stored with the run's checkpoint.
+    pub fn snapshot(&self, now: Instant) -> BudgetCheckpoint {
+        let mut checkpoint = self.ledger.snapshot(now);
+        checkpoint.claim = self.claim.clone();
+        checkpoint
     }
 
     /// The gate before an action. `projected_cost_micro_usd` is the flat-table
@@ -790,6 +980,7 @@ mod tests {
             max_runtime_s: runtime_s,
             max_cost_usd: cost_usd,
             browser_second_micro_usd: 0,
+            grant_bound: GrantBound::default(),
         }
     }
 
@@ -1236,5 +1427,226 @@ mod tests {
         assert_eq!(micro_usd(-1.0), 0);
         assert_eq!(micro_usd(f64::NAN), 0);
         assert_eq!(micro_usd(f64::INFINITY), 0);
+    }
+
+    // ── WS6.E: the grant-carried budget claim ──────────────────────────────
+
+    fn claim(micro_usd: u64, max_steps: u32, max_runtime_s: u32) -> GrantBudget {
+        GrantBudget {
+            micro_usd,
+            max_steps,
+            max_runtime_s,
+            source: "request".to_owned(),
+            minted_at_unix: 1_700_000_000,
+        }
+    }
+
+    fn resolved(
+        requested: &AgentConstraints,
+        claim: Option<&GrantBudget>,
+    ) -> (BudgetCaps, Vec<Clamp>) {
+        resolve_caps_with_claim(&BudgetLimits::default(), RunClass::Agent, requested, claim)
+            .expect("an agent run is budgeted")
+    }
+
+    #[test]
+    fn grant_claim_tightens_but_never_loosens_the_request() {
+        // The request asks for 50 steps, 600 s and $1; the claim bounds all three lower.
+        let ask = constraints(50, Some(600), Some(1.0));
+        let (caps, clamps) = resolved(&ask, Some(&claim(250_000, 10, 120)));
+        assert_eq!((caps.max_steps, caps.max_runtime_s), (10, 120));
+        assert!((caps.max_cost_usd - 0.25).abs() < 1e-9);
+        assert_eq!(
+            caps.grant_bound,
+            GrantBound {
+                steps: true,
+                runtime: true,
+                cost: true
+            }
+        );
+        // Attempts follow the tightened step cap, so a failing driver is bounded by it too.
+        assert_eq!(caps.max_attempts, 20);
+        let by_grant: Vec<_> = clamps.iter().filter(|c| c.by == "grant").collect();
+        assert_eq!(by_grant.len(), 3, "{clamps:?}");
+        let steps = by_grant.iter().find(|c| c.field == "max_steps").unwrap();
+        assert_eq!((steps.requested, steps.effective), (Some(50.0), 10.0));
+
+        // A claim above what the request gives changes nothing: the request wins.
+        let (caps, clamps) = resolved(&constraints(5, Some(60), Some(0.1)), Some(&claim(9_000_000, 500, 9_000)));
+        assert_eq!((caps.max_steps, caps.max_runtime_s), (5, 60));
+        assert!((caps.max_cost_usd - 0.1).abs() < 1e-9);
+        assert_eq!(caps.grant_bound, GrantBound::default());
+        assert!(clamps.is_empty(), "{clamps:?}");
+
+        // A claim equal to the request is not a tightening either.
+        let (caps, clamps) = resolved(&constraints(10, Some(120), None), Some(&claim(0, 10, 120)));
+        assert_eq!((caps.max_steps, caps.max_runtime_s), (10, 120));
+        assert_eq!(caps.grant_bound, GrantBound::default());
+        assert!(clamps.iter().all(|c| c.by != "grant"), "{clamps:?}");
+    }
+
+    #[test]
+    fn a_claim_below_the_default_binds_a_request_that_named_nothing() {
+        // No steps, no runtime, no cost asked: the defaults (60 / 900 s / $1.00) apply,
+        // and a lower claim replaces them. `requested` stays absent in the report.
+        let (caps, clamps) = resolved(&constraints(0, None, None), Some(&claim(0, 8, 0)));
+        assert_eq!(caps.max_steps, 8);
+        assert_eq!(caps.max_runtime_s, 900, "a dimension the claim leaves open keeps its default");
+        let steps: Vec<_> = clamps.iter().filter(|c| c.field == "max_steps").collect();
+        assert_eq!(steps.len(), 1, "one entry per field: {clamps:?}");
+        assert_eq!((steps[0].by, steps[0].requested, steps[0].effective), ("grant", None, 8.0));
+        assert!(clamps.iter().any(|c| c.field == "max_runtime_s" && c.by == "default"));
+    }
+
+    #[test]
+    fn a_claim_above_the_ceiling_cannot_lift_the_ceiling() {
+        let (caps, clamps) = resolved(
+            &constraints(1_000, Some(100_000), Some(500.0)),
+            Some(&claim(900_000_000, 5_000, 90_000)),
+        );
+        assert_eq!((caps.max_steps, caps.max_runtime_s), (300, 3600));
+        assert!((caps.max_cost_usd - 20.0).abs() < 1e-9);
+        assert!(clamps.iter().all(|c| c.by == "ceiling"), "{clamps:?}");
+    }
+
+    #[test]
+    fn absent_claim_changes_nothing() {
+        let ask = constraints(25, Some(300), Some(0.5));
+        let plain = resolve_caps(&BudgetLimits::default(), RunClass::Agent, &ask).unwrap();
+        for none_like in [None, Some(&claim(0, 0, 0))] {
+            let with = resolved(&ask, none_like);
+            assert_eq!(with.0, plain.0);
+            assert_eq!(with.1, plain.1);
+        }
+    }
+
+    #[test]
+    fn an_interactive_run_ignores_a_claim() {
+        let started = RunBudget::start_with_claim(
+            &BudgetLimits::default(),
+            RunClass::Interactive,
+            &constraints(12, Some(120), None),
+            Some(&claim(1, 1, 1)),
+            None,
+            Instant::now(),
+        );
+        assert!(started.caps.is_none());
+        assert!(started.claim.is_none(), "a person's session carries no claim");
+    }
+
+    #[test]
+    fn the_refusal_names_the_grant_as_its_limit_source() {
+        let start = Instant::now();
+        let mut budget = RunBudget::start_with_claim(
+            &BudgetLimits::default(),
+            RunClass::Agent,
+            &constraints(50, None, None),
+            Some(&claim(0, 2, 0)),
+            None,
+            start,
+        );
+        budget.charge(true, 100);
+        budget.charge(true, 100);
+        let refused = budget.gate(BudgetMode::On, 0, start).unwrap_err();
+        assert_eq!(refused.code, ErrorCode::BudgetExhausted);
+        let details = refused.details.unwrap();
+        assert_eq!(details["dimension"], "steps");
+        assert_eq!(details["limit"], 2.0);
+        assert_eq!(details["limit_source"], "grant");
+
+        // Without a claim the same cap is the run's own.
+        let mut plain = RunBudget::start(
+            &BudgetLimits::default(),
+            RunClass::Agent,
+            &constraints(2, None, None),
+            None,
+            start,
+        );
+        plain.charge(true, 0);
+        plain.charge(true, 0);
+        let refused = plain.gate(BudgetMode::On, 0, start).unwrap_err();
+        assert_eq!(refused.details.unwrap()["limit_source"], "run_budget");
+
+        // Attempts are bounded by the claim's step cap, so they name it too.
+        let mut failing = RunBudget::start_with_claim(
+            &BudgetLimits::default(),
+            RunClass::Agent,
+            &constraints(50, None, None),
+            Some(&claim(0, 1, 0)),
+            None,
+            start,
+        );
+        failing.charge(false, 0);
+        failing.charge(false, 0);
+        let refused = failing.gate(BudgetMode::On, 0, start).unwrap_err();
+        let details = refused.details.unwrap();
+        assert_eq!((details["dimension"].as_str(), details["limit_source"].as_str()), (Some("attempts"), Some("grant")));
+    }
+
+    #[test]
+    fn claim_is_not_rewidened_when_the_run_resumes() {
+        let start = Instant::now();
+        let limits = BudgetLimits::default();
+        let first = RunBudget::start_with_claim(
+            &limits,
+            RunClass::Agent,
+            &constraints(50, None, None),
+            Some(&claim(0, 10, 0)),
+            None,
+            start,
+        );
+        let saved = first.snapshot(start);
+        assert_eq!(saved.claim.as_ref().map(|c| c.max_steps), Some(10));
+
+        let steps_after = |claim: Option<&GrantBudget>| {
+            RunBudget::start_with_claim(
+                &limits,
+                RunClass::Agent,
+                &constraints(50, None, None),
+                claim,
+                Some(&saved),
+                Instant::now(),
+            )
+            .caps
+            .unwrap()
+            .max_steps
+        };
+        assert_eq!(steps_after(None), 10, "a resume with no claim keeps the stored one");
+        assert_eq!(steps_after(Some(&claim(0, 40, 0))), 10, "a wider claim does not widen it");
+        assert_eq!(steps_after(Some(&claim(0, 4, 0))), 4, "a tighter one still tightens it");
+
+        // The claim travels in the checkpoint's JSON and an old checkpoint without it loads.
+        let json = serde_json::to_value(&saved).unwrap();
+        assert_eq!(json["claim"]["max_steps"], 10);
+        let back: BudgetCheckpoint = serde_json::from_value(json).unwrap();
+        assert_eq!(back, saved);
+        let old: BudgetCheckpoint =
+            serde_json::from_str(r#"{"class":"agent","steps":3,"attempts":3,"spent_micro_usd":0,"active_ms":0}"#).unwrap();
+        assert!(old.claim.is_none());
+        let bare = RunBudget::start(&limits, RunClass::Agent, &constraints(50, None, None), None, start);
+        assert!(serde_json::to_value(bare.snapshot(start)).unwrap().get("claim").is_none());
+    }
+
+    #[test]
+    fn tighter_claim_takes_the_smaller_bound_per_dimension() {
+        let a = claim(1_000_000, 10, 0);
+        let b = claim(2_000_000, 0, 300);
+        let merged = tighter_claim(Some(&a), Some(&b)).unwrap();
+        assert_eq!((merged.micro_usd, merged.max_steps, merged.max_runtime_s), (1_000_000, 10, 300));
+        assert_eq!(merged.minted_at_unix, a.minted_at_unix, "the first claim's label and stamp stand");
+        assert_eq!(tighter_claim(None, None), None);
+        assert_eq!(tighter_claim(Some(&a), None), Some(a.clone()));
+        assert_eq!(tighter_claim(None, Some(&b)), Some(b));
+        assert_eq!(tighter_claim(Some(&claim(0, 0, 0)), None), None, "an empty claim is no claim");
+    }
+
+    #[test]
+    fn claim_mode_parses_and_defaults_to_ignore() {
+        assert_eq!(ClaimMode::parse("").unwrap(), ClaimMode::Ignore);
+        assert_eq!(ClaimMode::parse(" IGNORE ").unwrap(), ClaimMode::Ignore);
+        assert_eq!(ClaimMode::parse("enforce").unwrap(), ClaimMode::Enforce);
+        let error = ClaimMode::parse("on").unwrap_err();
+        assert!(error.contains(ENV_CLAIM_MODE), "{error}");
+        assert_eq!(ClaimMode::Enforce.label(), "enforce");
     }
 }

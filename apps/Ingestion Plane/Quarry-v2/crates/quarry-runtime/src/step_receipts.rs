@@ -100,6 +100,11 @@ pub struct BudgetCheckpoint {
     /// The dimension that was reached, once one was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exhausted: Option<String>,
+    /// The grant budget claim (WS6.E) the run's bounds were tightened by, so a
+    /// resume keeps it. Absent on a checkpoint written before claims existed
+    /// or for a run no claim applied to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim: Option<crate::grant_validator::GrantBudget>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]

@@ -15,8 +15,8 @@ use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 
 use super::model_plane::v1::browser_broker_client::BrowserBrokerClient;
-use super::model_plane::v1::{RevokeGrantRequest, ValidateGrantRequest};
-use crate::grant_validator::{GrantValidation, GrantValidator};
+use super::model_plane::v1::{RevokeGrantRequest, ValidateGrantRequest, ValidateGrantResponse};
+use crate::grant_validator::{GrantBudget, GrantValidation, GrantValidator};
 
 #[derive(Clone)]
 pub struct GrpcGrantValidator {
@@ -134,24 +134,7 @@ impl GrantValidator for GrpcGrantValidator {
                 grant_id: grant_id.to_string(),
             }));
             match client.validate_grant(request).await {
-                Ok(r) => {
-                    let resp = r.into_inner();
-                    return Ok(GrantValidation {
-                        grant_id: resp.grant_id,
-                        active: resp.active,
-                        expires_at: resp.expires_at.and_then(prost_ts_to_chrono),
-                        allowed_domains: resp.allowed_domains,
-                        allowed_actions: resp.allowed_actions,
-                        allowed_frame_ids: resp.allowed_frame_ids,
-                        allowed_dialog_ids: resp.allowed_dialog_ids,
-                        allowed_artifact_ids: resp.allowed_artifact_ids,
-                        parent_grant_id: (!resp.parent_grant_id.is_empty())
-                            .then_some(resp.parent_grant_id),
-                        kind: resp.kind,
-                        owner_id: resp.owner_id,
-                        zdr: resp.zdr,
-                    });
-                }
+                Ok(r) => return Ok(validation_from_response(r.into_inner())),
                 Err(status) if status.code() == tonic::Code::NotFound => {
                     return Ok(GrantValidation {
                         grant_id: grant_id.to_string(),
@@ -166,6 +149,7 @@ impl GrantValidator for GrpcGrantValidator {
                         kind: String::new(),
                         owner_id: String::new(),
                         zdr: false,
+                        budget: None,
                     });
                 }
                 Err(status) if is_transient(status.code()) => {
@@ -183,6 +167,32 @@ impl GrantValidator for GrpcGrantValidator {
         Err(last_err.unwrap_or_else(|| {
             QuarryError::new(ErrorCode::DriverFailed, "validate_grant exhausted retries")
         }))
+    }
+}
+
+/// What a `ValidateGrantResponse` says, in Quarry's own type. The budget claim
+/// is carried verbatim (WS6.E); whether it is applied is the edge's decision.
+pub(crate) fn validation_from_response(resp: ValidateGrantResponse) -> GrantValidation {
+    GrantValidation {
+        grant_id: resp.grant_id,
+        active: resp.active,
+        expires_at: resp.expires_at.and_then(prost_ts_to_chrono),
+        allowed_domains: resp.allowed_domains,
+        allowed_actions: resp.allowed_actions,
+        allowed_frame_ids: resp.allowed_frame_ids,
+        allowed_dialog_ids: resp.allowed_dialog_ids,
+        allowed_artifact_ids: resp.allowed_artifact_ids,
+        parent_grant_id: (!resp.parent_grant_id.is_empty()).then_some(resp.parent_grant_id),
+        kind: resp.kind,
+        owner_id: resp.owner_id,
+        zdr: resp.zdr,
+        budget: GrantBudget::from_wire(
+            resp.budget_micro_usd,
+            resp.budget_max_steps,
+            resp.budget_max_runtime_s,
+            resp.budget_source,
+            resp.budget_minted_at_unix,
+        ),
     }
 }
 
@@ -216,6 +226,55 @@ pub(crate) fn grpc_status_to_error(status: tonic::Status) -> QuarryError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_budget_claim_on_a_validate_response_is_carried_verbatim() {
+        let resp = ValidateGrantResponse {
+            grant_id: "g1".into(),
+            active: true,
+            kind: "run".into(),
+            budget_micro_usd: 1_500_000,
+            budget_max_steps: 25,
+            budget_max_runtime_s: 300,
+            budget_source: "org_default".into(),
+            budget_minted_at_unix: 1_760_000_000,
+            ..Default::default()
+        };
+        let grant = validation_from_response(resp);
+        assert_eq!(
+            grant.budget,
+            Some(GrantBudget {
+                micro_usd: 1_500_000,
+                max_steps: 25,
+                max_runtime_s: 300,
+                source: "org_default".into(),
+                minted_at_unix: 1_760_000_000,
+            })
+        );
+        assert_eq!(grant.kind, "run");
+    }
+
+    #[test]
+    fn a_validate_response_with_no_bound_carries_no_claim() {
+        // An old broker (all five fields zero) and a broker that sent only a label.
+        for resp in [
+            ValidateGrantResponse::default(),
+            ValidateGrantResponse {
+                budget_source: "request".into(),
+                budget_minted_at_unix: 1,
+                ..Default::default()
+            },
+            // A negative bound is not a bound (the broker never sends one).
+            ValidateGrantResponse {
+                budget_micro_usd: -5,
+                budget_max_steps: -1,
+                budget_max_runtime_s: -1,
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(validation_from_response(resp).budget, None);
+        }
+    }
 
     #[test]
     fn prost_ts_to_chrono_handles_zero() {
