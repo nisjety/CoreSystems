@@ -1736,9 +1736,12 @@ async fn assemble_plan(pool: &Pool, plan: &store::PlanRow) -> Result<proto::Plan
 /// delegated bearer (as it does for `SubagentStopped`), never as `service:execution-core`,
 /// so a gate on the service principal refused the executor's own park events: found live
 /// 2026-10-20 (`failed to publish RunParked (best-effort)`, `InvalidArgument`). With the
-/// store active the ordinary gate applies: `orchestration:write`, then the run-owner check,
-/// so a caller can only write ids and a segment number to a run it owns, exactly as for
-/// the other run events it can already record.
+/// store active the ordinary gate applies: `orchestration:write`, then the run-owner check
+/// (the run's own user, or a same-org service holding `orchestration:write`, which the
+/// service-principal registry grants to no principal today), exactly as for the other run
+/// events a caller can already record. The events carry ids and a segment number only, are
+/// write-only (nothing reads them back as proof that a run is parked: the fold store is the
+/// truth) and are not tied to a parked fold, so an owner can write one for their own run.
 #[allow(clippy::result_large_err)]
 fn refuse_park_events_while_parking_is_off(
     park_store_active: bool,
@@ -4767,27 +4770,6 @@ mod tests {
         assert_eq!(event_run_id(&loop_resumed), Some("run_k"));
     }
 
-    #[test]
-    fn the_execution_principal_holds_the_scope_the_park_events_are_recorded_under() {
-        // The park and resume events are recorded through the same
-        // `RecordOrchestrationEvent` gate as every other run event:
-        // `orchestration:write` for a service, then the run's owner check.
-        let execution_core = VerifiedIdentity::service_for_test_as(
-            "org_x",
-            "service:execution-core",
-            &["orchestration:write"],
-            false,
-        );
-        assert!(authorize_operation(&execution_core, "orchestration:write").is_ok());
-        let without_scope = VerifiedIdentity::service_for_test_as(
-            "org_x",
-            "service:execution-core",
-            &["orchestration:read"],
-            false,
-        );
-        assert!(authorize_operation(&without_scope, "orchestration:write").is_err());
-    }
-
     fn park_event(resumed: bool, run_id: &str) -> proto::OrchestrationEvent {
         proto::OrchestrationEvent {
             event_id: String::new(),
@@ -4836,54 +4818,74 @@ mod tests {
         }
     }
 
-    // The handler refuses before the run-owner lookup, the broadcast and the
-    // persist. The pool is lazy and unreachable: reaching the owner lookup would
-    // answer Internal, not InvalidArgument, and a broadcast would reach `rx`.
+    // The handler runs the park-event gate before the run-owner lookup, the broadcast and the
+    // persist, and the gate needs BOTH halves of `park_recovery_active` (the fold store AND park
+    // recovery). The pool is lazy and unreachable with a short acquire timeout: reaching the owner
+    // lookup answers Internal, a refusal by the gate answers InvalidArgument "event payload is
+    // required", and a broadcast would reach `rx`. Both a human owner and a service holding
+    // `orchestration:write` are tried: the gate is the switch, not the caller.
     #[tokio::test]
-    async fn record_orchestration_event_refuses_park_events_while_the_park_store_is_off_before_anything_runs(
+    async fn record_orchestration_event_gates_park_events_on_the_whole_park_store_before_anything_runs(
     ) {
-        // Forced off for this thread, so the answer does not depend on the process environment.
-        let _off = crate::terminalization::park_test_switch::Forced::set(false);
+        use crate::loop_checkpoint::test_switch as store_switch;
+        use crate::terminalization::park_test_switch;
         let (tx, mut rx) = broadcast::channel::<proto::OrchestrationEvent>(8);
         let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(200))
             .connect_lazy("postgresql://session-core@127.0.0.1:1/session_core")
             .expect("lazy pool");
         let svc = OrchestrationGrpc::new(pool, tx);
-        for resumed in [false, true] {
-            let mut request = Request::new(proto::RecordOrchestrationEventRequest {
-                event: Some(park_event(resumed, "run_x")),
-            });
-            request
-                .extensions_mut()
-                .insert(VerifiedIdentity::user_for_test("org_x", "user_x"));
-            let refused = svc
-                .record_orchestration_event(request)
-                .await
-                .expect_err("a park event is refused while the park store is off");
-            assert_eq!(refused.code(), tonic::Code::InvalidArgument);
-            assert_eq!(refused.message(), "event payload is required");
-
-            let mut request = Request::new(proto::RecordOrchestrationEventRequest {
-                event: Some(park_event(resumed, "run_x")),
-            });
-            request
-                .extensions_mut()
-                .insert(VerifiedIdentity::service_for_test_as(
+        let callers = || {
+            [
+                VerifiedIdentity::user_for_test("org_x", "user_x"),
+                VerifiedIdentity::service_for_test_as(
                     "org_x",
                     "service:model-gateway",
                     &["orchestration:write"],
                     false,
-                ));
-            let refused = svc
-                .record_orchestration_event(request)
-                .await
-                .expect_err("a service's park event is refused while the park store is off");
-            assert_eq!(refused.code(), tonic::Code::InvalidArgument);
-            assert_eq!(refused.message(), "event payload is required");
+                ),
+            ]
+        };
+        // (fold store, park recovery, whether the park store is active)
+        for (store, park, active) in [
+            (true, false, false),
+            (false, true, false),
+            (false, false, false),
+            (true, true, true),
+        ] {
+            // Forced for this thread, so the answer does not depend on the process environment.
+            let _store = store_switch::Forced::set(store);
+            let _park = park_test_switch::Forced::set(park);
+            for resumed in [false, true] {
+                for caller in callers() {
+                    let mut request = Request::new(proto::RecordOrchestrationEventRequest {
+                        event: Some(park_event(resumed, "run_x")),
+                    });
+                    request.extensions_mut().insert(caller);
+                    let answer = svc
+                        .record_orchestration_event(request)
+                        .await
+                        .expect_err("the unreachable pool means no call can succeed");
+                    if active {
+                        assert_eq!(
+                            answer.code(),
+                            tonic::Code::Internal,
+                            "store {store}, park {park}: the gate passed and the owner lookup was reached"
+                        );
+                    } else {
+                        assert_eq!(
+                            answer.code(),
+                            tonic::Code::InvalidArgument,
+                            "store {store}, park {park}: refused by the gate"
+                        );
+                        assert_eq!(answer.message(), "event payload is required");
+                    }
+                }
+            }
         }
         assert!(
             matches!(rx.try_recv(), Err(broadcast::error::TryRecvError::Empty)),
-            "a refused park event is never broadcast"
+            "a park event that did not pass the gate and the owner lookup is never broadcast"
         );
     }
 
@@ -5825,25 +5827,65 @@ mod tests {
                 ]
             );
 
-            // A caller that does not own the run is refused, as for every event.
-            let mut stranger = Request::new(proto::RecordOrchestrationEventRequest {
-                event: Some(proto::OrchestrationEvent {
-                    event_id: String::new(),
-                    at: None,
-                    event: Some(orchestration_event::Event::RunParked(
-                        orchestration_event::RunParked { run_id: run.clone() },
-                    )),
-                }),
-            });
-            stranger
-                .extensions_mut()
-                .insert(VerifiedIdentity::user_for_test("org-someone-else", "user-x"));
-            let refused = db
-                .svc
-                .record_orchestration_event(stranger)
-                .await
-                .expect_err("another org's caller must not record a park event");
-            assert_ne!(refused.code(), tonic::Code::Ok);
+            // With the park store ON the ordinary gate is the only protection, so each way past
+            // it is pinned with its exact refusal, and none writes a row: another org's user,
+            // another user of the same org, the owner's own ZDR credential, and a service
+            // without `orchestration:write`.
+            let events_before_refusals: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM events WHERE run_id = $1")
+                    .bind(&run)
+                    .fetch_one(&db.pool)
+                    .await
+                    .expect("count events");
+            let refused_callers = [
+                (
+                    "another org's user",
+                    VerifiedIdentity::user_for_test("org-someone-else", "user-x"),
+                    tonic::Code::PermissionDenied,
+                ),
+                (
+                    "another user of the same org",
+                    VerifiedIdentity::user_for_test(&db.org, "user-someone-else"),
+                    tonic::Code::PermissionDenied,
+                ),
+                (
+                    "the owner's ZDR credential",
+                    VerifiedIdentity::user_for_test_with_zdr(&db.org, &db.user, true),
+                    tonic::Code::FailedPrecondition,
+                ),
+                (
+                    "a service without orchestration:write",
+                    VerifiedIdentity::service_for_test_as(
+                        &db.org,
+                        "service:model-gateway",
+                        &["orchestration:read"],
+                        false,
+                    ),
+                    tonic::Code::PermissionDenied,
+                ),
+            ];
+            for (who, identity, expected) in refused_callers {
+                for resumed in [false, true] {
+                    let mut request = Request::new(proto::RecordOrchestrationEventRequest {
+                        event: Some(park_event(resumed, &run)),
+                    });
+                    request.extensions_mut().insert(identity.clone());
+                    let refused = db.svc.record_orchestration_event(request).await.expect_err(
+                        "a caller outside the ordinary gate must not record a park event",
+                    );
+                    assert_eq!(refused.code(), expected, "{who}, resumed {resumed}");
+                }
+            }
+            let events_after_refusals: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM events WHERE run_id = $1")
+                    .bind(&run)
+                    .fetch_one(&db.pool)
+                    .await
+                    .expect("count events");
+            assert_eq!(
+                events_before_refusals, events_after_refusals,
+                "a refused park event writes no events row"
+            );
 
             // With the park store off the run's own owner and a service principal that
             // holds orchestration:write are refused with exactly the answer they got before

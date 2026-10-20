@@ -900,7 +900,7 @@ fn switch_table() -> Vec<(&'static str, String, &'static str)> {
         (
             "session-core",
             const_str(&read(SESSION_TERMINALIZATION), "PARK_RECOVERY_ENV"),
-            "the park rules of the fold store and the recovery worker's spare of a parked fold (WS03 S8-4; needs the fold store; read through park_recovery_active)",
+            "the park rules of the fold store, the recovery worker's spare of a parked fold and the recording of the RunParked and RunResumed events (WS03 S8-4; needs the fold store; read through park_recovery_active)",
         ),
     ]
 }
