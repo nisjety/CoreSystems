@@ -117,14 +117,17 @@ describe('browser error copy', () => {
   // Line endings are normalised first: a Windows checkout of the .rs files may be CRLF.
   const productionHalf = (file: string) =>
     (readFileSync(resolve(gatewayDomains, file), 'utf8').replace(/\r\n/g, '\n').split(/^mod tests {/m)[0] ?? '')
-  // The three shapes a handler names its code in: error("code", ..), a
-  // (StatusCode, "code", "message") tuple, and a snake_case literal on its own
-  // line (a code in a multi-line call or a returned pair).
+  // The five shapes a handler names its code in: error("code", ..), a
+  // (StatusCode, "code", "message") tuple, a snake_case literal on its own
+  // line (a code in a multi-line call or a returned pair), a "code": "..." key
+  // of a json!({ "error": { .. } }) body, and a struct field `code: "..."`.
   function emittedCodes(source: string): Set<string> {
     const codes = new Set<string>()
     for (const match of source.matchAll(/\berror\(\s*"([a-z][a-z_]+)"/g)) codes.add(match[1] ?? '')
     for (const match of source.matchAll(/StatusCode::[A-Z_]+,\s*"([a-z][a-z_]+)",\s*"/g)) codes.add(match[1] ?? '')
     for (const match of source.matchAll(/^\s*"([a-z]+(?:_[a-z]+)+)",?\r?$/gm)) codes.add(match[1] ?? '')
+    for (const match of source.matchAll(/"code":\s*"([a-z][a-z_]+)"/g)) codes.add(match[1] ?? '')
+    for (const match of source.matchAll(/\bcode:\s*"([a-z][a-z_]+)"/g)) codes.add(match[1] ?? '')
     return codes
   }
   // Snake-case literals the scan above meets that are not error codes. (The bot-wall
@@ -147,6 +150,10 @@ describe('browser error copy', () => {
       'zdr_persistent_profile_forbidden',
       'model_gateway_unreachable',
       'invalid_idempotency_key',
+      // Named by a json!({ "error": { "code": .. } }) body and by a struct field.
+      'browser_artifact_failed',
+      'invalid_browser_control_mode',
+      'browser_human_takeover_active',
     ]) {
       expect(emitted.has(code), `the scan found ${code}`).toBe(true)
     }
@@ -160,8 +167,9 @@ describe('browser error copy', () => {
   // SCRAPE_PREVIEW_FAILURE_CODES is the closed list the preview can fail with:
   // the codes classify_scrape_failure returns plus the ones scrape_preview itself
   // answers before any upstream call. `unsupported_media` is the 415 slice's code (WS5.G):
-  // that slice brings its own copy entry in errors.ts and may put the code on the list in
-  // the same change or a later one, so it is exempt from the first comparison only.
+  // that slice brings its own copy entry in errors.ts and may put the code on the list
+  // and the 415 path in quarry.rs in either order, so it is exempt from BOTH comparisons
+  // (the gateway not answering with it yet, or the list not naming it yet, is fine).
   it('lists exactly the failure codes the scrape preview can answer with', () => {
     const source = productionHalf('knowledge/quarry.rs')
     const body = (signature: string): string => {
@@ -174,7 +182,7 @@ describe('browser error copy', () => {
     expect(answered.has('invalid_url')).toBe(true)
     const listed = new Set<string>(SCRAPE_PREVIEW_FAILURE_CODES)
     expect([...answered].filter((code) => !listed.has(code) && code !== 'unsupported_media')).toEqual([])
-    expect([...listed].filter((code) => !answered.has(code))).toEqual([])
+    expect([...listed].filter((code) => !answered.has(code) && code !== 'unsupported_media')).toEqual([])
   })
 
   it('keeps both languages non-empty for every entry of the whole table', () => {

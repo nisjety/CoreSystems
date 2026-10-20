@@ -1811,7 +1811,7 @@ async fn get_artifact(
                     return BrowserArtifactAbsence::NeverStored.into_response();
                 }
                 let body = upstream.json::<Value>().await.unwrap_or_else(
-                    |_| json!({ "error": { "code": "browser_artifact_unavailable" } }),
+                    |_| json!({ "error": { "code": "browser_artifact_failed" } }),
                 );
                 return forward_quarry_failure(status, body);
             }
