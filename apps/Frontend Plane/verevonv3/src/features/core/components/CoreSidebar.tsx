@@ -67,7 +67,7 @@ import {
   type SidebarSection,
 } from '@/features/core/lib/sidebar-navigation'
 import { clearChatThreads, deleteChatThread, listChatThreads, saveChatThreadSnapshot } from '@/shared/api/chat-client'
-import { useI18n } from '@/shared/i18n'
+import { useI18n, translateApiError } from '@/shared/i18n'
 import { cn } from '@/shared/lib/cn'
 import { shouldShowWorkspaceAdminNavigation } from '@/shared/session/access'
 import { getSession } from '@/shared/session/session-store'
@@ -354,7 +354,7 @@ export function ChatSidebarPanel(props: { onCollapse: () => void }) {
         setSessions(replaceChatThreadHistory([...refreshedSessions, ...localSessions]))
       }
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke laste lagrede samtaler.', 'Could not load saved conversations.'))
+      setError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke laste lagrede samtaler.', en: 'Could not load saved conversations.' }))
       refreshLocalSessions()
     } finally {
       setLoading(false)

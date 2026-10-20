@@ -26,7 +26,7 @@ import {
   setKnowledgeAddSourceRequested,
   setKnowledgeSearchQuery,
 } from '@/features/knowledge/state/knowledge-filter-store'
-import { useI18n } from '@/shared/i18n'
+import { useI18n, translateApiError } from '@/shared/i18n'
 import {
   buildKnowledgeSidebarLiveData,
   filterKnowledgeFolders,
@@ -125,7 +125,7 @@ export function KnowledgeExpandedSidebarPanel(props: { onCollapse: () => void })
         .catch((reason) => {
           if (controller.signal.aborted) return
           setLiveKnowledge(null)
-          setError(reason instanceof Error ? reason.message : i18n.tr('Kunnskaps-API er utilgjengelig.', 'Knowledge API unavailable.'))
+          setError(translateApiError(reason, i18n.tr, { no: 'Kunnskaps-API er utilgjengelig.', en: 'Knowledge API unavailable.' }))
         })
         .finally(() => {
           if (!controller.signal.aborted) setLoading(false)

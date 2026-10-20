@@ -34,7 +34,7 @@ import {
   type SocialTrendSignal,
 } from '@/shared/api/social-client'
 import { cn } from '@/shared/lib/cn'
-import { useI18n } from '@/shared/i18n'
+import { useI18n, translateApiError } from '@/shared/i18n'
 
 type TrFn = (noText: string, enText: string) => string
 
@@ -184,7 +184,7 @@ export default function SocialOperationsPage(props: { section: SocialOperationsS
       setCampaignBrief('')
       setCampaignFeedback(i18n.tr('Kampanje opprettet.', 'Campaign created.'))
     } catch (reason) {
-      setCampaignFeedback(reason instanceof Error ? reason.message : i18n.tr('Kampanjen kunne ikke opprettes.', 'Campaign could not be created.'))
+      setCampaignFeedback(translateApiError(reason, i18n.tr, { no: 'Kampanjen kunne ikke opprettes.', en: 'Campaign could not be created.' }))
     } finally {
       setCampaignBusy(false)
     }

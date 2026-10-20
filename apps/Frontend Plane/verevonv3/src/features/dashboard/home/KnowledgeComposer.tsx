@@ -67,7 +67,7 @@ import {
 } from '@/shared/api/knowledge-client'
 import { resolveCrawlIngest } from '@/shared/api/settings-client'
 import { cn } from '@/shared/lib/cn'
-import { useI18n } from '@/shared/i18n'
+import { useI18n, translateApiError } from '@/shared/i18n'
 import { readClientJson, removeClientValue, writeClientJson } from '@/shared/session/client-storage'
 import { CrawlPagePicker } from './CrawlPagePicker'
 import { DashboardPlanBadge } from './DashboardPlanBadge'
@@ -540,7 +540,7 @@ export function KnowledgeComposer(props: {
       }
       setUrl('')
     } catch (reason) {
-      const message = reason instanceof Error ? reason.message : i18n.tr('Crawl kunne ikke startes.', 'Crawl could not be started.')
+      const message = translateApiError(reason, i18n.tr, { no: 'Crawl kunne ikke startes.', en: 'Crawl could not be started.' })
       updateJob(key, { status: 'failed', error: message })
       setFormError(message)
     }
@@ -566,7 +566,7 @@ export function KnowledgeComposer(props: {
       }
       setDiscovery(result)
     } catch (reason) {
-      setFormError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke oppdage sider.', 'Could not discover pages.'))
+      setFormError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke oppdage sider.', en: 'Could not discover pages.' }))
     } finally {
       setDiscovering(false)
     }
@@ -606,7 +606,7 @@ export function KnowledgeComposer(props: {
       setDiscovery(null)
       setUrl('')
     } catch (reason) {
-      const message = reason instanceof Error ? reason.message : i18n.tr('Crawl kunne ikke startes.', 'Crawl could not be started.')
+      const message = translateApiError(reason, i18n.tr, { no: 'Crawl kunne ikke startes.', en: 'Crawl could not be started.' })
       updateJob(key, { status: 'failed', error: message })
       setFormError(message)
     } finally {
@@ -628,7 +628,7 @@ export function KnowledgeComposer(props: {
       }
       setProductExtraction(result)
     } catch (reason) {
-      setFormError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke hente produkter.', 'Could not fetch products.'))
+      setFormError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke hente produkter.', en: 'Could not fetch products.' }))
     }
   }
 
@@ -764,7 +764,7 @@ export function KnowledgeComposer(props: {
       const summary = await summarizeProducts(orgId(), selected, focus || undefined)
       setProductSummary(summary || i18n.tr('Ingen sammendrag ble generert.', 'No summary was generated.'))
     } catch (reason) {
-      setFormError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke lage AI-sammendrag.', 'Could not create an AI summary.'))
+      setFormError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke lage AI-sammendrag.', en: 'Could not create an AI summary.' }))
     } finally {
       setSummarizing(false)
     }
@@ -1275,7 +1275,7 @@ export function KnowledgeComposer(props: {
       setPreview(null)
       setUrl('')
     } catch (reason) {
-      const message = reason instanceof Error ? reason.message : i18n.tr('Kunne ikke legge til i kunnskapsbasen.', 'Could not add to the knowledge base.')
+      const message = translateApiError(reason, i18n.tr, { no: 'Kunne ikke legge til i kunnskapsbasen.', en: 'Could not add to the knowledge base.' })
       updateJob(key, { status: 'failed', error: message })
       setFormError(message)
     } finally {
@@ -1301,7 +1301,7 @@ export function KnowledgeComposer(props: {
       const job = await importUpload(orgId(), list)
       updateJob(key, { id: job.id, status: job.status || 'pending' })
     } catch (reason) {
-      const message = reason instanceof Error ? reason.message : i18n.tr('Opplasting feilet.', 'Upload failed.')
+      const message = translateApiError(reason, i18n.tr, { no: 'Opplasting feilet.', en: 'Upload failed.' })
       updateJob(key, { status: 'failed', error: message })
       setFormError(message)
     } finally {

@@ -20,7 +20,7 @@ import {
 import { SectionHeader, SettingsButton } from '@/features/settings/components/settings-ui'
 import { getSession } from '@/shared/session/session-store'
 import { isGateOpen } from '@/shared/context/ownership-gate'
-import { useI18n } from '@/shared/i18n'
+import { useI18n, translateApiError } from '@/shared/i18n'
 
 /**
  * Trust Center — per-connected-app transparency.
@@ -163,7 +163,7 @@ export function TrustCenterSection() {
       await disconnectConnection(id, connection.id)
       await refetch()
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : i18n.tr('Kunne ikke koble fra denne appen.', 'Could not disconnect this app.'))
+      setActionError(translateApiError(err, i18n.tr, { no: 'Kunne ikke koble fra denne appen.', en: 'Could not disconnect this app.' }))
     } finally {
       setBusyConnectionId(null)
     }

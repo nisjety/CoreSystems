@@ -40,7 +40,7 @@ import {
 } from '@/shared/api/navbar-client'
 import { shouldShowWorkspaceAdminNavigation } from '@/shared/session/access'
 import { clearSession, getSession, loadSession } from '@/shared/session/session-store'
-import { useI18n } from '@/shared/i18n'
+import { useI18n, translateApiError } from '@/shared/i18n'
 import { cn } from '@/shared/lib/cn'
 import { ChatAppearancePreview } from '@/features/chat/components/ChatAppearancePreview'
 import { chatAppearanceActive } from '@/features/chat/lib/chat-appearance-preview'
@@ -437,7 +437,7 @@ function GlobalSearchDialog(props: {
           })
           .catch((searchError: unknown) => {
             if (controller.signal.aborted) return
-            setError(searchError instanceof Error ? searchError.message : i18n.tr('Søk feilet.', 'Search failed.'))
+            setError(translateApiError(searchError, i18n.tr, { no: 'Søk feilet.', en: 'Search failed.' }))
             setResults([])
           })
           .finally(() => {

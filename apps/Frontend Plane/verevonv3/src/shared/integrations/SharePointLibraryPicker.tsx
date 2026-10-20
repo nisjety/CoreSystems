@@ -1,6 +1,6 @@
 import { For, Show, createEffect, createSignal, untrack } from 'solid-js'
 import type { SharePointDrive, SharePointSite, SharePointSourceRegistration } from '@/shared/api/knowledge-client'
-import { useI18n } from '@/shared/i18n'
+import { useI18n, translateApiError } from '@/shared/i18n'
 import { Button } from '@/shared/ui/Button'
 
 /** The SharePoint browse + register calls the picker needs. Callers wire them
@@ -58,7 +58,7 @@ export function SharePointLibraryPicker(props: SharePointLibraryPickerProps) {
         setError(i18n.tr('Dette nettstedet har ingen dokumentbiblioteker.', 'This site has no document libraries.'))
       }
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke hente biblioteker.', 'Could not load libraries.'))
+      setError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke hente biblioteker.', en: 'Could not load libraries.' }))
     } finally {
       setLoadingDrives(false)
     }
@@ -79,7 +79,7 @@ export function SharePointLibraryPicker(props: SharePointLibraryPickerProps) {
           if (first) await loadDrives(first.id)
           else setError(i18n.tr('Fant ingen SharePoint-nettsteder på denne kontoen.', 'No SharePoint sites were found on this account.'))
         } catch (reason) {
-          setError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke hente SharePoint-nettsteder.', 'Could not load SharePoint sites.'))
+          setError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke hente SharePoint-nettsteder.', en: 'Could not load SharePoint sites.' }))
         } finally {
           setLoadingSites(false)
         }
@@ -104,7 +104,7 @@ export function SharePointLibraryPicker(props: SharePointLibraryPickerProps) {
       })
       props.onDone()
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : i18n.tr('Biblioteket kunne ikke registreres.', 'The library could not be registered.'))
+      setError(translateApiError(reason, i18n.tr, { no: 'Biblioteket kunne ikke registreres.', en: 'The library could not be registered.' }))
     } finally {
       setRegistering(false)
     }

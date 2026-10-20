@@ -311,7 +311,7 @@ export function VerevonWorkspaceSettingsPage(props: {
       setBillingAccount(await loadBillingAccount(signal))
     } catch (reason) {
       if (reason instanceof Error && reason.name === 'AbortError') return
-      setBillingError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke laste faktureringskonto.', 'Could not load billing account.'))
+      setBillingError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke laste faktureringskonto.', en: 'Could not load billing account.' }))
     } finally {
       if (!signal?.aborted) setBillingLoading(false)
     }
@@ -1039,7 +1039,7 @@ function BillingSection(props: {
           throw new Error(i18n.tr('Kasseøkten inneholdt ikke en gyldig betalingsflate.', 'Checkout session did not include a valid payment surface.'))
       }
     } catch (reason) {
-      setCheckoutError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke starte kassen.', 'Could not start checkout.'))
+      setCheckoutError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke starte kassen.', en: 'Could not start checkout.' }))
     } finally {
       setStartingCheckout(false)
     }
@@ -1074,7 +1074,7 @@ function BillingSection(props: {
       await props.onRefresh()
       clearCheckoutParams()
     } catch (reason) {
-      setCheckoutError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke bekrefte kassen.', 'Could not confirm checkout.'))
+      setCheckoutError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke bekrefte kassen.', en: 'Could not confirm checkout.' }))
     } finally {
       setConfirmingCheckout(false)
     }
@@ -1408,7 +1408,7 @@ function OrgSecuritySection() {
         setZdrError(translateApiError(reason, i18n.tr))
       } else {
         setZdrError(
-          reason instanceof Error ? reason.message : i18n.tr('Kunne ikke oppdatere Zero Data Retention.', 'Could not update Zero Data Retention.'),
+          translateApiError(reason, i18n.tr, { no: 'Kunne ikke oppdatere Zero Data Retention.', en: 'Could not update Zero Data Retention.' }),
         )
       }
     } finally {
@@ -1428,7 +1428,7 @@ function OrgSecuritySection() {
     } catch (reason) {
       setSupportAiMode(previous)
       setSupportAiError(
-        reason instanceof Error ? reason.message : i18n.tr('Kunne ikke oppdatere Support AI-modus.', 'Could not update the Support AI mode.'),
+        translateApiError(reason, i18n.tr, { no: 'Kunne ikke oppdatere Support AI-modus.', en: 'Could not update the Support AI mode.' }),
       )
     } finally {
       setSupportAiBusy(false)

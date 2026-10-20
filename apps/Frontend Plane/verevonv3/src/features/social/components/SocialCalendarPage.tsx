@@ -39,7 +39,7 @@ import {
   type SocialProviderKey,
 } from '@/shared/api/social-client'
 import { cn } from '@/shared/lib/cn'
-import { useI18n } from '@/shared/i18n'
+import { useI18n, translateApiError } from '@/shared/i18n'
 
 const pendingDraftKey = 'verevon.social.pendingDraft'
 
@@ -127,7 +127,7 @@ export default function SocialCalendarPage() {
       setSelectedPostId(result.post.id)
       setFeedback(i18n.tr('Utkast opprettet og lagt til i kalenderkøen.', 'Draft created and added to the calendar queue.'))
     } catch (reason) {
-      setFeedback(reason instanceof Error ? reason.message : i18n.tr('Utkastet kunne ikke opprettes.', 'Draft could not be created.'))
+      setFeedback(translateApiError(reason, i18n.tr, { no: 'Utkastet kunne ikke opprettes.', en: 'Draft could not be created.' }))
     } finally {
       setBusy(false)
     }
@@ -148,7 +148,7 @@ export default function SocialCalendarPage() {
       setPosts((current) => current.map((candidate) => (candidate.id === post.id ? { ...candidate, ...result.post } : candidate)))
       setFeedback(i18n.tr(`Planlagt for ${window.label}.`, `Scheduled for ${window.label}.`))
     } catch (reason) {
-      setFeedback(reason instanceof Error ? reason.message : i18n.tr('Innlegget kunne ikke planlegges.', 'Post could not be scheduled.'))
+      setFeedback(translateApiError(reason, i18n.tr, { no: 'Innlegget kunne ikke planlegges.', en: 'Post could not be scheduled.' }))
     } finally {
       setBusy(false)
     }
@@ -171,7 +171,7 @@ export default function SocialCalendarPage() {
         ? i18n.tr('Publisering blokkert. Løs kravene fra leverandøren nedenfor før du legger i kø.', 'Publish blocked. Resolve the provider requirements below before queueing.')
         : i18n.tr('Publiseringsforespørsel akseptert. Leverandøradaptere håndterer plattformspesifikk publisering.', 'Publish intent accepted. Provider adapters will handle platform-specific publishing.'))
     } catch (reason) {
-      setFeedback(reason instanceof Error ? reason.message : i18n.tr('Innlegget kunne ikke publiseres.', 'Post could not be published.'))
+      setFeedback(translateApiError(reason, i18n.tr, { no: 'Innlegget kunne ikke publiseres.', en: 'Post could not be published.' }))
     } finally {
       setBusy(false)
     }

@@ -10,10 +10,10 @@ import {
 } from '@/shared/api/privacy-client'
 import { SectionHeader, SettingsButton } from '@/features/settings/components/settings-ui'
 import { getSession } from '@/shared/session/session-store'
-import { useI18n } from '@/shared/i18n'
+import { useI18n, translateApiError } from '@/shared/i18n'
 
 function errorMessage(error: unknown, i18n: ReturnType<typeof useI18n>): string {
-  return error instanceof Error ? error.message : i18n.tr('Uventet feil', 'Unexpected error')
+  return translateApiError(error, i18n.tr, { no: 'Uventet feil', en: 'Unexpected error' })
 }
 
 /**

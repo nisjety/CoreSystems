@@ -63,7 +63,7 @@ import {
   type ChatRunScreenshotState,
   type ChatRunWatchState,
 } from '@/features/chat/lib/chat-run-watch'
-import { useI18n } from '@/shared/i18n'
+import { useI18n, translateApiError } from '@/shared/i18n'
 import { RunNotifyButton } from './RunNotifyButton'
 
 const RUN_STREAM_ERROR = 'Kunne ikke lese hendelsesstrømmen for denne kjøringen.'
@@ -450,7 +450,7 @@ export function ChatLiveRunPanel(props: {
       // response cannot make the UI claim that a pause took effect.
       await controlBrowserAiRun(orgId, currentRunId, action)
     } catch (error) {
-      setControlError(error instanceof Error ? error.message : 'Nettleserkontrollen kunne ikke sendes.')
+      setControlError(translateApiError(error, i18n.tr, { no: 'Nettleserkontrollen kunne ikke sendes.', en: 'The browser control could not be sent.' }))
     } finally {
       setControlPending(null)
     }

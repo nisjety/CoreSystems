@@ -1,7 +1,7 @@
 import { createEffect, createMemo, createSignal, For, Show } from 'solid-js'
 import type { JSX } from '@solidjs/web'
 import { Folder, FolderPlus, MessageSquarePlus, MoreHorizontal, Pin, Search, SlidersHorizontal, X } from '@/shared/icons'
-import { useI18n } from '@/shared/i18n'
+import { useI18n, translateApiError } from '@/shared/i18n'
 import { getSession } from '@/shared/session/session-store'
 import type { ChatOrganizationAction } from '@/shared/actions/chat-organization'
 import { applyChatOrganizationAction, chatDateGroup, chatOrganizationStorageKey, emptyChatOrganization, readChatOrganization, saveChatOrganization, selectOrganizedChats } from '@/features/chat/lib/chat-organization'
@@ -118,7 +118,7 @@ export function ChatSidebarOrganizer(props: {
       setMoveNotice(i18n.tr(`Flyttet til ${group.label}.`, `Moved to ${group.label}.`) +
         (thread?.pinned ? i18n.tr(' Samtalen er fortsatt festet.', ' The chat stays pinned.') : ''))
     } catch (reason) {
-      setMoveNotice(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke flytte samtalen.', 'Could not move the chat.'))
+      setMoveNotice(translateApiError(reason, i18n.tr, { no: 'Kunne ikke flytte samtalen.', en: 'Could not move the chat.' }))
     }
     endDrag()
   }
@@ -186,7 +186,7 @@ export function ChatSidebarOrganizer(props: {
         setQuery('')
       }
       setMode(null)
-    } catch (reason) { setError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke lagre.', 'Could not save.')) }
+    } catch (reason) { setError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke lagre.', en: 'Could not save.' })) }
   }
 
   return (

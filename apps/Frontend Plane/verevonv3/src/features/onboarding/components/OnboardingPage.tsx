@@ -606,7 +606,14 @@ export default function OnboardingPage() {
           setState((s) => { s.website.branding = payload })
         },
         onWarning: (payload) => {
-          setState((s) => { s.website.warning = payload.message || payload.code })
+          // The warning's own text is English operator wording (or a client note about a
+          // packet it ignored), so the person gets the copy for its code instead.
+          setState((s) => {
+            s.website.warning = translateApiError({ code: payload.code }, i18n.tr, {
+              no: 'Forhåndsvisningen av nettsiden hadde et problem. Du kan prøve på nytt eller fortsette uten.',
+              en: 'The website preview ran into a problem. You can try again or continue without it.',
+            })
+          })
         },
         onDone: (payload) => {
           flush(() => {
