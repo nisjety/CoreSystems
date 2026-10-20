@@ -132,3 +132,18 @@ func sameBudgetClaim(a, b Budget) bool {
 	return a.MicroUSD == b.MicroUSD && a.MaxSteps == b.MaxSteps &&
 		a.MaxRuntimeS == b.MaxRuntimeS && a.Source == b.Source
 }
+
+// sameDeriveBudget decides whether a replay of a derive agrees with the grant
+// it names about the budget claim. A replay that sets a claim of its own (any
+// bound or a label) must ask for exactly what was issued: tightenBudget of the
+// parent and that request has to equal the issued claim, so a different claim,
+// tighter or looser, is a conflict. A replay that sets none is a lookup: it
+// asks for no claim, so there is nothing to disagree with, and it gets the
+// issued grant back with the claim that grant carries. That is what lets a
+// caller whose claim is recomputed on each attempt (from a ceiling that moved,
+// or one it could not read) retry a derive and find its grant. It cannot widen
+// or refresh anything: the claim returned is the stored one, fixed at the
+// first derive, and the stamp is not touched.
+func sameDeriveBudget(requested, issued, tightened Budget) bool {
+	return !requested.IsSet() || sameBudgetClaim(issued, tightened)
+}

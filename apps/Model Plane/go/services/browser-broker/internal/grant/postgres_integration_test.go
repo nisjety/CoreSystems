@@ -221,17 +221,29 @@ func TestPg_BudgetClaimIsDurableNullableAndConstrained(t *testing.T) {
 		t.Fatalf("after restart: %#v, %v (want %#v)", got, err, run.Budget)
 	}
 
-	// The schema refuses what the Go layer would never write.
+	// The schema refuses what the Go layer would never write. Each statement
+	// runs against a row where only the CHECK under test can refuse it: on the
+	// unclaimed row the table-level "a source labels a bound" CHECK would fire
+	// first and the column CHECKs would never be the reason. The parent already
+	// carries a source, a cost bound and a runtime bound (and no step bound), so
+	// that table constraint still holds after each of these.
 	for name, stmt := range map[string]string{
-		"a zero bound":           `UPDATE browser_grants SET budget_max_steps = 0 WHERE id = $1`,
-		"a negative bound":       `UPDATE browser_grants SET budget_micro_usd = -5 WHERE id = $1`,
-		"an unknown source":      `UPDATE browser_grants SET budget_source = 'client' WHERE id = $1`,
-		"a source with no bound": `UPDATE browser_grants SET budget_source = 'request' WHERE id = $1`,
-		"a negative stamp":       `UPDATE browser_grants SET budget_minted_at_unix = -1 WHERE id = $1`,
+		"a zero bound":          `UPDATE browser_grants SET budget_max_steps = 0 WHERE id = $1`,
+		"a negative bound":      `UPDATE browser_grants SET budget_micro_usd = -5 WHERE id = $1`,
+		"a zero cost bound":     `UPDATE browser_grants SET budget_micro_usd = 0 WHERE id = $1`,
+		"a negative step bound": `UPDATE browser_grants SET budget_max_steps = -1 WHERE id = $1`,
+		"a negative runtime":    `UPDATE browser_grants SET budget_max_runtime_s = -60 WHERE id = $1`,
+		"an unknown source":     `UPDATE browser_grants SET budget_source = 'client' WHERE id = $1`,
+		"a negative stamp":      `UPDATE browser_grants SET budget_minted_at_unix = -1 WHERE id = $1`,
+		"a zero stamp":          `UPDATE browser_grants SET budget_minted_at_unix = 0 WHERE id = $1`,
 	} {
-		if _, err := pool.Exec(ctx, stmt, bare.ID); err == nil {
+		if _, err := pool.Exec(ctx, stmt, parent.ID); err == nil {
 			t.Fatalf("%s was accepted by the schema", name)
 		}
+	}
+	// The table-level CHECK, on the row that has nothing: a source with no bound.
+	if _, err := pool.Exec(ctx, `UPDATE browser_grants SET budget_source = 'request' WHERE id = $1`, bare.ID); err == nil {
+		t.Fatal("a source with no bound was accepted by the schema")
 	}
 	if _, err := pool.Exec(ctx, `UPDATE browser_grants SET budget_micro_usd = NULL, budget_max_runtime_s = NULL WHERE id = $1`, parent.ID); err == nil {
 		t.Fatal("clearing every bound but keeping the source was accepted by the schema")

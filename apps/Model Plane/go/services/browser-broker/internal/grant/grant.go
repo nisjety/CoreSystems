@@ -46,7 +46,8 @@ var (
 	// parent is wider than one run may inherit, or its kind requires it.
 	ErrDeriveNeedsExplicitDomains = errors.New("derived browser grant requires an explicit host list")
 	// ErrDeriveConflict means (parent, session_key) already names a run grant
-	// with a different host list. A replay never changes an issued grant.
+	// with a different host list, or with a different budget claim than the one
+	// the replay asks for. A replay never changes an issued grant.
 	ErrDeriveConflict = errors.New("run grant already derived with a different policy")
 )
 
@@ -350,7 +351,10 @@ func (s *MemoryRepository) CreateScopedSensitiveApproval(_ context.Context, p Ap
 // same tenant and owner, hosts equal to or below the parent's, the parent's
 // ZDR flag, an expiry no later than the parent's, and a ParentGrantID so a
 // revocation of the parent cascades to it. It is idempotent on
-// (parent, SessionKey): a replay returns the issued grant unchanged.
+// (parent, SessionKey): a replay returns the issued grant unchanged. A replay
+// that sets a budget claim must set the one that was issued; a replay that sets
+// none (see sameDeriveBudget) asks for no claim of its own and gets the issued
+// grant with the claim it carries.
 //
 // The parent is looked up and the run grant inserted under one lock, so a
 // parent revoked concurrently can never leave a live child behind.
@@ -419,7 +423,7 @@ func (s *MemoryRepository) Derive(ctx context.Context, p DeriveParams) (*Grant, 
 			return nil, ErrGrantRevoked
 		case now.After(existing.ExpiresAt):
 			return nil, ErrGrantExpired
-		case !equalStrings(existing.AllowedDomains, domains), !sameBudgetClaim(existing.Budget, budget):
+		case !equalStrings(existing.AllowedDomains, domains), !sameDeriveBudget(requestedBudget, existing.Budget, budget):
 			return nil, ErrDeriveConflict
 		}
 		return clone(existing), nil

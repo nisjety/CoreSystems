@@ -418,7 +418,8 @@ func (s *PgStore) CreateScopedSensitiveApproval(ctx context.Context, p ApprovalP
 //  2. a per-parent advisory lock serialises derives under one parent, so the
 //     live-run count and the insert are exact (DefaultMaxActiveRunsPerParent);
 //  3. the insert is ON CONFLICT (parent_grant_id, session_key) DO NOTHING; a
-//     replay returns the issued grant unchanged.
+//     replay returns the issued grant unchanged (see sameDeriveBudget for
+//     what a replay may say about the budget claim).
 func (s *PgStore) Derive(ctx context.Context, p DeriveParams) (*Grant, error) {
 	if strings.TrimSpace(p.SessionKey) == "" || p.ParentGrantID == "" || p.OrgID == "" {
 		return nil, ErrParentNotDerivable
@@ -489,7 +490,7 @@ func (s *PgStore) Derive(ctx context.Context, p DeriveParams) (*Grant, error) {
 				return ErrGrantRevoked
 			case now.After(existing.ExpiresAt):
 				return ErrGrantExpired
-			case !equalStrings(existing.AllowedDomains, domains), !sameBudgetClaim(existing.Budget, budget):
+			case !equalStrings(existing.AllowedDomains, domains), !sameDeriveBudget(requestedBudget, existing.Budget, budget):
 				return ErrDeriveConflict
 			}
 			out = existing

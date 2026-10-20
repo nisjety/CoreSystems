@@ -221,16 +221,28 @@ func contractBudget_AReplayKeepsTheIssuedClaimAndADifferentClaimConflicts(t *tes
 		t.Fatalf("replay = %#v, first = %#v: a replay must not re-stamp or re-mint", again, first)
 	}
 	for name, other := range map[string]Budget{
-		"looser":   claim(2_000_000, 10, 0, BudgetSourceRequest),
-		"tighter":  claim(500_000, 10, 0, BudgetSourceRequest),
-		"no claim": {},
-		"label":    claim(1_000_000, 10, 0, BudgetSourceOrgDefault),
+		"looser":            claim(2_000_000, 10, 0, BudgetSourceRequest),
+		"tighter":           claim(500_000, 10, 0, BudgetSourceRequest),
+		"label":             claim(1_000_000, 10, 0, BudgetSourceOrgDefault),
+		"another dimension": claim(1_000_000, 10, 60, BudgetSourceRequest),
 	} {
 		if _, err := store.Derive(ctx, withBudget(parent, "replay", other)); !errors.Is(err, ErrDeriveConflict) {
 			t.Fatalf("%s replay: error = %v, want ErrDeriveConflict", name, err)
 		}
 	}
-	// The conflicts did not change the issued grant.
+	// A replay that asks for no claim of its own is a lookup: it gets the issued
+	// grant, with the issued claim and the issued stamp, however the caller's own
+	// ceiling has moved since. (Before this, a caller that recomputed its claim on
+	// every attempt could not retry a derive once the claim differed.)
+	clock.Advance(time.Minute)
+	looked, err := store.Derive(ctx, withBudget(parent, "replay", Budget{}))
+	if err != nil {
+		t.Fatalf("a replay that asks for no claim: %v", err)
+	}
+	if looked.ID != first.ID || looked.Budget != first.Budget {
+		t.Fatalf("lookup replay = %#v, first = %#v: it must return the issued claim, stamp included", looked, first)
+	}
+	// The conflicts and the lookup did not change the issued grant.
 	got, err := store.GetScoped(ctx, first.ID, first.OrgID, first.OwnerID)
 	if err != nil || got.Budget != first.Budget {
 		t.Fatalf("issued grant after conflicts = %#v, %v", got, err)
