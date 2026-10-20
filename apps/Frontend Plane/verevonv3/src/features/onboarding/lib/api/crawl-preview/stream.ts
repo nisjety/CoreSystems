@@ -1,4 +1,5 @@
 import { gatewayBaseUrl } from '@/shared/api/config'
+import { apiErrorFromResponse, signalSessionExpiry } from '@/shared/api/http'
 import type { SseHandlers } from '@/features/onboarding/lib/api/contracts'
 import { dispatchCrawlPreviewPacket } from './packets'
 
@@ -22,7 +23,14 @@ export async function streamCrawlPreview(
     }),
   })
 
-  if (!response.ok || !response.body) {
+  if (!response.ok) {
+    // The typed failure (code, Retry-After) rather than a bare Error, so the page can
+    // say why through the shared copy, and an expired session leads back to sign-in.
+    const failure = apiErrorFromResponse(await response.json().catch(() => null), response)
+    signalSessionExpiry(failure, '/api/v1/onboarding/crawl-preview')
+    throw failure
+  }
+  if (!response.body) {
     throw new Error(`Crawl preview failed (${response.status})`)
   }
 

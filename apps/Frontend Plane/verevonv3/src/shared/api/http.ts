@@ -130,6 +130,29 @@ export function apiErrorFromResponse(body: unknown, response: Pick<Response, 'st
   return new ApiError(message, response.status, code, { ...hints, retryAfterSeconds })
 }
 
+/**
+ * Tell the application shell that a protected request was refused because the
+ * server-side session is gone: one path back to sign-in for every transport.
+ *
+ * Only the gateway's own 401 `unauthorized` counts, and never on `/api/v1/auth/*`:
+ * a failed sign-in or two-factor challenge is an expected credential error that must
+ * stay on its form, and the session probe itself answering 401 must not re-trigger
+ * the probe (that would loop). A 503 `session_verification_unavailable`, a timeout or
+ * any 5xx says nothing about the session and never ends it. The streaming transports
+ * (`sse.ts`) do not call this: the agent stream maps the model gateway's own 401 to the
+ * same code, and a credential drift there is not a sign-out.
+ */
+export function signalSessionExpiry(failure: ApiError, path: string): void {
+  if (
+    failure.status === 401
+    && failure.code === 'unauthorized'
+    && !path.startsWith('/api/v1/auth/')
+    && typeof window !== 'undefined'
+  ) {
+    window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT))
+  }
+}
+
 export async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers)
   headers.set('Accept', 'application/json')
@@ -148,19 +171,10 @@ export async function requestJson<T>(path: string, init?: RequestInit): Promise<
 
   if (!response.ok) {
     const failure = apiErrorFromResponse(body, response)
-    const { code } = failure
-    // A failed sign-in or 2FA challenge is an expected credential error and
-    // must remain on its form. Other gateway `unauthorized` responses mean the
-    // existing browser session is no longer accepted, so leaving the user on a
-    // page with controls that will all fail is misleading.
-    if (
-      response.status === 401
-      && code === 'unauthorized'
-      && !path.startsWith('/api/v1/auth/')
-      && typeof window !== 'undefined'
-    ) {
-      window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT))
-    }
+    // Other gateway `unauthorized` responses mean the existing browser session is
+    // no longer accepted, so leaving the user on a page with controls that will
+    // all fail is misleading.
+    signalSessionExpiry(failure, path)
     throw failure
   }
 
@@ -193,7 +207,9 @@ export async function requestForm<T>(
   const body = (await response.json().catch(() => null)) as Envelope<T> | Record<string, unknown> | null
 
   if (!response.ok) {
-    throw apiErrorFromResponse(body, response)
+    const failure = apiErrorFromResponse(body, response)
+    signalSessionExpiry(failure, path)
+    throw failure
   }
 
   return unwrap(body as Envelope<T>)
