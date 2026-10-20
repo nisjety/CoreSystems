@@ -151,7 +151,9 @@ type querier interface {
 
 const grantColumns = `id, kind, org_id, owner_id, session_key, scope_url, allowed_domains,
 	allowed_actions, allowed_frame_ids, allowed_dialog_ids, allowed_artifact_ids,
-	COALESCE(parent_grant_id, ''), expires_at, revoked_at IS NOT NULL, COALESCE(revoked_reason, '')`
+	COALESCE(parent_grant_id, ''), expires_at, revoked_at IS NOT NULL, COALESCE(revoked_reason, ''),
+	COALESCE(budget_micro_usd, 0), COALESCE(budget_max_steps, 0), COALESCE(budget_max_runtime_s, 0),
+	COALESCE(budget_source, ''), COALESCE(budget_minted_at_unix, 0)`
 
 // fetch reads one grant; lock is "", " FOR SHARE" or " FOR UPDATE". A
 // missing row is ErrGrantNotFound.
@@ -162,6 +164,7 @@ func (s *PgStore) fetch(ctx context.Context, q querier, op, id, lock string) (*G
 		&g.ID, &kind, &g.OrgID, &g.OwnerID, &g.SessionKey, &g.ScopeURL, &g.AllowedDomains,
 		&g.AllowedActions, &g.AllowedFrameIDs, &g.AllowedDialogIDs, &g.AllowedArtifactIDs,
 		&g.ParentGrantID, &g.ExpiresAt, &g.Revoked, &g.RevokedReason,
+		&g.Budget.MicroUSD, &g.Budget.MaxSteps, &g.Budget.MaxRuntimeS, &g.Budget.Source, &g.Budget.MintedAtUnix,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrGrantNotFound
@@ -241,14 +244,17 @@ func nonNil(values []string) []string {
 
 const insertGrant = `INSERT INTO browser_grants (id, kind, org_id, owner_id, session_key, scope_url,
 	allowed_domains, allowed_actions, allowed_frame_ids, allowed_dialog_ids, allowed_artifact_ids,
-	parent_grant_id, expires_at, absolute_expires_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULLIF($12, ''), $13, $13)`
+	parent_grant_id, expires_at, absolute_expires_at,
+	budget_micro_usd, budget_max_steps, budget_max_runtime_s, budget_source, budget_minted_at_unix)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULLIF($12, ''), $13, $13,
+	NULLIF($14::bigint, 0), NULLIF($15::int, 0), NULLIF($16::int, 0), NULLIF($17::text, ''), NULLIF($18::bigint, 0))`
 
 func insertArgs(g *Grant) []any {
 	return []any{
 		g.ID, string(g.Kind), g.OrgID, g.OwnerID, g.SessionKey, g.ScopeURL,
 		nonNil(g.AllowedDomains), nonNil(g.AllowedActions), nonNil(g.AllowedFrameIDs),
 		nonNil(g.AllowedDialogIDs), nonNil(g.AllowedArtifactIDs), g.ParentGrantID, g.ExpiresAt,
+		g.Budget.MicroUSD, g.Budget.MaxSteps, g.Budget.MaxRuntimeS, g.Budget.Source, g.Budget.MintedAtUnix,
 	}
 }
 
@@ -266,14 +272,21 @@ func (s *PgStore) CreateSession(ctx context.Context, p CreateSessionParams) (*Gr
 	if err != nil {
 		return nil, err
 	}
+	budget, err := NormalizeBudget(p.Budget)
+	if err != nil {
+		return nil, err
+	}
 	id, err := newID(false)
 	if err != nil {
 		return nil, err
 	}
 	now := s.clock()
+	if budget.IsSet() {
+		budget.MintedAtUnix = now.Unix()
+	}
 	g := &Grant{
 		ID: id, Kind: KindSession, OrgID: p.OrgID, OwnerID: p.OwnerID, SessionKey: p.SessionKey,
-		ScopeURL: p.ScopeURL, AllowedDomains: domains, ExpiresAt: now.Add(p.TTL),
+		ScopeURL: p.ScopeURL, AllowedDomains: domains, Budget: budget, ExpiresAt: now.Add(p.TTL),
 	}
 	err = s.inTx(ctx, "create_session", func(tx pgx.Tx) error {
 		if p.MaxActivePerOwner > 0 {
@@ -445,6 +458,10 @@ func (s *PgStore) Derive(ctx context.Context, p DeriveParams) (*Grant, error) {
 		if err != nil {
 			return err
 		}
+		requestedBudget, err := NormalizeBudget(p.Budget)
+		if err != nil {
+			return err
+		}
 		if p.Policy != nil {
 			if err := p.Policy.CheckSession(ctx, p.OrgID, domains); err != nil {
 				return err
@@ -458,6 +475,10 @@ func (s *PgStore) Derive(ctx context.Context, p DeriveParams) (*Grant, error) {
 		if now.After(parent.ExpiresAt) {
 			return ErrGrantExpired
 		}
+		budget, err := tightenBudget(parent.Budget, requestedBudget, now.Unix())
+		if err != nil {
+			return err
+		}
 		replay := func() error {
 			existing, err := s.existingRun(ctx, tx, parent.ID, parent.OrgID, p.SessionKey)
 			if err != nil || existing == nil {
@@ -468,7 +489,7 @@ func (s *PgStore) Derive(ctx context.Context, p DeriveParams) (*Grant, error) {
 				return ErrGrantRevoked
 			case now.After(existing.ExpiresAt):
 				return ErrGrantExpired
-			case !equalStrings(existing.AllowedDomains, domains):
+			case !equalStrings(existing.AllowedDomains, domains), !sameBudgetClaim(existing.Budget, budget):
 				return ErrDeriveConflict
 			}
 			out = existing
@@ -505,7 +526,7 @@ func (s *PgStore) Derive(ctx context.Context, p DeriveParams) (*Grant, error) {
 		g := &Grant{
 			ID: id, Kind: KindRun, OrgID: parent.OrgID, OwnerID: parent.OwnerID,
 			SessionKey: p.SessionKey, ScopeURL: parent.ScopeURL, AllowedDomains: domains,
-			ParentGrantID: parent.ID, ExpiresAt: expires,
+			Budget: budget, ParentGrantID: parent.ID, ExpiresAt: expires,
 		}
 		var inserted string
 		err = tx.QueryRow(ctx, insertGrant+`

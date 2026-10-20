@@ -89,6 +89,18 @@ func (s *Server) AcquireGrant(ctx context.Context, req *AcquireGrantRequest) (*A
 	); err != nil {
 		return nil, status.Error(codes.InvalidArgument, "invalid sensitive browser approval scope")
 	}
+	budget, err := budgetFromRequest(
+		req.GetBudgetMicroUsd(), req.GetBudgetMaxSteps(), req.GetBudgetMaxRuntimeS(),
+		req.GetBudgetSource(), req.GetBudgetMintedAtUnix(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	// A sensitive approval is single-action authority; a spend bound on it
+	// would mean nothing and is refused rather than ignored.
+	if len(allowedActions) != 0 && budget.IsSet() {
+		return nil, status.Error(codes.InvalidArgument, "a sensitive browser approval cannot carry a budget claim")
+	}
 	var g *grant.Grant
 	if len(allowedActions) == 0 {
 		g, err = s.grants.CreateSession(ctx, grant.CreateSessionParams{
@@ -99,6 +111,7 @@ func (s *Server) AcquireGrant(ctx context.Context, req *AcquireGrantRequest) (*A
 			AllowedDomains:    allowedDomains,
 			TTL:               s.cfg.TTL,
 			Zdr:               zdr,
+			Budget:            budget,
 			MaxActivePerOwner: s.cfg.MaxActivePerOwner,
 		})
 	} else {
@@ -137,6 +150,11 @@ func (s *Server) AcquireGrant(ctx context.Context, req *AcquireGrantRequest) (*A
 		ParentGrantId:      g.ParentGrantID,
 		Kind:               string(g.Kind),
 		Zdr:                g.Zdr,
+		BudgetMicroUsd:     g.Budget.MicroUSD,
+		BudgetMaxSteps:     g.Budget.MaxSteps,
+		BudgetMaxRuntimeS:  g.Budget.MaxRuntimeS,
+		BudgetSource:       g.Budget.Source,
+		BudgetMintedAtUnix: g.Budget.MintedAtUnix,
 	}, nil
 }
 
@@ -189,6 +207,11 @@ func (s *Server) ValidateGrant(ctx context.Context, req *ValidateGrantRequest) (
 		Kind:               string(g.Kind),
 		OwnerId:            g.OwnerID,
 		Zdr:                g.Zdr,
+		BudgetMicroUsd:     g.Budget.MicroUSD,
+		BudgetMaxSteps:     g.Budget.MaxSteps,
+		BudgetMaxRuntimeS:  g.Budget.MaxRuntimeS,
+		BudgetSource:       g.Budget.Source,
+		BudgetMintedAtUnix: g.Budget.MintedAtUnix,
 	}, nil
 }
 
@@ -228,6 +251,13 @@ func (s *Server) DeriveRunGrant(ctx context.Context, req *DeriveRunGrantRequest)
 	if err != nil {
 		return nil, err
 	}
+	budget, err := budgetFromRequest(
+		req.GetBudgetMicroUsd(), req.GetBudgetMaxSteps(), req.GetBudgetMaxRuntimeS(),
+		req.GetBudgetSource(), req.GetBudgetMintedAtUnix(),
+	)
+	if err != nil {
+		return nil, err
+	}
 	g, err := s.grants.Derive(ctx, grant.DeriveParams{
 		OrgID:             principal.OrganizationID,
 		OwnerID:           authz.OwnerFilter(principal),
@@ -236,6 +266,7 @@ func (s *Server) DeriveRunGrant(ctx context.Context, req *DeriveRunGrantRequest)
 		RunDomains:        req.GetAllowedDomains(),
 		TTL:               ttl,
 		PrincipalZdr:      principal.ZeroDataRetention,
+		Budget:            budget,
 		MaxRunDomains:     s.cfg.MaxRunDomains,
 		Policy:            s.cfg.Policy,
 	})
@@ -252,7 +283,32 @@ func (s *Server) DeriveRunGrant(ctx context.Context, req *DeriveRunGrantRequest)
 		ParentGrantId:  g.ParentGrantID,
 		Kind:           string(g.Kind),
 		Zdr:            g.Zdr,
+		// The run grant's claim as stored: the request's, tightened by the
+		// parent's, or the parent's when the request set none.
+		BudgetMicroUsd:     g.Budget.MicroUSD,
+		BudgetMaxSteps:     g.Budget.MaxSteps,
+		BudgetMaxRuntimeS:  g.Budget.MaxRuntimeS,
+		BudgetSource:       g.Budget.Source,
+		BudgetMintedAtUnix: g.Budget.MintedAtUnix,
 	}, nil
+}
+
+// budgetFromRequest reads the budget claim fields of a request. The stamp is
+// the broker's: a request that sets it is refused rather than overwritten, so
+// a caller cannot believe it chose the claim's age. Shape errors (negative
+// bound, unknown source, a source with nothing to bound) are InvalidArgument.
+func budgetFromRequest(microUSD int64, maxSteps, maxRuntimeS int32, source string, mintedAtUnix int64) (grant.Budget, error) {
+	budget, err := grant.NormalizeBudget(grant.Budget{
+		MicroUSD:     microUSD,
+		MaxSteps:     maxSteps,
+		MaxRuntimeS:  maxRuntimeS,
+		Source:       source,
+		MintedAtUnix: mintedAtUnix,
+	})
+	if err != nil {
+		return grant.Budget{}, status.Error(codes.InvalidArgument, "invalid budget claim: bounds must not be negative, budget_source must be request, org_default or entitlement exactly when a bound is set, and budget_minted_at_unix is set by the broker")
+	}
+	return budget, nil
 }
 
 // deriveTTL resolves a requested run-grant lifetime: 0 is the configured

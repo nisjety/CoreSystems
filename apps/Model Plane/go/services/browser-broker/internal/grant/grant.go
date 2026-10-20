@@ -123,6 +123,10 @@ type Grant struct {
 	// Zdr marks a Zero Data Retention grant. It can be raised, never lowered,
 	// and a derived or approval grant inherits it.
 	Zdr bool
+	// Budget is the grant's budget claim (WS6.E): an upper bound a run under it
+	// may spend, never a raise. The zero Budget is no claim. A run grant's claim
+	// is never looser than its parent's.
+	Budget Budget
 	// AllowedDomains is the broker-owned, canonical navigation policy. It is
 	// copied at every storage boundary so no caller can mutate a persisted grant.
 	AllowedDomains []string
@@ -147,6 +151,9 @@ type CreateSessionParams struct {
 	AllowedDomains                       []string
 	TTL                                  time.Duration
 	Zdr                                  bool
+	// Budget is an optional budget claim (see Budget). MintedAtUnix must be
+	// zero; the store stamps it.
+	Budget Budget
 	// MaxActivePerOwner > 0 refuses creation with ErrTooManyGrants when the
 	// owner already holds that many active ordinary grants. The check and the
 	// insert are one atomic step.
@@ -177,6 +184,10 @@ type DeriveParams struct {
 	TTL time.Duration
 	// PrincipalZdr is the verified caller's ZDR flag.
 	PrincipalZdr bool
+	// Budget is the run's requested budget claim. It can only tighten the
+	// parent's (ErrDeriveWidensBudget otherwise); an empty one inherits it.
+	// MintedAtUnix must be zero; the store stamps it.
+	Budget Budget
 	// MaxRunDomains bounds the run's hosts; zero or negative uses
 	// DefaultMaxRunDomains.
 	MaxRunDomains int
@@ -232,9 +243,16 @@ func (s *MemoryRepository) CreateSession(_ context.Context, p CreateSessionParam
 	if err != nil {
 		return nil, err
 	}
+	budget, err := NormalizeBudget(p.Budget)
+	if err != nil {
+		return nil, err
+	}
 	id, err := newID(p.Zdr)
 	if err != nil {
 		return nil, err
+	}
+	if budget.IsSet() {
+		budget.MintedAtUnix = s.now().Unix()
 	}
 	g := &Grant{
 		ID:             id,
@@ -244,6 +262,7 @@ func (s *MemoryRepository) CreateSession(_ context.Context, p CreateSessionParam
 		SessionKey:     p.SessionKey,
 		ScopeURL:       p.ScopeURL,
 		Zdr:            p.Zdr,
+		Budget:         budget,
 		AllowedDomains: domains,
 		ExpiresAt:      s.now().Add(p.TTL),
 	}
@@ -362,6 +381,10 @@ func (s *MemoryRepository) Derive(ctx context.Context, p DeriveParams) (*Grant, 
 	if err != nil {
 		return nil, err
 	}
+	requestedBudget, err := NormalizeBudget(p.Budget)
+	if err != nil {
+		return nil, err
+	}
 	if p.Policy != nil {
 		if err := p.Policy.CheckSession(ctx, p.OrgID, domains); err != nil {
 			return nil, err
@@ -384,13 +407,19 @@ func (s *MemoryRepository) Derive(ctx context.Context, p DeriveParams) (*Grant, 
 		return nil, err
 	}
 	now := s.now()
+	// The parent's claim is fixed at its creation, so the child's is a pure
+	// function of it and the request; a replay is checked against it below.
+	budget, err := tightenBudget(parent.Budget, requestedBudget, now.Unix())
+	if err != nil {
+		return nil, err
+	}
 	if existing := s.derivedLocked(parent.ID, p.OrgID, p.SessionKey); existing != nil {
 		switch {
 		case existing.Revoked:
 			return nil, ErrGrantRevoked
 		case now.After(existing.ExpiresAt):
 			return nil, ErrGrantExpired
-		case !equalStrings(existing.AllowedDomains, domains):
+		case !equalStrings(existing.AllowedDomains, domains), !sameBudgetClaim(existing.Budget, budget):
 			return nil, ErrDeriveConflict
 		}
 		return clone(existing), nil
@@ -417,6 +446,7 @@ func (s *MemoryRepository) Derive(ctx context.Context, p DeriveParams) (*Grant, 
 		SessionKey:     p.SessionKey,
 		ScopeURL:       parent.ScopeURL,
 		Zdr:            parent.Zdr,
+		Budget:         budget,
 		AllowedDomains: domains,
 		ParentGrantID:  parent.ID,
 		ExpiresAt:      expires,

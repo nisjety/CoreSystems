@@ -87,7 +87,7 @@ func applyMigration(t *testing.T, pool *pgxpool.Pool, name string) {
 	}
 }
 
-// newTestDB creates a fresh database with 0001 applied and returns a pool on it.
+// newTestDB creates a fresh database with 0001 and 0003 applied and returns a pool on it.
 func newTestDB(t *testing.T) (*pgxpool.Pool, *pgxpool.Config) {
 	t.Helper()
 	bg := context.Background()
@@ -121,6 +121,7 @@ func newTestDB(t *testing.T) (*pgxpool.Pool, *pgxpool.Config) {
 		}
 	})
 	applyMigration(t, pool, "0001_browser_grants.up.sql")
+	applyMigration(t, pool, "0003_browser_grants_budget.up.sql")
 	return pool, cfg
 }
 
@@ -154,6 +155,97 @@ func TestPg_DeriveContract(t *testing.T) {
 				return routed, clock
 			})
 		})
+	}
+}
+
+// The WS6.E budget-claim contract, on the production store shape. Run grants
+// and sessions land in browser_grants, ZDR ones in memory.
+func TestPg_BudgetContract(t *testing.T) {
+	for _, c := range budgetContract {
+		t.Run(c.name, func(t *testing.T) {
+			pool, _ := newTestDB(t)
+			c.run(t, func(*testing.T) (Repository, *fakeClock) {
+				_, _, routed, clock := stores(pool)
+				return routed, clock
+			})
+		})
+	}
+}
+
+func TestPg_BudgetClaimIsDurableNullableAndConstrained(t *testing.T) {
+	pool, _ := newTestDB(t)
+	_, _, store, clock := stores(pool)
+
+	parent := session(t, store, CreateSessionParams{
+		TTL: 15 * time.Minute, Budget: claim(5_000_000, 0, 600, BudgetSourceOrgDefault),
+	})
+	bare := session(t, store, CreateSessionParams{SessionKey: "bare", TTL: 15 * time.Minute})
+	run, err := store.Derive(ctx, withBudget(parent, "run", claim(0, 12, 0, BudgetSourceRequest)))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A zero bound is stored as NULL, a bound as its value, never as 0.
+	type row struct {
+		micro, steps, runtime *int64
+		source                *string
+		minted                *int64
+	}
+	read := func(id string) row {
+		var r row
+		if err := pool.QueryRow(ctx, `SELECT budget_micro_usd, budget_max_steps::bigint, budget_max_runtime_s::bigint,
+			budget_source, budget_minted_at_unix FROM browser_grants WHERE id = $1`, id).
+			Scan(&r.micro, &r.steps, &r.runtime, &r.source, &r.minted); err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	if r := read(bare.ID); r.micro != nil || r.steps != nil || r.runtime != nil || r.source != nil || r.minted != nil {
+		t.Fatalf("an unclaimed grant stores %#v, want all NULL", r)
+	}
+	r := read(parent.ID)
+	if r.micro == nil || *r.micro != 5_000_000 || r.steps != nil || r.runtime == nil || *r.runtime != 600 ||
+		r.source == nil || *r.source != BudgetSourceOrgDefault || r.minted == nil || *r.minted != clock.Now().Unix() {
+		t.Fatalf("parent row = %#v", r)
+	}
+	r = read(run.ID)
+	if r.micro == nil || *r.micro != 5_000_000 || r.steps == nil || *r.steps != 12 || r.runtime == nil || *r.runtime != 600 ||
+		r.source == nil || *r.source != BudgetSourceRequest {
+		t.Fatalf("run row = %#v", r)
+	}
+
+	// A new broker instance on the same database serves the same claim.
+	_, _, restarted, _ := stores(pool)
+	got, err := restarted.GetScoped(ctx, run.ID, run.OrgID, run.OwnerID)
+	if err != nil || got.Budget != run.Budget {
+		t.Fatalf("after restart: %#v, %v (want %#v)", got, err, run.Budget)
+	}
+
+	// The schema refuses what the Go layer would never write.
+	for name, stmt := range map[string]string{
+		"a zero bound":           `UPDATE browser_grants SET budget_max_steps = 0 WHERE id = $1`,
+		"a negative bound":       `UPDATE browser_grants SET budget_micro_usd = -5 WHERE id = $1`,
+		"an unknown source":      `UPDATE browser_grants SET budget_source = 'client' WHERE id = $1`,
+		"a source with no bound": `UPDATE browser_grants SET budget_source = 'request' WHERE id = $1`,
+		"a negative stamp":       `UPDATE browser_grants SET budget_minted_at_unix = -1 WHERE id = $1`,
+	} {
+		if _, err := pool.Exec(ctx, stmt, bare.ID); err == nil {
+			t.Fatalf("%s was accepted by the schema", name)
+		}
+	}
+	if _, err := pool.Exec(ctx, `UPDATE browser_grants SET budget_micro_usd = NULL, budget_max_runtime_s = NULL WHERE id = $1`, parent.ID); err == nil {
+		t.Fatal("clearing every bound but keeping the source was accepted by the schema")
+	}
+
+	// A ZDR grant's claim never reaches the table.
+	zdr := session(t, store, CreateSessionParams{
+		SessionKey: "zdr", TTL: 15 * time.Minute, Zdr: true, Budget: claim(1, 1, 1, BudgetSourceRequest),
+	})
+	if n := rowCount(t, pool, "WHERE id = $1", zdr.ID); n != 0 {
+		t.Fatalf("a ZDR grant with a claim has %d rows in browser_grants", n)
+	}
+	if n := rowCount(t, pool, "WHERE budget_source IS NOT NULL AND org_id = $1", "org-a"); n != 2 {
+		t.Fatalf("rows with a claim = %d, want 2 (the parent and the run)", n)
 	}
 }
 
@@ -709,6 +801,8 @@ func TestPg_MigrationIsRerunnable(t *testing.T) {
 	before := session(t, store, CreateSessionParams{TTL: 10 * time.Minute})
 	applyMigration(t, pool, "0001_browser_grants.up.sql")
 	applyMigration(t, pool, "0001_browser_grants.up.sql")
+	applyMigration(t, pool, "0003_browser_grants_budget.up.sql")
+	applyMigration(t, pool, "0003_browser_grants_budget.up.sql")
 	if _, err := store.GetScoped(ctx, before.ID, before.OrgID, before.OwnerID); err != nil {
 		t.Fatalf("a re-applied migration lost a row: %v", err)
 	}
@@ -731,9 +825,23 @@ func TestPg_MigrationIsRerunnable(t *testing.T) {
 	if !sameStrings(indexes, want) {
 		t.Fatalf("indexes = %v, want %v", indexes, want)
 	}
+	applyMigration(t, pool, "0003_browser_grants_budget.down.sql")
+	applyMigration(t, pool, "0003_browser_grants_budget.down.sql")
+	// 0003 down leaves the 0001 table and its rows intact.
+	pool.Reset()
+	if _, err := store.GetScoped(ctx, before.ID, before.OrgID, before.OwnerID); err == nil {
+		t.Fatal("0003 down must drop the budget columns, which the store selects: the read should fail")
+	}
+	applyMigration(t, pool, "0003_browser_grants_budget.up.sql")
+	pool.Reset()
+	if _, err := store.GetScoped(ctx, before.ID, before.OrgID, before.OwnerID); err != nil {
+		t.Fatalf("0003 down then up lost the 0001 row: %v", err)
+	}
+	applyMigration(t, pool, "0003_browser_grants_budget.down.sql")
 	applyMigration(t, pool, "0001_browser_grants.down.sql")
 	applyMigration(t, pool, "0001_browser_grants.down.sql")
 	applyMigration(t, pool, "0001_browser_grants.up.sql")
+	applyMigration(t, pool, "0003_browser_grants_budget.up.sql")
 	// The table was re-created: drop connections holding cached statements.
 	pool.Reset()
 	after := session(t, store, CreateSessionParams{TTL: 10 * time.Minute})
