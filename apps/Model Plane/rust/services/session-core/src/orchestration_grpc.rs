@@ -1725,32 +1725,37 @@ async fn assemble_plan(pool: &Pool, plan: &store::PlanRow) -> Result<proto::Plan
     Ok(plan_from_row(plan, steps))
 }
 
-/// Persist the safe browser-agent event projection in the canonical event log.
+/// `RunParked` and `RunResumed` (WS03 S8) describe the park store, so they are
+/// recorded only while it is active ([`crate::terminalization::park_recovery_active`]).
+/// Before those tags existed prost skipped them, so any caller that sent one got
+/// `InvalidArgument("event payload is required")`; with the park store off a caller
+/// still gets exactly that answer, so the new tags open no new write path by default:
+/// nothing is persisted or broadcast for them.
 ///
-/// The one principal allowed to record the durable-loop park events.
-const PARK_EVENT_PRINCIPAL: &str = "service:execution-core";
-
-/// `RunParked` and `RunResumed` (WS03 S8) are the executor's events: it alone
-/// parks and resumes a run. Before those tags existed prost skipped them, so any
-/// caller that sent one got `InvalidArgument("event payload is required")`. A
-/// caller other than `service:execution-core` (a run's human owner, another
-/// service holding `orchestration:write`) still gets exactly that answer, so the
-/// new tags open no new write path: nothing is persisted or broadcast for them.
+/// Not a principal check. The executor records every run event under the RUN OWNER'S
+/// delegated bearer (as it does for `SubagentStopped`), never as `service:execution-core`,
+/// so a gate on the service principal refused the executor's own park events: found live
+/// 2026-10-20 (`failed to publish RunParked (best-effort)`, `InvalidArgument`). With the
+/// store active the ordinary gate applies: `orchestration:write`, then the run-owner check,
+/// so a caller can only write ids and a segment number to a run it owns, exactly as for
+/// the other run events it can already record.
 #[allow(clippy::result_large_err)]
-fn refuse_park_event_from_other_principals(
-    caller: &VerifiedIdentity,
+fn refuse_park_events_while_parking_is_off(
+    park_store_active: bool,
     event: &proto::OrchestrationEvent,
 ) -> Result<(), Status> {
     let is_park_event = matches!(
         event.event,
         Some(orchestration_event::Event::RunParked(_) | orchestration_event::Event::RunResumed(_))
     );
-    if is_park_event && !(caller.is_service() && caller.principal_id() == PARK_EVENT_PRINCIPAL) {
+    if is_park_event && !park_store_active {
         return Err(Status::invalid_argument("event payload is required"));
     }
     Ok(())
 }
 
+/// Persist the safe browser-agent event projection in the canonical event log.
+///
 /// Browser progress historically lived only in the per-run Redis/in-memory
 /// replay ring. That is enough for a reconnecting tab, but not for a reload
 /// after the ring TTL or a process restart. Keep the durable record deliberately
@@ -3482,7 +3487,10 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 return Err(Status::invalid_argument("event payload is required"));
             }
             // Before anything is looked up, persisted or broadcast.
-            refuse_park_event_from_other_principals(&caller, &ev)?;
+            refuse_park_events_while_parking_is_off(
+                crate::terminalization::park_recovery_active(),
+                &ev,
+            )?;
             // Only run-scoped events are deliverable on the per-run stream;
             // reject ones we couldn't route so callers learn early.
             if event_run_id(&ev).is_none_or(str::is_empty) {
@@ -4798,41 +4806,21 @@ mod tests {
     }
 
     // WS03 S8 review finding: before S8-2 prost skipped tags 24 and 25, so every
-    // caller got "event payload is required" for them. Only the executor may
-    // record them now; anyone else gets that same refusal.
+    // caller got "event payload is required" for them. With the park store off every
+    // caller still does; with it on the ordinary gate applies. The gate is the switch,
+    // not a principal: the executor records under the run owner's bearer, so a gate on
+    // `service:execution-core` refused its own events (found live 2026-10-20).
     #[test]
-    fn only_the_execution_principal_may_record_the_park_events() {
-        let executor = VerifiedIdentity::service_for_test_as(
-            "org_x",
-            "service:execution-core",
-            &["orchestration:write"],
-            false,
-        );
-        let human = VerifiedIdentity::user_for_test("org_x", "user_x");
-        let other_service = VerifiedIdentity::service_for_test_as(
-            "org_x",
-            "service:model-gateway",
-            &["orchestration:write"],
-            false,
-        );
-        // A look-alike service id is not the executor.
-        let lookalike = VerifiedIdentity::service_for_test_as(
-            "org_x",
-            "service:execution-core-2",
-            &["orchestration:write"],
-            false,
-        );
+    fn park_events_are_recorded_only_while_the_park_store_is_active() {
         for resumed in [false, true] {
             let ev = park_event(resumed, "run_x");
-            assert!(refuse_park_event_from_other_principals(&executor, &ev).is_ok());
-            for caller in [&human, &other_service, &lookalike] {
-                let refused = refuse_park_event_from_other_principals(caller, &ev)
-                    .expect_err("a non-executor principal must not record a park event");
-                assert_eq!(refused.code(), tonic::Code::InvalidArgument);
-                assert_eq!(refused.message(), "event payload is required");
-            }
+            let refused = refuse_park_events_while_parking_is_off(false, &ev)
+                .expect_err("a park event is refused while the park store is off");
+            assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+            assert_eq!(refused.message(), "event payload is required");
+            assert!(refuse_park_events_while_parking_is_off(true, &ev).is_ok());
         }
-        // Every other event is untouched by this gate.
+        // Every other event is untouched by this gate, with the store on or off.
         let other = proto::OrchestrationEvent {
             event_id: String::new(),
             at: None,
@@ -4843,15 +4831,19 @@ mod tests {
                 },
             )),
         };
-        assert!(refuse_park_event_from_other_principals(&human, &other).is_ok());
+        for active in [false, true] {
+            assert!(refuse_park_events_while_parking_is_off(active, &other).is_ok());
+        }
     }
 
     // The handler refuses before the run-owner lookup, the broadcast and the
     // persist. The pool is lazy and unreachable: reaching the owner lookup would
     // answer Internal, not InvalidArgument, and a broadcast would reach `rx`.
     #[tokio::test]
-    async fn record_orchestration_event_refuses_park_events_from_a_human_owner_before_anything_runs()
-    {
+    async fn record_orchestration_event_refuses_park_events_while_the_park_store_is_off_before_anything_runs(
+    ) {
+        // Forced off for this thread, so the answer does not depend on the process environment.
+        let _off = crate::terminalization::park_test_switch::Forced::set(false);
         let (tx, mut rx) = broadcast::channel::<proto::OrchestrationEvent>(8);
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgresql://session-core@127.0.0.1:1/session_core")
@@ -4867,7 +4859,7 @@ mod tests {
             let refused = svc
                 .record_orchestration_event(request)
                 .await
-                .expect_err("a human owner must not record a park event");
+                .expect_err("a park event is refused while the park store is off");
             assert_eq!(refused.code(), tonic::Code::InvalidArgument);
             assert_eq!(refused.message(), "event payload is required");
 
@@ -4885,7 +4877,7 @@ mod tests {
             let refused = svc
                 .record_orchestration_event(request)
                 .await
-                .expect_err("another service must not record a park event");
+                .expect_err("a service's park event is refused while the park store is off");
             assert_eq!(refused.code(), tonic::Code::InvalidArgument);
             assert_eq!(refused.message(), "event payload is required");
         }
@@ -5764,11 +5756,17 @@ mod tests {
 
         #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
         #[ignore = "requires DATABASE_URL to a SCRATCH Postgres (name contains \"test\")"]
-        async fn the_execution_principal_records_run_parked_and_run_resumed() {
+        async fn the_run_owners_bearer_records_run_parked_and_run_resumed_while_the_park_store_is_active(
+        ) {
+            // The executor records every run event under the run owner's delegated bearer, never
+            // as `service:execution-core` (found live 2026-10-20: a gate on that principal refused
+            // the executor's own park events). The park store is forced on for this test's thread.
+            let _store = crate::loop_checkpoint::test_switch::Forced::set(true);
+            let _park = crate::terminalization::park_test_switch::Forced::set(true);
             let db = PlanGateDb::connect().await;
             let run = db.new_run(&db.thread).await;
             let record = |event: orchestration_event::Event| {
-                db.as_exec_core(proto::RecordOrchestrationEventRequest {
+                db.as_owner(proto::RecordOrchestrationEventRequest {
                     event: Some(proto::OrchestrationEvent {
                         event_id: String::new(),
                         at: None,
@@ -5783,7 +5781,7 @@ mod tests {
                     orchestration_event::RunParked { run_id: run.clone() },
                 )))
                 .await
-                .expect("execution-core records RunParked")
+                .expect("the run owner's bearer records RunParked")
                 .into_inner()
                 .event_id;
             let resumed = db
@@ -5795,7 +5793,7 @@ mod tests {
                     },
                 )))
                 .await
-                .expect("execution-core records RunResumed")
+                .expect("the run owner's bearer records RunResumed")
                 .into_inner()
                 .event_id;
 
@@ -5847,9 +5845,10 @@ mod tests {
                 .expect_err("another org's caller must not record a park event");
             assert_ne!(refused.code(), tonic::Code::Ok);
 
-            // The run's own human owner and another service principal that
-            // holds orchestration:write are refused with exactly the answer
-            // they got before the tags existed, and nothing is written.
+            // With the park store off the run's own owner and a service principal that
+            // holds orchestration:write are refused with exactly the answer they got before
+            // the tags existed, and nothing is written.
+            let _off = crate::terminalization::park_test_switch::Forced::set(false);
             let before: i64 = sqlx::query_scalar("SELECT count(*) FROM events WHERE run_id = $1")
                 .bind(&run)
                 .fetch_one(&db.pool)
@@ -5880,7 +5879,7 @@ mod tests {
                     .svc
                     .record_orchestration_event(request)
                     .await
-                    .expect_err("only execution-core records a park event");
+                    .expect_err("no caller records a park event while the park store is off");
                 assert_eq!(refused.code(), tonic::Code::InvalidArgument);
                 assert_eq!(refused.message(), "event payload is required");
             }
