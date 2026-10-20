@@ -46,6 +46,12 @@ const BROWSER_ERROR_CODES = [
   'browser_idempotency_key_reused',
   'browser_idempotency_key_run_ended',
   'browser_idempotency_unverified',
+  // Refusals the gateway answers before any upstream call, and its agent proxy's outage.
+  'invalid_url',
+  'invalid_crawl_request',
+  'invalid_browser_action',
+  'zdr_persistent_profile_forbidden',
+  'model_gateway_unreachable',
 ] as const
 
 const BLOCK_REASONS = ['captcha_widget', 'waf_interstitial', 'unexpected_bot_error', 'challenge_loop'] as const
@@ -100,22 +106,34 @@ describe('browser error copy', () => {
   })
 
   // The table cannot drift from the gateway: every code the gateway's browser and
-  // scrape handlers answer with has an entry (a code added there without copy
-  // here would reach the person as the generic message).
+  // scrape handlers answer with, whatever its prefix, has an entry (a code added
+  // there without copy here would reach the person as the generic message).
+  // Maintenance: this reads the gateway Rust sources (the part above `mod tests {`)
+  // with the regexes below, so a NEW multi-word snake_case string literal alone on a
+  // line in browser.rs or knowledge/quarry.rs fails this test until it is either given
+  // copy in errors.ts (it is a code) or added to NOT_AN_ERROR_CODE (it is not). That is
+  // the intended tripwire, not a false positive.
+  const gatewayDomains = resolve(process.cwd(), 'apps/gateway/src/domains')
+  // Line endings are normalised first: a Windows checkout of the .rs files may be CRLF.
+  const productionHalf = (file: string) =>
+    (readFileSync(resolve(gatewayDomains, file), 'utf8').replace(/\r\n/g, '\n').split(/^mod tests {/m)[0] ?? '')
+  // The three shapes a handler names its code in: error("code", ..), a
+  // (StatusCode, "code", "message") tuple, and a snake_case literal on its own
+  // line (a code in a multi-line call or a returned pair).
+  function emittedCodes(source: string): Set<string> {
+    const codes = new Set<string>()
+    for (const match of source.matchAll(/\berror\(\s*"([a-z][a-z_]+)"/g)) codes.add(match[1] ?? '')
+    for (const match of source.matchAll(/StatusCode::[A-Z_]+,\s*"([a-z][a-z_]+)",\s*"/g)) codes.add(match[1] ?? '')
+    for (const match of source.matchAll(/^\s*"([a-z]+(?:_[a-z]+)+)",?\r?$/gm)) codes.add(match[1] ?? '')
+    return codes
+  }
+  // Snake-case literals the scan above meets that are not error codes. (The bot-wall
+  // reasons the scrape handler lists are not codes either; they have BLOCK_REASON_COPY.)
+  const NOT_AN_ERROR_CODE = new Set<string>([])
+
   it('has copy for every code the gateway browser and scrape handlers emit', () => {
-    const root = resolve(process.cwd(), 'apps/gateway/src/domains')
     const emitted = new Set<string>()
-    const sources = [
-      readFileSync(resolve(root, 'browser.rs'), 'utf8'),
-      readFileSync(resolve(root, 'knowledge/quarry.rs'), 'utf8'),
-    ]
-    for (const source of sources) {
-      // Only the production half: tests assert on codes they invent.
-      const production = source.split(/^mod tests {/m)[0] ?? ''
-      for (const match of production.matchAll(/\berror\(\s*"([a-z][a-z_]+)"/g)) emitted.add(match[1] ?? '')
-      for (const match of production.matchAll(/StatusCode::[A-Z_]+,\s*"([a-z][a-z_]+)",\s*"/g)) emitted.add(match[1] ?? '')
-      for (const match of production.matchAll(/^\s*"((?:browser_|scrape_|site_blocked)[a-z_]*)",$/gm)) emitted.add(match[1] ?? '')
-    }
+    for (const file of ['browser.rs', 'knowledge/quarry.rs']) for (const code of emittedCodes(productionHalf(file))) emitted.add(code)
     for (const code of [
       'browser_capacity_reached',
       'browser_tab_limit_reached',
@@ -123,13 +141,40 @@ describe('browser error copy', () => {
       'browser_site_blocked',
       'scrape_refused',
       'site_blocked',
+      'invalid_url',
+      'invalid_crawl_request',
+      'invalid_browser_action',
+      'zdr_persistent_profile_forbidden',
+      'model_gateway_unreachable',
+      'invalid_idempotency_key',
     ]) {
       expect(emitted.has(code), `the scan found ${code}`).toBe(true)
     }
     const withoutCopy = [...emitted].filter(
-      (code) => /^(browser_|scrape_)|^site_blocked$/.test(code) && !ERROR_COPY[code],
+      (code) =>
+        !ERROR_COPY[code] && !BLOCK_REASON_COPY[code] && !NOT_AN_ERROR_CODE.has(code),
     )
     expect(withoutCopy).toEqual([])
+  })
+
+  // SCRAPE_PREVIEW_FAILURE_CODES is the closed list the preview can fail with:
+  // the codes classify_scrape_failure returns plus the ones scrape_preview itself
+  // answers before any upstream call. `unsupported_media` is the 415 slice's code (WS5.G):
+  // that slice brings its own copy entry in errors.ts and may put the code on the list in
+  // the same change or a later one, so it is exempt from the first comparison only.
+  it('lists exactly the failure codes the scrape preview can answer with', () => {
+    const source = productionHalf('knowledge/quarry.rs')
+    const body = (signature: string): string => {
+      const start = source.indexOf(signature)
+      if (start < 0) throw new Error(`no ${signature} in knowledge/quarry.rs`)
+      return source.slice(start, source.indexOf('\n}\n', start))
+    }
+    const answered = new Set([...emittedCodes(body('fn classify_scrape_failure(')), ...emittedCodes(body('pub(super) async fn scrape_preview('))])
+    expect(answered.has('scrape_failed')).toBe(true)
+    expect(answered.has('invalid_url')).toBe(true)
+    const listed = new Set<string>(SCRAPE_PREVIEW_FAILURE_CODES)
+    expect([...answered].filter((code) => !listed.has(code) && code !== 'unsupported_media')).toEqual([])
+    expect([...listed].filter((code) => !answered.has(code))).toEqual([])
   })
 
   it('keeps both languages non-empty for every entry of the whole table', () => {
@@ -163,7 +208,11 @@ describe('describeApiError', () => {
       kind: 'unauthenticated',
       message: 'Du må logge inn på nytt.',
     })
-    expect(describeApiError(failure({ status: 401 }), no).kind).toBe('unauthenticated')
+    expect(describeApiError(failure({ status: 401 }), no)).toMatchObject({
+      kind: 'unauthenticated',
+      message: 'Du må logge inn på nytt.',
+    })
+    expect(describeApiError(failure({ status: 401 }), en).message).toBe('You need to sign in again.')
     expect(describeApiError(failure({ status: 403, code: 'forbidden' }), en).kind).toBe('forbidden')
     // An unmapped 403 is a refusal, not the caller's "could not do X".
     expect(describeApiError(failure({ status: 403 }), no, { no: 'Kunne ikke bytte nettleserfane.', en: 'x' }).message).toMatch(/ikke tilgang/)

@@ -88,30 +88,60 @@ describe('browser client error handling', () => {
   })
 
   it('handles 401, 403, 409 take-over, 410, 429 and 5xx distinctly', async () => {
-    const cases: Array<[number, unknown, string]> = [
-      [401, { error: { code: 'unauthenticated', message: 'Authentication required' } }, 'unauthenticated'],
-      [403, { error: { code: 'forbidden', message: 'no' } }, 'forbidden'],
-      [409, { error: { code: 'browser_human_takeover_active', message: 'x', details: { control_epoch: 3 } } }, 'takeover'],
-      [409, { error: { code: 'USER_TOOK_OVER', message: 'x' } }, 'takeover'],
-      [410, { error: { code: 'browser_session_reaped', message: 'x' } }, 'session_lost'],
-      [429, { error: { code: 'browser_tab_limit_reached', message: 'x', retryAfterSeconds: 12 } }, 'rate_limited'],
-      [500, { error: { code: 'browser_session_failed', message: 'Quarry browser session is not available.' } }, 'server'],
-      [503, { error: { code: 'upstream_unavailable', message: 'The upstream service is unavailable.' } }, 'server'],
+    // [status, body, kind, the exact Norwegian sentence]. The eight sentences are
+    // pairwise distinct: a status class never borrows another one's wording.
+    const cases: Array<[number, unknown, string, string]> = [
+      [401, { error: { code: 'unauthenticated', message: 'Authentication required' } }, 'unauthenticated', 'Du må logge inn på nytt.'],
+      [403, { error: { code: 'forbidden', message: 'no' } }, 'forbidden', 'Du har ikke tilgang til å gjøre dette.'],
+      [
+        409,
+        { error: { code: 'browser_human_takeover_active', message: 'x', details: { control_epoch: 3 } } },
+        'takeover',
+        'En person har overtatt styringen av denne nettleserøkten.',
+      ],
+      [
+        409,
+        { error: { code: 'USER_TOOK_OVER', message: 'x' } },
+        'takeover',
+        'En person har overtatt nettleseren, så agenten kan ikke handle akkurat nå. Vent til styringen er gitt tilbake.',
+      ],
+      [
+        410,
+        { error: { code: 'browser_session_reaped', message: 'x' } },
+        'session_lost',
+        'Denne nettleserøkten ble lukket fordi den var inaktiv. Start en ny økt for å fortsette.',
+      ],
+      [
+        429,
+        { error: { code: 'browser_tab_limit_reached', message: 'x', retryAfterSeconds: 12 } },
+        'rate_limited',
+        'Nettleseren har for mange faner åpne. Lukk en fane du ikke trenger. Prøv igjen om 12 sekunder.',
+      ],
+      [
+        500,
+        { error: { code: 'browser_session_failed', message: 'Quarry browser session is not available.' } },
+        'server',
+        'Nettleserøkten feilet. Prøv igjen.',
+      ],
+      [
+        503,
+        { error: { code: 'upstream_unavailable', message: 'The upstream service is unavailable.' } },
+        'server',
+        'Tjenesten er utilgjengelig akkurat nå. Prøv igjen om litt.',
+      ],
     ]
-    const kinds: string[] = []
-    const messages = new Set<string>()
-    for (const [status, body, kind] of cases) {
+    const messages: string[] = []
+    for (const [status, body, kind, sentence] of cases) {
       const failure = await failureOf(status, body)
       const description = describeBrowserError(failure, no)
-      expect(description.kind, `${status}`).toBe(kind)
-      kinds.push(description.kind)
-      messages.add(description.message)
+      expect(description.kind, `${status} ${kind}`).toBe(kind)
+      expect(description.message, `${status} ${kind}`).toBe(sentence)
+      messages.push(description.message)
       // Whatever the case, the English ops text of the response is not what is shown.
       expect(description.message).not.toMatch(/Authentication required|Quarry|upstream service/)
     }
-    expect(new Set(kinds).size).toBe(6)
-    // Nothing collapses into one generic sentence.
-    expect(messages.size).toBeGreaterThanOrEqual(6)
+    expect(new Set(messages).size).toBe(cases.length)
+    expect(new Set(cases.map(([, , kind]) => kind)).size).toBe(6)
   })
 
   it('shows the generic message for an unknown code, never the upstream message', async () => {

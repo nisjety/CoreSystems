@@ -277,7 +277,8 @@ function ownerTimelineEventLabel(event: BrowserOwnerTimelineItem): string {
   return event.state === 'closed' ? 'Økt lukket' : 'Økt startet'
 }
 
-function ownerTimelineEventMeta(event: BrowserOwnerTimelineItem): string {
+/** Exported for its test: the error line of an owner-timeline row is end-user copy. */
+export function ownerTimelineEventMeta(event: BrowserOwnerTimelineItem): string {
   const parts = [
     event.outcome,
     event.errorCode ? (ERROR_COPY[event.errorCode]?.no ?? 'Feil') : null,
