@@ -47,6 +47,27 @@ function productionCode(path: string): string {
 
 const sources = new Map(rustFiles(gatewaySrc).map((path) => [path.slice(gatewaySrc.length + 1), productionCode(path)]))
 
+/** Every `const|static NAME: &[&str] = &[ .. ];` of a source text, with the text between the brackets. */
+function stringTables(source: string): { name: string; body: string }[] {
+  const tables: { name: string; body: string }[] = []
+  for (const match of source.matchAll(/\b(?:const|static)\s+([A-Z][A-Z0-9_]*)\s*:\s*&\[&str\]\s*=\s*&\[([\s\S]*?)\];/g)) {
+    tables.push({ name: match[1] ?? '', body: match[2] ?? '' })
+  }
+  return tables
+}
+
+// The `&[&str]` tables of the gateway that do NOT hold error codes. Every other
+// string table is read for codes (see emittedCodes), whatever its name.
+const NOT_A_CODE_TABLE: Record<string, string> = {
+  SHAPE_DENY_KEYS: 'cache_admission.rs: JSON keys that keep a response out of the cache',
+  READ_ONLY_BROWSE_OPS: 'domains/integrations/browse.rs: operation names the read-only browse proxy allows',
+  READ_ONLY_CONTENT_OPS: 'domains/integrations/browse.rs: operation names the read-only content proxy allows',
+  FORGED_SPACE_AUTHORITY_FIELDS: 'domains/spaces.rs: request body fields a client may not set',
+  STRIPPED_HEADERS: 'middleware.rs: header names removed from a proxied request',
+  RENDERABLE_ARTIFACT_TYPES: 'upstream.rs: media types an artifact may be rendered as',
+  SENSITIVE_FIELDS: 'zdr_log.rs: field names the log redaction recognises',
+}
+
 // The shapes a handler names its code in. A code reaches the SPA as
 // `{ error: { code, message } }` built by `error("code", ..)`, as a
 // (StatusCode, "code", "message") or ("code", "message") pair a helper turns into
@@ -54,19 +75,22 @@ const sources = new Map(rustFiles(gatewaySrc).map((path) => [path.slice(gatewayS
 // `let code = if/match ..` that picks one of several.
 function emittedCodes(source: string): Set<string> {
   const codes = new Set<string>()
-  for (const match of source.matchAll(/\berror\(\s*"([A-Za-z][A-Za-z_]+)"/g)) codes.add(match[1] ?? '')
-  for (const match of source.matchAll(/StatusCode::[A-Z_]+,\s*"([a-z][a-z_]+)",\s*"/g)) codes.add(match[1] ?? '')
-  for (const match of source.matchAll(/\(\s*"([a-z][a-z_]+)",\s*"[A-Z][^"]* [^"]*"/g)) codes.add(match[1] ?? '')
-  for (const match of source.matchAll(/"code":\s*"([A-Za-z][A-Za-z_]+)"/g)) codes.add(match[1] ?? '')
-  for (const match of source.matchAll(/\bcode:\s*"([A-Za-z][A-Za-z_]+)"/g)) codes.add(match[1] ?? '')
+  for (const match of source.matchAll(/\berror\(\s*"([A-Za-z][A-Za-z0-9_]+)"/g)) codes.add(match[1] ?? '')
+  for (const match of source.matchAll(/StatusCode::[A-Z_]+,\s*"([a-z][a-z0-9_]+)",\s*"/g)) codes.add(match[1] ?? '')
+  for (const match of source.matchAll(/\(\s*"([a-z][a-z0-9_]+)",\s*"[A-Z][^"]* [^"]*"/g)) codes.add(match[1] ?? '')
+  for (const match of source.matchAll(/"code":\s*"([A-Za-z][A-Za-z0-9_]+)"/g)) codes.add(match[1] ?? '')
+  for (const match of source.matchAll(/\bcode:\s*"([A-Za-z][A-Za-z0-9_]+)"/g)) codes.add(match[1] ?? '')
   for (const block of source.matchAll(/let\s+code\s*=\s*(?:if|match)[\s\S]*?;\n/g)) {
-    for (const literal of block[0].matchAll(/"([A-Za-z][A-Za-z_]+)"/g)) codes.add(literal[1] ?? '')
+    for (const literal of block[0].matchAll(/"([A-Za-z][A-Za-z0-9_]+)"/g)) codes.add(literal[1] ?? '')
   }
   // A constant table of codes a function returns verbatim (upstream.rs: the
   // integration allow-list and the never-plan-gated codes). Every `&[&str]` constant
-  // with ERROR_CODE in its name is read, so a new entry is seen like any other code.
-  for (const table of source.matchAll(/\bconst\s+[A-Z_]*ERROR_CODE[A-Z_]*\s*:\s*&\[&str\]\s*=\s*&\[([\s\S]*?)\];/g)) {
-    for (const literal of (table[1] ?? '').matchAll(/"([A-Za-z][A-Za-z_]+)"/g)) codes.add(literal[1] ?? '')
+  // (const or static, any name) is read as a code table unless NOT_A_CODE_TABLE lists
+  // it, so a table named differently is not skipped: a new one fails the table test
+  // below until it is classified one way or the other.
+  for (const table of stringTables(source)) {
+    if (table.name in NOT_A_CODE_TABLE) continue
+    for (const literal of table.body.matchAll(/"([A-Za-z][A-Za-z0-9_]+)"/g)) codes.add(literal[1] ?? '')
   }
   return codes
 }
@@ -193,6 +217,25 @@ describe('every code the gateway emits', () => {
     ] as const) {
       expect(emittedBy.get(code), `the scan found ${code}`).toContain(file)
     }
+  })
+
+  it('classifies every string table of the gateway: read for codes, or listed as not holding codes', () => {
+    const read: string[] = []
+    const seen = new Set<string>()
+    for (const source of sources.values()) {
+      for (const table of stringTables(source)) {
+        seen.add(table.name)
+        if (!(table.name in NOT_A_CODE_TABLE)) read.push(table.name)
+      }
+    }
+    // The two tables of upstream.rs are read, so their entries reach the scan; a new
+    // table lands here and has to be added to this list (it holds codes) or to
+    // NOT_A_CODE_TABLE (it does not).
+    expect(read.sort()).toEqual(['INTEGRATION_ERROR_CODE_ALLOWLIST', 'NEVER_PLAN_GATED_INTEGRATION_ERROR_CODES'])
+    for (const name of Object.keys(NOT_A_CODE_TABLE)) {
+      expect(seen.has(name), `${name} is no longer a table in the gateway, remove it from NOT_A_CODE_TABLE`).toBe(true)
+    }
+    for (const reason of Object.values(NOT_A_CODE_TABLE)) expect(reason.length).toBeGreaterThan(20)
   })
 
   it('has copy, or an explicit reason it needs none', () => {

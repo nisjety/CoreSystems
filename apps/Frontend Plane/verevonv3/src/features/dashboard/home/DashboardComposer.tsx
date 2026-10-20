@@ -5502,8 +5502,6 @@ function ConnectorAttachPicker(props: {
 						"That item is no longer available. Search again.",
 					),
 				);
-			} else if (err instanceof Error) {
-				setPickError(err.message);
 			} else {
 				setPickError(translateApiError(err, props.i18n.tr));
 			}

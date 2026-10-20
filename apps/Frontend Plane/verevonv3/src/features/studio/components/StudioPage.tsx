@@ -58,6 +58,7 @@ import {
 import { cn } from '@/shared/lib/cn'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import { useI18n } from '@/shared/i18n'
+import { translateApiError } from '@/shared/i18n/errors'
 
 type StudioSection = 'canvas' | 'campaigns' | 'templates'
 
@@ -130,18 +131,14 @@ function StudioCanvasPage() {
   const loadingProjectMessage = createMemo(() => i18n.tr('Laster inn prosjekt', 'Loading project'))
   const readyToSaveMessage = createMemo(() => i18n.tr('Klar til å lagre', 'Ready to save'))
   const savingProjectMessage = createMemo(() => i18n.tr('Lagrer prosjekt', 'Saving project'))
-  const saveFailedMessage = createMemo(() => i18n.tr('Lagring mislyktes', 'Save failed'))
   const exportingDraftMessage = createMemo(() => i18n.tr('Eksporterer utkast', 'Exporting draft'))
   const socialDraftCreatedMessage = createMemo(() => i18n.tr('Sosialt utkast opprettet', 'Social draft created'))
-  const exportFailedMessage = createMemo(() => i18n.tr('Eksport mislyktes', 'Export failed'))
   const readLaunchCanvasTitle = () => untrack(launchCanvasTitle)
   const readLocalCanvasMessage = () => untrack(localCanvasMessage)
   const readEphemeralProjectMessage = () => untrack(ephemeralProjectMessage)
   const readSavingProjectMessage = () => untrack(savingProjectMessage)
-  const readSaveFailedMessage = () => untrack(saveFailedMessage)
   const readExportingDraftMessage = () => untrack(exportingDraftMessage)
   const readSocialDraftCreatedMessage = () => untrack(socialDraftCreatedMessage)
-  const readExportFailedMessage = () => untrack(exportFailedMessage)
   let canvasRef: HTMLDivElement | undefined
   let loadedProjectId: string | null = null
   const [blocks, setBlocks] = createSignal<StudioBlock[]>(initialBlocks)
@@ -283,7 +280,7 @@ function StudioCanvasPage() {
       await persistCurrentProject()
     } catch (reason) {
       setPersistenceSource('fallback')
-      setPersistenceMessage(reason instanceof Error ? reason.message : readSaveFailedMessage())
+      setPersistenceMessage(untrack(() => translateApiError(reason, i18n.tr, { no: 'Lagring mislyktes', en: 'Save failed' })))
     } finally {
       setBusyAction(null)
     }
@@ -309,7 +306,7 @@ function StudioCanvasPage() {
       setPersistenceMessage(readSocialDraftCreatedMessage())
     } catch (reason) {
       setPersistenceSource('fallback')
-      setPersistenceMessage(reason instanceof Error ? reason.message : readExportFailedMessage())
+      setPersistenceMessage(untrack(() => translateApiError(reason, i18n.tr, { no: 'Eksport mislyktes', en: 'Export failed' })))
     } finally {
       setBusyAction(null)
     }

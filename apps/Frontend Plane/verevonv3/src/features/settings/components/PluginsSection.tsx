@@ -8,7 +8,8 @@ import {
   updatePlugin,
   type Plugin,
 } from '@/shared/api/plugins-client'
-import { ApiError } from '@/shared/api/http'
+import { useI18n } from '@/shared/i18n'
+import { translateApiError } from '@/shared/i18n/errors'
 import { SectionHeader, SettingsButton } from '@/features/settings/components/settings-ui'
 import { VerevonInput } from '@/shared/ui/verevon/VerevonInput'
 import { getSession } from '@/shared/session/session-store'
@@ -23,6 +24,7 @@ import { hasWorkspaceAdminAccess } from '@/shared/session/access'
  * de gjelder hele organisasjonen.
  */
 export function PluginsSection() {
+  const i18n = useI18n()
   const session = getSession()
   const orgId = createMemo(() => session.activeOrg?.id ?? '')
   const isAdmin = createMemo(() => hasWorkspaceAdminAccess(session))
@@ -89,7 +91,7 @@ export function PluginsSection() {
       await refetch()
     } catch (err) {
       setFormError(
-        err instanceof ApiError ? err.message : 'Kunne ikke registrere plugin-pakken.',
+        translateApiError(err, i18n.tr, { no: 'Kunne ikke registrere plugin-pakken.', en: 'Could not register the plugin package.' }),
       )
     } finally {
       setSubmitting(false)
@@ -106,7 +108,7 @@ export function PluginsSection() {
       await refetch()
     } catch (err) {
       setActionError(
-        err instanceof ApiError ? err.message : 'Kunne ikke oppdatere plugin-pakken.',
+        translateApiError(err, i18n.tr, { no: 'Kunne ikke oppdatere plugin-pakken.', en: 'Could not update the plugin package.' }),
       )
     } finally {
       setBusyId(null)
@@ -129,7 +131,7 @@ export function PluginsSection() {
       await refetch()
     } catch (err) {
       setActionError(
-        err instanceof ApiError ? err.message : 'Kunne ikke fjerne plugin-pakken.',
+        translateApiError(err, i18n.tr, { no: 'Kunne ikke fjerne plugin-pakken.', en: 'Could not remove the plugin package.' }),
       )
     } finally {
       setBusyId(null)
