@@ -33,7 +33,7 @@ use quarry_browser::session::{
 use quarry_core::ids::kinds::ProfileKind;
 use quarry_edge::state::AppState;
 
-use zdr_harness::{user_in_standard_org, user_in_zdr_org, Harness};
+use zdr_harness::{golden_token, user_in_standard_org, user_in_zdr_org, Harness};
 
 const ZDR_ORG: &str = "org-zdr-golden";
 const INTERNAL_TOKEN: &str = "refusal-modes-internal-token";
@@ -771,4 +771,246 @@ async fn enforced_standard_org_is_unchanged() {
         !held_profiles(&harness, &standard).await.is_empty(),
         "the standard organization's profile writes are stored (so the empty store above means refusal)"
     );
+}
+
+// -- the refusals that were enforced before WS4.H (V4) -------------------------------------
+//
+// Durable crawl and batch (row `durable_jobs`) and a persistent profile at run start (row
+// `agent_persistent_profile`) are refused for a ZDR caller whatever the flag says: they are
+// not behind `QUARRY_EDGE__ZDR_REFUSE_DURABLE_RESOURCES`. Their status, error code and
+// message are unchanged; what V4 adds is `details.zdr_refusal { code, action }`, the same
+// object the flag-gated refusals carry, so a client keys on one shape. (The resume refusal of a
+// ZDR checkpoint needs a stored checkpoint and has its own test below.)
+
+/// Both modes, `/v1/crawl` and `/v1/batch`: 403 `FORBIDDEN`, the unchanged ZDR message, and
+/// `details.zdr_refusal` with the action `crawl` or `batch`. A body that asks for ZDR is refused
+/// the same way, nothing reaches Control Plane, and a standard organization gets no such
+/// details (its request is accepted).
+#[tokio::test]
+async fn durable_crawl_and_batch_refusals_carry_zdr_refusal_details_in_both_modes() {
+    for enforce in [false, true] {
+        let control = control_plane().await;
+        let harness = edge(control.uri(), enforce, empty_profiles()).await;
+        let probe = marker();
+
+        for (route, body, action) in [
+            (
+                "/v1/crawl",
+                json!({ "url": format!("https://page.test/{probe}"), "max_pages": 1 }),
+                "crawl",
+            ),
+            (
+                "/v1/batch",
+                json!({ "urls": [format!("https://page.test/{probe}")] }),
+                "batch",
+            ),
+        ] {
+            for (who, bearer, flag) in [
+                ("a ZDR organization's user", user_in_zdr_org(), None),
+                ("a standard user asking for ZDR", user_in_standard_org(), Some(true)),
+            ] {
+                let mut request = body.clone();
+                if let Some(flag) = flag {
+                    request["zdr"] = json!(flag);
+                }
+                let refused = harness.post(&bearer, route, request).await;
+                assert_eq!(
+                    refused.status().as_u16(),
+                    403,
+                    "{route} (flag {enforce}), {who}"
+                );
+                let payload: Value = refused.json().await.unwrap();
+                let context = format!("{route} (flag {enforce}), {who}: {payload}");
+                assert_eq!(payload["error"]["code"], "FORBIDDEN", "{context}");
+                assert_eq!(
+                    payload["error"]["message"],
+                    format!(
+                        "ZDR active: durable {action} jobs are not available under zero data \
+                         retention (the job record and per-page results are retained)"
+                    ),
+                    "the message is unchanged: {context}"
+                );
+                assert_eq!(
+                    payload["error"]["details"]["zdr_refusal"]["code"], CODE,
+                    "{context}"
+                );
+                assert_eq!(
+                    payload["error"]["details"]["zdr_refusal"]["action"], action,
+                    "{context}"
+                );
+                assert!(
+                    payload["error"]["details"]["zdr_refusal"]
+                        .as_object()
+                        .is_some_and(|object| object.len() == 2),
+                    "code and action only, no feature key: {context}"
+                );
+                assert!(!payload.to_string().contains(&probe), "{context}");
+            }
+        }
+        assert!(
+            control.received_requests().await.unwrap().is_empty(),
+            "a refused durable job never reaches Control Plane (flag {enforce})"
+        );
+
+        // A standard organization is not refused and its answer has no zdr_refusal.
+        let accepted = harness
+            .post(
+                &user_in_standard_org(),
+                "/v1/crawl",
+                json!({ "url": "https://page.test/", "max_pages": 1 }),
+            )
+            .await;
+        assert_ne!(accepted.status().as_u16(), 403, "flag {enforce}");
+        let accepted: Value = accepted.json().await.unwrap_or(Value::Null);
+        assert!(
+            accepted["error"]["details"]["zdr_refusal"].is_null(),
+            "{accepted}"
+        );
+    }
+}
+
+/// Both modes, `POST /v1/agent/runs` with a persistent profile: 400 `BAD_REQUEST` (the status
+/// and code this refusal has always had), the unchanged message, and `details.zdr_refusal`
+/// with the action `profile`, for a ZDR organization's user and for a service whose body says
+/// `zdr: true`. A standard organization's request carries no such details.
+#[cfg(feature = "browser-agent")]
+#[tokio::test]
+async fn the_persistent_profile_refusal_at_run_start_carries_zdr_refusal_details_in_both_modes() {
+    for enforce in [false, true] {
+        let control = control_plane().await;
+        let harness = edge(control.uri(), enforce, empty_profiles()).await;
+
+        for (who, bearer, body) in [
+            (
+                "a ZDR organization's user",
+                user_in_zdr_org(),
+                json!({ "zdr": false, "persist_profile": true }),
+            ),
+            (
+                "a service with a ZDR body",
+                golden_token("service_execution_core"),
+                json!({ "zdr": true, "persist_profile": true }),
+            ),
+        ] {
+            let refused = harness.post(&bearer, "/v1/agent/runs", body).await;
+            assert_eq!(refused.status().as_u16(), 400, "{who} (flag {enforce})");
+            let payload: Value = refused.json().await.unwrap();
+            let context = format!("{who} (flag {enforce}): {payload}");
+            assert_eq!(payload["error"]["code"], "BAD_REQUEST", "{context}");
+            assert!(
+                payload["error"]["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .starts_with("zdr_persistent_profile_forbidden:"),
+                "{context}"
+            );
+            assert_eq!(
+                payload["error"]["details"]["zdr_refusal"]["code"], CODE,
+                "{context}"
+            );
+            assert_eq!(
+                payload["error"]["details"]["zdr_refusal"]["action"], "profile",
+                "{context}"
+            );
+        }
+
+        let standard = harness
+            .post(
+                &user_in_standard_org(),
+                "/v1/agent/runs",
+                json!({ "zdr": false, "persist_profile": true }),
+            )
+            .await;
+        let standard: Value = standard.json().await.unwrap_or(Value::Null);
+        assert!(
+            standard["error"]["details"]["zdr_refusal"].is_null(),
+            "a standard organization gets no ZDR refusal details: {standard}"
+        );
+    }
+}
+
+/// Both modes, `POST /v1/agent/runs` with `resume_run_id` naming a ZDR checkpoint: 403 (with the
+/// `BAD_REQUEST` error code this refusal has always had), the unchanged message, and
+/// `details.zdr_refusal` with the action `resume`. A real edge never writes such a checkpoint
+/// (a ZDR run writes none), so the test stores one for the golden ZDR user; a checkpoint that is
+/// not ZDR is not refused for ZDR.
+#[cfg(feature = "browser-agent")]
+#[tokio::test]
+async fn resuming_a_zdr_checkpoint_is_refused_with_zdr_refusal_details_in_both_modes() {
+    use quarry_core::ids::kinds::RunKind;
+    use quarry_runtime::step_receipts::StepReceiptStore;
+    use quarry_runtime::AgentRunCheckpoint;
+
+    let checkpoint = |run: &str, zdr: &str| -> AgentRunCheckpoint {
+        serde_json::from_value(json!({
+            "org_id": ZDR_ORG,
+            "actor_id": "user-golden",
+            "run_id": run,
+            "profile_id": ProfileKind::new().to_string(),
+            "step": 1,
+            "current_url": "https://example.com/",
+            "constraints": { "max_steps": 5, "allowed_domains": ["example.com"], "max_runtime_s": 60 },
+            "zdr": zdr,
+            "status": "active",
+        }))
+        .expect("a checkpoint")
+    };
+
+    for enforce in [false, true] {
+        let zdr_run = RunKind::new().to_string();
+        let plain_run = RunKind::new().to_string();
+        let receipts = Arc::new(quarry_runtime::InMemoryStepReceiptStore::new());
+        for (run, zdr) in [(&zdr_run, "on"), (&plain_run, "off")] {
+            receipts
+                .save_run_checkpoint(checkpoint(run, zdr))
+                .await
+                .unwrap();
+        }
+        std::env::set_var("QUARRY_EDGE_INTERNAL_TOKEN", INTERNAL_TOKEN);
+        let control = control_plane().await;
+        let control_url = control.uri();
+        let harness = Harness::start_with(move |state| AppState {
+            control_base_url: control_url,
+            zdr_refuse_durable_resources: enforce,
+            receipts,
+            ..state
+        })
+        .await;
+
+        let refused = harness
+            .post(
+                &user_in_zdr_org(),
+                "/v1/agent/runs",
+                json!({ "resume_run_id": zdr_run }),
+            )
+            .await;
+        assert_eq!(refused.status().as_u16(), 403, "flag {enforce}");
+        let payload: Value = refused.json().await.unwrap();
+        let context = format!("flag {enforce}: {payload}");
+        assert_eq!(payload["error"]["code"], "BAD_REQUEST", "{context}");
+        assert_eq!(
+            payload["error"]["message"], "ZDR runs cannot be resumed from durable state",
+            "{context}"
+        );
+        assert_eq!(
+            payload["error"]["details"],
+            json!({ "zdr_refusal": { "code": CODE, "action": "resume" } }),
+            "{context}"
+        );
+
+        // A checkpoint that is not ZDR is not refused for ZDR (the user's own org floor still
+        // refuses the persistent profile it needs, which is the `profile` action, not `resume`).
+        let other = harness
+            .post(
+                &user_in_zdr_org(),
+                "/v1/agent/runs",
+                json!({ "resume_run_id": plain_run }),
+            )
+            .await;
+        let other: Value = other.json().await.unwrap_or(Value::Null);
+        assert_ne!(
+            other["error"]["details"]["zdr_refusal"]["action"], "resume",
+            "{other}"
+        );
+    }
 }

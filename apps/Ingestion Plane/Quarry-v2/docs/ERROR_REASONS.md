@@ -120,7 +120,15 @@ Not a `details.reason`: the body is `error.details {zdr_refusal: {code: "zdr_dur
 | `profiles` | `save`, `create`, `update` | `POST /v1/profiles`, `POST /v1/profiles/create`, `PATCH /v1/profiles/{id}` |
 | `change_record_internal` | `record` | `POST /v1/internal/change/record`, only when its body says `zdr: true` |
 
-Reads and deletes (schedule list, pause and delete; profile list, load, delete and `restore_probe`; `/v1/change/latest` and `/v1/change/history`) are never refused, so an organization can wind down. The refusals that already existed (crawl, batch, a persistent profile at run start, resume) do not carry `details.zdr_refusal` yet.
+Reads and deletes (schedule list, pause and delete; profile list, load, delete and `restore_probe`; `/v1/change/latest` and `/v1/change/history`) are never refused, so an organization can wind down. The refusals that existed before WS4.H are enforced whatever the flag says (they are not behind it), keep their status, error code and message word for word, and carry the same `details.zdr_refusal {code, action}` since V4:
+
+| matrix row | status and `error.code` | `details.zdr_refusal.action` | request |
+|---|---|---|---|
+| `durable_jobs` | 403 `FORBIDDEN` | `crawl`, `batch` | `POST /v1/crawl`, `POST /v1/batch` (a ZDR organization's user, or a body with `zdr: true`) |
+| `agent_persistent_profile` | 400 `BAD_REQUEST`, message `zdr_persistent_profile_forbidden: ...` | `profile` | `POST /v1/agent/runs` under ZDR with `persist_profile` or a `profile_id` |
+| `agent_resume` | 403 `BAD_REQUEST`, message `ZDR runs cannot be resumed from durable state` | `resume` | `POST /v1/agent/runs` with a `resume_run_id` whose checkpoint is ZDR |
+
+The orchestrator treats a 403 with this code from `/v1/internal/change/record` as a clean terminal outcome of the change-monitor run (`run_failed`, `reason: zdr_refused`, no retry), not as an auth failure; any other 403 stays an auth failure there (`docs/RUNBOOKS.md`, "A ZDR organization and durable resources").
 
 ## 402 `BUDGET_EXHAUSTED`: `details.limit_source` (WS6.E)
 

@@ -36,6 +36,20 @@ pub(super) fn bind_validated_grant(
     Ok(None)
 }
 
+/// [`status_err`] for a ZDR refusal that was enforced before WS4.H: the same status, the
+/// same `BAD_REQUEST` code and the same message, plus the shared
+/// `details.zdr_refusal { code, action }` (`crate::zdr_refusal::refusal_details`).
+fn zdr_status_err(status: StatusCode, request_id: &str, msg: &str, action: &str) -> ApiErr {
+    (
+        status,
+        Json(Envelope::<()>::err(
+            request_id,
+            QuarryError::new(ErrorCode::BadRequest, msg)
+                .with_details(crate::zdr_refusal::refusal_details(action)),
+        )),
+    )
+}
+
 /// A ZDR grant may only back a ZDR run: a run that is not ZDR would persist
 /// what the grant's owner asked never to be kept. A non-ZDR grant may back
 /// either (the run's own posture can only raise ZDR).
@@ -143,10 +157,11 @@ pub async fn start_run(
             ));
         }
         if checkpoint.zdr.is_active() {
-            return Err(status_err(
+            return Err(zdr_status_err(
                 StatusCode::FORBIDDEN,
                 &request_id,
                 "ZDR runs cannot be resumed from durable state",
+                "resume",
             ));
         }
         Some(checkpoint)
@@ -279,10 +294,11 @@ pub async fn start_run(
         |checkpoint| checkpoint.profile_scope,
     );
     if zdr_forbids_persistent_profile(zdr, persist_profile, body.profile_id.is_some()) {
-        return Err(status_err(
+        return Err(zdr_status_err(
             StatusCode::BAD_REQUEST,
             &request_id,
             "zdr_persistent_profile_forbidden: a ZDR run cannot request a persistent profile or profile_id",
+            "profile",
         ));
     }
     if persist_profile && !state.agent_driver.capabilities().persistent_profile {

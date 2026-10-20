@@ -63,11 +63,7 @@ pub fn refuse(
         return Ok(());
     }
     tracing::info!(row, action, org_id = %org_id, "zdr.refused");
-    let error = refusal_error(action);
-    Err((
-        StatusCode::from_u16(error.code.http_status()).unwrap_or(StatusCode::FORBIDDEN),
-        Json(Envelope::<()>::err(request_id, error)),
-    ))
+    Err(respond(request_id, refusal_error(action)))
 }
 
 /// [`refuse`] for a request that carries verified claims: the posture is the one
@@ -85,17 +81,41 @@ pub fn refuse_for_claims(
     refuse(state, &claims.org_id, zdr_active, request_id, row, action)
 }
 
+/// The `error.details` object every ZDR durable-resource refusal carries:
+/// `{ zdr_refusal: { code, action } }`, with no `feature` key (the catalogue has none
+/// for these). Shared by the observe/enforce helper above and by the refusals that
+/// were enforced before WS4.H (durable crawl and batch, a persistent profile or a
+/// resume of a ZDR checkpoint at run start), so every ZDR refusal names the same code
+/// and the same closed `action` labels (`docs/ERROR_REASONS.md`).
+pub fn refusal_details(action: &str) -> serde_json::Value {
+    serde_json::json!({
+        "zdr_refusal": { "code": REFUSAL_CODE, "action": action }
+    })
+}
+
+/// A 403 `FORBIDDEN` ZDR refusal with its own message and the shared details. For a
+/// refusal that was enforced before WS4.H and keeps its message word for word; the
+/// message names ZDR and carries no caller data.
+pub fn forbidden_with_details(message: impl Into<String>, action: &str) -> QuarryError {
+    QuarryError::new(ErrorCode::Forbidden, message).with_details(refusal_details(action))
+}
+
+/// The response of a refusal error: its own HTTP status and the standard envelope.
+pub fn respond(request_id: &str, error: QuarryError) -> Refused {
+    (
+        StatusCode::from_u16(error.code.http_status()).unwrap_or(StatusCode::FORBIDDEN),
+        Json(Envelope::<()>::err(request_id, error)),
+    )
+}
+
 /// The error body of an enforced refusal. The message names ZDR (clients and the
 /// existing durable-job refusal read it that way) and no caller data.
 fn refusal_error(action: &'static str) -> QuarryError {
-    QuarryError::new(
-        ErrorCode::Forbidden,
+    forbidden_with_details(
         "ZDR active: durable resources are not available under zero data retention \
          (the resource would be retained)",
+        action,
     )
-    .with_details(serde_json::json!({
-        "zdr_refusal": { "code": REFUSAL_CODE, "action": action }
-    }))
 }
 
 #[cfg(test)]
@@ -115,6 +135,23 @@ mod tests {
         );
         assert_eq!(details["zdr_refusal"]["action"], "create");
         assert!(details["zdr_refusal"].get("feature").is_none());
+    }
+
+    #[test]
+    fn the_shared_builders_give_the_same_details_for_any_message() {
+        let error = forbidden_with_details("ZDR active: a message of its own", "crawl");
+        assert_eq!(error.code, ErrorCode::Forbidden);
+        assert_eq!(error.message, "ZDR active: a message of its own");
+        assert_eq!(error.details, Some(refusal_details("crawl")));
+        assert_eq!(
+            refusal_details("crawl"),
+            serde_json::json!({
+                "zdr_refusal": { "code": "zdr_durable_mutation_forbidden", "action": "crawl" }
+            })
+        );
+        let (status, body) = respond("req_1", error);
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body.0.meta.request_id, "req_1");
     }
 
     #[test]

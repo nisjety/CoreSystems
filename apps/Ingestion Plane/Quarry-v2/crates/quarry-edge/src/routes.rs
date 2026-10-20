@@ -794,16 +794,18 @@ fn refuse_durable_job_under_zdr(
         kind,
         "durable job refused: zdr active and the durable path has no zdr support"
     );
-    let err = QuarryError::new(
-        ErrorCode::Forbidden,
-        format!(
-            "ZDR active: durable {kind} jobs are not available under zero data retention \
-             (the job record and per-page results are retained)"
+    // Always enforced (it was before WS4.H, and is not behind
+    // `QUARRY_EDGE__ZDR_REFUSE_DURABLE_RESOURCES`): the same 403, the same message,
+    // plus the shared `details.zdr_refusal` with `action` = `kind` (`crawl`, `batch`).
+    Err(crate::zdr_refusal::respond(
+        request_id,
+        crate::zdr_refusal::forbidden_with_details(
+            format!(
+                "ZDR active: durable {kind} jobs are not available under zero data retention \
+                 (the job record and per-page results are retained)"
+            ),
+            kind,
         ),
-    );
-    Err((
-        StatusCode::from_u16(err.code.http_status()).unwrap_or(StatusCode::FORBIDDEN),
-        Json(Envelope::<()>::err(request_id, err)),
     ))
 }
 
