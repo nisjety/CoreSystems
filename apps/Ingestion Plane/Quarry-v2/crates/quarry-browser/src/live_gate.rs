@@ -88,6 +88,22 @@ pub fn live_enabled() -> bool {
             )
         },
     );
+    enforce(outcome)
+}
+
+/// Map a gate decision onto what a test does: `true` runs, `false` returns
+/// early, and a refusal FAILS the test.
+///
+/// This is the one place a missing browser becomes a red run instead of a
+/// skip, so it is its own function: the tests below call it with injected
+/// outcomes (no environment mutation, which would race other tests) and pin
+/// the panic. A change that turned the `Err` arm into a skip would otherwise
+/// pass every test of [`decide`].
+///
+/// # Panics
+///
+/// On `Err`, with the reason in the message.
+pub fn enforce(outcome: Result<Gate, String>) -> bool {
     match outcome {
         Ok(Gate::Run(_)) => true,
         Ok(Gate::Skip) => {
@@ -126,7 +142,7 @@ mod tests {
     }
 
     #[test]
-    fn with_the_flag_and_no_chromium_it_fails_instead_of_skipping() {
+    fn decide_reports_an_error_when_the_flag_is_set_and_no_chromium_is_found() {
         let err = decide(Some("1"), None, |_| false, not_detected).unwrap_err();
         assert!(err.contains("no Chromium was found"), "{err}");
         assert!(err.contains("Could not auto detect"), "{err}");
@@ -135,7 +151,12 @@ mod tests {
     #[test]
     fn an_empty_chrome_counts_as_unset() {
         assert_eq!(
-            decide(Some("1"), Some(""), |_| false, detected("/usr/bin/chromium")),
+            decide(
+                Some("1"),
+                Some(""),
+                |_| false,
+                detected("/usr/bin/chromium")
+            ),
             Ok(Gate::Run(PathBuf::from("/usr/bin/chromium")))
         );
         assert!(decide(Some("1"), Some(""), |_| false, not_detected).is_err());
@@ -168,6 +189,49 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("/nonexistent"), "{err}");
         assert!(err.contains("refusing to fall back"), "{err}");
+    }
+
+    // The mapping from decision to test behaviour. These are what make "a
+    // missing browser fails the run" a pinned property rather than a reading
+    // of the code.
+
+    #[test]
+    #[should_panic(
+        expected = "CHROMIUMOXIDE_TEST=1 but the live browser cannot run: no Chromium was found"
+    )]
+    fn enforce_fails_the_test_when_the_flag_is_set_and_no_chromium_is_found() {
+        let outcome = decide(Some("1"), None, |_| false, not_detected);
+        enforce(outcome);
+    }
+
+    #[test]
+    #[should_panic(expected = "refusing to fall back")]
+    fn enforce_fails_the_test_when_chrome_names_a_missing_file() {
+        let outcome = decide(
+            Some("1"),
+            Some("/nonexistent"),
+            |_| false,
+            detected("/usr/bin/chromium"),
+        );
+        enforce(outcome);
+    }
+
+    #[test]
+    fn enforce_skips_without_the_flag_and_runs_with_a_browser() {
+        assert!(!enforce(decide(
+            None,
+            Some("/nonexistent"),
+            |_| false,
+            not_detected
+        )));
+        assert!(enforce(decide(
+            Some("1"),
+            None,
+            |_| false,
+            detected("/usr/bin/chromium")
+        )));
+        assert!(enforce(Ok(Gate::Run(PathBuf::from("/x")))));
+        assert!(!enforce(Ok(Gate::Skip)));
     }
 
     #[test]
