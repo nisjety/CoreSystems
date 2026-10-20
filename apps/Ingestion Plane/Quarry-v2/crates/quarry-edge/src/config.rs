@@ -241,6 +241,14 @@ pub struct EdgeConfig {
     pub rendered_branding_visual_enabled: bool,
     #[serde(default)]
     pub visual_max_regions: Option<usize>,
+    /// WS4.H: refuse durable resources (schedules, change monitors and snapshots,
+    /// browser profile writes) for a Zero Data Retention organization. Off by
+    /// default: a ZDR caller is served as before and the edge only logs a
+    /// content-free `zdr.would_refuse` event per request (observe mode). Turn it
+    /// on only after ADR-4 is signed off and customers are told.
+    /// Env: `QUARRY_EDGE__ZDR_REFUSE_DURABLE_RESOURCES`.
+    #[serde(default)]
+    pub zdr_refuse_durable_resources: bool,
 }
 
 fn default_port() -> u16 {
@@ -357,6 +365,7 @@ impl EdgeConfig {
             ocr_preconditioning_enabled: false,
             rendered_branding_visual_enabled: false,
             visual_max_regions: None,
+            zdr_refuse_durable_resources: false,
         }
     }
 }

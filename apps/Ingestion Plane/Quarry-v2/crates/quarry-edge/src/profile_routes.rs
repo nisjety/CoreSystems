@@ -105,6 +105,14 @@ pub async fn save_profile(
     Json(req): Json<SaveProfileRequest>,
 ) -> Result<Json<Envelope<SaveProfileResponse>>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = RequestKind::new().to_string();
+    crate::zdr_refusal::refuse_for_claims(
+        &state,
+        &claims,
+        None,
+        &request_id,
+        "profiles",
+        "save",
+    )?;
 
     let profile_id = match req.profile_id.as_deref() {
         Some(s) => parse_id(s).map_err(|e| err_response(&request_id, e))?,
@@ -131,6 +139,14 @@ pub async fn create_profile(
     Json(req): Json<CreateProfileRequest>,
 ) -> Result<Json<Envelope<ProfileSummaryResponse>>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = RequestKind::new().to_string();
+    crate::zdr_refusal::refuse_for_claims(
+        &state,
+        &claims,
+        None,
+        &request_id,
+        "profiles",
+        "create",
+    )?;
 
     if req.scope == ProfileScope::Ephemeral {
         return Err(err_response(
@@ -177,6 +193,14 @@ pub async fn update_profile(
     Json(req): Json<UpdateProfileRequest>,
 ) -> Result<Json<Envelope<ProfileSummaryResponse>>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = RequestKind::new().to_string();
+    crate::zdr_refusal::refuse_for_claims(
+        &state,
+        &claims,
+        None,
+        &request_id,
+        "profiles",
+        "update",
+    )?;
     let parsed = parse_id(&profile_id).map_err(|e| err_response(&request_id, e))?;
 
     if req.name.is_none() && req.scope.is_none() {

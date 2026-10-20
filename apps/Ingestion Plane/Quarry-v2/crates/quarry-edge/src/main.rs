@@ -61,6 +61,7 @@ mod search_routes;
 mod source_registrar;
 mod state;
 mod zdr_log;
+mod zdr_refusal;
 #[cfg(test)]
 mod test_support;
 mod telemetry;
@@ -1485,6 +1486,7 @@ async fn run() -> anyhow::Result<()> {
         receipts,
         grant_validator,
         require_browser_grants,
+        zdr_refuse_durable_resources: cfg.zdr_refuse_durable_resources,
         driver: default_driver,
         drivers,
         http3: http3_driver,

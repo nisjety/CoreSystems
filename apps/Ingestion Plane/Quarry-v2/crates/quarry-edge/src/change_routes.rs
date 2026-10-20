@@ -87,6 +87,14 @@ pub async fn check(
     Json(req): Json<CheckRequest>,
 ) -> Result<Json<Envelope<ChangeRecord>>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = RequestKind::new().to_string();
+    crate::zdr_refusal::refuse_for_claims(
+        &state,
+        &claims,
+        None,
+        &request_id,
+        "change_history",
+        "check",
+    )?;
     validate_url(&req.url).map_err(|e| err_response(&request_id, e))?;
 
     #[cfg(feature = "postgres-queue")]
@@ -203,6 +211,14 @@ pub async fn promote_snapshot(
     Query(q): Query<PromoteQuery>,
 ) -> Result<Json<Envelope<Snapshot>>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = RequestKind::new().to_string();
+    crate::zdr_refusal::refuse_for_claims(
+        &state,
+        &claims,
+        None,
+        &request_id,
+        "change_snapshot",
+        "snapshot",
+    )?;
     validate_url(&q.url).map_err(|e| err_response(&request_id, e))?;
     let Some(store) = state.baseline_store.as_ref() else {
         return Err(err_response(
@@ -249,6 +265,14 @@ pub async fn promote_snapshot(
     Query(q): Query<UrlQuery>,
 ) -> Result<Json<Envelope<()>>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = RequestKind::new().to_string();
+    crate::zdr_refusal::refuse_for_claims(
+        &state,
+        &claims,
+        None,
+        &request_id,
+        "change_snapshot",
+        "snapshot",
+    )?;
     validate_url(&q.url).map_err(|e| err_response(&request_id, e))?;
     let _ = (&state, &claims);
     Err(err_response(
@@ -297,6 +321,14 @@ pub async fn schedule_refresh(
     use quarry_runtime::request_queue::{Priority, RequestQueue};
 
     let request_id = RequestKind::new().to_string();
+    crate::zdr_refusal::refuse_for_claims(
+        &state,
+        &claims,
+        None,
+        &request_id,
+        "change_snapshot",
+        "refresh",
+    )?;
     validate_url(&req.url).map_err(|e| err_response(&request_id, e))?;
     let Some(pool) = state.queue_pool.as_ref() else {
         return Err(err_response(
@@ -343,6 +375,14 @@ pub async fn schedule_refresh(
     Json(req): Json<serde_json::Value>,
 ) -> Result<Json<Envelope<()>>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = RequestKind::new().to_string();
+    crate::zdr_refusal::refuse_for_claims(
+        &state,
+        &claims,
+        None,
+        &request_id,
+        "change_snapshot",
+        "refresh",
+    )?;
     let _ = (&state, &claims, &req);
     Err(err_response(
         &request_id,
@@ -382,7 +422,6 @@ pub struct RecordRequest {
     /// post-persistence side effects (the durable `ChangeDetected` event AND
     /// the control webhook) are suppressed — fail closed.
     #[serde(default)]
-    #[allow(dead_code)] // read only under `postgres-queue` in record_check
     pub zdr: Option<bool>,
 }
 
@@ -478,6 +517,17 @@ pub async fn record_internal(
             QuarryError::new(ErrorCode::BadRequest, "fresh_fingerprint required"),
         ));
     }
+
+    // WS4.H: a run declared ZDR by the orchestrator must not persist a baseline. The
+    // check sits before the store is touched, so a refusal writes nothing.
+    crate::zdr_refusal::refuse(
+        &state,
+        &req.org_id,
+        req.zdr.unwrap_or(false),
+        &request_id,
+        "change_record_internal",
+        "record",
+    )?;
 
     #[cfg(feature = "postgres-queue")]
     if let Some(store) = state.baseline_store.as_ref() {

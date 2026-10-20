@@ -36,6 +36,11 @@ pub struct AppState {
     /// development; production must configure an HTTP/gRPC-backed validator.
     pub grant_validator: Arc<dyn quarry_runtime::GrantValidator>,
     pub require_browser_grants: bool,
+    /// WS4.H: when true a ZDR organization's durable-resource writes (schedules,
+    /// change monitors and snapshots, profile writes) are refused with
+    /// `zdr_durable_mutation_forbidden`; when false they are served and only a
+    /// `zdr.would_refuse` event is logged. See `crate::zdr_refusal`.
+    pub zdr_refuse_durable_resources: bool,
     pub driver: Arc<dyn Driver>,
     pub drivers: DriverRegistry,
     /// Wave 7 — optional HTTP/3 driver. `Some` when the runtime was

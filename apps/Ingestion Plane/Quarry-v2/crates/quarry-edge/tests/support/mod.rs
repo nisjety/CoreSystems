@@ -46,6 +46,7 @@ pub fn base_state(driver: Arc<dyn Driver>, event_sink: EventSink) -> AppState {
         receipts: Arc::new(quarry_runtime::InMemoryStepReceiptStore::new()),
         grant_validator: Arc::new(quarry_runtime::NoopGrantValidator),
         require_browser_grants: false,
+        zdr_refuse_durable_resources: false,
         driver,
         drivers,
         http3: None,

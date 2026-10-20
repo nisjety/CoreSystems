@@ -1602,6 +1602,7 @@ mod tests {
             receipts: Arc::new(quarry_runtime::InMemoryStepReceiptStore::new()),
             grant_validator: Arc::new(quarry_runtime::NoopGrantValidator),
             require_browser_grants: false,
+            zdr_refuse_durable_resources: false,
             driver: static_driver,
             drivers,
             http3,

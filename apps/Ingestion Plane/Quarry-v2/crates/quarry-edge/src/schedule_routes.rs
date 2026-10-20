@@ -242,6 +242,14 @@ pub async fn create_schedule(
     Json(req): Json<CreateScheduleRequest>,
 ) -> Result<Json<Envelope<serde_json::Value>>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = RequestKind::new().to_string();
+    crate::zdr_refusal::refuse_for_claims(
+        &state,
+        &claims,
+        None,
+        &request_id,
+        "schedules",
+        "create",
+    )?;
 
     // W2 change-monitoring path: `preset` signals a recurring change
     // monitor. We build a control-facing store.Schedule body with org_id
@@ -364,6 +372,14 @@ pub async fn unpause_schedule(
     Path(id): Path<String>,
 ) -> Result<Json<Envelope<serde_json::Value>>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = RequestKind::new().to_string();
+    crate::zdr_refusal::refuse_for_claims(
+        &state,
+        &claims,
+        None,
+        &request_id,
+        "schedules",
+        "unpause",
+    )?;
     let path = format!("/v1/schedules/{id}/unpause");
     let summary = forward_json::<(), serde_json::Value>(
         &state,
@@ -383,6 +399,14 @@ pub async fn trigger_schedule(
     Path(id): Path<String>,
 ) -> Result<Json<Envelope<serde_json::Value>>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = RequestKind::new().to_string();
+    crate::zdr_refusal::refuse_for_claims(
+        &state,
+        &claims,
+        None,
+        &request_id,
+        "schedules",
+        "trigger",
+    )?;
     let path = format!("/v1/schedules/{id}/trigger");
     let summary = forward_json::<(), serde_json::Value>(
         &state,
@@ -403,6 +427,14 @@ pub async fn backfill_schedule(
     Json(req): Json<BackfillRequest>,
 ) -> Result<Json<Envelope<serde_json::Value>>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = RequestKind::new().to_string();
+    crate::zdr_refusal::refuse_for_claims(
+        &state,
+        &claims,
+        None,
+        &request_id,
+        "schedules",
+        "backfill",
+    )?;
     if req.end_at <= req.start_at {
         return Err(err_response(
             &request_id,
