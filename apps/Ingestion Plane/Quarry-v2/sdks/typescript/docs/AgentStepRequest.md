@@ -8,6 +8,8 @@ Name | Type
 ------------ | -------------
 `action` | [AgentAction](AgentAction.md)
 `initiatedBy` | string
+`aiRunId` | string
+`agentLabel` | string
 `instruction` | string
 `extractionProfile` | { [key: string]: any; }
 
@@ -20,6 +22,8 @@ import type { AgentStepRequest } from '@quarry/client'
 const example = {
   "action": null,
   "initiatedBy": null,
+  "aiRunId": null,
+  "agentLabel": null,
   "instruction": null,
   "extractionProfile": null,
 } satisfies AgentStepRequest
