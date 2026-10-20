@@ -425,6 +425,18 @@ A browser-broker grant can carry an upper bound on what a run under it may spend
 
 Known gaps: nothing in the live stack runs these images yet (no rebuilt broker, Quarry or model-gateway), and Quarry has no broker service credential before WS1.A2 (X-1), so no production run carries a claim; execution-core does not read the claim (the `browser_agent` tool input carries the tightened numbers instead; mapping the 402 to a resource-limit outcome is sibling (b)'s); `source: entitlement` is accepted and unused until WS6.D.
 
+## A ZDR organization and durable resources (`QUARRY_EDGE__ZDR_REFUSE_DURABLE_RESOURCES`; WS4.H stage A)
+
+ADR-4 (recommended default, accepted 2026-10-15) says a Zero Data Retention organization cannot create the durable resources the ZDR matrix lists as gaps: schedules, change monitors and snapshots, browser profile writes. This flag is the switch; stage A ships it **off**.
+
+| Variable | Values | Default | What it does | Rollback |
+|---|---|---|---|---|
+| `QUARRY_EDGE__ZDR_REFUSE_DURABLE_RESOURCES` | `true`, `false` | `false` | `false` (observe): a ZDR caller is served exactly as before, and each request below leaves one `zdr.would_refuse` log event with the fields `row`, `action` and `org_id` (no URL, host, title or query). `true` (enforce): the same requests are refused `403 FORBIDDEN` with `error.details.zdr_refusal {code: "zdr_durable_mutation_forbidden", action}` and a `zdr.refused` event, before Control Plane or a store is reached. | Set `false`, restart. |
+
+Refused (enforce) and observed (observe), by matrix row and `action`: `schedules` (`create`, `unpause`, `trigger`, `backfill`); `change_history` (`check`); `change_snapshot` (`snapshot`, `refresh`); `profiles` (`save` = `POST /v1/profiles`, `create` = `POST /v1/profiles/create`, `update` = `PATCH /v1/profiles/{id}`); `change_record_internal` (`record`, only when the orchestrator's body declares `zdr: true`: no baseline is written). Never refused, so a ZDR organization can wind down: schedule list, pause and delete; profile list, load, delete and `restore_probe` (reads, writes nothing); `/v1/change/latest` and `/v1/change/history` (reads). `/v1/search/suggest` is unassigned and not covered.
+
+Read the observe week with the log query `message = "zdr.would_refuse"`, grouped by `org_id` and `row`. Stage B (flag on by default in compose) waits for the owner's ADR-4 sign-off and the customer notice. Not done in stage A: `details.zdr_refusal` on the rows that already refuse (crawl, batch, profile at run start, resume), and flipping the rows to `Enforced` in `quarry_core::zdr_matrix` (the golden and the repo-level sync script move with it).
+
 ## Evidence, round 4 (rebuilt edge, 2026-10-20, U9)
 
 Two edge images were built with `docker build -f deploy/compose/Dockerfile.edge` (rc 0) and run alone on a private network, one at a time, with the dev bypass and `QUARRY_EDGE__TAKEOVER_ENFORCEMENT=on`: `u9head`, from an export of HEAD `31441f12`, and `u9wt`, from the working tree at that HEAD. The second one exists because the tab-initiator code (U3) and the WS6.E code (U5) were not committed when this was run, so a HEAD image alone could only show the old behaviour. Both were removed afterwards. The table with the commands and the raw output is in the side-session notes, `wf-U9-evidence.md`.
