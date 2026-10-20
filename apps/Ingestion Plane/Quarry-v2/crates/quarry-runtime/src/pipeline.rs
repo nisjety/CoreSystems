@@ -2629,11 +2629,36 @@ mod scrape_challenge_tests {
     const ARTICLE: &str = "<html><head><title>How CAPTCHAs work</title></head><body><main><h1>How CAPTCHAs work</h1><p>A CAPTCHA is a test that tells computers and humans apart. This article explains what a CAPTCHA is and why access to a page is sometimes forbidden to a bot.</p></main></body></html>";
     const CONTACT_WITH_WIDGET: &str = r#"<html><head><title>Contact us</title></head><body><form action="/send" method="post"><label>Name <input type="text" name="n"></label><label>Email <input type="email" name="e"></label><textarea name="m"></textarea><div class="g-recaptcha" data-sitekey="k"></div><button>Send</button></form><script src="https://www.google.com/recaptcha/api.js"></script></body></html>"#;
 
+    /// Makes per-thread tracing subscribers (`set_default`) reliable for every test in
+    /// this module, whatever order the parallel tests reach a callsite in.
+    ///
+    /// tracing-core caches an "interest" per callsite, computed when the callsite is
+    /// first hit. While only ONE dispatcher is registered process-wide it takes a
+    /// shortcut and asks only the CURRENT THREAD's default dispatcher. A test thread
+    /// with no subscriber that is first to hit a callsite (the two challenge lines in
+    /// `PageRunner::run`) therefore caches "never", and can overwrite the "sometimes"
+    /// that a concurrent `set_default` in the log test had just computed. The log test
+    /// then sees zero events: the flake of R8b (assertion left 0, right 1). Two
+    /// dispatchers that live for the whole process turn the shortcut off for good: the
+    /// interest is then always computed over every registered dispatcher, so a callsite
+    /// is never cached as "never" while a capturing subscriber is alive, and each event
+    /// asks the hitting thread's own subscriber. Called before any scrape in the module.
+    fn keep_per_thread_subscribers_reliable() {
+        static KEEP: std::sync::OnceLock<[tracing::Dispatch; 2]> = std::sync::OnceLock::new();
+        KEEP.get_or_init(|| {
+            [
+                tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()),
+                tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()),
+            ]
+        });
+    }
+
     /// Installs a challenge config for the current thread and removes it again.
     /// `#[tokio::test]` runs on the current thread, so the scrape sees it.
     struct Installed;
     impl Installed {
         fn new(config: ChallengeConfig) -> Self {
+            keep_per_thread_subscribers_reliable();
             TEST_CHALLENGE_CONFIG.with(|slot| slot.set(Some(config)));
             Installed
         }
@@ -2842,6 +2867,8 @@ mod scrape_challenge_tests {
     // (zero lines), never pass vacuously.
     #[tokio::test(flavor = "current_thread")]
     async fn the_scrape_path_logs_the_reason_and_the_status_and_never_the_host() {
+        // Before the first `set_default` below, so no registration races it.
+        keep_per_thread_subscribers_reliable();
         for zdr in [ZdrMode::Off, ZdrMode::On] {
             // Enforce: one refusal line.
             let events = EventLog::default();
