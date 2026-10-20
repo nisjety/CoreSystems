@@ -245,6 +245,182 @@ struct ResolvedBrowserGrant {
     /// The session grant a run grant was derived from (WS1.B); `None` when
     /// the caller already presented a run grant.
     parent_grant_id: Option<String>,
+    /// The budget claim on the grant as the broker returned it (WS6.E), when
+    /// `MODEL_GATEWAY_BROWSER_BUDGET_CLAIM` is on and the grant carries one.
+    /// It is what the broker stored, so it includes any bound inherited from
+    /// the parent session grant.
+    budget: Option<BudgetClaim>,
+}
+
+/// A budget claim: an upper bound on a run's spend. Zero is "no bound" on that
+/// dimension. It can only tighten what the request asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BudgetClaim {
+    micro_usd: i64,
+    max_steps: i32,
+    max_runtime_s: i32,
+}
+
+impl BudgetClaim {
+    /// The claim a broker message carries, or `None` when it bounds nothing
+    /// (an old broker, or a grant minted without one). A negative number is
+    /// not a bound.
+    fn from_wire(micro_usd: i64, max_steps: i32, max_runtime_s: i32) -> Option<Self> {
+        let claim = Self {
+            micro_usd: micro_usd.max(0),
+            max_steps: max_steps.max(0),
+            max_runtime_s: max_runtime_s.max(0),
+        };
+        (claim.micro_usd > 0 || claim.max_steps > 0 || claim.max_runtime_s > 0).then_some(claim)
+    }
+
+    /// The tighter of two claims per dimension (0 is open, so the other side
+    /// stands).
+    fn tighter(self, other: Self) -> Self {
+        fn bound<T: Ord + Copy + Default>(a: T, b: T) -> T {
+            let open = T::default();
+            if a == open {
+                b
+            } else if b == open {
+                a
+            } else {
+                a.min(b)
+            }
+        }
+        Self {
+            micro_usd: bound(self.micro_usd, other.micro_usd),
+            max_steps: bound(self.max_steps, other.max_steps),
+            max_runtime_s: bound(self.max_runtime_s, other.max_runtime_s),
+        }
+    }
+
+    /// Whether `self` is no wider than `ceiling` in every dimension the
+    /// ceiling bounds (a dimension the ceiling bounds must be bounded here too).
+    fn within(self, ceiling: Self) -> bool {
+        fn ok<T: Ord + Copy + Default>(own: T, ceiling: T) -> bool {
+            let open = T::default();
+            ceiling == open || (own != open && own <= ceiling)
+        }
+        ok(self.micro_usd, ceiling.micro_usd)
+            && ok(self.max_steps, ceiling.max_steps)
+            && ok(self.max_runtime_s, ceiling.max_runtime_s)
+    }
+}
+
+/// The labels this route puts on a claim it mints (the broker accepts
+/// `request`, `org_default` and `entitlement`; the last is the WS6.D resolver's).
+const BUDGET_SOURCE_REQUEST: &str = "request";
+const BUDGET_SOURCE_ORG_DEFAULT: &str = "org_default";
+
+/// What this route asks the broker to put on the run grant (WS6.E), and
+/// whether broker-returned claims are in force at all.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct BudgetMint {
+    /// `MODEL_GATEWAY_BROWSER_BUDGET_CLAIM=on`. Off: no claim is sent, none
+    /// is read back, and the run parameters are exactly the request's.
+    enabled: bool,
+    /// The claim to mint, when the request or the organization bounds
+    /// anything, and who set it.
+    minted: Option<(BudgetClaim, &'static str)>,
+}
+
+/// `MODEL_GATEWAY_BROWSER_BUDGET_CLAIM`: only `on` turns it on, so a misspelt
+/// value is off, never a silent half-on.
+fn budget_claim_flag(value: Option<&str>) -> bool {
+    value.is_some_and(|value| value.trim().eq_ignore_ascii_case("on"))
+}
+
+/// The claim for a run: `min(request, org per-run ceiling)` for cost, the
+/// request's own steps and runtime. The label says which side bound the cost
+/// (`org_default` when the organization's ceiling did, else `request`).
+/// `None` when neither bounds anything. A non-finite or non-positive request
+/// value is no bound, as everywhere else in this route.
+fn mint_budget_from(
+    req: &BrowserRunStartRequest,
+    org_ceiling_usd: Option<f64>,
+) -> Option<(BudgetClaim, &'static str)> {
+    let usable = |usd: f64| usd.is_finite() && usd > 0.0;
+    let asked = req.max_cost_usd.filter(|usd| usable(*usd));
+    let ceiling = org_ceiling_usd.filter(|usd| usable(*usd));
+    let (cost_usd, source) = match (asked, ceiling) {
+        (Some(asked), Some(ceiling)) if ceiling < asked => {
+            (Some(ceiling), BUDGET_SOURCE_ORG_DEFAULT)
+        }
+        (Some(asked), _) => (Some(asked), BUDGET_SOURCE_REQUEST),
+        (None, Some(ceiling)) => (Some(ceiling), BUDGET_SOURCE_ORG_DEFAULT),
+        (None, None) => (None, BUDGET_SOURCE_REQUEST),
+    };
+    let claim = BudgetClaim::from_wire(
+        // At least one micro-dollar: a positive ceiling that rounds to zero is
+        // still a bound.
+        cost_usd.map_or(0, |usd| crate::org_quota::usd_to_micros(usd).max(1)),
+        req.max_steps.unwrap_or(0),
+        req.max_runtime_s.unwrap_or(0),
+    )?;
+    Some((claim, source))
+}
+
+/// The run's mint: reads the organization's per-run ceiling from org-core (an
+/// unreachable or unconfigured org-core is fail-open, see
+/// `org_quota::fetch_org_limits`: Quarry's own ceiling still applies) and
+/// decides what to ask the broker for. Off by default.
+async fn mint_budget(state: &AppState, req: &BrowserRunStartRequest, org_id: &str) -> BudgetMint {
+    let flag = std::env::var("MODEL_GATEWAY_BROWSER_BUDGET_CLAIM").ok();
+    mint_budget_with(state, req, org_id, budget_claim_flag(flag.as_deref())).await
+}
+
+async fn mint_budget_with(
+    state: &AppState,
+    req: &BrowserRunStartRequest,
+    org_id: &str,
+    enabled: bool,
+) -> BudgetMint {
+    if !enabled {
+        return BudgetMint::default();
+    }
+    let limits = crate::org_quota::fetch_org_limits(
+        &state.http_client,
+        &state.org_core_base_url,
+        org_id,
+        &state.org_core_service_id,
+        &state.org_core_service_token,
+    )
+    .await;
+    BudgetMint {
+        enabled,
+        minted: mint_budget_from(req, limits.max_cost_usd),
+    }
+}
+
+/// The run parameters execution-core is given: the request's, tightened by the
+/// grant's claim. A claim never raises a value (an absent or zero request value
+/// takes the claim's, a larger one is replaced by it).
+fn bounded_run_params(
+    req: &BrowserRunStartRequest,
+    claim: Option<&BudgetClaim>,
+) -> (Option<i32>, Option<i32>, Option<f64>) {
+    let Some(claim) = claim else {
+        return (req.max_steps, req.max_runtime_s, req.max_cost_usd);
+    };
+    let tighten_i32 = |asked: Option<i32>, bound: i32| match asked.filter(|value| *value > 0) {
+        _ if bound <= 0 => asked,
+        Some(asked) => Some(asked.min(bound)),
+        None => Some(bound),
+    };
+    let cost = if claim.micro_usd > 0 {
+        let bound = crate::org_quota::micros_to_usd(claim.micro_usd);
+        match req.max_cost_usd.filter(|usd| usd.is_finite() && *usd > 0.0) {
+            Some(asked) => Some(asked.min(bound)),
+            None => Some(bound),
+        }
+    } else {
+        req.max_cost_usd
+    };
+    (
+        tighten_i32(req.max_steps, claim.max_steps),
+        tighten_i32(req.max_runtime_s, claim.max_runtime_s),
+        cost,
+    )
 }
 
 /// The only `DeriveRunGrant` purpose this route asks for.
@@ -266,6 +442,7 @@ async fn resolve_browser_grant(
     browser_bearer: &VerifiedBrowserBearer,
     org_id: &str,
     run_key: &str,
+    mint: &BudgetMint,
 ) -> Result<ResolvedBrowserGrant, ApiError> {
     let grant_id = request.grant_id.trim();
     if grant_id.is_empty() {
@@ -310,6 +487,12 @@ async fn resolve_browser_grant(
                 run_key,
                 grant_id,
                 &broker_policy,
+                mint,
+                BudgetClaim::from_wire(
+                    response.budget_micro_usd,
+                    response.budget_max_steps,
+                    response.budget_max_runtime_s,
+                ),
             )
             .await;
         }
@@ -353,12 +536,26 @@ async fn resolve_browser_grant(
         grant_id: grant_id.to_owned(),
         allowed_domains,
         parent_grant_id: None,
+        // A run grant the caller presented keeps the claim it was issued with.
+        budget: mint
+            .enabled
+            .then(|| {
+                BudgetClaim::from_wire(
+                    response.budget_micro_usd,
+                    response.budget_max_steps,
+                    response.budget_max_runtime_s,
+                )
+            })
+            .flatten(),
     })
 }
 
 /// Derives a run grant from a validated session grant. The broker enforces
 /// that the run grant is never wider than its parent; the response is checked
 /// again here so a misbehaving broker cannot widen what reaches execution-core.
+// Nine inputs, all distinct facts about one derive (the budget claim added two
+// to the seven it had); a parameter struct would only rename them.
+#[allow(clippy::too_many_arguments)]
 async fn derive_run_grant(
     state: &AppState,
     request: &BrowserRunStartRequest,
@@ -367,6 +564,8 @@ async fn derive_run_grant(
     run_key: &str,
     parent_grant_id: &str,
     parent_policy: &[String],
+    mint: &BudgetMint,
+    parent_budget: Option<BudgetClaim>,
 ) -> Result<ResolvedBrowserGrant, ApiError> {
     // `allowed_domains` narrows the session grant; absent (or explicit null)
     // inherits it, which the broker refuses for a parent wider than one run.
@@ -375,6 +574,21 @@ async fn derive_run_grant(
         Some(requested) => canonical_browser_domains(requested)
             .map_err(|()| bad_request("allowed_domains must be a bounded hostname policy"))?,
     };
+    // The claim to ask for: the minted one, no wider than the parent's own (the
+    // broker refuses a derive that widens its parent, and a run should not fail
+    // to start because the organization's ceiling is above a session's bound).
+    // None asks for none: a parent's claim is inherited by the broker.
+    let asked = if mint.enabled {
+        mint.minted.map(|(claim, source)| {
+            (
+                parent_budget.map_or(claim, |parent| claim.tighter(parent)),
+                source,
+            )
+        })
+    } else {
+        None
+    };
+    let (ask_claim, ask_source) = asked.unzip();
     let mut broker = state.browser_client.clone();
     let derived = broker
         .derive_run_grant(authenticated_browser_request(
@@ -385,6 +599,11 @@ async fn derive_run_grant(
                 allowed_domains: requested,
                 purpose: DERIVE_PURPOSE_AI_RUN.to_owned(),
                 ttl_seconds: 0,
+                budget_micro_usd: ask_claim.map_or(0, |claim| claim.micro_usd),
+                budget_max_steps: ask_claim.map_or(0, |claim| claim.max_steps),
+                budget_max_runtime_s: ask_claim.map_or(0, |claim| claim.max_runtime_s),
+                budget_source: ask_source.unwrap_or_default().to_owned(),
+                budget_minted_at_unix: 0,
             },
             browser_bearer,
         )?)
@@ -412,6 +631,20 @@ async fn derive_run_grant(
     {
         return Err(browser_grant_forbidden());
     }
+    // The claim the broker stored. It must be no wider than what was asked for
+    // (a broker cannot hand back a looser bound), and than the parent's.
+    let returned = BudgetClaim::from_wire(
+        derived.budget_micro_usd,
+        derived.budget_max_steps,
+        derived.budget_max_runtime_s,
+    );
+    if mint.enabled {
+        for ceiling in [ask_claim, parent_budget].into_iter().flatten() {
+            if !returned.is_some_and(|claim| claim.within(ceiling)) {
+                return Err(browser_grant_forbidden());
+            }
+        }
+    }
     if let Some(start_url) = request
         .start_url
         .as_deref()
@@ -425,6 +658,7 @@ async fn derive_run_grant(
         grant_id: grant_id.to_owned(),
         allowed_domains,
         parent_grant_id: Some(parent_grant_id.to_owned()),
+        budget: if mint.enabled { returned } else { None },
     })
 }
 
@@ -730,8 +964,9 @@ async fn browser_run_start_inner(
     // Validate the opaque caller-provided id before *any* thread/run write.
     // A cross-tenant/forged/missing policy grant must not create a durable run
     // that later fails asynchronously in execution-core.
+    let mint = mint_budget(&state, &req, &org_id).await;
     let browser_grant =
-        resolve_browser_grant(&state, &req, &browser_bearer, &org_id, &run_key).await?;
+        resolve_browser_grant(&state, &req, &browser_bearer, &org_id, &run_key, &mint).await?;
 
     let run = match idempotency_key {
         Some(_) => {
@@ -872,18 +1107,22 @@ async fn browser_run_start_inner(
     // reads `PlanConfig.run_id` from here — it's what every `BrowserEventSink`
     // method and the new pause/cancel `StateStore` gate key off of. Without
     // it the loop runs "blind": no events, no pause/resume/stop.
+    // The grant's budget claim tightens what execution-core is told, so the
+    // planner and Quarry bound the run by the same numbers.
+    let (max_steps, max_runtime_s, max_cost_usd) =
+        bounded_run_params(&req, browser_grant.budget.as_ref());
     let tool_input = json!({
         "grant_id": browser_grant.grant_id,
         "plan_id": plan_id,
         "run_id": run_id,
         "org_id": org_id,
         "system_prompt": req.goal,
-        "max_steps": req.max_steps,
-        "max_runtime_s": req.max_runtime_s,
+        "max_steps": max_steps,
+        "max_runtime_s": max_runtime_s,
         "allowed_domains": browser_grant.allowed_domains,
         "stop_criteria": req.stop_criteria,
         "require_approval": req.require_approval,
-        "max_cost_usd": req.max_cost_usd,
+        "max_cost_usd": max_cost_usd,
         "zdr": req.zdr,
         "profile_id": req.profile_id,
         "start_url": req.start_url,
@@ -1760,6 +1999,7 @@ mod tests {
             &VerifiedBrowserBearer::for_test("browser-user-token"),
             "org-a",
             "browser-run-key",
+            &BudgetMint::default(),
         )
         .await
         .expect_err("broker absence must fail closed");
@@ -1793,6 +2033,7 @@ mod tests {
             &VerifiedBrowserBearer::for_test("browser-user-token"),
             "org-a",
             "browser-run-key",
+            &BudgetMint::default(),
         )
         .await
         .expect("valid broker grant");
@@ -1813,6 +2054,7 @@ mod tests {
             &VerifiedBrowserBearer::for_test("browser-user-token"),
             "org-a",
             "browser-run-key",
+            &BudgetMint::default(),
         )
         .await
         .expect_err("empty broker policy must never be unrestricted");
@@ -1878,6 +2120,14 @@ mod tests {
         broker: TestBrowserBroker,
         request: BrowserRunStartRequest,
     ) -> (Result<ResolvedBrowserGrant, ApiError>, TestBrowserBroker) {
+        resolve_with_mint(broker, request, BudgetMint::default()).await
+    }
+
+    async fn resolve_with_mint(
+        broker: TestBrowserBroker,
+        request: BrowserRunStartRequest,
+        mint: BudgetMint,
+    ) -> (Result<ResolvedBrowserGrant, ApiError>, TestBrowserBroker) {
         let (state, handle) = state_with_browser_broker(broker.clone()).await;
         let result = resolve_browser_grant(
             &state,
@@ -1885,6 +2135,7 @@ mod tests {
             &VerifiedBrowserBearer::for_test("browser-user-token"),
             "org-a",
             "browser-run-key",
+            &mint,
         )
         .await;
         handle.abort();
@@ -1957,6 +2208,348 @@ mod tests {
                 .allowed_domains
                 .is_empty());
         }
+    }
+
+    // ── WS6.E: the budget claim minted onto a derived run grant ────────────
+
+    fn minted(micro_usd: i64, max_steps: i32, max_runtime_s: i32, source: &'static str) -> BudgetMint {
+        BudgetMint {
+            enabled: true,
+            minted: Some((
+                BudgetClaim {
+                    micro_usd,
+                    max_steps,
+                    max_runtime_s,
+                },
+                source,
+            )),
+        }
+    }
+
+    fn with_claim(
+        response: DeriveRunGrantResponse,
+        micro_usd: i64,
+        max_steps: i32,
+        max_runtime_s: i32,
+    ) -> DeriveRunGrantResponse {
+        DeriveRunGrantResponse {
+            budget_micro_usd: micro_usd,
+            budget_max_steps: max_steps,
+            budget_max_runtime_s: max_runtime_s,
+            budget_source: "request".to_owned(),
+            budget_minted_at_unix: 1_760_000_000,
+            ..response
+        }
+    }
+
+    #[test]
+    fn mint_budget_takes_the_min_of_request_and_org_ceiling() {
+        let mut request = browser_request("session-1");
+        request.max_cost_usd = Some(2.0);
+        request.max_steps = Some(30);
+        request.max_runtime_s = Some(300);
+
+        // The organization's ceiling is lower: it binds the cost, and says so.
+        let (claim, source) = mint_budget_from(&request, Some(0.5)).expect("a claim");
+        assert_eq!(
+            claim,
+            BudgetClaim {
+                micro_usd: 500_000,
+                max_steps: 30,
+                max_runtime_s: 300
+            }
+        );
+        assert_eq!(source, "org_default");
+
+        // The request is lower than the ceiling: the request binds it.
+        let (claim, source) = mint_budget_from(&request, Some(5.0)).expect("a claim");
+        assert_eq!(claim.micro_usd, 2_000_000);
+        assert_eq!(source, "request");
+
+        // No ceiling at all (org-core unconfigured): the request's own values.
+        let (claim, source) = mint_budget_from(&request, None).expect("a claim");
+        assert_eq!((claim.micro_usd, source), (2_000_000, "request"));
+
+        // No request cost, a ceiling: the ceiling is the bound.
+        request.max_cost_usd = None;
+        let (claim, source) = mint_budget_from(&request, Some(0.25)).expect("a claim");
+        assert_eq!((claim.micro_usd, source), (250_000, "org_default"));
+
+        // A positive ceiling that rounds to zero micro-dollars is still a bound.
+        let (claim, _) = mint_budget_from(&request, Some(1e-9)).expect("a claim");
+        assert_eq!(claim.micro_usd, 1);
+    }
+
+    #[test]
+    fn claim_is_absent_when_neither_is_set() {
+        let request = browser_request("session-1");
+        assert_eq!(mint_budget_from(&request, None), None);
+        // A zero, negative or non-finite value is no bound, in the request or the ceiling.
+        for junk in [Some(0.0), Some(-1.0), Some(f64::NAN), Some(f64::INFINITY)] {
+            let mut with_junk = browser_request("session-1");
+            with_junk.max_cost_usd = junk;
+            assert_eq!(mint_budget_from(&with_junk, junk), None, "{junk:?}");
+        }
+        let mut zero_steps = browser_request("session-1");
+        zero_steps.max_steps = Some(0);
+        zero_steps.max_runtime_s = Some(-5);
+        assert_eq!(mint_budget_from(&zero_steps, None), None);
+        assert_eq!(BudgetClaim::from_wire(0, 0, 0), None);
+        assert_eq!(BudgetClaim::from_wire(-1, -1, -1), None);
+    }
+
+    #[tokio::test]
+    async fn org_core_failure_does_not_block_the_run() {
+        let (mut state, handle) = state_with_browser_broker(session_broker(
+            &["example.com"],
+            Ok(derived_run("run-1", "session-1", &["example.com"])),
+        ))
+        .await;
+        // org-core is configured and unreachable: the read is fail-open, so the claim
+        // is the request's own values and the run starts.
+        state.org_core_base_url = "http://127.0.0.1:1".to_owned();
+        state.org_core_service_token = "test-token".to_owned();
+        let mut request = browser_request("session-1");
+        request.max_cost_usd = Some(0.75);
+        let mint = mint_budget_with(&state, &request, "org-a", true).await;
+        assert!(mint.enabled);
+        let (claim, source) = mint.minted.expect("the request's own bound");
+        assert_eq!((claim.micro_usd, source), (750_000, "request"));
+
+        // Switched off, nothing is read and nothing is minted.
+        assert_eq!(
+            mint_budget_with(&state, &request, "org-a", false).await,
+            BudgetMint::default()
+        );
+        handle.abort();
+    }
+
+    #[test]
+    fn only_on_turns_the_claim_flag_on() {
+        assert!(budget_claim_flag(Some("on")));
+        assert!(budget_claim_flag(Some(" ON ")));
+        for off in [None, Some(""), Some("off"), Some("true"), Some("1"), Some("onn")] {
+            assert!(!budget_claim_flag(off), "{off:?}");
+        }
+    }
+
+    #[test]
+    fn a_claim_tightens_the_run_parameters_and_never_raises_them() {
+        let mut request = browser_request("session-1");
+        request.max_steps = Some(40);
+        request.max_runtime_s = Some(600);
+        request.max_cost_usd = Some(3.0);
+        let tight = BudgetClaim {
+            micro_usd: 1_000_000,
+            max_steps: 10,
+            max_runtime_s: 120,
+        };
+        assert_eq!(
+            bounded_run_params(&request, Some(&tight)),
+            (Some(10), Some(120), Some(1.0))
+        );
+        // A claim above the request leaves the request alone.
+        let loose = BudgetClaim {
+            micro_usd: 9_000_000,
+            max_steps: 400,
+            max_runtime_s: 6_000,
+        };
+        assert_eq!(
+            bounded_run_params(&request, Some(&loose)),
+            (Some(40), Some(600), Some(3.0))
+        );
+        // A request that named nothing takes the claim's bounds, and a dimension the
+        // claim leaves open stays as the request had it.
+        let bare = browser_request("session-1");
+        let steps_only = BudgetClaim {
+            micro_usd: 0,
+            max_steps: 8,
+            max_runtime_s: 0,
+        };
+        assert_eq!(
+            bounded_run_params(&bare, Some(&steps_only)),
+            (Some(8), None, None)
+        );
+        // No claim: exactly the request's values.
+        assert_eq!(
+            bounded_run_params(&request, None),
+            (Some(40), Some(600), Some(3.0))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_minted_claim_rides_the_derive_request_and_the_returned_claim_bounds_the_run() {
+        let (result, broker) = resolve_with_mint(
+            session_broker(
+                &["example.com"],
+                Ok(with_claim(
+                    derived_run("run-1", "session-1", &["example.com"]),
+                    500_000,
+                    30,
+                    300,
+                )),
+            ),
+            browser_request("session-1"),
+            minted(500_000, 30, 300, "org_default"),
+        )
+        .await;
+        let grant = result.expect("derived run grant");
+        assert_eq!(
+            grant.budget,
+            Some(BudgetClaim {
+                micro_usd: 500_000,
+                max_steps: 30,
+                max_runtime_s: 300
+            })
+        );
+        let derives = broker.derive_requests.lock().expect("derive recorder");
+        let sent = &derives[0];
+        assert_eq!(
+            (
+                sent.budget_micro_usd,
+                sent.budget_max_steps,
+                sent.budget_max_runtime_s,
+                sent.budget_source.as_str(),
+                sent.budget_minted_at_unix
+            ),
+            (500_000, 30, 300, "org_default", 0),
+            "the stamp is the broker's, never sent"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_claim_asked_for_is_clipped_to_the_parents_own() {
+        // The session grant already carries a $1 bound; the organization's ceiling
+        // is $5. Asking for $5 would be refused by the broker as a widening, so
+        // the route asks for no more than the parent's.
+        let parent = ValidateGrantResponse {
+            budget_micro_usd: 1_000_000,
+            budget_source: "org_default".to_owned(),
+            budget_minted_at_unix: 1_760_000_000,
+            ..session_validation("session-1", &["example.com"])
+        };
+        let broker = TestBrowserBroker {
+            derive: Some(Ok(with_claim(
+                derived_run("run-1", "session-1", &["example.com"]),
+                1_000_000,
+                30,
+                0,
+            ))),
+            ..TestBrowserBroker::validating(Ok(parent))
+        };
+        let (result, broker) = resolve_with_mint(
+            broker,
+            browser_request("session-1"),
+            minted(5_000_000, 30, 0, "org_default"),
+        )
+        .await;
+        result.expect("a run grant");
+        let derives = broker.derive_requests.lock().expect("derive recorder");
+        assert_eq!(derives[0].budget_micro_usd, 1_000_000);
+        assert_eq!(derives[0].budget_max_steps, 30);
+    }
+
+    #[tokio::test]
+    async fn a_broker_that_widens_or_drops_the_claim_is_refused() {
+        let ask = minted(500_000, 30, 0, "org_default");
+        for (name, response) in [
+            (
+                "wider cost",
+                with_claim(derived_run("run-1", "session-1", &["example.com"]), 900_000, 30, 0),
+            ),
+            (
+                "wider steps",
+                with_claim(derived_run("run-1", "session-1", &["example.com"]), 500_000, 31, 0),
+            ),
+            (
+                "a dropped dimension",
+                with_claim(derived_run("run-1", "session-1", &["example.com"]), 500_000, 0, 0),
+            ),
+            (
+                "no claim at all",
+                derived_run("run-1", "session-1", &["example.com"]),
+            ),
+        ] {
+            let (result, _) = resolve_with_mint(
+                session_broker(&["example.com"], Ok(response)),
+                browser_request("session-1"),
+                ask.clone(),
+            )
+            .await;
+            let error = result.expect_err(name);
+            assert_eq!(error.0, StatusCode::FORBIDDEN, "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_disabled_mint_sends_no_claim_and_reads_none_back() {
+        // The broker answers with a claim (an inherited one); with the flag off the
+        // route neither asks for one nor honours it, so the run is exactly as before.
+        let (result, broker) = resolve_with_mint(
+            session_broker(
+                &["example.com"],
+                Ok(with_claim(
+                    derived_run("run-1", "session-1", &["example.com"]),
+                    100,
+                    1,
+                    1,
+                )),
+            ),
+            browser_request("session-1"),
+            BudgetMint::default(),
+        )
+        .await;
+        assert_eq!(result.expect("run grant").budget, None);
+        let derives = broker.derive_requests.lock().expect("derive recorder");
+        assert_eq!(
+            (
+                derives[0].budget_micro_usd,
+                derives[0].budget_max_steps,
+                derives[0].budget_max_runtime_s,
+                derives[0].budget_source.as_str()
+            ),
+            (0, 0, 0, "")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_presented_run_grant_keeps_its_claim_only_when_the_flag_is_on() {
+        let run_grant = ValidateGrantResponse {
+            kind: "run".to_owned(),
+            budget_max_steps: 12,
+            budget_source: "request".to_owned(),
+            ..session_validation("run-9", &["example.com"])
+        };
+        let on = BudgetMint {
+            enabled: true,
+            minted: None,
+        };
+        let (result, broker) = resolve_with_mint(
+            TestBrowserBroker::validating(Ok(run_grant.clone())),
+            browser_request("run-9"),
+            on,
+        )
+        .await;
+        let grant = result.expect("a presented run grant");
+        assert_eq!(
+            grant.budget,
+            Some(BudgetClaim {
+                micro_usd: 0,
+                max_steps: 12,
+                max_runtime_s: 0
+            })
+        );
+        assert!(
+            broker.derive_requests.lock().expect("recorder").is_empty(),
+            "a presented run grant is never re-minted"
+        );
+        let (result, _) = resolve_with_mint(
+            TestBrowserBroker::validating(Ok(run_grant)),
+            browser_request("run-9"),
+            BudgetMint::default(),
+        )
+        .await;
+        assert_eq!(result.expect("a presented run grant").budget, None);
     }
 
     #[tokio::test]
