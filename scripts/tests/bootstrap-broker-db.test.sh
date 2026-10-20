@@ -131,8 +131,13 @@ check "rotation: the old password no longer logs in" '! docker exec -i -e PGPASS
 #    cannot open Quarry's databases, and the container superuser (what Quarry uses) CAN open browser_broker.
 other=$(date +%s%N | sha256sum | cut -c1-24)
 sql "CREATE ROLE other_role LOGIN PASSWORD '$other'" >/dev/null
-docker exec -i -e PGPASSWORD="$other" "$pg" sh -c 'psql -X -tA -h "$(hostname -i | cut -d" " -f1)" -U other_role -d browser_broker -c "select 1"' >/dev/null 2>&1; rc=$?
-check "another ordinary role cannot connect to browser_broker (CONNECT revoked from PUBLIC)" '[[ $rc -ne 0 ]]'
+# The refusal only proves something if the role exists and its password is right: without the CREATE ROLE
+# above, the connect also fails (authentication failed for a role that is not there). So assert the role
+# exists and that the server's refusal names the CONNECT privilege ("permission denied for database"), not
+# a failed login.
+check "the ordinary role other_role exists (so the refusal below is not just an unknown role)" '[[ "$(sql "SELECT 1 FROM pg_roles WHERE rolname = '"'"'other_role'"'"'")" == "1" ]]'
+docker exec -i -e PGPASSWORD="$other" "$pg" sh -c 'psql -X -tA -h "$(hostname -i | cut -d" " -f1)" -U other_role -d browser_broker -c "select 1"' >"$work/o_other" 2>&1; rc=$?
+check "another ordinary role cannot connect to browser_broker (CONNECT revoked from PUBLIC)" '[[ $rc -ne 0 ]] && grep -q "permission denied for database" "$work/o_other"'
 check "browser_broker connects to its own database" 'tcp "$newpw" browser_broker browser_broker'
 check "browser_broker cannot connect to a Quarry-style database (CONNECT revoked from PUBLIC there)" '! tcp "$newpw" browser_broker quarry_probe'
 check "browser_broker cannot connect to the admin database either" '! tcp "$newpw" browser_broker ingestion_plane_db'
