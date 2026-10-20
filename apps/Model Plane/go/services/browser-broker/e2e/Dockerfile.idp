@@ -1,0 +1,8 @@
+# The stub identity provider of the browser-broker e2e harness. run.sh builds
+# ./idp for linux and the run-time jwks.json into the build context; no key
+# material of any kind is in this repository.
+FROM scratch
+COPY idp /idp
+COPY jwks.json /jwks.json
+EXPOSE 3000
+ENTRYPOINT ["/idp", "serve", "-addr", ":3000", "-jwks", "/jwks.json"]
