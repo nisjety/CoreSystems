@@ -5035,6 +5035,75 @@ mod tests {
         assert_eq!(mutations[2].2["initiatedBy"], "agent", "{:?}", mutations[2]);
     }
 
+    /// An agent's step forwards the identity its headers state as `aiRunId` and
+    /// `agentLabel` in the body (advisory fields; Quarry never decides on them), and a
+    /// person's own step carries neither, whatever the headers say. This drives
+    /// `run_action` itself, so removing its header read fails the test.
+    #[tokio::test]
+    async fn an_agents_step_forwards_its_advisory_identity_and_a_persons_does_not() {
+        use wiremock::{
+            matchers::{method as wm_method, path as wm_path},
+            Mock, ResponseTemplate,
+        };
+
+        let headers = headers_with(&[
+            (AGENT_RUN_ID_HEADER, "run_01J9"),
+            (AGENT_LABEL_HEADER, "research-planner"),
+        ]);
+        for (actor, control_mode) in [
+            (BrowserActionActor::Agent, "agent_control"),
+            (BrowserActionActor::Human, "human_takeover"),
+        ] {
+            let quarry = wiremock::MockServer::start().await;
+            mount_tab_run(&quarry, control_mode).await;
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/v1/agent/runs/run-1/step"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({ "data": { "ok": true } })),
+                )
+                .mount(&quarry)
+                .await;
+            let mut state = test_app_state();
+            state.quarry_edge_url = quarry.uri();
+
+            let response = run_action(
+                State(state),
+                Extension(test_user("user-owner", "org-owner")),
+                headers.clone(),
+                Path("run-1".to_owned()),
+                Json(ActionBody {
+                    action: json!({ "type": "wait", "ms": 10 }),
+                    actor,
+                }),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "{actor:?}");
+
+            let steps: Vec<Value> = quarry_mutations(&quarry)
+                .await
+                .into_iter()
+                .filter(|(_, target, _)| target == "/v1/agent/runs/run-1/step")
+                .map(|(_, _, body)| body)
+                .collect();
+            assert_eq!(steps.len(), 1, "{actor:?}: {steps:?}");
+            match actor {
+                BrowserActionActor::Agent => {
+                    assert_eq!(steps[0]["initiated_by"], "agent");
+                    assert_eq!(steps[0]["aiRunId"], "run_01J9");
+                    assert_eq!(steps[0]["agentLabel"], "research-planner");
+                }
+                BrowserActionActor::Human => {
+                    assert!(steps[0].get("initiated_by").is_none(), "{:?}", steps[0]);
+                    assert!(
+                        steps[0].get("aiRunId").is_none() && steps[0].get("agentLabel").is_none(),
+                        "{:?}",
+                        steps[0]
+                    );
+                }
+            }
+        }
+    }
+
     /// The agent identity the caller states in its headers reaches Quarry on an agent's
     /// tab open, select and close as the advisory fields, and only there: a person's own
     /// calls carry none, and a value that is not identifier-shaped is dropped.
