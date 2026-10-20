@@ -78,4 +78,19 @@ message ValidateGrantResponse {
   string kind = 10;
   string owner_id = 11;
   bool zdr = 12;
+
+  // Budget claim (WS6.E, field numbers 40-44 are the budget ledger entry of R-6;
+  // 45-49 are reserved for follow-ons). An upper bound a run under this grant
+  // may spend, which can only tighten: a consumer takes the smaller of the
+  // claim and what its own request or default gives, never the larger. Zero
+  // means no bound on that dimension; all zero and an empty source means no
+  // claim. budget_source is "request", "org_default" or "entitlement" and is
+  // required exactly when some dimension is set.
+  int64 budget_micro_usd = 40;
+  int32 budget_max_steps = 41;
+  int32 budget_max_runtime_s = 42;
+  string budget_source = 43;
+  // Stamped by the broker when the claim is stored; a request that sets it
+  // is refused.
+  int64 budget_minted_at_unix = 44;
 }

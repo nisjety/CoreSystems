@@ -40,23 +40,59 @@ function parseProto(text) {
 
 const numbers = (fields) => [...fields.keys()].sort((a, b) => a - b);
 
+// WS6.E (R-6 ledger): the budget claim is 40-44 on every message that carries it. 45-49 stay reserved.
+const BUDGET_NUMBERS = [40, 41, 42, 43, 44];
+const BUDGET_FIELDS = [
+  { name: 'budget_micro_usd', type: 'int64' },
+  { name: 'budget_max_steps', type: 'int32' },
+  { name: 'budget_max_runtime_s', type: 'int32' },
+  { name: 'budget_source', type: 'string' },
+  { name: 'budget_minted_at_unix', type: 'int64' },
+];
+const BUDGET_MESSAGES = [
+  'AcquireGrantRequest',
+  'AcquireGrantResponse',
+  'ValidateGrantResponse',
+  'DeriveRunGrantRequest',
+  'DeriveRunGrantResponse',
+];
+
 test('upstream proto: grant messages keep their field numbers and add kind/zdr/owner_id', () => {
   const messages = parseProto(read(UPSTREAM_PROTO));
 
   const request = messages.get('AcquireGrantRequest');
-  assert.deepEqual(numbers(request), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+  assert.deepEqual(numbers(request), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, ...BUDGET_NUMBERS]);
   assert.deepEqual(request.get(10), { name: 'zdr', type: 'bool', repeated: false });
 
   const issued = messages.get('AcquireGrantResponse');
-  assert.deepEqual(numbers(issued), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+  assert.deepEqual(numbers(issued), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, ...BUDGET_NUMBERS]);
   assert.deepEqual(issued.get(10), { name: 'kind', type: 'string', repeated: false });
   assert.deepEqual(issued.get(11), { name: 'zdr', type: 'bool', repeated: false });
 
   const validated = messages.get('ValidateGrantResponse');
-  assert.deepEqual(numbers(validated), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+  assert.deepEqual(numbers(validated), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, ...BUDGET_NUMBERS]);
   assert.deepEqual(validated.get(10), { name: 'kind', type: 'string', repeated: false });
   assert.deepEqual(validated.get(11), { name: 'owner_id', type: 'string', repeated: false });
   assert.deepEqual(validated.get(12), { name: 'zdr', type: 'bool', repeated: false });
+});
+
+test('upstream proto: the budget claim is fields 40-44 on every message that carries it', () => {
+  const messages = parseProto(read(UPSTREAM_PROTO));
+  for (const name of BUDGET_MESSAGES) {
+    const fields = messages.get(name);
+    assert.ok(fields, `${name} is missing`);
+    BUDGET_NUMBERS.forEach((number, index) => {
+      assert.deepEqual(
+        fields.get(number),
+        { ...BUDGET_FIELDS[index], repeated: false },
+        `${name}.${BUDGET_FIELDS[index].name} must be field ${number}`,
+      );
+    });
+    // 45-49 are reserved for follow-ons: nothing may take them silently.
+    for (const number of [45, 46, 47, 48, 49]) {
+      assert.equal(fields.has(number), false, `${name}: field ${number} is reserved by the ledger`);
+    }
+  }
 });
 
 test('upstream proto: DeriveRunGrant request and response pin their field numbers', () => {
@@ -65,7 +101,7 @@ test('upstream proto: DeriveRunGrant request and response pin their field number
 
   const request = messages.get('DeriveRunGrantRequest');
   assert.ok(request, 'DeriveRunGrantRequest is missing');
-  assert.deepEqual(numbers(request), [1, 2, 3, 4, 5, 6]);
+  assert.deepEqual(numbers(request), [1, 2, 3, 4, 5, 6, ...BUDGET_NUMBERS]);
   assert.deepEqual(request.get(1), { name: 'parent_grant_id', type: 'string', repeated: false });
   assert.deepEqual(request.get(2), { name: 'session_key', type: 'string', repeated: false });
   assert.deepEqual(request.get(3), { name: 'org_id', type: 'string', repeated: false });
@@ -75,7 +111,7 @@ test('upstream proto: DeriveRunGrant request and response pin their field number
 
   const response = messages.get('DeriveRunGrantResponse');
   assert.ok(response, 'DeriveRunGrantResponse is missing');
-  assert.deepEqual(numbers(response), [1, 2, 3, 4, 5, 6, 7]);
+  assert.deepEqual(numbers(response), [1, 2, 3, 4, 5, 6, 7, ...BUDGET_NUMBERS]);
   assert.deepEqual(response.get(1), { name: 'grant_id', type: 'string', repeated: false });
   assert.deepEqual(response.get(2), { name: 'endpoint', type: 'string', repeated: false });
   assert.deepEqual(response.get(3), { name: 'expires_at', type: 'google.protobuf.Timestamp', repeated: false });
@@ -91,7 +127,7 @@ test('upstream proto: DeriveRunGrant request and response pin their field number
   );
 });
 
-test('the generated Go code carries the same DeriveRunGrant fields as the proto', () => {
+test('the generated Go code carries the same grant fields as the proto, budget claim included', () => {
   // The broker's wire contract is the generated code, not the .proto text: a
   // proto edit without a regeneration leaves them apart. Each struct tag reads
   // protobuf:"bytes,<number>,<opt|rep>,name=<proto name>,...".
@@ -104,7 +140,7 @@ test('the generated Go code carries the same DeriveRunGrant fields as the proto'
       [...match[1].matchAll(/protobuf:"[a-z0-9]+,(\d+),(?:opt|rep),name=(\w+)/g)].map((m) => [Number(m[1]), m[2]]),
     );
   };
-  for (const name of ['DeriveRunGrantRequest', 'DeriveRunGrantResponse']) {
+  for (const name of BUDGET_MESSAGES) {
     const fromProto = new Map([...proto.get(name)].map(([number, field]) => [number, field.name]));
     assert.ok(fromProto.size > 0, `${name} parsed empty from the proto`);
     assert.deepEqual(goFields(name), fromProto, `${name}: browser.pb.go is stale against browser.proto`);
@@ -137,6 +173,14 @@ test('Quarry reads kind, owner_id and zdr from ValidateGrantResponse', () => {
   assert.deepEqual(
     [10, 11, 12].map((number) => validated.get(number)?.name),
     ['kind', 'owner_id', 'zdr'],
+  );
+});
+
+test('Quarry reads the budget claim from ValidateGrantResponse', () => {
+  const validated = parseProto(read(QUARRY_PROTO)).get('ValidateGrantResponse');
+  assert.deepEqual(
+    BUDGET_NUMBERS.map((number) => validated.get(number)?.name),
+    BUDGET_FIELDS.map((field) => field.name),
   );
 });
 
