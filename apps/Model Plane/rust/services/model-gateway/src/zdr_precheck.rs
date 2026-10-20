@@ -386,7 +386,9 @@ mod tests {
     /// provider and connection again, which is the line the defect lived on.
     #[test]
     fn the_zdr_stream_forwards_its_route_instead_of_dropping_it() {
-        let source = include_str!("sse.rs");
+        // A Windows working copy checks the file out with CRLF while the index and CI
+        // hold LF, so normalise before looking for the function's closing brace line.
+        let source = include_str!("sse.rs").replace("\r\n", "\n");
         let start = source
             .find("async fn zdr_direct_stream(")
             .expect("`zdr_direct_stream` exists");
