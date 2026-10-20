@@ -368,6 +368,44 @@ type CheckChangeResult struct {
 	PrevFingerprint string `json:"prev_fingerprint,omitempty"`
 	BaselineID      string `json:"baseline_id,omitempty"`
 	DiffID          string `json:"diff_id,omitempty"`
+	// ZDRRefused is true when the edge refused to record the probe because
+	// the organization is under Zero Data Retention (WS4.H): a baseline is a
+	// durable resource, so nothing was compared or stored. It is a terminal,
+	// non-retryable outcome of the job, not an error: Status is "zdr_refused"
+	// and no other field is set.
+	ZDRRefused bool `json:"zdr_refused,omitempty"`
+}
+
+// ZDRRefusalCode is the catalogue code the edge puts in
+// error.details.zdr_refusal.code when it refuses a durable-resource write for a
+// Zero Data Retention organization (crates/quarry-edge/src/zdr_refusal.rs).
+const ZDRRefusalCode = "zdr_durable_mutation_forbidden"
+
+// StatusZDRRefused is the CheckChangeResult.Status of a probe the edge refused
+// under ZDR.
+const StatusZDRRefused = "zdr_refused"
+
+// isZDRRefusal reports whether an edge response is the ZDR durable-resource
+// refusal: a 403 whose error envelope carries details.zdr_refusal.code ==
+// ZDRRefusalCode. Any other 403 (a wrong internal token, a bot wall) is NOT
+// one, and keeps its CategoryAuth classification.
+func isZDRRefusal(status int, body []byte) bool {
+	if status != http.StatusForbidden {
+		return false
+	}
+	var env struct {
+		Error struct {
+			Details struct {
+				ZDRRefusal struct {
+					Code string `json:"code"`
+				} `json:"zdr_refusal"`
+			} `json:"details"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		return false
+	}
+	return env.Error.Details.ZDRRefusal.Code == ZDRRefusalCode
 }
 
 // changeRecordRequest is the body POSTed to quarry-edge's internal
@@ -438,6 +476,13 @@ func (a *Activities) CheckChange(ctx context.Context, in CheckChangeInput) (Chec
 	defer resp.Body.Close()
 
 	respBody, _ := io.ReadAll(resp.Body)
+	// A ZDR organization's baseline would be a durable resource, so the edge
+	// refuses it. That is a clean terminal outcome of the job, not a failed
+	// activity: returning it as an error would classify it CategoryAuth and the
+	// workflow would record a crash.
+	if isZDRRefusal(resp.StatusCode, respBody) {
+		return CheckChangeResult{Status: StatusZDRRefused, ZDRRefused: true}, nil
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return CheckChangeResult{}, errs.FromHTTPStatus(op, resp.StatusCode, respBody).Temporal()
 	}

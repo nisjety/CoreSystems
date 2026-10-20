@@ -333,6 +333,19 @@ func ChangeMonitorWF(ctx workflow.Context, in ChangeMonitorInput, a *activities.
 		return err
 	}
 
+	// The edge refused to record the probe because the organization is under
+	// Zero Data Retention (a baseline is durable). Terminal and clean: the run
+	// is recorded as failed with reason zdr_refused, no change event is emitted
+	// and the workflow completes without error, so nothing retries it. The
+	// payload carries no URL.
+	if res.ZDRRefused {
+		return emitEvent(ctx, a, ids, quarrycontracts.EvtRunFailed, map[string]any{
+			"kind":         "change_monitor",
+			"reason":       activities.StatusZDRRefused,
+			"refusal_code": activities.ZDRRefusalCode,
+		}, runID, string(quarrycontracts.EvtRunFailed))
+	}
+
 	evt := quarrycontracts.EvtChangeUnchanged
 	if res.Changed {
 		evt = quarrycontracts.EvtChangeDetected

@@ -406,6 +406,53 @@ func TestChangeMonitorWF_ActivityFailureEmitsRunFailed(t *testing.T) {
 	require.Error(t, env.GetWorkflowError())
 }
 
+// A probe the edge refused under Zero Data Retention (a baseline would be a
+// durable resource) ends the run cleanly: one run_failed event whose reason is
+// zdr_refused and which carries no URL, no change event, and a workflow that
+// completes WITHOUT an error (so nothing retries it).
+func TestChangeMonitorWF_ZDRRefusalEndsTheRunCleanly(t *testing.T) {
+	env, a := newEnv(t)
+
+	env.OnActivity(a.CheckChange, mock.Anything, mock.Anything).Return(activities.CheckChangeResult{
+		Status:     activities.StatusZDRRefused,
+		ZDRRefused: true,
+	}, nil).Once()
+
+	var emitted []quarrycontracts.Event
+	env.OnActivity(a.EmitEvent, mock.Anything, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, _ string, evt quarrycontracts.Event) error {
+			emitted = append(emitted, evt)
+			return nil
+		})
+
+	env.ExecuteWorkflow(ChangeMonitorWF, ChangeMonitorInput{
+		RunID: "run_cm_zdr",
+		OrgID: "org_zdr",
+		URL:   "https://example.com/secret-path",
+	}, a)
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError(), "a ZDR refusal is a clean terminal outcome, not a workflow failure")
+
+	types := make([]quarrycontracts.EventType, 0, len(emitted))
+	for _, evt := range emitted {
+		types = append(types, evt.Type)
+	}
+	require.Equal(t, []quarrycontracts.EventType{quarrycontracts.EvtRunStarted, quarrycontracts.EvtRunFailed}, types,
+		"no change_detected, change_unchanged or run_completed for a refused probe")
+
+	failed := emitted[1]
+	require.Equal(t, "zdr_refused", failed.Payload["reason"])
+	require.Equal(t, "zdr_durable_mutation_forbidden", failed.Payload["refusal_code"])
+	require.Equal(t, "change_monitor", failed.Payload["kind"])
+	for key, value := range failed.Payload {
+		require.NotContains(t, key, "url")
+		if text, ok := value.(string); ok {
+			require.NotContains(t, text, "secret-path")
+		}
+	}
+}
+
 // emitCallCount returns the number of times EmitEvent was invoked. Temporal's
 // test environment does not expose call counts directly, so we count via the
 // AssertExpectations side-effect on the Mock.
