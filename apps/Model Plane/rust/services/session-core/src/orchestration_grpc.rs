@@ -1730,7 +1730,8 @@ async fn assemble_plan(pool: &Pool, plan: &store::PlanRow) -> Result<proto::Plan
 /// Before those tags existed prost skipped them, so any caller that sent one got
 /// `InvalidArgument("event payload is required")`; with the park store off a caller
 /// still gets exactly that answer, so the new tags open no new write path by default:
-/// nothing is persisted or broadcast for them.
+/// nothing is persisted or broadcast for them on this gRPC path (the NATS ingress, which only
+/// platform credentials can publish to, takes events without this check).
 ///
 /// Not a principal check. The executor records every run event under the RUN OWNER'S
 /// delegated bearer (as it does for `SubagentStopped`), never as `service:execution-core`,
@@ -1743,7 +1744,11 @@ async fn assemble_plan(pool: &Pool, plan: &store::PlanRow) -> Result<proto::Plan
 /// fold ([`require_park_event_to_match_the_fold`]), and its id and time are the server's
 /// (the `record_orchestration_event` handler), so a caller can only add a true statement about a run
 /// it owns. The events carry ids and a segment number only and are write-only (nothing reads
-/// them back as proof that a run is parked: the fold store is the truth).
+/// them back as proof that a run is parked: the fold store is the truth). The fold check proves
+/// the event consistent with the store, not that the executor produced the fold: the holder of
+/// the run's bearer can write a fold of its own through `SaveLoopCheckpoint` and
+/// `ClaimLoopCheckpoint` (the same scope), so what stays writable is a true statement about a
+/// fold the run really holds.
 #[allow(clippy::result_large_err)]
 fn refuse_park_events_while_parking_is_off(
     park_store_active: bool,
@@ -1769,16 +1774,17 @@ const PARKED_FOLD_EXISTS_SQL: &str = "SELECT EXISTS ( \
     SELECT 1 FROM run_loop_checkpoints \
     WHERE run_id = $1 AND kind = 'park' AND state = 'parked')";
 
-/// What a `RunResumed` says is true: the run was claimed from a park (the claim wrote a
-/// `CHECKPOINT_RESTORED` event of kind `park`) and now holds an open fold of the segment it
-/// names. The fence save of the resumed loop replaces the parked fold, so the fold is no
-/// longer `parked` by the time the executor publishes.
+/// What a `RunResumed` says is true: the run's latest claim was a claim of a park (the claim
+/// wrote a `CHECKPOINT_RESTORED` event of kind `park`; a later pause claim would be the latest
+/// instead) and it now holds an open fold of the segment the event names. The fence save of the
+/// resumed loop replaces the parked fold, so the fold is no longer `parked` by the time the
+/// executor publishes.
 const RESUMED_FOLD_EXISTS_SQL: &str = "SELECT EXISTS ( \
     SELECT 1 FROM run_loop_checkpoints c \
     WHERE c.run_id = $1 AND c.state <> 'closed' AND c.segment_no = $2 \
-      AND EXISTS (SELECT 1 FROM events e \
-                  WHERE e.run_id = c.run_id AND e.event_type = 'CHECKPOINT_RESTORED' \
-                    AND e.payload->>'kind' = 'park'))";
+      AND (SELECT e.payload->>'kind' FROM events e \
+           WHERE e.run_id = c.run_id AND e.event_type = 'CHECKPOINT_RESTORED' \
+           ORDER BY e.ts DESC, e.id DESC LIMIT 1) = 'park')";
 
 /// Refuse a `RunParked` or `RunResumed` that the run's own fold does not bear out. Called
 /// after the run-owner check, so only the run's caller learns whether it holds a fold. Any
@@ -4902,9 +4908,10 @@ mod tests {
         let order = [
             "refuse_park_events_while_parking_is_off(",
             "authorize_run_owner(",
+            "if is_park_event(&ev) {",
             "ev.event_id = String::new();",
             "ev.at = None;",
-            "require_park_event_to_match_the_fold(",
+            "require_park_event_to_match_the_fold(&self.pool, &ev).await?;",
             "broadcast_event(",
             "persist_browser_event(",
         ];
@@ -4917,15 +4924,17 @@ mod tests {
             last = at;
         }
         // What each fold check says is true must not loosen unnoticed.
-        for predicate in ["kind = 'park'", "state = 'parked'"] {
+        // Both are scoped to the event's own run, not to its tenant.
+        for predicate in ["run_id = $1", "kind = 'park'", "state = 'parked'"] {
             assert!(PARKED_FOLD_EXISTS_SQL.contains(predicate), "{predicate}");
         }
         for predicate in [
+            "c.run_id = $1",
             "c.state <> 'closed'",
             "c.segment_no = $2",
             "e.event_type = 'CHECKPOINT_RESTORED'",
-            "e.payload->>'kind' = 'park'",
             "e.run_id = c.run_id",
+            "ORDER BY e.ts DESC, e.id DESC LIMIT 1) = 'park'",
         ] {
             assert!(RESUMED_FOLD_EXISTS_SQL.contains(predicate), "{predicate}");
         }
@@ -5898,27 +5907,31 @@ mod tests {
             .expect("put the fold row");
         }
 
-        /// The `CHECKPOINT_RESTORED` event of kind `park` the store writes when a park is
-        /// claimed.
-        async fn put_park_claim_event(db: &PlanGateDb, run: &str) {
+        /// The `CHECKPOINT_RESTORED` event the store writes when a fold is claimed, of the claimed
+        /// fold's `kind` (`park` for a park, `pause` for a pause), `offset_secs` from now (the
+        /// handler asks which claim is the latest).
+        async fn put_claim_event(db: &PlanGateDb, run: &str, kind: &str, offset_secs: i32) {
             sqlx::query(
                 "INSERT INTO events (id, event_type, run_id, payload, ts, org_id, user_id, \
                     correlation_id, causation_id, idempotency_key, resource_ref, type_url, \
                     producer, schema_version) \
-                 VALUES ($1, 'CHECKPOINT_RESTORED', $2, $3, now(), $4, $5, $2, '', $6, $7, $8, \
-                    'session-core', 1)",
+                 VALUES ($1, 'CHECKPOINT_RESTORED', $2, $3, now() + make_interval(secs => $9), \
+                    $4, $5, $2, '', $6, $7, $8, 'session-core', 1)",
             )
             .bind(mp_ids::new_ulid())
             .bind(run)
-            .bind(serde_json::json!({ "seq": 1, "kind": "park" }))
+            .bind(serde_json::json!({ "seq": 1, "kind": kind }))
             .bind(&db.org)
             .bind(&db.user)
-            .bind(format!("{run}:1:CHECKPOINT_RESTORED:test"))
-            .bind(format!("run:{run}:loop_checkpoint:1:CHECKPOINT_RESTORED"))
+            .bind(format!("{run}:1:CHECKPOINT_RESTORED:{kind}:{offset_secs}"))
+            .bind(format!(
+                "run:{run}:loop_checkpoint:1:CHECKPOINT_RESTORED:{kind}:{offset_secs}"
+            ))
             .bind("type.googleapis.com/model_plane.v1.CheckpointRestored")
+            .bind(f64::from(offset_secs))
             .execute(&db.pool)
             .await
-            .expect("put the park claim event");
+            .expect("put the claim event");
         }
 
         async fn count_events(db: &PlanGateDb, run: &str) -> i64 {
@@ -5931,6 +5944,7 @@ mod tests {
 
         #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
         #[ignore = "requires DATABASE_URL to a SCRATCH Postgres (name contains \"test\")"]
+        #[allow(clippy::too_many_lines)]
         async fn the_run_owners_bearer_records_run_parked_and_run_resumed_for_the_fold_they_describe(
         ) {
             // The executor records every run event under the run owner's delegated bearer, never
@@ -5940,7 +5954,7 @@ mod tests {
             let _park = crate::terminalization::park_test_switch::Forced::set(true);
             let db = PlanGateDb::connect().await;
             let run = db.new_run(&db.thread).await;
-            let long_ago = prost_types::Timestamp {
+            let long_ago = || prost_types::Timestamp {
                 seconds: 978_307_200, // 2001-01-01
                 nanos: 0,
             };
@@ -5992,7 +6006,7 @@ mod tests {
                     false,
                     0,
                     "caller-chosen-event-id",
-                    Some(long_ago),
+                    Some(long_ago()),
                 ))
                 .await
                 .expect("the run owner's bearer records RunParked for a parked fold")
@@ -6024,7 +6038,7 @@ mod tests {
             // The park is claimed and the resumed loop's fence replaces the fold: an open fold of
             // segment 2. RunResumed now matches segment 2 and no other; RunParked no longer
             // matches, the fold is not parked.
-            put_park_claim_event(&db, &run).await;
+            put_claim_event(&db, &run, "park", -10).await;
             put_fold(&db, &run, "pre_effect", "active", 2).await;
             for segment in [1_u32, 3, u32::MAX] {
                 let refused = db
@@ -6040,13 +6054,78 @@ mod tests {
                 .await
                 .expect_err("no RunParked while the fold is active");
             mismatch(refused.code(), refused.message());
+            // The caller's own event id and time are ignored for RunResumed as well.
             let resumed = db
                 .svc
-                .record_orchestration_event(record(true, 2, "", None))
+                .record_orchestration_event(record(
+                    true,
+                    2,
+                    "caller-chosen-resumed-id",
+                    Some(long_ago()),
+                ))
                 .await
                 .expect("the run owner's bearer records RunResumed for the resumed fold")
                 .into_inner()
                 .event_id;
+            assert_ne!(
+                resumed, "caller-chosen-resumed-id",
+                "the server assigns the event id"
+            );
+            let (stored_id, recent): (String, bool) = sqlx::query_as(
+                "SELECT id, ts > now() - interval '5 minutes' FROM events \
+                 WHERE run_id = $1 AND event_type = 'RUN_RESUMED'",
+            )
+            .bind(&run)
+            .fetch_one(&db.pool)
+            .await
+            .expect("the RUN_RESUMED row");
+            assert_eq!(stored_id, resumed);
+            assert!(recent, "the server assigns the time, not the caller's 2001");
+
+            // Only the run's LATEST claim bears out a RunResumed: once a later claim is a pause's
+            // (an approval resume), the earlier park claim no longer does. A later park claim
+            // restores the case the rest of this test relies on.
+            put_claim_event(&db, &run, "pause", 10).await;
+            let refused = db
+                .svc
+                .record_orchestration_event(record(true, 2, "", None))
+                .await
+                .expect_err("a later pause claim is the run's latest claim");
+            mismatch(refused.code(), refused.message());
+            put_claim_event(&db, &run, "park", 20).await;
+
+            // The fold lookups are the event's own run's: a sibling run of the same tenant holds
+            // no fold, whatever this run holds, so it records neither event; and a caller outside
+            // the tenant is refused by the owner check, before the fold is looked at.
+            let sibling = db.new_run(&db.thread).await;
+            for resumed in [false, true] {
+                let refused = db
+                    .svc
+                    .record_orchestration_event(db.as_owner(
+                        proto::RecordOrchestrationEventRequest {
+                            event: Some(park_event(resumed, &sibling)),
+                        },
+                    ))
+                    .await
+                    .expect_err("a sibling run without a fold records no park event");
+                mismatch(refused.code(), refused.message());
+                let mut stranger = Request::new(proto::RecordOrchestrationEventRequest {
+                    event: Some(park_event(resumed, &sibling)),
+                });
+                stranger
+                    .extensions_mut()
+                    .insert(VerifiedIdentity::user_for_test(
+                        "org-someone-else",
+                        "user-x",
+                    ));
+                let refused = db
+                    .svc
+                    .record_orchestration_event(stranger)
+                    .await
+                    .expect_err("another tenant's caller is refused before the fold is read");
+                assert_eq!(refused.code(), tonic::Code::PermissionDenied);
+            }
+            assert_eq!(count_events(&db, &sibling).await, 0);
 
             // A paused fold and a fold under a claim are not parked folds either, and a closed
             // fold is nothing to resume.
@@ -6187,6 +6266,124 @@ mod tests {
                 count_events(&db, &run).await,
                 "a refused park event writes no events row"
             );
+
+            sqlx::query("DELETE FROM events WHERE run_id = $1")
+                .bind(&run)
+                .execute(&db.pool)
+                .await
+                .expect("cleanup events");
+            db.cleanup().await;
+        }
+
+        // The first test builds its fold rows by hand, so a change in what the store really
+        // writes would not turn it red. This one lets the store write them: the real park save, the
+        // real park claim and the real fence save (the sequence the executor drives), and asks the
+        // handler at each step what it would record.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore = "requires DATABASE_URL to a SCRATCH Postgres (name contains \"test\")"]
+        async fn the_stores_own_park_save_claim_and_fence_bear_out_the_park_events() {
+            use crate::loop_checkpoint::test_support::{cipher, fold_for, seed_fold};
+            use crate::loop_checkpoint::{claim, save, SaveInput};
+            let _store = crate::loop_checkpoint::test_switch::Forced::set(true);
+            let _park = crate::terminalization::park_test_switch::Forced::set(true);
+            let db = PlanGateDb::connect().await;
+            let run = db.new_run(&db.thread).await;
+            let record = |resumed: bool, segment: u32| {
+                let event = if resumed {
+                    orchestration_event::Event::RunResumed(orchestration_event::RunResumed {
+                        run_id: run.clone(),
+                        resumed_segment: segment,
+                    })
+                } else {
+                    orchestration_event::Event::RunParked(orchestration_event::RunParked {
+                        run_id: run.clone(),
+                    })
+                };
+                db.as_owner(proto::RecordOrchestrationEventRequest {
+                    event: Some(proto::OrchestrationEvent {
+                        event_id: String::new(),
+                        at: None,
+                        event: Some(event),
+                    }),
+                })
+            };
+
+            // Before any fold: nothing to describe.
+            let refused = db
+                .svc
+                .record_orchestration_event(record(false, 0))
+                .await
+                .expect_err("no RunParked before the park save");
+            assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+
+            // The real park save. It is already due, so the claim below is allowed.
+            let reference = mp_contracts::loop_fold::park_ref(&run, 1);
+            seed_fold(
+                &db.pool,
+                &run,
+                "park",
+                &reference,
+                "upstream_unavailable",
+                Some(chrono::Utc::now() - chrono::Duration::seconds(5)),
+            )
+            .await
+            .expect("the store's park save");
+            db.svc
+                .record_orchestration_event(record(false, 0))
+                .await
+                .expect("RunParked after the store's own park save");
+            let refused = db
+                .svc
+                .record_orchestration_event(record(true, 2))
+                .await
+                .expect_err("no RunResumed before the park is claimed");
+            assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+
+            // The real park claim (the empty reference) and the resumed loop's fence save at the
+            // claimed seq, in the next segment.
+            let claimed = claim(&db.pool, &cipher(), &run, "", "claim-token-1")
+                .await
+                .expect("the store's park claim");
+            let resumed_segment = claimed.segment_no + 1;
+            let mut fence: serde_json::Value =
+                serde_json::from_slice(&fold_for(&run)).expect("fold json");
+            fence["segment_no"] = serde_json::json!(resumed_segment);
+            save(
+                &db.pool,
+                &cipher(),
+                SaveInput {
+                    run_id: &run,
+                    expected_seq: claimed.seq,
+                    kind: "pre_effect",
+                    fold: &serde_json::to_vec(&fence).expect("fold json"),
+                    authority_digest: "auth-1",
+                    pause_ref: "",
+                    park_reason: "",
+                    park_until: None,
+                },
+            )
+            .await
+            .expect("the store's fence save");
+            let segment = u32::try_from(resumed_segment).expect("segment");
+            for wrong in [segment - 1, segment + 1] {
+                let refused = db
+                    .svc
+                    .record_orchestration_event(record(true, wrong))
+                    .await
+                    .expect_err("a RunResumed names the fenced fold's own segment");
+                assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+            }
+            db.svc
+                .record_orchestration_event(record(true, segment))
+                .await
+                .expect("RunResumed after the store's own claim and fence");
+            // The fold is no longer parked: a RunParked would now be a different, later park.
+            let refused = db
+                .svc
+                .record_orchestration_event(record(false, 0))
+                .await
+                .expect_err("no RunParked while the fenced fold is active");
+            assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
 
             sqlx::query("DELETE FROM events WHERE run_id = $1")
                 .bind(&run)
