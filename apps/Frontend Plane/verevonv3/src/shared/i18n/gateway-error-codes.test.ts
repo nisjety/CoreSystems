@@ -6,8 +6,10 @@ import { BLOCK_REASON_COPY, ERROR_COPY, describeApiError, translateApiError } fr
 // Every error code the Verevon gateway can send to the SPA has end-user copy in
 // `errors.ts`, or a reasoned entry below saying why it needs none. The scan reads
 // every Rust file under `apps/gateway/src` (domains, middleware, upstream proxy,
-// onboarding), so a code added in ANY of them fails here until it is given copy or
-// an explicit exemption. List of the codes and where each one comes from:
+// onboarding), so a code added in ANY of them, in one of the shapes listed below,
+// fails here until it is given copy or an explicit exemption. A code a helper builds
+// from a variable has no shape to scan: those are pinned one by one in HELPER_EMITTED.
+// List of the codes and where each one comes from:
 // `wf-V3-spa-errors-codes.md` in the side-session notes.
 
 const no = (norwegian: string) => norwegian
@@ -60,6 +62,12 @@ function emittedCodes(source: string): Set<string> {
   for (const block of source.matchAll(/let\s+code\s*=\s*(?:if|match)[\s\S]*?;\n/g)) {
     for (const literal of block[0].matchAll(/"([A-Za-z][A-Za-z_]+)"/g)) codes.add(literal[1] ?? '')
   }
+  // A constant table of codes a function returns verbatim (upstream.rs: the
+  // integration allow-list and the never-plan-gated codes). Every `&[&str]` constant
+  // with ERROR_CODE in its name is read, so a new entry is seen like any other code.
+  for (const table of source.matchAll(/\bconst\s+[A-Z_]*ERROR_CODE[A-Z_]*\s*:\s*&\[&str\]\s*=\s*&\[([\s\S]*?)\];/g)) {
+    for (const literal of (table[1] ?? '').matchAll(/"([A-Za-z][A-Za-z_]+)"/g)) codes.add(literal[1] ?? '')
+  }
   return codes
 }
 
@@ -68,10 +76,12 @@ for (const [file, source] of sources) {
   for (const code of emittedCodes(source)) emittedBy.set(code, [...(emittedBy.get(code) ?? []), file])
 }
 
-// Codes the scan cannot see because a helper builds them from a variable or a
-// constant table (`auth_core_error(.., "api_key_error")`, `translation_failure(..)`,
-// `integration_error_code`, the video relabel in `search.rs`). Each one has copy, and
-// each literal must still be in the gateway source so the entry cannot rot.
+// Codes the scan cannot see because a helper builds them from a variable
+// (`auth_core_error(.., "api_key_error")`, `translation_failure(..)`, the video relabel
+// in `search.rs`, the PLAN_REQUIRED of `integration_error_code`). Each one has copy, and
+// each literal must still be in the gateway source so the entry cannot rot. The
+// constant tables of `upstream.rs` (the integration allow-list and the never-plan-gated
+// codes) are not here: `emittedCodes` reads them, so a new entry fails like any other code.
 const HELPER_EMITTED = [
   'api_key_error',
   'no_sources_registered',
@@ -176,6 +186,10 @@ describe('every code the gateway emits', () => {
       ['invalid_url', 'domains/browser.rs'],
       ['scrape_failed', 'domains/knowledge/quarry.rs'],
       ['model_error', 'upstream.rs'],
+      // Read from the constant tables of integration_error_code, not from a call.
+      ['personal_connection_forbidden', 'upstream.rs'],
+      ['personal_connection_no_delegated_user', 'upstream.rs'],
+      ['no_sources_registered', 'upstream.rs'],
     ] as const) {
       expect(emittedBy.get(code), `the scan found ${code}`).toContain(file)
     }

@@ -318,3 +318,45 @@ describe('OnboardingPage organization step and the Zero Data Retention switch', 
     expect(stored.organization.id).toBe('')
   })
 })
+
+describe('OnboardingPage website preview warnings', () => {
+  // The gateway's warning packet carries English operator wording in `message`. The
+  // page shows the copy for its code instead, and a neutral sentence for a code
+  // that has none, never the packet's own text.
+  async function previewWithWarning(packet: { code: string; message: string }) {
+    seedOnboardingState({
+      step: 'website',
+      website: { ...createInitialOnboardingState().website, url: 'https://example.no' },
+    })
+    const body = `event: warning\ndata: ${JSON.stringify(packet)}\n\n`
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async (input) => {
+      const url = String(input)
+      if (url.includes('/onboarding/crawl-preview')) {
+        return new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
+      }
+      return new Response(JSON.stringify(
+        url.includes('/onboarding/theme') ? { persisted: true, mode: 'verevon', primaryColor: '#111111' } : {},
+      ), { headers: { 'Content-Type': 'application/json' }, status: 200 })
+    }))
+
+    renderWithProviders(() => <OnboardingPage />)
+    await screen.findAllByRole('button', { name: 'Analyser nettside' })
+    fireEvent.click(document.querySelector('.onboarding-url-recrawl') as HTMLElement)
+    return waitFor(() => {
+      const element = document.querySelector('.onboarding-warning')
+      expect(element).toBeTruthy()
+      return element?.textContent ?? ''
+    })
+  }
+
+  it('shows the copy for the warning code and not the packet text', async () => {
+    const shown = await previewWithWarning({ code: 'control_unreachable', message: 'control plane unreachable: connection refused' })
+    expect(shown).toMatch(/Vi kunne ikke følge med på hentingen av nettsiden/)
+    expect(shown).not.toMatch(/connection refused/)
+  })
+
+  it('shows a neutral sentence for a warning code that has no copy', async () => {
+    const shown = await previewWithWarning({ code: 'review_probe_unknown_code', message: 'raw operator text' })
+    expect(shown).toBe('Forhåndsvisningen av nettsiden hadde et problem. Du kan prøve på nytt eller fortsette uten.')
+  })
+})
