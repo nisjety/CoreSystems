@@ -10,7 +10,10 @@
 -- column, and the id CHECK refuses a "z_" id, so a routing bug fails the
 -- insert instead of persisting a ZDR grant.
 --
--- Only browser-broker reads or writes this table.
+-- By design only browser-broker reads or writes this table. On the shared Postgres
+-- server (ingestion-postgres) a superuser, which Quarry's services use
+-- (ingestion_user), ignores the database CONNECT revoke and can also read and
+-- write it; see apps/Ingestion Plane/scripts/bootstrap_broker_db.sh.
 
 CREATE TABLE IF NOT EXISTS browser_grants (
     id                   TEXT        PRIMARY KEY,

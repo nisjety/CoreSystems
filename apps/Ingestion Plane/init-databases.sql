@@ -150,5 +150,11 @@ WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'shipping_core')\gexec
 --    this file only runs on a fresh data volume. Run
 --    scripts/bootstrap_broker_db.sh (idempotent) after the stack is up; it
 --    creates role browser_broker and database browser_broker (owned by it, with
---    CONNECT revoked from PUBLIC). The broker applies its own migrations.
+--    CONNECT revoked from PUBLIC) and revokes PUBLIC CONNECT on the databases
+--    above, as they exist when it runs, so the broker role cannot open them
+--    (a database created later keeps the default PUBLIC CONNECT until the
+--    script is run again). The broker applies its own
+--    migrations. This is separation by database and role only: ingestion_user
+--    is a superuser, ignores those revokes, and so can still read and write
+--    browser_broker.
 -- ─────────────────────────────────────────────────────────────────────────────

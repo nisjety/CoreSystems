@@ -5,18 +5,32 @@
 # Creates, only when missing:
 #   - role     browser_broker  (LOGIN, no superuser/createdb/createrole, 40 connections)
 #   - database browser_broker  (owned by that role; CONNECT revoked from PUBLIC, so no
-#                               other role, including Quarry's, can open it)
+#                               ordinary role can open it)
 # and always (re)applies the role's password from BROWSER_BROKER_PG_PASSWORD, so a
 # rotation in the env file is picked up by running this again. The broker applies its
 # own table migrations at start (docker-entrypoint.sh); this script creates no tables.
+# Unless --keep-public-connect is given it also revokes CONNECT from PUBLIC on every
+# other non-template database THAT EXISTS WHEN THE SCRIPT RUNS, so the browser_broker
+# role can log in to none of the Quarry databases that exist at that moment (PostgreSQL
+# grants CONNECT to PUBLIC by default; every Quarry service connects as the superuser
+# ingestion_user, which that revoke does not touch). The revoke is a one-time ACL change,
+# not a standing rule: a database created AFTER the script ran keeps the PostgreSQL
+# default (PUBLIC may connect) until this script is run again, so re-run it after adding
+# a database to this server.
 #
 # Why a script: init-databases.sql only runs on a fresh data volume and cannot read
-# the password. This is a deliberate SHARED Postgres SERVER across two planes; a
-# separate database and role keep the data apart (no direct database crossing), but an
-# owner may want a dedicated instance later.
+# the password. This is a deliberate SHARED Postgres SERVER across two planes. The
+# separation is by database and role only (no shared schema, no shared credential for
+# the broker). It is NOT a security boundary against Quarry: every Quarry service
+# connects as ingestion_user, the container's POSTGRES_USER superuser, and a superuser
+# ignores the CONNECT revoke, so Quarry (and any other superuser) can still read and
+# write browser_grants directly. A dedicated Postgres instance for the broker, or
+# Quarry services on a non-superuser role plus a pg_hba.conf reject for browser_broker,
+# is the real isolation; an owner may want that later.
 #
-# Password source, first hit wins (the value is NEVER printed, logged or put on a
-# command line):
+# Password source, first hit wins (the value is NEVER printed, logged or put on the
+# command line of any command; scripts/tests/bootstrap-broker-db.test.sh checks that
+# with PATH shims that record every external command's argv):
 #   1. $BROWSER_BROKER_PG_PASSWORD
 #   2. BROWSER_BROKER_PG_PASSWORD= in $MODEL_PLANE_ENV_FILE
 #      (default: <repo>/apps/Model Plane/deploy/.env)
@@ -26,9 +40,11 @@
 #
 # Usage: bootstrap_broker_db.sh [--check] [--mint-if-missing] [--no-network]
 #                               [--container NAME] [--admin-user U] [--admin-db D]
-#                               [--network NAME]
+#                               [--network NAME] [--keep-public-connect]
 #   --check        read-only: report what exists, change nothing
 #   --no-network   do not attach the container to the broker-db network
+#   --keep-public-connect  do not revoke CONNECT from PUBLIC on the other databases
+#                          (without it only the databases that exist now are covered)
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
@@ -40,7 +56,7 @@ env_file=${MODEL_PLANE_ENV_FILE:-$root/apps/Model Plane/deploy/.env}
 key=BROWSER_BROKER_PG_PASSWORD
 role=browser_broker
 database=browser_broker
-check_only=0 mint=0 attach=1
+check_only=0 mint=0 attach=1 lockdown=1
 
 die() { printf 'bootstrap_broker_db: %s\n' "$*" >&2; exit "${2:-1}"; }
 
@@ -49,6 +65,7 @@ while [[ $# -gt 0 ]]; do
     --check) check_only=1 ;;
     --mint-if-missing) mint=1 ;;
     --no-network) attach=0 ;;
+    --keep-public-connect) lockdown=0 ;;
     --container) container=${2:?--container needs a value}; shift ;;
     --admin-user) admin_user=${2:?--admin-user needs a value}; shift ;;
     --admin-db) admin_db=${2:?--admin-db needs a value}; shift ;;
@@ -80,8 +97,23 @@ if [[ -z "$pw" ]]; then
       pw=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
     fi
     if grep -qE "^${key}=" "$env_file"; then
-      # present but empty (anything non-empty was read above and never reaches here)
-      sed -i -E "s|^${key}=(\r?)\$|${key}=${pw}\1|" "$env_file"
+      # Present but empty (anything non-empty was read above and never reaches here).
+      # Rewrite the file with shell builtins only (read, printf): the value must not
+      # appear in the argv of any external command such as sed, where `ps` could show it.
+      tmp=$(mktemp "${env_file}.XXXXXX")
+      trap 'rm -f "$tmp"' EXIT
+      while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" == "${key}="* && -z "${line#"${key}="}" ]]; then
+          printf '%s=%s\n' "$key" "$pw"
+        elif [[ "$line" == "${key}="$'\r' ]]; then
+          printf '%s=%s\r\n' "$key" "$pw"
+        else
+          printf '%s\n' "$line"
+        fi
+      done <"$env_file" >"$tmp"
+      # write through the existing file so its owner, mode and inode survive
+      cat "$tmp" >"$env_file"
+      rm -f "$tmp"; trap - EXIT
     else
       [[ -z "$(tail -c1 "$env_file")" ]] || printf '\n' >>"$env_file"
       printf '%s=%s\n' "$key" "$pw" >>"$env_file"
@@ -142,8 +174,15 @@ SELECT NOT EXISTS (SELECT FROM pg_database WHERE datname = '$database') AS db_mi
 \\endif
 ALTER DATABASE $database OWNER TO $role;
 REVOKE ALL ON DATABASE $database FROM PUBLIC;
+\\if $lockdown
+  -- the broker role must not log in to Quarry's databases (CONNECT is granted to PUBLIC by default);
+  -- covers only the databases that exist now, a later CREATE DATABASE needs a re-run
+  SELECT format('REVOKE CONNECT ON DATABASE %I FROM PUBLIC', datname) FROM pg_database
+    WHERE NOT datistemplate AND datallowconn AND datname <> '$database' \\gexec
+\\endif
 \\echo role $role: :role_missing (t = created now, f = already existed; password applied either way)
 \\echo database $database: :db_missing (t = created now, f = already existed)
+\echo other databases: CONNECT $([[ $lockdown -eq 1 ]] && echo 'revoked from PUBLIC on the ones that exist now (re-run after creating a database)' || echo left as it was)
 SQL
 
 # Prove the password works over TCP (the loopback line of the stock pg_hba is trust, so use the
