@@ -261,6 +261,27 @@ impl Harness {
             .await
             .expect("request reaches the edge")
     }
+
+    /// `PATCH` with the same bearer handling as [`Harness::post`].
+    pub async fn patch(&self, bearer: &str, route: &str, body: Value) -> reqwest::Response {
+        self.client
+            .patch(format!("http://{}{route}", self.addr))
+            .bearer_auth(bearer)
+            .json(&body)
+            .send()
+            .await
+            .expect("request reaches the edge")
+    }
+
+    /// `DELETE` with the same bearer handling as [`Harness::post`].
+    pub async fn delete(&self, bearer: &str, route: &str) -> reqwest::Response {
+        self.client
+            .delete(format!("http://{}{route}", self.addr))
+            .bearer_auth(bearer)
+            .send()
+            .await
+            .expect("request reaches the edge")
+    }
 }
 
 /// Control Plane as the edge sees it for the routes the ZDR matrix classifies as
