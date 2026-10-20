@@ -32,9 +32,9 @@ set -euo pipefail
 # CI, MODEL_PLANE_RESIDENCY and UPDATE_AUDIT_CORE_FIXTURES. Other environment reads are not
 # cleared. The block is marked, and the contract test runs it under an empty environment.
 # An unfiltered run prints its pass count in a banner. The last full run recorded for
-# this harness, through a disposable Postgres, passed 679 tests with 0 failed (2026-10-20;
-# it was 680 before the park-event gate review follow-up replaced two tests with one, 658
-# before the S8-4 park store tests, 648 before the S8-0 recovery-expiry tests,
+# this harness, through a disposable Postgres, passed 680 tests with 0 failed (2026-10-20;
+# it was 679 before the park-event fold check added its source-order guard, 680 before the
+# park-event gate review follow-up replaced two tests with one, 658 before the S8-4 park store tests, 648 before the S8-0 recovery-expiry tests,
 # 642 before the descriptor-reaper tests, and 588 before the Build 1b, 2 and 2b rounds).
 #
 # Needs a responding Docker engine and the image below present locally.
@@ -240,7 +240,7 @@ run_selection() {
     # The unfiltered run is the whole suite, so its count goes where a person will read it.
     printf '\n============================================================\n'
     printf 'session-core DB tests, FULL RUN: %s passed, 0 failed\n' "$(count_passed "$LOG")"
-    printf 'last full run recorded for this harness: 679 passed, 0 failed; a different count means a test was added, removed or skipped\n'
+    printf 'last full run recorded for this harness: 680 passed, 0 failed; a different count means a test was added, removed or skipped\n'
     printf '============================================================\n\n'
   fi
   return 0
