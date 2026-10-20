@@ -1,7 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { SCRAPE_PREVIEW_FAILURE_CODES } from '@/shared/api/knowledge-client'
 import { BLOCK_REASON_COPY, ERROR_COPY, describeApiError, translateApiError } from './errors'
 
 const no = (norwegian: string) => norwegian
@@ -93,12 +92,6 @@ describe('browser error copy', () => {
     expect(Object.keys(BLOCK_REASON_COPY).sort()).toEqual([...BLOCK_REASONS].sort())
   })
 
-  it('has copy for every failure code the scrape preview can carry', () => {
-    for (const code of SCRAPE_PREVIEW_FAILURE_CODES) {
-      expect(ERROR_COPY[code], code).toBeDefined()
-    }
-  })
-
   it('never offers a proxy', () => {
     for (const [code, copy] of Object.entries(ERROR_COPY)) {
       expect(`${copy.no} ${copy.en}`, code).not.toMatch(/proxy/i)
@@ -159,18 +152,19 @@ describe('browser error copy', () => {
     }
     const withoutCopy = [...emitted].filter(
       (code) =>
-        !ERROR_COPY[code] && !BLOCK_REASON_COPY[code] && !NOT_AN_ERROR_CODE.has(code),
+        !ERROR_COPY[code] && !BLOCK_REASON_COPY[code] && !NOT_AN_ERROR_CODE.has(code) && code !== 'unsupported_media',
     )
     expect(withoutCopy).toEqual([])
   })
 
-  // SCRAPE_PREVIEW_FAILURE_CODES is the closed list the preview can fail with:
-  // the codes classify_scrape_failure returns plus the ones scrape_preview itself
-  // answers before any upstream call. `unsupported_media` is the 415 slice's code (WS5.G):
-  // that slice brings its own copy entry in errors.ts and may put the code on the list
-  // and the 415 path in quarry.rs in either order, so it is exempt from BOTH comparisons
-  // (the gateway not answering with it yet, or the list not naming it yet, is fine).
-  it('lists exactly the failure codes the scrape preview can answer with', () => {
+  // The codes a scrape preview can fail with: those `classify_scrape_failure` returns plus the
+  // ones `scrape_preview` itself answers before any upstream call. There is no list of them in
+  // the SPA: the composer's catch site hands the error to `browserErrorMessage`, which looks the
+  // code up in ERROR_COPY like every other, so this is the one place that pins the set.
+  // `unsupported_media` is the 415 slice's code (WS5.G): that slice brings its own copy entry in
+  // errors.ts and may land before or after the gateway code, so it is exempt here (the gateway
+  // not answering with it yet, or the copy not being there yet, is fine).
+  it('has copy for every failure code the scrape preview can answer with, and shows it through the generic path', () => {
     const source = productionHalf('knowledge/quarry.rs')
     const body = (signature: string): string => {
       const start = source.indexOf(signature)
@@ -178,11 +172,14 @@ describe('browser error copy', () => {
       return source.slice(start, source.indexOf('\n}\n', start))
     }
     const answered = new Set([...emittedCodes(body('fn classify_scrape_failure(')), ...emittedCodes(body('pub(super) async fn scrape_preview('))])
-    expect(answered.has('scrape_failed')).toBe(true)
-    expect(answered.has('invalid_url')).toBe(true)
-    const listed = new Set<string>(SCRAPE_PREVIEW_FAILURE_CODES)
-    expect([...answered].filter((code) => !listed.has(code) && code !== 'unsupported_media')).toEqual([])
-    expect([...listed].filter((code) => !answered.has(code) && code !== 'unsupported_media')).toEqual([])
+    for (const code of ['scrape_failed', 'invalid_url', 'site_blocked', 'scrape_refused', 'scrape_rate_limited', 'scrape_timeout']) {
+      expect(answered.has(code), `the scan found ${code}`).toBe(true)
+    }
+    for (const code of answered) {
+      if (code === 'unsupported_media') continue
+      expect(ERROR_COPY[code], code).toBeDefined()
+      expect(describeApiError({ code, status: 400 }, no).message.startsWith(copyOf(ERROR_COPY, code).no), code).toBe(true)
+    }
   })
 
   it('keeps both languages non-empty for every entry of the whole table', () => {
@@ -274,8 +271,10 @@ describe('describeApiError', () => {
   it('passes resumable through and keeps translateApiError on the code-then-fallback rule', () => {
     expect(describeApiError(failure({ status: 404, code: 'NOT_FOUND', resumable: true }), no).resumable).toBe(true)
     expect(describeApiError(failure({ status: 404, code: 'NOT_FOUND' }), no).resumable).toBe(false)
-    // translateApiError does not answer by status class: the caller's fallback wins.
-    expect(translateApiError(failure({ status: 403 }), no, { no: 'Kunne ikke slette planen.', en: 'x' })).toBe('Kunne ikke slette planen.')
+    // translateApiError answers by status class exactly as describeApiError does (a refusal is
+    // not the caller's "could not do X"); a status without a class of its own gets the fallback.
+    expect(translateApiError(failure({ status: 403 }), no, { no: 'Kunne ikke slette planen.', en: 'x' })).toBe('Du har ikke tilgang til å gjøre dette.')
+    expect(translateApiError(failure({ status: 404 }), no, { no: 'Kunne ikke slette planen.', en: 'x' })).toBe('Kunne ikke slette planen.')
     expect(translateApiError(failure({ status: 429, code: 'scrape_rate_limited', retryAfterSeconds: 8 }), no)).toMatch(/Prøv igjen om 8 sekunder\.$/)
   })
 })

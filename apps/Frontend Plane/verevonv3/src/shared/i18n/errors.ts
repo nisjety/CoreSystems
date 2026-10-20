@@ -7,8 +7,11 @@
 // `err.message` directly. Unknown/unmapped codes fall back to a safe, generic
 // Norwegian message instead of leaking the raw English string.
 //
-// Convention: NEW codes get added here as they're identified as user-facing.
-// This is the seam — not a claim that every gateway code is covered yet.
+// Convention: a code the gateway can emit and a person can hit gets an entry here.
+// `browser-errors.test.ts` scans every gateway domain file and fails on an emitted
+// code that has neither an entry nor a reasoned internal-only exemption, so the
+// table cannot drift. A code answered by status class (401, 403, 429, no network)
+// needs no entry; everything else falls back to the caller's own sentence.
 
 type ErrorCopy = {
   no: string
@@ -325,6 +328,466 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
     no: 'Kunne ikke kontrollere hvilke leverandører som har registrert ZDR-godkjenning, så Zero Data Retention kan ikke slås på akkurat nå. Prøv igjen om litt, eller fortsett uten og slå det på senere.',
     en: 'We could not check which providers have a recorded ZDR attestation, so Zero Data Retention cannot be turned on right now. Try again shortly, or carry on without it and turn it on later.',
   },
+
+  // Rooms (Spaces), agents, schedules and instructions (gateway `spaces.rs`, `agent_actions.rs`,
+
+  // `orgs/instructions.rs`, `persona.rs`). Written for the person at the screen: what happened and
+
+  // what they can do. A "nothing was altered" refusal says so, because the gateway guarantees it.
+  space_not_found: {
+    no: 'Fant ikke dette rommet, eller du har ikke tilgang til det. Gå tilbake til oversikten og velg et annet rom.',
+    en: 'This space could not be found, or you do not have access to it. Go back to the overview and pick another space.',
+  },
+  space_read_not_authorized: {
+    no: 'Du har ikke tilgang til å lese samtalen i dette rommet. Be en eier eller leder av rommet om tilgang.',
+    en: 'You do not have access to read the conversation in this space. Ask an owner or manager of the space for access.',
+  },
+  space_lifecycle_unavailable: {
+    no: 'Rommets status kunne ikke hentes akkurat nå. Prøv igjen om litt.',
+    en: 'The status of this space could not be fetched right now. Try again shortly.',
+  },
+  space_deletion_unavailable: {
+    no: 'Slettingen av rommet kunne ikke kontrolleres akkurat nå. Prøv igjen om litt.',
+    en: 'The deletion of this space could not be checked right now. Try again shortly.',
+  },
+  space_deletion_not_found: {
+    no: 'Fant ingen slettingsforespørsel for dette rommet. Den kan allerede være fullført eller avbrutt.',
+    en: 'No deletion request was found for this space. It may already be finished or cancelled.',
+  },
+  space_provisioning_unavailable: {
+    no: 'Rommet kunne ikke opprettes akkurat nå, og ingenting ble satt opp. Prøv igjen om litt.',
+    en: 'The space could not be created right now, and nothing was set up. Try again shortly.',
+  },
+  space_required: {
+    no: 'Du trenger et aktivt personlig rom for å opprette en tidsplan.',
+    en: 'You need an active personal space to create a schedule.',
+  },
+  space_role_cannot_create_agent: {
+    no: 'Bare eiere og ledere av rommet kan legge til en agent her.',
+    en: 'Only owners and managers of the space can add an agent here.',
+  },
+  space_role_cannot_edit_instructions: {
+    no: 'Bare redaktører, ledere og eiere av rommet kan endre instruksjonene.',
+    en: 'Only editors, managers and owners of the space can change its instructions.',
+  },
+  room_name_required: {
+    no: 'Et rom trenger et navn. Skriv inn et navn og prøv igjen.',
+    en: 'A room needs a name. Enter a name and try again.',
+  },
+  room_membership_unavailable: {
+    no: 'Medlemmene i rommet kunne ikke endres akkurat nå, og ingenting ble endret. Prøv igjen om litt.',
+    en: 'The members of the room could not be changed right now, and nothing was altered. Try again shortly.',
+  },
+  room_membership_unconfirmed: {
+    no: 'Endringen ble lagret, men er ikke bekreftet for rommets medlemmer ennå. Det kan ta et øyeblikk før listen er oppdatert.',
+    en: 'The change was saved, but the room members have not confirmed it yet. It may take a moment before the list is up to date.',
+  },
+  member_required: {
+    no: 'Velg et medlem først.',
+    en: 'Choose a member first.',
+  },
+  member_not_found: {
+    no: 'Fant ikke dette medlemmet i organisasjonen.',
+    en: 'This member was not found in the organization.',
+  },
+  thread_presentation_owner_only: {
+    no: 'Bare den som startet innlegget kan endre tittelen eller feste det.',
+    en: 'Only the person who started the post can retitle or pin it.',
+  },
+  thread_presentation_unavailable: {
+    no: 'Innlegget kunne ikke endres, og ingenting ble endret. Prøv igjen.',
+    en: 'The post could not be changed, and nothing was altered. Try again.',
+  },
+  invalid_presentation: {
+    no: 'Tittelen må være mellom 1 og 200 tegn. Sjekk den og prøv igjen.',
+    en: 'The title must be between 1 and 200 characters. Check it and try again.',
+  },
+  presence_unavailable: {
+    no: 'Vi kunne ikke se hvem som er i rommet akkurat nå. Resten fungerer som vanlig.',
+    en: 'We could not see who is in the room right now. Everything else works as usual.',
+  },
+  read_marker_unavailable: {
+    no: 'Vi kunne ikke lagre hvor langt du har lest. Resten fungerer som vanlig.',
+    en: 'We could not save how far you have read. Everything else works as usual.',
+  },
+  scoped_append_content_required: {
+    no: 'Meldingen kan ikke være tom. Skriv noe og prøv igjen.',
+    en: 'The message cannot be empty. Write something and try again.',
+  },
+  active_membership_required: {
+    no: 'Du må være aktivt medlem av organisasjonen for å gjøre dette.',
+    en: 'You need to be an active member of the organization to do this.',
+  },
+  owner_grant_role_required: {
+    no: 'Bare en eier eller administrator i organisasjonen kan styre hva agenter har lov til å gjøre.',
+    en: 'Only an owner or administrator of the organization can manage what agents are allowed to do.',
+  },
+  invalid_owner_grant_decision: {
+    no: 'Tilgangskontrollen ga et uventet svar, så ingenting ble endret. Prøv igjen om litt.',
+    en: 'The access check gave an unexpected answer, so nothing was changed. Try again shortly.',
+  },
+  invalid_space_decision: {
+    no: 'Tilgangskontrollen ga et uventet svar, så rommet ble ikke åpnet. Prøv igjen om litt.',
+    en: 'The access check gave an unexpected answer, so the space was not opened. Try again shortly.',
+  },
+  owner_action_contract_invalid: {
+    no: 'Samtaletjenesten ga et uventet svar, så handlingen ble ikke utført. Prøv igjen om litt.',
+    en: 'The conversation service gave an unexpected answer, so the action was not carried out. Try again shortly.',
+  },
+  ticket_operation_receipt_invalid: {
+    no: 'Vi fikk ikke bekreftet at endringen på saken ble lagret. Last inn siden på nytt for å se hva som skjedde.',
+    en: 'We could not confirm that the change to the ticket was saved. Reload the page to see what happened.',
+  },
+  invalid_model_gateway_response: {
+    no: 'Fikk et uventet svar fra AI-tjenesten. Prøv igjen.',
+    en: 'Got an unexpected answer from the AI service. Try again.',
+  },
+  agent_binding_state_unavailable: {
+    no: 'Agentens status i dette rommet kunne ikke endres, og ingenting ble endret. Prøv igjen.',
+    en: 'The status of the agent in this room could not be changed, and nothing was altered. Try again.',
+  },
+  agent_binding_unavailable: {
+    no: 'Agenten kunne ikke knyttes til rommet, og ingenting ble satt opp. Prøv igjen om litt.',
+    en: 'The agent could not be added to the room, and nothing was set up. Try again shortly.',
+  },
+  agent_creation_unavailable: {
+    no: 'Agenten kunne ikke opprettes, og ingenting ble satt opp. Prøv igjen om litt.',
+    en: 'The agent could not be created, and nothing was set up. Try again shortly.',
+  },
+  agent_invocation_blocked: {
+    no: 'Agenten er satt på pause eller fjernet i dette rommet, så den kan ikke brukes nå.',
+    en: 'The agent is paused or removed in this room, so it cannot be used now.',
+  },
+  agent_membership_unconfirmed: {
+    no: 'Agenten ble lagt til, men rommet har ikke bekreftet den som medlem ennå. Den står som ventende i agentfanen.',
+    en: 'The agent was added, but the room has not confirmed it as a member yet. It stays pending in the agents tab.',
+  },
+  agent_mention_not_enabled: {
+    no: 'Denne agenten kan ikke tilkalles med @ i dette rommet.',
+    en: 'This agent cannot be called with @ in this room.',
+  },
+  agent_mention_requires_space: {
+    no: 'En agent kan bare tilkalles med @ inne i et rom.',
+    en: 'An agent can only be called with @ inside a room.',
+  },
+  mentioned_agent_not_bound: {
+    no: 'Denne agenten er ikke lagt til i dette rommet.',
+    en: 'This agent has not been added to this room.',
+  },
+  agent_registry_unavailable: {
+    no: 'Organisasjonens agenter kunne ikke hentes akkurat nå. Prøv igjen om litt.',
+    en: 'The organization agents could not be fetched right now. Try again shortly.',
+  },
+  agent_revocation_unconfirmed: {
+    no: 'Agenten ble fjernet, men rommets medlemsliste er ikke oppdatert ennå. Den kan vises en stund til.',
+    en: 'The agent was removed, but the member list of the room is not updated yet. It may still show for a while.',
+  },
+  installable_agents_unavailable: {
+    no: 'Listen over agenter du kan legge til kunne ikke hentes akkurat nå. Prøv igjen om litt.',
+    en: 'The list of agents you can add could not be fetched right now. Try again shortly.',
+  },
+  invalid_agent_instructions: {
+    no: 'Instruksjonene til agenten må være under 4000 tegn.',
+    en: 'The agent instructions must be under 4000 characters.',
+  },
+  invalid_agent_name: {
+    no: 'Navnet på agenten må være mellom 2 og 60 tegn.',
+    en: 'The agent name must be between 2 and 60 characters.',
+  },
+  instructions_too_long: {
+    no: 'Instruksjonene er for lange. De kan ha opptil 4000 tegn.',
+    en: 'The instructions are too long. They can have up to 4000 characters.',
+  },
+  instructions_unavailable: {
+    no: 'Instruksjonene kunne ikke lagres akkurat nå. Prøv igjen om litt.',
+    en: 'The instructions could not be saved right now. Try again shortly.',
+  },
+  persona_instructions_too_long: {
+    no: 'Instruksjonene er for lange. De kan ha opptil 1500 tegn.',
+    en: 'The instructions are too long. They can have up to 1500 characters.',
+  },
+  invalid_cron_request: {
+    no: 'Tidsplanen kunne ikke opprettes med disse innstillingene. Sjekk oppgaven og tidspunktet, og prøv igjen.',
+    en: 'The schedule could not be created with these settings. Check the task and the time, and try again.',
+  },
+  invalid_task_template: {
+    no: 'Oppgaven i tidsplanen kunne ikke brukes slik den er. Sjekk oppgaven, og prøv igjen.',
+    en: 'The task in the schedule could not be used as it is. Check the task, and try again.',
+  },
+  task_template_required: {
+    no: 'En tidsplan trenger en oppgave. Beskriv oppgaven og prøv igjen.',
+    en: 'A schedule needs a task. Describe the task and try again.',
+  },
+
+  // Inbox, tickets and the organization's support and data-retention rules (gateway `inbox.rs`,
+
+  // `tickets.rs`, `chat/history.rs`). The ZDR refusals say what is not kept, not that it failed.
+  active_organization_required: {
+    no: 'Velg en organisasjon først.',
+    en: 'Select an organization first.',
+  },
+  ai_review_mode_required: {
+    no: 'Lagrede AI-forslag krever at organisasjonen bruker gjennomgang av AI i support. En administrator kan slå det på i innstillingene.',
+    en: 'Saved AI proposals need the organization to use AI review in support. An administrator can turn it on in the settings.',
+  },
+  zdr_ai_proposal_forbidden: {
+    no: 'AI-forslag lagres ikke, fordi organisasjonen har Zero Data Retention slått på.',
+    en: 'AI proposals are not kept, because the organization has Zero Data Retention turned on.',
+  },
+  zdr_draft_persistence_forbidden: {
+    no: 'Utkast lagres ikke, fordi organisasjonen har Zero Data Retention slått på.',
+    en: 'Drafts are not kept, because the organization has Zero Data Retention turned on.',
+  },
+  zdr_recurrence_forbidden: {
+    no: 'Lignende saker vises ikke, fordi organisasjonen har Zero Data Retention slått på.',
+    en: 'Similar tickets are not shown, because the organization has Zero Data Retention turned on.',
+  },
+  support_ai_policy_unavailable: {
+    no: 'AI-gjennomgang er utilgjengelig til organisasjonens regler kan kontrolleres. Prøv igjen om litt.',
+    en: 'AI review is unavailable until the organization rules can be checked. Try again shortly.',
+  },
+  retention_posture_unavailable: {
+    no: 'Utkast kan ikke lagres før organisasjonens regler for datalagring kan kontrolleres. Prøv igjen om litt.',
+    en: 'Drafts cannot be saved until the organization data-retention rules can be checked. Try again shortly.',
+  },
+  support_recurrence_permission_required: {
+    no: 'Rollen din har ikke tilgang til å se lignende saker.',
+    en: 'Your role does not have access to see similar tickets.',
+  },
+  support_recurrence_policy_unavailable: {
+    no: 'Lignende saker er utilgjengelige til organisasjonens regler og tilganger kan kontrolleres. Prøv igjen om litt.',
+    en: 'Similar tickets are unavailable until the organization rules and permissions can be checked. Try again shortly.',
+  },
+  thread_not_found: {
+    no: 'Fant ikke samtalen. Den kan være slettet.',
+    en: 'The conversation was not found. It may have been deleted.',
+  },
+
+  // Knowledge, SharePoint and search (gateway `knowledge/*.rs`, `search.rs`, `insights.rs`).
+  sharepoint_sites_unavailable: {
+    no: 'Vi kunne ikke hente SharePoint-nettstedene. Koble til Microsoft 365 først, og prøv igjen.',
+    en: 'We could not fetch the SharePoint sites. Connect Microsoft 365 first, and try again.',
+  },
+  sharepoint_drives_unavailable: {
+    no: 'Vi kunne ikke hente dokumentbibliotekene for dette nettstedet. Prøv igjen om litt.',
+    en: 'We could not fetch the document libraries for this site. Try again shortly.',
+  },
+  sharepoint_folders_unavailable: {
+    no: 'Vi kunne ikke hente mappene i dette dokumentbiblioteket. Prøv igjen om litt.',
+    en: 'We could not fetch the folders in this document library. Try again shortly.',
+  },
+  site_id_required: {
+    no: 'Velg et SharePoint-nettsted først.',
+    en: 'Choose a SharePoint site first.',
+  },
+  drive_id_required: {
+    no: 'Velg et dokumentbibliotek først.',
+    en: 'Choose a document library first.',
+  },
+  invalid_content: {
+    no: 'Innholdet kan ikke være tomt. Skriv eller lim inn noe og prøv igjen.',
+    en: 'The content cannot be empty. Write or paste something and try again.',
+  },
+  invalid_body: {
+    no: 'Dokumentet trenger både en tittel og et innhold. Fyll ut begge og prøv igjen.',
+    en: 'The document needs both a title and content. Fill in both and try again.',
+  },
+  no_products: {
+    no: 'Velg minst ett produkt som skal oppsummeres.',
+    en: 'Choose at least one product to summarize.',
+  },
+  summary_failed: {
+    no: 'Vi kunne ikke lage AI-sammendraget. Prøv igjen.',
+    en: 'We could not create the AI summary. Try again.',
+  },
+  invalid_query: {
+    no: 'Skriv inn et søk og prøv igjen.',
+    en: 'Enter a search and try again.',
+  },
+  web_search_unavailable: {
+    no: 'Nettsøket kunne ikke fullføres akkurat nå. Prøv igjen om litt.',
+    en: 'The web search could not be completed right now. Try again shortly.',
+  },
+  web_search_timeout: {
+    no: 'Nettsøket brukte for lang tid. Prøv igjen, eller gjør søket mer spesifikt.',
+    en: 'The web search took too long. Try again, or make the search more specific.',
+  },
+  video_search_timeout: {
+    no: 'Videosøket brukte for lang tid. Prøv igjen, eller gjør søket mer spesifikt.',
+    en: 'The video search took too long. Try again, or make the search more specific.',
+  },
+  insights_upstream_unavailable: {
+    no: 'Innsikt er midlertidig utilgjengelig. Prøv igjen om litt.',
+    en: 'Insights is temporarily unavailable. Try again shortly.',
+  },
+  // A screenshot or a file of a browser run, relayed as bytes (`upstream.rs`, `proxy_artifact_bytes`).
+  artifact_unavailable: {
+    no: 'Vi kunne ikke hente vedlegget akkurat nå. Prøv igjen om litt.',
+    en: 'We could not fetch the attachment right now. Try again shortly.',
+  },
+  artifact_too_large: {
+    no: 'Vedlegget er for stort til å vises.',
+    en: 'The attachment is too large to display.',
+  },
+
+  // Onboarding and the website preview. The three crawl codes arrive as `warning` events on the
+
+  // preview stream, not as an error response; the onboarding page translates them by code.
+  connection_not_found: {
+    no: 'Vi fant ingen tilkobling for denne tjenesten ennå. Koble den til først, og prøv igjen.',
+    en: 'We found no connection for this service yet. Connect it first, and try again.',
+  },
+  invalid_name: {
+    no: 'Organisasjonen trenger et navn. Skriv inn et navn og prøv igjen.',
+    en: 'The organization needs a name. Enter a name and try again.',
+  },
+  onboarding_completion_failed: {
+    no: 'Oppsettet kunne ikke fullføres trygt. Fremgangen din er lagret, så du kan prøve igjen.',
+    en: 'The setup could not be completed safely. Your progress is saved, so you can try again.',
+  },
+  recommendation_unavailable: {
+    no: 'Planforslaget er midlertidig utilgjengelig. Velg en plan selv, eller prøv igjen senere.',
+    en: 'The plan recommendation is temporarily unavailable. Choose a plan yourself, or try again later.',
+  },
+  translation_unavailable: {
+    no: 'Oversettelsen er utilgjengelig akkurat nå. Prøv igjen om litt.',
+    en: 'The translation is unavailable right now. Try again shortly.',
+  },
+  translation_invalid_response: {
+    no: 'Oversettelsen ga et uventet svar. Prøv igjen om litt.',
+    en: 'The translation gave an unexpected answer. Try again shortly.',
+  },
+  empty_crawl: {
+    no: 'Vi fikk ikke hentet innhold fra nettsiden. Prøv på nytt, eller fortsett uten forhåndsvisning.',
+    en: 'We could not get any content from the website. Try again, or continue without a preview.',
+  },
+  control_unreachable: {
+    no: 'Vi kunne ikke følge med på hentingen av nettsiden. Prøv på nytt, eller fortsett uten forhåndsvisning.',
+    en: 'We could not follow the fetching of the website. Try again, or continue without a preview.',
+  },
+  crawl_failed: {
+    no: 'Hentingen av nettsiden mislyktes. Prøv på nytt, eller fortsett uten forhåndsvisning.',
+    en: 'Fetching the website failed. Try again, or continue without a preview.',
+  },
+  invalid_checkout_request: {
+    no: 'Betalingen kunne ikke startes med disse opplysningene. Sjekk dem og prøv igjen.',
+    en: 'The payment could not be started with these details. Check them and try again.',
+  },
+
+  // Session, settings and integrations (gateway `middleware.rs`, `settings/*.rs`, `navbar.rs`, `upstream.rs`).
+  session_verification_unavailable: {
+    no: 'Innloggingen din kunne ikke bekreftes akkurat nå, men økten er ikke endret. Prøv igjen om litt.',
+    en: 'Your sign-in could not be verified right now, but your session is unchanged. Try again shortly.',
+  },
+  api_key_error: {
+    no: 'API-nøkkelen kunne ikke endres. Prøv igjen.',
+    en: 'The API key could not be changed. Try again.',
+  },
+  invalid_api_key_name: {
+    no: 'API-nøkkelen trenger et navn. Skriv inn et navn og prøv igjen.',
+    en: 'The API key needs a name. Enter a name and try again.',
+  },
+  invalid_color_scheme: {
+    no: 'Fargevalget er ikke gyldig. Velg et fargetema, eller skriv en gyldig fargekode.',
+    en: 'The colour choice is not valid. Pick a colour theme, or enter a valid colour code.',
+  },
+  invalid_theme: {
+    no: 'Temaet er ikke gyldig. Velg lyst, mørkt eller systemets tema.',
+    en: 'The theme is not valid. Choose light, dark or the system theme.',
+  },
+  invalid_request: {
+    no: 'Forespørselen mangler noe eller er ugyldig. Sjekk og prøv igjen.',
+    en: 'The request is missing something or is not valid. Check it and try again.',
+  },
+  no_sources_registered: {
+    no: 'Ingen kilder er valgt for denne tilkoblingen ennå. Velg et bibliotek først.',
+    en: 'No sources are chosen for this connection yet. Choose a library first.',
+  },
+  PLAN_REQUIRED: {
+    no: 'Denne funksjonen krever en høyere plan. Oppgrader planen din for å fortsette.',
+    en: 'This feature needs a higher plan. Upgrade your plan to continue.',
+  },
+  model_error: {
+    no: 'AI-tjenesten svarte med en feil. Prøv igjen.',
+    en: 'The AI service returned an error. Try again.',
+  },
+  model_request_timeout: {
+    no: 'AI-tjenesten brukte for lang tid på å svare. Prøv igjen.',
+    en: 'The AI service took too long to answer. Try again.',
+  },
+
+  // Sign-in and invitations: auth-core's own codes, passed through verbatim (UPPER_SNAKE_CASE).
+  INVITATION_AUTHORITY_UNAVAILABLE: {
+    no: 'Invitasjonen kunne ikke kontrolleres akkurat nå. Prøv igjen om litt.',
+    en: 'The invitation could not be checked right now. Try again shortly.',
+  },
+  TOO_MANY_REQUESTS: {
+    no: 'Det kommer for mange forsøk akkurat nå.',
+    en: 'There are too many attempts right now.',
+    retryable: true,
+  },
+  USER_ALREADY_EXISTS: {
+    no: 'Det finnes allerede en konto med denne e-postadressen. Logg inn i stedet.',
+    en: 'An account with this email address already exists. Sign in instead.',
+  },
+  DISPOSABLE_EMAIL_BLOCKED: {
+    no: 'Engangsadresser kan ikke brukes. Bruk din vanlige e-postadresse.',
+    en: 'Disposable email addresses cannot be used. Use your regular email address.',
+  },
+
+  // What Quarry answers with on a browser call and the gateway passes through unchanged (its own
+
+  // UPPER_SNAKE_CASE codes; `CHALLENGE_DETECTED` and `USER_TOOK_OVER` are above). The generic ones
+
+  // (BAD_REQUEST, UNAUTHORIZED, FORBIDDEN, NOT_FOUND, CONFLICT, INTERNAL, ACTION_UNKNOWN) answer by
+
+  // status class instead, so they are not listed.
+  RATE_LIMITED: {
+    no: 'Det kommer for mange forespørsler akkurat nå.',
+    en: 'There are too many requests right now.',
+    retryable: true,
+  },
+  TIMEOUT: {
+    no: 'Nettleseren brukte for lang tid på å svare. Prøv igjen.',
+    en: 'The browser took too long to respond. Try again.',
+  },
+  SECURITY_BLOCKED: {
+    no: 'Nettleseren i appen stoppet denne handlingen av sikkerhetsgrunner. Prøv en annen adresse eller handling.',
+    en: 'The in-app browser stopped this action for security reasons. Try another address or action.',
+  },
+  DRIVER_FAILED: {
+    no: 'Nettleseren kunne ikke utføre handlingen. Prøv igjen, eller start en ny økt.',
+    en: 'The browser could not carry out the action. Try again, or start a new session.',
+  },
+  RUNTIME_NOT_READY: {
+    no: 'Nettleseren er ikke klar ennå.',
+    en: 'The browser is not ready yet.',
+    retryable: true,
+  },
+  CHECKPOINT_LOST: {
+    no: 'Siden endret seg underveis, så agenten mistet tråden. Start kjøringen på nytt.',
+    en: 'The page changed along the way, so the agent lost its place. Start the run again.',
+  },
+  TARGET_REPAIR_REQUIRED: {
+    no: 'Siden endret seg, og agenten fant ikke igjen stedet den skulle trykke. Prøv handlingen på nytt.',
+    en: 'The page changed, and the agent could not find the place to click again. Try the action again.',
+  },
+  UPSTREAM_BLOCKED: {
+    no: 'Nettstedet svarte ikke eller stengte tilgangen. Prøv en annen kilde.',
+    en: 'The site did not answer or closed access. Try another source.',
+  },
+  UNSUPPORTED: {
+    no: 'Nettleseren i appen støtter ikke dette ennå.',
+    en: 'The in-app browser does not support this yet.',
+  },
+  UNSUPPORTED_MEDIA: {
+    no: 'Dette innholdet kan ikke åpnes i nettleseren i appen.',
+    en: 'This content cannot be opened in the in-app browser.',
+  },
+  BUDGET_EXHAUSTED: {
+    no: 'Grensen for hva nettleseren kan bruke i denne kjøringen er nådd. Start en ny kjøring.',
+    en: 'The limit on what the browser may use in this run has been reached. Start a new run.',
+  },
 }
 
 /**
@@ -417,7 +880,6 @@ function describe(
   err: unknown,
   tr: (noText: string, enText: string) => string,
   fallback: ErrorCopy | undefined,
-  statusCopy: boolean,
 ): ApiErrorDescription {
   const like = (err && typeof err === 'object' ? err : null) as ApiErrorLike
   const code = typeof like?.code === 'string' ? like.code : null
@@ -429,7 +891,7 @@ function describe(
   // A refusal that names why the wall is up gets the sentence for that reason.
   if (kind === 'blocked' && typeof like?.blockReason === 'string') copy = BLOCK_REASON_COPY[like.blockReason]
   copy ??= code ? ERROR_COPY[code] : undefined
-  if (!copy && statusCopy) {
+  if (!copy) {
     if (kind === 'unauthenticated') copy = ERROR_COPY.unauthenticated
     else if (kind === 'forbidden') copy = ERROR_COPY.forbidden
     else if (kind === 'rate_limited') copy = ERROR_COPY.rate_limited
@@ -453,28 +915,29 @@ function describe(
  * caller supplied one, otherwise a generic Norwegian/English message — never
  * the raw `message` from the gateway, which is always English ops text. A
  * retryable entry gets a "try again in N seconds" sentence from the error's own
- * retry hint.
+ * retry hint. For an error whose code has no copy it answers by status class
+ * (401, 403, 429, no network) before the caller's `fallback`: a session that
+ * expired, a refusal, a rate limit or a lost connection is never reported as the
+ * fallback's "could not do X", the same as {@link describeApiError}.
  */
 export function translateApiError(
   err: unknown,
   tr: (noText: string, enText: string) => string,
   fallback?: ErrorCopy,
 ): string {
-  return describe(err, tr, fallback, false).message
+  return describe(err, tr, fallback).message
 }
 
 /**
  * {@link translateApiError} plus what the caller needs to react: the `kind`
  * (401, 403, takeover, bot wall, 429, lost session, 5xx, no network), the retry
- * hint and `resumable`. For an error whose code has no copy it answers by status
- * class (401, 403, 429, no network) before the caller's `fallback`, so a
- * session that expired or a rate limit is never reported as the fallback's
- * "could not do X". Still never the raw `message`.
+ * hint and `resumable`. Answers by status class exactly as {@link translateApiError}
+ * does. Still never the raw `message`.
  */
 export function describeApiError(
   err: unknown,
   tr: (noText: string, enText: string) => string,
   fallback?: ErrorCopy,
 ): ApiErrorDescription {
-  return describe(err, tr, fallback, true)
+  return describe(err, tr, fallback)
 }
