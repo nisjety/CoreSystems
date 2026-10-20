@@ -12,7 +12,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -268,6 +268,82 @@ function composeService(text, name) {
   return next < 0 ? rest : rest.slice(0, next + 1);
 }
 
+// ---- compose network membership (no YAML dependency: the files are regular enough) ----
+
+/** Names of the services of one compose file text. */
+function composeServiceNames(text) {
+  const padded = '\n' + text;
+  const start = padded.indexOf('\nservices:\n');
+  if (start < 0) return []; // an overlay without services
+  const rest = padded.slice(start + '\nservices:\n'.length);
+  const end = rest.search(/\n[A-Za-z]/); // the next top-level key
+  const body = end < 0 ? rest : rest.slice(0, end);
+  return [...body.matchAll(/^ {2}([A-Za-z0-9_.-]+):[ \t]*(?:#.*)?$/gm)].map((m) => m[1]);
+}
+
+/**
+ * The networks one service block joins: list form ("- name"), map form ("name:" or "name: {}"),
+ * and flow form ("networks: [a, b]"). Comments and nested options (aliases) are ignored.
+ */
+function serviceNetworks(block) {
+  const flow = block.match(/\n {4}networks:[ \t]*\[([^\]]*)\]/);
+  if (flow) return flow[1].split(',').map((n) => n.trim()).filter(Boolean);
+  const lines = block.split('\n');
+  const at = lines.findIndex((line) => /^ {4}networks:[ \t]*(?:#.*)?$/.test(line));
+  if (at < 0) return [];
+  const names = [];
+  for (const line of lines.slice(at + 1)) {
+    if (/^\s*(?:#.*)?$/.test(line)) continue;
+    const indent = line.match(/^ */)[0].length;
+    if (indent <= 4) break;
+    if (indent !== 6) continue; // options of a network entry, such as aliases
+    const entry = line.match(/^ {6}(?:- ([A-Za-z0-9_.-]+)|([A-Za-z0-9_.-]+):)[ \t]*(?:\{\})?[ \t]*(?:#.*)?$/);
+    if (entry) names.push(entry[1] ?? entry[2]);
+  }
+  return names;
+}
+
+/** Services (across the given compose texts) that are on the network, sorted. */
+function networkMembers(texts, network) {
+  const members = new Set();
+  for (const text of texts) {
+    for (const name of composeServiceNames(text)) {
+      if (serviceNetworks(composeService(text, name)).includes(network)) members.add(name);
+    }
+  }
+  return [...members].sort();
+}
+
+/** Every docker-compose*.yml of a plane directory (base file and overlays), as texts. */
+const composeTexts = (dir) =>
+  readdirSync(join(ROOT, dir))
+    .filter((file) => /^docker-compose.*\.ya?ml$/.test(file))
+    .map((file) => read(dir + '/' + file));
+
+// The ephemeral-store flag as a YAML key of an environment block (indented, at line start).
+const EPHEMERAL_FLAG = /^\s+BROWSER_BROKER_ALLOW_EPHEMERAL_DEVELOPMENT:/m;
+
+test('compose network membership: the parser sees list, map and flow forms, and the flag guard fires', () => {
+  const sample = [
+    'name: x', 'services:',
+    '  a:', '    image: i', '    networks:', '      - one', '      - two # c',
+    '  b:', '    networks:', '      one: {}', '      two:', '        aliases:', '          - zed',
+    '  c:', '    networks: [two, three]',
+    '  d:', '    image: j',
+    'volumes: {}', '',
+  ].join('\n');
+  assert.deepEqual(composeServiceNames(sample), ['a', 'b', 'c', 'd']);
+  assert.deepEqual(serviceNetworks(composeService(sample, 'a')), ['one', 'two']);
+  assert.deepEqual(serviceNetworks(composeService(sample, 'b')), ['one', 'two']);
+  assert.deepEqual(serviceNetworks(composeService(sample, 'c')), ['two', 'three']);
+  assert.deepEqual(serviceNetworks(composeService(sample, 'd')), []);
+  assert.deepEqual(networkMembers([sample], 'one'), ['a', 'b']);
+  assert.deepEqual(networkMembers([sample], 'three'), ['c']);
+  // The ephemeral-flag guard must match an indented environment key (it once had "s+" for "\s+" and never fired).
+  assert.match('    environment:\n      BROWSER_BROKER_ALLOW_EPHEMERAL_DEVELOPMENT: "true"\n', EPHEMERAL_FLAG);
+  assert.doesNotMatch('      # BROWSER_BROKER_ALLOW_EPHEMERAL_DEVELOPMENT=true is dev only\n', EPHEMERAL_FLAG);
+});
+
 test('the broker is reachable on inter-plane-bus under the names its clients use', () => {
   const compose = read('apps/Model Plane/deploy/docker-compose.yml');
   const broker = composeService(compose, 'browser-broker');
@@ -291,7 +367,7 @@ test('the broker uses a dedicated database and role on Quarry\'s Postgres, reach
     broker,
     /DATABASE_URL: postgresql:\/\/browser_broker:\$\{BROWSER_BROKER_PG_PASSWORD:\?[^}]+\}@ingestion-postgres:5432\/browser_broker\n/,
   );
-  assert.doesNotMatch(broker, /^s+BROWSER_BROKER_ALLOW_EPHEMERAL_DEVELOPMENT:/m, 'the base file must not enable the ephemeral store');
+  assert.doesNotMatch(broker, EPHEMERAL_FLAG, 'the base file must not enable the ephemeral store');
   // The broker joins the dedicated network, declared external in Model Plane and owned by the Ingestion compose.
   assert.match(broker, /\n\s+browser-broker-db: \{\}/);
   assert.match(compose, /\n {2}browser-broker-db:\n {4}external: true/);
@@ -300,12 +376,34 @@ test('the broker uses a dedicated database and role on Quarry\'s Postgres, reach
   assert.match(postgres, /container_name: ingestion-postgres/);
   assert.match(postgres, /networks:\n(?:\s+(?:#.*|- ingestion-net)\n)+\s+- browser-broker-db\n/);
   assert.match(ingestion, /\n {2}browser-broker-db:\n {4}name: browser-broker-db\n {4}driver: bridge/);
-  // Only the broker joins it on the Model Plane side.
-  const joiners = [...compose.matchAll(/\n {6}browser-broker-db: \{\}/g)].length;
-  assert.equal(joiners, 1, 'only browser-broker joins browser-broker-db in the Model Plane compose');
+  // Membership, counted across the base file and every overlay of each plane, in list, map and flow form:
+  // only ingestion-postgres on the Ingestion side, only the broker on the Model Plane side, and the broker
+  // is never on ingestion-net (that would reach Quarry's own services).
+  assert.deepEqual(
+    networkMembers(composeTexts('apps/Ingestion Plane'), 'browser-broker-db'),
+    ['postgres'],
+    'only the postgres service of the Ingestion compose files may join browser-broker-db',
+  );
+  assert.deepEqual(
+    networkMembers(composeTexts('apps/Model Plane/deploy'), 'browser-broker-db'),
+    ['browser-broker'],
+    'only browser-broker may join browser-broker-db in the Model Plane compose files',
+  );
+  assert.ok(!serviceNetworks(broker).includes('ingestion-net'), 'browser-broker must not join ingestion-net');
+  assert.deepEqual(
+    networkMembers(composeTexts('apps/Model Plane/deploy'), 'ingestion-net'),
+    [],
+    'no Model Plane service joins ingestion-net',
+  );
   // The password is documented, and a signed release may carry it.
   assert.match(read('apps/Model Plane/deploy/.env.example'), /^BROWSER_BROKER_PG_PASSWORD=$/m);
   assert.match(read('apps/Model Plane/scripts/release-artifact.sh'), /\bBROWSER_BROKER_PG_PASSWORD\b/);
+  // The root bootstrap provisions it (a compose variable that is required but never minted breaks
+  // scripts/tests/bootstrap_runtime_environment.test.sh), in the Model Plane env file.
+  assert.match(
+    read('scripts/bootstrap_runtime_environment.sh'),
+    /ensure_secret "\$MODEL_ENV" BROWSER_BROKER_PG_PASSWORD >\/dev\/null/,
+  );
 });
 
 test('the broker defaults in compose match the Go defaults', () => {

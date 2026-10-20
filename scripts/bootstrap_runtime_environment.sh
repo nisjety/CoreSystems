@@ -767,6 +767,9 @@ if [[ "$ROTATE_NATS" == "true" ]]; then
 fi
 ensure_secret "$MODEL_ENV" MODEL_POSTGRES_PASSWORD >/dev/null
 ensure_secret "$MODEL_ENV" MODEL_TEMPORAL_POSTGRES_PASSWORD >/dev/null
+# browser-broker grant store: role/database browser_broker on the Ingestion Plane Postgres server. random_secret is
+# hex, so it is URL-safe and 64 characters (it sits inside DATABASE_URL; see apps/Ingestion Plane/scripts/bootstrap_broker_db.sh).
+ensure_secret "$MODEL_ENV" BROWSER_BROKER_PG_PASSWORD >/dev/null
 model_nats_token="$(ensure_secret "$MODEL_ENV" MODEL_NATS_TOKEN)"
 ensure_secret "$MODEL_ENV" MODEL_DRAGONFLY_PASSWORD >/dev/null
 model_minio_user="$(dotenv_get "$MODEL_ENV" MODEL_MINIO_ROOT_USER 2>/dev/null || true)"
