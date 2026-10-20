@@ -39,7 +39,7 @@ pub async fn step(
         &handle,
         &mut entry,
         AdmitInput {
-            initiator: derive_initiator(&claims, body.initiated_by),
+            initiator: derive_initiator_ref(&claims, body.initiated_by, &body.advisory_agent()),
             action: &body.action,
             enforce_takeover: crate::run_limits::takeover_enforced(),
         },
@@ -90,6 +90,7 @@ pub async fn step(
                 .org_id(entry.org_id.clone())
                 .actor_id(entry.actor_id.clone())
                 .initiator(admitted.initiator, admitted.control_epoch)
+                .agent(admitted.agent.clone())
                 .complete(receipt_action, Some(obs.clone()), cost_usd);
             if !entry.zdr.is_active() {
                 state
@@ -110,6 +111,7 @@ pub async fn step(
                 .org_id(entry.org_id.clone())
                 .actor_id(entry.actor_id.clone())
                 .initiator(admitted.initiator, admitted.control_epoch)
+                .agent(admitted.agent.clone())
                 .fail(receipt_action, &error);
             if !entry.zdr.is_active() {
                 state
@@ -164,7 +166,7 @@ pub(super) async fn execute_ws_action(
         handle,
         &mut entry,
         AdmitInput {
-            initiator: derive_initiator(claims, hint),
+            initiator: derive_initiator_ref(claims, hint, &AdvisoryAgent::default()),
             action: &action,
             enforce_takeover: crate::run_limits::takeover_enforced(),
         },
@@ -204,6 +206,7 @@ pub(super) async fn execute_ws_action(
                     .org_id(entry.org_id.clone())
                     .actor_id(entry.actor_id.clone())
                     .initiator(admitted.initiator, admitted.control_epoch)
+                    .agent(admitted.agent.clone())
                     .complete(receipt_action.clone(), Some(observation.clone()), cost_usd);
                 state.receipts.append(receipt).await?;
             }
@@ -220,6 +223,7 @@ pub(super) async fn execute_ws_action(
                     .org_id(entry.org_id.clone())
                     .actor_id(entry.actor_id.clone())
                     .initiator(admitted.initiator, admitted.control_epoch)
+                    .agent(admitted.agent.clone())
                     .fail(receipt_action, &error);
                 state.receipts.append(receipt).await?;
             }

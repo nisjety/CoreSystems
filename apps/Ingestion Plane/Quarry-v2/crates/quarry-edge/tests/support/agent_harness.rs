@@ -178,6 +178,12 @@ pub fn service_token() -> String {
     token("service_execution_core", |_| {})
 }
 
+/// A service principal without `browser:execute` (it holds scrape and search scopes
+/// only), so the browser routes refuse it.
+pub fn model_gateway_service_token() -> String {
+    token("service_model_gateway", |_| {})
+}
+
 // ── browser driver double ───────────────────────────────────────────────────
 
 /// A browser driver that starts runs and remembers what it was asked to do.
@@ -347,6 +353,8 @@ impl BrowserDriver for RecordingDriver {
 
     async fn close_tab(&self, _session: &BrowserSession, tab_id: &str) -> QuarryResult<()> {
         self.tab_closes.lock().unwrap().push(tab_id.to_owned());
+        // A closed tab is no longer listed, as with a real browser.
+        self.tab_ids.lock().unwrap().retain(|id| id != tab_id);
         Ok(())
     }
 }

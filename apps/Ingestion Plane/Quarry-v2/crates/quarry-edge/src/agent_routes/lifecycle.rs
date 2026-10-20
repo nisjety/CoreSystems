@@ -448,6 +448,7 @@ pub async fn start_run(
         budget,
         closed: false,
         last_rejected_epoch: None,
+        tab_origins: HashMap::new(),
     };
     let live = RunLive::new(
         entry.org_id.clone(),

@@ -11,8 +11,9 @@ pub(super) fn safe_display_url(raw: &str) -> String {
     parsed.to_string()
 }
 
-pub(super) fn browser_session_tab(tab: BrowserTab) -> BrowserSessionTab {
+pub(super) fn browser_session_tab(tab: BrowserTab, opened_by: Option<TabOrigin>) -> BrowserSessionTab {
     BrowserSessionTab {
+        opened_by,
         tab_id: tab.tab_id,
         title: tab.title,
         url: tab
@@ -53,7 +54,13 @@ pub(super) fn live_browser_session_projection(
         control_mode: entry.control_mode,
         control_epoch: entry.control_epoch,
         execution_tier: entry.execution_tier,
-        tabs: tabs.into_iter().map(browser_session_tab).collect(),
+        tabs: tabs
+            .into_iter()
+            .map(|tab| {
+                let opened_by = entry.tab_origins.get(&tab.tab_id).cloned();
+                browser_session_tab(tab, opened_by)
+            })
+            .collect(),
         last_observation: entry.last_observation.clone(),
         grant_id: entry.grant_id.clone(),
     }
@@ -102,6 +109,7 @@ pub(super) fn browser_timeline_action(receipt: StepReceipt) -> BrowserTimelineIt
             outcome,
             error_code,
             initiated_by: receipt.initiated_by,
+            agent: receipt.agent,
             control_epoch: receipt.control_epoch,
         },
     }
@@ -123,12 +131,14 @@ pub(super) fn browser_timeline_event(event: BrowserTimelineEvent) -> BrowserTime
             tab_id,
             active_tab_id,
             initiated_by,
+            agent,
             control_epoch,
         } => BrowserTimelineItemDetail::Tab {
             operation,
             tab_id,
             active_tab_id,
             initiated_by,
+            agent,
             control_epoch,
         },
         BrowserTimelineEventKind::Devtools {

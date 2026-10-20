@@ -29,6 +29,7 @@ mod support;
 
 use agent_harness::*;
 use quarry_edge::agent_routes::RunHandle;
+use quarry_edge::budget::RunClass;
 use quarry_edge::run_limits::{
     parse_takeover_enforcement, takeover_enforced, RunLimits, ENV_TAKEOVER_ENFORCEMENT,
 };
@@ -910,5 +911,667 @@ async fn an_unknown_tab_label_is_refused_and_runs_nothing() {
     assert!(
         edge.driver.selected_tabs().is_empty() && edge.driver.closed_tabs().is_empty(),
         "a malformed label never reaches the driver"
+    );
+}
+
+// ── both spellings of the initiator hint, on every body that carries it ─────
+
+/// The wire spelling of the response and the timeline is camelCase (`initiatedBy`); a
+/// request may carry the hint as `initiated_by` or `initiatedBy` on every route that
+/// takes it. One test per carrier; each is refused with enforcement on during a
+/// take-over when it names the agent, which is what proves the hint was read (before,
+/// a snake_case `initiated_by` on a tab open was silently ignored and the agent's call
+/// opened a tab in a person's browser: the rebuilt-edge evidence run, check 5).
+#[tokio::test]
+#[serial]
+async fn a_tab_open_takes_the_hint_under_either_spelling() {
+    set_takeover_enforcement(Some("1"));
+
+    let edge = Edge::start(RunLimits::default()).await;
+    let person = member_token();
+    let run = edge.start_run(&person, json!({})).await;
+    let takeover = edge
+        .control(&person, &run, json!({ "mode": "human_takeover" }))
+        .await;
+    assert_eq!(takeover.status, 200, "{}", takeover.body);
+
+    for body in [
+        json!({ "initiated_by": "agent" }),
+        json!({ "initiatedBy": "agent" }),
+    ] {
+        let refused = edge
+            .post(&person, &format!("/v1/agent/runs/{run}/tabs"), body.clone())
+            .await;
+        assert_eq!(refused.status, 409, "{body}: {}", refused.body);
+        assert_eq!(refused.code(), "USER_TOOK_OVER", "{body}");
+    }
+    assert_eq!(
+        edge.driver.tabs_opened(),
+        0,
+        "a refused tab never reaches the driver"
+    );
+
+    // The two spellings in one body are a client bug, not a reason to pick one.
+    let both = edge
+        .post(
+            &person,
+            &format!("/v1/agent/runs/{run}/tabs"),
+            json!({ "initiated_by": "human", "initiatedBy": "agent" }),
+        )
+        .await;
+    assert_eq!(both.status, 422, "{}", both.body);
+    assert_eq!(edge.driver.tabs_opened(), 0);
+
+    // The person's own open, under either spelling, is admitted.
+    for body in [
+        json!({ "initiated_by": "human" }),
+        json!({ "initiatedBy": "human" }),
+    ] {
+        let opened = edge
+            .post(&person, &format!("/v1/agent/runs/{run}/tabs"), body.clone())
+            .await;
+        assert_eq!(opened.status, 200, "{body}: {}", opened.body);
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn a_tab_select_and_close_take_the_hint_under_either_spelling_in_the_query() {
+    set_takeover_enforcement(Some("1"));
+
+    let edge = Edge::start(RunLimits::default()).await;
+    let person = member_token();
+    let (run, tab_id) = run_with_a_tab_under_takeover(&edge, &person).await;
+
+    for query in ["initiated_by=agent", "initiatedBy=agent"] {
+        let select = edge
+            .send(
+                reqwest::Method::POST,
+                &person,
+                &format!("/v1/agent/runs/{run}/tabs/{tab_id}/select?{query}"),
+                None,
+            )
+            .await;
+        let close = edge
+            .send(
+                reqwest::Method::DELETE,
+                &person,
+                &format!("/v1/agent/runs/{run}/tabs/{tab_id}?{query}"),
+                None,
+            )
+            .await;
+        assert_eq!(
+            (select.status, close.status),
+            (409, 409),
+            "{query}: select {} close {}",
+            select.body,
+            close.body
+        );
+    }
+    assert!(
+        edge.driver.selected_tabs().is_empty() && edge.driver.closed_tabs().is_empty(),
+        "a refused tab call never reaches the driver"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn a_step_takes_the_hint_under_either_spelling() {
+    set_takeover_enforcement(Some("1"));
+
+    let edge = Edge::start(RunLimits::default()).await;
+    let person = member_token();
+    let run = edge.start_run(&person, json!({})).await;
+    let takeover = edge
+        .control(&person, &run, json!({ "mode": "human_takeover" }))
+        .await;
+    assert_eq!(takeover.status, 200, "{}", takeover.body);
+
+    for key in ["initiated_by", "initiatedBy"] {
+        let refused = edge
+            .post(
+                &person,
+                &format!("/v1/agent/runs/{run}/step"),
+                json!({ "action": wait_action(), key: "agent" }),
+            )
+            .await;
+        assert_eq!(refused.status, 409, "{key}: {}", refused.body);
+        assert_eq!(refused.code(), "USER_TOOK_OVER", "{key}");
+    }
+
+    // One skipped receipt per take-over (the second refusal is the same episode): it
+    // records the agent's identity, as the person's session, never a principal.
+    let receipts = edge.receipts(&person, &run).await;
+    let skips = skipped(&receipts);
+    assert_eq!(skips.len(), 1, "{receipts:?}");
+    assert_eq!(skips[0]["initiated_by"], "agent", "{}", skips[0]);
+    assert_eq!(
+        skips[0]["agent"],
+        json!({ "basis": "user_session" }),
+        "{}",
+        skips[0]
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn a_socket_action_takes_the_hint_under_either_spelling() {
+    set_takeover_enforcement(Some("1"));
+
+    let edge = Edge::start(RunLimits::default()).await;
+    let person = member_token();
+    let run = edge.start_run(&person, json!({})).await;
+    let takeover = edge
+        .control(&person, &run, json!({ "mode": "human_takeover" }))
+        .await;
+    assert_eq!(takeover.status, 200, "{}", takeover.body);
+
+    let mut socket =
+        TestSocket::connect(&edge, &person, &format!("/v1/agent/runs/{run}/frames/ws")).await;
+    // `actor` is the socket's own name for it.
+    for key in ["actor", "initiated_by", "initiatedBy"] {
+        socket
+            .send_text(
+                &json!({ "type": "action", "action": wait_action(), key: "agent" }).to_string(),
+            )
+            .await;
+        let refused = socket
+            .next_matching(|message| message["type"] == "error" || message["type"] == "observation")
+            .await;
+        assert_eq!(refused["type"], "error", "{key}: {refused}");
+        assert!(
+            refused["message"]
+                .as_str()
+                .is_some_and(|text| text.starts_with("UserTookOver:")),
+            "{key}: {refused}"
+        );
+    }
+}
+
+/// A run start takes the hint under both spellings too: it classes the run as an agent
+/// run, which is budgeted. The projection does not expose the class, so this reads the
+/// registry's own record of it.
+#[tokio::test]
+#[serial]
+async fn a_run_start_takes_the_hint_under_either_spelling() {
+    set_takeover_enforcement(None);
+
+    let edge = Edge::start(RunLimits::default()).await;
+    let person = member_token();
+    for key in ["initiated_by", "initiatedBy"] {
+        let reply = edge
+            .post(&person, "/v1/agent/runs", json!({ key: "agent" }))
+            .await;
+        assert_eq!(reply.status, 200, "{key}: {}", reply.body);
+        let run = reply.data()["run_id"]
+            .as_str()
+            .expect("a run id")
+            .to_owned();
+        let handle = edge.live(&run).expect("the run is live");
+        assert_eq!(
+            handle.live.class(),
+            RunClass::Agent,
+            "{key}: the run was classed as an interactive one"
+        );
+    }
+}
+
+// ── who opened, selected or closed a tab ────────────────────────────────────
+
+fn tab_items(timeline: &[Value]) -> Vec<&Value> {
+    timeline
+        .iter()
+        .filter(|item| item["kind"] == "tab")
+        .collect()
+}
+
+/// An agent's tab calls on a person's token are the agent's by the hint, and the agent
+/// is the person's session, not a verified principal: the timeline says so, carries the
+/// caller's run id and label as advisory fields only, and never a `principalId`. The
+/// projection names the opener on the tab. A person's own calls carry no agent.
+#[tokio::test]
+#[serial]
+async fn a_tab_call_records_which_agent_made_it_and_never_a_forged_principal() {
+    set_takeover_enforcement(None);
+
+    let edge = Edge::start(RunLimits::default()).await;
+    let person = member_token();
+    let run = edge.start_run(&person, json!({})).await;
+
+    let by_agent = edge
+        .post(
+            &person,
+            &format!("/v1/agent/runs/{run}/tabs"),
+            json!({
+                "initiatedBy": "agent",
+                "aiRunId": "run_01J9",
+                "agentLabel": "research-planner",
+                // Not part of the contract; a client can send what it likes.
+                "principalId": "service:execution-core",
+                "agent": { "basis": "service_principal", "principalId": "service:execution-core" },
+            }),
+        )
+        .await;
+    assert_eq!(by_agent.status, 200, "{}", by_agent.body);
+    let agent_tab = by_agent.data()["tab"]["tabId"].as_str().unwrap().to_owned();
+    let by_person = edge.new_tab(&person, &run, None).await;
+    assert_eq!(by_person.status, 200, "{}", by_person.body);
+    let person_tab = by_person.data()["tab"]["tabId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let select = edge
+        .send(
+            reqwest::Method::POST,
+            &person,
+            &format!(
+                "/v1/agent/runs/{run}/tabs/{agent_tab}/select?initiatedBy=agent&aiRunId=run_01J9"
+            ),
+            None,
+        )
+        .await;
+    assert_eq!(select.status, 200, "{}", select.body);
+    // The tab record: the agent's tab says who opened it, the person's says a person,
+    // and the browser's own tab has no opener.
+    let projection = edge.projection(&person, &run).await;
+    let tabs = projection.data()["tabs"].as_array().unwrap().clone();
+    let opened_by = |tab_id: &str| {
+        tabs.iter()
+            .find(|tab| tab["tabId"] == tab_id)
+            .map(|tab| tab["openedBy"].clone())
+    };
+    let expected_open =
+        json!({ "basis": "user_session", "aiRunId": "run_01J9", "label": "research-planner" });
+    assert_eq!(
+        opened_by(&agent_tab),
+        Some(json!({ "initiatedBy": "agent", "agent": expected_open.clone() })),
+        "{tabs:?}"
+    );
+    assert_eq!(
+        opened_by(&person_tab),
+        Some(json!({ "initiatedBy": "human" })),
+        "{tabs:?}"
+    );
+    assert_eq!(
+        opened_by("tab_home"),
+        Some(Value::Null),
+        "the browser's own tab has no opener"
+    );
+
+    let close = edge
+        .send(
+            reqwest::Method::DELETE,
+            &person,
+            &format!("/v1/agent/runs/{run}/tabs/{person_tab}?initiated_by=agent&agent_label=research-planner"),
+            None,
+        )
+        .await;
+    assert_eq!(close.status, 200, "{}", close.body);
+    // A closed tab's record is dropped.
+    let handle = edge.live(&run).expect("the run is live");
+    assert!(!handle
+        .entry
+        .lock()
+        .await
+        .tab_origins
+        .contains_key(&person_tab));
+    assert!(handle
+        .entry
+        .lock()
+        .await
+        .tab_origins
+        .contains_key(&agent_tab));
+
+    let timeline = edge.timeline(&person, &run).await;
+    let items = tab_items(&timeline);
+    let operations: Vec<&str> = items
+        .iter()
+        .map(|item| item["operation"].as_str().unwrap_or(""))
+        .collect();
+    assert_eq!(
+        operations,
+        vec!["opened", "opened", "selected", "closed"],
+        "{timeline:?}"
+    );
+
+    assert_eq!(items[0]["initiatedBy"], "agent");
+    assert_eq!(items[0]["agent"], expected_open, "{}", items[0]);
+    assert!(
+        items[0]["agent"].get("principalId").is_none(),
+        "{}",
+        items[0]
+    );
+    // The person's own open: a person, and no agent at all.
+    assert_eq!(items[1]["initiatedBy"], "human");
+    assert!(items[1].get("agent").is_none(), "{}", items[1]);
+    // The select names the run only; the close names the label only.
+    assert_eq!(
+        items[2]["agent"],
+        json!({ "basis": "user_session", "aiRunId": "run_01J9" })
+    );
+    assert_eq!(
+        items[3]["agent"],
+        json!({ "basis": "user_session", "label": "research-planner" })
+    );
+}
+
+/// A service principal is an agent whatever it sends, and its identity is the signed
+/// service id, not anything in the request. A label that is not identifier-shaped (it
+/// could carry a URL or a title) is dropped, not stored.
+#[tokio::test]
+#[serial]
+async fn a_service_principals_tab_call_is_recorded_with_its_verified_id() {
+    set_takeover_enforcement(None);
+
+    let edge = Edge::start(RunLimits::default()).await;
+    let service = service_token();
+    let run = edge.start_run(&service, json!({})).await;
+
+    let opened = edge
+        .post(
+            &service,
+            &format!("/v1/agent/runs/{run}/tabs"),
+            json!({
+                "initiatedBy": "human",
+                "aiRunId": "run_01J9",
+                "agentLabel": "https://example.com/secret title",
+                "principalId": "service:somebody-else",
+                "agent": { "basis": "user_session", "principalId": "service:somebody-else" },
+            }),
+        )
+        .await;
+    assert_eq!(opened.status, 200, "{}", opened.body);
+
+    let timeline = edge.timeline(&service, &run).await;
+    let items = tab_items(&timeline);
+    assert_eq!(items.len(), 1, "{timeline:?}");
+    assert_eq!(
+        items[0]["initiatedBy"], "agent",
+        "a service cannot claim human"
+    );
+    assert_eq!(
+        items[0]["agent"],
+        json!({
+            "basis": "service_principal",
+            "principalId": "service:execution-core",
+            "aiRunId": "run_01J9"
+        }),
+        "{}",
+        items[0]
+    );
+    let stored = serde_json::to_string(&timeline).unwrap();
+    assert!(
+        !stored.contains("example.com") && !stored.contains("secret"),
+        "{stored}"
+    );
+
+    // A step records the same identity on its receipt.
+    let step = edge.step(&service, &run, wait_action(), None).await;
+    assert_eq!(step.status, 200, "{}", step.body);
+    let receipts = edge.receipts(&service, &run).await;
+    assert_eq!(receipts[0]["initiated_by"], "agent");
+    assert_eq!(receipts[0]["agent"]["basis"], "service_principal");
+    assert_eq!(
+        receipts[0]["agent"]["principalId"],
+        "service:execution-core"
+    );
+    let timeline = edge.timeline(&service, &run).await;
+    let action = timeline
+        .iter()
+        .find(|item| item["kind"] == "action")
+        .expect("the step is on the timeline");
+    assert_eq!(
+        action["agent"]["principalId"], "service:execution-core",
+        "{action}"
+    );
+}
+
+/// A person's step labelled agent records the agent as the person's session too.
+#[tokio::test]
+#[serial]
+async fn a_persons_step_labelled_agent_is_recorded_as_a_user_session_agent() {
+    set_takeover_enforcement(None);
+
+    let edge = Edge::start(RunLimits::default()).await;
+    let person = member_token();
+    let run = edge.start_run(&person, json!({})).await;
+    let step = edge
+        .post(
+            &person,
+            &format!("/v1/agent/runs/{run}/step"),
+            json!({ "action": wait_action(), "initiatedBy": "agent", "aiRunId": "run_01J9" }),
+        )
+        .await;
+    assert_eq!(step.status, 200, "{}", step.body);
+    let human = edge.step(&person, &run, wait_action(), None).await;
+    assert_eq!(human.status, 200, "{}", human.body);
+
+    let receipts = edge.receipts(&person, &run).await;
+    assert_eq!(receipts[0]["initiated_by"], "agent");
+    assert_eq!(
+        receipts[0]["agent"],
+        json!({ "basis": "user_session", "aiRunId": "run_01J9" })
+    );
+    assert_eq!(receipts[1]["initiated_by"], "human");
+    assert!(receipts[1].get("agent").is_none(), "{}", receipts[1]);
+}
+
+/// A service principal's tab call during a take-over is refused with enforcement on,
+/// whatever hint it sends (the service owns the run, so the take-over is set on the live
+/// handle, as the module docs say), and a service token without `browser:execute` never
+/// reaches the tab routes.
+#[tokio::test]
+#[serial]
+async fn a_service_principal_cannot_loosen_the_takeover_rule_on_a_tab_call() {
+    set_takeover_enforcement(Some("1"));
+
+    let edge = Edge::start(RunLimits::default()).await;
+    let service = service_token();
+    let run = edge.start_run(&service, json!({})).await;
+    let opened = edge.new_tab(&service, &run, None).await;
+    assert_eq!(opened.status, 200, "{}", opened.body);
+    let tab_id = opened.data()["tab"]["tabId"].as_str().unwrap().to_owned();
+    take_over_live(&edge, &run).await;
+
+    for hint in [None, Some("human"), Some("agent")] {
+        let open = edge.new_tab(&service, &run, hint).await;
+        assert_eq!(open.status, 409, "hint {hint:?}: {}", open.body);
+        let query = hint.map_or(String::new(), |hint| format!("?initiatedBy={hint}"));
+        let select = edge
+            .send(
+                reqwest::Method::POST,
+                &service,
+                &format!("/v1/agent/runs/{run}/tabs/{tab_id}/select{query}"),
+                None,
+            )
+            .await;
+        let close = edge
+            .send(
+                reqwest::Method::DELETE,
+                &service,
+                &format!("/v1/agent/runs/{run}/tabs/{tab_id}{query}"),
+                None,
+            )
+            .await;
+        assert_eq!((select.status, close.status), (409, 409), "hint {hint:?}");
+    }
+
+    // The refused step is recorded once, with the verified principal and nothing the
+    // request said.
+    let step = edge
+        .post(
+            &service,
+            &format!("/v1/agent/runs/{run}/step"),
+            json!({
+                "action": wait_action(),
+                "initiatedBy": "human",
+                "agent": { "basis": "user_session", "principalId": "service:somebody-else" },
+            }),
+        )
+        .await;
+    assert_eq!(step.status, 409, "{}", step.body);
+    let receipts = edge.receipts(&service, &run).await;
+    let skips = skipped(&receipts);
+    assert_eq!(skips.len(), 1, "{receipts:?}");
+    assert_eq!(
+        skips[0]["initiated_by"], "agent",
+        "a service cannot claim human"
+    );
+    assert_eq!(
+        skips[0]["agent"],
+        json!({ "basis": "service_principal", "principalId": "service:execution-core" }),
+        "{}",
+        skips[0]
+    );
+
+    let no_scope = model_gateway_service_token();
+    let refused = edge.new_tab(&no_scope, &run, None).await;
+    assert_eq!(refused.status, 403, "{}", refused.body);
+}
+
+/// The two spellings of the hint in one request are a client bug on every route that
+/// takes it, not a reason to pick one: the tab open (above), the step, the run start and
+/// the select and close query are all refused, and nothing reaches the driver.
+#[tokio::test]
+#[serial]
+async fn both_spellings_of_the_hint_in_one_request_are_refused_on_every_route() {
+    set_takeover_enforcement(None);
+
+    let edge = Edge::start(RunLimits::default()).await;
+    let person = member_token();
+
+    let start = edge
+        .post(
+            &person,
+            "/v1/agent/runs",
+            json!({ "initiated_by": "human", "initiatedBy": "agent" }),
+        )
+        .await;
+    assert_eq!(start.status, 422, "{}", start.body);
+
+    let (run, tab_id) = {
+        let run = edge.start_run(&person, json!({})).await;
+        let opened = edge.new_tab(&person, &run, None).await;
+        assert_eq!(opened.status, 200, "{}", opened.body);
+        let tab_id = opened.data()["tab"]["tabId"].as_str().unwrap().to_owned();
+        (run, tab_id)
+    };
+    let steps_before = edge.receipts(&person, &run).await.len();
+
+    let step = edge
+        .post(
+            &person,
+            &format!("/v1/agent/runs/{run}/step"),
+            json!({ "action": wait_action(), "initiated_by": "human", "initiatedBy": "agent" }),
+        )
+        .await;
+    assert_eq!(step.status, 422, "{}", step.body);
+
+    let query = "initiated_by=human&initiatedBy=agent";
+    let select = edge
+        .send(
+            reqwest::Method::POST,
+            &person,
+            &format!("/v1/agent/runs/{run}/tabs/{tab_id}/select?{query}"),
+            None,
+        )
+        .await;
+    let close = edge
+        .send(
+            reqwest::Method::DELETE,
+            &person,
+            &format!("/v1/agent/runs/{run}/tabs/{tab_id}?{query}"),
+            None,
+        )
+        .await;
+    for (name, reply) in [("select", &select), ("close", &close)] {
+        assert!(
+            (400..500).contains(&reply.status),
+            "{name}: a query with both spellings is a client error, got {}: {}",
+            reply.status,
+            reply.body
+        );
+    }
+    assert!(
+        edge.driver.selected_tabs().is_empty() && edge.driver.closed_tabs().is_empty(),
+        "a refused tab call never reaches the driver"
+    );
+    assert_eq!(
+        edge.receipts(&person, &run).await.len(),
+        steps_before,
+        "a refused step leaves no receipt"
+    );
+}
+
+/// A ZDR run persists no timeline item and no receipt for a tab call, whoever made it,
+/// but the owner's projection still says who opened each tab: that record is in memory
+/// only, ids and classes, and goes with the run.
+#[tokio::test]
+#[serial]
+async fn a_zdr_runs_tab_calls_persist_nothing_but_the_projection_names_the_opener() {
+    set_takeover_enforcement(None);
+
+    let edge = Edge::start(RunLimits::default()).await;
+    let person = zdr_member_token();
+    let run = edge.start_run(&person, json!({})).await;
+    let (org, actor) = ("org-zdr-golden", "user-golden");
+    let store = edge.state.receipts.clone();
+
+    let by_agent = edge
+        .post(
+            &person,
+            &format!("/v1/agent/runs/{run}/tabs"),
+            json!({ "initiated_by": "agent", "aiRunId": "run_01J9", "agentLabel": "research-planner" }),
+        )
+        .await;
+    assert_eq!(by_agent.status, 200, "{}", by_agent.body);
+    let agent_tab = by_agent.data()["tab"]["tabId"].as_str().unwrap().to_owned();
+    let by_person = edge.new_tab(&person, &run, None).await;
+    assert_eq!(by_person.status, 200, "{}", by_person.body);
+    let person_tab = by_person.data()["tab"]["tabId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let select = edge
+        .send(
+            reqwest::Method::POST,
+            &person,
+            &format!("/v1/agent/runs/{run}/tabs/{agent_tab}/select?initiatedBy=agent"),
+            None,
+        )
+        .await;
+    assert_eq!(select.status, 200, "{}", select.body);
+    let close = edge
+        .send(
+            reqwest::Method::DELETE,
+            &person,
+            &format!("/v1/agent/runs/{run}/tabs/{person_tab}?initiatedBy=human"),
+            None,
+        )
+        .await;
+    assert_eq!(close.status, 200, "{}", close.body);
+
+    assert_nothing_persisted(store.as_ref(), org, actor, &run, "after tab calls").await;
+
+    let projection = edge.projection(&person, &run).await;
+    assert_eq!(projection.status, 200, "{}", projection.body);
+    assert_eq!(projection.data()["zdr"], true);
+    let tabs = projection.data()["tabs"].as_array().unwrap().clone();
+    let opened_by = tabs
+        .iter()
+        .find(|tab| tab["tabId"] == agent_tab.as_str())
+        .map(|tab| tab["openedBy"].clone());
+    assert_eq!(
+        opened_by,
+        Some(json!({
+            "initiatedBy": "agent",
+            "agent": { "basis": "user_session", "aiRunId": "run_01J9", "label": "research-planner" }
+        })),
+        "{tabs:?}"
+    );
+    assert!(
+        tabs.iter().all(|tab| tab["tabId"] != person_tab.as_str()),
+        "the closed tab is gone from the projection: {tabs:?}"
     );
 }

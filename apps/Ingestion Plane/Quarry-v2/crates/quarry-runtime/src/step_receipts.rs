@@ -183,6 +183,11 @@ pub enum BrowserTimelineEventKind {
         active_tab_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         initiated_by: Option<BrowserTimelineInitiator>,
+        /// Which agent opened, selected or closed the tab, when `initiated_by` is
+        /// `agent`. Absent for a person and on events written before agents were
+        /// recorded.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<AgentIdentity>,
         #[serde(default, skip_serializing_if = "is_zero")]
         control_epoch: u64,
     },
@@ -205,6 +210,51 @@ pub enum BrowserTimelineInitiator {
     Human,
     Agent,
     System,
+}
+
+/// How an [`AgentIdentity`] was established.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentIdentityBasis {
+    /// Verified: the call carried a service principal's own signed token, and
+    /// `principal_id` is that token's service id.
+    ServicePrincipal,
+    /// Not verified: the call carried a person's session token with an `agent`
+    /// hint (the gateway sends one for an action the model proposed through the
+    /// person's own session). Which agent it was is only what the caller said.
+    UserSession,
+}
+
+/// Which agent was behind an operation an agent initiated. Ids and classes only:
+/// never a URL, a title or free text, so it is safe to store under ZDR rules that
+/// allow ids.
+///
+/// `principal_id` is the only verified part, and only for
+/// `AgentIdentityBasis::ServicePrincipal`. `ai_run_id` and `label` are what the
+/// caller supplied (identifier-shaped, bounded): advisory, never used for an
+/// authorization decision.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentIdentity {
+    pub basis: AgentIdentityBasis,
+    /// The signed service id of the calling principal; present only for
+    /// `ServicePrincipal`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal_id: Option<String>,
+    /// The AI run the caller says it is acting for. Advisory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_run_id: Option<String>,
+    /// A short identifier-shaped name the caller gave its agent. Advisory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+impl AgentIdentity {
+    /// True when `principal_id` was established from a verified token.
+    #[must_use]
+    pub fn is_verified(&self) -> bool {
+        self.basis == AgentIdentityBasis::ServicePrincipal && self.principal_id.is_some()
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -259,6 +309,10 @@ pub struct StepReceipt {
     /// The control epoch the step was admitted under. Absent on older receipts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_epoch: Option<u64>,
+    /// Which agent drove the step, when `initiated_by` is `agent`. Absent for a
+    /// person and on receipts written before agents were recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentIdentity>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -515,6 +569,7 @@ pub struct ReceiptBuilder {
     correction_of: Option<String>,
     initiated_by: Option<BrowserTimelineInitiator>,
     control_epoch: Option<u64>,
+    agent: Option<AgentIdentity>,
 }
 
 impl ReceiptBuilder {
@@ -528,7 +583,14 @@ impl ReceiptBuilder {
             correction_of: None,
             initiated_by: None,
             control_epoch: None,
+            agent: None,
         }
+    }
+
+    /// Record which agent drove the step (call after `initiator`).
+    pub fn agent(mut self, agent: Option<AgentIdentity>) -> Self {
+        self.agent = agent;
+        self
     }
 
     /// Record who drove the step and the control epoch it was admitted under.
@@ -576,6 +638,7 @@ impl ReceiptBuilder {
             cost_micro_usd: (cost_usd * 1_000_000.0).max(0.0) as u64,
             initiated_by: self.initiated_by,
             control_epoch: self.control_epoch,
+            agent: self.agent,
         }
     }
 
@@ -602,6 +665,7 @@ impl ReceiptBuilder {
             cost_micro_usd: 0,
             initiated_by: self.initiated_by,
             control_epoch: self.control_epoch,
+            agent: self.agent,
         }
     }
 
@@ -624,6 +688,7 @@ impl ReceiptBuilder {
             cost_micro_usd: 0,
             initiated_by: self.initiated_by,
             control_epoch: self.control_epoch,
+            agent: self.agent,
         }
     }
 }
@@ -831,6 +896,77 @@ mod tests {
         let back: StepReceipt = serde_json::from_value(json).unwrap();
         assert_eq!(back.initiated_by, None);
         assert_eq!(back.control_epoch, None);
+    }
+
+    fn service_agent() -> AgentIdentity {
+        AgentIdentity {
+            basis: AgentIdentityBasis::ServicePrincipal,
+            principal_id: Some("service:execution-core".into()),
+            ai_run_id: Some("run_01J".into()),
+            label: None,
+        }
+    }
+
+    #[test]
+    fn receipt_roundtrips_the_agent_identity_and_omits_it_for_a_person() {
+        let receipt = ReceiptBuilder::start("run_x", 1)
+            .initiator(BrowserTimelineInitiator::Agent, 0)
+            .agent(Some(service_agent()))
+            .complete(sample_action(), None, 0.0);
+        let json = serde_json::to_value(&receipt).unwrap();
+        assert_eq!(json["agent"]["basis"], "service_principal");
+        assert_eq!(json["agent"]["principalId"], "service:execution-core");
+        assert_eq!(json["agent"]["aiRunId"], "run_01J");
+        assert!(json["agent"].get("label").is_none(), "{json}");
+        let back: StepReceipt = serde_json::from_value(json).unwrap();
+        assert_eq!(back.agent, Some(service_agent()));
+        assert!(back.agent.as_ref().unwrap().is_verified());
+
+        let person = ReceiptBuilder::start("run_x", 2)
+            .initiator(BrowserTimelineInitiator::Human, 0)
+            .complete(sample_action(), None, 0.0);
+        assert!(serde_json::to_value(&person).unwrap().get("agent").is_none());
+    }
+
+    #[test]
+    fn a_user_session_identity_is_never_verified() {
+        let identity = AgentIdentity {
+            basis: AgentIdentityBasis::UserSession,
+            principal_id: Some("service:forged".into()),
+            ai_run_id: None,
+            label: Some("planner".into()),
+        };
+        assert!(!identity.is_verified());
+    }
+
+    #[test]
+    fn tab_event_roundtrips_the_agent_and_a_legacy_event_has_none() {
+        let kind = BrowserTimelineEventKind::Tab {
+            operation: BrowserTabOperation::Opened,
+            tab_id: Some("tab-2".into()),
+            active_tab_id: Some("tab-2".into()),
+            initiated_by: Some(BrowserTimelineInitiator::Agent),
+            agent: Some(service_agent()),
+            control_epoch: 1,
+        };
+        let json = serde_json::to_value(&kind).unwrap();
+        assert_eq!(json["kind"], "tab");
+        assert_eq!(json["initiated_by"], "agent");
+        assert_eq!(json["agent"]["principalId"], "service:execution-core");
+        assert_eq!(serde_json::from_value::<BrowserTimelineEventKind>(json).unwrap(), kind);
+
+        // An event stored before agents were recorded has no key and reads as none.
+        let legacy = serde_json::json!({
+            "kind": "tab", "operation": "closed", "tab_id": "tab-1",
+            "active_tab_id": null, "initiated_by": "agent", "control_epoch": 2
+        });
+        match serde_json::from_value::<BrowserTimelineEventKind>(legacy).unwrap() {
+            BrowserTimelineEventKind::Tab { agent, initiated_by, .. } => {
+                assert_eq!(agent, None);
+                assert_eq!(initiated_by, Some(BrowserTimelineInitiator::Agent));
+            }
+            other => panic!("not a tab event: {other:?}"),
+        }
     }
 
     #[test]

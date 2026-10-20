@@ -42,6 +42,26 @@ pub async fn list_tabs(
     Ok(Json(Envelope::ok(request_id, BrowserTabsData { tabs })))
 }
 
+/// The most tab openers a run remembers. Entries for tabs that are gone are dropped
+/// first, so only a run with this many tabs open at once stops recording openers.
+const MAX_TAB_ORIGINS: usize = 256;
+
+/// Remember who opened `tab_id`, after dropping the openers of tabs that no
+/// longer exist (`live_tabs` is the list the driver just returned).
+pub(super) fn remember_tab_opener(
+    entry: &mut RunEntry,
+    tab_id: &str,
+    origin: TabOrigin,
+    live_tabs: &[BrowserTab],
+) {
+    entry
+        .tab_origins
+        .retain(|id, _| live_tabs.iter().any(|tab| tab.tab_id == *id));
+    if entry.tab_origins.len() < MAX_TAB_ORIGINS || entry.tab_origins.contains_key(tab_id) {
+        entry.tab_origins.insert(tab_id.to_owned(), origin);
+    }
+}
+
 /// `POST /v1/agent/runs/{run_id}/tabs` — open a new live browser tab.
 pub async fn new_tab(
     State(state): State<AppState>,
@@ -58,7 +78,7 @@ pub async fn new_tab(
     // Counts as in flight from before it waits for the run lock, as a step does, so
     // the sweeper never releases a run a tab call is queued on.
     let _in_flight = handle.live.in_flight_guard();
-    let entry = handle.entry.lock().await;
+    let mut entry = handle.entry.lock().await;
     if !caller_owns_live_run(&entry, &claims) {
         return Err(status_err(
             StatusCode::NOT_FOUND,
@@ -74,7 +94,7 @@ pub async fn new_tab(
     let admitted = admit_tab_operation(
         &handle,
         &entry,
-        derive_initiator(&claims, body.initiated_by),
+        derive_initiator_ref(&claims, body.initiated_by, &body.advisory_agent()),
         crate::run_limits::takeover_enforced(),
     )
     .map_err(|error| driver_err(&request_id, error))?;
@@ -143,12 +163,22 @@ pub async fn new_tab(
         .list_tabs(&entry.session)
         .await
         .map_err(|e| driver_err(&request_id, e))?;
+    remember_tab_opener(
+        &mut entry,
+        &tab.tab_id,
+        TabOrigin {
+            initiated_by: admitted.initiator,
+            agent: admitted.agent.clone(),
+        },
+        &tabs,
+    );
     record_browser_timeline_event(
         &state,
         &entry,
         BrowserTimelineEventKind::Tab {
             operation: BrowserTabOperation::Opened,
             initiated_by: Some(admitted.initiator),
+            agent: admitted.agent.clone(),
             control_epoch: admitted.control_epoch,
             tab_id: Some(tab.tab_id.clone()),
             active_tab_id: active_browser_tab_id(&tabs),
@@ -192,7 +222,7 @@ pub async fn select_tab(
     let admitted = admit_tab_operation(
         &handle,
         &entry,
-        derive_initiator(&claims, call.initiated_by),
+        derive_initiator_ref(&claims, call.initiated_by, &call.advisory_agent()),
         crate::run_limits::takeover_enforced(),
     )
     .map_err(|error| driver_err(&request_id, error))?;
@@ -213,6 +243,7 @@ pub async fn select_tab(
         BrowserTimelineEventKind::Tab {
             operation: BrowserTabOperation::Selected,
             initiated_by: Some(admitted.initiator),
+            agent: admitted.agent.clone(),
             control_epoch: admitted.control_epoch,
             tab_id: Some(tab_id),
             active_tab_id: active_browser_tab_id(&tabs),
@@ -240,7 +271,7 @@ pub async fn close_tab(
     // Counts as in flight from before it waits for the run lock, as a step does, so
     // the sweeper never releases a run a tab call is queued on.
     let _in_flight = handle.live.in_flight_guard();
-    let entry = handle.entry.lock().await;
+    let mut entry = handle.entry.lock().await;
     if !caller_owns_live_run(&entry, &claims) {
         return Err(status_err(
             StatusCode::NOT_FOUND,
@@ -256,7 +287,7 @@ pub async fn close_tab(
     let admitted = admit_tab_operation(
         &handle,
         &entry,
-        derive_initiator(&claims, call.initiated_by),
+        derive_initiator_ref(&claims, call.initiated_by, &call.advisory_agent()),
         crate::run_limits::takeover_enforced(),
     )
     .map_err(|error| driver_err(&request_id, error))?;
@@ -271,12 +302,14 @@ pub async fn close_tab(
         .list_tabs(&entry.session)
         .await
         .map_err(|e| driver_err(&request_id, e))?;
+    entry.tab_origins.remove(&tab_id);
     record_browser_timeline_event(
         &state,
         &entry,
         BrowserTimelineEventKind::Tab {
             operation: BrowserTabOperation::Closed,
             initiated_by: Some(admitted.initiator),
+            agent: admitted.agent.clone(),
             control_epoch: admitted.control_epoch,
             tab_id: Some(tab_id),
             active_tab_id: active_browser_tab_id(&tabs),

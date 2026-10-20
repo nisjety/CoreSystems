@@ -80,6 +80,101 @@ pub fn derive_initiator(
     }
 }
 
+/// The longest advisory value kept.
+const ADVISORY_MAX_LEN: usize = 64;
+
+/// What the caller said about *which* agent it is, in fields it chose: the AI run
+/// it acts for and a short label. Advisory only. Nothing here is verified, so no
+/// decision (takeover gate, budget class, ownership) may read it; it is recorded
+/// next to the verified identity and marked as the caller's word.
+///
+/// Both are identifier-shaped (`[A-Za-z0-9._:-]`, 1 to 64 characters). Anything
+/// else is dropped, not rejected: a bad label must not fail a browser call, and an
+/// identifier-shaped value cannot carry a URL or a page title into a ZDR-bound
+/// record.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AdvisoryAgent {
+    pub ai_run_id: Option<String>,
+    pub label: Option<String>,
+}
+
+impl AdvisoryAgent {
+    #[must_use]
+    pub fn new(ai_run_id: Option<&str>, label: Option<&str>) -> Self {
+        Self {
+            ai_run_id: advisory_identifier(ai_run_id),
+            label: advisory_identifier(label),
+        }
+    }
+}
+
+fn advisory_identifier(raw: Option<&str>) -> Option<String> {
+    let value = raw?.trim();
+    let shaped = !value.is_empty()
+        && value.len() <= ADVISORY_MAX_LEN
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'));
+    shaped.then(|| value.to_owned())
+}
+
+/// Who drove an operation: the class, and for an agent which one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Initiator {
+    pub class: StepInitiator,
+    /// Present only when `class` is `Agent` and the call came through
+    /// [`derive_initiator_ref`].
+    pub agent: Option<AgentIdentity>,
+}
+
+impl From<StepInitiator> for Initiator {
+    fn from(class: StepInitiator) -> Self {
+        Self { class, agent: None }
+    }
+}
+
+/// [`derive_initiator`] plus which agent it was.
+///
+/// - A service principal's token: an agent, whatever it sends. The identity is
+///   `ServicePrincipal` and its `principal_id` is the token's signed service id:
+///   the only verified part. It cannot be claimed or changed from the request.
+/// - A person's token with the `agent` hint: an agent (the hint only tightens),
+///   identity `UserSession` with no `principal_id`: the token proves a person,
+///   not an agent.
+/// - A person's token otherwise: a person, no agent.
+///
+/// `advisory` rides along on an agent's identity and is dropped for a person.
+#[must_use]
+pub fn derive_initiator_ref(
+    claims: &crate::auth::Claims,
+    hint: Option<InitiatorHint>,
+    advisory: &AdvisoryAgent,
+) -> Initiator {
+    let class = derive_initiator(claims, hint);
+    if class != StepInitiator::Agent {
+        return Initiator { class, agent: None };
+    }
+    let service = claims.is_service();
+    Initiator {
+        class,
+        agent: Some(AgentIdentity {
+            basis: if service {
+                AgentIdentityBasis::ServicePrincipal
+            } else {
+                AgentIdentityBasis::UserSession
+            },
+            principal_id: service.then(|| {
+                claims
+                    .service_id
+                    .clone()
+                    .unwrap_or_else(|| claims.actor_id().to_owned())
+            }),
+            ai_run_id: advisory.ai_run_id.clone(),
+            label: advisory.label.clone(),
+        }),
+    }
+}
+
 /// A consistent reading of who holds the browser and for which epoch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ControlSnapshot {

@@ -117,6 +117,7 @@ async fn step_refuses_raw_script_and_consumes_nothing() {
         budget: None,
         closed: false,
         last_rejected_epoch: None,
+        tab_origins: HashMap::new(),
     };
     let handle = handle_for(entry);
     let entry_arc = handle.entry.clone();
@@ -137,6 +138,8 @@ async fn step_refuses_raw_script_and_consumes_nothing() {
             instruction: None,
             extraction_profile: None,
             initiated_by: None,
+            ai_run_id: None,
+            agent_label: None,
         }),
     )
     .await;
@@ -300,6 +303,7 @@ fn step_budget_is_fail_closed_once_limit_is_reached() {
         budget: None,
         closed: false,
         last_rejected_epoch: None,
+        tab_origins: HashMap::new(),
     };
     assert!(enforce_step_budget(&entry).is_err());
     entry.constraints.max_steps = 0;
@@ -358,6 +362,7 @@ fn entry_with_budget(budget: Option<crate::budget::RunBudget>) -> RunEntry {
         budget,
         closed: false,
         last_rejected_epoch: None,
+        tab_origins: HashMap::new(),
     }
 }
 
@@ -497,6 +502,8 @@ async fn call_step(
             instruction: None,
             extraction_profile: None,
             initiated_by: None,
+            ai_run_id: None,
+            agent_label: None,
         }),
     )
     .await;
@@ -811,7 +818,7 @@ fn run_in_takeover(claims: &crate::auth::Claims, epoch: u64) -> RunHandle {
 
 fn input(initiator: StepInitiator, action: &AgentAction, enforce: bool) -> AdmitInput<'_> {
     AdmitInput {
-        initiator,
+        initiator: initiator.into(),
         action,
         enforce_takeover: enforce,
     }
@@ -839,6 +846,185 @@ fn derive_initiator_user_is_human_unless_hint_tightens() {
         derive_initiator(&user, Some(InitiatorHint::Agent)),
         StepInitiator::Agent
     );
+}
+
+/// The six combinations of a verified principal and a client hint. The class follows
+/// the token first: a service principal is always an agent; a person is a person unless
+/// the hint tightens. The agent identity follows the token too: only a service principal
+/// has a verified `principal_id`, and a hint on a person's token never gets one.
+#[test]
+fn the_initiator_of_each_principal_and_hint_combination() {
+    let user = crate::test_support::claims_for_org("org");
+    let service = service_claims("org", "service:execution-core");
+    let none = AdvisoryAgent::default();
+
+    // (claims, hint, class, basis of the identity if any)
+    let table: [(&crate::auth::Claims, Option<InitiatorHint>, StepInitiator, Option<AgentIdentityBasis>); 6] = [
+        (&user, None, StepInitiator::Human, None),
+        (&user, Some(InitiatorHint::Human), StepInitiator::Human, None),
+        (&user, Some(InitiatorHint::Agent), StepInitiator::Agent, Some(AgentIdentityBasis::UserSession)),
+        (&service, None, StepInitiator::Agent, Some(AgentIdentityBasis::ServicePrincipal)),
+        (&service, Some(InitiatorHint::Human), StepInitiator::Agent, Some(AgentIdentityBasis::ServicePrincipal)),
+        (&service, Some(InitiatorHint::Agent), StepInitiator::Agent, Some(AgentIdentityBasis::ServicePrincipal)),
+    ];
+    for (claims, hint, class, basis) in table {
+        let initiator = derive_initiator_ref(claims, hint, &none);
+        assert_eq!(initiator.class, class, "{:?} {hint:?}", claims.principal_type);
+        assert_eq!(
+            initiator.agent.as_ref().map(|agent| agent.basis),
+            basis,
+            "{:?} {hint:?}",
+            claims.principal_type
+        );
+        // The class never disagrees with the existing rule.
+        assert_eq!(initiator.class, derive_initiator(claims, hint));
+        // Only a service principal's identity is verified, and it is the signed id.
+        match (basis, initiator.agent) {
+            (Some(AgentIdentityBasis::ServicePrincipal), Some(agent)) => {
+                assert!(agent.is_verified());
+                assert_eq!(agent.principal_id.as_deref(), Some("service:execution-core"));
+            }
+            (Some(AgentIdentityBasis::UserSession), Some(agent)) => {
+                assert!(!agent.is_verified());
+                assert_eq!(agent.principal_id, None);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The advisory fields ride on an agent's identity, are dropped for a person, and are
+/// only kept when identifier-shaped: a URL or a title cannot reach a stored record.
+#[test]
+fn advisory_agent_fields_are_identifier_shaped_and_only_an_agent_keeps_them() {
+    let user = crate::test_support::claims_for_org("org");
+    let advisory = AdvisoryAgent::new(Some(" run_01J9 "), Some("research-planner.v2"));
+    assert_eq!(advisory.ai_run_id.as_deref(), Some("run_01J9"));
+    assert_eq!(advisory.label.as_deref(), Some("research-planner.v2"));
+
+    let agent = derive_initiator_ref(&user, Some(InitiatorHint::Agent), &advisory)
+        .agent
+        .expect("an agent has an identity");
+    assert_eq!(agent.ai_run_id.as_deref(), Some("run_01J9"));
+    assert_eq!(agent.label.as_deref(), Some("research-planner.v2"));
+    assert_eq!(derive_initiator_ref(&user, None, &advisory).agent, None);
+
+    let long = "a".repeat(65);
+    for rejected in [
+        "",
+        "   ",
+        "has space",
+        "https://example.com/x",
+        "a/b",
+        "title: secret",
+        "tab\u{0}",
+        "caf\u{e9}",
+        long.as_str(),
+    ] {
+        let advisory = AdvisoryAgent::new(Some(rejected), Some(rejected));
+        assert_eq!(advisory, AdvisoryAgent::default(), "{rejected:?}");
+    }
+    assert!(AdvisoryAgent::new(Some(&"a".repeat(64)), None).ai_run_id.is_some());
+}
+
+/// Every body that carries the hint takes `initiated_by` and `initiatedBy`; both in one
+/// body is an error, never a silent pick.
+#[test]
+fn every_request_body_takes_the_hint_under_both_spellings() {
+    use serde_json::json;
+    for key in ["initiated_by", "initiatedBy"] {
+        let tab: NewTabBody = serde_json::from_value(json!({ key: "agent" })).unwrap();
+        assert_eq!(tab.initiated_by, Some(InitiatorHint::Agent), "{key}");
+        let query: TabCallQuery = serde_json::from_value(json!({ key: "agent" })).unwrap();
+        assert_eq!(query.initiated_by, Some(InitiatorHint::Agent), "{key}");
+        let step: StepBody = serde_json::from_value(
+            json!({ "action": { "type": "wait", "ms": 0 }, key: "agent" }),
+        )
+        .unwrap();
+        assert_eq!(step.initiated_by, Some(InitiatorHint::Agent), "{key}");
+        let start: StartRunBody = serde_json::from_value(json!({ key: "agent" })).unwrap();
+        assert_eq!(start.initiated_by.as_deref(), Some("agent"), "{key}");
+        let socket: BrowserWsClientMessage = serde_json::from_value(
+            json!({ "type": "action", "action": { "type": "wait", "ms": 0 }, key: "agent" }),
+        )
+        .unwrap();
+        assert!(matches!(
+            socket,
+            BrowserWsClientMessage::Action { actor: Some(InitiatorHint::Agent), .. }
+        ));
+    }
+    assert!(serde_json::from_value::<NewTabBody>(
+        json!({ "initiated_by": "human", "initiatedBy": "agent" })
+    )
+    .is_err());
+    // Both spellings in one body are refused on every carrier, never a silent pick.
+    let both = json!({ "initiated_by": "human", "initiatedBy": "agent" });
+    let with = |extra: serde_json::Value| {
+        let mut body = both.clone();
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        body
+    };
+    assert!(serde_json::from_value::<TabCallQuery>(both.clone()).is_err());
+    assert!(serde_json::from_value::<StartRunBody>(both.clone()).is_err());
+    assert!(serde_json::from_value::<StepBody>(with(json!({ "action": { "type": "wait", "ms": 0 } })))
+        .is_err());
+    assert!(serde_json::from_value::<BrowserWsClientMessage>(with(
+        json!({ "type": "action", "action": { "type": "wait", "ms": 0 } })
+    ))
+    .is_err());
+    // The socket's own name for it counts as a spelling too.
+    assert!(serde_json::from_value::<BrowserWsClientMessage>(json!({
+        "type": "action",
+        "action": { "type": "wait", "ms": 0 },
+        "actor": "human",
+        "initiatedBy": "agent",
+    }))
+    .is_err());
+    assert!(serde_json::from_value::<NewTabBody>(json!({ "initiatedBy": "system" })).is_err());
+
+    // The advisory fields take both spellings as well.
+    for (run, label) in [("ai_run_id", "agent_label"), ("aiRunId", "agentLabel")] {
+        let tab: NewTabBody =
+            serde_json::from_value(json!({ run: "run_1", label: "planner" })).unwrap();
+        assert_eq!(tab.advisory_agent().ai_run_id.as_deref(), Some("run_1"));
+        assert_eq!(tab.advisory_agent().label.as_deref(), Some("planner"));
+        let query: TabCallQuery =
+            serde_json::from_value(json!({ run: "run_1", label: "planner" })).unwrap();
+        assert_eq!(query.advisory_agent(), tab.advisory_agent());
+    }
+}
+
+/// The tab record keeps only as many openers as it can verify exist, drops the ones
+/// whose tab is gone first, and never grows past its cap.
+#[test]
+fn the_tab_opener_record_is_bounded_and_prunes_gone_tabs() {
+    let mut entry = entry_with_budget(None);
+    let origin = |agent: bool| TabOrigin {
+        initiated_by: if agent { StepInitiator::Agent } else { StepInitiator::Human },
+        agent: None,
+    };
+    let tab = |id: String| BrowserTab { tab_id: id, title: None, url: None, active: false };
+
+    let first: Vec<BrowserTab> = (0..256).map(|n| tab(format!("t{n}"))).collect();
+    for tab in &first {
+        remember_tab_opener(&mut entry, &tab.tab_id, origin(true), &first);
+    }
+    assert_eq!(entry.tab_origins.len(), 256);
+
+    // At the cap with every tab still open: a new opener is not recorded.
+    let mut crowded = first.clone();
+    crowded.push(tab("extra".into()));
+    remember_tab_opener(&mut entry, "extra", origin(false), &crowded);
+    assert_eq!(entry.tab_origins.len(), 256);
+    assert!(!entry.tab_origins.contains_key("extra"));
+
+    // Once tabs are gone their openers are pruned and the new one fits.
+    let remaining: Vec<BrowserTab> = vec![tab("t0".into()), tab("extra".into())];
+    remember_tab_opener(&mut entry, "extra", origin(false), &remaining);
+    assert_eq!(entry.tab_origins.len(), 2);
+    assert_eq!(entry.tab_origins["extra"].initiated_by, StepInitiator::Human);
 }
 
 #[test]
@@ -1718,6 +1904,8 @@ async fn a_step_on_a_released_run_carries_the_hint() {
             instruction: None,
             extraction_profile: None,
             initiated_by: None,
+            ai_run_id: None,
+            agent_label: None,
         }),
     )
     .await;

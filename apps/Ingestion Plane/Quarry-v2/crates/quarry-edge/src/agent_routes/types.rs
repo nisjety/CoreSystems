@@ -37,6 +37,20 @@ pub struct RunEntry {
     /// The control epoch for which a refused agent action already left its one
     /// `skipped` receipt (one per takeover, not one per refused call).
     pub last_rejected_epoch: Option<u64>,
+    /// Who opened each tab a call through the tab routes opened (tab id to opener).
+    /// Process-local, ids and classes only, bounded (see `tabs::remember_tab_opener`).
+    /// A tab the browser opened itself (the first one, a popup) has no entry.
+    pub tab_origins: HashMap<String, TabOrigin>,
+}
+
+/// Who opened a tab: the initiator class and, for an agent, which one. The owner
+/// projection carries it on the tab as `openedBy`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TabOrigin {
+    pub initiated_by: BrowserTimelineInitiator,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentIdentity>,
 }
 
 /// run_id → handle. Outer std-Mutex guards the map (held only for the O(1)
@@ -88,7 +102,7 @@ pub struct StartRunBody {
     /// Who is driving this run: `"agent"` marks it as a model-driven run.
     /// Tighten-only: it can make a run an agent run (budgeted), never the
     /// reverse; a service principal is an agent run whatever it sends.
-    #[serde(default)]
+    #[serde(default, alias = "initiatedBy")]
     pub initiated_by: Option<String>,
     /// Optional requirements for the selected execution driver. Quarry
     /// fails closed instead of silently beginning a run with a driver that
@@ -213,6 +227,10 @@ pub struct BrowserSessionTab {
     pub title: Option<String>,
     pub url: Option<String>,
     pub active: bool,
+    /// Who opened the tab, for a tab opened through the tab routes. Absent for a
+    /// tab the browser opened itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opened_by: Option<TabOrigin>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -220,12 +238,26 @@ pub struct StepBody {
     pub action: AgentAction,
     /// Who initiated the action. Can only tighten: `agent` on a person's token
     /// makes this call an agent's; a service principal is an agent regardless.
-    #[serde(default)]
+    /// `initiatedBy` is accepted as well.
+    #[serde(default, alias = "initiatedBy")]
     pub initiated_by: Option<InitiatorHint>,
+    /// The AI run the caller says it acts for. Advisory (see `AdvisoryAgent`).
+    #[serde(default, alias = "aiRunId")]
+    pub ai_run_id: Option<String>,
+    /// A short label the caller gave its agent. Advisory (see `AdvisoryAgent`).
+    #[serde(default, alias = "agentLabel")]
+    pub agent_label: Option<String>,
     #[serde(default)]
     pub instruction: Option<String>,
     #[serde(default)]
     pub extraction_profile: Option<ExtractionProfile>,
+}
+
+impl StepBody {
+    #[must_use]
+    pub fn advisory_agent(&self) -> AdvisoryAgent {
+        AdvisoryAgent::new(self.ai_run_id.as_deref(), self.agent_label.as_deref())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -269,6 +301,8 @@ pub enum BrowserTimelineItemDetail {
         error_code: Option<String>,
         #[serde(rename = "initiatedBy", skip_serializing_if = "Option::is_none")]
         initiated_by: Option<BrowserTimelineInitiator>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        agent: Option<AgentIdentity>,
         #[serde(rename = "controlEpoch", skip_serializing_if = "Option::is_none")]
         control_epoch: Option<u64>,
     },
@@ -285,6 +319,8 @@ pub enum BrowserTimelineItemDetail {
         active_tab_id: Option<String>,
         #[serde(rename = "initiatedBy", skip_serializing_if = "Option::is_none")]
         initiated_by: Option<BrowserTimelineInitiator>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        agent: Option<AgentIdentity>,
         #[serde(rename = "controlEpoch")]
         control_epoch: u64,
     },
@@ -470,8 +506,23 @@ pub struct EgressReceiptsData {
 pub struct NewTabBody {
     #[serde(default)]
     pub url: Option<String>,
-    #[serde(default, alias = "initiatedBy")]
+    /// `initiatedBy` and `initiated_by` are both accepted (the wire spelling is
+    /// camelCase; `/step` has always taken snake_case).
+    #[serde(default, alias = "initiated_by")]
     pub initiated_by: Option<InitiatorHint>,
+    /// The AI run the caller says it acts for. Advisory (see `AdvisoryAgent`).
+    #[serde(default, alias = "ai_run_id")]
+    pub ai_run_id: Option<String>,
+    /// A short label the caller gave its agent. Advisory (see `AdvisoryAgent`).
+    #[serde(default, alias = "agent_label")]
+    pub agent_label: Option<String>,
+}
+
+impl NewTabBody {
+    #[must_use]
+    pub fn advisory_agent(&self) -> AdvisoryAgent {
+        AdvisoryAgent::new(self.ai_run_id.as_deref(), self.agent_label.as_deref())
+    }
 }
 
 /// The query of a tab select or close (neither has a body): who initiated the call.
@@ -484,6 +535,19 @@ pub struct NewTabBody {
 pub struct TabCallQuery {
     #[serde(default, alias = "initiated_by")]
     pub initiated_by: Option<InitiatorHint>,
+    /// The AI run the caller says it acts for. Advisory (see `AdvisoryAgent`).
+    #[serde(default, alias = "ai_run_id")]
+    pub ai_run_id: Option<String>,
+    /// A short label the caller gave its agent. Advisory (see `AdvisoryAgent`).
+    #[serde(default, alias = "agent_label")]
+    pub agent_label: Option<String>,
+}
+
+impl TabCallQuery {
+    #[must_use]
+    pub fn advisory_agent(&self) -> AdvisoryAgent {
+        AdvisoryAgent::new(self.ai_run_id.as_deref(), self.agent_label.as_deref())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -493,7 +557,7 @@ pub enum BrowserWsClientMessage {
         action: AgentAction,
         #[serde(default)]
         instruction: Option<String>,
-        #[serde(default, alias = "initiated_by")]
+        #[serde(default, alias = "initiated_by", alias = "initiatedBy")]
         actor: Option<InitiatorHint>,
     },
     Ping,

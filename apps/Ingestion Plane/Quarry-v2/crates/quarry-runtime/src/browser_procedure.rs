@@ -267,6 +267,7 @@ mod tests {
             cost_micro_usd: 0,
             initiated_by: None,
             control_epoch: None,
+            agent: None,
         }
     }
 

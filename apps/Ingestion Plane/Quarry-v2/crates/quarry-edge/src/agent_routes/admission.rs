@@ -250,14 +250,16 @@ pub(super) fn require_action_capabilities(
 
 /// What an admitted action runs under: who drove it and the control epoch it was
 /// admitted in (both stamped on its receipt).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(super) struct Admitted {
     pub initiator: StepInitiator,
+    /// Which agent, when `initiator` is `Agent`.
+    pub agent: Option<AgentIdentity>,
     pub control_epoch: u64,
 }
 
 pub(super) struct AdmitInput<'a> {
-    pub initiator: StepInitiator,
+    pub initiator: Initiator,
     pub action: &'a AgentAction,
     /// Refuse (not just log) an agent action while a person holds the browser.
     pub enforce_takeover: bool,
@@ -308,7 +310,7 @@ async fn record_takeover_skip(
     state: &AppState,
     entry: &mut RunEntry,
     action: &AgentAction,
-    initiator: StepInitiator,
+    initiator: &Initiator,
     snapshot: ControlSnapshot,
 ) {
     if entry.last_rejected_epoch == Some(snapshot.epoch) {
@@ -321,7 +323,8 @@ async fn record_takeover_skip(
     let receipt = ReceiptBuilder::start(entry.run_id.to_string(), entry.ctx.step)
         .org_id(entry.org_id.clone())
         .actor_id(entry.actor_id.clone())
-        .initiator(initiator, snapshot.epoch)
+        .initiator(initiator.class, snapshot.epoch)
+        .agent(initiator.agent.clone())
         .skip(action.clone(), "user_took_over");
     if let Err(error) = state.receipts.append(receipt).await {
         // zdr-log-ok: a ZDR run returns above, before the receipt is built; only a non-ZDR run reaches this line, and the store error text is what an operator needs
@@ -354,11 +357,11 @@ pub(super) async fn admit_action(
     }
 
     // 3. control / takeover
-    let snapshot = match takeover_gate(handle, entry, input.initiator, input.enforce_takeover, "action") {
+    let snapshot = match takeover_gate(handle, entry, input.initiator.class, input.enforce_takeover, "action") {
         Ok(snapshot) => snapshot,
         Err(error) => {
             let snapshot = handle.live.snapshot();
-            record_takeover_skip(state, entry, action, input.initiator, snapshot).await;
+            record_takeover_skip(state, entry, action, &input.initiator, snapshot).await;
             return Err(error);
         }
     };
@@ -416,7 +419,8 @@ pub(super) async fn admit_action(
     validate_navigation(action, state.security.as_ref()).await?;
 
     Ok(Admitted {
-        initiator: input.initiator,
+        initiator: input.initiator.class,
+        agent: input.initiator.agent,
         control_epoch: snapshot.epoch,
     })
 }
@@ -426,16 +430,18 @@ pub(super) async fn admit_action(
 pub(super) fn admit_tab_operation(
     handle: &RunHandle,
     entry: &RunEntry,
-    initiator: StepInitiator,
+    initiator: impl Into<Initiator>,
     enforce_takeover: bool,
 ) -> QuarryResult<Admitted> {
+    let initiator = initiator.into();
     if entry.closed {
         return Err(QuarryError::new(ErrorCode::NotFound, "agent run is not live")
             .with_details(serde_json::json!({ "reason": "run_not_live" })));
     }
-    let snapshot = takeover_gate(handle, entry, initiator, enforce_takeover, "tab")?;
+    let snapshot = takeover_gate(handle, entry, initiator.class, enforce_takeover, "tab")?;
     Ok(Admitted {
-        initiator,
+        initiator: initiator.class,
+        agent: initiator.agent,
         control_epoch: snapshot.epoch,
     })
 }

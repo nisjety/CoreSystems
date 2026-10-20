@@ -162,7 +162,8 @@ use quarry_runtime::browser_procedure::{
 use quarry_runtime::observation::{ObservationContext, ObservationRunner, ObservationSnapshot};
 #[cfg(feature = "browser-agent")]
 use quarry_runtime::step_receipts::{
-    AgentRunCheckpoint, AgentRunStatus, BrowserControlMode, BrowserProfileScope,
+    AgentIdentity, AgentIdentityBasis, AgentRunCheckpoint, AgentRunStatus, BrowserControlMode,
+    BrowserProfileScope,
     BrowserTabOperation, BrowserTimelineEvent, BrowserTimelineEventKind,
     BrowserTimelineInitiator, BrowserTimelineLifecycle, ReceiptBuilder, StepOutcome,
     StepReceipt,

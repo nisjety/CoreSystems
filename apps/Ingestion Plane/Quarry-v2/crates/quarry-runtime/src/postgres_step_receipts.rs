@@ -100,6 +100,17 @@ impl PostgresStepReceiptStore {
                 .try_get::<Option<i64>, _>("control_epoch")
                 .map_err(|error| db_err("decode control_epoch", error))?
                 .map(|value| value.max(0) as u64),
+            agent: row
+                .try_get::<Option<serde_json::Value>, _>("initiated_agent")
+                .map_err(|error| db_err("decode initiated_agent", error))?
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|error| {
+                    QuarryError::new(
+                        ErrorCode::Internal,
+                        format!("decode receipt agent: {error}"),
+                    )
+                })?,
         })
     }
 }
@@ -147,11 +158,24 @@ impl StepReceiptStore for PostgresStepReceiptStore {
                 )
             })?;
 
+        let agent = receipt
+            .agent
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|error| {
+                QuarryError::new(
+                    ErrorCode::Internal,
+                    format!("encode receipt agent: {error}"),
+                )
+            })?;
+
         sqlx::query(
             "INSERT INTO quarry_step_receipts
              (receipt_id, run_id, org_id, actor_id, step, started_at, finished_at, action,
-              outcome, observation, correction_of, cost_micro_usd, initiated_by, control_epoch)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+              outcome, observation, correction_of, cost_micro_usd, initiated_by, control_epoch,
+              initiated_agent)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
              ON CONFLICT (receipt_id) DO NOTHING",
         )
         .bind(&receipt.receipt_id)
@@ -173,6 +197,7 @@ impl StepReceiptStore for PostgresStepReceiptStore {
                 .and_then(|value| value.as_str().map(str::to_owned)),
         )
         .bind(receipt.control_epoch.map(|value| value as i64))
+        .bind(agent)
         .execute(&self.pool)
         .await
         .map_err(|error| db_err("append receipt", error))?;
@@ -193,7 +218,7 @@ impl StepReceiptStore for PostgresStepReceiptStore {
         let rows = sqlx::query(
             "SELECT receipt_id, run_id, org_id, actor_id, step, started_at, finished_at,
                     action, outcome, observation, correction_of, cost_micro_usd,
-                    initiated_by, control_epoch
+                    initiated_by, control_epoch, initiated_agent
              FROM quarry_step_receipts
              WHERE org_id = $1 AND run_id = $2
              ORDER BY step ASC, finished_at ASC",
@@ -221,7 +246,7 @@ impl StepReceiptStore for PostgresStepReceiptStore {
         let rows = sqlx::query(
             "SELECT receipt_id, run_id, org_id, actor_id, step, started_at, finished_at,
                     action, outcome, observation, correction_of, cost_micro_usd,
-                    initiated_by, control_epoch
+                    initiated_by, control_epoch, initiated_agent
              FROM quarry_step_receipts
              WHERE org_id = $1 AND actor_id = $2 AND run_id = $3
              ORDER BY step ASC, finished_at ASC",
@@ -239,7 +264,7 @@ impl StepReceiptStore for PostgresStepReceiptStore {
         let row = sqlx::query(
             "SELECT receipt_id, run_id, org_id, actor_id, step, started_at, finished_at,
                     action, outcome, observation, correction_of, cost_micro_usd,
-                    initiated_by, control_epoch
+                    initiated_by, control_epoch, initiated_agent
              FROM quarry_step_receipts WHERE receipt_id = $1",
         )
         .bind(receipt_id)
@@ -420,8 +445,9 @@ impl StepReceiptStore for PostgresStepReceiptStore {
 mod tests {
     use super::*;
     use crate::step_receipts::{
-        BrowserControlMode, BrowserProfileScope, BrowserTimelineEventKind,
-        BrowserTimelineInitiator, ReceiptBuilder, StepOutcome,
+        AgentIdentity, AgentIdentityBasis, BrowserControlMode, BrowserProfileScope,
+        BrowserTabOperation, BrowserTimelineEventKind, BrowserTimelineInitiator, ReceiptBuilder,
+        StepOutcome,
     };
     use quarry_core::contracts::{AgentAction, AgentConstraints};
     use quarry_core::ids::Id;
@@ -509,6 +535,79 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[tokio::test]
+    async fn receipt_round_trip_keeps_the_agent_identity() {
+        let Some(pool) = fresh_pool().await else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let store = PostgresStepReceiptStore::new(pool);
+        let run_id: RunKind = Id::new();
+        let identity = AgentIdentity {
+            basis: AgentIdentityBasis::ServicePrincipal,
+            principal_id: Some("service:execution-core".into()),
+            ai_run_id: Some("run_01J".into()),
+            label: Some("planner".into()),
+        };
+        let agent = ReceiptBuilder::start(run_id.to_string(), 1)
+            .org_id("org_a")
+            .actor_id("service:execution-core")
+            .initiator(BrowserTimelineInitiator::Agent, 0)
+            .agent(Some(identity.clone()))
+            .complete(action(), None, 0.0);
+        let person = ReceiptBuilder::start(run_id.to_string(), 2)
+            .org_id("org_a")
+            .actor_id("service:execution-core")
+            .initiator(BrowserTimelineInitiator::Human, 0)
+            .complete(action(), None, 0.0);
+        for receipt in [&agent, &person] {
+            store.append(receipt.clone()).await.unwrap();
+        }
+        let listed = store.list_for_org("org_a", &run_id).await.unwrap();
+        assert_eq!(listed[0].agent, Some(identity.clone()));
+        assert_eq!(listed[1].agent, None);
+        let fetched = store.get(&agent.receipt_id).await.unwrap().unwrap();
+        assert_eq!(fetched.agent, Some(identity));
+    }
+
+    #[tokio::test]
+    async fn tab_timeline_event_round_trip_keeps_the_agent_identity() {
+        let Some(pool) = fresh_pool().await else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let store = PostgresStepReceiptStore::new(pool);
+        let run_id: RunKind = Id::new();
+        let kind = BrowserTimelineEventKind::Tab {
+            operation: BrowserTabOperation::Selected,
+            tab_id: Some("tab-2".into()),
+            active_tab_id: Some("tab-2".into()),
+            initiated_by: Some(BrowserTimelineInitiator::Agent),
+            agent: Some(AgentIdentity {
+                basis: AgentIdentityBasis::UserSession,
+                principal_id: None,
+                ai_run_id: Some("run_01J".into()),
+                label: None,
+            }),
+            control_epoch: 1,
+        };
+        store
+            .append_browser_timeline_event(BrowserTimelineEvent::new(
+                "org_a",
+                "user_a",
+                run_id.to_string(),
+                kind.clone(),
+            ))
+            .await
+            .unwrap();
+        let events = store
+            .list_browser_timeline_events("org_a", "user_a", &run_id)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event, kind);
     }
 
     #[tokio::test]
