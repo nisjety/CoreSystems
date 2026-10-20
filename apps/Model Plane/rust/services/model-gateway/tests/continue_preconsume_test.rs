@@ -38,10 +38,7 @@ use axum::{
     },
     Router,
 };
-use model_gateway::{
-    http_routes::build_router,
-    state::{AppState, DynPublisher},
-};
+use model_gateway::{http_routes::build_router, state::DynPublisher};
 use mp_contracts::model_plane::v1 as mpv1;
 use mp_contracts::model_plane::v1::{
     execution_core_client::ExecutionCoreClient,
@@ -69,6 +66,9 @@ use wiremock::{
     matchers::{method, path},
     Mock, MockServer, ResponseTemplate,
 };
+
+#[path = "support/offline_downstreams.rs"]
+mod offline_downstreams;
 
 const ORG: &str = "org-1";
 const USER: &str = "user-1";
@@ -729,7 +729,7 @@ async fn rig(case: Case) -> Rig {
         .await;
 
     let publisher = Arc::new(DynPublisher::InMemory(InMemoryPublisher::new()));
-    let mut state = AppState::new();
+    let mut state = offline_downstreams::offline_state();
     state.publisher = publisher.clone();
     state.orchestration_client = OrchestrationCoreServiceClient::new(serve!(Orchestration {
         order: order.clone(),
