@@ -563,8 +563,16 @@ pub(crate) struct ContinueRunBody {
 /// `None` when either identifier is blank. Otherwise the upstream body is rebuilt
 /// from the two fields alone, so nothing else a client sent is forwarded. The
 /// claim token is forwarded as sent: trimming it would change the credential.
-fn continue_upstream_body(body: &ContinueRunBody) -> Option<Value> {
-    if body.approval_id.trim().is_empty() || body.claim_token.trim().is_empty() {
+///
+/// The one exception (WS03 S8-A) is the PARK form, the resume of a run the executor
+/// parked, which has no approval: with `park_form` on (`AppState::continue_park_form`),
+/// an `approval_id` that is EXACTLY empty is forwarded, present and empty, together with
+/// a non-blank token. Everything else, a whitespace-only id included, and every input
+/// with the flag off, is exactly as it was. An absent `approval_id` key is not a park
+/// form: the extractor refuses it (422) before this runs.
+fn continue_upstream_body(body: &ContinueRunBody, park_form: bool) -> Option<Value> {
+    let park = park_form && body.approval_id.is_empty();
+    if (!park && body.approval_id.trim().is_empty()) || body.claim_token.trim().is_empty() {
         return None;
     }
     Some(serde_json::json!({
@@ -652,7 +660,7 @@ pub(crate) async fn continue_run(
     Path(run_id): Path<String>,
     Json(body): Json<ContinueRunBody>,
 ) -> Response {
-    let Some(upstream_body) = continue_upstream_body(&body) else {
+    let Some(upstream_body) = continue_upstream_body(&body, state.continue_park_form) else {
         return invalid_chat_request("continue needs an approval id and a claim token")
             .into_response();
     };
@@ -853,6 +861,7 @@ mod tests {
             mail_task_nats_url: String::new(),
             mail_task_nats_user: String::new(),
             mail_task_nats_password: String::new(),
+            continue_park_form: false,
             mail_task_pipeline: None,
         }
     }
@@ -1056,7 +1065,7 @@ mod tests {
             claim_token: "claim-1".to_owned(),
         };
         assert_eq!(
-            continue_upstream_body(&body),
+            continue_upstream_body(&body, false),
             Some(json!({"approval_id": "apr-1", "claim_token": "claim-1"}))
         );
     }
@@ -1074,7 +1083,7 @@ mod tests {
                 claim_token: claim_token.to_owned(),
             };
             assert_eq!(
-                continue_upstream_body(&body),
+                continue_upstream_body(&body, false),
                 None,
                 "approval {approval_id:?}, claim {claim_token:?}"
             );
@@ -1091,6 +1100,270 @@ mod tests {
             "tool_names": ["shell"],
         });
         assert!(serde_json::from_value::<ContinueRunBody>(with_tools).is_err());
+    }
+
+    fn continue_body(approval_id: &str, claim_token: &str) -> ContinueRunBody {
+        ContinueRunBody {
+            approval_id: approval_id.to_owned(),
+            claim_token: claim_token.to_owned(),
+        }
+    }
+
+    /// The committed `continue_upstream_body` (before the park form), kept here as the oracle
+    /// the flag-off body must equal for every input.
+    fn committed_upstream_body(body: &ContinueRunBody) -> Option<serde_json::Value> {
+        if body.approval_id.trim().is_empty() || body.claim_token.trim().is_empty() {
+            return None;
+        }
+        Some(json!({
+            "approval_id": body.approval_id,
+            "claim_token": body.claim_token,
+        }))
+    }
+
+    #[test]
+    fn continue_forwards_the_park_form_only_with_the_flag_and_an_exact_empty_approval() {
+        // On, an exactly empty approval id and a non-blank token: the park form, id present.
+        assert_eq!(
+            continue_upstream_body(&continue_body("", "claim-1"), true),
+            Some(json!({"approval_id": "", "claim_token": "claim-1"}))
+        );
+        // The token is forwarded as sent (trimming it would change the credential).
+        assert_eq!(
+            continue_upstream_body(&continue_body("", " claim-1 "), true),
+            Some(json!({"approval_id": "", "claim_token": " claim-1 "}))
+        );
+        // Off: the same body is refused.
+        assert_eq!(continue_upstream_body(&continue_body("", "claim-1"), false), None);
+        // On, but not exactly empty: a whitespace-only id is still refused, never read as the
+        // park form.
+        for approval_id in [" ", "   ", "\t", "\n", "\u{a0}"] {
+            assert_eq!(
+                continue_upstream_body(&continue_body(approval_id, "claim-1"), true),
+                None,
+                "approval {approval_id:?}"
+            );
+        }
+        // On, an empty id and a blank token: refused.
+        for claim_token in ["", " ", " \t"] {
+            assert_eq!(
+                continue_upstream_body(&continue_body("", claim_token), true),
+                None,
+                "claim {claim_token:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_flag_changes_nothing_for_an_ordinary_approval_continue() {
+        let cases = [
+            ("apr-1", "claim-1"),
+            (" apr-1 ", "claim-1"),
+            ("apr-1", " "),
+            ("apr-1", ""),
+            ("   ", "claim-1"),
+            ("", ""),
+            ("", "claim-1"),
+        ];
+        for (approval_id, claim_token) in cases {
+            let body = continue_body(approval_id, claim_token);
+            // Flag off: byte for byte the committed body, for every input.
+            assert_eq!(
+                continue_upstream_body(&body, false),
+                committed_upstream_body(&body),
+                "off: approval {approval_id:?}, claim {claim_token:?}"
+            );
+            // Flag on: only the exactly-empty id with a token differs.
+            if !approval_id.is_empty() {
+                assert_eq!(
+                    continue_upstream_body(&body, true),
+                    committed_upstream_body(&body),
+                    "on: approval {approval_id:?}, claim {claim_token:?}"
+                );
+            }
+        }
+    }
+
+    /// Drives the real route through axum's extractors, as a browser's request would reach it.
+    /// Returns the status and the body text. `upstream` is a mock model-gateway.
+    async fn post_continue(
+        state: AppState,
+        body: serde_json::Value,
+    ) -> (StatusCode, String) {
+        use axum::{body::Body, http::Request, routing::post, Extension, Router};
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let app = Router::new()
+            .route("/runs/{run_id}/continue", post(super::continue_run))
+            .layer(Extension(test_user()))
+            .with_state(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/runs/run-1/continue")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .expect("request"),
+            )
+            .await
+            .expect("route answers");
+        let status = response.status();
+        let bytes = response.into_body().collect().await.expect("body").to_bytes();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    /// A state whose every upstream is a mock that must receive nothing.
+    fn state_with_unreachable_upstreams(park_form: bool) -> AppState {
+        let mut state = test_state(false);
+        state.continue_park_form = park_form;
+        state
+    }
+
+    #[tokio::test]
+    async fn with_the_flag_off_a_blank_approval_is_the_committed_400_and_an_absent_key_the_committed_422() {
+        // A blank approval id (empty or whitespace): the committed 400, before any upstream call
+        // (every upstream of this state refuses connections).
+        for approval_id in ["", "   "] {
+            let (status, text) = post_continue(
+                state_with_unreachable_upstreams(false),
+                json!({"approval_id": approval_id, "claim_token": "claim-1"}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{approval_id:?}: {text}");
+            let body: serde_json::Value = serde_json::from_str(&text).expect("a JSON envelope");
+            assert_eq!(body["error"]["code"], "invalid_request", "{text}");
+        }
+        // An absent key is axum's own 422, with the flag off AND on: there is no absent-key form.
+        for park_form in [false, true] {
+            let (status, text) = post_continue(
+                state_with_unreachable_upstreams(park_form),
+                json!({"claim_token": "claim-1"}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "park_form {park_form}: {text}");
+            let (status, text) = post_continue(
+                state_with_unreachable_upstreams(park_form),
+                json!({"approval_id": "apr-1"}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "park_form {park_form}: {text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_park_form_with_a_blank_id_that_is_not_empty_or_a_blank_token_is_still_the_400() {
+        for (approval_id, claim_token) in [("   ", "claim-1"), ("", "   "), ("", "")] {
+            let (status, text) = post_continue(
+                state_with_unreachable_upstreams(true),
+                json!({"approval_id": approval_id, "claim_token": claim_token}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{approval_id:?}/{claim_token:?}: {text}");
+            let body: serde_json::Value = serde_json::from_str(&text).expect("a JSON envelope");
+            assert_eq!(body["error"]["code"], "invalid_request", "{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn deny_unknown_fields_still_holds() {
+        // A client cannot smuggle a field into the park form either: with the flag on and off the
+        // extractor refuses the request outright (422), before any upstream call.
+        for park_form in [false, true] {
+            for body in [
+                json!({"approval_id": "", "claim_token": "claim-1", "tool_names": ["shell"]}),
+                json!({"approval_id": "apr-1", "claim_token": "claim-1", "mode": "park"}),
+                json!({"approval_id": "", "claim_token": "claim-1", "park": true}),
+            ] {
+                let (status, text) =
+                    post_continue(state_with_unreachable_upstreams(park_form), body.clone()).await;
+                assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}: {text}");
+            }
+        }
+        assert!(serde_json::from_value::<ContinueRunBody>(
+            json!({"approval_id": "", "claim_token": "claim-1", "tool_names": ["shell"]})
+        )
+        .is_err());
+    }
+
+    /// With the flag on, the handler posts the park form to model-gateway's continue route:
+    /// the id present and empty, the token as sent, and nothing else.
+    #[tokio::test]
+    async fn the_park_form_reaches_model_gateway_as_an_empty_id_and_the_token_with_the_flag_on() {
+        use wiremock::{
+            matchers::{body_json, method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let server = MockServer::start().await;
+        mount_continue_token_mocks(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/v1/orchestration/runs/run-1/continue"))
+            .and(body_json(json!({"approval_id": "", "claim_token": "claim-1"})))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                "event: run_parked\ndata: {\"run_id\":\"run-1\"}\n\n",
+                "text/event-stream",
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut state = test_state(false);
+        state.auth_core_url = server.uri();
+        state.model_gateway_url = server.uri();
+        state.org_core_url = server.uri();
+        state.model_gateway_dev_bearer = "dev-model-bearer".into();
+        state.continue_park_form = true;
+
+        let (status, text) = post_continue(state, json!({"approval_id": "", "claim_token": "claim-1"})).await;
+
+        assert_eq!(status, StatusCode::OK, "{text}");
+        assert!(text.contains("run_parked"), "the stream is relayed: {text}");
+    }
+
+    /// With the flag off, the same request never leaves the BFF.
+    #[tokio::test]
+    async fn the_park_form_never_reaches_model_gateway_with_the_flag_off() {
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let server = MockServer::start().await;
+        mount_continue_token_mocks(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/v1/orchestration/runs/run-1/continue"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let mut state = test_state(false);
+        state.auth_core_url = server.uri();
+        state.model_gateway_url = server.uri();
+        state.org_core_url = server.uri();
+        state.model_gateway_dev_bearer = "dev-model-bearer".into();
+        state.continue_park_form = false;
+
+        let (status, _) = post_continue(state, json!({"approval_id": "", "claim_token": "claim-1"})).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn the_flag_is_an_app_state_field_and_the_handler_passes_it_to_the_body_builder() {
+        let source = include_str!("orchestration.rs");
+        let handler = source
+            .split("pub(crate) async fn continue_run(")
+            .nth(1)
+            .and_then(|rest| rest.split("pub(crate) async fn cancel_run(").next())
+            .expect("the continue handler");
+        assert!(
+            handler.contains("continue_upstream_body(&body, state.continue_park_form)"),
+            "{handler}"
+        );
+        assert_eq!(handler.matches("continue_park_form").count(), 1);
     }
 
     const UPSTREAM_TEXT: &str = "UPSTREAM-ONLY-TEXT-must-never-reach-the-client";

@@ -378,6 +378,7 @@ mod tests {
             mail_task_nats_url: String::new(),
             mail_task_nats_user: String::new(),
             mail_task_nats_password: String::new(),
+            continue_park_form: false,
             mail_task_pipeline: None,
         }
     }

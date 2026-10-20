@@ -896,7 +896,13 @@ fn map_upstream_frame(run: &mut AgUiRunState, frame: SseFrame) -> Vec<Event> {
         | "browser_action_decided"
         | "approval_continuation_verified"
         | "browser_run_paused"
-        | "browser_run_resumed" => {
+        | "browser_run_resumed"
+        // A run the executor parked at a round boundary stays open and resumable
+        // (WS03 S8-A): `run_parked` on the owner's turn stream, `run_resumed` when a
+        // continue resumes it. Display only, like the rest of this family; the park
+        // reason is the closed token the gateway chose to say, never free text.
+        | "run_parked"
+        | "run_resumed" => {
             vec![ag_ui_event(json!({
                 "type": "CUSTOM",
                 "name": event,
@@ -1282,5 +1288,60 @@ mod tests {
             },
         );
         assert_eq!(grounding.len(), 1);
+    }
+
+    /// WS03 S8-A: a parked run's `run_parked` frame and the `run_resumed` of its resume are
+    /// carried as non-executable CUSTOM payloads, like the other governance events, with the
+    /// upstream frame's fields intact and its SSE cursor kept. They are not opaque RAW.
+    #[test]
+    fn a_parked_runs_frames_are_carried_as_custom_events_with_their_cursor() {
+        for (name, data, marker) in [
+            (
+                "run_parked",
+                r#"{"run_id":"run_1","request_id":"req_1","status":"parked","reason":"provider_exhausted","resume_after":"2026-10-20T12:00:00Z"}"#,
+                "provider_exhausted",
+            ),
+            (
+                "run_resumed",
+                r#"{"run_id":"run_1","resumed_segment":2}"#,
+                "resumed_segment",
+            ),
+        ] {
+            let mut run = AgUiRunState::default();
+            let events = map_upstream_frame(
+                &mut run,
+                SseFrame {
+                    event: Some(name.into()),
+                    id: Some("17".into()),
+                    data: data.into(),
+                },
+            );
+            assert_eq!(events.len(), 1, "{name}");
+            let rendered = format!("{:?}", events[0]);
+            assert!(rendered.contains("CUSTOM"), "{name}: {rendered}");
+            assert!(rendered.contains(name), "{name}: {rendered}");
+            assert!(rendered.contains(marker), "{name}: {rendered}");
+            assert!(rendered.contains("id: 17"), "{name} keeps its cursor: {rendered}");
+            assert!(!rendered.contains("RAW"), "{name} is not opaque: {rendered}");
+        }
+    }
+
+    /// The CUSTOM allowlist stays closed: the two new names are in it, and a name that merely
+    /// resembles them is still passed through as RAW.
+    #[test]
+    fn a_name_that_only_resembles_a_park_frame_stays_raw() {
+        let mut run = AgUiRunState::default();
+        let events = map_upstream_frame(
+            &mut run,
+            SseFrame {
+                event: Some("run_parked_later".into()),
+                id: None,
+                data: r#"{"run_id":"run_1"}"#.into(),
+            },
+        );
+        assert_eq!(events.len(), 1);
+        let rendered = format!("{:?}", events[0]);
+        assert!(rendered.contains("RAW"), "{rendered}");
+        assert!(!rendered.contains("CUSTOM"), "{rendered}");
     }
 }

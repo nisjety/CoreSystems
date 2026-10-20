@@ -1,10 +1,15 @@
+import { readdirSync, readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   chatRunContinueFrameRefusalOf,
   chatRunContinueHttpRefusalOf,
+  chatRunContinueParkFailureOf,
   chatRunContinueSpentConnected,
   chatRunContinueTransportFailureOf,
   chatRunContinueUnflaggedRefusalOf,
+  continueParkedRun,
   continueRun,
   decideApproval,
   listApprovals,
@@ -437,5 +442,134 @@ describe('the chat.run.continue contract guards, re-exported by the client', () 
     const [connected, refusal] = frames.map(([, data]) => data)
     expect(chatRunContinueSpentConnected(connected)).not.toBeNull()
     expect(chatRunContinueFrameRefusalOf(refusal)).toMatchObject({ regime: 1, code: 'continue_unreachable' })
+  })
+})
+
+/** The non-test source files under `src`, as [path, text] pairs. */
+function sourceFiles(dir: string): Array<[string, string]> {
+  const found: Array<[string, string]> = []
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name)
+    if (entry.isDirectory()) {
+      if (entry.name !== 'node_modules') found.push(...sourceFiles(path))
+    } else if (/\.(ts|tsx)$/.test(entry.name) && !/\.test\.(ts|tsx)$/.test(entry.name)) {
+      found.push([path, readFileSync(path, 'utf8')])
+    }
+  }
+  return found
+}
+
+describe('continueParkedRun (WS03 S8-A, no caller)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('posts an exactly empty approval_id and the claim token, and relays the frames', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response('event: connected\ndata: {"ok":true,"run_id":"run_1"}\n\n', {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const events: string[] = []
+
+    await continueParkedRun('run_1', 'claim_1', (event) => {
+      events.push(event.event ?? '')
+    })
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toContain('/api/v1/orchestration/runs/run_1/continue')
+    expect(init.method).toBe('POST')
+    // Snake_case, and the approval id is present and empty: the BFF's body has no absent-key form.
+    expect(String(init.body)).toBe('{"approval_id":"","claim_token":"claim_1"}')
+    expect(events).toEqual(['connected'])
+  })
+
+  it('passes the abort signal to the request', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response('', { status: 200, headers: { 'Content-Type': 'text/event-stream' } }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const controller = new AbortController()
+
+    await continueParkedRun('run_1', 'claim_1', () => {}, controller.signal)
+
+    expect((fetchMock.mock.calls[0] as [string, RequestInit])[1].signal).toBe(controller.signal)
+  })
+
+  it('encodes the run id into the path', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response('', { status: 200, headers: { 'Content-Type': 'text/event-stream' } }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await continueParkedRun('run/1 x', 'claim_1', () => {})
+
+    expect((fetchMock.mock.calls[0] as [string])[0]).toContain('/runs/run%2F1%20x/continue')
+  })
+
+  it('rejects with the typed error when the gateway refuses before a stream opens', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ error: { code: 'not_resumable', message: 'not resumable' } }), {
+          status: 409,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      ),
+    )
+
+    await expect(continueParkedRun('run_1', 'claim_1', () => {})).rejects.toMatchObject({
+      status: 409,
+      code: 'not_resumable',
+    })
+  })
+
+  it('relays a park failure frame untouched, and the park reader (only) reads it', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(
+          'event: error\ndata: {"code":"park_not_due","message":"park not due","retryable":false,'
+            + '"run_id":"run_1","park_continue":true}\n\n',
+          { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+        ),
+      ),
+    )
+    const frames: unknown[] = []
+
+    await continueParkedRun('run_1', 'claim_1', (event) => {
+      frames.push(JSON.parse(event.data))
+    })
+
+    expect(frames).toHaveLength(1)
+    expect(chatRunContinueParkFailureOf(frames[0])).toMatchObject({
+      regime: 'park',
+      code: 'park_not_due',
+      approvalSpent: 'no',
+      follow: true,
+      runStaysParked: 'yes',
+    })
+    expect(chatRunContinueFrameRefusalOf(frames[0])).toBeNull()
+    expect(chatRunContinueUnflaggedRefusalOf(frames[0])).toBeNull()
+  })
+
+  it('has no caller: nothing under src but the client itself names it', () => {
+    const here = dirname(fileURLToPath(import.meta.url))
+    const src = join(here, '..', '..')
+    const naming = sourceFiles(src)
+      .filter(([, text]) => text.includes('continueParkedRun'))
+      .map(([path]) => path.slice(src.length + 1).replaceAll('\\', '/'))
+    expect(naming).toEqual(['shared/api/orchestration-client.ts'])
+  })
+
+  it('documents the park form without telling a caller to retry', () => {
+    const doc = (clientSource.match(/\/\*\*(?:[^*]|\*(?!\/))*\*\/\s*export async function continueParkedRun/)?.[0] ?? '')
+      .replace(/\s*\n\s*\*\s?/g, ' ')
+    expect(doc).toContain('no caller')
+    expect(doc).toContain('chatRunContinueParkFailureOf')
+    expect(doc).toContain('follow the run')
+    expect(doc).not.toMatch(/retry|try again|send (it|the request) again/i)
   })
 })

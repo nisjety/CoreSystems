@@ -189,6 +189,12 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
       VEREVON_ALLOWED_ORIGINS: ${VEREVON_ALLOWED_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:5199,http://127.0.0.1:5199,http://localhost:3186,http://127.0.0.1:3186,http://localhost:3187,http://127.0.0.1:3187}
       VEREVON_PUBLIC_ORIGIN: ${VEREVON_PUBLIC_ORIGIN:-http://localhost:5173}
+      # WS03 S8-A: forward the PARK form of POST .../runs/{run_id}/continue (an exactly empty
+      # approval_id plus a claim token, the resume of a run the executor parked). Off unless
+      # exactly "true". Flip it together with model-gateway's EXECUTION_LOOP_PARKING_ENABLED
+      # (on in front of a gateway with parking off, the park form is a 400 continue_incomplete).
+      # Nothing in the SPA calls the route yet.
+      VEREVON_GATEWAY_CONTINUE_PARK_ENABLED: ${VEREVON_GATEWAY_CONTINUE_PARK_ENABLED:-false}
     ports:
       - "${VEREVON_BIND_ADDRESS:-127.0.0.1}:3185:3185"
     networks:

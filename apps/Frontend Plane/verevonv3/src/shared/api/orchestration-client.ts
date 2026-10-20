@@ -8,6 +8,7 @@ export {
   CHAT_RUN_CONTINUE_HTTP_REFUSALS,
   chatRunContinueFrameRefusalOf,
   chatRunContinueHttpRefusalOf,
+  chatRunContinueParkFailureOf,
   chatRunContinueSpentConnected,
   chatRunContinueTransportFailureOf,
   chatRunContinueUnflaggedRefusalOf,
@@ -18,6 +19,8 @@ export type {
   ChatRunContinueFrameRefusalCode,
   ChatRunContinueHttpRefusal,
   ChatRunContinueHttpRefusalCode,
+  ChatRunContinueParkFailure,
+  ChatRunContinueRunStaysParked,
   ChatRunContinueTransportFailure,
   ChatRunContinueTransportReason,
 } from '../actions/chat-run-continue-contract'
@@ -171,6 +174,46 @@ export async function continueRun(
       method: 'POST',
       // Snake_case on the wire: the BFF body rejects unknown fields outright.
       body: JSON.stringify({ approval_id: approvalId, claim_token: claimToken }),
+      signal,
+    },
+    onEvent,
+    (err) => {
+      connError = err
+    },
+  )
+
+  if (connError) throw connError
+}
+
+/**
+ * Resume a run the executor PARKED (WS03 S8-A): there is no approval to spend, so the body is
+ * the park form `{ approval_id: '', claim_token }`, the id present and exactly empty. The
+ * gateway relays the resume as SSE, and a failure is a frame marked `park_continue: true` (or
+ * the bare `agent_dispatch_unavailable` of the stream). It has no caller: there is no button,
+ * no flow and no controller that resumes a parked run yet, so it exists only so the contract
+ * and the wire shape are pinned before one is wired.
+ *
+ * Rejects as `continueRun` does when the gateway refuses before a stream opens (for example
+ * 409 `not_resumable`). Read the frames with `chatRunContinueParkFailureOf` (pass
+ * `{ parkStream: true }` for the bare frame): a failed park continue spends nothing, so the
+ * reader says to follow the run by its id, and whether the run stays parked (`runStaysParked`);
+ * the run read is the arbiter.
+ */
+export async function continueParkedRun(
+  runId: string,
+  claimToken: string,
+  onEvent: (event: SseEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  let connError: unknown
+
+  await readSseStream(
+    `/api/v1/orchestration/runs/${encodeURIComponent(runId)}/continue`,
+    {
+      method: 'POST',
+      // Snake_case on the wire, and the approval id is present and exactly empty: the BFF body
+      // has no absent-key form.
+      body: JSON.stringify({ approval_id: '', claim_token: claimToken }),
       signal,
     },
     onEvent,

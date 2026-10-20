@@ -24,6 +24,7 @@ import {
   forgetThreadLocally,
   reconcileLocalThreads,
 } from '@/features/chat/lib/chat-retention'
+import { runParkedFrameOf, type RunParkedFrame } from '@/features/chat/lib/run-park'
 
 // ── Wire contract ───────────────────────────────────────────────────────────
 // `truncated` is set when a workbook was cut on a row boundary to fit one turn;
@@ -685,6 +686,12 @@ export type ChatStreamHandlers = {
    * only. Ungated: sent whatever features the client opted into. See `ChatRetrievalNoticeEvent`.
    */
   onRetrievalNotice?: (event: ChatRetrievalNoticeEvent) => void
+  /**
+   * The run was PARKED (WS03 S8-A): it stopped on a typed, recoverable failure and stays open, so
+   * it can be resumed later. Display only: read with `runParkedFrameOf`, and a frame whose reason
+   * this build does not know goes to `onUnknownEvent` instead. Nothing here resumes the run.
+   */
+  onRunParked?: (event: RunParkedFrame) => void
   /**
    * Any SSE event this client has no case for. The gateway relays upstream
    * events verbatim with no allowlist, so a new backend event reaches the
@@ -1410,6 +1417,12 @@ function dispatchAgUiEvent(
             status: str(value.status),
           })
           break
+        case 'run_parked': {
+          const parked = runParkedFrameOf(value)
+          if (parked) handlers.onRunParked?.(parked)
+          else handlers.onUnknownEvent?.({ name: 'run_parked', payload: value })
+          break
+        }
         case 'tool_result':
           handlers.onToolResult?.({
             id: str(value.id) ?? str(value.tool_call_id),
@@ -1651,6 +1664,14 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
         ...(event.id ? { frameId: event.id } : {}),
       })
       break
+    case 'run_parked': {
+      // A parked run (WS03 S8-A): display only. A reason this build does not know is not read as
+      // a park; it is reported like any other event this client has not learned.
+      const parked = runParkedFrameOf(payload)
+      if (parked) handlers.onRunParked?.(parked)
+      else handlers.onUnknownEvent?.({ name: 'run_parked', payload })
+      break
+    }
     case 'awaiting_approval':
       // Agentic runs can pause at the run boundary before a derived
       // `step_update` is available. Keep the same compatibility callback so

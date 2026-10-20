@@ -1897,3 +1897,101 @@ describe('turn_timing, cost_basis and result_receipt', () => {
     expect(onDone).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('run_parked (WS03 S8-A, display only)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const frame = (event: string, data: unknown) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
+  const parked = (overrides: Record<string, unknown> = {}) => ({
+    run_id: 'run-42',
+    request_id: 'req-1',
+    status: 'parked',
+    reason: 'provider_exhausted',
+    resume_after: '2026-10-20T12:00:00Z',
+    ...overrides,
+  })
+
+  it('routes a run_parked frame with a known reason to onRunParked, not to onUnknownEvent', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(sseResponse([frame('run_parked', parked())])))
+    const onRunParked = vi.fn()
+    const onUnknownEvent = vi.fn()
+    await streamChat({ content: 'hi' }, { onRunParked, onUnknownEvent })
+
+    expect(onRunParked).toHaveBeenCalledTimes(1)
+    expect(onRunParked).toHaveBeenCalledWith({
+      runId: 'run-42',
+      requestId: 'req-1',
+      reason: 'provider_exhausted',
+      resumeAfter: '2026-10-20T12:00:00Z',
+    })
+    expect(onUnknownEvent).not.toHaveBeenCalled()
+  })
+
+  it('reads every closed reason, and gives a null time for a resume_after it cannot read', async () => {
+    const reasons = ['credential_window', 'provider_exhausted', 'upstream_unavailable', 'reauth_required']
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        sseResponse(reasons.map((reason) => frame('run_parked', parked({ reason, resume_after: null })))),
+      ),
+    )
+    const onRunParked = vi.fn()
+    await streamChat({ content: 'hi' }, { onRunParked })
+
+    expect(onRunParked.mock.calls.map(([parkedFrame]) => parkedFrame.reason)).toEqual(reasons)
+    for (const [parkedFrame] of onRunParked.mock.calls) expect(parkedFrame.resumeAfter).toBeNull()
+  })
+
+  it('sends a run_parked frame with a reason it does not know, or none, to onUnknownEvent', async () => {
+    const unknownReason = parked({ reason: 'crash_interrupted' })
+    const noReason = { run_id: 'run-42' }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        sseResponse([frame('run_parked', unknownReason), frame('run_parked', noReason)]),
+      ),
+    )
+    const onRunParked = vi.fn()
+    const onUnknownEvent = vi.fn()
+    await streamChat({ content: 'hi' }, { onRunParked, onUnknownEvent })
+
+    expect(onRunParked).not.toHaveBeenCalled()
+    expect(onUnknownEvent.mock.calls).toEqual([
+      [{ name: 'run_parked', payload: unknownReason }],
+      [{ name: 'run_parked', payload: noReason }],
+    ])
+  })
+
+  it('does nothing, and does not report an unknown event, for a known frame when no handler is set', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(sseResponse([frame('run_parked', parked()), frame('done', {})])))
+    const onUnknownEvent = vi.fn()
+    const onDone = vi.fn()
+    await streamChat({ content: 'hi' }, { onUnknownEvent, onDone })
+
+    expect(onUnknownEvent).not.toHaveBeenCalled()
+    expect(onDone).toHaveBeenCalledTimes(1)
+  })
+
+  it('reads the same frame in an AG-UI CUSTOM envelope', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        sseResponse([
+          frame('CUSTOM', { type: 'CUSTOM', name: 'run_parked', value: parked(), runId: 'run-42' }),
+          frame('CUSTOM', { type: 'CUSTOM', name: 'run_parked', value: parked({ reason: 'x' }), runId: 'run-42' }),
+        ]),
+      ),
+    )
+    const onRunParked = vi.fn()
+    const onUnknownEvent = vi.fn()
+    await streamChat({ content: 'hi' }, { onRunParked, onUnknownEvent })
+
+    expect(onRunParked).toHaveBeenCalledTimes(1)
+    expect(onRunParked.mock.calls[0]?.[0]).toMatchObject({ runId: 'run-42', reason: 'provider_exhausted' })
+    expect(onUnknownEvent.mock.calls).toEqual([
+      [{ name: 'run_parked', payload: parked({ reason: 'x' }) }],
+    ])
+  })
+})

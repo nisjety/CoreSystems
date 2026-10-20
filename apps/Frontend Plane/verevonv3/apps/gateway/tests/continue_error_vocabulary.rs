@@ -26,7 +26,11 @@
 //!   typed ChatGPT-subscription failures a spent run can end on, final after a pre-consume)
 //!   = model-gateway's `CONTINUE_SPENT_SUBSCRIPTION_FRAMES`, disjoint from the run-end list
 //!   and from both refusal lists;
-//! * every `proxy_sse_stream_with_data_plane` caller other than `continue_run` passes `&[]`.
+//! * every `proxy_sse_stream_with_data_plane` caller other than `continue_run` passes `&[]`;
+//! * the frame of a failed PARK continue (WS03 S8-A): model-gateway's `park_refusal_event`
+//!   writes `park_continue: true` and never `approval_spent`, the SPA's park reader reads that
+//!   marker, the tokens such a frame carries are in the closed frame lists, and the BFF reads
+//!   and writes neither marker.
 //!
 //! The model-gateway source is read across the plane boundary as a TEST only, the way
 //! `sse_relay_no_allowlist.rs` reads its `ChatEvent`: nothing in the BFF's production
@@ -592,4 +596,183 @@ fn only_the_continue_handler_relays_upstream_error_codes() {
         "the relay list is passed from `{}`, not from continue_run",
         handler.lines().next().unwrap_or("")
     );
+}
+
+/// The body of `fn name(` in `source`, with whole-line comments dropped.
+fn gateway_fn_body(source: &str, name: &str) -> String {
+    delimited(source, &format!("fn {name}("), '{', '}')
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The third argument of every production call of `park_refusal_event(` in the gateway's
+/// `sse.rs` (a production call passes `&request_id`; the unit tests pass literals), with
+/// its whitespace folded away.
+fn gateway_park_refusal_tokens(source: &str) -> Vec<String> {
+    let needle = "park_refusal_event(";
+    let mut found = Vec::new();
+    let mut from = 0;
+    while let Some(at) = source[from..].find(needle) {
+        let at = at + from;
+        from = at + needle.len();
+        if source[..at].trim_end().ends_with("fn") {
+            continue; // the definition
+        }
+        let args = delimited(&source[at..], needle, '(', ')');
+        let mut depth = 0i32;
+        let mut parts = Vec::new();
+        let mut current = String::new();
+        for ch in args.chars() {
+            match ch {
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => depth -= 1,
+                _ => {}
+            }
+            if ch == ',' && depth == 0 {
+                parts.push(current.trim().to_owned());
+                current.clear();
+            } else {
+                current.push(ch);
+            }
+        }
+        if !current.trim().is_empty() {
+            parts.push(current.trim().to_owned());
+        }
+        if parts.first().is_some_and(|first| first == "&request_id") {
+            assert_eq!(parts.len(), 3, "park_refusal_event takes three arguments: {args}");
+            found.push(parts[2].split_whitespace().collect::<Vec<_>>().join(""));
+        }
+    }
+    found
+}
+
+/// WS03 S8-A parity row: the frame of a failed PARK continue. model-gateway's
+/// `park_refusal_event` writes the committed refusal frame plus `run_id` and the marker
+/// `park_continue: true`, and never `approval_spent`; the SPA's park reader
+/// (`chatRunContinueParkFailureOf`) reads exactly that marker, refuses a frame that also says
+/// `approval_spent`, and the tokens such a frame can carry are the closed frame list the SPA
+/// already has. The BFF relays the stream byte for byte: it neither reads nor writes the marker.
+#[test]
+fn the_park_frame_the_gateway_writes_is_the_one_the_spa_park_reader_reads() {
+    let gateway = model_gateway_sse_source();
+    let spa = spa_contract_source();
+
+    // The gateway's frame: the marker and the run, and no spend.
+    let writer = gateway_fn_body(&gateway, "park_refusal_event");
+    assert!(
+        writer.contains(r#"payload["park_continue"] = json!(true);"#),
+        "park_refusal_event no longer sets park_continue: true\n{writer}"
+    );
+    assert!(
+        writer.contains(r#"payload["run_id"] = json!(run_id);"#),
+        "park_refusal_event no longer names the run\n{writer}"
+    );
+    assert!(
+        !writer.contains("approval_spent") && !writer.contains("ApprovalSpend"),
+        "a park frame must never say approval_spent\n{writer}"
+    );
+
+    // The SPA's reader: the same marker (an exact `true`), and no `approval_spent` key at all.
+    assert!(
+        spa.contains("return record.park_continue === true"),
+        "the SPA's park marker is no longer `park_continue === true`"
+    );
+    let reader = delimited(&spa, "export function chatRunContinueParkRefusalOf(", '{', '}');
+    assert!(
+        reader.contains("isParkMarked(record)") && reader.contains("'approval_spent' in record"),
+        "the SPA's park reader must require the marker and refuse any approval_spent key\n{reader}"
+    );
+
+    // The tokens a park frame can carry: the construction refusal, whatever the executor refused
+    // (a token of the closed list), an unreachable executor and an unknown outcome.
+    let frame_list = string_literals(&gateway_const_list(&gateway, "CONTINUE_FRAME_REFUSALS"), '"');
+    let spa_list = spa_frame_refusals();
+    let mut written = gateway_park_refusal_tokens(&gateway);
+    written.sort();
+    assert_eq!(
+        written,
+        vec!["\"continue_refused\"".to_owned(), "park_frame_token(&failure)".to_owned()],
+        "model-gateway's production park frames are the construction refusal and the dispatch \
+         failure, nothing else; parsed {written:?}"
+    );
+    let mapped = string_literals(&gateway_fn_body(&gateway, "park_frame_token"), '"');
+    assert_eq!(mapped, ["continue_unreachable", "continue_outcome_unknown"]);
+    for token in mapped.iter().map(String::as_str).chain(["continue_refused"]) {
+        assert!(
+            frame_list.iter().any(|known| known == token) && spa_list.iter().any(|known| known == token),
+            "a park frame can say `{token}`, which is not in both frame lists"
+        );
+    }
+    // The three tokens only a park continue sends are in the lists too.
+    for token in ["park_not_restorable", "park_route_unavailable", "park_not_due"] {
+        assert!(
+            frame_list.iter().any(|known| known == token) && spa_list.iter().any(|known| known == token),
+            "`{token}` is not in both frame lists"
+        );
+    }
+
+    // The SPA's `runStaysParked` buckets name only tokens a park frame can carry: a closed frame
+    // token, or the bare `agent_dispatch_unavailable`, which is NOT in the frame list (it is the
+    // committed unmarked frame of a deadline or a join error).
+    let bucket = |name: &str| -> Vec<String> {
+        string_literals(
+            &delimited(&spa, &format!("export const {name}"), '[', ']')
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            '\'',
+        )
+    };
+    let not_parked = bucket("CHAT_RUN_CONTINUE_PARK_NOT_PARKED_CODES");
+    let unknown = bucket("CHAT_RUN_CONTINUE_PARK_UNKNOWN_CODES");
+    assert_eq!(not_parked, ["not_resumable", "park_not_restorable"]);
+    assert_eq!(
+        unknown,
+        ["continue_outcome_unknown", "continue_in_progress", "agent_dispatch_unavailable"]
+    );
+    for code in not_parked.iter().chain(unknown.iter()) {
+        if code == "agent_dispatch_unavailable" {
+            assert!(
+                !frame_list.contains(code) && !spa_list.contains(code),
+                "agent_dispatch_unavailable is the bare frame, not a refusal token"
+            );
+            assert!(
+                gateway_fn_body(&gateway, "agent_dispatch_unavailable_event").contains("\"agent_dispatch_unavailable\""),
+                "the gateway no longer writes agent_dispatch_unavailable"
+            );
+        } else if code == "not_resumable" {
+            // A 409 before the stream opens (CONTINUE_HTTP_REFUSALS), read through the park
+            // reader only when a frame names it; the BFF relays it by its closed code.
+            assert!(
+                bff_relayed().iter().any(|(known, _)| known == code),
+                "the BFF no longer relays `{code}`"
+            );
+        } else {
+            assert!(
+                frame_list.contains(code) && spa_list.contains(code),
+                "`{code}` is in a runStaysParked bucket but not in both frame lists"
+            );
+        }
+    }
+
+    // The BFF relays the stream untouched: its continue handler neither reads nor writes
+    // the park marker or the spend flag.
+    let orchestration = read(&gateway_file("src/domains/orchestration.rs"));
+    let production = orchestration
+        .split("#[cfg(test)]\nmod tests")
+        .next()
+        .expect("orchestration.rs production text")
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for word in ["park_continue", "approval_spent"] {
+        assert!(
+            !production.contains(word),
+            "the BFF's continue handler must not read or write `{word}`: the stream is relayed byte for byte"
+        );
+    }
 }
