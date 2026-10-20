@@ -27,7 +27,9 @@ mod support;
 #[path = "support/zdr_harness.rs"]
 mod zdr_harness;
 
-use quarry_browser::session::{InMemoryProfileStore, ProfileStore, SessionSnapshot};
+use quarry_browser::session::{
+    InMemoryProfileStore, ProfileMetadata, ProfileScope, ProfileStore, SessionSnapshot,
+};
 use quarry_core::ids::kinds::ProfileKind;
 use quarry_edge::state::AppState;
 
@@ -36,6 +38,7 @@ use zdr_harness::{user_in_standard_org, user_in_zdr_org, Harness};
 const ZDR_ORG: &str = "org-zdr-golden";
 const INTERNAL_TOKEN: &str = "refusal-modes-internal-token";
 const CODE: &str = "zdr_durable_mutation_forbidden";
+const SEEDED_NAME: &str = "seeded-profile-name";
 
 #[derive(Clone, Default)]
 struct Capture(Arc<Mutex<Vec<u8>>>);
@@ -91,10 +94,11 @@ fn marker() -> String {
     format!("zdr-probe-{}", uuid::Uuid::new_v4().simple())
 }
 
-/// The enforce tests share the process-global capture and all emit `zdr.refused` for the same
-/// organization, so each takes this lock for its whole body and reads only the events appended
-/// after it started. (The observe test emits `zdr.would_refuse` only and needs no lock.)
-static ENFORCE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// Every test here shares the process-global capture, and the enforce tests all emit
+/// `zdr.refused` for the same organization, so each test takes this lock for its whole body (the
+/// observe test too, so its "no `zdr.would_refuse` yet" check cannot depend on a test that
+/// later learns to emit one) and reads only the events appended after it started.
+static CAPTURE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// How many `zdr.refused` events the process log holds now; pass it to [`refused_since`].
 fn refused_mark() -> usize {
@@ -143,8 +147,8 @@ fn assert_refused_events(seen: &[Value], expected: &BTreeSet<(String, String)>) 
     }
 }
 
-/// The profiles the organization behind `bearer` holds, by id (a wind-down read).
-async fn held_profiles(harness: &Harness, bearer: &str) -> Vec<String> {
+/// The profiles the organization behind `bearer` holds, as (id, name) (a wind-down read).
+async fn held_profiles(harness: &Harness, bearer: &str) -> Vec<(String, Option<String>)> {
     let listed = harness.get(bearer, "/v1/profiles").await;
     assert_eq!(listed.status().as_u16(), 200, "profile list");
     let listed: Value = listed.json().await.unwrap();
@@ -152,7 +156,14 @@ async fn held_profiles(harness: &Harness, bearer: &str) -> Vec<String> {
         .as_array()
         .expect("a profiles array")
         .iter()
-        .filter_map(|profile| profile["profile_id"].as_str().map(str::to_owned))
+        .filter_map(|profile| {
+            profile["profile_id"].as_str().map(|id| {
+                (
+                    id.to_owned(),
+                    profile["name"].as_str().map(str::to_owned),
+                )
+            })
+        })
         .collect()
 }
 
@@ -198,14 +209,15 @@ fn empty_profiles() -> Arc<dyn ProfileStore> {
 }
 
 /// One request per refused action: `(row, action, response)`. Each carries `marker` in its
-/// URL so a leak into the log is visible.
+/// URL so a leak into the log is visible. `profile_id` is the profile the update renames: pass a
+/// profile the organization holds to see whether a refused update changed it.
 async fn durable_writes(
     harness: &Harness,
     token: &str,
     marker: &str,
+    profile_id: &str,
 ) -> Vec<(&'static str, &'static str, reqwest::Response)> {
     let url = format!("https://page.test/{marker}");
-    let profile_id = ProfileKind::new().to_string();
     let backfill = json!({ "start_at": "2026-01-01T00:00:00Z", "end_at": "2026-01-02T00:00:00Z" });
     vec![
         (
@@ -298,10 +310,11 @@ fn internal_record(zdr: Option<bool>, marker: &str) -> Value {
 /// served as before (never a refusal naming ZDR) and leaves one event per action, with the row,
 /// the action and the org id, and nothing the caller sent.
 ///
-/// One test on purpose: the capture is process-global and this is the only test here that runs
-/// with the flag off, so the "none yet" check below cannot see another test's events.
+/// The only test here that runs with the flag off; it holds the capture lock like the others, so
+/// the "none yet" check below sees no other test's events.
 #[tokio::test]
 async fn observe_mode_serves_a_zdr_org_as_before_and_logs_one_content_free_event_per_action() {
+    let _serial = CAPTURE_LOCK.lock().await;
     capture();
     let control = control_plane().await;
     let profiles = Arc::new(InMemoryProfileStore::new());
@@ -314,7 +327,9 @@ async fn observe_mode_serves_a_zdr_org_as_before_and_logs_one_content_free_event
     let probe = marker();
 
     // A standard organization: served, and not observed.
-    for (_row, action, response) in durable_writes(&harness, &user_in_standard_org(), &probe).await
+    let unheld = ProfileKind::new().to_string();
+    for (_row, action, response) in
+        durable_writes(&harness, &user_in_standard_org(), &probe, &unheld).await
     {
         assert_ne!(
             response.status().as_u16(),
@@ -342,7 +357,9 @@ async fn observe_mode_serves_a_zdr_org_as_before_and_logs_one_content_free_event
 
     // A ZDR organization: served as before.
     let mut expected: BTreeSet<(String, String)> = BTreeSet::new();
-    for (row, action, response) in durable_writes(&harness, &user_in_zdr_org(), &probe).await {
+    for (row, action, response) in
+        durable_writes(&harness, &user_in_zdr_org(), &probe, &held.to_string()).await
+    {
         let status = response.status().as_u16();
         let payload: Value = response.json().await.unwrap_or(Value::Null);
         assert!(
@@ -454,15 +471,36 @@ async fn observe_mode_serves_a_zdr_org_as_before_and_logs_one_content_free_event
 /// refused 403 with the catalogue code, and not one of them reaches Control Plane.
 #[tokio::test]
 async fn enforced_zdr_org_is_refused_every_durable_write_and_control_plane_sees_nothing() {
-    let _serial = ENFORCE_LOCK.lock().await;
+    let _serial = CAPTURE_LOCK.lock().await;
     capture();
     let control = control_plane().await;
-    let harness = edge(control.uri(), true, empty_profiles()).await;
+    // The organization already holds a named profile: a refused update must leave its name alone
+    // (a profile id the store never held could not show a mutate-then-403 update).
+    let profiles = Arc::new(InMemoryProfileStore::new());
+    let held: ProfileKind = quarry_core::ids::Id::new();
+    profiles
+        .save(ZDR_ORG, &held, &SessionSnapshot::default())
+        .await
+        .expect("seed a profile the organization already holds");
+    profiles
+        .save_metadata(
+            ZDR_ORG,
+            &held,
+            &ProfileMetadata {
+                name: Some(SEEDED_NAME.to_owned()),
+                scope: ProfileScope::UserPrivate,
+            },
+        )
+        .await
+        .expect("name the seeded profile");
+    let harness = edge(control.uri(), true, profiles.clone()).await;
     let probe = marker();
     let mark = refused_mark();
     let mut expected: BTreeSet<(String, String)> = BTreeSet::new();
 
-    for (row, action, response) in durable_writes(&harness, &user_in_zdr_org(), &probe).await {
+    for (row, action, response) in
+        durable_writes(&harness, &user_in_zdr_org(), &probe, &held.to_string()).await
+    {
         expected.insert((row.to_owned(), action.to_owned()));
         assert_eq!(response.status().as_u16(), 403, "{row}/{action}");
         let payload: Value = response.json().await.unwrap();
@@ -500,9 +538,23 @@ async fn enforced_zdr_org_is_refused_every_durable_write_and_control_plane_sees_
             .collect::<Vec<_>>()
             .join("\n")
     );
-    assert!(
-        held_profiles(&harness, &user_in_zdr_org()).await.is_empty(),
-        "a refused profile create, save or update stored nothing"
+    assert_eq!(
+        held_profiles(&harness, &user_in_zdr_org()).await,
+        vec![(held.to_string(), Some(SEEDED_NAME.to_owned()))],
+        "a refused profile create, save or update stored nothing and renamed nothing"
+    );
+    let stored = profiles
+        .load_metadata(ZDR_ORG, &held)
+        .await
+        .expect("load the seeded profile's metadata")
+        .expect("the seeded profile keeps its metadata");
+    assert_eq!(
+        stored,
+        ProfileMetadata {
+            name: Some(SEEDED_NAME.to_owned()),
+            scope: ProfileScope::UserPrivate,
+        },
+        "a refused update left the stored profile as it was"
     );
 }
 
@@ -511,7 +563,7 @@ async fn enforced_zdr_org_is_refused_every_durable_write_and_control_plane_sees_
 /// harness wires no baseline store). The shared token is still checked first.
 #[tokio::test]
 async fn enforced_internal_change_record_refuses_a_declared_zdr_body_only() {
-    let _serial = ENFORCE_LOCK.lock().await;
+    let _serial = CAPTURE_LOCK.lock().await;
     capture();
     let control = control_plane().await;
     let harness = edge(control.uri(), true, empty_profiles()).await;
@@ -573,7 +625,7 @@ async fn enforced_internal_change_record_refuses_a_declared_zdr_body_only() {
 /// read and delete the profiles it already holds, and read the change history.
 #[tokio::test]
 async fn enforced_zdr_org_can_still_wind_down() {
-    let _serial = ENFORCE_LOCK.lock().await;
+    let _serial = CAPTURE_LOCK.lock().await;
     capture();
     let control = control_plane().await;
     let profiles = Arc::new(InMemoryProfileStore::new());
@@ -674,7 +726,7 @@ async fn enforced_zdr_org_can_still_wind_down() {
 /// (200) and gets the same 501 for the change routes that it got before.
 #[tokio::test]
 async fn enforced_standard_org_is_unchanged() {
-    let _serial = ENFORCE_LOCK.lock().await;
+    let _serial = CAPTURE_LOCK.lock().await;
     capture();
     let control = control_plane().await;
     let harness = edge(control.uri(), true, empty_profiles()).await;
@@ -682,7 +734,8 @@ async fn enforced_standard_org_is_unchanged() {
     let probe = marker();
     let mark = refused_mark();
 
-    for (row, action, response) in durable_writes(&harness, &standard, &probe).await {
+    let unheld = ProfileKind::new().to_string();
+    for (row, action, response) in durable_writes(&harness, &standard, &probe, &unheld).await {
         let status = response.status().as_u16();
         let payload: Value = response.json().await.unwrap_or(Value::Null);
         assert!(
