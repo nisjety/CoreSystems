@@ -249,13 +249,13 @@ func TestSensitiveApproval_RejectsAnApprovalParentAndMismatchedSession(t *testin
 	}
 	nested := approval
 	nested.ParentGrantID = child.ID
-	if _, err := store.CreateScopedSensitiveApproval(ctx, nested); err == nil {
-		t.Fatal("an approval must not parent another approval")
+	if _, err := store.CreateScopedSensitiveApproval(ctx, nested); !errors.Is(err, ErrApprovalParentInvalid) {
+		t.Fatalf("an approval must not parent another approval: want ErrApprovalParentInvalid, got %v", err)
 	}
 	mismatched := approval
 	mismatched.SessionKey = "other-session"
-	if _, err := store.CreateScopedSensitiveApproval(ctx, mismatched); err == nil {
-		t.Fatal("approval for a different session must be refused")
+	if _, err := store.CreateScopedSensitiveApproval(ctx, mismatched); !errors.Is(err, ErrApprovalParentInvalid) {
+		t.Fatalf("approval for a different session must be refused with ErrApprovalParentInvalid, got %v", err)
 	}
 	noAction := approval
 	noAction.AllowedActions, noAction.AllowedFrameIDs = nil, nil

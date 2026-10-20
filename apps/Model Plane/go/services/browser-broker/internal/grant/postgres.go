@@ -362,7 +362,7 @@ func (s *PgStore) CreateScopedSensitiveApproval(ctx context.Context, p ApprovalP
 			return err
 		}
 		if _, ok := approvalParents[parent.Kind]; !ok || parent.SessionKey != p.SessionKey || len(parent.AllowedActions) != 0 {
-			return errors.New("sensitive approval parent grant is not an ordinary matching session or run grant")
+			return ErrApprovalParentInvalid
 		}
 		domains, err := NormalizeAllowedDomains(p.AllowedDomains)
 		if err != nil {

@@ -38,7 +38,8 @@ func mapErr(err error) error {
 		return status.Error(codes.PermissionDenied, err.Error())
 	case errors.Is(err, grant.ErrInvalidBudget):
 		return status.Error(codes.InvalidArgument, err.Error())
-	case errors.Is(err, grant.ErrParentNotDerivable), errors.Is(err, grant.ErrZdrPostureChanged):
+	case errors.Is(err, grant.ErrParentNotDerivable), errors.Is(err, grant.ErrApprovalParentInvalid),
+		errors.Is(err, grant.ErrZdrPostureChanged):
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, grant.ErrDeriveConflict):
 		return status.Error(codes.AlreadyExists, err.Error())
@@ -78,7 +79,7 @@ func grantOutcome(err error) string {
 		return "invalid_budget"
 	case errors.Is(err, grant.ErrDeriveNeedsExplicitDomains):
 		return "derive_needs_explicit_domains"
-	case errors.Is(err, grant.ErrParentNotDerivable):
+	case errors.Is(err, grant.ErrParentNotDerivable), errors.Is(err, grant.ErrApprovalParentInvalid):
 		return "parent_not_derivable"
 	case errors.Is(err, grant.ErrZdrPostureChanged):
 		return "zdr_posture_changed"

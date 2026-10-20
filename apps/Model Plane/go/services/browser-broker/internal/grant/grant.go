@@ -35,6 +35,11 @@ var (
 	// is not a derivable kind, carries sensitive actions, or has too little
 	// lifetime left. The message never says which.
 	ErrParentNotDerivable = errors.New("browser grant is not derivable")
+	// ErrApprovalParentInvalid means a sensitive approval named a parent it
+	// cannot bind to: not an ordinary session or run grant (an approval is
+	// not), or a grant of another session key. It is the caller's mistake
+	// (FailedPrecondition), not a broker fault. The message never says which.
+	ErrApprovalParentInvalid = errors.New("browser grant cannot take a sensitive approval")
 	// ErrDeriveWidensParent means a requested run host is not equal to or
 	// below any host of the parent grant.
 	ErrDeriveWidensParent = errors.New("derived browser grant would widen its parent")
@@ -290,7 +295,7 @@ func (s *MemoryRepository) CreateScopedSensitiveApproval(_ context.Context, p Ap
 		return nil, err
 	}
 	if _, ok := approvalParents[parent.Kind]; !ok || parent.SessionKey != p.SessionKey || len(parent.AllowedActions) != 0 {
-		return nil, errors.New("sensitive approval parent grant is not an ordinary matching session or run grant")
+		return nil, ErrApprovalParentInvalid
 	}
 	domains, err := NormalizeAllowedDomains(p.AllowedDomains)
 	if err != nil {
