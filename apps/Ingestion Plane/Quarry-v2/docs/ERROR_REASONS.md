@@ -1,6 +1,6 @@
 # `details.reason` values
 
-One closed list of the machine-readable reasons the edge puts in `error.details.reason` for a 403 (bot wall), a 404, a 415, a 429, a 502 or a 504. A client keys on the `reason`, never on the message. A design that adds a reason appends it here in the same change.
+One closed list of the machine-readable reasons the edge puts in `error.details.reason` for a 403 (bot wall), a 404, a 415, a 429, a 502 or a 504. A client keys on the `reason`, never on the message. A design that adds a reason appends it here in the same change. Three answers that are not a `reason` have their own sections at the end: a ZDR durable-resource refusal (`details.zdr_refusal`), a budget refusal (`details.limit_source`) and a body that names the initiator twice.
 
 ## 429 `RATE_LIMITED` on `POST /v1/agent/runs` (run caps)
 
@@ -107,3 +107,25 @@ Not retryable by the same caller, and only when `QUARRY_CHALLENGE_ENFORCE=enforc
 | `challenge_loop` | agent path only: the host challenged again after the one recovery |
 
 Observations carry the same closed values in `challenge.block_reason` and a `recovery` of `available`, `exhausted` or `not_applicable`.
+
+## 403 `FORBIDDEN`: a durable resource under Zero Data Retention (WS4.H stage A)
+
+Not a `details.reason`: the body is `error.details {zdr_refusal: {code: "zdr_durable_mutation_forbidden", action}}`, with no `feature` key. The message says that ZDR is active and carries no caller data (no URL, host, title or organization). The refusal happens only when `QUARRY_EDGE__ZDR_REFUSE_DURABLE_RESOURCES=true`, before Control Plane or a store is reached, and leaves a `zdr.refused` event. With the flag off, the default, nothing is refused: a ZDR caller is served as before and each request below leaves one `zdr.would_refuse` event (`docs/RUNBOOKS.md`, "A ZDR organization and durable resources"). Not retryable by the same caller.
+
+| matrix row | `details.zdr_refusal.action` | request |
+|---|---|---|
+| `schedules` | `create`, `unpause`, `trigger`, `backfill` | the schedule write routes |
+| `change_history` | `check` | a change check |
+| `change_snapshot` | `snapshot`, `refresh` | a change snapshot or refresh |
+| `profiles` | `save`, `create`, `update` | `POST /v1/profiles`, `POST /v1/profiles/create`, `PATCH /v1/profiles/{id}` |
+| `change_record_internal` | `record` | `POST /v1/internal/change/record`, only when its body says `zdr: true` |
+
+Reads and deletes (schedule list, pause and delete; profile list, load, delete and `restore_probe`; `/v1/change/latest` and `/v1/change/history`) are never refused, so an organization can wind down. The refusals that already existed (crawl, batch, a persistent profile at run start, resume) do not carry `details.zdr_refusal` yet.
+
+## 402 `BUDGET_EXHAUSTED`: `details.limit_source` (WS6.E)
+
+A step of an agent run is refused when the run reached a bound. `details` is `{dimension, limit, spent, unit, estimated, limit_source, resumable: false}`. `limit_source` is `grant` when a broker grant's budget claim set the bound that was reached (only with `QUARRY_EDGE__GRANT_BUDGET_CLAIM=enforce`, and only when the claim was tighter than what the request, the default and the ceiling gave), and `run_budget` otherwise. `data.clamped[].by` on the run start takes the same value `grant`. The claim caps one run, not the grant (`docs/RUNBOOKS.md`, "A grant carries a budget claim").
+
+## 422 on a body that names the initiator twice
+
+A tab open whose JSON body carries both `initiated_by` and `initiatedBy` was answered `422` with a plain-text body (`duplicate field initiatedBy`), not an error envelope, on the edge image U9 built from the working tree that became `dec93d1e` (`docs/RUNBOOKS.md`, "Evidence, round 4"). The step body and the run start body take the same JSON extractor, and `agent_routes/tests.rs` (`every_request_body_takes_the_hint_under_both_spellings`) pins that the tab, step, run-start and socket-message types and the select/close query all refuse two spellings, but the HTTP status was seen only for the tab open: the query and the socket message go through their own extractors. Quarry never picks one of two spellings; one spelling of either is accepted everywhere. An agent call during a take-over is `409 USER_TOOK_OVER` whichever spelling it uses (`docs/CONTRACTS.md`, "Which agent opened a tab").
