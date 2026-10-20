@@ -91,6 +91,71 @@ fn marker() -> String {
     format!("zdr-probe-{}", uuid::Uuid::new_v4().simple())
 }
 
+/// The enforce tests share the process-global capture and all emit `zdr.refused` for the same
+/// organization, so each takes this lock for its whole body and reads only the events appended
+/// after it started. (The observe test emits `zdr.would_refuse` only and needs no lock.)
+static ENFORCE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// How many `zdr.refused` events the process log holds now; pass it to [`refused_since`].
+fn refused_mark() -> usize {
+    events("zdr.refused").len()
+}
+
+/// The `zdr.refused` events appended since `mark`.
+fn refused_since(mark: usize) -> Vec<Value> {
+    events("zdr.refused").split_off(mark)
+}
+
+/// One `zdr.refused` event per refused request, naming exactly these rows and actions, the
+/// organization id, and nothing else (no URL, host, title or name).
+fn assert_refused_events(seen: &[Value], expected: &BTreeSet<(String, String)>) {
+    let observed: BTreeSet<(String, String)> = seen
+        .iter()
+        .map(|fields| {
+            (
+                fields["row"].as_str().unwrap_or_default().to_owned(),
+                fields["action"].as_str().unwrap_or_default().to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        &observed, expected,
+        "one zdr.refused per refused durable write: {seen:?}"
+    );
+    assert_eq!(
+        seen.len(),
+        expected.len(),
+        "exactly one event per refused request: {seen:?}"
+    );
+    for fields in seen {
+        assert_eq!(fields["org_id"], ZDR_ORG, "{fields}");
+        let keys: BTreeSet<&str> = fields
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            BTreeSet::from(["action", "message", "org_id", "row"]),
+            "the event carries the row, the action and the org id and nothing else: {fields}"
+        );
+    }
+}
+
+/// The profiles the organization behind `bearer` holds, by id (a wind-down read).
+async fn held_profiles(harness: &Harness, bearer: &str) -> Vec<String> {
+    let listed = harness.get(bearer, "/v1/profiles").await;
+    assert_eq!(listed.status().as_u16(), 200, "profile list");
+    let listed: Value = listed.json().await.unwrap();
+    listed["data"]["profiles"]
+        .as_array()
+        .expect("a profiles array")
+        .iter()
+        .filter_map(|profile| profile["profile_id"].as_str().map(str::to_owned))
+        .collect()
+}
+
 /// Control Plane as the edge sees it for the schedule routes: create and every lifecycle call
 /// answer 2xx, the list answers an empty page. wiremock records every request it receives.
 async fn control_plane() -> MockServer {
@@ -239,7 +304,13 @@ fn internal_record(zdr: Option<bool>, marker: &str) -> Value {
 async fn observe_mode_serves_a_zdr_org_as_before_and_logs_one_content_free_event_per_action() {
     capture();
     let control = control_plane().await;
-    let harness = edge(control.uri(), false, empty_profiles()).await;
+    let profiles = Arc::new(InMemoryProfileStore::new());
+    let held: ProfileKind = quarry_core::ids::Id::new();
+    profiles
+        .save(ZDR_ORG, &held, &SessionSnapshot::default())
+        .await
+        .expect("seed a profile the organization already holds");
+    let harness = edge(control.uri(), false, profiles.clone()).await;
     let probe = marker();
 
     // A standard organization: served, and not observed.
@@ -311,9 +382,27 @@ async fn observe_mode_serves_a_zdr_org_as_before_and_logs_one_content_free_event
         harness
             .delete(&user_in_zdr_org(), "/v1/schedules/sched-1")
             .await,
+        harness
+            .post(
+                &user_in_zdr_org(),
+                &format!("/v1/profiles/{held}/restore_probe"),
+                json!({ "url": format!("https://page.test/{probe}") }),
+            )
+            .await,
     ] {
         assert!(response.status().is_success(), "{}", response.status());
     }
+    // `GET /v1/change/latest` is a read: 501 here (no baseline store), never observed.
+    let latest = harness
+        .get(
+            &user_in_zdr_org(),
+            &format!(
+                "/v1/change/latest?url={}",
+                urlencode(&format!("https://page.test/{probe}"))
+            ),
+        )
+        .await;
+    assert_eq!(latest.status().as_u16(), 501, "change latest is served as before");
 
     let seen = events("zdr.would_refuse");
     let observed: BTreeSet<(String, String)> = seen
@@ -365,11 +454,16 @@ async fn observe_mode_serves_a_zdr_org_as_before_and_logs_one_content_free_event
 /// refused 403 with the catalogue code, and not one of them reaches Control Plane.
 #[tokio::test]
 async fn enforced_zdr_org_is_refused_every_durable_write_and_control_plane_sees_nothing() {
+    let _serial = ENFORCE_LOCK.lock().await;
+    capture();
     let control = control_plane().await;
     let harness = edge(control.uri(), true, empty_profiles()).await;
     let probe = marker();
+    let mark = refused_mark();
+    let mut expected: BTreeSet<(String, String)> = BTreeSet::new();
 
     for (row, action, response) in durable_writes(&harness, &user_in_zdr_org(), &probe).await {
+        expected.insert((row.to_owned(), action.to_owned()));
         assert_eq!(response.status().as_u16(), 403, "{row}/{action}");
         let payload: Value = response.json().await.unwrap();
         assert_eq!(
@@ -396,6 +490,20 @@ async fn enforced_zdr_org_is_refused_every_durable_write_and_control_plane_sees_
         control.received_requests().await.unwrap().is_empty(),
         "a refused request never reaches Control Plane"
     );
+    assert_refused_events(&refused_since(mark), &expected);
+    assert!(
+        !logged().contains(&probe),
+        "a refused request put its URL or name in the log:\n{}",
+        logged()
+            .lines()
+            .filter(|l| l.contains(&probe))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    assert!(
+        held_profiles(&harness, &user_in_zdr_org()).await.is_empty(),
+        "a refused profile create, save or update stored nothing"
+    );
 }
 
 /// The orchestrator's internal change record: a body that declares `zdr: true` is refused before
@@ -403,9 +511,12 @@ async fn enforced_zdr_org_is_refused_every_durable_write_and_control_plane_sees_
 /// harness wires no baseline store). The shared token is still checked first.
 #[tokio::test]
 async fn enforced_internal_change_record_refuses_a_declared_zdr_body_only() {
+    let _serial = ENFORCE_LOCK.lock().await;
+    capture();
     let control = control_plane().await;
     let harness = edge(control.uri(), true, empty_profiles()).await;
     let probe = marker();
+    let mark = refused_mark();
 
     let wrong_token = harness
         .post(
@@ -451,12 +562,19 @@ async fn enforced_internal_change_record_refuses_a_declared_zdr_body_only() {
             "an undeclared run is not refused"
         );
     }
+    // Exactly the declared body was refused: the 401, the two served bodies left no event.
+    assert_refused_events(
+        &refused_since(mark),
+        &BTreeSet::from([("change_record_internal".to_owned(), "record".to_owned())]),
+    );
 }
 
 /// A ZDR organization can still wind down: list schedules, pause and delete a schedule, list,
 /// read and delete the profiles it already holds, and read the change history.
 #[tokio::test]
 async fn enforced_zdr_org_can_still_wind_down() {
+    let _serial = ENFORCE_LOCK.lock().await;
+    capture();
     let control = control_plane().await;
     let profiles = Arc::new(InMemoryProfileStore::new());
     let held: ProfileKind = quarry_core::ids::Id::new();
@@ -466,6 +584,7 @@ async fn enforced_zdr_org_can_still_wind_down() {
         .expect("seed a profile the organization already holds");
     let harness = edge(control.uri(), true, profiles).await;
     let zdr = user_in_zdr_org();
+    let mark = refused_mark();
 
     let listed = harness.get(&zdr, "/v1/schedules").await;
     assert_eq!(listed.status().as_u16(), 200, "schedule list");
@@ -492,6 +611,19 @@ async fn enforced_zdr_org_can_still_wind_down() {
     );
     let read = harness.get(&zdr, &format!("/v1/profiles/{held}")).await;
     assert_eq!(read.status().as_u16(), 200, "profile read");
+    let probed = harness
+        .post(
+            &zdr,
+            &format!("/v1/profiles/{held}/restore_probe"),
+            json!({ "url": "https://page.test/restore" }),
+        )
+        .await;
+    assert_eq!(probed.status().as_u16(), 200, "profile restore_probe");
+    let probed: Value = probed.json().await.unwrap();
+    assert!(
+        probed["error"]["details"]["zdr_refusal"].is_null(),
+        "{probed}"
+    );
     let erased = harness.delete(&zdr, &format!("/v1/profiles/{held}")).await;
     assert_eq!(
         erased.status().as_u16(),
@@ -518,16 +650,37 @@ async fn enforced_zdr_org_can_still_wind_down() {
         history["error"]["details"]["zdr_refusal"].is_null(),
         "{history}"
     );
+    let latest = harness
+        .get(&zdr, "/v1/change/latest?url=https%3A%2F%2Fpage.test%2F")
+        .await;
+    assert_eq!(
+        latest.status().as_u16(),
+        501,
+        "latest is a read: not refused (no store here: 501)"
+    );
+    let latest: Value = latest.json().await.unwrap_or(Value::Null);
+    assert!(
+        latest["error"]["details"]["zdr_refusal"].is_null(),
+        "{latest}"
+    );
+    assert!(
+        refused_since(mark).is_empty(),
+        "no wind-down call left a zdr.refused event: {:?}",
+        refused_since(mark)
+    );
 }
 
 /// A standard organization is unchanged with the flag on: it creates a schedule and a profile
 /// (200) and gets the same 501 for the change routes that it got before.
 #[tokio::test]
 async fn enforced_standard_org_is_unchanged() {
+    let _serial = ENFORCE_LOCK.lock().await;
+    capture();
     let control = control_plane().await;
     let harness = edge(control.uri(), true, empty_profiles()).await;
     let standard = user_in_standard_org();
     let probe = marker();
+    let mark = refused_mark();
 
     for (row, action, response) in durable_writes(&harness, &standard, &probe).await {
         let status = response.status().as_u16();
@@ -555,5 +708,14 @@ async fn enforced_standard_org_is_unchanged() {
             .iter()
             .any(|r| r.method.as_str() == "POST" && r.url.path() == "/v1/schedules"),
         "the standard organization's schedule reached Control Plane"
+    );
+    assert!(
+        refused_since(mark).is_empty(),
+        "a standard organization leaves no zdr.refused event: {:?}",
+        refused_since(mark)
+    );
+    assert!(
+        !held_profiles(&harness, &standard).await.is_empty(),
+        "the standard organization's profile writes are stored (so the empty store above means refusal)"
     );
 }
