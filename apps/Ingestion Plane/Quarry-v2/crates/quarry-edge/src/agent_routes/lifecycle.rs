@@ -38,14 +38,26 @@ pub(super) fn bind_validated_grant(
 
 /// [`status_err`] for a ZDR refusal that was enforced before WS4.H: the same status, the
 /// same `BAD_REQUEST` code and the same message, plus the shared
-/// `details.zdr_refusal { code, action }` (`crate::zdr_refusal::refusal_details`).
-fn zdr_status_err(status: StatusCode, request_id: &str, msg: &str, action: &str) -> ApiErr {
+/// `details.zdr_refusal { code, action }` (`crate::zdr_refusal::refusal_details`). A refusal
+/// that had its own machine-readable token before WS4.H passes it as `legacy_code`; it is
+/// added to the details beside `zdr_refusal` (the plan's WS4.H detail), so a client that
+/// matched the old token in the message can read it from a field.
+fn zdr_status_err(
+    status: StatusCode,
+    request_id: &str,
+    msg: &str,
+    action: &str,
+    legacy_code: Option<&str>,
+) -> ApiErr {
+    let mut details = crate::zdr_refusal::refusal_details(action);
+    if let (Some(legacy), Some(map)) = (legacy_code, details.as_object_mut()) {
+        map.insert("legacy_code".to_owned(), serde_json::json!(legacy));
+    }
     (
         status,
         Json(Envelope::<()>::err(
             request_id,
-            QuarryError::new(ErrorCode::BadRequest, msg)
-                .with_details(crate::zdr_refusal::refusal_details(action)),
+            QuarryError::new(ErrorCode::BadRequest, msg).with_details(details),
         )),
     )
 }
@@ -162,6 +174,9 @@ pub async fn start_run(
                 &request_id,
                 "ZDR runs cannot be resumed from durable state",
                 "resume",
+                // The resume refusal never had a token of its own (its message carries none),
+                // so there is no legacy code to repeat.
+                None,
             ));
         }
         Some(checkpoint)
@@ -299,6 +314,7 @@ pub async fn start_run(
             &request_id,
             "zdr_persistent_profile_forbidden: a ZDR run cannot request a persistent profile or profile_id",
             "profile",
+            Some("zdr_persistent_profile_forbidden"),
         ));
     }
     if persist_profile && !state.agent_driver.capabilities().persistent_profile {

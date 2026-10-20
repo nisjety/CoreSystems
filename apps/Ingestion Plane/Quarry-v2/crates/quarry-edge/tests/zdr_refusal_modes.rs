@@ -912,6 +912,11 @@ async fn the_persistent_profile_refusal_at_run_start_carries_zdr_refusal_details
                 payload["error"]["details"]["zdr_refusal"]["action"], "profile",
                 "{context}"
             );
+            // The token this refusal has always carried in its message is also a field.
+            assert_eq!(
+                payload["error"]["details"]["legacy_code"], "zdr_persistent_profile_forbidden",
+                "{context}"
+            );
         }
 
         let standard = harness
