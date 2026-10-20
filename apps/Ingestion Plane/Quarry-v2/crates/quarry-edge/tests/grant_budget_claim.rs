@@ -410,3 +410,40 @@ async fn a_zdr_run_is_tightened_by_its_claim_and_persists_nothing() {
     }
     assert_eq!(edge.step(&agent, &run, wait_action(), None).await.status, 402);
 }
+
+/// What the claim is, stated so it cannot drift: a cap on one Quarry run, not a
+/// budget for the grant. Quarry keeps no spend state per grant (a grant is checked
+/// at each start and the claim is snapshotted into that run's own ledger), so a
+/// second `start_run` under the same grant gets a full ledger again, and only a
+/// resume of a named run continues one. The broker mints a run grant for one model
+/// run and the gateway presents it to one dispatch; a caller that starts several
+/// Quarry runs under one run grant is bounded per run, by the concurrency and
+/// per-organization run caps, and by the grant's own expiry, not by a shared total.
+/// If this ever changes to a per-grant total, this test is the one to change on
+/// purpose.
+#[tokio::test]
+#[serial]
+async fn the_claim_caps_each_run_not_the_grant() {
+    setup(Some("enforce"));
+    let broker = FakeBroker::default();
+    broker.set(grant("g-1", "run", "svc", steps_claim(2)));
+    let edge = edge_with(broker).await;
+    let agent = service_token();
+
+    let first = edge.start_run(&agent, start_body("g-1", 50)).await;
+    for _ in 0..2 {
+        assert_eq!(edge.step(&agent, &first, wait_action(), None).await.status, 200);
+    }
+    let spent = edge.step(&agent, &first, wait_action(), None).await;
+    assert_eq!(spent.status, 402, "the first run spent the whole claim: {}", spent.body);
+
+    // The same grant, a new run: a fresh ledger with the whole claim again.
+    let second = edge.start_run(&agent, start_body("g-1", 50)).await;
+    assert_ne!(first, second);
+    assert_eq!(caps_max_steps(&edge, &second).await, 2);
+    for n in 1..=2 {
+        let step = edge.step(&agent, &second, wait_action(), None).await;
+        assert_eq!(step.status, 200, "second run step {n}: {}", step.body);
+    }
+    assert_eq!(edge.step(&agent, &second, wait_action(), None).await.status, 402);
+}
