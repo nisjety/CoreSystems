@@ -309,6 +309,8 @@ struct Orchestration {
     order: Order,
     behaviour: ConsumeBehaviour,
     consumes: Arc<Mutex<Vec<SeenConsume>>>,
+    /// How many times `GetApproval` was asked (a park continue never asks).
+    approval_reads: Arc<Mutex<usize>>,
 }
 
 double_service!(Orchestration, "model_plane.v1.OrchestrationCoreService");
@@ -322,6 +324,7 @@ impl Orchestration {
         let this = self.clone();
         match request.uri().path() {
             "/model_plane.v1.OrchestrationCoreService/GetApproval" => {
+                *this.approval_reads.lock().expect("lock") += 1;
                 answer(request, move |_: TReq<mpv1::GetApprovalRequest>| async move {
                     Ok(Response::new(mpv1::GetApprovalResponse {
                         approval: Some(mpv1::Approval {
@@ -406,6 +409,8 @@ impl Orchestration {
 #[derive(Clone)]
 struct Runs {
     resumable: bool,
+    status: &'static str,
+    park_reason: &'static str,
 }
 
 double_service!(Runs, "model_plane.v1.RunService");
@@ -416,7 +421,7 @@ impl Runs {
         B: tonic::codegen::Body + Send + 'static,
         B::Error: Into<tonic::codegen::StdError> + Send + 'static,
     {
-        let resumable = self.resumable;
+        let (resumable, status, park_reason) = (self.resumable, self.status, self.park_reason);
         match request.uri().path() {
             "/model_plane.v1.RunService/ResolveRunOwner" => {
                 answer(request, |_: TReq<mpv1::ResolveRunOwnerRequest>| async {
@@ -429,9 +434,10 @@ impl Runs {
                     Ok(Response::new(mpv1::RunDetail {
                         run_id: RUN.to_owned(),
                         thread_id: "thread-1".to_owned(),
-                        status: "awaiting_approval".to_owned(),
+                        status: status.to_owned(),
                         goal: "the run's goal".to_owned(),
                         resumable,
+                        park_reason: park_reason.to_owned(),
                         ..Default::default()
                     }))
                 })
@@ -448,6 +454,8 @@ struct Execution {
     order: Order,
     requests: Arc<Mutex<Vec<mpv1::RunAgentRequest>>>,
     answer: Result<mpv1::RunAgentResponse, Status>,
+    /// How long `RunAgent` takes to answer (a run that outlives the follow deadline).
+    delay: Option<Duration>,
 }
 
 #[tonic::async_trait]
@@ -458,6 +466,9 @@ impl ExecutionCore for Execution {
     ) -> Result<Response<mpv1::RunAgentResponse>, Status> {
         self.order.lock().expect("lock").push("run_agent");
         self.requests.lock().expect("lock").push(request.into_inner());
+        if let Some(delay) = self.delay {
+            tokio::time::sleep(delay).await;
+        }
         self.answer.clone().map(Response::new)
     }
 
@@ -605,6 +616,8 @@ enum ExecutionKind {
     Unreachable,
     /// The connection is established and then dropped.
     Dropping,
+    /// `RunAgent` answers this after the delay.
+    Slow(Result<mpv1::RunAgentResponse, Status>, Duration),
 }
 
 fn paused_for_approval() -> ExecutionKind {
@@ -640,6 +653,12 @@ struct Case {
     resumable: bool,
     consume: ConsumeBehaviour,
     execution: ExecutionKind,
+    /// `EXECUTION_LOOP_PARKING_ENABLED` at the gateway (WS03 S8-A).
+    parking_switch: bool,
+    /// `RunDetail.status` of the run.
+    status: &'static str,
+    /// `RunDetail.park_reason` of the run (empty: not parked).
+    park_reason: &'static str,
 }
 
 impl Case {
@@ -649,6 +668,19 @@ impl Case {
             resumable: true,
             consume: ConsumeBehaviour::Won,
             execution,
+            parking_switch: false,
+            status: "awaiting_approval",
+            park_reason: "",
+        }
+    }
+
+    /// A parked run, with the resume and parking switches on.
+    fn parked(execution: ExecutionKind) -> Self {
+        Self {
+            parking_switch: true,
+            status: "running",
+            park_reason: "provider_exhausted",
+            ..Self::new(true, execution)
         }
     }
 }
@@ -658,6 +690,7 @@ struct Rig {
     auth: Auth,
     order: Order,
     consumes: Arc<Mutex<Vec<SeenConsume>>>,
+    approval_reads: Arc<Mutex<usize>>,
     run_agents: Arc<Mutex<Vec<mpv1::RunAgentRequest>>>,
     receipts: Receipts,
     publisher: Arc<DynPublisher>,
@@ -673,9 +706,14 @@ async fn rig(case: Case) -> Rig {
             "EXECUTION_LOOP_RESUME_ENABLED",
             case.resume_switch.then_some("true"),
         ),
+        EnvGuard::set(
+            "EXECUTION_LOOP_PARKING_ENABLED",
+            case.parking_switch.then_some("true"),
+        ),
     ];
     let order: Order = Arc::default();
     let consumes: Arc<Mutex<Vec<SeenConsume>>> = Arc::default();
+    let approval_reads: Arc<Mutex<usize>> = Arc::default();
     let run_agents: Arc<Mutex<Vec<mpv1::RunAgentRequest>>> = Arc::default();
     let receipts: Receipts = Arc::default();
 
@@ -697,12 +735,15 @@ async fn rig(case: Case) -> Rig {
         order: order.clone(),
         behaviour: case.consume,
         consumes: consumes.clone(),
+        approval_reads: approval_reads.clone(),
     }));
     // The consume goes to session-core's own endpoint, not through orchestrator-core (which does
     // not serve it): one double stands for both here.
     state.consume_client = state.orchestration_client.clone();
     state.run_client = RunServiceClient::new(serve!(Runs {
         resumable: case.resumable,
+        status: case.status,
+        park_reason: case.park_reason,
     }));
     state.managed_run_client = ManagedRunLifecycleClient::new({
         let lifecycle = Lifecycle {
@@ -723,14 +764,20 @@ async fn rig(case: Case) -> Rig {
             .await
             .expect("connect")
     });
-    state.execution_client = match case.execution {
+    let (execution, delay) = match case.execution {
+        ExecutionKind::Slow(answer, delay) => (ExecutionKind::Answers(answer), Some(delay)),
+        other => (other, None),
+    };
+    state.execution_client = match execution {
         ExecutionKind::Unreachable => unreachable_execution_client().await,
         ExecutionKind::Dropping => connection_dropping_execution_client().await,
+        ExecutionKind::Slow(..) => unreachable!("taken apart above"),
         ExecutionKind::Answers(answer) => {
             let double = Execution {
                 order: order.clone(),
                 requests: run_agents.clone(),
                 answer,
+                delay,
             };
             let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
             let addr = listener.local_addr().expect("addr");
@@ -763,6 +810,7 @@ async fn rig(case: Case) -> Rig {
         auth,
         order,
         consumes,
+        approval_reads,
         run_agents,
         receipts,
         publisher,
@@ -773,6 +821,11 @@ async fn rig(case: Case) -> Rig {
 
 impl Rig {
     fn continue_request(&self, claim_token: &str) -> Request<Body> {
+        self.continue_request_with(APPROVAL, claim_token)
+    }
+
+    /// The continue with this approval id (`""` is the park form, WS03 S8-A).
+    fn continue_request_with(&self, approval_id: &str, claim_token: &str) -> Request<Body> {
         Request::builder()
             .method("POST")
             .uri(format!("/v1/orchestration/runs/{RUN}/continue"))
@@ -783,17 +836,22 @@ impl Rig {
             .header("x-inference-authorization", format!("Bearer {}", self.auth.inference))
             .header(CONTENT_TYPE, "application/json")
             .body(Body::from(
-                json!({ "approval_id": APPROVAL, "claim_token": claim_token }).to_string(),
+                json!({ "approval_id": approval_id, "claim_token": claim_token }).to_string(),
             ))
             .expect("a request")
     }
 
     /// POST the continue and read the whole answer.
     async fn post(&self, claim_token: &str) -> Answer {
+        self.post_with(APPROVAL, claim_token).await
+    }
+
+    /// POST the continue with this approval id and read the whole answer.
+    async fn post_with(&self, approval_id: &str, claim_token: &str) -> Answer {
         let response = self
             .app
             .clone()
-            .oneshot(self.continue_request(claim_token))
+            .oneshot(self.continue_request_with(approval_id, claim_token))
             .await
             .expect("the router answers");
         let status = response.status();
@@ -820,6 +878,10 @@ impl Rig {
 
     fn receipt_count(&self) -> usize {
         self.receipts.lock().expect("lock").len()
+    }
+
+    fn approval_read_count(&self) -> usize {
+        *self.approval_reads.lock().expect("lock")
     }
 
     /// Whether `RUN_DISPATCH_DEGRADED` was published for the run.
@@ -1397,4 +1459,165 @@ async fn the_output_unavailable_frame_is_final_only_after_a_spend() {
     let types: Vec<String> = rig_on.published().into_iter().map(|(_, e)| e.event_type).collect();
     assert_eq!(types, ["RUN_STARTED", "RUN_OUTPUT_UNAVAILABLE"], "the closing event of a refusal is not published for it");
     assert_eq!(rig_on.receipt_count(), 0);
+}
+
+// ---- WS03 S8-A S8-7: the park continue, which never terminalizes ------------------------
+
+/// The park form of `/continue` (an exactly empty approval id, with the gateway's parking
+/// switch on) resumes a parked run. Whatever the executor answers, the gateway NEVER
+/// terminalizes it and never consumes or reads an approval: every failure is one final
+/// `park_continue` frame that never says `approval_spent` (or, for a follow deadline, the bare
+/// committed `agent_dispatch_unavailable`), and the run subject sees exactly one event that
+/// closes the attempt after `RUN_STARTED`.
+///
+/// The construction case (a credential that is not valid metadata) cannot be reached through
+/// the router, whose bearers are verified JWTs; `sse.rs`'s
+/// `a_park_continue_skips_the_pre_consume_check_and_its_construction_failure_is_a_park_frame`
+/// drives it on the stream itself.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_park_continue_never_terminalizes() {
+    const REFUSED: &str = "RUN_CONTINUE_REFUSED";
+    const DEGRADED: &str = "RUN_DISPATCH_DEGRADED";
+    // (name, what the executor does, the frame's code, whether it is a park frame, the event
+    // that closes the attempt)
+    #[allow(clippy::type_complexity)]
+    let cases: Vec<(&str, ExecutionKind, &str, bool, &str)> = vec![
+        ("InvalidArgument", refusing(Status::invalid_argument("resume_incomplete")), "resume_incomplete", true, REFUSED),
+        ("PermissionDenied", refusing(Status::permission_denied("resume_forbidden")), "resume_forbidden", true, REFUSED),
+        ("Unauthenticated", refusing(Status::unauthenticated("a credential sentence")), "continue_refused", true, REFUSED),
+        ("park_not_due", refusing(Status::failed_precondition("park_not_due")), "park_not_due", true, REFUSED),
+        ("not_resumable", refusing(Status::failed_precondition("not_resumable")), "not_resumable", true, REFUSED),
+        ("continue_disabled", refusing(Status::failed_precondition("continue_disabled")), "continue_disabled", true, REFUSED),
+        ("ECONNREFUSED", ExecutionKind::Unreachable, "continue_unreachable", true, REFUSED),
+        ("dropped", ExecutionKind::Dropping, "continue_outcome_unknown", true, DEGRADED),
+        (
+            "follow deadline",
+            ExecutionKind::Slow(
+                Ok(mpv1::RunAgentResponse { status: "completed".to_owned(), ..Default::default() }),
+                Duration::from_secs(5),
+            ),
+            "agent_dispatch_unavailable",
+            false,
+            DEGRADED,
+        ),
+    ];
+    for (name, execution, code, park_frame, closing) in cases {
+        // Only the deadline case caps the follow: on Windows a connect to a closed port takes
+        // about two seconds to be refused, so a one-second cap on every case would turn the
+        // unreachable and dropped cases into deadline cases.
+        let deadline = (name == "follow deadline").then_some("1");
+        let _deadline = EnvGuard::set("AGENTIC_RUN_DEADLINE_SECS", deadline);
+        let unreachable = matches!(execution, ExecutionKind::Unreachable | ExecutionKind::Dropping);
+        let rig = rig(Case::parked(execution)).await;
+        let answer = rig.post_with("", "claim-1").await;
+        assert_eq!(answer.status, StatusCode::OK, "{name}: {}", answer.body);
+        let error = answer
+            .error_frame()
+            .unwrap_or_else(|| panic!("{name}: an error frame: {}", answer.body));
+        assert_eq!(error["code"], code, "{name}: {}", answer.body);
+        assert!(error.get("approval_spent").is_none(), "{name}: a park spends nothing: {error}");
+        assert_eq!(error["run_id"], RUN, "{name}");
+        if park_frame {
+            assert_eq!(error["park_continue"], true, "{name}");
+            assert_eq!(error["retryable"], false, "{name}");
+        } else {
+            assert!(error.get("park_continue").is_none(), "{name}: the committed bare frame: {error}");
+            assert_eq!(error["retryable"], true, "{name}");
+        }
+        let connected = answer.frame("connected").expect("a connected frame");
+        assert!(connected.get("approval_spent").is_none(), "{name}");
+
+        assert_eq!(rig.receipt_count(), 0, "{name}: the gateway never terminalizes a park continue");
+        assert_eq!(rig.consume_count(), 0, "{name}: nothing is consumed");
+        assert_eq!(rig.approval_read_count(), 0, "{name}: no approval is read");
+        let types: Vec<String> = rig.published().into_iter().map(|(_, e)| e.event_type).collect();
+        assert_eq!(types, ["RUN_STARTED", closing], "{name}: exactly one attempt-closing event");
+        if !unreachable {
+            let requests = rig.run_agents.lock().expect("lock");
+            assert_eq!(requests.len(), 1, "{name}");
+            let resume = requests[0].resume.as_ref().expect("a resume");
+            assert_eq!(resume.mode, "park", "{name}");
+            assert_eq!(resume.approval_id, "", "{name}");
+            assert_eq!(resume.claim_token, "claim-1", "{name}");
+        }
+    }
+}
+
+/// A parked answer (to a park continue, or to any run) is the `run_parked` frame on the turn
+/// stream and `RUN_PARKED` on the run subject: no error, nothing terminalized, no receipt. A
+/// park reason the gateway does not know is an unknown status, as before.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_parked_answer_is_a_run_parked_frame() {
+    let parked = |reason: &str| {
+        ExecutionKind::Answers(Ok(mpv1::RunAgentResponse {
+            status: "parked".to_owned(),
+            park_reason: reason.to_owned(),
+            resets_at: "2026-10-20T12:00:00Z".to_owned(),
+            ..Default::default()
+        }))
+    };
+    let rig_park = rig(Case::parked(parked("provider_exhausted"))).await;
+    let answer = rig_park.post_with("", "claim-1").await;
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+    let frame = answer.frame("run_parked").expect("a run_parked frame");
+    assert_eq!(
+        frame,
+        json!({
+            "run_id": RUN,
+            "request_id": frame["request_id"].clone(),
+            "status": "parked",
+            "reason": "provider_exhausted",
+            "resume_after": "2026-10-20T12:00:00Z",
+        })
+    );
+    assert!(answer.error_frame().is_none(), "{}", answer.body);
+    let types: Vec<String> = rig_park.published().into_iter().map(|(_, e)| e.event_type).collect();
+    assert_eq!(types, ["RUN_STARTED", "RUN_PARKED"]);
+    assert_eq!(rig_park.receipt_count(), 0);
+    drop(rig_park);
+
+    let rig_unknown = rig(Case::parked(parked("a_reason_nobody_knows"))).await;
+    let answer = rig_unknown.post_with("", "claim-1").await;
+    assert!(answer.frame("run_parked").is_none(), "{}", answer.body);
+    assert_eq!(answer.error_frame().expect("an error frame")["code"], "agent_run_state_unknown");
+}
+
+/// The park form is accepted only as designed: with the parking switch off an empty id is the
+/// committed 400, a blank id is the committed 400 whatever the switch says, a park continue with
+/// the resume switch off is 409 `continue_disabled`, and a run that is not parked, or has ended,
+/// is 409 `not_resumable`. None of them reads an approval, consumes or dispatches.
+#[tokio::test]
+#[serial_test::serial]
+async fn the_park_form_is_refused_before_any_dispatch_unless_the_run_is_parked() {
+    let paused = || paused_for_approval();
+    let cases: Vec<(&str, Case, &str, &str, StatusCode, &str)> = vec![
+        ("parking off, empty id", Case { parking_switch: false, ..Case::parked(paused()) }, "", "claim-1", StatusCode::BAD_REQUEST, "continue_incomplete"),
+        ("parking on, blank id", Case::parked(paused()), "  ", "claim-1", StatusCode::BAD_REQUEST, "continue_incomplete"),
+        ("parking on, no claim", Case::parked(paused()), "", " ", StatusCode::BAD_REQUEST, "continue_incomplete"),
+        ("resume switch off", Case { resume_switch: false, ..Case::parked(paused()) }, "", "claim-1", StatusCode::CONFLICT, "continue_disabled"),
+        ("not parked", Case { park_reason: "", ..Case::parked(paused()) }, "", "claim-1", StatusCode::CONFLICT, "not_resumable"),
+        ("not resumable", Case { resumable: false, ..Case::parked(paused()) }, "", "claim-1", StatusCode::CONFLICT, "not_resumable"),
+        ("ended", Case { status: "completed", ..Case::parked(paused()) }, "", "claim-1", StatusCode::CONFLICT, "not_resumable"),
+    ];
+    for (name, case, approval_id, claim, status, code) in cases {
+        let rig = rig(case).await;
+        let answer = rig.post_with(approval_id, claim).await;
+        assert_eq!(answer.status, status, "{name}: {}", answer.body);
+        assert_eq!(answer.http_code(), code, "{name}");
+        assert_eq!(rig.approval_read_count(), 0, "{name}: no approval is read");
+        assert_eq!(rig.consume_count(), 0, "{name}");
+        assert_eq!(rig.run_agent_count(), 0, "{name}");
+        assert_eq!(rig.receipt_count(), 0, "{name}");
+    }
+    // An approval continuation is untouched by the parking switch: it still reads its approval.
+    let rig = rig(Case { parking_switch: true, ..Case::new(false, paused_for_approval()) }).await;
+    let answer = rig.post("claim-1").await;
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+    assert_eq!(rig.approval_read_count(), 1);
+    assert_eq!(
+        rig.run_agents.lock().expect("lock")[0].resume.as_ref().expect("resume").mode,
+        "segment"
+    );
 }

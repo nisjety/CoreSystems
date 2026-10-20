@@ -268,6 +268,18 @@ services:
       # user's click and has the executor refuse it: the click is lost and the run waits out
       # the renewed recovery window (see the execution-core entry for what each mismatch does).
       EXECUTION_LOOP_RESUME_ENABLED: ${EXECUTION_LOOP_RESUME_ENABLED:-false}
+      # Build plan WS03 S8-A (S8-7): on THIS service the parking switch only ACCEPTS the park
+      # form of /continue (an exactly empty approval_id with a claim token), which asks
+      # execution-core to resume a parked run and never terminalizes it. Execution-core's own
+      # entry of the same name WRITES parks. OFF by default; only the literal `true` turns it on.
+      # With it off an empty approval_id is the committed 400 continue_incomplete. It needs
+      # EXECUTION_LOOP_RESUME_ENABLED above (a park continue with it off is 409
+      # continue_disabled). Flip it together with the BFF's VEREVON_GATEWAY_CONTINUE_PARK_ENABLED,
+      # BEFORE execution-core's parking switch, and turn it off only after session-core's park
+      # recovery is off or no park is left. It is NOT the executor's flip, so it is read from a
+      # host variable of its own, MODEL_GATEWAY_LOOP_PARKING_ENABLED: turning the executor's
+      # parking off must leave the existing parks resumable here.
+      EXECUTION_LOOP_PARKING_ENABLED: ${MODEL_GATEWAY_LOOP_PARKING_ENABLED:-false}
       # WS14 S2a, "run the approved plan": the kill switch of the execute turn (the request
       # field `execute_granted`, sent by the SPA after a plan approval). OFF by default; only
       # the literal `true` turns it on. With it off such a turn is refused typed
@@ -1147,9 +1159,11 @@ services:
       # AGENT_CONTINUE_AFTER_APPROVAL_ENABLED, EXECUTION_LOOP_CHECKPOINT_ENABLED and
       # EXECUTION_EFFECT_LEDGER_ENABLED also on (a park nothing can resume is never written).
       # A park resume is NOT gated by this switch: with it off, existing parks stay resumable.
-      # This service WRITES parks; model-gateway reads the same name to ACCEPT the park form of
-      # /continue. Needs session-core's SESSION_CORE_PARK_RECOVERY_ENABLED (a store that does
-      # not accept the park leaves the run with its committed outcome). Flip it last.
+      # This service WRITES parks; model-gateway reads the same container name to ACCEPT the
+      # park form of /continue, from its own host variable MODEL_GATEWAY_LOOP_PARKING_ENABLED,
+      # so turning this one off does not turn the gateway's acceptance off. Needs session-core's
+      # SESSION_CORE_PARK_RECOVERY_ENABLED (a store that does not accept the park leaves the run
+      # with its committed outcome). Flip it last, after the gateway and the BFF; turn it off first.
       EXECUTION_LOOP_PARKING_ENABLED: ${EXECUTION_LOOP_PARKING_ENABLED:-false}
       # Autonomous tool-using runs route through Azure's model-router deployment,
       # which selects the best model per turn (tool-calling model selection is

@@ -878,6 +878,11 @@ fn switch_table() -> Vec<(&'static str, String, &'static str)> {
             "the park write (WS03 S8-A S8-5; read through park::parking_active, which also needs the resume switches above; a park resume is never gated by it)",
         ),
         (
+            "model-gateway",
+            mp_contracts::loop_fold::LOOP_PARKING_ENV.to_owned(),
+            "the park form of /continue (WS03 S8-A S8-7; read once in sse.rs continue_run through loop_parking_enabled; the gateway accepts the shape, it writes nothing)",
+        ),
+        (
             "session-core",
             const_str(&read(SESSION_CHECKPOINT), "ENABLED_ENV"),
             "the fold store",
@@ -911,6 +916,21 @@ fn const_str(source: &str, name: &str) -> String {
     .unwrap_or_else(|| panic!("no `const {name}: &str = \"..\";` found; re-point the switch table"))
 }
 
+/// The host variable a service's switch is read from in compose. A coupled switch shares one
+/// host variable across its services (one flip); the parking switch does NOT: the gateway
+/// ACCEPTS the park form and is flipped before the executor WRITES parks, and the executor is
+/// turned off first while existing parks stay resumable (WS03 S8-A, kill order a then c), so
+/// model-gateway reads it from a host variable of its own.
+fn compose_host_var(service: &str, key: &str) -> String {
+    if service == "model-gateway" && key == mp_contracts::loop_fold::LOOP_PARKING_ENV {
+        GATEWAY_PARKING_HOST_VAR.to_owned()
+    } else {
+        key.to_owned()
+    }
+}
+
+const GATEWAY_PARKING_HOST_VAR: &str = "MODEL_GATEWAY_LOOP_PARKING_ENABLED";
+
 fn compose_violations(
     compose: &str,
     table: &[(&'static str, String, &'static str)],
@@ -919,7 +939,7 @@ fn compose_violations(
     for (service, key, why) in table {
         let env = service_env(compose, service);
         let entries: Vec<&(String, String)> = env.iter().filter(|(name, _)| name == key).collect();
-        let want = format!("${{{key}:-false}}");
+        let want = format!("${{{}:-false}}", compose_host_var(service, key));
         match entries.as_slice() {
             [] => violations.push(format!("compose: {service} does not set {key} ({why}), so it cannot be switched with the others")),
             [(_, value)] if *value == want => {}
@@ -937,7 +957,11 @@ fn every_switch_defaults_off_violations(compose_files: &[(String, String)]) -> V
     for (name, compose) in compose_files {
         for captured in line.captures_iter(compose) {
             let (key, value) = (&captured[1], captured[2].trim_matches('"'));
-            if is_loop_switch(key) && value != format!("${{{key}:-false}}") {
+            // Which service may use the gateway's own parking host variable is
+            // compose_violations' business; here either spelling must still default OFF.
+            let gateway_parking = key == mp_contracts::loop_fold::LOOP_PARKING_ENV
+                && value == format!("${{{GATEWAY_PARKING_HOST_VAR}:-false}}");
+            if is_loop_switch(key) && value != format!("${{{key}:-false}}") && !gateway_parking {
                 violations.push(format!(
                     "{name}: {key} is `{value}`, a durable-loop switch must be `${{{key}:-false}}`"
                 ));
@@ -3132,10 +3156,19 @@ fn spent_closing_violations(gateway_sse: &str) -> Vec<String> {
             }
         }
     }
+    // AMENDED for the park continue (WS03 S8-A S8-7): the literal is written twice, once in each
+    // map, and nowhere else.
     let written = matches_of(&sse.text, r#""RUN_CONTINUE_REFUSED""#);
-    if written != 1 {
+    let in_maps: usize = ["spent_dispatch_run_event", "park_dispatch_run_event"]
+        .iter()
+        .map(|map| {
+            sse.fn_body(map)
+                .map_or(0, |body| matches_of(&body, r#""RUN_CONTINUE_REFUSED""#).min(1))
+        })
+        .sum();
+    if written != 2 || in_maps != 2 {
         violations.push(format!(
-            "sse.rs writes \"RUN_CONTINUE_REFUSED\" {written} times, expected once (in spent_dispatch_run_event)"
+            "sse.rs writes \"RUN_CONTINUE_REFUSED\" {written} times ({in_maps} of the two maps name it), expected twice: once in spent_dispatch_run_event and once in park_dispatch_run_event"
         ));
     }
     let asked = matches_of(&sse.text, r"\bspent_dispatch_run_event\s*\(");
@@ -3143,6 +3176,352 @@ fn spent_closing_violations(gateway_sse: &str) -> Vec<String> {
         violations.push(format!(
             "sse.rs mentions spent_dispatch_run_event( {asked} times, expected its definition and the one call of the spent arm"
         ));
+    }
+    violations
+}
+
+/// The gateway's park continue (WS03 S8-A S8-7) NEVER terminalizes, and its handling stands
+/// outside the committed dispatch match, so the arm-role guards above do not see it. This is the
+/// one guard of its body and its position:
+///
+/// * `agentic_run_stream` binds `let parking = resume.as_ref().is_some_and(..)` once;
+/// * it calls `park_dispatch_of(parking, dispatch_result)` exactly once, after the dispatch is
+///   followed (`follow_agentic_run(`) and before `let response = match dispatch_result {`;
+/// * `park_dispatch_of` and `enum ParkDispatch` are defined outside `agentic_run_stream`, and
+///   `park_dispatch_of`'s body has the one pattern `Ok(Ok(Err(status))) if parking`;
+/// * the `ParkDispatch::Refused` branch publishes exactly once (`let _ = state.publisher.publish(`),
+///   before `park_refusal_event(`, asks `park_dispatch_run_event(` once, binds no `closing`, returns,
+///   and names no terminalization, `AgentDispatchFailure`, `SpentByGateway`, `approval_spent`,
+///   `dispatch_unknown_event(`, `spent_dispatch_run_event(` or `RUN_*` literal;
+/// * the construction arm has an `if parking {` block, before the committed
+///   `if spend.is_spent() {`, that sends `park_refusal_event(` and returns, and names no publish
+///   and no terminalization;
+/// * the committed match still has exactly its five `Ok(Ok(Err(status)))` arms.
+fn park_dispatch_violations(gateway_sse: &str) -> Vec<String> {
+    let mut violations = Vec::new();
+    let sse = Code::new(gateway_sse).without_tests();
+    let Some((open, close)) = sse.fn_span("agentic_run_stream") else {
+        return vec!["sse.rs has no agentic_run_stream: re-point this guard".into()];
+    };
+    let skel = &sse.skel[open..close];
+    let first = |pattern: &str| {
+        Regex::new(pattern)
+            .expect("pattern")
+            .find(skel)
+            .map(|found| open + found.start())
+    };
+    let binding = r"\blet\s+parking\s*=\s*resume\s*\.\s*as_ref\s*\(\s*\)\s*\.\s*is_some_and\s*\(";
+    if matches_of(skel, binding) != 1 {
+        violations.push(
+            "agentic_run_stream does not bind `let parking = resume.as_ref().is_some_and(..)` exactly once"
+                .into(),
+        );
+    }
+    let call = r"\bpark_dispatch_of\s*\(\s*parking\s*,\s*dispatch_result\s*\)";
+    let calls = matches_of(skel, call);
+    if calls != 1 {
+        violations.push(format!(
+            "agentic_run_stream calls park_dispatch_of(parking, dispatch_result) {calls} times, expected exactly once: a park continue the executor refused would take the committed arms and be terminalized"
+        ));
+    }
+    match (
+        first(call),
+        first(r"\bfollow_agentic_run\s*\("),
+        first(r"\blet\s+response\s*=\s*match\s+dispatch_result\s*\{"),
+    ) {
+        (Some(at), Some(followed), Some(matched)) if followed < at && at < matched => {}
+        (Some(_), Some(_), Some(_)) => violations.push(
+            "the park interception is not between the follow and `let response = match dispatch_result {`: it must take the executor's refusal of a park BEFORE the committed match"
+                .into(),
+        ),
+        _ => violations.push(
+            "agentic_run_stream lacks the park interception, `follow_agentic_run(` or `let response = match dispatch_result {`"
+                .into(),
+        ),
+    }
+    // The helper and its enum live outside the stream, with the one pattern.
+    match sse.fn_span("park_dispatch_of") {
+        Some((at, _)) if at > open && at < close => violations.push(
+            "park_dispatch_of is defined inside agentic_run_stream: its pattern would be a sixth dispatch arm"
+                .into(),
+        ),
+        Some(_) => {
+            let body = sse.fn_body_skel("park_dispatch_of").unwrap_or_default();
+            if matches_of(&body, r"\bOk\(Ok\(Err\(status\)\)\)\s*if\s+parking\s*=>") != 1
+                || matches_of(&body, r"\bOk\(Ok\(Err\(") != 1
+            {
+                violations.push(
+                    "park_dispatch_of no longer takes exactly `Ok(Ok(Err(status))) if parking` and passes everything else"
+                        .into(),
+                );
+            }
+        }
+        None => violations.push("sse.rs has no `fn park_dispatch_of`".into()),
+    }
+    match block_span(&sse, r"\benum\s+ParkDispatch\s*<[^>]*>\s*\{") {
+        Some((at, _)) if at > open && at < close => violations.push(
+            "enum ParkDispatch is declared inside agentic_run_stream".into(),
+        ),
+        Some(_) => {}
+        None => violations.push("sse.rs has no `enum ParkDispatch`".into()),
+    }
+    // The Refused branch.
+    match first(r"\bParkDispatch\s*::\s*Refused\s*\(\s*status\s*\)\s*=>\s*\{") {
+        None => violations.push("agentic_run_stream has no `ParkDispatch::Refused(status) => {` branch".into()),
+        Some(at) => {
+            let brace = at + sse.skel[at..].find('{').expect("the branch has a brace");
+            let end = matching_brace(&sse.skel, brace).unwrap_or(brace);
+            let text = &sse.text[brace..=end];
+            let body = &sse.skel[brace..=end];
+            let publishes = matches_of(body, r"\.\s*publish\s*\(");
+            let ignored = matches_of(
+                body,
+                r"let\s+_\s*=\s*state\s*\.\s*publisher\s*\.\s*publish\s*\(",
+            );
+            if publishes != 1 || ignored != 1 {
+                violations.push(format!(
+                    "the park Refused branch publishes {publishes} run-subject events ({ignored} as `let _ = state.publisher.publish(`), expected exactly one per attempt, its answer ignored"
+                ));
+            }
+            match (body.find(".publish("), body.find("park_refusal_event(")) {
+                (Some(published), Some(frame)) if published < frame => {}
+                _ => violations.push(
+                    "the park Refused branch does not publish before it sends park_refusal_event(..)"
+                        .into(),
+                ),
+            }
+            if matches_of(body, r"\bpark_dispatch_run_event\s*\(") != 1 {
+                violations.push(
+                    "the park Refused branch does not ask park_dispatch_run_event(..) exactly once"
+                        .into(),
+                );
+            }
+            if Regex::new(r"\blet\s+closing\b").expect("pattern").is_match(body) {
+                violations.push(
+                    "the park Refused branch binds `closing`: the spent arm's guard rows would find it first"
+                        .into(),
+                );
+            }
+            if !Regex::new(r"\breturn\s*;").expect("pattern").is_match(body) {
+                violations.push("the park Refused branch does not return".into());
+            }
+            if Regex::new(TERMINALIZE).expect("pattern").is_match(body) {
+                violations.push(
+                    "the park Refused branch terminalizes the run: the gateway never terminalizes a park continue"
+                        .into(),
+                );
+            }
+            for forbidden in [
+                "AgentDispatchFailure",
+                "SpentByGateway",
+                "approval_spent",
+                "dispatch_unknown_event(",
+                "spent_dispatch_run_event(",
+            ] {
+                if text.contains(forbidden) {
+                    violations.push(format!("the park Refused branch names `{forbidden}`"));
+                }
+            }
+            if Regex::new(r#""RUN_[A-Z_]*""#).expect("pattern").is_match(text) {
+                violations.push(
+                    "the park Refused branch names a RUN_* type itself: the type comes from park_dispatch_run_event"
+                        .into(),
+                );
+            }
+        }
+    }
+    // The construction arm: the park block, before the committed spent check.
+    let anchor = sse.text[open..close]
+        .find("RunAgent request construction rejected before dispatch")
+        .map(|offset| open + offset);
+    match anchor {
+        None => violations.push(
+            "agentic_run_stream lost its construction-failure log line: re-point this guard".into(),
+        ),
+        Some(anchor) => {
+            let after = |pattern: &str| {
+                Regex::new(pattern)
+                    .expect("pattern")
+                    .find(&sse.skel[anchor..close])
+                    .map(|found| anchor + found.start())
+            };
+            match (after(r"\bif\s+parking\s*\{"), after(r"\bif\s+spend\.is_spent\(\)\s*\{")) {
+                (Some(park), Some(spent)) if park < spent => {
+                    let brace = park + sse.skel[park..].find('{').expect("a brace");
+                    let end = matching_brace(&sse.skel, brace).unwrap_or(brace);
+                    let block = &sse.skel[brace..=end];
+                    if !block.contains("park_refusal_event(")
+                        || !Regex::new(r"\breturn\s*;").expect("pattern").is_match(block)
+                    {
+                        violations.push(
+                            "the construction arm's `if parking {` block does not send park_refusal_event(..) and return"
+                                .into(),
+                        );
+                    }
+                    if block.contains(".publish(") || Regex::new(TERMINALIZE).expect("pattern").is_match(block) {
+                        violations.push(
+                            "the construction arm's `if parking {` block publishes or terminalizes: nothing was started"
+                                .into(),
+                        );
+                    }
+                }
+                (Some(_), Some(_)) => violations.push(
+                    "the construction arm's `if parking {` block is not before the committed `if spend.is_spent() {`: a park construction failure would be terminalized"
+                        .into(),
+                ),
+                (None, _) => violations.push(
+                    "the construction arm has no `if parking {` block: a park construction failure would be terminalized"
+                        .into(),
+                ),
+                (_, None) => violations.push(
+                    "the construction arm lost the committed `if spend.is_spent() {`".into(),
+                ),
+            }
+        }
+    }
+    let arms = dispatch_arms(&sse).len();
+    if arms != 5 {
+        violations.push(format!(
+            "agentic_run_stream's dispatch match has {arms} `Ok(Ok(Err(status)))` arms, expected the five committed ones"
+        ));
+    }
+    violations
+}
+
+/// The park form of `/continue` (WS03 S8-A S8-7), as `continue_run` reads it:
+///
+/// * `let parking = req.approval_id.is_empty() && ..loop_parking_enabled();` is bound once, and
+///   `loop_parking_enabled(` is read once in the gateway;
+/// * `.get_approval(` and `continue_preflight(` stand in the non-park branch only, and
+///   `park_preflight(` in the park branch only (`if parking { .. } else { .. }`);
+/// * `if parking && !resume_enabled {` comes after the switch read;
+/// * `let resume_enabled = resume_enabled && !parking;` appears exactly once, after
+///   `resume_mode_for(` and that check and BEFORE the first `if resume_enabled {`, the pre-consume
+///   check, whose text is the committed one: a park continue never reaches it.
+fn park_continue_violations(gateway_sources: &[(String, String)]) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut parking_reads = 0;
+    let mut continue_run: Option<Code> = None;
+    for (path, source) in gateway_sources {
+        let code = Code::new(source).without_tests();
+        parking_reads += matches_of(&code.skel, r"\bloop_parking_enabled\s*\(");
+        if path.replace('\\', "/").ends_with("/sse.rs") {
+            continue_run = Some(code);
+        }
+    }
+    if parking_reads != 1 {
+        violations.push(format!(
+            "the gateway calls loop_parking_enabled() {parking_reads} times, expected exactly once (in continue_run)"
+        ));
+    }
+    let Some(sse) = continue_run else {
+        return vec!["the gateway sources have no sse.rs: re-point this guard".into()];
+    };
+    let Some((open, close)) = sse.fn_span("continue_run") else {
+        return vec!["sse.rs has no `fn continue_run`: re-point this guard".into()];
+    };
+    let skel = &sse.skel[open..close];
+    let first = |pattern: &str| {
+        Regex::new(pattern)
+            .expect("pattern")
+            .find(skel)
+            .map(|found| open + found.start())
+    };
+    let binding = r"\blet\s+parking\s*=\s*req\s*\.\s*approval_id\s*\.\s*is_empty\s*\(\s*\)\s*&&\s*[\w:]*loop_parking_enabled\s*\(\s*\)\s*;";
+    if matches_of(skel, binding) != 1 {
+        violations.push(
+            "continue_run does not bind `let parking = req.approval_id.is_empty() && ..loop_parking_enabled();` exactly once: only an EXACTLY empty id, with the switch on, is the park form"
+                .into(),
+        );
+    }
+    // The two branches.
+    match first(r"\bif\s+parking\s*\{") {
+        None => violations.push("continue_run has no `if parking {` branch".into()),
+        Some(at) => {
+            let brace = at + sse.skel[at..].find('{').expect("a brace");
+            let end = matching_brace(&sse.skel, brace).unwrap_or(brace);
+            let park_branch = &sse.skel[brace..=end];
+            let rest = sse.skel[end + 1..close].trim_start();
+            let other = rest.strip_prefix("else").map(str::trim_start).and_then(|rest| {
+                rest.starts_with('{').then(|| {
+                    let from = close - rest.len();
+                    let to = matching_brace(&sse.skel, from).unwrap_or(from);
+                    sse.skel[from..=to].to_owned()
+                })
+            });
+            match other {
+                None => violations.push("continue_run's `if parking {` has no `else {` branch".into()),
+                Some(other) => {
+                    for (needle, in_park, in_other, why) in [
+                        (r"\.\s*get_approval\s*\(", 0, 1, "a park continue reads no approval"),
+                        (r"\bcontinue_preflight\s*\(", 0, 1, "the approval preflight is the approval continuation's"),
+                        (r"\bpark_preflight\s*\(", 1, 0, "the park preflight is the park continue's"),
+                    ] {
+                        let (park, rest_count, total) = (
+                            matches_of(park_branch, needle),
+                            matches_of(&other, needle),
+                            matches_of(skel, needle),
+                        );
+                        if park != in_park || rest_count != in_other || total != in_park + in_other {
+                            violations.push(format!(
+                                "continue_run names `{needle}` {park} times in the park branch, {rest_count} in the other and {total} in all: {why}"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let switch = first(r"\blet\s+resume_enabled\s*=\s*[\w:]*loop_resume_enabled\s*\(\s*\)\s*;");
+    let refused = first(r"\bif\s+parking\s*&&\s*!\s*resume_enabled\s*\{");
+    let mode = first(r"\bresume_mode_for\s*\(\s*resume_enabled\s*,\s*detail\.resumable\s*,\s*parking\s*\)");
+    let rebinding_pattern = r"\blet\s+resume_enabled\s*=\s*resume_enabled\s*&&\s*!\s*parking\s*;";
+    let rebinding = first(rebinding_pattern);
+    let precheck = first(r"\bif\s+resume_enabled\s*\{");
+    if matches_of(skel, rebinding_pattern) != 1 {
+        violations.push(
+            "continue_run does not rebind `let resume_enabled = resume_enabled && !parking;` exactly once"
+                .into(),
+        );
+    }
+    match (switch, mode, refused, rebinding, precheck) {
+        (Some(switch), Some(mode), Some(refused), Some(rebinding), Some(precheck)) => {
+            if !(switch < refused) {
+                violations.push(
+                    "continue_run's `if parking && !resume_enabled {` comes before the switch is read"
+                        .into(),
+                );
+            }
+            if !(mode < rebinding && refused < rebinding) {
+                violations.push(
+                    "continue_run rebinds resume_enabled before resume_mode_for(..) or the park continue_disabled check"
+                        .into(),
+                );
+            }
+            if !(rebinding < precheck) {
+                violations.push(
+                    "continue_run rebinds resume_enabled AFTER the pre-consume check: a park continue would get the unbuildable stream's frame, which is no park frame"
+                        .into(),
+                );
+            }
+            let end = matching_brace(&sse.skel, precheck + sse.skel[precheck..].find('{').expect("a brace"))
+                .unwrap_or(precheck);
+            let block: String = sse.text[precheck..=end].split_whitespace().collect::<Vec<_>>().join(" ");
+            for needle in [
+                "if resume_enabled { if let Err(error) = run_agent_request_is_buildable( &execution_bearer, &data_plane_bearer, &model_bearer, &inference_bearer, ) {",
+                "return Ok(unbuildable_continuation_stream(&run_id));",
+            ] {
+                if !block.contains(needle) {
+                    violations.push(format!(
+                        "the pre-consume check is no longer the committed one (missing `{needle}`): {block}"
+                    ));
+                }
+            }
+        }
+        _ => violations.push(
+            "continue_run lacks one of the switch read, resume_mode_for(resume_enabled, detail.resumable, parking), `if parking && !resume_enabled {`, the rebinding or the pre-check"
+                .into(),
+        ),
     }
     violations
 }
@@ -4048,8 +4427,34 @@ fn store_proofs() -> Vec<StoreProof> {
         },
         StoreProof {
             store: Some(DurableStore::Park),
-            gate: "park: NOT BUILT (WS03 S8). When it is, list the tests that drive its real gate here",
-            tests: &[],
+            gate: "park (WS03 S8-A): the executor parks only a run park::run_parkable admits (fed !req.zdr and !route.is_waived()) and refuses a zero-retention or waived park resume; session-core's park save goes through run_owner_tx, which refuses a non-persistent class; the gateway's park continue passes continue_persistent_gate and park_preflight",
+            tests: &[
+                (EXECUTOR_PARK, "run_parkable_refuses_every_excluded_run"),
+                (EXECUTOR_LOOP, "loop_park_a_zdr_or_waived_pinned_run_never_parks"),
+                (EXECUTOR_LOOP, "loop_park_a_park_resume_refuses_a_zdr_or_waived_caller"),
+                (
+                    EXECUTOR_LOOP,
+                    "loop_park_a_parked_run_resumes_from_its_fold_fenced_before_any_inference",
+                ),
+                // DB-backed (#[ignore]): the disposable-Postgres harness runs them.
+                (
+                    SESSION_CHECKPOINT,
+                    "loop_checkpoint_a_park_save_is_refused_for_a_zdr_or_waived_run",
+                ),
+                (
+                    SESSION_CHECKPOINT,
+                    "loop_checkpoint_a_park_save_is_validated_and_echoed_only_under_park_recovery",
+                ),
+                (
+                    SESSION_CHECKPOINT,
+                    "loop_checkpoint_an_empty_ref_claims_only_a_due_park",
+                ),
+                (
+                    GATEWAY_SSE,
+                    "a_park_continue_of_a_non_persistent_turn_is_refused_before_any_read",
+                ),
+                (GATEWAY_PRECONSUME_TESTS, "a_park_continue_never_terminalizes"),
+            ],
         },
     ]
 }
@@ -4090,7 +4495,7 @@ fn store_proof_violations(
     // A file is read and cleaned once, however many of its tests are named.
     let mut cleaned: std::collections::BTreeMap<&str, String> = std::collections::BTreeMap::new();
     for proof in proofs {
-        if proof.tests.is_empty() && proof.store != Some(DurableStore::Park) {
+        if proof.tests.is_empty() {
             violations.push(format!("{} names no test that drives it", proof.gate));
         }
         for (path, name) in proof.tests {
@@ -5066,6 +5471,190 @@ fn a_spent_attempt_is_closed_on_the_run_subject_and_every_frame_after_the_answer
     assert_green(&after_answer_frame_violations(&sse, &read(GATEWAY_SUBSCRIPTION)));
 }
 
+/// The gateway's park continue (WS03 S8-A S8-7) never terminalizes, is intercepted before the
+/// committed dispatch match, and never reaches the approval read, the pre-consume check or the
+/// consume.
+#[test]
+fn the_park_continue_never_terminalizes_and_never_reaches_the_pre_consume() {
+    let sse = read(GATEWAY_SSE);
+    assert_green(&park_dispatch_violations(&sse));
+    assert_green(&park_continue_violations(&gateway_sources()));
+}
+
+/// The park guards go red on the regressions they exist for.
+#[test]
+fn the_park_continue_guards_go_red_when_the_code_they_guard_regresses() {
+    let sse = read(GATEWAY_SSE);
+    let gateway = gateway_sources();
+    assert_green(&park_dispatch_violations(&sse));
+    let interception = "let dispatch_result = match park_dispatch_of(parking, dispatch_result) {";
+    // The interception removed.
+    must_flag(
+        park_dispatch_violations(&mutate(
+            &sse,
+            interception,
+            "let dispatch_result = match park_dispatch_of_nothing(parking, dispatch_result) {",
+        )),
+        "calls park_dispatch_of(parking, dispatch_result) 0 times",
+    );
+    // The interception moved after the committed match.
+    let start = sse.find(interception).expect("the interception");
+    let end_marker = "ParkDispatch::Pass(result) => result,\n        };\n";
+    let end = start + sse[start..].find(end_marker).expect("the interception ends") + end_marker.len();
+    let block = &sse[start..end];
+    let without = format!("{}{}", &sse[..start], &sse[end..]);
+    let matched = "Ok(Ok(Ok(response))) => response,\n        };\n";
+    let moved = mutate(&without, matched, &format!("{matched}{block}"));
+    must_flag(
+        park_dispatch_violations(&moved),
+        "is not between the follow and `let response = match dispatch_result {`",
+    );
+    // A terminalization in the Refused branch.
+    must_flag(
+        park_dispatch_violations(&mutate_in(
+            &sse,
+            "ParkDispatch::Refused(status) => {",
+            "let failure =",
+            "let _ = crate::session_flow::terminalize_agent_dispatch_rejection_authenticated(&state, &run, crate::session_flow::AgentDispatchFailure::Rejected, &model_bearer).await;\n                let failure =",
+        )),
+        "the park Refused branch terminalizes the run",
+    );
+    // A second publish.
+    must_flag(
+        park_dispatch_violations(&mutate_in(
+            &sse,
+            "ParkDispatch::Refused(status) => {",
+            "let _ = tx",
+            "let _ = state.publisher.publish(&subjects::run_event_subject(&run.run_id), &park_closing).await;\n                let _ = tx",
+        )),
+        "publishes 2 run-subject events",
+    );
+    // The binding renamed to `closing`, which the spent arm's rows key on.
+    must_flag(
+        park_dispatch_violations(&mutate(&sse, "let park_closing =", "let closing =")),
+        "binds `closing`",
+    );
+    // The construction block dropped, or moved after the committed spent check.
+    let anchor = "RunAgent request construction rejected before dispatch";
+    must_flag(
+        park_dispatch_violations(&mutate_in(&sse, anchor, "if parking {", "if false {")),
+        "has no `if parking {` block",
+    );
+    let swapped = mutate_in(
+        &mutate_in(&sse, anchor, "if parking {", "if __SWAP__ {"),
+        anchor,
+        "if spend.is_spent() {",
+        "if parking {",
+    );
+    must_flag(
+        park_dispatch_violations(&mutate_in(&swapped, anchor, "if __SWAP__ {", "if spend.is_spent() {")),
+        "is not before the committed `if spend.is_spent() {`",
+    );
+    // A sixth dispatch arm.
+    must_flag(
+        park_dispatch_violations(&mutate(
+            &sse,
+            "Ok(Ok(Ok(response))) => response,",
+            "Ok(Ok(Err(status))) if false => { let _ = status; return; }\n            Ok(Ok(Ok(response))) => response,",
+        )),
+        "has 6 `Ok(Ok(Err(status)))` arms",
+    );
+
+    // park_continue_violations.
+    assert_green(&park_continue_violations(&gateway));
+    let cont = |text: &str| park_continue_violations(&replace_source(&gateway, "/sse.rs", text));
+    let rebinding = "    let resume_enabled = resume_enabled && !parking;\n";
+    // The rebinding moved AFTER the pre-check.
+    let moved = mutate(
+        &mutate(&sse, rebinding, ""),
+        "    // The run already exists: reuse it under its own managed obligation",
+        &format!("{rebinding}    // The run already exists: reuse it under its own managed obligation"),
+    );
+    must_flag(cont(&moved), "AFTER the pre-consume check");
+    must_flag(cont(&mutate(&sse, rebinding, "")), "exactly once");
+    // The parking switch read a second way, or a blank id taken for the park form.
+    must_flag(
+        cont(&format!("{sse}\nfn second() -> bool {{ mp_contracts::loop_fold::loop_parking_enabled() }}")),
+        "calls loop_parking_enabled() 2 times",
+    );
+    must_flag(
+        cont(&mutate(
+            &sse,
+            "let parking = req.approval_id.is_empty() &&",
+            "let parking = req.approval_id.trim().is_empty() &&",
+        )),
+        "does not bind `let parking = req.approval_id.is_empty()",
+    );
+    // The approval read in the park branch too.
+    must_flag(
+        cont(&mutate(
+            &sse,
+            "        park_preflight(\n",
+            "        let _ = state.orchestration_client.clone().get_approval(todo!());\n        park_preflight(\n",
+        )),
+        "a park continue reads no approval",
+    );
+    // The park continue_disabled check before the switch read.
+    let refusal = "    if parking && !resume_enabled {\n        return Err(continue_error(StatusCode::CONFLICT, \"continue_disabled\"));\n    }\n";
+    must_flag(
+        cont(&mutate(
+            &mutate(&sse, refusal, ""),
+            "    let resume_enabled = mp_contracts::loop_fold::loop_resume_enabled();\n",
+            &format!("{refusal}    let resume_enabled = mp_contracts::loop_fold::loop_resume_enabled();\n"),
+        )),
+        "comes before the switch is read",
+    );
+    // The pre-check is no longer the committed one.
+    must_flag(
+        cont(&mutate(
+            &sse,
+            "            return Ok(unbuildable_continuation_stream(&run_id));",
+            "            return Ok(launch_nothing(&run_id));",
+        )),
+        "the pre-consume check is no longer the committed one",
+    );
+
+    // The amended closing count: a third literal is flagged.
+    assert_green(&spent_closing_violations(&sse));
+    must_flag(
+        spent_closing_violations(&format!(
+            "{sse}\nfn rogue() -> &'static str {{ \"RUN_CONTINUE_REFUSED\" }}"
+        )),
+        "writes \"RUN_CONTINUE_REFUSED\" 3 times",
+    );
+    must_flag(
+        spent_closing_violations(&mutate_in(
+            &sse,
+            "fn park_dispatch_run_event(",
+            "\"RUN_CONTINUE_REFUSED\"",
+            "\"RUN_FAILED\"",
+        )),
+        "writes \"RUN_CONTINUE_REFUSED\" 1 times",
+    );
+
+    // The Park store proof is checkable like every other: a renamed gateway test is flagged.
+    let proofs = store_proofs();
+    for (target, name, keyword) in [
+        (GATEWAY_SSE, "a_park_continue_of_a_non_persistent_turn_is_refused_before_any_read", "fn"),
+        (GATEWAY_PRECONSUME_TESTS, "a_park_continue_never_terminalizes", "async fn"),
+    ] {
+        let text = mutate(&read(target), &format!("{keyword} {name}("), &format!("{keyword} {name}_x("));
+        let file = move |path: &str| if path == target { text.clone() } else { read(path) };
+        must_flag(store_proof_violations(&proofs, &file, &[]), &format!("has no test `{name}`"));
+    }
+    // And an empty Park entry is no longer exempt.
+    let mut emptied = store_proofs();
+    for proof in &mut emptied {
+        if proof.store == Some(DurableStore::Park) {
+            proof.tests = &[];
+        }
+    }
+    must_flag(
+        store_proof_violations(&emptied, &|path: &str| read(path), &[]),
+        "names no test that drives it",
+    );
+}
+
 /// Every refusal the executor can send is a word of the gateway's closed vocabulary, and every
 /// word is sent by something.
 #[test]
@@ -5532,6 +6121,46 @@ fn every_guard_goes_red_when_the_code_it_guards_regresses() {
     must_flag(
         compose_violations(&compose.replacen(&resume_line, &literal_on, 1), &table),
         &format!("model-gateway sets {resume_key}: true"),
+    );
+    // The parking switch (WS03 S8-A) is NOT one coupled flip: model-gateway reads it from a
+    // host variable of its own, so the executor can be turned off (kill order a) while the
+    // gateway still accepts the park form. Sharing the executor's host variable on the
+    // gateway, or the gateway's on the executor, is flagged, and the gateway's own default OFF.
+    let park_key = mp_contracts::loop_fold::LOOP_PARKING_ENV;
+    let shared_park_line = format!("      {park_key}: ${{{park_key}:-false}}\n");
+    let gateway_park_line =
+        format!("      {park_key}: ${{{GATEWAY_PARKING_HOST_VAR}:-false}}\n");
+    assert_eq!(
+        (compose.matches(&gateway_park_line).count(), compose.matches(&shared_park_line).count()),
+        (1, 1),
+        "the compose parking switch lines moved: re-point this test"
+    );
+    assert!(
+        compose.find(&gateway_park_line) < compose.find(&shared_park_line),
+        "model-gateway is declared before execution-core: re-point this test"
+    );
+    must_flag(
+        compose_violations(&compose.replacen(&gateway_park_line, &shared_park_line, 1), &table),
+        &format!("model-gateway sets {park_key}: ${{{park_key}:-false}}"),
+    );
+    must_flag(
+        compose_violations(&compose.replacen(&shared_park_line, &gateway_park_line, 1), &table),
+        &format!("execution-core sets {park_key}: ${{{GATEWAY_PARKING_HOST_VAR}:-false}}"),
+    );
+    must_flag(
+        compose_violations(&compose.replacen(&gateway_park_line, "", 1), &table),
+        &format!("model-gateway does not set {park_key}"),
+    );
+    must_flag(
+        every_switch_defaults_off_violations(&[(
+            "x.yml".to_owned(),
+            compose.replacen(
+                &gateway_park_line,
+                &format!("      {park_key}: ${{{GATEWAY_PARKING_HOST_VAR}:-true}}\n"),
+                1,
+            ),
+        )]),
+        park_key,
     );
     must_flag(
         every_switch_defaults_off_violations(&[(

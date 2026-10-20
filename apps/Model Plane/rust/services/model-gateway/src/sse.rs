@@ -9479,6 +9479,9 @@ enum AgenticRunOutcome {
     Completed,
     Failed,
     AwaitingApproval,
+    /// The executor parked the run (WS03 S8-A): a typed, recoverable stop saved as a durable
+    /// park; the run stays open and is resumed through the park form of `/continue`.
+    Parked,
     Unknown,
 }
 
@@ -9516,8 +9519,39 @@ fn classify_agentic_run_outcome(status: &str) -> AgenticRunOutcome {
         // Execution Core deliberately uses this non-terminal status after it
         // has persisted the approval record. Gateway must preserve that pause.
         "awaiting_approval" => AgenticRunOutcome::AwaitingApproval,
+        // Non-terminal too (WS03 S8-A): the run is parked, nothing was appended and no
+        // receipt was written. Read only with a park reason this build knows
+        // ([`run_parked_event`]); otherwise the stream treats it as an unknown status.
+        "parked" => AgenticRunOutcome::Parked,
         _ => AgenticRunOutcome::Unknown,
     }
+}
+
+/// The `run_parked` frame of a run the executor parked (WS03 S8-A), sent on the owner's turn
+/// stream: the run, this request, the status, the closed park reason and when the run can be
+/// resumed (`resume_after`, the executor's `resets_at`, RFC 3339, or `null` when it is not a
+/// readable time). Ids, a closed token and a timestamp only. `None` when the response names
+/// no park reason this build knows: the stream then answers as for an unknown status.
+fn run_parked_event(request_id: &str, run_id: &str, response: &RunAgentResponse) -> Option<Event> {
+    let reason = mp_contracts::loop_fold::ParkReason::parse(&response.park_reason)?;
+    let resume_after = chrono::DateTime::parse_from_rfc3339(response.resets_at.trim())
+        .ok()
+        .map(|at| {
+            at.with_timezone(&Utc)
+                .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
+        });
+    Some(
+        Event::default().event("run_parked").data(
+            json!({
+                "run_id": run_id,
+                "request_id": request_id,
+                "status": "parked",
+                "reason": reason.as_str(),
+                "resume_after": resume_after,
+            })
+            .to_string(),
+        ),
+    )
 }
 
 /// Only these gRPC codes prove the remote execution boundary rejected the
@@ -9851,6 +9885,12 @@ fn agentic_run_stream(
         // A continuation of a paused run (any stage, spent or not): its dispatch failures
         // are told apart from an ordinary run's below.
         let continuing = resume.is_some();
+        // A park continue (WS03 S8-A): the resume of a PARKED run, which spends no approval.
+        // The gateway never terminalizes it: every failure below is a `park_continue` frame
+        // (or the bare `agent_dispatch_unavailable`) and the run stays parked until the
+        // executor resumes it or session-core's park TTL ends it. Computed once, here, so no
+        // dispatch arm is guarded by the resume itself.
+        let parking = resume.as_ref().is_some_and(|r| r.mode == "park");
 
         // The prepared run exists — surface its ids so the SPA can drive durable
         // observation (GET /v1/runs/{run_id}/events) and approvals. After a gateway
@@ -9903,6 +9943,19 @@ fn agentic_run_stream(
             Ok(dispatch) => dispatch,
             Err(error) => {
                 tracing::warn!(%error, run_id = %run.run_id, "RunAgent request construction rejected before dispatch");
+                if parking {
+                    // A park continue skipped the pre-consume check (it spends nothing), so a
+                    // credential that is not valid metadata is answered here. Nothing was
+                    // claimed, started or published; the run stays parked.
+                    let _ = tx
+                        .send(Ok(park_refusal_event(
+                            &request_id,
+                            &run.run_id,
+                            "continue_refused",
+                        )))
+                        .await;
+                    return;
+                }
                 if spend.is_spent() {
                     // The click is already spent and nothing was sent. The gateway never
                     // terminalizes a pre-consumed continuation: the run's renewed recovery
@@ -9980,8 +10033,11 @@ fn agentic_run_stream(
         // deadline ends it otherwise. Failure to tail events cannot decide the
         // run outcome, so it never returns early or manufactures a terminal SSE
         // frame.
-        let deadline =
-            resolve_agentic_run_deadline(route.is_pinned(), &|key| std::env::var(key).ok());
+        // A park continue runs on the route the executor rebuilds from the park (always a
+        // pinned one), so it is followed for as long as a pinned run is.
+        let deadline = resolve_agentic_run_deadline(route.is_pinned() || parking, &|key| {
+            std::env::var(key).ok()
+        });
         let followed_at = std::time::Instant::now();
         let dispatch_result = follow_agentic_run(
             agentic_run_events(&state, &run.run_id, &model_bearer),
@@ -10004,6 +10060,44 @@ fn agentic_run_stream(
             outcome = if dispatch_result.is_ok() { "resolved" } else { "deadline" },
             "agentic run followed"
         );
+
+        // A park continue the executor did not start (WS03 S8-A): intercepted HERE, before the
+        // dispatch match, so the match keeps its committed arms. The gateway never terminalizes
+        // a park continue: the run stays parked. RUN_STARTED is already on the run subject, so
+        // the attempt is closed there by one event ([`park_dispatch_run_event`]), and the
+        // client gets one final `park_continue` frame that never says `approval_spent`. A
+        // follow deadline and a join error keep the committed arms below.
+        let dispatch_result = match park_dispatch_of(parking, dispatch_result) {
+            ParkDispatch::Refused(status) => {
+                let failure = classify_continue_dispatch_failure(&status);
+                tracing::warn!(
+                    code = ?status.code(),
+                    ?failure,
+                    run_id = %run.run_id,
+                    "RunAgent of a park continue did not start; the run stays parked"
+                );
+                let park_closing = build_stream_envelope(
+                    &request_id,
+                    park_dispatch_run_event(&failure),
+                    &org_id,
+                    &user_id,
+                    &model,
+                );
+                let _ = state
+                    .publisher
+                    .publish(&subjects::run_event_subject(&run.run_id), &park_closing)
+                    .await;
+                let _ = tx
+                    .send(Ok(park_refusal_event(
+                        &request_id,
+                        &run.run_id,
+                        park_frame_token(&failure),
+                    )))
+                    .await;
+                return;
+            }
+            ParkDispatch::Pass(result) => result,
+        };
 
         // An absent response after the deadline is ambiguous: the remote
         // server may have accepted the run even if this client never received
@@ -10296,8 +10390,12 @@ fn agentic_run_stream(
                 // `emit_subscription_failure`, which would terminalize a second
                 // time: the frame is built directly, and the explanation is
                 // persisted so the thread is honest on reload.
-                let event = match agent_subscription_failure(&response, !route.provider_hint.is_empty())
-                {
+                // A park continue is resumed on the pinned route of its park (the gateway states
+                // none), so its typed failure is worded as a pinned run's.
+                let event = match agent_subscription_failure(
+                    &response,
+                    !route.provider_hint.is_empty() || parking,
+                ) {
                     Some(failure) => {
                         tracing::warn!(
                             run_id = %run.run_id,
@@ -10348,7 +10446,24 @@ fn agentic_run_stream(
                 let _ = tx.send(Ok(event)).await;
                 return;
             }
-            AgenticRunOutcome::Unknown => {
+            // A parked run (WS03 S8-A), for every turn: non-terminal, nothing appended, no
+            // receipt. The run subject is told RUN_PARKED and the owner's stream gets the
+            // `run_parked` frame. A park reason this build does not know is an unknown status.
+            AgenticRunOutcome::Parked
+                if run_parked_event(&request_id, &run.run_id, &response).is_some() =>
+            {
+                let parked =
+                    build_stream_envelope(&request_id, "RUN_PARKED", &org_id, &user_id, &model);
+                let _ = state
+                    .publisher
+                    .publish(&subjects::run_event_subject(&run.run_id), &parked)
+                    .await;
+                if let Some(frame) = run_parked_event(&request_id, &run.run_id, &response) {
+                    let _ = tx.send(Ok(frame)).await;
+                }
+                return;
+            }
+            AgenticRunOutcome::Parked | AgenticRunOutcome::Unknown => {
                 tracing::error!(status = %response.status, run_id = %run.run_id, "Execution Core returned an unknown agent run status");
                 let degraded = build_stream_envelope(
                     &request_id,
@@ -14005,8 +14120,15 @@ const PRECONSUME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1
 /// `resume_enabled` is the one read of the switch that the caller makes
 /// ([`mp_contracts::loop_fold::loop_resume_enabled`]); this function reads no
 /// environment.
-fn resume_mode_for(resume_enabled: bool, resumable: bool) -> &'static str {
-    if resume_enabled && resumable {
+///
+/// `parking` (WS03 S8-A) is the park form of `/continue` (an exactly empty approval id,
+/// accepted only with the gateway's parking switch on): it always asks for `park`, the resume
+/// of the run's current parked fold. The caller refuses it with `continue_disabled` when the
+/// resume switch is off.
+fn resume_mode_for(resume_enabled: bool, resumable: bool, parking: bool) -> &'static str {
+    if parking {
+        "park"
+    } else if resume_enabled && resumable {
         "loop"
     } else {
         "segment"
@@ -14567,6 +14689,99 @@ fn spent_dispatch_run_event(failure: &ContinueDispatchFailure) -> &'static str {
     }
 }
 
+// ---- The park continue (build plan WS03 S8-A, S8-7): the resume of a PARKED run through the
+// one `/continue` route. It spends no approval and the gateway never terminalizes it: the run
+// stays parked until the executor resumes it, or session-core's park TTL ends it.
+
+/// The checks a park continue makes before anything is sent, as a pure function: the route is
+/// on and the turn keeps state ([`continue_turn_gate`]), the run has not ended, and the run is
+/// recorded as parked and resumable (`RunDetail.resumable` and a non-empty
+/// `RunDetail.park_reason`, which session-core shows the run's owner). No approval is read.
+fn park_preflight(
+    enabled: bool,
+    run_status: &str,
+    resumable: bool,
+    parked: bool,
+    persistent: bool,
+) -> Result<(), (StatusCode, &'static str)> {
+    continue_turn_gate(enabled, persistent)?;
+    if matches!(run_status, "completed" | "failed" | "cancelled") {
+        return Err((StatusCode::CONFLICT, "not_resumable"));
+    }
+    if !resumable || !parked {
+        return Err((StatusCode::CONFLICT, "not_resumable"));
+    }
+    Ok(())
+}
+
+/// The `error` frame of a park continue that did not start: the closed token as code and as a
+/// plain message, never retryable, naming the run, and the closed additive marker
+/// `park_continue: true`. It NEVER says `approval_spent`: a park continue spends no approval.
+/// `token` is in [`CONTINUE_FRAME_REFUSALS`].
+fn park_refusal_event(request_id: &str, run_id: &str, token: &'static str) -> Event {
+    debug_assert!(
+        CONTINUE_FRAME_REFUSALS.contains(&token),
+        "{token} is not in the closed continue frame vocabulary"
+    );
+    let event = crate::sse_events::ChatEvent::Error {
+        code: token.to_owned(),
+        message: token.replace('_', " "),
+        retryable: false,
+    };
+    let mut payload = event.payload(request_id);
+    payload["run_id"] = json!(run_id);
+    payload["park_continue"] = json!(true);
+    Event::default()
+        .event(event.name())
+        .data(payload.to_string())
+}
+
+/// The run-subject event that closes the attempt of a park continue the executor did not start.
+/// A refusal, and an executor that was never reached, are the attempt-level
+/// `RUN_CONTINUE_REFUSED` (nothing was claimed or started); an unknown outcome keeps the
+/// run-level `RUN_DISPATCH_DEGRADED`. Neither ends the run.
+fn park_dispatch_run_event(failure: &ContinueDispatchFailure) -> &'static str {
+    match failure {
+        ContinueDispatchFailure::Refused(_) | ContinueDispatchFailure::Unreachable => {
+            "RUN_CONTINUE_REFUSED"
+        }
+        ContinueDispatchFailure::Unknown => "RUN_DISPATCH_DEGRADED",
+    }
+}
+
+/// The token of the frame of a park continue the executor did not start: a refusal is its
+/// closed token, an unreachable executor `continue_unreachable`, anything else
+/// `continue_outcome_unknown`.
+fn park_frame_token(failure: &ContinueDispatchFailure) -> &'static str {
+    match *failure {
+        ContinueDispatchFailure::Refused(token) => token,
+        ContinueDispatchFailure::Unreachable => "continue_unreachable",
+        ContinueDispatchFailure::Unknown => "continue_outcome_unknown",
+    }
+}
+
+/// What [`park_dispatch_of`] makes of a dispatch result: the executor's refusal of a park
+/// continue, or the result untouched.
+enum ParkDispatch<R> {
+    Refused(tonic::Status),
+    Pass(R),
+}
+
+/// Takes the executor's refusal (`Ok(Ok(Err(status)))`) of a PARK continue out of the dispatch
+/// result before `agentic_run_stream`'s dispatch match sees it, so that match keeps its
+/// committed arms. Everything else (a park's answer, a follow deadline, a join error, and every
+/// result of a run that is not a park continue) passes untouched.
+#[allow(clippy::type_complexity)]
+fn park_dispatch_of<T, J, D>(
+    parking: bool,
+    result: Result<Result<Result<T, tonic::Status>, J>, D>,
+) -> ParkDispatch<Result<Result<Result<T, tonic::Status>, J>, D>> {
+    match result {
+        Ok(Ok(Err(status))) if parking => ParkDispatch::Refused(status),
+        other => ParkDispatch::Pass(other),
+    }
+}
+
 /// The payload of the `connected` frame: the ids of the prepared run, so a client can
 /// follow it. With nothing spent it is exactly the committed payload; after a
 /// pre-consume it adds `approval_spent: true`, so a client knows from the first frame
@@ -14625,7 +14840,11 @@ pub(crate) async fn continue_run(
         &claims,
     )
     .map_err(|(status, code)| continue_error(status, code))?;
-    if req.approval_id.trim().is_empty() || req.claim_token.trim().is_empty() {
+    // The park form (WS03 S8-A): an EXACTLY empty approval id, accepted only with this
+    // service's parking switch on, resumes the run's current parked fold. With the switch off
+    // it is the committed 400, and so is a blank id that is not empty.
+    let parking = req.approval_id.is_empty() && mp_contracts::loop_fold::loop_parking_enabled();
+    if (!parking && req.approval_id.trim().is_empty()) || req.claim_token.trim().is_empty() {
         return Err(continue_error(StatusCode::BAD_REQUEST, "continue_incomplete"));
     }
     let (Some(Extension(execution_bearer)), Some(Extension(data_plane_bearer))) =
@@ -14656,49 +14875,71 @@ pub(crate) async fn continue_run(
         .await
         .map_err(|error| crate::http_routes::grpc_status_to_http(&error))?
         .into_inner();
-    let approval = state
-        .orchestration_client
-        .clone()
-        .get_approval(authenticated_session_request(
-            mp_contracts::model_plane::v1::GetApprovalRequest {
-                approval_id: req.approval_id.clone(),
-                // Scoped to the verified org, never a client value.
-                org_id: claims.org_id.clone(),
-            },
-            &model_bearer,
+    if parking {
+        // A park continue names no approval, so none is read: the run's own record says
+        // whether it is parked and resumable.
+        park_preflight(
+            mp_contracts::loop_fold::continue_after_approval_enabled(),
+            &detail.status,
+            detail.resumable,
+            !detail.park_reason.is_empty(),
+            continue_turn_is_persistent(&claims),
         )
-        .map_err(|error| crate::http_routes::grpc_status_to_http(&error))?)
-        .await
-        .map_err(|error| crate::http_routes::grpc_status_to_http(&error))?
-        .into_inner()
-        .approval;
-    let granted = mp_contracts::model_plane::v1::ApprovalState::Granted as i32;
-    let (matches_run, is_granted, mode, consumed) = match approval.as_ref() {
-        Some(approval) => (
-            approval.run_id == run_id,
-            approval.state == granted,
-            approval.continuation_mode.clone(),
-            approval.consumed_at.is_some(),
-        ),
-        None => (false, false, String::new(), false),
-    };
-    continue_preflight(
-        mp_contracts::loop_fold::continue_after_approval_enabled(),
-        &detail.status,
-        matches_run,
-        is_granted,
-        &mode,
-        consumed,
-        continue_turn_is_persistent(&claims),
-    )
-    .map_err(|(status, code)| continue_error(status, code))?;
+        .map_err(|(status, code)| continue_error(status, code))?;
+    } else {
+        let approval = state
+            .orchestration_client
+            .clone()
+            .get_approval(authenticated_session_request(
+                mp_contracts::model_plane::v1::GetApprovalRequest {
+                    approval_id: req.approval_id.clone(),
+                    // Scoped to the verified org, never a client value.
+                    org_id: claims.org_id.clone(),
+                },
+                &model_bearer,
+            )
+            .map_err(|error| crate::http_routes::grpc_status_to_http(&error))?)
+            .await
+            .map_err(|error| crate::http_routes::grpc_status_to_http(&error))?
+            .into_inner()
+            .approval;
+        let granted = mp_contracts::model_plane::v1::ApprovalState::Granted as i32;
+        let (matches_run, is_granted, mode, consumed) = match approval.as_ref() {
+            Some(approval) => (
+                approval.run_id == run_id,
+                approval.state == granted,
+                approval.continuation_mode.clone(),
+                approval.consumed_at.is_some(),
+            ),
+            None => (false, false, String::new(), false),
+        };
+        continue_preflight(
+            mp_contracts::loop_fold::continue_after_approval_enabled(),
+            &detail.status,
+            matches_run,
+            is_granted,
+            &mode,
+            consumed,
+            continue_turn_is_persistent(&claims),
+        )
+        .map_err(|(status, code)| continue_error(status, code))?;
+    }
 
     // The resume switch is read ONCE, here. It decides the stage the gateway asks for
     // (`loop` only for a run whose pause is recorded as resumable), whether the gateway
     // consumes the approval itself before it opens the stream, and what the stream will
     // say about the spend. With it off nothing below differs from the route as it was.
     let resume_enabled = mp_contracts::loop_fold::loop_resume_enabled();
-    let mode = resume_mode_for(resume_enabled, detail.resumable);
+    let mode = resume_mode_for(resume_enabled, detail.resumable, parking);
+    // A park resume needs the executor's resume path, which this switch also gates.
+    if parking && !resume_enabled {
+        return Err(continue_error(StatusCode::CONFLICT, "continue_disabled"));
+    }
+    // From here on `resume_enabled` means "an approval continuation the gateway may
+    // pre-consume". A park continue spends no approval, so it skips the pre-check below (a
+    // construction failure of its request is answered by the stream, with a `park_continue`
+    // frame), is launched as NotSpent and never reaches the consume.
+    let resume_enabled = resume_enabled && !parking;
 
     // The gateway is about to spend the click. The one local failure its launch can still
     // have, a credential that is not valid metadata, is checked BEFORE the consume, so a
@@ -15401,7 +15642,7 @@ mod continue_run_tests {
             (false, false, "segment"),
         ] {
             assert_eq!(
-                resume_mode_for(enabled, resumable),
+                resume_mode_for(enabled, resumable, false),
                 expected,
                 "switch {enabled}, resumable {resumable}"
             );
@@ -15513,6 +15754,7 @@ mod continue_run_tests {
         let mut scanned = Vec::new();
         scanned.extend(pairs(&item_text("fn continue_turn_gate(", "\n}\n")));
         scanned.extend(pairs(&item_text("fn continue_preflight(", "\n}\n")));
+        scanned.extend(pairs(&item_text("fn park_preflight(", "\n}\n")));
         scanned.extend(pairs(&continue_run_body));
         assert!(scanned.len() >= 8, "the scan found only {scanned:?}");
         for (status_name, code) in &scanned {
@@ -16840,14 +17082,19 @@ mod continue_run_tests {
         assert!(arm.contains("let _ = state .publisher .publish("), "{arm}");
         assert!(position(arm, ".publish(") < position(arm, "continue_failure_event("), "{arm}");
         // The type name is written in the one function that maps a failure to it.
+        // AMENDED for the park continue (WS03 S8-A): written twice, once per map, so the spent
+        // map and the park map each name it once and nothing else does.
         let production = without_comments(&production_text());
-        assert_eq!(production.matches("\"RUN_CONTINUE_REFUSED\"").count(), 1);
-        assert_eq!(
-            without_comments(&item_text("fn spent_dispatch_run_event(", "\n}\n"))
-                .matches("\"RUN_CONTINUE_REFUSED\"")
-                .count(),
-            1
-        );
+        assert_eq!(production.matches("\"RUN_CONTINUE_REFUSED\"").count(), 2);
+        for map in ["fn spent_dispatch_run_event(", "fn park_dispatch_run_event("] {
+            assert_eq!(
+                without_comments(&item_text(map, "\n}\n"))
+                    .matches("\"RUN_CONTINUE_REFUSED\"")
+                    .count(),
+                1,
+                "{map}"
+            );
+        }
     }
 
     // ---- the real consumer, over a real gRPC transport ----
@@ -17281,7 +17528,7 @@ mod continue_run_tests {
             ..Default::default()
         };
         for resumable in [false, true] {
-            let mode = resume_mode_for(false, resumable);
+            let mode = resume_mode_for(false, resumable, false);
             let built = continue_resume("appr_1", "claim-1", mode);
             assert_eq!(built.encode_to_vec(), committed().encode_to_vec(), "resumable {resumable}");
             let request = |resume| {
@@ -17555,6 +17802,413 @@ mod continue_run_tests {
             }
         }
         assert!(statements >= 5, "the scan found only {statements} log statements");
+    }
+
+    // ---- WS03 S8-A S8-7: the park continue, the regime that never terminalizes ----
+
+    fn parked_answer(reason: &str, resets_at: &str) -> RunAgentResponse {
+        RunAgentResponse {
+            status: "parked".to_owned(),
+            park_reason: reason.to_owned(),
+            resets_at: resets_at.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn classify_agentic_run_outcome_parked() {
+        assert_eq!(classify_agentic_run_outcome("parked"), AgenticRunOutcome::Parked);
+        // Exact words only, as for every other status.
+        for status in ["Parked", "parked ", "park"] {
+            assert_eq!(classify_agentic_run_outcome(status), AgenticRunOutcome::Unknown, "{status:?}");
+        }
+    }
+
+    /// The `run_parked` frame of the owner's turn stream: ids, the status, the closed reason and
+    /// the time the run can be resumed, and nothing else.
+    #[tokio::test]
+    async fn run_parked_frame_has_exactly_the_documented_keys() {
+        for reason in [
+            "credential_window",
+            "provider_exhausted",
+            "upstream_unavailable",
+            "reauth_required",
+        ] {
+            let event = run_parked_event("req-1", "run-42", &parked_answer(reason, "2026-10-20T12:00:00Z"))
+                .unwrap_or_else(|| panic!("{reason} is a known park reason"));
+            let (name, frame) = frame_of(event).await;
+            assert_eq!(name, "run_parked");
+            assert_eq!(
+                frame,
+                json!({
+                    "run_id": "run-42",
+                    "request_id": "req-1",
+                    "status": "parked",
+                    "reason": reason,
+                    "resume_after": "2026-10-20T12:00:00Z",
+                }),
+                "{reason}"
+            );
+        }
+        // An unreadable time is null, never echoed.
+        let event = run_parked_event("req-1", "run-42", &parked_answer("provider_exhausted", "soon, maybe"))
+            .expect("a known reason");
+        let (_, frame) = frame_of(event).await;
+        assert!(frame["resume_after"].is_null(), "{frame}");
+    }
+
+    /// A parked answer with a reason this build does not know is an unknown status: the stream
+    /// reads the parked outcome only through `run_parked_event`.
+    #[test]
+    fn an_unknown_park_reason_is_agent_run_state_unknown() {
+        for reason in ["", "Provider_Exhausted", "provider_exhausted ", "a sentence"] {
+            assert!(
+                run_parked_event("req-1", "run-42", &parked_answer(reason, "")).is_none(),
+                "{reason:?}"
+            );
+        }
+        let stream = squash(&stream_code());
+        assert!(
+            stream.contains(
+                "AgenticRunOutcome::Parked if run_parked_event(&request_id, &run.run_id, &response).is_some() =>"
+            ),
+            "{stream}"
+        );
+        assert!(stream.contains("AgenticRunOutcome::Parked | AgenticRunOutcome::Unknown =>"));
+        // The parked arm appends nothing, terminalizes nothing and publishes RUN_PARKED once.
+        let arm = arm_text(
+            &stream,
+            "AgenticRunOutcome::Parked if",
+            "AgenticRunOutcome::Parked | AgenticRunOutcome::Unknown =>",
+        );
+        assert!(!arm.contains("append_assistant_message"), "{arm}");
+        assert!(!arm.contains("terminalize"), "{arm}");
+        assert_eq!(arm.matches(".publish(").count(), 1, "{arm}");
+        assert!(arm.contains("\"RUN_PARKED\""), "{arm}");
+    }
+
+    #[tokio::test]
+    async fn orchestration_run_parked_frame_has_no_reason() {
+        let event = OrchestrationEvent {
+            event: Some(orchestration_event::Event::RunParked(
+                orchestration_event::RunParked {
+                    run_id: "run-42".to_owned(),
+                },
+            )),
+            ..Default::default()
+        };
+        let (name, frame) = frame_of(orchestration_event_to_sse(&event).expect("a frame")).await;
+        assert_eq!(name, "run_parked");
+        assert_eq!(frame["run_id"], "run-42");
+        assert!(
+            frame.get("reason").is_none() && frame.get("park_reason").is_none(),
+            "the park reason is never broadcast: {frame}"
+        );
+    }
+
+    #[tokio::test]
+    async fn orchestration_run_resumed_frame_uses_resumed_segment() {
+        let event = OrchestrationEvent {
+            event: Some(orchestration_event::Event::RunResumed(
+                orchestration_event::RunResumed {
+                    run_id: "run-42".to_owned(),
+                    resumed_segment: 3,
+                },
+            )),
+            ..Default::default()
+        };
+        let (name, frame) = frame_of(orchestration_event_to_sse(&event).expect("a frame")).await;
+        assert_eq!(name, "run_resumed");
+        assert_eq!(frame["run_id"], "run-42");
+        assert_eq!(frame["resumed_segment"], 3);
+    }
+
+    #[test]
+    fn park_dispatch_run_event_maps_refused_and_unreachable_to_the_attempt_and_unknown_to_degraded() {
+        for token in CONTINUE_FRAME_REFUSALS {
+            assert_eq!(
+                park_dispatch_run_event(&ContinueDispatchFailure::Refused(token)),
+                "RUN_CONTINUE_REFUSED",
+                "{token}"
+            );
+        }
+        assert_eq!(
+            park_dispatch_run_event(&ContinueDispatchFailure::Unreachable),
+            "RUN_CONTINUE_REFUSED",
+            "nothing was claimed or started"
+        );
+        assert_eq!(
+            park_dispatch_run_event(&ContinueDispatchFailure::Unknown),
+            "RUN_DISPATCH_DEGRADED"
+        );
+    }
+
+    #[test]
+    fn park_frame_token_table() {
+        for token in CONTINUE_FRAME_REFUSALS {
+            assert_eq!(park_frame_token(&ContinueDispatchFailure::Refused(token)), *token);
+        }
+        assert_eq!(park_frame_token(&ContinueDispatchFailure::Unreachable), "continue_unreachable");
+        assert_eq!(park_frame_token(&ContinueDispatchFailure::Unknown), "continue_outcome_unknown");
+    }
+
+    /// The park frame is the committed refusal frame plus the run and the closed additive marker
+    /// `park_continue: true`; it never says `approval_spent`.
+    #[tokio::test]
+    async fn park_refusal_event_marks_the_frame_and_never_says_approval_spent() {
+        for token in CONTINUE_FRAME_REFUSALS {
+            let (name, frame) = frame_of(park_refusal_event("req-1", "run-42", token)).await;
+            assert_eq!(name, "error");
+            assert_eq!(
+                frame,
+                json!({
+                    "code": token,
+                    "message": token.replace('_', " "),
+                    "retryable": false,
+                    "request_id": "req-1",
+                    "run_id": "run-42",
+                    "park_continue": true,
+                }),
+                "{token}"
+            );
+        }
+        let body = without_comments(&item_text("fn park_refusal_event(", "\n}\n"));
+        assert!(!body.contains("approval_spent") && !body.contains("ApprovalSpend"), "{body}");
+    }
+
+    #[test]
+    fn park_dispatch_of_takes_only_an_executor_refusal_of_a_park() {
+        type Result3 = Result<Result<Result<u8, tonic::Status>, &'static str>, DeadlineExpired>;
+        let cases = || -> Vec<(&'static str, Result3)> {
+            vec![
+                ("refusal", Ok(Ok(Err(tonic::Status::failed_precondition("park_not_due"))))),
+                ("answer", Ok(Ok(Ok(7)))),
+                ("join", Ok(Err("join"))),
+                ("deadline", Err(DeadlineExpired)),
+            ]
+        };
+        for (name, result) in cases() {
+            assert!(
+                matches!(park_dispatch_of(false, result), ParkDispatch::Pass(_)),
+                "{name}: not a park continue, so everything passes"
+            );
+        }
+        for (name, result) in cases() {
+            match (name, park_dispatch_of(true, result)) {
+                ("refusal", ParkDispatch::Refused(status)) => {
+                    assert_eq!(status.message(), "park_not_due");
+                }
+                ("answer", ParkDispatch::Pass(Ok(Ok(Ok(7)))))
+                | ("join", ParkDispatch::Pass(Ok(Err("join"))))
+                | ("deadline", ParkDispatch::Pass(Err(DeadlineExpired))) => {}
+                (name, _) => panic!("{name} was not handled as designed"),
+            }
+        }
+    }
+
+    /// The park branch of `continue_run`: the pure checks, the stage, and its place in the source
+    /// (the handler-level cases are in `tests/continue_preconsume_test.rs`).
+    #[test]
+    fn the_park_branch() {
+        let conflict = |code| Err((StatusCode::CONFLICT, code));
+        assert_eq!(park_preflight(true, "running", true, true, true), Ok(()));
+        assert_eq!(park_preflight(false, "running", true, true, true), conflict("continue_disabled"));
+        // The switch off answers first, whatever else is wrong.
+        assert_eq!(
+            park_preflight(false, "completed", false, false, false),
+            conflict("continue_disabled")
+        );
+        assert_eq!(park_preflight(true, "running", true, true, false), conflict("not_resumable"));
+        for status in ["completed", "failed", "cancelled"] {
+            assert_eq!(park_preflight(true, status, true, true, true), conflict("not_resumable"), "{status}");
+        }
+        assert_eq!(park_preflight(true, "running", false, true, true), conflict("not_resumable"));
+        assert_eq!(
+            park_preflight(true, "running", true, false, true),
+            conflict("not_resumable"),
+            "a resumable run that is not parked is not a park continue"
+        );
+        for (enabled, resumable) in [(true, true), (true, false), (false, true), (false, false)] {
+            assert_eq!(resume_mode_for(enabled, resumable, true), "park", "{enabled} {resumable}");
+        }
+
+        let body = continue_run_code();
+        let squashed = squash(&body);
+        assert_eq!(
+            squashed
+                .matches("let parking = req.approval_id.is_empty() && mp_contracts::loop_fold::loop_parking_enabled();")
+                .count(),
+            1,
+            "an EXACTLY empty id, and only with the switch on"
+        );
+        assert!(squashed.contains(
+            "if (!parking && req.approval_id.trim().is_empty()) || req.claim_token.trim().is_empty() {"
+        ));
+        let park_branch = position(&body, "if parking {");
+        let preflight = position(&body, "park_preflight(");
+        let else_branch = position(&body, "} else {");
+        let approval = position(&body, ".get_approval(");
+        let continue_check = position(&body, "continue_preflight(");
+        assert!(
+            position(&body, ".get_run(") < park_branch
+                && park_branch < preflight
+                && preflight < else_branch
+                && else_branch < approval
+                && approval < continue_check,
+            "a park continue reads no approval: park_preflight in the park branch, GetApproval and continue_preflight in the other"
+        );
+        assert_eq!(body.matches(".get_approval(").count(), 1);
+        assert_eq!(body.matches("park_preflight(").count(), 1);
+        assert!(squashed.contains(
+            "if parking && !resume_enabled { return Err(continue_error(StatusCode::CONFLICT, \"continue_disabled\")); }"
+        ));
+        assert!(squashed.contains("resume_mode_for(resume_enabled, detail.resumable, parking)"));
+    }
+
+    /// Park StoreProof: a waived or zero-retention turn is refused before the run is read, by the
+    /// same early gate an approval continuation has, and the park preflight refuses it too.
+    #[test]
+    fn a_park_continue_of_a_non_persistent_turn_is_refused_before_any_read() {
+        let waived = token(
+            false,
+            Some(true),
+            Some(json!({"version": 1, "provider": PROVIDER_ID, "connection": "conn-1"})),
+        );
+        let zdr = token(true, Some(true), None);
+        for claims in [&waived, &zdr] {
+            assert_eq!(
+                continue_persistent_gate(true, claims),
+                Err((StatusCode::CONFLICT, "not_resumable"))
+            );
+            assert_eq!(
+                park_preflight(true, "running", true, true, continue_turn_is_persistent(claims)),
+                Err((StatusCode::CONFLICT, "not_resumable"))
+            );
+        }
+        let persistent = token(false, Some(false), None);
+        assert_eq!(
+            park_preflight(true, "running", true, true, continue_turn_is_persistent(&persistent)),
+            Ok(())
+        );
+        let body = continue_run_code();
+        let gate = position(&body, "continue_persistent_gate(");
+        for later in ["let parking =", "require_durable_run_owner", ".get_run(", "park_preflight("] {
+            assert!(gate < position(&body, later), "the gate must come before {later}");
+        }
+    }
+
+    /// The pre-consume check is skipped for a park continue (the rebinding stands before it), and
+    /// a park continue whose request cannot be built is answered by the stream with ONE
+    /// `park_continue` `continue_refused` frame, never the unbuildable stream's frame: nothing
+    /// published, nothing terminalized, nothing claimed.
+    #[tokio::test]
+    async fn a_park_continue_skips_the_pre_consume_check_and_its_construction_failure_is_a_park_frame() {
+        let body = continue_run_code();
+        let rebinding = "let resume_enabled = resume_enabled && !parking;";
+        assert_eq!(body.matches(rebinding).count(), 1);
+        let rebound = position(&body, rebinding);
+        assert!(position(&body, "resume_mode_for(") < rebound);
+        assert!(position(&body, "if parking && !resume_enabled {") < rebound);
+        assert!(
+            rebound < position(&body, "if resume_enabled {"),
+            "the rebinding comes BEFORE the pre-consume check, so a park never reaches it"
+        );
+        let stream = stream_code();
+        let anchor = position(&stream, "RunAgent request construction rejected before dispatch");
+        let park_block = anchor + position(&stream[anchor..], "if parking {");
+        let spent = anchor + position(&stream[anchor..], "if spend.is_spent() {");
+        assert!(park_block < spent, "the park block precedes the committed spent check");
+
+        let mut state = AppState::new();
+        let publisher = std::sync::Arc::new(crate::state::DynPublisher::InMemory(
+            mp_events::publisher::InMemoryPublisher::new(),
+        ));
+        state.publisher = publisher.clone();
+        let (execution, data_plane, session, inference) = bearers_with(Some("inference"));
+        let stream = agentic_run_stream(
+            state,
+            crate::session_flow::SessionRun {
+                thread_id: "thread-1".to_owned(),
+                run_id: "run-42".to_owned(),
+                org_id: "org-1".to_owned(),
+                already_started: true,
+                terminal_source: mp_contracts::model_plane::v1::ManagedRunSource::ExecutionAgent,
+            },
+            "req-1".to_owned(),
+            "org-1".to_owned(),
+            "user-1".to_owned(),
+            String::new(),
+            "the run's goal".to_owned(),
+            Vec::new(),
+            Vec::new(),
+            false,
+            None,
+            0,
+            CONTINUE_PERMISSION_MODE.to_owned(),
+            false,
+            false,
+            execution,
+            data_plane,
+            session,
+            inference,
+            String::new(),
+            None,
+            AgentRoute::default(),
+            None,
+            Some(continue_resume("", "claim-1", "park")),
+            ApprovalSpend::NotSpent,
+        );
+        let frames = frames_of_stream(stream).await;
+        let names: Vec<&str> = frames.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, ["connected", "error"], "{frames:?}");
+        assert!(frames[0].1.get("approval_spent").is_none(), "{frames:?}");
+        assert_eq!(
+            frames[1].1,
+            json!({
+                "code": "continue_refused",
+                "message": "continue refused",
+                "retryable": false,
+                "request_id": "req-1",
+                "run_id": "run-42",
+                "park_continue": true,
+            })
+        );
+        assert!(publisher.drain().is_empty(), "nothing is published for a park construction failure");
+        // The unbuildable stream's frame is not a park frame: a park continue must never get it.
+        let unbuildable = frames_of_stream(unbuildable_continuation_stream("run-42")).await;
+        assert!(unbuildable[0].1.get("park_continue").is_none());
+    }
+
+    /// A park continue runs on the pinned route the executor rebuilds from the park, so the
+    /// gateway follows it with the pinned deadline and words its typed failure as a pinned run's.
+    #[test]
+    fn a_park_continue_words_a_pinned_failure_and_follows_with_the_pinned_deadline() {
+        let stream = squash(&stream_code());
+        assert_eq!(
+            stream
+                .matches("let parking = resume.as_ref().is_some_and(|r| r.mode == \"park\");")
+                .count(),
+            1
+        );
+        assert!(stream.contains("resolve_agentic_run_deadline(route.is_pinned() || parking,"), "{stream}");
+        assert!(
+            stream.contains("agent_subscription_failure( &response, !route.provider_hint.is_empty() || parking, )"),
+            "{stream}"
+        );
+        assert_eq!(
+            resolve_agentic_run_deadline(true, &|_| None),
+            std::time::Duration::from_secs(AGENTIC_RUN_DEADLINE_SUBSCRIPTION_SECS)
+        );
+        let failed = RunAgentResponse {
+            status: "failed".to_owned(),
+            failure_code: "subscription_usage_limit".to_owned(),
+            ..Default::default()
+        };
+        assert!(agent_subscription_failure(&failed, false).is_none(), "an unpinned turn is not worded");
+        assert_eq!(
+            agent_subscription_failure(&failed, true).map(|failure| failure.code),
+            Some("subscription_usage_limit")
+        );
     }
 }
 
