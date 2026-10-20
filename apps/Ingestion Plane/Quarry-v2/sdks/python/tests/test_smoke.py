@@ -8,6 +8,7 @@ import json
 import pytest
 
 from quarry_client.models import (
+    AgentAction,
     AgentConstraints,
     AgentStepRequest,
     BatchRequest,
@@ -219,8 +220,10 @@ class TestWebAgentContracts:
             ),
             grant_id="grant_123",
         )
+        # AgentAction is a generated oneOf wrapper: a plain dict would leave
+        # actual_instance empty and serialize to None, so build it with from_dict.
         step = AgentStepRequest(
-            action={"type": "navigate", "url": "https://example.com"},
+            action=AgentAction.from_dict({"type": "navigate", "url": "https://example.com"}),
             extraction_profile={"fields": [{"name": "title", "source": "dom"}]},
         )
 
