@@ -279,11 +279,30 @@ fn classify_scrape_failure(
     )
 }
 
+/// Seconds Quarry asked the caller to wait on a scrape's 429, bounded to
+/// 1..=3600. quarry-edge answers a `/v1/scrape` `RATE_LIMITED` with the flat
+/// `ApiError` (`retry_after_seconds` at the top of the body), other 429s with
+/// the canonical envelope (`error.details.retry_after_seconds`); both are read,
+/// the envelope first. `None` for a missing, non-numeric or out-of-range value.
+fn scrape_retry_after_seconds(upstream: &Value) -> Option<u64> {
+    upstream
+        .pointer("/error/details/retry_after_seconds")
+        .and_then(Value::as_u64)
+        .filter(|seconds| (1..=3600).contains(seconds))
+        .or_else(|| {
+            upstream
+                .pointer("/retry_after_seconds")
+                .and_then(Value::as_u64)
+                .filter(|seconds| (1..=3600).contains(seconds))
+        })
+}
+
 /// The refusal the caller sees for a failed scrape preview: the typed gateway
 /// code and a fixed message, plus the two typed hints the SPA has copy for. The
 /// block reason is one of this file's static strings (`scrape_block_reason`);
-/// the retry hint is a number in 1..=3600 seconds. Nothing else of the
-/// upstream body is forwarded.
+/// the retry hint is a number in 1..=3600 seconds, read from either shape
+/// Quarry answers a scrape's 429 with (`scrape_retry_after_seconds`). Nothing
+/// else of the upstream body is forwarded.
 fn scrape_failure_response(
     status: StatusCode,
     code: &'static str,
@@ -297,11 +316,7 @@ fn scrape_failure_response(
         }
     }
     if code == "scrape_rate_limited" {
-        let retry_after = upstream
-            .pointer("/error/details/retry_after_seconds")
-            .and_then(Value::as_u64)
-            .filter(|seconds| (1..=3600).contains(seconds));
-        if let Some(seconds) = retry_after {
+        if let Some(seconds) = scrape_retry_after_seconds(upstream) {
             body["error"]["retryAfterSeconds"] = json!(seconds);
             return (
                 status,
@@ -1325,6 +1340,44 @@ mod tests {
             assert_eq!(body["error"]["code"], "scrape_rate_limited");
             assert!(body["error"].get("retryAfterSeconds").is_none(), "{bad}");
         }
+    }
+
+    // The body quarry-edge really sends for a /v1/scrape RATE_LIMITED
+    // (`ApiError::rate_limited`): flat, `error` is a string, the hint is top-level.
+    #[tokio::test]
+    async fn a_429_scrape_in_quarry_edges_flat_shape_carries_its_retry_hint() {
+        let flat = |seconds: Value| json!({
+            "error": "rate limited on secret.example",
+            "code": "RATE_LIMITED",
+            "hint": "reduce request rate or retry after the indicated window",
+            "window": "1m",
+            "retry_after_seconds": seconds,
+            "next_actions": ["retry after 60 seconds", "reduce concurrent request rate"],
+        });
+        let (status, retry_after, text, calls) = refused_preview(429, flat(json!(60))).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(retry_after.as_deref(), Some("60"));
+        let body: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(body["error"]["code"], "scrape_rate_limited");
+        assert_eq!(body["error"]["retryAfterSeconds"], 60);
+        assert!(
+            !text.contains("secret.example") && !text.contains("next_actions") && !text.contains("window"),
+            "{text}"
+        );
+        assert_eq!(calls, 1);
+
+        for bad in [json!(0), json!(3601), json!("soon"), json!(null)] {
+            let (_, retry_after, text, _) = refused_preview(429, flat(bad.clone())).await;
+            assert!(retry_after.is_none(), "{bad}");
+            let body: Value = serde_json::from_str(&text).unwrap();
+            assert!(body["error"].get("retryAfterSeconds").is_none(), "{bad}");
+        }
+        // The envelope wins when both are present.
+        let both = json!({
+            "error": { "code": "RATE_LIMITED", "details": { "retry_after_seconds": 5 } },
+            "retry_after_seconds": 60,
+        });
+        assert_eq!(scrape_retry_after_seconds(&both), Some(5));
     }
 }
 
