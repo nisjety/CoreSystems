@@ -5305,6 +5305,33 @@ mod tests {
         }
     }
 
+    /// The retry key can be absent altogether (an older Quarry, or a cap that sets none),
+    /// not only null or out of range: `details` has no `retry_after_seconds`.
+    #[tokio::test]
+    async fn an_absent_retry_key_falls_back_to_ten_seconds_for_every_capacity_reason() {
+        for (reason, code) in [
+            ("global_run_cap", "browser_capacity_reached"),
+            ("org_run_cap", "browser_capacity_reached"),
+            ("org_interactive_run_cap", "browser_capacity_reached"),
+            ("browser_session_cap", "browser_capacity_reached"),
+            ("browser_page_cap", "browser_tab_limit_reached"),
+        ] {
+            let quarry = json!({ "error": {
+                "code": "RATE_LIMITED",
+                "message": "browser capacity exhausted",
+                "details": { "reason": reason, "scope": "org", "limit": 3, "active": 3 },
+                "retryable": true
+            }});
+            let response = forward_quarry_failure(StatusCode::TOO_MANY_REQUESTS, quarry);
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS, "{reason}");
+            assert_eq!(response.headers().get("retry-after").unwrap(), "10", "{reason}");
+            let body = body_of(response).await;
+            assert_eq!(body["error"]["code"], code, "{reason}");
+            assert_eq!(body["error"]["retryAfterSeconds"], 10, "{reason}");
+            assert!(!body.to_string().contains(reason), "{reason}");
+        }
+    }
+
     #[tokio::test]
     async fn a_lost_browser_session_is_410_with_its_own_code_and_no_retry_hint() {
         for (reason, code) in [
