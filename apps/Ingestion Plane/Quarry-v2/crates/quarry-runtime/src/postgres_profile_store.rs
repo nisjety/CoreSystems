@@ -216,21 +216,11 @@ impl ProfileStore for PostgresProfileStore {
 mod tests {
     use super::*;
 
-    /// Gracefully skip when no DATABASE_URL is set — default CI stays
-    /// green without a Postgres dependency. Local dev pointing at a
-    /// disposable Postgres exercises the real wire.
-    fn database_url() -> Option<String> {
-        std::env::var("DATABASE_URL").ok().filter(|s| !s.is_empty())
-    }
-
+    /// A pool on this test's own schema (`crate::postgres_test_support`): no table is
+    /// shared with another test, so these run in parallel. Skips without a
+    /// `DATABASE_URL`; fails instead when `REQUIRE_CONTRACT` is set.
     async fn fresh_pool() -> Option<PgPool> {
-        let url = database_url()?;
-        let pool = PgPool::connect(&url).await.ok()?;
-        sqlx::migrate!("./migrations")
-            .run(&pool)
-            .await
-            .expect("migrations must apply");
-        Some(pool)
+        crate::postgres_test_support::isolated_pool("profile store").await
     }
 
     async fn clean(pool: &PgPool) {

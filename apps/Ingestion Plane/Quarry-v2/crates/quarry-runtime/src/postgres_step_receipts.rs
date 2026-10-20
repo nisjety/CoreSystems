@@ -455,38 +455,15 @@ mod tests {
 
     // Needs a Postgres reachable through DATABASE_URL. Without one the test skips
     // (libtest hides the eprintln of a passing test, so the skip is silent in a
-    // default run), like the other postgres_* stores. A job that provides a
-    // Postgres sets REQUIRE_CONTRACT=1; then a missing or unreachable database is
-    // a failure, never a skip (the quarry-v2-ci.yml "Postgres store gates" step).
-    // The test only writes rows under fresh run ids.
+    // default run). A job that provides a Postgres sets REQUIRE_CONTRACT=1; then a
+    // missing or unreachable database is a failure, never a skip (the
+    // quarry-v2-ci.yml "Postgres store gates" step). Every postgres_* store test
+    // gets its own schema from `crate::postgres_test_support`.
     async fn fresh_pool() -> Option<PgPool> {
-        let required = std::env::var_os("REQUIRE_CONTRACT").is_some();
-        let Some(url) = std::env::var("DATABASE_URL")
-            .ok()
-            .filter(|s| !s.is_empty())
-        else {
-            assert!(
-                !required,
-                "REQUIRE_CONTRACT is set but DATABASE_URL is not: the step receipt store \
-                 tests (migration 0011, the agent identity column) would silently skip"
-            );
-            return None;
-        };
-        let pool = match PgPool::connect(&url).await {
-            Ok(pool) => pool,
-            Err(err) => {
-                assert!(
-                    !required,
-                    "REQUIRE_CONTRACT is set but DATABASE_URL is unreachable: {err}"
-                );
-                return None;
-            }
-        };
-        sqlx::migrate!("./migrations")
-            .run(&pool)
-            .await
-            .expect("migrations must apply");
-        Some(pool)
+        crate::postgres_test_support::isolated_pool(
+            "step receipt store (migration 0011, the agent identity column)",
+        )
+        .await
     }
 
     fn action() -> AgentAction {

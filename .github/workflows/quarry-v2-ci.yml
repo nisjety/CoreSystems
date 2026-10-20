@@ -251,12 +251,14 @@ jobs:
         # The postgres_* tests of quarry-runtime (incl. the step receipt round trips
         # that prove migration 0011 and the agent identity column) skip without a
         # database. With REQUIRE_CONTRACT=1 an unreachable Postgres fails the step
-        # (postgres_step_receipts.rs). --test-threads=1: the stores share tables in
-        # one database, so parallel tests of different stores race on each other.
+        # (postgres_test_support.rs, which every postgres_* store test uses). Each
+        # test runs in its own schema, so no table is shared and the tests run in
+        # parallel; they used to need --test-threads=1 because the stores shared
+        # tables in one schema and each test began with a TRUNCATE.
         env:
           DATABASE_URL: postgres://postgres:quarry@127.0.0.1:5433/quarry_test
           REQUIRE_CONTRACT: "1"
-        run: cargo test -p quarry-runtime --features postgres-queue --lib postgres_ -- --test-threads=1
+        run: cargo test -p quarry-runtime --features postgres-queue --lib postgres_
 
       # The scrape options schema is a golden generated from the Rust type, and
       # the OpenAPI file is checked against it and against the routes the edge

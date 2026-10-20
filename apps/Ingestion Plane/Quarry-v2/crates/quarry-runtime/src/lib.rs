@@ -73,6 +73,9 @@ pub mod postgres_profile_store;
 pub mod postgres_queue;
 #[cfg(feature = "postgres-queue")]
 pub mod postgres_step_receipts;
+// One schema per test for the postgres_* store tests (see the module doc).
+#[cfg(all(test, feature = "postgres-queue"))]
+mod postgres_test_support;
 pub mod proxy_pool;
 pub mod publisher;
 pub mod request_queue;

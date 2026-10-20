@@ -425,19 +425,12 @@ mod tests {
     /// instance). Without that var set, the tests print a single
     /// skip-line and pass — so default CI (which doesn't expose a DB)
     /// stays green while local dev gets real coverage on opt-in.
-    fn database_url() -> Option<String> {
-        std::env::var("DATABASE_URL").ok().filter(|s| !s.is_empty())
-    }
-
+    ///
+    /// Each test gets its own schema (`crate::postgres_test_support`), so no
+    /// table is shared with another test and these run in parallel. With
+    /// `REQUIRE_CONTRACT` set a missing database is a failure, not a skip.
     async fn fresh_pool() -> Option<PgPool> {
-        let url = database_url()?;
-        let pool = PgPool::connect(&url).await.ok()?;
-        // Run migrations every test (they're idempotent).
-        sqlx::migrate!("./migrations")
-            .run(&pool)
-            .await
-            .expect("migrations must apply");
-        Some(pool)
+        crate::postgres_test_support::isolated_pool("request queue").await
     }
 
     /// Drop and recreate the queue tables between tests so we don't
