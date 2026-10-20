@@ -36,9 +36,17 @@ named `e2e-*-<suffix>`).
 4. Runs `go test -tags e2e ./e2e/` on the host. Ports are published to
    `127.0.0.1` at random and looked up again after each restart.
 5. Scans the broker's log for host names, bearer tokens and the database
-   password (counts only; all must be 0) and removes every container, volume,
-   network and image it created (trap, so also on failure). The last lines
-   report `E2E_CLEANUP leftovers ...` (all 0).
+   password (counts only). This is a gate: any non-zero count fails the run,
+   and a control that plants one of each in a copy of the log must fire, so a
+   broken pattern cannot pass for a clean log.
+6. Checks that the run really ran: every scenario below must have printed its
+   `E2E_SCENARIO_OK` line (go test exits 0 when the test skips, so its exit
+   status alone proves nothing) and no test may be skipped.
+7. Removes every container, volume, network and image it created (trap, so also
+   on failure; the broker image `browser-broker-e2e:test` only when this run
+   built it). The last lines report `E2E_CLEANUP leftovers ...` (containers,
+   networks, volumes and images, all 0) and
+   `E2E_RESULT rc=... scenarios=<ok>/<expected>`.
 
 ## Scenarios
 
@@ -54,12 +62,19 @@ scopes the broker's `internal/authz` requires: a person is `principal_type=user`
 | b | a ZDR session grant (request flag, and token claim) writes no row; after a restart it is NotFound |
 | c | Derive: hosts inside the parent's (dot boundary), expiry <= parent's, replay returns the same grant, a replay with other hosts is AlreadyExists, the ninth live run under one session is ResourceExhausted (a replay at the cap is not new), a service derives from a user's session, ZDR parent gives ZDR child that never reaches Postgres, revoking a parent revokes the subtree (before a restart and after one) |
 | d | WS6.E: a claim above the parent's (any dimension) is refused and leaves nothing; a tighter claim inherits omitted dimensions; a replay without a claim returns the stored claim and the original stamp (not re-stamped); a different claim on replay is AlreadyExists; the claim survives a restart; ZDR claims stay in memory |
-| f | wrong audience, expired, wrong issuer, forged signature, no token: Unauthenticated; `grpc.health.v1` stays public; read-only and write-only services get PermissionDenied where the scope is missing; another person, or the same user id in another organization, gets NotFound for an existing grant with the same message as for a missing one |
+| g | sensitive approvals (the other derived-grant path): never wider than the parent (a host outside it, a look-alike host, one bad host among good ones: PermissionDenied and no row), expiry capped at the parent's (also under a 60 s run grant), one action and one frame, a budget claim or a second action refused, an approval under an approval or under another session's key is FailedPrecondition (not Internal), no run grant derives from an approval or a run grant, a ZDR principal under a persistent parent is FailedPrecondition, ZDR parent gives a ZDR memory-only approval; another person, the same user id in another organization and a service of another organization get NotFound (same message as a missing parent) for acquire, revoke and validate; revoking an approval leaves the parent, revoking the parent revokes its approvals, a live approval survives a restart |
+| f | wrong audience, expired, wrong issuer, forged signature, no token: Unauthenticated; `grpc.health.v1` stays public; read-only and write-only services get PermissionDenied where the scope is missing; another person, or the same user id in another organization, gets NotFound for an existing grant with the same message as for a missing one; a person and a browser:write service of another organization get the same NotFound for derive, revoke and validate of that grant, with the derive message equal to the one for a missing parent, and nothing is written |
 | e | Postgres stopped: `/readyz` 503, `/healthz` 200, Validate/Acquire/Derive/Revoke of durable grants are Unavailable and never answer valid (a ZDR grant, held in memory, still validates); Postgres started: `/readyz` 200 and the earlier grant validates again |
 
 Only grant ids and counts are printed, never a host list or a token.
 
 ## Notes
+
+* Erratum: the message of commit c25865fc says "three runs of bash e2e/run.sh".
+  That is wrong. Two full runs reached the scenarios and passed; the first run
+  failed in run.sh on an MSYS path before any scenario started (a harness bug,
+  since fixed). The assertion counts that commit gives (192) were reproduced by
+  an independent run.
 
 * No BrowserBroker method is service-only (`authz.Authorize` lets every person
   through), so "a person calls a service-only method" has nothing to refuse.

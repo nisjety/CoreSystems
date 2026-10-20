@@ -28,6 +28,7 @@ func TestBrokerE2E(t *testing.T) {
 	t.Run("c_derive", func(t *testing.T) { scenarioC(t, e) })
 	t.Run("d_budget_claim", func(t *testing.T) { scenarioD(t, e) })
 	t.Run("f_auth", func(t *testing.T) { scenarioF(t, e, shared.sessionA) })
+	t.Run("g_sensitive_approval", func(t *testing.T) { scenarioG(t, e) })
 	t.Run("e_postgres_down", func(t *testing.T) { scenarioE(t, e, shared.sessionA) })
 }
 
@@ -447,6 +448,25 @@ func scenarioF(t *testing.T, e *env, sessionA string) {
 	s.code(err, codes.NotFound, "another person deriving from user-a's grant")
 	_, err = e.validate(e.personInOrg2(t, "user-a"), sessionA)
 	s.code(err, codes.NotFound, "the same user id in another organization")
+	// another organization cannot derive from, revoke or read it, as a person or as a
+	// browser:write service: the same NotFound as for a missing grant, never a refusal that
+	// shows the grant exists
+	_, errMissingDerive := e.derive(userA, e.runReq("0123456789abcdef0123456789abcdef", "f-missing", nil))
+	s.code(errMissingDerive, codes.NotFound, "deriving from a parent that does not exist")
+	org2Person := e.personInOrg2(t, "user-a")
+	org2Service := e.sign(t, idp.Service(e.issuer, e.org2, "model-gateway", scopeRead, scopeWrite))
+	org2Run := e.runReq(sessionA, "f-org2", nil)
+	org2Run.OrgId = e.org2
+	for _, who := range []struct{ name, token string }{{"a person of another organization", org2Person}, {"a service of another organization", org2Service}} {
+		_, err = e.derive(who.token, org2Run)
+		s.code(err, codes.NotFound, who.name+" deriving from the grant")
+		s.ok(err != nil && errMissingDerive != nil && errMessage(err) == errMessage(errMissingDerive), who.name+": the derive message equals the one for a missing parent")
+		_, err = e.revoke(who.token, sessionA, "e2e")
+		s.code(err, codes.NotFound, who.name+" revoking the grant")
+		_, err = e.validate(who.token, sessionA)
+		s.code(err, codes.NotFound, who.name+" validating the grant")
+	}
+	s.ok(e.count(t, "parent_grant_id = '"+sessionA+"' AND session_key = 'f-org2'") == 0, "the cross-organization derive left no row")
 	v, err = e.validate(userA, sessionA)
 	s.ok(err == nil && v.GetActive(), "user-a's grant is still active after the attempts")
 }

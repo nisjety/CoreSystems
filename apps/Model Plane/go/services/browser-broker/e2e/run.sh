@@ -40,6 +40,7 @@ PGPW="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 W="$(mktemp -d "${TMPDIR:-/tmp}/bbe2e.XXXXXX")"
 WIN() { if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi; }
 LOG="$W/test.log"
+BUILT=""
 
 cleanup() {
   local rc=$?
@@ -48,12 +49,20 @@ cleanup() {
   docker volume rm -f "$VOL" >/dev/null 2>&1
   docker network rm "$NET" >/dev/null 2>&1
   docker rmi "$IDP_IMG" >/dev/null 2>&1
+  # the broker image is ours only when this run built it (E2E_SKIP_BUILD reuses an older one)
+  if [ -n "$BUILT" ]; then docker rmi "$BR_IMG" >/dev/null 2>&1; fi
   rm -rf "$W"
-  local c n v
+  local c n v i img
   c="$(docker ps -a --format '{{.Names}}' 2>/dev/null | grep -c -- "-$SFX$")"
   n="$(docker network ls --format '{{.Name}}' 2>/dev/null | grep -c -- "-$SFX$")"
   v="$(docker volume ls --format '{{.Name}}' 2>/dev/null | grep -c -- "-$SFX$")"
-  echo "E2E_CLEANUP leftovers containers=${c:-?} networks=${n:-?} volumes=${v:-?}"
+  local imgs="$IDP_IMG"
+  [ -n "$BUILT" ] && imgs="$imgs $BR_IMG"
+  i=0
+  for img in $imgs; do
+    docker image inspect "$img" >/dev/null 2>&1 && i=$((i + 1))
+  done
+  echo "E2E_CLEANUP leftovers containers=${c:-?} networks=${n:-?} volumes=${v:-?} images=${i:-?}"
   return $rc
 }
 trap cleanup EXIT
@@ -72,6 +81,7 @@ if [ -z "${E2E_SKIP_BUILD:-}" ]; then
   echo "== docker build $BR_IMG (source revision $rev)"
   (cd "$GODIR" && docker build -q -t "$BR_IMG" --build-arg "SOURCE_REVISION=$rev" \
       -f services/browser-broker/Dockerfile .) >"$W/build.log" 2>&1 || { tail -30 "$W/build.log"; fail "broker image build failed"; }
+  BUILT=1
 fi
 docker image inspect "$BR_IMG" >/dev/null 2>&1 || fail "image $BR_IMG does not exist"
 
@@ -128,12 +138,52 @@ echo "== go test (build tag e2e)"
 rc=${PIPESTATUS[0]}
 
 # ---- 6. what the broker logged ---------------------------------------------------
+# The scan is a gate: a broker that logs a host name the scenarios use, a bearer
+# token or the database password fails the run. Counts only are printed. A
+# control proves the patterns fire: it plants one of each in a copy of the log
+# and the scan must find all three, otherwise a pattern that matches nothing
+# would pass for a clean log.
 docker logs "$BR" >"$W/broker.log" 2>&1
-echo "E2E_BROKER_LOG lines=$(wc -l <"$W/broker.log" | tr -d ' ') \
-host_names=$(grep -c -E 'example\.(com|org|net)' "$W/broker.log") \
-bearer_tokens=$(grep -c -E 'eyJ[A-Za-z0-9_-]{10,}' "$W/broker.log") \
-db_password=$(grep -c -F -- "$PGPW" "$W/broker.log")"
+HOST_RE='(example\.(com|org|net)|badexample)'
+TOKEN_RE='eyJ[A-Za-z0-9_-]{10,}|[Bb]earer +[A-Za-z0-9._-]{16,}'
+scan_hosts()  { grep -c -E -- "$HOST_RE" "$1"; }
+scan_tokens() { grep -c -E -- "$TOKEN_RE" "$1"; }
+scan_pw()     { grep -c -F -- "$PGPW" "$1"; }
+cp "$W/broker.log" "$W/control.log"
+{
+  echo "control: allowed_domains=[docs.example.org]"
+  echo "control: authorization Bearer eyJhbGciOiJSUzI1NiIsImtpZCI6ImUyZSJ9.payload.signature"
+  echo "control: dsn password=$PGPW"
+} >>"$W/control.log"
+ctl_h="$(scan_hosts "$W/control.log")"; ctl_t="$(scan_tokens "$W/control.log")"; ctl_p="$(scan_pw "$W/control.log")"
+hn="$(scan_hosts "$W/broker.log")"; bt="$(scan_tokens "$W/broker.log")"; pw="$(scan_pw "$W/broker.log")"
+echo "E2E_BROKER_LOG lines=$(wc -l <"$W/broker.log" | tr -d ' ') host_names=$hn bearer_tokens=$bt db_password=$pw"
+base_h="$hn"; base_t="$bt"; base_p="$pw"
+echo "E2E_SCAN_CONTROL planted lines found: host=$((ctl_h - base_h)) token=$((ctl_t - base_t)) password=$((ctl_p - base_p)) (each must be at least 1)"
+if [ "$ctl_h" -le "$base_h" ] || [ "$ctl_t" -le "$base_t" ] || [ "$ctl_p" -le "$base_p" ]; then
+  echo "E2E_RUN_ERROR: the log scan control did not fire (host $ctl_h/$base_h, token $ctl_t/$base_t, password $ctl_p/$base_p): the scan patterns are broken" >&2
+  rc=1
+fi
+if [ "$hn" != 0 ] || [ "$bt" != 0 ] || [ "$pw" != 0 ]; then
+  echo "E2E_RUN_ERROR: the broker log holds caller data (host_names=$hn bearer_tokens=$bt db_password=$pw); it must log counts and classes only" >&2
+  rc=1
+fi
+
+# ---- 7. the run must really have run every scenario ---------------------------------
+# go test exits 0 when the test skips (a missing E2E_* variable), so the exit
+# status alone proves nothing: every scenario must have printed its OK line.
+SCENARIOS="a_restart_survival b_zdr_is_memory_only c_derive d_budget_claim f_auth g_sensitive_approval e_postgres_down"
+missing=""
+for sc in $SCENARIOS; do
+  grep -q -E "^E2E_SCENARIO_OK $sc assertions=[1-9][0-9]*" "$LOG" || missing="$missing $sc"
+done
+if [ -n "$missing" ]; then echo "E2E_RUN_ERROR: no E2E_SCENARIO_OK line for:$missing" >&2; rc=1; fi
+if grep -q -E '^\s*--- SKIP' "$LOG"; then echo "E2E_RUN_ERROR: a test was skipped" >&2; rc=1; fi
+nok="$(grep -c -E '^E2E_SCENARIO_OK ' "$LOG")"
+nexp="$(echo $SCENARIOS | wc -w | tr -d ' ')"
+[ "$nok" = "$nexp" ] || { echo "E2E_RUN_ERROR: $nok E2E_SCENARIO_OK lines, expected $nexp" >&2; rc=1; }
+
 echo "== summary"
 grep -E '^E2E_SCENARIO_OK|^(--- |=== RUN)|^(ok|FAIL|PASS)\b|\[[a-z_]+\] FAIL' "$LOG" | grep -v '=== RUN' || true
-echo "E2E_RESULT rc=$rc"
+echo "E2E_RESULT rc=$rc scenarios=$nok/$nexp"
 exit "$rc"
