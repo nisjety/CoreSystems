@@ -517,10 +517,19 @@ pub(crate) async fn rate_limit_middleware(request: Request, next: Next) -> Respo
                 retry_after = retry_after,
                 "inbound rate limit exceeded"
             );
+            // The gateway's typed error envelope, as every other refusal: a plain-text
+            // body gave the SPA no code to read, so a limited person saw the caller's
+            // "could not save" instead of "too many requests, try again in N seconds".
+            // The wait is also in the body, for a client that cannot read headers.
+            let mut body = crate::envelope::error(
+                "rate_limited",
+                "Too many requests. Try again shortly.",
+            );
+            body["error"]["retryAfterSeconds"] = serde_json::json!(retry_after);
             (
                 StatusCode::TOO_MANY_REQUESTS,
                 [("Retry-After", retry_after.to_string())],
-                "rate limit exceeded",
+                axum::Json(body),
             )
                 .into_response()
         }
@@ -872,6 +881,48 @@ mod tests {
                 call(&app, "POST", "/job", "org_b", "198.51.100.1").await.0,
                 StatusCode::OK
             );
+        }
+
+        #[tokio::test]
+        async fn a_denied_request_is_the_typed_envelope_with_the_wait_in_header_and_body() {
+            let app = app(&[("GATEWAY_RATE_LIMIT_RPM_JOB_SUBMIT", "1")]).await;
+            let send = |app: Router| async move {
+                app.oneshot(
+                    HttpRequest::builder()
+                        .method("POST")
+                        .uri("/job")
+                        .header("x-test-org", "org_a")
+                        .header("x-forwarded-for", "198.51.100.1")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            };
+            assert_eq!(send(app.clone()).await.status(), StatusCode::OK);
+            let denied = send(app.clone()).await;
+            assert_eq!(denied.status(), StatusCode::TOO_MANY_REQUESTS);
+            let header = denied
+                .headers()
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok())
+                .expect("a numeric Retry-After header");
+            assert!(header >= 1);
+            assert_eq!(
+                denied
+                    .headers()
+                    .get("content-type")
+                    .and_then(|value| value.to_str().ok()),
+                Some("application/json")
+            );
+            let bytes = axum::body::to_bytes(denied.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["error"]["code"], "rate_limited");
+            assert_eq!(body["error"]["retryAfterSeconds"], header);
+            assert!(!body.to_string().contains("org_a"), "no caller identity in the body");
         }
 
         #[tokio::test]
