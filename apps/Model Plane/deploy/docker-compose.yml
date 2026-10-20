@@ -1139,7 +1139,9 @@ services:
       # run, a pinned, persistent, root run that meets a spent usage limit, a transient upstream
       # failure, an expired sign-in or its credential deadline at a round boundary saves a `park`
       # fold, returns `parked` and stays open, to be resumed through the one /continue route
-      # (the resume ships in a later step: do not turn this on before it is deployed). OFF by
+      # (AgentResume.mode `park`: this image resumes it from the fold, on the pinned route the
+      # fold recorded, fenced before its first inference; the gateway's park form ships later,
+      # so do not turn this on before it is deployed). OFF by
       # default: with it off no park is written and runs end exactly as before. Only the
       # literal `true` turns it on, and it takes effect only with EXECUTION_LOOP_RESUME_ENABLED,
       # AGENT_CONTINUE_AFTER_APPROVAL_ENABLED, EXECUTION_LOOP_CHECKPOINT_ENABLED and

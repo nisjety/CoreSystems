@@ -673,6 +673,11 @@ fn enforce_run_context(req: &pb::RunAgentRequest) -> Result<(), Status> {
 /// boundary: refused while the durable-loop switch is off, and refused when it
 /// does not name the exact approved call. The resumed segment authenticates with
 /// the request's own bearers; nothing here widens authority.
+///
+/// A park resume (WS03 S8-6, mode `park`) names no approval: it carries a claim token and
+/// nothing an approval stage reads (no approval, step, tool, fingerprint or brief), and a
+/// park that names one is incomplete. Neither the client's segment number nor the parking
+/// switch is read here: with parking off an existing park stays resumable.
 fn enforce_resume(req: &pb::RunAgentRequest, enabled: bool) -> Result<(), Status> {
     let Some(resume) = req.resume.as_ref() else {
         return Ok(());
@@ -680,10 +685,21 @@ fn enforce_resume(req: &pb::RunAgentRequest, enabled: bool) -> Result<(), Status
     if !enabled {
         return Err(Status::failed_precondition("continue_disabled"));
     }
-    if !matches!(resume.mode.as_str(), "segment" | "loop")
-        || resume.approval_id.is_empty()
-        || resume.claim_token.is_empty()
-    {
+    if !matches!(resume.mode.as_str(), "segment" | "loop" | "park") {
+        return Err(Status::invalid_argument("resume_incomplete"));
+    }
+    if resume.mode == "park" {
+        let names_an_approval = !resume.approval_id.is_empty()
+            || !resume.step_id.is_empty()
+            || !resume.tool_name.is_empty()
+            || !resume.action_fingerprint.is_empty()
+            || !resume.brief.is_empty();
+        if names_an_approval || resume.claim_token.is_empty() {
+            return Err(Status::invalid_argument("resume_incomplete"));
+        }
+        return Ok(());
+    }
+    if resume.approval_id.is_empty() || resume.claim_token.is_empty() {
         return Err(Status::invalid_argument("resume_incomplete"));
     }
     Ok(())
@@ -2225,6 +2241,59 @@ mod run_context_boundary_tests {
             let e = enforce_resume(&with_resume(Some(incomplete)), true).expect_err("incomplete");
             assert_eq!(e.code(), tonic::Code::InvalidArgument);
             assert_eq!(e.message(), "resume_incomplete");
+        }
+    }
+
+    /// A park resume (WS03 S8-6): the `park` mode with a claim token and nothing an approval
+    /// names. The switch is judged first, as for every resume; a park that names an approval, a
+    /// step, a tool, a fingerprint or a brief, or carries no token, is incomplete. The committed
+    /// rows of the other two modes are unchanged, and the validator never reads `segment_no`
+    /// or the parking switch (a park stays resumable with parking off).
+    #[test]
+    fn enforce_resume_park_shape() {
+        let park = || pb::AgentResume {
+            mode: "park".to_owned(),
+            claim_token: "claim".to_owned(),
+            ..Default::default()
+        };
+        // The switch first, whatever the shape.
+        for shape in [park(), pb::AgentResume { approval_id: "appr_1".to_owned(), ..park() }] {
+            let refused = enforce_resume(&with_resume(Some(shape)), false).expect_err("switch off");
+            assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+            assert_eq!(refused.message(), "continue_disabled");
+        }
+        assert!(enforce_resume(&with_resume(Some(park())), true).is_ok());
+        // A client-sent segment number is not read (the executor derives it from the fold).
+        assert!(enforce_resume(
+            &with_resume(Some(pb::AgentResume { segment_no: 7, ..park() })),
+            true
+        )
+        .is_ok());
+        let incomplete = [
+            pb::AgentResume { approval_id: "appr_1".to_owned(), ..park() },
+            pb::AgentResume { step_id: "tool_1_x".to_owned(), ..park() },
+            pb::AgentResume { tool_name: "delete_records".to_owned(), ..park() },
+            pb::AgentResume { action_fingerprint: "fp".to_owned(), ..park() },
+            pb::AgentResume { brief: "recorded results".to_owned(), ..park() },
+            pb::AgentResume { claim_token: String::new(), ..park() },
+            pb::AgentResume { mode: "PARK".to_owned(), ..park() },
+        ];
+        for shape in incomplete {
+            let e = enforce_resume(&with_resume(Some(shape)), true).expect_err("incomplete park");
+            assert_eq!(e.code(), tonic::Code::InvalidArgument);
+            assert_eq!(e.message(), "resume_incomplete");
+        }
+        // The committed truth table of the approval stages: both ids are still required.
+        for mode in ["segment", "loop"] {
+            assert!(enforce_resume(&with_resume(Some(resume(mode))), true).is_ok(), "{mode}");
+            let mut no_approval = resume(mode);
+            no_approval.approval_id.clear();
+            let mut no_claim = resume(mode);
+            no_claim.claim_token.clear();
+            for shape in [no_approval, no_claim] {
+                let e = enforce_resume(&with_resume(Some(shape)), true).expect_err(mode);
+                assert_eq!(e.message(), "resume_incomplete");
+            }
         }
     }
 

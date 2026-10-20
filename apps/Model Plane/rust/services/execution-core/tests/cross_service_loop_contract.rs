@@ -156,3 +156,260 @@ fn rendered_tool_output_cap_matches_inline_chat() {
          richer on one surface than the other."
     );
 }
+
+// ---- WS03 S8-A S8-6: the park resume against session-core's park store ----------------------
+//
+// The executor's park resume and session-core's park store are two independently deployed
+// services that must agree on two things no build dependency checks: the closed token the store
+// answers a park claim with when the park is not yet due (`park_not_due`, which the executor
+// turns into its own `park_not_due` refusal, so the run stays parked), and the format of a
+// park's reference (`park:{run_id}:{n}`, which the store validates on a park save and the
+// executor writes on the park fold and checks on the claimed one). Both read the reference
+// from the one helper in mp-contracts. These pins read the sources of record, like the rest.
+
+const SESSION_CHECKPOINT: &str = "../session-core/src/loop_checkpoint.rs";
+const EXECUTOR_PARK: &str = "src/runtime_loop/park.rs";
+const LOOP_FOLD: &str = "../../crates/mp-contracts/src/loop_fold.rs";
+
+/// The lines of `source` that are production code: not line comments, and nothing from the
+/// file's first `#[cfg(test)] mod tests {` on (each pinned file keeps its tests there, and a test
+/// may spell a reference out to check it).
+fn code_lines(source: &str) -> Vec<&str> {
+    let lines: Vec<&str> = source.lines().collect();
+    let end = (1..lines.len())
+        .find(|&at| lines[at].trim() == "mod tests {" && lines[at - 1].trim() == "#[cfg(test)]")
+        .map_or(lines.len(), |at| at - 1);
+    lines[..end]
+        .iter()
+        .copied()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect()
+}
+
+/// session-core answers a not-yet-due park claim `failed_precondition("park_not_due")`, and the
+/// executor maps exactly that code and message to its `park_not_due` refusal.
+fn park_not_due_violations(session: &str, park: &str) -> Vec<String> {
+    let mut violations = Vec::new();
+    if !code_lines(session)
+        .iter()
+        .any(|line| line.contains("Status::failed_precondition(\"park_not_due\")"))
+    {
+        violations.push(
+            "session-core no longer answers a not-yet-due park claim \
+             `failed_precondition(\"park_not_due\")`: the executor would refuse it as unavailable"
+                .to_owned(),
+        );
+    }
+    if !code_lines(park).iter().any(|line| {
+        line.contains("(Code::FailedPrecondition, \"park_not_due\") => ResumeRefusal::ParkNotDue")
+    }) {
+        violations.push(
+            "the executor's classify_park_claim no longer maps session-core's \
+             (FailedPrecondition, \"park_not_due\") to ResumeRefusal::ParkNotDue"
+                .to_owned(),
+        );
+    }
+    violations
+}
+
+/// session-core opens and checks a claimed fold BEFORE it commits the claim, so a fold that does
+/// not authenticate (`failed_precondition("loop checkpoint did not authenticate")`) or is
+/// malformed (`invalid_argument`) rolls the claim back: the row STAYS parked and the executor has
+/// no seq to close at. The executor must therefore answer those two with
+/// `ResumeRefusal::CheckpointUnavailable` (`resume_checkpoint_unavailable`, which the SPA reads as
+/// "the run stays parked"), never `ParkNotRestorable` (`park_not_restorable`, which it reads as
+/// "no longer parked").
+fn park_torn_claim_violations(session: &str, park: &str) -> Vec<String> {
+    let mut violations = Vec::new();
+    let flat = |source: &str| {
+        code_lines(source)
+            .join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    if !flat(session)
+        .contains("Status::failed_precondition(\"loop checkpoint did not authenticate\")")
+    {
+        violations.push(
+            "session-core no longer answers a claimed fold that does not authenticate \
+             `failed_precondition(\"loop checkpoint did not authenticate\")`"
+                .to_owned(),
+        );
+    }
+    if !flat(park).contains(
+        "(Code::FailedPrecondition, \"loop checkpoint did not authenticate\") \
+         | (Code::InvalidArgument, _) => ResumeRefusal::CheckpointUnavailable,",
+    ) {
+        violations.push(
+            "the executor's classify_park_claim no longer maps a torn fold (did not authenticate, \
+             invalid argument) to ResumeRefusal::CheckpointUnavailable: the row stays parked, so \
+             it must not be park_not_restorable"
+                .to_owned(),
+        );
+    }
+    violations
+}
+
+/// A park's reference is `park:{run_id}:{n}`, built by the one mp-contracts helper; session-core
+/// validates a park save against it, and the executor writes and checks it through it. Neither
+/// service builds the string itself.
+fn park_ref_violations(session: &str, park: &str, loop_fold: &str) -> Vec<String> {
+    let mut violations = Vec::new();
+    let helper = code_lines(loop_fold);
+    let at = helper
+        .iter()
+        .position(|line| line.contains("pub fn park_ref(run_id: &str, n: u32) -> String {"));
+    match at {
+        Some(at)
+            if helper
+                .get(at + 1)
+                .is_some_and(|line| line.trim() == "format!(\"park:{run_id}:{n}\")") => {}
+        _ => violations.push(
+            "mp-contracts park_ref is no longer `format!(\"park:{run_id}:{n}\")`".to_owned(),
+        ),
+    }
+    let session_code = code_lines(session);
+    if !session_code
+        .iter()
+        .any(|line| line.contains("input.pause_ref != park_ref(run_id, parks)"))
+    {
+        violations.push(
+            "session-core no longer validates a park save's reference against park_ref(run_id, parks)"
+                .to_owned(),
+        );
+    }
+    for (name, code) in [("session-core", &session_code), ("the executor", &code_lines(park))] {
+        if code
+            .iter()
+            .any(|line| line.contains("fn park_ref(") || line.contains("\"park:"))
+        {
+            violations.push(format!(
+                "{name} builds a park reference itself instead of through mp-contracts park_ref"
+            ));
+        }
+    }
+    let park_code = code_lines(park);
+    for need in ["lf::park_ref(site.run_id, n)", "lf::park_ref(run_id, parks)"] {
+        if !park_code.iter().any(|line| line.contains(need)) {
+            violations.push(format!(
+                "the executor no longer writes or checks a park's reference with `{need}`"
+            ));
+        }
+    }
+    violations
+}
+
+#[test]
+fn the_park_resume_and_the_park_store_agree_on_park_not_due() {
+    let violations = park_not_due_violations(&read(SESSION_CHECKPOINT), &read(EXECUTOR_PARK));
+    assert!(violations.is_empty(), "{violations:#?}");
+}
+
+#[test]
+fn a_torn_park_claim_stays_parked_and_is_refused_as_unavailable() {
+    let violations = park_torn_claim_violations(&read(SESSION_CHECKPOINT), &read(EXECUTOR_PARK));
+    assert!(violations.is_empty(), "{violations:#?}");
+}
+
+#[test]
+fn the_park_resume_and_the_park_store_agree_on_the_park_reference() {
+    let violations = park_ref_violations(
+        &read(SESSION_CHECKPOINT),
+        &read(EXECUTOR_PARK),
+        &read(LOOP_FOLD),
+    );
+    assert!(violations.is_empty(), "{violations:#?}");
+}
+
+/// `text` with the first `from` replaced by `to`; the target must exist.
+fn mutate(text: &str, from: &str, to: &str) -> String {
+    assert!(text.contains(from), "the mutation target `{from}` is gone: re-point this test");
+    text.replacen(from, to, 1)
+}
+
+/// Each pin goes red when either side drifts.
+#[test]
+fn the_park_pins_go_red_when_either_side_drifts() {
+    let session = read(SESSION_CHECKPOINT);
+    let park = read(EXECUTOR_PARK);
+    let loop_fold = read(LOOP_FOLD);
+    let flagged = |violations: Vec<String>, containing: &str| {
+        assert!(
+            violations.iter().any(|violation| violation.contains(containing)),
+            "expected a violation containing {containing:?}, got {violations:?}"
+        );
+    };
+    flagged(
+        park_not_due_violations(
+            &mutate(
+                &session,
+                "Status::failed_precondition(\"park_not_due\")",
+                "Status::failed_precondition(\"park_not_yet_due\")",
+            ),
+            &park,
+        ),
+        "session-core no longer answers a not-yet-due park claim",
+    );
+    flagged(
+        park_not_due_violations(
+            &session,
+            &mutate(
+                &park,
+                "(Code::FailedPrecondition, \"park_not_due\") => ResumeRefusal::ParkNotDue",
+                "(Code::Aborted, \"park_not_due\") => ResumeRefusal::ParkNotDue",
+            ),
+        ),
+        "classify_park_claim no longer maps",
+    );
+    flagged(
+        park_torn_claim_violations(
+            &mutate(
+                &session,
+                "Status::failed_precondition(\"loop checkpoint did not authenticate\")",
+                "Status::failed_precondition(\"loop checkpoint is unreadable\")",
+            ),
+            &park,
+        ),
+        "session-core no longer answers a claimed fold that does not authenticate",
+    );
+    flagged(
+        park_torn_claim_violations(
+            &session,
+            &mutate(
+                &park,
+                "| (Code::InvalidArgument, _) => ResumeRefusal::CheckpointUnavailable,",
+                "| (Code::InvalidArgument, _) => ResumeRefusal::ParkNotRestorable,",
+            ),
+        ),
+        "classify_park_claim no longer maps a torn fold",
+    );
+    flagged(
+        park_ref_violations(
+            &session,
+            &park,
+            &mutate(&loop_fold, "format!(\"park:{run_id}:{n}\")", "format!(\"park/{run_id}/{n}\")"),
+        ),
+        "mp-contracts park_ref is no longer",
+    );
+    flagged(
+        park_ref_violations(
+            &mutate(
+                &session,
+                "input.pause_ref != park_ref(run_id, parks)",
+                "input.pause_ref != format!(\"park:{run_id}:{parks}\")",
+            ),
+            &park,
+            &loop_fold,
+        ),
+        "session-core no longer validates",
+    );
+    flagged(
+        park_ref_violations(
+            &session,
+            &mutate(&park, "lf::park_ref(run_id, parks)", "format!(\"park:{run_id}:{parks}\")"),
+            &loop_fold,
+        ),
+        "the executor builds a park reference itself",
+    );
+}

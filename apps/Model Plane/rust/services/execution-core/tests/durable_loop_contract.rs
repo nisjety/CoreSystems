@@ -1330,10 +1330,11 @@ fn resume_parser_strictness_violations(loop_fold_source: &str) -> Vec<String> {
 
 // ---- WS03 S8-A S8-5: the park write -----------------------------------------------------------
 
-/// What the production constant `park::PARK_RESUME_BUILT` must be. `false` until the park RESUME
-/// (WS03 S8-6) is built: the executor still refuses `AgentResume.mode` `park`, so a park written
-/// by such a binary could not be continued. The S8-6 unit flips this and the constant together.
-const PARK_RESUME_BUILT_EXPECTED: bool = false;
+/// What the production constant `park::PARK_RESUME_BUILT` must be. It was `false` until the park
+/// RESUME (WS03 S8-6) was built, because a park written by a binary that refuses
+/// `AgentResume.mode` `park` could not be continued. S8-6 built the resume half and flipped this
+/// and the constant together: `true`.
+const PARK_RESUME_BUILT_EXPECTED: bool = true;
 
 /// The executor's park (a typed, recoverable stop of a pinned root run saved as a durable
 /// `park` fold, the run left open) is written by ONE function, behind ONE decision, from three
@@ -1353,8 +1354,9 @@ const PARK_RESUME_BUILT_EXPECTED: bool = false;
 ///   facts (zero-retention, waived, Space, depth, release, derivable tools, route);
 /// * a parked outcome returns from `run_agent_with_route_parkable` BEFORE `finalize`, and its
 ///   arm names no receipt, no append and no lease release;
-/// * the tool set a run offers is derivable only for a fresh request, never for an approval
-///   continuation, never for a delegated child;
+/// * the tool set a run offers is derivable only for a fresh request (or a park resume, the one
+///   continuation with no release), never for an approval continuation, never for a delegated
+///   child; a park resume's count of parks already taken is its claimed fold's (S8-6);
 /// * the parking switch has one parser, and a park is written only with the resume switches on.
 ///
 /// `sources` are the executor's production files (for the "only here" claims); the three named
@@ -1755,16 +1757,46 @@ fn park_writer_violations(
         }
     }
 
-    // Derivability: fresh only.
-    let derivable_root =
-        r"\btools_derivable\s*:\s*derivable\s*&&\s*resumed\s*\.\s*is_none\s*\(\s*\)";
+    // Derivability: a fresh request or a park resume (WS03 S8-6), the one continuation that holds
+    // no release; never an approval continuation, never a child.
+    let derivable_root = r"\btools_derivable\s*:\s*derivable\s*&&\s*resumed\s*\.\s*as_ref\s*\(\s*\)\s*\.\s*is_none_or\s*\(\s*\|\s*r\s*\|\s*r\s*\.\s*release\s*\.\s*is_none\s*\(\s*\)\s*\)";
     let derivable_child = r"\btools_derivable\s*:\s*false\b";
     if matches_of(&agent.skel, derivable_root) != 1 || matches_of(&agent.skel, derivable_child) != 1
     {
         violations.push(
-            "the loop's contexts do not read `tools_derivable: derivable && resumed.is_none()` (root) and `tools_derivable: false` (child), once each"
+            "the loop's contexts do not read `tools_derivable: derivable && resumed.as_ref().is_none_or(|r| r.release.is_none())` (root) and `tools_derivable: false` (child), once each"
                 .into(),
         );
+    }
+    // The park cap across resumes (WS03 S8-6): once a park resume exists (`RoundSeed::Parked`),
+    // the loop's count of parks already taken is seeded from the claimed fold's seed, never a
+    // literal and never the request, and the seed's count is the fold's own (`lf::parks_in`).
+    if matches_of(&agent.skel, r"\bRoundSeed\s*::\s*Parked\b") > 0 {
+        let literal = Regex::new(r"\blet\s+park_gate\s*=\s*ParkGate\s*\{")
+            .expect("pattern")
+            .find(&agent.skel)
+            .map(|found| found.end() - 1);
+        let span = literal
+            .and_then(|open| matching_brace(&agent.skel, open).map(|close| (open, close)));
+        match span {
+            None => violations.push("agent.rs builds no ParkGate literal".into()),
+            Some((open, close)) => {
+                let body: String = agent.text[open..=close].split_whitespace().collect();
+                if !body.contains("parks_so_far:parked.as_ref().map_or(0,|parked|parked.parks)") {
+                    violations.push(
+                        "the ParkGate's `parks_so_far` is not seeded from the park resume's seed (`parked.as_ref().map_or(0, |parked| parked.parks)`): a run that parks and resumes would never reach the park cap"
+                            .into(),
+                    );
+                }
+            }
+        }
+        match park.fn_body_skel("seed_from") {
+            Some(body) if body.split_whitespace().collect::<String>().contains("parks:lf::parks_in(fold)") => {}
+            _ => violations.push(
+                "park::seed_from no longer takes the parks already taken from the claimed fold (`parks: lf::parks_in(fold)`)"
+                    .into(),
+            ),
+        }
     }
     match agent.fn_body_skel("offered_tools") {
         None => violations.push("agent.rs has no `fn offered_tools`".into()),
@@ -1866,6 +1898,307 @@ fn one_parking_parser_violations(sources: &[(String, String)]) -> Vec<String> {
         "loop_parking_enabled",
         sources,
     )
+}
+
+// ---- WS03 S8-A S8-6: the park resume ----------------------------------------------------------
+
+/// The start of the first match of `pattern` in `haystack`.
+fn first_at(haystack: &str, pattern: &str) -> Option<usize> {
+    Regex::new(pattern)
+        .expect("pattern")
+        .find(haystack)
+        .map(|found| found.start())
+}
+
+/// The park resume claims only after it is admitted and its tools are derived, restores only a
+/// fold this executor parked, and FENCES before its first inference. Each claim below is what a
+/// careless edit would break without turning a lib test red:
+///
+/// * `park.rs` writes the fence once, in `fence_parked` (the only `save_fence(` of the module),
+///   of the boundary fold (`build_fold(snapshot, None, None)`), and claims with an EMPTY pause
+///   reference, classifying a refusal through `classify_park_claim`;
+/// * `run_rounds` calls `park::fence_parked(` once, after the one seeded writer and before its
+///   `while` loop, ends the request through `fence_refusal(` when it fails, and publishes
+///   `RunResumed` (`publish_run_resumed(`, once) only after it;
+/// * `run_agent` decides `is_park_resume(` before it lists any tool (`offered_tools(`), and
+///   `resume_parked_run` admits, derives, claims, checks, closes an unrestorable fold and only
+///   then runs the loop (`run_agent_with_offered(`), in that order, once each, and never names
+///   an MCP listing, the merged tool set or an approval consume;
+/// * `derivable_tool_defs` builds from `base_tool_defs(false)` and lists nothing from MCP;
+/// * `run_agent_with_offered` refuses a park whose route is waived or not pinned;
+/// * `park_continuation` holds no release, builds no writer gate and makes no RPC.
+fn park_fence_violations(executor_loop: &str, executor_park: &str) -> Vec<String> {
+    let mut violations = Vec::new();
+    let agent = Code::new(executor_loop).without_tests();
+    let park = Code::new(executor_park).without_tests();
+    let flat = |text: &str| text.split_whitespace().collect::<String>();
+
+    // park.rs: one fence, of the boundary fold; the claim of the current park.
+    let fence = r"\bsave_fence\s*\(";
+    let in_fence_parked = park
+        .fn_body_skel("fence_parked")
+        .map_or(0, |body| matches_of(&body, fence));
+    if matches_of(&park.skel, fence) != 1 || in_fence_parked != 1 {
+        violations.push(format!(
+            "park.rs calls `save_fence(` {} times ({in_fence_parked} in fence_parked); the park resume writes one fence, in fence_parked",
+            matches_of(&park.skel, fence)
+        ));
+    }
+    if !park
+        .fn_body("fence_parked")
+        .is_some_and(|body| flat(&body).contains("build_fold(snapshot,None,None)"))
+    {
+        violations.push(
+            "fence_parked no longer fences the boundary fold (`build_fold(snapshot, None, None)`)"
+                .into(),
+        );
+    }
+    match park.fn_body("claim_parked") {
+        None => violations.push("park.rs has no `fn claim_parked`".into()),
+        Some(body) => {
+            if !flat(&body).contains("pause_ref:String::new(),") {
+                violations.push(
+                    "claim_parked does not claim with an EMPTY pause reference (the current park)"
+                        .into(),
+                );
+            }
+            if !body.contains("classify_park_claim(") {
+                violations.push("claim_parked does not classify a refused claim".into());
+            }
+        }
+    }
+    match park.fn_body_skel("derivable_tool_defs") {
+        None => violations.push("park.rs has no `fn derivable_tool_defs`".into()),
+        Some(body) => {
+            if !flat(&body).contains("base_tool_defs(false)") {
+                violations.push("derivable_tool_defs does not build from `base_tool_defs(false)`".into());
+            }
+            for forbidden in ["McpGatewayClient", "list_tools", "merged_tool_defs"] {
+                if word_count(&body, forbidden) > 0 {
+                    violations.push(format!(
+                        "derivable_tool_defs names `{forbidden}`: a park resume never lists an MCP server's tools"
+                    ));
+                }
+            }
+        }
+    }
+
+    // run_rounds: one fence, after the seeded writer, before the loop, then RunResumed.
+    let Some(rounds) = agent.fn_body_skel("run_rounds") else {
+        violations.push("agent.rs has no `fn run_rounds`: re-point this guard".into());
+        return violations;
+    };
+    let fence_call = r"\bpark\s*::\s*fence_parked\s*\(";
+    let resumed_call = r"\bpublish_run_resumed\s*\(";
+    if matches_of(&rounds, fence_call) != 1 || matches_of(&agent.skel, fence_call) != 1 {
+        violations.push(format!(
+            "agent.rs calls `park::fence_parked(` {} times ({} in run_rounds); the park resume fences once, in run_rounds",
+            matches_of(&agent.skel, fence_call),
+            matches_of(&rounds, fence_call)
+        ));
+    }
+    if matches_of(&rounds, resumed_call) != 1 || matches_of(&agent.skel, resumed_call) != 1 {
+        violations.push(
+            "agent.rs publishes RunResumed (`publish_run_resumed(`) other than once, in run_rounds"
+                .into(),
+        );
+    }
+    match (
+        first_at(&rounds, r"\bFoldWriter\s*::\s*seeded\s*\("),
+        first_at(&rounds, fence_call),
+        first_at(&rounds, resumed_call),
+        first_at(&rounds, r"\bwhile\s+rounds_executed\b"),
+    ) {
+        (Some(writer), Some(fence_at), Some(resumed), Some(loop_at)) => {
+            if !(writer < fence_at && fence_at < resumed && resumed < loop_at) {
+                violations.push(
+                    "run_rounds does not fence the park resume after its seeded writer and before its loop, with RunResumed after the fence: a round could be inferred before the fence"
+                        .into(),
+                );
+            } else {
+                let between = &rounds[fence_at..resumed];
+                if !between.contains("fence_refusal(") || !between.contains("return Err(") {
+                    violations.push(
+                        "a failed park fence does not end the request through `fence_refusal(`"
+                            .into(),
+                    );
+                }
+            }
+        }
+        _ => violations.push(
+            "run_rounds lacks one of `FoldWriter::seeded(`, `park::fence_parked(`, `publish_run_resumed(` or its `while rounds_executed` loop"
+                .into(),
+        ),
+    }
+
+    // run_agent: the park branch first; resume_parked_run in order, and nothing listed.
+    match agent.fn_body_skel("run_agent") {
+        None => violations.push("agent.rs has no `fn run_agent`".into()),
+        Some(body) => match (
+            first_at(&body, r"\bis_park_resume\s*\("),
+            first_at(&body, r"\bresume_parked_run\s*\("),
+            first_at(&body, r"\boffered_tools\s*\("),
+        ) {
+            (Some(branch), Some(resume), Some(offer)) if branch < resume && resume < offer => {}
+            _ => violations.push(
+                "run_agent does not decide a park resume (`is_park_resume(` then `resume_parked_run(`) before it lists any tool (`offered_tools(`)"
+                    .into(),
+            ),
+        },
+    }
+    match agent.fn_body_skel("resume_parked_run") {
+        None => violations.push("agent.rs has no `fn resume_parked_run`".into()),
+        Some(body) => {
+            let steps = [
+                r"\bpark\s*::\s*admit\s*\(",
+                r"\bpark\s*::\s*derivable_tool_defs\s*\(",
+                r"\bpark\s*::\s*claim_parked\s*\(",
+                r"\bpark\s*::\s*check_park_fold\s*\(",
+                r"\bpark\s*::\s*close_unrestorable\s*\(",
+                r"\brun_agent_with_offered\s*\(",
+            ];
+            let at: Vec<Option<usize>> = steps.iter().map(|step| first_at(&body, step)).collect();
+            let once = steps.iter().all(|step| matches_of(&body, step) == 1);
+            let ordered = at.windows(2).all(|pair| matches!(pair, [Some(a), Some(b)] if a < b));
+            if !once || !ordered {
+                violations.push(
+                    "resume_parked_run does not admit, derive, claim, check, close and run, once each and in that order: a park could be claimed before it is admitted or its tools derived"
+                        .into(),
+                );
+            }
+            for forbidden in [
+                "McpGatewayClient",
+                "list_tools",
+                "merged_tool_defs",
+                "merged_tool_defs_with_sources",
+                "offered_tools",
+                "begin_continuation",
+                "consume_for_resume",
+            ] {
+                if word_count(&body, forbidden) > 0 {
+                    violations.push(format!(
+                        "resume_parked_run names `{forbidden}`: a park resume derives its tools and consumes no approval"
+                    ));
+                }
+            }
+        }
+    }
+    match agent.fn_body("run_agent_with_offered") {
+        None => violations.push("agent.rs has no `fn run_agent_with_offered`".into()),
+        Some(body) => {
+            let body = flat(&body);
+            for need in [
+                "ifpark.is_some(){ifroute.is_waived(){returnErr(super::resume::Refusal::DurableMutationForbidden.status());}if!route.is_pinned(){returnErr(super::resume::Refusal::ParkRouteUnavailable.status());}}",
+                "ifpark.is_some(){super::resume::Refusal::ParkRouteUnavailable.status()}",
+            ] {
+                if !body.contains(need) {
+                    violations.push(
+                        "run_agent_with_offered no longer refuses a park whose route does not resolve, is waived or is not pinned"
+                            .into(),
+                    );
+                    break;
+                }
+            }
+        }
+    }
+    match agent.fn_body_skel("park_continuation") {
+        None => violations.push("agent.rs has no `fn park_continuation`".into()),
+        Some(body) => {
+            if !flat(&agent.fn_body("park_continuation").unwrap_or_default()).contains("release:None,") {
+                violations.push("park_continuation holds a release: a park consumed no approval".into());
+            }
+            for forbidden in ["writer_gate", "Client"] {
+                if Regex::new(&format!(r"\b\w*{forbidden}\b"))
+                    .expect("pattern")
+                    .is_match(&body)
+                {
+                    violations.push(format!(
+                        "park_continuation names `{forbidden}`: it is pure, with no writer decision and no RPC"
+                    ));
+                }
+            }
+        }
+    }
+    violations
+}
+
+/// A park resume takes its segment from the fold it claimed, never from the client: the
+/// segment it writes under is the fold's plus one, its step prefix is that segment's, and the
+/// only fields of the client's resume it reads are the mode (`is_park_resume`) and the claim
+/// token. In `park.rs` the reads of `segment_no` are an exact whitelist: the claimed fold's
+/// (`fold.segment_no`, twice: `check_park_fold` and `seed_from`) and the claim response's
+/// (`response.segment_no`, once, in `claim_parked`).
+fn park_segment_violations(executor_loop: &str, executor_park: &str) -> Vec<String> {
+    let mut violations = Vec::new();
+    let agent = Code::new(executor_loop).without_tests();
+    let park = Code::new(executor_park).without_tests();
+    let flat = |text: &str| text.split_whitespace().collect::<String>();
+
+    // A binding named `resume` (the client's resume), not the request's `.resume` field.
+    let field =
+        Regex::new(r"(?:^|[^.\w])resume\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)").expect("pattern");
+    for captured in field.captures_iter(&park.text) {
+        if &captured[1] != "mode" {
+            violations.push(format!(
+                "park.rs reads `resume.{}`: the park resume reads only the mode of the client's resume (and is handed the claim token)",
+                &captured[1]
+            ));
+        }
+    }
+    match agent.fn_body("resume_parked_run") {
+        None => violations.push("agent.rs has no `fn resume_parked_run`".into()),
+        Some(body) => {
+            for captured in field.captures_iter(&body) {
+                if &captured[1] != "claim_token" {
+                    violations.push(format!(
+                        "resume_parked_run reads `resume.{}`: only the claim token of the client's resume is read",
+                        &captured[1]
+                    ));
+                }
+            }
+        }
+    }
+    let token = Regex::new(r"(?:\b([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*)?\bsegment_no\b").expect("pattern");
+    let (mut folds, mut responses) = (0, 0);
+    for captured in token.captures_iter(&park.text) {
+        match captured.get(1).map(|receiver| receiver.as_str()) {
+            Some("fold") => folds += 1,
+            Some("response") => responses += 1,
+            other => violations.push(format!(
+                "park.rs reads `{}segment_no`: only the claimed fold's and the claim response's may be read, never the client's AgentResume.segment_no",
+                other.map_or(String::new(), |receiver| format!("{receiver}."))
+            )),
+        }
+    }
+    if (folds, responses) != (2, 1) {
+        violations.push(format!(
+            "park.rs reads `fold.segment_no` {folds} times and `response.segment_no` {responses} times; the whitelist is exactly 2 and 1"
+        ));
+    }
+    if !park
+        .fn_body("seed_from")
+        .is_some_and(|body| flat(&body).contains("segment:fold.segment_no.saturating_add(1),"))
+    {
+        violations.push(
+            "seed_from no longer resumes under the fold's segment plus one (`segment: fold.segment_no.saturating_add(1)`)"
+                .into(),
+        );
+    }
+    match agent.fn_body("park_continuation") {
+        None => violations.push("agent.rs has no `fn park_continuation`".into()),
+        Some(body) => {
+            let body = flat(&body);
+            if !body.contains("letsegment=seed.segment;")
+                || !body.contains("step_prefix:format!(\"s{segment}.\"),")
+            {
+                violations.push(
+                    "park_continuation's step prefix is not the seed's segment (`s{segment}.` from `seed.segment`)"
+                        .into(),
+                );
+            }
+        }
+    }
+    violations
 }
 
 /// The park rules of session-core's `save` are asked, and `park_accepted` is set, ONLY while
@@ -2967,11 +3300,18 @@ fn after_answer_frame_violations(gateway_sse: &str, subscription_failure: &str) 
 ///   code (`produced_elsewhere`: their comment-free production text, joined);
 /// * the frame list is exactly the message list, the two derived codes
 ///   (`approval_not_found`, `durable_mutation_forbidden`) and the three the gateway makes.
+///
+/// AMENDED for the park resume (WS03 S8-6): the scan also covers the park resume's own path, in
+/// `park.rs` (`admit`, `derivable_tool_defs`, `claim_parked`, `classify_park_claim`,
+/// `check_park_fold`, `fence_parked`) and in `agent.rs` (`resume_parked_run`,
+/// `park_continuation`, `run_agent_with_offered`, `run_agent_with_route_parkable`): a status
+/// one of them builds must be a listed token too.
 fn continue_vocabulary_violations(
     gateway_sse: &str,
     executor_grpc: &str,
     executor_loop: &str,
     executor_resume: &str,
+    executor_park: &str,
     produced_elsewhere: &str,
 ) -> Vec<String> {
     let mut violations = Vec::new();
@@ -3021,10 +3361,28 @@ fn continue_vocabulary_violations(
         "begin_continuation",
         "restore_continuation",
         "run_rounds",
+        "resume_parked_run",
+        "park_continuation",
+        "run_agent_with_offered",
+        "run_agent_with_route_parkable",
     ] {
         match agent.fn_body(name) {
             Some(body) => bodies.push((format!("agent.rs fn {name}"), body)),
             None => violations.push(format!("agent.rs has no `fn {name}`: re-point this guard")),
+        }
+    }
+    let park = Code::new(executor_park).without_tests();
+    for name in [
+        "admit",
+        "derivable_tool_defs",
+        "claim_parked",
+        "classify_park_claim",
+        "check_park_fold",
+        "fence_parked",
+    ] {
+        match park.fn_body(name) {
+            Some(body) => bodies.push((format!("park.rs fn {name}"), body)),
+            None => violations.push(format!("park.rs has no `fn {name}`: re-point this guard")),
         }
     }
     for name in ["select_stage", "in_place_scope"] {
@@ -3990,6 +4348,267 @@ fn the_store_asks_the_park_rules_and_accepts_a_park_only_under_park_recovery() {
     assert_green(&park_save_gate_violations(&read(SESSION_CHECKPOINT)));
 }
 
+/// The park resume is admitted, derived, claimed, checked and fenced in that order, before its
+/// first inference, and takes its segment from the fold (WS03 S8-A, S8-6).
+#[test]
+fn the_park_resume_claims_after_admission_and_fences_before_any_inference() {
+    assert_green(&park_fence_violations(&read(EXECUTOR_LOOP), &read(EXECUTOR_PARK)));
+    assert_green(&park_segment_violations(&read(EXECUTOR_LOOP), &read(EXECUTOR_PARK)));
+}
+
+/// Each claim of `park_fence_violations`, `park_segment_violations` and of the park half of the
+/// amended `continue_vocabulary_violations` goes red when the code it guards regresses (WS03
+/// S8-6). A broken copy of the text, never a production file.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn the_park_resume_guards_go_red_when_the_code_they_guard_regresses() {
+    let agent = read(EXECUTOR_LOOP);
+    let park = read(EXECUTOR_PARK);
+    assert_green(&park_fence_violations(&agent, &park));
+    assert_green(&park_segment_violations(&agent, &park));
+
+    // A second fence in park.rs, or a fence of another fold, or a claim that names a pause.
+    must_flag(
+        park_fence_violations(
+            &agent,
+            &format!("{park}\nasync fn rogue(f: &mut FoldWriter<'_>) {{ let _ = f.save_fence(x).await; }}"),
+        ),
+        "the park resume writes one fence, in fence_parked",
+    );
+    must_flag(
+        park_fence_violations(
+            &agent,
+            &mutate_in(&park, "pub(crate) async fn fence_parked", "build_fold(snapshot, None, None)", "build_fold(snapshot, None, pending)"),
+        ),
+        "fence_parked no longer fences the boundary fold",
+    );
+    must_flag(
+        park_fence_violations(
+            &agent,
+            &mutate_in(&park, "pub(crate) async fn claim_parked", "pause_ref: String::new(),", "pause_ref: lf::park_ref(run_id, 1),"),
+        ),
+        "does not claim with an EMPTY pause reference",
+    );
+    must_flag(
+        park_fence_violations(
+            &agent,
+            &mutate_in(
+                &park,
+                "pub(crate) async fn derivable_tool_defs",
+                "let mut tools = super::agent::base_tool_defs(false);",
+                "let mut tools = super::agent::base_tool_defs(false); let _ = crate::mcp_gateway::McpGatewayClient::from_env();",
+            ),
+        ),
+        "derivable_tool_defs names `McpGatewayClient`",
+    );
+    // The fence moved into the loop, or dropped, or RunResumed said before it, or a failure that
+    // carries on.
+    must_flag(
+        park_fence_violations(
+            &mutate(&agent, "if let Err(error) = super::park::fence_parked(&mut folds, &snapshot).await {", "if let Err(error) = Ok::<u64, ()>(0) {"),
+            &park,
+        ),
+        "the park resume fences once, in run_rounds",
+    );
+    must_flag(
+        park_fence_violations(
+            &mutate(
+                &agent,
+                "    while rounds_executed + delegated_rounds < max_rounds {",
+                "    while rounds_executed + delegated_rounds < max_rounds {\n        let _ = super::park::fence_parked(&mut folds, &snapshot).await;",
+            ),
+            &park,
+        ),
+        "the park resume fences once, in run_rounds",
+    );
+    must_flag(
+        park_fence_violations(
+            &mutate_in(
+                &agent,
+                "The park resume's FENCE (WS03 S8-6)",
+                "        let Some(authority) = fold_authority.as_ref() else {",
+                "        super::park::publish_run_resumed(ctx.session_channel, None, &req.run_id, 0).await;\n        let Some(authority) = fold_authority.as_ref() else {",
+            ),
+            &park,
+        ),
+        "RunResumed (`publish_run_resumed(`) other than once",
+    );
+    must_flag(
+        park_fence_violations(
+            &mutate_in(
+                &agent,
+                "The park resume's FENCE (WS03 S8-6)",
+                "            return Err(refusal.status());",
+                "            let _ = refusal;",
+            ),
+            &park,
+        ),
+        "a failed park fence does not end the request through `fence_refusal(`",
+    );
+    // The park branch after the tool listing; a claim before the admission or the derivation;
+    // a park resume that lists MCP tools or consumes an approval.
+    must_flag(
+        park_fence_violations(
+            &mutate_in(
+                &agent,
+                "pub(crate) async fn run_agent(",
+                "    if super::park::is_park_resume(&req) {",
+                "    let _ = offered_tools(&req, capability_policy).await;\n    if super::park::is_park_resume(&req) {",
+            ),
+            &park,
+        ),
+        "run_agent does not decide a park resume",
+    );
+    must_flag(
+        park_fence_violations(
+            &mutate_in(
+                &agent,
+                "async fn resume_parked_run(",
+                "    super::park::admit(&req, session_bearer.is_some())?;",
+                "",
+            ),
+            &park,
+        ),
+        "resume_parked_run does not admit, derive, claim, check, close and run",
+    );
+    must_flag(
+        park_fence_violations(
+            &mutate_in(
+                &agent,
+                "async fn resume_parked_run(",
+                "    super::park::admit(&req, session_bearer.is_some())?;",
+                "    let _ = super::park::claim_parked(&session_channel, \"\", &req.run_id, \"\").await;\n    super::park::admit(&req, session_bearer.is_some())?;",
+            ),
+            &park,
+        ),
+        "resume_parked_run does not admit, derive, claim, check, close and run",
+    );
+    must_flag(
+        park_fence_violations(
+            &mutate_in(
+                &agent,
+                "async fn resume_parked_run(",
+                "    let route_req = super::park::route_request(&req, &claimed.fold);",
+                "    let _ = merged_tool_defs(&req.run_id, &req.org_id, &req.user_id, &req.tools, capability_policy, false).await;\n    let route_req = super::park::route_request(&req, &claimed.fold);",
+            ),
+            &park,
+        ),
+        "resume_parked_run names `merged_tool_defs`",
+    );
+    // A park that runs on a waived or unpinned route, or a continuation that holds a release.
+    must_flag(
+        park_fence_violations(
+            &mutate_in(&agent, "async fn run_agent_with_offered(", "        if !route.is_pinned() {", "        if false {"),
+            &park,
+        ),
+        "run_agent_with_offered no longer refuses a park",
+    );
+    must_flag(
+        park_fence_violations(
+            &mutate_in(&agent, "fn park_continuation(", "        release: None,", "        release: Some(release),"),
+            &park,
+        ),
+        "park_continuation holds a release",
+    );
+    must_flag(
+        park_fence_violations(
+            &mutate_in(
+                &agent,
+                "fn park_continuation(",
+                "    let seed = super::park::seed_from(&claimed.claimed);",
+                "    let _ = writer_gate(req, &route, true, 0, false, true);\n    let seed = super::park::seed_from(&claimed.claimed);",
+            ),
+            &park,
+        ),
+        "park_continuation names `writer_gate`",
+    );
+
+    // The segment: a read of the client's resume, a new segment_no read, a segment not the
+    // fold's plus one, a step prefix that is not the seed's.
+    must_flag(
+        park_segment_violations(
+            &agent,
+            &format!("{park}\nfn rogue(resume: &pb::AgentResume) -> u32 {{ resume.segment_no }}"),
+        ),
+        "park.rs reads `resume.segment_no`",
+    );
+    must_flag(
+        park_segment_violations(
+            &agent,
+            &mutate_in(&park, "pub(crate) fn seed_from", "segment: fold.segment_no.saturating_add(1),", "segment: 2,"),
+        ),
+        "the whitelist is exactly 2 and 1",
+    );
+    must_flag(
+        park_segment_violations(
+            &agent,
+            &mutate_in(&park, "pub(crate) fn seed_from", "segment: fold.segment_no.saturating_add(1),", "segment: fold.segment_no,"),
+        ),
+        "seed_from no longer resumes under the fold's segment plus one",
+    );
+    must_flag(
+        park_segment_violations(
+            &mutate_in(&agent, "fn park_continuation(", "step_prefix: format!(\"s{segment}.\"),", "step_prefix: String::new(),"),
+            &park,
+        ),
+        "park_continuation's step prefix is not the seed's segment",
+    );
+    must_flag(
+        park_segment_violations(
+            &mutate_in(
+                &agent,
+                "async fn resume_parked_run(",
+                ".map_or(\"\", |resume| resume.claim_token.as_str());",
+                ".map_or(\"\", |resume| resume.approval_id.as_str());",
+            ),
+            &park,
+        ),
+        "resume_parked_run reads `resume.approval_id`",
+    );
+
+    // The vocabulary: a park refusal nobody listed, in park.rs and in the agent's park fns.
+    let produced = executor_and_session_production_text();
+    let vocabulary = |agent: &str, park: &str| {
+        continue_vocabulary_violations(
+            &read(GATEWAY_SSE),
+            &read(EXECUTOR_GRPC),
+            agent,
+            &read(EXECUTOR_RESUME),
+            park,
+            &produced,
+        )
+    };
+    assert_green(&vocabulary(&agent, &park));
+    must_flag(
+        vocabulary(
+            &agent,
+            &mutate_in(
+                &park,
+                "pub(crate) fn admit(",
+                "tonic::Status::failed_precondition(\"continue_disabled\")",
+                "tonic::Status::failed_precondition(\"park_brand_new_refusal\")",
+            ),
+        ),
+        "park.rs fn admit refuses a continuation with `park_brand_new_refusal`",
+    );
+    must_flag(
+        vocabulary(
+            &mutate_in(
+                &agent,
+                "async fn run_agent_with_route_parkable(",
+                "tonic::Status::invalid_argument(\"resume_incomplete\")",
+                "tonic::Status::invalid_argument(\"park_without_a_claim\")",
+            ),
+            &park,
+        ),
+        "agent.rs fn run_agent_with_route_parkable refuses a continuation with `park_without_a_claim`",
+    );
+    must_flag(
+        vocabulary(&agent, &mutate(&park, "pub(crate) fn admit(", "pub(crate) fn admitted(")),
+        "park.rs has no `fn admit`",
+    );
+}
+
 /// Each claim of `park_writer_violations` goes red when the code it guards regresses. Kept apart
 /// from `every_guard_goes_red_when_the_code_it_guards_regresses` (whose rows the later S8 steps
 /// leave unchanged), and built the same way: a broken copy of the text, never a production file.
@@ -4192,18 +4811,51 @@ fn the_park_writer_guard_goes_red_when_the_code_it_guards_regresses() {
         )),
         "parked_response names `append_message`",
     );
-    // Derivability: a continuation or a child that may park.
+    // Derivability: an approval continuation or a child that may park.
+    let root_derivable =
+        "tools_derivable: derivable && resumed.as_ref().is_none_or(|r| r.release.is_none()),";
+    must_flag(
+        broken_agent(mutate(&agent, root_derivable, "tools_derivable: derivable,")),
+        "do not read `tools_derivable: derivable && resumed.as_ref().is_none_or(",
+    );
     must_flag(
         broken_agent(mutate(
             &agent,
-            "tools_derivable: derivable && resumed.is_none(),",
-            "tools_derivable: derivable,",
+            root_derivable,
+            "tools_derivable: derivable && resumed.as_ref().is_none_or(|r| r.release.is_some()),",
         )),
-        "do not read `tools_derivable: derivable && resumed.is_none()`",
+        "do not read `tools_derivable: derivable && resumed.as_ref().is_none_or(",
     );
     must_flag(
         broken_agent(mutate(&agent, "tools_derivable: false,", "tools_derivable: true,")),
-        "do not read `tools_derivable: derivable && resumed.is_none()`",
+        "do not read `tools_derivable: derivable && resumed.as_ref().is_none_or(",
+    );
+    // The park cap across resumes: the count is a literal again, or read from the request, or
+    // the seed stops taking it from the fold.
+    must_flag(
+        broken_agent(mutate(
+            &agent,
+            "parks_so_far: parked.as_ref().map_or(0, |parked| parked.parks),",
+            "parks_so_far: 0,",
+        )),
+        "the ParkGate's `parks_so_far` is not seeded from the park resume's seed",
+    );
+    must_flag(
+        broken_agent(mutate(
+            &agent,
+            "parks_so_far: parked.as_ref().map_or(0, |parked| parked.parks),",
+            "parks_so_far: req.max_subagents,",
+        )),
+        "the ParkGate's `parks_so_far` is not seeded from the park resume's seed",
+    );
+    must_flag(
+        broken_park(mutate_in(
+            &park,
+            "pub(crate) fn seed_from",
+            "parks: lf::parks_in(fold),",
+            "parks: 0,",
+        )),
+        "park::seed_from no longer takes the parks already taken from the claimed fold",
     );
     must_flag(
         broken_agent(mutate_in(&agent, "async fn offered_tools", "derivable: false,", "derivable: true,")),
@@ -4251,15 +4903,15 @@ fn the_park_writer_guard_goes_red_when_the_code_it_guards_regresses() {
         )),
         "parking_active no longer reads `park_resume_built()`",
     );
-    // The resume half is flagged built before it is (parking switches on with nothing to resume
-    // it), the constant is no longer read, a second reader appears, or the constant is gone.
+    // The resume half is built (S8-6): the constant flipped back off (parking structurally off
+    // although the resume exists), the constant no longer read, a second reader, or it is gone.
     must_flag(
         broken_park(mutate(
             &park,
-            "const PARK_RESUME_BUILT: bool = false;",
             "const PARK_RESUME_BUILT: bool = true;",
+            "const PARK_RESUME_BUILT: bool = false;",
         )),
-        "declares PARK_RESUME_BUILT = true",
+        "declares PARK_RESUME_BUILT = false",
     );
     must_flag(
         broken_park(mutate_in(
@@ -4277,8 +4929,8 @@ fn the_park_writer_guard_goes_red_when_the_code_it_guards_regresses() {
     must_flag(
         broken_park(mutate(
             &park,
-            "const PARK_RESUME_BUILT: bool = false;",
-            "const PARK_RESUME_BUILT_GONE: bool = false;",
+            "const PARK_RESUME_BUILT: bool = true;",
+            "const PARK_RESUME_BUILT_GONE: bool = true;",
         )),
         "declares `const PARK_RESUME_BUILT: bool` 0 times",
     );
@@ -4423,6 +5075,7 @@ fn every_refusal_the_executor_can_send_is_in_the_gateways_closed_vocabulary() {
         &read(EXECUTOR_GRPC),
         &read(EXECUTOR_LOOP),
         &read(EXECUTOR_RESUME),
+        &read(EXECUTOR_PARK),
         &executor_and_session_production_text(),
     ));
 }
@@ -5733,7 +6386,7 @@ fn every_guard_goes_red_when_the_code_it_guards_regresses() {
     // The vocabulary agrees with what the executor can send.
     let produced = executor_and_session_production_text();
     let vocabulary = |sse: &str, grpc: &str, agent: &str, resume: &str| {
-        continue_vocabulary_violations(sse, grpc, agent, resume, &produced)
+        continue_vocabulary_violations(sse, grpc, agent, resume, &read(EXECUTOR_PARK), &produced)
     };
     assert_green(&vocabulary(&sse, &grpc, &agent, &resume_rs));
     // A new executor refusal nobody listed, on the consume path and in the validator and in

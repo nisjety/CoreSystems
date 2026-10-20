@@ -32,15 +32,19 @@
 //! content-free: ids, counts, closed tokens and timestamps. The park reason reaches only
 //! the response and the store, never an event.
 
+use std::collections::BTreeSet;
+
 use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
 use mp_contracts::loop_fold::{
     self as lf, LoopFoldV1, ParkReason, PauseKind, PendingPause, MAX_PARKS_PER_RUN,
 };
 use mp_contracts::model_plane::v1 as pb;
+use mp_contracts::model_plane::v1::session_core_client::SessionCoreClient;
 use tonic::transport::Channel;
 use tracing::{info, warn};
 
 use super::fold::{self, FoldWriter, ParkSaveError, SaveError, Snapshot};
+use super::resume::{ClaimedFold, Refusal as ResumeRefusal};
 use crate::run_budget::DeadlineCause;
 use crate::subscription_refusal::{
     Refusal, RATE_LIMITED, SUBSCRIPTION_REAUTH_REQUIRED, SUBSCRIPTION_UPSTREAM_UNAVAILABLE,
@@ -50,8 +54,7 @@ use crate::subscription_refusal::{
 /// `RunAgentResponse.status` of a run that parked.
 pub(crate) const PARKED_STATUS: &str = "parked";
 
-/// `AgentResume.mode` of a park resume (S8-6 builds the resume itself).
-#[cfg_attr(not(test), allow(dead_code, reason = "read by the park resume (WS03 S8-6)"))]
+/// `AgentResume.mode` of a park resume (WS03 S8-6).
 pub(crate) const PARK_MODE: &str = "park";
 
 /// The longest wait a provider's own hint may ask for, in milliseconds. session-core refuses
@@ -118,14 +121,13 @@ impl Drop for ResumeBuilt {
     }
 }
 
-/// Whether the RESUME half of the park (WS03 S8-6) is built into this binary. It is not: the
-/// executor still refuses `AgentResume.mode` `park` (`enforce_resume`), so a park written by
-/// this binary would be held until its 24 hour park TTL with nothing able to continue it, a
-/// run waiting for nothing. With this `false`, [`parking_active`] is false whatever the
-/// switches say, so an image that has the write but not the resume cannot park a run by
-/// configuration alone. S8-6 flips it to `true` together with the resume half, and the guard
-/// of `durable_loop_contract.rs` (`PARK_RESUME_BUILT_EXPECTED`) in the same commit.
-const PARK_RESUME_BUILT: bool = false;
+/// Whether the RESUME half of the park (WS03 S8-6) is built into this binary. It is: the
+/// executor accepts `AgentResume.mode` `park` (`enforce_resume`) and continues a parked run
+/// from its fold (`agent::resume_parked_run`). Before S8-6 this was `false`, so an image that
+/// had the write but not the resume could not park a run by configuration alone (a park
+/// nothing can continue is a run held for the whole park TTL). It flipped together with the
+/// resume half and the guard of `durable_loop_contract.rs` (`PARK_RESUME_BUILT_EXPECTED`).
+const PARK_RESUME_BUILT: bool = true;
 
 /// [`PARK_RESUME_BUILT`], or a test's override of it.
 fn park_resume_built() -> bool {
@@ -176,7 +178,6 @@ pub(crate) enum SeedKind {
     /// The in-place resume of an approval pause.
     InPlace,
     /// A park resume (WS03 S8-6): the loop continues from a claimed park fold.
-    #[cfg_attr(not(test), allow(dead_code, reason = "built by the park resume (WS03 S8-6)"))]
     Parked,
 }
 
@@ -570,11 +571,451 @@ fn authenticated<T>(value: T, bearer: Option<&str>) -> Option<tonic::Request<T>>
 
 /// Whether `req` is a park resume (WS03 S8-6): its resume names the `park` mode. A park
 /// resume has no approval to consume and no release to hold.
-#[cfg_attr(not(test), allow(dead_code, reason = "read by the park resume (WS03 S8-6)"))]
 pub(crate) fn is_park_resume(req: &pb::RunAgentRequest) -> bool {
     req.resume
         .as_ref()
         .is_some_and(|resume| resume.mode == PARK_MODE)
+}
+
+// --- the park resume (WS03 S8-6) ------------------------------------------------------------
+//
+// A parked run is continued through the one `/continue` route: the gateway sends
+// `AgentResume.mode` `park` with a claim token and no approval. The executor admits it with no
+// RPC, derives the tool set the run may be offered without any MCP or client input, claims
+// "the current parked fold" (an empty pause reference), checks the fold is a park THIS
+// executor wrote and can restore, rebuilds the pinned route from the identifiers on the fold
+// (never a default route), and fences at the claimed seq before its first inference. Nothing
+// is claimed before the admission and the derivation succeed, and nothing is inferred or
+// dispatched before the fence.
+
+/// Admit a park resume, with no RPC (WS03 S8-6). In order:
+///
+/// * a request that names a route: the route is the fold's, never the caller's;
+/// * a Space: a park never belongs to one (a Space run never parks);
+/// * a zero-retention request: it keeps no durable state, so it resumes none;
+/// * the resume switches (the in-place resume, the continue switch, the fold writer and the
+///   effect ledger) not all on: `continue_disabled`. The PARKING switch is not read: with it
+///   off no new park is written, and the parks that exist stay resumable;
+/// * no session credential: nothing can be claimed.
+///
+/// # Errors
+///
+/// The refusal's status (closed tokens).
+#[allow(clippy::result_large_err)]
+pub(crate) fn admit(
+    req: &pb::RunAgentRequest,
+    has_session_bearer: bool,
+) -> Result<(), tonic::Status> {
+    if !req.provider_hint.is_empty() || !req.subscription_connection_id.is_empty() {
+        return Err(ResumeRefusal::AuthorityRouteMismatch.status());
+    }
+    if !req.space_id.is_empty() {
+        return Err(ResumeRefusal::AuthoritySpaceMismatch.status());
+    }
+    if req.zdr {
+        return Err(ResumeRefusal::DurableMutationForbidden.status());
+    }
+    if !park_resume_active() {
+        return Err(tonic::Status::failed_precondition("continue_disabled"));
+    }
+    if !has_session_bearer {
+        return Err(ResumeRefusal::CheckpointUnavailable.status());
+    }
+    Ok(())
+}
+
+/// The tool set a park resume offers: the deployment's base set for a run with no Space and the
+/// run-bound server-resolved view, and NOTHING an MCP server or a caller adds (the gateway is
+/// never asked to list tools). It is the set a parked run was offered, by construction of what
+/// may park; [`check_park_fold`] then proves it by name and digest.
+///
+/// # Errors
+///
+/// [`ResumeRefusal::CheckpointUnavailable`] when the server-resolved view cannot be read: the
+/// set cannot be proven, so the resume stops BEFORE it claims anything, and the park is left as
+/// it was for a later attempt.
+pub(crate) async fn derivable_tool_defs(
+    run_id: &str,
+    org_id: &str,
+    // The run's user: the view is run-bound (resolved by run and org), so it is not read.
+    _user_id: &str,
+    capability_policy: &dyn crate::capability_policy::CapabilityPolicy,
+) -> Result<Vec<pb::ToolDefinition>, ResumeRefusal> {
+    let mut tools = super::agent::base_tool_defs(false);
+    match capability_policy
+        .resolve_server_tool_definitions(run_id, org_id)
+        .await
+    {
+        Ok(resolved) => {
+            super::agent::append_server_resolved_tool_defs(&mut tools, &resolved);
+            Ok(tools)
+        }
+        Err(error) => {
+            warn!(
+                run_id = %run_id,
+                grpc_code = ?error.code(),
+                "run_agent: the server-resolved tool view is unavailable; the park is not claimed"
+            );
+            Err(ResumeRefusal::CheckpointUnavailable)
+        }
+    }
+}
+
+/// A parked fold this request claimed: what [`check_park_fold`] passed and the loop continues
+/// from. It holds the history, so its `Debug` is the claimed fold's content-free one.
+#[derive(Debug, Clone)]
+pub(crate) struct ParkClaimed {
+    pub claimed: ClaimedFold,
+}
+
+/// What a park resume's loop starts from: the parked loop's own history and counters, the parks
+/// it already took, and where its writer stands. It holds the history, so its `Debug` prints
+/// counts only, never a message.
+#[derive(Clone, PartialEq)]
+pub(crate) struct ParkSeed {
+    /// The history, system prompt first.
+    pub messages: Vec<pb::ChatMessage>,
+    /// The loop's own rounds before it parked (the round that failed included): there is no
+    /// open round to charge again.
+    pub rounds_executed: u32,
+    pub delegated_rounds: u32,
+    pub step_seq: u32,
+    pub children_started: u32,
+    pub grounded: bool,
+    pub compaction_triggered: bool,
+    pub attempted_retrievals: BTreeSet<String>,
+    /// The parks the run took before this resume, from the fold (`lf::parks_in`), never from
+    /// the request: the cap counts them across every resume.
+    pub parks: u32,
+    /// The seq the claim returned: the fence expects it and the seeded writer starts there.
+    pub claimed_seq: u64,
+    /// The segment the resumed loop writes under: the fold's plus one.
+    pub segment: u32,
+}
+
+impl std::fmt::Debug for ParkSeed {
+    /// Content-free: counters and counts. Never the history or a retrieval signature.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ParkSeed")
+            .field("messages", &self.messages.len())
+            .field("rounds_executed", &self.rounds_executed)
+            .field("delegated_rounds", &self.delegated_rounds)
+            .field("step_seq", &self.step_seq)
+            .field("children_started", &self.children_started)
+            .field("grounded", &self.grounded)
+            .field("compaction_triggered", &self.compaction_triggered)
+            .field("attempted_retrievals", &self.attempted_retrievals.len())
+            .field("parks", &self.parks)
+            .field("claimed_seq", &self.claimed_seq)
+            .field("segment", &self.segment)
+            .finish()
+    }
+}
+
+/// The seed of a claimed park fold (one [`check_park_fold`] passed).
+pub(crate) fn seed_from(claimed: &ClaimedFold) -> ParkSeed {
+    let fold = &claimed.fold;
+    ParkSeed {
+        messages: fold
+            .messages
+            .iter()
+            .map(|message| pb::ChatMessage {
+                role: message.role.clone(),
+                content: message.content.clone(),
+                name: message.name.clone(),
+                compaction_summary: message.compaction_summary.clone(),
+            })
+            .collect(),
+        rounds_executed: fold.rounds_executed,
+        delegated_rounds: fold.delegated_rounds,
+        step_seq: fold.step_seq,
+        children_started: fold.children_started,
+        grounded: fold.grounded,
+        compaction_triggered: fold.compaction_triggered,
+        attempted_retrievals: fold.attempted_retrievals.iter().cloned().collect(),
+        parks: lf::parks_in(fold),
+        claimed_seq: claimed.seq,
+        segment: fold.segment_no.saturating_add(1),
+    }
+}
+
+/// Claim the run's current parked fold: `ClaimLoopCheckpoint` with an EMPTY pause reference
+/// under the request's claim token, under [`fold::GATED_SAVE_TIMEOUT`]. A claim that timed out
+/// may have committed; the row is then `resuming` for its lease and nothing closes it.
+///
+/// # Errors
+///
+/// [`classify_park_claim`] of a refused claim, [`ResumeRefusal::CheckpointUnavailable`] for a
+/// timeout or a credential that is not valid metadata, and
+/// [`ResumeRefusal::ParkNotRestorable`] for a claimed fold that does not parse (its row is
+/// closed best effort first).
+pub(crate) async fn claim_parked(
+    channel: &Channel,
+    bearer: &str,
+    run_id: &str,
+    claim_token: &str,
+) -> Result<ClaimedFold, ResumeRefusal> {
+    let Some(request) = authenticated(
+        pb::ClaimLoopCheckpointRequest {
+            run_id: run_id.to_owned(),
+            // The empty reference names no pause: it asks for the run's current parked fold.
+            pause_ref: String::new(),
+            claim_token: claim_token.to_owned(),
+        },
+        Some(bearer),
+    ) else {
+        return Err(ResumeRefusal::CheckpointUnavailable);
+    };
+    let response = match tokio::time::timeout(
+        fold::GATED_SAVE_TIMEOUT,
+        SessionCoreClient::new(channel.clone()).claim_loop_checkpoint(request),
+    )
+    .await
+    {
+        Err(_elapsed) => return Err(ResumeRefusal::CheckpointUnavailable),
+        Ok(Err(status)) => return Err(classify_park_claim(&status)),
+        Ok(Ok(response)) => response.into_inner(),
+    };
+    let Ok(parsed) = LoopFoldV1::from_bytes(&response.fold) else {
+        close_unrestorable(channel, bearer, run_id, response.seq).await;
+        return Err(ResumeRefusal::ParkNotRestorable);
+    };
+    Ok(ClaimedFold {
+        seq: response.seq,
+        authority_digest: response.authority_digest,
+        kind: response.kind,
+        segment: response.segment_no,
+        fold: parsed,
+    })
+}
+
+/// Classify a refused park claim. TOTAL: every status has an arm.
+///
+/// The ZDR catalogue trailer is read FIRST, whatever the code. A held lease (any token's) is
+/// another attempt of this park in progress; a run that ended or has no claimable park is not
+/// resumable; a denial is a denial; a park whose due time has not come stays parked; a fold
+/// that does not authenticate or a request the store refuses as malformed is the checkpoint
+/// being unavailable, NOT `park_not_restorable`: session-core opens and checks the fold before
+/// it commits the claim, so such a claim rolls back, the row STAYS parked (held by the recovery
+/// worker until the park TTL) and the executor has no seq to close at; the closed refusal that
+/// tells the caller the run is still parked is the truthful one. Everything else (the store off,
+/// unreachable, a missing key) is the checkpoint being unavailable too, and the park is left as
+/// it was. `park_not_restorable` is reserved for a fold the executor itself CLOSED.
+#[allow(
+    clippy::match_same_arms,
+    reason = "the torn-fold answers are named on purpose: they are the arms that once meant park_not_restorable"
+)]
+pub(crate) fn classify_park_claim(status: &tonic::Status) -> ResumeRefusal {
+    use tonic::Code;
+    if mp_contracts::zdr_refusal::Refusal::from_status(status).is_some() {
+        return ResumeRefusal::DurableMutationForbidden;
+    }
+    match (status.code(), status.message()) {
+        (Code::Aborted, "loop_checkpoint_claim_held") => ResumeRefusal::ContinueInProgress,
+        (
+            Code::FailedPrecondition,
+            "loop_checkpoint_run_ended" | "loop_checkpoint_not_claimable",
+        ) => ResumeRefusal::RunEnded,
+        (Code::PermissionDenied | Code::Unauthenticated, _) => ResumeRefusal::Forbidden,
+        (Code::FailedPrecondition, "park_not_due") => ResumeRefusal::ParkNotDue,
+        (Code::FailedPrecondition, "loop checkpoint did not authenticate")
+        | (Code::InvalidArgument, _) => ResumeRefusal::CheckpointUnavailable,
+        _ => ResumeRefusal::CheckpointUnavailable,
+    }
+}
+
+/// The structural checks of a claimed park fold, before anything of it is used. A park
+/// resume restores ONLY a fold this executor's park write produced (`park_fold`): a fold of an
+/// approval pause, a round, a segment or an in-place continuation is never resumable through
+/// the park path, whatever row it sits in. In order:
+///
+/// 1. the row is a park;
+/// 2. the fold is this run's;
+/// 3. the row's segment is the fold's;
+/// 4. the fold is not a tombstone;
+/// 5. it was written with the effect ledger on;
+/// 6. the history starts with the system prompt;
+/// 7. the claimed authority digest is the fold authority's;
+/// 8. its pending pause is a park, named `park:{run_id}:{n}` for the count it records, with no
+///    step, call or fingerprint (an approval pause names all three);
+/// 9. it is at a round boundary (no round in flight);
+/// 10. it belongs to no Space;
+/// 11. it records 1 to [`MAX_PARKS_PER_RUN`] parks;
+/// 12. the round budget it was parked under has a round left;
+/// 13. it names its pinned route (the provider, the model and the connection) and a non-zero
+///     sub-agent ceiling, the identifiers only a park records;
+/// 14. the derived tools are the fold's, by sorted name and by the prompt digest.
+///
+/// # Errors
+///
+/// The closed token of the first check that failed, for the log line. The caller closes the
+/// fold and refuses with [`ResumeRefusal::ParkNotRestorable`].
+pub(crate) fn check_park_fold(
+    claimed: &ClaimedFold,
+    run_id: &str,
+    derived: &[pb::ToolDefinition],
+) -> Result<(), &'static str> {
+    let fold = &claimed.fold;
+    if claimed.kind != PARK_MODE {
+        return Err("fold_kind_mismatch");
+    }
+    if fold.run_id != run_id {
+        return Err("fold_run_mismatch");
+    }
+    if claimed.segment != fold.segment_no {
+        return Err("segment_mismatch");
+    }
+    if !fold.is_resumable() {
+        return Err("not_resumable");
+    }
+    if fold.extensions.get(lf::EXT_EFFECT_LEDGER) != Some(&serde_json::Value::Bool(true)) {
+        return Err("ledger_off_in_fold");
+    }
+    if fold.messages.first().map(|message| message.role.as_str()) != Some("system") {
+        return Err("history_invalid");
+    }
+    if claimed.authority_digest != fold.authority.digest() {
+        return Err("authority_digest_mismatch");
+    }
+    let parks = lf::parks_in(fold);
+    let a_park = fold.pending.as_ref().is_some_and(|pending| {
+        pending.kind == PauseKind::Park
+            && pending.pause_ref == lf::park_ref(run_id, parks)
+            && pending.step_id.is_empty()
+            && pending.call.is_empty()
+            && pending.action_fingerprint.is_empty()
+    });
+    if !a_park {
+        return Err("pending_mismatch");
+    }
+    if fold.round_in_flight.is_some() {
+        return Err("round_invalid");
+    }
+    if !fold.authority.space_id.is_empty() {
+        return Err("space_scope_unsupported");
+    }
+    if !(1..=MAX_PARKS_PER_RUN).contains(&parks) {
+        return Err("park_count_invalid");
+    }
+    let budget = super::resume::resolved_max_rounds(fold.authority.max_rounds);
+    if fold.rounds_executed.saturating_add(fold.delegated_rounds) >= budget {
+        return Err("budget_spent");
+    }
+    if fold.authority.provider_hint.is_empty()
+        || lf::route_model_in(fold).is_none()
+        || lf::route_connection_in(fold).is_none()
+        || lf::child_ceiling_in(fold).is_none_or(|ceiling| ceiling == 0)
+    {
+        return Err("route_unrecorded");
+    }
+    let names: BTreeSet<String> = derived.iter().map(|tool| tool.name.clone()).collect();
+    if names.iter().collect::<Vec<_>>() != fold.authority.tool_names.iter().collect::<Vec<_>>() {
+        return Err("tools_drift");
+    }
+    let digest = fold::prompt_digest_of(&super::agent::compose_system_prompt(&names), derived);
+    if fold.prompt_digest.is_empty() || fold.prompt_digest != digest {
+        return Err("prompt_drift");
+    }
+    Ok(())
+}
+
+/// Close a claimed park that cannot be restored (`park_not_restorable`), best effort: the
+/// recovery worker then terminalizes the run within its committed deadline.
+pub(crate) async fn close_unrestorable(channel: &Channel, bearer: &str, run_id: &str, seq: u64) {
+    fold::close_rpc(
+        channel,
+        bearer,
+        run_id,
+        seq,
+        "park_not_restorable",
+        fold::GATED_SAVE_TIMEOUT,
+    )
+    .await;
+}
+
+/// The request the resumed run is routed by: the request as the gateway sent it, with the
+/// pinned route the fold recorded (its model, provider and connection, identifiers only), the
+/// fold authority's plan mode, and a sub-agent ceiling no wider than the fold's. A request
+/// stating none (`max_subagents` 0, what the gateway sends) keeps the fold's recorded ceiling
+/// as it is, even above the default of 8: it is the original run's own ceiling, so nothing
+/// widens; a stated value only narrows it. The route is then resolved as any run's is; a
+/// route that no longer resolves is refused, never replaced.
+pub(crate) fn route_request(req: &pb::RunAgentRequest, fold: &LoopFoldV1) -> pb::RunAgentRequest {
+    let requested = crate::subagent::resolve_child_ceiling(
+        Some(req.max_subagents).filter(|&n| n != 0),
+        None,
+    );
+    let ceiling = match lf::child_ceiling_in(fold) {
+        Some(recorded) if req.max_subagents == 0 => recorded,
+        Some(recorded) => recorded.min(requested),
+        None => requested,
+    };
+    pb::RunAgentRequest {
+        model: lf::route_model_in(fold).unwrap_or_default().to_owned(),
+        provider_hint: fold.authority.provider_hint.clone(),
+        subscription_connection_id: lf::route_connection_in(fold).unwrap_or_default().to_owned(),
+        plan_mode: fold.authority.plan_mode,
+        max_subagents: ceiling,
+        ..req.clone()
+    }
+}
+
+/// The fence of a park resume: ONE save through [`FoldWriter::save_fence`] at the claimed seq,
+/// of the round-boundary fold the resumed loop starts from, before its first inference. Of two
+/// claimants of one park (a lapsed lease) exactly one wins; the loser infers and dispatches
+/// nothing. This is the only `save_fence(` of this module.
+///
+/// # Errors
+///
+/// The failed save's [`SaveError`]; the caller refuses with `resume::fence_refusal`.
+pub(crate) async fn fence_parked(
+    folds: &mut FoldWriter<'_>,
+    snapshot: &Snapshot<'_>,
+) -> Result<u64, SaveError> {
+    folds.save_fence(fold::build_fold(snapshot, None, None)).await
+}
+
+/// Publish `RunResumed` on session-core's orchestration broadcast after a park resume won its
+/// fence. Best effort, ids and the segment only.
+pub(crate) async fn publish_run_resumed(
+    channel: &Channel,
+    bearer: Option<&str>,
+    run_id: &str,
+    resumed_segment: u32,
+) {
+    let request = pb::RecordOrchestrationEventRequest {
+        event: Some(pb::OrchestrationEvent {
+            // session-core assigns event_id and at.
+            event_id: String::new(),
+            at: None,
+            event: Some(pb::orchestration_event::Event::RunResumed(
+                pb::orchestration_event::RunResumed {
+                    run_id: run_id.to_owned(),
+                    resumed_segment,
+                },
+            )),
+        }),
+    };
+    let result = match authenticated(request, bearer) {
+        Some(request) => {
+            pb::orchestration_core_service_client::OrchestrationCoreServiceClient::new(
+                channel.clone(),
+            )
+            .record_orchestration_event(request)
+            .await
+            .map(|_| ())
+        }
+        None => Err(tonic::Status::unauthenticated(
+            "verified session credential required",
+        )),
+    };
+    if let Err(status) = result {
+        warn!(
+            run_id = %run_id,
+            grpc_code = ?status.code(),
+            "run_agent: failed to publish RunResumed (best-effort)"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1128,5 +1569,195 @@ mod tests {
         }
         assert_eq!(connections, 0, "nothing was sent to session-core");
         assert_eq!(folds.expected_seq(), 0, "the writer did not move");
+    }
+
+    // ---- the park resume (WS03 S8-6) ----
+
+    fn park_request() -> pb::RunAgentRequest {
+        pb::RunAgentRequest {
+            run_id: "run-1".to_owned(),
+            resume: Some(pb::AgentResume {
+                mode: PARK_MODE.to_owned(),
+                claim_token: "claim-1".to_owned(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// The admission, in order, with no RPC: a named route, a Space, zero retention, the
+    /// resume switches, a credential. The PARKING switch is not one of them.
+    #[test]
+    fn admit_refuses_in_order_and_never_reads_the_parking_switch() {
+        use crate::runtime_loop::resume::LoopResumeSwitch;
+        let _on = all_on();
+        assert!(admit(&park_request(), true).is_ok());
+        let refused = |req: pb::RunAgentRequest, bearer: bool| {
+            admit(&req, bearer).expect_err("refused").message().to_owned()
+        };
+        assert_eq!(
+            refused(pb::RunAgentRequest { provider_hint: "x".to_owned(), ..park_request() }, true),
+            "authority_route_mismatch"
+        );
+        assert_eq!(
+            refused(
+                pb::RunAgentRequest {
+                    subscription_connection_id: "conn_1".to_owned(),
+                    space_id: "space_1".to_owned(),
+                    ..park_request()
+                },
+                true
+            ),
+            "authority_route_mismatch",
+            "the route is judged first"
+        );
+        assert_eq!(
+            refused(pb::RunAgentRequest { space_id: "space_1".to_owned(), ..park_request() }, true),
+            "authority_space_mismatch"
+        );
+        let zdr = admit(&pb::RunAgentRequest { zdr: true, ..park_request() }, true)
+            .expect_err("zero retention");
+        assert!(mp_contracts::zdr_refusal::Refusal::from_status(&zdr).is_some());
+        assert_eq!(refused(park_request(), false), "resume_checkpoint_unavailable");
+        // Parking off: no new parks, and the parks that exist are still admitted.
+        let _parking_off = ParkSwitch::set(false);
+        assert!(!parking_active());
+        assert!(admit(&park_request(), true).is_ok());
+        // A resume switch off (a guard's drop clears its override, so this is the last check).
+        let _off = LoopResumeSwitch::set(false);
+        assert_eq!(refused(park_request(), true), "continue_disabled");
+    }
+
+    /// The claim's refusals, whole: the ZDR trailer first, then the closed table, and every
+    /// other status the checkpoint being unavailable (the two torn-fold answers among them).
+    /// The `park_not_due` literal is session-core's (pinned against its source by
+    /// `cross_service_loop_contract`).
+    #[test]
+    fn classify_park_claim_is_total_and_closed() {
+        use tonic::Status;
+        use ResumeRefusal as R;
+        let zdr = mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN
+            .grpc_status(tonic::Code::FailedPrecondition);
+        assert_eq!(classify_park_claim(&zdr), R::DurableMutationForbidden);
+        let table = [
+            (Status::aborted("loop_checkpoint_claim_held"), R::ContinueInProgress),
+            (Status::failed_precondition("loop_checkpoint_run_ended"), R::RunEnded),
+            (Status::failed_precondition("loop_checkpoint_not_claimable"), R::RunEnded),
+            (Status::permission_denied("anything"), R::Forbidden),
+            (Status::unauthenticated("anything"), R::Forbidden),
+            (Status::failed_precondition("park_not_due"), R::ParkNotDue),
+            // A torn fold rolls the claim back: the row stays parked, so it is never
+            // `park_not_restorable` (which says the run is no longer parked).
+            (Status::failed_precondition("loop checkpoint did not authenticate"), R::CheckpointUnavailable),
+            (Status::invalid_argument("claim token is required"), R::CheckpointUnavailable),
+            (Status::failed_precondition("loop_checkpoint_disabled"), R::CheckpointUnavailable),
+            (Status::failed_precondition("loop checkpoint key unavailable"), R::CheckpointUnavailable),
+            (Status::aborted("loop_checkpoint_stale"), R::CheckpointUnavailable),
+            (Status::unavailable("down"), R::CheckpointUnavailable),
+            (Status::unimplemented("old store"), R::CheckpointUnavailable),
+            (Status::not_found("no run"), R::CheckpointUnavailable),
+        ];
+        for (status, expected) in table {
+            assert_eq!(classify_park_claim(&status), expected, "{status:?}");
+        }
+    }
+
+    fn park_claim(fold: LoopFoldV1) -> ClaimedFold {
+        ClaimedFold {
+            seq: 4,
+            authority_digest: fold.authority.digest(),
+            kind: "park".to_owned(),
+            segment: fold.segment_no,
+            fold,
+        }
+    }
+
+    /// A fold the park write produced, at a round boundary.
+    fn written_park(tools: &[pb::ToolDefinition]) -> LoopFoldV1 {
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
+        let retrievals = BTreeSet::from(["knowledge_search:q".to_owned()]);
+        let messages = vec![chat("system", "p"), chat("user", "the goal")];
+        let names: BTreeSet<String> = tools.iter().map(|tool| tool.name.clone()).collect();
+        let prompt = super::super::agent::compose_system_prompt(&names);
+        let digest = fold::prompt_digest_of(&prompt, tools);
+        let mut snapshot = snapshot(&retrievals, &messages);
+        snapshot.authority.tool_names = names.into_iter().collect();
+        snapshot.prompt_digest = &digest;
+        park_fold(&snapshot, &site(&channel), 2)
+    }
+
+    /// The write and the check agree: what `park_fold` writes passes `check_park_fold`, and its
+    /// seed carries the fold's history and counters, the count of parks, the claimed seq and
+    /// the next segment. The seed's `Debug` prints counts, never the history.
+    #[tokio::test]
+    async fn a_written_park_checks_and_seeds() {
+        let tools = vec![pb::ToolDefinition {
+            name: "knowledge_search".to_owned(),
+            description: "search".to_owned(),
+            parameters_json: "{}".to_owned(),
+        }];
+        let claimed = park_claim(written_park(&tools));
+        assert_eq!(check_park_fold(&claimed, "run-1", &tools), Ok(()));
+        assert_eq!(check_park_fold(&claimed, "run-2", &tools), Err("fold_run_mismatch"));
+        let other_tools = vec![pb::ToolDefinition { name: "yr_weather".to_owned(), ..tools[0].clone() }];
+        assert_eq!(check_park_fold(&claimed, "run-1", &other_tools), Err("tools_drift"));
+        let reworded = vec![pb::ToolDefinition { description: "find".to_owned(), ..tools[0].clone() }];
+        assert_eq!(check_park_fold(&claimed, "run-1", &reworded), Err("prompt_drift"));
+
+        let seed = seed_from(&claimed);
+        assert_eq!(seed.parks, 2, "the fold's count (lf::parks_in), never the request's");
+        assert_eq!(seed.claimed_seq, 4);
+        assert_eq!(seed.segment, 2, "the fold's segment plus one");
+        assert_eq!(seed.rounds_executed, 3, "no open round: nothing is taken off");
+        assert_eq!(seed.delegated_rounds, 1);
+        assert_eq!(seed.step_seq, 3);
+        assert_eq!(seed.children_started, 1);
+        assert!(seed.grounded);
+        assert_eq!(seed.messages.len(), 2);
+        assert_eq!(seed.attempted_retrievals.len(), 1);
+        let debug = format!("{seed:?}");
+        assert!(!debug.contains("the goal") && !debug.contains("knowledge_search:q"), "{debug}");
+        assert!(debug.contains("messages: 2"), "{debug}");
+    }
+
+    /// The rebuilt request: the fold's model, provider and connection (identifiers only), the
+    /// fold authority's plan mode, and a sub-agent ceiling no wider than the fold's. Nothing
+    /// else of the request changes.
+    #[tokio::test]
+    async fn route_request_takes_the_route_from_the_fold() {
+        let fold = written_park(&[]);
+        let rebuilt = route_request(&park_request(), &fold);
+        assert_eq!(rebuilt.model, "gpt-5.6-terra");
+        assert_eq!(rebuilt.provider_hint, "openai-codex-subscription");
+        assert_eq!(rebuilt.subscription_connection_id, "conn_1");
+        assert!(rebuilt.plan_mode);
+        assert_eq!(rebuilt.max_subagents, 4, "the fold's ceiling, a request stating none");
+        assert_eq!(rebuilt.resume, park_request().resume);
+        assert_eq!(rebuilt.run_id, "run-1");
+        let narrower = pb::RunAgentRequest { max_subagents: 2, ..park_request() };
+        assert_eq!(route_request(&narrower, &fold).max_subagents, 2);
+        let wider = pb::RunAgentRequest { max_subagents: 50, ..park_request() };
+        assert_eq!(route_request(&wider, &fold).max_subagents, 4, "never wider than the fold");
+    }
+
+    /// A request stating no ceiling (the gateway states none) resumes under the fold's own
+    /// recorded ceiling, even above the default of 8: it is the original run's ceiling, so
+    /// nothing widens. A stated value only narrows.
+    #[tokio::test]
+    async fn route_request_keeps_a_recorded_ceiling_above_the_default() {
+        let mut fold = written_park(&[]);
+        fold.extensions
+            .insert(lf::EXT_CHILD_CEILING.to_owned(), serde_json::Value::from(20));
+        assert_eq!(lf::child_ceiling_in(&fold), Some(20));
+        let none = pb::RunAgentRequest { max_subagents: 0, ..park_request() };
+        assert_eq!(
+            route_request(&none, &fold).max_subagents,
+            20,
+            "a request stating none keeps the fold's ceiling, not the default of 8"
+        );
+        let narrower = pb::RunAgentRequest { max_subagents: 5, ..park_request() };
+        assert_eq!(route_request(&narrower, &fold).max_subagents, 5);
+        let wider = pb::RunAgentRequest { max_subagents: 50, ..park_request() };
+        assert_eq!(route_request(&wider, &fold).max_subagents, 20, "never wider than the fold");
     }
 }

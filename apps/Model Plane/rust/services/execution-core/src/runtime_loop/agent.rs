@@ -204,8 +204,9 @@ const ACTION_TOOL_NAMES: &[&str] = &[
 ///
 /// Order is fixed and snippets are independent, so the prompt is a pure function
 /// of the offered set — the property the test asserts, and what makes a prompt
-/// diff reviewable.
-fn compose_system_prompt(offered: &BTreeSet<String>) -> String {
+/// diff reviewable. A park resume (WS03 S8-6) recomputes it from the tools it derives, to
+/// prove they are the tools the run was parked under.
+pub(super) fn compose_system_prompt(offered: &BTreeSet<String>) -> String {
     let mut parts: Vec<&str> = vec![PREAMBLE_CORE];
 
     let has_action = offered
@@ -635,6 +636,30 @@ pub(crate) async fn run_agent(
     sandbox_tokens: &crate::sandbox_lease::SandboxManagerTokenProvider,
     process_host: Option<&crate::process_host::ProcessHost>,
 ) -> Result<pb::RunAgentResponse, tonic::Status> {
+    // A park resume (WS03 S8-6) is decided FIRST, before any tool is listed: its tool set is
+    // derived without an MCP server or a caller, and nothing is claimed before it is.
+    if super::park::is_park_resume(&req) {
+        return resume_parked_run(
+            state,
+            session_channel,
+            inference_channel,
+            caller,
+            req,
+            data_plane_bearer,
+            session_bearer,
+            inference_bearer,
+            capability_policy,
+            terminal_tokens,
+            sandbox_bearer,
+            capability_client,
+            sandbox_manager_client,
+            backend_id,
+            cas_client,
+            sandbox_tokens,
+            process_host,
+        )
+        .await;
+    }
     let tools = offered_tools(&req, capability_policy).await;
     run_agent_with_offered(
         state,
@@ -655,6 +680,108 @@ pub(crate) async fn run_agent(
         cas_client,
         sandbox_tokens,
         process_host,
+        None,
+    )
+    .await
+}
+
+/// The park resume (WS03 S8-6): continue a parked run from its claimed park fold.
+///
+/// In order, and each step only when the one before it passed:
+///
+/// 1. admit the request, with no RPC (`park::admit`);
+/// 2. derive the tool set, never asking an MCP server and never taking a caller's tools; a
+///    server view that cannot be read refuses here, BEFORE anything is claimed;
+/// 3. claim the run's current parked fold (an empty pause reference) under the request's claim
+///    token;
+/// 4. check the fold is a park this executor wrote and can restore; one that is not is closed
+///    (`park_not_restorable`) and refused;
+/// 5. rebuild the pinned route from the fold and run the loop on it, through the same driver as
+///    every run: a route that no longer resolves, or is no longer pinned, is refused and never
+///    replaced by a default one, and the loop fences at the claimed seq before its first
+///    inference.
+///
+/// # Errors
+///
+/// Closed tokens: the admission's, the claim's, `park_not_restorable`, `park_route_unavailable`,
+/// the fence's and the loop's own.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the authenticated execution boundary keeps each audience-specific bearer explicit"
+)]
+async fn resume_parked_run(
+    state: &crate::state::StateStore,
+    session_channel: Channel,
+    inference_channel: Channel,
+    caller: &crate::auth::AuthenticatedUser,
+    req: pb::RunAgentRequest,
+    data_plane_bearer: Option<String>,
+    session_bearer: Option<String>,
+    inference_bearer: String,
+    capability_policy: &dyn crate::capability_policy::CapabilityPolicy,
+    terminal_tokens: &dyn ManagedRunTokenProvider,
+    sandbox_bearer: Option<String>,
+    capability_client: Option<&crate::capability_client::CapabilityClient>,
+    sandbox_manager_client: &crate::sandbox_manager_client::SandboxManagerClient,
+    backend_id: &str,
+    cas_client: Option<&crate::workspace_cas::CasClient>,
+    sandbox_tokens: &crate::sandbox_lease::SandboxManagerTokenProvider,
+    process_host: Option<&crate::process_host::ProcessHost>,
+) -> Result<pb::RunAgentResponse, tonic::Status> {
+    super::park::admit(&req, session_bearer.is_some())?;
+    let derived =
+        super::park::derivable_tool_defs(&req.run_id, &req.org_id, &req.user_id, capability_policy)
+            .await
+            .map_err(super::resume::Refusal::status)?;
+    let bearer = session_bearer.as_deref().unwrap_or_default();
+    let claim_token = req
+        .resume
+        .as_ref()
+        .map_or("", |resume| resume.claim_token.as_str());
+    let claimed = super::park::claim_parked(&session_channel, bearer, &req.run_id, claim_token)
+        .await
+        .map_err(|refusal| {
+            info!(
+                run_id = %req.run_id,
+                refusal = refusal.as_str(),
+                "run_agent: the park could not be claimed; nothing was run"
+            );
+            refusal.status()
+        })?;
+    if let Err(rule) = super::park::check_park_fold(&claimed, &req.run_id, &derived) {
+        warn!(
+            run_id = %req.run_id,
+            seq = claimed.seq,
+            rule,
+            "run_agent: the claimed park cannot be restored; closing it"
+        );
+        super::park::close_unrestorable(&session_channel, bearer, &req.run_id, claimed.seq).await;
+        return Err(super::resume::Refusal::ParkNotRestorable.status());
+    }
+    let route_req = super::park::route_request(&req, &claimed.fold);
+    run_agent_with_offered(
+        state,
+        session_channel,
+        inference_channel,
+        caller,
+        route_req,
+        OfferedTools {
+            defs: derived,
+            derivable: true,
+        },
+        data_plane_bearer,
+        session_bearer,
+        inference_bearer,
+        capability_policy,
+        terminal_tokens,
+        sandbox_bearer,
+        capability_client,
+        sandbox_manager_client,
+        backend_id,
+        cas_client,
+        sandbox_tokens,
+        process_host,
+        Some(super::park::ParkClaimed { claimed }),
     )
     .await
 }
@@ -713,7 +840,7 @@ async fn offered_tools(
 /// the process family for a Space run on a host that runs processes. A park resume derives
 /// its tool set from this and the server-resolved view alone, so it is a function of the
 /// deployment and the run's Space and nothing else.
-fn base_tool_defs(space_scoped: bool) -> Vec<pb::ToolDefinition> {
+pub(super) fn base_tool_defs(space_scoped: bool) -> Vec<pb::ToolDefinition> {
     let mut tools = offered_tool_defs();
     // Wide-research kill switch (`WIDE_RESEARCH_FAN_OUT_ENABLED`): when the
     // deployment switches the fan-out off, the model is simply not shown it.
@@ -835,8 +962,8 @@ fn append_untrusted_tool_defs(
 // Core's run-bound resolver. Its client validates the signed Control view and
 // fixed schema before this helper sees a definition; this final exact-name
 // allowlist prevents a compromised catalog response from becoming a general
-// tool injection channel.
-fn append_server_resolved_tool_defs(
+// tool injection channel. A park resume (WS03 S8-6) derives its set through it too.
+pub(super) fn append_server_resolved_tool_defs(
     tools: &mut Vec<pb::ToolDefinition>,
     resolved_tools: &[pb::ToolDefinition],
 ) {
@@ -925,12 +1052,37 @@ async fn run_agent_with_tools(
         cas_client,
         sandbox_tokens,
         process_host,
+        None,
     )
     .await
 }
 
+#[cfg(test)]
+thread_local! {
+    /// A test's override of the ChatGPT-subscription switches the route is resolved under, so
+    /// a test can drive [`run_agent`] on a pinned run without the process environment.
+    static TEST_SUBSCRIPTION_SWITCHES: std::cell::Cell<
+        Option<mp_contracts::agentic_subscription::Switches>,
+    > = const { std::cell::Cell::new(None) };
+}
+
+/// The ChatGPT-subscription switches of this process (`Switches::from_env`), or a test's
+/// override of them.
+fn subscription_switches() -> mp_contracts::agentic_subscription::Switches {
+    #[cfg(test)]
+    if let Some(forced) = TEST_SUBSCRIPTION_SWITCHES.with(std::cell::Cell::get) {
+        return forced;
+    }
+    mp_contracts::agentic_subscription::Switches::from_env()
+}
+
 /// [`run_agent_with_tools`] with the offer carrying whether its tool set is derivable
 /// (WS03 S8-A): the body the wrapper above and [`run_agent`] share.
+///
+/// `park` is the fold a park resume claimed (WS03 S8-6), `None` for every other run. For a park
+/// the request's route is the one rebuilt from the fold, and it is never replaced: a route that
+/// does not resolve, or is not pinned, is `park_route_unavailable`, and a waived route is the
+/// zero-retention refusal (a waived run keeps no durable state, so it resumes none).
 #[allow(clippy::too_many_arguments)]
 async fn run_agent_with_offered(
     state: &crate::state::StateStore,
@@ -951,13 +1103,30 @@ async fn run_agent_with_offered(
     cas_client: Option<&crate::workspace_cas::CasClient>,
     sandbox_tokens: &crate::sandbox_lease::SandboxManagerTokenProvider,
     process_host: Option<&crate::process_host::ProcessHost>,
+    park: Option<super::park::ParkClaimed>,
 ) -> Result<pb::RunAgentResponse, tonic::Status> {
     let route = crate::agent_route::ModelRoute::resolve(
         &req,
-        mp_contracts::agentic_subscription::Switches::from_env(),
+        subscription_switches(),
         std::env::var("EXECUTION_AGENT_MODEL").ok().as_deref(),
         caller,
-    )?;
+    )
+    .map_err(|status| {
+        if park.is_some() {
+            super::resume::Refusal::ParkRouteUnavailable.status()
+        } else {
+            status
+        }
+    })?;
+    // The park route checks (WS03 S8-6): the rebuilt route is the parked run's own or nothing.
+    if park.is_some() {
+        if route.is_waived() {
+            return Err(super::resume::Refusal::DurableMutationForbidden.status());
+        }
+        if !route.is_pinned() {
+            return Err(super::resume::Refusal::ParkRouteUnavailable.status());
+        }
+    }
     // The run's time budget, resolved once and shared with every delegated
     // child: the operator's wall clock (`EXECUTION_RUN_WALL_CLOCK_SECS`, off by
     // default) and, for a run pinned to the subscription, the expiry of the
@@ -997,6 +1166,7 @@ async fn run_agent_with_offered(
         route,
         deadline,
         tools.derivable,
+        park,
     )
     .await
 }
@@ -1027,7 +1197,7 @@ async fn run_agent_with_route(
     route: crate::agent_route::ModelRoute,
     deadline: crate::run_budget::RunDeadline,
 ) -> Result<pb::RunAgentResponse, tonic::Status> {
-    // A tool set nobody derived: a run offered it never parks.
+    // A tool set nobody derived: a run offered it never parks, and it resumes no park.
     run_agent_with_route_parkable(
         state,
         session_channel,
@@ -1049,13 +1219,16 @@ async fn run_agent_with_route(
         route,
         deadline,
         false,
+        None,
     )
     .await
 }
 
 /// [`run_agent_with_route`] with whether the offered tool set is derivable (WS03 S8-A): the
-/// body of the route-level driver. `derivable` is the offer's own claim; a continuation is
-/// never derivable whatever it says, because its tools are the snapshot's.
+/// body of the route-level driver. `derivable` is the offer's own claim; an approval
+/// continuation is never derivable whatever it says, because its tools are the snapshot's.
+/// `park` is the fold a park resume claimed (WS03 S8-6): its continuation holds no release and
+/// runs under the derived tools, so it may park again.
 #[allow(clippy::too_many_arguments)]
 async fn run_agent_with_route_parkable(
     state: &crate::state::StateStore,
@@ -1078,6 +1251,7 @@ async fn run_agent_with_route_parkable(
     route: crate::agent_route::ModelRoute,
     deadline: crate::run_budget::RunDeadline,
     derivable: bool,
+    park: Option<super::park::ParkClaimed>,
 ) -> Result<pb::RunAgentResponse, tonic::Status> {
     let plan_id = format!("plan_{}", req.run_id);
 
@@ -1085,13 +1259,19 @@ async fn run_agent_with_route_parkable(
     // then either restore the paused loop from its fold (the in-place resume) or start the
     // segment of stage 1. Its tools and mode come from the retained snapshot, never from the
     // request, so this runs before the offered set is derived below. Every refusal of it
-    // returns before the run's first heartbeat, so the run is left as it was.
-    let resumed = match req.resume.as_ref() {
-        Some(resume) => Some(
+    // returns before the run's first heartbeat, so the run is left as it was. A park resume
+    // (WS03 S8-6) arrives with its fold already claimed and consumes nothing; a park request
+    // that reaches this driver without one is refused, never treated as an approval stage.
+    let resumed = match (park, req.resume.as_ref()) {
+        (Some(claimed), _) => Some(park_continuation(&req, claimed, tools.clone())?),
+        (None, Some(_)) if super::park::is_park_resume(&req) => {
+            return Err(tonic::Status::invalid_argument("resume_incomplete"));
+        }
+        (None, Some(resume)) => Some(
             begin_continuation(&session_channel, session_bearer.as_deref(), &req, resume, &route)
                 .await?,
         ),
-        None => None,
+        (None, None) => None,
     };
     // The loop reads the floor, the rung, plan mode and the round budget off the
     // request on every round. A continuation's request states placeholders, so it
@@ -1176,9 +1356,10 @@ async fn run_agent_with_route_parkable(
     }
 
     let context = LoopContext {
-        release: resumed.as_ref().map(|r| r.release.clone()),
-        // A continuation runs under the snapshot's tools, which nothing derives again.
-        tools_derivable: derivable && resumed.is_none(),
+        release: resumed.as_ref().and_then(|r| r.release.clone()),
+        // An approval continuation runs under the snapshot's tools, which nothing derives
+        // again. A park resume holds no release and runs under the derived set (WS03 S8-6).
+        tools_derivable: derivable && resumed.as_ref().is_none_or(|r| r.release.is_none()),
         effect_ledger: runtime_loop::effect::ledger_enabled(),
         state,
         session_channel: &session_channel,
@@ -1477,6 +1658,10 @@ enum RoundSeed {
     /// continues the paused conversation: its history, counters and open round come from the
     /// fold, and the request's goal is never read.
     InPlace(Box<super::resume::Restored>),
+    /// A park resume (WS03 S8-6): the parked loop, from its claimed park fold. It was parked
+    /// at a round boundary, so there is no open round: the loop starts its next round with an
+    /// inference, after the fence, from the fold's history and counters.
+    Parked(Box<super::park::ParkSeed>),
 }
 
 /// What a round loop reads once, when it starts, to decide at each stop whether it may park
@@ -1728,15 +1913,18 @@ async fn run_rounds(
     // A continuation's first round: the segment's approved call, or the paused loop's own open
     // round restored from its fold (the in-place resume, WS03 S7b). Either way it is consumed by
     // the first round, which skips inference.
-    let in_place = matches!(seed, Some(RoundSeed::InPlace(_)));
+    // A park resume (WS03 S8-6) re-enters in place too: it is not a stage-1 segment, and its
+    // writer is the seeded one. It has no open round, so nothing of its first round is seeded.
+    let in_place = matches!(seed, Some(RoundSeed::InPlace(_) | RoundSeed::Parked(_)));
     // What the loop starts from, as the park decision reads it (WS03 S8-A).
     let seed_kind = match &seed {
         None => super::park::SeedKind::Fresh,
         Some(RoundSeed::Segment(_)) => super::park::SeedKind::Segment,
         Some(RoundSeed::InPlace(_)) => super::park::SeedKind::InPlace,
+        Some(RoundSeed::Parked(_)) => super::park::SeedKind::Parked,
     };
-    let (mut seeded_round, mut restored) = match seed {
-        Some(RoundSeed::Segment(round)) => (Some(round), None),
+    let (mut seeded_round, mut restored, mut parked) = match seed {
+        Some(RoundSeed::Segment(round)) => (Some(round), None, None),
         // `resume::restore` builds one slot per call; a seed that does not is not one this
         // loop understands, and nothing has run.
         Some(RoundSeed::InPlace(restored)) if !restored.is_consistent() => {
@@ -1745,8 +1933,10 @@ async fn run_rounds(
         Some(RoundSeed::InPlace(mut restored)) => (
             Some(std::mem::take(&mut restored.response)),
             Some(*restored),
+            None,
         ),
-        None => (None, None),
+        Some(RoundSeed::Parked(parked)) => (None, None, Some(*parked)),
+        None => (None, None, None),
     };
     // What each call of the restored round does when the loop re-enters it, one slot per call.
     let mut restored_slots = restored
@@ -1760,12 +1950,14 @@ async fn run_rounds(
     // inherits it rather than deciding retention for itself.
     let zdr = req.zdr;
 
-    let mut messages = match restored.as_mut() {
+    let mut messages = match (restored.as_mut(), parked.as_mut()) {
         // The paused conversation: its own history, the system prompt it was paused under
         // included. The request's goal and brief are never read, and the skills a fresh
         // start fetches are not fetched again.
-        Some(restored) => std::mem::take(&mut restored.messages),
-        None => fresh_history(ctx, goal).await,
+        (Some(restored), _) => std::mem::take(&mut restored.messages),
+        // The parked conversation (WS03 S8-6), the same way: the fold's own history.
+        (None, Some(parked)) => std::mem::take(&mut parked.messages),
+        (None, None) => fresh_history(ctx, goal).await,
     };
 
     let mut inference = InferenceCoreClient::new(ctx.inference_channel.clone());
@@ -1775,30 +1967,49 @@ async fn run_rounds(
     // tools.
     let mut concluded = false;
     // A restored loop re-enters with the counters its fold carried, the open round not yet
-    // charged (the loop's own increment charges it once).
-    let mut rounds_executed: u32 = restored.as_ref().map_or(0, |restored| restored.rounds_executed);
-    let mut delegated_rounds: u32 = restored.as_ref().map_or(0, |restored| restored.delegated_rounds);
-    let mut step_seq: u32 = restored.as_ref().map_or(0, |restored| restored.step_seq);
-    let mut attempted_retrievals = restored
-        .as_mut()
-        .map_or_else(BTreeSet::new, |restored| std::mem::take(&mut restored.attempted_retrievals));
+    // charged (the loop's own increment charges it once). A parked loop re-enters with its
+    // fold's counters as they are: it was parked at a round boundary (WS03 S8-6).
+    let mut rounds_executed: u32 = restored.as_ref().map_or(
+        parked.as_ref().map_or(0, |parked| parked.rounds_executed),
+        |restored| restored.rounds_executed,
+    );
+    let mut delegated_rounds: u32 = restored.as_ref().map_or(
+        parked.as_ref().map_or(0, |parked| parked.delegated_rounds),
+        |restored| restored.delegated_rounds,
+    );
+    let mut step_seq: u32 = restored.as_ref().map_or(
+        parked.as_ref().map_or(0, |parked| parked.step_seq),
+        |restored| restored.step_seq,
+    );
+    let mut attempted_retrievals = match (restored.as_mut(), parked.as_mut()) {
+        (Some(restored), _) => std::mem::take(&mut restored.attempted_retrievals),
+        (None, Some(parked)) => std::mem::take(&mut parked.attempted_retrievals),
+        (None, None) => BTreeSet::new(),
+    };
     // Run-scoped, NOT round-scoped: the ceiling bounds how many delegations this
     // run opens in TOTAL, so three per round for four rounds is bounded exactly
     // like twelve at once. Deliberately independent of the round budget — see
     // `subagent::DEFAULT_MAX_CHILDREN` on why one cannot express the other.
     let children_started = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(
-        restored.as_ref().map_or(0, |restored| restored.children_started),
+        restored.as_ref().map_or(
+            parked.as_ref().map_or(0, |parked| parked.children_started),
+            |restored| restored.children_started,
+        ),
     ));
     // Reported on the step outcome. Was a hardcoded `false` at every
     // construction site while being surfaced over gRPC — a dead-but-visible
     // field, the pattern §13.3 rejects.
-    let mut compaction_triggered = restored
-        .as_ref()
-        .is_some_and(|restored| restored.compaction_triggered);
+    let mut compaction_triggered = restored.as_ref().map_or(
+        parked.as_ref().is_some_and(|parked| parked.compaction_triggered),
+        |restored| restored.compaction_triggered,
+    );
     // HONESTY_CONTRACT: true once any knowledge_search call in this run
     // actually returned org knowledge (JSON status "ok"), so the final
     // RunAgentResponse can report real grounding instead of a guess.
-    let mut grounded = restored.as_ref().is_some_and(|restored| restored.grounded);
+    let mut grounded = restored.as_ref().map_or(
+        parked.as_ref().is_some_and(|parked| parked.grounded),
+        |restored| restored.grounded,
+    );
 
     // The durable loop's fold (build plan WS03 S6). Off unless the switch, the effect
     // ledger and a persistent root run all allow it: then this is a pure value, no
@@ -1807,7 +2018,8 @@ async fn run_rounds(
     // with `fold::Snapshot` when a loop-local is added.
     //
     // An in-place resume's writer is SEEDED: it expects the seq the claim returned and
-    // writes under the resumed segment, through the same gate as every writer.
+    // writes under the resumed segment, through the same gate as every writer. A park resume's
+    // is the same one writer, seeded from its own claim (WS03 S8-6).
     let gate = writer_gate(
         req,
         &ctx.route,
@@ -1816,14 +2028,18 @@ async fn run_rounds(
         ctx.release.is_some(),
         in_place,
     );
-    let mut folds = match restored.as_ref() {
-        Some(restored) => runtime_loop::fold::FoldWriter::seeded(
+    let seeded_at = restored
+        .as_ref()
+        .map(|restored| (restored.claimed_seq, restored.segment))
+        .or_else(|| parked.as_ref().map(|parked| (parked.claimed_seq, parked.segment)));
+    let mut folds = match seeded_at {
+        Some((claimed_seq, segment)) => runtime_loop::fold::FoldWriter::seeded(
             ctx.session_channel,
             ctx.session_bearer,
             &req.run_id,
             gate,
-            restored.claimed_seq,
-            restored.segment,
+            claimed_seq,
+            segment,
         ),
         None => runtime_loop::fold::FoldWriter::new(
             ctx.session_channel,
@@ -1856,9 +2072,53 @@ async fn run_rounds(
             connection_id_present: !ctx.route.subscription_connection_id().is_empty(),
             model_present: !ctx.route.model().is_empty(),
         }),
-        // Parks the run took before this loop started: none until a park resume seeds it.
-        parks_so_far: 0,
+        // Parks the run took before this loop started: a park resume's count is its claimed
+        // fold's (`lf::parks_in`, through the seed), never the request's, so a run that parks
+        // and resumes again and again still stops at the cap. A fresh loop has taken none.
+        parks_so_far: parked.as_ref().map_or(0, |parked| parked.parks),
     };
+
+    // The park resume's FENCE (WS03 S8-6): ONE save at the claimed seq, of the round-boundary
+    // fold the loop starts from, before its first inference. Of two claimants of one park
+    // exactly one passes it; a save that cannot be made (a lost compare-and-set, a writer that
+    // is off, a denial) ends the request with a closed token, and nothing is inferred or
+    // dispatched. Only after it does the run say it resumed.
+    if let Some(parked) = parked.as_ref() {
+        let Some(authority) = fold_authority.as_ref() else {
+            return Err(runtime_loop::resume::Refusal::CheckpointUnavailable.status());
+        };
+        let snapshot = runtime_loop::fold::Snapshot {
+            run_id: &req.run_id,
+            segment_no: folds.segment(),
+            rounds_executed,
+            delegated_rounds,
+            step_seq,
+            children_started: children_started.load(std::sync::atomic::Ordering::Relaxed),
+            grounded,
+            compaction_triggered,
+            attempted_retrievals: &attempted_retrievals,
+            messages: &messages,
+            authority: authority.clone(),
+            prompt_digest: &fold_prompt_digest,
+            effect_ledger: ctx.effect_ledger,
+        };
+        if let Err(error) = super::park::fence_parked(&mut folds, &snapshot).await {
+            let refusal = runtime_loop::resume::fence_refusal(error);
+            warn!(
+                run_id = %req.run_id,
+                refusal = refusal.as_str(),
+                "run_agent: the park resume's fence could not be saved; nothing was run"
+            );
+            return Err(refusal.status());
+        }
+        super::park::publish_run_resumed(
+            ctx.session_channel,
+            ctx.session_bearer,
+            &req.run_id,
+            parked.segment,
+        )
+        .await;
+    }
 
     // A delegated loop's rounds are charged against the SAME budget, so a parent
     // that delegates on every round cannot drive max_rounds² inference calls.
@@ -6251,9 +6511,11 @@ async fn finalize(
 
 /// What a continuation starts from (build plan WS03 S3, S7b): the segment of stage 1, or the
 /// paused loop restored in place. Both hold the one release and run under the snapshot's tools,
-/// mode and authority.
+/// mode and authority. A park resume (WS03 S8-6) is a continuation with NO release: it
+/// consumed no approval, and runs under the derived tools and the fold's authority.
 struct Continuation {
-    release: super::resume::ApprovedRelease,
+    /// The one approved call an approval continuation may release; `None` for a park resume.
+    release: Option<super::resume::ApprovedRelease>,
     step_prefix: String,
     /// The goal with the framed brief of recorded results appended. Not read by an in-place
     /// resume, which continues the paused conversation.
@@ -6431,7 +6693,7 @@ fn build_segment(
         format!("{}\n\n{}", req.goal, super::resume::frame_brief(&resume.brief))
     };
     Ok(Continuation {
-        release,
+        release: Some(release),
         step_prefix,
         goal,
         seed: RoundSeed::Segment(pb::InferResponse {
@@ -6493,7 +6755,7 @@ async fn restore_continuation(
     .await
     {
         Ok(restored) => Ok(Ok(Continuation {
-            release,
+            release: Some(release),
             step_prefix: format!("s{}.", consumed.segment),
             goal: req.goal.clone(),
             seed: RoundSeed::InPlace(Box::new(restored)),
@@ -6576,6 +6838,48 @@ async fn begin_continuation(
         "loop_resume_stage"
     );
     Ok(continuation)
+}
+
+/// What a park resume starts from (WS03 S8-6), from the fold it claimed and the tools it
+/// derived. Pure: no RPC, and no writer decision of its own (the loop's one gate decides, and a
+/// writer that cannot write is refused at the fence, never downgraded).
+///
+/// It runs under the fold's authority, narrowed by what the request states and refused if it
+/// widens, with the round budget the run was parked under (the one place a budget is taken from
+/// a fold: the gateway states none, and the default would cut a run parked under a larger one).
+/// It holds no release (no approval was consumed), and its segment is the fold's plus one.
+///
+/// # Errors
+///
+/// The refusal of a request that widens the fold's authority (closed tokens).
+#[allow(clippy::result_large_err)]
+fn park_continuation(
+    req: &pb::RunAgentRequest,
+    claimed: super::park::ParkClaimed,
+    tools: Vec<pb::ToolDefinition>,
+) -> Result<Continuation, tonic::Status> {
+    let fold = &claimed.claimed.fold;
+    let mut effective = super::resume::effective_authority(&fold.authority, req)
+        .map_err(super::resume::Refusal::status)?;
+    effective.max_rounds = super::resume::resolved_max_rounds(fold.authority.max_rounds);
+    let seed = super::park::seed_from(&claimed.claimed);
+    let segment = seed.segment;
+    info!(
+        run_id = %req.run_id,
+        resume_stage = super::park::PARK_MODE,
+        fallback_reason = "",
+        resumed_segment = segment,
+        "loop_resume_stage"
+    );
+    Ok(Continuation {
+        release: None,
+        step_prefix: format!("s{segment}."),
+        goal: req.goal.clone(),
+        seed: RoundSeed::Parked(Box::new(seed)),
+        tools,
+        mode: fold.authority.mode.clone(),
+        effective,
+    })
 }
 
 /// Publish a `PlanTransitioned` orchestration event on session-core's broadcast
@@ -7068,6 +7372,8 @@ mod tests {
         park_unaccepted: bool,
         /// The run id of every `RunParked` the mock saw on the orchestration broadcast.
         run_parked_events: Vec<String>,
+        /// `(run_id, resumed_segment)` of every `RunResumed` the mock saw (WS03 S8-6).
+        run_resumed_events: Vec<(String, u32)>,
         /// Every `ClaimLoopCheckpoint` the mock observed. Only an in-place resume claims (a
         /// stage 1 continuation touches no fold), so tests of stage 1 pin it empty.
         claim_calls: Vec<pb::ClaimLoopCheckpointRequest>,
@@ -7942,6 +8248,25 @@ mod tests {
             if let Some(answer) = rec.claim_response.clone() {
                 return answer.map(Response::new);
             }
+            // An EMPTY reference claims the run's current parked fold (WS03 S8-6), as a
+            // park-aware session-core does: the stored row is the last accepted save, and it is
+            // claimable only if that save was a park. The claim does not move the seq.
+            if rec.claim_calls.last().is_some_and(|claim| claim.pause_ref.is_empty()) {
+                let current = rec.loop_saves.last().filter(|save| save.kind == "park").cloned();
+                return match current {
+                    Some(save) => {
+                        let segment_no = save.fold().segment_no;
+                        Ok(Response::new(pb::ClaimLoopCheckpointResponse {
+                            seq: rec.loop_seq,
+                            fold: save.fold,
+                            segment_no,
+                            authority_digest: save.authority_digest,
+                            kind: save.kind,
+                        }))
+                    }
+                    None => Err(Status::failed_precondition("loop_checkpoint_not_claimable")),
+                };
+            }
             Ok(Response::new(pb::ClaimLoopCheckpointResponse {
                 seq: rec.claim_seq,
                 fold: Vec::new(),
@@ -8471,6 +8796,15 @@ mod tests {
                     ..
                 }) => {
                     self.rec.lock().unwrap().run_parked_events.push(parked.run_id);
+                }
+                Some(pb::OrchestrationEvent {
+                    event: Some(pb::orchestration_event::Event::RunResumed(resumed)),
+                    ..
+                }) => {
+                    let mut rec = self.rec.lock().unwrap();
+                    rec.order.push("run_resumed".to_owned());
+                    rec.run_resumed_events
+                        .push((resumed.run_id, resumed.resumed_segment));
                 }
                 _ => {}
             }
@@ -20717,6 +21051,7 @@ mod tests {
             route,
             deadline,
             how.derivable,
+            None,
         )
         .await;
         ParkRun {
@@ -21632,6 +21967,7 @@ mod tests {
             route,
             credential_deadline_already_spent(std::time::Instant::now()),
             true,
+            None,
         )
         .await;
         // The stop is the credential deadline at the first loop top: the very stop that parks
@@ -21855,5 +22191,1115 @@ mod tests {
         let r = rec.lock().unwrap();
         assert_eq!(r.run_parked_events.len(), 5);
         assert!(r.close_calls.is_empty());
+    }
+
+    // ---- WS03 S8-A, S8-6: the park resume ----
+    //
+    // A run is parked through `run_agent` itself (the production entry, so its tools are the
+    // ones a resume derives), then resumed through `run_agent` with a `park` resume against the
+    // SAME park-aware session-core mock, which answers an empty-reference claim with the park it
+    // stored (or with what a test installs in its place). What each test reads back is what the
+    // executor sent and returned.
+
+    /// Holds the ChatGPT-subscription switches a pinned run is resolved under, for the test's
+    /// thread, in place of the process environment.
+    struct SubscriptionSwitches;
+
+    impl SubscriptionSwitches {
+        fn set(switches: Switches) -> Self {
+            TEST_SUBSCRIPTION_SWITCHES.with(|cell| cell.set(Some(switches)));
+            Self
+        }
+    }
+
+    impl Drop for SubscriptionSwitches {
+        fn drop(&mut self) {
+            TEST_SUBSCRIPTION_SWITCHES.with(|cell| cell.set(None));
+        }
+    }
+
+    /// Every switch a park and its resume read, held for the test's thread until dropped.
+    struct HeldSwitches(
+        runtime_loop::park::ParkSwitch,
+        runtime_loop::fold::CheckpointSwitch,
+        runtime_loop::effect::LedgerSwitch,
+        runtime_loop::resume::LoopResumeSwitch,
+        runtime_loop::resume::ContinueSwitch,
+        SubscriptionSwitches,
+    );
+
+    fn hold(knobs: ParkKnobs, switches: Switches) -> HeldSwitches {
+        HeldSwitches(
+            runtime_loop::park::ParkSwitch::set(knobs.parking),
+            runtime_loop::fold::CheckpointSwitch::set(knobs.checkpoint),
+            runtime_loop::effect::LedgerSwitch::set(knobs.ledger),
+            runtime_loop::resume::LoopResumeSwitch::set(knobs.resume),
+            runtime_loop::resume::ContinueSwitch::set(knobs.continue_on),
+            SubscriptionSwitches::set(switches),
+        )
+    }
+
+    /// A `/continue` of a parked run as the gateway sends it: the `park` mode, a claim token,
+    /// no approval, no route, no Space and the request's placeholders.
+    fn park_resume_request() -> pb::RunAgentRequest {
+        pb::RunAgentRequest {
+            resume: Some(pb::AgentResume {
+                mode: "park".to_owned(),
+                claim_token: "claim-1".to_owned(),
+                ..Default::default()
+            }),
+            max_rounds: 0,
+            ..sample_request()
+        }
+    }
+
+    struct AgentRun {
+        result: Result<pb::RunAgentResponse, Status>,
+        observed: ObservedRoutes,
+        messages: ObservedMessages,
+        tooling: ObservedTooling,
+    }
+
+    /// `run_agent`, the production entry, against the mock session-core over `rec`.
+    async fn run_agent_on(
+        rec: &SharedRecorder,
+        caller: &crate::auth::AuthenticatedUser,
+        policy: &dyn crate::capability_policy::CapabilityPolicy,
+        req: pb::RunAgentRequest,
+        script: Vec<Scripted>,
+    ) -> AgentRun {
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let observed: ObservedRoutes = Arc::new(Mutex::new(Vec::new()));
+        let messages: ObservedMessages = Arc::default();
+        let tooling: ObservedTooling = Arc::default();
+        let inference_channel = spawn_inference_channel_inner(MockInference {
+            observed_messages: messages.clone(),
+            observed_tooling: tooling.clone(),
+            ..MockInference::with_route_probe(script, observed.clone(), Serving::Echo)
+        })
+        .await;
+        let state = crate::state::StateStore::new();
+        let result = run_agent(
+            &state,
+            session_channel,
+            inference_channel,
+            caller,
+            req,
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            policy,
+            &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
+        )
+        .await;
+        AgentRun {
+            result,
+            observed,
+            messages,
+            tooling,
+        }
+    }
+
+    /// A usage limit whose reset has already passed: the park is due at once.
+    fn usage_limit_due_now() -> Scripted {
+        usage_limit_at("2020-01-01T00:00:00Z")
+    }
+
+    /// Park a fresh pinned run through `run_agent`: one read round, then a usage limit.
+    async fn park_through_run_agent(
+        rec: &SharedRecorder,
+        policy: &dyn crate::capability_policy::CapabilityPolicy,
+        req: pb::RunAgentRequest,
+    ) {
+        let run = run_agent_on(
+            rec,
+            &plain_caller(),
+            policy,
+            req,
+            vec![read_round(&["w1"]), usage_limit_due_now()],
+        )
+        .await;
+        let response = run.result.expect("the fresh run is a response");
+        assert_eq!(response.status, "parked", "{response:?}");
+    }
+
+    /// The claim answer a park-aware session-core gives for the park `rec` stored last, at the
+    /// seq the store stands at, with the fold edited by `edit` (and the digest recomputed unless
+    /// `edit` says otherwise through `keep_digest`).
+    fn claimed_park_answer(
+        rec: &Recorder,
+        edit: impl FnOnce(&mut mp_contracts::loop_fold::LoopFoldV1),
+    ) -> pb::ClaimLoopCheckpointResponse {
+        let save = rec
+            .loop_saves
+            .iter()
+            .rev()
+            .find(|save| save.kind == "park")
+            .expect("a stored park")
+            .clone();
+        let mut fold = save.fold();
+        edit(&mut fold);
+        pb::ClaimLoopCheckpointResponse {
+            seq: rec.loop_seq,
+            fold: serde_json::to_vec(&fold).expect("a fold serializes"),
+            segment_no: fold.segment_no,
+            authority_digest: fold.authority.digest(),
+            kind: "park".to_owned(),
+        }
+    }
+
+    /// The happy path: a parked run resumes from its own fold. The claim is the empty
+    /// reference under the request's token; the FENCE (one `pre_effect` save at the claimed
+    /// seq, of the boundary fold) comes before any inference; `RunResumed` says so with the new
+    /// segment; the first resumed inference sees exactly the parked history; every round is on
+    /// the pinned route the fold recorded; and the run finishes with one receipt.
+    #[tokio::test]
+    async fn loop_park_a_parked_run_resumes_from_its_fold_fenced_before_any_inference() {
+        let _on = hold(ParkKnobs::ON, SWITCH_ON);
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        park_through_run_agent(&rec, &ALLOW_CAPABILITY_POLICY, subscription_request()).await;
+        let (park, seq_at_park, saves_at_park) = {
+            let r = rec.lock().unwrap();
+            (the_park(&r), r.loop_seq, r.loop_saves.len())
+        };
+        let parked_fold = park.fold();
+
+        let run = run_agent_on(
+            &rec,
+            &plain_caller(),
+            &ALLOW_CAPABILITY_POLICY,
+            park_resume_request(),
+            vec![Scripted::Answer("four".to_owned())],
+        )
+        .await;
+        let response = run.result.expect("the resumed run is a response");
+        assert_eq!(response.status, "completed", "{response:?}");
+        assert_eq!(response.final_output, "four");
+        assert_eq!(
+            response.rounds_executed,
+            parked_fold.rounds_executed + 1,
+            "the parked rounds stay charged and the resumed one is added"
+        );
+
+        let r = rec.lock().unwrap();
+        assert_eq!(r.claim_calls.len(), 1);
+        assert_eq!(r.claim_calls[0].run_id, "run_test");
+        assert_eq!(r.claim_calls[0].pause_ref, "", "the empty reference: the current park");
+        assert_eq!(r.claim_calls[0].claim_token, "claim-1");
+        assert!(r.consume_calls.is_empty(), "a park resume consumes no approval");
+        let fence = &r.loop_saves[saves_at_park];
+        assert_eq!(fence.kind, "pre_effect", "{:?}", r.order);
+        assert_eq!(fence.expected_seq, seq_at_park, "the fence is written at the claimed seq");
+        let fenced = fence.fold();
+        assert_eq!(fenced.segment_no, parked_fold.segment_no + 1);
+        assert_eq!(fenced.messages, parked_fold.messages, "the boundary the run was parked at");
+        assert_eq!(fenced.rounds_executed, parked_fold.rounds_executed);
+        assert!(fenced.pending.is_none() && fenced.round_in_flight.is_none());
+        assert_eq!(mp_contracts::loop_fold::parks_in(&fenced), 0, "a fence names no park");
+        assert_eq!(fenced.authority, parked_fold.authority, "the same authority");
+        assert_eq!(fenced.prompt_digest, parked_fold.prompt_digest, "and the same tools");
+        // The order: the claim, the fence, then the run says it resumed.
+        let claim_at = r.order.iter().position(|entry| entry == "claim").expect("claim");
+        let fence_at = r.order[claim_at..]
+            .iter()
+            .position(|entry| entry == "save:pre_effect")
+            .map(|at| at + claim_at)
+            .expect("the fence");
+        let resumed_at = r.order.iter().position(|entry| entry == "run_resumed").expect("event");
+        assert!(claim_at < fence_at && fence_at < resumed_at, "{:?}", r.order);
+        assert_eq!(r.run_resumed_events, vec![("run_test".to_owned(), 2)]);
+        // The first resumed inference continues the parked conversation, nothing else.
+        let seen = run.messages.lock().unwrap();
+        assert_eq!(seen.len(), 1, "one resumed round");
+        let parked_history: Vec<(String, String)> = parked_fold
+            .messages
+            .iter()
+            .map(|m| (m.role.clone(), m.content.clone()))
+            .collect();
+        let first: Vec<(String, String)> =
+            seen[0].iter().map(|m| (m.role.clone(), m.content.clone())).collect();
+        assert_eq!(first, parked_history);
+        assert!(
+            run.observed.lock().unwrap().iter().all(|route| *route == pinned_round()),
+            "every resumed round is on the pinned route the fold recorded"
+        );
+        assert_eq!(
+            root_receipts(&r),
+            vec![(
+                "run_test".to_owned(),
+                pb::ManagedRunSource::ExecutionAgent as i32,
+                pb::TerminalOutcome::Completed as i32,
+                String::new(),
+            )],
+            "exactly one terminal receipt, for the finished run"
+        );
+        assert!(r.close_calls.is_empty());
+        assert_eq!(r.plan_transitions.len(), 2, "DRAFT->EXECUTING once, then the completion");
+    }
+
+    /// The kill order (a), the positive half: with the PARKING switch off and the resume
+    /// switches on, an existing park still resumes. Parking off stops new parks only. (The
+    /// negative half, a limit met on the resumed run, is
+    /// `loop_park_a_park_resume_with_parking_off_does_not_park_again`.)
+    #[tokio::test]
+    async fn loop_park_a_park_resume_works_with_executor_parking_off() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        {
+            let _on = hold(ParkKnobs::ON, SWITCH_ON);
+            park_through_run_agent(&rec, &ALLOW_CAPABILITY_POLICY, subscription_request()).await;
+        }
+        let _parking_off = hold(
+            ParkKnobs {
+                parking: false,
+                ..ParkKnobs::ON
+            },
+            SWITCH_ON,
+        );
+        // No limit is met here: the park is claimed and the run finishes.
+        let run = run_agent_on(
+            &rec,
+            &plain_caller(),
+            &ALLOW_CAPABILITY_POLICY,
+            park_resume_request(),
+            vec![read_round(&["w2"]), Scripted::Answer("done".to_owned())],
+        )
+        .await;
+        let response = run.result.expect("resumed");
+        assert_eq!(response.status, "completed", "{response:?}");
+        let r = rec.lock().unwrap();
+        assert_eq!(r.claim_calls.len(), 1);
+        assert_eq!(r.run_resumed_events.len(), 1);
+        assert_eq!(root_receipts(&r).len(), 1);
+    }
+
+    /// The kill order (a), the negative half: a park resumed with the PARKING switch off still
+    /// claims, fences and publishes `RunResumed`, but a usage limit met on the resumed run is
+    /// NOT parked again: it ends with the committed typed failure and its one receipt, and not
+    /// one park save is attempted.
+    #[tokio::test]
+    async fn loop_park_a_park_resume_with_parking_off_does_not_park_again() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        {
+            let _on = hold(ParkKnobs::ON, SWITCH_ON);
+            park_through_run_agent(&rec, &ALLOW_CAPABILITY_POLICY, subscription_request()).await;
+        }
+        let (attempts, parked_events) = {
+            let r = rec.lock().unwrap();
+            (park_attempts(&r), r.run_parked_events.len())
+        };
+        assert_eq!(attempts, 1, "the first park");
+        let _parking_off = hold(
+            ParkKnobs {
+                parking: false,
+                ..ParkKnobs::ON
+            },
+            SWITCH_ON,
+        );
+        let run = run_agent_on(
+            &rec,
+            &plain_caller(),
+            &ALLOW_CAPABILITY_POLICY,
+            park_resume_request(),
+            vec![read_round(&["w2"]), usage_limit_due_now()],
+        )
+        .await;
+        let response = run.result.expect("a finalized response");
+        assert_eq!(response.status, "failed", "{response:?}");
+        assert_eq!(response.failure_code, "subscription_usage_limit");
+        let r = rec.lock().unwrap();
+        assert_eq!(park_attempts(&r), attempts, "no new park was attempted");
+        assert_eq!(r.run_parked_events.len(), parked_events, "no new RunParked");
+        assert_eq!(r.claim_calls.len(), 1, "the existing park was claimed");
+        assert_eq!(r.run_resumed_events, vec![("run_test".to_owned(), 2)]);
+        assert_eq!(
+            root_receipts(&r),
+            failed_receipt("provider_unavailable"),
+            "the committed failure path ran: one receipt"
+        );
+        assert!(r.close_calls.is_empty());
+    }
+
+    /// A park resume needs every resume switch (the in-place resume, the continue switch, the
+    /// fold writer, the effect ledger): with any one off it is `continue_disabled` and NOTHING is
+    /// claimed, so the park is left exactly as it was.
+    #[tokio::test]
+    async fn loop_park_a_park_resume_needs_the_resume_switches() {
+        for off in 0..4 {
+            let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+            {
+                let _on = hold(ParkKnobs::ON, SWITCH_ON);
+                park_through_run_agent(&rec, &ALLOW_CAPABILITY_POLICY, subscription_request())
+                    .await;
+            }
+            let saves = rec.lock().unwrap().loop_saves.len();
+            let _held = hold(
+                ParkKnobs {
+                    parking: true,
+                    checkpoint: off != 0,
+                    ledger: off != 1,
+                    resume: off != 2,
+                    continue_on: off != 3,
+                },
+                SWITCH_ON,
+            );
+            let run = run_agent_on(
+                &rec,
+                &plain_caller(),
+                &ALLOW_CAPABILITY_POLICY,
+                park_resume_request(),
+                vec![Scripted::Answer("must not run".to_owned())],
+            )
+            .await;
+            let refused = run.result.expect_err("refused");
+            assert_eq!(refused.code(), tonic::Code::FailedPrecondition, "switch {off}");
+            assert_eq!(refused.message(), "continue_disabled", "switch {off}");
+            let r = rec.lock().unwrap();
+            assert!(r.claim_calls.is_empty(), "switch {off}: zero claims");
+            assert_eq!(r.loop_saves.len(), saves, "switch {off}: nothing saved");
+            assert!(run.observed.lock().unwrap().is_empty(), "switch {off}: nothing inferred");
+        }
+    }
+
+    /// A zero-retention request is refused before anything is claimed, and a waived caller is
+    /// refused on the rebuilt route before anything is fenced or inferred: neither keeps
+    /// durable state, so neither resumes one (the Park store proof of the executor).
+    #[tokio::test]
+    async fn loop_park_a_park_resume_refuses_a_zdr_or_waived_caller() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let _on = hold(ParkKnobs::ON, SWITCH_ON);
+        park_through_run_agent(&rec, &ALLOW_CAPABILITY_POLICY, subscription_request()).await;
+        let saves = rec.lock().unwrap().loop_saves.len();
+
+        let zdr = run_agent_on(
+            &rec,
+            &plain_caller(),
+            &ALLOW_CAPABILITY_POLICY,
+            pb::RunAgentRequest {
+                zdr: true,
+                ..park_resume_request()
+            },
+            vec![Scripted::Answer("must not run".to_owned())],
+        )
+        .await;
+        let refused = zdr.result.expect_err("a zero-retention resume is refused");
+        assert!(
+            mp_contracts::zdr_refusal::Refusal::from_status(&refused).is_some(),
+            "the catalogue's own refusal: {refused:?}"
+        );
+        assert!(rec.lock().unwrap().claim_calls.is_empty(), "nothing was claimed");
+
+        drop(_on);
+        let _waived_switches = hold(
+            ParkKnobs::ON,
+            Switches {
+                enabled: true,
+                allow_effects: true,
+            },
+        );
+        let waived = run_agent_on(
+            &rec,
+            &crate::auth::AuthenticatedUser::for_test_with_waiver(
+                "org_test",
+                "user_test",
+                "conn_1",
+                "ack-1",
+            ),
+            &ALLOW_CAPABILITY_POLICY,
+            park_resume_request(),
+            vec![Scripted::Answer("must not run".to_owned())],
+        )
+        .await;
+        let refused = waived.result.expect_err("a waived resume is refused");
+        assert!(
+            mp_contracts::zdr_refusal::Refusal::from_status(&refused).is_some(),
+            "the catalogue's own refusal: {refused:?}"
+        );
+        let r = rec.lock().unwrap();
+        assert_eq!(r.loop_saves.len(), saves, "no fence, no fold of any kind");
+        assert!(r.close_calls.is_empty(), "a refused route closes nothing");
+        assert!(waived.observed.lock().unwrap().is_empty(), "nothing inferred");
+        assert!(r.run_resumed_events.is_empty());
+    }
+
+    /// The tool set of a park resume is derived: the deployment's base set and the run-bound
+    /// server view, never a caller's tools (and never an MCP server's, which the derivation
+    /// does not ask; `durable_loop_contract` holds that textually). The run is offered exactly
+    /// the set it was parked under.
+    #[tokio::test]
+    async fn loop_park_a_park_resume_never_lists_mcp_tools() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let _on = hold(ParkKnobs::ON, SWITCH_ON);
+        park_through_run_agent(&rec, &RunBoundTicketView, subscription_request()).await;
+        let with_client_tool = pb::RunAgentRequest {
+            tools: vec![pb::ToolDefinition {
+                name: "custom.read".to_owned(),
+                description: "a caller's tool".to_owned(),
+                parameters_json: "{}".to_owned(),
+            }],
+            ..park_resume_request()
+        };
+        let run = run_agent_on(
+            &rec,
+            &plain_caller(),
+            &RunBoundTicketView,
+            with_client_tool,
+            vec![read_round(&["w2"]), Scripted::Answer("done".to_owned())],
+        )
+        .await;
+        assert_eq!(run.result.expect("resumed").status, "completed");
+        let derived = base_tool_defs(false).len() + 1;
+        let tooling = run.tooling.lock().unwrap();
+        assert_eq!(tooling.len(), 2);
+        assert!(
+            tooling.iter().all(|(offered, _)| *offered == derived),
+            "the base set and the resolved owner action, never the caller's tool: {tooling:?}"
+        );
+    }
+
+    /// A policy whose server-resolved view offers the owner action for the sample run.
+    struct RunBoundTicketView;
+
+    #[tonic::async_trait]
+    impl crate::capability_policy::CapabilityPolicy for RunBoundTicketView {
+        async fn evaluate(
+            &self,
+            _tool_name: &str,
+            _run_id: &str,
+            _org_id: &str,
+        ) -> Result<crate::capability_policy::CapabilityDecision, Status> {
+            Ok(crate::capability_policy::CapabilityDecision::Allow)
+        }
+        async fn resolve_server_tool_definitions(
+            &self,
+            run_id: &str,
+            org_id: &str,
+        ) -> Result<Vec<pb::ToolDefinition>, Status> {
+            TicketViewPolicy
+                .resolve_server_tool_definitions(
+                    if run_id == "run_test" { "run-1" } else { run_id },
+                    if org_id == "org_test" { "org-1" } else { org_id },
+                )
+                .await
+        }
+    }
+
+    /// A policy whose server-resolved view cannot be read.
+    struct UnreadableViewPolicy;
+
+    #[tonic::async_trait]
+    impl crate::capability_policy::CapabilityPolicy for UnreadableViewPolicy {
+        async fn evaluate(
+            &self,
+            _tool_name: &str,
+            _run_id: &str,
+            _org_id: &str,
+        ) -> Result<crate::capability_policy::CapabilityDecision, Status> {
+            Ok(crate::capability_policy::CapabilityDecision::Allow)
+        }
+        async fn resolve_server_tool_definitions(
+            &self,
+            _run_id: &str,
+            _org_id: &str,
+        ) -> Result<Vec<pb::ToolDefinition>, Status> {
+            Err(Status::unavailable("the view is down"))
+        }
+    }
+
+    /// A transient outage of the server view refuses BEFORE the claim: the park is untouched
+    /// and a later attempt can still claim it.
+    #[tokio::test]
+    async fn loop_park_a_resolver_outage_refuses_before_the_claim() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let _on = hold(ParkKnobs::ON, SWITCH_ON);
+        park_through_run_agent(&rec, &ALLOW_CAPABILITY_POLICY, subscription_request()).await;
+        let run = run_agent_on(
+            &rec,
+            &plain_caller(),
+            &UnreadableViewPolicy,
+            park_resume_request(),
+            vec![Scripted::Answer("must not run".to_owned())],
+        )
+        .await;
+        let refused = run.result.expect_err("refused");
+        assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(refused.message(), "resume_checkpoint_unavailable");
+        let r = rec.lock().unwrap();
+        assert!(r.claim_calls.is_empty(), "zero claims");
+        assert!(r.close_calls.is_empty());
+        assert!(run.observed.lock().unwrap().is_empty());
+    }
+
+    /// Every refusal of the claim ends the request with a closed token of the gateway's
+    /// vocabulary, closes nothing, saves nothing and infers nothing. The two torn-fold
+    /// answers (a fold that did not authenticate, a request the store called malformed) are
+    /// `resume_checkpoint_unavailable`, NOT `park_not_restorable`: session-core rolls the claim
+    /// back, the row STAYS parked and the executor has no seq to close at, so the closed
+    /// refusal that says "the run stays parked" is the truthful one.
+    #[tokio::test]
+    async fn loop_park_park_claim_refusals_are_closed() {
+        let _on = hold(ParkKnobs::ON, SWITCH_ON);
+        let zdr_refusal = mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN
+            .grpc_status(tonic::Code::FailedPrecondition);
+        let cases: Vec<(Status, tonic::Code, &str)> = vec![
+            (
+                Status::aborted("loop_checkpoint_claim_held"),
+                tonic::Code::Aborted,
+                "continue_in_progress",
+            ),
+            (
+                Status::failed_precondition("loop_checkpoint_run_ended"),
+                tonic::Code::FailedPrecondition,
+                "not_resumable",
+            ),
+            (
+                Status::failed_precondition("loop_checkpoint_not_claimable"),
+                tonic::Code::FailedPrecondition,
+                "not_resumable",
+            ),
+            (
+                Status::permission_denied("not the owner"),
+                tonic::Code::PermissionDenied,
+                "resume_forbidden",
+            ),
+            (
+                Status::unauthenticated("no credential"),
+                tonic::Code::PermissionDenied,
+                "resume_forbidden",
+            ),
+            (
+                Status::failed_precondition("park_not_due"),
+                tonic::Code::FailedPrecondition,
+                "park_not_due",
+            ),
+            (
+                Status::failed_precondition("loop checkpoint did not authenticate"),
+                tonic::Code::FailedPrecondition,
+                "resume_checkpoint_unavailable",
+            ),
+            (
+                Status::invalid_argument("claim token is required"),
+                tonic::Code::FailedPrecondition,
+                "resume_checkpoint_unavailable",
+            ),
+            (
+                Status::failed_precondition("loop_checkpoint_disabled"),
+                tonic::Code::FailedPrecondition,
+                "resume_checkpoint_unavailable",
+            ),
+            (
+                Status::unavailable("session-core is down"),
+                tonic::Code::FailedPrecondition,
+                "resume_checkpoint_unavailable",
+            ),
+        ];
+        for (answer, code, token) in cases {
+            let rec: SharedRecorder = Arc::new(Mutex::new(Recorder {
+                claim_response: Some(Err(answer.clone())),
+                ..Recorder::default()
+            }));
+            let run = run_agent_on(
+                &rec,
+                &plain_caller(),
+                &ALLOW_CAPABILITY_POLICY,
+                park_resume_request(),
+                vec![Scripted::Answer("must not run".to_owned())],
+            )
+            .await;
+            let refused = run.result.expect_err(token);
+            assert_eq!(refused.code(), code, "{answer:?}");
+            assert_eq!(refused.message(), token, "{answer:?}");
+            let r = rec.lock().unwrap();
+            assert_eq!(r.claim_calls.len(), 1);
+            assert!(r.close_calls.is_empty(), "{token}: a refused claim closes nothing");
+            assert_eq!(r.loop_save_attempts, 0, "{token}");
+            assert!(run.observed.lock().unwrap().is_empty(), "{token}");
+        }
+        // The catalogue's zero-retention refusal is relayed as the catalogue's own.
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder {
+            claim_response: Some(Err(zdr_refusal)),
+            ..Recorder::default()
+        }));
+        let run = run_agent_on(
+            &rec,
+            &plain_caller(),
+            &ALLOW_CAPABILITY_POLICY,
+            park_resume_request(),
+            Vec::new(),
+        )
+        .await;
+        let refused = run.result.expect_err("zdr");
+        assert!(mp_contracts::zdr_refusal::Refusal::from_status(&refused).is_some());
+    }
+
+    /// A claimed fold that is not a park this executor wrote, or that it can no longer restore,
+    /// is closed (`park_not_restorable`, at the claimed seq) and refused, with nothing inferred.
+    /// One case per rule of `park::check_park_fold`, each against an otherwise faithful copy of
+    /// a park the production writer stored; among them, folds an approval pause, a round, a
+    /// segment or an in-place continuation would leave are never resumed through the park path.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn loop_park_a_structurally_unrestorable_park_is_closed_and_refused() {
+        use mp_contracts::loop_fold as lf;
+        type Edit = Box<dyn Fn(&mut pb::ClaimLoopCheckpointResponse)>;
+        let refold = |edit: fn(&mut lf::LoopFoldV1)| -> Edit {
+            Box::new(move |answer: &mut pb::ClaimLoopCheckpointResponse| {
+                let mut fold = lf::LoopFoldV1::from_bytes(&answer.fold).expect("a fold");
+                edit(&mut fold);
+                answer.fold = serde_json::to_vec(&fold).expect("serializes");
+                answer.segment_no = fold.segment_no;
+                answer.authority_digest = fold.authority.digest();
+            })
+        };
+        let cases: Vec<(&str, Edit)> = vec![
+            ("a pause row", Box::new(|a| a.kind = "pause".to_owned())),
+            ("another run's fold", refold(|f| f.run_id = "run_other".to_owned())),
+            ("a segment the row does not name", Box::new(|a| a.segment_no += 1)),
+            (
+                "a tombstone",
+                refold(|f| {
+                    f.extensions.insert(
+                        lf::EXT_NOT_RESUMABLE.to_owned(),
+                        serde_json::Value::String("content_refused".to_owned()),
+                    );
+                }),
+            ),
+            (
+                "a fold written with the ledger off",
+                refold(|f| {
+                    f.extensions.remove(lf::EXT_EFFECT_LEDGER);
+                }),
+            ),
+            ("a history without the system prompt", refold(|f| f.messages[0].role = "user".to_owned())),
+            ("a digest the authority does not have", Box::new(|a| a.authority_digest = "x".to_owned())),
+            (
+                "an approval pause relabelled as a park",
+                refold(|f| {
+                    f.pending = Some(lf::PendingPause {
+                        kind: lf::PauseKind::Approval,
+                        pause_ref: "run_test:tool_1_d1".to_owned(),
+                        step_id: "tool_1_d1".to_owned(),
+                        call: "delete_records".to_owned(),
+                        action_fingerprint: "fp".to_owned(),
+                    });
+                }),
+            ),
+            (
+                "a park pending that names a step",
+                refold(|f| {
+                    if let Some(pending) = f.pending.as_mut() {
+                        pending.step_id = "tool_1_d1".to_owned();
+                    }
+                }),
+            ),
+            (
+                "a park reference for another count",
+                refold(|f| {
+                    if let Some(pending) = f.pending.as_mut() {
+                        pending.pause_ref = lf::park_ref("run_test", 2);
+                    }
+                }),
+            ),
+            ("a round fold (no pending)", refold(|f| f.pending = None)),
+            (
+                "a fold with a round in flight (an in-place continuation's)",
+                refold(|f| {
+                    f.round_in_flight = Some(lf::RoundInFlight {
+                        assistant_content: String::new(),
+                        calls: Vec::new(),
+                        completed: Vec::new(),
+                    });
+                }),
+            ),
+            ("a Space's fold", refold(|f| f.authority.space_id = "space_1".to_owned())),
+            (
+                "a fold with no park count",
+                refold(|f| {
+                    f.extensions.remove(lf::EXT_PARKS);
+                    if let Some(pending) = f.pending.as_mut() {
+                        pending.pause_ref = lf::park_ref("run_test", 0);
+                    }
+                }),
+            ),
+            (
+                "a fold past the park cap",
+                refold(|f| {
+                    let over = lf::MAX_PARKS_PER_RUN + 1;
+                    f.extensions.insert(lf::EXT_PARKS.to_owned(), serde_json::Value::from(over));
+                    if let Some(pending) = f.pending.as_mut() {
+                        pending.pause_ref = lf::park_ref("run_test", over);
+                    }
+                }),
+            ),
+            ("a spent budget", refold(|f| f.rounds_executed = 4)),
+            ("no provider", refold(|f| f.authority.provider_hint.clear())),
+            (
+                "no recorded model",
+                refold(|f| {
+                    f.extensions.remove(lf::EXT_ROUTE_MODEL);
+                }),
+            ),
+            (
+                "no recorded connection",
+                refold(|f| {
+                    f.extensions.remove(lf::EXT_ROUTE_CONNECTION);
+                }),
+            ),
+            (
+                "no recorded ceiling",
+                refold(|f| {
+                    f.extensions.remove(lf::EXT_CHILD_CEILING);
+                }),
+            ),
+            (
+                "a zero ceiling",
+                refold(|f| {
+                    f.extensions
+                        .insert(lf::EXT_CHILD_CEILING.to_owned(), serde_json::Value::from(0));
+                }),
+            ),
+            ("a tool set that drifted", refold(|f| {
+                f.authority.tool_names.pop();
+            })),
+            ("a prompt that drifted", refold(|f| f.prompt_digest = "drifted".to_owned())),
+            ("bytes that are not a fold", Box::new(|a| a.fold = b"{not a fold".to_vec())),
+        ];
+        for (label, edit) in cases {
+            let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+            let _on = hold(ParkKnobs::ON, SWITCH_ON);
+            park_through_run_agent(&rec, &ALLOW_CAPABILITY_POLICY, subscription_request()).await;
+            let saves = {
+                let mut r = rec.lock().unwrap();
+                let mut answer = claimed_park_answer(&r, |_| {});
+                edit(&mut answer);
+                r.claim_response = Some(Ok(answer));
+                r.loop_saves.len()
+            };
+            let run = run_agent_on(
+                &rec,
+                &plain_caller(),
+                &ALLOW_CAPABILITY_POLICY,
+                park_resume_request(),
+                vec![Scripted::Answer("must not run".to_owned())],
+            )
+            .await;
+            let refused = run.result.expect_err(label);
+            assert_eq!(refused.code(), tonic::Code::FailedPrecondition, "{label}");
+            assert_eq!(refused.message(), "park_not_restorable", "{label}");
+            let r = rec.lock().unwrap();
+            assert_eq!(r.close_calls.len(), 1, "{label}: closed once");
+            assert_eq!(r.close_calls[0].reason, "park_not_restorable", "{label}");
+            assert_eq!(r.close_calls[0].seq, r.loop_seq, "{label}: at the claimed seq");
+            assert_eq!(r.loop_saves.len(), saves, "{label}: no fence");
+            assert!(run.observed.lock().unwrap().is_empty(), "{label}: zero inferences");
+            assert!(r.run_resumed_events.is_empty(), "{label}");
+        }
+    }
+
+    /// The route of a resumed park is the one the fold recorded, on every round; a route that
+    /// no longer resolves (here: the subscription switch is off) is `park_route_unavailable`,
+    /// never a default route, and closes nothing (the lease lapses and the park is terminalized
+    /// at its TTL); so is a rebuilt route that is not pinned.
+    #[tokio::test]
+    async fn loop_park_a_park_resume_rebuilds_the_pinned_route_or_refuses() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        {
+            let _on = hold(ParkKnobs::ON, SWITCH_ON);
+            park_through_run_agent(&rec, &ALLOW_CAPABILITY_POLICY, subscription_request()).await;
+        }
+        let saves = rec.lock().unwrap().loop_saves.len();
+        {
+            let _off = hold(ParkKnobs::ON, Switches::default());
+            let run = run_agent_on(
+                &rec,
+                &plain_caller(),
+                &ALLOW_CAPABILITY_POLICY,
+                park_resume_request(),
+                vec![Scripted::Answer("must not run".to_owned())],
+            )
+            .await;
+            let refused = run.result.expect_err("no route");
+            assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+            assert_eq!(refused.message(), "park_route_unavailable");
+            assert!(run.observed.lock().unwrap().is_empty(), "never a default route");
+            let r = rec.lock().unwrap();
+            assert!(r.close_calls.is_empty(), "nothing is closed");
+            assert_eq!(r.loop_saves.len(), saves, "no fence");
+        }
+
+        // A rebuilt request that is not pinned (no route at all) is refused the same way.
+        let _on = hold(ParkKnobs::ON, SWITCH_ON);
+        let claimed = {
+            let r = rec.lock().unwrap();
+            let answer = claimed_park_answer(&r, |_| {});
+            runtime_loop::resume::ClaimedFold {
+                seq: answer.seq,
+                authority_digest: answer.authority_digest,
+                kind: answer.kind,
+                segment: answer.segment_no,
+                fold: mp_contracts::loop_fold::LoopFoldV1::from_bytes(&answer.fold)
+                    .expect("a fold"),
+            }
+        };
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let observed: ObservedRoutes = Arc::new(Mutex::new(Vec::new()));
+        let inference_channel =
+            spawn_inference_channel_with_routes(Vec::new(), observed.clone(), Serving::Echo).await;
+        let state = crate::state::StateStore::new();
+        let refused = run_agent_with_offered(
+            &state,
+            session_channel,
+            inference_channel,
+            &plain_caller(),
+            park_resume_request(),
+            OfferedTools {
+                defs: base_tool_defs(false),
+                derivable: true,
+            },
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
+            Some(runtime_loop::park::ParkClaimed { claimed }),
+        )
+        .await
+        .expect_err("an unpinned rebuild is refused");
+        assert_eq!(refused.message(), "park_route_unavailable");
+        assert!(observed.lock().unwrap().is_empty());
+
+        // And the faithful rebuild: every resumed round carries the fold's route.
+        let run = run_agent_on(
+            &rec,
+            &plain_caller(),
+            &ALLOW_CAPABILITY_POLICY,
+            park_resume_request(),
+            vec![read_round(&["w2"]), Scripted::Answer("done".to_owned())],
+        )
+        .await;
+        assert_eq!(run.result.expect("resumed").status, "completed");
+        assert_eq!(*run.observed.lock().unwrap(), vec![pinned_round(), pinned_round()]);
+    }
+
+    /// A claimant that loses the fence (another one won it, or the store refuses it) infers
+    /// nothing and dispatches nothing: the request ends with the fence's closed token.
+    #[tokio::test]
+    async fn loop_park_a_lost_fence_infers_and_dispatches_nothing() {
+        for (status, token) in [
+            (Status::aborted("loop_checkpoint_stale"), "resume_checkpoint_unavailable"),
+            (Status::permission_denied("not the owner"), "resume_forbidden"),
+        ] {
+            let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+            let _on = hold(ParkKnobs::ON, SWITCH_ON);
+            park_through_run_agent(&rec, &ALLOW_CAPABILITY_POLICY, subscription_request()).await;
+            let steps_at_park = {
+                let mut r = rec.lock().unwrap();
+                r.loop_save_failures
+                    .push(failing_save("pre_effect", 1, status, false));
+                r.completed.len()
+            };
+            let run = run_agent_on(
+                &rec,
+                &plain_caller(),
+                &ALLOW_CAPABILITY_POLICY,
+                park_resume_request(),
+                vec![read_round(&["w2"]), Scripted::Answer("must not run".to_owned())],
+            )
+            .await;
+            let refused = run.result.expect_err(token);
+            assert_eq!(refused.message(), token);
+            assert!(run.observed.lock().unwrap().is_empty(), "{token}: zero inferences");
+            let r = rec.lock().unwrap();
+            assert_eq!(r.completed.len(), steps_at_park, "{token}: nothing dispatched");
+            assert!(r.reservations.is_empty(), "{token}");
+            assert!(r.run_resumed_events.is_empty(), "{token}: not resumed");
+            assert!(root_receipts(&r).is_empty(), "{token}: no receipt");
+        }
+    }
+
+    /// The resumed run is budgeted by the fold it was parked under, not by the request (the
+    /// gateway states none, which would be the default of 12): a run parked under 4 rounds
+    /// stops at 4, and one parked under 20 runs to 20.
+    #[tokio::test]
+    async fn loop_park_a_park_resume_keeps_the_folds_round_budget() {
+        for budget in [4_u32, 20] {
+            let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+            let _on = hold(ParkKnobs::ON, SWITCH_ON);
+            park_through_run_agent(&rec, &ALLOW_CAPABILITY_POLICY, pinned_with_rounds(budget))
+                .await;
+            let parked_rounds = the_park(&rec.lock().unwrap()).fold().rounds_executed;
+            let endless: Vec<Scripted> = (0..30)
+                .map(|index| read_round(&[&format!("wx-{index}")]))
+                .collect();
+            let run = run_agent_on(
+                &rec,
+                &plain_caller(),
+                &ALLOW_CAPABILITY_POLICY,
+                park_resume_request(),
+                endless,
+            )
+            .await;
+            let response = run.result.expect("finalized");
+            assert_eq!(response.status, "failed", "budget {budget}: it ran out of rounds");
+            assert_eq!(response.rounds_executed, budget, "budget {budget}");
+            assert_eq!(
+                run.observed.lock().unwrap().len(),
+                (budget - parked_rounds) as usize,
+                "budget {budget}: only the rounds the fold had left"
+            );
+        }
+    }
+
+    /// The sub-agent ceiling of a resumed park is never wider than the one the fold recorded:
+    /// the request may narrow it, never widen it. Read back from the park the resumed run
+    /// takes next, which records the ceiling it ran under.
+    #[tokio::test]
+    async fn loop_park_a_park_resume_clamps_the_child_ceiling_to_the_fold() {
+        for (parked_under, requested, expected) in [(2_u32, 5_u32, 2_u32), (4, 1, 1), (3, 0, 3), (20, 0, 20)] {
+            let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+            let _on = hold(ParkKnobs::ON, SWITCH_ON);
+            park_through_run_agent(
+                &rec,
+                &ALLOW_CAPABILITY_POLICY,
+                pb::RunAgentRequest {
+                    max_subagents: parked_under,
+                    ..pinned_with_rounds(8)
+                },
+            )
+            .await;
+            assert_eq!(
+                mp_contracts::loop_fold::child_ceiling_in(&the_park(&rec.lock().unwrap()).fold()),
+                Some(parked_under)
+            );
+            let run = run_agent_on(
+                &rec,
+                &plain_caller(),
+                &ALLOW_CAPABILITY_POLICY,
+                pb::RunAgentRequest {
+                    max_subagents: requested,
+                    ..park_resume_request()
+                },
+                vec![usage_limit_due_now()],
+            )
+            .await;
+            assert_eq!(run.result.expect("parked again").status, "parked");
+            let r = rec.lock().unwrap();
+            let again = r.loop_saves.last().expect("the second park").fold();
+            assert_eq!(
+                mp_contracts::loop_fold::child_ceiling_in(&again),
+                Some(expected),
+                "parked under {parked_under}, asked for {requested}"
+            );
+        }
+    }
+
+    /// A resumed park may park again (the count rides on), and then finish: two parks, two
+    /// resumes, ONE terminal receipt, and each resume a segment of its own.
+    #[tokio::test]
+    async fn loop_park_a_resumed_park_can_park_again_and_then_finishes_with_one_receipt() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let _on = hold(ParkKnobs::ON, SWITCH_ON);
+        park_through_run_agent(&rec, &ALLOW_CAPABILITY_POLICY, pinned_with_rounds(8)).await;
+        let again = run_agent_on(
+            &rec,
+            &plain_caller(),
+            &ALLOW_CAPABILITY_POLICY,
+            park_resume_request(),
+            vec![read_round(&["w2"]), usage_limit_due_now()],
+        )
+        .await;
+        let response = again.result.expect("parked again");
+        assert_eq!(response.status, "parked");
+        assert_eq!(response.park_reason, "provider_exhausted");
+        {
+            let r = rec.lock().unwrap();
+            let second = r.loop_saves.last().expect("the second park");
+            assert_eq!(second.kind, "park");
+            assert_eq!(second.pause_ref, "park:run_test:2");
+            let fold = second.fold();
+            assert_eq!(mp_contracts::loop_fold::parks_in(&fold), 2);
+            assert_eq!(fold.segment_no, 2, "written by the resumed segment");
+            assert!(root_receipts(&r).is_empty(), "a parked run has no receipt yet");
+        }
+        let done = run_agent_on(
+            &rec,
+            &plain_caller(),
+            &ALLOW_CAPABILITY_POLICY,
+            park_resume_request(),
+            vec![Scripted::Answer("finally".to_owned())],
+        )
+        .await;
+        let response = done.result.expect("finished");
+        assert_eq!(response.status, "completed");
+        let r = rec.lock().unwrap();
+        assert_eq!(root_receipts(&r).len(), 1, "one receipt across two parks and two resumes");
+        assert_eq!(
+            r.run_resumed_events,
+            vec![("run_test".to_owned(), 2), ("run_test".to_owned(), 3)]
+        );
+        assert_eq!(r.run_parked_events.len(), 2);
+        assert_eq!(r.appended_assistant, vec!["finally".to_owned()]);
+    }
+
+    /// THE PARK CAP across resumes: a resume's count is seeded from the CLAIMED fold, so a run
+    /// that has already parked `MAX_PARKS_PER_RUN` times cannot park again; it keeps the
+    /// committed outcome. One fewer, and it parks once more, as the last one.
+    #[tokio::test]
+    async fn loop_park_a_park_resume_at_the_cap_cannot_park_again() {
+        use mp_contracts::loop_fold as lf;
+        for (parks, parks_again) in [
+            (lf::MAX_PARKS_PER_RUN, false),
+            (lf::MAX_PARKS_PER_RUN - 1, true),
+        ] {
+            let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+            let _on = hold(ParkKnobs::ON, SWITCH_ON);
+            park_through_run_agent(&rec, &ALLOW_CAPABILITY_POLICY, pinned_with_rounds(8)).await;
+            let attempts = {
+                let mut r = rec.lock().unwrap();
+                let answer = claimed_park_answer(&r, |fold| {
+                    fold.extensions
+                        .insert(lf::EXT_PARKS.to_owned(), serde_json::Value::from(parks));
+                    if let Some(pending) = fold.pending.as_mut() {
+                        pending.pause_ref = lf::park_ref("run_test", parks);
+                    }
+                });
+                r.claim_response = Some(Ok(answer));
+                park_attempts(&r)
+            };
+            let run = run_agent_on(
+                &rec,
+                &plain_caller(),
+                &ALLOW_CAPABILITY_POLICY,
+                park_resume_request(),
+                vec![usage_limit_due_now()],
+            )
+            .await;
+            let response = run.result.expect("a response");
+            let r = rec.lock().unwrap();
+            if parks_again {
+                assert_eq!(response.status, "parked", "{response:?}");
+                let last = r.loop_saves.last().expect("the park");
+                assert_eq!(last.pause_ref, lf::park_ref("run_test", lf::MAX_PARKS_PER_RUN));
+            } else {
+                assert_eq!(response.status, "failed", "{response:?}");
+                assert_eq!(response.failure_code, "subscription_usage_limit");
+                assert_eq!(park_attempts(&r), attempts, "no park was attempted at the cap");
+                // The committed receipt of a spent usage limit.
+                assert_eq!(root_receipts(&r), failed_receipt("provider_unavailable"));
+            }
+        }
     }
 }

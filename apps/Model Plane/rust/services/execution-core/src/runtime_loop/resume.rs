@@ -332,17 +332,11 @@ pub(crate) enum Refusal {
     DurableMutationForbidden,
     /// The run's parked fold cannot be restored (it is structurally unusable, or the tools
     /// the run would offer no longer match the fold's): the fold is closed, never re-routed.
-    // Built by the park resume (WS03 S8-6), which removes this allow.
-    #[allow(dead_code)]
     ParkNotRestorable,
     /// The parked run's pinned route cannot be rebuilt (the connection or model is gone, or
     /// the route is no longer pinned): never a default route.
-    // Built by the park resume (WS03 S8-6), which removes this allow.
-    #[allow(dead_code)]
     ParkRouteUnavailable,
     /// The park is not yet due: its earliest resume time has not passed. The run stays parked.
-    // Built by the park resume (WS03 S8-6), which removes this allow.
-    #[allow(dead_code)]
     ParkNotDue,
 }
 
@@ -385,8 +379,9 @@ impl Refusal {
 }
 
 /// The round budget a request or a pause resolves to: zero means the default,
-/// and nothing exceeds the ceiling (the same rule the loop applies).
-fn resolved_max_rounds(raw: u32) -> u32 {
+/// and nothing exceeds the ceiling (the same rule the loop applies). A park resume
+/// (WS03 S8-6) runs under the parked fold's own resolved budget.
+pub(crate) fn resolved_max_rounds(raw: u32) -> u32 {
     if raw == 0 {
         super::agent::DEFAULT_MAX_ROUNDS
     } else {
