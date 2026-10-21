@@ -1,0 +1,212 @@
+{
+  "src/features/agents/components/AgentRoleSurfaces.tsx": {
+    "no-restricted-syntax": {
+      "count": 32
+    }
+  },
+  "src/features/agents/components/AgentRunConsole.tsx": {
+    "no-restricted-syntax": {
+      "count": 1
+    }
+  },
+  "src/features/agents/components/AgentsPage.tsx": {
+    "no-restricted-syntax": {
+      "count": 11
+    }
+  },
+  "src/features/agents/components/AgentsVisuals.tsx": {
+    "no-restricted-syntax": {
+      "count": 3
+    }
+  },
+  "src/features/agents/components/AgentsWorkspacePrimitives.tsx": {
+    "no-restricted-syntax": {
+      "count": 14
+    }
+  },
+  "src/features/agents/components/ChatbotPlayground.tsx": {
+    "no-restricted-syntax": {
+      "count": 42
+    }
+  },
+  "src/features/agents/components/ChatbotStudio.tsx": {
+    "no-restricted-syntax": {
+      "count": 48
+    }
+  },
+  "src/features/agents/components/ChatbotStudioCards.tsx": {
+    "no-restricted-syntax": {
+      "count": 22
+    }
+  },
+  "src/features/agents/components/ChatbotStudioPrimitives.tsx": {
+    "no-restricted-syntax": {
+      "count": 23
+    }
+  },
+  "src/features/agents/components/DesignPreviewBadge.tsx": {
+    "no-restricted-syntax": {
+      "count": 2
+    }
+  },
+  "src/features/agents/components/FleetRunConsole.tsx": {
+    "no-restricted-syntax": {
+      "count": 2
+    }
+  },
+  "src/features/agents/components/WorkflowBrandMark.tsx": {
+    "no-restricted-syntax": {
+      "count": 11
+    }
+  },
+  "src/features/agents/components/WorkflowBuilder.tsx": {
+    "no-restricted-syntax": {
+      "count": 4
+    }
+  },
+  "src/features/agents/components/WorkflowCanvas.tsx": {
+    "no-restricted-syntax": {
+      "count": 13
+    }
+  },
+  "src/features/agents/components/WorkflowInspector.tsx": {
+    "no-restricted-syntax": {
+      "count": 19
+    }
+  },
+  "src/features/agents/components/WorkflowToolsPanel.tsx": {
+    "no-restricted-syntax": {
+      "count": 11
+    }
+  },
+  "src/features/agents/lib/agent-roles.ts": {
+    "no-restricted-syntax": {
+      "count": 81
+    }
+  },
+  "src/features/agents/lib/use-chatbot-support-status.ts": {
+    "no-restricted-syntax": {
+      "count": 1
+    }
+  },
+  "src/features/agents/lib/verevon-agent-blueprints.tsx": {
+    "no-restricted-syntax": {
+      "count": 427
+    }
+  },
+  "src/features/agents/lib/verevon-agent-page-styles.ts": {
+    "no-restricted-syntax": {
+      "count": 13
+    }
+  },
+  "src/features/agents/lib/verevon-agent-surface-data.ts": {
+    "no-restricted-syntax": {
+      "count": 46
+    }
+  },
+  "src/features/agents/lib/verevon-chatbot-studio-data.ts": {
+    "no-restricted-syntax": {
+      "count": 20
+    }
+  },
+  "src/features/agents/lib/verevon-workflow-builder-data.ts": {
+    "no-restricted-syntax": {
+      "count": 40
+    }
+  },
+  "src/features/chat/components/ChatAttachmentCanvas.tsx": {
+    "no-restricted-syntax": {
+      "count": 4
+    }
+  },
+  "src/features/chat/components/ChatChart.tsx": {
+    "no-restricted-syntax": {
+      "count": 5
+    }
+  },
+  "src/features/chat/components/ChatLiveRunPanel.tsx": {
+    "no-restricted-syntax": {
+      "count": 25
+    }
+  },
+  "src/features/chat/components/ChatMessages.tsx": {
+    "no-restricted-syntax": {
+      "count": 37
+    }
+  },
+  "src/features/chat/components/ChatPage.tsx": {
+    "no-restricted-syntax": {
+      "count": 4
+    }
+  },
+  "src/features/chat/components/ChatPanels.tsx": {
+    "no-restricted-syntax": {
+      "count": 34
+    }
+  },
+  "src/features/chat/components/chat-artifacts.ts": {
+    "no-restricted-syntax": {
+      "count": 1
+    }
+  },
+  "src/features/chat/components/chat-media-markdown.tsx": {
+    "no-restricted-syntax": {
+      "count": 12
+    }
+  },
+  "src/features/chat/components/chat-normalizers.ts": {
+    "no-restricted-syntax": {
+      "count": 35
+    }
+  },
+  "src/features/chat/components/chat-types.ts": {
+    "no-restricted-syntax": {
+      "count": 9
+    }
+  },
+  "src/features/chat/components/use-chat-controller.ts": {
+    "no-restricted-syntax": {
+      "count": 15
+    }
+  },
+  "src/features/chat/lib/brreg-action.ts": {
+    "no-restricted-syntax": {
+      "count": 3
+    }
+  },
+  "src/features/chat/lib/chat-chart/spec.ts": {
+    "no-restricted-syntax": {
+      "count": 1
+    }
+  },
+  "src/features/chat/lib/chat-export/print.ts": {
+    "no-restricted-syntax": {
+      "count": 1
+    }
+  },
+  "src/features/chat/lib/chat-run-watch.ts": {
+    "no-restricted-syntax": {
+      "count": 12
+    }
+  },
+  "src/features/chat/lib/chat-surfaces.ts": {
+    "no-restricted-syntax": {
+      "count": 12
+    }
+  },
+  "src/features/chat/lib/prepare-chat-attachments.ts": {
+    "no-restricted-syntax": {
+      "count": 1
+    }
+  },
+  "src/features/chat/lib/run-park.ts": {
+    "no-restricted-syntax": {
+      "count": 5
+    }
+  },
+  "src/features/chat/lib/stream-activity.ts": {
+    "no-restricted-syntax": {
+      "count": 3
+    }
+  }
+}

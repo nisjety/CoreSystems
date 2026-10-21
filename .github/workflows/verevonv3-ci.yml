@@ -192,6 +192,64 @@ jobs:
       - name: Verify (lint -> typecheck -> test -> build)
         run: pnpm verify
 
+  # UI copy and raw-colour gate for the chat and agents surfaces, plus every
+  # product file this change adds under src/. It is its own job so a red
+  # spa-verify (lint, typecheck, tests) cannot hide it. Existing findings are
+  # baselined in eslint-suppressions.json: the ESLint CLI fails when the tree has
+  # more findings than the baseline (a new leak) or fewer (a fixed leak that was
+  # not pruned from the baseline in the same change).
+  spa-ui-gates:
+    name: SPA — UI copy and raw-colour gates
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: 'apps/Frontend Plane/verevonv3'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The new-file scan diffs against the base commit, so it needs history.
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: '11.3.0'
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+          cache-dependency-path: 'apps/Frontend Plane/verevonv3/pnpm-lock.yaml'
+
+      # Same as spa-verify: package.json depends on the generated Quarry SDK by
+      # file: path, so the install cannot resolve without it.
+      - name: Generate and build the Quarry TypeScript SDK
+        working-directory: 'apps/Ingestion Plane/Quarry-v2/sdks'
+        run: |
+          ./generate.sh
+          cd typescript
+          pnpm install --ignore-scripts
+          pnpm run build
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Chat and agents against the baseline
+        run: pnpm exec eslint -c eslint.ui-gates.config.js src
+
+      - name: Product files this change adds
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          base="${PR_BASE_SHA:-$PUSH_BEFORE_SHA}"
+          # A push that creates the branch has no previous tip to diff against.
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+            base=HEAD~1
+          fi
+          node scripts/ui-gates-new-files.mjs "$base"
+
   docker-image:
     name: Docker — production SPA image
     runs-on: ubuntu-latest
