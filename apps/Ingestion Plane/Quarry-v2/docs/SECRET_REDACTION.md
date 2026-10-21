@@ -129,7 +129,7 @@ that the loader joins, so no secret-shaped literal sits in the repository (and
 `.gitleaks.toml` is not edited). It holds 36 positive cases (18 `live`, 18
 `durable`), 27 negative cases (a 16-digit order number failing Luhn, a UUID, a
 40-hex sha, a 64-hex hash, "pin the tab", a byte-identical `status=completed`
-line, ...), 7 JSON cases and 30 field cases. The positive, negative and JSON cases list `applies_to`
+line, ...), 10 JSON cases and 30 field cases. The positive, negative and JSON cases list `applies_to`
 (`quarry`, `mp`); the field cases do not (they are `quarry` only). `mp` is the set
 the Model Plane scrubber will run: the `live` shapes and the negatives that guard
 its over-redaction.
