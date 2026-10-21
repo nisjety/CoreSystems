@@ -151,9 +151,13 @@ pub(super) fn sensitive_approval_for_action(
 
 pub(super) async fn validate_sensitive_approval(
     state: &AppState,
+    org_id: &str,
     approval: &SensitiveApproval,
 ) -> QuarryResult<()> {
-    let grant = state.grant_validator.validate(&approval.grant_id).await?;
+    let grant = state
+        .grant_validator
+        .validate_for_org(org_id, &approval.grant_id)
+        .await?;
     if !grant.is_usable() {
         Err(QuarryError::new(
             ErrorCode::SecurityBlocked,

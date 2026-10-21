@@ -215,7 +215,7 @@ pub async fn start_run(
     if let Some(grant_id) = grant_id.as_deref() {
         let grant = state
             .grant_validator
-            .validate(grant_id)
+            .validate_for_org(&org_id, grant_id)
             .await
             .map_err(|error| driver_err(&request_id, error))?;
         if !grant.is_usable() {

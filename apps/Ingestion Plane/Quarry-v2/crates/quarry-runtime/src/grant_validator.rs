@@ -177,6 +177,22 @@ impl GrantValidation {
 #[async_trait]
 pub trait GrantValidator: Send + Sync {
     async fn validate(&self, grant_id: &str) -> QuarryResult<GrantValidation>;
+
+    /// Validate `grant_id` on behalf of `org_id`, the organization of the
+    /// verified run (never one taken from a request body). A validator that
+    /// can bind the call to an organization (the broker, with a service token
+    /// minted for that org) overrides this; the default ignores the org and
+    /// delegates to [`GrantValidator::validate`], so every existing validator
+    /// keeps its behaviour. Callers on the agent routes always use this
+    /// method, so the org reaches the validator on every check.
+    async fn validate_for_org(
+        &self,
+        org_id: &str,
+        grant_id: &str,
+    ) -> QuarryResult<GrantValidation> {
+        let _ = org_id;
+        self.validate(grant_id).await
+    }
 }
 
 /// Always-allow validator. Useful for dev, internal-only edges, and tests.
@@ -396,6 +412,33 @@ mod tests {
         let v = NoopGrantValidator;
         let result = v.validate("any").await.unwrap();
         assert!(result.is_usable());
+    }
+
+    /// A validator that only knows `validate`: `validate_for_org` reaches it
+    /// through the default body, with the grant id unchanged.
+    #[tokio::test]
+    async fn default_validate_for_org_delegates_to_validate() {
+        struct PlainOnly(std::sync::Mutex<Vec<String>>);
+        #[async_trait]
+        impl GrantValidator for PlainOnly {
+            async fn validate(&self, grant_id: &str) -> QuarryResult<GrantValidation> {
+                self.0.lock().unwrap().push(grant_id.to_owned());
+                NoopGrantValidator.validate(grant_id).await
+            }
+        }
+        let plain = PlainOnly(std::sync::Mutex::new(Vec::new()));
+        let grant = plain.validate_for_org("org-a", "grant-1").await.unwrap();
+        assert_eq!(grant.grant_id, "grant-1");
+        assert!(grant.is_usable());
+        assert_eq!(*plain.0.lock().unwrap(), vec!["grant-1".to_owned()]);
+
+        // An empty org is not this method's business: the default does not
+        // invent a refusal, and the validator it delegates to keeps its own.
+        let noop = NoopGrantValidator
+            .validate_for_org("", "grant-2")
+            .await
+            .unwrap();
+        assert_eq!(noop.grant_id, "grant-2");
     }
 
     #[tokio::test]

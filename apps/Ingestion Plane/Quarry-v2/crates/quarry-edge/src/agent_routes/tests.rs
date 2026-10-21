@@ -2130,3 +2130,57 @@ fn validated_grant_overrides_client_domains_in_every_mode() {
     assert_eq!(bind_validated_grant(&hostless, &claims, false), Ok(None));
     assert!(bind_validated_grant(&hostless, &claims, true).is_err());
 }
+
+/// The approval grant is validated for the run's organization, handed down from
+/// the verified run (`entry.org_id`), never read from the approval itself.
+#[tokio::test]
+async fn sensitive_approval_is_validated_for_the_runs_org() {
+    use quarry_runtime::grant_validator::{GrantValidation, GrantValidator};
+
+    struct Recording(std::sync::Mutex<Vec<(String, String)>>);
+    #[async_trait::async_trait]
+    impl GrantValidator for Recording {
+        async fn validate(&self, grant_id: &str) -> QuarryResult<GrantValidation> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(("<plain>".into(), grant_id.into()));
+            Err(QuarryError::new(ErrorCode::Internal, "org-blind call"))
+        }
+        async fn validate_for_org(
+            &self,
+            org_id: &str,
+            grant_id: &str,
+        ) -> QuarryResult<GrantValidation> {
+            self.0.lock().unwrap().push((org_id.into(), grant_id.into()));
+            Ok(serde_json::from_value(serde_json::json!({
+                "grant_id": grant_id,
+                "active": true,
+                "kind": "sensitive_approval",
+                "allowed_actions": ["respond_dialog"],
+                "allowed_dialog_ids": ["dlg_1"],
+                "parent_grant_id": "grant_run_1",
+            }))
+            .unwrap())
+        }
+    }
+
+    let recording = Arc::new(Recording(std::sync::Mutex::new(Vec::new())));
+    let mut state = test_state_with_static_driver();
+    state.grant_validator = recording.clone();
+    let approval = SensitiveApproval {
+        grant_id: "grant_approval_1".into(),
+        parent_grant_id: "grant_run_1".into(),
+        action: "respond_dialog",
+        frame_id: None,
+        dialog_id: Some("dlg_1".into()),
+        artifact_id: None,
+    };
+    validate_sensitive_approval(&state, "org-of-the-run", &approval)
+        .await
+        .expect("the approval grant matches the observed action");
+    assert_eq!(
+        *recording.0.lock().unwrap(),
+        vec![("org-of-the-run".to_owned(), "grant_approval_1".to_owned())]
+    );
+}

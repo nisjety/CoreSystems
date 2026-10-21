@@ -142,8 +142,13 @@ pub async fn new_tab(
     // do not let it bypass the per-action broker revalidation that normal
     // REST/WebSocket steps receive.
     if let Some(grant_id) = entry.grant_id.as_deref() {
-        validate_run_grant(&state, grant_id, &entry.constraints.allowed_domains)
-            .await
+        validate_run_grant(
+            &state,
+            &entry.org_id,
+            grant_id,
+            &entry.constraints.allowed_domains,
+        )
+        .await
             .map_err(|error| driver_err(&request_id, error))?;
     } else if state.require_browser_grants {
         return Err(status_err(

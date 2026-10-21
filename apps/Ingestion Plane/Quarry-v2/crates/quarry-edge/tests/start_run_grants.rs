@@ -45,6 +45,72 @@ impl GrantValidator for FakeBroker {
     }
 }
 
+/// A broker that records which organization every validation was made for.
+/// `validate` (the org-blind call) is recorded as `<plain>`, so a call site
+/// that skipped `validate_for_org` shows up in the assertions.
+struct RecordingBroker {
+    grants: HashMap<String, GrantValidation>,
+    calls: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+}
+
+#[async_trait]
+impl GrantValidator for RecordingBroker {
+    async fn validate(&self, grant_id: &str) -> QuarryResult<GrantValidation> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(("<plain>".to_owned(), grant_id.to_owned()));
+        self.grants
+            .get(grant_id)
+            .cloned()
+            .ok_or_else(|| QuarryError::new(ErrorCode::NotFound, "unknown browser grant"))
+    }
+
+    async fn validate_for_org(
+        &self,
+        org_id: &str,
+        grant_id: &str,
+    ) -> QuarryResult<GrantValidation> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push((org_id.to_owned(), grant_id.to_owned()));
+        self.validate_inner(grant_id)
+    }
+}
+
+impl RecordingBroker {
+    fn validate_inner(&self, grant_id: &str) -> QuarryResult<GrantValidation> {
+        self.grants
+            .get(grant_id)
+            .cloned()
+            .ok_or_else(|| QuarryError::new(ErrorCode::NotFound, "unknown browser grant"))
+    }
+}
+
+/// An edge whose broker records the organization of every validation.
+async fn recording_edge(
+    grants: Vec<GrantValidation>,
+    require: bool,
+) -> (Edge, Arc<std::sync::Mutex<Vec<(String, String)>>>) {
+    let calls: Arc<std::sync::Mutex<Vec<(String, String)>>> = Arc::default();
+    let broker = RecordingBroker {
+        grants: grants
+            .into_iter()
+            .map(|grant| (grant.grant_id.clone(), grant))
+            .collect(),
+        calls: calls.clone(),
+    };
+    let edge = Edge::start_with(RunLimits::default(), move |state| {
+        let mut state = state;
+        state.grant_validator = Arc::new(broker);
+        state.require_browser_grants = require;
+        state
+    })
+    .await;
+    (edge, calls)
+}
+
 /// A usable grant. Every field not named here is the broker's default (empty).
 fn grant(id: &str, tweak: impl FnOnce(&mut serde_json::Map<String, Value>)) -> GrantValidation {
     let mut fields = json!({ "grant_id": id, "active": true })
@@ -348,4 +414,84 @@ async fn known_gap_a_service_principal_is_not_bound_to_the_grants_owner() {
         assert_eq!(started.status, 200, "require={require}: {}", started.body);
         assert_eq!(edge.driver.acquired().len(), 1, "require={require}");
     }
+}
+
+/// The organization reaches the validator on every check of a run's grant: at
+/// start (the caller's org), on a step, and when a tab is opened (the run's org,
+/// never a body's). The org-blind `validate` is never called on these routes.
+/// Both modes. (WS1.A2: the broker binds the call to this org once a service
+/// token is minted for it.)
+#[tokio::test]
+async fn the_runs_grant_is_validated_for_the_runs_org_at_start_step_and_new_tab() {
+    for require in [false, true] {
+        let (edge, calls) = recording_edge(
+            vec![grant("grant-org", |fields| {
+                fields.insert("owner_id".into(), json!("user-golden"));
+                fields.insert("allowed_domains".into(), json!(["example.com"]));
+            })],
+            require,
+        )
+        .await;
+        let person = member_token();
+
+        let run = edge
+            .start_run(&person, start_body("grant-org", None))
+            .await;
+        let after_start = calls.lock().unwrap().len();
+        assert_eq!(after_start, 1, "require={require}: one validation at start");
+
+        // The recording driver's page is on no allowed host, so the step may end
+        // in the post-action host check; the grant check is before it and is
+        // what this test is about, so the replies' statuses are not asserted.
+        let _ = edge.step(&person, &run, wait_action(), None).await;
+        let after_step = calls.lock().unwrap().len();
+        assert_eq!(after_step, 2, "require={require}: the step validates once");
+        let _ = edge.new_tab(&person, &run, None).await;
+
+        let seen = calls.lock().unwrap().clone();
+        assert!(
+            seen.len() == 3,
+            "require={require}: start, step and new tab each validate once: {seen:?}"
+        );
+        for (org, grant_id) in &seen {
+            assert_eq!(
+                (org.as_str(), grant_id.as_str()),
+                ("org-standard-golden", "grant-org"),
+                "require={require}: every validation names the run's org: {seen:?}"
+            );
+        }
+    }
+}
+
+/// A caller of another organization is refused before the broker is asked about
+/// the run's grant on a step, so a foreign org never reaches the validator with
+/// the run's grant id.
+#[tokio::test]
+async fn another_orgs_caller_never_reaches_the_validator_for_a_run_it_does_not_own() {
+    let (edge, calls) = recording_edge(
+        vec![grant("grant-org", |fields| {
+            fields.insert("owner_id".into(), json!("user-golden"));
+            fields.insert("allowed_domains".into(), json!(["example.com"]));
+        })],
+        true,
+    )
+    .await;
+    let run = edge
+        .start_run(&member_token(), start_body("grant-org", None))
+        .await;
+    let before = calls.lock().unwrap().len();
+    let refused = edge
+        .step(&stranger_token(), &run, wait_action(), None)
+        .await;
+    assert!(
+        refused.status == 403 || refused.status == 404,
+        "{}: {}",
+        refused.status,
+        refused.body
+    );
+    assert_eq!(
+        calls.lock().unwrap().len(),
+        before,
+        "the validator was not asked on behalf of a stranger"
+    );
 }

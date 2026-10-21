@@ -32,10 +32,11 @@ pub(super) async fn validate_navigation(
 /// while retaining a broader client-supplied `allowed_domains` list.
 pub(super) async fn validate_run_grant(
     state: &AppState,
+    org_id: &str,
     grant_id: &str,
     run_domains: &[String],
 ) -> QuarryResult<()> {
-    let grant = state.grant_validator.validate(grant_id).await?;
+    let grant = state.grant_validator.validate_for_org(org_id, grant_id).await?;
     if !grant.is_usable() {
         return Err(QuarryError::new(
             ErrorCode::SecurityBlocked,
@@ -368,7 +369,13 @@ pub(super) async fn admit_action(
 
     // 4. grant
     if let Some(grant_id) = entry.grant_id.as_deref() {
-        validate_run_grant(state, grant_id, &entry.constraints.allowed_domains).await?;
+        validate_run_grant(
+            state,
+            &entry.org_id,
+            grant_id,
+            &entry.constraints.allowed_domains,
+        )
+        .await?;
     } else if state.require_browser_grants {
         return Err(QuarryError::new(
             ErrorCode::Forbidden,
@@ -393,7 +400,7 @@ pub(super) async fn admit_action(
 
     // 10. sensitive approval (the only gate that consumes state)
     if let Some(approval) = sensitive_approval_for_action(entry, action)? {
-        validate_sensitive_approval(state, &approval).await?;
+        validate_sensitive_approval(state, &entry.org_id, &approval).await?;
         if !entry
             .used_sensitive_approval_grants
             .insert(approval.grant_id)
