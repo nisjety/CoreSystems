@@ -2,9 +2,9 @@
 //!
 //! Subscribes to `tools.completions.*`, decodes JSON payloads, and inserts a
 //! `STEP_COMPLETED` row into the `events` table with
-//! `org_id`/`user_id` hydrated from the `runs` table. Only `STEP_COMPLETED` is stored (a message
+//! `org_id`/`user_id` taken from the `runs` table. Only `STEP_COMPLETED` is stored (a message
 //! of any other event type is refused), and every row names the tool-completion producer and type
-//! URL, whatever the publisher sent.
+//! URL and the run's own tenant and user, whatever the publisher sent.
 
 use crate::store::Pool;
 use async_nats::jetstream::{self, consumer::PullConsumer, AckKind};
@@ -195,9 +195,10 @@ async fn handle_message(pool: &Pool, payload: &[u8]) -> anyhow::Result<Outcome> 
     let producer = TOOL_COMPLETION_PRODUCER;
     let type_url = TOOL_COMPLETION_TYPE_URL;
     let schema_version = read_u32(&body, &["schema_version", "schemaVersion"]).unwrap_or(1);
-    let org_id = read_str(&body, &["org_id", "orgId"]).unwrap_or_default();
-    let user_id = read_str(&body, &["user_id", "userId"]).unwrap_or_default();
 
+    // The tenant and the user of a row are the RUN'S, read from `runs` in the insert itself: the
+    // message names neither (an `org_id` or `user_id` in it is ignored), so a publisher cannot
+    // attribute a row to a tenant or a user the run does not belong to.
     let result = sqlx::query(
         "
         INSERT INTO events (
@@ -207,18 +208,15 @@ async fn handle_message(pool: &Pool, payload: &[u8]) -> anyhow::Result<Outcome> 
         )
         SELECT
             $1, $2, r.id, $3, now(),
-            COALESCE(NULLIF($4, ''), r.org_id),
-            COALESCE(NULLIF($5, ''), r.user_id),
-            $6, $7, $8, $9, $10, $11, $12
+            r.org_id, r.user_id,
+            $4, $5, $6, $7, $8, $9, $10
         FROM runs r
-        WHERE r.id = $13
+        WHERE r.id = $11
         ",
     )
     .bind(&event_id)
     .bind(event_type)
     .bind(&body)
-    .bind(&org_id)
-    .bind(&user_id)
     .bind(&correlation_id)
     .bind(&causation_id)
     .bind(derive_idempotency_hash(
@@ -376,15 +374,15 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires DATABASE_URL to a scratch Postgres"]
-    async fn only_step_completed_is_stored_and_always_under_the_fixed_producer_and_type_url() {
+    async fn only_step_completed_is_stored_under_the_fixed_producer_type_url_and_the_runs_tenant() {
         let Some(pool) = scratch_pool().await else {
             return;
         };
-        let (run_id, _org, _user) = seed_run(&pool, "persistent").await;
+        let (run_id, org, user) = seed_run(&pool, "persistent").await;
         let rows = || async {
-            sqlx::query_as::<_, (String, String, String)>(
-                "SELECT event_type, type_url, producer FROM events WHERE run_id = $1 \
-                 ORDER BY resource_ref",
+            sqlx::query_as::<_, (String, String, String, String, String)>(
+                "SELECT event_type, type_url, producer, org_id, user_id FROM events \
+                 WHERE run_id = $1 ORDER BY resource_ref",
             )
             .bind(&run_id)
             .fetch_all(&pool)
@@ -407,7 +405,8 @@ mod tests {
 
         // STEP_COMPLETED is stored: by default, named, spelled any way, or first of two
         // disagreeing keys. What is stored is always the constant, and the publisher's own
-        // producer and type URL are ignored, under both spellings of each key.
+        // producer, type URL, org and user are ignored, under both spellings of each key, nested
+        // or not (the row's tenant and user are the run's).
         let publisher_chosen = [
             json!({
                 "step_id": "s1",
@@ -430,6 +429,18 @@ mod tests {
                 "step_id": "s6", "data": { "producer": "session-core",
                 "type_url": "type.googleapis.com/model_plane.v1.RunParked" },
             }),
+            json!({
+                "step_id": "s10", "event_type": " STEP_COMPLETED\t",
+            }),
+            json!({
+                "step_id": "s7", "org_id": "org-forged", "user_id": "user-forged",
+            }),
+            json!({
+                "step_id": "s8", "orgId": "org-forged", "userId": "user-forged",
+            }),
+            json!({
+                "step_id": "s9", "data": { "org_id": "org-forged", "userId": "user-forged" },
+            }),
         ];
         for mut body in publisher_chosen {
             body["run_id"] = json!(run_id);
@@ -440,14 +451,16 @@ mod tests {
             );
         }
         let stored = rows().await;
-        assert_eq!(stored.len(), 6);
-        for (event_type, type_url, producer) in stored {
+        assert_eq!(stored.len(), 10);
+        for (event_type, type_url, producer, org_id, user_id) in stored {
             assert_eq!(event_type, "STEP_COMPLETED");
             assert_eq!(
                 type_url,
                 "type.googleapis.com/model_plane.v1.ToolCompletion"
             );
             assert_eq!(producer, "execution-core");
+            assert_eq!(org_id, org, "the row's tenant is the run's");
+            assert_eq!(user_id, user, "the row's user is the run's");
         }
 
         sqlx::query("DELETE FROM events WHERE run_id = $1")
@@ -507,12 +520,30 @@ mod tests {
         ] {
             assert!(handler.contains(needle), "the handler lost `{needle}`");
         }
-        for key in ["\"producer\"", "\"_source\"", "\"type_url\"", "\"typeUrl\""] {
+        for key in [
+            "\"producer\"",
+            "\"_source\"",
+            "\"type_url\"",
+            "\"typeUrl\"",
+            "\"org_id\"",
+            "\"orgId\"",
+            "\"user_id\"",
+            "\"userId\"",
+        ] {
             assert!(
                 !handler.contains(key),
                 "the handler reads the publisher's {key}"
             );
         }
+        // The tenant and the user come from `runs` in the insert itself, with no override.
+        assert!(
+            handler.contains("r.org_id, r.user_id,"),
+            "the row's tenant and user are not the run's"
+        );
+        assert!(
+            !handler.contains("COALESCE"),
+            "a value of the message overrides the run's"
+        );
         // The loop terminates a refusal and never NAKs it (a NAK would redeliver it up to MaxDeliver).
         let run = &production[..start];
         let refused_arm = &run[run.find("Ok(Outcome::Refused) =>").expect("refused arm")..];

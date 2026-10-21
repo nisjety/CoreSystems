@@ -6098,6 +6098,11 @@ mod tests {
             // The fold lookups are the event's own run's: a sibling run of the same tenant holds
             // no fold, whatever this run holds, so it records neither event; and a caller outside
             // the tenant is refused by the owner check, before the fold is looked at.
+            // The run holds a PARKED fold of the segment both events name, and a park claim is its
+            // latest, while the sibling is asked about: were a lookup scoped to the tenant, the
+            // sibling would borrow it. (With the run's fold merely active a tenant-scoped RunParked
+            // lookup finds no parked fold anywhere and refuses the sibling for the wrong reason.)
+            put_fold(&db, &run, "park", "parked", 2).await;
             let sibling = db.new_run(&db.thread).await;
             for resumed in [false, true] {
                 let refused = db
@@ -6127,6 +6132,7 @@ mod tests {
                 assert_eq!(refused.code(), tonic::Code::PermissionDenied);
             }
             assert_eq!(count_events(&db, &sibling).await, 0);
+            put_fold(&db, &run, "pre_effect", "active", 2).await;
 
             // A paused fold and a fold under a claim are not parked folds either, and a closed
             // fold is nothing to resume.
