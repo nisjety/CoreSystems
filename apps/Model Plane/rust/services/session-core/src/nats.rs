@@ -2,7 +2,9 @@
 //!
 //! Subscribes to `tools.completions.*`, decodes JSON payloads, and inserts a
 //! `STEP_COMPLETED` row into the `events` table with
-//! `org_id`/`user_id` hydrated from the `runs` table.
+//! `org_id`/`user_id` hydrated from the `runs` table. Only `STEP_COMPLETED` is stored (a message
+//! of any other event type is refused), and every row names the tool-completion producer and type
+//! URL, whatever the publisher sent.
 
 use crate::store::Pool;
 use async_nats::jetstream::{self, consumer::PullConsumer, AckKind};
@@ -21,33 +23,29 @@ const DURABLE_NAME: &str = "session-core-tools";
 const STEP_COMPLETED_EVENT_TYPE: &str = "STEP_COMPLETED";
 const TOOL_COMPLETION_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.ToolCompletion";
 
-/// Event types session-core writes itself, and so never takes from a publisher. The loop fold
-/// store writes `CHECKPOINT_SAVED` and `CHECKPOINT_RESTORED` inside its own transactions, and the
-/// park events `RUN_PARKED` and `RUN_RESUMED` are recorded only through `RecordOrchestrationEvent`,
-/// where they are checked against the run's own fold. That check reads `CHECKPOINT_RESTORED` as
-/// the store's own record that a park was claimed, so a row of one of these types arriving over
-/// NATS would be the same forgery by another door.
-const RESERVED_EVENT_TYPES: [&str; 4] = [
-    "RUN_PARKED",
-    "RUN_RESUMED",
-    "CHECKPOINT_SAVED",
-    "CHECKPOINT_RESTORED",
-];
+/// The producer every stored row names. Never the publisher's: a publisher that names
+/// `session-core` would make its row read as session-core's own.
+const TOOL_COMPLETION_PRODUCER: &str = "execution-core";
 
 /// What became of one message.
 #[derive(Debug, PartialEq, Eq)]
 enum Outcome {
     Stored,
-    /// Not stored: its event type is one session-core owns.
+    /// Not stored: its event type is not `STEP_COMPLETED`.
     Refused,
 }
 
-/// Whether `event_type` is one of [`RESERVED_EVENT_TYPES`], however it is cased or padded.
-fn is_reserved_event_type(event_type: &str) -> bool {
-    let event_type = event_type.trim();
-    RESERVED_EVENT_TYPES
-        .iter()
-        .any(|reserved| reserved.eq_ignore_ascii_case(event_type))
+/// Whether `event_type` is `STEP_COMPLETED`, however it is cased or padded. This ingress is an
+/// ALLOWLIST of that one type, the only one it exists for. Every other type is session-core's own
+/// or another workflow's: the loop fold store writes `CHECKPOINT_SAVED` and `CHECKPOINT_RESTORED`
+/// inside its own transactions, the park events `RUN_PARKED` and `RUN_RESUMED` are recorded only
+/// through `RecordOrchestrationEvent` (where they are checked against the run's own fold, which
+/// reads `CHECKPOINT_RESTORED` as the store's own record of a park claim), and a row of any of
+/// them arriving over NATS would be a forgery by another door.
+fn is_accepted_event_type(event_type: &str) -> bool {
+    event_type
+        .trim()
+        .eq_ignore_ascii_case(STEP_COMPLETED_EVENT_TYPE)
 }
 
 pub async fn run(pool: Pool, nats_url: String) -> anyhow::Result<()> {
@@ -136,7 +134,7 @@ pub async fn run(pool: Pool, nats_url: String) -> anyhow::Result<()> {
                 // is logged, and its last token is the publisher's.
                 warn!(
                     subject = %msg.subject,
-                    "refused a tool completion whose event type session-core owns"
+                    "refused a tool completion whose event type is not STEP_COMPLETED"
                 );
                 counter!("mp_session_events_total", "type" => "refused").increment(1);
                 if let Err(e) = msg.ack_with(AckKind::Term).await {
@@ -167,10 +165,12 @@ async fn handle_message(pool: &Pool, payload: &[u8]) -> anyhow::Result<Outcome> 
     let event_id = read_str(&body, &["event_id", "eventId"]).unwrap_or_else(mp_ids::new_ulid);
     let event_type = read_str(&body, &["event_type", "eventType"])
         .unwrap_or_else(|| STEP_COMPLETED_EVENT_TYPE.to_owned());
-    // Before anything is derived from the body or written: these types are session-core's own.
-    if is_reserved_event_type(&event_type) {
+    // Before anything else is derived from the body or written: the allowlist. What is stored is
+    // then the constant, never the publisher's spelling of it.
+    if !is_accepted_event_type(&event_type) {
         return Ok(Outcome::Refused);
     }
+    let event_type = STEP_COMPLETED_EVENT_TYPE;
     let step_id = read_str(&body, &["step_id", "stepId"]).unwrap_or_default();
     let resource_ref = read_str(&body, &["resource_ref", "resourceRef"]).unwrap_or_else(|| {
         if step_id.is_empty() {
@@ -190,10 +190,10 @@ async fn handle_message(pool: &Pool, payload: &[u8]) -> anyhow::Result<Outcome> 
                 format!("{run_id}:{step_id}")
             }
         });
-    let producer =
-        read_str(&body, &["producer", "_source"]).unwrap_or_else(|| "execution-core".to_owned());
-    let type_url = read_str(&body, &["type_url", "typeUrl"])
-        .unwrap_or_else(|| TOOL_COMPLETION_TYPE_URL.to_owned());
+    // Neither the producer nor the type URL is the publisher's to choose: a row of this ingress
+    // always names the tool-completion producer and the tool-completion message.
+    let producer = TOOL_COMPLETION_PRODUCER;
+    let type_url = TOOL_COMPLETION_TYPE_URL;
     let schema_version = read_u32(&body, &["schema_version", "schemaVersion"]).unwrap_or(1);
     let org_id = read_str(&body, &["org_id", "orgId"]).unwrap_or_default();
     let user_id = read_str(&body, &["user_id", "userId"]).unwrap_or_default();
@@ -215,21 +215,21 @@ async fn handle_message(pool: &Pool, payload: &[u8]) -> anyhow::Result<Outcome> 
         ",
     )
     .bind(&event_id)
-    .bind(&event_type)
+    .bind(event_type)
     .bind(&body)
     .bind(&org_id)
     .bind(&user_id)
     .bind(&correlation_id)
     .bind(&causation_id)
     .bind(derive_idempotency_hash(
-        &producer,
-        &event_type,
+        producer,
+        event_type,
         &resource_ref,
         &idempotency_key,
     ))
     .bind(&resource_ref)
-    .bind(&type_url)
-    .bind(&producer)
+    .bind(type_url)
+    .bind(producer)
     .bind(i32::try_from(schema_version).unwrap_or(i32::MAX))
     .bind(&run_id)
     .execute(pool)
@@ -281,180 +281,174 @@ mod tests {
     use crate::loop_checkpoint::test_support::{scratch_pool, seed_run};
     use serde_json::json;
 
-    #[test]
-    fn the_reserved_event_types_are_the_ones_the_fold_store_and_the_park_events_write() {
-        let mut reserved = RESERVED_EVENT_TYPES.to_vec();
-        reserved.sort_unstable();
-        assert_eq!(
-            reserved,
-            [
-                "CHECKPOINT_RESTORED",
-                "CHECKPOINT_SAVED",
-                "RUN_PARKED",
-                "RUN_RESUMED"
-            ]
-        );
-    }
+    /// Event types session-core writes itself (see [`is_accepted_event_type`]), and two ordinary
+    /// ones another workflow might use: none of them is this ingress's to store.
+    const NOT_STEP_COMPLETED: [&str; 8] = [
+        "RUN_PARKED",
+        "RUN_RESUMED",
+        "CHECKPOINT_SAVED",
+        "CHECKPOINT_RESTORED",
+        "ACTION_COMPLETED",
+        "RUN_STARTED",
+        "RUN_COMPLETED",
+        "THREAD_CREATED",
+    ];
 
     #[test]
-    fn a_reserved_event_type_is_recognised_however_it_is_cased_or_padded() {
-        for reserved in RESERVED_EVENT_TYPES {
-            assert!(is_reserved_event_type(reserved), "{reserved}");
-            assert!(
-                is_reserved_event_type(&reserved.to_lowercase()),
-                "{reserved}"
-            );
-            assert!(
-                is_reserved_event_type(&format!("  {reserved}\t")),
-                "{reserved}"
-            );
-        }
-    }
-
-    #[test]
-    fn the_event_types_the_ingress_exists_for_are_not_reserved() {
-        for allowed in [
-            STEP_COMPLETED_EVENT_TYPE,
-            "ACTION_COMPLETED",
-            "RUN_STARTED",
-            "RUN_PARKED_X",
-            "RUN_PARK",
-            "",
+    fn only_step_completed_is_accepted_however_it_is_cased_or_padded() {
+        for accepted in [
+            "STEP_COMPLETED",
+            "step_completed",
+            "Step_Completed",
+            "  STEP_COMPLETED\t",
         ] {
-            assert!(!is_reserved_event_type(allowed), "{allowed:?}");
+            assert!(is_accepted_event_type(accepted), "{accepted:?}");
+        }
+        for refused in NOT_STEP_COMPLETED.iter().copied().chain([
+            "",
+            " ",
+            "STEP",
+            "STEP_COMPLETED_X",
+            "X_STEP_COMPLETED",
+            "STEP COMPLETED",
+            "RUN_PARKED\0STEP_COMPLETED",
+        ]) {
+            assert!(!is_accepted_event_type(refused), "{refused:?}");
+            assert!(
+                !is_accepted_event_type(&refused.to_lowercase()),
+                "{refused:?}"
+            );
         }
     }
 
-    fn message(run_id: &str, event_type: Option<&str>, nested: bool) -> Vec<u8> {
-        let mut body = json!({ "run_id": run_id, "step_id": "step-1" });
-        if let Some(event_type) = event_type {
-            if nested {
-                body["data"] = json!({ "eventType": event_type });
-            } else {
-                body["event_type"] = json!(event_type);
-            }
-        }
-        serde_json::to_vec(&body).expect("message json")
-    }
-
-    // A message of a reserved type is refused BEFORE the database is touched: the pool is lazy and
-    // unreachable, so reaching the insert would answer an error, not `Refused`.
-    #[tokio::test]
-    async fn a_message_of_a_reserved_type_is_refused_before_the_database_is_reached() {
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .acquire_timeout(std::time::Duration::from_millis(200))
-            .connect_lazy("postgresql://session-core@127.0.0.1:1/session_core")
-            .expect("lazy pool");
-        for reserved in RESERVED_EVENT_TYPES {
-            for nested in [false, true] {
-                let outcome = handle_message(&pool, &message("run-x", Some(reserved), nested))
-                    .await
-                    .expect("a refusal is not an error");
-                assert_eq!(outcome, Outcome::Refused, "{reserved}, nested {nested}");
-            }
-        }
-        // A type that is not reserved reaches the insert, which cannot be served here.
-        assert!(
-            handle_message(&pool, &message("run-x", Some("ACTION_COMPLETED"), false))
-                .await
-                .is_err()
+    #[test]
+    fn the_stored_producer_and_type_url_are_the_tool_completion_ones() {
+        assert_eq!(STEP_COMPLETED_EVENT_TYPE, "STEP_COMPLETED");
+        assert_eq!(TOOL_COMPLETION_PRODUCER, "execution-core");
+        assert_eq!(
+            TOOL_COMPLETION_TYPE_URL,
+            "type.googleapis.com/model_plane.v1.ToolCompletion"
         );
-        assert!(handle_message(&pool, &message("run-x", None, false))
-            .await
-            .is_err());
     }
 
-    // Every way a message can carry its event type is read by the filter, and when two keys
-    // disagree the one that is checked is the one that is stored (the DB test below stores).
-    #[tokio::test]
-    async fn the_filter_reads_every_key_and_nesting_the_event_type_can_arrive_under() {
-        let pool = sqlx::postgres::PgPoolOptions::new()
+    fn lazy_pool() -> Pool {
+        sqlx::postgres::PgPoolOptions::new()
             .acquire_timeout(std::time::Duration::from_millis(200))
             .connect_lazy("postgresql://session-core@127.0.0.1:1/session_core")
-            .expect("lazy pool");
-        for reserved in RESERVED_EVENT_TYPES {
+            .expect("lazy pool")
+    }
+
+    async fn outcome_of(pool: &Pool, body: &Value) -> anyhow::Result<Outcome> {
+        handle_message(pool, &serde_json::to_vec(body).expect("message json")).await
+    }
+
+    // A message that is not STEP_COMPLETED is refused BEFORE the database is reached: the pool is
+    // lazy and unreachable, so reaching the insert would answer an error, not `Refused`. Every key
+    // and nesting the event type can arrive under is read, and when two keys disagree the first
+    // one read decides, for the check and for what would be stored.
+    #[tokio::test]
+    async fn a_message_of_another_type_is_refused_before_the_database_is_reached() {
+        let pool = lazy_pool();
+        for other in NOT_STEP_COMPLETED {
             for body in [
-                json!({ "run_id": "run-x", "event_type": reserved }),
-                json!({ "run_id": "run-x", "eventType": reserved }),
-                json!({ "run_id": "run-x", "data": { "event_type": reserved } }),
-                json!({ "run_id": "run-x", "data": { "eventType": reserved } }),
-                // The first key read wins, whichever key the reserved type is under.
-                json!({ "run_id": "run-x", "event_type": reserved, "eventType": "STEP_COMPLETED" }),
+                json!({ "run_id": "run-x", "event_type": other }),
+                json!({ "run_id": "run-x", "eventType": other }),
+                json!({ "run_id": "run-x", "data": { "event_type": other } }),
+                json!({ "run_id": "run-x", "data": { "eventType": other } }),
+                json!({ "run_id": "run-x", "event_type": other, "eventType": "STEP_COMPLETED" }),
             ] {
-                let payload = serde_json::to_vec(&body).expect("message json");
-                let outcome = handle_message(&pool, &payload)
+                let outcome = outcome_of(&pool, &body)
                     .await
                     .expect("a refusal is not an error");
                 assert_eq!(outcome, Outcome::Refused, "{body}");
             }
         }
+        // STEP_COMPLETED, named or by default, reaches the insert, which cannot be served here.
+        for body in [
+            json!({ "run_id": "run-x" }),
+            json!({ "run_id": "run-x", "event_type": "STEP_COMPLETED" }),
+            json!({ "run_id": "run-x", "eventType": " step_completed " }),
+            json!({ "run_id": "run-x", "event_type": "STEP_COMPLETED", "eventType": "RUN_PARKED" }),
+        ] {
+            assert!(outcome_of(&pool, &body).await.is_err(), "{body}");
+        }
     }
 
     #[tokio::test]
     #[ignore = "requires DATABASE_URL to a scratch Postgres"]
-    async fn a_reserved_type_writes_no_row_and_an_ordinary_completion_still_does() {
+    async fn only_step_completed_is_stored_and_always_under_the_fixed_producer_and_type_url() {
         let Some(pool) = scratch_pool().await else {
             return;
         };
         let (run_id, _org, _user) = seed_run(&pool, "persistent").await;
-        let count = || async {
-            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM events WHERE run_id = $1")
-                .bind(&run_id)
-                .fetch_one(&pool)
-                .await
-                .expect("count events")
+        let rows = || async {
+            sqlx::query_as::<_, (String, String, String)>(
+                "SELECT event_type, type_url, producer FROM events WHERE run_id = $1 \
+                 ORDER BY resource_ref",
+            )
+            .bind(&run_id)
+            .fetch_all(&pool)
+            .await
+            .expect("read events")
         };
 
-        for reserved in RESERVED_EVENT_TYPES {
-            let outcome = handle_message(&pool, &message(&run_id, Some(reserved), false))
-                .await
-                .expect("a refusal is not an error");
-            assert_eq!(outcome, Outcome::Refused, "{reserved}");
+        // Every other type is refused and writes no row.
+        for other in NOT_STEP_COMPLETED {
+            let body = json!({ "run_id": run_id, "step_id": "refused", "event_type": other });
+            assert_eq!(
+                outcome_of(&pool, &body)
+                    .await
+                    .expect("a refusal is not an error"),
+                Outcome::Refused,
+                "{other}"
+            );
         }
-        assert_eq!(count().await, 0, "a refused message writes no events row");
+        assert!(rows().await.is_empty(), "a refused message writes no row");
 
-        // The ingress still does what it exists for: the default type and another ordinary one.
-        let stored = handle_message(&pool, &message(&run_id, None, false))
-            .await
-            .expect("an ordinary completion");
-        assert_eq!(stored, Outcome::Stored);
-        let other = serde_json::to_vec(&json!({
-            "run_id": run_id,
-            "step_id": "step-2",
-            "event_type": "ACTION_COMPLETED",
-        }))
-        .expect("message json");
-        assert_eq!(
-            handle_message(&pool, &other).await.expect("another type"),
-            Outcome::Stored
-        );
-        // Two keys that disagree: the type that is checked is the one that is stored. The first
-        // key read is `event_type`, so the benign type is stored and the reserved one under the
-        // other key never is.
-        let conflicting = serde_json::to_vec(&json!({
-            "run_id": run_id,
-            "step_id": "step-3",
-            "event_type": "ACTION_COMPLETED",
-            "eventType": "RUN_PARKED",
-        }))
-        .expect("message json");
-        assert_eq!(
-            handle_message(&pool, &conflicting)
-                .await
-                .expect("conflicting keys"),
-            Outcome::Stored
-        );
-        let types: Vec<String> = sqlx::query_scalar(
-            "SELECT event_type FROM events WHERE run_id = $1 ORDER BY event_type",
-        )
-        .bind(&run_id)
-        .fetch_all(&pool)
-        .await
-        .expect("event types");
-        assert_eq!(
-            types,
-            ["ACTION_COMPLETED", "ACTION_COMPLETED", "STEP_COMPLETED"]
-        );
+        // STEP_COMPLETED is stored: by default, named, spelled any way, or first of two
+        // disagreeing keys. What is stored is always the constant, and the publisher's own
+        // producer and type URL are ignored, under both spellings of each key.
+        let publisher_chosen = [
+            json!({
+                "step_id": "s1",
+            }),
+            json!({
+                "step_id": "s2", "event_type": "step_completed",
+            }),
+            json!({
+                "step_id": "s3", "event_type": "STEP_COMPLETED", "eventType": "RUN_PARKED",
+            }),
+            json!({
+                "step_id": "s4", "producer": "session-core",
+                "type_url": "type.googleapis.com/model_plane.v1.CheckpointSaved",
+            }),
+            json!({
+                "step_id": "s5", "_source": "session-core",
+                "typeUrl": "type.googleapis.com/model_plane.v1.CheckpointRestored",
+            }),
+            json!({
+                "step_id": "s6", "data": { "producer": "session-core",
+                "type_url": "type.googleapis.com/model_plane.v1.RunParked" },
+            }),
+        ];
+        for mut body in publisher_chosen {
+            body["run_id"] = json!(run_id);
+            assert_eq!(
+                outcome_of(&pool, &body).await.expect("a completion"),
+                Outcome::Stored,
+                "{body}"
+            );
+        }
+        let stored = rows().await;
+        assert_eq!(stored.len(), 6);
+        for (event_type, type_url, producer) in stored {
+            assert_eq!(event_type, "STEP_COMPLETED");
+            assert_eq!(
+                type_url,
+                "type.googleapis.com/model_plane.v1.ToolCompletion"
+            );
+            assert_eq!(producer, "execution-core");
+        }
 
         sqlx::query("DELETE FROM events WHERE run_id = $1")
             .bind(&run_id)
@@ -463,10 +457,11 @@ mod tests {
             .expect("cleanup events");
     }
 
-    // The handler of this file must keep its refusal ahead of every use of the body and of the
-    // insert, and must terminate (not NAK) what it refuses.
+    // The handler of this file must keep its allowlist ahead of every other use of the body and of
+    // the insert, store the constants and never the publisher's type, producer or type URL, and
+    // must terminate (not NAK) what it refuses.
     #[test]
-    fn the_refusal_comes_before_the_body_is_used_and_a_refused_message_is_terminated() {
+    fn the_allowlist_comes_first_the_row_is_fixed_and_a_refusal_is_terminated() {
         let source = include_str!("nats.rs").replace("\r\n", "\n");
         let production = &source[..source.find("\n#[cfg(test)]\nmod tests").expect("tests")];
         let start = production
@@ -478,25 +473,46 @@ mod tests {
                 .find(needle)
                 .unwrap_or_else(|| panic!("the handler lost `{needle}`"))
         };
-        assert!(
-            at("if is_reserved_event_type(&event_type) {") < at("let step_id"),
-            "the refusal is after the body is used"
-        );
-        assert!(
-            at("return Ok(Outcome::Refused);") < at("INSERT INTO events"),
-            "the refusal is after the insert"
-        );
-        // The type that is checked is the type that is stored: derived once, bound once.
+        // Read once, checked, then replaced by the constant before anything else is derived.
+        let order = [
+            "let event_type = read_str(",
+            "if !is_accepted_event_type(&event_type) {",
+            "return Ok(Outcome::Refused);",
+            "let event_type = STEP_COMPLETED_EVENT_TYPE;",
+            "let step_id",
+            "INSERT INTO events",
+        ];
+        let mut last = 0;
+        for needle in order {
+            let found = at(needle);
+            assert!(found >= last, "`{needle}` is out of order in the handler");
+            last = found;
+        }
         assert_eq!(
             handler.matches("let event_type").count(),
-            1,
-            "the event type is derived more than once"
+            2,
+            "the event type is derived more than twice"
         );
         assert_eq!(
-            handler.matches(".bind(&event_type)").count(),
+            handler.matches(".bind(event_type)").count(),
             1,
-            "the stored event type is not the checked one"
+            "the stored event type is not the one the allowlist left"
         );
+        // The producer and the type URL are the constants, never read from the message.
+        for needle in [
+            "let producer = TOOL_COMPLETION_PRODUCER;",
+            "let type_url = TOOL_COMPLETION_TYPE_URL;",
+            ".bind(type_url)",
+            ".bind(producer)",
+        ] {
+            assert!(handler.contains(needle), "the handler lost `{needle}`");
+        }
+        for key in ["\"producer\"", "\"_source\"", "\"type_url\"", "\"typeUrl\""] {
+            assert!(
+                !handler.contains(key),
+                "the handler reads the publisher's {key}"
+            );
+        }
         // The loop terminates a refusal and never NAKs it (a NAK would redeliver it up to MaxDeliver).
         let run = &production[..start];
         let refused_arm = &run[run.find("Ok(Outcome::Refused) =>").expect("refused arm")..];
