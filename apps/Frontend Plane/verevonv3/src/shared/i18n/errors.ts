@@ -110,6 +110,7 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   // Knowledge base / crawl / documents
   crawl_backlog_full: { no: 'Det venter for mange gjennomganger på organisasjonen din. Prøv igjen om litt.', en: 'Too many crawls are waiting for your organization. Try again shortly.' },
   scrape_failed: { no: 'Kunne ikke hente innhold fra siden. Prøv igjen.', en: 'Could not fetch content from the page. Try again.' },
+  unsupported_media: { no: 'Dette innholdet kan ikke vises som forhåndsvisning. Prøv en lenke til en nettside eller et dokument.', en: 'This content cannot be previewed. Try a link to a web page or a document.' },
   extraction_failed: { no: 'Kunne ikke hente ut innhold fra dette dokumentet.', en: 'Could not extract content from this document.' },
   translation_failed: { no: 'Kunne ikke oversette innholdet.', en: 'Could not translate the content.' },
   sharepoint_register_failed: { no: 'Kunne ikke koble til SharePoint. Prøv igjen.', en: 'Could not connect to SharePoint. Try again.' },

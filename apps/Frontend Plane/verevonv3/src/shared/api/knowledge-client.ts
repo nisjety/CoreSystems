@@ -94,9 +94,13 @@ export interface CrawlJob {
 export interface ScrapeRequest {
   url: string
   render?: Record<string, unknown>
-  renderHints?: Record<string, unknown>
   signals?: Record<string, unknown>
-  cachePolicy?: string
+  /** Output formats quarry-edge should return. The gateway adds `['markdown']` when absent so the
+   * text comes back inline in `data.markdown` instead of as an artifact reference. */
+  formats?: string[]
+  only_main_content?: boolean
+  include_tags?: string[]
+  exclude_tags?: string[]
   /** When true, quarry-edge persists the fetched page into the knowledge base
    * (not just returns it). Omit/false for preview-only scrapes. */
   ingest?: boolean
@@ -145,7 +149,7 @@ export interface ScrapeResult {
   html?: string
   markdown?: string
   metadata?: ScrapeMetadata
-  rawHtml?: string
+  raw_html?: string
   text?: string
   url?: string | { final?: string; final_url?: string; requested?: string }
   data?: {
@@ -154,7 +158,7 @@ export interface ScrapeResult {
     html?: string
     markdown?: string
     metadata?: ScrapeMetadata
-    rawHtml?: string
+    raw_html?: string
     text?: string
     url?: string | { final?: string; final_url?: string; requested?: string }
   }

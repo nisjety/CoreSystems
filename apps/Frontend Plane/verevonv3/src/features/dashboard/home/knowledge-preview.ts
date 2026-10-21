@@ -147,8 +147,10 @@ function markdownFromResult(value: unknown): string {
 
   const html = firstNestedString(value, [
     ['html'],
+    ['raw_html'],
     ['rawHtml'],
     ['data', 'html'],
+    ['data', 'raw_html'],
     ['data', 'rawHtml'],
   ])
   return html ? htmlToReadableText(html) : ''

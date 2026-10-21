@@ -152,7 +152,7 @@ describe('browser error copy', () => {
     }
     const withoutCopy = [...emitted].filter(
       (code) =>
-        !ERROR_COPY[code] && !BLOCK_REASON_COPY[code] && !NOT_AN_ERROR_CODE.has(code) && code !== 'unsupported_media',
+        !ERROR_COPY[code] && !BLOCK_REASON_COPY[code] && !NOT_AN_ERROR_CODE.has(code),
     )
     expect(withoutCopy).toEqual([])
   })
@@ -161,9 +161,7 @@ describe('browser error copy', () => {
   // ones `scrape_preview` itself answers before any upstream call. There is no list of them in
   // the SPA: the composer's catch site hands the error to `browserErrorMessage`, which looks the
   // code up in ERROR_COPY like every other, so this is the one place that pins the set.
-  // `unsupported_media` is the 415 slice's code (WS5.G): that slice brings its own copy entry in
-  // errors.ts and may land before or after the gateway code, so it is exempt here (the gateway
-  // not answering with it yet, or the copy not being there yet, is fine).
+  // `unsupported_media` (WS5.G's 415) is in the set and has its copy like the others.
   it('has copy for every failure code the scrape preview can answer with, and shows it through the generic path', () => {
     const source = productionHalf('knowledge/quarry.rs')
     const body = (signature: string): string => {
@@ -176,7 +174,6 @@ describe('browser error copy', () => {
       expect(answered.has(code), `the scan found ${code}`).toBe(true)
     }
     for (const code of answered) {
-      if (code === 'unsupported_media') continue
       expect(ERROR_COPY[code], code).toBeDefined()
       expect(describeApiError({ code, status: 400 }, no).message.startsWith(copyOf(ERROR_COPY, code).no), code).toBe(true)
     }

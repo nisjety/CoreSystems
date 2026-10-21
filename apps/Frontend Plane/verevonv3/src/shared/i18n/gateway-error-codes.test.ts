@@ -186,12 +186,6 @@ const INTERNAL_ONLY: Record<string, string> = {
   payload_too_large: 'the mail-task ingest endpoint is called service to service; no SPA code calls it',
 }
 
-// WS5.G's 415 slice (`unsupported_media`) brings its own copy entry and its gateway
-// code in either order: the gateway answering with it before the copy lands, or the
-// copy landing before the gateway answers, are both fine. It is the only code exempt
-// from "emitted means copied".
-const MAY_LAND_BEFORE_ITS_COPY = new Set(['unsupported_media'])
-
 function hasCopy(code: string): boolean {
   return Boolean(ERROR_COPY[code] ?? BLOCK_REASON_COPY[code])
 }
@@ -244,7 +238,6 @@ describe('every code the gateway emits', () => {
       ...Object.keys(CALLER_WORDS_IT),
       ...Object.keys(NOT_AN_ERROR_CODE),
       ...SPACE_SECTION_CODES,
-      ...MAY_LAND_BEFORE_ITS_COPY,
     ])
     const without = [...emittedBy.keys()].filter((code) => !hasCopy(code) && !exempt.has(code)).sort()
     expect(without, 'a code the gateway emits has no copy in errors.ts and no entry in an exemption list of this test').toEqual([])
@@ -294,16 +287,15 @@ describe('every code the gateway emits', () => {
     for (const code of SPACE_SECTION_CODES) expect(panels, `${code} has a case in a Space panel`).toContain(`'${code}'`)
   })
 
-  // `unsupported_media` is exempt from "emitted means copied" (above) and, the other
-  // way round, copy for it may exist before the gateway answers with it: neither
-  // direction fails, and the copy is only checked when it is there.
-  it('treats the 415 slice code as optional on both sides', () => {
+  // WS5.G: the gateway answers a 415 from quarry-edge with `unsupported_media`, and the
+  // copy for it is in the same tree. It is held to "emitted means copied" like every code;
+  // this pins that the scan sees it and that the copy reads as a sentence in both languages.
+  it('has copy for the 415 code the scrape preview answers with', () => {
+    expect(emittedBy.get('unsupported_media'), 'the scan found unsupported_media').toContain('domains/knowledge/quarry.rs')
     const copy = ERROR_COPY.unsupported_media
-    if (copy) {
-      expect(copy.no.length).toBeGreaterThan(15)
-      expect(copy.en.length).toBeGreaterThan(15)
-    }
-    expect(MAY_LAND_BEFORE_ITS_COPY.has('unsupported_media')).toBe(true)
+    expect(copy).toBeDefined()
+    expect(copy?.no.length).toBeGreaterThan(15)
+    expect(copy?.en.length).toBeGreaterThan(15)
   })
 })
 

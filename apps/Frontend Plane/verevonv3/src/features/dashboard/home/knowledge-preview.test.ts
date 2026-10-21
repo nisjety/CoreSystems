@@ -45,6 +45,18 @@ describe('knowledge preview parsing', () => {
     expect(preview.blocks.map((block) => block.text)).toEqual(['News', 'First paragraph.', 'Second paragraph.'])
   })
 
+  it('reads the document as fetched from raw_html, the spelling quarry-edge emits', () => {
+    const result: ScrapeResult = {
+      data: {
+        raw_html: '<main><h1>Raw</h1><p>Fetched paragraph.</p></main>',
+        metadata: { title: 'Raw page' },
+      },
+    }
+    const preview = toScrapePreview('https://example.com/raw', result)
+
+    expect(preview.blocks.map((block) => block.text)).toEqual(['Raw', 'Fetched paragraph.'])
+  })
+
   it('keeps artifact-only metadata without inventing selected text', () => {
     const result: ScrapeResult = {
       data: {
