@@ -100,6 +100,7 @@ func handleDelivery(msg *nats.Msg, purger OrgPurger, logger zerolog.Logger) {
 			Int64("sources_deleted", result.SourcesDeleted).
 			Int64("benchmarks_deleted", result.BenchmarksDeleted).
 			Int64("idempotency_keys_deleted", result.IdempotencyKeysDeleted).
+			Int64("zdr_tombstones_deleted", result.ZdrTombstonesDeleted).
 			Msg("gdpr: org-scoped crawl data purged")
 	}
 	if ackErr := msg.Ack(); ackErr != nil {

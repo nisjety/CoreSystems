@@ -183,6 +183,14 @@ func main() {
 		// the hmacVerifier.Middleware above — mount here, not outside the
 		// group, so the handler inherits verification.
 		resources.MountChangeWebhook(r, db, notifySink)
+		// WS4.J: the ZDR run tombstone receiver. A new egress path under ZDR, so
+		// it is mounted only when this process has an HMAC secret (a trust-the-
+		// network control plane has no receiver at all). OFF BY DEFAULT end to
+		// end: the edge emits nothing unless QUARRY_EDGE__ZDR_TOMBSTONE is on,
+		// and counsel review gates turning that on.
+		if hmacVerifier.HasSecret() {
+			resources.MountZdrTombstones(r, db)
+		}
 		resources.MountBlocklists(r, db)
 		resources.MountWebhookDeliveries(r, db)
 		resources.MountPresets(r)
@@ -215,6 +223,15 @@ func main() {
 	// Phase 7 retention sweep — INERT unless QUARRY_RETENTION_DAYS>0, and only
 	// deletes when QUARRY_RETENTION_DRY_RUN=false; otherwise a default-safe no-op.
 	go janitor.Run(dCtx, db, janitor.OptionsFromEnv(), log.Logger)
+	// WS4.J: the ZDR tombstone sweeper. Unlike the artifact janitor above it runs by
+	// default (30 days): it deletes metadata only, nothing references a tombstone,
+	// and with the edge flag off there are no rows. A bad retention value logs and
+	// falls back to 30; it never disables the sweep.
+	tombOpts, tombInvalid := janitor.TombstoneOptionsFromEnv(os.Getenv)
+	if tombInvalid {
+		log.Warn().Int("retention_days", tombOpts.RetentionDays).Msg("QUARRY_ZDR_TOMBSTONE_RETENTION_DAYS is not a non-negative integer — using the default")
+	}
+	go janitor.RunTombstones(dCtx, db, tombOpts, log.Logger)
 
 	// GDPR cross-plane org-erasure purge consumer — subscribes to
 	// verevon.gdpr.erasure.requested (org-core, fanned out over the

@@ -134,6 +134,15 @@ GOLDENS=(
   # its digest here updated in the same change.
   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/zdr-feature-matrix.json|76500d48fe3ed5ab7d8fdb6189e0dcd7ec5a035dc6f8f594a30bb5af08c9061f"
 
+  # WS4.J: the allowlist of the ZDR run tombstone, the ONLY fields that egress path may carry.
+  # AUTHORED data owned by Quarry. quarry-edge's serializer (src/zdr_tombstone.rs, tests/
+  # zdr_tombstone.rs) reads it in place; quarry-control's receiver (internal/resources/
+  # zdr_tombstone.go) is tested against the copy in VENDORED. To change it: edit it, refresh
+  # the .sha256 pin beside it, update the digest here, re-vendor the copy and its pin, and
+  # change the edge struct, the Go wire struct and migration 015 to match (each has a test
+  # that fails when the key sets differ). Enabling the tombstone is gated on counsel review.
+  "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/zdr-tombstone.schema.json|8996f90b2eef139898427f92f30b69a51714bc9ac8700db6be49f7be8a516fe9"
+
   # WS12.S0: the secret-redaction shapes, what Quarry's rules must mask and must leave alone.
   # AUTHORED data, not generated, owned by Quarry; every secret in it is a fragment array so
   # no secret-shaped literal sits in the repository. The Rust loader is
@@ -201,6 +210,11 @@ VENDORED=(
   "apps/Control Plane/auth-core/src/auth/fixtures/cross-plane-token-requests.json|apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/cross-plane-token-requests.json"
   "apps/Control Plane/auth-core/src/auth/fixtures/cross-plane-token-requests.json.sha256|apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/cross-plane-token-requests.json.sha256"
 
+  # WS4.J: quarry-control's copy of the tombstone allowlist schema and its pin
+  # (internal/resources/zdr_tombstone_test.go compares the Go wire struct to it).
+  "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/testdata/zdr-tombstone.schema.json|apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/zdr-tombstone.schema.json"
+  "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/testdata/zdr-tombstone.schema.json.sha256|apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/zdr-tombstone.schema.json.sha256"
+
   # WS4.I: Quarry's copy of the refusal catalogue and its pin. The matrix test
   # (crates/quarry-edge/tests/zdr_feature_matrix.rs) derives its closed code and feature
   # lists from this copy and checks it against the pin; the copies are no longer hand-written.
@@ -234,6 +248,8 @@ CONSUMERS=(
   # authorizePlaneServicePrincipal over every row of a byte-for-byte vendored copy
   # (granted rows must be authorized, granted:false rows refused).
   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/cross-plane-token-requests.json|auth-core|apps/Control Plane/auth-core/|CR-T17 (plane-calls manifest contract spec; QB-T02 owns the manifest)"
+  # WS4.J: the tombstone allowlist. quarry-control's receiver is tested against a vendored copy.
+  "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/zdr-tombstone.schema.json|quarry-control|apps/Ingestion Plane/Quarry-v2/services/quarry-control/|WS4.J (receiver allowlist, struct and migration compared to the schema)"
   # WS4.I: the refusal catalogue. Quarry's matrix test derives its closed lists from the copy.
   "apps/Model Plane/api/contracts/zdr-refusals.json|quarry-edge|apps/Ingestion Plane/Quarry-v2/|WS4.I (matrix closed lists derived from the catalogue)"
   # Z-05b: the SPA renders every code of the refusal catalogue in Norwegian and English, with its action.

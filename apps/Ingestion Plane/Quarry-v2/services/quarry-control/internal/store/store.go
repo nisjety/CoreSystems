@@ -36,6 +36,10 @@ type DB interface {
 	// ResourceStore[Snapshot] used by MountRestore — different table, different
 	// producer. See SnapshotV2 for the coexistence rationale.
 	SnapshotsV2() SnapshotsV2Store
+	// ZdrTombstones is the metadata-only record of runs that happened under Zero
+	// Data Retention (WS4.J, migration 015). OFF BY DEFAULT: nothing writes it
+	// unless the edge's QUARRY_EDGE__ZDR_TOMBSTONE is on. See zdr_tombstones.go.
+	ZdrTombstones() ZdrTombstoneStore
 	// PurgeOrg hard-deletes every row this service holds for orgID across
 	// every org-scoped table (jobs, schedules, quarry_sources,
 	// quarry_benchmarks, quarry_idempotency_keys) — the GDPR cross-plane
@@ -489,6 +493,7 @@ type memDB struct {
 	events       *memEventLog
 	snapshotsV2  *memSnapshotsV2
 	jobClaims    *jobClaimTable
+	zdrTombs     *memZdrTombstones
 }
 
 func NewMemory() DB {
@@ -506,8 +511,11 @@ func NewMemory() DB {
 		events:       &memEventLog{},
 		snapshotsV2:  &memSnapshotsV2{},
 		jobClaims:    &jobClaimTable{until: map[quarrycontracts.ID]time.Time{}},
+		zdrTombs:     newMemZdrTombstones(),
 	}
 }
+
+func (d *memDB) ZdrTombstones() ZdrTombstoneStore { return d.zdrTombs }
 
 func (d *memDB) Jobs() JobsStore                         { return &memJobs{d.jobs, d.jobClaims} }
 func (d *memDB) Stores() ResourceStore[NamedStore]       { return d.stores }

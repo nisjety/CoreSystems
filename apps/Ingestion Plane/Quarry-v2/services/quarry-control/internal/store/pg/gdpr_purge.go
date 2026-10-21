@@ -7,7 +7,7 @@
 //
 // Every statement below is a direct `DELETE ... WHERE org_id = $1` — no
 // joins, no derived subject sets — per the safety rule that a purge query
-// must never be able to reach another tenant's rows. All five run inside
+// must never be able to reach another tenant's rows. All six run inside
 // one transaction so a mid-purge failure never leaves a partial erasure
 // committed; each individual statement is also independently idempotent (a
 // repeat run matches zero rows), so retrying the whole call after a
@@ -26,7 +26,8 @@ import (
 )
 
 // PurgeOrg hard-deletes every row for orgID across jobs, schedules,
-// quarry_sources, quarry_benchmarks, and quarry_idempotency_keys.
+// quarry_sources, quarry_benchmarks, quarry_idempotency_keys and
+// zdr_run_tombstones (WS4.J).
 func (d *postgresDB) PurgeOrg(orgID string) (store.PurgeResult, error) {
 	orgID = strings.TrimSpace(orgID)
 	if orgID == "" {
@@ -64,6 +65,9 @@ func (d *postgresDB) PurgeOrg(orgID string) (store.PurgeResult, error) {
 	}
 	if res.IdempotencyKeysDeleted, derr = del(`DELETE FROM quarry_idempotency_keys WHERE org_id = $1`); derr != nil {
 		return store.PurgeResult{}, fmt.Errorf("pg: PurgeOrg quarry_idempotency_keys: %w", derr)
+	}
+	if res.ZdrTombstonesDeleted, derr = del(`DELETE FROM zdr_run_tombstones WHERE org_id = $1`); derr != nil {
+		return store.PurgeResult{}, fmt.Errorf("pg: PurgeOrg zdr_run_tombstones: %w", derr)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
