@@ -65,7 +65,7 @@ fn finish_stream_registrations(
 }
 
 #[allow(clippy::result_large_err)]
-fn authenticated_session_request<T>(
+pub(crate) fn authenticated_session_request<T>(
     value: T,
     bearer: &VerifiedModelBearer,
 ) -> Result<tonic::Request<T>, tonic::Status> {
@@ -711,6 +711,7 @@ mod agent_route_tests {
             None,
             route,
             budget,
+            None,
             None,
         )
     }
@@ -1534,6 +1535,22 @@ pub async fn invoke_stream_sse(
             None,
             // An ordinary turn is never a pre-consumed continuation.
             ApprovalSpend::NotSpent,
+            // Off builds no request, so a run is exactly what it was before the switch.
+            crate::run_context::RunContextRequest::for_turn(
+                crate::run_context::RunContextMode::from_env(),
+                || authored_layers(&state, &req),
+                sovereign_retrieval,
+                // The memory search carries what an Ask turn's would: the user's text,
+                // PII-redacted when the org's policy requires it (see `user_content`
+                // below), so a run opens no new egress of raw PII.
+                || {
+                    if pii_redaction_required {
+                        crate::moderation::redact_pii(&req.content).0
+                    } else {
+                        req.content.clone()
+                    }
+                },
+            ),
         );
     }
 
@@ -4931,6 +4948,33 @@ async fn load_context_assembly_messages(
     )
 }
 
+/// Whether the thread's own persona toggle is on, for an agent run's authored
+/// instructions. It is carried by the same context-assembly response an Ask turn
+/// reads; the assembly text is not used here, and no Data Plane credential is
+/// delegated, so the read costs no retrieval. Open when the read fails, like an
+/// Ask turn whose assembly is unavailable.
+pub(crate) async fn load_thread_persona_enabled(
+    state: &AppState,
+    thread_id: &str,
+    run_id: &str,
+    goal: &str,
+    bearer: &VerifiedModelBearer,
+    sovereign_required: bool,
+) -> bool {
+    load_context_assembly_messages(
+        state,
+        thread_id,
+        run_id,
+        goal,
+        goal,
+        bearer,
+        None,
+        sovereign_required,
+    )
+    .await
+    .1
+}
+
 /// Segment kinds that carry actual Data Plane evidence, as opposed to identity,
 /// goals or conversation history.
 ///
@@ -5189,7 +5233,8 @@ async fn fetch_compaction_memory_directive(
 /// summarizer is bounded on and for the same reason: memory is advisory
 /// context, and a slow memory backend must cost the turn nothing but the
 /// recall, never a visible hang.
-const MEMORY_PREFETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(400);
+pub(crate) const MEMORY_PREFETCH_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_millis(400);
 
 /// What one turn's memory prefetch actually injected, for the
 /// `memory_recall` SSE indicator. `None` = nothing recalled, no event.
@@ -5314,7 +5359,7 @@ pub(crate) const MEMORY_PREFETCH_OUTCOMES: &[&str] =
 /// product.
 const MEMORY_PREFETCH_OUTCOME_METRIC: &str = "mp_gateway_chat_memory_prefetch_total";
 
-fn record_memory_prefetch_outcome(outcome: &'static str) {
+pub(crate) fn record_memory_prefetch_outcome(outcome: &'static str) {
     debug_assert!(
         MEMORY_PREFETCH_OUTCOMES.contains(&outcome),
         "unlisted memory-prefetch outcome label"
@@ -6361,14 +6406,6 @@ fn temporal_awareness_message() -> ChatMessage {
     }
 }
 
-/// ADR-0003's non-empty check: trims and treats blank as absent, the same
-/// rule every layer of the authored-instruction hierarchy already applies to
-/// its own field.
-fn non_empty_trimmed(value: &str) -> Option<&str> {
-    let trimmed = value.trim();
-    (!trimmed.is_empty()).then_some(trimmed)
-}
-
 /// Composes ADR-0003's authored-instruction hierarchy — platform (deployment
 /// env config) → org → Space → per-agent persona — into one system message,
 /// replacing `agent_persona_message`'s old mention-only firing with
@@ -6381,6 +6418,10 @@ fn non_empty_trimmed(value: &str) -> Option<&str> {
 /// (`agent_persona_message`'s own text, including its "you are currently
 /// answering as" framing) — only its firing condition (mention-gated) stays
 /// as-is; it is simply the last section here instead of the sole message.
+///
+/// The text itself is composed by `run_context::compose_authored_instructions`,
+/// the one composer an Ask turn and an agent run share; this wraps it in the
+/// system message an Ask turn sends.
 ///
 /// `None` only when platform, org, Space, persona, and agent are ALL empty —
 /// preserving today's silent-no-message behavior for a deployment/org/Space
@@ -6397,59 +6438,35 @@ fn non_empty_trimmed(value: &str) -> Option<&str> {
 /// like every other layer here — only the per-thread *toggle* is
 /// ZDR-blocked (`update_thread_presentation` rejects ZDR callers outright,
 /// enforced in session-core, not here).
-fn authored_instructions_message(
+pub(crate) fn authored_instructions_message(
     state: &AppState,
     req: &InvokeRequest,
     persona_enabled: bool,
 ) -> Option<ChatMessage> {
-    let mut sections: Vec<String> = Vec::new();
-
-    if let Some(platform) = non_empty_trimmed(&state.platform_instructions) {
-        sections.push(platform.to_owned());
-    }
-    if let Some(org) = req.org_instructions.as_deref().and_then(non_empty_trimmed) {
-        sections.push(format!(
-            "--- Organization instructions (may add to, but must not override, the platform instructions above) ---\n{org}"
-        ));
-    }
-    if let Some(space) = req
-        .space_instructions
-        .as_deref()
-        .and_then(non_empty_trimmed)
-    {
-        sections.push(format!(
-            "--- Space instructions (may add to, but must not override, the platform or organization instructions above) ---\n{space}"
-        ));
-    }
-    // Persona spec — the user layer, subordinate to org/Space but still
-    // ahead of an explicitly-summoned Space agent's own character (the next
-    // section): a mentioned agent's persona still wins on that turn, mirroring
-    // today's org/Space precedent (persona.md §6.3, owner ruling: "an
-    // explicitly summoned agent wins").
-    if persona_enabled {
-        if let Some(persona) = req
-            .persona_instructions
-            .as_deref()
-            .and_then(non_empty_trimmed)
-        {
-            sections.push(format!(
-                "--- Your personal instructions (may add to, but must not override, the platform, organization or Space instructions above) ---\n{persona}"
-            ));
+    let layers = authored_layers(state, req);
+    crate::run_context::compose_authored_instructions(&layers, persona_enabled).map(|content| {
+        ChatMessage {
+            compaction_summary: String::new(),
+            role: "system".to_owned(),
+            content,
+            name: String::new(),
         }
-    }
-    if let Some(persona) = agent_persona_message(req) {
-        sections.push(persona.content);
-    }
-
-    if sections.is_empty() {
-        return None;
-    }
-    Some(ChatMessage {
-        compaction_summary: String::new(),
-        role: "system".to_owned(),
-        content: sections.join("\n\n"),
-        name: String::new(),
     })
+}
+
+/// The authored layers one request carries: the deployment's platform text and
+/// the org, Space, persona and mentioned-agent text the BFF resolved onto it.
+pub(crate) fn authored_layers(
+    state: &AppState,
+    req: &InvokeRequest,
+) -> crate::run_context::AuthoredLayers {
+    crate::run_context::AuthoredLayers {
+        platform: state.platform_instructions.clone(),
+        org: req.org_instructions.clone(),
+        space: req.space_instructions.clone(),
+        persona: req.persona_instructions.clone(),
+        agent: agent_persona_message(req).map(|message| message.content),
+    }
 }
 
 /// Persona for a turn addressed to a Space agent by `@` mention
@@ -9180,6 +9197,9 @@ fn spawn_run_dispatch(
     approved_plan_context: Option<&str>,
     route: &AgentRoute,
     resume: Option<mp_contracts::model_plane::v1::AgentResume>,
+    // The composed run context (build plan WS02 S6); `None` with the switch off, for a
+    // continuation and for every request built before it existed.
+    run_context: Option<mp_contracts::model_plane::v1::RunContext>,
 ) -> Result<tokio::task::JoinHandle<Result<RunAgentResponse, tonic::Status>>, tonic::Status> {
     let mut execution_client = state.execution_client.clone();
     // The graded authority execution-core enforces PER CALL.
@@ -9260,6 +9280,7 @@ fn spawn_run_dispatch(
         route,
         budget,
         resume,
+        run_context,
     );
     let run_agent_req = authenticated_run_agent_request(
         run_agent_req,
@@ -9360,6 +9381,7 @@ fn resolved_run_agent_request(
     route: &AgentRoute,
     budget: crate::run_budget::RunBudget,
     resume: Option<mp_contracts::model_plane::v1::AgentResume>,
+    run_context: Option<mp_contracts::model_plane::v1::RunContext>,
 ) -> RunAgentRequest {
     let autonomy_rung = dispatch_autonomy_rung(plan_mode, resume.is_some(), granted);
     build_run_agent_request(
@@ -9379,6 +9401,7 @@ fn resolved_run_agent_request(
         route,
         budget,
         resume,
+        run_context,
     )
 }
 
@@ -9406,6 +9429,7 @@ fn build_run_agent_request(
     route: &AgentRoute,
     budget: crate::run_budget::RunBudget,
     resume: Option<mp_contracts::model_plane::v1::AgentResume>,
+    run_context: Option<mp_contracts::model_plane::v1::RunContext>,
 ) -> RunAgentRequest {
     RunAgentRequest {
         run_id: run.run_id.clone(),
@@ -9466,9 +9490,10 @@ fn build_run_agent_request(
         // byte-identical to what was sent before these fields existed.
         provider_hint: route.provider_hint.clone(),
         subscription_connection_id: route.subscription_connection_id.clone(),
-        // The run context is composed and sent by a later slice (build plan
-        // WS02 S6); absent = today's behaviour.
-        run_context: None,
+        // What the gateway composed for this run (`run_context::prepare`): data only, it
+        // changes neither `mode` nor the rung above. Absent (the switch off, a
+        // continuation) = today's behaviour.
+        run_context,
         // A continuation segment carries its resume; every other run sends none.
         resume,
     }
@@ -9875,6 +9900,9 @@ fn agentic_run_stream(
     // opened (build plan WS03 S7c). `NotSpent` for every turn but a pre-consumed
     // continuation; it is the gateway's own knowledge, never read from the resume.
     spend: ApprovalSpend,
+    // The run context to compose for this run (build plan WS02 S6): `None` with
+    // `MODEL_GATEWAY_RUN_CONTEXT` off and for every continuation.
+    run_context_request: Option<crate::run_context::RunContextRequest>,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     tokio::spawn(async move {
@@ -9901,6 +9929,34 @@ fn agentic_run_stream(
                 .event("connected")
                 .data(connected.to_string())))
             .await;
+
+        // The run's context: the instructions an Ask turn would carry, and with `full`
+        // the thread's recent turns and recalled memory. Composed after `connected`
+        // so the client already holds the run's ids while the reads happen, and
+        // never for a continuation, which resumes the run's own context.
+        let run_context = match &run_context_request {
+            Some(request) if !continuing => Some(
+                crate::run_context::prepare(
+                    &state,
+                    request,
+                    &crate::run_context::RunFacts {
+                        goal: &content,
+                        zdr,
+                        waived: matches!(
+                            retention_class,
+                            Some(crate::sse_events::RetentionClass::ZdrWaived { .. })
+                        ),
+                        space_scoped: !space_id.is_empty(),
+                        pinned_route: route.is_pinned(),
+                    },
+                    &run,
+                    &org_id,
+                    &model_bearer,
+                )
+                .await,
+            ),
+            _ => None,
+        };
 
         // plan-gate §2.4: a run that is itself in plan mode has no authority
         // to consume a plan with yet, and a continuation takes its goal and
@@ -9939,6 +9995,7 @@ fn agentic_run_stream(
             plan_context.as_deref(),
             &route,
             resume.clone(),
+            run_context,
         ) {
             Ok(dispatch) => dispatch,
             Err(error) => {
@@ -15024,6 +15081,8 @@ pub(crate) async fn continue_run(
             None,
             Some(resume),
             approval_spend_for(resume_enabled),
+            // A continuation resumes the run's own context.
+            None,
         )
     };
     if !resume_enabled {
@@ -15305,6 +15364,7 @@ mod continue_run_tests {
             &AgentRoute::default(),
             budget,
             Some(resume),
+            None,
         )
     }
 
@@ -16857,6 +16917,7 @@ mod continue_run_tests {
             None,
             Some(continue_resume("appr-1", "claim-1", "loop")),
             ApprovalSpend::SpentByGateway,
+            None,
         );
         let frames = frames_of_stream(stream).await;
         let names: Vec<&str> = frames.iter().map(|(name, _)| name.as_str()).collect();
@@ -18167,6 +18228,7 @@ mod continue_run_tests {
             None,
             Some(continue_resume("", "claim-1", "park")),
             ApprovalSpend::NotSpent,
+            None,
         );
         let frames = frames_of_stream(stream).await;
         let names: Vec<&str> = frames.iter().map(|(name, _)| name.as_str()).collect();

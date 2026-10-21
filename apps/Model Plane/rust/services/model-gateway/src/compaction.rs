@@ -421,6 +421,47 @@ pub fn apply_head_summary(
     messages
 }
 
+/// Left where a run's history was cut to its budget.
+///
+/// A run's history carries only `user` and `assistant` turns
+/// (`mp_contracts::run_context::validate`), so the marker is an assistant turn,
+/// not a system message. It names no recovery tool: the Do loop has no
+/// `reattach_context`, and pointing the model at a call that does not exist is
+/// worse than saying nothing.
+pub const RUN_HISTORY_DROPPED_NOTICE: &str =
+    "[Earlier messages in this conversation are not included in this run: they exceeded its \
+     history budget. They still exist. If the user refers to something you cannot see here, \
+     say so instead of guessing.]";
+
+/// The marker [`apply_head_drop`] leaves behind.
+#[must_use]
+pub fn run_history_dropped_notice() -> ChatMessage {
+    ChatMessage {
+        compaction_summary: String::new(),
+        role: "assistant".to_owned(),
+        content: RUN_HISTORY_DROPPED_NOTICE.to_owned(),
+        name: String::new(),
+    }
+}
+
+/// Replace the head with [`RUN_HISTORY_DROPPED_NOTICE`], with no summary.
+///
+/// What a run does where a thread's loader would call a summariser: a run is
+/// dispatched only once its context is read, so it cannot wait on an inference
+/// call, and the cost of the cut is stated instead of hidden.
+#[must_use]
+pub fn apply_head_drop(mut messages: Vec<ChatMessage>, head: HeadSummary) -> Vec<ChatMessage> {
+    let end = head.end.min(messages.len());
+    if head.start >= end {
+        return messages;
+    }
+    let tail = messages.split_off(end);
+    messages.truncate(head.start);
+    messages.push(run_history_dropped_notice());
+    messages.extend(tail);
+    messages
+}
+
 /// One loaded conversation message together with the durable id session-core
 /// returned for it (`SessionMessage.message_id`).
 ///
@@ -1270,6 +1311,33 @@ mod tests {
             )[1]
             .content,
             DROPPED_HISTORY_NOTICE
+        );
+    }
+
+    #[test]
+    fn a_run_history_head_is_dropped_for_one_notice_that_names_no_missing_tool() {
+        let mut messages = vec![message("user", "first")];
+        messages.extend((0..10).map(|i| message("assistant", &format!("turn {i}"))));
+        let head = HeadSummary { start: 0, end: 8 };
+
+        let dropped = apply_head_drop(messages.clone(), head);
+
+        assert_eq!(dropped.len(), 1 + 3);
+        assert_eq!(dropped[0], run_history_dropped_notice());
+        assert_eq!(dropped[0].role, "assistant");
+        assert_eq!(dropped[1..], messages[8..]);
+        assert!(
+            !RUN_HISTORY_DROPPED_NOTICE.contains("reattach_context"),
+            "the Do loop does not offer it"
+        );
+        // An empty or out-of-range head changes nothing.
+        assert_eq!(
+            apply_head_drop(messages.clone(), HeadSummary { start: 4, end: 4 }),
+            messages
+        );
+        assert_eq!(
+            apply_head_drop(messages.clone(), HeadSummary { start: 20, end: 30 }),
+            messages
         );
     }
 

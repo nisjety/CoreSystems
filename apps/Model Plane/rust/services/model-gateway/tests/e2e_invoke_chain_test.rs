@@ -1122,6 +1122,11 @@ struct MockSessionHandles {
     /// (role, `thread_id`) of `AppendMessage` RPCs only, unlike
     /// `append_captures`, which also holds messages the atomic call saved.
     append_rpc_captures: Arc<Mutex<Vec<(String, String)>>>,
+    /// Every `RecordRunContext` call: (authorization, request).
+    run_context_captures: Arc<Mutex<Vec<(String, mpv1::RecordRunContextRequest)>>>,
+    /// `GetContextAssembly` never answers: it is counted, then the call stalls, as
+    /// a session-core replica that accepted the connection and wedged would.
+    context_assembly_hangs: Arc<AtomicBool>,
 }
 
 struct MockSessionCore {
@@ -1160,6 +1165,8 @@ impl MockSessionCore {
             retry_reaches_old_replica: Arc::new(AtomicBool::new(false)),
             expire_delegated_assistant_append: Arc::new(AtomicBool::new(false)),
             append_rpc_captures: Arc::new(Mutex::new(Vec::new())),
+            run_context_captures: Arc::new(Mutex::new(Vec::new())),
+            context_assembly_hangs: Arc::new(AtomicBool::new(false)),
         };
         (
             Self {
@@ -1492,6 +1499,9 @@ impl SessionCore for MockSessionCore {
             .lock()
             .unwrap()
             .push((req.thread_id, req.run_id, req.max_tokens));
+        if self.handles.context_assembly_hangs.load(Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
         let Some(segments) = self.handles.context_segments.lock().unwrap().clone() else {
             return Err(Status::unimplemented(
                 "get_context_assembly not configured in this test",
@@ -1540,10 +1550,21 @@ impl SessionCore for MockSessionCore {
 
     async fn record_run_context(
         &self,
-        _: TReq<mp_contracts::model_plane::v1::RecordRunContextRequest>,
+        request: TReq<mp_contracts::model_plane::v1::RecordRunContextRequest>,
     ) -> Result<Response<mp_contracts::model_plane::v1::RecordRunContextResponse>, Status> {
-        Err(Status::unimplemented(
-            "record_run_context not needed in this test",
+        let authorization = request
+            .metadata()
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
+        self.handles
+            .run_context_captures
+            .lock()
+            .unwrap()
+            .push((authorization, request.into_inner()));
+        Ok(Response::new(
+            mp_contracts::model_plane::v1::RecordRunContextResponse {},
         ))
     }
 }
@@ -2224,27 +2245,6 @@ impl mpv1::orchestration_core_service_server::OrchestrationCoreService for Scrip
         Err(Status::unimplemented("consume_approval not needed in test"))
     }
 
-    async fn decide_approval(
-        &self,
-        _: TReq<mpv1::DecideApprovalRequest>,
-    ) -> Result<Response<mpv1::DecideApprovalResponse>, Status> {
-        Err(Status::unimplemented("decide_approval not needed in test"))
-    }
-    async fn claim_approval_deliveries(
-        &self,
-        _: TReq<mpv1::ClaimApprovalDeliveriesRequest>,
-    ) -> Result<Response<mpv1::ClaimApprovalDeliveriesResponse>, Status> {
-        Err(Status::unimplemented(
-            "claim_approval_deliveries not needed in test",
-        ))
-    }
-    async fn get_approval_continuation(
-        &self,
-        _: TReq<mpv1::GetApprovalContinuationRequest>,
-    ) -> Result<Response<mpv1::GetApprovalContinuationResponse>, Status> {
-        Err(Status::unimplemented(
-            "get_approval_continuation not needed in test",
-        ))
     async fn create_run_question(
         &self,
         _: TReq<mpv1::CreateRunQuestionRequest>,
@@ -2270,6 +2270,27 @@ impl mpv1::orchestration_core_service_server::OrchestrationCoreService for Scrip
         ))
     }
 
+    async fn decide_approval(
+        &self,
+        _: TReq<mpv1::DecideApprovalRequest>,
+    ) -> Result<Response<mpv1::DecideApprovalResponse>, Status> {
+        Err(Status::unimplemented("decide_approval not needed in test"))
+    }
+    async fn claim_approval_deliveries(
+        &self,
+        _: TReq<mpv1::ClaimApprovalDeliveriesRequest>,
+    ) -> Result<Response<mpv1::ClaimApprovalDeliveriesResponse>, Status> {
+        Err(Status::unimplemented(
+            "claim_approval_deliveries not needed in test",
+        ))
+    }
+    async fn get_approval_continuation(
+        &self,
+        _: TReq<mpv1::GetApprovalContinuationRequest>,
+    ) -> Result<Response<mpv1::GetApprovalContinuationResponse>, Status> {
+        Err(Status::unimplemented(
+            "get_approval_continuation not needed in test",
+        ))
     }
     async fn record_approval_continuation_started(
         &self,
@@ -11811,5 +11832,515 @@ async fn a_waived_turns_own_knowledge_search_says_so_on_the_stream_too() {
         !turn.body.contains("zdr_dense_unavailable") && !turn.body.contains("Semantic search"),
         "{}",
         turn.body
+    );
+}
+
+// ── WS02-S6: the run context a Do run starts with ───────────────────────────
+
+/// A mock memory service: answers every `SearchMemory` with `entries` and
+/// records what it was asked. The rest is unreachable on this path.
+struct MockMemory {
+    entries: Vec<String>,
+    queries: Arc<Mutex<Vec<mpv1::SearchMemoryRequest>>>,
+}
+
+#[tonic::async_trait]
+impl mpv1::memory_service_server::MemoryService for MockMemory {
+    async fn search_memory(
+        &self,
+        request: TReq<mpv1::SearchMemoryRequest>,
+    ) -> Result<Response<mpv1::SearchMemoryResponse>, Status> {
+        self.queries.lock().unwrap().push(request.into_inner());
+        Ok(Response::new(mpv1::SearchMemoryResponse {
+            entries: self
+                .entries
+                .iter()
+                .map(|content| mpv1::MemoryEntry {
+                    content: content.clone(),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }))
+    }
+
+    async fn index_memory(
+        &self,
+        _: TReq<mpv1::IndexMemoryRequest>,
+    ) -> Result<Response<mpv1::IndexMemoryResponse>, Status> {
+        Err(Status::unimplemented("index_memory not needed in test"))
+    }
+
+    async fn list_memory(
+        &self,
+        _: TReq<mpv1::ListMemoryRequest>,
+    ) -> Result<Response<mpv1::ListMemoryResponse>, Status> {
+        Err(Status::unimplemented("list_memory not needed in test"))
+    }
+
+    async fn delete_memory(
+        &self,
+        _: TReq<mpv1::DeleteMemoryRequest>,
+    ) -> Result<Response<mpv1::DeleteMemoryResponse>, Status> {
+        Err(Status::unimplemented("delete_memory not needed in test"))
+    }
+
+    async fn health(
+        &self,
+        _: TReq<mpv1::MemoryHealthRequest>,
+    ) -> Result<Response<mpv1::MemoryHealthResponse>, Status> {
+        Err(Status::unimplemented("health not needed in test"))
+    }
+}
+
+async fn spawn_memory_mock(
+    entries: Vec<String>,
+    queries: Arc<Mutex<Vec<mpv1::SearchMemoryRequest>>>,
+) -> mpv1::memory_service_client::MemoryServiceClient<tonic::transport::Channel> {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        Server::builder()
+            .add_service(mpv1::memory_service_server::MemoryServiceServer::new(
+                MockMemory { entries, queries },
+            ))
+            .serve_with_incoming(TcpListenerStream::new(listener))
+            .await
+            .ok();
+    });
+    let ch = Endpoint::from_shared(format!("http://{addr}"))
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    mpv1::memory_service_client::MemoryServiceClient::new(ch)
+}
+
+/// What one agentic turn sent and read, for the run-context tests.
+struct RunContextTurn {
+    run_agent: mpv1::RunAgentRequest,
+    session: MockSessionHandles,
+    memory_queries: Vec<mpv1::SearchMemoryRequest>,
+}
+
+/// What differs between the run-context turns: the session-core and capability-core
+/// behaviour around one agentic request.
+#[derive(Default)]
+struct RunContextTurnOptions {
+    /// `GetContextAssembly` (the persona-toggle read) never answers.
+    hang_context_assembly: bool,
+    /// The org's safety policies are readable and hold no PII filter, so the turn
+    /// is not redacted. Unset, the policy cannot be read and the turn is redacted.
+    pii_policy_off: bool,
+}
+
+/// One agentic turn on a thread that already holds two turns, with a platform
+/// instruction deployed and one recalled memory. The caller holds any env guard.
+async fn run_context_turn(body: &str) -> RunContextTurn {
+    run_context_turn_with(body, RunContextTurnOptions::default()).await
+}
+
+async fn run_context_turn_with(body: &str, options: RunContextTurnOptions) -> RunContextTurn {
+    let client = spawn_mock(MockOk::default()).await;
+    let (mock_session, session_handles) = MockSessionCore::new();
+    session_handles.conversation.lock().unwrap().extend([
+        (
+            "user".to_owned(),
+            "thread-existing".to_owned(),
+            "My project codename is BLUEHERON.".to_owned(),
+        ),
+        (
+            "assistant".to_owned(),
+            "thread-existing".to_owned(),
+            "Noted: the codename is BLUEHERON.".to_owned(),
+        ),
+    ]);
+    // The thread's persona toggle rides the context-assembly response.
+    *session_handles.context_segments.lock().unwrap() = Some(Vec::new());
+    session_handles
+        .context_assembly_hangs
+        .store(options.hang_context_assembly, Ordering::SeqCst);
+    let session_client = spawn_session_mock(mock_session).await;
+    let (mut state, _publisher) = make_state(client, session_client).await;
+    state.platform_instructions = "Platform rule.".to_owned();
+    let memory_queries = Arc::new(Mutex::new(Vec::new()));
+    state.memory_client =
+        spawn_memory_mock(vec!["likes tea".to_owned()], memory_queries.clone()).await;
+    let captured: CapturedRunAgentRequests = Arc::new(Mutex::new(Vec::new()));
+    state.execution_client = spawn_capturing_execution_mock(captured.clone()).await;
+    // Held to the end of the turn: it answers the PII policy read.
+    let capability_core = MockServer::start().await;
+    if options.pii_policy_off {
+        Mock::given(method("GET"))
+            .and(path("/api/v1/safety"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "policies": [] })),
+            )
+            .mount(&capability_core)
+            .await;
+        state.capability_core_base_url = capability_core.uri();
+    }
+    let (app, _delegated_jwks) = authenticated_user_router(
+        build_router(state, None),
+        "org_placeholder",
+        "user_placeholder",
+    )
+    .await;
+    let app = if options.pii_policy_off {
+        // The delegated bearer Capability Core's policy read needs (default audience).
+        let now = token_now();
+        let capability = encode_test_token(
+            &serde_json::json!({
+                "sub": "user_placeholder", "iss": TEST_AUTH_ISSUER, "aud": "capability-core",
+                "exp": now + 300, "nbf": now - 5, "org_id": "org_placeholder",
+                "user_id": "user_placeholder", "principal_type": "user", "zdr": false
+            }),
+            &zdr_route_test_keypair().0,
+        );
+        app.layer(middleware::from_fn(
+            move |mut request: Request<Body>, next: Next| {
+                let capability = capability.clone();
+                async move {
+                    request.headers_mut().insert(
+                        "x-capability-authorization",
+                        HeaderValue::from_str(&format!("Bearer {capability}")).unwrap(),
+                    );
+                    next.run(request).await
+                }
+            },
+        ))
+    } else {
+        app
+    };
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/invoke/stream")
+        .header(AUTHORIZATION, "Bearer dev")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_owned()))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let _ = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let run_agent = {
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.len(), 1, "exactly one RunAgent dispatch");
+        captured[0].clone()
+    };
+    let memory_queries = memory_queries.lock().unwrap().clone();
+    RunContextTurn {
+        run_agent,
+        session: session_handles,
+        memory_queries,
+    }
+}
+
+const RUN_CONTEXT_TURN: &str = r#"{"content":"what is my project codename?","model":"m","thread_id":"thread-existing","features":["agentic"],"org_instructions":"Org rule.","persona_instructions":"Always be terse."}"#;
+
+fn part_of(
+    status: &Option<mpv1::RunContextStatus>,
+    pick: fn(&mpv1::RunContextStatus) -> &Option<mpv1::RunContextPart>,
+) -> Option<(i32, u32, u32, String)> {
+    let status = status.as_ref().expect("status stamped");
+    pick(status)
+        .as_ref()
+        .map(|part| (part.state, part.included, part.omitted, part.reason.clone()))
+}
+
+/// `MODEL_GATEWAY_RUN_CONTEXT=full`: the dispatch carries the authored
+/// instructions an Ask turn would carry, the thread's earlier turns without the
+/// goal itself, and the recalled memory; the status says so, and the same status
+/// is stamped on the run record. Nothing about the run's authority moves.
+#[tokio::test]
+#[serial_test::serial]
+async fn agentic_dispatch_carries_the_composed_run_context() {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+    let _history = EnvGuard::set("MODEL_GATEWAY_RUN_CONTEXT_HISTORY_TOKENS", None);
+    let off = {
+        let _switch = EnvGuard::set("MODEL_GATEWAY_RUN_CONTEXT", None);
+        run_context_turn(RUN_CONTEXT_TURN).await
+    };
+    let turn = {
+        let _switch = EnvGuard::set("MODEL_GATEWAY_RUN_CONTEXT", Some("full"));
+        run_context_turn(RUN_CONTEXT_TURN).await
+    };
+
+    let context = turn
+        .run_agent
+        .run_context
+        .clone()
+        .expect("full sends a run context");
+    assert!(context.authored_instructions.contains("Platform rule."));
+    assert!(context.authored_instructions.contains("Org rule."));
+    assert!(context.authored_instructions.contains("Always be terse."));
+    let history: Vec<(&str, &str)> = context
+        .history
+        .iter()
+        .map(|message| (message.role.as_str(), message.content.as_str()))
+        .collect();
+    assert_eq!(
+        history,
+        [
+            ("user", "My project codename is BLUEHERON."),
+            ("assistant", "Noted: the codename is BLUEHERON."),
+        ],
+        "the earlier turns, and not the goal the run already carries"
+    );
+    assert!(context.memory_block.contains("likes tea"));
+
+    use mpv1::RunContextState::Included;
+    let status = &context.status;
+    assert_eq!(
+        part_of(status, |s| &s.instructions),
+        Some((Included as i32, 1, 0, String::new()))
+    );
+    assert_eq!(
+        part_of(status, |s| &s.history),
+        Some((Included as i32, 2, 0, String::new()))
+    );
+    assert_eq!(
+        part_of(status, |s| &s.memory),
+        Some((Included as i32, 1, 0, String::new()))
+    );
+
+    // The memory read asked for the goal on the run's own thread.
+    assert_eq!(turn.memory_queries.len(), 1);
+    assert_eq!(turn.memory_queries[0].query, "what is my project codename?");
+    assert_eq!(turn.memory_queries[0].thread_id, "thread-existing");
+
+    // The same status is stamped on the run record, best-effort, once.
+    {
+        let recorded = turn.session.run_context_captures.lock().unwrap();
+        assert_eq!(recorded.len(), 1, "one RecordRunContext call");
+        let (authorization, request) = &recorded[0];
+        assert!(authorization.starts_with("Bearer "), "{authorization}");
+        assert_eq!(request.run_id, "managed-run-for-thread-existing");
+        assert_eq!(request.status, context.status);
+    }
+
+    // Text is data: nothing about the run's authority or budget moved.
+    let mut with = turn.run_agent.clone();
+    with.run_context = None;
+    assert_eq!(
+        with, off.run_agent,
+        "apart from the run context the request is the one an unset switch sends"
+    );
+}
+
+/// `instructions` states the authored layers and reads nothing else: no thread
+/// history, no memory, and the record leaves those two parts unstated.
+#[tokio::test]
+#[serial_test::serial]
+async fn agentic_run_context_in_instructions_mode_reads_no_history_or_memory() {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+    let _switch = EnvGuard::set("MODEL_GATEWAY_RUN_CONTEXT", Some("instructions"));
+    let turn = run_context_turn(RUN_CONTEXT_TURN).await;
+
+    let context = turn.run_agent.run_context.clone().expect("a run context");
+    assert!(context.authored_instructions.contains("Org rule."));
+    assert!(context.history.is_empty());
+    assert!(context.memory_block.is_empty());
+    assert!(part_of(&context.status, |s| &s.history).is_none());
+    assert!(part_of(&context.status, |s| &s.memory).is_none());
+    assert!(
+        turn.memory_queries.is_empty(),
+        "instructions mode makes no memory read"
+    );
+}
+
+/// A prompt like "ok" recalls nothing (it only derails the reply), but the
+/// thread's history is still the run's to read.
+#[tokio::test]
+#[serial_test::serial]
+async fn agentic_run_context_skips_memory_for_a_trivial_prompt_and_keeps_history() {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+    let _switch = EnvGuard::set("MODEL_GATEWAY_RUN_CONTEXT", Some("full"));
+    let turn = run_context_turn(
+        r#"{"content":"ok","model":"m","thread_id":"thread-existing","features":["agentic"]}"#,
+    )
+    .await;
+
+    let context = turn.run_agent.run_context.clone().expect("a run context");
+    assert!(turn.memory_queries.is_empty());
+    assert!(context.memory_block.is_empty());
+    assert_eq!(
+        part_of(&context.status, |s| &s.memory),
+        Some((
+            mpv1::RunContextState::SkippedByPolicy as i32,
+            0,
+            0,
+            "trivial_prompt".to_owned()
+        ))
+    );
+    assert_eq!(context.history.len(), 2);
+}
+
+/// A run pinned to the ChatGPT subscription re-sends its prompt uncached on every
+/// round, so it gets its instructions and nothing heavier, whatever the switch says.
+#[tokio::test]
+#[serial_test::serial]
+async fn agentic_run_context_on_the_pinned_subscription_route_is_instructions_only() {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+    let _switch = EnvGuard::set("MODEL_GATEWAY_RUN_CONTEXT", Some("full"));
+    let _route = EnvGuard::set("AGENTIC_SUBSCRIPTION_ENABLED", Some("1"));
+    let _effects = EnvGuard::set("AGENTIC_SUBSCRIPTION_ALLOW_EFFECTS", None);
+    let turn = run_context_turn(
+        r#"{"content":"what is my project codename?","model":"gpt-5.6-terra","provider":"chatgpt-codex","subscription_connection_id":"conn_1","thread_id":"thread-existing","features":["agentic"],"plan_mode":true,"org_instructions":"Org rule."}"#,
+    )
+    .await;
+
+    let context = turn.run_agent.run_context.clone().expect("a run context");
+    assert!(context.authored_instructions.contains("Org rule."));
+    assert!(context.history.is_empty() && context.memory_block.is_empty());
+    assert!(turn.memory_queries.is_empty());
+    let skipped = |reason: &str| {
+        Some((
+            mpv1::RunContextState::SkippedByPolicy as i32,
+            0,
+            0,
+            reason.to_owned(),
+        ))
+    };
+    assert_eq!(
+        part_of(&context.status, |s| &s.history),
+        skipped("route_uncached")
+    );
+    assert_eq!(
+        part_of(&context.status, |s| &s.memory),
+        skipped("route_uncached")
+    );
+}
+
+/// Off is the default, and nothing but the exact literals turns it on: an unset
+/// switch, `off` and every near miss send the one request, with no context, no
+/// extra read and no `RecordRunContext` call.
+#[tokio::test]
+#[serial_test::serial]
+async fn agentic_run_context_off_is_byte_identical_and_makes_no_extra_call() {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+    let baseline = {
+        let _switch = EnvGuard::set("MODEL_GATEWAY_RUN_CONTEXT", None);
+        run_context_turn(RUN_CONTEXT_TURN).await
+    };
+    assert!(baseline.run_agent.run_context.is_none());
+    for value in ["off", "", "FULL", "true", "1", "instruction"] {
+        let _switch = EnvGuard::set("MODEL_GATEWAY_RUN_CONTEXT", Some(value));
+        let turn = run_context_turn(RUN_CONTEXT_TURN).await;
+        assert!(turn.run_agent.run_context.is_none(), "{value:?}");
+        assert_eq!(
+            prost::Message::encode_to_vec(&turn.run_agent),
+            prost::Message::encode_to_vec(&baseline.run_agent),
+            "{value:?}: the request is byte-identical to the unset switch's"
+        );
+        assert!(turn.memory_queries.is_empty(), "{value:?}");
+        assert_eq!(
+            turn.session.context_assembly_count.load(Ordering::SeqCst),
+            0,
+            "{value:?}: no persona read"
+        );
+        assert!(
+            turn.session.run_context_captures.lock().unwrap().is_empty(),
+            "{value:?}: nothing recorded"
+        );
+    }
+}
+
+/// The persona-toggle read shares a `join!` with the history and memory reads. A
+/// session-core whose `GetContextAssembly` never answers must cost that one
+/// read, not the run: the run is still dispatched within the read's own bound,
+/// with the toggle left open (persona text kept) and the other two parts intact.
+#[tokio::test]
+#[serial_test::serial]
+async fn agentic_run_context_dispatches_when_the_persona_read_never_returns() {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+    let _history = EnvGuard::set("MODEL_GATEWAY_RUN_CONTEXT_HISTORY_TOKENS", None);
+    let _switch = EnvGuard::set("MODEL_GATEWAY_RUN_CONTEXT", Some("full"));
+
+    let started = std::time::Instant::now();
+    let turn = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        run_context_turn_with(
+            RUN_CONTEXT_TURN,
+            RunContextTurnOptions {
+                hang_context_assembly: true,
+                ..RunContextTurnOptions::default()
+            },
+        ),
+    )
+    .await
+    .expect("a stalled persona read must not hold the run");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "dispatched within the persona read's bound, not after it: {elapsed:?}"
+    );
+    assert_eq!(
+        turn.session.context_assembly_count.load(Ordering::SeqCst),
+        1,
+        "the persona read was made, and it is the call that stalled"
+    );
+
+    let context = turn.run_agent.run_context.clone().expect("a run context");
+    assert!(
+        context.authored_instructions.contains("Always be terse."),
+        "an unreadable toggle is open, like an Ask turn whose assembly is unavailable"
+    );
+    assert_eq!(context.history.len(), 2, "the history read was not lost");
+    assert!(context.memory_block.contains("likes tea"));
+    use mpv1::RunContextState::Included;
+    assert_eq!(
+        part_of(&context.status, |s| &s.history),
+        Some((Included as i32, 2, 0, String::new()))
+    );
+    assert_eq!(
+        part_of(&context.status, |s| &s.memory),
+        Some((Included as i32, 1, 0, String::new()))
+    );
+}
+
+const RUN_CONTEXT_PII_TURN: &str = r#"{"content":"mail anna@example.com about the project codename","model":"m","thread_id":"thread-existing","features":["agentic"]}"#;
+
+/// The run's memory search is sent what an Ask turn's would be: the user's text
+/// PII-redacted when the org's policy requires it, so the run opens no new
+/// egress of raw PII; unchanged when the policy is off.
+#[tokio::test]
+#[serial_test::serial]
+async fn agentic_run_context_memory_query_is_redacted_exactly_when_the_policy_requires() {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+    let _switch = EnvGuard::set("MODEL_GATEWAY_RUN_CONTEXT", Some("full"));
+
+    // The policy cannot be read, which redacts (fail closed).
+    let redacted = run_context_turn_with(RUN_CONTEXT_PII_TURN, RunContextTurnOptions::default())
+        .await;
+    assert_eq!(redacted.memory_queries.len(), 1);
+    assert_eq!(
+        redacted.memory_queries[0].query,
+        "mail [redacted-email] about the project codename"
+    );
+    assert!(
+        !redacted.memory_queries[0].query.contains("anna@example.com"),
+        "the raw address must not reach the memory service"
+    );
+
+    // A readable policy with no PII filter leaves the text as typed.
+    let plain = run_context_turn_with(
+        RUN_CONTEXT_PII_TURN,
+        RunContextTurnOptions {
+            pii_policy_off: true,
+            ..RunContextTurnOptions::default()
+        },
+    )
+    .await;
+    assert_eq!(plain.memory_queries.len(), 1);
+    assert_eq!(
+        plain.memory_queries[0].query,
+        "mail anna@example.com about the project codename"
     );
 }
