@@ -181,7 +181,30 @@ async fn fetch_page(
     }
 }
 
+/// `POST /v1/extract`. WS4.J: wraps `extract_run` so a ZDR run's metadata-only tombstone is
+/// sent once, from the response status (off unless the flag is on; fail open). A per-URL
+/// failure inside a 200 batch is not an outcome of the request.
 pub async fn extract(
+    State(state): State<AppState>,
+    Extension(claims): Extension<crate::auth::Claims>,
+    Json(req): Json<ExtractRequest>,
+) -> axum::response::Response {
+    let pending = crate::zdr_tombstone::Pending::begin(
+        state.tombstones.as_ref(),
+        claims.effective_zdr(req.zdr.unwrap_or(false)),
+        &claims.org_id,
+        crate::zdr_tombstone::Kind::Extract,
+    );
+    let response = extract_run(State(state), Extension(claims), Json(req))
+        .await
+        .into_response();
+    if let Some(pending) = pending {
+        pending.finish_status(response.status().as_u16());
+    }
+    response
+}
+
+async fn extract_run(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
     Json(req): Json<ExtractRequest>,

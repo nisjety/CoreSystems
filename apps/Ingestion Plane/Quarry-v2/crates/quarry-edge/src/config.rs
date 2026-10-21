@@ -249,6 +249,13 @@ pub struct EdgeConfig {
     /// Env: `QUARRY_EDGE__ZDR_REFUSE_DURABLE_RESOURCES`.
     #[serde(default)]
     pub zdr_refuse_durable_resources: bool,
+    /// WS4.J: send a metadata-only tombstone to quarry-control when a ZDR run ends.
+    /// OFF by default and not set by any env file, compose file or default: counsel
+    /// review gates turning it on (it retains the fact that a ZDR run happened).
+    /// Needs `control_base_url` and `internal_secret`; without them nothing is sent.
+    /// Env: `QUARRY_EDGE__ZDR_TOMBSTONE`.
+    #[serde(default)]
+    pub zdr_tombstone: bool,
 }
 
 fn default_port() -> u16 {
@@ -366,6 +373,7 @@ impl EdgeConfig {
             rendered_branding_visual_enabled: false,
             visual_max_regions: None,
             zdr_refuse_durable_resources: false,
+            zdr_tombstone: false,
         }
     }
 }

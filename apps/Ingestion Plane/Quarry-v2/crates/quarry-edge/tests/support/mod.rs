@@ -74,6 +74,7 @@ pub fn base_state(driver: Arc<dyn Driver>, event_sink: EventSink) -> AppState {
         policy: quarry_runtime::RunPolicy::default(),
         scheduler: None,
         internal_signer: None,
+        tombstones: None,
         page_renderer: None,
         visual_processor: None,
         #[cfg(feature = "postgres-queue")]

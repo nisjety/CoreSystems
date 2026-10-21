@@ -41,7 +41,30 @@ pub struct ErrorBody {
     pub hint: Option<String>,
 }
 
+/// `POST /v1/answer`. WS4.J: wraps `answer_run` so a ZDR run's metadata-only tombstone is
+/// sent once, from the response status (off unless the flag is on; fail open). The
+/// streamed variant (`answer_stream`) ends inside its stream and emits no tombstone yet.
 pub async fn answer(
+    State(state): State<AppState>,
+    Extension(claims): Extension<crate::auth::Claims>,
+    Json(req): Json<AnswerHttpRequest>,
+) -> axum::response::Response {
+    let pending = crate::zdr_tombstone::Pending::begin(
+        state.tombstones.as_ref(),
+        claims.effective_zdr(req.zdr.unwrap_or(false)),
+        &claims.org_id,
+        crate::zdr_tombstone::Kind::Answer,
+    );
+    let response = answer_run(State(state), Extension(claims), Json(req))
+        .await
+        .into_response();
+    if let Some(pending) = pending {
+        pending.finish_status(response.status().as_u16());
+    }
+    response
+}
+
+async fn answer_run(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
     Json(req): Json<AnswerHttpRequest>,

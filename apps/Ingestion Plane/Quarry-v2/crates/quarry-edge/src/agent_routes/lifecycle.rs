@@ -650,6 +650,23 @@ pub(super) async fn finish_run(
         .lock()
         .expect("agent_runs mutex poisoned")
         .remove(run_id);
+    // WS4.J: the ZDR tombstone, sent only by the path that won the removal (the
+    // `closed` check above returns first for a racing second caller). Off unless the
+    // flag is on; fail open; ids, class and counts only.
+    {
+        let org_id = entry.org_id.clone();
+        let run_id_text = rid.to_string();
+        let mut run_end = crate::zdr_tombstone::RunEnd::new(&run_id_text, &org_id, crate::zdr_tombstone::Kind::AgentRun).ended_as(
+            match reason {
+                CloseReason::Explicit => crate::zdr_tombstone::Outcome::Ok,
+                CloseReason::Expired(_) => crate::zdr_tombstone::Outcome::Timeout,
+            },
+        );
+        if let Some(budget) = entry.budget.as_ref() {
+            run_end = run_end.steps(budget.ledger.steps);
+        }
+        crate::zdr_tombstone::emit_run_end(state.tombstones.as_ref(), zdr.is_active(), &run_end);
+    }
     let session = entry.session.clone();
     drop(entry);
     if let Err(error) = state.agent_driver.release(session).await {

@@ -113,6 +113,11 @@ pub struct AppState {
     /// forward; when `None`, calls go out unsigned (acceptable only
     /// in private-network single-tenant dev).
     pub internal_signer: Option<Arc<crate::internal_auth::InternalSigner>>,
+    /// WS4.J: the ZDR run tombstone emitter. `None` (the default everywhere) emits
+    /// nothing; `Some` only when `QUARRY_EDGE__ZDR_TOMBSTONE` is on and control and
+    /// the signer are configured. Counsel review gates turning it on. See
+    /// `crate::zdr_tombstone`.
+    pub tombstones: Option<Arc<crate::zdr_tombstone::TombstoneEmitter>>,
     /// Phase-2 visual RAG — page-image producer. `Some` when configured (CAS
     /// bucket + Data Plane NATS + edge base URL, browser-agent feature on);
     /// injected into every `PageRunner` so ingested pages get rendered → CAS →

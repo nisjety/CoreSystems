@@ -63,6 +63,7 @@ mod source_registrar;
 mod state;
 mod zdr_log;
 mod zdr_refusal;
+mod zdr_tombstone;
 #[cfg(test)]
 mod test_support;
 mod telemetry;
@@ -1498,6 +1499,22 @@ async fn run() -> anyhow::Result<()> {
             }
         };
 
+    // WS4.J: the ZDR run tombstone emitter. Off unless QUARRY_EDGE__ZDR_TOMBSTONE is on
+    // AND control and the signer are configured; counsel review gates turning it on.
+    let tombstones: Option<std::sync::Arc<zdr_tombstone::TombstoneEmitter>> = if cfg.zdr_tombstone {
+        match (cfg.control_base_url.is_empty(), internal_signer.clone()) {
+            (false, Some(signer)) => zdr_tombstone::HttpSink::new(&cfg.control_base_url, signer).map(|sink| {
+                tracing::warn!("ZDR run tombstones are ENABLED: metadata-only records of ZDR runs go to quarry-control");
+                std::sync::Arc::new(zdr_tombstone::TombstoneEmitter::new(std::sync::Arc::new(sink)))
+            }),
+            _ => {
+                tracing::warn!("QUARRY_EDGE__ZDR_TOMBSTONE is on but control_base_url or the internal secret is missing: tombstones stay off");
+                None
+            }
+        }
+    } else {
+        None
+    };
     let app_state = state::AppState {
         readiness: state::ReadinessState {
             durable: durable_ready,
@@ -1545,6 +1562,7 @@ async fn run() -> anyhow::Result<()> {
         #[cfg(feature = "postgres-queue")]
         baseline_store,
         internal_signer,
+        tombstones,
         // Cycle 21 / cluster #2 — best-effort policy by default.
         // Operators wanting `strict` reproducibility set
         // `QUARRY_EDGE__RUN_POLICY=strict` (future config wiring; for

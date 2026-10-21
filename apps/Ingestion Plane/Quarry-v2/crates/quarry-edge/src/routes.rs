@@ -644,6 +644,7 @@ async fn scrape_with(
             extractor: resolved.extractor,
         },
     };
+    let tombstone_started = chrono::Utc::now();
     // The caller's bound, never past the table's cap, so the typed Timeout
     // reaches the caller before the router's own limit drops the request.
     let run = tokio::time::timeout(
@@ -660,6 +661,28 @@ async fn scrape_with(
                 })),
         )
     });
+    // WS4.J: a ZDR run's metadata-only tombstone (off unless the flag is on; fail open).
+    let tombstone_run_id = run_id.to_string();
+    crate::zdr_tombstone::emit_run_end(
+        state.tombstones.as_ref(),
+        zdr.is_active(),
+        &match &run {
+            Ok((out, _)) => crate::zdr_tombstone::RunEnd::new(
+                &tombstone_run_id,
+                &org_id,
+                crate::zdr_tombstone::Kind::Scrape,
+            )
+            .started(tombstone_started)
+            .driver(out.driver.kind),
+            Err(err) => crate::zdr_tombstone::RunEnd::new(
+                &tombstone_run_id,
+                &org_id,
+                crate::zdr_tombstone::Kind::Scrape,
+            )
+            .started(tombstone_started)
+            .failed(err),
+        },
+    );
     match run {
         Ok((out, inline)) => {
             if cache_allowed && should_write(&req.cache) {
@@ -1404,8 +1427,32 @@ async fn scrape_stream(
         let cache = state.cache.clone();
         let cache_org_id = org_id.clone();
         let policy = req.cache.clone();
+        let tombstones = state.tombstones.clone();
+        let tombstone_started = chrono::Utc::now();
         let runner_handle = tokio::spawn(async move {
             let res = runner.run(&runner_run_id, &runner_url, prev_fp).await;
+            // WS4.J: a ZDR run's metadata-only tombstone (off unless the flag is on; fail open).
+            let tombstone_run_id = runner_run_id.to_string();
+            crate::zdr_tombstone::emit_run_end(
+                tombstones.as_ref(),
+                zdr.is_active(),
+                &match &res {
+                    Ok(out) => crate::zdr_tombstone::RunEnd::new(
+                        &tombstone_run_id,
+                        &cache_org_id,
+                        crate::zdr_tombstone::Kind::Scrape,
+                    )
+                    .started(tombstone_started)
+                    .driver(out.driver.kind),
+                    Err(err) => crate::zdr_tombstone::RunEnd::new(
+                        &tombstone_run_id,
+                        &cache_org_id,
+                        crate::zdr_tombstone::Kind::Scrape,
+                    )
+                    .started(tombstone_started)
+                    .failed(err),
+                },
+            );
             if let Ok(ref out) = res {
                 if !zdr.is_active() && should_write(&policy) {
                     if let Some(c) = cache.as_ref() {
@@ -1630,6 +1677,7 @@ mod tests {
             policy: RunPolicy::default(),
             scheduler: None,
             internal_signer: None,
+            tombstones: None,
             page_renderer: None,
             visual_processor: None,
             #[cfg(feature = "postgres-queue")]

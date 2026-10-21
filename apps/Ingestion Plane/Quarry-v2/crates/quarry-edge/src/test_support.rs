@@ -129,6 +129,7 @@ pub fn test_state(static_driver: Arc<dyn Driver>) -> AppState {
         policy: RunPolicy::default(),
         scheduler: None,
         internal_signer: None,
+        tombstones: None,
         page_renderer: None,
         visual_processor: None,
         #[cfg(feature = "postgres-queue")]

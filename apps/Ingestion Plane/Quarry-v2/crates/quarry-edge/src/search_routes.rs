@@ -591,7 +591,30 @@ fn wrap_ci(text: &str, term: &str) -> String {
 
 // ── handler ─────────────────────────────────────────────────────────────────
 
+/// `POST /v1/search`. WS4.J: wraps `search_run` so a ZDR run's metadata-only tombstone is
+/// sent once, from the response status, whichever of the handler's returns produced it
+/// (off unless the flag is on; fail open).
 pub async fn search(
+    State(state): State<AppState>,
+    Extension(claims): Extension<crate::auth::Claims>,
+    Json(req): Json<SearchRequest>,
+) -> axum::response::Response {
+    let pending = crate::zdr_tombstone::Pending::begin(
+        state.tombstones.as_ref(),
+        claims.effective_zdr(req.zdr),
+        &claims.org_id,
+        crate::zdr_tombstone::Kind::Search,
+    );
+    let response = search_run(State(state), Extension(claims), Json(req))
+        .await
+        .into_response();
+    if let Some(pending) = pending {
+        pending.finish_status(response.status().as_u16());
+    }
+    response
+}
+
+async fn search_run(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
     Json(req): Json<SearchRequest>,
