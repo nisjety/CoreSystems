@@ -17,6 +17,8 @@ chrono = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
 base64 = { workspace = true }
+# Secret redaction (src/redaction): linear-time patterns, RegexSet pre-pass.
+regex = "1"
 # JSON Schema for the scrape options (a golden that the OpenAPI file and the
 # Model Plane tool schema are checked against). Off by default.
 schemars = { version = "1", optional = true }

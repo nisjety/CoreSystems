@@ -24,6 +24,7 @@ pub mod pagination;
 pub mod policy;
 pub mod presets;
 pub mod privacy;
+pub mod redaction;
 pub mod resources;
 pub mod scrape;
 pub mod tracked_snapshot;
