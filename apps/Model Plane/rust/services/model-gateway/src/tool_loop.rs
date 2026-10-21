@@ -366,6 +366,31 @@ pub(crate) fn retrieval_notice_events(outcome: &ToolOutcome) -> Vec<ChatEvent> {
     vec![ChatEvent::RetrievalNotice { notice }]
 }
 
+/// What the model is told when a knowledge search fails (Z-41b): the status code and, for a refused
+/// restrictive retrieval, the turn's typed notice code. Never the Data Plane's own sentence: it is English
+/// written for an operator, and on a refused retrieval it words the turn's retention posture, which only a
+/// typed notice may state. A transient failure keeps the phrase `tool_retry` reads, so the retry the
+/// dispatcher makes on it is the one it always made.
+fn knowledge_search_failure(status: &tonic::Status, data_plane_mode: Option<&str>) -> String {
+    if crate::retrieval::dense_unavailable_refusal(status).is_some() {
+        // The turn's mode decides what it may be told, as for a reduced answer: a waived turn only that it was
+        // reduced, a persistent turn nothing at all, so it falls through to the plain failure below.
+        let notice = crate::retrieval_metadata::notice_for_code(
+            crate::retrieval_metadata::ZDR_DENSE_UNAVAILABLE,
+        )
+        .and_then(|notice| crate::retrieval_metadata::notice_for_mode(notice, data_plane_mode));
+        if let Some(notice) = notice {
+            return format!("knowledge_search refused: {}", notice.code);
+        }
+    }
+    let code = status.code();
+    if crate::tool_retry::is_transient_tool_failure(status.message()) {
+        format!("knowledge_search failed: {code:?} (temporarily unavailable)")
+    } else {
+        format!("knowledge_search failed: {code:?}")
+    }
+}
+
 /// Harvests `artifact`/`attachment` events from a tool outcome and returns a
 /// compact, model-facing replacement for its output.
 ///
@@ -2478,13 +2503,17 @@ pub async fn dispatch_tool(
     // Space-scoped turn (see `auth::VerifiedSandboxBearer`). Read by exactly
     // one arm, `code_interpreter`, and only when `space_id` is set.
     sandbox_bearer: Option<&VerifiedSandboxBearer>,
+    // The turn's Data Plane retrieval mode (`TurnPosture::data_plane_mode`): `ephemeral` for a ZDR turn,
+    // `reject` for a waived one, none for a persistent one. Threaded rather than derived from `zdr`, which
+    // cannot say a turn is waived, so a waived caller would silently lose `reject` (Z-41b).
+    data_plane_mode: Option<String>,
 ) -> ToolOutcome {
     dispatch_tool_with_cost(
         state, run_id, org_id, user_id, thread_id, space_id, prompt_contents,
         conversation, data_plane_bearer, execution_bearer, inference_bearer,
         session_bearer, capability_bearer, zdr, sovereign_required,
         allow_paid_providers, call, ingestion_bearer, sandbox_bearer, None,
-        crate::retrieval::data_plane_zdr_mode(zdr, false),
+        data_plane_mode,
     ).await
 }
 
@@ -3433,7 +3462,10 @@ async fn dispatch_tool_with_cost(
                         // may state: a persistent turn is never told its answer was reduced, and a waived turn
                         // only that it was, under the generic code.
                         if let Some(notice) = metadata.notice.and_then(|notice| {
-                            crate::retrieval_metadata::notice_for_mode(notice, data_plane_mode.as_deref())
+                            crate::retrieval_metadata::notice_for_mode(
+                                notice,
+                                data_plane_mode.as_deref(),
+                            )
                         }) {
                             object.insert(
                                 RETRIEVAL_NOTICE_KEY.to_owned(),
@@ -3456,7 +3488,10 @@ async fn dispatch_tool_with_cost(
                         error: None,
                     }
                 }
-                Err(e) => err_outcome(call, format!("knowledge_search failed: {}", e.message())),
+                Err(e) => err_outcome(
+                    call,
+                    knowledge_search_failure(&e, data_plane_mode.as_deref()),
+                ),
             }
         }
         // Data Plane v2's typed retrieval endpoints — the ones
@@ -8090,6 +8125,7 @@ mod tests {
             &call,
             None,
             None,
+            crate::retrieval::data_plane_zdr_mode(true, false),
         )
         .await;
 
@@ -8260,6 +8296,7 @@ mod tests {
             &call,
             None,
             None,
+            None,
         )
         .await;
 
@@ -8309,6 +8346,7 @@ mod tests {
             false,
             false,
             &call,
+            None,
             None,
             None,
         )
@@ -8364,6 +8402,7 @@ mod tests {
             &call,
             None,
             None,
+            None,
         )
         .await;
 
@@ -8409,6 +8448,7 @@ mod tests {
             false,
             false,
             &call,
+            None,
             None,
             None,
         )
@@ -8470,7 +8510,7 @@ mod tests {
         for (args, should_fail) in [("{}", false), (r#"{"id":"missing"}"#, true)] {
             let call = tool_call("read_artifact", args);
             let outcome = dispatch_tool(&state, "run", "org", "user", "thread", "", &[], "",
-                None, None, "", "", None, false, false, false, &call, None, None).await;
+                None, None, "", "", None, false, false, false, &call, None, None, None).await;
             assert_eq!(outcome.error.is_some(), should_fail);
             if !should_fail { assert!(outcome.output.contains("No artifacts")); }
         }
@@ -8485,10 +8525,10 @@ mod tests {
         assert!(!offered.iter().any(|tool| matches!(tool.name.as_str(), "read_artifact" | "update_artifact")));
         let create = tool_call("create_artifact", r#"{"id":"brief","kind":"document","title":"Brief","content":"Validated draft."}"#);
         let outcome = dispatch_tool(&state, "run", "org", "user", "thread", "", &[], "",
-            None, None, "", "", None, false, false, false, &create, None, None).await;
+            None, None, "", "", None, false, false, false, &create, None, None, None).await;
         assert!(outcome.error.is_none(), "{:?}", outcome.error);
         let sole_read = dispatch_tool(&state, "run", "org", "user", "thread", "", &[], "",
-            None, None, "", "", None, false, false, false, &tool_call("read_artifact", "{}"), None, None).await;
+            None, None, "", "", None, false, false, false, &tool_call("read_artifact", "{}"), None, None, None).await;
         assert!(sole_read.error.is_none());
         assert!(sole_read.output.contains("Validated draft."));
         assert!(!sole_read.output.contains("Call read_artifact again"));
@@ -8498,10 +8538,10 @@ mod tests {
         assert!(!other_thread.iter().any(|tool| tool.name == "read_artifact"));
         let second = tool_call("create_artifact", r#"{"id":"note","kind":"document","title":"Note","content":"Second document."}"#);
         let outcome = dispatch_tool(&state, "run", "org", "user", "thread", "", &[], "",
-            None, None, "", "", None, false, false, false, &second, None, None).await;
+            None, None, "", "", None, false, false, false, &second, None, None, None).await;
         assert!(outcome.error.is_none(), "{:?}", outcome.error);
         let listing = dispatch_tool(&state, "run", "org", "user", "thread", "", &[], "",
-            None, None, "", "", None, false, false, false, &tool_call("read_artifact", "{}"), None, None).await;
+            None, None, "", "", None, false, false, false, &tool_call("read_artifact", "{}"), None, None, None).await;
         assert!(listing.error.is_none());
         assert!(listing.output.contains("'brief'") && listing.output.contains("'note'"));
         assert!(!listing.output.contains("Validated draft."));
@@ -8524,7 +8564,7 @@ mod tests {
             r#"{"id":"salgsrapport-uke37","kind":"document","title":"Salgsrapport uke 37","content":"v1 content"}"#,
         );
         let outcome = dispatch_tool(&state, "run", "org", "user", "thread", "", &[], "",
-            None, None, "", "", None, false, false, false, &first, None, None).await;
+            None, None, "", "", None, false, false, false, &first, None, None, None).await;
         assert!(outcome.error.is_none(), "{:?}", outcome.error);
         assert_eq!(state.artifact_versions.current_version("thread", "salgsrapport-uke37"), Some(1));
 
@@ -8535,7 +8575,7 @@ mod tests {
             r#"{"id":"salgsrapportuke37","kind":"document","title":"Salgsrapport uke 37 (oppdatert)","content":"v2 content"}"#,
         );
         let outcome = dispatch_tool(&state, "run", "org", "user", "thread", "", &[], "",
-            None, None, "", "", None, false, false, false, &second, None, None).await;
+            None, None, "", "", None, false, false, false, &second, None, None, None).await;
         assert!(outcome.error.is_none(), "{:?}", outcome.error);
 
         assert_eq!(
@@ -8561,7 +8601,7 @@ mod tests {
             r#"{"id":"sales-report-q3","kind":"document","title":"Sales Report Q3","content":"v1 content"}"#,
         );
         let outcome = dispatch_tool(&state, "run", "org", "user", "thread", "", &[], "",
-            None, None, "", "", None, false, false, false, &first, None, None).await;
+            None, None, "", "", None, false, false, false, &first, None, None, None).await;
         assert!(outcome.error.is_none(), "{:?}", outcome.error);
         assert_eq!(state.artifact_versions.current_version("thread", "sales-report-q3"), Some(1));
 
@@ -8573,7 +8613,7 @@ mod tests {
             r#"{"id":"new-id","title":"Sales Report Q3","content":"v2 content"}"#,
         );
         let outcome = dispatch_tool(&state, "run", "org", "user", "thread", "", &[], "",
-            None, None, "", "", None, false, false, false, &second, None, None).await;
+            None, None, "", "", None, false, false, false, &second, None, None, None).await;
         assert!(outcome.error.is_none(), "the title match must resolve the update instead of refusing it: {:?}", outcome.error);
 
         assert_eq!(
@@ -8601,9 +8641,9 @@ mod tests {
         assert_eq!((call.id.as_str(), call.name.as_str()), (SOLE_ARTIFACT_PREFETCH_READ_ID, "read_artifact"));
         assert_eq!(serde_json::from_str::<Value>(&call.arguments_json).unwrap(), serde_json::json!({ "id": "plan" }));
         let prefetched = dispatch_tool(&state, "run", "org", "user", "thread", "", &[], "",
-            None, None, "", "", None, false, false, false, &call, None, None).await;
+            None, None, "", "", None, false, false, false, &call, None, None, None).await;
         let own_read = dispatch_tool(&state, "run", "org", "user", "thread", "", &[], "",
-            None, None, "", "", None, false, false, false, &tool_call("read_artifact", "{}"), None, None).await;
+            None, None, "", "", None, false, false, false, &tool_call("read_artifact", "{}"), None, None, None).await;
         assert_eq!(prefetched.output, "Current content of artifact 'plan' (v2):\n\n# Plan\n\nTask A.");
         assert_eq!(prefetched.output, own_read.output, "the model's own read returns the same text");
         // The same result lines, under a header of its own.
@@ -8724,9 +8764,9 @@ mod tests {
             let call = sole_artifact_prefetch(on, store, &thread, &readable, true, "new note")
                 .unwrap_or_else(|| panic!("{chars}: a document that fits whole is prefetched"));
             let prefetched = dispatch_tool(&state, "run", "org", "user", &thread, "", &[], "",
-                None, None, "", "", None, false, false, false, &call, None, None).await;
+                None, None, "", "", None, false, false, false, &call, None, None, None).await;
             let explicit = dispatch_tool(&state, "run", "org", "user", &thread, "", &[], "",
-                None, None, "", "", None, false, false, false, &tool_call("read_artifact", r#"{"id":"rapport"}"#), None, None).await;
+                None, None, "", "", None, false, false, false, &tool_call("read_artifact", r#"{"id":"rapport"}"#), None, None, None).await;
             assert_eq!(prefetched.output, explicit.output, "{chars}: the prefetch is the ordinary read");
             for (via, outcome, shown) in [
                 ("the prefetch", &prefetched, format_gateway_read_context(std::slice::from_ref(&prefetched))),
@@ -8750,7 +8790,7 @@ mod tests {
         store.seed_persisted("thread-long", "rapport", "Rapport", &document_of(MAX_READ_ARTIFACT_CHARS + 1), 1);
         assert!(sole_artifact_prefetch(on, store, "thread-long", &readable, true, "new note").is_none());
         let cut = dispatch_tool(&state, "run", "org", "user", "thread-long", "", &[], "",
-            None, None, "", "", None, false, false, false, &tool_call("read_artifact", "{}"), None, None).await;
+            None, None, "", "", None, false, false, false, &tool_call("read_artifact", "{}"), None, None, None).await;
         assert!(cut.output.contains("[Only the first part of this artifact is shown"));
         assert!(!read_whole_artifact(&cut));
 
@@ -8759,7 +8799,7 @@ mod tests {
         let long_id = "a".repeat(2_000);
         store.seed_persisted("thread-id", &long_id, "Rapport", &document_of(MAX_READ_ARTIFACT_CHARS), 1);
         let framed = dispatch_tool(&state, "run", "org", "user", "thread-id", "", &[], "",
-            None, None, "", "", None, false, false, false, &tool_call("read_artifact", "{}"), None, None).await;
+            None, None, "", "", None, false, false, false, &tool_call("read_artifact", "{}"), None, None, None).await;
         assert!(!framed.output.contains("[Only the first part of this artifact is shown"));
         assert!(!read_whole_artifact(&framed), "text the model did not see is never counted as read");
         assert!(format_tool_context(std::slice::from_ref(&framed)).contains("[truncated"));
@@ -8951,6 +8991,7 @@ mod tests {
             &call,
             None,
             None,
+            None,
         )
         .await;
 
@@ -8988,6 +9029,7 @@ mod tests {
             false,
             false,
             &call,
+            None,
             None,
             None,
         )
@@ -9032,6 +9074,7 @@ mod tests {
             &call,
             None,
             None,
+            None,
         )
         .await;
 
@@ -9070,6 +9113,7 @@ mod tests {
             &call,
             None,
             None,
+            None,
         )
         .await;
         let error = outcome.error.expect("direct MCP must be denied");
@@ -9102,6 +9146,7 @@ mod tests {
             false,
             false,
             &tool_call(crate::runtime_registries::MCP_CATALOG_TOOL_NAME, "{}"),
+            None,
             None,
             None,
         )
@@ -9283,6 +9328,7 @@ mod tests {
                     &call,
                     None,
                     None,
+                    crate::retrieval::data_plane_zdr_mode(true, false),
                 );
                 let error =
                     match tokio::time::timeout(std::time::Duration::from_secs(2), dispatch).await {
@@ -9320,7 +9366,7 @@ mod tests {
         let state = crate::state::AppState::new();
         let call = tool_call("count_words", r#"{"texts":["Blå lampe, 16 cm. #Kontor","Don't re-write this."]}"#);
         let outcome = dispatch_tool(&state, "run", "org", "user", "thread", "", &[], "",
-            None, None, "", "", None, true, false, false, &call, None, None).await;
+            None, None, "", "", None, true, false, false, &call, None, None, crate::retrieval::data_plane_zdr_mode(true, false)).await;
         assert!(outcome.error.is_none());
         let output: serde_json::Value = serde_json::from_str(&outcome.output).unwrap();
         assert_eq!(output["counts"], serde_json::json!([5, 3]));
@@ -9469,6 +9515,7 @@ mod tests {
             &call,
             None,
             None,
+            crate::retrieval::data_plane_zdr_mode(true, false),
         )
         .await;
         assert!(outcome.output.is_empty(), "a failed read returns no output");
@@ -9503,6 +9550,7 @@ mod tests {
             &call,
             None,
             None,
+            crate::retrieval::data_plane_zdr_mode(true, false),
         )
         .await;
         let error = outcome.error.expect("missing bearer must error");
@@ -9720,10 +9768,12 @@ mod tests {
     }
 
     /// One knowledge search through the real dispatch, against a Data Plane double, on a turn of the given
-    /// retention posture. Returns the outcome and every `zdr_mode` the double received.
+    /// retention posture (`waived` is a persistent turn on one connection, which sends `reject`). Returns the
+    /// outcome and every `zdr_mode` the double received.
     async fn knowledge_search_on_turn(
         reply: crate::retrieval::notice_double::Reply,
         zdr: bool,
+        waived: bool,
     ) -> (ToolOutcome, Vec<Option<String>>) {
         use crate::retrieval::notice_double::NoticeDouble;
         let double = NoticeDouble::new(reply);
@@ -9752,6 +9802,7 @@ mod tests {
             &call,
             None,
             None,
+            crate::retrieval::data_plane_zdr_mode(zdr, waived),
         )
         .await;
         (outcome, seen.modes())
@@ -9762,8 +9813,12 @@ mod tests {
     /// typed code, never the Data Plane's sentence.
     #[tokio::test]
     async fn a_reduced_knowledge_search_on_a_zdr_turn_surfaces_one_typed_notice() {
-        let (outcome, modes) =
-            knowledge_search_on_turn(crate::retrieval::notice_double::Reply::Degraded, true).await;
+        let (outcome, modes) = knowledge_search_on_turn(
+            crate::retrieval::notice_double::Reply::Degraded,
+            true,
+            false,
+        )
+        .await;
         assert!(outcome.error.is_none(), "{:?}", outcome.error);
         assert_eq!(modes, vec![Some("ephemeral".to_owned())]);
         let events = retrieval_notice_events(&outcome);
@@ -9789,8 +9844,12 @@ mod tests {
     /// model reads. A persistent turn is never told its answer was reduced under zero retention.
     #[tokio::test]
     async fn a_reduced_knowledge_search_on_a_persistent_turn_carries_no_notice() {
-        let (outcome, modes) =
-            knowledge_search_on_turn(crate::retrieval::notice_double::Reply::Degraded, false).await;
+        let (outcome, modes) = knowledge_search_on_turn(
+            crate::retrieval::notice_double::Reply::Degraded,
+            false,
+            false,
+        )
+        .await;
         assert!(outcome.error.is_none(), "{:?}", outcome.error);
         assert_eq!(modes, vec![None]);
         assert!(retrieval_notice_events(&outcome).is_empty());
@@ -9801,11 +9860,126 @@ mod tests {
         );
     }
 
+    /// A waived turn keeps `reject` through the dispatch, and a reduced result on it is told under the generic
+    /// code, never the zero-retention one: the turn is persistent for its connection.
+    #[tokio::test]
+    async fn a_waived_knowledge_search_keeps_reject_and_states_only_a_reduction() {
+        let (outcome, modes) = knowledge_search_on_turn(
+            crate::retrieval::notice_double::Reply::Degraded,
+            false,
+            true,
+        )
+        .await;
+        assert!(outcome.error.is_none(), "{:?}", outcome.error);
+        assert_eq!(modes, vec![Some("reject".to_owned())]);
+        assert!(
+            matches!(
+                retrieval_notice_events(&outcome).as_slice(),
+                [ChatEvent::RetrievalNotice { notice }] if notice.code == "retrieval_reduced"
+            ),
+            "{}",
+            outcome.output
+        );
+        assert!(
+            !outcome.output.contains("zdr_dense_unavailable"),
+            "a waived turn is never told zero retention applied: {}",
+            outcome.output
+        );
+    }
+
+    /// A refused knowledge search on a ZDR turn tells the model the typed code and nothing the Data Plane wrote.
+    #[tokio::test]
+    async fn a_refused_knowledge_search_on_a_zdr_turn_tells_the_model_only_the_typed_code() {
+        let (outcome, modes) =
+            knowledge_search_on_turn(crate::retrieval::notice_double::Reply::Refused, true, false)
+                .await;
+        assert_eq!(modes, vec![Some("ephemeral".to_owned())]);
+        assert_eq!(
+            outcome.error.as_deref(),
+            Some("knowledge_search refused: zdr_dense_unavailable")
+        );
+        assert!(outcome.output.is_empty(), "{}", outcome.output);
+    }
+
+    /// The same refusal on a waived turn says only that the answer was reduced, and on a persistent turn nothing of
+    /// the refusal: the Data Plane's sentence reaches neither.
+    #[tokio::test]
+    async fn a_refused_knowledge_search_states_what_the_turns_mode_allows() {
+        let (waived, _) =
+            knowledge_search_on_turn(crate::retrieval::notice_double::Reply::Refused, false, true)
+                .await;
+        assert_eq!(
+            waived.error.as_deref(),
+            Some("knowledge_search refused: retrieval_reduced")
+        );
+        let (persistent, _) = knowledge_search_on_turn(
+            crate::retrieval::notice_double::Reply::Refused,
+            false,
+            false,
+        )
+        .await;
+        assert_eq!(
+            persistent.error.as_deref(),
+            Some("knowledge_search failed: FailedPrecondition")
+        );
+        for outcome in [&waived, &persistent] {
+            let text = outcome.error.as_deref().unwrap_or_default();
+            assert!(!text.contains("Semantic search"), "{text}");
+            assert!(!text.contains("zero data retention"), "{text}");
+        }
+    }
+
+    /// The model is not given the Data Plane's text on any failure, and the dispatcher's retry decision on the
+    /// failure is the one it made on the text it used to read.
+    #[test]
+    fn a_knowledge_search_failure_keeps_the_retry_decision_and_drops_the_text() {
+        use tonic::{Code, Status};
+        for (status, retried) in [
+            (
+                Status::unavailable("error trying to connect: connection refused"),
+                true,
+            ),
+            (Status::deadline_exceeded("operation timed out"), true),
+            (Status::resource_exhausted("429 too many requests"), true),
+            (
+                Status::internal("embedding provider returned empty vector"),
+                false,
+            ),
+            (Status::invalid_argument("org_id is required"), false),
+            (
+                Status::permission_denied("invalid Space retrieval decision"),
+                false,
+            ),
+            (Status::new(Code::Unknown, "transport error"), true),
+        ] {
+            let before = format!("knowledge_search failed: {}", status.message());
+            let after = knowledge_search_failure(&status, None);
+            assert_eq!(
+                crate::tool_retry::is_transient_tool_failure(&after),
+                retried,
+                "{status:?} -> {after}"
+            );
+            assert_eq!(
+                crate::tool_retry::is_transient_tool_failure(&before),
+                crate::tool_retry::is_transient_tool_failure(&after),
+                "{status:?}"
+            );
+            assert!(
+                !after.contains(status.message()),
+                "the Data Plane's text stays behind: {after}"
+            );
+        }
+    }
+
     /// An ordinary knowledge search on a ZDR turn, which the Data Plane did not reduce, carries no notice.
     #[tokio::test]
     async fn an_ordinary_zdr_knowledge_search_is_unchanged() {
-        let (outcome, _) =
-            knowledge_search_on_turn(crate::retrieval::notice_double::Reply::Ordinary, true).await;
+        let (outcome, _) = knowledge_search_on_turn(
+            crate::retrieval::notice_double::Reply::Ordinary,
+            true,
+            false,
+        )
+        .await;
         assert!(outcome.error.is_none(), "{:?}", outcome.error);
         assert!(retrieval_notice_events(&outcome).is_empty());
         assert!(
@@ -12793,6 +12967,7 @@ mod tests {
             &tool_call("reattach_context", "{}"),
             None,
             None,
+            crate::retrieval::data_plane_zdr_mode(true, false),
         )
         .await;
         let error = outcome.error.unwrap_or_default();
@@ -12830,6 +13005,7 @@ mod tests {
             &tool_call("reattach_context", "{}"),
             None,
             None,
+            crate::retrieval::data_plane_zdr_mode(true, false),
         )
         .await;
         let error = outcome.error.clone().unwrap_or_default();
@@ -13024,6 +13200,7 @@ mod tests {
             &tool_call("knowledge_search", "{}"),
             None,
             None,
+            crate::retrieval::data_plane_zdr_mode(true, false),
         )
         .await;
         let error = outcome.error.unwrap_or_default();

@@ -1182,8 +1182,11 @@ pub async fn retrieve_checked(
 }
 
 /// The typed refusal a Data Plane status carries when a restrictive retrieval could not be answered:
-/// `failed_precondition` whose reason is `zdr_dense_unavailable` (Z-41). Any other status keeps its
-/// existing handling, so this maps only the refusal the Data Plane makes on purpose.
+/// the reason `zdr_dense_unavailable` leads its message (Z-41). The reason is the type, not the status
+/// code: the Data Plane's stream sends it as `failed_precondition`, and a status code is the Data Plane's
+/// to choose per call, so a code check would silently stop matching the day the unary call carries the
+/// same reason on another code. Any other reason keeps its existing handling, so this maps only the
+/// refusal the Data Plane makes on purpose.
 #[must_use]
 pub fn dense_unavailable_refusal(
     status: &tonic::Status,
@@ -1193,8 +1196,7 @@ pub fn dense_unavailable_refusal(
         .split_once(':')
         .map_or(message, |(reason, _)| reason)
         .trim();
-    (status.code() == tonic::Code::FailedPrecondition
-        && reason == crate::retrieval_metadata::ZDR_DENSE_UNAVAILABLE)
+    (reason == crate::retrieval_metadata::ZDR_DENSE_UNAVAILABLE)
         .then_some(mp_contracts::zdr_refusal::Refusal::UNAVAILABLE)
 }
 
@@ -1700,12 +1702,15 @@ mod tests {
     /// The zero-retention code and its wording never reach it.
     #[tokio::test]
     async fn a_waived_retrieval_is_told_only_that_its_answer_was_reduced() {
-        let (result, modes) = retrieve_through(notice_double::Reply::Degraded, Some("reject")).await;
+        let (result, modes) =
+            retrieve_through(notice_double::Reply::Degraded, Some("reject")).await;
         let grounding = result
             .expect("the answer is delivered")
             .expect("the grounding is returned");
         assert_eq!(
-            grounding.notice.map(|notice| (notice.code, notice.wording_key)),
+            grounding
+                .notice
+                .map(|notice| (notice.code, notice.wording_key)),
             Some(("retrieval_reduced", "retrieval.reduced"))
         );
         assert_eq!(modes, vec![Some("reject".to_owned())]);
@@ -1744,10 +1749,10 @@ mod tests {
         assert!(matches!(result, Ok(None)), "{result:?}");
     }
 
-    /// Only the Data Plane's own refusal maps to the typed refusal. The same message on another status,
-    /// or another reason, keeps its existing handling.
+    /// The reason is the type: the Data Plane's refusal maps whatever status code carries it, and another
+    /// reason keeps its existing handling, whatever its code.
     #[test]
-    fn only_the_data_plane_dense_refusal_maps_to_the_typed_refusal() {
+    fn only_the_data_plane_dense_reason_maps_to_the_typed_refusal() {
         use tonic::{Code, Status};
         let refusal = dense_unavailable_refusal(&Status::failed_precondition(
             "zdr_dense_unavailable: Semantic search was not used for this answer.",
@@ -1760,9 +1765,19 @@ mod tests {
         );
         for status in [
             Status::new(Code::InvalidArgument, "zdr_dense_unavailable: text"),
+            Status::internal("zdr_dense_unavailable: text"),
+            Status::unavailable("zdr_dense_unavailable"),
+        ] {
+            assert!(
+                dense_unavailable_refusal(&status).is_some(),
+                "the reason decides, not the code: {status:?}"
+            );
+        }
+        for status in [
             Status::failed_precondition("sovereign_required: the query route is Azure-hosted"),
             Status::failed_precondition("zdr_dense_unavailable_later: text"),
-            Status::internal("zdr_dense_unavailable: text"),
+            Status::internal("retrieval pipeline failed: zdr_dense_unavailable"),
+            Status::internal(""),
         ] {
             assert!(dense_unavailable_refusal(&status).is_none(), "{status:?}");
         }
@@ -1770,7 +1785,10 @@ mod tests {
 
     #[test]
     fn zdr_posture_maps_to_ephemeral_retrieval_mode() {
-        assert_eq!(data_plane_zdr_mode(true, false).as_deref(), Some("ephemeral"));
+        assert_eq!(
+            data_plane_zdr_mode(true, false).as_deref(),
+            Some("ephemeral")
+        );
         assert_eq!(data_plane_zdr_mode(false, false), None);
     }
 

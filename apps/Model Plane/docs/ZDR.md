@@ -437,20 +437,29 @@ persistent for its connection, so it is told only that its answer was reduced, u
   frame, so a resumed stream replays it. A ZDR answer has no stream buffer by design, so it cannot be resumed,
   and its notice reaches only the live connection;
 - `notice` on the answer of `POST /v1/retrieval`, present only when the answer was reduced;
-- `retrieval_notice` in the knowledge-search tool result that the model reads.
+- `retrieval_notice` in the knowledge-search tool result that the model reads. A ZDR turn runs no tool loop (it
+  offers no tools), so only a waived turn reaches this place; the turn emits the same typed event where it emits the
+  tool result, so a resumed stream replays it.
 
 The notice carries only the code and the key the client's wording is filed under, never the Data Plane's
 English sentence. The wording belongs to the client (task Z-20). A persistent turn never carries the notice,
 whatever mode its body asks for. Where the Data Plane refuses a restrictive retrieval instead of answering it
-(`failed_precondition` with the reason `zdr_dense_unavailable`, the form its streaming retrieval uses), the turn
-gets the typed `zdr_unavailable` refusal, not an empty answer.
+(the reason `zdr_dense_unavailable` leads the status message; its streaming retrieval sends it as
+`failed_precondition`, and the gateway matches the reason, not the code), the turn gets the typed `zdr_unavailable`
+refusal, not an empty answer. A refused knowledge search inside a waived turn's tool loop reaches the model as a tool
+error that carries only the typed code (`knowledge_search refused: retrieval_reduced`), never the Data Plane's
+sentence; a persistent turn gets a plain failure named by its status code.
 
-Not covered yet: the source-verification retrieval that runs after a durable answer, whose verdict does not
-carry the notice, and a refused knowledge search inside the tool loop, which reaches the model as a tool error.
-The gateway's unary Data Plane call never receives that refusal today, so the typed path is proven by a Data
-Plane double only. With hybrid search switched off on the Data Plane, the same refusal reaches the gateway as an
-internal error, so the answer goes on ungrounded with no notice. The typed refusal has to come from the Data Plane
-(task Z-41); this section does not change it. The live proof needs an attested ZDR route, so it waits for Z-40 and Z-60.
+Not covered: the source-verification retrieval that runs after a durable answer, whose verdict does not carry the
+notice. Accepted limit (Z-41b finding b, owned by the Data Plane): the gateway's unary Data Plane call never receives
+the typed refusal today, so the typed path is proven by a Data Plane double only. With hybrid search switched off on
+the Data Plane, the unary retrieve returns the refusal as `internal` with the embedding error text and no typed
+reason (retrieval-engine `retrieve` handler, `Status::internal(e.to_string())`), so the answer goes on ungrounded with
+no notice; the gateway cannot match a reason the Data Plane does not send. The typed refusal has to come from the Data
+Plane (task Z-41) and this item is raised to its owner. Proof of what is built: the streamed notice before the first
+chunk, on resume, on a persistent turn (absent) and from a waived tool call is covered by the `stream_answer` and
+`knowledge_search_says` tests in `model-gateway/tests/e2e_invoke_chain_test.rs`. The live proof needs an attested ZDR
+route, so it waits for Z-40 and Z-60.
 
 ### 5.11 Durable mutations and the retention receipt (Z-15b)
 

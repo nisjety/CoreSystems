@@ -346,12 +346,17 @@ impl InferenceCore for MockOk {
         };
         // A subscription round must name the pinned model and provider, or
         // the gateway rejects it as a route mismatch.
-        let (model_used, provider_used) =
-            if self.refusal.is_some() && !request.subscription_connection_id.is_empty() {
-                (request.model.clone(), "openai-codex-subscription".to_owned())
-            } else {
-                ("mock".to_owned(), String::new())
-            };
+        let (model_used, provider_used) = if (self.refusal.is_some()
+            || self.planned_rounds.is_some())
+            && !request.subscription_connection_id.is_empty()
+        {
+            (
+                request.model.clone(),
+                "openai-codex-subscription".to_owned(),
+            )
+        } else {
+            ("mock".to_owned(), String::new())
+        };
         let mut response = Response::new(InferResponse {
             compaction_summary: String::new(),
             request_id: String::new(),
@@ -2496,6 +2501,13 @@ fn token_now() -> u64 {
         .as_secs()
 }
 
+/// Set every key of the object `extra` on the object `claims`.
+fn merge_claims(claims: &mut serde_json::Value, extra: &serde_json::Value) {
+    for (key, value) in extra.as_object().expect("extra claims are an object") {
+        claims[key] = value.clone();
+    }
+}
+
 async fn signed_model_token(zdr: bool) -> (wiremock::MockServer, String) {
     let now = token_now();
     signed_claims_token(serde_json::json!({
@@ -2546,10 +2558,21 @@ async fn signed_delegated_user_tokens(
     user_id: &str,
     zdr: bool,
 ) -> (wiremock::MockServer, DelegatedUserTokens) {
+    signed_delegated_user_tokens_with_retention(org_id, user_id, serde_json::json!({ "zdr": zdr }))
+        .await
+}
+
+/// The user bearers of one turn, each carrying `retention`: the object of retention claims (`zdr`, and for a
+/// waived turn `org_zdr` and `zdr_waiver`) the turn's ingress token carries too.
+async fn signed_delegated_user_tokens_with_retention(
+    org_id: &str,
+    user_id: &str,
+    retention: serde_json::Value,
+) -> (wiremock::MockServer, DelegatedUserTokens) {
     let dev_bypass = std::env::var("MODEL_GATEWAY_AUTH_DEV_BYPASS").ok();
     let now = token_now();
     let claims = |audience: &str| {
-        serde_json::json!({
+        let mut claims = serde_json::json!({
             "sub": user_id,
             "iss": TEST_AUTH_ISSUER,
             "aud": audience,
@@ -2557,9 +2580,10 @@ async fn signed_delegated_user_tokens(
             "nbf": now - 5,
             "org_id": org_id,
             "user_id": user_id,
-            "principal_type": "user",
-            "zdr": zdr
-        })
+            "principal_type": "user"
+        });
+        merge_claims(&mut claims, &retention);
+        claims
     };
     let (jwks, inference) = signed_claims_token(claims("inference-core")).await;
     if let Some(dev_bypass) = dev_bypass {
@@ -11348,4 +11372,419 @@ async fn a_zdr_stream_turn_frames_its_usage_before_done_only_when_asked_for() {
     .await;
     assert_eq!(plain.status, StatusCode::OK, "{}", plain.body);
     assert!(!plain.body.contains("event: usage"), "{}", plain.body);
+}
+
+// ---------------------------------------------------------------------------
+// Z-41b: the retrieval notice through the real stream handler
+// ---------------------------------------------------------------------------
+
+/// A Data Plane whose `Retrieve` answers the way it answers a restrictive retrieval whose dense arm degraded to
+/// text search: `notice {code, message}` in the retrieval metadata. It records every `zdr_mode` it is sent.
+/// Every other RPC is unimplemented.
+#[derive(Clone, Default)]
+struct DegradedDataPlane {
+    modes: Arc<Mutex<Vec<Option<String>>>>,
+}
+
+impl DegradedDataPlane {
+    async fn client(
+        &self,
+    ) -> mp_contracts::dataplane::retrieval_v2::retrieval_service_client::RetrievalServiceClient<
+        tonic::transport::Channel,
+    > {
+        use mp_contracts::dataplane::retrieval_v2::{
+            retrieval_service_client::RetrievalServiceClient,
+            retrieval_service_server::RetrievalServiceServer,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let service = self.clone();
+        tokio::spawn(async move {
+            Server::builder()
+                .add_service(RetrievalServiceServer::new(service))
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await
+                .ok();
+        });
+        let channel = Endpoint::from_shared(format!("http://{addr}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        RetrievalServiceClient::new(channel)
+    }
+
+    fn modes(&self) -> Vec<Option<String>> {
+        self.modes.lock().unwrap().clone()
+    }
+}
+
+#[tonic::async_trait]
+impl mp_contracts::dataplane::retrieval_v2::retrieval_service_server::RetrievalService
+    for DegradedDataPlane
+{
+    type RetrieveStreamStream =
+        tokio_stream::Empty<Result<mp_contracts::dataplane::retrieval_v2::RetrievalChunk, Status>>;
+
+    async fn retrieve(
+        &self,
+        request: TReq<mp_contracts::dataplane::retrieval_v2::RetrieveRequest>,
+    ) -> Result<Response<mp_contracts::dataplane::retrieval_v2::RetrieveResponse>, Status> {
+        self.modes
+            .lock()
+            .unwrap()
+            .push(request.into_inner().zdr_mode);
+        let text = |value: &str| prost_types::Value {
+            kind: Some(prost_types::value::Kind::StringValue(value.to_owned())),
+        };
+        let notice = prost_types::Struct {
+            fields: [
+                ("code".to_owned(), text("zdr_dense_unavailable")),
+                (
+                    "message".to_owned(),
+                    text("Semantic search was not used for this answer."),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        Ok(Response::new(
+            mp_contracts::dataplane::retrieval_v2::RetrieveResponse {
+                retrieval_metadata: Some(prost_types::Struct {
+                    fields: [(
+                        "notice".to_owned(),
+                        prost_types::Value {
+                            kind: Some(prost_types::value::Kind::StructValue(notice)),
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
+                }),
+                ..Default::default()
+            },
+        ))
+    }
+
+    async fn retrieve_stream(
+        &self,
+        _request: TReq<mp_contracts::dataplane::retrieval_v2::RetrieveRequest>,
+    ) -> Result<Response<Self::RetrieveStreamStream>, Status> {
+        Err(Status::unimplemented("the double answers Retrieve only"))
+    }
+
+    async fn get_trace(
+        &self,
+        _request: TReq<mp_contracts::dataplane::retrieval_v2::GetTraceRequest>,
+    ) -> Result<Response<mp_contracts::dataplane::retrieval_v2::GetTraceResponse>, Status> {
+        Err(Status::unimplemented("the double answers Retrieve only"))
+    }
+
+    async fn get_sources(
+        &self,
+        _request: TReq<mp_contracts::dataplane::retrieval_v2::GetSourcesRequest>,
+    ) -> Result<Response<mp_contracts::dataplane::retrieval_v2::GetSourcesResponse>, Status> {
+        Err(Status::unimplemented("the double answers Retrieve only"))
+    }
+
+    async fn get_chunks(
+        &self,
+        _request: TReq<mp_contracts::dataplane::retrieval_v2::GetChunksRequest>,
+    ) -> Result<Response<mp_contracts::dataplane::retrieval_v2::GetChunksResponse>, Status> {
+        Err(Status::unimplemented("the double answers Retrieve only"))
+    }
+
+    async fn pack_context(
+        &self,
+        _request: TReq<mp_contracts::dataplane::retrieval_v2::PackContextRequest>,
+    ) -> Result<Response<mp_contracts::dataplane::retrieval_v2::PackContextResponse>, Status> {
+        Err(Status::unimplemented("the double answers Retrieve only"))
+    }
+}
+
+/// How a signed turn's tokens state retention.
+#[derive(Clone, Copy)]
+enum TurnRetention {
+    /// The user's own ZDR claim.
+    Zdr,
+    /// The org is ZDR and one connection is waived for this turn: persistent for that connection.
+    Waived,
+    /// No retention claim: a persistent turn.
+    Persistent,
+}
+
+impl TurnRetention {
+    /// The retention claims every bearer of the turn carries, the ingress token included.
+    fn claims(self) -> serde_json::Value {
+        match self {
+            Self::Zdr => serde_json::json!({ "zdr": true }),
+            Self::Waived => serde_json::json!({
+                "zdr": false,
+                "org_zdr": true,
+                "zdr_waiver": {
+                    "version": 1,
+                    "provider": "openai-codex-subscription",
+                    "connection": "conn-1"
+                }
+            }),
+            Self::Persistent => serde_json::json!({ "zdr": false }),
+        }
+    }
+}
+
+/// What a turn through the real stream handler came back with, against a Data Plane that degrades every
+/// retrieval to text search.
+struct NoticeTurn {
+    /// The live SSE body.
+    body: String,
+    /// The body of a resume of the finished stream, when the turn keeps a stream buffer to resume from.
+    resumed: Option<String>,
+    /// Every `zdr_mode` the Data Plane was sent.
+    modes: Vec<Option<String>>,
+}
+
+/// POST `request` to the stream route on tokens that state `retention`, with a Data Plane that answers every
+/// retrieval in its degraded form, and, for a turn that is persistent for its connection, resume the finished
+/// stream. `inference` is the model's side of the turn.
+async fn notice_turn(
+    retention: TurnRetention,
+    request: serde_json::Value,
+    inference: MockOk,
+) -> NoticeTurn {
+    std::env::remove_var("ALLOWED_MODELS");
+    let now = token_now();
+    let mut ingress = serde_json::json!({
+        "sub": "user-zdr",
+        "iss": TEST_AUTH_ISSUER,
+        "aud": "model-gateway",
+        "exp": now + 300,
+        "nbf": now - 5,
+        "org_id": "org-zdr",
+        "user_id": "user-zdr",
+        "principal_type": "user"
+    });
+    merge_claims(&mut ingress, &retention.claims());
+    let (_jwks, token) = signed_claims_token(ingress).await;
+    let client = spawn_mock(inference).await;
+    let (mock_session, _session) = MockSessionCore::new();
+    let session_client = spawn_session_mock(mock_session).await;
+    let (mut state, _publisher) = make_state(client, session_client).await;
+    let data_plane = DegradedDataPlane::default();
+    state.retrieval_client = data_plane.client().await;
+    let (_delegated_jwks, tokens) =
+        signed_delegated_user_tokens_with_retention("org-zdr", "user-zdr", retention.claims())
+            .await;
+    let app = with_delegated_user_tokens(build_router(state, None), tokens);
+    let post = Request::builder()
+        .method("POST")
+        .uri("/v1/invoke/stream")
+        .header(AUTHORIZATION, format!("Bearer {token}"))
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(request.to_string()))
+        .unwrap();
+    let response = app.clone().oneshot(post).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    let resumed = if matches!(retention, TurnRetention::Zdr) {
+        None
+    } else {
+        let request_id = sse_frames(&body)
+            .into_iter()
+            .find(|(_, name, _)| name == "connected")
+            .and_then(|(_, _, data)| data["request_id"].as_str().map(str::to_owned))
+            .expect("the connected frame names the request");
+        let resume = Request::builder()
+            .method("GET")
+            .uri(format!("/v1/invoke/resume/{request_id}"))
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let resumed = app.oneshot(resume).await.unwrap();
+        assert_eq!(resumed.status(), StatusCode::OK);
+        let resumed = tokio::time::timeout(
+            Duration::from_secs(10),
+            to_bytes(resumed.into_body(), usize::MAX),
+        )
+        .await
+        .expect("a resume of a finished stream closes")
+        .unwrap();
+        Some(String::from_utf8(resumed.to_vec()).unwrap())
+    };
+    clear_model_auth_env();
+    NoticeTurn {
+        body,
+        resumed,
+        modes: data_plane.modes(),
+    }
+}
+
+/// The one `retrieval_notice` frame of an SSE body, which must come before the first answer chunk.
+fn notice_before_the_first_chunk(body: &str) -> serde_json::Value {
+    let frames = sse_frames(body);
+    let names: Vec<&str> = frames.iter().map(|(_, name, _)| name.as_str()).collect();
+    let notices: Vec<usize> = names
+        .iter()
+        .enumerate()
+        .filter(|(_, name)| **name == "retrieval_notice")
+        .map(|(at, _)| at)
+        .collect();
+    assert_eq!(notices.len(), 1, "one notice per reduced answer: {names:?}");
+    let first_chunk = names
+        .iter()
+        .position(|name| *name == "chunk")
+        .unwrap_or_else(|| panic!("the answer streams: {names:?}"));
+    assert!(
+        notices[0] < first_chunk,
+        "the notice comes before the first chunk: {names:?}"
+    );
+    frames[notices[0]].2.clone()
+}
+
+/// A reduced ZDR answer, through the real handler, says so before it streams. Mutation: dropping the emission
+/// in the ZDR branch's answer stream fails here.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_zdr_stream_answer_from_text_search_only_says_so_before_its_first_chunk() {
+    let turn = notice_turn(
+        TurnRetention::Zdr,
+        serde_json::json!({ "content": "what is our refund policy", "model": "mock", "features": ["knowledge"] }),
+        MockOk::default(),
+    )
+    .await;
+    assert_eq!(
+        turn.modes,
+        vec![Some("ephemeral".to_owned())],
+        "{}",
+        turn.body
+    );
+    let notice = notice_before_the_first_chunk(&turn.body);
+    assert_eq!(notice["code"], "zdr_dense_unavailable", "{notice}");
+    assert_eq!(
+        notice["wording_key"], "retrieval.zdr_dense_unavailable",
+        "{notice}"
+    );
+    assert!(
+        !turn.body.contains("Semantic search was not used"),
+        "the Data Plane's sentence stays behind: {}",
+        turn.body
+    );
+}
+
+/// A waived turn is persistent for its connection: its answer says only that it was reduced, under the generic
+/// code and never the zero-retention one, before its first chunk, and a resume of the finished stream replays
+/// the same frame. Mutation: dropping the durable emission, or emitting it unbuffered, fails here.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_waived_stream_answer_from_text_search_only_says_so_before_its_chunk_and_on_resume() {
+    let request = serde_json::json!({
+        "content": "what is our refund policy",
+        "model": "gpt-5.6-terra",
+        "provider": "openai-codex-subscription",
+        "subscription_connection_id": "conn-1",
+        "features": ["knowledge"]
+    });
+    let turn = notice_turn(TurnRetention::Waived, request, MockOk::default()).await;
+    assert!(error_frames(&turn.body).is_empty(), "{}", turn.body);
+    // The answer's own retrieval and the source check after it both ask, and both ask in `reject` mode.
+    assert!(
+        !turn.modes.is_empty()
+            && turn
+                .modes
+                .iter()
+                .all(|mode| mode.as_deref() == Some("reject")),
+        "{:?}",
+        turn.modes
+    );
+    let live = notice_before_the_first_chunk(&turn.body);
+    assert_eq!(live["code"], "retrieval_reduced", "{live}");
+    assert_eq!(live["wording_key"], "retrieval.reduced", "{live}");
+    assert!(
+        !turn.body.contains("zdr_dense_unavailable"),
+        "a waived turn is never told zero retention applied: {}",
+        turn.body
+    );
+    let resumed = turn.resumed.expect("a waived turn keeps a stream buffer");
+    let replayed = notice_before_the_first_chunk(&resumed);
+    assert_eq!(
+        replayed, live,
+        "the resume replays the frame as it was sent"
+    );
+}
+
+/// A persistent turn is never told its answer was reduced under zero retention: the same degraded Data Plane
+/// answer produces no notice frame on the live stream or on a resume.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_persistent_stream_answer_never_carries_the_notice() {
+    let request = serde_json::json!({
+        "content": "what is our refund policy",
+        "model": "gpt-5.6-terra",
+        "provider": "openai-codex-subscription",
+        "subscription_connection_id": "conn-1",
+        "features": ["knowledge"]
+    });
+    let turn = notice_turn(TurnRetention::Persistent, request, MockOk::default()).await;
+    assert!(error_frames(&turn.body).is_empty(), "{}", turn.body);
+    assert!(
+        !turn.modes.is_empty() && turn.modes.iter().all(Option::is_none),
+        "a persistent retrieval sends no mode: {:?}",
+        turn.modes
+    );
+    assert!(
+        !turn.body.contains("event: retrieval_notice"),
+        "{}",
+        turn.body
+    );
+    assert!(
+        !turn
+            .resumed
+            .expect("a persistent turn keeps a stream buffer")
+            .contains("event: retrieval_notice"),
+        "the resume carries no notice either"
+    );
+}
+
+/// A waived turn whose model searches the knowledge base itself: the tool result's reduction reaches the stream
+/// as its own typed notice, beside the one the turn's own retrieval produced, and the model is told nothing of
+/// the Data Plane's sentence. Mutation: dropping the tool loop's emission leaves one notice, not two.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_waived_turns_own_knowledge_search_says_so_on_the_stream_too() {
+    let request = serde_json::json!({
+        "content": "what is our refund policy",
+        "model": "gpt-5.6-terra",
+        "provider": "openai-codex-subscription",
+        "subscription_connection_id": "conn-1",
+        "features": ["tools"]
+    });
+    let search = vec![mpv1::ToolCall {
+        id: "call-search".into(),
+        name: "knowledge_search".into(),
+        arguments_json: serde_json::json!({ "query": "refund policy" }).to_string(),
+    }];
+    let turn = notice_turn(
+        TurnRetention::Waived,
+        request,
+        MockOk::planning(vec![search]),
+    )
+    .await;
+    assert!(error_frames(&turn.body).is_empty(), "{}", turn.body);
+    let notices: Vec<_> = sse_frames(&turn.body)
+        .into_iter()
+        .filter(|(_, name, _)| name == "retrieval_notice")
+        .collect();
+    assert_eq!(
+        notices.len(),
+        2,
+        "the turn's own retrieval and its tool call each say so: {}",
+        turn.body
+    );
+    for (_, _, notice) in &notices {
+        assert_eq!(notice["code"], "retrieval_reduced", "{notice}");
+    }
+    assert!(
+        !turn.body.contains("zdr_dense_unavailable") && !turn.body.contains("Semantic search"),
+        "{}",
+        turn.body
+    );
 }
