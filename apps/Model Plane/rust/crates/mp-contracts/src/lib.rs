@@ -10,6 +10,7 @@ pub mod retention;
 pub mod run_context;
 pub mod skill_recovery;
 pub mod tool_arguments;
+pub mod tool_class;
 pub mod user_question;
 pub mod zdr_refusal;
 

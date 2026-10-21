@@ -20,8 +20,14 @@ import (
 // It is intentionally simple — the full CRUD and audit lives in
 // CapabilitiesStore; this type only satisfies Source for use in a Registry.
 type CapabilitiesSource struct {
-	pool  *pgxpool.Pool
+	db    capabilitiesQuerier
 	orgID string // empty string = all orgs
+}
+
+// capabilitiesQuerier is the one read the source makes. *pgxpool.Pool satisfies
+// it; a unit test substitutes rows without a database.
+type capabilitiesQuerier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
 
 // NewCapabilitiesSource constructs a CapabilitiesSource.  Pass an empty
@@ -31,7 +37,36 @@ func NewCapabilitiesSource(pool *pgxpool.Pool, orgID string) (*CapabilitiesSourc
 	if pool == nil {
 		return nil, fmt.Errorf("pgx pool is required")
 	}
-	return &CapabilitiesSource{pool: pool, orgID: orgID}, nil
+	return &CapabilitiesSource{db: pool, orgID: orgID}, nil
+}
+
+// sourceCapabilityColumns is the column list both Load queries select, in the
+// order scanSourceCapability scans it. The class and floor are read here so the
+// in-memory registry (and the gRPC read surface built on it) reports the stored
+// declaration instead of an empty value, which reads as the strictest.
+const sourceCapabilityColumns = `id, org_id, kind, name, version, description,
+			       risk_level, scope, lazy_load, enabled,
+			       idempotency_key, enabled_for_scopes, rollout_state,
+			       availability_state, availability_reason_code,
+			       availability_reason, execution_mode, cost_class,
+			       health_checked_at, side_effect_class, approval_floor`
+
+// scanSourceCapability scans one row of sourceCapabilityColumns.
+func scanSourceCapability(row pgxScanner) (*models.Capability, error) {
+	c := &models.Capability{}
+	var scopes []string
+	if err := row.Scan(
+		&c.ID, &c.OrgID, &c.Kind, &c.Name, &c.Version,
+		&c.Description, &c.RiskLevel, &c.Scope,
+		&c.LazyLoad, &c.Enabled, &c.IdempotencyKey, &scopes, &c.RolloutState,
+		&c.AvailabilityState, &c.ReasonCode, &c.Reason,
+		&c.ExecutionMode, &c.CostClass, &c.HealthCheckedAt,
+		&c.SideEffectClass, &c.ApprovalFloor,
+	); err != nil {
+		return nil, err
+	}
+	c.EnabledForScopes = scopes
+	return c, nil
 }
 
 // Load implements Source by querying the capabilities table.
@@ -44,25 +79,13 @@ func (s *CapabilitiesSource) Load() ([]*models.Capability, error) {
 	)
 
 	if s.orgID == "" {
-		rows, err = s.pool.Query(ctx, `
-			SELECT id, org_id, kind, name, version, description,
-			       risk_level, scope, lazy_load, enabled,
-			       idempotency_key, enabled_for_scopes, rollout_state,
-			       availability_state, availability_reason_code,
-			       availability_reason, execution_mode, cost_class,
-			       health_checked_at
+		rows, err = s.db.Query(ctx, "SELECT "+sourceCapabilityColumns+`
 			FROM capabilities
 			WHERE deleted_at IS NULL
 			ORDER BY kind, name
 		`)
 	} else {
-		rows, err = s.pool.Query(ctx, `
-			SELECT id, org_id, kind, name, version, description,
-			       risk_level, scope, lazy_load, enabled,
-			       idempotency_key, enabled_for_scopes, rollout_state,
-			       availability_state, availability_reason_code,
-			       availability_reason, execution_mode, cost_class,
-			       health_checked_at
+		rows, err = s.db.Query(ctx, "SELECT "+sourceCapabilityColumns+`
 			FROM capabilities
 			WHERE deleted_at IS NULL
 			  AND (org_id = $1 OR org_id = 'global')
@@ -76,18 +99,10 @@ func (s *CapabilitiesSource) Load() ([]*models.Capability, error) {
 
 	var caps []*models.Capability
 	for rows.Next() {
-		c := &models.Capability{}
-		var scopes []string
-		if err := rows.Scan(
-			&c.ID, &c.OrgID, &c.Kind, &c.Name, &c.Version,
-			&c.Description, &c.RiskLevel, &c.Scope,
-			&c.LazyLoad, &c.Enabled, &c.IdempotencyKey, &scopes, &c.RolloutState,
-			&c.AvailabilityState, &c.ReasonCode, &c.Reason,
-			&c.ExecutionMode, &c.CostClass, &c.HealthCheckedAt,
-		); err != nil {
+		c, err := scanSourceCapability(rows)
+		if err != nil {
 			return nil, fmt.Errorf("capabilities source scan: %w", err)
 		}
-		c.EnabledForScopes = scopes
 		caps = append(caps, c)
 	}
 	if err := rows.Err(); err != nil {

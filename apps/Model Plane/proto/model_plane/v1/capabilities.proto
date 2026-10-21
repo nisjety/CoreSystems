@@ -117,6 +117,18 @@ message CapabilityDetail {
   // model-kind only: declared residency label ("global", "eu", "norway").
   // Empty means undeclared.
   string residency = 17;
+
+  // Declared side-effect class of the capability, the strictest class of the
+  // tools it carries: "read", "sandbox_compute", "context_write",
+  // "external_write", "destructive", "owner_effect" or "unclassified". The
+  // vocabulary is closed and "unclassified" is the strictest, so an empty or
+  // unrecognised value is reported as "unclassified", never as a weaker class.
+  // Read-only: no request field sets it.
+  string side_effect_class = 18;
+
+  // Approval floor the class implies: "none", "ask" or "durable_owner".
+  // "owner_effect" always carries "durable_owner".
+  string approval_floor = 19;
 }
 
 // EvaluatePolicy — check whether a tool invocation is allowed.

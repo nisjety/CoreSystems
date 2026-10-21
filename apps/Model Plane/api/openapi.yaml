@@ -1579,6 +1579,24 @@ components:
           type: string
           format: date-time
           description: Server-recorded health-attestation time; empty when health is not attested.
+        side_effect_class:
+          type: string
+          enum: [read, sandbox_compute, context_write, external_write, destructive, owner_effect, unclassified]
+          readOnly: true
+          description: >-
+            Declared side-effect class of the capability, the strictest class of
+            the tools it carries. The vocabulary is closed and unclassified is the
+            strictest, so a value the registry has not classified reads as
+            unclassified, never as a weaker class. Set only by the registry's seed
+            and observation paths; no request field sets it.
+        approval_floor:
+          type: string
+          enum: [none, ask, durable_owner]
+          readOnly: true
+          description: >-
+            The least approval the class may be run under. owner_effect always
+            carries durable_owner and unclassified always carries at least ask;
+            an empty or unrecognised floor reads as durable_owner, the strictest.
 
     TaskInput:
       type: object

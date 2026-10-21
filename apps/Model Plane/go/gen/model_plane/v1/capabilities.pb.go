@@ -243,7 +243,17 @@ type CapabilityDetail struct {
 	PrivacyTier PrivacyTier `protobuf:"varint,16,opt,name=privacy_tier,json=privacyTier,proto3,enum=model_plane.v1.PrivacyTier" json:"privacy_tier,omitempty"`
 	// model-kind only: declared residency label ("global", "eu", "norway").
 	// Empty means undeclared.
-	Residency     string `protobuf:"bytes,17,opt,name=residency,proto3" json:"residency,omitempty"`
+	Residency string `protobuf:"bytes,17,opt,name=residency,proto3" json:"residency,omitempty"`
+	// Declared side-effect class of the capability, the strictest class of the
+	// tools it carries: "read", "sandbox_compute", "context_write",
+	// "external_write", "destructive", "owner_effect" or "unclassified". The
+	// vocabulary is closed and "unclassified" is the strictest, so an empty or
+	// unrecognised value is reported as "unclassified", never as a weaker class.
+	// Read-only: no request field sets it.
+	SideEffectClass string `protobuf:"bytes,18,opt,name=side_effect_class,json=sideEffectClass,proto3" json:"side_effect_class,omitempty"`
+	// Approval floor the class implies: "none", "ask" or "durable_owner".
+	// "owner_effect" always carries "durable_owner".
+	ApprovalFloor string `protobuf:"bytes,19,opt,name=approval_floor,json=approvalFloor,proto3" json:"approval_floor,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -393,6 +403,20 @@ func (x *CapabilityDetail) GetPrivacyTier() PrivacyTier {
 func (x *CapabilityDetail) GetResidency() string {
 	if x != nil {
 		return x.Residency
+	}
+	return ""
+}
+
+func (x *CapabilityDetail) GetSideEffectClass() string {
+	if x != nil {
+		return x.SideEffectClass
+	}
+	return ""
+}
+
+func (x *CapabilityDetail) GetApprovalFloor() string {
+	if x != nil {
+		return x.ApprovalFloor
 	}
 	return ""
 }
@@ -949,7 +973,7 @@ const file_model_plane_v1_capabilities_proto_rawDesc = "" +
 	"\bhas_more\x18\x02 \x01(\bR\ahasMore\"j\n" +
 	"\x14GetCapabilityRequest\x12#\n" +
 	"\rcapability_id\x18\x01 \x01(\tR\fcapabilityId\x12-\n" +
-	"\x12version_constraint\x18\x02 \x01(\tR\x11versionConstraint\"\xb9\x04\n" +
+	"\x12version_constraint\x18\x02 \x01(\tR\x11versionConstraint\"\x8c\x05\n" +
 	"\x10CapabilityDetail\x12#\n" +
 	"\rcapability_id\x18\x01 \x01(\tR\fcapabilityId\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x12\n" +
@@ -971,7 +995,9 @@ const file_model_plane_v1_capabilities_proto_rawDesc = "" +
 	"cost_class\x18\x0e \x01(\tR\tcostClass\x12*\n" +
 	"\x11health_checked_at\x18\x0f \x01(\tR\x0fhealthCheckedAt\x12>\n" +
 	"\fprivacy_tier\x18\x10 \x01(\x0e2\x1b.model_plane.v1.PrivacyTierR\vprivacyTier\x12\x1c\n" +
-	"\tresidency\x18\x11 \x01(\tR\tresidency\"\x9b\x01\n" +
+	"\tresidency\x18\x11 \x01(\tR\tresidency\x12*\n" +
+	"\x11side_effect_class\x18\x12 \x01(\tR\x0fsideEffectClass\x12%\n" +
+	"\x0eapproval_floor\x18\x13 \x01(\tR\rapprovalFloor\"\x9b\x01\n" +
 	"\x15EvaluatePolicyRequest\x12#\n" +
 	"\rcapability_id\x18\x01 \x01(\tR\fcapabilityId\x12\x15\n" +
 	"\x06run_id\x18\x02 \x01(\tR\x05runId\x12\x19\n" +

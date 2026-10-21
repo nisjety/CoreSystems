@@ -19,6 +19,10 @@ const (
 	KindMemoryAdapter = "memory_adapter"
 	KindSafetyPolicy  = "safety_policy"
 	KindCommand       = "command"
+	// KindMCPTool is one tool of an MCP server. Its rows are created only by the
+	// observation path (WS05-S2); the generic capability write surface rejects
+	// the kind so a tenant cannot mint a tool row with a class of its choosing.
+	KindMCPTool = "mcp_tool"
 )
 
 // RiskLevel values for Capability.RiskLevel.
@@ -130,4 +134,9 @@ type Capability struct {
 	// posture; never fabricated for a non-model capability.
 	PrivacyTier string
 	Residency   string
+	// SideEffectClass and ApprovalFloor are the capability's ceiling: the
+	// strictest class and floor among its tools. Empty means the row was loaded
+	// without them, which reads as `unclassified` (see NormalizeSideEffectClass).
+	SideEffectClass string
+	ApprovalFloor   string
 }

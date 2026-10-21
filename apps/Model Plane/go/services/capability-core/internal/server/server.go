@@ -82,6 +82,8 @@ func toDetail(c *models.Capability) *mpv1.CapabilityDetail {
 		HealthCheckedAt:  availability.HealthCheckedAt,
 		PrivacyTier:      privacyTierToProto(c.PrivacyTier),
 		Residency:        c.Residency,
+		SideEffectClass:  models.NormalizeSideEffectClass(c.SideEffectClass),
+		ApprovalFloor:    models.EffectiveApprovalFloor(c.SideEffectClass, c.ApprovalFloor),
 	}
 }
 
@@ -419,6 +421,8 @@ func rowToCapability(r *registry.CapabilityRow) *models.Capability {
 		ExecutionMode:     r.ExecutionMode,
 		CostClass:         r.CostClass,
 		HealthCheckedAt:   r.HealthCheckedAt,
+		SideEffectClass:   r.SideEffectClass,
+		ApprovalFloor:     r.ApprovalFloor,
 	}
 }
 
