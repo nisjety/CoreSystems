@@ -6,6 +6,7 @@ use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
+use super::effort::{self, Family, ModelAliases, Resolved, Wire};
 use super::zdr::ZdrAttestation;
 use super::{
     narrow_f64, EmbedRequest, EmbedResponse, InferChunk, InferRequest, InferResponse, ModelInfo,
@@ -13,6 +14,59 @@ use super::{
 };
 
 const DEFAULT_OPENAI_BASE: &str = "https://api.openai.com/v1";
+
+/// Switch for sending `reasoning_effort` and raising the completion ceiling by
+/// the level's allowance. Off unless the literal `true`, read once at startup.
+const REASONING_EFFORT_ENV: &str = "INFERENCE_CORE_OPENAI_REASONING_EFFORT";
+
+/// Whether an explicit env value turns the switch on. Pure so the policy is
+/// unit-testable without touching the process environment; a stray `1` or `on`
+/// must not start spending reasoning allowance.
+fn parse_enabled(raw: Option<&str>) -> bool {
+    raw.map(str::trim) == Some("true")
+}
+
+/// The reasoning-effort switch and the deployment aliases that tell an
+/// operator-named Azure deployment which model it really is.
+#[derive(Clone, Default)]
+struct EffortSettings {
+    enabled: bool,
+    aliases: ModelAliases,
+}
+
+impl EffortSettings {
+    fn from_env() -> Self {
+        let enabled = parse_enabled(std::env::var(REASONING_EFFORT_ENV).ok().as_deref());
+        Self {
+            enabled,
+            aliases: if enabled {
+                ModelAliases::from_env()
+            } else {
+                ModelAliases::default()
+            },
+        }
+    }
+}
+
+/// What the request body needs to know about reasoning for one model.
+#[derive(Clone, Copy)]
+struct ReasoningPlan {
+    /// The model takes `max_completion_tokens` and no `temperature`.
+    reasoning_model: bool,
+    /// The level to send, set only when the switch is on and the model has a
+    /// wire for it.
+    effort: Option<Resolved>,
+}
+
+impl ReasoningPlan {
+    /// The behaviour from before the ladder: no effort, the name-prefix test.
+    fn legacy(model: &str) -> Self {
+        Self {
+            reasoning_model: is_reasoning_model(model),
+            effort: None,
+        }
+    }
+}
 
 /// Default chat model used when a request leaves the model unspecified
 /// ("Verevon Auto"). The fallback chain substitutes this when OpenAI/Azure is
@@ -64,6 +118,8 @@ pub struct OpenAiProvider {
     residency: super::Residency,
     /// Whether this endpoint serves only its declared catalog.
     exclusive_catalog: bool,
+    /// Reasoning-effort switch and deployment aliases.
+    effort: EffortSettings,
 }
 
 impl OpenAiProvider {
@@ -100,6 +156,7 @@ impl OpenAiProvider {
             provider_id: None,
             residency: super::Residency::Global,
             exclusive_catalog: false,
+            effort: EffortSettings::from_env(),
         })
     }
 
@@ -150,6 +207,7 @@ impl OpenAiProvider {
             provider_id: None,
             residency: super::Residency::Global,
             exclusive_catalog: false,
+            effort: EffortSettings::from_env(),
         })
     }
 
@@ -201,6 +259,7 @@ impl OpenAiProvider {
             provider_id: None,
             residency: super::Residency::Global,
             exclusive_catalog: false,
+            effort: EffortSettings::from_env(),
         })
     }
 
@@ -360,6 +419,99 @@ impl OpenAiProvider {
             }
         }
     }
+
+    /// How this request treats reasoning. With the switch off it is the
+    /// name-prefix test alone, so the body is exactly what it was before the
+    /// ladder; with it on, the support table decides, so an `o4` model gets the
+    /// completion-token shape and an aliased Azure deployment is judged by the
+    /// model behind it rather than by its operator-chosen name.
+    fn reasoning_plan(&self, req: &InferRequest) -> ReasoningPlan {
+        let legacy = ReasoningPlan::legacy(&req.model);
+        if !self.effort.enabled {
+            return legacy;
+        }
+        let support = self.effort.aliases.support(Family::OpenAi, &req.model);
+        ReasoningPlan {
+            reasoning_model: legacy.reasoning_model || support.wire == Wire::OpenAiReasoningEffort,
+            effort: effort::resolve(req.reasoning_effort, support),
+        }
+    }
+
+    /// POST the chat completion and return the successful response.
+    ///
+    /// A 400 that names `reasoning_effort` means this deployment (an Azure
+    /// api-version or model that predates the parameter) refused the level, not
+    /// the request, so it is retried once without it. The plan then carries no
+    /// effort, which bounds the loop to a single retry.
+    async fn post_chat(
+        &self,
+        req: &InferRequest,
+        stream: bool,
+    ) -> Result<reqwest::Response, ProviderError> {
+        let url = self.chat_completions_url(&req.model);
+        let request_logprobs = self.wants_logprobs(&req.model);
+        let mut plan = self.reasoning_plan(req);
+        if let Some(resolved) = plan.effort {
+            info!(
+                request_id = %req.request_id,
+                model = %req.model,
+                wire = ?resolved.wire,
+                requested = resolved.requested.as_str(),
+                applied = resolved.applied.as_str(),
+                clamped = resolved.clamped(),
+                "effort_resolved"
+            );
+        }
+
+        loop {
+            let body = build_request_body(req, stream, request_logprobs, plan);
+            let response = self
+                .apply_auth(self.client.post(&url))
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| ProviderError::Http(e.to_string()))?;
+
+            if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                let retry_after = response
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(1);
+                return Err(ProviderError::RateLimited {
+                    retry_after_ms: retry_after * 1000,
+                });
+            }
+
+            if response.status().is_success() {
+                return Ok(response);
+            }
+
+            let status = response.status();
+            let text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "no body".to_owned());
+            if plan.effort.is_some() && rejects_reasoning_effort(status, &text) {
+                warn!(
+                    request_id = %req.request_id,
+                    model = %req.model,
+                    "deployment rejected reasoning_effort; retrying once without it"
+                );
+                plan.effort = None;
+                continue;
+            }
+            return Err(crate::provider::overflow::classify_http_failure(
+                status, &text,
+            ));
+        }
+    }
+}
+
+/// True when a failed completion is the deployment refusing `reasoning_effort`.
+fn rejects_reasoning_effort(status: reqwest::StatusCode, body: &str) -> bool {
+    status == reqwest::StatusCode::BAD_REQUEST && body.contains("reasoning_effort")
 }
 
 fn to_i32_or_max(value: i64) -> i32 {
@@ -412,6 +564,7 @@ fn build_request_body(
     req: &InferRequest,
     stream: bool,
     request_logprobs: bool,
+    reasoning: ReasoningPlan,
 ) -> serde_json::Value {
     let messages: Vec<serde_json::Value> = req
         .messages
@@ -441,8 +594,16 @@ fn build_request_body(
         body["stream_options"] = serde_json::json!({ "include_usage": true });
     }
 
-    if is_reasoning_model(&req.model) {
-        body["max_completion_tokens"] = serde_json::json!(req.max_tokens);
+    if reasoning.reasoning_model {
+        // A reasoning model spends its ceiling thinking, so a level raises the
+        // ceiling by its allowance; otherwise Deep would only buy an empty answer.
+        let ceiling = reasoning.effort.map_or(req.max_tokens, |resolved| {
+            effort::raised_ceiling(req.max_tokens, resolved.applied)
+        });
+        body["max_completion_tokens"] = serde_json::json!(ceiling);
+        if let Some(resolved) = reasoning.effort {
+            body["reasoning_effort"] = serde_json::json!(resolved.applied.as_str());
+        }
     } else {
         body["max_tokens"] = serde_json::json!(req.max_tokens);
         body["temperature"] = serde_json::json!(req.temperature);
@@ -657,38 +818,7 @@ impl ProviderRouter for OpenAiProvider {
     }
 
     async fn infer(&self, req: &InferRequest) -> Result<InferResponse, ProviderError> {
-        let body = build_request_body(req, false, self.wants_logprobs(&req.model));
-        let url = self.chat_completions_url(&req.model);
-
-        let response = self
-            .apply_auth(self.client.post(&url))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| ProviderError::Http(e.to_string()))?;
-
-        if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(1);
-            return Err(ProviderError::RateLimited {
-                retry_after_ms: retry_after * 1000,
-            });
-        }
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "no body".to_owned());
-            return Err(crate::provider::overflow::classify_http_failure(
-                status, &text,
-            ));
-        }
+        let response = self.post_chat(req, false).await?;
 
         let json: serde_json::Value = response
             .json()
@@ -750,38 +880,7 @@ impl ProviderRouter for OpenAiProvider {
         &self,
         req: &InferRequest,
     ) -> Result<mpsc::Receiver<InferChunk>, ProviderError> {
-        let body = build_request_body(req, true, self.wants_logprobs(&req.model));
-        let url = self.chat_completions_url(&req.model);
-
-        let response = self
-            .apply_auth(self.client.post(&url))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| ProviderError::Http(e.to_string()))?;
-
-        if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(1);
-            return Err(ProviderError::RateLimited {
-                retry_after_ms: retry_after * 1000,
-            });
-        }
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "no body".to_owned());
-            return Err(crate::provider::overflow::classify_http_failure(
-                status, &text,
-            ));
-        }
+        let response = self.post_chat(req, true).await?;
 
         let request_id = req.request_id.clone();
         let model = req.model.clone();
@@ -1081,7 +1180,16 @@ impl ProviderRouter for OpenAiProvider {
                 cheap: is_cheap_model(id),
                 privacy_tier,
                 residency_label: residency_label.clone(),
-                effort_levels: Vec::new(),
+                // Advertised only while the adapter actually sends the level.
+                effort_levels: if self.effort.enabled {
+                    self.effort
+                        .aliases
+                        .support(Family::OpenAi, id)
+                        .levels
+                        .to_vec()
+                } else {
+                    Vec::new()
+                },
             })
             .chain(self.embedding_models.iter().map(|id| ModelInfo {
                 id: id.clone(),
@@ -1140,6 +1248,16 @@ mod tests {
         }
     }
 
+    /// The body as it was before the ladder: the name-prefix test, no effort.
+    fn legacy_body(req: &InferRequest, stream: bool, request_logprobs: bool) -> serde_json::Value {
+        build_request_body(
+            req,
+            stream,
+            request_logprobs,
+            ReasoningPlan::legacy(&req.model),
+        )
+    }
+
     #[test]
     fn build_request_body_includes_tools_and_choice() {
         let mut req = make_request("gpt-4o");
@@ -1149,7 +1267,7 @@ mod tests {
             parameters_json: r#"{"type":"object","properties":{"q":{"type":"string"}}}"#.to_owned(),
         }];
         req.tool_choice = "auto".to_owned();
-        let body = build_request_body(&req, false, false);
+        let body = legacy_body(&req, false, false);
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tools"][0]["function"]["name"], "search_web");
         assert_eq!(body["tools"][0]["function"]["parameters"]["type"], "object");
@@ -1158,7 +1276,7 @@ mod tests {
 
     #[test]
     fn build_request_body_omits_tools_when_empty() {
-        let body = build_request_body(&make_request("gpt-4o"), false, false);
+        let body = legacy_body(&make_request("gpt-4o"), false, false);
         assert!(body.get("tools").is_none());
     }
 
@@ -1320,7 +1438,7 @@ mod tests {
 
     #[test]
     fn gpt5_uses_completion_token_limit_shape() {
-        let body = build_request_body(&make_request("gpt-5-mini"), false, false);
+        let body = legacy_body(&make_request("gpt-5-mini"), false, false);
 
         assert_eq!(body["max_completion_tokens"], 1024);
         assert!(body.get("max_tokens").is_none());
@@ -1329,7 +1447,7 @@ mod tests {
 
     #[test]
     fn standard_models_use_chat_completion_shape() {
-        let body = build_request_body(&make_request("gpt-4o-mini"), false, false);
+        let body = legacy_body(&make_request("gpt-4o-mini"), false, false);
 
         assert_eq!(body["max_tokens"], 1024);
         let temperature = body["temperature"].as_f64().expect("temperature");
@@ -1343,17 +1461,17 @@ mod tests {
     /// only obeys.
     #[test]
     fn logprobs_are_requested_only_when_asked_for() {
-        let with = build_request_body(&make_request("gpt-4o-mini"), false, true);
+        let with = legacy_body(&make_request("gpt-4o-mini"), false, true);
         assert_eq!(with["logprobs"], true);
         // The alternatives the model considered are far more data than the
         // aggregate needs, on every turn.
         assert!(with.get("top_logprobs").is_none());
 
-        let without = build_request_body(&make_request("gpt-4o-mini"), false, false);
+        let without = legacy_body(&make_request("gpt-4o-mini"), false, false);
         assert!(without.get("logprobs").is_none());
 
         // Streaming asks the same way; the summary is accumulated across chunks.
-        let streamed = build_request_body(&make_request("gpt-4o-mini"), true, true);
+        let streamed = legacy_body(&make_request("gpt-4o-mini"), true, true);
         assert_eq!(streamed["logprobs"], true);
         assert_eq!(streamed["stream"], true);
     }
@@ -1541,5 +1659,268 @@ mod tests {
         let azure_body = build_embedding_request_body(&req, false);
         assert!(azure_body.get("model").is_none());
         assert_eq!(azure_body["input"], "hello");
+    }
+
+    mod reasoning_effort {
+        use super::*;
+        use crate::provider::effort::Level;
+
+        /// A provider with the switch on and the given `deployment=base` aliases.
+        fn provider(aliases: &str) -> OpenAiProvider {
+            let mut provider = OpenAiProvider::new("key", None).expect("provider");
+            provider.effort = EffortSettings {
+                enabled: true,
+                aliases: ModelAliases::parse(aliases),
+            };
+            provider
+        }
+
+        fn request(model: &str, level: Option<Level>) -> InferRequest {
+            InferRequest {
+                reasoning_effort: level,
+                ..make_request(model)
+            }
+        }
+
+        fn body_for(provider: &OpenAiProvider, req: &InferRequest) -> serde_json::Value {
+            build_request_body(req, false, false, provider.reasoning_plan(req))
+        }
+
+        #[test]
+        fn only_the_literal_true_enables_the_switch() {
+            assert!(parse_enabled(Some("true")));
+            assert!(parse_enabled(Some(" true ")));
+            for off in ["1", "on", "yes", "TRUE", "enabled", ""] {
+                assert!(!parse_enabled(Some(off)), "{off:?} must leave it off");
+            }
+            assert!(!parse_enabled(None));
+        }
+
+        #[test]
+        fn reasoning_effort_sent_for_gpt5_family_only() {
+            let provider = provider("");
+            for model in ["gpt-5-mini", "gpt-5", "gpt-5-nano", "gpt-5.1"] {
+                let body = body_for(&provider, &request(model, Some(Level::Medium)));
+                assert_eq!(body["reasoning_effort"], "medium", "{model}");
+            }
+            for model in ["gpt-4o-mini", "gpt-4.1", "gpt-5-chat-latest"] {
+                let body = body_for(&provider, &request(model, Some(Level::Medium)));
+                assert!(body.get("reasoning_effort").is_none(), "{model}");
+            }
+        }
+
+        #[test]
+        fn quick_on_gpt5_mini_clamps_and_sends_low() {
+            let provider = provider("");
+
+            let quick = body_for(&provider, &request("gpt-5-mini", Some(Level::Low)));
+            assert_eq!(quick["reasoning_effort"], "low");
+
+            // `xhigh` is above everything the family accepts: the strongest
+            // supported level is sent, never a rejected value.
+            let req = request("gpt-5-mini", Some(Level::XHigh));
+            let plan = provider.reasoning_plan(&req);
+            let resolved = plan.effort.expect("resolved");
+            assert!(resolved.clamped());
+            assert_eq!(resolved.applied, Level::High);
+            assert_eq!(body_for(&provider, &req)["reasoning_effort"], "high");
+        }
+
+        #[test]
+        fn standard_body_is_byte_identical_to_before() {
+            let provider = provider("");
+            for model in ["gpt-5-mini", "o3-mini", "gpt-4o-mini", "gpt-5-chat-latest"] {
+                let req = request(model, None);
+                assert_eq!(
+                    body_for(&provider, &req).to_string(),
+                    legacy_body(&req, false, false).to_string(),
+                    "{model}: no level requested must leave the body as it was"
+                );
+            }
+
+            // With the switch off a requested level changes nothing either.
+            let mut off = provider.clone();
+            off.effort.enabled = false;
+            let req = request("gpt-5-mini", Some(Level::High));
+            assert_eq!(
+                body_for(&off, &req).to_string(),
+                legacy_body(&req, false, false).to_string()
+            );
+        }
+
+        #[test]
+        fn non_reasoning_model_never_gets_the_key() {
+            let provider = provider("");
+            let body = body_for(&provider, &request("gpt-4o-mini", Some(Level::High)));
+            assert!(body.get("reasoning_effort").is_none());
+            assert!(body.get("max_completion_tokens").is_none());
+            assert_eq!(body["max_tokens"], 1024);
+            assert!(body.get("temperature").is_some());
+        }
+
+        #[test]
+        fn azure_deployment_alias_resolves_to_its_base_model() {
+            let req = request("prod-chat", Some(Level::High));
+
+            let aliased = body_for(&provider("prod-chat=gpt-5-mini"), &req);
+            assert_eq!(aliased["reasoning_effort"], "high");
+            assert!(aliased.get("max_completion_tokens").is_some());
+            assert_eq!(aliased["model"], "prod-chat", "the deployment name stays");
+
+            // Without the alias the name says nothing about the model, so the
+            // body is the legacy one rather than a guess.
+            let unaliased = body_for(&provider(""), &req);
+            assert!(unaliased.get("reasoning_effort").is_none());
+            assert_eq!(
+                unaliased.to_string(),
+                legacy_body(&req, false, false).to_string()
+            );
+        }
+
+        #[test]
+        fn o4_uses_max_completion_tokens() {
+            let provider = provider("");
+            let body = body_for(&provider, &request("o4-mini", None));
+            assert_eq!(body["max_completion_tokens"], 1024);
+            assert!(body.get("max_tokens").is_none());
+            assert!(body.get("temperature").is_none());
+
+            // Switch off: the name-prefix test never knew `o4`.
+            let off = legacy_body(&request("o4-mini", None), false, false);
+            assert_eq!(off["max_tokens"], 1024);
+        }
+
+        #[test]
+        fn allowance_raises_max_completion_tokens_not_max_tokens() {
+            let provider = provider("");
+            for (level, expected) in [
+                (Level::Low, 1024 + 1_024),
+                (Level::Medium, 1024 + 2_048),
+                (Level::High, 1024 + 4_096),
+            ] {
+                let body = body_for(&provider, &request("gpt-5-mini", Some(level)));
+                assert_eq!(body["max_completion_tokens"], expected, "{level:?}");
+                assert!(body.get("max_tokens").is_none());
+            }
+
+            // The total is bounded, and a ceiling the caller set above the cap
+            // is never lowered.
+            let mut near = request("o3", Some(Level::High));
+            near.max_tokens = 30_000;
+            assert_eq!(
+                body_for(&provider, &near)["max_completion_tokens"],
+                effort::TOTAL_TOKEN_CAP
+            );
+            let mut above = request("o3", Some(Level::High));
+            above.max_tokens = 40_000;
+            assert_eq!(body_for(&provider, &above)["max_completion_tokens"], 40_000);
+        }
+
+        #[test]
+        fn catalogue_lists_levels_only_while_the_switch_is_on() {
+            let models = |provider: OpenAiProvider| {
+                provider.with_model_catalog(
+                    vec!["gpt-5-mini".to_owned(), "gpt-4o-mini".to_owned()],
+                    Vec::new(),
+                )
+            };
+
+            let on = models(provider("")).list_models();
+            assert_eq!(
+                on[0].effort_levels,
+                vec![Level::Minimal, Level::Low, Level::Medium, Level::High]
+            );
+            assert!(on[1].effort_levels.is_empty());
+
+            let mut off = provider("");
+            off.effort.enabled = false;
+            assert!(models(off)
+                .list_models()
+                .iter()
+                .all(|model| model.effort_levels.is_empty()));
+        }
+
+        #[test]
+        fn only_a_400_naming_the_parameter_is_retried() {
+            use reqwest::StatusCode;
+            let named = r#"{"error":{"message":"Unrecognized request argument supplied: reasoning_effort"}}"#;
+            assert!(rejects_reasoning_effort(StatusCode::BAD_REQUEST, named));
+            assert!(!rejects_reasoning_effort(
+                StatusCode::BAD_REQUEST,
+                "bad json"
+            ));
+            assert!(!rejects_reasoning_effort(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                named
+            ));
+        }
+
+        fn completion() -> serde_json::Value {
+            serde_json::json!({
+                "model": "gpt-5-mini",
+                "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 2},
+            })
+        }
+
+        #[tokio::test]
+        async fn a_rejected_level_is_retried_once_without_the_key() {
+            use wiremock::matchers::{method, path};
+            use wiremock::{Mock, MockServer, ResponseTemplate};
+
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/chat/completions"))
+                .and(|request: &wiremock::Request| {
+                    String::from_utf8_lossy(&request.body).contains("reasoning_effort")
+                })
+                .respond_with(ResponseTemplate::new(400).set_body_string(
+                    r#"{"error":{"message":"Unrecognized request argument: reasoning_effort"}}"#,
+                ))
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/chat/completions"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(completion()))
+                .mount(&server)
+                .await;
+
+            let mut provider = OpenAiProvider::new("key", Some(server.uri())).expect("provider");
+            provider.effort.enabled = true;
+
+            let response = provider
+                .infer(&request("gpt-5-mini", Some(Level::High)))
+                .await
+                .expect("the retry succeeds");
+            assert_eq!(response.content, "ok");
+
+            let sent = server.received_requests().await.expect("recorded");
+            assert_eq!(sent.len(), 2, "one attempt with the key, one retry without");
+            assert!(String::from_utf8_lossy(&sent[0].body).contains("reasoning_effort"));
+            assert!(!String::from_utf8_lossy(&sent[1].body).contains("reasoning_effort"));
+        }
+
+        #[tokio::test]
+        async fn an_unrelated_400_is_not_retried() {
+            use wiremock::matchers::{method, path};
+            use wiremock::{Mock, MockServer, ResponseTemplate};
+
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/chat/completions"))
+                .respond_with(ResponseTemplate::new(400).set_body_string("invalid tool schema"))
+                .mount(&server)
+                .await;
+
+            let mut provider = OpenAiProvider::new("key", Some(server.uri())).expect("provider");
+            provider.effort.enabled = true;
+
+            let result = provider
+                .infer(&request("gpt-5-mini", Some(Level::High)))
+                .await;
+            assert!(result.is_err());
+            let sent = server.received_requests().await.expect("recorded");
+            assert_eq!(sent.len(), 1);
+        }
     }
 }
