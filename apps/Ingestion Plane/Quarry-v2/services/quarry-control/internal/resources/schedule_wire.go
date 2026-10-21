@@ -34,6 +34,11 @@ type changeMonitorArgs struct {
 	OrgID     string `json:"org_id"`
 	URL       string `json:"url"`
 	CreatedBy string `json:"created_by,omitempty"`
+	// Zdr is the posture stamped at schedule create (WS4.H, migration 023).
+	// A pointer with omitempty: a row created before the stamp (nil) emits
+	// byte-identical args to what shipped before, so an existing Temporal
+	// schedule sees no spec change on the next reconcile pass.
+	Zdr *bool `json:"zdr,omitempty"`
 }
 
 // workflowFor maps a schedule's target_kind to the Temporal workflow name +
@@ -44,7 +49,7 @@ type changeMonitorArgs struct {
 func workflowFor(s store.Schedule) (string, []any) {
 	switch s.TargetKind {
 	case store.TargetKindChangeMonitor:
-		return "ChangeMonitorWF", []any{changeMonitorArgs{OrgID: s.OrgID, URL: s.TargetRef, CreatedBy: s.CreatedBy}}
+		return "ChangeMonitorWF", []any{changeMonitorArgs{OrgID: s.OrgID, URL: s.TargetRef, CreatedBy: s.CreatedBy, Zdr: s.Zdr}}
 	default:
 		return "", nil
 	}

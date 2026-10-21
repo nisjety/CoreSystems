@@ -409,6 +409,16 @@ type Schedule struct {
 	// change reaches the person who set the monitor up. Empty for legacy
 	// rows / non-user-initiated schedules.
 	CreatedBy string `json:"created_by,omitempty"`
+	// Zdr is the Zero Data Retention posture of the caller, STAMPED AT
+	// CREATE (migration 023, WS4.H). The edge sets it from the verified
+	// claims and a client body can never lower it (the edge's
+	// CreateScheduleRequest has no such field). nil means "created before
+	// the stamp existed" and is distinct from false ("stamped standard");
+	// both serialise to workflow args exactly as before. It rides into the
+	// change-monitor workflow so the orchestrator can declare the posture
+	// on /v1/internal/change/record. An org that turns ZDR on LATER keeps
+	// the stamp it was created with (documented gap, RUNBOOKS).
+	Zdr *bool `json:"zdr,omitempty"`
 	// Preset is INPUT-ONLY for change_monitor schedules: the caller sends
 	// a fixed cadence ("hourly"|"daily"|"weekly") which Validate maps to a
 	// literal 5-field cron. It is never persisted (no DB column) — only

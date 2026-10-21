@@ -734,18 +734,18 @@ type schedulesStore struct{ pool *pgxpool.Pool }
 
 func (s *schedulesStore) Create(v store.Schedule) error {
 	_, err := s.pool.Exec(context.Background(),
-		`INSERT INTO schedules(id, org_id, cron, target_kind, target_ref, enabled, created_at, created_by)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-		string(v.ID), v.OrgID, v.Cron, v.TargetKind, v.TargetRef, v.Enabled, v.CreatedAt, v.CreatedBy)
+		`INSERT INTO schedules(id, org_id, cron, target_kind, target_ref, enabled, created_at, created_by, zdr)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+		string(v.ID), v.OrgID, v.Cron, v.TargetKind, v.TargetRef, v.Enabled, v.CreatedAt, v.CreatedBy, v.Zdr)
 	return mapPgErr(err)
 }
 
 func (s *schedulesStore) Get(id quarrycontracts.ID) (store.Schedule, bool) {
 	var v store.Schedule
 	err := s.pool.QueryRow(context.Background(),
-		`SELECT id, org_id, cron, target_kind, target_ref, enabled, created_at, created_by
+		`SELECT id, org_id, cron, target_kind, target_ref, enabled, created_at, created_by, zdr
 		 FROM schedules WHERE id=$1`, string(id),
-	).Scan(&v.ID, &v.OrgID, &v.Cron, &v.TargetKind, &v.TargetRef, &v.Enabled, &v.CreatedAt, &v.CreatedBy)
+	).Scan(&v.ID, &v.OrgID, &v.Cron, &v.TargetKind, &v.TargetRef, &v.Enabled, &v.CreatedAt, &v.CreatedBy, &v.Zdr)
 	if err != nil {
 		return store.Schedule{}, false
 	}
@@ -755,7 +755,7 @@ func (s *schedulesStore) Get(id quarrycontracts.ID) (store.Schedule, bool) {
 func (s *schedulesStore) List(limit int, cur string) ([]store.Schedule, string) {
 	limit = pageLimit(limit, defaultMaxPage)
 	c, _ := decodeCursor(cur)
-	q := `SELECT id, org_id, cron, target_kind, target_ref, enabled, created_at, created_by FROM schedules`
+	q := `SELECT id, org_id, cron, target_kind, target_ref, enabled, created_at, created_by, zdr FROM schedules`
 	args := []any{}
 	if c != nil {
 		q += ` WHERE (created_at, id) < ($1, $2)`
@@ -770,7 +770,7 @@ func (s *schedulesStore) List(limit int, cur string) ([]store.Schedule, string) 
 	out := make([]store.Schedule, 0, limit)
 	for rows.Next() {
 		var v store.Schedule
-		if err := rows.Scan(&v.ID, &v.OrgID, &v.Cron, &v.TargetKind, &v.TargetRef, &v.Enabled, &v.CreatedAt, &v.CreatedBy); err != nil {
+		if err := rows.Scan(&v.ID, &v.OrgID, &v.Cron, &v.TargetKind, &v.TargetRef, &v.Enabled, &v.CreatedAt, &v.CreatedBy, &v.Zdr); err != nil {
 			return nil, ""
 		}
 		out = append(out, v)

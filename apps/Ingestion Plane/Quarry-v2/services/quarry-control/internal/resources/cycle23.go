@@ -82,6 +82,11 @@ type sourceCreateBody struct {
 	Monitor bool           `json:"monitor,omitempty"`
 	Preset  string         `json:"preset,omitempty"` // hourly|daily|weekly when Monitor
 	Config  map[string]any `json:"config,omitempty"`
+	// Zdr is the caller's ZDR posture, stamped by the EDGE from verified
+	// claims and consumed only when Monitor is true (it becomes the
+	// schedule's stamp, WS4.H). Never client-supplied: the edge's own
+	// request type has no such field.
+	Zdr *bool `json:"zdr,omitempty"`
 }
 
 var validSourceKinds = map[string]bool{"crawl": true, "scrape": true, "search": true}
@@ -199,6 +204,7 @@ func createSourceHandler(db store.DB) http.HandlerFunc {
 				TargetRef:  body.URL,
 				Enabled:    true,
 				Preset:     preset,
+				Zdr:        body.Zdr,
 			}
 			if err := sched.Validate(); err != nil {
 				httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, "monitor: "+err.Error(), nil)

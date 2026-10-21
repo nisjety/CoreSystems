@@ -1,0 +1,18 @@
+-- WS4.H: the Zero Data Retention posture of the caller, stamped on a schedule
+-- at create time. The edge sets it from the verified claims (a client body can
+-- never lower it); quarry-control puts it into the change-monitor workflow
+-- args and the orchestrator declares it on /v1/internal/change/record.
+--
+-- Nullable with no default on purpose: NULL means "created before the stamp
+-- existed" (distinct from false = "stamped standard"), so every existing row
+-- stays valid and its workflow args serialise exactly as before. Idempotent.
+--
+-- Known gap (RUNBOOKS): an org that turns ZDR on later keeps the stamp its
+-- schedules were created with. Operator remedy:
+--   UPDATE schedules SET zdr = true WHERE org_id = '<org>';
+-- The orchestrator reconcile propagates it on its next pass.
+--
+-- R-2 ledger: 023 is the next free number after 019/020 (015 WS4.J, 016-018
+-- WS15, 021-022 epics are reserved). WS15's 017_schedules_definition must
+-- carry this column if it ever rebuilds the table.
+ALTER TABLE schedules ADD COLUMN IF NOT EXISTS zdr BOOLEAN;
