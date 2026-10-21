@@ -5,6 +5,8 @@ import { createSignal, flush } from 'solid-js'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { vi } from 'vitest'
 import type { RunEventHandlers } from '@/shared/api/run-console-client'
+import { I18nProvider } from '@/shared/i18n'
+import { localeStorageKey } from '@/shared/i18n/locales'
 
 const hoisted = vi.hoisted(() => ({
   subscriptions: [] as Array<{ handlers: Record<string, unknown>; runId: string }>,
@@ -426,6 +428,29 @@ describe('ChatLiveRunPanel', () => {
     flush()
 
     expect(screen.getByText('Kunne ikke lese hendelsesstrømmen for denne kjøringen.')).toBeTruthy()
+  })
+
+  it('words the status and a stream failure in English under en', async () => {
+    window.localStorage.setItem(localeStorageKey, 'en')
+    try {
+      render(() => (
+        <I18nProvider>
+          <ChatLiveRunPanel collapsed={false} onToggleCollapsed={() => undefined} runId="run_abc123" zdr={false} />
+        </I18nProvider>
+      ))
+      await subscribed()
+      expect(screen.getByText('Waiting for the agent')).toBeTruthy()
+      expect(screen.getAllByText('Running').length).toBeGreaterThan(0)
+
+      handlers().onError?.(new Error('boom'))
+      flush()
+
+      expect(screen.getByText('The event stream for this run could not be read.')).toBeTruthy()
+      expect(screen.getByRole('button', { name: 'Reconnect' })).toBeTruthy()
+      expect(screen.getAllByText('Interrupted').length).toBeGreaterThan(0)
+    } finally {
+      window.localStorage.removeItem(localeStorageKey)
+    }
   })
 
   it('re-subscribes to the new run and drops the previous run\'s steps', async () => {

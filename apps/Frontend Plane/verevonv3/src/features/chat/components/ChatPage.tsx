@@ -31,7 +31,7 @@ import {
   EmptyChatState,
   MessageBlock,
   QueuedInputStrip,
-  RUNG_LABEL,
+  rungLabel,
 } from './ChatMessages'
 import {
   ArtifactsPanel,
@@ -246,7 +246,7 @@ export default function ChatPage() {
       // run on this thread. The controller owns whether it is selected.
       approvedPlan={
         approvedPlanView()
-          ? { rungLabel: RUNG_LABEL[approvedPlanView()!.rung], selected: approvedPlanView()!.selected }
+          ? { rungLabel: rungLabel(approvedPlanView()!.rung, i18n.tr), selected: approvedPlanView()!.selected }
           : undefined
       }
       onApprovedPlanSelect={selectExecute}

@@ -339,8 +339,11 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
               >
                 <GitCompare size={14} />
                 {showDiff()
-                  ? 'Vis versjonen'
-                  : `Vis endringer (+${diff().stat.added} −${diff().stat.removed})`}
+                  ? i18n.tr('Vis versjonen', 'Show version')
+                  : i18n.tr(
+                    `Vis endringer (+${diff().stat.added} −${diff().stat.removed})`,
+                    `Show changes (+${diff().stat.added} −${diff().stat.removed})`,
+                  )}
               </button>
             )}
           </Show>
@@ -351,7 +354,7 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
               onClick={() => setShowSource((value) => !value)}
             >
               {showSource() ? <Eye size={14} /> : <Code2 size={14} />}
-              {showSource() ? 'Vis forhåndsvisning' : 'Vis kode'}
+              {showSource() ? i18n.tr('Vis forhåndsvisning', 'Show preview') : i18n.tr('Vis kode', 'Show code')}
             </button>
           </Show>
           <Show when={isCopyableRenderKind(renderKind()) && !missing()}>
@@ -367,9 +370,9 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
                 <Match when={copyState() === 'copied'}><Check size={14} /></Match>
                 <Match when={copyState() === 'failed'}><AlertCircle size={14} /></Match>
               </Switch>
-              <Switch fallback="Kopier">
-                <Match when={copyState() === 'copied'}>Kopiert</Match>
-                <Match when={copyState() === 'failed'}>Kunne ikke kopiere</Match>
+              <Switch fallback={i18n.tr('Kopier', 'Copy')}>
+                <Match when={copyState() === 'copied'}>{i18n.tr('Kopiert', 'Copied')}</Match>
+                <Match when={copyState() === 'failed'}>{i18n.tr('Kunne ikke kopiere', 'Could not copy')}</Match>
               </Switch>
             </button>
           </Show>
@@ -394,7 +397,7 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
                 download={meta().downloadName}
               >
                 <Download size={14} />
-                Last ned
+                {i18n.tr('Last ned', 'Download')}
               </a>
             )}
           </Show>
@@ -560,6 +563,7 @@ export function ArtifactFileCard(props: {
   meta: { bytes: number; downloadName: string; href: string; mime: string; mimeLabel: string }
   title: string
 }) {
+  const i18n = useI18n()
   return (
     <div class="verevon-chat-artifact-file">
       <span class="verevon-chat-artifact-file__icon"><FileSpreadsheet size={22} /></span>
@@ -578,7 +582,7 @@ export function ArtifactFileCard(props: {
           download={props.meta.downloadName}
         >
           <Download size={14} />
-          Last ned
+          {i18n.tr('Last ned', 'Download')}
         </a>
       </div>
     </div>
@@ -604,7 +608,12 @@ export function ArtifactLoadFailure(props: { kind: string }) {
       <AlertCircle size={18} />
       <div>
         <strong>{i18n.tr('Artefaktet kunne ikke lastes', 'The artifact could not be loaded')}</strong>
-        <p>Verevon meldte om et artefakt av typen «{props.kind}», men innholdet kom aldri fram. Prøv å generere det på nytt.</p>
+        <p>
+          {i18n.tr(
+            `Verevon meldte om et artefakt av typen «${props.kind}», men innholdet kom aldri fram. Prøv å generere det på nytt.`,
+            `Verevon reported an artifact of type «${props.kind}», but its content never arrived. Try generating it again.`,
+          )}
+        </p>
       </div>
     </div>
   )

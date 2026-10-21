@@ -1639,10 +1639,10 @@ export function ReasoningPopover(props: { message: ChatTurn }) {
     || (props.message.toolCalls?.length ?? 0) > 0,
   ))
   const tabs = createMemo(() => [
-    { id: 'general', label: 'Oversikt' },
-    ...(props.message.reasoning ? [{ id: 'insight', label: 'Innsikt' }] : []),
-    ...((props.message.toolCalls?.length ?? 0) > 0 ? [{ id: 'tools', label: 'Verktøy' }] : []),
-    ...(props.message.grounding || (props.message.citations?.length ?? 0) > 0 ? [{ id: 'sources', label: 'Kilder' }] : []),
+    { id: 'general', label: i18n.tr('Oversikt', 'Overview') },
+    ...(props.message.reasoning ? [{ id: 'insight', label: i18n.tr('Innsikt', 'Insight') }] : []),
+    ...((props.message.toolCalls?.length ?? 0) > 0 ? [{ id: 'tools', label: i18n.tr('Verktøy', 'Tools') }] : []),
+    ...(props.message.grounding || (props.message.citations?.length ?? 0) > 0 ? [{ id: 'sources', label: i18n.tr('Kilder', 'Sources') }] : []),
   ])
 
   createEffect(
@@ -1912,14 +1912,14 @@ export function ApprovalRequests(props: {
                 class="verevon-chat-approval__approve"
                 onClick={() => props.onDecide(approval.id, 'approve')}
               >
-                Godkjenn
+                {i18n.tr('Godkjenn', 'Approve')}
               </button>
               <button
                 type="button"
                 class="verevon-chat-approval__reject"
                 onClick={() => props.onDecide(approval.id, 'reject')}
               >
-                Avvis
+                {i18n.tr('Avvis', 'Reject')}
               </button>
             </div>
           </div>
@@ -2025,7 +2025,7 @@ export function ToolCallCard(props: { call: ChatToolCall }) {
     Boolean(props.call.error) || props.call.status === 'error'
   const running = () => !props.call.status || props.call.status === 'running'
   const statusLabel = () =>
-    failed() ? 'feilet' : running() ? 'kjører ...' : 'fullført'
+    failed() ? i18n.tr('feilet', 'failed') : running() ? i18n.tr('kjører ...', 'running ...') : i18n.tr('fullført', 'completed')
   const args = () => formatToolArgs(props.call.args)
   const presentation = createMemo(() => toolPresentation(props.call))
 
@@ -2343,6 +2343,13 @@ export function PlanApprovalControl(props: {
         removed: row.removed,
       }))
 
+  // Inside an English sentence the rung name has to read as a phrase, so it is
+  // lower-cased there; the Norwegian names are lower-case already.
+  const grantedSentence = () => {
+    const label = rungLabel(props.grantedRung ?? 'read_only', i18n.tr)
+    return i18n.tr(`Godkjent: agenten kan nå ${label}.`, `Approved: the agent can now ${label.toLowerCase()}.`)
+  }
+
   const approveDisabled = () =>
     tooShort() ||
     props.pending ||
@@ -2355,7 +2362,7 @@ export function PlanApprovalControl(props: {
         <p class="verevon-chat-plan-granted">
           <Show
             when={props.rejected}
-            fallback={<>Godkjent: agenten kan nå {RUNG_LABEL[props.grantedRung ?? 'read_only']}.</>}
+            fallback={<>{grantedSentence()}</>}
           >
             {i18n.tr(
               'Planen ble avvist – ingenting ble utført.',
@@ -2367,8 +2374,10 @@ export function PlanApprovalControl(props: {
     >
       <section class="verevon-chat-plan" aria-label={i18n.tr('Godkjenn planen', 'Approve the plan')}>
         <p class="verevon-chat-plan__lead">
-          Dette var en plan – ingenting er utført. Velg hvor mye agenten får gjøre, og skriv
-          hvorfor.
+          {i18n.tr(
+            'Dette var en plan – ingenting er utført. Velg hvor mye agenten får gjøre, og skriv hvorfor.',
+            'This was a plan – nothing has been executed. Choose how much the agent may do, and say why.',
+          )}
         </p>
         <Show when={hasStructuredPlan()}>
           <Show when={props.summary}>
@@ -2447,7 +2456,7 @@ export function PlanApprovalControl(props: {
                 data-selected={rung() === option}
                 onClick={() => setRung(option)}
               >
-                {RUNG_LABEL[option]}
+                {rungLabel(option, i18n.tr)}
               </button>
             )}
           </For>
@@ -2467,7 +2476,10 @@ export function PlanApprovalControl(props: {
               with no reason given is indistinguishable from a broken one. */}
           <Show when={tooShort()}>
             <span class="verevon-chat-plan__hint">
-              Minst {MIN_PLAN_JUSTIFICATION_CHARS} tegn – en begrunnelse noen kan vurdere.
+              {i18n.tr(
+                `Minst ${MIN_PLAN_JUSTIFICATION_CHARS} tegn – en begrunnelse noen kan vurdere.`,
+                `At least ${MIN_PLAN_JUSTIFICATION_CHARS} characters – a reason someone can assess.`,
+              )}
             </span>
           </Show>
           <Show when={hasStructuredPlan() && remainingCount() === 0 && !tooShort()}>
@@ -2518,7 +2530,7 @@ export function PlanApprovalControl(props: {
               }
             }}
           >
-            {props.pending ? 'Godkjenner…' : 'Godkjenn'}
+            {props.pending ? i18n.tr('Godkjenner…', 'Approving…') : i18n.tr('Godkjenn', 'Approve')}
           </button>
         </div>
       </section>
@@ -2533,11 +2545,24 @@ export function PlanApprovalControl(props: {
  */
 const GRANTABLE_RUNGS: AutonomyRung[] = ['workspace_write', 'danger_full_access']
 
-// Exported for the composer's "Kjør plan" pill, which names the same rung in the same words.
+// Exported for the composer's "Kjør plan" pill, which names the same rung in the
+// same words. That pill takes no translation yet, so it stays Norwegian until
+// ChatPage passes rungLabel instead.
 export const RUNG_LABEL: Record<AutonomyRung, string> = {
   read_only: 'bare undersøke',
   workspace_write: 'skrive i arbeidsområdet',
   danger_full_access: 'utføre alt, også utgående handlinger',
+}
+
+const RUNG_LABEL_EN: Record<AutonomyRung, string> = {
+  read_only: 'Read only',
+  workspace_write: 'Write in the workspace',
+  danger_full_access: 'Do anything, including outbound actions',
+}
+
+/** A rung's name in the reader's language, for the grant control and the granted sentence. */
+export function rungLabel(rung: AutonomyRung, tr: (noText: string, enText: string) => string): string {
+  return tr(RUNG_LABEL[rung], RUNG_LABEL_EN[rung])
 }
 
 export function ToolChips(props: { tools: ComposerToolId[] }) {
