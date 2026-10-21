@@ -4958,11 +4958,12 @@ components:
       x-quarry-lenient-until: >-
         Lenient until QUARRY_EDGE__SCRAPE_STRICT_AFTER is reached (an RFC 3339
         time or a YYYY-MM-DD date, read at start). From that instant unknown keys
-        are a 400; while the variable is set, every scrape response carries
-        Deprecation and Sunset. QUARRY_EDGE__SCRAPE_REQUEST_VALIDATION=strict makes
-        the edge strict at once. No date is set in this repository: the operator
-        sets it when the quarry.scrape.unknown_field log line shows that no caller
-        still sends an unlisted key.
+        are a 400. A response that carries unknown-field warnings gets
+        Deprecation: true, and Sunset with the date while the variable is set.
+        QUARRY_EDGE__SCRAPE_REQUEST_VALIDATION=strict makes the edge strict at
+        once. No date is set in this repository: the operator sets it when the
+        quarry.scrape.unknown_field log line shows that no caller still sends an
+        unlisted key.
       required:
       - url
       properties:
