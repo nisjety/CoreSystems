@@ -17,6 +17,9 @@ on:
       - 'apps/Ingestion Plane/Quarry-v2/docs/openapi.yaml'
       - 'apps/Ingestion Plane/Quarry-v2/sdks/generate.sh'
       - 'apps/Ingestion Plane/Quarry-v2/sdks/typescript/docs/**'
+      # The committed Python SDK smoke tests run in spa-verify (see the step
+      # "Test the generated Quarry Python SDK"), so editing them must trigger it.
+      - 'apps/Ingestion Plane/Quarry-v2/sdks/python/tests/**'
       - '.github/workflows/verevonv3-ci.yml'
   push:
     branches: [main]
@@ -27,6 +30,9 @@ on:
       - 'apps/Ingestion Plane/Quarry-v2/docs/openapi.yaml'
       - 'apps/Ingestion Plane/Quarry-v2/sdks/generate.sh'
       - 'apps/Ingestion Plane/Quarry-v2/sdks/typescript/docs/**'
+      # The committed Python SDK smoke tests run in spa-verify (see the step
+      # "Test the generated Quarry Python SDK"), so editing them must trigger it.
+      - 'apps/Ingestion Plane/Quarry-v2/sdks/python/tests/**'
       - '.github/workflows/verevonv3-ci.yml'
 
 permissions:
@@ -211,11 +217,17 @@ jobs:
       # test that constructs a oneOf wrapper wrongly. A throwaway venv keeps the
       # runner's Python untouched; the cost is one pip install of five small wheels
       # and a test run of under ten seconds (measured: 28 tests, 8.6 s).
+      # Failure surface to know about: the step needs PyPI. pytest is pinned to
+      # the 8.x line so a new major release cannot break spa-verify unannounced;
+      # the generated package's own requirements are the ranges generate.sh wrote.
+      # If PyPI is down, this step (and so spa-verify) fails for a reason that is
+      # not the SPA: re-run it, or drop the step if PyPI flakiness ever outweighs
+      # the value of the SDK tests.
       - name: Test the generated Quarry Python SDK
         working-directory: 'apps/Ingestion Plane/Quarry-v2/sdks/python'
         run: |
           python3 -m venv "$RUNNER_TEMP/quarry-py"
-          "$RUNNER_TEMP/quarry-py/bin/pip" install --quiet -r requirements.txt pytest
+          "$RUNNER_TEMP/quarry-py/bin/pip" install --quiet -r requirements.txt 'pytest>=8,<9'
           PYTHONPATH=. "$RUNNER_TEMP/quarry-py/bin/python" -m pytest tests -q
 
       - name: Build the Quarry TypeScript SDK
