@@ -85,3 +85,22 @@ Only grant ids and counts are printed, never a host list or a token.
 * `e2e/idp` has its own `go test -tags e2e ./e2e/idp`, which needs no Docker and
   checks the stub's tokens against the broker's real verifier and authz rules.
 * The build tag `e2e` keeps all of this out of `go test ./...` and `go vet ./...`.
+
+## Mutation check of the cross-organization assertions (2026-10-21)
+
+The cross-organization assertions of scenarios f and g were checked by
+single-fault injection: one change to `internal/grant/postgres.go`, one full
+`run.sh`, then the change was reverted by hand (the tree is clean).
+
+* The org comparison removed from `scoped()` (used by Derive, the approval path
+  and GetScoped): the run failed (`scenarios=5/7`); f failed on the derive and
+  validate of another organization's grant (code OK, want NotFound, and the
+  "left no row" count), g failed on the cross-organization approval and on the
+  subtree-revoked row check.
+* The org comparison removed from `RevokeScoped` only (the SQL `org_id = $2`
+  filter still keeps the data safe, so the revoke returned OK instead of
+  NotFound and changed nothing): f and g failed on the four cross-organization
+  revoke assertions.
+
+The unmutated tree passes 7/7 (see the commits above). Re-run the mutation by
+hand if you change the scoping code.
