@@ -1,7 +1,7 @@
 import { createEffect, createMemo, createSignal, For, Show } from 'solid-js'
 import type { JSX } from '@solidjs/web'
 import { Folder, FolderPlus, MessageSquarePlus, MoreHorizontal, Pin, Search, SlidersHorizontal, X } from '@/shared/icons'
-import { useI18n, translateApiError } from '@/shared/i18n'
+import { useI18n, translateApiError, LocalizedError } from '@/shared/i18n'
 import { getSession } from '@/shared/session/session-store'
 import type { ChatOrganizationAction } from '@/shared/actions/chat-organization'
 import { applyChatOrganizationAction, chatDateGroup, chatOrganizationStorageKey, emptyChatOrganization, readChatOrganization, saveChatOrganization, selectOrganizedChats } from '@/features/chat/lib/chat-organization'
@@ -66,7 +66,7 @@ export function ChatSidebarOrganizer(props: {
 
   const dispatch = (...actions: ChatOrganizationAction[]) => {
     const key = scope()
-    if (!key) throw new Error(i18n.tr('Logg inn på et arbeidsområde først.', 'Sign in to a workspace first.'))
+    if (!key) throw new LocalizedError({ no: 'Logg inn på et arbeidsområde først.', en: 'Sign in to a workspace first.' })
     // Solid batches signal writes. Apply related changes in one transaction so
     // a view update cannot overwrite a project created in the same event.
     const next = actions.reduce(applyChatOrganizationAction, organization())
@@ -251,8 +251,8 @@ export function ChatSidebarOrganizer(props: {
           <Show when={error()}><p role="alert">{error()}</p></Show>
           <Show when={mode()?.kind === 'project'}>
             <div class="chat-project-dialog__manage">
-              <button type="button" onClick={() => { const staticCurrent = mode(); if (staticCurrent?.kind !== 'project') return; const pinned = organization().projects.find((project) => project.id === staticCurrent.id)?.pinned; try { dispatch({ type: 'project.pin', id: staticCurrent.id, pinned: !pinned }) } catch (reason) { setError(String(reason)) } }}>{organization().projects.find((project) => project.id === (mode() as { id?: string })?.id)?.pinned ? i18n.tr('Løsne prosjekt', 'Unpin project') : i18n.tr('Fest prosjekt', 'Pin project')}</button>
-              <button type="button" onClick={() => { const current = mode(); if (current?.kind !== 'project') return; try { dispatch({ type: 'project.remove', id: current.id }); setMode(null) } catch (reason) { setError(String(reason)) } }}>{i18n.tr('Fjern prosjekt, behold samtaler', 'Remove project, keep chats')}</button>
+              <button type="button" onClick={() => { const staticCurrent = mode(); if (staticCurrent?.kind !== 'project') return; const pinned = organization().projects.find((project) => project.id === staticCurrent.id)?.pinned; try { dispatch({ type: 'project.pin', id: staticCurrent.id, pinned: !pinned }) } catch (reason) { setError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke lagre.', en: 'Could not save.' })) } }}>{organization().projects.find((project) => project.id === (mode() as { id?: string })?.id)?.pinned ? i18n.tr('Løsne prosjekt', 'Unpin project') : i18n.tr('Fest prosjekt', 'Pin project')}</button>
+              <button type="button" onClick={() => { const current = mode(); if (current?.kind !== 'project') return; try { dispatch({ type: 'project.remove', id: current.id }); setMode(null) } catch (reason) { setError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke fjerne prosjektet.', en: 'Could not remove the project.' })) } }}>{i18n.tr('Fjern prosjekt, behold samtaler', 'Remove project, keep chats')}</button>
             </div>
           </Show>
           <div class="chat-project-dialog__footer"><button type="button" onClick={() => setMode(null)}>{i18n.tr('Avbryt', 'Cancel')}</button><button type="submit">{mode()?.kind === 'create' ? i18n.tr('Opprett prosjekt', 'Create project') : i18n.tr('Lagre', 'Save')}</button></div>

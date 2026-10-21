@@ -28,16 +28,42 @@ import { describe, expect, it } from 'vitest'
 // was tried and put back: it shows an integration's own sentence on purpose);
 // the rest are listed here with what is known about each.
 
-const RAW_MESSAGE_READ =
-  /\b[A-Za-z0-9_$.]*(?:err|Err|error|Error|reason|Reason|cause|Cause|failure|Failure|caught)\??\.message\b|\be\??\.message\b/g
+// Round-6 review: `setError(String(reason))` (an Error prints as "Error: <English message>")
+// and `${reason}` in a template read the same raw text without the word `.message`, and
+// two such sites in the chat organizer sat outside every list. Both shapes count now.
+// `String(x)` counts for every catch name above; the template shape counts only for a
+// bare `${err}`, `${error}`, `${e}`, `${cause}`, `${caught}` or `${failure}`, because
+// `${reason}` and `${proposal.reason}` are mostly a domain field (a triage reason, a
+// label), not a caught value. A message that is passed as the FALLBACK copy of translateApiError
+// (`{ no: event.message, en: event.message }`) is a third way to put it on screen:
+// it is counted separately, in RAW_MESSAGE_AS_FALLBACK below.
+const CATCH_NAME = '[A-Za-z0-9_$.]*(?:err|Err|error|Error|reason|Reason|cause|Cause|failure|Failure|caught)'
+const RAW_MESSAGE_READ = new RegExp(
+  [
+    `\\b${CATCH_NAME}\\??\\.message\\b`,
+    '\\be\\??\\.message\\b',
+    `\\bString\\(\\s*(?:${CATCH_NAME}|e)\\s*\\)`,
+    '\\$\\{\\s*(?:err|error|e|cause|caught|failure)\\s*\\}',
+  ].join('|'),
+  'g',
+)
+const RAW_MESSAGE_AS_FALLBACK = /\b(?:no|en):\s*[A-Za-z0-9_$.?]+\.message\b/g
 
-/** Counts the reads in one source text, comment lines excluded. */
-function countRawMessageReads(source: string): number {
-  const code = source
+function withoutCommentLines(source: string): string {
+  return source
     .split(/\r?\n/)
     .filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line))
     .join('\n')
-  return (code.match(RAW_MESSAGE_READ) ?? []).length
+}
+
+/** Counts the reads in one source text, comment lines excluded. */
+function countRawMessageReads(source: string): number {
+  return (withoutCommentLines(source).match(RAW_MESSAGE_READ) ?? []).length
+}
+
+/** Counts `{ no: x.message, en: x.message }` fallbacks: the same raw text, in both languages. */
+function countRawMessageAsFallback(source: string): number {
+  return (withoutCommentLines(source).match(RAW_MESSAGE_AS_FALLBACK) ?? []).length
 }
 
 const UNREVIEWED =
@@ -88,10 +114,13 @@ const NOT_CONVERTED: Record<string, { sites: number; reason: string }> = {
     reason:
       "shows the integration's own sentence for an integration_error on purpose (the library-picker test pins it); translateApiError has no copy for that code by design, so a conversion would hide it",
   },
-  'features/spaces/components/SpaceRoomComposer.tsx': { sites: 1, reason: UNREVIEWED },
+  'features/spaces/components/SpaceRoomComposer.tsx': {
+    sites: 2,
+    reason: `${UNREVIEWED} (one line holds both error.message and String(error), the abort or failure of a send)`,
+  },
   'features/support/components/RemoteSupportPage.tsx': {
-    sites: 4,
-    reason: 'remote-core results and events carry their own English text; unreviewed (the page has pre-existing type errors)',
+    sites: 5,
+    reason: 'remote-core results and events carry their own English text, one site reads String(error); unreviewed (the page has pre-existing type errors)',
   },
   'features/voice/VoiceModeDialog.tsx': { sites: 1, reason: UNREVIEWED },
   'shared/api/ag-ui-client.ts': {
@@ -113,6 +142,17 @@ const NOT_CONVERTED: Record<string, { sites: number; reason: string }> = {
   'shared/api/search-client.ts': { sites: 1, reason: UNREVIEWED },
 }
 
+// Fallback copy that is the raw message of a stream event, on purpose: the room shows the
+// server's own sentence for a run error whose code has no copy, rather than a generic line
+// that hides what happened. Each entry counts the `no:` and `en:` matches.
+const RAW_MESSAGE_AS_FALLBACK_LISTED: Record<string, { sites: number; reason: string }> = {
+  'features/spaces/components/SpaceRoomComposer.tsx': {
+    sites: 2,
+    reason:
+      'onError of the Space run stream: a code with copy gets the room words, an unknown code keeps the model gateway event message in both languages on purpose (comment at the site)',
+  },
+}
+
 const srcRoot = resolve(process.cwd(), 'src')
 
 function sourceFiles(dir: string): string[] {
@@ -126,9 +166,13 @@ function sourceFiles(dir: string): string[] {
 }
 
 const found = new Map<string, number>()
+const foundFallback = new Map<string, number>()
 for (const path of sourceFiles(srcRoot)) {
-  const count = countRawMessageReads(readFileSync(path, 'utf8'))
+  const text = readFileSync(path, 'utf8')
+  const count = countRawMessageReads(text)
   if (count > 0) found.set(path.slice(srcRoot.length + 1), count)
+  const fallback = countRawMessageAsFallback(text)
+  if (fallback > 0) foundFallback.set(path.slice(srcRoot.length + 1), fallback)
 }
 
 describe('the raw-message read pattern', () => {
@@ -144,6 +188,10 @@ describe('the raw-message read pattern', () => {
       "setErrorMessage(result.error?.message ?? 'x')",
       "{items.error instanceof Error ? items.error.message : 'x'}",
       "next.on('error', (e) => show(e.message))",
+      "} catch (reason) { setError(String(reason)) }",
+      "} catch (error) { setNotice(String(error)) }",
+      "setNotice(`Failed: ${err}`)",
+      "catch (e) { show(String(e)) }",
     ]
     for (const shape of shapes) expect(countRawMessageReads(shape), shape).toBeGreaterThanOrEqual(1)
   })
@@ -153,6 +201,16 @@ describe('the raw-message read pattern', () => {
     expect(countRawMessageReads(' * the raw error.message is never shown')).toBe(0)
     expect(countRawMessageReads('const text = payload.message ?? data.message')).toBe(0)
     expect(countRawMessageReads("setError(translateApiError(err, i18n.tr, { no: 'a', en: 'b' }))")).toBe(0)
+    expect(countRawMessageReads('const label = String(item.id)')).toBe(0)
+    expect(countRawMessageReads('const label = `${item.name}`')).toBe(0)
+    expect(countRawMessageReads('return reason ? `${label} - ${reason}` : label')).toBe(0)
+  })
+
+  it('sees a message used as the fallback copy of both languages', () => {
+    expect(countRawMessageAsFallback('translateApiError({ code }, tr, { no: event.message, en: event.message })')).toBe(2)
+    expect(countRawMessageAsFallback('{ no: payload?.message, en: "x" }')).toBe(1)
+    expect(countRawMessageAsFallback("{ no: 'Kunne ikke.', en: 'Could not.' }")).toBe(0)
+    expect(countRawMessageAsFallback('// { no: event.message, en: event.message }')).toBe(0)
   })
 })
 
@@ -176,6 +234,16 @@ describe('catch sites that show the raw text of a failure', () => {
       .filter(([file, count]) => count > (NOT_CONVERTED[file]?.sites ?? 0))
       .map(([file, count]) => `${file}: ${count} (allowed ${NOT_CONVERTED[file]?.sites ?? 0}); use translateApiError(reason, i18n.tr, { no, en })`)
     expect(over, 'a catch site shows err.message instead of translateApiError').toEqual([])
+  })
+
+  it('lists every fallback that is a raw message, with its reason, and no more', () => {
+    const differing = [...new Set([...foundFallback.keys(), ...Object.keys(RAW_MESSAGE_AS_FALLBACK_LISTED)])]
+      .filter((file) => (foundFallback.get(file) ?? 0) !== (RAW_MESSAGE_AS_FALLBACK_LISTED[file]?.sites ?? 0))
+      .map((file) => `${file}: found ${foundFallback.get(file) ?? 0}, listed ${RAW_MESSAGE_AS_FALLBACK_LISTED[file]?.sites ?? 0}`)
+    expect(differing).toEqual([])
+    for (const [file, entry] of Object.entries(RAW_MESSAGE_AS_FALLBACK_LISTED)) {
+      expect(entry.reason.length, `${file} names its reason`).toBeGreaterThan(20)
+    }
   })
 
   it('keeps the list honest: a file that dropped below its number lowers it or leaves the list', () => {

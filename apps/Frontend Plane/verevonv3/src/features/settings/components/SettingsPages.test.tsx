@@ -924,6 +924,43 @@ describe('workspace settings page', () => {
     expect(screen.queryByRole('heading', { name: /attribute mapping/i })).toBeNull()
     expect(screen.queryByText('SSO provider selection and verified domain')).toBeNull()
   })
+
+  function stubBilling(handlers: Record<string, () => Response>) {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      for (const [suffix, respond] of Object.entries(handlers)) if (url.endsWith(suffix)) return respond()
+      return new Response(JSON.stringify({}), { headers: { 'Content-Type': 'application/json' }, status: 200 })
+    }))
+  }
+  const json = (body: unknown, status = 200) => () =>
+    new Response(JSON.stringify(body), { headers: { 'Content-Type': 'application/json' }, status })
+
+  it('says why checkout could not start when the session has no valid payment surface, not only "could not start checkout"', async () => {
+    stubBilling({
+      '/api/v1/billing/account': json({ org_id: 'org_settings', plan: 'trial', subscription_state: 'trialing', credits: 1 }),
+      '/api/v1/billing/checkout': json({ provider: 'unknown-provider', id: 'pay_1', status: 'created' }, 201),
+    })
+    render(() => <VerevonWorkspaceSettingsPage section="billing" />)
+    expect((await screen.findAllByText(/trialing/i)).length).toBeGreaterThan(0)
+    fireEvent.click(screen.getByRole('button', { name: /aktiver advanced/i }))
+    expect(await screen.findByText('Kasseøkten inneholdt ikke en gyldig betalingsflate. Prøv igjen, eller kontakt support.')).toBeTruthy()
+    expect(screen.queryByText('Kunne ikke starte kassen.')).toBeNull()
+  })
+
+  it('says the payment is not complete, with its status, when the confirmation is not an activating status', async () => {
+    window.history.pushState({}, '', '/?checkout=success&plan=advanced&payment_id=pay_1&status=failed')
+    try {
+      stubBilling({
+        '/api/v1/billing/account': json({ org_id: 'org_settings', plan: 'trial', subscription_state: 'trialing', credits: 1 }),
+        '/api/v1/billing/checkout/confirm': json({ status: 'failed', plan: 'advanced' }),
+      })
+      render(() => <VerevonWorkspaceSettingsPage section="billing" />)
+      expect(await screen.findByText('Betalingen er ikke fullført (status: failed). Prøv igjen, eller kontakt support.')).toBeTruthy()
+      expect(screen.queryByText('Kunne ikke bekrefte kassen.')).toBeNull()
+    } finally {
+      window.history.pushState({}, '', '/')
+    }
+  })
 })
 
 describe('settings sidebars', () => {

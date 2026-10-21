@@ -1,7 +1,7 @@
 import { Show, createEffect, createSignal, onCleanup } from 'solid-js'
 import type { CheckoutSession } from '@/features/billing/lib/api'
 import { useI18n } from '@/shared/i18n'
-import { translateApiError } from '@/shared/i18n/errors'
+import { LocalizedError, translateApiError } from '@/shared/i18n/errors'
 
 type ConfirmedPayment = {
   paymentId?: string
@@ -102,7 +102,7 @@ export function NexiCheckout(props: NexiCheckoutProps) {
 
       void loadNexiScript(clientURL)
         .then(() => {
-          if (!window.Dibs) throw new Error('Payment checkout is unavailable.')
+          if (!window.Dibs) throw new LocalizedError({ no: 'Betalingssiden er ikke tilgjengelig akkurat nå. Prøv igjen senere.', en: 'The payment page is not available right now. Try again later.' })
 
           instance = window.Dibs.Checkout({
             checkoutKey,

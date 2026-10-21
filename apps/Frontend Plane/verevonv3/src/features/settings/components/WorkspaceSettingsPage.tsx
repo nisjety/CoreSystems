@@ -53,7 +53,7 @@ import {
   type SupportAIMode,
 } from '@/shared/api/organization-client'
 import { hasZeroRetentionModel, listModels } from '@/shared/api/chat-client'
-import { translateApiError } from '@/shared/i18n/errors'
+import { LocalizedError, translateApiError } from '@/shared/i18n/errors'
 import { triggerSync } from '@/shared/api/integrations-client'
 import { ApiError } from '@/shared/api/http'
 import {
@@ -1036,7 +1036,7 @@ function BillingSection(props: {
           window.location.assign(session.url!)
           return
         default:
-          throw new Error(i18n.tr('Kasseøkten inneholdt ikke en gyldig betalingsflate.', 'Checkout session did not include a valid payment surface.'))
+          throw new LocalizedError({ no: 'Kasseøkten inneholdt ikke en gyldig betalingsflate. Prøv igjen, eller kontakt support.', en: 'Checkout session did not include a valid payment surface. Try again, or contact support.' })
       }
     } catch (reason) {
       setCheckoutError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke starte kassen.', en: 'Could not start checkout.' }))
@@ -1064,7 +1064,7 @@ function BillingSection(props: {
       })
 
       if (!isCheckoutActivatingStatus(result.status)) {
-        throw new Error(`${i18n.tr('Betalingsstatus er', 'Payment status is')} ${result.status}.`)
+        throw new LocalizedError({ no: `Betalingen er ikke fullført (status: ${result.status}). Prøv igjen, eller kontakt support.`, en: `The payment is not complete (status: ${result.status}). Try again, or contact support.` })
       }
 
       setCheckoutSession(undefined)

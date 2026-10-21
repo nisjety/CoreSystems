@@ -67,7 +67,7 @@ import {
 } from '@/shared/api/knowledge-client'
 import { resolveCrawlIngest } from '@/shared/api/settings-client'
 import { cn } from '@/shared/lib/cn'
-import { useI18n, translateApiError } from '@/shared/i18n'
+import { useI18n, translateApiError, LocalizedError } from '@/shared/i18n'
 import { readClientJson, removeClientValue, writeClientJson } from '@/shared/session/client-storage'
 import { CrawlPagePicker } from './CrawlPagePicker'
 import { DashboardPlanBadge } from './DashboardPlanBadge'
@@ -1184,7 +1184,7 @@ export function KnowledgeComposer(props: {
     try {
       let approvalId = entry.approvalId
       if (!approvalId) {
-        if (!entry.runId) throw new Error(i18n.tr('Fant ikke kjøringen denne handlingen tilhører.', 'Could not find the run this action belongs to.'))
+        if (!entry.runId) throw new LocalizedError({ no: 'Fant ikke kjøringen denne handlingen tilhører.', en: 'Could not find the run this action belongs to.' })
         const pending = await listApprovals(entry.runId)
         const match = pending.find((candidate) => (candidate.status ?? '').toUpperCase() === 'PENDING')
         if (!match) {

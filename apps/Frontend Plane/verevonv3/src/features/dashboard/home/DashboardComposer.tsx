@@ -131,7 +131,7 @@ import {
 	sovereignCatalogNotice,
 	type PrivacyTier,
 } from "@/shared/api/privacy-tier";
-import { translateApiError, useI18n } from "@/shared/i18n";
+import { LocalizedError, translateApiError, useI18n } from "@/shared/i18n";
 import { ApiError } from "@/shared/api/http";
 import { cn } from "@/shared/lib/cn";
 import { getSession } from "@/shared/session/session-store";
@@ -5386,12 +5386,10 @@ async function buildComposerFileFromPick(input: {
 		try {
 			extractedText = (await extractChatDocument(name, contentBase64, mimeType)).content;
 		} catch {
-			throw new Error(
-				i18n.tr(
-					`Kunne ikke lese «${name}». Prøv igjen eller velg en annen fil.`,
-					`Could not read "${name}". Try again or choose a different file.`,
-				),
-			);
+			throw new LocalizedError({
+				no: `Kunne ikke lese «${name}». Prøv igjen eller velg en annen fil.`,
+				en: `Could not read "${name}". Try again or choose a different file.`,
+			});
 		}
 	} else if (mimeType.startsWith("text/") || CONNECTOR_TEXT_INGEST_EXTENSIONS.test(name)) {
 		// Already have the bytes — decoding locally is free, no second

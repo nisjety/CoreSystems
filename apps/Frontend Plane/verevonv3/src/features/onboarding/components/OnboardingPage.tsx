@@ -71,7 +71,7 @@ import {
   recommendationText,
   withRecommendationTranslation,
 } from '@/features/onboarding/lib/plan-recommendation'
-import { translateApiError, useI18n } from '@/shared/i18n'
+import { LocalizedError, translateApiError, useI18n } from '@/shared/i18n'
 import { ContactSalesModal } from '@/features/onboarding/components/ContactSalesModal'
 import { LeaveOnboardingDialog } from '@/features/onboarding/components/LeaveOnboardingDialog'
 import { AssemblyStepContent, AssemblyStepVisual } from '@/features/onboarding/components/steps/AssemblyStep'
@@ -203,7 +203,7 @@ export default function OnboardingPage() {
     listDrives: (siteId: string) => listSharePointDrives(state.organization.id ?? '', siteId),
     register: async (connectionId: string, selection: SharePointSourceRegistration) => {
       const orgId = state.organization.id
-      if (!orgId) throw new Error(i18n.tr('Opprett organisasjonen først.', 'Create the organization first.'))
+      if (!orgId) throw new LocalizedError({ no: 'Opprett organisasjonen først.', en: 'Create the organization first.' })
       await registerSharePointSource(orgId, selection)
       setLibrariesNeeded((current) => {
         const next = new Set(current)
@@ -735,7 +735,7 @@ export default function OnboardingPage() {
       if (option.provider === 'shipping') {
         const carriers = await getShippingCarriers()
         if (carriers.length === 0) {
-          throw new Error('Fraktaggregatoren svarte uten transportører. Sjekk shipping-core.')
+          throw new LocalizedError({ no: 'Fraktjenesten har ingen transportører tilgjengelig akkurat nå. Prøv igjen senere.', en: 'The shipping service has no carriers available right now. Try again later.' })
         }
         setState((s) => { s.connectors = ((current) => [
           ...current.filter((item) => item.id !== option.id),
@@ -902,7 +902,7 @@ export default function OnboardingPage() {
           window.location.assign(checkout.url!)
           return
         default:
-          throw new Error('Payment checkout is not configured.')
+          throw new LocalizedError({ no: 'Betaling er ikke satt opp for denne planen ennå. Kontakt support.', en: 'Payment is not set up for this plan yet. Contact support.' })
       }
     } catch (reason) {
       setError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke lagre den valgte planen.', en: 'Could not save the selected plan.' }))
