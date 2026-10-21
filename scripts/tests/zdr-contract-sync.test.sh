@@ -133,7 +133,7 @@ GOLDENS=(
   # edit the rules in quarry_core::redaction, bump RULE_VERSION, edit the file, refresh the
   # .sha256 pin beside it, update the digest here, then re-vendor every copy (the Model Plane
   # mp-scrub crate, WS12.S4). See "apps/Ingestion Plane/Quarry-v2/docs/SECRET_REDACTION.md".
-  "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/tests/fixtures/redaction/secret-shapes.v1.json|47e64a87cb83f811d9b5bf07a15d71e3348216560dbf67645b43202a48c44d37"
+  "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/tests/fixtures/redaction/secret-shapes.v1.json|2af1c8fee605023964fc9ecfbf09c341f04713d70867f9eeb5f13f79d347cba3"
 )
 
 # "<repo-relative copy>|<repo-relative golden>"

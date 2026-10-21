@@ -174,9 +174,51 @@ pub fn find_pan_runs(text: &str) -> Vec<Range<usize>> {
     out
 }
 
+/// Group layouts of two Luhn-valid numbers (4111111111111111 and
+/// 378282246310005) at the edges of the card-like group-size rule, and what
+/// `find_pan_runs` does with each, as text. Part of the drift fingerprint.
+pub(crate) fn group_behaviour_probe() -> String {
+    const LAYOUTS: &[&str] = &[
+        "4111 1111 1111 1111",
+        "411 111 111 111 111 1",
+        "41 11 11 11 11 11 11 11",
+        "41111 11111 11111 1",
+        "411111 111111 1111",
+        "4111111 11111 1111",
+        "4111-1111-1111-1111",
+        "4111  1111 1111 1111",
+        "378 282 246 310 005",
+        "3782 822463 10005",
+        "37 8282 2463 1000 5",
+        "3782822 463 10005",
+        "378282246310005",
+    ];
+    LAYOUTS
+        .iter()
+        .map(|t| format!("{t}={:?};", find_pan_runs(t)))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn group_sizes_of_three_to_six_are_card_like_and_two_or_seven_are_not() {
+        let runs = |t: &str| find_pan_runs(t).len();
+        // 3 and 6 digit groups are accepted inside a multi-group run.
+        assert_eq!(runs("378 282 246 310 005"), 1, "five groups of 3");
+        assert_eq!(runs("411111 111111 1111"), 1, "6-6-4");
+        assert_eq!(runs("3782 822463 10005"), 1, "Amex 4-6-5");
+        // A 2 digit group or a 7 digit group makes the run an identifier.
+        assert_eq!(runs("37 8282 2463 1000 5"), 0, "a group of 2");
+        assert_eq!(runs("4111111 11111 1111"), 0, "a group of 7");
+        assert_eq!(runs("3782822 463 10005"), 0, "a group of 7");
+        assert_eq!(runs("41 11 11 11 11 11 11 11"), 0, "groups of 2");
+        // The same digits as one run are a card either way.
+        assert_eq!(runs("378282246310005"), 1);
+        assert_eq!(runs("4111111111111111"), 1);
+    }
 
     #[test]
     fn luhn_accepts_published_test_numbers_and_rejects_a_changed_digit() {

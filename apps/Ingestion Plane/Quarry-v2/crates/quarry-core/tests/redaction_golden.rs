@@ -38,8 +38,8 @@ const PIN_PATH: &str = concat!(
 /// and this test then fails until `RULE_VERSION` is bumped and the new version
 /// is pinned here: that is the version-bump policy of `docs/SECRET_REDACTION.md`.
 const PINNED_FINGERPRINTS: &[(&str, &str)] = &[(
-    "qr-redact/1",
-    "b70e08bbb9beff08f2288c6fdbb705671d7415005040f5229ccb387dd7ddf179",
+    "qr-redact/2",
+    "7abfda6e750cac98232ae5ac40b1f63bd78b38bbb3b8e9828a534dd2bed4803d",
 )];
 
 #[derive(Deserialize)]
@@ -427,6 +427,20 @@ fn redaction_json_cases() {
             );
         }
         assert!(!t.is_empty(), "{}", c.id);
+        if c.profile == CaseProfile::Live {
+            // Durable is a superset of Live: a Live case holds there too.
+            let mut dur = input.clone();
+            let mut dt = Tally::new();
+            redact_json_with(Mode::Enforce, &mut dur, Profile::Durable, &mut dt);
+            let dur_out = serde_json::to_string(&dur).unwrap();
+            for bad in &c.must_not_contain {
+                assert!(
+                    !dur_out.contains(&fill(bad, &secrets)),
+                    "{}: secret survived under Durable in {dur_out}",
+                    c.id
+                );
+            }
+        }
         if c.profile == CaseProfile::Durable {
             let mut live = input.clone();
             let mut lt = Tally::new();

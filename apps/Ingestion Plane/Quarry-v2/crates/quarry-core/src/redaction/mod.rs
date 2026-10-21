@@ -18,7 +18,8 @@
 //!   and URL query and fragment secrets.
 //!
 //! The marker that replaces a secret is `[redacted:<kind>]`. The rule set is
-//! identified by [`RULE_VERSION`]; any change to any rule bumps it.
+//! identified by [`RULE_VERSION`]; a change to a rule bumps it (see
+//! [`rule_fingerprint`] for what the drift test can and cannot see).
 
 pub mod field;
 pub mod json;
@@ -37,11 +38,12 @@ use serde_json::Value;
 pub use field::{classify, classify_field, FieldFacts, FieldKind};
 pub use stamp::{ProbeState, RedactionStamp, ScreenshotState};
 
-/// Identifies the rule set. Any change to a pattern, a rule, a key list or a
-/// field label bumps this (the `redaction_rule_drift_requires_a_version_bump`
-/// test fails otherwise), and the golden, its pin and every vendored copy are
+/// Identifies the rule set. Any change to a pattern, a rule, a key list, a field
+/// label or a threshold bumps this (the `redaction_rule_drift_requires_a_version_bump`
+/// test fails otherwise, for those and for the behaviours in the fingerprint's
+/// probe corpus), and the golden, its pin and every vendored copy are
 /// regenerated in the same change.
-pub const RULE_VERSION: &str = "qr-redact/1";
+pub const RULE_VERSION: &str = "qr-redact/2";
 
 /// Every rule id that can appear in a [`Tally`] or a stamp.
 pub const RULE_IDS: &[&str] = &[
@@ -320,8 +322,11 @@ pub fn redact_url_with<'a>(
 }
 
 /// A digest of every rule: ids, kinds, profiles, patterns, key lists, field
-/// labels and the card-number table. The drift test pins it per
-/// [`RULE_VERSION`], so a rule cannot change without a version bump.
+/// labels, thresholds, the card-number table, and what the rules do to a fixed
+/// probe corpus (the verify functions, the card group-size rule, the JSON header
+/// pairs). The drift test pins it per [`RULE_VERSION`], so a rule cannot change
+/// without a version bump. A behaviour change that no probe reaches is caught
+/// by the golden cases, not by the fingerprint.
 #[must_use]
 pub fn rule_fingerprint() -> String {
     let mut h = blake3::Hasher::new();
@@ -339,6 +344,7 @@ pub fn rule_fingerprint() -> String {
         .chain(json::fingerprint_parts())
         .chain(url::fingerprint_parts())
         .chain(std::iter::once(luhn_behaviour_digest()))
+        .chain(std::iter::once(luhn::group_behaviour_probe()))
     {
         feed(&part);
     }

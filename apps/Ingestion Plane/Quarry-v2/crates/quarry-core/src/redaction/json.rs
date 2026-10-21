@@ -88,6 +88,27 @@ fn mask_keyed_value(value: &mut Value, kind: MarkerKind, tally: &mut Tally) -> b
     }
 }
 
+/// HTTP header names whose value is a credential. Unlike `KEY_RULES` this runs
+/// under both profiles: a header dumped as JSON (`{"Authorization": "Bearer x"}`,
+/// or a `{"name": "Authorization", "value": "..."}` pair as HAR and CDP write it)
+/// has no `Authorization` word inside the string leaf, so the text rules cannot
+/// see the header context, and the name is unambiguous.
+const HEADER_KEYS: [&str; 2] = ["authorization", "proxy-authorization"];
+/// Keys that hold the header name in a `{name, value}` pair.
+const HEADER_NAME_KEYS: [&str; 2] = ["name", "key"];
+
+fn is_header_name(s: &str) -> bool {
+    HEADER_KEYS.iter().any(|h| s.trim().eq_ignore_ascii_case(h))
+}
+
+/// Does this object look like `{"name": "Authorization", "value": ...}`?
+fn is_header_pair(map: &serde_json::Map<String, Value>) -> bool {
+    map.iter().any(|(k, v)| {
+        HEADER_NAME_KEYS.iter().any(|n| k.eq_ignore_ascii_case(n))
+            && v.as_str().is_some_and(is_header_name)
+    })
+}
+
 fn walk(value: &mut Value, profile: Profile, tally: &mut Tally, depth: usize) {
     if depth > MAX_DEPTH {
         *value = Value::String(mask(MarkerKind::Secret).to_owned());
@@ -107,7 +128,13 @@ fn walk(value: &mut Value, profile: Profile, tally: &mut Tally, depth: usize) {
             }
         }
         Value::Object(map) => {
+            let pair = is_header_pair(map);
             for (key, v) in map.iter_mut() {
+                if is_header_name(key) || (pair && key.eq_ignore_ascii_case("value")) {
+                    // Always settles: a flag or an absent value is left, the rest is replaced.
+                    mask_keyed_value(v, MarkerKind::Credential, tally);
+                    continue;
+                }
                 if profile == Profile::Durable {
                     if let Some(kind) = key_kind(key) {
                         if mask_keyed_value(v, kind, tally) {
@@ -129,13 +156,44 @@ pub(crate) fn redact_value(value: &mut Value, profile: Profile, tally: &mut Tall
 }
 
 pub(crate) fn fingerprint_parts() -> Vec<String> {
-    let mut parts = vec![format!("json.max_depth|{MAX_DEPTH}")];
+    let mut parts = vec![
+        format!("json.max_depth|{MAX_DEPTH}"),
+        format!("json.header_keys|{}", HEADER_KEYS.join(",")),
+        format!("json.header_name_keys|{}", HEADER_NAME_KEYS.join(",")),
+    ];
     parts.extend(
         KEY_RULES
             .into_iter()
             .map(|(k, p)| format!("json.key|{k:?}|{p}")),
     );
+    parts.push(format!("json.behaviour|{}", behaviour_probe()));
     parts
+}
+
+/// What the walk does to a fixed set of values under both profiles, as text.
+/// Part of the drift fingerprint, so a change in how keys, header pairs, depth
+/// or flags are treated counts as a rule change even when no data table moved.
+fn behaviour_probe() -> String {
+    use serde_json::json;
+    let probes = [
+        json!({"Authorization": "Bearer abcdefghijklmnopqrstuvwx"}),
+        json!({"proxy-authorization": "Basic dXNlcjpwYXNz", "x": 1}),
+        json!({"headers": [{"name": "Authorization", "value": "Bearer abcdefghijklmnopqrstuvwx"}, {"name": "Accept", "value": "text/html"}]}),
+        json!({"key": "authorization", "value": 7}),
+        json!({"authorization": true, "Authorization": null, "AUTHORIZATION": ""}),
+        json!({"password": "hunter two", "max_tokens": 4096, "accessToken": "abc", "tokens": ["a"]}),
+        json!({"nested": [{"secret": {"a": 1}}, "password=hunter2"]}),
+    ];
+    let mut out = String::new();
+    for profile in [Profile::Live, Profile::Durable] {
+        for p in &probes {
+            let mut v = p.clone();
+            let mut t = Tally::new();
+            redact_value(&mut v, profile, &mut t);
+            out.push_str(&format!("{profile:?}={v}/{};", t.values_masked()));
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -180,6 +238,62 @@ mod tests {
         let mut t = Tally::new();
         redact_value(&mut v, Profile::Live, &mut t);
         assert_eq!(v["password_requirements"], "at least 8 characters");
+        assert!(t.is_empty());
+    }
+
+    fn live(mut v: Value) -> (Value, Tally) {
+        let mut t = Tally::new();
+        redact_value(&mut v, Profile::Live, &mut t);
+        (v, t)
+    }
+
+    #[test]
+    fn an_authorization_header_object_is_masked_under_both_profiles() {
+        // Letters only after the scheme: the text rules need a digit or a
+        // symbol to call a bare token a secret, so only the key can catch these.
+        for input in [
+            json!({"Authorization": "Bearer abcdefghijklmnopqrstuvwxyz"}),
+            json!({"authorization": "Basic dXNlcjpwYXNz"}),
+            json!({"Proxy-Authorization": "Basic dXNlcjpwYXNz"}),
+            json!({"headers": {"AUTHORIZATION": "Bearer abcdefghijklmnopqrstuvwxyz", "Accept": "text/html"}}),
+        ] {
+            let (l, lt) = live(input.clone());
+            let (d, dt) = durable(input.clone());
+            assert_eq!(l, d, "{input}");
+            assert_eq!(lt.by_rule().get("json.key"), Some(&1), "{input}");
+            assert_eq!(dt.by_rule().get("json.key"), Some(&1), "{input}");
+            assert!(l.to_string().contains("[redacted:credential]"), "{l}");
+            assert!(!l.to_string().contains("abcdefgh"), "{l}");
+            assert!(!l.to_string().contains("dXNlcjpw"), "{l}");
+        }
+    }
+
+    #[test]
+    fn a_name_value_header_pair_masks_the_value_only() {
+        let (v, t) = live(json!({"headers": [
+            {"name": "Authorization", "value": "Bearer abcdefghijklmnopqrstuvwxyz"},
+            {"name": "Accept", "value": "text/html"},
+            {"key": "Proxy-Authorization", "value": "Basic dXNlcjpwYXNz"},
+        ]}));
+        assert_eq!(v["headers"][0]["value"], "[redacted:credential]");
+        assert_eq!(v["headers"][0]["name"], "Authorization");
+        assert_eq!(v["headers"][1]["value"], "text/html");
+        assert_eq!(v["headers"][2]["value"], "[redacted:credential]");
+        assert_eq!(t.by_rule().get("json.key"), Some(&2));
+    }
+
+    #[test]
+    fn header_keys_with_nothing_to_hide_and_other_names_are_left_alone() {
+        let input = json!({
+            "authorization": true,
+            "Authorization": null,
+            "AUTHORIZATION": "",
+            "authorization_required": "yes",
+            "name": "Content-Type",
+            "value": "text/html",
+        });
+        let (v, t) = live(input.clone());
+        assert_eq!(v, input);
         assert!(t.is_empty());
     }
 

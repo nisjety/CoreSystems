@@ -423,7 +423,50 @@ pub(crate) fn fingerprint_parts() -> Vec<String> {
         "thresholds|bearer={BEARER_BARE_MIN}|basic={BASIC_BARE_MIN}|lookbehind={HEADER_LOOKBEHIND}|passes={MAX_PASSES}"
     ));
     parts.push(format!("stoplist|{}", LABELLED_STOPLIST.join(",")));
+    parts.push(format!("behaviour|{}", behaviour_probe()));
     parts
+}
+
+/// Inputs that sit on the edge of each verify function and of the label rules,
+/// all letters, digits and symbols with no vendor shape in them. The drift
+/// fingerprint hashes what both profiles do to each one, so a change inside a
+/// verify closure (the digit-or-symbol clause, a length threshold, the header
+/// look-behind) counts as a rule change, which the data tables alone cannot show.
+const BEHAVIOUR_PROBES: &[&str] = &[
+    "Authorization: Bearer abcdef",
+    "Authorization: Basic abcdefgh",
+    "send Bearer abcdefghijklmnop here",
+    "send Bearer abcdefghijklmno1 here",
+    "send Bearer abcdefghijklmn+p here",
+    "send Bearer abcdefghijklm_p here",
+    "send Bearer abcdefghijklmn.p here",
+    "send Bearer abcde12 here",
+    "send Bearer nightingaleinthedark here",
+    "the bearer of the message arrived",
+    "Basic infrastructure",
+    "Basic abcdefghijkl",
+    "Basic abcdefghijk1",
+    "Basic abcdefghijk+",
+    "Basic abcdefghijk/",
+    "Basic abcdefghijk=",
+    "Basic abcdefgh1",
+    "Authorization:                                Bearer abcdefghij",
+    "password: required token=null secret: ok1 secret='' key: \"two words\"",
+    "passord=x1y2 api_key: abcd",
+    "otp 482913 and 731904 er din engangskode",
+];
+
+/// What both profiles do to each of [`BEHAVIOUR_PROBES`], as text.
+fn behaviour_probe() -> String {
+    let mut out = String::new();
+    for profile in [Profile::Live, Profile::Durable] {
+        for p in BEHAVIOUR_PROBES {
+            let mut t = Tally::new();
+            let r = redact(p, profile, &mut t);
+            out.push_str(&format!("{profile:?}:{r}/{};", t.values_masked()));
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -497,6 +540,42 @@ mod tests {
         assert_eq!(prose, "the bearer of the message arrived");
         let (hdr, _) = run(Profile::Live, "Authorization: Bearer abcdef");
         assert_eq!(hdr, "Authorization: Bearer [redacted:token]");
+    }
+
+    #[test]
+    fn a_bare_bearer_word_of_letters_only_survives_however_long_it_is() {
+        // 20 letters pass the pattern's minimum, so only the narrowing in
+        // `bearer_ok` (a digit or a base64 symbol) keeps this prose alive.
+        let s = "send Bearer nightingaleinthedark here";
+        for profile in [Profile::Live, Profile::Durable] {
+            let (out, t) = run(profile, s);
+            assert_eq!(out, s, "{profile:?}");
+            assert!(t.is_empty(), "{profile:?}");
+        }
+        // The same length with a digit, or a base64 symbol, is a token.
+        for s in [
+            "send Bearer nightingaleinthedar1 here",
+            "send Bearer nightingaleinthedar+ here",
+        ] {
+            let (out, _) = run(Profile::Live, s);
+            assert_eq!(out, "send Bearer [redacted:token] here", "{s}");
+        }
+        // Fifteen characters with a digit are below the bare minimum.
+        let short = "send Bearer abcdefghijklmn1 here";
+        let (out, _) = run(Profile::Live, short);
+        assert_eq!(out, short);
+    }
+
+    #[test]
+    fn every_behaviour_probe_is_stable_on_a_second_pass() {
+        for profile in [Profile::Live, Profile::Durable] {
+            for p in BEHAVIOUR_PROBES {
+                let (first, _) = run(profile, p);
+                let (second, t) = run(profile, &first);
+                assert_eq!(first, second, "{p}");
+                assert!(t.is_empty(), "{p}");
+            }
+        }
     }
 
     #[test]
