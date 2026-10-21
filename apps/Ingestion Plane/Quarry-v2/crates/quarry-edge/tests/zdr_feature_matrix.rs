@@ -331,59 +331,41 @@ fn every_row_has_a_log_canary_or_is_marked_log_unverified() {
     assert!(canaries < ROWS.len(), "no row is log-unverified: update this test's premise");
 }
 
-/// The Model Plane's `zdr-refusals` catalogue (`model-plane.zdr-refusals`, v1):
-/// the closed set of refusal codes and feature keys a ZDR refusal may carry.
+/// The Model Plane's `zdr-refusals` catalogue (`model-plane.zdr-refusals`, v1): the
+/// closed set of refusal codes and feature keys a ZDR refusal may carry.
 ///
-/// A COPY. The catalogue file lives at `apps/Model Plane/api/contracts/zdr-refusals.json`
-/// and, when this was written, was uncommitted work in a sibling checkout, so it
-/// cannot be vendored yet (WS4.I, gated on X-16, replaces these two lists with the
-/// vendored file and a sha pin). Until then the lists below are the plan's "10 code
-/// strings and 30 feature keys", copied from that file as it stood on 2026-10-18.
-const CATALOGUE_CODES: &[&str] = &[
-    "zdr_unavailable",
-    "zdr_feature_not_supported",
-    "zdr_connection_not_supported",
-    "zdr_connection_not_acknowledged",
-    "zdr_explicit_request_not_supported_by_connection",
-    "zdr_decision_unavailable",
-    "zdr_waiver_route_mismatch",
-    "zdr_posture_mismatch",
-    "zdr_durable_mutation_forbidden",
-    "zdr_inference_failed",
-];
+/// VENDORED (WS4.I): `crates/quarry-runtime/tests/fixtures/zdr-refusals/zdr-refusals.json`
+/// is a byte-for-byte copy of `apps/Model Plane/api/contracts/zdr-refusals.json` as it
+/// stands on branch `model-plane` at commit 5ae7fe13 (this branch did not merge it).
+/// `scripts/tests/zdr-contract-sync.test.sh` keeps the copy identical to the golden, and
+/// this file pins the copy to its `.sha256` so the lists below are parsed from the
+/// catalogue itself and are never hand-written again.
+const CATALOGUE: &str = include_str!("../../quarry-runtime/tests/fixtures/zdr-refusals/zdr-refusals.json");
+const CATALOGUE_SHA256: &str = include_str!("../../quarry-runtime/tests/fixtures/zdr-refusals/zdr-refusals.json.sha256");
 
-const CATALOGUE_FEATURES: &[&str] = &[
-    "attachments",
-    "image_generation",
-    "deep_research",
-    "agentic",
-    "plan_mode",
-    "web_search",
-    "client_tools",
-    "structured_output",
-    "skills",
-    "pinned_messages",
-    "spend_cap",
-    "deployed_agent",
-    "tool_execution",
-    "agent_run",
-    "run_control",
-    "scheduled_step",
-    "approval_continuation",
-    "send_message",
-    "lsp_query",
-    "mcp_execution",
-    "command_execution",
-    "speech_synthesis",
-    "speech_transcription",
-    "browser_run",
-    "browser_run_control",
-    "translation",
-    "document_analysis",
-    "language_analysis",
-    "realtime_voice",
-    "video_generation",
-];
+fn catalogue_names(array: &str, key: &str) -> Vec<String> {
+    let parsed: serde_json::Value = serde_json::from_str(CATALOGUE).expect("the vendored catalogue is JSON");
+    parsed[array]
+        .as_array()
+        .unwrap_or_else(|| panic!("the vendored catalogue has no `{array}` array"))
+        .iter()
+        .map(|entry| entry[key].as_str().unwrap_or_else(|| panic!("a `{array}` entry has no `{key}`")).to_owned())
+        .collect()
+}
+
+/// The closed refusal codes the catalogue holds.
+fn catalogue_codes() -> Vec<String> {
+    catalogue_names("codes", "code")
+}
+
+/// The closed feature keys the catalogue holds.
+fn catalogue_features() -> Vec<String> {
+    catalogue_names("features", "key")
+}
+
+fn in_catalogue(list: &[String], name: &str) -> bool {
+    list.iter().any(|held| held == name)
+}
 
 /// What the matrix names today that the catalogue does not hold, and why.
 ///
@@ -393,8 +375,9 @@ const CATALOGUE_FEATURES: &[&str] = &[
 /// code (WS4.H adds it behind ADR-4), and the catalogue has no key for these
 /// features until the Model Plane initiative takes the PR that adds
 /// `durable_crawl`, `browser_profile`, `session_resume` and `page_screenshot`
-/// (WS4.I, X-16). Until then Quarry uses its own names, and they are listed here
-/// so a new one is a visible decision, not drift.
+/// (X-16: existing codes only, so WS4.I does not add them). Quarry uses its own
+/// names for them, and they are listed here so a new one is a visible decision,
+/// not drift.
 const PENDING_CODES: &[&str] = &["BAD_REQUEST", "FORBIDDEN"];
 const PENDING_FEATURES: &[&str] = &[
     "durable_job",
@@ -418,18 +401,20 @@ fn refusals_named_by_the_matrix() -> (BTreeSet<&'static str>, BTreeSet<&'static 
 
 #[test]
 fn every_code_and_feature_the_matrix_names_is_in_the_closed_catalogue_list() {
-    assert_eq!(CATALOGUE_CODES.len(), 10, "the plan's closed list has 10 codes");
-    assert_eq!(CATALOGUE_FEATURES.len(), 30, "the plan's closed list has 30 feature keys");
+    let catalogue_codes = catalogue_codes();
+    let catalogue_features = catalogue_features();
+    assert_eq!(catalogue_codes.len(), 10, "the plan's closed list has 10 codes");
+    assert_eq!(catalogue_features.len(), 30, "the plan's closed list has 30 feature keys");
     let (codes, features) = refusals_named_by_the_matrix();
     assert!(!codes.is_empty() && !features.is_empty(), "no refusal row names a code: the premise is gone");
 
     let outside_codes: Vec<&&str> = codes
         .iter()
-        .filter(|code| !CATALOGUE_CODES.contains(code) && !PENDING_CODES.contains(code))
+        .filter(|code| !in_catalogue(&catalogue_codes, code) && !PENDING_CODES.contains(code))
         .collect();
     let outside_features: Vec<&&str> = features
         .iter()
-        .filter(|feature| !CATALOGUE_FEATURES.contains(feature) && !PENDING_FEATURES.contains(feature))
+        .filter(|feature| !in_catalogue(&catalogue_features, feature) && !PENDING_FEATURES.contains(feature))
         .collect();
     assert!(
         outside_codes.is_empty() && outside_features.is_empty(),
@@ -447,10 +432,23 @@ fn every_code_and_feature_the_matrix_names_is_in_the_closed_catalogue_list() {
     );
     let adopted: Vec<&&str> = PENDING_CODES
         .iter()
-        .filter(|code| CATALOGUE_CODES.contains(code))
-        .chain(PENDING_FEATURES.iter().filter(|feature| CATALOGUE_FEATURES.contains(feature)))
+        .filter(|code| in_catalogue(&catalogue_codes, code))
+        .chain(PENDING_FEATURES.iter().filter(|feature| in_catalogue(&catalogue_features, feature)))
         .collect();
     assert!(adopted.is_empty(), "the catalogue now holds {adopted:?}: drop them from PENDING_*");
+}
+
+/// The vendored catalogue is the one its pin names, so a copy that drifted from the Model
+/// Plane golden fails here as well as in the sync script.
+#[test]
+fn the_vendored_catalogue_is_the_one_its_pin_names() {
+    use sha2::{Digest, Sha256};
+    let digest = format!("{:x}", Sha256::digest(CATALOGUE.as_bytes()));
+    let pinned = CATALOGUE_SHA256.split_whitespace().next().expect("the pin carries a digest");
+    assert_eq!(
+        digest, pinned,
+        "zdr-refusals.json drifted from its .sha256 pin: re-vendor both from the Model Plane golden          (scripts/tests/zdr-contract-sync.test.sh lists the rows)"
+    );
 }
 
 /// The pending codes are Quarry's own `ErrorCode` wire names, not invented
