@@ -683,6 +683,103 @@ async fn browser_signals_neither_read_nor_write_the_page_cache() {
     purge_key(&mut conn, &planted_fp).await;
 }
 
+/// The other half of the `prior_block_signals 2` case above, for `honest` (the
+/// default since WS3.I): the field is ignored, the plan is static, and the request is
+/// an ordinary default scrape for the cache. A planted entry is served on its
+/// fingerprint without a fetch, and a miss fetches and writes the result. Skipped in
+/// `legacy` mode, where the same request is a browser request and bypasses the cache.
+#[tokio::test]
+async fn honest_prior_block_signals_do_not_bypass_the_page_cache() {
+    if !quarry_runtime::escalation::EscalationMode::current().is_honest() {
+        eprintln!("skip: QUARRY_BLOCK_ESCALATION=legacy (the bypass is asserted above)");
+        return;
+    }
+    let Some((state, mut conn)) = build_state().await else {
+        eprintln!("skip: REDIS_URL unreachable");
+        return;
+    };
+    let addr = spawn_app(state).await;
+    let client = reqwest::Client::new();
+    let cache = PageCache::new(conn.clone(), Duration::from_secs(3600));
+
+    let planted_fp = format!("fp-honest-prior-block-planted-{}", unique_nonce());
+    cache
+        .put(
+            DEV_ORG,
+            &planted_fp,
+            &planted_output(
+                "http://127.0.0.1:1/honest-prior-block",
+                &planted_fp,
+                "PLANTED HONEST TITLE",
+            ),
+        )
+        .await
+        .expect("plant the entry");
+
+    let nonce = unique_nonce();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(nonce_page(&nonce)))
+        .mount(&server)
+        .await;
+    let signals = driver_signals(serde_json::json!({ "prior_block_signals": 2 }));
+
+    let hit = authed(
+        client
+            .post(format!("http://{addr}/v1/scrape"))
+            .json(&serde_json::json!({
+                "url": server.uri(),
+                "prev_fingerprint": planted_fp,
+                "cache": { "mode": "read_write" },
+                "signals": signals
+            })),
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(hit.status(), 200);
+    let hit: serde_json::Value = hit.json().await.unwrap();
+    assert_eq!(hit["data"]["effective_options"]["cache_state"], "hit");
+    assert!(hit["data"]["metadata"]["title"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("PLANTED HONEST TITLE"));
+    assert_eq!(
+        server.received_requests().await.unwrap_or_default().len(),
+        0,
+        "served from the cache, no fetch"
+    );
+
+    let miss = authed(
+        client
+            .post(format!("http://{addr}/v1/scrape"))
+            .json(&serde_json::json!({
+                "url": server.uri(),
+                "prev_fingerprint": "fp-not-in-the-cache",
+                "cache": { "mode": "read_write" },
+                "signals": signals
+            })),
+    )
+    .send()
+    .await
+    .unwrap();
+    let miss: serde_json::Value = miss.json().await.unwrap();
+    assert_eq!(miss["data"]["effective_options"]["cache_state"], "miss");
+    assert_eq!(
+        server.received_requests().await.unwrap_or_default().len(),
+        1
+    );
+    let fp = extract_fingerprint(&miss);
+    let written: bool = conn.exists(page_key(DEV_ORG, &fp)).await.unwrap_or(false);
+    assert!(
+        written,
+        "the result of a default-plan request is written to the cache"
+    );
+
+    purge_key(&mut conn, &planted_fp).await;
+    purge_key(&mut conn, &fp).await;
+}
+
 /// Default options keep the page cache: a result is written under its fingerprint,
 /// a known fingerprint is served from the cache without a fetch, and an unknown one
 /// is a miss that fetches.

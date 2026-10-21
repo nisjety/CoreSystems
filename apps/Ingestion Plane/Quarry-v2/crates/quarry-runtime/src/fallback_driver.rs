@@ -216,12 +216,29 @@ impl FallbackDriver {
                     // www.aquatiq.com` and got the 220 KB Next.js shell, TLS
                     // returned a 308 with a 44-char "Redirecting" body, and
                     // that body became the page's whole excerpt.
+                    //
+                    // Not when the response is a block status (or a strong
+                    // challenge) that `honest` refuses to rotate on: a block
+                    // body is always "thinner" than a shell, and rotating on
+                    // that would hand the page that just refused this identity
+                    // to the browser, which is the status-driven change of
+                    // identity the first branch above forbids. The refusal is
+                    // returned as it is, `served_by` names the driver that got
+                    // it (WS3.I). Under `legacy` a block status never reaches
+                    // here with a driver ahead (the first branch took it), so
+                    // this changes nothing there.
                     if *kind != DriverKind::Browser && idx < order.len() - 1 {
                         let is_redirect = (300..400).contains(&resp.status);
                         let thinner = best_shell
                             .as_ref()
                             .map(|b| visible_text_len(&resp.body) <= visible_text_len(&b.body))
-                            .unwrap_or(false);
+                            .unwrap_or(false)
+                            && !(crate::fingerprint_rotation::is_block_status(resp.status)
+                                && !escalation_allowed(
+                                    self.mode,
+                                    EscalationTrigger::BlockStatus(resp.status),
+                                ))
+                            && !self.challenge_forbids_escalation(url, &resp);
                         if is_redirect || thinner {
                             attempts.push((
                                 *kind,
@@ -1028,6 +1045,254 @@ mod tests {
 
         assert_eq!(resp.served_by, DriverKind::Browser);
         assert_eq!(browser.calls.load(Ordering::Relaxed), 1);
+    }
+
+    fn rendered_body() -> Vec<u8> {
+        "<html><body><main><h1>Hygiene for matindustrien</h1><p>Vi leverer hygieneløsninger til næringsmiddelindustrien.</p></main></body></html>".as_bytes().to_vec()
+    }
+
+    fn body_driver(kind: DriverKind, body: Vec<u8>) -> Arc<BodyDriver> {
+        Arc::new(BodyDriver {
+            kind,
+            body,
+            calls: AtomicU32::new(0),
+        })
+    }
+
+    /// The production chain is `[Static, Tls, Browser]`. Static returns a JS
+    /// shell (kept as `best_shell`), TLS answers 403. The 403 body is always
+    /// thinner than the shell, so the "not an improvement" branch used to hand
+    /// the page that had just refused the TLS identity to the browser: a
+    /// status-driven change of identity under `honest`.
+    #[tokio::test]
+    async fn honest_block_from_tls_after_a_shell_is_returned_not_sent_to_the_browser() {
+        let static_shell = body_driver(DriverKind::Static, shell_body());
+        let tls = Arc::new(BlockDriver::new(DriverKind::Tls));
+        let browser = body_driver(DriverKind::Browser, rendered_body());
+        let fb = chain(
+            EscalationMode::Honest,
+            vec![
+                (DriverKind::Static, static_shell.clone()),
+                (DriverKind::Tls, tls.clone()),
+                (DriverKind::Browser, browser.clone()),
+            ],
+        );
+
+        let resp = fb
+            .fetch(&"https://example.com".parse().unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status, 403, "the block is surfaced as it is");
+        assert_eq!(resp.served_by, DriverKind::Tls);
+        assert_eq!(tls.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(browser.calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn legacy_block_from_tls_after_a_shell_still_reaches_the_browser() {
+        let static_shell = body_driver(DriverKind::Static, shell_body());
+        let tls = Arc::new(BlockDriver::new(DriverKind::Tls));
+        let browser = body_driver(DriverKind::Browser, rendered_body());
+        let fb = chain(
+            EscalationMode::Legacy,
+            vec![
+                (DriverKind::Static, static_shell.clone()),
+                (DriverKind::Tls, tls.clone()),
+                (DriverKind::Browser, browser.clone()),
+            ],
+        );
+
+        let resp = fb
+            .fetch(&"https://example.com".parse().unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.served_by, DriverKind::Browser);
+        assert_eq!(browser.calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn honest_strong_challenge_from_tls_after_a_shell_is_returned_not_sent_to_the_browser() {
+        let static_shell = body_driver(DriverKind::Static, shell_body());
+        let tls = body_driver(DriverKind::Tls, challenge_interstitial_body());
+        let browser = body_driver(DriverKind::Browser, rendered_body());
+        let fb = chain(
+            EscalationMode::Honest,
+            vec![
+                (DriverKind::Static, static_shell.clone()),
+                (DriverKind::Tls, tls.clone()),
+                (DriverKind::Browser, browser.clone()),
+            ],
+        );
+
+        let resp = fb
+            .fetch(&"https://example.com".parse().unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.served_by, DriverKind::Tls);
+        assert_eq!(resp.status, 200);
+        assert_eq!(tls.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(browser.calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn legacy_strong_challenge_from_tls_after_a_shell_still_reaches_the_browser() {
+        let static_shell = body_driver(DriverKind::Static, shell_body());
+        let tls = body_driver(DriverKind::Tls, challenge_interstitial_body());
+        let browser = body_driver(DriverKind::Browser, rendered_body());
+        let fb = chain(
+            EscalationMode::Legacy,
+            vec![
+                (DriverKind::Static, static_shell.clone()),
+                (DriverKind::Tls, tls.clone()),
+                (DriverKind::Browser, browser.clone()),
+            ],
+        );
+
+        let resp = fb
+            .fetch(&"https://example.com".parse().unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.served_by, DriverKind::Browser);
+        assert_eq!(browser.calls.load(Ordering::Relaxed), 1);
+    }
+
+    /// Only the strong class forbids the browser under `honest`. A weak hint
+    /// (a prove-human phrase, a login form with a reCAPTCHA widget) and a
+    /// non-signal (a plain login page) are JS shells like any other: the page
+    /// withheld its content and a browser may render it.
+    #[tokio::test]
+    async fn honest_weak_hint_and_non_signal_shells_still_escalate_to_browser() {
+        let mut weak_phrase = shell_body();
+        weak_phrase.extend_from_slice(b"<p>Please verify you are human to continue.</p>");
+        let mut weak_login_widget = shell_body();
+        weak_login_widget.extend_from_slice(
+            b"<form><input type=\"email\" name=\"e\"><input type=\"password\" name=\"p\"><div class=\"g-recaptcha\" data-sitekey=\"k\"></div></form>",
+        );
+        let mut plain_login = shell_body();
+        plain_login.extend_from_slice(
+            b"<form><input type=\"email\" name=\"e\"><input type=\"password\" name=\"p\"></form>",
+        );
+        let url: Url = "https://example.com".parse().unwrap();
+
+        for (label, body, expected_class) in [
+            ("prove-human phrase", weak_phrase, ChallengeStrength::Weak),
+            (
+                "login form with a recaptcha",
+                weak_login_widget,
+                ChallengeStrength::Weak,
+            ),
+            (
+                "plain login form",
+                plain_login,
+                ChallengeStrength::NonSignal,
+            ),
+        ] {
+            // Premises: still a shell, and not a strong challenge.
+            assert!(
+                needs_browser_escalation(&body, 200, StructuredYield::Unknown),
+                "{label}: premise, the body is a shell"
+            );
+            let head =
+                String::from_utf8_lossy(&body[..body.len().min(MAX_SCANNED_BYTES)]).into_owned();
+            let seen = classify(&ChallengeInput {
+                url: url.as_str(),
+                title: None,
+                html: Some(&head),
+                text_snippet: None,
+                main_doc_status: Some(200),
+            });
+            assert_ne!(
+                seen.as_ref().map(|s| s.strength),
+                Some(ChallengeStrength::Strong),
+                "{label}: premise, not a strong challenge"
+            );
+            assert_eq!(
+                seen.as_ref().map(|s| s.strength),
+                Some(expected_class),
+                "{label}: premise, the class the test is about"
+            );
+
+            let static_driver = body_driver(DriverKind::Static, body);
+            let browser = body_driver(DriverKind::Browser, rendered_body());
+            let fb = chain(
+                EscalationMode::Honest,
+                vec![
+                    (DriverKind::Static, static_driver.clone()),
+                    (DriverKind::Browser, browser.clone()),
+                ],
+            );
+
+            let resp = fb.fetch(&url).await.unwrap();
+
+            assert_eq!(resp.served_by, DriverKind::Browser, "{label}");
+            assert_eq!(browser.calls.load(Ordering::Relaxed), 1, "{label}");
+        }
+    }
+
+    /// A connect failure on the static driver is reported as
+    /// `UpstreamBlocked`, the same code a proxied 403 gets, and the error
+    /// alone cannot tell them apart. Under `honest` it therefore does not fall
+    /// through to the TLS driver (fail closed, documented in `escalation.rs`
+    /// and RUNBOOKS); under `legacy` it does. Pinned so the choice is a
+    /// visible one: changing the mapping must change this test.
+    #[tokio::test]
+    async fn honest_connect_failure_on_the_static_driver_does_not_fall_through_to_tls() {
+        use quarry_core::privacy::PrivacyPolicy;
+        let dead = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap()
+        };
+        let hints = FetchHints {
+            org_id: "org_connect_failure".into(),
+            privacy: PrivacyPolicy {
+                allow_third_party_processing: true,
+                processor_id: Some("quarry_proxy_pool".into()),
+                ..PrivacyPolicy::default()
+            },
+            ..FetchHints::default()
+        };
+        let url: Url = "http://example.com/".parse().unwrap();
+
+        for mode in [EscalationMode::Honest, EscalationMode::Legacy] {
+            let pool = crate::proxy_pool::ProxyPool::from_env_string(&format!("http://{dead}"));
+            let static_driver = Arc::new(
+                crate::fetch::StaticDriver::with_proxy_pool_and_processor(
+                    std::time::Duration::from_secs(5),
+                    "QuarryTest/1.0",
+                    pool,
+                    Some("quarry_proxy_pool".into()),
+                )
+                .unwrap()
+                .with_escalation_mode(mode),
+            );
+            let tls = Arc::new(OkDriver::new(DriverKind::Tls));
+            let fb = chain(
+                mode,
+                vec![
+                    (DriverKind::Static, static_driver),
+                    (DriverKind::Tls, tls.clone()),
+                ],
+            );
+
+            let result = fb.fetch_conditional(&url, &hints).await;
+
+            match mode {
+                EscalationMode::Honest => {
+                    let err = result.expect_err("honest: the connect failure is returned");
+                    assert_eq!(err.code, ErrorCode::UpstreamBlocked);
+                    assert_eq!(tls.calls.load(Ordering::Relaxed), 0);
+                }
+                EscalationMode::Legacy => {
+                    let resp = result.expect("legacy: the TLS driver serves it");
+                    assert_eq!(resp.served_by, DriverKind::Tls);
+                    assert_eq!(tls.calls.load(Ordering::Relaxed), 1);
+                }
+            }
+        }
     }
 
     #[tokio::test]
