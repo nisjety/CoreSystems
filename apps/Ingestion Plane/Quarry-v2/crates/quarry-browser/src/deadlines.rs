@@ -53,11 +53,18 @@ pub(crate) enum Op {
     ProfileCapture,
     DownloadBegin,
     DownloadComplete,
+    /// The whole wait for a ref target to become actionable (visible, enabled,
+    /// not covered), and the bound of each CDP call inside it; polled every
+    /// 100 ms (WS3.K). Nothing has been clicked yet, so it is effect-less.
+    Actionability,
+    /// The window in which a target's box has to hold still, sampled every
+    /// 25 ms (WS3.K). Effect-less.
+    StablePoll,
 }
 
 impl Op {
     #[cfg(test)]
-    pub(crate) const ALL: [Op; 18] = [
+    pub(crate) const ALL: [Op; 20] = [
         Op::Launch,
         Op::TabAttach,
         Op::Navigate,
@@ -76,6 +83,8 @@ impl Op {
         Op::ProfileCapture,
         Op::DownloadBegin,
         Op::DownloadComplete,
+        Op::Actionability,
+        Op::StablePoll,
     ];
 
     pub(crate) const fn name(self) -> &'static str {
@@ -98,6 +107,8 @@ impl Op {
             Op::ProfileCapture => "profile_capture",
             Op::DownloadBegin => "download_begin",
             Op::DownloadComplete => "download_complete",
+            Op::Actionability => "actionability",
+            Op::StablePoll => "stable_poll",
         }
     }
 
@@ -132,6 +143,8 @@ impl Op {
             Op::ProfileCapture => 5_000,
             Op::DownloadBegin => 10_000,
             Op::DownloadComplete => 30_000,
+            Op::Actionability => 2_000,
+            Op::StablePoll => 500,
         }
     }
 }
@@ -338,6 +351,26 @@ mod tests {
             assert_eq!(details["deadline_ms"], 1500);
             assert_eq!(details["effect"], "unknown");
         }
+    }
+
+    #[test]
+    fn actionability_ops_are_effect_less_and_retryable() {
+        // Nothing has been clicked while a target is still being checked, so a
+        // timeout there says the page was not touched and may be retried.
+        for op in [Op::Actionability, Op::StablePoll] {
+            assert!(!op.effectful(), "{}", op.name());
+            let error = timeout_error(op, Duration::from_millis(500));
+            assert!(error.retryable, "{}", op.name());
+            assert_eq!(error.details.unwrap()["effect"], "none");
+        }
+        assert_eq!(
+            deadline_scaled(Op::Actionability, 1.0),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            deadline_scaled(Op::StablePoll, 1.0),
+            Duration::from_millis(500)
+        );
     }
 
     #[test]

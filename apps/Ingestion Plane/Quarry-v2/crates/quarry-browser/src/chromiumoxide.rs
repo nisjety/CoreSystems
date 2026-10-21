@@ -66,6 +66,7 @@ use quarry_core::contracts::{
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 use quarry_core::lease::{BrowserLease, BrowserViewport};
 
+use crate::actionability::{self, DialogWatch};
 use crate::actions::ScrollTarget;
 use crate::deadlines::{best_effort, deadline, read_with_retry, timeout_error, with_deadline, Op};
 use crate::navigation::{guard_navigation_target, guard_page_request_target};
@@ -311,6 +312,22 @@ pub struct ChromiumoxideDriver {
     dialog_pages: Arc<Mutex<HashMap<String, HashMap<String, Page>>>>,
     dialog_sequence: Arc<Mutex<u64>>,
     profiles: Option<Arc<dyn ProfileStore>>,
+    /// `QUARRY_BROWSER_TRUSTED_INPUT=on`: ref-targeted click, type and select
+    /// on a top-level target run the actionability pipeline and send trusted
+    /// input (WS3.K). Off by default.
+    trusted_input: bool,
+}
+
+/// How a native target action reaches its element.
+#[derive(Clone)]
+enum InputMode {
+    /// The in-page script that always was: `element.click()`, a value setter,
+    /// synthetic events. Governed downloads, uploads, child-frame targets and
+    /// `wait_for` always use it.
+    Synthetic,
+    /// The actionability pipeline and real CDP input (see `actionability.rs`),
+    /// with the session's dialog list so a click that opens an `alert` returns.
+    Trusted(DialogWatch),
 }
 
 impl Default for ChromiumoxideDriver {
@@ -351,7 +368,44 @@ impl ChromiumoxideDriver {
             dialog_pages: Arc::new(Mutex::new(HashMap::new())),
             dialog_sequence: Arc::new(Mutex::new(0)),
             profiles: None,
+            trusted_input: actionability::parse_trusted_input(
+                std::env::var("QUARRY_BROWSER_TRUSTED_INPUT")
+                    .ok()
+                    .as_deref(),
+            ),
         }
+    }
+
+    /// Turn trusted input (the actionability pipeline) on or off, overriding
+    /// `QUARRY_BROWSER_TRUSTED_INPUT`. Call before the first `acquire`.
+    pub fn with_trusted_input(mut self, enabled: bool) -> Self {
+        self.trusted_input = enabled;
+        self
+    }
+
+    /// The input mode for one native target of `session`. Trusted only with
+    /// the flag on and only for the page's own frame: a child frame has its
+    /// own coordinate space and may live in another process, so its targets
+    /// stay on the synthetic path (WS3.L).
+    async fn input_mode_for(
+        &self,
+        session: &BrowserSession,
+        page: &Page,
+        target: &BrowserNativeTarget,
+    ) -> InputMode {
+        if !self.trusted_input {
+            return InputMode::Synthetic;
+        }
+        if let Some(frame_id) = target.frame_id.as_deref() {
+            match root_frame_id(page).await {
+                Ok(root) if root == frame_id => {}
+                _ => return InputMode::Synthetic,
+            }
+        }
+        InputMode::Trusted(DialogWatch {
+            dialogs: self.dialogs.clone(),
+            session_key: Self::session_key(session),
+        })
     }
 
     pub fn with_profile_store(mut self, store: Arc<dyn ProfileStore>) -> Self {
@@ -411,6 +465,7 @@ impl ChromiumoxideDriver {
             dialog_pages: self.dialog_pages.clone(),
             dialog_sequence: self.dialog_sequence.clone(),
             profiles: self.profiles.clone(),
+            trusted_input: self.trusted_input,
         }
     }
 
@@ -2084,6 +2139,7 @@ async fn execute_native_target_action(
     page: &Page,
     target: BrowserNativeTarget,
     operation: VerifiedTargetOperation,
+    mode: &InputMode,
 ) -> QuarryResult<()> {
     // `DOM.resolveNode` must execute in the target frame's current realm. In
     // particular, an out-of-process child iframe cannot be safely assumed to
@@ -2129,6 +2185,14 @@ async fn execute_native_target_action(
         )
         .with_details(json!({ "ax_node_id": target.ax_node_id }))
     })?;
+    if let InputMode::Trusted(watch) = mode {
+        if actionability::handles(&operation) {
+            let outcome = actionability::run(page, &object_id, &operation, watch).await;
+            // Same rule as the synthetic path: the handle never outlives the action.
+            let _ = page.execute(ReleaseObjectParams::new(object_id)).await;
+            return outcome;
+        }
+    }
     let operation_value = serde_json::to_value(&operation).map_err(|error| {
         QuarryError::new(
             ErrorCode::Internal,
@@ -2848,6 +2912,7 @@ impl BrowserDriver for ChromiumoxideDriver {
             isolated_egress: self.pinned_egress_proxy.is_some(),
             security_evidence: self.pinned_egress_proxy.is_some(),
             atomic_target_actions: true,
+            trusted_input: self.trusted_input,
         }
     }
 
@@ -3042,9 +3107,10 @@ impl BrowserDriver for ChromiumoxideDriver {
     ) -> QuarryResult<()> {
         let page = self.current_page(session).await?;
         if let Some(native_target) = action.native_target {
+            let mode = self.input_mode_for(session, &page, &native_target).await;
             return with_deadline(
                 Op::NativeAction,
-                execute_native_target_action(&page, native_target, action.operation),
+                execute_native_target_action(&page, native_target, action.operation, &mode),
             )
             .await;
         }
@@ -3305,7 +3371,14 @@ impl BrowserDriver for ChromiumoxideDriver {
 
         with_deadline(
             Op::NativeAction,
-            execute_native_target_action(&page, target, VerifiedTargetOperation::Click),
+            execute_native_target_action(
+                &page,
+                target,
+                VerifiedTargetOperation::Click,
+                // The download is bound to this click's synthetic activation and
+                // frame; real input is not part of the governed download path.
+                &InputMode::Synthetic,
+            ),
         )
         .await?;
 
@@ -3935,68 +4008,7 @@ impl BrowserDriver for ChromiumoxideDriver {
 
     async fn click_point(&self, _session: &BrowserSession, x: f64, y: f64) -> QuarryResult<()> {
         let page = self.current_page(_session).await?;
-        let base = DispatchMouseEventParams::builder()
-            .x(x)
-            .y(y)
-            .button(MouseButton::Left)
-            .click_count(1)
-            .pointer_type(DispatchMouseEventPointerType::Mouse);
-
-        let moved = base
-            .clone()
-            .r#type(DispatchMouseEventType::MouseMoved)
-            .buttons(0)
-            .build()
-            .map_err(|e| {
-                QuarryError::new(
-                    ErrorCode::DriverFailed,
-                    format!("click_point build move failed: {e}"),
-                )
-            })?;
-        let pressed = base
-            .clone()
-            .r#type(DispatchMouseEventType::MousePressed)
-            .buttons(1)
-            .build()
-            .map_err(|e| {
-                QuarryError::new(
-                    ErrorCode::DriverFailed,
-                    format!("click_point build press failed: {e}"),
-                )
-            })?;
-        let released = base
-            .r#type(DispatchMouseEventType::MouseReleased)
-            .buttons(0)
-            .build()
-            .map_err(|e| {
-                QuarryError::new(
-                    ErrorCode::DriverFailed,
-                    format!("click_point build release failed: {e}"),
-                )
-            })?;
-
-        with_deadline(Op::Input, async {
-            page.execute(moved).await.map_err(|e| {
-                QuarryError::new(ErrorCode::DriverFailed, "click_point move failed")
-                    .with_details(json!({ "x": x, "y": y, "error": e.to_string() }))
-            })
-        })
-        .await?;
-        with_deadline(Op::Input, async {
-            page.execute(pressed).await.map_err(|e| {
-                QuarryError::new(ErrorCode::DriverFailed, "click_point press failed")
-                    .with_details(json!({ "x": x, "y": y, "error": e.to_string() }))
-            })
-        })
-        .await?;
-        with_deadline(Op::Input, async {
-            page.execute(released).await.map_err(|e| {
-                QuarryError::new(ErrorCode::DriverFailed, "click_point release failed")
-                    .with_details(json!({ "x": x, "y": y, "error": e.to_string() }))
-            })
-        })
-        .await?;
-        Ok(())
+        actionability::dispatch_click(&page, x, y).await
     }
 
     async fn type_text(

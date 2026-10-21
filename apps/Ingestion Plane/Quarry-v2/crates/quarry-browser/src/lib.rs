@@ -150,6 +150,8 @@ fn is_canonical_broker_domain(domain: &str) -> bool {
     })
 }
 
+#[cfg(feature = "chromiumoxide")]
+mod actionability;
 pub mod actions;
 pub mod browserbase;
 pub mod browserless;
@@ -287,6 +289,13 @@ pub struct BrowserDriverCapabilities {
     /// must not infer this merely from a top-level URL guard.
     pub security_evidence: bool,
     pub atomic_target_actions: bool,
+    /// Ref-targeted click, type and select run the actionability pipeline
+    /// (visible, enabled, stable, not covered) and send trusted input
+    /// (`event.isTrusted` is true) instead of in-page script events. True only
+    /// when the driver was started with `QUARRY_BROWSER_TRUSTED_INPUT=on`.
+    /// Additive on the wire: an older peer omits it and reads as `false`.
+    #[serde(default)]
+    pub trusted_input: bool,
 }
 
 /// Browser-authored page state for an agent observation. Drivers return only
@@ -758,4 +767,40 @@ pub struct BrowserSession {
 pub struct SessionInner {
     pub connected: bool,
     pub pages_served: u64,
+}
+
+#[cfg(test)]
+mod capability_wire_tests {
+    use super::*;
+
+    #[test]
+    fn capabilities_flag_defaults_false_and_is_additive_on_the_wire() {
+        // Deny by default: a driver that does not say so has no trusted input.
+        assert!(!BrowserDriverCapabilities::default().trusted_input);
+        // A peer that predates the field sends no such key and still parses.
+        let older = serde_json::json!({
+            "persistent_profile": true,
+            "devtools_trace": false,
+            "downloads_to_artifacts": false,
+            "uploads_from_artifacts": false,
+            "full_visual_fidelity": true,
+            "isolated_egress": true,
+            "security_evidence": true,
+            "atomic_target_actions": true
+        });
+        let parsed: BrowserDriverCapabilities =
+            serde_json::from_value(older.clone()).expect("older shape parses");
+        assert!(!parsed.trusted_input);
+        assert!(parsed.atomic_target_actions);
+        // The new key is the only difference on the way out, and it round-trips.
+        let mut on = parsed;
+        on.trusted_input = true;
+        let wire = serde_json::to_value(on).expect("serializes");
+        assert_eq!(wire["trusted_input"], true);
+        let mut without = wire.clone();
+        without.as_object_mut().unwrap().remove("trusted_input");
+        assert_eq!(without, older);
+        let back: BrowserDriverCapabilities = serde_json::from_value(wire).expect("round-trips");
+        assert!(back.trusted_input);
+    }
 }
