@@ -85,6 +85,14 @@ pub(super) async fn scrape_preview(
         }
     };
     body["url"] = Value::String(target.clone());
+    // Ask for the text inline. Without `formats` quarry-edge answers a
+    // non-ZDR scrape with an artifact reference, which costs a second
+    // `/v1/extract` call below to read back; a caller that sent its own
+    // `formats` keeps them. Set before the variant digest so the cache key
+    // describes the request that is actually forwarded.
+    if body.get("formats").is_none() {
+        body["formats"] = json!(["markdown"]);
+    }
 
     // Cache admission MIRRORS quarry-edge's (`routes.rs` `should_read` /
     // `should_write` / `effective_ttl`) rather than inventing a second policy.
@@ -265,6 +273,12 @@ fn classify_scrape_failure(
         return (
             "scrape_rate_limited",
             "Nettstedet mottar for mange forespørsler akkurat nå. Vent litt og prøv igjen.".to_owned(),
+        );
+    }
+    if status.as_u16() == 415 {
+        return (
+            "unsupported_media",
+            "Dette innholdet kan ikke vises som forhåndsvisning (for eksempel et bilde, et arkiv eller en annen filtype uten tekst). Prøv en lenke til en nettside eller et dokument.".to_owned(),
         );
     }
     if elapsed >= Duration::from_secs(20) || matches!(status.as_u16(), 408 | 504) {
@@ -1017,6 +1031,154 @@ mod tests {
         assert_eq!(preview["source"], "inline");
         assert_eq!(preview["markdown"], "# Inline\n\nContent");
         assert_eq!(preview["title"], "Inline page");
+    }
+
+    fn preview_user() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.invalid".to_owned(),
+            user_name: "User".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: None,
+        }
+    }
+
+    async fn preview_body(response: Response) -> Value {
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// The preview asks for `formats: ["markdown"]`, so quarry-edge inlines the
+    /// text and the second `/v1/extract` call has nothing left to do. The mock
+    /// mounts no `/v1/extract`: a request to it would 404 and show up below.
+    #[tokio::test]
+    async fn preview_makes_one_quarry_call_when_markdown_is_inline() {
+        use wiremock::matchers::{method as wm_method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/scrape"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "status": 200,
+                    "markdown": "# Inline\n\nContent",
+                    "metadata": { "title": "Inline page", "content_kind": "html" },
+                    "formats": { "markdown": { "artifact_id": "art-md", "bytes": 17 } }
+                }
+            })))
+            .mount(&quarry)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+
+        let response = scrape_preview(
+            State(state),
+            Extension(preview_user()),
+            HeaderMap::new(),
+            Json(json!({ "url": "https://example.com/a" })),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let value = preview_body(response).await;
+        assert_eq!(value["data"]["source"], "inline");
+        assert_eq!(value["data"]["markdown"], "# Inline\n\nContent");
+
+        let requests = quarry.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1, "one quarry call per preview");
+        assert_eq!(requests[0].url.path(), "/v1/scrape");
+        let sent: Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(sent["formats"], json!(["markdown"]));
+    }
+
+    /// A caller that names its own formats keeps them.
+    #[tokio::test]
+    async fn preview_keeps_the_formats_the_caller_sent() {
+        use wiremock::matchers::{method as wm_method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/scrape"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "status": 200, "markdown": "# Hi" }
+            })))
+            .mount(&quarry)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+
+        let response = scrape_preview(
+            State(state),
+            Extension(preview_user()),
+            HeaderMap::new(),
+            Json(json!({ "url": "https://example.com/a", "formats": ["markdown", "html"] })),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let requests = quarry.received_requests().await.unwrap();
+        let sent: Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(sent["formats"], json!(["markdown", "html"]));
+    }
+
+    #[test]
+    fn a_415_is_classified_as_unsupported_media() {
+        let (code, message) = classify_scrape_failure(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            Duration::ZERO,
+            &Value::Null,
+        );
+        assert_eq!(code, "unsupported_media");
+        assert!(!message.is_empty());
+        // The neighbours are unchanged.
+        assert_eq!(
+            classify_scrape_failure(StatusCode::FORBIDDEN, Duration::ZERO, &Value::Null).0,
+            "scrape_refused"
+        );
+        assert_eq!(
+            classify_scrape_failure(StatusCode::BAD_GATEWAY, Duration::ZERO, &Value::Null).0,
+            "scrape_failed"
+        );
+    }
+
+    /// End to end through the handler: quarry-edge's typed 415 reaches the
+    /// caller as the same status with the typed code.
+    #[tokio::test]
+    async fn preview_of_an_unsupported_media_type_is_a_typed_415() {
+        use wiremock::matchers::{method as wm_method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/scrape"))
+            .respond_with(ResponseTemplate::new(415).set_body_json(json!({
+                "error": { "code": "UNSUPPORTED_MEDIA", "message": "image/png" }
+            })))
+            .mount(&quarry)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+
+        let response = scrape_preview(
+            State(state),
+            Extension(preview_user()),
+            HeaderMap::new(),
+            Json(json!({ "url": "https://example.com/logo.png" })),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        let value = preview_body(response).await;
+        assert_eq!(value["error"]["code"], "unsupported_media");
+        assert_eq!(
+            quarry.received_requests().await.unwrap().len(),
+            1,
+            "a typed refusal is final: no static retry"
+        );
     }
 
     #[test]

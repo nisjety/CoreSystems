@@ -129,7 +129,6 @@ async fn search_web(
         let url = format!("{}/v1/scrape", state.quarry_edge_url);
         let mut browser_payload = json!({
             "url": target,
-            "maxPages": 1,
             "formats": ["markdown"],
             "signals": {
                 "actions": ["render_page"],
@@ -145,7 +144,6 @@ async fn search_web(
         });
         let mut static_payload = json!({
             "url": target,
-            "maxPages": 1,
             "formats": ["markdown"],
         });
         if zdr {
@@ -1374,5 +1372,49 @@ mod tests {
             "org B must see the upstream failure, got {value_b}"
         );
         assert!(!value_b.to_string().contains("A-ONLY"));
+    }
+
+    /// The search bar reads `data.markdown`, which quarry-edge only inlines
+    /// when asked for the `markdown` format. A `maxPages` key is not a scrape
+    /// option (the edge warns on it), so it must not be sent.
+    #[tokio::test]
+    async fn fetch_mode_excerpt_is_populated_from_inline_markdown() {
+        let w = world(&[], &["org-a"]).await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/scrape"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "status": 200,
+                    "markdown": "# Example\n\nInline page text.",
+                    "metadata": { "title": "Example", "content_kind": "html" }
+                }
+            })))
+            .mount(&w.quarry)
+            .await;
+
+        let (status, value) = search_as(
+            &w,
+            "org-a",
+            &[],
+            json!({ "query": "https://example.invalid/a" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["data"]["mode"], json!("fetch"));
+        assert_eq!(value["data"]["title"], json!("Example"));
+        assert_eq!(
+            value["data"]["excerpt"],
+            json!("# Example\n\nInline page text.")
+        );
+
+        let sent = w.quarry.received_requests().await.unwrap_or_default();
+        let scrapes: Vec<Value> = sent
+            .iter()
+            .filter(|request| request.url.path() == "/v1/scrape")
+            .map(|request| serde_json::from_slice(&request.body).unwrap())
+            .collect();
+        assert_eq!(scrapes.len(), 1, "one scrape serves the fetch");
+        assert_eq!(scrapes[0]["formats"], json!(["markdown"]));
+        assert!(scrapes[0].get("maxPages").is_none(), "{}", scrapes[0]);
     }
 }
