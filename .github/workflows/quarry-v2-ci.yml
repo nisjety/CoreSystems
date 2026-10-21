@@ -523,3 +523,42 @@ jobs:
           total=$(go tool cover -func=coverage.out | tail -1 | grep -oE '[0-9]+\.[0-9]+')
           echo "total coverage: ${total}%"
           awk -v t="$total" 'BEGIN { exit (t + 0 >= 80) ? 0 : 1 }'
+
+  # quarry-control's Postgres store tests (the TestPostgres_* set, the schedule ZDR
+  # stamp round trip and the migration 023 idempotence test) skip without
+  # QUARRY_TEST_DSN, and go-coverage above is report-only and has no database, so a
+  # regression in the zdr INSERT, SELECT or Scan (a stamp written as NULL, which
+  # drops the posture from the orchestrator's change-record call) merged green.
+  # This lane runs them against a real Postgres. QUARRY_REQUIRE_DB=1 makes a lost
+  # database a failure instead of a skip. REQUIRED: no continue-on-error.
+  quarry-control-postgres:
+    name: quarry-control Postgres tests
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: quarry
+          POSTGRES_DB: quarry_test
+        ports:
+          - 5434:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d quarry_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache-dependency-path: 'apps/Ingestion Plane/Quarry-v2/services/quarry-control/go.sum'
+
+      - name: Postgres store tests
+        working-directory: 'apps/Ingestion Plane/Quarry-v2/services/quarry-control'
+        env:
+          QUARRY_TEST_DSN: postgres://postgres:quarry@127.0.0.1:5434/quarry_test?sslmode=disable
+          QUARRY_REQUIRE_DB: "1"
+        run: go test -count=1 ./internal/store/pg/...

@@ -22,12 +22,29 @@ import (
 // to exercise the migrator + Postgres CRUD path end-to-end.
 const envDSN = "QUARRY_TEST_DSN"
 
-func openOrSkip(t *testing.T) store.DB {
+// envRequireDB turns the "no database" skip into a failure. The CI job that
+// provides a Postgres service sets it to 1, so a lane that lost its database
+// (a renamed secret, a dropped service block) is red instead of green with
+// every persistence test silently skipped.
+const envRequireDB = "QUARRY_REQUIRE_DB"
+
+// testDSN returns the database the integration tests run against. Unset, it
+// skips the test, unless QUARRY_REQUIRE_DB=1, where it fails it.
+func testDSN(t *testing.T) string {
 	t.Helper()
 	dsn := os.Getenv(envDSN)
 	if dsn == "" {
+		if os.Getenv(envRequireDB) == "1" {
+			t.Fatalf("%s is unset but %s=1: the postgres integration tests must run here", envDSN, envRequireDB)
+		}
 		t.Skipf("%s unset — skipping postgres integration test", envDSN)
 	}
+	return dsn
+}
+
+func openOrSkip(t *testing.T) store.DB {
+	t.Helper()
+	dsn := testDSN(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	db, err := New(ctx, dsn)
@@ -280,10 +297,7 @@ func first[T any](items []T, _ string) []T { return items }
 // jobs must not see the rows other tests left behind in the shared schema.
 func openIsolatedOrSkip(t *testing.T) store.DB {
 	t.Helper()
-	dsn := os.Getenv(envDSN)
-	if dsn == "" {
-		t.Skipf("%s unset — skipping postgres integration test", envDSN)
-	}
+	dsn := testDSN(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	admin, err := pgxpool.New(ctx, dsn)
