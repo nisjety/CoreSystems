@@ -357,6 +357,12 @@ type CheckChangeInput struct {
 	RunID string `json:"run_id"`
 	OrgID string `json:"org_id"`
 	URL   string `json:"url"`
+	// Zdr is the ZDR posture stamped on the schedule when it was created
+	// (WS4.H, quarry-control migration 023). nil = a schedule that predates the
+	// stamp: nothing is declared, exactly as before. It is forwarded verbatim
+	// on /v1/internal/change/record, where the edge refuses (flag on) or logs
+	// would-refuse (flag off) for a true value.
+	Zdr *bool `json:"zdr,omitempty"`
 }
 
 // CheckChangeResult is the outcome of comparing a fresh fetch against the
@@ -417,6 +423,9 @@ type changeRecordRequest struct {
 	URL              string `json:"url"`
 	FreshFingerprint string `json:"fresh_fingerprint"`
 	RunID            string `json:"run_id"`
+	// Zdr declares the posture stamped at schedule create. Omitted (nil) for a
+	// legacy schedule, so its request body is byte-identical to before.
+	Zdr *bool `json:"zdr,omitempty"`
 }
 
 // CheckChange fetches the URL fresh (via the runtime), then asks the edge to
@@ -448,6 +457,7 @@ func (a *Activities) CheckChange(ctx context.Context, in CheckChangeInput) (Chec
 		URL:              in.URL,
 		FreshFingerprint: page.Fingerprint,
 		RunID:            in.RunID,
+		Zdr:              in.Zdr,
 	})
 	if err != nil {
 		return CheckChangeResult{}, errs.New(errs.CategoryValidation, op, err).Temporal()

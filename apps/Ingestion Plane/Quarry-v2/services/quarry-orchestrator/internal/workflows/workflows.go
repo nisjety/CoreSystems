@@ -56,6 +56,12 @@ type ChangeMonitorInput struct {
 	// the change_detected event payload so quarry-control can deliver the
 	// one in-product notification to the right user. Empty = no notify.
 	CreatedBy string `json:"created_by,omitempty"`
+	// Zdr is the ZDR posture stamped on the schedule at create (WS4.H). The
+	// workflow only passes it to the CheckChange activity and branches on
+	// nothing else; nil for a schedule that predates the stamp. Known gaps are
+	// in RUNBOOKS: an org that turns ZDR on later keeps its stamp, and this
+	// workflow still emits run_started/change_detected events with the URL.
+	Zdr *bool `json:"zdr,omitempty"`
 }
 
 // BatchJobInput drives a fan-out over a bounded URL list.
@@ -324,6 +330,7 @@ func ChangeMonitorWF(ctx workflow.Context, in ChangeMonitorInput, a *activities.
 		RunID: runID,
 		OrgID: in.OrgID,
 		URL:   in.URL,
+		Zdr:   in.Zdr,
 	}).Get(ctx, &res)
 	if err != nil {
 		_ = emitEvent(ctx, a, ids, quarrycontracts.EvtRunFailed, map[string]any{
