@@ -93,6 +93,13 @@ struct ControlScheduleCreate {
     enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     preset: Option<String>,
+    /// The caller's Zero Data Retention posture, STAMPED AT CREATE (WS4.H,
+    /// quarry-control migration 023). Always serialised (false is "stamped
+    /// standard", which control keeps distinct from an unstamped legacy row).
+    /// It comes only from verified claims via [`Claims::effective_zdr`]:
+    /// [`CreateScheduleRequest`] has no `zdr` field, so a client body can
+    /// never lower it.
+    zdr: bool,
 }
 
 /// `POST /v1/schedules/:id/backfill` body. The Temporal `backfill`
@@ -242,10 +249,13 @@ pub async fn create_schedule(
     Json(req): Json<CreateScheduleRequest>,
 ) -> Result<Json<Envelope<serde_json::Value>>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = RequestKind::new().to_string();
-    crate::zdr_refusal::refuse_for_claims(
+    // One posture for both uses: the refusal below and the stamp on the forwarded
+    // change-monitor schedule are the same value, so they can never disagree.
+    let zdr = claims.effective_zdr(false);
+    crate::zdr_refusal::refuse(
         &state,
-        &claims,
-        None,
+        &claims.org_id,
+        zdr,
         &request_id,
         "schedules",
         "create",
@@ -299,6 +309,7 @@ pub async fn create_schedule(
             target_ref,
             enabled: true,
             preset: Some(preset.to_string()),
+            zdr,
         };
         let summary = forward_json::<ControlScheduleCreate, serde_json::Value>(
             &state,
@@ -532,6 +543,7 @@ mod tests {
             target_ref: "https://example.com".into(),
             enabled: true,
             preset: Some("daily".into()),
+            zdr: true,
         };
         let s = serde_json::to_string(&body).unwrap();
         assert!(s.contains("\"org_id\":\"org_verevon\""));
@@ -539,6 +551,11 @@ mod tests {
         assert!(s.contains("\"target_kind\":\"change_monitor\""));
         assert!(s.contains("\"target_ref\":\"https://example.com\""));
         assert!(s.contains("\"preset\":\"daily\""));
+        // The stamp is always serialised, true and false alike (false is
+        // "stamped standard", which control keeps distinct from unstamped).
+        assert!(s.contains("\"zdr\":true"));
+        let standard = ControlScheduleCreate { zdr: false, ..body };
+        assert!(serde_json::to_string(&standard).unwrap().contains("\"zdr\":false"));
         // cron omitted (derived server-side from preset).
         assert!(!s.contains("\"cron\":"));
     }
