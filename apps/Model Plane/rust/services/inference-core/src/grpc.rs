@@ -1097,6 +1097,7 @@ fn to_internal_request(
 
     Ok(provider::InferRequest {
         thinking_budget_tokens: req.thinking_budget_tokens,
+        reasoning_effort: None,
         prefer_priority_service_tier: req.prefer_priority_service_tier,
         request_id: req.request_id.clone(),
         provider_hint: req.provider_hint.clone(),

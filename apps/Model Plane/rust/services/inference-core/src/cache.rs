@@ -87,6 +87,12 @@ impl PromptCache {
         // The thinking budget shapes the answer (a "quick" and a "deep" turn of the
         // same prompt are different products), so a different budget must miss.
         hasher.update(&req.thinking_budget_tokens.to_le_bytes());
+        // The canonical effort level is hashed separately from the budget: a
+        // level-driven adapter sends no budget at all, so the budget alone would
+        // leave `quick` and `deep` on the same key. The tag keeps "no level"
+        // distinct from every level, and a request with none hashes one constant
+        // byte, so legacy callers still share entries with each other.
+        hasher.update(&[req.reasoning_effort.map_or(0, |level| level as u8 + 1)]);
         // Response-shaping fields — a tool/schema change must miss the cache.
         for tool in &req.tools {
             hasher.update(tool.name.as_bytes());
@@ -191,6 +197,7 @@ impl PromptCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::effort::Level;
     use crate::provider::{ChatMessage, InferRequest, InferResponse};
 
     fn sample_request() -> InferRequest {
@@ -242,6 +249,52 @@ mod tests {
             "a deep turn must not be served the quick turn's cached answer"
         );
         assert!(cache.get(&quick).is_some(), "the same budget still hits");
+    }
+
+    #[test]
+    fn a_different_effort_misses_the_cache() {
+        let cache = PromptCache::new(300);
+        let quick = InferRequest {
+            reasoning_effort: Some(Level::Low),
+            ..sample_request()
+        };
+        let deep = InferRequest {
+            reasoning_effort: Some(Level::High),
+            ..sample_request()
+        };
+        // Two distinct keys, not just two cache misses.
+        assert_ne!(PromptCache::cache_key(&quick), PromptCache::cache_key(&deep));
+        cache.put(&quick, &sample_response());
+        assert!(
+            cache.get(&deep).is_none(),
+            "a deep turn must not be served the quick turn's cached answer"
+        );
+        assert!(cache.get(&quick).is_some(), "the same effort still hits");
+    }
+
+    #[test]
+    fn no_effort_is_distinct_from_every_level() {
+        let unset = PromptCache::cache_key(&sample_request());
+        for level in Level::ALL {
+            let request = InferRequest {
+                reasoning_effort: Some(level),
+                ..sample_request()
+            };
+            assert_ne!(PromptCache::cache_key(&request), unset, "{level:?}");
+        }
+        // Every level keys differently from every other.
+        let mut keys: Vec<String> = Level::ALL
+            .into_iter()
+            .map(|level| {
+                PromptCache::cache_key(&InferRequest {
+                    reasoning_effort: Some(level),
+                    ..sample_request()
+                })
+            })
+            .collect();
+        keys.sort();
+        keys.dedup();
+        assert_eq!(keys.len(), Level::ALL.len());
     }
 
     #[test]

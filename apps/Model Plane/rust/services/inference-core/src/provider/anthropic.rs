@@ -982,6 +982,7 @@ impl ProviderRouter for AnthropicProvider {
                     cheap,
                     privacy_tier,
                     residency_label: residency_label.clone(),
+                    effort_levels: Vec::new(),
                 }
             })
             .collect()

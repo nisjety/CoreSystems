@@ -1081,6 +1081,7 @@ impl ProviderRouter for OpenAiProvider {
                 cheap: is_cheap_model(id),
                 privacy_tier,
                 residency_label: residency_label.clone(),
+                effort_levels: Vec::new(),
             })
             .chain(self.embedding_models.iter().map(|id| ModelInfo {
                 id: id.clone(),

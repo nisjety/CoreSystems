@@ -7,6 +7,7 @@ pub mod artifact_ref;
 pub mod codex_subscription;
 mod codex_subscription_tools;
 pub mod doc_intel;
+pub mod effort;
 pub mod fallback;
 pub mod intent;
 pub mod language;
@@ -150,6 +151,11 @@ pub struct InferRequest {
     /// not is a hard 400 rather than a silent no-op. See
     /// `anthropic::supports_extended_thinking`.
     pub thinking_budget_tokens: i32,
+    /// Requested reasoning effort on the canonical ladder. `None` requests no
+    /// effort control and is the pre-existing behaviour byte-for-byte. It is
+    /// part of the response-cache identity, since a `quick` and a `deep` turn of
+    /// the same prompt are different products. Inert until an adapter reads it.
+    pub reasoning_effort: Option<effort::Level>,
     /// Optional speed tier for supported subscription models. It does not
     /// select a provider or reduce the requested reasoning effort.
     pub prefer_priority_service_tier: bool,
@@ -366,6 +372,9 @@ pub struct ModelInfo {
     pub privacy_tier: PrivacyTier,
     /// Declared residency label ([`Residency::as_str`]); empty when undeclared.
     pub residency_label: String,
+    /// Reasoning effort levels the model accepts, weakest first; empty when it
+    /// has no effort control.
+    pub effort_levels: Vec<effort::Level>,
 }
 
 /// Introspectable feature flags for a provider.

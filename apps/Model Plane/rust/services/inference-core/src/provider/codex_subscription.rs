@@ -887,6 +887,7 @@ impl CodexSubscriptionProvider {
                 cheap: false,
                 privacy_tier: PrivacyTier::classify(&caps),
                 residency_label: caps.residency.as_str().to_owned(),
+                effort_levels: Vec::new(),
             })
             .collect()
     }
