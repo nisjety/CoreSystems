@@ -19,7 +19,18 @@ type Preset struct {
 	Description string                    `json:"description"`
 	Tags        []string                  `json:"tags,omitempty"`
 	Policy      quarrycontracts.RunPolicy `json:"policy"`
+	// AliasOf names the preset this entry is an alias of. An alias resolves to
+	// the same policy; it exists so an id that shipped keeps working for one
+	// release after a rename (WS3.I: stealth -> careful).
+	AliasOf string `json:"alias_of,omitempty"`
+	// Deprecated marks an alias that will be removed. GET /v1/presets/{name}
+	// answers it with a Deprecation header and a successor Link.
+	Deprecated bool `json:"deprecated,omitempty"`
 }
+
+// deprecatedPresetAliases maps a renamed preset id to its successor. Remove an
+// entry (and the alias row in the catalog) one release after it ships.
+var deprecatedPresetAliases = map[string]string{"stealth": "careful"}
 
 // MountPresets registers `GET /v1/presets` (list) and
 // `GET /v1/presets/{name}` (single).
@@ -34,6 +45,10 @@ func MountPresets(r chi.Router) {
 		name := chi.URLParam(r, "name")
 		for _, p := range catalog {
 			if p.Name == name {
+				if p.Deprecated && p.AliasOf != "" {
+					w.Header().Set("Deprecation", "true")
+					w.Header().Set("Link", "</v1/presets/"+p.AliasOf+">; rel=\"successor-version\"")
+				}
 				httpx.WriteJSON(w, r, http.StatusOK, p)
 				return
 			}
@@ -55,7 +70,7 @@ func ResolvePreset(name string) (quarrycontracts.RunPolicy, bool) {
 
 func defaultPresets() []Preset {
 	u32 := func(v uint32) *uint32 { return &v }
-	return []Preset{
+	presets := []Preset{
 		{
 			Name:        "fast",
 			Title:       "Fast scrape",
@@ -81,10 +96,10 @@ func defaultPresets() []Preset {
 			Policy:      quarrycontracts.DefaultRunPolicy(),
 		},
 		{
-			Name:        "stealth",
-			Title:       "Stealth scrape",
-			Description: "Browser-friendly. Sticky proxy, longer jittered delays, escalate on bot signals.",
-			Tags:        []string{"stealth", "anti-bot"},
+			Name:        "careful",
+			Title:       "Careful scrape",
+			Description: "Slow and steady. Sticky proxy, longer jittered delays, robots respected. A challenge ends the run; Quarry does not change identity to get past it.",
+			Tags:        []string{"careful", "slow"},
 			Policy: quarrycontracts.RunPolicy{
 				Concurrency: quarrycontracts.Concurrency{PerRun: 4, PerDomain: 1},
 				Delay:       quarrycontracts.Delay{MinMs: 1500, MaxMs: 5000, Jitter: true},
@@ -93,8 +108,8 @@ func defaultPresets() []Preset {
 				Robots:      quarrycontracts.RobotsRespect,
 				Ordering:    quarrycontracts.OrdFifo,
 				Block: quarrycontracts.BlockPolicy{
-					On:     quarrycontracts.TrigSuspectBot,
-					Action: quarrycontracts.BlkEscalate,
+					On:     quarrycontracts.TrigChallenge,
+					Action: quarrycontracts.BlkAbort,
 				},
 				Checkpoint:  quarrycontracts.Checkpoint{EveryNPages: u32(25), EveryS: u32(30)},
 				Determinism: quarrycontracts.DetBestEff,
@@ -121,4 +136,21 @@ func defaultPresets() []Preset {
 			},
 		},
 	}
+	// Deprecated aliases come last: same policy as the successor, own name.
+	for old, successor := range deprecatedPresetAliases {
+		for _, p := range presets {
+			if p.Name != successor {
+				continue
+			}
+			alias := p
+			alias.Name = old
+			alias.Description = "Deprecated alias of `" + successor + "`, kept for one release. " + p.Description
+			alias.Tags = append([]string(nil), p.Tags...)
+			alias.AliasOf = successor
+			alias.Deprecated = true
+			presets = append(presets, alias)
+			break
+		}
+	}
+	return presets
 }

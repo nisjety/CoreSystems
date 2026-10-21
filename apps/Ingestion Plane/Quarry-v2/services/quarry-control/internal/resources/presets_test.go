@@ -48,14 +48,95 @@ func TestPresets_ListReturnsCatalog(t *testing.T) {
 		n, _ := m["name"].(string)
 		names[n] = true
 	}
-	for _, want := range []string{"fast", "polite", "stealth", "deterministic"} {
+	for _, want := range []string{"fast", "polite", "careful", "deterministic"} {
 		if !names[want] {
 			t.Errorf("preset %q missing from catalog", want)
 		}
 	}
 }
 
+func TestPresets_ListHasCarefulAndStealthAlias(t *testing.T) {
+	t.Parallel()
+	h, _ := newPresetServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/v1/presets", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d; body=%s", w.Code, w.Body.String())
+	}
+	var env map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := env["data"].(map[string]any)
+	items, _ := data["items"].([]any)
+	byName := map[string]map[string]any{}
+	for _, it := range items {
+		m, _ := it.(map[string]any)
+		n, _ := m["name"].(string)
+		byName[n] = m
+	}
+	careful, ok := byName["careful"]
+	if !ok {
+		t.Fatal("careful missing from the catalog")
+	}
+	if _, has := careful["alias_of"]; has {
+		t.Errorf("careful is the preset, not an alias: %v", careful["alias_of"])
+	}
+	if _, has := careful["deprecated"]; has {
+		t.Errorf("careful must not be marked deprecated")
+	}
+	stealth, ok := byName["stealth"]
+	if !ok {
+		t.Fatal("the stealth alias must stay in the catalog for one release")
+	}
+	if stealth["alias_of"] != "careful" || stealth["deprecated"] != true {
+		t.Errorf("stealth must be a deprecated alias of careful, got alias_of=%v deprecated=%v", stealth["alias_of"], stealth["deprecated"])
+	}
+	cp, _ := json.Marshal(careful["policy"])
+	sp, _ := json.Marshal(stealth["policy"])
+	if string(cp) != string(sp) {
+		t.Errorf("alias policy differs from the preset's:\n careful=%s\n stealth=%s", cp, sp)
+	}
+	// Nothing in the public catalog sells evasion any more.
+	for name, m := range byName {
+		blob, _ := json.Marshal(map[string]any{"title": m["title"], "description": m["description"], "tags": m["tags"]})
+		if name == "stealth" {
+			continue // the alias must keep its old id; its own text is the deprecation notice
+		}
+		for _, banned := range []string{"stealth", "anti-bot", "evade", "undetect"} {
+			if strings.Contains(strings.ToLower(string(blob)), banned) {
+				t.Errorf("preset %q text mentions %q: %s", name, banned, blob)
+			}
+		}
+	}
+}
+
 func TestPresets_GetByName(t *testing.T) {
+	t.Parallel()
+	h, _ := newPresetServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/v1/presets/careful", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d; body=%s", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("Deprecation"); got != "" {
+		t.Errorf("careful must not carry a Deprecation header, got %q", got)
+	}
+	var env map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &env)
+	data, _ := env["data"].(map[string]any)
+	if data["name"] != "careful" {
+		t.Errorf("expected name=careful, got %v", data["name"])
+	}
+	policy, _ := data["policy"].(map[string]any)
+	if policy == nil {
+		t.Fatal("policy missing from preset response")
+	}
+}
+
+func TestPresets_StealthAliasResolvesToCarefulWithDeprecation(t *testing.T) {
 	t.Parallel()
 	h, _ := newPresetServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/v1/presets/stealth", nil)
@@ -64,15 +145,56 @@ func TestPresets_GetByName(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d; body=%s", w.Code, w.Body.String())
 	}
+	if got := w.Header().Get("Deprecation"); got != "true" {
+		t.Errorf("Deprecation header = %q, want true", got)
+	}
+	if got := w.Header().Get("Link"); got != "</v1/presets/careful>; rel=\"successor-version\"" {
+		t.Errorf("Link header = %q", got)
+	}
 	var env map[string]any
 	_ = json.Unmarshal(w.Body.Bytes(), &env)
 	data, _ := env["data"].(map[string]any)
-	if data["name"] != "stealth" {
-		t.Errorf("expected name=stealth, got %v", data["name"])
+	if data["name"] != "stealth" || data["alias_of"] != "careful" || data["deprecated"] != true {
+		t.Errorf("unexpected alias body: %v", data)
 	}
-	policy, _ := data["policy"].(map[string]any)
-	if policy == nil {
-		t.Fatal("policy missing from preset response")
+
+	old, ok := ResolvePreset("stealth")
+	if !ok {
+		t.Fatal("ResolvePreset(stealth) must keep resolving")
+	}
+	neu, ok := ResolvePreset("careful")
+	if !ok {
+		t.Fatal("ResolvePreset(careful) not found")
+	}
+	a, _ := json.Marshal(old)
+	b, _ := json.Marshal(neu)
+	if string(a) != string(b) {
+		t.Errorf("alias and preset resolve to different policies:\n%s\n%s", a, b)
+	}
+}
+
+func TestPresets_CarefulAbortsOnChallenge(t *testing.T) {
+	t.Parallel()
+	p, ok := ResolvePreset("careful")
+	if !ok {
+		t.Fatal("careful preset not found")
+	}
+	if p.Block.On != quarrycontracts.TrigChallenge || p.Block.Action != quarrycontracts.BlkAbort {
+		t.Errorf("careful must abort on a challenge, got %+v", p.Block)
+	}
+	// Pacing and the sticky proxy are what the preset always did; renaming
+	// must not change them.
+	if p.Concurrency.PerRun != 4 || p.Concurrency.PerDomain != 1 {
+		t.Errorf("concurrency changed: %+v", p.Concurrency)
+	}
+	if p.Delay.MinMs != 1500 || p.Delay.MaxMs != 5000 || !p.Delay.Jitter {
+		t.Errorf("delay changed: %+v", p.Delay)
+	}
+	if p.Proxy.Strategy != quarrycontracts.ProxySticky {
+		t.Errorf("proxy strategy changed: %+v", p.Proxy)
+	}
+	if p.Robots != quarrycontracts.RobotsRespect {
+		t.Errorf("robots changed: %v", p.Robots)
 	}
 }
 
@@ -89,22 +211,29 @@ func TestPresets_GetUnknownReturns404(t *testing.T) {
 
 func TestCreateJob_AppliesPresetPolicy(t *testing.T) {
 	t.Parallel()
-	h, _ := newPresetServer(t)
-	body := `{"kind":"scrape","preset":"stealth","params":{"url":"https://x"}}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/jobs?org_id=org_test", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-	if w.Code != http.StatusCreated {
-		t.Fatalf("status = %d; body=%s", w.Code, w.Body.String())
-	}
-	var env map[string]any
-	_ = json.Unmarshal(w.Body.Bytes(), &env)
-	data, _ := env["data"].(map[string]any)
-	policy, _ := data["policy"].(map[string]any)
-	concurrency, _ := policy["concurrency"].(map[string]any)
-	if concurrency["per_run"].(float64) != 4 {
-		t.Errorf("expected stealth per_run=4, got %v", concurrency["per_run"])
+	// The new id and the deprecated alias stamp the same policy on the job.
+	for _, preset := range []string{"careful", "stealth"} {
+		h, _ := newPresetServer(t)
+		body := `{"kind":"scrape","preset":"` + preset + `","params":{"url":"https://x"}}`
+		req := httptest.NewRequest(http.MethodPost, "/v1/jobs?org_id=org_test", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusCreated {
+			t.Fatalf("%s: status = %d; body=%s", preset, w.Code, w.Body.String())
+		}
+		var env map[string]any
+		_ = json.Unmarshal(w.Body.Bytes(), &env)
+		data, _ := env["data"].(map[string]any)
+		policy, _ := data["policy"].(map[string]any)
+		concurrency, _ := policy["concurrency"].(map[string]any)
+		if concurrency["per_run"].(float64) != 4 {
+			t.Errorf("%s: expected per_run=4, got %v", preset, concurrency["per_run"])
+		}
+		block, _ := policy["block"].(map[string]any)
+		if block["on"] != "challenge" || block["action"] != "abort" {
+			t.Errorf("%s: expected block challenge/abort, got %v", preset, block)
+		}
 	}
 }
 
