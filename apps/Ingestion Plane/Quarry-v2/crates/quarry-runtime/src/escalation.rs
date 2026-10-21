@@ -1,0 +1,222 @@
+//! Block escalation policy (WS3.I, ADR-5).
+//!
+//! One question lives here: may a fetch change the identity it presents (the
+//! egress proxy, the TLS fingerprint, the browser tier) because of what the
+//! origin answered? Under `honest` the answer is no. A status, a block-class
+//! error or a caller hint never changes identity; only a failure of the
+//! transport itself (the connection did not carry the request) rotates a proxy.
+//! Quarry then refuses with an existing error code and the caller decides.
+//!
+//! This module classifies and refuses. It does not spoof anything: no user
+//! agent, TLS or header change is added anywhere, in either mode.
+//!
+//! `QUARRY_BLOCK_ESCALATION=legacy|honest` selects the mode once per process
+//! (a change is a restart, which is also the rollback). `legacy` records the
+//! behaviour of releases before WS3.I: a block status rotates the proxy, the
+//! next driver in the chain is tried and a prior-block hint raises the driver
+//! tier. Components take the mode as an explicit field, with [`current`] only as
+//! the default, so tests never touch the process environment.
+
+use std::sync::OnceLock;
+
+use quarry_core::error::ErrorCode;
+
+/// The environment variable that selects the mode.
+pub const ESCALATION_ENV: &str = "QUARRY_BLOCK_ESCALATION";
+
+/// The mode a process runs in when [`ESCALATION_ENV`] is unset (or blank).
+/// Shipped as `Legacy` first; flipped to `Honest` in its own commit, gated by
+/// a test (`build_default_matches_the_documented_default`).
+pub const BUILD_DEFAULT: EscalationMode = EscalationMode::Legacy;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EscalationMode {
+    /// Pre-WS3.I behaviour: a block status may rotate the proxy and the driver.
+    Legacy,
+    /// A status never changes identity; only a transport failure rotates.
+    Honest,
+}
+
+impl Default for EscalationMode {
+    fn default() -> Self {
+        BUILD_DEFAULT
+    }
+}
+
+impl EscalationMode {
+    /// The pure half of [`current`](Self::current).
+    ///
+    /// Unset or blank is the build default. `legacy` and `honest` (any case,
+    /// surrounding blanks ignored) are themselves. Any other value is `Honest`:
+    /// an operator who set the variable meant a change, and `Honest` can only
+    /// refuse more, never widen identity changes, so a typo fails closed.
+    pub fn from_value(value: Option<&str>) -> Self {
+        let Some(raw) = value else {
+            return BUILD_DEFAULT;
+        };
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "" => BUILD_DEFAULT,
+            "legacy" => Self::Legacy,
+            _ => Self::Honest,
+        }
+    }
+
+    /// The process-wide mode, read from the environment once. The first read
+    /// logs the mode name (operator configuration, not caller data).
+    pub fn current() -> Self {
+        static MODE: OnceLock<EscalationMode> = OnceLock::new();
+        *MODE.get_or_init(|| {
+            let mode = Self::from_value(std::env::var(ESCALATION_ENV).ok().as_deref());
+            tracing::info!(mode = mode.as_str(), "quarry.block_escalation.mode");
+            mode
+        })
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::Honest => "honest",
+        }
+    }
+
+    pub fn is_honest(self) -> bool {
+        self == Self::Honest
+    }
+}
+
+/// What prompted a request to change identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EscalationTrigger {
+    /// The origin answered with a block-class HTTP status (0 when only the
+    /// error class survived, see [`trigger_for_error`]).
+    BlockStatus(u16),
+    /// A strong challenge was classified on the page (`challenge.rs`).
+    StrongChallenge,
+    /// The caller passed prior-block hints (`DriverSignals::prior_block_signals`).
+    CallerSignals(u8),
+    /// The connection did not carry the request: connect, timeout, reset.
+    TransportError,
+}
+
+/// May `trigger` change the identity presented to the origin under `mode`?
+pub fn escalation_allowed(mode: EscalationMode, trigger: EscalationTrigger) -> bool {
+    match mode {
+        EscalationMode::Legacy => true,
+        EscalationMode::Honest => matches!(trigger, EscalationTrigger::TransportError),
+    }
+}
+
+/// The trigger a driver error stands for. `UpstreamBlocked` and `RateLimited`
+/// are what a block status becomes once it is an error; every other code
+/// (timeout, driver failure) is a transport-class failure.
+///
+/// A connect failure is also reported as `UpstreamBlocked` by the static driver
+/// (its code mapping predates this module and is public API), so under `honest`
+/// a connect failure does not fall through to the next driver either. That is
+/// the fail-closed side of an ambiguity the error code cannot resolve.
+pub fn trigger_for_error(code: ErrorCode) -> EscalationTrigger {
+    match code {
+        ErrorCode::UpstreamBlocked | ErrorCode::RateLimited => EscalationTrigger::BlockStatus(0),
+        _ => EscalationTrigger::TransportError,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ALL_TRIGGERS: [EscalationTrigger; 4] = [
+        EscalationTrigger::BlockStatus(403),
+        EscalationTrigger::StrongChallenge,
+        EscalationTrigger::CallerSignals(2),
+        EscalationTrigger::TransportError,
+    ];
+
+    #[test]
+    fn matrix_legacy_allows_every_trigger() {
+        for trigger in ALL_TRIGGERS {
+            assert!(
+                escalation_allowed(EscalationMode::Legacy, trigger),
+                "legacy must keep allowing {trigger:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn matrix_honest_allows_only_transport_error() {
+        for trigger in ALL_TRIGGERS {
+            let allowed = escalation_allowed(EscalationMode::Honest, trigger);
+            assert_eq!(
+                allowed,
+                trigger == EscalationTrigger::TransportError,
+                "honest and {trigger:?}"
+            );
+        }
+        for status in [401u16, 403, 407, 429, 503] {
+            assert!(!escalation_allowed(
+                EscalationMode::Honest,
+                EscalationTrigger::BlockStatus(status)
+            ));
+        }
+    }
+
+    #[test]
+    fn unset_is_build_default_and_unknown_is_honest() {
+        assert_eq!(EscalationMode::from_value(None), BUILD_DEFAULT);
+        assert_eq!(EscalationMode::from_value(Some("")), BUILD_DEFAULT);
+        assert_eq!(EscalationMode::from_value(Some("   ")), BUILD_DEFAULT);
+        assert_eq!(
+            EscalationMode::from_value(Some("legacy")),
+            EscalationMode::Legacy
+        );
+        assert_eq!(
+            EscalationMode::from_value(Some(" LEGACY ")),
+            EscalationMode::Legacy
+        );
+        assert_eq!(
+            EscalationMode::from_value(Some("honest")),
+            EscalationMode::Honest
+        );
+        assert_eq!(
+            EscalationMode::from_value(Some("Honest")),
+            EscalationMode::Honest
+        );
+        // A typo fails closed: it can only refuse more.
+        for typo in ["hnoest", "off", "false", "stealth", "0"] {
+            assert_eq!(
+                EscalationMode::from_value(Some(typo)),
+                EscalationMode::Honest,
+                "{typo:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn block_class_errors_map_to_block_status() {
+        for code in [ErrorCode::UpstreamBlocked, ErrorCode::RateLimited] {
+            assert!(matches!(
+                trigger_for_error(code),
+                EscalationTrigger::BlockStatus(_)
+            ));
+        }
+        for code in [
+            ErrorCode::Timeout,
+            ErrorCode::DriverFailed,
+            ErrorCode::Internal,
+        ] {
+            assert_eq!(trigger_for_error(code), EscalationTrigger::TransportError);
+        }
+    }
+
+    #[test]
+    fn default_mode_is_the_build_default() {
+        assert_eq!(EscalationMode::default(), BUILD_DEFAULT);
+    }
+
+    /// The gate for the default flip: changing `BUILD_DEFAULT` means changing
+    /// this line in the same commit, on purpose.
+    #[test]
+    fn build_default_matches_the_documented_default() {
+        assert_eq!(BUILD_DEFAULT, EscalationMode::Legacy);
+    }
+}

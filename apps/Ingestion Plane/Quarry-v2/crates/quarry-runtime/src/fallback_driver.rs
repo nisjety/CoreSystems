@@ -12,12 +12,17 @@ use tracing::{info, warn};
 use url::Url;
 
 use crate::driver::{Driver, FetchHints};
+use crate::escalation::{escalation_allowed, trigger_for_error, EscalationMode, EscalationTrigger};
 use crate::fetch::FetchResponse;
 
 pub struct FallbackDriver {
     primary: DriverKind,
     chain: Vec<DriverKind>,
     drivers: HashMap<DriverKind, Arc<dyn Driver>>,
+    /// Whether a block status (or a block-class error) may move the request to
+    /// the next driver (WS3.I). Non-block reasons (a JS shell, an unfollowed
+    /// redirect, a transport failure) move it in both modes.
+    mode: EscalationMode,
 }
 
 impl FallbackDriver {
@@ -30,7 +35,14 @@ impl FallbackDriver {
             primary,
             chain,
             drivers,
+            mode: EscalationMode::current(),
         }
+    }
+
+    /// Pins the escalation mode instead of reading the process default.
+    pub fn with_escalation_mode(mut self, mode: EscalationMode) -> Self {
+        self.mode = mode;
+        self
     }
 
     pub fn from_plan(
@@ -41,6 +53,7 @@ impl FallbackDriver {
             primary: plan.driver,
             chain: plan.fallback_chain.clone(),
             drivers,
+            mode: EscalationMode::current(),
         }
     }
 
@@ -68,6 +81,8 @@ impl FallbackDriver {
         // 2D — on a block STATUS (403/429/503/…), fall through to the next
         // driver (a different TLS fingerprint / transport) instead of
         // returning the block. Bounded naturally by the chain length.
+        // Only under `legacy`: `honest` never changes driver on a status
+        // (WS3.I, ADR-5), the block is returned and the caller decides.
         let mut best_block: Option<FetchResponse> = None;
         // JS-shell rescue: keep the best (most readable text) shell response
         // we saw from a non-browser driver. If the browser then fails, or
@@ -95,6 +110,10 @@ impl FallbackDriver {
                 Ok(resp) => {
                     if crate::fingerprint_rotation::is_block_status(resp.status)
                         && idx < order.len() - 1
+                        && escalation_allowed(
+                            self.mode,
+                            EscalationTrigger::BlockStatus(resp.status),
+                        )
                     {
                         attempts.push((*kind, format!("blocked: HTTP {}", resp.status)));
                         warn!(
@@ -218,7 +237,11 @@ impl FallbackDriver {
                     return Ok(resp);
                 }
                 Err(e) => {
-                    let is_retryable = is_retryable_driver_error(e.code);
+                    // A block-class error is a status that became an error
+                    // (a proxied 403 from the static driver), so it is gated
+                    // like the status itself.
+                    let is_retryable = is_retryable_driver_error(e.code)
+                        && escalation_allowed(self.mode, trigger_for_error(e.code));
                     attempts.push((
                         *kind,
                         format!("{}: {}", error_code_short(e.code), e.message),
@@ -704,7 +727,8 @@ mod tests {
         let mut drivers: HashMap<DriverKind, Arc<dyn Driver>> = HashMap::new();
         drivers.insert(DriverKind::Static, primary.clone());
         drivers.insert(DriverKind::Tls, fallback.clone());
-        let fb = FallbackDriver::new(DriverKind::Static, vec![DriverKind::Tls], drivers);
+        let fb = FallbackDriver::new(DriverKind::Static, vec![DriverKind::Tls], drivers)
+            .with_escalation_mode(EscalationMode::Legacy);
         let resp = fb
             .fetch(&"https://example.com".parse().unwrap())
             .await
@@ -715,6 +739,172 @@ mod tests {
         assert_eq!(fallback.calls.load(Ordering::Relaxed), 1);
     }
 
+    /// A driver that always fails with a chosen error code.
+    struct CodeFailDriver {
+        kind: DriverKind,
+        code: ErrorCode,
+        calls: AtomicU32,
+    }
+
+    impl CodeFailDriver {
+        fn new(kind: DriverKind, code: ErrorCode) -> Self {
+            Self {
+                kind,
+                code,
+                calls: AtomicU32::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Driver for CodeFailDriver {
+        fn kind(&self) -> DriverKind {
+            self.kind
+        }
+
+        async fn fetch(&self, _url: &Url) -> QuarryResult<FetchResponse> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Err(QuarryError::new(self.code, "simulated failure"))
+        }
+    }
+
+    fn chain(mode: EscalationMode, order: Vec<(DriverKind, Arc<dyn Driver>)>) -> FallbackDriver {
+        let primary = order[0].0;
+        let rest = order[1..].iter().map(|(k, _)| *k).collect();
+        let drivers: HashMap<DriverKind, Arc<dyn Driver>> = order.into_iter().collect();
+        FallbackDriver::new(primary, rest, drivers).with_escalation_mode(mode)
+    }
+
+    #[tokio::test]
+    async fn honest_block_status_returns_without_next_driver() {
+        let primary = Arc::new(BlockDriver::new(DriverKind::Static));
+        let fallback = Arc::new(OkDriver::new(DriverKind::Tls));
+        let browser = Arc::new(OkDriver::new(DriverKind::Browser));
+        let fb = chain(
+            EscalationMode::Honest,
+            vec![
+                (DriverKind::Static, primary.clone()),
+                (DriverKind::Tls, fallback.clone()),
+                (DriverKind::Browser, browser.clone()),
+            ],
+        );
+
+        let resp = fb
+            .fetch(&"https://example.com".parse().unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status, 403, "the block is surfaced as it is");
+        assert_eq!(resp.served_by, DriverKind::Static);
+        assert_eq!(primary.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(fallback.calls.load(Ordering::Relaxed), 0);
+        assert_eq!(browser.calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn honest_upstream_blocked_error_does_not_fall_through() {
+        // The static driver turns a proxied 403 into an UpstreamBlocked error;
+        // the error path is a second way a status could change the driver.
+        for code in [ErrorCode::UpstreamBlocked, ErrorCode::RateLimited] {
+            let primary = Arc::new(CodeFailDriver::new(DriverKind::Static, code));
+            let fallback = Arc::new(OkDriver::new(DriverKind::Tls));
+            let fb = chain(
+                EscalationMode::Honest,
+                vec![
+                    (DriverKind::Static, primary.clone()),
+                    (DriverKind::Tls, fallback.clone()),
+                ],
+            );
+
+            let err = fb
+                .fetch(&"https://example.com".parse().unwrap())
+                .await
+                .unwrap_err();
+
+            assert_eq!(err.code, code);
+            assert_eq!(primary.calls.load(Ordering::Relaxed), 1);
+            assert_eq!(fallback.calls.load(Ordering::Relaxed), 0, "{code:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_upstream_blocked_error_still_falls_through() {
+        let primary = Arc::new(CodeFailDriver::new(
+            DriverKind::Static,
+            ErrorCode::UpstreamBlocked,
+        ));
+        let fallback = Arc::new(OkDriver::new(DriverKind::Tls));
+        let fb = chain(
+            EscalationMode::Legacy,
+            vec![
+                (DriverKind::Static, primary.clone()),
+                (DriverKind::Tls, fallback.clone()),
+            ],
+        );
+
+        let resp = fb
+            .fetch(&"https://example.com".parse().unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.served_by, DriverKind::Tls);
+        assert_eq!(fallback.calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn honest_timeout_still_falls_through() {
+        for code in [ErrorCode::Timeout, ErrorCode::DriverFailed] {
+            let primary = Arc::new(CodeFailDriver::new(DriverKind::Static, code));
+            let fallback = Arc::new(OkDriver::new(DriverKind::Tls));
+            let fb = chain(
+                EscalationMode::Honest,
+                vec![
+                    (DriverKind::Static, primary.clone()),
+                    (DriverKind::Tls, fallback.clone()),
+                ],
+            );
+
+            let resp = fb
+                .fetch(&"https://example.com".parse().unwrap())
+                .await
+                .unwrap();
+
+            assert_eq!(resp.served_by, DriverKind::Tls, "{code:?}");
+            assert_eq!(fallback.calls.load(Ordering::Relaxed), 1, "{code:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn honest_js_shell_still_escalates_to_browser() {
+        // Not a status: a 200 page that withheld its content. The browser tier
+        // stays available for that in both modes.
+        let static_shell = Arc::new(BodyDriver {
+            kind: DriverKind::Static,
+            body: shell_body(),
+            calls: AtomicU32::new(0),
+        });
+        let browser = Arc::new(BodyDriver {
+            kind: DriverKind::Browser,
+            body: "<html><body><main><h1>Hygiene for matindustrien</h1><p>Vi leverer hygieneløsninger til næringsmiddelindustrien.</p></main></body></html>".as_bytes().to_vec(),
+            calls: AtomicU32::new(0),
+        });
+        let fb = chain(
+            EscalationMode::Honest,
+            vec![
+                (DriverKind::Static, static_shell.clone()),
+                (DriverKind::Browser, browser.clone()),
+            ],
+        );
+
+        let resp = fb
+            .fetch(&"https://example.com".parse().unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.served_by, DriverKind::Browser);
+        assert_eq!(browser.calls.load(Ordering::Relaxed), 1);
+    }
+
     #[tokio::test]
     async fn all_blocked_returns_last_block_response() {
         let primary = Arc::new(BlockDriver::new(DriverKind::Static));
@@ -722,7 +912,8 @@ mod tests {
         let mut drivers: HashMap<DriverKind, Arc<dyn Driver>> = HashMap::new();
         drivers.insert(DriverKind::Static, primary.clone());
         drivers.insert(DriverKind::Tls, fallback.clone());
-        let fb = FallbackDriver::new(DriverKind::Static, vec![DriverKind::Tls], drivers);
+        let fb = FallbackDriver::new(DriverKind::Static, vec![DriverKind::Tls], drivers)
+            .with_escalation_mode(EscalationMode::Legacy);
         let resp = fb
             .fetch(&"https://example.com".parse().unwrap())
             .await

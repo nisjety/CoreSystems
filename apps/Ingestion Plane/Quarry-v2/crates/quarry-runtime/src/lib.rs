@@ -24,6 +24,7 @@ pub mod driver;
 pub mod driver_plan;
 pub mod driver_registry;
 pub mod egress_broker;
+pub mod escalation;
 pub mod event_bus;
 pub mod events;
 pub mod host_scheduler;

@@ -14,6 +14,7 @@ use serde_json::json;
 use crate::dns_guard::{resolve_public_url, PinnedDnsResolver};
 use crate::driver::{Driver, FetchHints};
 use crate::egress_broker::{EgressBroker, EgressDecision, EgressIdentity};
+use crate::escalation::{escalation_allowed, EscalationMode, EscalationTrigger};
 use crate::proxy_pool::{ProxyEntry, ProxyPool};
 
 #[derive(Debug, Clone)]
@@ -73,6 +74,9 @@ pub struct StaticDriver {
     /// client-side fix; see the "Provider gates" section of `docs/POLICY.md`.
     proxy_pin_resolvers: HashMap<String, Arc<PinnedDnsResolver>>,
     egress: EgressBroker,
+    /// Whether a block status may rotate the proxy (WS3.I). Transport errors
+    /// rotate in both modes.
+    mode: EscalationMode,
 }
 
 impl StaticDriver {
@@ -134,7 +138,16 @@ impl StaticDriver {
             proxy_clients,
             proxy_pin_resolvers,
             egress: EgressBroker::new(pool, proxy_processor_id),
+            mode: EscalationMode::current(),
         })
+    }
+
+    /// Pins the escalation mode (and the broker's) instead of reading the
+    /// process default, so a test never depends on the environment.
+    pub fn with_escalation_mode(mut self, mode: EscalationMode) -> Self {
+        self.egress = self.egress.with_escalation_mode(mode);
+        self.mode = mode;
+        self
     }
 
     /// Selects the client for this egress decision. Direct egress always
@@ -258,7 +271,15 @@ impl StaticDriver {
                             None,
                             "block_status",
                         ));
-                        if idx + 1 < plan.len() {
+                        // A status is not a transport failure: under `honest`
+                        // the first proxy's answer is final, one attempt, and
+                        // the caller gets the existing block code.
+                        if idx + 1 < plan.len()
+                            && escalation_allowed(
+                                self.mode,
+                                EscalationTrigger::BlockStatus(resp.status),
+                            )
+                        {
                             tracing::warn!(
                                 status = resp.status,
                                 attempt = idx,
@@ -267,7 +288,7 @@ impl StaticDriver {
                             );
                             continue;
                         }
-                        return Err(blocked_error(resp.status, attempts));
+                        return Err(blocked_error(resp.status, attempts, self.mode));
                     }
                     return Ok(SendOutcome::Response(resp));
                 }
@@ -279,7 +300,10 @@ impl StaticDriver {
                         Some(&err),
                         "transport_error",
                     ));
-                    if is_retryable_egress_error(err.code) && idx + 1 < plan.len() {
+                    if is_retryable_egress_error(err.code)
+                        && idx + 1 < plan.len()
+                        && escalation_allowed(self.mode, EscalationTrigger::TransportError)
+                    {
                         tracing::warn!(
                             error_class = err.code.wire_name(),
                             attempt = idx,
@@ -433,17 +457,22 @@ fn attempt_record(
     })
 }
 
-fn blocked_error(status: u16, attempts: Vec<serde_json::Value>) -> QuarryError {
+fn blocked_error(
+    status: u16,
+    attempts: Vec<serde_json::Value>,
+    mode: EscalationMode,
+) -> QuarryError {
     let code = if status == 429 {
         ErrorCode::RateLimited
     } else {
         ErrorCode::UpstreamBlocked
     };
-    QuarryError::new(
-        code,
-        format!("all approved egress identities blocked; last status={status}"),
-    )
-    .with_details(json!({ "egress_attempts": attempts }))
+    let message = if mode.is_honest() {
+        format!("egress identity answered with a block status and was not rotated; status={status}")
+    } else {
+        format!("all approved egress identities blocked; last status={status}")
+    };
+    QuarryError::new(code, message).with_details(json!({ "egress_attempts": attempts }))
 }
 
 #[async_trait]
@@ -585,7 +614,8 @@ mod tests {
             pool,
             Some("quarry_proxy_pool".into()),
         )
-        .unwrap();
+        .unwrap()
+        .with_escalation_mode(EscalationMode::Legacy);
         let url: Url = format!("http://{host}/").parse().unwrap();
         let hints = approved_hints_for_org(org_id);
 
@@ -616,7 +646,8 @@ mod tests {
             pool,
             Some("quarry_proxy_pool".into()),
         )
-        .unwrap();
+        .unwrap()
+        .with_escalation_mode(EscalationMode::Legacy);
         let url: Url = "http://example.com/".parse().unwrap();
         let hints = approved_hints_for_org("org_a".into());
 
@@ -628,6 +659,166 @@ mod tests {
             .as_ref()
             .and_then(|v| v.get("egress_attempts"))
             .is_some());
+    }
+
+    /// Two mock proxies that both answer `status`, a driver pinned to `mode`,
+    /// and the one request the tests send. Returns the error and how many
+    /// requests the two origins saw in total.
+    async fn fetch_through_two_blocking_proxies(
+        status: u16,
+        mode: EscalationMode,
+    ) -> (QuarryError, usize) {
+        let p1 = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(status).set_body_string("blocked"))
+            .mount(&p1)
+            .await;
+        let p2 = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(status).set_body_string("blocked"))
+            .mount(&p2)
+            .await;
+        let pool =
+            ProxyPool::from_env_string(&format!("http://{};http://{}", p1.address(), p2.address()));
+        let driver = StaticDriver::with_proxy_pool_and_processor(
+            Duration::from_secs(5),
+            "QuarryTest/1.0",
+            pool,
+            Some("quarry_proxy_pool".into()),
+        )
+        .unwrap()
+        .with_escalation_mode(mode);
+        let url: Url = "http://example.com/".parse().unwrap();
+        let hints = approved_hints_for_org("org_a".into());
+
+        let err = driver.fetch_conditional(&url, &hints).await.unwrap_err();
+
+        let hits = p1.received_requests().await.unwrap().len()
+            + p2.received_requests().await.unwrap().len();
+        (err, hits)
+    }
+
+    fn attempt_count(err: &QuarryError) -> usize {
+        err.details
+            .as_ref()
+            .and_then(|v| v.get("egress_attempts"))
+            .and_then(|v| v.as_array())
+            .map_or(0, Vec::len)
+    }
+
+    #[tokio::test]
+    async fn honest_mode_never_rotates_on_status() {
+        for (status, code) in [
+            (403u16, ErrorCode::UpstreamBlocked),
+            (429, ErrorCode::RateLimited),
+            (503, ErrorCode::UpstreamBlocked),
+        ] {
+            let (err, hits) =
+                fetch_through_two_blocking_proxies(status, EscalationMode::Honest).await;
+
+            assert_eq!(err.code, code, "status {status}");
+            assert_eq!(hits, 1, "status {status}: exactly one upstream attempt");
+            assert_eq!(
+                attempt_count(&err),
+                1,
+                "status {status}: one attempt record"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_mode_unchanged() {
+        let (err, hits) = fetch_through_two_blocking_proxies(403, EscalationMode::Legacy).await;
+
+        assert_eq!(err.code, ErrorCode::UpstreamBlocked);
+        assert_eq!(hits, 2, "legacy still tries every approved proxy");
+        assert_eq!(attempt_count(&err), 2);
+    }
+
+    #[tokio::test]
+    async fn honest_mode_still_rotates_on_transport_error() {
+        // A proxy address nothing listens on: connecting fails, which is a
+        // transport failure and rotates in both modes.
+        let dead = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap()
+        };
+        let ok_proxy = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+            .mount(&ok_proxy)
+            .await;
+        let dead_uri = format!("http://{dead}");
+        let ok_uri = format!("http://{}", ok_proxy.address());
+        let pool = ProxyPool::from_env_string(&format!("{dead_uri};{ok_uri}"));
+        let host = "example.com";
+        let org_id = (0..100)
+            .map(|i| format!("org_{i}"))
+            .find(|org| pool.pick(org, host).is_some_and(|p| p.uri == dead_uri))
+            .expect("test should find an org that maps to the dead proxy");
+
+        for mode in [EscalationMode::Honest, EscalationMode::Legacy] {
+            let driver = StaticDriver::with_proxy_pool_and_processor(
+                Duration::from_secs(5),
+                "QuarryTest/1.0",
+                pool.clone(),
+                Some("quarry_proxy_pool".into()),
+            )
+            .unwrap()
+            .with_escalation_mode(mode);
+            let url: Url = format!("http://{host}/").parse().unwrap();
+
+            let resp = driver
+                .fetch_conditional(&url, &approved_hints_for_org(org_id.clone()))
+                .await
+                .unwrap();
+
+            assert_eq!(resp.status, 200, "{mode:?}");
+            assert_eq!(resp.body, b"ok", "{mode:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn honest_mode_does_not_move_the_next_request_to_another_proxy_after_a_403() {
+        // First proxy answers 403, second answers 200. Honest: the 403 is
+        // returned as the error, and a SECOND request to the same host still
+        // goes to the first proxy (health is transport-only).
+        let blocked_proxy = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(403).set_body_string("blocked"))
+            .mount(&blocked_proxy)
+            .await;
+        let ok_proxy = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+            .mount(&ok_proxy)
+            .await;
+        let blocked_uri = format!("http://{}", blocked_proxy.address());
+        let ok_uri = format!("http://{}", ok_proxy.address());
+        let pool = ProxyPool::from_env_string(&format!("{blocked_uri};{ok_uri}"));
+        let host = "example.com";
+        let org_id = (0..100)
+            .map(|i| format!("org_{i}"))
+            .find(|org| pool.pick(org, host).is_some_and(|p| p.uri == blocked_uri))
+            .expect("test should find an org that maps to the blocked proxy");
+        let driver = StaticDriver::with_proxy_pool_and_processor(
+            Duration::from_secs(5),
+            "QuarryTest/1.0",
+            pool,
+            Some("quarry_proxy_pool".into()),
+        )
+        .unwrap()
+        .with_escalation_mode(EscalationMode::Honest);
+        let url: Url = format!("http://{host}/").parse().unwrap();
+        let hints = approved_hints_for_org(org_id);
+
+        for _ in 0..2 {
+            let err = driver.fetch_conditional(&url, &hints).await.unwrap_err();
+            assert_eq!(err.code, ErrorCode::UpstreamBlocked);
+        }
+
+        assert_eq!(blocked_proxy.received_requests().await.unwrap().len(), 2);
+        assert!(ok_proxy.received_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test]

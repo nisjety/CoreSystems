@@ -5155,7 +5155,12 @@ components:
         prior_block_signals:
           type: integer
           default: 0
-          description: Number of prior blocks (>=2 escalates to browser)
+          deprecated: true
+          description: >-
+            Deprecated. Number of prior blocks. Under QUARRY_BLOCK_ESCALATION=legacy
+            a value of 1 selects the TLS driver and 2 or more the browser; under
+            honest (WS3.I) the field is accepted and ignored, because a block never
+            changes the identity Quarry presents.
         profile_required:
           type: boolean
           default: false
