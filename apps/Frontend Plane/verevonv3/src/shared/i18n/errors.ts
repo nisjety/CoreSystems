@@ -36,6 +36,24 @@ const GENERIC_FALLBACK: ErrorCopy = {
   en: 'Something went wrong. Try again, or contact support if the problem persists.',
 }
 
+/**
+ * An error the SPA raises itself, with a sentence already written for the person
+ * in both languages ("A project with this name already exists", "Create the
+ * organization first"). {@link translateApiError} and {@link describeApiError}
+ * show this copy as it is, because a catch site that only knows its own
+ * "could not do X" fallback would otherwise hide the reason the person can act
+ * on. An error that is not one of these (or an ApiError) is never shown raw.
+ */
+export class LocalizedError extends Error {
+  readonly copy: { no: string; en: string }
+
+  constructor(copy: { no: string; en: string }) {
+    super(copy.en)
+    this.name = 'LocalizedError'
+    this.copy = copy
+  }
+}
+
 export const ERROR_COPY: Record<string, ErrorCopy> = {
   // Cross-cutting / structural
   validation_error: { no: 'Noen av feltene er ikke gyldige. Sjekk og prøv igjen.', en: 'Some fields are invalid. Check and try again.' },
@@ -888,6 +906,7 @@ function describe(
     typeof like?.retryAfterSeconds === 'number' && like.retryAfterSeconds >= 1 ? Math.ceil(like.retryAfterSeconds) : null
 
   let copy: ErrorCopy | undefined
+  if (err instanceof LocalizedError) copy = err.copy
   // A refusal that names why the wall is up gets the sentence for that reason.
   if (kind === 'blocked' && typeof like?.blockReason === 'string') copy = BLOCK_REASON_COPY[like.blockReason]
   copy ??= code ? ERROR_COPY[code] : undefined
