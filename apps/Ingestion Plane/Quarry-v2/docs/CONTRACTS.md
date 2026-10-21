@@ -614,3 +614,34 @@ A fetched page that is itself a bot challenge fails the scrape: `403`, `error.co
 `driver_capabilities` (on the run start response) has one more boolean, `trusted_input`: `true` when the driver was started with `QUARRY_BROWSER_TRUSTED_INPUT=on`, `false` otherwise and for every driver that does not say. It is additive: a client that predates it reads a missing key as `false`, and it is reported only, not requestable (a `driver_requirements.trusted_input` is ignored).
 
 With it `true`, a `click_ref`, `type_ref` or `select_ref` on a top-level ref is checked before it is performed (visible, enabled, still, not covered) and a click and a type are real browser input. A ref the check refuses is `409 TARGET_REPAIR_REQUIRED`, the same status, error code and `retryable: false` as every stale-ref answer, with `details.reason` from a closed list (`target_not_attached`, `target_not_visible`, `target_disabled`, `target_covered`, `target_unstable`, `target_has_no_box`, `target_unreachable_after_scroll`) and, for `target_covered` only, `details.covered_by_tag`, the tag name of what covers the target. The details never carry a selector, URL or text from the page. The list, the meaning of each reason and what to do next are in `docs/ERROR_REASONS.md`; the flag, the rollout rule and what stays on the old in-page path (child frames, downloads, uploads, `wait_for_ref`) are in `docs/RUNBOOKS.md`, "Trusted input for ref actions". A client may treat a reason it does not know as "observe again".
+
+## 9.4 `POST /v1/crawl` bounds (WS6.A)
+
+Every crawl has a finite page bound and a finite depth bound. The edge resolves the request's `max_pages` and `max_depth` before it hands the job to the orchestrator, and the orchestrator resolves them again when it dispatches the job, so a job row written without the values is bounded too.
+
+- Absent or `0`: the default. The defaults are 1000 pages (`QUARRY_CRAWL_DEFAULT_MAX_PAGES`) and depth 5 (`QUARRY_CRAWL_DEFAULT_MAX_DEPTH`). Zero is never unlimited, and the edge does not answer `400` for it (the strict refusal of `0` is WS14.I and is opt-in).
+- Above the hard ceiling: clamped to it. The ceilings are 5000 pages (`QUARRY_CRAWL_HARD_MAX_PAGES`; the value awaits the owner's ruling and is overridable by this variable) and depth 10 (`QUARRY_CRAWL_HARD_MAX_DEPTH`).
+- Otherwise: used as asked.
+
+A default of `0` disables the default, so an absent request takes the hard ceiling; it never disables a ceiling. A zero ceiling, an unparsable value or a default above its ceiling stops the edge or the orchestrator at start-up, and the error names the variable.
+
+The response to `POST /v1/crawl` reports what runs, under `data.limits`:
+
+```json
+{ "max_pages": { "requested": null, "effective": 1000, "clamped_by": ["default"] },
+  "max_depth": { "requested": 12, "effective": 10, "clamped_by": ["hard"] } }
+```
+
+`requested` is what the caller sent (`null` when absent), `effective` is what runs, and `clamped_by` is `default` or `hard`, empty when the request was used unchanged. The job's `params` carry the effective values as `max_pages` and `max_depth`, and the requested ones as `max_pages_requested` and `max_depth_requested`.
+
+The workflow keeps its own fallback for a job that reaches it with a zero bound: 1000 pages and depth 5. The change sits behind `workflow.GetVersion("crawl-bounded-v1")`, so a history recorded before it keeps its old behaviour. A crawl stops with `reason: "max_failures"` once its failed pages reach its page bound.
+
+The gateway's `POST /api/v1/knowledge/crawl` returns the edge's `limits` under `data`, beside `upstream`. It keeps its own rules: a `maxPages` of `0` is a `400`, and a larger value is clamped to 5000 before the request reaches the edge.
+
+## 9.5 `/v1/extract` does not sniff content (deferred, WS5.B)
+
+`POST /v1/extract` does not route by content. This is an explicit deferral, not an oversight. Each fetched source is read as text (`String::from_utf8_lossy`) and passed to readability and the structured-data harvester, as it was before the document route existed. A PDF or a DOCX fetched through it is not parsed and is not refused with `415 UNSUPPORTED_MEDIA`; its markdown is whatever readability finds in the lossy text of the bytes, which is not the document's text. Documents and images are read through `POST /v1/scrape`, whose route is decided by the bytes (section 9.1, `QUARRY_EDGE__DOC_ROUTING`).
+
+Why it is deferred: the WS5.B definition of done allows the step to be "landed or explicitly deferred"; the open question on it (plan X-14, and the WS5.B default) records the deferral; and routing extract through the content sniff would change the per-source result of a batch, which needs a contract decision the plan has not taken. The W1 criteria for documents (SC6) are measured on `/v1/scrape`.
+
+To pick it up: route `fetch_page` in `crates/quarry-edge/src/extract_routes.rs` through `quarry_transform::sniff::detect` and `quarry_runtime::content_route::parse_document`, answer a document it cannot read with a typed per-source `UNSUPPORTED_MEDIA` that uses the reason codes of `/v1/scrape`, and test that a PDF in a batch fails only its own source.
