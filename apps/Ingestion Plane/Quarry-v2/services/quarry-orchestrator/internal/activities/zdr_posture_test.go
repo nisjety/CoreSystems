@@ -82,3 +82,81 @@ func TestCheckChangeOmitsZdrWhenUnstamped(t *testing.T) {
 	require.NoError(t, json.Unmarshal(got[0], &m))
 	require.NotContains(t, m, "zdr")
 }
+
+// pageCapture plays the runtime run_page route and the edge record route and
+// keeps the raw bytes of every run_page body.
+func pageCapture(t *testing.T) (*httptest.Server, func() [][]byte) {
+	t.Helper()
+	var mu sync.Mutex
+	var bodies [][]byte
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/internal/run_page", func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		bodies = append(bodies, b)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":200,"fingerprint":"blake3:fresh","links":[]}`))
+	})
+	mux.HandleFunc("/v1/internal/change/record", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"new","changed":false,"fingerprint":"blake3:fresh"}`))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv, func() [][]byte {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([][]byte(nil), bodies...)
+	}
+}
+
+// WS4.H review fix: the fetch that precedes the record call runs in ZDR mode
+// for a stamped monitor, so a ZDR monitor's page content is not persisted
+// (artifacts, durable page events, local-index write-backs) before the record
+// route refuses. The run_page body carries the stamp verbatim.
+func TestCheckChangeSendsStampedZdrOnTheRunPageFetch(t *testing.T) {
+	yes, no := true, false
+	for _, tc := range []struct {
+		name string
+		in   *bool
+		want bool
+	}{{"zdr", &yes, true}, {"standard", &no, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, bodies := pageCapture(t)
+			_, err := newChangeActivities(srv).CheckChange(context.Background(), CheckChangeInput{
+				RunID: "run_1", OrgID: "org_a", URL: "https://example.com/p", Zdr: tc.in,
+			})
+			require.NoError(t, err)
+			got := bodies()
+			require.Len(t, got, 1)
+			var m map[string]any
+			require.NoError(t, json.Unmarshal(got[0], &m))
+			v, present := m["zdr"]
+			require.True(t, present, "the stamp must be declared on the run_page body: %s", got[0])
+			require.Equal(t, tc.want, v)
+		})
+	}
+}
+
+// An unstamped schedule (and every other RunPage caller: jobs, crawls) sends a
+// run_page body without a zdr key, exactly as before.
+func TestRunPageOmitsZdrWhenUnstamped(t *testing.T) {
+	srv, bodies := pageCapture(t)
+	_, err := newChangeActivities(srv).CheckChange(context.Background(), CheckChangeInput{
+		RunID: "run_1", OrgID: "org_a", URL: "https://example.com/p",
+	})
+	require.NoError(t, err)
+	got := bodies()
+	require.Len(t, got, 1)
+	var m map[string]any
+	require.NoError(t, json.Unmarshal(got[0], &m))
+	require.NotContains(t, m, "zdr")
+
+	_, err = newChangeActivities(srv).RunPage(context.Background(), RunPageInput{RunID: "run_2", OrgID: "org_a", URL: "https://example.com/p"})
+	require.NoError(t, err)
+	got = bodies()
+	require.Len(t, got, 2)
+	require.NoError(t, json.Unmarshal(got[1], &m))
+	require.NotContains(t, m, "zdr")
+}
