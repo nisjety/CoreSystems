@@ -20,7 +20,10 @@
 //! * the tiers of the `add` calls never decrease, so a Volatile block never
 //!   precedes the Conversation, and a Stable block never follows a Context one;
 //! * the conversation is added under Conversation and the user turn being
-//!   answered last, under Current.
+//!   answered last, under Current;
+//! * the execution loop's own seed (`seed_order` in `runtime_loop/agent.rs`)
+//!   places its run context in the same tier order, and its appended tool
+//!   segments are sorted by name.
 
 use std::path::{Path, PathBuf};
 
@@ -241,5 +244,68 @@ fn render_stable_prefix(self) -> TieredPrompt {
         adds.windows(2)
             .any(|pair| rank(&pair[0].0) > rank(&pair[1].0)),
         "a Volatile block ahead of the Conversation was not detected"
+    );
+}
+
+fn loop_source() -> String {
+    read_from(&services(), "execution-core/src/runtime_loop/agent.rs")
+}
+
+/// The offset of the first `needle` in `body`, or a failure that names it.
+fn at(body: &str, needle: &str) -> usize {
+    body.find(needle)
+        .unwrap_or_else(|| panic!("`{needle}` is gone from seed_order; re-point this test"))
+}
+
+/// The loop's own seed follows the same tiers, so a run's prefix is as cacheable as a
+/// chat turn's: preamble (Stable), authored instructions (Context), the thread
+/// (Conversation), memory then skills (Volatile), the goal (Current).
+#[test]
+fn the_loop_seeds_its_run_context_in_tier_order() {
+    let body = function_body(&loop_source(), "fn seed_order(");
+    let instructions = at(&body, "authored_instructions.clone()");
+    let history = at(&body, ".history");
+    let memory = at(&body, "memory_block.clone()");
+    // The skills are placed twice (the no-context path returns early); the last placement
+    // is the one that follows a run context.
+    let skills = body
+        .rfind("messages.extend(skills)")
+        .expect("the skills are placed in seed_order");
+    let goal = body
+        .rfind("seed_message(\"user\"")
+        .expect("the goal is placed in seed_order");
+    assert!(
+        instructions < history && history < memory && memory < skills && skills < goal,
+        "seed_order must place instructions, history, memory, skills and goal in that order \
+         (Context, Conversation, Volatile, Volatile, Current): a block that changes every run \
+         ahead of the thread makes every byte after it a cache miss"
+    );
+    // Only the root loop reads the thread and the memory; a child inherits instructions only.
+    let root_gate = at(&body, "if root {");
+    assert!(
+        instructions < root_gate && root_gate < history && memory < skills,
+        "history and memory must sit behind the root-only gate, instructions ahead of it"
+    );
+}
+
+/// The tool list is part of the prefix: the MCP and client segments must not take the order
+/// their source happened to list them in.
+#[test]
+fn the_appended_tool_segments_are_sorted_by_name() {
+    let source = loop_source();
+    let body = function_body(&source, "fn merged_tool_defs_with_sources(");
+    assert_eq!(
+        body.matches("append_untrusted_tool_defs_sorted(").count(),
+        2,
+        "the MCP segment and the client segment are both appended sorted"
+    );
+    assert!(
+        !body.contains("append_untrusted_tool_defs(&"),
+        "an unsorted append would let a registry's order reach the prompt"
+    );
+    let sorted = function_body(&source, "fn append_untrusted_tool_defs_sorted(");
+    assert!(
+        sorted.contains("sort_by") && sorted.contains(".name"),
+        "append_untrusted_tool_defs_sorted must sort what it appends by tool name"
     );
 }
