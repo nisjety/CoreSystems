@@ -153,6 +153,7 @@ fn the_manifest_has_exactly_the_documented_shape() {
         let expected_path = match audience {
             "data-plane" => "/api/data-plane/internal-token",
             "model-gateway" => "/api/model-plane/internal-token",
+            "browser-broker" => "/api/browser-broker/internal-token",
             other => panic!(
                 "row {name}: audience {other:?} is not a registry audience quarry-edge mints for"
             ),
@@ -814,4 +815,27 @@ async fn a_model_stream_asks_auth_core_for_exactly_the_stream_row() {
 
     assert_one_mint_is_row(&mints(&auth).await, "model-stream", "org_wire");
     assert_bearer_reached(&model_plane, "/v1/invoke/stream").await;
+}
+
+/// The broker credential: exactly the `browser-grant-validate` row reaches Auth Core,
+/// on the browser-broker path, for the verified org. The call path is the one A2b
+/// wires into the grant validator (`browser_grant_token_request`).
+#[tokio::test]
+async fn the_broker_credential_asks_auth_core_for_exactly_the_browser_grant_row() {
+    use crate::service_tokens::ServiceTokenProvider;
+    let server = auth_core().await;
+    // The grpc feature (on in the workspace build) owns the call site; without it
+    // the row is built straight from the manifest, which this file may do.
+    #[cfg(feature = "grpc")]
+    let request = crate::grpc::browser_broker::browser_grant_token_request()
+        .expect("the browser-grant-validate row builds");
+    #[cfg(not(feature = "grpc"))]
+    let request = crate::service_tokens::ServiceTokenRequest::from_manifest("browser-grant-validate")
+        .expect("the browser-grant-validate row builds");
+    let bearer = provider(&server)
+        .token_for_org("org_verified", &request, false)
+        .await
+        .expect("a mint for the verified org");
+    assert_eq!(bearer.expose(), MINTED);
+    assert_one_mint_is_row(&mints(&server).await, "browser-grant-validate", "org_verified");
 }

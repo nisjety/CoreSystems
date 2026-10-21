@@ -75,6 +75,17 @@
       "used_by": ["crates/quarry-edge/src/audio_routes.rs"],
       "feature_flags": ["QUARRY_EDGE__MODEL_PLANE_URL"],
       "notes": "POST /v1/audio, forwarded to /v1/ai/speech and /v1/ai/transcribe. Refused today for the same reason as model-invoke (D16, QB-T17)."
+    },
+    {
+      "name": "browser-grant-validate",
+      "audience": "browser-broker",
+      "mint_path": "/api/browser-broker/internal-token",
+      "scopes": ["browser:read"],
+      "reason": "validate verified browser grant",
+      "granted": true,
+      "used_by": ["crates/quarry-runtime/src/grpc/browser_broker.rs"],
+      "feature_flags": ["QUARRY_EDGE__BROWSER_GRANT_VALIDATOR_GRPC_URL"],
+      "notes": "The BrowserBroker ValidateGrant call for the run's grant, made on behalf of the run's verified organization (X-1, WS1.A2): a token minted for that org makes the broker look the grant up in that org, so another org's grant is not found. Scope browser:read only: acquire, revoke and derive-run need browser:write, which no principal holds. The registry lane is ZDR (validation carries no content); the request never names a retention."
     }
   ]
 }

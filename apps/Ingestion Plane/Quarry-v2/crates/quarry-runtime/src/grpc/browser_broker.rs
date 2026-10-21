@@ -17,6 +17,15 @@ use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 use super::model_plane::v1::browser_broker_client::BrowserBrokerClient;
 use super::model_plane::v1::{RevokeGrantRequest, ValidateGrantRequest, ValidateGrantResponse};
 use crate::grant_validator::{GrantBudget, GrantValidation, GrantValidator};
+use crate::service_tokens::ServiceTokenRequest;
+
+/// The service-token request for validating a grant at the broker: the
+/// `browser-grant-validate` row of the cross-plane manifest (audience
+/// `browser-broker`, scope `browser:read` only). The validator mints it per
+/// organization through the shared service-token provider.
+pub fn browser_grant_token_request() -> QuarryResult<ServiceTokenRequest> {
+    ServiceTokenRequest::from_manifest("browser-grant-validate")
+}
 
 #[derive(Clone)]
 pub struct GrpcGrantValidator {
