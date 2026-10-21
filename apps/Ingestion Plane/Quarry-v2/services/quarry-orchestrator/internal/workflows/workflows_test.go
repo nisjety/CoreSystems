@@ -442,10 +442,13 @@ func TestChangeMonitorWF_ZDRRefusalEndsTheRunCleanly(t *testing.T) {
 	require.Equal(t, []quarrycontracts.EventType{quarrycontracts.EvtRunStarted, quarrycontracts.EvtRunFailed}, types,
 		"no change_detected, change_unchanged or run_completed for a refused probe")
 
-	// KNOWN GAP, pinned so it cannot change unnoticed: run_started is emitted BEFORE the
-	// record call (the orchestrator cannot know the refusal beforehand), so a refused
-	// run's first event still carries the monitored URL. Only the run_failed event is
-	// URL-free. See docs/RUNBOOKS.md "What the orchestrator lacks".
+	// KNOWN RETENTION GAP, NOT DESIRED BEHAVIOUR. This assertion records today's defect so it
+	// cannot change unnoticed: run_started is emitted BEFORE the record call (the orchestrator
+	// cannot know the refusal beforehand), so a refused run's first event still carries the
+	// monitored URL. Only the run_failed event is URL-free. The change that closes the gap
+	// (for example by emitting run_started after the record call, or without the URL for a
+	// ZDR job) must flip this assertion to NotContains in the same commit.
+	// See docs/RUNBOOKS.md "What the orchestrator lacks".
 	require.Equal(t, "https://example.com/secret-path", emitted[0].Payload["url"],
 		"run_started carries the URL of a run that is refused afterwards")
 

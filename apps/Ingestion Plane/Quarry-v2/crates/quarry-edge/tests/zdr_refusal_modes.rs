@@ -897,11 +897,10 @@ async fn the_persistent_profile_refusal_at_run_start_carries_zdr_refusal_details
             let payload: Value = refused.json().await.unwrap();
             let context = format!("{who} (flag {enforce}): {payload}");
             assert_eq!(payload["error"]["code"], "BAD_REQUEST", "{context}");
-            assert!(
-                payload["error"]["message"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .starts_with("zdr_persistent_profile_forbidden:"),
+            // The full text is pinned: it is the message this refusal has always carried.
+            assert_eq!(
+                payload["error"]["message"],
+                "zdr_persistent_profile_forbidden: a ZDR run cannot request a persistent profile or profile_id",
                 "{context}"
             );
             assert_eq!(
