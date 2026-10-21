@@ -1104,3 +1104,194 @@ async fn a_second_ref_action_with_a_dialog_pending_returns_within_the_bound() {
         .expect("answer the dialog");
     driver.release(session).await.expect("release");
 }
+
+// Round 7: the three branches of the hit test and of the "gone" answers that no
+// fixture reached before.
+
+/// The target is the element in a shadow root that wraps a `<slot>`, and what
+/// the pointer lands on is the slotted light-DOM child. Only the
+/// `assignedSlot` step of the ancestor climb connects the two: the child's
+/// `parentNode` is the shadow host, and the host's ancestors never reach the
+/// wrapper in the root.
+#[tokio::test]
+async fn a_slotted_child_of_the_target_passes_through_the_assigned_slot() {
+    if !live_enabled() {
+        return;
+    }
+    let (driver, session) = trusted_fixture(
+        true,
+        "ti-slot-climb",
+        "<fancy-card id=card style=\"position:absolute;left:10px;top:10px;display:block\">\
+           <span style=\"display:block;width:140px;height:30px\">light child</span>\
+         </fancy-card>\
+         <script>\
+           window.__log = [];\
+           const root = document.getElementById('card').attachShadow({mode:'open'});\
+           root.innerHTML = '<div id=wrap role=button tabindex=0 aria-label=\"Slot wrapper\">\
+             <slot></slot></div>';\
+           root.getElementById('wrap').addEventListener('click', (e) => \
+             window.__log.push(['wrap', e.isTrusted, e.target.localName]));\
+         </script>",
+    )
+    .await;
+    // What the page says the hit is: the light child, not the wrapper.
+    let hit = page_json(
+        &driver,
+        &session,
+        "(() => { const r = document.getElementById('card').firstElementChild\
+           .getBoundingClientRect();\
+           const h = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);\
+           const wrap = document.getElementById('card').shadowRoot.getElementById('wrap');\
+           return { hit: h.localName, assigned: !!h.assignedSlot, \
+                    wrapper_is_ancestor_by_parent_node: wrap.contains(h) }; })()",
+    )
+    .await;
+    assert_eq!(hit["hit"], "span", "{hit}");
+    assert_eq!(hit["assigned"], true, "{hit}");
+    assert_eq!(
+        hit["wrapper_is_ancestor_by_parent_node"], false,
+        "the wrapper is not a DOM ancestor of the slotted child: {hit}"
+    );
+    act_on(
+        &driver,
+        &session,
+        "Slot wrapper",
+        VerifiedTargetOperation::Click,
+    )
+    .await
+    .expect("a slotted child under the pointer is the target's own content");
+    assert_eq!(
+        page_json(&driver, &session, "window.__log").await,
+        serde_json::json!([["wrap", true, "span"]])
+    );
+    driver.release(session).await.expect("release");
+}
+
+/// A known limit, pinned so a change is noticed: a closed shadow root hides
+/// what is inside it, so a cover that lives in the same closed root as the
+/// target cannot be told from the target. The pipeline accepts it (the hit is
+/// the root's host, the target's own component) and the click then lands on the
+/// cover. The docs say so (RUNBOOKS, "Trusted input for ref actions"). If
+/// detecting this is ever built, this test changes with it.
+#[tokio::test]
+async fn a_cover_in_the_same_closed_root_as_the_target_is_not_detected() {
+    if !live_enabled() {
+        return;
+    }
+    let (driver, session) = trusted_fixture(
+        true,
+        "ti-closed-cover",
+        "<div id=host style=\"position:absolute;left:10px;top:10px\"></div>\
+         <script>\
+           window.__log = [];\
+           const root = document.getElementById('host').attachShadow({mode:'closed'});\
+           root.innerHTML = '<button id=under>Under</button>\
+             <div id=cover style=\"position:fixed;left:0;top:0;right:0;bottom:0\"></div>';\
+           const note = (name) => (e) => window.__log.push([name, e.isTrusted]);\
+           root.getElementById('under').addEventListener('click', note('under'));\
+           root.getElementById('cover').addEventListener('click', note('cover'));\
+         </script>",
+    )
+    .await;
+    act_on(&driver, &session, "Under", VerifiedTargetOperation::Click)
+        .await
+        .expect("the limit: a cover inside the target's own closed root is not seen");
+    assert_eq!(
+        page_json(&driver, &session, "window.__log").await,
+        serde_json::json!([["cover", true]]),
+        "the click landed on the cover, not on the target"
+    );
+    driver.release(session).await.expect("release");
+}
+
+/// The node leaves the document after it was resolved and before the first
+/// probe: the answer is `target_not_attached`, at once, with the reason only.
+#[tokio::test]
+async fn a_node_that_leaves_between_resolve_and_probe_is_not_attached() {
+    if !live_enabled() {
+        return;
+    }
+    let (driver, session) = trusted_fixture(
+        true,
+        "ti-race",
+        "<button id=b onclick=\"window.__n=1\">Racing</button>",
+    )
+    .await;
+    let target = ref_named(&driver, &session, "Racing").await;
+    let page = driver.current_page(&session).await.expect("current page");
+    let resolved = page
+        .execute(
+            ResolveNodeParams::builder()
+                .backend_node_id(BackendNodeId::new(target.backend_node_id))
+                .build(),
+        )
+        .await
+        .expect("resolve");
+    let object_id = resolved.object.object_id.clone().expect("object id");
+    // Resolved. Now the page removes it.
+    run_in_page(&driver, &session, "document.getElementById('b').remove();").await;
+    let started = Instant::now();
+    let error = crate::actionability::prepare_click(&page, &object_id)
+        .await
+        .expect_err("a removed node is not clicked");
+    assert_repair(&error, "target_not_attached");
+    assert!(
+        started.elapsed() < Duration::from_millis(1500),
+        "a gone node is final at once, not after the 2 s budget: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        page_json(&driver, &session, "window.__n").await,
+        serde_json::Value::Null
+    );
+    driver.release(session).await.expect("release");
+}
+
+/// The document the node belonged to is replaced by a navigation: the realm the
+/// handle lived in is destroyed, and the probe's own call fails. That is the
+/// "gone" answer too (`node_is_gone`), not an internal error.
+#[tokio::test]
+async fn a_handle_whose_realm_was_destroyed_by_a_navigation_is_not_attached() {
+    if !live_enabled() {
+        return;
+    }
+    let (driver, session) = trusted_fixture(
+        true,
+        "ti-navigated",
+        "<button id=b onclick=\"window.__n=1\">Doomed</button>",
+    )
+    .await;
+    let target = ref_named(&driver, &session, "Doomed").await;
+    let page = driver.current_page(&session).await.expect("current page");
+    let resolved = page
+        .execute(
+            ResolveNodeParams::builder()
+                .backend_node_id(BackendNodeId::new(target.backend_node_id))
+                .build(),
+        )
+        .await
+        .expect("resolve");
+    let object_id = resolved.object.object_id.clone().expect("object id");
+    page.goto("about:blank").await.expect("navigate away");
+    let error = crate::actionability::prepare_click(&page, &object_id)
+        .await
+        .expect_err("a handle from a destroyed realm is not clicked");
+    eprintln!("destroyed realm: {error:?}");
+    assert_repair(&error, "target_not_attached");
+
+    // And the other end of the same story: the ref itself. After the navigation
+    // `DOM.resolveNode` cannot resolve the old backend node, and the answer is
+    // the older reason-less repair error (no `details.reason` from the closed
+    // list), which ERROR_REASONS describes.
+    let error = driver
+        .act_on_verified_target(
+            &session,
+            target_action(target, VerifiedTargetOperation::Click),
+        )
+        .await
+        .expect_err("a ref from the previous document");
+    eprintln!("stale ref after navigation: {error:?}");
+    assert_eq!(error.code, ErrorCode::TargetRepairRequired, "{error:?}");
+    assert_eq!(error.target_repair_reason(), None, "{error:?}");
+    driver.release(session).await.expect("release");
+}
