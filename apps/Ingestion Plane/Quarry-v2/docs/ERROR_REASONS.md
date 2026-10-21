@@ -145,15 +145,15 @@ Only with `QUARRY_BROWSER_TRUSTED_INPUT=on` (`driver_capabilities.trusted_input`
 
 | reason | meaning | what the caller does |
 |---|---|---|
-| `target_not_attached` | the element left the document between the observation and the action (a stale ref) | observe again |
+| `target_not_attached` | the element left the document between the observation and the action (a stale ref, including a node that is already gone when the action starts: it still resolves, and the probe finds it detached) | observe again |
 | `target_not_visible` | `display: none`, `visibility: hidden` or no layout box, still so when the 2 s budget ended | make it visible (open the menu, scroll its container) or pick another ref, then observe again |
-| `target_disabled` | disabled or `aria-disabled="true"`; for a type also read-only, or not a field that takes text | pick another ref or enable the control, then observe again |
+| `target_disabled` | disabled or `aria-disabled="true"`; for a type also read-only, or not a field that takes text or a value (a checkbox, a radio, a submit button and a file input are not) | pick another ref or enable the control, then observe again |
 | `target_covered` | another element receives the pointer at the click point (a modal, a cookie banner, a sticky header). `covered_by_tag` names it | dismiss or scroll past the covering element, then observe again |
 | `target_unstable` | the box kept moving (more than 0.5 px between two samples 25 ms apart) for the whole 500 ms stability window of each attempt, until the 2 s budget ended | wait for the animation, then observe again |
 | `target_has_no_box` | laid out, but with no area to point at (zero width or height) | pick another ref |
 | `target_unreachable_after_scroll` | there is a box, but none of it is inside the viewport after scrolling it into view (a fixed element placed off screen, a clipped container) | pick another ref |
 
-The check repeats every 100 ms for up to 2 s (`Op::Actionability`), so a button that becomes enabled or an overlay that closes during that time is acted on; the reason returned is the last one seen. A node that has already left the document when the action starts cannot be resolved at all and gets the older reason-less `TARGET_REPAIR_REQUIRED` ("native accessibility target is no longer live"), with the flag on or off.
+The check repeats every 100 ms for up to 2 s (`Op::Actionability`), so a button that becomes enabled or an overlay that closes during that time is acted on; the reason returned is the last one seen. A node that has already left the document when the action starts gets `target_not_attached` with the flag on (a removed node still resolves from its backend node id and the first probe finds it detached; measured, `display_none_fails_target_not_visible`). With the flag off the old script path answers as it always did, with `native_target_not_connected`. The older reason-less "native accessibility target is no longer live" is what a node answers when `DOM.resolveNode` itself fails, which can happen with either setting.
 
 Reasons the in-page script path has always put in `details.reason` stay as they were, for one release after trusted input is on by default: `native_target_not_connected` (an alias of `target_not_attached`: `canonical()` in `target_repair_reason` maps it), `target_not_unique_or_changed`, `target_not_typeable`, `value_setter_unavailable`, `target_not_select`, `select_value_unavailable`, `unsupported_native_operation`, `unsupported_verified_operation`. A client written against the old strings keeps working; a client may map a reason it does not know to "observe again".
 
