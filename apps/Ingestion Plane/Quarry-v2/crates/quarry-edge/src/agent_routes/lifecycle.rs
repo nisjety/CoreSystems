@@ -6,9 +6,13 @@ use super::*;
 /// (`browser grant belongs to another user`). A service principal acts for
 /// the run's owner, so the owner rule does not apply to it. Quarry does NOT check
 /// the grant's organization for either kind of caller: the broker's
-/// `ValidateGrantResponse` carries no `org_id`, so the only organization scoping
-/// is the broker's own, keyed to Quarry's static bearer (see the known-gap test
-/// `known_gap_a_service_principal_is_not_bound_to_the_grants_owner`).
+/// `ValidateGrantResponse` carries no `org_id`, so the organization scoping is the
+/// broker's own. Every check is made with a service token minted for the verified
+/// run's organization (`validate_for_org`), and the broker resolves the grant
+/// within that organization, so another organization's grant is not found (an
+/// inactive grant, a 403). The service token is not bound to the grant's owner:
+/// that gap stays pinned by the known-gap test
+/// `known_gap_a_service_principal_is_not_bound_to_the_grants_owner`.
 /// An empty `owner_id` (a broker that predates owners, or the no-op
 /// validator) is refused only when grants are required.
 ///

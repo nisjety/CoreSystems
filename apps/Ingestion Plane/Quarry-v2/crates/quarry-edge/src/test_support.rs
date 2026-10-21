@@ -148,6 +148,22 @@ pub fn test_state(static_driver: Arc<dyn Driver>) -> AppState {
     }
 }
 
+/// [`test_state`] with a grant validator and the production posture switch:
+/// `require` is the edge's `require_browser_grants` (true under
+/// `ENVIRONMENT=production`), so a test states the one thing it varies instead
+/// of overwriting two fields after the fact.
+pub fn test_state_with_grants(
+    static_driver: Arc<dyn Driver>,
+    grant_validator: Arc<dyn quarry_runtime::GrantValidator>,
+    require: bool,
+) -> AppState {
+    AppState {
+        grant_validator,
+        require_browser_grants: require,
+        ..test_state(static_driver)
+    }
+}
+
 /// Verified-looking JWT claims scoped to `org_id` (dev-bypass equivalent).
 pub fn claims_for_org(org_id: &str) -> Claims {
     Claims {
@@ -265,5 +281,29 @@ mod tests {
     fn json_keys_are_sorted() {
         let v = serde_json::json!({ "zeta": 1, "alpha": 2 });
         assert_eq!(json_keys(&v), vec!["alpha", "zeta"]);
+    }
+
+    #[tokio::test]
+    async fn test_state_with_grants_carries_the_validator_and_the_posture() {
+        struct Denying;
+        #[async_trait]
+        impl quarry_runtime::GrantValidator for Denying {
+            async fn validate(
+                &self,
+                _grant_id: &str,
+            ) -> QuarryResult<quarry_runtime::GrantValidation> {
+                Err(QuarryError::new(ErrorCode::Forbidden, "denied by the test validator"))
+            }
+        }
+        let state = test_state_with_grants(StubDriver::ok(), Arc::new(Denying), true);
+        assert!(state.require_browser_grants);
+        // The org-aware call reaches the injected validator (its default body).
+        let refused = state
+            .grant_validator
+            .validate_for_org("org-1", "grant-1")
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code, ErrorCode::Forbidden);
+        assert!(!test_state(StubDriver::ok()).require_browser_grants);
     }
 }

@@ -43,6 +43,7 @@ mod drain;
 mod experiments;
 mod extract_routes;
 mod graphql;
+mod grant_boot;
 mod handoff;
 mod internal_auth;
 mod limits;
@@ -276,22 +277,36 @@ async fn run() -> anyhow::Result<()> {
             .unwrap_or(false);
     let require_browser_grants =
         cfg.require_browser_grants || matches!(environment.as_str(), "prod" | "production");
-    let browser_grant_http_configured = cfg
-        .browser_grant_validator_url
-        .as_deref()
-        .is_some_and(|url| !url.trim().is_empty());
-    let browser_grant_grpc_configured = cfg
-        .browser_grant_validator_grpc_url
-        .as_deref()
-        .is_some_and(|url| !url.trim().is_empty());
-    #[cfg(not(feature = "grpc"))]
-    if browser_grant_grpc_configured {
-        anyhow::bail!("QUARRY_EDGE__BROWSER_GRANT_VALIDATOR_GRPC_URL requires the grpc feature");
-    }
-    if require_browser_grants && !browser_grant_http_configured && !browser_grant_grpc_configured {
-        anyhow::bail!(
-            "browser grants are required but no BrowserBroker validation endpoint is configured"
-        );
+    // Which grant validator this environment calls for, or why the edge must not
+    // start (grant_boot.rs): production needs the gRPC validator and the service
+    // credential that mints its per-organization tokens.
+    let grant_validator_choice = grant_boot::decide(grant_boot::GrantBootInputs {
+        production: matches!(environment.as_str(), "prod" | "production"),
+        require_grants: require_browser_grants,
+        http_configured: cfg
+            .browser_grant_validator_url
+            .as_deref()
+            .is_some_and(|url| !url.trim().is_empty()),
+        grpc_configured: cfg
+            .browser_grant_validator_grpc_url
+            .as_deref()
+            .is_some_and(|url| !url.trim().is_empty()),
+        grpc_compiled: cfg!(feature = "grpc"),
+        service_tokens_configured: cfg
+            .quarry_service_api_key
+            .as_deref()
+            .is_some_and(|credential| !credential.trim().is_empty()),
+        dev_bypass: cfg.cross_plane_auth_dev_bypass,
+    })
+    .map_err(|refusal| anyhow::anyhow!("{refusal}"))?;
+    match grant_validator_choice {
+        grant_boot::ValidatorChoice::Grpc => {}
+        grant_boot::ValidatorChoice::Http => tracing::warn!(
+            "browser grants are validated through the HTTP compatibility shim (not production)"
+        ),
+        grant_boot::ValidatorChoice::Noop => tracing::warn!(
+            "no BrowserBroker validator is configured: browser grants are not enforced (not production)"
+        ),
     }
     if durability_required
         && matches!(
@@ -781,12 +796,18 @@ async fn run() -> anyhow::Result<()> {
             .as_deref()
             .filter(|url| !url.trim().is_empty())
         {
+            // Fail at boot, not on the first run, when the broker cannot be
+            // reached or the manifest row the validator mints against is invalid.
+            quarry_runtime::grpc::browser_broker::browser_grant_token_request()?;
             let validator = quarry_runtime::grpc::GrpcGrantValidator::connect(url).await?;
-            let validator = match cfg.model_plane_token.as_deref() {
-                Some(token) if cfg.cross_plane_auth_dev_bypass => {
+            let validator = match (cross_plane_tokens.clone(), cfg.model_plane_token.as_deref()) {
+                // The production credential: a broker token minted per organization.
+                (Some(tokens), _) => validator.with_service_tokens(tokens),
+                // Development only (grant_boot refuses this combination in production).
+                (None, Some(token)) if cfg.cross_plane_auth_dev_bypass => {
                     validator.with_bearer_token(token.to_owned())
                 }
-                _ => validator,
+                (None, _) => validator,
             };
             Arc::new(validator)
         } else {

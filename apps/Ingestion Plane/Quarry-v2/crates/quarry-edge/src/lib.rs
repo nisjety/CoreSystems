@@ -14,6 +14,7 @@ pub mod drain;
 pub mod experiments;
 pub mod extract_routes;
 pub mod graphql;
+pub mod grant_boot;
 pub mod handoff;
 pub mod internal_auth;
 pub mod limits;
