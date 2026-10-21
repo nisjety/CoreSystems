@@ -10795,6 +10795,10 @@ fn orchestration_event_to_sse(event: &OrchestrationEvent) -> Option<Event> {
         }
         orchestration_event::Event::RunParked(_) => "run_parked",
         orchestration_event::Event::RunResumed(_) => "run_resumed",
+        // The question events reach the chat stream as the user_question
+        // ChatEvent (WS14-S4), not as a raw orchestration event. They get no named
+        // arm so the SSE taxonomy generator, which counts named arms, stays in step.
+        _ => return None,
     };
     let data = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_owned());
     Some(Event::default().event(event_name).data(data))
@@ -10852,10 +10856,6 @@ fn orchestration_event_to_step_update(
             // Wide-research fan-out (chat-wave2-specs, 2026-09-28): show the
             // delegated goal when the run carries one instead of the bare
             // "attached", so this flat-timeline rendering also names what a
-        // The question events reach the chat stream as the user_question
-        // ChatEvent (WS14-S4), not as a raw orchestration event. They get no named
-        // arm so the SSE taxonomy generator, which counts named arms, stays in step.
-        _ => return None,
             // card is doing without a second fetch.
             if p.goal_summary.is_empty() {
                 "attached".to_owned()
@@ -11152,6 +11152,9 @@ fn event_payload_value(event: &OrchestrationEvent) -> Option<Value> {
                 json!(payload.resumed_segment),
             );
         }
+        // Never forwarded raw (see the name map), so there is nothing to project.
+        orchestration_event::Event::QuestionAsked(_)
+        | orchestration_event::Event::QuestionAnswered(_) => {}
     }
 
     Some(Value::Object(object))
@@ -11209,9 +11212,6 @@ impl EnumName for SubagentRole {
 /// Detection is synchronous and pure — string work against an in-process map.
 /// The PUBLISH is spawned rather than awaited, and that is the important part:
 /// this runs BEFORE the response stream opens, so awaiting a bus round-trip here
-        // Never forwarded raw (see the name map), so there is nothing to project.
-        orchestration_event::Event::QuestionAsked(_)
-        | orchestration_event::Event::QuestionAnswered(_) => {}
 /// would put NATS latency in front of every chat turn and a stalled bus would
 /// stall answers. A learning signal must never be able to do that.
 ///
