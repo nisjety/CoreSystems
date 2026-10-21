@@ -43,7 +43,7 @@ pub use stamp::{ProbeState, RedactionStamp, ScreenshotState};
 /// test fails otherwise, for those and for the behaviours in the fingerprint's
 /// probe corpus), and the golden, its pin and every vendored copy are
 /// regenerated in the same change.
-pub const RULE_VERSION: &str = "qr-redact/2";
+pub const RULE_VERSION: &str = "qr-redact/3";
 
 /// Every rule id that can appear in a [`Tally`] or a stamp.
 pub const RULE_IDS: &[&str] = &[

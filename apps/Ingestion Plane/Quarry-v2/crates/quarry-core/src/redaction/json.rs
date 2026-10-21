@@ -88,24 +88,45 @@ fn mask_keyed_value(value: &mut Value, kind: MarkerKind, tally: &mut Tally) -> b
     }
 }
 
-/// HTTP header names whose value is a credential. Unlike `KEY_RULES` this runs
-/// under both profiles: a header dumped as JSON (`{"Authorization": "Bearer x"}`,
-/// or a `{"name": "Authorization", "value": "..."}` pair as HAR and CDP write it)
-/// has no `Authorization` word inside the string leaf, so the text rules cannot
-/// see the header context, and the name is unambiguous.
-const HEADER_KEYS: [&str; 2] = ["authorization", "proxy-authorization"];
+/// HTTP header names whose value is a credential, with the marker kind each
+/// gets. Unlike `KEY_RULES` this runs under both profiles: a header dumped as
+/// JSON (`{"Authorization": "Bearer x"}`, or a `{"name": "Cookie", "value":
+/// "..."}` pair as HAR and CDP write it) has no header word inside the string
+/// leaf, so the text rules cannot see the header context, and the name is
+/// unambiguous.
+///
+/// The whole value is replaced, whatever its shape: an object or array under one
+/// of these keys (a structured `authorization` config, say) is masked as a
+/// unit rather than walked, because a credential can sit in any child.
+const HEADER_KEYS: [(&str, MarkerKind); 6] = [
+    ("authorization", MarkerKind::Credential),
+    ("proxy-authorization", MarkerKind::Credential),
+    ("cookie", MarkerKind::Secret),
+    ("set-cookie", MarkerKind::Secret),
+    ("x-api-key", MarkerKind::Key),
+    ("x-auth-token", MarkerKind::Token),
+];
 /// Keys that hold the header name in a `{name, value}` pair.
 const HEADER_NAME_KEYS: [&str; 2] = ["name", "key"];
 
-fn is_header_name(s: &str) -> bool {
-    HEADER_KEYS.iter().any(|h| s.trim().eq_ignore_ascii_case(h))
+/// The marker kind for a credential header name, in any case.
+fn header_kind(s: &str) -> Option<MarkerKind> {
+    let s = s.trim();
+    HEADER_KEYS
+        .iter()
+        .find(|(h, _)| s.eq_ignore_ascii_case(h))
+        .map(|(_, kind)| *kind)
 }
 
-/// Does this object look like `{"name": "Authorization", "value": ...}`?
-fn is_header_pair(map: &serde_json::Map<String, Value>) -> bool {
-    map.iter().any(|(k, v)| {
-        HEADER_NAME_KEYS.iter().any(|n| k.eq_ignore_ascii_case(n))
-            && v.as_str().is_some_and(is_header_name)
+/// If this object looks like `{"name": "Cookie", "value": ...}`, the kind to
+/// mask its `value` with.
+fn header_pair_kind(map: &serde_json::Map<String, Value>) -> Option<MarkerKind> {
+    map.iter().find_map(|(k, v)| {
+        if HEADER_NAME_KEYS.iter().any(|n| k.eq_ignore_ascii_case(n)) {
+            v.as_str().and_then(header_kind)
+        } else {
+            None
+        }
     })
 }
 
@@ -128,11 +149,16 @@ fn walk(value: &mut Value, profile: Profile, tally: &mut Tally, depth: usize) {
             }
         }
         Value::Object(map) => {
-            let pair = is_header_pair(map);
+            let pair = header_pair_kind(map);
             for (key, v) in map.iter_mut() {
-                if is_header_name(key) || (pair && key.eq_ignore_ascii_case("value")) {
+                let header = header_kind(key).or(if key.eq_ignore_ascii_case("value") {
+                    pair
+                } else {
+                    None
+                });
+                if let Some(kind) = header {
                     // Always settles: a flag or an absent value is left, the rest is replaced.
-                    mask_keyed_value(v, MarkerKind::Credential, tally);
+                    mask_keyed_value(v, kind, tally);
                     continue;
                 }
                 if profile == Profile::Durable {
@@ -158,7 +184,14 @@ pub(crate) fn redact_value(value: &mut Value, profile: Profile, tally: &mut Tall
 pub(crate) fn fingerprint_parts() -> Vec<String> {
     let mut parts = vec![
         format!("json.max_depth|{MAX_DEPTH}"),
-        format!("json.header_keys|{}", HEADER_KEYS.join(",")),
+        format!(
+            "json.header_keys|{}",
+            HEADER_KEYS
+                .iter()
+                .map(|(h, k)| format!("{h}:{k:?}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
         format!("json.header_name_keys|{}", HEADER_NAME_KEYS.join(",")),
     ];
     parts.extend(
@@ -183,6 +216,9 @@ fn behaviour_probe() -> String {
         json!({"authorization": true, "Authorization": null, "AUTHORIZATION": ""}),
         json!({"password": "hunter two", "max_tokens": 4096, "accessToken": "abc", "tokens": ["a"]}),
         json!({"nested": [{"secret": {"a": 1}}, "password=hunter2"]}),
+        json!({"Cookie": "sid=abcdefgh", "set-cookie": ["a=b"], "X-Api-Key": "kkkkkkkkkkkk", "x-auth-token": 7, "cookies_enabled": true}),
+        json!({"headers": [{"name": "Cookie", "value": "sid=abcdefgh"}, {"key": "X-API-KEY", "value": "kkkkkkkkkkkk"}, {"name": "Accept", "value": "text/html"}]}),
+        json!({"authorization": {"scheme": "Bearer", "credentials": ["abcdefgh"]}}),
     ];
     let mut out = String::new();
     for profile in [Profile::Live, Profile::Durable] {
@@ -280,6 +316,62 @@ mod tests {
         assert_eq!(v["headers"][1]["value"], "text/html");
         assert_eq!(v["headers"][2]["value"], "[redacted:credential]");
         assert_eq!(t.by_rule().get("json.key"), Some(&2));
+    }
+
+    #[test]
+    fn cookie_and_api_key_headers_are_masked_under_both_profiles_with_their_own_kind() {
+        let input = json!({
+            "Cookie": "sid=abcdefghijklmnop",
+            "set-cookie": "a=b; HttpOnly",
+            "X-Api-Key": "kkkkkkkkkkkkkkkk",
+            "X-AUTH-TOKEN": "tttttttttttttttt",
+            "Accept": "text/html",
+            "cookies_enabled": true,
+        });
+        let (l, lt) = live(input.clone());
+        let (d, dt) = durable(input);
+        assert_eq!(l, d);
+        assert_eq!(l["Cookie"], "[redacted:secret]");
+        assert_eq!(l["set-cookie"], "[redacted:secret]");
+        assert_eq!(l["X-Api-Key"], "[redacted:key]");
+        assert_eq!(l["X-AUTH-TOKEN"], "[redacted:token]");
+        assert_eq!(l["Accept"], "text/html");
+        assert_eq!(l["cookies_enabled"], true);
+        assert_eq!(lt.by_rule().get("json.key"), Some(&4));
+        assert_eq!(dt.by_rule().get("json.key"), Some(&4));
+    }
+
+    #[test]
+    fn a_cookie_name_value_pair_masks_the_value_only() {
+        let (v, t) = live(json!({"headers": [
+            {"name": "Cookie", "value": "sid=abcdefghijklmnop"},
+            {"key": "X-API-KEY", "value": "kkkkkkkkkkkkkkkk"},
+            {"name": "Accept", "value": "text/html"},
+        ]}));
+        assert_eq!(v["headers"][0]["name"], "Cookie");
+        assert_eq!(v["headers"][0]["value"], "[redacted:secret]");
+        assert_eq!(v["headers"][1]["value"], "[redacted:key]");
+        assert_eq!(v["headers"][2]["value"], "text/html");
+        assert_eq!(t.by_rule().get("json.key"), Some(&2));
+    }
+
+    #[test]
+    fn a_structured_value_under_a_header_key_is_masked_whole() {
+        // Over-masking by design: a credential can sit in any child, and the
+        // key name is the only context the walk has.
+        for profile in [Profile::Live, Profile::Durable] {
+            let mut v = json!({
+                "authorization": {"scheme": "Bearer", "credentials": ["abcdefgh"]},
+                "cookie": ["a=b", "c=d"],
+                "other": {"kept": "yes"},
+            });
+            let mut t = Tally::new();
+            redact_value(&mut v, profile, &mut t);
+            assert_eq!(v["authorization"], "[redacted:credential]", "{profile:?}");
+            assert_eq!(v["cookie"], "[redacted:secret]", "{profile:?}");
+            assert_eq!(v["other"]["kept"], "yes", "{profile:?}");
+            assert_eq!(t.by_rule().get("json.key"), Some(&2), "{profile:?}");
+        }
     }
 
     #[test]

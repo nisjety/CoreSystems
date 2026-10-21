@@ -38,8 +38,8 @@ const PIN_PATH: &str = concat!(
 /// and this test then fails until `RULE_VERSION` is bumped and the new version
 /// is pinned here: that is the version-bump policy of `docs/SECRET_REDACTION.md`.
 const PINNED_FINGERPRINTS: &[(&str, &str)] = &[(
-    "qr-redact/2",
-    "7abfda6e750cac98232ae5ac40b1f63bd78b38bbb3b8e9828a534dd2bed4803d",
+    "qr-redact/3",
+    "1e19132a70dc67238e09a20f5059447ff5727bfa630fbf4065b71a2102222796",
 )];
 
 #[derive(Deserialize)]

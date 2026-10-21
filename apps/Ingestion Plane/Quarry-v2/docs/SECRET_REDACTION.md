@@ -7,7 +7,7 @@ one set of rules is applied before anything Quarry captures reaches a caller, an
 artifact, an event, a receipt, a log or a model prompt, instead of each of those
 places growing its own filter.
 
-Rule set: `RULE_VERSION = "qr-redact/2"` (see "Version history"). Marker: `[redacted:<kind>]` with
+Rule set: `RULE_VERSION = "qr-redact/3"` (see "Version history"). Marker: `[redacted:<kind>]` with
 `<kind>` one of `password`, `otp`, `card`, `phone`, `secret`, `token`, `key`,
 `credential`.
 
@@ -104,7 +104,7 @@ Contextual rules (`Durable` only):
 | `ctx.pan` | 13 to 19 digits with a known issuer prefix, an issuer-valid length and a passing Luhn sum, written as one run or as 3 to 6 digit groups joined by single spaces or dashes, and not glued to a letter | `card` |
 | `url.query` | the value of `token`, `access_token`, `id_token`, `refresh_token`, `code`, `key`, `api_key`, `apikey`, `sig`, `signature`, `password`, `secret`, `session`, `sid`, `otp`, `jwt`, `x-amz-*` after `?`, `&` or `;` | `token` |
 | `url.fragment` | the value of `access_token`, `id_token`, `refresh_token`, `token`, `code` in a `#fragment` | `token` |
-| `json.key` (header rule, **both profiles**) | the value under an object key `Authorization` or `Proxy-Authorization` (any case), and the `value` of a `{"name": "Authorization", "value": ...}` or `{"key": ...}` pair as HAR and CDP write headers; the whole value is replaced, scheme included | `credential` |
+| `json.key` (header rule, **both profiles**) | the value under an object key naming a credential header (any case): `Authorization`, `Proxy-Authorization` (`credential`), `Cookie`, `Set-Cookie` (`secret`), `X-Api-Key` (`key`), `X-Auth-Token` (`token`); and the `value` of a `{"name": "Cookie", "value": ...}` or `{"key": ...}` pair as HAR and CDP write headers. The whole value is replaced, scheme included, **whatever its shape**: an object or array under one of these keys is masked as a unit (over-masking by design: the key is the only context the walk has and a credential can sit in any child; a non-header field that happens to be called `authorization` loses its content) | per header |
 | `json.key` | the value under an object key that names a secret (`password`, `credential`, `api_key`, `private_key`, `token`, `accessToken`, `secret`, `session_id`, `cookie`, env-style `*_KEY`). Counters (`max_tokens`, `token_count`) and booleans survive; a number, array or object under such a key is replaced whole | per key |
 
 Field rules (`field.*`, the first hit wins): `type=password` is a password and
@@ -165,7 +165,7 @@ basic verify rules, the card group-size rule, the JSON header pairs) changes
 `rule_fingerprint()`, and `redaction_rule_drift_requires_a_version_bump`
 fails until you:
 
-1. bump `RULE_VERSION` (for example `qr-redact/2`);
+1. bump `RULE_VERSION` (for example `qr-redact/4`);
 2. add the new `(version, fingerprint)` pair to `PINNED_FINGERPRINTS` in
    `tests/redaction_golden.rs` (keep the old pair out: a version names one rule set);
 3. edit the golden, set its `rule_version`, refresh the `.sha256` pin beside it and
@@ -181,12 +181,17 @@ case, so give every verify rule and every threshold a positive and a negative ca
 
 - `qr-redact/1`: first rule set (WS12.S0, commit d405aa87). Never consumed: nothing
   calls the module and no copy of the golden was vendored.
-- `qr-redact/2`: `Authorization` and `Proxy-Authorization` JSON object keys and
+- `qr-redact/2` (never consumed either): `Authorization` and `Proxy-Authorization` JSON object keys and
   `{name, value}` header pairs are masked under both profiles (a header dumped as
   JSON was not masked when its token was letters only), the drift fingerprint
   covers the verify and group-size behaviour, and the golden gained negatives
   for a bare letters-only `Bearer` word and for 7- and 2-digit groups in a card-like
   run.
+- `qr-redact/3`: the header rule also covers `Cookie`, `Set-Cookie`, `X-Api-Key`
+  and `X-Auth-Token` object keys and `{name, value}` pairs under both profiles
+  (under `Live` they were only caught by the shape rules), and the golden gained
+  three JSON cases (a cookie and api-key pair, cookie and api-key keys, a structured
+  `authorization` value masked whole). Review residual of `qr-redact/2`.
 
 ## Honest limits
 
@@ -201,7 +206,7 @@ case, so give every verify rule and every threshold a positive and a negative ca
   masked only up to the first space; `Basic <base64>` outside an `Authorization`
   header is masked only when it carries a digit or a base64 symbol; labels are
   English and Norwegian only; `{"name": "password", "value": ...}` pairs are not
-  covered by the object-key rule (only `Authorization` header pairs are) (field facts cover them in S1 and S3).
+  covered by the object-key rule (only the credential header names above are); neither are cookies dumped as `{"name": "sid", "value": ...}`, where the cookie's own name is the only context (field facts cover them in S1 and S3).
 - **Contextual rules over-mask on purpose** under `Durable`: `password: must
   contain 8 characters` loses one word.
 - **Leaves of any size are scanned whole.** The plan sketched a 64 KiB leaf cap;
