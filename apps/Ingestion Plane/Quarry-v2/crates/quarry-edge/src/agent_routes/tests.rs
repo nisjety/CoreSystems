@@ -2131,41 +2131,66 @@ fn validated_grant_overrides_client_domains_in_every_mode() {
     assert!(bind_validated_grant(&hostless, &claims, true).is_err());
 }
 
-/// The approval grant is validated for the run's organization, handed down from
-/// the verified run (`entry.org_id`), never read from the approval itself.
-#[tokio::test]
-async fn sensitive_approval_is_validated_for_the_runs_org() {
-    use quarry_runtime::grant_validator::{GrantValidation, GrantValidator};
+/// A grant validator that records every call (`"<plain>"` for the org-blind
+/// `validate`, the org for `validate_for_org`) and answers with a usable run
+/// grant, or with the sensitive approval for `grant_approval_1`.
+struct RecordingGrantValidator(std::sync::Mutex<Vec<(String, String)>>);
 
-    struct Recording(std::sync::Mutex<Vec<(String, String)>>);
-    #[async_trait::async_trait]
-    impl GrantValidator for Recording {
-        async fn validate(&self, grant_id: &str) -> QuarryResult<GrantValidation> {
-            self.0
-                .lock()
-                .unwrap()
-                .push(("<plain>".into(), grant_id.into()));
-            Err(QuarryError::new(ErrorCode::Internal, "org-blind call"))
-        }
-        async fn validate_for_org(
-            &self,
-            org_id: &str,
-            grant_id: &str,
-        ) -> QuarryResult<GrantValidation> {
-            self.0.lock().unwrap().push((org_id.into(), grant_id.into()));
-            Ok(serde_json::from_value(serde_json::json!({
+impl RecordingGrantValidator {
+    fn new() -> Arc<Self> {
+        Arc::new(Self(std::sync::Mutex::new(Vec::new())))
+    }
+
+    fn calls(&self) -> Vec<(String, String)> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl quarry_runtime::grant_validator::GrantValidator for RecordingGrantValidator {
+    async fn validate(
+        &self,
+        grant_id: &str,
+    ) -> QuarryResult<quarry_runtime::grant_validator::GrantValidation> {
+        self.0
+            .lock()
+            .unwrap()
+            .push(("<plain>".into(), grant_id.into()));
+        Err(QuarryError::new(ErrorCode::Internal, "org-blind call"))
+    }
+
+    async fn validate_for_org(
+        &self,
+        org_id: &str,
+        grant_id: &str,
+    ) -> QuarryResult<quarry_runtime::grant_validator::GrantValidation> {
+        self.0.lock().unwrap().push((org_id.into(), grant_id.into()));
+        let grant = if grant_id == "grant_approval_1" {
+            serde_json::json!({
                 "grant_id": grant_id,
                 "active": true,
                 "kind": "sensitive_approval",
                 "allowed_actions": ["respond_dialog"],
                 "allowed_dialog_ids": ["dlg_1"],
                 "parent_grant_id": "grant_run_1",
-            }))
-            .unwrap())
-        }
+            })
+        } else {
+            serde_json::json!({
+                "grant_id": grant_id,
+                "active": true,
+                "kind": "run",
+            })
+        };
+        Ok(serde_json::from_value(grant).unwrap())
     }
+}
 
-    let recording = Arc::new(Recording(std::sync::Mutex::new(Vec::new())));
+/// Forwarding only: `validate_sensitive_approval` hands the validator the org
+/// it was given. That the admission chain gives it the run's org is pinned by
+/// `admission_validates_the_run_and_its_approval_for_the_runs_org`.
+#[tokio::test]
+async fn sensitive_approval_helper_forwards_the_org_it_is_handed() {
+    let recording = RecordingGrantValidator::new();
     let mut state = test_state_with_static_driver();
     state.grant_validator = recording.clone();
     let approval = SensitiveApproval {
@@ -2176,11 +2201,62 @@ async fn sensitive_approval_is_validated_for_the_runs_org() {
         dialog_id: Some("dlg_1".into()),
         artifact_id: None,
     };
-    validate_sensitive_approval(&state, "org-of-the-run", &approval)
+    validate_sensitive_approval(&state, "org-handed-down", &approval)
         .await
         .expect("the approval grant matches the observed action");
     assert_eq!(
-        *recording.0.lock().unwrap(),
-        vec![("org-of-the-run".to_owned(), "grant_approval_1".to_owned())]
+        recording.calls(),
+        vec![("org-handed-down".to_owned(), "grant_approval_1".to_owned())]
+    );
+}
+
+/// The chain's two grant checks (gate 4, the run grant, and gate 10, the
+/// sensitive approval) both reach the validator with the org of the verified
+/// run (`entry.org_id`), and the org-blind `validate` is never used. The run's
+/// org differs from the default test org so a call site that passes a constant,
+/// an empty string or another org's id fails here. The approval is consumed.
+#[tokio::test]
+async fn admission_validates_the_run_and_its_approval_for_the_runs_org() {
+    let recording = RecordingGrantValidator::new();
+    let mut state = test_state_with_static_driver();
+    state.grant_validator = recording.clone();
+
+    let mut entry = entry_with_budget(None);
+    entry.org_id = "org-of-the-run".into();
+    entry.grant_id = Some("grant_run_1".into());
+    entry.last_observation = Some(
+        serde_json::from_value(serde_json::json!({
+            "run_id": entry.run_id,
+            "step": 1,
+            "url": "https://example.test/",
+            "dialogs": [{
+                "dialog_id": "dlg_1",
+                "kind": "confirm",
+                "message": "ok?",
+                "opened_at_ms": 1,
+            }],
+            "observed_at": "2026-01-01T00:00:00Z",
+        }))
+        .expect("a minimal observation with one open dialog"),
+    );
+    let handle = handle_for(entry);
+    let mut entry = handle.entry.lock().await;
+
+    let action = respond_dialog();
+    admit_action(&state, &handle, &mut entry, input(StepInitiator::Agent, &action, true))
+        .await
+        .expect("the run grant and the approval grant are both usable");
+
+    assert_eq!(
+        recording.calls(),
+        vec![
+            ("org-of-the-run".to_owned(), "grant_run_1".to_owned()),
+            ("org-of-the-run".to_owned(), "grant_approval_1".to_owned()),
+        ],
+        "gate 4 and gate 10 each validate for the run's org, never org-blind"
+    );
+    assert!(
+        entry.used_sensitive_approval_grants.contains("grant_approval_1"),
+        "the approval grant is consumed once it validated"
     );
 }
