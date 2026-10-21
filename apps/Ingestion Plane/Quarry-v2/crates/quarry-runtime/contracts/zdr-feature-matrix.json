@@ -226,7 +226,7 @@
       "treatment": "inert"
     },
     {
-      "basis": "resource_routes forwards to Control Plane with the verified identity and keeps no copy",
+      "basis": "resource_routes forwards to Control Plane with the verified identity and keeps no copy; EXCEPT POST /v1/sources with monitor:true, which registers a recurring change-monitor schedule in Control Plane and is classified by the schedules row (it is refused or observed under the same flag and stamps the posture on the schedule)",
       "detail": {
         "reason": "reads or proxies Control Plane records; Quarry stores nothing for the caller"
       },
@@ -254,7 +254,7 @@
       "treatment": "inert"
     },
     {
-      "basis": "change_routes read the token's identity only; ZDR is consulted nowhere on these routes",
+      "basis": "change_routes::check calls zdr_refusal::refuse behind QUARRY_EDGE__ZDR_REFUSE_DURABLE_RESOURCES (default off: observe, zdr.would_refuse, served as before); latest and history are reads and stay open",
       "detail": {
         "warning": "a change check keeps a baseline and history for the URL"
       },
@@ -274,7 +274,7 @@
       "treatment": "degraded"
     },
     {
-      "basis": "change_routes::snapshot and ::refresh do not read the ZDR floor",
+      "basis": "change_routes::snapshot and ::refresh call zdr_refusal::refuse behind QUARRY_EDGE__ZDR_REFUSE_DURABLE_RESOURCES (default off: observe, zdr.would_refuse, served as before)",
       "detail": {
         "warning": "promoting a snapshot and scheduling a refresh both retain the page"
       },
@@ -293,13 +293,13 @@
       "treatment": "degraded"
     },
     {
-      "basis": "under postgres-queue, record_check saves the baseline (New or Changed) before it reads the body's zdr, and that flag is consulted only in change_routes::emit_change_side_effects, which returns early under ZDR; no test observes the write, because the harness wires no baseline store",
+      "basis": "record_internal calls zdr_refusal::refuse on the body's declared zdr before the store (flag on: 403; flag off: zdr.would_refuse and the baseline is stored as before); emit_change_side_effects suppresses the change event and webhook for a declared zdr in both modes. The orchestrator declares the posture quarry-control stamped on the schedule at create (migration 023); a schedule created before that (NULL), by a service principal, or before its org turned ZDR on declares nothing or false and is stored (pinned by zdr_posture_stamp::record_trusts_the_stamp_not_the_current_posture); ChangeMonitorWF also still emits run_started and change_detected with the URL. No test observes the baseline write, because the harness wires no baseline store",
       "detail": {
         "warning": "the change event and webhook are suppressed; the baseline is still stored"
       },
       "enforced_by": [],
       "id": "change_record_internal",
-      "issue": "WS4.H: do not persist a baseline when the body declares zdr",
+      "issue": "WS4.H stage B: with QUARRY_EDGE__ZDR_REFUSE_DURABLE_RESOURCES on, a body that declares zdr is refused before the baseline is stored; the flag default stays off until ADR-4 sign-off and the customer notice",
       "log": "log_unverified",
       "log_canary": null,
       "routes": [
@@ -309,7 +309,7 @@
       "treatment": "degraded"
     },
     {
-      "basis": "schedule_routes forwards to Control Plane and never reads the ZDR floor",
+      "basis": "schedule_routes call zdr_refusal::refuse on create, unpause, trigger and backfill (default off: observe, zdr.would_refuse, forwarded as before); POST /v1/sources with monitor:true is covered by this row; the caller's posture is stamped on the change-monitor schedule at create (quarry-control migration 023) from verified claims only. Known gaps: an org that turns ZDR on later keeps its stamp, a service principal's schedule is stamped false, the legacy non-preset create is not stamped",
       "detail": {
         "warning": "a schedule is a durable resource; a ZDR organization can create and run one"
       },
@@ -317,7 +317,7 @@
         "zdr_gap_rows::gap_rows_currently_violate_schedules"
       ],
       "id": "schedules",
-      "issue": "WS4.H: refuse create, trigger, backfill and unpause; keep list, get, pause and delete so an organization can wind down",
+      "issue": "WS4.H stage B: with QUARRY_EDGE__ZDR_REFUSE_DURABLE_RESOURCES on, create, trigger, backfill and unpause are refused and list, get, pause and delete stay open so an organization can wind down; the flag default stays off until ADR-4 sign-off and the customer notice",
       "log": "log_unverified",
       "log_canary": null,
       "routes": [
@@ -332,7 +332,7 @@
       "treatment": "degraded"
     },
     {
-      "basis": "profile_routes never read the ZDR floor; only the agent start refuses a persistent profile",
+      "basis": "profile_routes call zdr_refusal::refuse on create, save and update (default off: observe, zdr.would_refuse, served as before); the agent start refuses a persistent profile in both modes",
       "detail": {
         "warning": "a browser profile (cookies, storage) is a durable resource a ZDR organization can create"
       },
@@ -340,7 +340,7 @@
         "zdr_gap_rows::gap_rows_currently_violate_profiles"
       ],
       "id": "profiles",
-      "issue": "WS4.H: refuse POST, PUT and PATCH; keep list and delete so profiles can be erased",
+      "issue": "WS4.H stage B: with QUARRY_EDGE__ZDR_REFUSE_DURABLE_RESOURCES on, create, save and update are refused and list, read, restore_probe and delete stay open so profiles can be erased; the flag default stays off until ADR-4 sign-off and the customer notice",
       "log": "log_unverified",
       "log_canary": null,
       "routes": [

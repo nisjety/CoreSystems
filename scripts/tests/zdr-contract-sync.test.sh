@@ -113,7 +113,7 @@ GOLDENS=(
   # row: edit it, refresh the .sha256 pin beside it (the Rust tests in
   # src/token_request_contract.rs compare it), update the digest here, then re-vendor
   # every copy listed in VENDORED (Auth Core's, CR-T17) and refresh its pin.
-  "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/cross-plane-token-requests.json|0849784e418ef475b18f39a58850a0e06b2a0973032d2c2a60fa80908ef30359"
+  "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/cross-plane-token-requests.json|30ec31e3a92a015df80b921bf0b27b70d463b148154863ae26903bd36df813ee"
 
   # WS4.G: the ZDR feature matrix, what Zero Data Retention does to each route. Generated
   # from quarry_core::zdr_matrix::ROWS by the owner's test, never written by hand:
@@ -124,7 +124,7 @@ GOLDENS=(
   # the_golden_and_markdown_are_what_the_table_generates (crates/quarry-core/src/zdr_matrix.rs),
   # which quarry-v2-ci.yml runs through cargo test --workspace. A regenerated golden needs
   # its digest here updated in the same change.
-  "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/zdr-feature-matrix.json|d8ea63483b07352354d5a07b00a3eb1e6e526cc135a829be30f2473d45b36daa"
+  "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/zdr-feature-matrix.json|ef586d01693fd3928717fe008f9ffbee983237adb766dd0d223af179e4c105e8"
 
   # WS12.S0: the secret-redaction shapes, what Quarry's rules must mask and must leave alone.
   # AUTHORED data, not generated, owned by Quarry; every secret in it is a fragment array so
