@@ -124,7 +124,7 @@ GOLDENS=(
   # the_golden_and_markdown_are_what_the_table_generates (crates/quarry-core/src/zdr_matrix.rs),
   # which quarry-v2-ci.yml runs through cargo test --workspace. A regenerated golden needs
   # its digest here updated in the same change.
-  "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/zdr-feature-matrix.json|ef586d01693fd3928717fe008f9ffbee983237adb766dd0d223af179e4c105e8"
+  "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/zdr-feature-matrix.json|76500d48fe3ed5ab7d8fdb6189e0dcd7ec5a035dc6f8f594a30bb5af08c9061f"
 
   # WS12.S0: the secret-redaction shapes, what Quarry's rules must mask and must leave alone.
   # AUTHORED data, not generated, owned by Quarry; every secret in it is a fragment array so
