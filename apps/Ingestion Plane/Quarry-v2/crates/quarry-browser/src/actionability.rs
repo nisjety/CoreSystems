@@ -15,7 +15,9 @@
 //!    viewport ([`click_point_from_quads`]);
 //! 4. a second probe asks `elementFromPoint` (shadow-root aware) what receives
 //!    the pointer there. Anything that is not the target, one of its
-//!    descendants or its label covers it.
+//!    descendants or its label covers it. A hit that is the host of a closed
+//!    shadow root holding the target counts as the target (the root hides what
+//!    is inside it, so a cover inside a closed root is not seen).
 //!
 //! The click is then real CDP input (`Input.dispatchMouseEvent`); typing is
 //! `Input.insertText` after the field was focused and its content selected, so
@@ -99,9 +101,13 @@ pub(crate) const ACTIONABILITY_PROBE_JS: &str = r#"function(request) {
         out.settable = !el.readOnly;
         out.editable = !el.readOnly;
     } else if (el instanceof HTMLInputElement) {
+        const kind = String(el.type || 'text').toLowerCase();
         const textual = ['text', 'search', 'url', 'tel', 'email', 'password', 'number'];
-        out.settable = !el.readOnly;
-        out.editable = !el.readOnly && textual.includes(String(el.type || 'text').toLowerCase());
+        // Controls that take a value but no typed text. Checkbox, radio, hidden,
+        // submit, file and the like are neither: a type into them is refused.
+        const valued = ['date', 'datetime-local', 'month', 'week', 'time', 'color', 'range'];
+        out.editable = !el.readOnly && textual.includes(kind);
+        out.settable = !el.readOnly && (textual.includes(kind) || valued.includes(kind));
     } else {
         out.editable = !!el.isContentEditable;
     }
@@ -122,6 +128,17 @@ pub(crate) const ACTIONABILITY_PROBE_JS: &str = r#"function(request) {
                 if (node === el) { ok = true; break; }
                 const up = node.assignedSlot || node.parentNode;
                 node = up && up.nodeType === 11 && up.host ? up.host : up;
+            }
+        }
+        if (!ok && hit && !hit.shadowRoot) {
+            // A closed shadow root hides what is inside it: elementFromPoint stops
+            // at its host. A hit that is the host of a root holding the target is
+            // the target's own component, so the pointer is where a person means.
+            for (let node = el, guard = 0; node && !ok && guard < 32; guard++) {
+                const root = node.getRootNode ? node.getRootNode() : null;
+                if (!root || !root.host) break;
+                if (root.host === hit) ok = true;
+                node = root.host;
             }
         }
         out.hit = {
@@ -691,13 +708,17 @@ async fn content_quads(page: &Page, object_id: &RemoteObjectId) -> Result<Vec<Ve
 
 /// Sample the box until two consecutive samples agree, for at most
 /// `Op::StablePoll`. Returns the last probe (the freshest viewport and box).
-async fn wait_stable(page: &Page, object_id: &RemoteObjectId) -> Result<Probe, Fail> {
+async fn wait_stable(
+    page: &Page,
+    object_id: &RemoteObjectId,
+    intent: Intent,
+) -> Result<Probe, Fail> {
     let window = deadline(Op::StablePoll);
     let started = Instant::now();
     let mut samples: Vec<BoxRect> = Vec::new();
     loop {
         let current = probe(page, object_id, None).await?;
-        decide(&current, Intent::Click).map_err(Fail::Reject)?;
+        decide(&current, intent).map_err(Fail::Reject)?;
         if let Some(rect) = current.bbox {
             samples.push(rect);
         }
@@ -713,8 +734,9 @@ async fn wait_stable(page: &Page, object_id: &RemoteObjectId) -> Result<Probe, F
 
 /// A target that passed every check for its intent.
 struct Settled {
-    /// Where to click (click only).
-    point: Option<(f64, f64)>,
+    /// Where the hit test passed: the click point for a click, the middle of
+    /// the visible box for a type or a select.
+    point: (f64, f64),
     probe: Probe,
 }
 
@@ -722,13 +744,10 @@ async fn attempt(page: &Page, object_id: &RemoteObjectId, intent: Intent) -> Res
     let first = probe(page, object_id, None).await?;
     decide(&first, intent).map_err(Fail::Reject)?;
     scroll_into_view(page, object_id).await?;
-    if intent != Intent::Click {
-        return Ok(Settled {
-            point: None,
-            probe: first,
-        });
-    }
-    let steady = wait_stable(page, object_id).await?;
+    // Click, type and select all have to hold still and be the element that
+    // receives the pointer where a person would aim: a field under a modal is
+    // not typed into any more than a button under it is clicked.
+    let steady = wait_stable(page, object_id, intent).await?;
     let quads = content_quads(page, object_id).await?;
     let point =
         click_point_from_quads(&quads, steady.viewport.w, steady.viewport.h).map_err(|error| {
@@ -740,7 +759,7 @@ async fn attempt(page: &Page, object_id: &RemoteObjectId, intent: Intent) -> Res
     let covered = probe(page, object_id, Some(point)).await?;
     decide(&covered, intent).map_err(Fail::Reject)?;
     Ok(Settled {
-        point: Some(point),
+        point,
         probe: covered,
     })
 }
@@ -778,9 +797,7 @@ pub(crate) async fn prepare_click(
     object_id: &RemoteObjectId,
 ) -> QuarryResult<(f64, f64)> {
     let settled = settle(page, object_id, Intent::Click).await?;
-    settled.point.ok_or_else(|| {
-        QuarryError::new(ErrorCode::Internal, "actionability produced no click point")
-    })
+    Ok(settled.point)
 }
 
 /// How a typed value reaches the field.
@@ -1091,10 +1108,13 @@ mod tests {
             click_point_from_quads(&[rect(700.0, 580.0, 200.0, 100.0)], 800.0, 600.0).unwrap(),
             (750.0, 590.0),
         );
-        // A rotated box cut by the viewport keeps the point inside the visible part.
+        // A rotated box cut by the viewport: the centroid of what is left of it
+        // (see rotated_boxes_are_cut_to_the_viewport for the working).
         let turned = vec![-20.0, 100.0, 40.0, 40.0, 100.0, 100.0, 40.0, 160.0];
-        let point = click_point_from_quads(&[turned], 800.0, 600.0).unwrap();
-        assert!(point.0 >= 0.0 && point.0 <= 100.0 && point.1 > 40.0 && point.1 < 160.0);
+        near(
+            click_point_from_quads(&[turned], 800.0, 600.0).unwrap(),
+            (290_666.666_666_666_7 / 6800.0, 100.0),
+        );
         // Entirely outside the viewport: there is a box, it is out of reach.
         assert_eq!(
             click_point_from_quads(&[rect(900.0, 10.0, 50.0, 50.0)], 800.0, 600.0),
@@ -1150,6 +1170,77 @@ mod tests {
             click_point_from_quads(&[rect(10.0, 10.0, 50.0, 50.0)], 0.0, 0.0),
             Err(PointError::Unreachable)
         );
+    }
+
+    /// Whether `p` is inside (or on the edge of) the convex polygon, any winding.
+    fn inside_convex(polygon: &[(f64, f64)], p: (f64, f64)) -> bool {
+        let mut sign = 0.0_f64;
+        for (index, a) in polygon.iter().enumerate() {
+            let b = polygon[(index + 1) % polygon.len()];
+            let cross = (b.0 - a.0) * (p.1 - a.1) - (b.1 - a.1) * (p.0 - a.0);
+            if cross.abs() < 1e-9 {
+                continue;
+            }
+            if sign == 0.0 {
+                sign = cross.signum();
+            } else if cross.signum() != sign {
+                return false;
+            }
+        }
+        true
+    }
+
+    #[test]
+    fn rotated_boxes_are_cut_to_the_viewport() {
+        // The diamond (-20,100) (40,40) (100,100) (40,160): centre (40,100), half
+        // diagonals 60, area 7200. The left edge of the viewport cuts off the
+        // triangle (-20,100) (0,80) (0,120): area 400, centroid x -20/3. What is
+        // left has area 6800 and, by symmetry about y = 100, centroid y = 100;
+        // its x moment is 40 * 7200 minus the triangle's, so x = 42.745098...
+        let whole = 7200.0_f64;
+        let cut = 400.0_f64;
+        let expected = ((40.0 * whole + (20.0 / 3.0) * cut) / (whole - cut), 100.0);
+        assert!((expected.0 - 42.745_098_039).abs() < 1e-6, "{expected:?}");
+
+        let turned = vec![-20.0, 100.0, 40.0, 40.0, 100.0, 100.0, 40.0, 160.0];
+        let point = click_point_from_quads(&[turned], 800.0, 600.0).unwrap();
+        near(point, expected);
+        // Neither the unclipped centre (40, 100) nor a bounding-box clip (50, 100).
+        assert!((point.0 - 40.0).abs() > 1.0 && (point.0 - 50.0).abs() > 1.0);
+        let visible = [
+            (0.0, 80.0),
+            (40.0, 40.0),
+            (100.0, 100.0),
+            (40.0, 160.0),
+            (0.0, 120.0),
+        ];
+        assert!(inside_convex(&visible, point));
+
+        // A second diamond, centre (50,100), half diagonal 40, in a viewport 100
+        // high: only the upper half (10,100) (50,60) (90,100) is visible, a
+        // triangle whose centroid is (50, 260/3).
+        let low = vec![50.0, 60.0, 90.0, 100.0, 50.0, 140.0, 10.0, 100.0];
+        let point = click_point_from_quads(&[low], 800.0, 100.0).unwrap();
+        near(point, (50.0, 260.0 / 3.0));
+        assert!(inside_convex(
+            &[(10.0, 100.0), (50.0, 60.0), (90.0, 100.0)],
+            point
+        ));
+
+        // A 100 x 40 box turned 30 degrees about (100, 100), cut by the right
+        // edge of a 120 px wide viewport: the point is inside the box, inside
+        // the viewport, and left of the unclipped centre.
+        let (cos, sin) = (30.0_f64.to_radians().cos(), 30.0_f64.to_radians().sin());
+        let corners = [(-50.0, -20.0), (50.0, -20.0), (50.0, 20.0), (-50.0, 20.0)];
+        let tilted: Vec<f64> = corners
+            .iter()
+            .flat_map(|(x, y)| [100.0 + x * cos - y * sin, 100.0 + x * sin + y * cos])
+            .collect();
+        let polygon: Vec<(f64, f64)> = (0..4).map(|i| (tilted[2 * i], tilted[2 * i + 1])).collect();
+        let point = click_point_from_quads(&[tilted], 120.0, 600.0).unwrap();
+        assert!(inside_convex(&polygon, point), "{point:?}");
+        assert!(point.0 >= 0.0 && point.0 <= 120.0, "{point:?}");
+        assert!(point.0 < 100.0, "{point:?}");
     }
 
     #[test]

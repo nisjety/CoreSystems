@@ -3114,11 +3114,13 @@ impl BrowserDriver for ChromiumoxideDriver {
     ) -> QuarryResult<()> {
         let page = self.current_page(session).await?;
         if let Some(native_target) = action.native_target {
-            let mode = self.input_mode_for(session, &page, &native_target).await;
-            return with_deadline(
-                Op::NativeAction,
-                execute_native_target_action(&page, native_target, action.operation, &mode),
-            )
+            // The frame lookup behind the mode is a CDP call too: with a
+            // JavaScript dialog pending it never answers, so it runs under the
+            // same bound as the action itself, not before it.
+            return with_deadline(Op::NativeAction, async {
+                let mode = self.input_mode_for(session, &page, &native_target).await;
+                execute_native_target_action(&page, native_target, action.operation, &mode).await
+            })
             .await;
         }
         let action_json = serde_json::to_string(&action).map_err(|error| {
