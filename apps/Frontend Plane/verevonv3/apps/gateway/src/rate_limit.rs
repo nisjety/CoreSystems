@@ -922,7 +922,24 @@ mod tests {
             let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(body["error"]["code"], "rate_limited");
             assert_eq!(body["error"]["retryAfterSeconds"], header);
-            assert!(!body.to_string().contains("org_a"), "no caller identity in the body");
+            // Nothing about the caller is in the body: not the org, not the user id
+            // the session layer attached (user-of-org_a), not the client IP the
+            // limiter may have keyed on (the x-forwarded-for above).
+            let text = body.to_string();
+            for secret in ["org_a", "user-of-org_a", "198.51.100.1"] {
+                assert!(!text.contains(secret), "{secret} is in the body: {text}");
+            }
+            // The envelope has exactly the typed fields, so a new caller field
+            // cannot be added unseen.
+            let mut keys: Vec<&str> = body["error"]
+                .as_object()
+                .expect("error is an object")
+                .keys()
+                .map(String::as_str)
+                .collect();
+            keys.sort_unstable();
+            assert_eq!(keys, ["code", "message", "retryAfterSeconds"]);
+            assert_eq!(body.as_object().unwrap().len(), 1, "only the error envelope");
         }
 
         #[tokio::test]
