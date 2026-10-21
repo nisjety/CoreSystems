@@ -98,7 +98,7 @@ func defaultPresets() []Preset {
 		{
 			Name:        "careful",
 			Title:       "Careful scrape",
-			Description: "Slow and steady. Sticky proxy, longer jittered delays, robots respected. A challenge ends the run; Quarry does not change identity to get past it.",
+			Description: "Slow and steady. Sticky proxy, longer jittered delays, robots respected. Quarry does not change identity to get past a challenge. The policy records Block {challenge, abort}, but no runtime reader enforces it yet: it is advisory, and a run is not stopped by a challenge.",
 			Tags:        []string{"careful", "slow"},
 			Policy: quarrycontracts.RunPolicy{
 				Concurrency: quarrycontracts.Concurrency{PerRun: 4, PerDomain: 1},

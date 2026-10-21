@@ -173,6 +173,35 @@ func TestPresets_StealthAliasResolvesToCarefulWithDeprecation(t *testing.T) {
 	}
 }
 
+// The Block policy of careful is recorded, not enforced: no Rust or Go reader
+// acts on Block.On / Block.Action. The description must say so, so an API
+// caller is not told that a challenge ends the run when it does not.
+func TestPresets_CarefulBlockIsAdvisoryAndSaysSo(t *testing.T) {
+	t.Parallel()
+	p, ok := ResolvePreset("careful")
+	if !ok {
+		t.Fatal("careful preset not found")
+	}
+	var desc string
+	for _, preset := range defaultPresets() {
+		if preset.Name == "careful" {
+			desc = preset.Description
+		}
+	}
+	if desc == "" {
+		t.Fatal("careful has no description in the catalog")
+	}
+	if strings.Contains(desc, "ends the run") || strings.Contains(desc, "abort the run") {
+		t.Errorf("description claims enforcement nothing provides: %q", desc)
+	}
+	if !strings.Contains(desc, "advisory") {
+		t.Errorf("description must say the Block policy is advisory: %q", desc)
+	}
+	if p.Block.Action != quarrycontracts.BlkAbort {
+		t.Errorf("the recorded Block action changed: %+v", p.Block)
+	}
+}
+
 func TestPresets_CarefulAbortsOnChallenge(t *testing.T) {
 	t.Parallel()
 	p, ok := ResolvePreset("careful")
