@@ -15,6 +15,7 @@ use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+use super::effort::{self, Family, Wire};
 use super::zdr::ZdrAttestation;
 use super::{InferChunk, InferRequest, InferResponse, ModelInfo, ProviderError, ProviderRouter};
 
@@ -469,6 +470,101 @@ fn resolve_thinking_budget(model: &str, requested: i32, max_tokens: i32) -> Opti
     Some(requested)
 }
 
+/// Switch for the ladder wire classes. Off keeps the budget-only `thinking`
+/// block above byte-for-byte; on renders the canonical effort ladder per model
+/// class (`effort::support`). Only the literal `true` enables it: the default
+/// stays off until the live probe shows what Foundry accepts for the newest
+/// models, so a typo can never switch the wire shape.
+const ADAPTIVE_THINKING_ENV: &str = "INFERENCE_CORE_ANTHROPIC_ADAPTIVE_THINKING";
+
+fn adaptive_thinking_enabled() -> bool {
+    adaptive_thinking_flag_enabled(std::env::var(ADAPTIVE_THINKING_ENV).ok().as_deref())
+}
+
+/// Pure parser behind [`adaptive_thinking_enabled`], for the same reason as
+/// [`context_management_flag_enabled`].
+fn adaptive_thinking_flag_enabled(raw: Option<&str>) -> bool {
+    matches!(raw, Some("true"))
+}
+
+/// The requested level resolved against this model's wire class. The gateway
+/// still speaks token budgets today, so a request with no explicit level falls
+/// back to the ladder level its budget maps onto.
+fn resolve_ladder_effort(req: &InferRequest) -> Option<effort::Resolved> {
+    let requested = req
+        .reasoning_effort
+        .or_else(|| effort::from_legacy_budget(req.thinking_budget_tokens));
+    let support = effort::ModelAliases::from_env().support(Family::Anthropic, &req.model);
+    effort::resolve(requested, support)
+}
+
+/// The levels the catalogue lists for a model. Empty while the ladder wire is
+/// off: a level the adapter would not render must not be offered.
+fn advertised_effort_levels(model: &str, ladder: bool) -> Vec<effort::Level> {
+    if !ladder {
+        return Vec::new();
+    }
+    effort::ModelAliases::from_env()
+        .support(Family::Anthropic, model)
+        .levels
+        .to_vec()
+}
+
+/// Write `thinking` (and, for the adaptive class, `output_config`) into the
+/// request body, and raise `max_tokens` by the level's allowance: thinking is
+/// spent from `max_tokens` on every class, so without the raise a deeper level
+/// would only shrink the answer.
+fn apply_thinking(body: &mut serde_json::Value, req: &InferRequest, ladder: bool) {
+    if !ladder {
+        if let Some(budget) =
+            resolve_thinking_budget(&req.model, req.thinking_budget_tokens, req.max_tokens)
+        {
+            body["thinking"] = serde_json::json!({
+                "type": "enabled",
+                "budget_tokens": budget,
+            });
+        }
+        return;
+    }
+    let Some(resolved) = resolve_ladder_effort(req) else {
+        return;
+    };
+    let max_tokens = effort::raised_ceiling(req.max_tokens, resolved.applied);
+    match resolved.wire {
+        Wire::AnthropicBudget => {
+            let budget = effort::allowance(resolved.applied);
+            // Same guard as the legacy path: a budget that leaves no room for
+            // an answer is a provider 400.
+            if max_tokens <= budget {
+                warn!(
+                    budget,
+                    max_tokens,
+                    "extended-thinking budget leaves no room for an answer; omitting"
+                );
+                return;
+            }
+            body["thinking"] = serde_json::json!({
+                "type": "enabled",
+                "budget_tokens": budget,
+            });
+        }
+        Wire::AnthropicAdaptive => {
+            // `summarized` asks for visible reasoning; the newest models default
+            // to omitting it, which would leave the reasoning stream empty.
+            body["thinking"] = serde_json::json!({
+                "type": "adaptive",
+                "display": "summarized",
+            });
+            body["output_config"] = serde_json::json!({
+                "effort": resolved.applied.as_str(),
+            });
+        }
+        // No other wire class is declared for the Anthropic family.
+        _ => return,
+    }
+    body["max_tokens"] = serde_json::json!(max_tokens);
+}
+
 /// Beta header for Anthropic's server-side context-editing feature FAMILY —
 /// the `clear_tool_uses_20250919` strategy lives inside this family and is
 /// selected in the request body, not by a header of its own. Verified live
@@ -710,14 +806,7 @@ fn build_request_body_with_context_management(req: &InferRequest, native_enabled
         "messages": messages,
         "max_tokens": req.max_tokens,
     });
-    if let Some(budget) =
-        resolve_thinking_budget(&req.model, req.thinking_budget_tokens, req.max_tokens)
-    {
-        body["thinking"] = serde_json::json!({
-            "type": "enabled",
-            "budget_tokens": budget,
-        });
-    }
+    apply_thinking(&mut body, req, adaptive_thinking_enabled());
     // `temperature` is deliberately omitted. Anthropic constrains it to [0, 1]
     // (vs OpenAI's [0, 2]) and the newest Claude models reject it outright
     // ("`temperature` is deprecated for this model" — e.g. claude-opus-4-8), so
@@ -945,6 +1034,7 @@ impl ProviderRouter for AnthropicProvider {
     /// model picker reads this). Direct uses the first-party model ids; Azure
     /// Foundry uses the deployed Claude deployment names from config.
     fn list_models(&self) -> Vec<ModelInfo> {
+        let ladder = adaptive_thinking_enabled();
         let provider = self.provider_name().to_owned();
         let ids: Vec<String> = match &self.flavor {
             AnthropicFlavor::Direct => [
@@ -969,6 +1059,7 @@ impl ProviderRouter for AnthropicProvider {
         ids.into_iter()
             .map(|id| {
                 let cheap = is_cheap_claude(&id);
+                let effort_levels = advertised_effort_levels(&id, ladder);
                 ModelInfo {
                     id,
                     provider: provider.clone(),
@@ -982,7 +1073,7 @@ impl ProviderRouter for AnthropicProvider {
                     cheap,
                     privacy_tier,
                     residency_label: residency_label.clone(),
-                    effort_levels: Vec::new(),
+                    effort_levels,
                 }
             })
             .collect()
@@ -2355,5 +2446,168 @@ mod native_context_management_tests {
             "usage": { "input_tokens": 10, "output_tokens": 2 }
         });
         assert!(applied_context_edits(&json).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod ladder_wire_tests {
+    use super::{
+        adaptive_thinking_flag_enabled, advertised_effort_levels, apply_thinking,
+        build_request_body, resolve_thinking_budget,
+    };
+    use crate::provider::effort::Level;
+    use crate::provider::InferRequest;
+
+    fn request(model: &str, effort: Option<Level>, legacy_budget: i32) -> InferRequest {
+        InferRequest {
+            model: model.to_owned(),
+            max_tokens: 4096,
+            reasoning_effort: effort,
+            thinking_budget_tokens: legacy_budget,
+            ..Default::default()
+        }
+    }
+
+    fn ladder_body(req: &InferRequest) -> serde_json::Value {
+        let mut body = serde_json::json!({ "model": req.model, "max_tokens": req.max_tokens });
+        apply_thinking(&mut body, req, true);
+        body
+    }
+
+    #[test]
+    fn the_switch_is_off_unless_the_literal_true() {
+        assert!(!adaptive_thinking_flag_enabled(None));
+        for raw in ["", "1", "TRUE", "True", "yes", "on", " true", "false"] {
+            assert!(!adaptive_thinking_flag_enabled(Some(raw)), "{raw:?}");
+        }
+        assert!(adaptive_thinking_flag_enabled(Some("true")));
+    }
+
+    #[test]
+    fn switch_off_keeps_the_legacy_budget_block() {
+        // The process environment does not set the switch, so the public
+        // builder takes the legacy path.
+        let body = build_request_body(&request("claude-opus-4-8", Some(Level::High), 2048));
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["budget_tokens"], 2048);
+        assert_eq!(body["max_tokens"], 4096);
+        assert!(body.get("output_config").is_none());
+    }
+
+    #[test]
+    fn adaptive_models_send_adaptive_plus_effort_not_budget() {
+        let body = ladder_body(&request("claude-opus-4-8", Some(Level::High), 0));
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert_eq!(body["output_config"]["effort"], "high");
+        assert!(body["thinking"].get("budget_tokens").is_none());
+    }
+
+    #[test]
+    fn claude_unknown_future_model_defaults_to_adaptive() {
+        for model in ["claude-opus-5", "claude-fable-9", "claude-mythos"] {
+            let body = ladder_body(&request(model, Some(Level::Medium), 0));
+            assert_eq!(body["thinking"]["type"], "adaptive", "{model}");
+            assert_eq!(body["output_config"]["effort"], "medium", "{model}");
+        }
+    }
+
+    #[test]
+    fn budget_class_unchanged_for_sonnet_4_5() {
+        for (level, legacy) in [(Level::Low, 1024), (Level::Medium, 2048), (Level::High, 4096)] {
+            let body = ladder_body(&request("claude-sonnet-4-5", Some(level), 0));
+            assert_eq!(body["thinking"]["type"], "enabled");
+            assert_eq!(body["thinking"]["budget_tokens"], legacy);
+            assert!(body.get("output_config").is_none());
+            // The ladder's budget is exactly what the legacy path sent for the
+            // same request when the gateway spoke budgets.
+            assert_eq!(
+                resolve_thinking_budget("claude-sonnet-4-5", legacy, 32_000),
+                Some(legacy)
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_budget_requests_map_onto_the_ladder() {
+        let body = ladder_body(&request("claude-sonnet-4-5", None, 1024));
+        assert_eq!(body["thinking"]["budget_tokens"], 1024);
+        let body = ladder_body(&request("claude-opus-4-8", None, 4096));
+        assert_eq!(body["output_config"]["effort"], "high");
+    }
+
+    #[test]
+    fn standard_omits_thinking_and_output_config() {
+        for model in ["claude-opus-4-8", "claude-sonnet-4-5"] {
+            let body = ladder_body(&request(model, None, 0));
+            assert!(body.get("thinking").is_none(), "{model}");
+            assert!(body.get("output_config").is_none(), "{model}");
+            assert_eq!(body["max_tokens"], 4096, "{model}: no level, no raise");
+        }
+    }
+
+    #[test]
+    fn models_without_effort_control_send_nothing() {
+        let body = ladder_body(&request("claude-3-5-haiku-20241022", Some(Level::High), 0));
+        assert!(body.get("thinking").is_none());
+        assert!(body.get("output_config").is_none());
+        assert_eq!(body["max_tokens"], 4096);
+    }
+
+    #[test]
+    fn summarized_display_is_requested() {
+        let body = ladder_body(&request("claude-opus-4-8", Some(Level::Low), 0));
+        assert_eq!(body["thinking"]["display"], "summarized");
+    }
+
+    #[test]
+    fn max_tokens_includes_the_budget() {
+        let body = ladder_body(&request("claude-sonnet-4-5", Some(Level::High), 0));
+        let budget = body["thinking"]["budget_tokens"].as_i64().unwrap();
+        let max_tokens = body["max_tokens"].as_i64().unwrap();
+        assert_eq!(
+            max_tokens,
+            4096 + budget,
+            "the answer ceiling is kept on top of the budget"
+        );
+        assert!(max_tokens > budget);
+    }
+
+    #[test]
+    fn the_raise_is_capped_but_never_lowers_the_callers_ceiling() {
+        let mut req = request("claude-opus-4-8", Some(Level::Max), 0);
+        req.max_tokens = 30_000;
+        assert_eq!(ladder_body(&req)["max_tokens"], 32_768);
+        req.max_tokens = 40_000;
+        assert_eq!(ladder_body(&req)["max_tokens"], 40_000);
+    }
+
+    #[test]
+    fn a_requested_level_stronger_than_the_class_is_clamped() {
+        // Budget-class models top out at High.
+        let body = ladder_body(&request("claude-sonnet-4-5", Some(Level::Max), 0));
+        assert_eq!(body["thinking"]["budget_tokens"], 4096);
+    }
+
+    #[test]
+    fn foundry_and_direct_share_the_shape() {
+        // The body builder takes no flavor, so both Claude routes render the
+        // same shape, and the catalogue lists the same levels for a model.
+        let req = request("claude-opus-4-8", Some(Level::XHigh), 0);
+        assert_eq!(ladder_body(&req), ladder_body(&req.clone()));
+        assert_eq!(ladder_body(&req)["output_config"]["effort"], "xhigh");
+        assert_eq!(
+            advertised_effort_levels("claude-opus-4-8", true),
+            vec![Level::Low, Level::Medium, Level::High, Level::XHigh, Level::Max]
+        );
+    }
+
+    #[test]
+    fn the_catalogue_lists_levels_only_while_the_ladder_is_on() {
+        assert!(advertised_effort_levels("claude-opus-4-8", false).is_empty());
+        assert_eq!(
+            advertised_effort_levels("claude-sonnet-4-5", true),
+            vec![Level::Low, Level::Medium, Level::High]
+        );
+        assert!(advertised_effort_levels("claude-3-5-haiku-20241022", true).is_empty());
     }
 }
