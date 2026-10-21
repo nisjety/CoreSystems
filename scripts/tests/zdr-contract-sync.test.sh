@@ -24,6 +24,11 @@
 # Z-05a catalogue codes, no row that breaks a safety property, the two files agree),
 # which this script runs on every check.
 #
+# A third authored golden, the secret-redaction shapes (WS12.S0, secret-shapes.v1.json), is
+# held to its own Rust loader instead (crates/quarry-core/tests/redaction_golden.rs: strict
+# schema, the .sha256 pin, every rule exercised). This script pins its bytes and lists the
+# Model Plane consumer (mp-scrub, WS12.S4) as pending until that crate vendors its copy.
+#
 # CONSUMERS says who must vendor which golden. A consumer that has not vendored its
 # copy yet is reported as "pending"; under REQUIRE_CONTRACT (set it in any job that
 # runs from a full checkout and expects the build to be complete) a pending consumer
@@ -120,6 +125,15 @@ GOLDENS=(
   # which quarry-v2-ci.yml runs through cargo test --workspace. A regenerated golden needs
   # its digest here updated in the same change.
   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/zdr-feature-matrix.json|d8ea63483b07352354d5a07b00a3eb1e6e526cc135a829be30f2473d45b36daa"
+
+  # WS12.S0: the secret-redaction shapes, what Quarry's rules must mask and must leave alone.
+  # AUTHORED data, not generated, owned by Quarry; every secret in it is a fragment array so
+  # no secret-shaped literal sits in the repository. The Rust loader is
+  # "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/tests/redaction_golden.rs". To change it:
+  # edit the rules in quarry_core::redaction, bump RULE_VERSION, edit the file, refresh the
+  # .sha256 pin beside it, update the digest here, then re-vendor every copy (the Model Plane
+  # mp-scrub crate, WS12.S4). See "apps/Ingestion Plane/Quarry-v2/docs/SECRET_REDACTION.md".
+  "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/tests/fixtures/redaction/secret-shapes.v1.json|47e64a87cb83f811d9b5bf07a15d71e3348216560dbf67645b43202a48c44d37"
 )
 
 # "<repo-relative copy>|<repo-relative golden>"
@@ -208,6 +222,9 @@ CONSUMERS=(
   # The contextualizer built on it: the same two contracts, vendored into the embedding engine.
   "apps/Model Plane/api/contracts/infer-statuses.json|embedding-engine|apps/Data Plane v2/services/embedding-engine-rs/|CR-T7 (outcome table over every wire status)"
   "apps/Control Plane/auth-core/src/auth/fixtures/inference-service-tokens.golden.json|embedding-engine|apps/Data Plane v2/services/embedding-engine-rs/|CR-T7 (engine tests replay the real mint)"
+  # The secret-redaction shapes: the Model Plane scrub crate vendors the golden and runs the
+  # cases that name it (applies_to "mp"). Pending until WS12.S4 creates the crate.
+  "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/tests/fixtures/redaction/secret-shapes.v1.json|mp-scrub|apps/Model Plane/rust/crates/mp-scrub/|WS12.S4 (Model Plane scrub crate, vendored golden)"
 )
 
 passes=0
