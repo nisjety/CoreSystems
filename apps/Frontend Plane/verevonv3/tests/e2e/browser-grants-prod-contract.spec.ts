@@ -1,4 +1,4 @@
-import { test, expect, request as playwrightRequest, type APIRequestContext, type APIResponse } from '@playwright/test'
+import { test, expect, request as playwrightRequest, type APIRequestContext, type APIResponse, type TestInfo } from '@playwright/test'
 
 /**
  * SC1 L2 — the production-mode browser grant contract (plan 6.4 A, WS1.A2).
@@ -27,11 +27,14 @@ import { test, expect, request as playwrightRequest, type APIRequestContext, typ
  *     forged id, revoked grant (403, not 5xx: G6) and expired grant (after the
  *     TTL) are refused; A6 another user's grant is refused. A7 (no host names in
  *     the broker, model-gateway or gateway logs) is the wrapper's log scan.
- *   B and C (gateway session, AI run through the gateway): written with
- *     `test.fail()`. They go green with WS1.B on the production stack; the failure
- *     they are expected to have is recorded as an annotation (`observed`) so the
- *     wrapper's transcript carries it. An UNEXPECTED PASS fails the suite on
- *     purpose: whoever lands WS1.B on this stack removes `test.fail()` here.
+ *   B and C (gateway session, AI run through the gateway): they go green with
+ *     WS1.B on the production stack. Until then they are inverted by `untilWs1b`
+ *     (not `test.fail()`, which would accept a transport error or a 500 as "the
+ *     expected failure"): only an HTTP refusal with a status in KNOWN_BC_STATUSES
+ *     passes, every answer is recorded as an annotation (`observed`) before
+ *     anything is asserted so the wrapper's transcript carries it, and an
+ *     UNEXPECTED PASS fails the suite on purpose. After WS1.B run with
+ *     CONTRACT_BC_GREEN=1.
  */
 
 const ENABLED = process.env.BROWSER_GRANT_PROD_CONTRACT === '1'
@@ -55,6 +58,61 @@ const SECOND_EMAIL = process.env.E2E_EMAIL || 'e2e@verevon.dev'
 const SECOND_PASSWORD = process.env.E2E_PASSWORD || 'e2e-Verevon-Pass-123'
 
 type Json = Record<string, any>
+
+/** The statuses of the refusal legs B and C show until WS1.B runs on the stack. */
+const KNOWN_BC_STATUSES = (process.env.CONTRACT_BC_EXPECTED_STATUSES || '400,401,403,409,502,503')
+  .split(',')
+  .map((s) => Number(s.trim()))
+  .filter((n) => Number.isInteger(n))
+/** Legs B and C are expected to pass (after WS1.B): the inversion below is off. */
+const BC_GREEN = process.env.CONTRACT_BC_GREEN === '1'
+
+/**
+ * Runs a leg that is expected to fail with a known refusal until WS1.B lands.
+ * `seen` records each HTTP answer (status and message only, never a body) as an
+ * `observed` annotation before anything is asserted. The leg passes only when it
+ * throws AFTER an HTTP answer whose status is in KNOWN_BC_STATUSES; a throw with no
+ * HTTP answer (transport error), or after an answer outside that set (a 200 that
+ * went on to fail, a 404, a 500), is a real failure and is rethrown; a leg that
+ * completes is an unexpected pass and fails on purpose. With CONTRACT_BC_GREEN=1
+ * the body runs as an ordinary test.
+ */
+async function untilWs1b(
+  info: TestInfo,
+  leg: string,
+  body: (seen: (step: string, status: number, message: string) => void) => Promise<void>,
+): Promise<void> {
+  let last: { step: string; status: number } | undefined
+  const seen = (step: string, status: number, message: string): void => {
+    last = { step, status }
+    info.annotations.push({ type: 'observed', description: `${leg} ${step} status=${status} message=${message}` })
+  }
+  if (BC_GREEN) {
+    await body(seen)
+    return
+  }
+  try {
+    await body(seen)
+  } catch (error) {
+    if (!last) {
+      info.annotations.push({
+        type: 'observed',
+        description: `${leg} no HTTP answer (${error instanceof Error ? error.name : typeof error})`,
+      })
+      throw error
+    }
+    if (!KNOWN_BC_STATUSES.includes(last.status)) throw error
+    info.annotations.push({
+      type: 'expected-failure',
+      description: `${leg} refused at ${last.step} with ${last.status}, the known failure until WS1.B`,
+    })
+    return
+  }
+  throw new Error(
+    `UNEXPECTED PASS: leg ${leg} is green, so WS1.B is on this stack; set CONTRACT_BC_GREEN=1 (and drop the inversion in this spec)`,
+  )
+}
+
 
 interface Tokens {
   browser: string
@@ -190,62 +248,71 @@ test.describe('SC1 production-mode browser grants (L2)', () => {
     })
   })
 
-  // ---- legs B and C: expected to fail until WS1.B is on this stack (test.fail) --------
+  // ---- legs B and C: the known failure until WS1.B is on this stack ---------------------
+  //
+  // Not `test.fail()`: that accepts ANY throw, so a transport error or a 500 from a
+  // broken stack would pass as "the expected failure". `untilWs1b` accepts exactly one
+  // shape: the gateway answered with an HTTP refusal whose status is in
+  // KNOWN_BC_STATUSES. The status and message of every answer are recorded as an
+  // `observed` annotation BEFORE anything is asserted, and a transport error records
+  // its class and is rethrown, so the transcript always carries what happened.
 
   test('B a gateway browser session starts with a grant and takes its first step @legBC', async ({ request }, info) => {
-    test.fail(true, 'expected to fail until WS1.B runs on the production stack; remove with it')
-    const created = await request.post('/api/v1/browser/sessions', {
-      headers: { 'content-type': 'application/json', origin: LOCAL_ORIGIN },
-      data: { url: ALLOWED_URL },
+    await untilWs1b(info, 'B', async (seen) => {
+      const created = await request.post('/api/v1/browser/sessions', {
+        headers: { 'content-type': 'application/json', origin: LOCAL_ORIGIN },
+        data: { url: ALLOWED_URL },
+      })
+      const body = await safeJson(created)
+      seen('session', created.status(), errorMessage(body))
+      try {
+        expect(created.status(), JSON.stringify(body).slice(0, 300)).toBe(200)
+        expect(String(body.data?.sessionId ?? body.data?.id ?? '')).not.toEqual('')
+      } finally {
+        const id = String(body.data?.sessionId ?? body.data?.id ?? '')
+        if (id) await request.delete(`/api/v1/browser/sessions/${encodeURIComponent(id)}`).catch(() => undefined)
+      }
     })
-    const body = await safeJson(created)
-    // Recorded for the wrapper's transcript: status and message only, never a body.
-    info.annotations.push({ type: 'observed', description: `B status=${created.status()} message=${errorMessage(body)}` })
-    try {
-      expect(created.status(), JSON.stringify(body).slice(0, 300)).toBe(200)
-      expect(String(body.data?.sessionId ?? body.data?.id ?? '')).not.toEqual('')
-    } finally {
-      const id = String(body.data?.sessionId ?? body.data?.id ?? '')
-      if (id) await request.delete(`/api/v1/browser/sessions/${encodeURIComponent(id)}`).catch(() => undefined)
-    }
   })
 
   test('C an AI run through the gateway acts and observes with no 401 or 403 @legBC', async ({ request }, info) => {
-    test.fail(true, 'expected to fail until WS1.B runs on the production stack; remove with it')
     test.setTimeout(150_000)
-    const created = await request.post('/api/v1/browser/sessions', {
-      headers: { 'content-type': 'application/json', origin: LOCAL_ORIGIN },
-      data: { url: ALLOWED_URL },
-    })
-    const session = await safeJson(created)
-    const sessionId = String(session.data?.sessionId ?? session.data?.id ?? '')
-    info.annotations.push({ type: 'observed', description: `C session status=${created.status()} message=${errorMessage(session)}` })
-    expect(sessionId, 'the session must exist for the AI run').not.toEqual('')
-    try {
-      const run = await request.post(`/api/v1/browser/sessions/${encodeURIComponent(sessionId)}/ai-runs`, {
+    await untilWs1b(info, 'C', async (seen) => {
+      const created = await request.post('/api/v1/browser/sessions', {
         headers: { 'content-type': 'application/json', origin: LOCAL_ORIGIN },
-        data: { goal: 'Open example.com and read its title.', allowed_domains: [ALLOWED_HOST], max_steps: 3 },
+        data: { url: ALLOWED_URL },
       })
-      const runBody = await safeJson(run)
-      info.annotations.push({ type: 'observed', description: `C run status=${run.status()} message=${errorMessage(runBody)}` })
-      expect(run.status(), JSON.stringify(runBody).slice(0, 300)).toBe(200)
-      const runId = String(runBody.data?.run_id ?? runBody.data?.runId ?? '')
-      expect(runId).not.toEqual('')
-      await expect
-        .poll(
-          async () => {
-            const replay = await request.get(`/api/v1/runs/${encodeURIComponent(runId)}/events/replay`)
-            return replay.ok() ? await replay.text() : ''
-          },
-          { timeout: 90_000, intervals: [2_000, 3_000, 5_000] },
-        )
-        .toContain('BrowserObservationReceived')
-      const replay = await (await request.get(`/api/v1/runs/${encodeURIComponent(runId)}/events/replay`)).text()
-      expect(replay).toContain('BrowserActionDispatched')
-      expect(replay).not.toMatch(/\b40[13]\b|PermissionDenied|Unauthenticated|not authorized/)
-    } finally {
-      await request.delete(`/api/v1/browser/sessions/${encodeURIComponent(sessionId)}`).catch(() => undefined)
-    }
+      const session = await safeJson(created)
+      const sessionId = String(session.data?.sessionId ?? session.data?.id ?? '')
+      seen('session', created.status(), errorMessage(session))
+      expect(created.status(), 'the session must be created for the AI run').toBe(200)
+      expect(sessionId, 'the session must exist for the AI run').not.toEqual('')
+      try {
+        const run = await request.post(`/api/v1/browser/sessions/${encodeURIComponent(sessionId)}/ai-runs`, {
+          headers: { 'content-type': 'application/json', origin: LOCAL_ORIGIN },
+          data: { goal: 'Open example.com and read its title.', allowed_domains: [ALLOWED_HOST], max_steps: 3 },
+        })
+        const runBody = await safeJson(run)
+        seen('run', run.status(), errorMessage(runBody))
+        expect(run.status(), JSON.stringify(runBody).slice(0, 300)).toBe(200)
+        const runId = String(runBody.data?.run_id ?? runBody.data?.runId ?? '')
+        expect(runId).not.toEqual('')
+        await expect
+          .poll(
+            async () => {
+              const replay = await request.get(`/api/v1/runs/${encodeURIComponent(runId)}/events/replay`)
+              return replay.ok() ? await replay.text() : ''
+            },
+            { timeout: 90_000, intervals: [2_000, 3_000, 5_000] },
+          )
+          .toContain('BrowserObservationReceived')
+        const replay = await (await request.get(`/api/v1/runs/${encodeURIComponent(runId)}/events/replay`)).text()
+        expect(replay).toContain('BrowserActionDispatched')
+        expect(replay).not.toMatch(/\b40[13]\b|PermissionDenied|Unauthenticated|not authorized/)
+      } finally {
+        await request.delete(`/api/v1/browser/sessions/${encodeURIComponent(sessionId)}`).catch(() => undefined)
+      }
+    })
   })
 
   // ---- leg A5 and A6, the negative controls (each is self-contained) -------------------

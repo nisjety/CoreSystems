@@ -22,7 +22,8 @@
 #
 # Phases (the plan puts the log scan after the happy legs and before the negatives):
 #   1. @happy   legs A1 to A4                 then the five-hop log scan (fatal)
-#   2. @legBC   legs B and C (test.fail())    scanned, fatal only with CONTRACT_BC_GREEN=1
+#   2. @legBC   legs B and C (inverted until WS1.B: only a known HTTP refusal passes)
+#                                             scanned, fatal only with CONTRACT_BC_GREEN=1
 #   3. @negative legs A5 and A6
 #
 # --boot runs the repo's own recipes in order and REBUILDS containers of the running
@@ -42,7 +43,7 @@
 #   DOCKER_LOCK        a prefix that serialises container-starting docker commands,
 #                      e.g. "bash /path/with-lock.sh docker 2700 --"
 #   CONTRACT_BC_GREEN=1   legs B and C are expected to pass (after WS1.B): the
-#                      scan of phase 2 becomes fatal and test.fail() must be gone.
+#                      scan of phase 2 becomes fatal and the spec runs the legs as plain tests.
 #   GATEWAY_SWAP_TOOL  the host tool that swaps the gateway image (--boot only)
 
 set -euo pipefail
@@ -64,6 +65,16 @@ TUNNEL_IMAGE="${TUNNEL_IMAGE:-alpine/socat}"
 GRANT_TTL_SECONDS=45
 BROKER_GRPC="http://browser-broker:9095"
 DOCKER_LOCK="${DOCKER_LOCK:-}"
+
+# Counts the processes whose command line holds --no-sandbox, from /proc (the quarry-edge
+# image is debian-slim and has no ps). The pattern is written [-]-no-sandbox so that the
+# probe's own command line (sh -c, tr, grep) cannot match it. It prints
+# NOSANDBOX_SCANNED=<command lines read> and NOSANDBOX_COUNT=<matches>.
+NOSANDBOX_PROBE='n=0; s=0; for f in /proc/[0-9]*/cmdline; do
+  line="$(tr "\0" " " < "$f" 2>/dev/null)" || continue
+  s=$((s+1))
+  case "$line" in *[-]-no-sandbox*) n=$((n+1));; esac
+done; echo "NOSANDBOX_SCANNED=$s"; echo "NOSANDBOX_COUNT=$n"'
 
 # The scan of one hop's log: a hit is a refusal somewhere on the happy path.
 FAILURE_PATTERN='\b40[13]\b|PermissionDenied|Unauthenticated|browser grant is not authorized|browser grant_id is required'
@@ -100,6 +111,18 @@ registry_ok() {
     });'
 }
 
+# nosandbox_verdict: reads the probe's output on stdin and prints ok, "found <n>", or
+# "unrunnable" (no markers, or no command line could be read: the probe proved nothing).
+nosandbox_verdict() {
+  local out scanned count
+  out="$(cat)"
+  scanned="$(printf '%s\n' "$out" | sed -n 's/^NOSANDBOX_SCANNED=\([0-9][0-9]*\)$/\1/p' | head -n 1)"
+  count="$(printf '%s\n' "$out" | sed -n 's/^NOSANDBOX_COUNT=\([0-9][0-9]*\)$/\1/p' | head -n 1)"
+  if [ -z "$scanned" ] || [ -z "$count" ] || [ "$scanned" -eq 0 ]; then echo unrunnable
+  elif [ "$count" -eq 0 ]; then echo ok
+  else echo "found $count"; fi
+}
+
 self_test() {
   local bad=0
   check() { # <name> <expected> <actual>
@@ -126,6 +149,32 @@ self_test() {
   check "the registry check refuses browser:write" bad \
     "$(printf '{"quarry-edge":{"scopesByAudience":{"browser-broker":["browser:read"]}},"x":{"scopes":["browser:write"]}}' | registry_ok)"
   check "the registry check says unreadable for garbage" unreadable "$(printf 'not json' | registry_ok)"
+  check "the probe verdict: clean" ok "$(printf 'NOSANDBOX_SCANNED=7\nNOSANDBOX_COUNT=0\n' | nosandbox_verdict)"
+  check "the probe verdict: one Chromium with --no-sandbox" "found 1" "$(printf 'NOSANDBOX_SCANNED=7\nNOSANDBOX_COUNT=1\n' | nosandbox_verdict)"
+  check "the probe verdict: no output is unrunnable, not clean" unrunnable "$(printf 'sh: 1: tr: not found\n' | nosandbox_verdict)"
+  check "the probe verdict: nothing scanned is unrunnable" unrunnable "$(printf 'NOSANDBOX_SCANNED=0\nNOSANDBOX_COUNT=0\n' | nosandbox_verdict)"
+  # The probe itself, on this machine's /proc: a process whose argv0 carries the flag is
+  # found, and the probe does not count itself.
+  local clean flagged pid
+  clean="$(sh -c "$NOSANDBOX_PROBE" 2>/dev/null | nosandbox_verdict)"
+  check "the probe finds no flag on an idle shell" ok "$clean"
+  bash -c 'exec -a "chromium --headless --no-sandbox" sleep 20' & pid=$!
+  sleep 1
+  flagged="$(sh -c "$NOSANDBOX_PROBE" 2>/dev/null | nosandbox_verdict)"
+  kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
+  check "the probe finds a process started with --no-sandbox" "found 1" "$flagged"
+  # scan_hops must fail, whatever its fatal flag, when a hop's container does not exist.
+  local failed_before
+  docker() { return 1; }                          # every inspect says: no such container
+  FAILED=0; scan_hops "2026-01-01T00:00:00Z" 0 >/dev/null 2>&1 || true
+  failed_before="$FAILED"; FAILED=0
+  unset -f docker
+  check "scan_hops fails when a hop has no container" 1 "$failed_before"
+  docker() { case "$1" in inspect) return 0;; logs) printf 'GET /health 200\n';; esac; }
+  FAILED=0; scan_hops "2026-01-01T00:00:00Z" 1 >/dev/null 2>&1 || true
+  failed_before="$FAILED"; FAILED=0
+  unset -f docker
+  check "scan_hops passes five clean hops" 0 "$failed_before"
   [ "$bad" -eq 0 ] && log "self-test passed" || { log "self-test FAILED"; return 1; }
 }
 
@@ -145,7 +194,7 @@ preflight() {
   log "preflight (read-only)"
   command -v docker >/dev/null || { fail "docker is not on PATH"; return; }
   local c
-  for c in "$QUARRY_CONTAINER" "$BROKER_CONTAINER" "$MODEL_GATEWAY_CONTAINER" "$GATEWAY_CONTAINER" "$AUTH_CONTAINER"; do
+  for c in "$QUARRY_CONTAINER" "$BROKER_CONTAINER" "$MODEL_GATEWAY_CONTAINER" "$EXECUTION_CORE_CONTAINER" "$GATEWAY_CONTAINER" "$AUTH_CONTAINER"; do
     if [ "$(docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null || echo false)" = true ]; then
       log "  ok   running: $c"
     else
@@ -178,18 +227,25 @@ preflight() {
   ports="$(docker inspect -f '{{len .HostConfig.PortBindings}}' "$QUARRY_CONTAINER" 2>/dev/null || echo '?')"
   [ "$ports" = 0 ] && log "  ok   quarry-edge publishes no host port" || fail "quarry-edge publishes $ports port binding(s)"
 
-  # WS3.A: no Chromium runs with --no-sandbox.
-  local nosandbox
-  nosandbox="$(docker exec "$QUARRY_CONTAINER" sh -c 'ps -eo args | grep -c -- --no-sandbox' 2>/dev/null || true)"
-  # grep counts its own sh -c line; zero running browsers shows 0 or 1 (the probe itself).
-  case "${nosandbox:-0}" in 0|1) log "  ok   no Chromium started with --no-sandbox (count $nosandbox, the probe itself included)";;
-    *) fail "Chromium runs with --no-sandbox ($nosandbox processes)";; esac
+  check_no_sandbox "preflight"
 
   # auth-core serves the registry row, from the file it actually loaded.
   local verdict
   verdict="$(docker exec "$AUTH_CONTAINER" sh -c 'if [ -n "$PLANE_SERVICE_PRINCIPALS_FILE" ]; then cat "$PLANE_SERVICE_PRINCIPALS_FILE"; else printf "%s" "$PLANE_SERVICE_PRINCIPALS_JSON"; fi' 2>/dev/null | registry_ok || true)"
   [ "$verdict" = ok ] && log "  ok   auth-core registry: quarry-edge holds browser:read on browser-broker, no browser:write anywhere" \
     || fail "auth-core registry check says '${verdict:-none}': rebuild auth-core with the registry row (--boot)"
+}
+
+# WS3.A: no Chromium runs with --no-sandbox. Run in the preflight and again after the
+# happy legs, while their browsers are alive. A probe that cannot run is a failure.
+check_no_sandbox() { # <when>
+  local verdict
+  verdict="$(MSYS_NO_PATHCONV=1 docker exec "$QUARRY_CONTAINER" sh -c "$NOSANDBOX_PROBE" 2>&1 | nosandbox_verdict || true)"
+  case "$verdict" in
+    ok) log "  ok   $1: no process in $QUARRY_CONTAINER has --no-sandbox on its command line";;
+    "found "*) fail "$1: ${verdict#found } process(es) in $QUARRY_CONTAINER run with --no-sandbox";;
+    *) fail "$1: the --no-sandbox probe could not run in $QUARRY_CONTAINER (no sh, tr or /proc?); it proved nothing";;
+  esac
 }
 
 # ---- the tunnel and the spec -------------------------------------------------------
@@ -242,19 +298,21 @@ run_phase() {
 }
 
 # scan_hops <since> <fatal 1|0>: failure patterns on all five hops, domain strings on three.
+# A hop whose container is missing fails the run whatever <fatal> says: an unscanned hop
+# must never read as a clean one. <fatal> only decides whether a HIT fails the run.
 scan_hops() {
   local since="$1" fatal="$2" hop container hits any=0
   log "---- per-hop log scan since $since (counts only)"
   for hop in gateway:"$GATEWAY_CONTAINER" model-gateway:"$MODEL_GATEWAY_CONTAINER" \
              execution-core:"$EXECUTION_CORE_CONTAINER" quarry-edge:"$QUARRY_CONTAINER" browser-broker:"$BROKER_CONTAINER"; do
     container="${hop#*:}"
-    if ! docker inspect "$container" >/dev/null 2>&1; then log "  skip ${hop%%:*}: no container $container"; continue; fi
+    if ! docker inspect "$container" >/dev/null 2>&1; then fail "log scan: no container $container for hop ${hop%%:*} (it was not scanned)"; continue; fi
     hits="$(docker logs --since "$since" "$container" 2>&1 | count_hits "$FAILURE_PATTERN")"
     if [ "$hits" -eq 0 ]; then log "  ok   ${hop%%:*}: 0 refusals"; else any=1; log "  HIT  ${hop%%:*}: $hits line(s) match the refusal patterns"; fi
   done
   for hop in browser-broker:"$BROKER_CONTAINER" model-gateway:"$MODEL_GATEWAY_CONTAINER" gateway:"$GATEWAY_CONTAINER"; do
     container="${hop#*:}"
-    docker inspect "$container" >/dev/null 2>&1 || continue
+    if ! docker inspect "$container" >/dev/null 2>&1; then fail "log scan: no container $container for hop ${hop%%:*} (it was not scanned)"; continue; fi
     hits="$(docker logs --since "$since" "$container" 2>&1 | count_hits "$DOMAIN_PATTERN")"
     if [ "$hits" -eq 0 ]; then log "  ok   ${hop%%:*}: 0 host names in the log"; else any=1; log "  HIT  ${hop%%:*}: $hits line(s) carry a host name"; fi
   done
@@ -335,10 +393,11 @@ main() {
   local t0 t1 rc=0
   t0="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   run_phase '@happy' || { fail "phase @happy failed (legs A1 to A4)"; }
+  check_no_sandbox "after the happy legs"
   scan_hops "$t0" 1
 
   t1="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  run_phase '@legBC' || { fail "phase @legBC failed (a test.fail() leg passed unexpectedly, or a green leg failed)"; }
+  run_phase '@legBC' || { fail "phase @legBC failed (a leg passed unexpectedly, failed with an unknown answer, or had no HTTP answer)"; }
   scan_hops "$t1" "${CONTRACT_BC_GREEN:-0}"
 
   run_phase '@negative' || { fail "phase @negative failed (legs A5 and A6)"; }
