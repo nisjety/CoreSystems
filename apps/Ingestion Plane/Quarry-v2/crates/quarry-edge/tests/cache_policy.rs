@@ -591,9 +591,13 @@ fn driver_signals(overrides: serde_json::Value) -> serde_json::Value {
 /// entry is not served, the origin is fetched, and the new result is not written.
 /// Without the plan check in the `routes.rs` gate, the cached static result would
 /// answer the request and its browser-only output would be absent.
-/// The five signals are the ones `plan_from_signals` (quarry-runtime/src/driver_plan.rs)
-/// routes to the browser: a non-empty `actions` list, `screenshot`, `pdf`,
-/// `prior_block_signals` of 2 or more, and `profile_required`. Each has a case below.
+/// The signals are the ones `plan_from_signals` (quarry-runtime/src/driver_plan.rs)
+/// routes to the browser: a non-empty `actions` list, `screenshot`, `pdf`, and
+/// `profile_required`, plus `prior_block_signals` of 2 or more only under
+/// `QUARRY_BLOCK_ESCALATION=legacy` (WS3.I: under `honest` the field is ignored, the
+/// plan is static, and the page cache applies like for any default scrape). Each has a
+/// case below; the `prior_block_signals` case is present only when the process runs
+/// in legacy mode, because the cache gate follows the plan.
 #[tokio::test]
 async fn browser_signals_neither_read_nor_write_the_page_cache() {
     let Some((state, mut conn)) = build_state().await else {
@@ -615,19 +619,21 @@ async fn browser_signals_neither_read_nor_write_the_page_cache() {
         .await
         .expect("plant the entry");
 
-    let cases = [
+    let mut cases = vec![
         ("screenshot", driver_signals(serde_json::json!({ "screenshot": true }))),
         ("pdf", driver_signals(serde_json::json!({ "pdf": true }))),
         ("actions", driver_signals(serde_json::json!({ "actions": ["click"] }))),
-        (
-            "prior_block_signals 2",
-            driver_signals(serde_json::json!({ "prior_block_signals": 2 })),
-        ),
         (
             "profile_required",
             driver_signals(serde_json::json!({ "profile_required": true })),
         ),
     ];
+    if !quarry_runtime::escalation::EscalationMode::current().is_honest() {
+        cases.push((
+            "prior_block_signals 2",
+            driver_signals(serde_json::json!({ "prior_block_signals": 2 })),
+        ));
+    }
     for (label, signals) in cases {
         let nonce = unique_nonce();
         let server = MockServer::start().await;

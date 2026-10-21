@@ -25,9 +25,13 @@ use quarry_core::error::ErrorCode;
 pub const ESCALATION_ENV: &str = "QUARRY_BLOCK_ESCALATION";
 
 /// The mode a process runs in when [`ESCALATION_ENV`] is unset (or blank).
-/// Shipped as `Legacy` first; flipped to `Honest` in its own commit, gated by
-/// a test (`build_default_matches_the_documented_default`).
-pub const BUILD_DEFAULT: EscalationMode = EscalationMode::Legacy;
+/// The mechanism shipped with `Legacy` as the default (61906c93); this is the
+/// flip to `Honest`, made on ADR-5's approved default in its own commit and
+/// gated by `build_default_matches_the_documented_default`. The plan asks for a
+/// before and after measurement of the pages a TLS or browser tier used to
+/// rescue; none was possible on this branch, so the flip rests on the tests, not
+/// on a measurement. `QUARRY_BLOCK_ESCALATION=legacy` is the rollback.
+pub const BUILD_DEFAULT: EscalationMode = EscalationMode::Honest;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EscalationMode {
@@ -213,10 +217,11 @@ mod tests {
         assert_eq!(EscalationMode::default(), BUILD_DEFAULT);
     }
 
-    /// The gate for the default flip: changing `BUILD_DEFAULT` means changing
-    /// this line in the same commit, on purpose.
+    /// The gate for the default: changing `BUILD_DEFAULT` means changing this
+    /// line and the "Block escalation" section of docs/RUNBOOKS.md in the same
+    /// commit, on purpose.
     #[test]
     fn build_default_matches_the_documented_default() {
-        assert_eq!(BUILD_DEFAULT, EscalationMode::Legacy);
+        assert_eq!(BUILD_DEFAULT, EscalationMode::Honest);
     }
 }
