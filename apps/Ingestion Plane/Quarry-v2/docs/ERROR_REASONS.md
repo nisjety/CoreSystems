@@ -137,3 +137,24 @@ A step of an agent run is refused when the run reached a bound. `details` is `{d
 ## 422 on a body that names the initiator twice
 
 A tab open whose JSON body carries both `initiated_by` and `initiatedBy` was answered `422` with a plain-text body (`duplicate field initiatedBy`), not an error envelope, on the edge image U9 built from the working tree that became `dec93d1e` (`docs/RUNBOOKS.md`, "Evidence, round 4"). The step body and the run start body take the same JSON extractor, and `agent_routes/tests.rs` (`every_request_body_takes_the_hint_under_both_spellings`) pins that the tab, step, run-start and socket-message types and the select/close query all refuse two spellings, but the HTTP status was seen only for the tab open: the query and the socket message go through their own extractors. Quarry never picks one of two spellings; one spelling of either is accepted everywhere. An agent call during a take-over is `409 USER_TOOK_OVER` whichever spelling it uses (`docs/CONTRACTS.md`, "Which agent opened a tab").
+
+
+## 409 `TARGET_REPAIR_REQUIRED` from trusted input: `details.reason` (WS3.K)
+
+Only with `QUARRY_BROWSER_TRUSTED_INPUT=on` (`driver_capabilities.trusted_input` is `true`, `docs/RUNBOOKS.md`, "Trusted input for ref actions"). A click, type or select on a top-level ref that cannot be performed as a person would is refused before anything happens, with the same status and the same error code as every other stale-ref answer (`409 TARGET_REPAIR_REQUIRED`, `retryable: false`). `details` is `{reason}` and, for `target_covered` only, `{reason, covered_by_tag}`. `covered_by_tag` is the tag name of the element that received the pointer (`div`, `dialog`, a custom element name), lower case, letters, digits and hyphens, 32 characters at most: never its text, id, class or URL. The message is a fixed sentence per reason. Nothing else about the page is in the error or in the log. Closed list (`quarry_core::error::target_repair_reason`); a new reason is appended here in the same change.
+
+| reason | meaning | what the caller does |
+|---|---|---|
+| `target_not_attached` | the element left the document between the observation and the action (a stale ref) | observe again |
+| `target_not_visible` | `display: none`, `visibility: hidden` or no layout box, still so when the 2 s budget ended | make it visible (open the menu, scroll its container) or pick another ref, then observe again |
+| `target_disabled` | disabled or `aria-disabled="true"`; for a type also read-only, or not a field that takes text | pick another ref or enable the control, then observe again |
+| `target_covered` | another element receives the pointer at the click point (a modal, a cookie banner, a sticky header). `covered_by_tag` names it | dismiss or scroll past the covering element, then observe again |
+| `target_unstable` | the box kept moving (more than 0.5 px between two samples 25 ms apart) for the whole 500 ms stability window of each attempt, until the 2 s budget ended | wait for the animation, then observe again |
+| `target_has_no_box` | laid out, but with no area to point at (zero width or height) | pick another ref |
+| `target_unreachable_after_scroll` | there is a box, but none of it is inside the viewport after scrolling it into view (a fixed element placed off screen, a clipped container) | pick another ref |
+
+The check repeats every 100 ms for up to 2 s (`Op::Actionability`), so a button that becomes enabled or an overlay that closes during that time is acted on; the reason returned is the last one seen. A node that has already left the document when the action starts cannot be resolved at all and gets the older reason-less `TARGET_REPAIR_REQUIRED` ("native accessibility target is no longer live"), with the flag on or off.
+
+Reasons the in-page script path has always put in `details.reason` stay as they were, for one release after trusted input is on by default: `native_target_not_connected` (an alias of `target_not_attached`: `canonical()` in `target_repair_reason` maps it), `target_not_unique_or_changed`, `target_not_typeable`, `value_setter_unavailable`, `target_not_select`, `select_value_unavailable`, `unsupported_native_operation`, `unsupported_verified_operation`. A client written against the old strings keeps working; a client may map a reason it does not know to "observe again".
+
+The two new driver deadlines (`op` in the 504 table above): `actionability` (2 s; each protocol call inside the check is bounded by it too, and it is the `op` of a 504 `TIMEOUT` only when one of those calls does not answer) and `stable_poll` (500 ms, a polling window that ends in `target_unstable`, never in a 504). Both are `effect: none` and retryable: nothing has been clicked while a target is still being checked.

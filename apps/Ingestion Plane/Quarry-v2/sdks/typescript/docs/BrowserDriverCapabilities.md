@@ -15,6 +15,7 @@ Name | Type
 `isolatedEgress` | boolean
 `securityEvidence` | boolean
 `atomicTargetActions` | boolean
+`trustedInput` | boolean
 
 ## Example
 
@@ -31,6 +32,7 @@ const example = {
   "isolatedEgress": null,
   "securityEvidence": null,
   "atomicTargetActions": null,
+  "trustedInput": null,
 } satisfies BrowserDriverCapabilities
 
 console.log(example)
