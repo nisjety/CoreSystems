@@ -434,19 +434,35 @@ async fn the_runs_grant_is_validated_for_the_runs_org_at_start_step_and_new_tab(
         .await;
         let person = member_token();
 
-        let run = edge
-            .start_run(&person, start_body("grant-org", None))
-            .await;
+        // Every body carries a conflicting organization under each plausible
+        // spelling: the org is the verified run's, so none of them may be read.
+        let stranger_org = conflicting_org_fields();
+        let mut start = start_body("grant-org", None);
+        merge_fields(&mut start, &stranger_org);
+        let started = edge.post(&person, "/v1/agent/runs", start).await;
+        assert_eq!(started.status, 200, "start refused: {}", started.body);
+        let run = started.data()["run_id"]
+            .as_str()
+            .expect("start answers a run_id")
+            .to_owned();
         let after_start = calls.lock().unwrap().len();
         assert_eq!(after_start, 1, "require={require}: one validation at start");
 
         // The recording driver's page is on no allowed host, so the step may end
         // in the post-action host check; the grant check is before it and is
         // what this test is about, so the replies' statuses are not asserted.
-        let _ = edge.step(&person, &run, wait_action(), None).await;
+        let mut step = json!({ "action": wait_action() });
+        merge_fields(&mut step, &stranger_org);
+        let _ = edge
+            .post(&person, &format!("/v1/agent/runs/{run}/step"), step)
+            .await;
         let after_step = calls.lock().unwrap().len();
         assert_eq!(after_step, 2, "require={require}: the step validates once");
-        let _ = edge.new_tab(&person, &run, None).await;
+        let mut tab = json!({});
+        merge_fields(&mut tab, &stranger_org);
+        let _ = edge
+            .post(&person, &format!("/v1/agent/runs/{run}/tabs"), tab)
+            .await;
 
         let seen = calls.lock().unwrap().clone();
         assert!(
@@ -460,6 +476,27 @@ async fn the_runs_grant_is_validated_for_the_runs_org_at_start_step_and_new_tab(
                 "require={require}: every validation names the run's org: {seen:?}"
             );
         }
+    }
+}
+
+/// A foreign organization under every spelling a body might use.
+fn conflicting_org_fields() -> Value {
+    json!({
+        "org_id": "org-stranger",
+        "orgId": "org-stranger",
+        "org": "org-stranger",
+        "organization_id": "org-stranger",
+        "organizationId": "org-stranger",
+    })
+}
+
+/// Copy `extra`'s fields onto the object `body`.
+fn merge_fields(body: &mut Value, extra: &Value) {
+    let (Some(body), Some(extra)) = (body.as_object_mut(), extra.as_object()) else {
+        panic!("both are objects");
+    };
+    for (key, value) in extra {
+        body.insert(key.clone(), value.clone());
     }
 }
 
