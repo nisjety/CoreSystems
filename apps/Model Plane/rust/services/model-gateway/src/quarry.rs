@@ -1569,8 +1569,16 @@ mod tests {
             )
             .mount(&quarry)
             .await;
-        // No /v1/artifacts mock: any GET would fail the test as an
-        // unmatched request.
+        // wiremock answers an unmatched request with 404 and does not fail
+        // the test, so the artifact read is mounted with a real body and
+        // `expect(0)`: the count is checked when the server drops, so a
+        // fetch under ZDR fails here (and the text assertion below too).
+        Mock::given(method("GET"))
+            .and(path("/v1/artifacts/art_01ZDR"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("persisted bytes"))
+            .expect(0)
+            .mount(&quarry)
+            .await;
 
         let result = test_client(quarry.uri())
             .scrape_readable("https://ssb.no", "org-a", true)
@@ -1641,7 +1649,10 @@ mod tests {
             .expect(1)
             .mount(&quarry)
             .await;
-        // No /v1/artifacts mock: any GET would fail the test as unmatched.
+        // No artifact is referenced here and no artifact read is mounted;
+        // an unmatched GET would get wiremock's 404, not a test failure.
+        // The ZDR artifact guard is pinned by
+        // `zdr_scrape_does_not_resolve_artifacts`.
 
         let result = test_client(quarry.uri())
             .scrape_readable("https://example.com/a", "org-a", true)
