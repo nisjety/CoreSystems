@@ -2188,8 +2188,15 @@ async fn execute_native_target_action(
     if let InputMode::Trusted(watch) = mode {
         if actionability::handles(&operation) {
             let outcome = actionability::run(page, &object_id, &operation, watch).await;
-            // Same rule as the synthetic path: the handle never outlives the action.
-            let _ = page.execute(ReleaseObjectParams::new(object_id)).await;
+            // Same rule as the synthetic path: the handle never outlives the
+            // action. Bounded, because a click that opened an `alert` has left
+            // the renderer blocked inside the dialog: the release is queued
+            // behind it and runs when the dialog is answered.
+            let _ = tokio::time::timeout(
+                Duration::from_millis(500),
+                page.execute(ReleaseObjectParams::new(object_id)),
+            )
+            .await;
             return outcome;
         }
     }
@@ -6412,4 +6419,7 @@ mod tests {
             driver.release(session).await.expect("release");
         }
     }
+
+    // WS3.K: live fixtures for trusted input and the actionability pipeline.
+    include!("trusted_input_live.rs");
 }
