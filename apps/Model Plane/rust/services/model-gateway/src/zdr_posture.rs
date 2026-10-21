@@ -841,6 +841,10 @@ mod tests {
             ("sse.rs", "continue_run"),
             ("http_routes.rs", "cancel_run"),
             ("http_routes.rs", "ingest_feedback"),
+            // Question answers are stored user content (WS14-S3); the list route is
+            // gated too, since a waived run never owns a question.
+            ("http_routes.rs", "list_run_questions"),
+            ("http_routes.rs", "answer_run_question"),
         ];
         let mut missing = Vec::new();
         for (file, function) in DURABLE_MUTATIONS {

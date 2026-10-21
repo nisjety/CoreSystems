@@ -2,7 +2,9 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { ApiError } from './http'
 import {
+  answerQuestion,
   chatRunContinueFrameRefusalOf,
   chatRunContinueHttpRefusalOf,
   chatRunContinueParkFailureOf,
@@ -13,8 +15,11 @@ import {
   continueRun,
   decideApproval,
   listApprovals,
+  listRunQuestions,
   normalizePlan,
+  normalizeRunQuestion,
   planStepEditToWire,
+  runQuestionErrorCodeOf,
 } from './orchestration-client'
 import clientSource from './orchestration-client.ts?raw'
 
@@ -571,5 +576,197 @@ describe('continueParkedRun (WS03 S8-A, no caller)', () => {
     expect(doc).toContain('chatRunContinueParkFailureOf')
     expect(doc).toContain('follow the run')
     expect(doc).not.toMatch(/retry|try again|send (it|the request) again/i)
+  })
+})
+
+// ── Run questions (build plan WS14 S3) ───────────────────────────────────────
+
+function rawQuestion(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: 'q_1',
+    run_id: 'run_1',
+    thread_id: 'thread_1',
+    step_id: 'step_1',
+    state: 'requested',
+    delivery: 'next_turn',
+    items: [
+      {
+        id: 'scope',
+        kind: 'single',
+        prompt: 'Which branch?',
+        options: [
+          { id: 'main', label: 'main', description: null },
+          { id: 'feature', label: 'A feature branch', description: 'New work' },
+        ],
+        allow_other: false,
+      },
+    ],
+    requested_at: '2026-10-21T10:00:00+00:00',
+    expires_at: '2026-10-22T10:00:00+00:00',
+    answered_at: null,
+    answers: [],
+    answered_message_id: null,
+    ...overrides,
+  }
+}
+
+describe('run questions', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('lists the run questions from the questions route and reads them as camelCase', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ questions: [rawQuestion()] }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const questions = await listRunQuestions('run 1')
+
+    const [listUrl] = fetchMock.mock.calls[0] as [string]
+    expect(String(listUrl)).toMatch(/\/api\/v1\/orchestration\/runs\/run%201\/questions$/)
+    expect(questions).toEqual([
+      {
+        id: 'q_1',
+        runId: 'run_1',
+        threadId: 'thread_1',
+        stepId: 'step_1',
+        state: 'requested',
+        delivery: 'next_turn',
+        items: [
+          {
+            id: 'scope',
+            kind: 'single',
+            prompt: 'Which branch?',
+            options: [
+              { id: 'main', label: 'main' },
+              { id: 'feature', label: 'A feature branch', description: 'New work' },
+            ],
+            allowOther: false,
+          },
+        ],
+        requestedAt: '2026-10-21T10:00:00+00:00',
+        expiresAt: '2026-10-22T10:00:00+00:00',
+        answers: [],
+      },
+    ])
+  })
+
+  it('drops a question it cannot present whole instead of showing half of it', () => {
+    const cases: Record<string, unknown>[] = [
+      rawQuestion({ state: 'pending' }),
+      rawQuestion({ delivery: 'later' }),
+      rawQuestion({ items: [] }),
+      rawQuestion({ items: [{ id: 'k', kind: 'secret', prompt: 'Your key?', options: [] }] }),
+      rawQuestion({ items: [{ id: 'k', kind: 'single', prompt: 'p', options: [{ id: 'a' }] }] }),
+      rawQuestion({ answers: [{ option_ids: ['a'] }] }),
+    ]
+    for (const raw of cases) expect(normalizeRunQuestion(raw)).toBeNull()
+    expect(normalizeRunQuestion(null)).toBeNull()
+    expect(normalizeRunQuestion([rawQuestion()])).toBeNull()
+  })
+
+  it('sends only the answers on the answer route, in snake_case, and reads the stored question back', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        question: rawQuestion({
+          state: 'answered',
+          answered_at: '2026-10-21T10:05:00+00:00',
+          answers: [{ item_id: 'scope', option_ids: ['main'], text: '' }],
+        }),
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const stored = await answerQuestion('q_1', {
+      answers: [{ itemId: 'scope', optionIds: ['main'], text: '' }],
+    })
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(String(url)).toMatch(/\/api\/v1\/orchestration\/questions\/q_1\/answer$/)
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(init.body as string)).toEqual({
+      answers: [{ item_id: 'scope', option_ids: ['main'], text: '' }],
+      skip: false,
+    })
+    expect(stored?.state).toBe('answered')
+    expect(stored?.answers).toEqual([{ itemId: 'scope', optionIds: ['main'], text: '' }])
+    expect(stored?.answeredAt).toBe('2026-10-21T10:05:00+00:00')
+  })
+
+  it('sends a skip with no answers', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ question: rawQuestion({ state: 'skipped', answers: [] }) }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const stored = await answerQuestion('q_1', { skip: true })
+
+    const [, skipInit] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(JSON.parse(skipInit.body as string)).toEqual({ answers: [], skip: true })
+    expect(stored?.state).toBe('skipped')
+  })
+
+  it('reads each typed refusal by its code and its status together', async () => {
+    const cases: Array<[number, string]> = [
+      [404, 'question_not_found'],
+      [410, 'question_expired'],
+      [409, 'question_already_answered'],
+      [422, 'invalid_answer'],
+    ]
+    for (const [status, code] of cases) {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue(
+          new Response(JSON.stringify({ error: { code, message: 'refused', details: {} } }), {
+            status,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+        ),
+      )
+      const failure = await answerQuestion('q_1', { skip: true }).catch((error: unknown) => error)
+      expect(runQuestionErrorCodeOf(failure)).toBe(code)
+    }
+  })
+
+  it('does not read a code under the wrong status, or any other failure, as a question error', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ error: { code: 'question_expired', message: 'x' } }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      ),
+    )
+    const wrongStatus = await answerQuestion('q_1', { skip: true }).catch((error: unknown) => error)
+    expect(runQuestionErrorCodeOf(wrongStatus)).toBeNull()
+    expect(runQuestionErrorCodeOf(new Error('question_expired'))).toBeNull()
+    expect(runQuestionErrorCodeOf(null)).toBeNull()
+    expect(runQuestionErrorCodeOf(new ApiError('x', 410, 'toString'))).toBeNull()
+  })
+
+  it('is refused typed for a zero-retention credential and the refusal reaches the caller untouched', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            error: { code: 'zdr_durable_mutation_forbidden', message: 'Not available under zero data retention.' },
+          }),
+          { status: 412, headers: { 'Content-Type': 'application/json' } },
+        ),
+      ),
+    )
+    const refused = await listRunQuestions('run_1').catch((error: unknown) => error)
+    expect(refused).toBeInstanceOf(ApiError)
+    expect((refused as ApiError).code).toBe('zdr_durable_mutation_forbidden')
+    expect(runQuestionErrorCodeOf(refused)).toBeNull()
+  })
+
+  it('has no caller yet: nothing under src but the client and its tests names the question calls', () => {
+    const here = dirname(fileURLToPath(import.meta.url))
+    const src = join(here, '..', '..')
+    const naming = sourceFiles(src)
+      .filter(([, text]) => /\b(listRunQuestions|answerQuestion)\b/.test(text))
+      .map(([path]) => path.slice(src.length + 1).replaceAll('\\', '/'))
+      .filter((path) => !path.endsWith('.test.ts'))
+    expect(naming).toEqual(['shared/api/orchestration-client.ts'])
   })
 })

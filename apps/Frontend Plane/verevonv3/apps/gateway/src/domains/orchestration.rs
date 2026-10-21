@@ -74,6 +74,10 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             get(list_approvals),
         )
         .route(
+            "/api/v1/orchestration/runs/{run_id}/questions",
+            get(list_run_questions),
+        )
+        .route(
             "/api/v1/orchestration/runs/{run_id}/proof-bundle",
             get(get_run_proof_bundle),
         )
@@ -93,6 +97,10 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route(
             "/api/v1/orchestration/approvals/{approval_id}/decide",
             post(decide_approval),
+        )
+        .route(
+            "/api/v1/orchestration/questions/{question_id}/answer",
+            post(answer_run_question),
         )
         .route(
             "/api/v1/orchestration/plans/{plan_id}/approve",
@@ -377,6 +385,26 @@ async fn list_approvals(
     .await
 }
 
+/// The caller's own questions for a run (build plan WS14 S3). A question is its
+/// own store, not an approval, and the answer route below grants nothing. The
+/// upstream answers with the typed `{ error: { code, message, details } }`
+/// envelope (`question_not_found` 404, `question_expired` 410, ...), which this
+/// proxy relays as it is.
+async fn list_run_questions(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(run_id): Path<String>,
+) -> impl IntoResponse {
+    mg_get(
+        &state,
+        &user,
+        &headers,
+        &format!("/v1/orchestration/runs/{}/questions", enc(&run_id)),
+    )
+    .await
+}
+
 /// The Verevon Proof Bundle for one run — the portable evidence record of what
 /// was authorized, executed, observed, and independently verified. Read-only;
 /// model-gateway scopes it to the caller's verified org.
@@ -514,6 +542,61 @@ async fn reject_plan(
         &headers,
         &format!("/v1/orchestration/plans/{}/reject", enc(&plan_id)),
         body,
+    )
+    .await
+}
+
+/// One answered item of a question. Only the item and what was chosen or written.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AnswerItemBody {
+    item_id: String,
+    #[serde(default)]
+    option_ids: Vec<String>,
+    #[serde(default)]
+    text: String,
+}
+
+/// The body an answer accepts (build plan WS14 S3): the per-item answers, or a skip. Nothing
+/// else crosses: the org and the owner are the verified credential's, and the message that
+/// carries an answer is recorded by the server, so a client field naming any of them is
+/// refused, not ignored.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AnswerQuestionBody {
+    #[serde(default)]
+    answers: Vec<AnswerItemBody>,
+    #[serde(default)]
+    skip: bool,
+}
+
+/// The upstream body, rebuilt from the accepted fields alone.
+fn answer_upstream_body(body: &AnswerQuestionBody) -> Value {
+    serde_json::json!({
+        "answers": body.answers.iter().map(|answer| serde_json::json!({
+            "item_id": answer.item_id,
+            "option_ids": answer.option_ids,
+            "text": answer.text,
+        })).collect::<Vec<_>>(),
+        "skip": body.skip,
+    })
+}
+
+/// Answer, or skip, one of the caller's questions once. An answer is information, never a
+/// grant: this route is not the approval decision route and carries no execution delegation.
+async fn answer_run_question(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(question_id): Path<String>,
+    Json(body): Json<AnswerQuestionBody>,
+) -> impl IntoResponse {
+    mg_post(
+        &state,
+        &user,
+        &headers,
+        &format!("/v1/orchestration/questions/{}/answer", enc(&question_id)),
+        answer_upstream_body(&body),
     )
     .await
 }
@@ -1668,5 +1751,108 @@ mod tests {
             .expect("the code is listed");
         assert!(!message.contains("continue the run"), "{message}");
         assert!(message.contains("Check the run"), "{message}");
+    }
+
+    // ── run questions (build plan WS14 S3) ───────────────────────────────────
+
+    #[test]
+    fn run_question_the_answer_body_refuses_a_field_the_client_does_not_own() {
+        use super::AnswerQuestionBody;
+        for body in [
+            json!({"skip": true, "org_id": "org-forged"}),
+            json!({"skip": true, "user_id": "user-forged"}),
+            json!({"skip": true, "answered_message_id": "msg-forged"}),
+            json!({"answers": [{"item_id": "scope", "user_id": "user-forged"}]}),
+        ] {
+            assert!(
+                serde_json::from_value::<AnswerQuestionBody>(body.clone()).is_err(),
+                "{body} must be refused, not ignored"
+            );
+        }
+    }
+
+    #[test]
+    fn run_question_the_upstream_answer_is_rebuilt_from_the_accepted_fields_alone() {
+        use super::{answer_upstream_body, AnswerQuestionBody};
+        let body: AnswerQuestionBody = serde_json::from_value(json!({
+            "answers": [{"item_id": "scope", "option_ids": ["main"]}, {"item_id": "notes", "text": "n/a"}],
+        }))
+        .expect("accepted");
+        assert_eq!(
+            answer_upstream_body(&body),
+            json!({
+                "answers": [
+                    {"item_id": "scope", "option_ids": ["main"], "text": ""},
+                    {"item_id": "notes", "option_ids": [], "text": "n/a"},
+                ],
+                "skip": false,
+            })
+        );
+        let skip: AnswerQuestionBody = serde_json::from_value(json!({"skip": true})).expect("accepted");
+        assert_eq!(answer_upstream_body(&skip), json!({"answers": [], "skip": true}));
+    }
+
+    /// The typed refusals of a question answer reach the browser as the upstream wrote them, with
+    /// their own status, and the call carries the session credential only: an answer is not a
+    /// decision, so no execution delegation is minted for it.
+    #[tokio::test]
+    async fn run_question_a_typed_refusal_is_relayed_as_it_is_without_an_execution_token() {
+        use wiremock::{
+            matchers::{header, method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let server = MockServer::start().await;
+        // Only the session token is mintable: a call that asked for an execution token would fail.
+        Mock::given(method("GET"))
+            .and(path("/api/session-core/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"token": "session-test-token"})))
+            .mount(&server)
+            .await;
+        let typed = json!({"error": {
+            "code": "question_expired",
+            "message": "The question has expired and can no longer be answered.",
+            "details": {},
+        }});
+        Mock::given(method("POST"))
+            .and(path("/v1/orchestration/questions/q-1/answer"))
+            .and(header("x-session-authorization", "Bearer session-test-token"))
+            .respond_with(ResponseTemplate::new(410).set_body_json(typed.clone()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut state = test_state(false);
+        state.auth_core_url = server.uri();
+        state.model_gateway_url = server.uri();
+        let (status, Json(body)) = super::mg_post(
+            &state,
+            &test_user(),
+            &HeaderMap::new(),
+            &format!("/v1/orchestration/questions/{}/answer", super::enc("q-1")),
+            json!({"answers": [], "skip": true}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::GONE);
+        assert_eq!(body, typed);
+    }
+
+    #[test]
+    fn run_question_an_answer_is_not_an_approval_decision() {
+        assert!(
+            !requires_execution_delegation("/v1/orchestration/questions/q-1/answer"),
+            "an answer is information: it carries no execution delegation"
+        );
+    }
+
+    #[test]
+    fn run_question_both_routes_are_registered_and_the_answer_route_is_a_post() {
+        let source = include_str!("orchestration.rs").replace("\r\n", "\n");
+        assert!(source.contains(
+            "\"/api/v1/orchestration/runs/{run_id}/questions\",\n            get(list_run_questions),"
+        ));
+        assert!(source.contains(
+            "\"/api/v1/orchestration/questions/{question_id}/answer\",\n            post(answer_run_question),"
+        ));
     }
 }

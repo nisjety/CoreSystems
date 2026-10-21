@@ -99,6 +99,20 @@ service OrchestrationCoreService {
   rpc AcknowledgeApprovalDelivery(AcknowledgeApprovalDeliveryRequest)
       returns (AcknowledgeApprovalDeliveryResponse);
 
+  // Ask the run's owner a question (build plan WS14 S3). A question is a pause
+  // kind with its own store, never an approval: an answer is information, not an
+  // authority grant, so it lives in `run_questions` and never reads as a grant.
+  // Refused for a zero-retention or waived run, and for a ZDR or waived caller.
+  rpc CreateRunQuestion(CreateRunQuestionRequest) returns (CreateRunQuestionResponse);
+
+  // List the caller's own questions for a run. Owner-only; an overdue
+  // question is reported EXPIRED.
+  rpc ListRunQuestions(ListRunQuestionsRequest) returns (ListRunQuestionsResponse);
+
+  // Answer (or skip) a requested question once. An identical retry is an
+  // idempotent replay; a different second answer is refused.
+  rpc AnswerRunQuestion(AnswerRunQuestionRequest) returns (AnswerRunQuestionResponse);
+
   // Fetch the subagent lineage for a thread.
   rpc GetSubagentLineage(GetSubagentLineageRequest) returns (GetSubagentLineageResponse);
 
@@ -1163,6 +1177,13 @@ message OrchestrationEvent {
     // loop resumed through the one continue route. Ids and the resumed segment
     // number only.
     RunResumed run_resumed = 25;
+
+    // Human-in-the-loop questions (build plan WS14 S3, tags 27 and 28 — additive;
+    // 26 is WS15's ToolRetryScheduled). Ids only: the question text and the
+    // answer are owner-only and are read through ListRunQuestions.
+    QuestionAsked question_asked = 27;
+    // A requested question was answered or skipped.
+    QuestionAnswered question_answered = 28;
   }
 
   message PlanTransitioned {
@@ -1355,6 +1376,26 @@ message OrchestrationEvent {
     // The segment the resumed loop runs as.
     uint32 resumed_segment = 2;
   }
+
+  // A question was put to the run's owner and now awaits an answer.
+  message QuestionAsked {
+    string run_id = 1;
+    // The question to read through ListRunQuestions.
+    string question_id = 2;
+    // `next_turn` or `resume`.
+    string delivery = 3;
+    // After this instant the question reads as EXPIRED.
+    google.protobuf.Timestamp expires_at = 4;
+  }
+
+  // A requested question was answered or skipped by its owner.
+  message QuestionAnswered {
+    string run_id = 1;
+    // The question that was answered or skipped.
+    string question_id = 2;
+    // The state it reached: ANSWERED or SKIPPED.
+    QuestionState state = 3;
+  }
 }
 
 // --- RecordOrchestrationEvent ---
@@ -1414,4 +1455,149 @@ message StartWorkflowResponse {
 
   // Canonical workflow type that was started, echoed from the allowlist.
   string workflow_type = 3;
+}
+
+// --- Run questions (build plan WS14 S3) ---
+
+// Lifecycle state of a run question.
+enum QuestionState {
+  // Not set.
+  QUESTION_STATE_UNSPECIFIED = 0;
+  // Put to the owner and awaiting an answer.
+  QUESTION_STATE_REQUESTED = 1;
+  // Answered by its owner.
+  QUESTION_STATE_ANSWERED = 2;
+  // Dismissed by its owner without an answer.
+  QUESTION_STATE_SKIPPED = 3;
+  // Not answered before `expires_at`.
+  QUESTION_STATE_EXPIRED = 4;
+  // Withdrawn because its run ended or was cancelled.
+  QUESTION_STATE_CANCELLED = 5;
+}
+
+// One choice of a single- or multi-select item.
+message QuestionOption {
+  // Stable within its item; `[a-z0-9_-]`, at most 64 characters.
+  string id = 1;
+  // Short text shown for the option.
+  string label = 2;
+  // Optional longer explanation of the option.
+  string description = 3;
+}
+
+// One thing asked. The bounds and the closed kind set are the shared
+// `mp_contracts::user_question` contract.
+message QuestionItem {
+  // Stable within its question; `[a-z0-9_-]`, at most 64 characters.
+  string id = 1;
+  // `single`, `multi` or `text`. A secret or credential kind does not exist.
+  string kind = 2;
+  // The question text shown to the owner.
+  string prompt = 3;
+  // Required (2 to 6) for `single` and `multi`; empty for `text`.
+  repeated QuestionOption options = 4;
+  // A `single` or `multi` item also accepts a free-text answer.
+  bool allow_other = 5;
+}
+
+// The owner's answer to one item.
+message QuestionAnswerItem {
+  // The `QuestionItem.id` this answers.
+  string item_id = 1;
+  // Chosen option ids: exactly one for `single`, one or more for `multi`
+  // (unless `text` carries the answer), none for `text`.
+  repeated string option_ids = 2;
+  // The free-text answer: the whole answer of a `text` item, or the "other"
+  // answer of an item that allows one.
+  string text = 3;
+}
+
+// A durable question put to a run's owner. Own table (`run_questions`), not an
+// approval: an answer is information and never an authority grant.
+message RunQuestion {
+  // Question identifier (ULID, prefix `q_`).
+  string id = 1;
+  string run_id = 2;
+  string thread_id = 3;
+  // The plan step or tool step that asked. Empty when none.
+  string step_id = 4;
+  string org_id = 5;
+  // The owner: the only principal who may list or answer it.
+  string user_id = 6;
+  // Where the question is in its lifecycle.
+  QuestionState state = 7;
+  // `next_turn` (the answer is the next user message) or `resume` (the answer
+  // continues the same run; not offered until the resume slice).
+  string delivery = 8;
+  // What was asked, in order.
+  repeated QuestionItem items = 9;
+  // When the question was put to the owner.
+  google.protobuf.Timestamp requested_at = 10;
+  // After this instant an unanswered question reads as EXPIRED.
+  google.protobuf.Timestamp expires_at = 11;
+  // Unset until answered or skipped.
+  google.protobuf.Timestamp answered_at = 12;
+  // The owner's answers, one per item. Empty until answered.
+  repeated QuestionAnswerItem answers = 13;
+  // The user message that carried the answer, when one did.
+  string answered_message_id = 14;
+}
+
+// Put a question to the run's owner. See `CreateRunQuestion`.
+message CreateRunQuestionRequest {
+  string run_id = 1;
+  // The step that asked. Empty for none.
+  string step_id = 2;
+  // Must equal the caller's verified org.
+  string org_id = 3;
+  // `next_turn`; empty means `next_turn`. `resume` is refused until it ships.
+  string delivery = 4;
+  // What to ask: the bounds are the `user_question` contract.
+  repeated QuestionItem items = 5;
+  // Requested lifetime in seconds. Clamped to the delivery's ceiling (24 h for
+  // `next_turn`); zero takes the ceiling.
+  uint32 expires_in_seconds = 6;
+  // A retry with the same key (per org) returns the stored question. Callers
+  // use `{run_id}:{step_id}`.
+  string idempotency_key = 7;
+}
+
+// The stored question (a retry with the same idempotency key returns it).
+message CreateRunQuestionResponse {
+  // The created or already stored question.
+  RunQuestion question = 1;
+}
+
+// List a run's questions for its owner. See `ListRunQuestions`.
+message ListRunQuestionsRequest {
+  string run_id = 1;
+  // Must equal the caller's verified org.
+  string org_id = 2;
+}
+
+// The run's questions for the calling owner.
+message ListRunQuestionsResponse {
+  // Oldest first.
+  repeated RunQuestion questions = 1;
+}
+
+// Answer or skip a requested question. See `AnswerRunQuestion`.
+message AnswerRunQuestionRequest {
+  // The question being answered (`RunQuestion.id`).
+  string question_id = 1;
+  // Must equal the caller's verified org.
+  string org_id = 2;
+  // One entry per item. Empty when `skip` is set.
+  repeated QuestionAnswerItem answers = 3;
+  // Dismiss the question without answering it.
+  bool skip = 4;
+  // The user message that carries the answer. Empty when the answer arrives on
+  // its own.
+  string answered_message_id = 5;
+}
+
+// The question after the answer was recorded (or replayed).
+message AnswerRunQuestionResponse {
+  // The answered or skipped question.
+  RunQuestion question = 1;
 }

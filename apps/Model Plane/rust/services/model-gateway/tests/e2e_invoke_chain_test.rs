@@ -2245,6 +2245,31 @@ impl mpv1::orchestration_core_service_server::OrchestrationCoreService for Scrip
         Err(Status::unimplemented(
             "get_approval_continuation not needed in test",
         ))
+    async fn create_run_question(
+        &self,
+        _: TReq<mpv1::CreateRunQuestionRequest>,
+    ) -> Result<Response<mpv1::CreateRunQuestionResponse>, Status> {
+        Err(Status::unimplemented(
+            "create_run_question not needed in test",
+        ))
+    }
+
+    async fn list_run_questions(
+        &self,
+        _: TReq<mpv1::ListRunQuestionsRequest>,
+    ) -> Result<Response<mpv1::ListRunQuestionsResponse>, Status> {
+        Err(Status::unimplemented("list_run_questions not needed in test"))
+    }
+
+    async fn answer_run_question(
+        &self,
+        _: TReq<mpv1::AnswerRunQuestionRequest>,
+    ) -> Result<Response<mpv1::AnswerRunQuestionResponse>, Status> {
+        Err(Status::unimplemented(
+            "answer_run_question not needed in test",
+        ))
+    }
+
     }
     async fn record_approval_continuation_started(
         &self,

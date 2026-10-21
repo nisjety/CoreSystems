@@ -18,8 +18,9 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::Utc;
 use metrics_exporter_prometheus::PrometheusHandle;
 use mp_contracts::model_plane::v1::{
-    AnalyzeDocumentRequest, AnalyzeImageRequest, AnalyzeLanguageRequest, Approval, ApprovalKind,
-    ApprovalProof, ApprovalState, BatchTranslateTextRequest, CancelRunRequest,
+    AnalyzeDocumentRequest, AnalyzeImageRequest, AnalyzeLanguageRequest, AnswerRunQuestionRequest,
+    Approval, ApprovalKind, ApprovalProof, ApprovalState, BatchTranslateTextRequest,
+    CancelRunRequest, ListRunQuestionsRequest, QuestionAnswerItem, QuestionState, RunQuestion,
     ContinuationExecution, CreateEmbeddingRequest, CreateRealtimeSessionRequest,
     CreateVideoGenerationJobRequest, DecideApprovalRequest, DetectTextLanguageRequest, Event,
     EventType, ExtractImageTextRequest, GenerateImageRequest, GetApprovalRequest, GetPlanRequest,
@@ -284,6 +285,10 @@ fn orchestration_routes() -> Router<AppState> {
             get(list_approvals),
         )
         .route(
+            "/v1/orchestration/runs/:run_id/questions",
+            get(list_run_questions),
+        )
+        .route(
             "/v1/orchestration/runs/:run_id/proof-bundle",
             get(get_run_proof_bundle),
         )
@@ -312,6 +317,10 @@ fn orchestration_routes() -> Router<AppState> {
         .route(
             "/v1/orchestration/approvals/:approval_id/decide",
             post(decide_approval),
+        )
+        .route(
+            "/v1/orchestration/questions/:question_id/answer",
+            post(answer_run_question),
         )
         .route("/v1/orchestration/runs/:run_id/cancel", post(cancel_run))
         .route("/v1/orchestration/runs/:run_id/resume", post(resume_run))
@@ -987,6 +996,178 @@ async fn list_approvals(
     Ok(Json(json!({
         "approvals": response.approvals.iter().map(approval_value).collect::<Vec<_>>(),
     })))
+}
+
+/// The caller's own questions for a run (build plan WS14 S3). A question is a durable store of its
+/// own, so a ZDR or waived caller is refused here and never reaches it; Session Core answers only
+/// for the run's owner and scopes the org to the verified credential.
+async fn list_run_questions(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path(run_id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    require_non_zdr_durable_mutation(&claims)?;
+    let response = state
+        .orchestration_client
+        .clone()
+        .list_run_questions(authenticated_session_request(
+            ListRunQuestionsRequest {
+                run_id,
+                org_id: claims.org_id.clone(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|e| question_status_to_http(&e))?
+        .into_inner();
+
+    Ok(Json(json!({
+        "questions": response.questions.iter().map(run_question_value).collect::<Vec<_>>(),
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct AnswerQuestionItemBody {
+    item_id: String,
+    #[serde(default)]
+    option_ids: Vec<String>,
+    #[serde(default)]
+    text: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct AnswerQuestionBody {
+    #[serde(default)]
+    answers: Vec<AnswerQuestionItemBody>,
+    #[serde(default)]
+    skip: bool,
+}
+
+/// Answer, or skip, one of the caller's questions once (build plan WS14 S3). An answer is
+/// information, never an authority grant: this route cannot decide an approval and shares no state
+/// with one. A ZDR or waived caller is refused before anything is read.
+async fn answer_run_question(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path(question_id): Path<String>,
+    Json(body): Json<AnswerQuestionBody>,
+) -> Result<Json<Value>, HttpJsonError> {
+    require_non_zdr_durable_mutation(&claims)?;
+    let response = state
+        .orchestration_client
+        .clone()
+        .answer_run_question(authenticated_session_request(
+            AnswerRunQuestionRequest {
+                question_id,
+                org_id: claims.org_id.clone(),
+                answers: body
+                    .answers
+                    .into_iter()
+                    .map(|answer| QuestionAnswerItem {
+                        item_id: answer.item_id,
+                        option_ids: answer.option_ids,
+                        text: answer.text,
+                    })
+                    .collect(),
+                skip: body.skip,
+                // The message that carries an answer is recorded by the server when the answer
+                // arrives on a turn; this route never takes it from the caller.
+                answered_message_id: String::new(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|e| question_status_to_http(&e))?
+        .into_inner();
+    let question = response
+        .question
+        .ok_or_else(|| question_error(StatusCode::NOT_FOUND, "question_not_found", json!({})))?;
+    Ok(Json(json!({ "question": run_question_value(&question) })))
+}
+
+/// A typed question error body: `{ "error": { "code", "message", "details" } }`.
+fn question_error(status: StatusCode, code: &str, details: Value) -> HttpJsonError {
+    let message = match code {
+        "question_not_found" => "The question was not found.",
+        "question_expired" => "The question has expired and can no longer be answered.",
+        "question_already_answered" => "The question was already answered.",
+        _ => "The answer does not fit the question.",
+    };
+    let mut body = json!({ "error": { "code": code, "message": message } });
+    body["error"]["details"] = details;
+    (status, Json(body))
+}
+
+/// Map Session Core's question statuses to their typed HTTP errors: `question_not_found` 404,
+/// `question_expired` 410, `question_already_answered` 409 and `invalid_answer` 422 (with the
+/// refused field and reason). Anything else, a typed ZDR refusal included, takes the general map.
+fn question_status_to_http(error: &tonic::Status) -> HttpJsonError {
+    match (error.code(), error.message()) {
+        (tonic::Code::NotFound, "question_not_found") => {
+            question_error(StatusCode::NOT_FOUND, "question_not_found", json!({}))
+        }
+        (tonic::Code::FailedPrecondition, "question_expired") => {
+            question_error(StatusCode::GONE, "question_expired", json!({}))
+        }
+        (tonic::Code::AlreadyExists, "question_already_answered") => {
+            question_error(StatusCode::CONFLICT, "question_already_answered", json!({}))
+        }
+        (tonic::Code::InvalidArgument, message) if message.starts_with("invalid_answer: ") => {
+            let problem = &message["invalid_answer: ".len()..];
+            let (field, reason) = problem.rsplit_once(": ").unwrap_or(("answers", problem));
+            question_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_answer",
+                json!({ "field": field, "reason": reason }),
+            )
+        }
+        _ => grpc_status_to_http(error),
+    }
+}
+
+fn question_state_token(state: i32) -> &'static str {
+    match QuestionState::try_from(state).unwrap_or(QuestionState::Unspecified) {
+        QuestionState::Requested => "requested",
+        QuestionState::Answered => "answered",
+        QuestionState::Skipped => "skipped",
+        QuestionState::Expired => "expired",
+        QuestionState::Cancelled => "cancelled",
+        QuestionState::Unspecified => "unspecified",
+    }
+}
+
+/// The question as the browser reads it. The owner's own org and user ids stay off the wire.
+fn run_question_value(question: &RunQuestion) -> Value {
+    json!({
+        "id": question.id,
+        "run_id": question.run_id,
+        "thread_id": question.thread_id,
+        "step_id": empty_to_null(&question.step_id),
+        "state": question_state_token(question.state),
+        "delivery": question.delivery,
+        "items": question.items.iter().map(|item| json!({
+            "id": item.id,
+            "kind": item.kind,
+            "prompt": item.prompt,
+            "options": item.options.iter().map(|option| json!({
+                "id": option.id,
+                "label": option.label,
+                "description": empty_to_null(&option.description),
+            })).collect::<Vec<_>>(),
+            "allow_other": item.allow_other,
+        })).collect::<Vec<_>>(),
+        "requested_at": question.requested_at.as_ref().map_or(Value::Null, prost_ts_to_rfc3339),
+        "expires_at": question.expires_at.as_ref().map_or(Value::Null, prost_ts_to_rfc3339),
+        "answered_at": question.answered_at.as_ref().map_or(Value::Null, prost_ts_to_rfc3339),
+        "answers": question.answers.iter().map(|answer| json!({
+            "item_id": answer.item_id,
+            "option_ids": answer.option_ids,
+            "text": answer.text,
+        })).collect::<Vec<_>>(),
+        "answered_message_id": empty_to_null(&question.answered_message_id),
+    })
 }
 
 /// The Verevon Proof Bundle for one run (roadmap P1.2). Read-only; the org is

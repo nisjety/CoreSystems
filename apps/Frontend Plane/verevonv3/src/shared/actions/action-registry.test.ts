@@ -231,4 +231,64 @@ describe('action registry', () => {
       editedSteps: [{ stepId: 's1', removed: true }],
     }).success).toBe(false)
   })
+
+  it('registers the question answer as a low-risk, owner-only action that never grants authority', () => {
+    const answer = getActionDescriptor('chat.answer_question')
+
+    expect(answer?.ownerPlane).toBe('model')
+    expect(answer?.risk).toBe('low')
+    expect(answer?.requiresApproval).toBe(false)
+    expect(isModelExecutableAction('chat.answer_question')).toBe(false)
+
+    const description = answer?.description ?? ''
+    expect(description).toContain('not an approval')
+    expect(description).toContain('never an authority grant')
+    expect(description).toContain('question_already_answered')
+    expect(description).toContain('question_expired')
+    expect(description).toContain('Never model-executable')
+  })
+
+  it('takes an answer for the question, or a skip, and nothing a client does not own', () => {
+    const answer = getActionDescriptor('chat.answer_question')
+    const one = { itemId: 'scope', optionIds: ['main'] }
+
+    expect(answer?.inputSchema.safeParse({ questionId: 'q_1', answers: [one] }).success).toBe(true)
+    expect(answer?.inputSchema.safeParse({ questionId: 'q_1', answers: [{ itemId: 'notes', text: 'n/a' }] }).success).toBe(true)
+    expect(answer?.inputSchema.safeParse({ questionId: 'q_1', skip: true }).success).toBe(true)
+
+    // Neither nothing, nor a skip that also answers, nor an answer that skips nothing.
+    expect(answer?.inputSchema.safeParse({ questionId: 'q_1' }).success).toBe(false)
+    expect(answer?.inputSchema.safeParse({ questionId: 'q_1', skip: true, answers: [one] }).success).toBe(false)
+    expect(answer?.inputSchema.safeParse({ questionId: 'q_1', skip: false, answers: [] }).success).toBe(false)
+    expect(answer?.inputSchema.safeParse({ questionId: '', skip: true }).success).toBe(false)
+
+    // The org, the owner and the carrying message are the server's, never a client input.
+    for (const forged of [{ orgId: 'org_x' }, { userId: 'user_x' }, { answeredMessageId: 'msg_x' }]) {
+      expect(answer?.inputSchema.safeParse({ questionId: 'q_1', skip: true, ...forged }).success).toBe(false)
+    }
+    expect(answer?.inputSchema.safeParse({
+      questionId: 'q_1',
+      answers: [{ itemId: 'scope', optionIds: ['main'], userId: 'user_x' }],
+    }).success).toBe(false)
+  })
+
+  it('holds the answer to the shared question bounds', () => {
+    const answer = getActionDescriptor('chat.answer_question')
+    const item = (n: number) => ({ itemId: `i${n}`, optionIds: ['a'] })
+
+    expect(answer?.inputSchema.safeParse({ questionId: 'q_1', answers: [1, 2, 3, 4].map(item) }).success).toBe(true)
+    expect(answer?.inputSchema.safeParse({ questionId: 'q_1', answers: [1, 2, 3, 4, 5].map(item) }).success).toBe(false)
+    expect(answer?.inputSchema.safeParse({
+      questionId: 'q_1',
+      answers: [{ itemId: 'i', optionIds: ['a', 'b', 'c', 'd', 'e', 'f', 'g'] }],
+    }).success).toBe(false)
+    expect(answer?.inputSchema.safeParse({
+      questionId: 'q_1',
+      answers: [{ itemId: 'notes', text: 'x'.repeat(2000) }],
+    }).success).toBe(true)
+    expect(answer?.inputSchema.safeParse({
+      questionId: 'q_1',
+      answers: [{ itemId: 'notes', text: 'x'.repeat(2001) }],
+    }).success).toBe(false)
+  })
 })

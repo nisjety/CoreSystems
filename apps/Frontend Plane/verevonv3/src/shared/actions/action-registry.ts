@@ -1078,6 +1078,31 @@ const chatRunContinueInput = z.object({
   claimToken: z.string().min(1),
 })
 
+// The person's answer to a question a run put to them (build plan WS14 S3), or a skip. A
+// question is its own store with its own owner-only answer, never an approval: an answer is
+// information and carries no authority, so the entry is low risk and shares nothing with the
+// approval decisions. Strict, so a client cannot name an org, a user or the message that
+// carries the answer: those are the server's. The bounds mirror the shared contract
+// (`mp_contracts::user_question`): 4 items, 6 options, 2000 characters.
+const chatAnswerQuestionAnswer = z
+  .object({
+    itemId: z.string().min(1).max(64),
+    optionIds: z.array(z.string().min(1).max(64)).max(6).optional(),
+    text: z.string().max(2000).optional(),
+  })
+  .strict()
+
+const chatAnswerQuestionInput = z
+  .object({
+    questionId: z.string().min(1),
+    answers: z.array(chatAnswerQuestionAnswer).max(4).optional(),
+    skip: z.boolean().optional(),
+  })
+  .strict()
+  .refine((input) => (input.skip === true ? (input.answers ?? []).length === 0 : (input.answers ?? []).length > 0), {
+    message: 'A skip carries no answers, and an answer carries at least one.',
+  })
+
 const chatClearThreadsInput = z.object({})
 
 const chatDeleteThreadInput = z.object({
@@ -2916,6 +2941,17 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: false,
     inputSchema: chatRunContinueInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.answer_question',
+    label: 'Answer a run question',
+    description: 'Answer, or skip, a question a run put to the person (a run_questions row, not an approval). The owner records one answer per question: an identical retry is accepted again, a different second answer is refused 409 question_already_answered, a question past its time is refused 410 question_expired, another person\'s question is 404 question_not_found, and an answer that does not fit the question is 422 invalid_answer with the refused field and reason. An answer is information, never an authority grant, and it cannot approve a tool call or a plan. Refused typed under zero data retention and for a waived credential, since a zero-retention or waived run holds no question. Never model-executable: the answer is the person\'s own.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: chatAnswerQuestionInput,
     outputSchema: envelopeStatusOutput,
   },
   {

@@ -1,4 +1,4 @@
-import { requestJson } from './http'
+import { ApiError, requestJson } from './http'
 import { readSseStream, type SseEvent } from './sse'
 
 // The closed refusal vocabulary of `continueRun` lives in the action contract; the
@@ -436,4 +436,199 @@ export async function getLineage(threadId: string, signal?: AbortSignal): Promis
     `/api/v1/orchestration/threads/${encodeURIComponent(threadId)}/lineage`,
     { signal },
   )
+}
+
+// ── Run questions (build plan WS14 S3) ───────────────────────────────────────
+// A question a run put to the person. It is its own store (`run_questions`), never an
+// approval: an answer is information and grants nothing. Dark until a later slice creates
+// questions, so nothing calls these yet.
+
+export type RunQuestionState = 'requested' | 'answered' | 'skipped' | 'expired' | 'cancelled'
+
+/** The closed item kinds. There is no kind for a secret or a credential. */
+export type QuestionItemKind = 'single' | 'multi' | 'text'
+
+export type QuestionOption = { id: string; label: string; description?: string }
+
+export type QuestionItem = {
+  id: string
+  kind: QuestionItemKind
+  prompt: string
+  /** Two to six for `single` and `multi`; empty for `text`. */
+  options: QuestionOption[]
+  /** A `single` or `multi` item also accepts a free-text answer. */
+  allowOther: boolean
+}
+
+/** The person's answer to one item. */
+export type QuestionAnswer = { itemId: string; optionIds: string[]; text: string }
+
+export type RunQuestion = {
+  id: string
+  runId: string
+  threadId: string
+  stepId?: string
+  state: RunQuestionState
+  /** `next_turn`: the answer is the next message. `resume`: it continues the same run. */
+  delivery: 'next_turn' | 'resume'
+  items: QuestionItem[]
+  requestedAt?: string
+  expiresAt?: string
+  answeredAt?: string
+  answers: QuestionAnswer[]
+  answeredMessageId?: string
+}
+
+const RUN_QUESTION_STATES: readonly RunQuestionState[] = [
+  'requested',
+  'answered',
+  'skipped',
+  'expired',
+  'cancelled',
+]
+const QUESTION_ITEM_KINDS: readonly QuestionItemKind[] = ['single', 'multi', 'text']
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string' && item.length > 0)
+    : []
+}
+
+function normalizeQuestionItem(raw: unknown): QuestionItem | null {
+  if (!isRecord(raw)) return null
+  const id = str(raw.id)
+  const prompt = str(raw.prompt)
+  const kind = QUESTION_ITEM_KINDS.find((candidate) => candidate === raw.kind)
+  if (!id || !prompt || !kind) return null
+  const options: QuestionOption[] = []
+  for (const rawOption of Array.isArray(raw.options) ? raw.options : []) {
+    if (!isRecord(rawOption)) return null
+    const optionId = str(rawOption.id)
+    const label = str(rawOption.label)
+    if (!optionId || !label) return null
+    const description = str(rawOption.description)
+    options.push(description ? { id: optionId, label, description } : { id: optionId, label })
+  }
+  return { id, kind, prompt, options, allowOther: raw.allow_other === true }
+}
+
+/**
+ * Normalize a model-gateway question (snake_case) to our camelCase shape. A question this
+ * client cannot render whole (an unknown state, an item kind it does not know, a malformed
+ * option) is dropped rather than shown half: the person is never asked something the card
+ * cannot present.
+ */
+export function normalizeRunQuestion(raw: unknown): RunQuestion | null {
+  if (!isRecord(raw)) return null
+  const id = str(raw.id)
+  const runId = str(raw.run_id)
+  const threadId = str(raw.thread_id)
+  const state = RUN_QUESTION_STATES.find((candidate) => candidate === raw.state)
+  const delivery = raw.delivery === 'next_turn' || raw.delivery === 'resume' ? raw.delivery : null
+  if (!id || !runId || !threadId || !state || !delivery || !Array.isArray(raw.items)) return null
+  const items: QuestionItem[] = []
+  for (const rawItem of raw.items) {
+    const item = normalizeQuestionItem(rawItem)
+    if (!item) return null
+    items.push(item)
+  }
+  if (items.length === 0) return null
+  const answers: QuestionAnswer[] = []
+  for (const rawAnswer of Array.isArray(raw.answers) ? raw.answers : []) {
+    if (!isRecord(rawAnswer)) return null
+    const itemId = str(rawAnswer.item_id)
+    if (!itemId) return null
+    answers.push({
+      itemId,
+      optionIds: stringList(rawAnswer.option_ids),
+      text: typeof rawAnswer.text === 'string' ? rawAnswer.text : '',
+    })
+  }
+  const question: RunQuestion = { id, runId, threadId, state, delivery, items, answers }
+  const stepId = str(raw.step_id)
+  if (stepId) question.stepId = stepId
+  const requestedAt = str(raw.requested_at)
+  if (requestedAt) question.requestedAt = requestedAt
+  const expiresAt = str(raw.expires_at)
+  if (expiresAt) question.expiresAt = expiresAt
+  const answeredAt = str(raw.answered_at)
+  if (answeredAt) question.answeredAt = answeredAt
+  const answeredMessageId = str(raw.answered_message_id)
+  if (answeredMessageId) question.answeredMessageId = answeredMessageId
+  return question
+}
+
+/**
+ * List the signed-in person's own questions for a run, oldest first. Another person's
+ * questions are never returned. Rejects with the typed `ApiError`: a zero-retention or waived
+ * credential is refused (`zdr_durable_mutation_forbidden`, `zdr_waiver_route_mismatch`).
+ */
+export async function listRunQuestions(runId: string, signal?: AbortSignal): Promise<RunQuestion[]> {
+  const payload = await requestJson<{ questions?: unknown[] }>(
+    `/api/v1/orchestration/runs/${encodeURIComponent(runId)}/questions`,
+    { signal },
+  )
+  const list = Array.isArray(payload.questions) ? payload.questions : []
+  return list.map(normalizeRunQuestion).filter((question): question is RunQuestion => question !== null)
+}
+
+/** What the person gave: an answer for every item, or a skip. */
+export type RunQuestionResponse = { answers: QuestionAnswer[] } | { skip: true }
+
+/**
+ * The closed set of codes an answer can be refused with, each under its own status: 404
+ * `question_not_found` (another person's question answers the same), 410 `question_expired`,
+ * 409 `question_already_answered`, 422 `invalid_answer`. The transport error carries the code
+ * and message only, so the refused field and reason stay in the response body. A zero-retention
+ * refusal is read with the existing ZDR refusal guards.
+ */
+export const RUN_QUESTION_ERRORS = {
+  question_not_found: 404,
+  question_expired: 410,
+  question_already_answered: 409,
+  invalid_answer: 422,
+} as const
+
+export type RunQuestionErrorCode = keyof typeof RUN_QUESTION_ERRORS
+
+/** The typed question error a rejection carries, or null for any other failure. */
+export function runQuestionErrorCodeOf(error: unknown): RunQuestionErrorCode | null {
+  if (!(error instanceof ApiError)) return null
+  const { code, status } = error
+  if (code === null || !Object.hasOwn(RUN_QUESTION_ERRORS, code)) return null
+  const known = code as RunQuestionErrorCode
+  return RUN_QUESTION_ERRORS[known] === status ? known : null
+}
+
+/**
+ * Answer, or skip, one question. An identical retry is accepted again and returns the stored
+ * question; a different second answer is refused (see `RUN_QUESTION_ERRORS`). Only the answers
+ * or the skip go on the wire: the org, the owner and the message that carries the answer are
+ * the server's.
+ */
+export async function answerQuestion(
+  questionId: string,
+  response: RunQuestionResponse,
+  signal?: AbortSignal,
+): Promise<RunQuestion | null> {
+  const body =
+    'skip' in response
+      ? { answers: [], skip: true }
+      : {
+          answers: response.answers.map((answer) => ({
+            item_id: answer.itemId,
+            option_ids: answer.optionIds,
+            text: answer.text,
+          })),
+          skip: false,
+        }
+  const payload = await requestJson<{ question?: unknown }>(
+    `/api/v1/orchestration/questions/${encodeURIComponent(questionId)}/answer`,
+    { method: 'POST', body: JSON.stringify(body), signal },
+  )
+  return normalizeRunQuestion(payload.question)
 }

@@ -44,6 +44,11 @@ pub enum ShimError {
     /// The envelope did not include an event payload.
     #[error("orchestration event envelope missing payload")]
     MissingEvent,
+    /// The event is a wire event with no domain counterpart: the question events
+    /// (build plan WS14 S3) are written by session-core's question store and travel
+    /// only on the run's gRPC stream, never through this mirror.
+    #[error("orchestration event has no domain mapping")]
+    UnsupportedEvent,
     /// The envelope timestamp was not a valid `chrono::DateTime<Utc>`.
     #[error("orchestration event timestamp out of range")]
     InvalidTimestamp,
@@ -628,6 +633,9 @@ impl TryFrom<ProtoOrchestrationEvent> for OrchestrationEvent {
                 resumed_segment: p.resumed_segment,
                 at,
             },
+            ProtoEvent::QuestionAsked(_) | ProtoEvent::QuestionAnswered(_) => {
+                return Err(ShimError::UnsupportedEvent);
+            }
         })
     }
 }
@@ -644,6 +652,25 @@ mod tests {
         let pb: ProtoOrchestrationEvent = ev.clone().into();
         let back: OrchestrationEvent = pb.try_into().expect("decode");
         assert_eq!(*ev, back);
+    }
+
+    #[test]
+    fn the_question_events_have_no_domain_mapping() {
+        use mp_contracts::model_plane::v1::orchestration_event::{QuestionAnswered, QuestionAsked};
+        for event in [
+            ProtoEvent::QuestionAsked(QuestionAsked::default()),
+            ProtoEvent::QuestionAnswered(QuestionAnswered::default()),
+        ] {
+            let pb = ProtoOrchestrationEvent {
+                at: Some(ts_from(fixture_at())),
+                event_id: String::new(),
+                event: Some(event),
+            };
+            assert_eq!(
+                OrchestrationEvent::try_from(pb),
+                Err(ShimError::UnsupportedEvent)
+            );
+        }
     }
 
     #[test]

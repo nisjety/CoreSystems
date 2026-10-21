@@ -632,6 +632,34 @@ mod tests {
             Err(Status::unimplemented("consume_approval not needed in test"))
         }
 
+        async fn create_run_question(
+            &self,
+            _: TonicRequest<mp_contracts::model_plane::v1::CreateRunQuestionRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::CreateRunQuestionResponse>, Status>
+        {
+            Err(Status::unimplemented(
+                "create_run_question not needed in test",
+            ))
+        }
+
+        async fn list_run_questions(
+            &self,
+            _: TonicRequest<mp_contracts::model_plane::v1::ListRunQuestionsRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::ListRunQuestionsResponse>, Status>
+        {
+            Err(Status::unimplemented("list_run_questions not needed in test"))
+        }
+
+        async fn answer_run_question(
+            &self,
+            _: TonicRequest<mp_contracts::model_plane::v1::AnswerRunQuestionRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::AnswerRunQuestionResponse>, Status>
+        {
+            Err(Status::unimplemented(
+                "answer_run_question not needed in test",
+            ))
+        }
+
         async fn decide_approval(
             &self,
             request: TonicRequest<DecideApprovalRequest>,

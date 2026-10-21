@@ -13,8 +13,11 @@ use mp_contracts::model_plane::v1::{
     orchestration_event,
     run_service_client::RunServiceClient,
     run_service_server::{RunService, RunServiceServer},
-    AcknowledgeApprovalDeliveryRequest, AcknowledgeApprovalDeliveryResponse, Approval,
-    ApprovalState, AttachSubagentRequest, AttachSubagentResponse, CancelRunRequest,
+    AcknowledgeApprovalDeliveryRequest, AcknowledgeApprovalDeliveryResponse,
+    AnswerRunQuestionRequest, AnswerRunQuestionResponse, Approval, ApprovalState,
+    AttachSubagentRequest, AttachSubagentResponse, CancelRunRequest,
+    CreateRunQuestionRequest, CreateRunQuestionResponse, ListRunQuestionsRequest,
+    ListRunQuestionsResponse, QuestionItem, QuestionOption, QuestionState, RunQuestion,
     CancelRunResponse, ClaimApprovalDeliveriesRequest, ClaimApprovalDeliveriesResponse,
     ConsumeApprovalRequest, ConsumeApprovalResponse,
     CreateApprovalRequest, CreateApprovalResponse, DecideApprovalRequest, DecideApprovalResponse,
@@ -203,6 +206,12 @@ struct CaptureState {
     decide_approval: CapturedTransition,
     lineage_thread_id: Arc<Mutex<Option<String>>>,
     stream_run_id: Arc<Mutex<Option<String>>>,
+    /// `(run_id, org_id)` of the last `ListRunQuestions` call.
+    list_questions: Arc<Mutex<Option<(String, String)>>>,
+    /// The last `AnswerRunQuestion` request.
+    answer_question: Arc<Mutex<Option<AnswerRunQuestionRequest>>>,
+    /// Every question RPC that reached the double, to prove a refused caller never did.
+    question_calls: Arc<AtomicUsize>,
 }
 
 struct MockOrchestration {
@@ -696,6 +705,57 @@ impl OrchestrationCoreService for MockOrchestration {
         ))
     }
 
+    async fn create_run_question(
+        &self,
+        _: TonicRequest<CreateRunQuestionRequest>,
+    ) -> Result<Response<CreateRunQuestionResponse>, Status> {
+        Err(Status::unimplemented(
+            "the gateway serves no question create route",
+        ))
+    }
+
+    async fn list_run_questions(
+        &self,
+        request: TonicRequest<ListRunQuestionsRequest>,
+    ) -> Result<Response<ListRunQuestionsResponse>, Status> {
+        self.state.question_calls.fetch_add(1, Ordering::SeqCst);
+        let request = request.into_inner();
+        *self.state.list_questions.lock().unwrap() =
+            Some((request.run_id.clone(), request.org_id.clone()));
+        Ok(Response::new(ListRunQuestionsResponse {
+            questions: vec![scripted_question("q-1", &request.run_id, QuestionState::Requested)],
+        }))
+    }
+
+    /// The question id picks the outcome: each typed refusal Session Core can give.
+    async fn answer_run_question(
+        &self,
+        request: TonicRequest<AnswerRunQuestionRequest>,
+    ) -> Result<Response<AnswerRunQuestionResponse>, Status> {
+        self.state.question_calls.fetch_add(1, Ordering::SeqCst);
+        let request = request.into_inner();
+        *self.state.answer_question.lock().unwrap() = Some(request.clone());
+        match request.question_id.as_str() {
+            "q-missing" => Err(Status::not_found("question_not_found")),
+            "q-expired" => Err(Status::failed_precondition("question_expired")),
+            "q-done" => Err(Status::already_exists("question_already_answered")),
+            "q-bad" => Err(Status::invalid_argument(
+                "invalid_answer: answers[0].option_ids[0]: unknown_option",
+            )),
+            _ => Ok(Response::new(AnswerRunQuestionResponse {
+                question: Some(scripted_question(
+                    &request.question_id,
+                    "run-1",
+                    if request.skip {
+                        QuestionState::Skipped
+                    } else {
+                        QuestionState::Answered
+                    },
+                )),
+            })),
+        }
+    }
+
     async fn record_orchestration_event(
         &self,
         _: TonicRequest<mp_contracts::model_plane::v1::RecordOrchestrationEventRequest>,
@@ -728,6 +788,49 @@ impl OrchestrationCoreService for MockOrchestration {
                 )),
             },
         )]))))
+    }
+}
+
+/// A stored question as Session Core would hand it back: one single-choice item.
+fn scripted_question(id: &str, run_id: &str, state: QuestionState) -> RunQuestion {
+    RunQuestion {
+        id: id.into(),
+        run_id: run_id.into(),
+        thread_id: "thread-1".into(),
+        step_id: "step-1".into(),
+        org_id: "org-1".into(),
+        user_id: "user-1".into(),
+        state: state as i32,
+        delivery: "next_turn".into(),
+        items: vec![QuestionItem {
+            id: "scope".into(),
+            kind: "single".into(),
+            prompt: "Which branch?".into(),
+            options: vec![
+                QuestionOption {
+                    id: "main".into(),
+                    label: "main".into(),
+                    description: String::new(),
+                },
+                QuestionOption {
+                    id: "feature".into(),
+                    label: "A feature branch".into(),
+                    description: "New work".into(),
+                },
+            ],
+            allow_other: false,
+        }],
+        requested_at: Some(prost_types::Timestamp {
+            seconds: 1_790_000_000,
+            nanos: 0,
+        }),
+        expires_at: Some(prost_types::Timestamp {
+            seconds: 1_790_086_400,
+            nanos: 0,
+        }),
+        answered_at: None,
+        answers: Vec::new(),
+        answered_message_id: String::new(),
     }
 }
 
@@ -1360,6 +1463,24 @@ impl OrchestrationCoreService for OrgScopedMock {
         &self,
         _: TonicRequest<StreamRunEventsRequest>,
     ) -> Result<Response<Self::StreamRunEventsStream>, Status> {
+        Err(Status::unimplemented("not needed in this test"))
+    }
+    async fn create_run_question(
+        &self,
+        _: TonicRequest<CreateRunQuestionRequest>,
+    ) -> Result<Response<CreateRunQuestionResponse>, Status> {
+        Err(Status::unimplemented("not needed in this test"))
+    }
+    async fn list_run_questions(
+        &self,
+        _: TonicRequest<ListRunQuestionsRequest>,
+    ) -> Result<Response<ListRunQuestionsResponse>, Status> {
+        Err(Status::unimplemented("not needed in this test"))
+    }
+    async fn answer_run_question(
+        &self,
+        _: TonicRequest<AnswerRunQuestionRequest>,
+    ) -> Result<Response<AnswerRunQuestionResponse>, Status> {
         Err(Status::unimplemented("not needed in this test"))
     }
     async fn record_orchestration_event(
@@ -2154,5 +2275,291 @@ async fn approving_without_a_structured_plan_is_still_the_plain_rung_grant() {
     assert_eq!(
         harness.plan_mode.granted_rung("org-owner", "thread-1"),
         Some(mp_contracts::model_plane::v1::AutonomyRung::WorkspaceWrite)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// WS14 S3: run questions. Dark: no producer exists yet, so these routes read and
+// answer questions that a later slice (or a direct RPC) creates. A question is its
+// own store, never an approval: an answer cannot grant authority.
+// ---------------------------------------------------------------------------
+
+struct QuestionHarness {
+    app: axum::Router,
+    capture: CaptureState,
+}
+
+async fn question_harness() -> QuestionHarness {
+    let (mock, capture) = MockOrchestration::new();
+    let app = build_router(make_state(spawn_orchestration_mock(mock).await), None);
+    QuestionHarness { app, capture }
+}
+
+async fn question_call(
+    harness: &QuestionHarness,
+    method: &str,
+    uri: &str,
+    tokens: &UserTokens,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, serde_json::Value) {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(AUTHORIZATION, format!("Bearer {}", tokens.model))
+        .header(
+            "x-session-authorization",
+            format!("Bearer {}", tokens.session),
+        );
+    let body = match body {
+        Some(body) => {
+            builder = builder.header("content-type", "application/json");
+            Body::from(body.to_string())
+        }
+        None => Body::empty(),
+    };
+    let response = harness
+        .app
+        .clone()
+        .oneshot(builder.body(body).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json = serde_json::from_slice(&bytes)
+        .unwrap_or_else(|_| serde_json::Value::String(String::from_utf8_lossy(&bytes).into_owned()));
+    (status, json)
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn run_question_the_list_route_scopes_the_org_to_the_callers_credential() {
+    let _auth = AuthFixture::start().await;
+    let harness = question_harness().await;
+    let tokens = AuthFixture::user_tokens("org-1", "user-1");
+    let (status, body) = question_call(
+        &harness,
+        "GET",
+        "/v1/orchestration/runs/run-9/questions?org_id=org-forged",
+        &tokens,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        *harness.capture.list_questions.lock().unwrap(),
+        Some(("run-9".into(), "org-1".into())),
+        "the org is the verified claim's, never a query value"
+    );
+    let question = &body["questions"][0];
+    assert_eq!(question["id"], "q-1");
+    assert_eq!(question["state"], "requested");
+    assert_eq!(question["delivery"], "next_turn");
+    assert_eq!(question["items"][0]["kind"], "single");
+    assert_eq!(question["items"][0]["options"][1]["description"], "New work");
+    assert_eq!(question["items"][0]["options"][0]["description"], serde_json::Value::Null);
+    assert_eq!(question["answered_at"], serde_json::Value::Null);
+    assert!(
+        question.get("org_id").is_none() && question.get("user_id").is_none(),
+        "the owner's own ids stay off the wire"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn run_question_an_answer_is_forwarded_with_the_callers_org_and_returns_the_question() {
+    let _auth = AuthFixture::start().await;
+    let harness = question_harness().await;
+    let tokens = AuthFixture::user_tokens("org-1", "user-1");
+    let (status, body) = question_call(
+        &harness,
+        "POST",
+        "/v1/orchestration/questions/q-7/answer",
+        &tokens,
+        Some(serde_json::json!({
+            "answers": [{"item_id": "scope", "option_ids": ["main"]}],
+            "org_id": "org-forged",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["question"]["id"], "q-7");
+    assert_eq!(body["question"]["state"], "answered");
+    let sent = harness
+        .capture
+        .answer_question
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the answer reached Session Core");
+    assert_eq!(sent.question_id, "q-7");
+    assert_eq!(sent.org_id, "org-1", "the org is the verified claim's");
+    assert!(!sent.skip);
+    assert_eq!(sent.answers.len(), 1);
+    assert_eq!(sent.answers[0].item_id, "scope");
+    assert_eq!(sent.answers[0].option_ids, vec!["main".to_owned()]);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn run_question_a_skip_is_forwarded_as_a_skip() {
+    let _auth = AuthFixture::start().await;
+    let harness = question_harness().await;
+    let tokens = AuthFixture::user_tokens("org-1", "user-1");
+    let (status, body) = question_call(
+        &harness,
+        "POST",
+        "/v1/orchestration/questions/q-7/answer",
+        &tokens,
+        Some(serde_json::json!({"skip": true, "answered_message_id": "msg-forged"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["question"]["state"], "skipped");
+    let sent = harness.capture.answer_question.lock().unwrap().clone().unwrap();
+    assert!(sent.skip && sent.answers.is_empty());
+    assert_eq!(
+        sent.answered_message_id, "",
+        "the message that carries an answer is never taken from the caller"
+    );
+}
+
+/// Each refusal Session Core can give has its own status and a typed body.
+#[tokio::test]
+#[serial_test::serial]
+async fn run_question_each_refusal_maps_to_its_typed_error() {
+    let _auth = AuthFixture::start().await;
+    let harness = question_harness().await;
+    let tokens = AuthFixture::user_tokens("org-1", "user-1");
+    for (question, status, code) in [
+        ("q-missing", StatusCode::NOT_FOUND, "question_not_found"),
+        ("q-expired", StatusCode::GONE, "question_expired"),
+        ("q-done", StatusCode::CONFLICT, "question_already_answered"),
+        ("q-bad", StatusCode::UNPROCESSABLE_ENTITY, "invalid_answer"),
+    ] {
+        let (got, body) = question_call(
+            &harness,
+            "POST",
+            &format!("/v1/orchestration/questions/{question}/answer"),
+            &tokens,
+            Some(serde_json::json!({"skip": true})),
+        )
+        .await;
+        assert_eq!(got, status, "{question}: {body}");
+        assert_eq!(body["error"]["code"], code, "{question}: {body}");
+        assert!(
+            body["error"]["message"].as_str().is_some_and(|m| !m.is_empty()),
+            "{question}: a message rides every typed error"
+        );
+        assert!(body["error"]["details"].is_object(), "{question}: {body}");
+    }
+    let (_, body) = question_call(
+        &harness,
+        "POST",
+        "/v1/orchestration/questions/q-bad/answer",
+        &tokens,
+        Some(serde_json::json!({"skip": true})),
+    )
+    .await;
+    assert_eq!(
+        body["error"]["details"],
+        serde_json::json!({"field": "answers[0].option_ids[0]", "reason": "unknown_option"}),
+        "an invalid answer names the field and the reason"
+    );
+}
+
+/// A ZDR credential is refused with the typed durable-mutation refusal before Session Core is
+/// asked anything, on both routes.
+#[tokio::test]
+#[serial_test::serial]
+async fn run_question_a_zdr_credential_is_refused_before_anything_is_asked() {
+    let _auth = AuthFixture::start().await;
+    let harness = question_harness().await;
+    let tokens = user_tokens_with_retention("org-1", "user-1", true, true, None);
+    let (status, body) = question_call(
+        &harness,
+        "GET",
+        "/v1/orchestration/runs/run-1/questions",
+        &tokens,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{body}");
+    assert_eq!(body["error"]["code"], "zdr_durable_mutation_forbidden", "{body}");
+    let (status, body) = question_call(
+        &harness,
+        "POST",
+        "/v1/orchestration/questions/q-1/answer",
+        &tokens,
+        Some(serde_json::json!({"skip": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{body}");
+    assert_eq!(body["error"]["code"], "zdr_durable_mutation_forbidden", "{body}");
+    assert_eq!(
+        harness.capture.question_calls.load(Ordering::SeqCst),
+        0,
+        "no question RPC was made for a ZDR credential"
+    );
+}
+
+/// A waived run counts as ZDR for every new durable store (DEC-32), so a waived credential is refused
+/// too, as a route mismatch, and Session Core is never asked.
+#[tokio::test]
+#[serial_test::serial]
+async fn run_question_a_waived_credential_is_refused_before_anything_is_asked() {
+    let _auth = AuthFixture::start().await;
+    let harness = question_harness().await;
+    let waiver = serde_json::json!({
+        "version": 1,
+        "provider": mp_contracts::agentic_subscription::PROVIDER_ID,
+        "connection": "conn-1",
+    });
+    let tokens = user_tokens_with_retention("org-1", "user-1", false, true, Some(waiver));
+    let (status, body) = question_call(
+        &harness,
+        "GET",
+        "/v1/orchestration/runs/run-1/questions",
+        &tokens,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"]["code"], "zdr_waiver_route_mismatch", "{body}");
+    let (status, body) = question_call(
+        &harness,
+        "POST",
+        "/v1/orchestration/questions/q-1/answer",
+        &tokens,
+        Some(serde_json::json!({"skip": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(
+        harness.capture.question_calls.load(Ordering::SeqCst),
+        0,
+        "no question RPC was made for a waived credential"
+    );
+}
+
+/// An answer is information, never a grant: the answer route shares no path with an approval, and
+/// answering a question decides nothing.
+#[tokio::test]
+#[serial_test::serial]
+async fn run_question_an_answer_never_touches_an_approval() {
+    let _auth = AuthFixture::start().await;
+    let harness = question_harness().await;
+    let tokens = AuthFixture::user_tokens("org-1", "user-1");
+    let (status, _) = question_call(
+        &harness,
+        "POST",
+        "/v1/orchestration/questions/q-7/answer",
+        &tokens,
+        Some(serde_json::json!({"skip": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        harness.capture.decide_approval.lock().unwrap().is_none(),
+        "answering a question decided no approval"
     );
 }

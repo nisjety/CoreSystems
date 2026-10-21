@@ -21,6 +21,8 @@ use mp_contracts::model_plane::v1::{
     orchestration_core_service_server::{OrchestrationCoreService, OrchestrationCoreServiceServer},
     orchestration_event,
 };
+use mp_contracts::user_question;
+use mp_contracts::zdr_refusal::Refusal;
 use serde_json::Value as JsonValue;
 use sqlx::Row;
 use tokio::sync::broadcast;
@@ -2082,6 +2084,291 @@ fn event_run_id(ev: &proto::OrchestrationEvent) -> Option<&str> {
         // stream and the replay buffer.
         orchestration_event::Event::RunParked(p) => Some(&p.run_id),
         orchestration_event::Event::RunResumed(p) => Some(&p.run_id),
+        // Questions (WS14 S3): run-scoped, ids only.
+        orchestration_event::Event::QuestionAsked(p) => Some(&p.run_id),
+        orchestration_event::Event::QuestionAnswered(p) => Some(&p.run_id),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Run questions (build plan WS14 S3)
+// ---------------------------------------------------------------------------
+
+/// Whether `event` is one of the two question events. Only the question store writes them.
+fn is_question_event(event: &proto::OrchestrationEvent) -> bool {
+    matches!(
+        event.event,
+        Some(
+            orchestration_event::Event::QuestionAsked(_)
+                | orchestration_event::Event::QuestionAnswered(_)
+        )
+    )
+}
+
+/// Refuse a question event published through `RecordOrchestrationEvent`. A question's events say
+/// that a row was written, so a caller that could publish them could announce a question that
+/// does not exist or an answer that was never given; the store is their only author.
+#[allow(clippy::result_large_err)]
+fn refuse_question_events_from_callers(event: &proto::OrchestrationEvent) -> Result<(), Status> {
+    if is_question_event(event) {
+        return Err(Status::invalid_argument(
+            "question events are written by the question store",
+        ));
+    }
+    Ok(())
+}
+
+/// The ZDR gate of the question RPCs. A question is a new durable store, so a ZDR credential never
+/// reaches it, and a waived one does not either: a waived run counts as ZDR for every new store
+/// (DEC-32). Decided before any lookup, so a refused call reads and writes nothing.
+#[allow(clippy::result_large_err)]
+fn refuse_zdr_or_waived_question_caller(caller: &VerifiedIdentity) -> Result<(), Status> {
+    retention_receipt::refuse_zdr_continuation(caller)?;
+    if caller.zdr_waiver().is_some() {
+        return Err(Refusal::WAIVER_ROUTE_MISMATCH.grpc_status(tonic::Code::PermissionDenied));
+    }
+    Ok(())
+}
+
+/// Only a persistent run keeps a question: a zero-retention run keeps nothing, and a waived run is
+/// persistent only for chat, so it asks nothing and stores nothing new (DEC-32).
+#[allow(clippy::result_large_err)]
+fn require_persistent_run_for_question(
+    stored: &retention_receipt::RunRetention,
+) -> Result<(), Status> {
+    if stored.class == retention_receipt::RetentionClass::Persistent {
+        Ok(())
+    } else {
+        Err(Refusal::DURABLE_MUTATION_FORBIDDEN.grpc_status(tonic::Code::FailedPrecondition))
+    }
+}
+
+/// The typed status of an invalid question. The message is `invalid_question: <field>: <reason>`
+/// and the gateway reads the code and the problem back out of it.
+fn invalid_question(problem: &user_question::Problem) -> Status {
+    Status::invalid_argument(format!("invalid_question: {problem}"))
+}
+
+/// The typed status of an invalid answer: `invalid_answer: <field>: <reason>`.
+fn invalid_answer(problem: &user_question::Problem) -> Status {
+    Status::invalid_argument(format!("invalid_answer: {problem}"))
+}
+
+fn question_items_from_proto(items: &[proto::QuestionItem]) -> Vec<user_question::Item> {
+    items
+        .iter()
+        .map(|item| user_question::Item {
+            id: item.id.clone(),
+            kind: item.kind.clone(),
+            prompt: item.prompt.clone(),
+            options: item
+                .options
+                .iter()
+                .map(|option| user_question::OptionSpec {
+                    id: option.id.clone(),
+                    label: option.label.clone(),
+                    description: option.description.clone(),
+                })
+                .collect(),
+            allow_other: item.allow_other,
+        })
+        .collect()
+}
+
+fn question_items_to_proto(items: &[user_question::Item]) -> Vec<proto::QuestionItem> {
+    items
+        .iter()
+        .map(|item| proto::QuestionItem {
+            id: item.id.clone(),
+            kind: item.kind.clone(),
+            prompt: item.prompt.clone(),
+            options: item
+                .options
+                .iter()
+                .map(|option| proto::QuestionOption {
+                    id: option.id.clone(),
+                    label: option.label.clone(),
+                    description: option.description.clone(),
+                })
+                .collect(),
+            allow_other: item.allow_other,
+        })
+        .collect()
+}
+
+fn question_answers_from_proto(answers: &[proto::QuestionAnswerItem]) -> Vec<user_question::Answer> {
+    answers
+        .iter()
+        .map(|answer| user_question::Answer {
+            item_id: answer.item_id.clone(),
+            option_ids: answer.option_ids.clone(),
+            text: answer.text.clone(),
+        })
+        .collect()
+}
+
+fn question_answers_to_proto(answers: &[user_question::Answer]) -> Vec<proto::QuestionAnswerItem> {
+    answers
+        .iter()
+        .map(|answer| proto::QuestionAnswerItem {
+            item_id: answer.item_id.clone(),
+            option_ids: answer.option_ids.clone(),
+            text: answer.text.clone(),
+        })
+        .collect()
+}
+
+fn question_state_to_proto(state: &str) -> proto::QuestionState {
+    match state {
+        "requested" => proto::QuestionState::Requested,
+        "answered" => proto::QuestionState::Answered,
+        "skipped" => proto::QuestionState::Skipped,
+        "expired" => proto::QuestionState::Expired,
+        "cancelled" => proto::QuestionState::Cancelled,
+        _ => proto::QuestionState::Unspecified,
+    }
+}
+
+/// The wire form of a stored question.
+///
+/// # Errors
+/// `internal` when the stored spec or answers are not the shared contract's shape, which no writer
+/// of this table produces.
+#[allow(clippy::result_large_err)]
+fn run_question_from_row(row: &store::RunQuestionRow) -> Result<proto::RunQuestion, Status> {
+    let items: Vec<user_question::Item> = serde_json::from_value(row.spec.clone())
+        .map_err(|_| Status::internal("stored question is malformed"))?;
+    let answers: Vec<user_question::Answer> = match row.answers.as_ref() {
+        Some(value) => serde_json::from_value(value.clone())
+            .map_err(|_| Status::internal("stored answer is malformed"))?,
+        None => Vec::new(),
+    };
+    Ok(proto::RunQuestion {
+        id: row.id.clone(),
+        run_id: row.run_id.clone(),
+        thread_id: row.thread_id.clone(),
+        step_id: row.step_id.clone(),
+        org_id: row.org_id.clone(),
+        user_id: row.user_id.clone(),
+        state: question_state_to_proto(&row.state) as i32,
+        delivery: row.delivery.clone(),
+        items: question_items_to_proto(&items),
+        requested_at: Some(ts(row.requested_at)),
+        expires_at: Some(ts(row.expires_at)),
+        answered_at: row.answered_at.map(ts),
+        answers: question_answers_to_proto(&answers),
+        answered_message_id: row.answered_message_id.clone(),
+    })
+}
+
+/// A question ready to store: everything `CreateRunQuestion` decides before it writes.
+#[derive(Debug)]
+struct PreparedQuestion {
+    delivery: &'static str,
+    expires_in: chrono::Duration,
+    spec: JsonValue,
+}
+
+/// Validate a create request's own fields and shape them for the store. Pure, so every refusal is
+/// tested without a database.
+///
+/// `resume` is a delivery the schema holds but nothing serves yet, so it is refused here rather
+/// than stored as a question that no later step would pick up.
+#[allow(clippy::result_large_err)]
+fn prepare_question(req: &proto::CreateRunQuestionRequest) -> Result<PreparedQuestion, Status> {
+    let delivery = match req.delivery.as_str() {
+        "" | user_question::DELIVERY_NEXT_TURN => user_question::DELIVERY_NEXT_TURN,
+        user_question::DELIVERY_RESUME => {
+            return Err(Status::invalid_argument("question_delivery_unavailable"));
+        }
+        _ => {
+            return Err(invalid_question(&user_question::Problem {
+                field: "delivery".to_owned(),
+                reason: "unknown_delivery",
+            }));
+        }
+    };
+    for (field, value) in [("step_id", &req.step_id), ("idempotency_key", &req.idempotency_key)] {
+        if value.len() > 256 {
+            return Err(invalid_question(&user_question::Problem {
+                field: field.to_owned(),
+                reason: "text_too_long",
+            }));
+        }
+    }
+    let items = question_items_from_proto(&req.items);
+    user_question::validate_items(&items).map_err(|problem| invalid_question(&problem))?;
+    let ceiling = user_question::delivery_ttl_secs(delivery)
+        .ok_or_else(|| Status::internal("delivery has no lifetime"))?;
+    let lifetime = if req.expires_in_seconds == 0 {
+        ceiling
+    } else {
+        req.expires_in_seconds.min(ceiling)
+    };
+    Ok(PreparedQuestion {
+        delivery,
+        expires_in: chrono::Duration::seconds(i64::from(lifetime)),
+        spec: serde_json::to_value(&items).map_err(|_| Status::internal("question is not JSON"))?,
+    })
+}
+
+/// An answer checked against its question and shaped for the store.
+#[derive(Debug)]
+struct PreparedAnswer {
+    answers: JsonValue,
+    digest: String,
+}
+
+/// Check an answer request against the stored question's items. Pure.
+#[allow(clippy::result_large_err)]
+fn prepare_answer(
+    row: &store::RunQuestionRow,
+    req: &proto::AnswerRunQuestionRequest,
+) -> Result<PreparedAnswer, Status> {
+    if req.answered_message_id.len() > 256 {
+        return Err(invalid_answer(&user_question::Problem {
+            field: "answered_message_id".to_owned(),
+            reason: "text_too_long",
+        }));
+    }
+    let items: Vec<user_question::Item> = serde_json::from_value(row.spec.clone())
+        .map_err(|_| Status::internal("stored question is malformed"))?;
+    let answers = question_answers_from_proto(&req.answers);
+    user_question::validate_answers(&items, &answers, req.skip)
+        .map_err(|problem| invalid_answer(&problem))?;
+    Ok(PreparedAnswer {
+        digest: user_question::answers_digest(&answers, req.skip),
+        answers: serde_json::to_value(&answers)
+            .map_err(|_| Status::internal("answer is not JSON"))?,
+    })
+}
+
+fn question_asked_event(row: &store::RunQuestionRow) -> proto::OrchestrationEvent {
+    proto::OrchestrationEvent {
+        event_id: String::new(),
+        at: Some(now_ts()),
+        event: Some(orchestration_event::Event::QuestionAsked(
+            orchestration_event::QuestionAsked {
+                run_id: row.run_id.clone(),
+                question_id: row.id.clone(),
+                delivery: row.delivery.clone(),
+                expires_at: Some(ts(row.expires_at)),
+            },
+        )),
+    }
+}
+
+fn question_answered_event(row: &store::RunQuestionRow) -> proto::OrchestrationEvent {
+    proto::OrchestrationEvent {
+        event_id: String::new(),
+        at: Some(now_ts()),
+        event: Some(orchestration_event::Event::QuestionAnswered(
+            orchestration_event::QuestionAnswered {
+                run_id: row.run_id.clone(),
+                question_id: row.id.clone(),
+                state: question_state_to_proto(&row.state) as i32,
+            },
+        )),
     }
 }
 
@@ -2887,6 +3174,176 @@ impl OrchestrationCoreService for OrchestrationGrpc {
         result
     }
 
+    // Build plan WS14 S3: a question is its own pause kind with its own store, never an
+    // approval. It is stored for a persistent run only, bound to the run's owner, and
+    // answered once by that owner alone.
+    async fn create_run_question(
+        &self,
+        request: Request<proto::CreateRunQuestionRequest>,
+    ) -> Result<Response<proto::CreateRunQuestionResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<proto::CreateRunQuestionResponse>, Status> = async {
+            let caller = identity(&request)?;
+            refuse_zdr_or_waived_question_caller(&caller)?;
+            authorize_operation(&caller, "orchestration:write")?;
+            let req = request.into_inner();
+            if req.run_id.is_empty() {
+                return Err(Status::invalid_argument("run_id is required"));
+            }
+            caller.authorize_org(&req.org_id)?;
+            let scope = store::run_question_scope(&self.pool, &req.run_id)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?
+                .ok_or_else(|| Status::not_found("run not found"))?;
+            authorize_owner_row(&caller, &scope.org_id, &scope.user_id, OwnerIntent::Mutate)?;
+            // A system workload owns no person to ask.
+            if crate::auth::is_system_run_owner(&scope.user_id) {
+                return Err(Status::failed_precondition("question_run_has_no_owner"));
+            }
+            require_persistent_run_for_question(
+                &retention_receipt::stored_run_retention(&self.pool, &req.run_id).await?,
+            )?;
+            let prepared = prepare_question(&req)?;
+
+            let id = format!("q_{}", mp_ids::new_ulid());
+            let created = store::create_run_question(
+                &self.pool,
+                &store::NewRunQuestion {
+                    id: &id,
+                    run_id: &req.run_id,
+                    thread_id: &scope.thread_id,
+                    step_id: &req.step_id,
+                    org_id: &scope.org_id,
+                    user_id: &scope.user_id,
+                    delivery: prepared.delivery,
+                    spec: &prepared.spec,
+                    idempotency_key: &req.idempotency_key,
+                    expires_at: Utc::now() + prepared.expires_in,
+                },
+                user_question::MAX_QUESTIONS_PER_RUN,
+            )
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+            let row = match created {
+                store::CreatedRunQuestion::Created(row) => {
+                    // Only a question this call wrote is announced; a retry that resolved to the
+                    // stored one stays silent.
+                    broadcast_event(&self.events_tx, &self.replay, question_asked_event(&row));
+                    row
+                }
+                store::CreatedRunQuestion::Existing(row) => row,
+                store::CreatedRunQuestion::BudgetExhausted => {
+                    return Err(Status::resource_exhausted("question_budget_exhausted"));
+                }
+                store::CreatedRunQuestion::KeyInUse => {
+                    return Err(Status::already_exists("question_key_in_use"));
+                }
+            };
+            Ok(Response::new(proto::CreateRunQuestionResponse {
+                question: Some(run_question_from_row(&row)?),
+            }))
+        }
+        .await;
+        record_metrics("create_run_question", started, result.is_ok());
+        result
+    }
+
+    async fn list_run_questions(
+        &self,
+        request: Request<proto::ListRunQuestionsRequest>,
+    ) -> Result<Response<proto::ListRunQuestionsResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<proto::ListRunQuestionsResponse>, Status> = async {
+            let caller = identity(&request)?;
+            refuse_zdr_or_waived_question_caller(&caller)?;
+            authorize_operation(&caller, "orchestration:read")?;
+            let req = request.into_inner();
+            if req.run_id.is_empty() {
+                return Err(Status::invalid_argument("run_id is required"));
+            }
+            caller.authorize_org(&req.org_id)?;
+            // Questions are the owner's alone, so a credential with no user behind it reads none.
+            let user_id = caller
+                .user_id()
+                .ok_or_else(|| Status::permission_denied("user-bound credential required"))?;
+            authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Read).await?;
+            let rows = store::list_run_questions(&self.pool, &req.run_id, &req.org_id, user_id)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+            let questions = rows
+                .iter()
+                .map(run_question_from_row)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Response::new(proto::ListRunQuestionsResponse { questions }))
+        }
+        .await;
+        record_metrics("list_run_questions", started, result.is_ok());
+        result
+    }
+
+    async fn answer_run_question(
+        &self,
+        request: Request<proto::AnswerRunQuestionRequest>,
+    ) -> Result<Response<proto::AnswerRunQuestionResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<proto::AnswerRunQuestionResponse>, Status> = async {
+            let caller = identity(&request)?;
+            refuse_zdr_or_waived_question_caller(&caller)?;
+            authorize_operation(&caller, "orchestration:write")?;
+            let req = request.into_inner();
+            if req.question_id.is_empty() {
+                return Err(Status::invalid_argument("question_id is required"));
+            }
+            caller.authorize_org(&req.org_id)?;
+            let user_id = caller
+                .user_id()
+                .ok_or_else(|| Status::permission_denied("user-bound credential required"))?;
+            // Another user's question, and one that does not exist, answer the same.
+            let stored =
+                store::get_run_question(&self.pool, &req.question_id, &req.org_id, user_id)
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?
+                    .ok_or_else(|| Status::not_found("question_not_found"))?;
+            let prepared = prepare_answer(&stored, &req)?;
+
+            let outcome = store::answer_run_question(
+                &self.pool,
+                &req.question_id,
+                &req.org_id,
+                user_id,
+                &prepared.answers,
+                &prepared.digest,
+                req.skip,
+                &req.answered_message_id,
+            )
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+            let row = match outcome {
+                store::AnsweredRunQuestion::Answered(row) => {
+                    // Only the answer that won the compare-and-set is announced.
+                    broadcast_event(&self.events_tx, &self.replay, question_answered_event(&row));
+                    row
+                }
+                store::AnsweredRunQuestion::Replay(row) => row,
+                store::AnsweredRunQuestion::AlreadyAnswered => {
+                    return Err(Status::already_exists("question_already_answered"));
+                }
+                store::AnsweredRunQuestion::Gone(_) => {
+                    return Err(Status::failed_precondition("question_expired"));
+                }
+                store::AnsweredRunQuestion::NotFound => {
+                    return Err(Status::not_found("question_not_found"));
+                }
+            };
+            Ok(Response::new(proto::AnswerRunQuestionResponse {
+                question: Some(run_question_from_row(&row)?),
+            }))
+        }
+        .await;
+        record_metrics("answer_run_question", started, result.is_ok());
+        result
+    }
+
     // Build plan WS03 S2: the durable Do loop claims a granted loop-mode approval
     // exactly once when it re-enters. The cold delivery worker never sees a
     // loop-mode approval (decide_approval makes no delivery row for it), so the
@@ -3561,6 +4018,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 crate::terminalization::park_recovery_active(),
                 &ev,
             )?;
+            refuse_question_events_from_callers(&ev)?;
             // Only run-scoped events are deliverable on the per-run stream;
             // reject ones we couldn't route so callers learn early.
             if event_run_id(&ev).is_none_or(str::is_empty) {
@@ -5040,6 +5498,471 @@ mod tests {
 
         let buffered = replay.replay_after("run_rec", "").await;
         assert_eq!(buffered.len(), 1, "browser event buffered for replay");
+    }
+
+    // -----------------------------------------------------------------------
+    // Run questions (build plan WS14 S3)
+    // -----------------------------------------------------------------------
+
+    fn question_item(id: &str, kind: &str) -> proto::QuestionItem {
+        proto::QuestionItem {
+            id: id.to_owned(),
+            kind: kind.to_owned(),
+            prompt: "Which one?".to_owned(),
+            options: if kind == "text" {
+                Vec::new()
+            } else {
+                vec![
+                    proto::QuestionOption {
+                        id: "a".to_owned(),
+                        label: "A".to_owned(),
+                        description: String::new(),
+                    },
+                    proto::QuestionOption {
+                        id: "b".to_owned(),
+                        label: "B".to_owned(),
+                        description: String::new(),
+                    },
+                ]
+            },
+            allow_other: false,
+        }
+    }
+
+    fn create_question_request(items: Vec<proto::QuestionItem>) -> proto::CreateRunQuestionRequest {
+        proto::CreateRunQuestionRequest {
+            run_id: "run_q".to_owned(),
+            org_id: "org_q".to_owned(),
+            items,
+            ..Default::default()
+        }
+    }
+
+    fn stored_question(spec: JsonValue) -> store::RunQuestionRow {
+        store::RunQuestionRow {
+            id: "q_1".to_owned(),
+            run_id: "run_q".to_owned(),
+            thread_id: "thread_q".to_owned(),
+            step_id: "step-1".to_owned(),
+            org_id: "org_q".to_owned(),
+            user_id: "user_q".to_owned(),
+            state: "requested".to_owned(),
+            delivery: "next_turn".to_owned(),
+            spec,
+            answers: None,
+            answers_digest: None,
+            answered_message_id: String::new(),
+            idempotency_key: String::new(),
+            requested_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+            answered_at: None,
+        }
+    }
+
+    fn lazy_unreachable_service() -> (OrchestrationGrpc, broadcast::Receiver<proto::OrchestrationEvent>) {
+        let (tx, rx) = broadcast::channel::<proto::OrchestrationEvent>(8);
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(200))
+            .connect_lazy("postgresql://session-core@127.0.0.1:1/session_core")
+            .expect("lazy pool");
+        (OrchestrationGrpc::new(pool, tx), rx)
+    }
+
+    fn with_caller<T>(message: T, caller: VerifiedIdentity) -> Request<T> {
+        let mut request = Request::new(message);
+        request.extensions_mut().insert(caller);
+        request
+    }
+
+    #[test]
+    fn run_question_create_defaults_to_next_turn_and_clamps_the_lifetime() {
+        let items = vec![question_item("scope", "single")];
+        let mut req = create_question_request(items);
+        let prepared = prepare_question(&req).expect("valid");
+        assert_eq!(prepared.delivery, "next_turn");
+        assert_eq!(prepared.expires_in, chrono::Duration::hours(24));
+        assert_eq!(prepared.spec[0]["id"], "scope");
+        req.expires_in_seconds = 90;
+        assert_eq!(
+            prepare_question(&req).expect("valid").expires_in,
+            chrono::Duration::seconds(90)
+        );
+        req.expires_in_seconds = 999_999;
+        assert_eq!(
+            prepare_question(&req).expect("valid").expires_in,
+            chrono::Duration::hours(24),
+            "a longer lifetime is clamped to the delivery's ceiling"
+        );
+    }
+
+    #[test]
+    fn run_question_create_refuses_resume_and_unknown_deliveries() {
+        let mut req = create_question_request(vec![question_item("scope", "single")]);
+        req.delivery = "resume".to_owned();
+        let refused = prepare_question(&req).expect_err("resume is not served yet");
+        assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+        assert_eq!(refused.message(), "question_delivery_unavailable");
+        req.delivery = "whenever".to_owned();
+        assert_eq!(
+            prepare_question(&req).expect_err("unknown").message(),
+            "invalid_question: delivery: unknown_delivery"
+        );
+    }
+
+    #[test]
+    fn run_question_create_names_the_problem_the_shared_contract_found() {
+        for (items, message) in [
+            (vec![], "invalid_question: items: no_items"),
+            (
+                vec![question_item("scope", "secret")],
+                "invalid_question: items[0].kind: unsupported_kind",
+            ),
+            (
+                vec![question_item("a", "text"), question_item("a", "text")],
+                "invalid_question: items[1].id: duplicate_id",
+            ),
+        ] {
+            let refused = prepare_question(&create_question_request(items)).expect_err("invalid");
+            assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+            assert_eq!(refused.message(), message);
+        }
+        let mut req = create_question_request(vec![question_item("scope", "single")]);
+        req.idempotency_key = "k".repeat(257);
+        assert_eq!(
+            prepare_question(&req).expect_err("long key").message(),
+            "invalid_question: idempotency_key: text_too_long"
+        );
+    }
+
+    #[test]
+    fn run_question_answer_is_checked_against_the_stored_items() {
+        let items = vec![question_item("scope", "single")];
+        let row = stored_question(
+            prepare_question(&create_question_request(items))
+                .expect("valid")
+                .spec,
+        );
+        let answer = |options: &[&str]| proto::AnswerRunQuestionRequest {
+            question_id: "q_1".to_owned(),
+            org_id: "org_q".to_owned(),
+            answers: vec![proto::QuestionAnswerItem {
+                item_id: "scope".to_owned(),
+                option_ids: options.iter().map(|o| (*o).to_owned()).collect(),
+                text: String::new(),
+            }],
+            ..Default::default()
+        };
+        let ok = prepare_answer(&row, &answer(&["a"])).expect("valid");
+        assert_eq!(ok.answers[0]["option_ids"][0], "a");
+        assert_eq!(ok.digest.len(), 64);
+        assert_ne!(ok.digest, prepare_answer(&row, &answer(&["b"])).expect("valid").digest);
+        let refused = prepare_answer(&row, &answer(&["z"])).expect_err("unknown option");
+        assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+        assert_eq!(refused.message(), "invalid_answer: answers[0].option_ids[0]: unknown_option");
+        let skip = proto::AnswerRunQuestionRequest {
+            skip: true,
+            ..answer(&[])
+        };
+        assert_eq!(
+            prepare_answer(&row, &skip).expect_err("a skip carries no answers").message(),
+            "invalid_answer: answers: skip_with_answers"
+        );
+    }
+
+    #[test]
+    fn run_question_a_stored_question_reads_back_as_it_was_written() {
+        let prepared = prepare_question(&create_question_request(vec![
+            question_item("scope", "single"),
+            question_item("notes", "text"),
+        ]))
+        .expect("valid");
+        let mut row = stored_question(prepared.spec);
+        let wire = run_question_from_row(&row).expect("readable");
+        assert_eq!(wire.state, proto::QuestionState::Requested as i32);
+        assert_eq!(wire.items.len(), 2);
+        assert_eq!(wire.items[0].options.len(), 2);
+        assert!(wire.answered_at.is_none() && wire.answers.is_empty());
+
+        row.state = "answered".to_owned();
+        row.answers = Some(serde_json::json!([{"item_id": "scope", "option_ids": ["a"], "text": ""}]));
+        row.answered_at = Some(Utc::now());
+        let wire = run_question_from_row(&row).expect("readable");
+        assert_eq!(wire.state, proto::QuestionState::Answered as i32);
+        assert_eq!(wire.answers[0].option_ids, vec!["a".to_owned()]);
+
+        row.spec = serde_json::json!({"not": "a list of items"});
+        assert_eq!(
+            run_question_from_row(&row).expect_err("malformed").code(),
+            tonic::Code::Internal
+        );
+    }
+
+    #[test]
+    fn run_question_only_a_persistent_run_may_ask() {
+        use retention_receipt::RunRetention;
+        assert!(require_persistent_run_for_question(&RunRetention::persistent()).is_ok());
+        for stored in [RunRetention::zdr(), RunRetention::waived("ack-1", "conn-1")] {
+            let refused = require_persistent_run_for_question(&stored).expect_err("refused");
+            assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+            assert_eq!(
+                Refusal::from_status(&refused).expect("typed").code(),
+                mp_contracts::zdr_refusal::code::DURABLE_MUTATION_FORBIDDEN
+            );
+        }
+    }
+
+    #[test]
+    fn run_question_a_zdr_or_waived_caller_is_refused_with_a_typed_refusal() {
+        use crate::auth::VerifiedIdentity as Id;
+        assert!(refuse_zdr_or_waived_question_caller(&Id::user_for_test("org_q", "user_q")).is_ok());
+        let zdr = refuse_zdr_or_waived_question_caller(&Id::user_for_test_with_zdr(
+            "org_q", "user_q", true,
+        ))
+        .expect_err("a ZDR credential is refused");
+        assert_eq!(zdr.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(
+            Refusal::from_status(&zdr).expect("typed").code(),
+            mp_contracts::zdr_refusal::code::DURABLE_MUTATION_FORBIDDEN
+        );
+        let waived = refuse_zdr_or_waived_question_caller(&Id::user_for_test_with_waiver(
+            "org_q", "user_q", "conn-1", "ack-1",
+        ))
+        .expect_err("a waived credential is refused: a waived run counts as ZDR for a new store");
+        assert_eq!(waived.code(), tonic::Code::PermissionDenied);
+        assert_eq!(
+            Refusal::from_status(&waived).expect("typed").code(),
+            mp_contracts::zdr_refusal::code::WAIVER_ROUTE_MISMATCH
+        );
+    }
+
+    // Every question RPC refuses a ZDR or waived caller before it reads or writes anything. The pool
+    // is unreachable: reaching the database would answer Internal, a refusal answers the typed code.
+    #[tokio::test]
+    async fn run_question_every_rpc_refuses_a_zdr_or_waived_caller_before_any_lookup() {
+        let (svc, mut rx) = lazy_unreachable_service();
+        let callers = || {
+            [
+                VerifiedIdentity::user_for_test_with_zdr("org_q", "user_q", true),
+                VerifiedIdentity::user_for_test_with_waiver("org_q", "user_q", "conn-1", "ack-1"),
+            ]
+        };
+        for caller in callers() {
+            let created = svc
+                .create_run_question(with_caller(
+                    create_question_request(vec![question_item("scope", "single")]),
+                    caller,
+                ))
+                .await
+                .expect_err("refused");
+            assert_ne!(created.code(), tonic::Code::Internal, "create reached the database");
+            assert!(Refusal::from_status(&created).is_some(), "create: {created}");
+        }
+        for caller in callers() {
+            let listed = svc
+                .list_run_questions(with_caller(
+                    proto::ListRunQuestionsRequest {
+                        run_id: "run_q".to_owned(),
+                        org_id: "org_q".to_owned(),
+                    },
+                    caller,
+                ))
+                .await
+                .expect_err("refused");
+            assert_ne!(listed.code(), tonic::Code::Internal, "list reached the database");
+            assert!(Refusal::from_status(&listed).is_some(), "list: {listed}");
+        }
+        for caller in callers() {
+            let answered = svc
+                .answer_run_question(with_caller(
+                    proto::AnswerRunQuestionRequest {
+                        question_id: "q_1".to_owned(),
+                        org_id: "org_q".to_owned(),
+                        skip: true,
+                        ..Default::default()
+                    },
+                    caller,
+                ))
+                .await
+                .expect_err("refused");
+            assert_ne!(answered.code(), tonic::Code::Internal, "answer reached the database");
+            assert!(Refusal::from_status(&answered).is_some(), "answer: {answered}");
+        }
+        assert!(matches!(
+            rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+    }
+
+    // A ZDR service workload is refused too: the write scope gate keeps it out of the store.
+    #[tokio::test]
+    async fn run_question_a_zdr_service_token_cannot_create_a_question() {
+        let (svc, _rx) = lazy_unreachable_service();
+        let caller = VerifiedIdentity::service_for_test_as(
+            "org_q",
+            "service:execution-core",
+            &["orchestration:write"],
+            true,
+        );
+        let refused = svc
+            .create_run_question(with_caller(
+                create_question_request(vec![question_item("scope", "single")]),
+                caller,
+            ))
+            .await
+            .expect_err("refused");
+        assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+    }
+
+    // The org is the verified credential's, never the request's.
+    #[tokio::test]
+    async fn run_question_a_request_for_another_org_is_refused_before_any_lookup() {
+        let (svc, _rx) = lazy_unreachable_service();
+        let caller = || VerifiedIdentity::user_for_test("org_q", "user_q");
+        let mut create = create_question_request(vec![question_item("scope", "single")]);
+        create.org_id = "org_other".to_owned();
+        assert_eq!(
+            svc.create_run_question(with_caller(create, caller()))
+                .await
+                .expect_err("refused")
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        assert_eq!(
+            svc.list_run_questions(with_caller(
+                proto::ListRunQuestionsRequest {
+                    run_id: "run_q".to_owned(),
+                    org_id: "org_other".to_owned(),
+                },
+                caller()
+            ))
+            .await
+            .expect_err("refused")
+            .code(),
+            tonic::Code::PermissionDenied
+        );
+        assert_eq!(
+            svc.answer_run_question(with_caller(
+                proto::AnswerRunQuestionRequest {
+                    question_id: "q_1".to_owned(),
+                    org_id: "org_other".to_owned(),
+                    skip: true,
+                    ..Default::default()
+                },
+                caller()
+            ))
+            .await
+            .expect_err("refused")
+            .code(),
+            tonic::Code::PermissionDenied
+        );
+    }
+
+    // The question events say a row was written, so no caller may publish them.
+    #[tokio::test]
+    async fn run_question_events_cannot_be_published_through_record_orchestration_event() {
+        let (svc, mut rx) = lazy_unreachable_service();
+        for event in [
+            question_asked_event(&stored_question(serde_json::json!([]))),
+            question_answered_event(&stored_question(serde_json::json!([]))),
+        ] {
+            for caller in [
+                VerifiedIdentity::user_for_test("org_q", "user_q"),
+                VerifiedIdentity::service_for_test_as(
+                    "org_q",
+                    "service:execution-core",
+                    &["orchestration:write"],
+                    false,
+                ),
+            ] {
+                let refused = svc
+                    .record_orchestration_event(with_caller(
+                        proto::RecordOrchestrationEventRequest {
+                            event: Some(event.clone()),
+                        },
+                        caller,
+                    ))
+                    .await
+                    .expect_err("refused");
+                assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+                assert_eq!(
+                    refused.message(),
+                    "question events are written by the question store"
+                );
+            }
+        }
+        assert!(matches!(
+            rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn run_question_events_carry_ids_and_state_only() {
+        let mut row = stored_question(serde_json::json!([]));
+        let asked = question_asked_event(&row);
+        assert_eq!(event_run_id(&asked), Some("run_q"));
+        let Some(orchestration_event::Event::QuestionAsked(asked)) = asked.event else {
+            panic!("a QuestionAsked event");
+        };
+        assert_eq!(asked.question_id, "q_1");
+        assert_eq!(asked.delivery, "next_turn");
+        assert!(asked.expires_at.is_some());
+
+        row.state = "skipped".to_owned();
+        let answered = question_answered_event(&row);
+        assert_eq!(event_run_id(&answered), Some("run_q"));
+        let Some(orchestration_event::Event::QuestionAnswered(answered)) = answered.event else {
+            panic!("a QuestionAnswered event");
+        };
+        assert_eq!(answered.state, proto::QuestionState::Skipped as i32);
+    }
+
+    // The handlers need a database to run, so the order of their gates is read from the source:
+    // the ZDR gate first, the scope gate, then the org, and only then any lookup. The event is
+    // broadcast only for the call that won the write.
+    #[test]
+    fn run_question_handlers_gate_before_they_look_anything_up() {
+        let source = include_str!("orchestration_grpc.rs").replace("\r\n", "\n");
+        for (handler, next, scope) in [
+            ("create_run_question", "list_run_questions", "orchestration:write"),
+            ("list_run_questions", "answer_run_question", "orchestration:read"),
+            ("answer_run_question", "consume_approval", "orchestration:write"),
+        ] {
+            let start = source
+                .find(&format!("    async fn {handler}("))
+                .unwrap_or_else(|| panic!("{handler} is present"));
+            let rest = &source[start..];
+            let body = &rest[..rest.find(&format!("async fn {next}(")).expect("the next handler")];
+            let gate = body
+                .find("refuse_zdr_or_waived_question_caller(&caller)?;")
+                .unwrap_or_else(|| panic!("{handler} lost its ZDR gate"));
+            let operation = body
+                .find(&format!("authorize_operation(&caller, \"{scope}\")?;"))
+                .unwrap_or_else(|| panic!("{handler} lost its scope gate"));
+            let org = body
+                .find("caller.authorize_org(&req.org_id)?;")
+                .unwrap_or_else(|| panic!("{handler} lost its org gate"));
+            let lookup = body.find("store::").expect("a store call");
+            assert!(gate < operation && operation < org && org < lookup, "{handler} gate order");
+        }
+        let create = &source[source.find("    async fn create_run_question(").unwrap()..];
+        let create = &create[..create.find("async fn list_run_questions(").unwrap()];
+        let persistent = create
+            .find("require_persistent_run_for_question(")
+            .expect("create checks the run's own receipt");
+        assert!(
+            create.find("store::run_question_scope(").unwrap() < persistent
+                && persistent < create.find("store::create_run_question(").unwrap(),
+            "the run's receipt is read before anything is written"
+        );
+        assert!(create.contains("store::CreatedRunQuestion::Created(row) => {"));
+        let answer = &source[source.find("    async fn answer_run_question(").unwrap()..];
+        let answer = &answer[..answer.find("async fn consume_approval(").unwrap()];
+        assert!(answer.contains("store::AnsweredRunQuestion::Answered(row) => {"));
+        assert!(
+            answer.matches("broadcast_event(").count() == 1,
+            "only the winning answer is announced"
+        );
     }
 
     // -----------------------------------------------------------------------

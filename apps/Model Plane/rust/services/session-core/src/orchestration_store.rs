@@ -1892,6 +1892,375 @@ pub async fn list_approval_metrics_rows_for_org(
     Ok(rows)
 }
 
+// ---------------------------------------------------------------------------
+// Run questions (build plan WS14 S3)
+// ---------------------------------------------------------------------------
+
+/// A stored question put to a run's owner. Its own table (`run_questions`), never an approval.
+#[derive(sqlx::FromRow, Debug, Clone)]
+pub struct RunQuestionRow {
+    pub id: String,
+    pub run_id: String,
+    pub thread_id: String,
+    pub step_id: String,
+    pub org_id: String,
+    pub user_id: String,
+    pub state: String,
+    pub delivery: String,
+    pub spec: JsonValue,
+    pub answers: Option<JsonValue>,
+    pub answers_digest: Option<String>,
+    pub answered_message_id: String,
+    pub idempotency_key: String,
+    pub requested_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub answered_at: Option<DateTime<Utc>>,
+}
+
+const RUN_QUESTION_COLUMNS: &str = "id, run_id, thread_id, step_id, org_id, user_id, state, \
+     delivery, spec, answers, answers_digest, answered_message_id, idempotency_key, \
+     requested_at, expires_at, answered_at";
+
+/// Who owns a run and where it lives: the facts a question is bound to.
+#[derive(sqlx::FromRow, Debug, Clone)]
+#[allow(clippy::struct_field_names)] // the three are the ids the row is bound to
+pub struct RunQuestionScope {
+    pub org_id: String,
+    pub user_id: String,
+    pub thread_id: String,
+}
+
+/// The owner and thread of a run, for the question about to be put to its owner.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn run_question_scope(pool: &Pool, run_id: &str) -> Result<Option<RunQuestionScope>> {
+    let row = sqlx::query_as::<_, RunQuestionScope>(
+        "SELECT org_id, user_id, thread_id FROM runs WHERE id = $1",
+    )
+    .bind(run_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
+/// A question to store.
+pub struct NewRunQuestion<'a> {
+    pub id: &'a str,
+    pub run_id: &'a str,
+    pub thread_id: &'a str,
+    pub step_id: &'a str,
+    pub org_id: &'a str,
+    pub user_id: &'a str,
+    pub delivery: &'a str,
+    pub spec: &'a JsonValue,
+    pub idempotency_key: &'a str,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// What [`create_run_question`] did.
+#[derive(Debug)]
+pub enum CreatedRunQuestion {
+    /// A new row was stored.
+    Created(RunQuestionRow),
+    /// The idempotency key already named this run's question: the stored row, unchanged.
+    Existing(RunQuestionRow),
+    /// The run has already asked its whole budget.
+    BudgetExhausted,
+    /// The idempotency key belongs to another run's question.
+    KeyInUse,
+}
+
+/// Store a question, once per idempotency key, within the run's question budget.
+///
+/// The run row is locked for the duration so two concurrent asks cannot both fit under the
+/// budget. A retry that names an existing key is answered with the stored row before the
+/// budget is looked at, so a retry never fails for a question it already made.
+///
+/// # Errors
+///
+/// Returns an error if the transaction or a statement fails.
+pub async fn create_run_question(
+    pool: &Pool,
+    new: &NewRunQuestion<'_>,
+    max_per_run: usize,
+) -> Result<CreatedRunQuestion> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SELECT 1 FROM runs WHERE id = $1 FOR NO KEY UPDATE")
+        .bind(new.run_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+
+    if !new.idempotency_key.is_empty() {
+        let existing = sqlx::query_as::<_, RunQuestionRow>(&format!(
+            "SELECT {RUN_QUESTION_COLUMNS} FROM run_questions \
+             WHERE org_id = $1 AND idempotency_key = $2"
+        ))
+        .bind(new.org_id)
+        .bind(new.idempotency_key)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if let Some(row) = existing {
+            transaction.commit().await?;
+            return Ok(if row.run_id == new.run_id {
+                CreatedRunQuestion::Existing(row)
+            } else {
+                CreatedRunQuestion::KeyInUse
+            });
+        }
+    }
+
+    let asked: i64 = sqlx::query_scalar("SELECT count(*) FROM run_questions WHERE run_id = $1")
+        .bind(new.run_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+    if usize::try_from(asked).map_or(true, |asked| asked >= max_per_run) {
+        transaction.commit().await?;
+        return Ok(CreatedRunQuestion::BudgetExhausted);
+    }
+
+    let row = sqlx::query_as::<_, RunQuestionRow>(&format!(
+        "INSERT INTO run_questions (id, run_id, thread_id, step_id, org_id, user_id, delivery, \
+         spec, idempotency_key, expires_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
+         RETURNING {RUN_QUESTION_COLUMNS}"
+    ))
+    .bind(new.id)
+    .bind(new.run_id)
+    .bind(new.thread_id)
+    .bind(new.step_id)
+    .bind(new.org_id)
+    .bind(new.user_id)
+    .bind(new.delivery)
+    .bind(new.spec)
+    .bind(new.idempotency_key)
+    .bind(new.expires_at)
+    .fetch_one(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    info!(question_id = %row.id, run_id = %row.run_id, "run question stored");
+    Ok(CreatedRunQuestion::Created(row))
+}
+
+/// The owner's questions for a run, oldest first. A question past its time is marked expired
+/// first, so a list never reports a lapsed question as still waiting.
+///
+/// # Errors
+///
+/// Returns an error if a statement fails.
+pub async fn list_run_questions(
+    pool: &Pool,
+    run_id: &str,
+    org_id: &str,
+    user_id: &str,
+) -> Result<Vec<RunQuestionRow>> {
+    sqlx::query(
+        "UPDATE run_questions SET state = 'expired' \
+         WHERE run_id = $1 AND org_id = $2 AND user_id = $3 \
+           AND state = 'requested' AND expires_at <= now()",
+    )
+    .bind(run_id)
+    .bind(org_id)
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+    let rows = sqlx::query_as::<_, RunQuestionRow>(&format!(
+        "SELECT {RUN_QUESTION_COLUMNS} FROM run_questions \
+         WHERE run_id = $1 AND org_id = $2 AND user_id = $3 \
+         ORDER BY requested_at, id"
+    ))
+    .bind(run_id)
+    .bind(org_id)
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// What [`answer_run_question`] did.
+#[derive(Debug)]
+pub enum AnsweredRunQuestion {
+    /// This call moved the question out of `requested`.
+    Answered(RunQuestionRow),
+    /// An identical answer had already been recorded: the stored row, unchanged.
+    Replay(RunQuestionRow),
+    /// A different answer had already been recorded.
+    AlreadyAnswered,
+    /// The question lapsed or was withdrawn before it was answered.
+    Gone(RunQuestionRow),
+    /// No such question for this owner.
+    NotFound,
+}
+
+/// Why a question that did not take an answer cannot. `None` for a question that is still
+/// waiting, which only a state that changed between two statements can produce.
+#[derive(Debug, PartialEq, Eq)]
+enum Unanswerable {
+    Gone,
+    Replay,
+    Conflict,
+}
+
+/// Read a question that refused an answer. `new_digest` is the digest of the answer that was
+/// refused, so an identical retry is a replay and a different second answer is a conflict.
+fn classify_unanswerable(
+    state: &str,
+    stored_digest: Option<&str>,
+    new_digest: &str,
+) -> Option<Unanswerable> {
+    match state {
+        "expired" | "cancelled" => Some(Unanswerable::Gone),
+        "answered" | "skipped" => Some(if stored_digest == Some(new_digest) {
+            Unanswerable::Replay
+        } else {
+            Unanswerable::Conflict
+        }),
+        _ => None,
+    }
+}
+
+/// Record the owner's answer (or skip) on a question, once.
+///
+/// The move out of `requested` is one compare-and-set on `state = 'requested' AND expires_at >
+/// now()`, so two concurrent answers produce exactly one winner. A caller that loses reads the
+/// stored row to learn why: replay, conflict or expiry. A question owned by someone else is
+/// `NotFound`, the same answer as one that does not exist.
+///
+/// # Errors
+///
+/// Returns an error if a statement fails, or if the question is still waiting after the
+/// compare-and-set missed (a state that cannot be reached by these statements alone).
+#[allow(clippy::too_many_arguments)]
+pub async fn answer_run_question(
+    pool: &Pool,
+    question_id: &str,
+    org_id: &str,
+    user_id: &str,
+    answers: &JsonValue,
+    digest: &str,
+    skip: bool,
+    answered_message_id: &str,
+) -> Result<AnsweredRunQuestion> {
+    let won = sqlx::query_as::<_, RunQuestionRow>(&format!(
+        "UPDATE run_questions \
+            SET state = CASE WHEN $4 THEN 'skipped' ELSE 'answered' END, \
+                answers = $5, answers_digest = $6, answered_message_id = $7, answered_at = now() \
+          WHERE id = $1 AND org_id = $2 AND user_id = $3 \
+            AND state = 'requested' AND expires_at > now() \
+      RETURNING {RUN_QUESTION_COLUMNS}"
+    ))
+    .bind(question_id)
+    .bind(org_id)
+    .bind(user_id)
+    .bind(skip)
+    .bind(answers)
+    .bind(digest)
+    .bind(answered_message_id)
+    .fetch_optional(pool)
+    .await?;
+    if let Some(row) = won {
+        info!(question_id = %row.id, state = %row.state, "run question answered");
+        return Ok(AnsweredRunQuestion::Answered(row));
+    }
+
+    // The compare-and-set missed: lapse the question if its time is up, then read why.
+    sqlx::query(
+        "UPDATE run_questions SET state = 'expired' \
+         WHERE id = $1 AND org_id = $2 AND user_id = $3 \
+           AND state = 'requested' AND expires_at <= now()",
+    )
+    .bind(question_id)
+    .bind(org_id)
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+    let Some(row) = get_run_question(pool, question_id, org_id, user_id).await? else {
+        return Ok(AnsweredRunQuestion::NotFound);
+    };
+    match classify_unanswerable(&row.state, row.answers_digest.as_deref(), digest) {
+        Some(Unanswerable::Gone) => Ok(AnsweredRunQuestion::Gone(row)),
+        Some(Unanswerable::Replay) => Ok(AnsweredRunQuestion::Replay(row)),
+        Some(Unanswerable::Conflict) => Ok(AnsweredRunQuestion::AlreadyAnswered),
+        None => bail!("run question {question_id} is still waiting after a missed answer"),
+    }
+}
+
+/// One of the owner's questions by id. Another user's question, and one in another org, are
+/// `None`.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn get_run_question(
+    pool: &Pool,
+    question_id: &str,
+    org_id: &str,
+    user_id: &str,
+) -> Result<Option<RunQuestionRow>> {
+    let row = sqlx::query_as::<_, RunQuestionRow>(&format!(
+        "SELECT {RUN_QUESTION_COLUMNS} FROM run_questions \
+         WHERE id = $1 AND org_id = $2 AND user_id = $3"
+    ))
+    .bind(question_id)
+    .bind(org_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
+#[cfg(test)]
+mod run_question_tests {
+    use super::*;
+
+    #[test]
+    fn run_question_a_lapsed_or_withdrawn_question_is_gone() {
+        for state in ["expired", "cancelled"] {
+            assert_eq!(
+                classify_unanswerable(state, None, "d"),
+                Some(Unanswerable::Gone),
+                "{state}"
+            );
+        }
+    }
+
+    #[test]
+    fn run_question_an_identical_retry_is_a_replay_and_a_different_answer_a_conflict() {
+        for state in ["answered", "skipped"] {
+            assert_eq!(
+                classify_unanswerable(state, Some("same"), "same"),
+                Some(Unanswerable::Replay),
+                "{state}"
+            );
+            assert_eq!(
+                classify_unanswerable(state, Some("first"), "second"),
+                Some(Unanswerable::Conflict),
+                "{state}"
+            );
+        }
+    }
+
+    #[test]
+    fn run_question_a_waiting_question_is_never_classified_as_unanswerable() {
+        assert_eq!(classify_unanswerable("requested", None, "d"), None);
+        assert_eq!(classify_unanswerable("something-else", None, "d"), None);
+    }
+
+    /// The compare-and-set is the only way out of `requested`: the statement must keep both
+    /// the state and the clock in its predicate, and nothing but this module may write state.
+    #[test]
+    fn run_question_the_answer_statement_keeps_the_compare_and_set_predicate() {
+        let source = include_str!("orchestration_store.rs").replace("\r\n", "\n");
+        let body = &source[source
+            .find("pub async fn answer_run_question(")
+            .expect("the answer function is present")..];
+        let body = &body[..body.find("\n}\n").expect("end of the function")];
+        assert!(body.contains("AND state = 'requested' AND expires_at > now()"));
+        assert!(body.contains("AND org_id = $2 AND user_id = $3"));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3349,5 +3718,387 @@ mod approval_consume_db_tests {
             .unwrap()
             .unwrap();
         assert!(spend.already_consumed && spend.same_claim && spend.call.is_none());
+    }
+}
+
+/// Build plan WS14 S3: DB-backed checks of the run question store. Run with
+/// `DATABASE_URL=... cargo test -p session-core --bin session-core run_question -- --ignored --test-threads=1`
+/// against a scratch Postgres (the database name must say it is a test database).
+#[cfg(test)]
+mod run_question_db_tests {
+    use super::*;
+    use sqlx::postgres::PgPoolOptions;
+
+    async fn scratch_pool() -> Option<Pool> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return None;
+        };
+        assert!(url.contains("test"), "the scratch database name must say test");
+        let pool = PgPoolOptions::new()
+            .max_connections(8)
+            .connect(&url)
+            .await
+            .expect("connect pg");
+        sqlx::migrate!("./migrations").run(&pool).await.expect("migrate");
+        Some(pool)
+    }
+
+    struct Seed {
+        run_id: String,
+        thread_id: String,
+        org: String,
+        user: String,
+    }
+
+    async fn seed_run(pool: &Pool, tag: &str) -> Seed {
+        let sfx = mp_ids::new_ulid();
+        let (thread_id, run_id, org, user) = (
+            format!("rq-t-{tag}-{sfx}"),
+            format!("rq-r-{tag}-{sfx}"),
+            format!("rq-org-{sfx}"),
+            "u1".to_owned(),
+        );
+        sqlx::query("INSERT INTO threads (id,session_key,org_id,user_id) VALUES ($1,$1,$2,$3)")
+            .bind(&thread_id).bind(&org).bind(&user).execute(pool).await.expect("seed thread");
+        sqlx::query("INSERT INTO runs (id,thread_id,goal,org_id,user_id) VALUES ($1,$2,'g',$3,$4)")
+            .bind(&run_id).bind(&thread_id).bind(&org).bind(&user).execute(pool).await.expect("seed run");
+        Seed { run_id, thread_id, org, user }
+    }
+
+    fn spec() -> JsonValue {
+        serde_json::json!([{
+            "id": "scope", "kind": "single", "prompt": "Which one?",
+            "options": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}]
+        }])
+    }
+
+    async fn ask(
+        pool: &Pool,
+        seed: &Seed,
+        key: &str,
+        expires_in: chrono::Duration,
+    ) -> CreatedRunQuestion {
+        let id = format!("q_{}", mp_ids::new_ulid());
+        let spec = spec();
+        create_run_question(
+            pool,
+            &NewRunQuestion {
+                id: &id,
+                run_id: &seed.run_id,
+                thread_id: &seed.thread_id,
+                step_id: "step-1",
+                org_id: &seed.org,
+                user_id: &seed.user,
+                delivery: "next_turn",
+                spec: &spec,
+                idempotency_key: key,
+                expires_at: Utc::now() + expires_in,
+            },
+            3,
+        )
+        .await
+        .expect("create")
+    }
+
+    async fn created(pool: &Pool, seed: &Seed, key: &str) -> RunQuestionRow {
+        match ask(pool, seed, key, chrono::Duration::hours(1)).await {
+            CreatedRunQuestion::Created(row) => row,
+            other => panic!("expected a new question, got {other:?}"),
+        }
+    }
+
+    async fn answer(
+        pool: &Pool,
+        seed: &Seed,
+        question: &str,
+        option: &str,
+        skip: bool,
+    ) -> AnsweredRunQuestion {
+        let answers = if skip {
+            serde_json::json!([])
+        } else {
+            serde_json::json!([{"item_id": "scope", "option_ids": [option], "text": ""}])
+        };
+        // Any 64-character digest will do: the store only compares them.
+        let digest = format!("{:0>64}", if skip { "skip".to_owned() } else { option.to_owned() });
+        answer_run_question(pool, question, &seed.org, &seed.user, &answers, &digest, skip, "")
+            .await
+            .expect("answer")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn run_question_a_retry_with_the_same_key_returns_the_stored_row() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "idem").await;
+        let first = created(&pool, &seed, "run:step-1").await;
+        assert_eq!(first.state, "requested");
+        assert_eq!(first.delivery, "next_turn");
+        let CreatedRunQuestion::Existing(again) =
+            ask(&pool, &seed, "run:step-1", chrono::Duration::hours(1)).await
+        else {
+            panic!("a retry must return the stored question");
+        };
+        assert_eq!(again.id, first.id);
+        let listed = list_run_questions(&pool, &seed.run_id, &seed.org, &seed.user)
+            .await
+            .expect("list");
+        assert_eq!(listed.len(), 1, "a retry made no second row");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn run_question_the_fourth_question_of_a_run_is_refused_but_a_retry_still_resolves() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "budget").await;
+        for n in 0..3 {
+            created(&pool, &seed, &format!("k{n}")).await;
+        }
+        assert!(matches!(
+            ask(&pool, &seed, "k3", chrono::Duration::hours(1)).await,
+            CreatedRunQuestion::BudgetExhausted
+        ));
+        assert!(matches!(
+            ask(&pool, &seed, "k1", chrono::Duration::hours(1)).await,
+            CreatedRunQuestion::Existing(_)
+        ));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn run_question_concurrent_asks_never_exceed_the_budget() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "budget-race").await;
+        let mut tasks = Vec::new();
+        for n in 0..8 {
+            let pool = pool.clone();
+            let (run_id, thread_id, org, user) = (
+                seed.run_id.clone(),
+                seed.thread_id.clone(),
+                seed.org.clone(),
+                seed.user.clone(),
+            );
+            tasks.push(tokio::spawn(async move {
+                let id = format!("q_{}", mp_ids::new_ulid());
+                let spec = spec();
+                create_run_question(
+                    &pool,
+                    &NewRunQuestion {
+                        id: &id,
+                        run_id: &run_id,
+                        thread_id: &thread_id,
+                        step_id: "",
+                        org_id: &org,
+                        user_id: &user,
+                        delivery: "next_turn",
+                        spec: &spec,
+                        idempotency_key: &format!("race-{n}"),
+                        expires_at: Utc::now() + chrono::Duration::hours(1),
+                    },
+                    3,
+                )
+                .await
+                .expect("create")
+            }));
+        }
+        let mut stored = 0;
+        for task in tasks {
+            if matches!(task.await.expect("join"), CreatedRunQuestion::Created(_)) {
+                stored += 1;
+            }
+        }
+        assert_eq!(stored, 3, "exactly the budget is stored");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn run_question_a_key_that_names_another_runs_question_is_refused() {
+        let Some(pool) = scratch_pool().await else { return };
+        let first = seed_run(&pool, "key-a").await;
+        created(&pool, &first, "shared-key").await;
+        // The same org, another run, the same key.
+        let sfx = mp_ids::new_ulid();
+        let other_run = format!("rq-r-other-{sfx}");
+        sqlx::query("INSERT INTO runs (id,thread_id,goal,org_id,user_id) VALUES ($1,$2,'g',$3,$4)")
+            .bind(&other_run).bind(&first.thread_id).bind(&first.org).bind(&first.user)
+            .execute(&pool).await.expect("seed second run");
+        let other = Seed {
+            run_id: other_run,
+            thread_id: first.thread_id.clone(),
+            org: first.org.clone(),
+            user: first.user.clone(),
+        };
+        assert!(matches!(
+            ask(&pool, &other, "shared-key", chrono::Duration::hours(1)).await,
+            CreatedRunQuestion::KeyInUse
+        ));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn run_question_is_answered_once_an_identical_retry_replays_and_another_answer_conflicts() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "once").await;
+        let question = created(&pool, &seed, "k").await;
+
+        let AnsweredRunQuestion::Answered(done) = answer(&pool, &seed, &question.id, "a", false).await
+        else {
+            panic!("the first answer must win");
+        };
+        assert_eq!(done.state, "answered");
+        assert!(done.answered_at.is_some());
+        assert!(matches!(
+            answer(&pool, &seed, &question.id, "a", false).await,
+            AnsweredRunQuestion::Replay(_)
+        ));
+        assert!(matches!(
+            answer(&pool, &seed, &question.id, "b", false).await,
+            AnsweredRunQuestion::AlreadyAnswered
+        ));
+        assert!(matches!(
+            answer(&pool, &seed, &question.id, "", true).await,
+            AnsweredRunQuestion::AlreadyAnswered
+        ));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn run_question_a_skip_is_recorded_as_skipped() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "skip").await;
+        let question = created(&pool, &seed, "k").await;
+        let AnsweredRunQuestion::Answered(done) = answer(&pool, &seed, &question.id, "", true).await
+        else {
+            panic!("a skip must be recorded");
+        };
+        assert_eq!(done.state, "skipped");
+        assert_eq!(done.answers, Some(serde_json::json!([])));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn run_question_two_parallel_answers_yield_exactly_one_winner() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "race").await;
+        let question = created(&pool, &seed, "k").await;
+        let mut tasks = Vec::new();
+        for n in 0..6 {
+            let (pool, id, org, user) = (
+                pool.clone(),
+                question.id.clone(),
+                seed.org.clone(),
+                seed.user.clone(),
+            );
+            tasks.push(tokio::spawn(async move {
+                // Half the callers give one answer, half another.
+                let option = if n % 2 == 0 { "a" } else { "b" };
+                let answers = serde_json::json!([{"item_id": "scope", "option_ids": [option], "text": ""}]);
+                let digest = format!("{option:0>64}");
+                answer_run_question(&pool, &id, &org, &user, &answers, &digest, false, "")
+                    .await
+                    .expect("answer")
+            }));
+        }
+        let mut won = 0;
+        for task in tasks {
+            match task.await.expect("join") {
+                AnsweredRunQuestion::Answered(_) => won += 1,
+                AnsweredRunQuestion::Replay(_) | AnsweredRunQuestion::AlreadyAnswered => {}
+                other => panic!("unexpected outcome {other:?}"),
+            }
+        }
+        assert_eq!(won, 1, "exactly one answer wins the compare-and-set");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn run_question_a_lapsed_question_is_gone_and_a_list_reports_it_expired() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "expired").await;
+        let question = match ask(&pool, &seed, "k", chrono::Duration::seconds(-5)).await {
+            CreatedRunQuestion::Created(row) => row,
+            other => panic!("expected a new question, got {other:?}"),
+        };
+        let AnsweredRunQuestion::Gone(row) = answer(&pool, &seed, &question.id, "a", false).await
+        else {
+            panic!("a lapsed question must be gone");
+        };
+        assert_eq!(row.state, "expired");
+
+        let lapsed = match ask(&pool, &seed, "k2", chrono::Duration::seconds(-5)).await {
+            CreatedRunQuestion::Created(row) => row,
+            other => panic!("expected a new question, got {other:?}"),
+        };
+        let listed = list_run_questions(&pool, &seed.run_id, &seed.org, &seed.user)
+            .await
+            .expect("list");
+        let state = |id: &str| listed.iter().find(|q| q.id == id).expect("listed").state.clone();
+        assert_eq!(state(&lapsed.id), "expired");
+        assert_eq!(state(&question.id), "expired");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn run_question_another_user_or_org_sees_no_such_question() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "owner").await;
+        let question = created(&pool, &seed, "k").await;
+        let stranger = answer_run_question(
+            &pool,
+            &question.id,
+            &seed.org,
+            "u2",
+            &serde_json::json!([]),
+            &format!("{:0>64}", "x"),
+            true,
+            "",
+        )
+        .await
+        .expect("answer");
+        assert!(matches!(stranger, AnsweredRunQuestion::NotFound));
+        let foreign_org = answer_run_question(
+            &pool,
+            &question.id,
+            "another-org",
+            &seed.user,
+            &serde_json::json!([]),
+            &format!("{:0>64}", "x"),
+            true,
+            "",
+        )
+        .await
+        .expect("answer");
+        assert!(matches!(foreign_org, AnsweredRunQuestion::NotFound));
+        assert!(list_run_questions(&pool, &seed.run_id, &seed.org, "u2")
+            .await
+            .expect("list")
+            .is_empty());
+        // The owner's question is untouched by the strangers' attempts.
+        let still = get_run_question(&pool, &question.id, &seed.org, &seed.user)
+            .await
+            .expect("get")
+            .expect("owner reads it");
+        assert_eq!(still.state, "requested");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn run_question_erasing_the_run_erases_its_questions() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "erase").await;
+        let question = created(&pool, &seed, "k").await;
+        answer(&pool, &seed, &question.id, "a", false).await;
+        sqlx::query("DELETE FROM runs WHERE id = $1")
+            .bind(&seed.run_id)
+            .execute(&pool)
+            .await
+            .expect("delete run");
+        let left: i64 = sqlx::query_scalar("SELECT count(*) FROM run_questions WHERE id = $1")
+            .bind(&question.id)
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(left, 0, "the question and its answer are erased with the run");
     }
 }

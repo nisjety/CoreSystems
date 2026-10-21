@@ -37,6 +37,9 @@ const (
 	OrchestrationCoreService_RecordApprovalContinuationStarted_FullMethodName = "/model_plane.v1.OrchestrationCoreService/RecordApprovalContinuationStarted"
 	OrchestrationCoreService_RecordApprovalContinuationOutcome_FullMethodName = "/model_plane.v1.OrchestrationCoreService/RecordApprovalContinuationOutcome"
 	OrchestrationCoreService_AcknowledgeApprovalDelivery_FullMethodName       = "/model_plane.v1.OrchestrationCoreService/AcknowledgeApprovalDelivery"
+	OrchestrationCoreService_CreateRunQuestion_FullMethodName                 = "/model_plane.v1.OrchestrationCoreService/CreateRunQuestion"
+	OrchestrationCoreService_ListRunQuestions_FullMethodName                  = "/model_plane.v1.OrchestrationCoreService/ListRunQuestions"
+	OrchestrationCoreService_AnswerRunQuestion_FullMethodName                 = "/model_plane.v1.OrchestrationCoreService/AnswerRunQuestion"
 	OrchestrationCoreService_GetSubagentLineage_FullMethodName                = "/model_plane.v1.OrchestrationCoreService/GetSubagentLineage"
 	OrchestrationCoreService_AttachSubagent_FullMethodName                    = "/model_plane.v1.OrchestrationCoreService/AttachSubagent"
 	OrchestrationCoreService_GetRunProofBundle_FullMethodName                 = "/model_plane.v1.OrchestrationCoreService/GetRunProofBundle"
@@ -116,6 +119,17 @@ type OrchestrationCoreServiceClient interface {
 	// delivered outcome until Execution Core can present a durable, authenticated
 	// continuation receipt proving that the paused work actually restarted.
 	AcknowledgeApprovalDelivery(ctx context.Context, in *AcknowledgeApprovalDeliveryRequest, opts ...grpc.CallOption) (*AcknowledgeApprovalDeliveryResponse, error)
+	// Ask the run's owner a question (build plan WS14 S3). A question is a pause
+	// kind with its own store, never an approval: an answer is information, not an
+	// authority grant, so it lives in `run_questions` and never reads as a grant.
+	// Refused for a zero-retention or waived run, and for a ZDR or waived caller.
+	CreateRunQuestion(ctx context.Context, in *CreateRunQuestionRequest, opts ...grpc.CallOption) (*CreateRunQuestionResponse, error)
+	// List the caller's own questions for a run. Owner-only; an overdue
+	// question is reported EXPIRED.
+	ListRunQuestions(ctx context.Context, in *ListRunQuestionsRequest, opts ...grpc.CallOption) (*ListRunQuestionsResponse, error)
+	// Answer (or skip) a requested question once. An identical retry is an
+	// idempotent replay; a different second answer is refused.
+	AnswerRunQuestion(ctx context.Context, in *AnswerRunQuestionRequest, opts ...grpc.CallOption) (*AnswerRunQuestionResponse, error)
 	// Fetch the subagent lineage for a thread.
 	GetSubagentLineage(ctx context.Context, in *GetSubagentLineageRequest, opts ...grpc.CallOption) (*GetSubagentLineageResponse, error)
 	// Attach a subagent lineage edge (parent_run_id -> child_run_id).
@@ -328,6 +342,36 @@ func (c *orchestrationCoreServiceClient) AcknowledgeApprovalDelivery(ctx context
 	return out, nil
 }
 
+func (c *orchestrationCoreServiceClient) CreateRunQuestion(ctx context.Context, in *CreateRunQuestionRequest, opts ...grpc.CallOption) (*CreateRunQuestionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CreateRunQuestionResponse)
+	err := c.cc.Invoke(ctx, OrchestrationCoreService_CreateRunQuestion_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *orchestrationCoreServiceClient) ListRunQuestions(ctx context.Context, in *ListRunQuestionsRequest, opts ...grpc.CallOption) (*ListRunQuestionsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListRunQuestionsResponse)
+	err := c.cc.Invoke(ctx, OrchestrationCoreService_ListRunQuestions_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *orchestrationCoreServiceClient) AnswerRunQuestion(ctx context.Context, in *AnswerRunQuestionRequest, opts ...grpc.CallOption) (*AnswerRunQuestionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AnswerRunQuestionResponse)
+	err := c.cc.Invoke(ctx, OrchestrationCoreService_AnswerRunQuestion_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *orchestrationCoreServiceClient) GetSubagentLineage(ctx context.Context, in *GetSubagentLineageRequest, opts ...grpc.CallOption) (*GetSubagentLineageResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetSubagentLineageResponse)
@@ -468,6 +512,17 @@ type OrchestrationCoreServiceServer interface {
 	// delivered outcome until Execution Core can present a durable, authenticated
 	// continuation receipt proving that the paused work actually restarted.
 	AcknowledgeApprovalDelivery(context.Context, *AcknowledgeApprovalDeliveryRequest) (*AcknowledgeApprovalDeliveryResponse, error)
+	// Ask the run's owner a question (build plan WS14 S3). A question is a pause
+	// kind with its own store, never an approval: an answer is information, not an
+	// authority grant, so it lives in `run_questions` and never reads as a grant.
+	// Refused for a zero-retention or waived run, and for a ZDR or waived caller.
+	CreateRunQuestion(context.Context, *CreateRunQuestionRequest) (*CreateRunQuestionResponse, error)
+	// List the caller's own questions for a run. Owner-only; an overdue
+	// question is reported EXPIRED.
+	ListRunQuestions(context.Context, *ListRunQuestionsRequest) (*ListRunQuestionsResponse, error)
+	// Answer (or skip) a requested question once. An identical retry is an
+	// idempotent replay; a different second answer is refused.
+	AnswerRunQuestion(context.Context, *AnswerRunQuestionRequest) (*AnswerRunQuestionResponse, error)
 	// Fetch the subagent lineage for a thread.
 	GetSubagentLineage(context.Context, *GetSubagentLineageRequest) (*GetSubagentLineageResponse, error)
 	// Attach a subagent lineage edge (parent_run_id -> child_run_id).
@@ -553,6 +608,15 @@ func (UnimplementedOrchestrationCoreServiceServer) RecordApprovalContinuationOut
 }
 func (UnimplementedOrchestrationCoreServiceServer) AcknowledgeApprovalDelivery(context.Context, *AcknowledgeApprovalDeliveryRequest) (*AcknowledgeApprovalDeliveryResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method AcknowledgeApprovalDelivery not implemented")
+}
+func (UnimplementedOrchestrationCoreServiceServer) CreateRunQuestion(context.Context, *CreateRunQuestionRequest) (*CreateRunQuestionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateRunQuestion not implemented")
+}
+func (UnimplementedOrchestrationCoreServiceServer) ListRunQuestions(context.Context, *ListRunQuestionsRequest) (*ListRunQuestionsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListRunQuestions not implemented")
+}
+func (UnimplementedOrchestrationCoreServiceServer) AnswerRunQuestion(context.Context, *AnswerRunQuestionRequest) (*AnswerRunQuestionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AnswerRunQuestion not implemented")
 }
 func (UnimplementedOrchestrationCoreServiceServer) GetSubagentLineage(context.Context, *GetSubagentLineageRequest) (*GetSubagentLineageResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetSubagentLineage not implemented")
@@ -918,6 +982,60 @@ func _OrchestrationCoreService_AcknowledgeApprovalDelivery_Handler(srv interface
 	return interceptor(ctx, in, info, handler)
 }
 
+func _OrchestrationCoreService_CreateRunQuestion_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateRunQuestionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OrchestrationCoreServiceServer).CreateRunQuestion(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: OrchestrationCoreService_CreateRunQuestion_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OrchestrationCoreServiceServer).CreateRunQuestion(ctx, req.(*CreateRunQuestionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _OrchestrationCoreService_ListRunQuestions_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListRunQuestionsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OrchestrationCoreServiceServer).ListRunQuestions(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: OrchestrationCoreService_ListRunQuestions_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OrchestrationCoreServiceServer).ListRunQuestions(ctx, req.(*ListRunQuestionsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _OrchestrationCoreService_AnswerRunQuestion_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AnswerRunQuestionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OrchestrationCoreServiceServer).AnswerRunQuestion(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: OrchestrationCoreService_AnswerRunQuestion_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OrchestrationCoreServiceServer).AnswerRunQuestion(ctx, req.(*AnswerRunQuestionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _OrchestrationCoreService_GetSubagentLineage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetSubagentLineageRequest)
 	if err := dec(in); err != nil {
@@ -1097,6 +1215,18 @@ var OrchestrationCoreService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "AcknowledgeApprovalDelivery",
 			Handler:    _OrchestrationCoreService_AcknowledgeApprovalDelivery_Handler,
+		},
+		{
+			MethodName: "CreateRunQuestion",
+			Handler:    _OrchestrationCoreService_CreateRunQuestion_Handler,
+		},
+		{
+			MethodName: "ListRunQuestions",
+			Handler:    _OrchestrationCoreService_ListRunQuestions_Handler,
+		},
+		{
+			MethodName: "AnswerRunQuestion",
+			Handler:    _OrchestrationCoreService_AnswerRunQuestion_Handler,
 		},
 		{
 			MethodName: "GetSubagentLineage",

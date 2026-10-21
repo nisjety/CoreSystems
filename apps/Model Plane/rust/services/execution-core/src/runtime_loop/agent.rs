@@ -8973,6 +8973,31 @@ mod tests {
                 .decisions
                 .push((req.approval_id.clone(), req.decision));
             let approval = pb::Approval {
+        async fn create_run_question(
+            &self,
+            _: Request<pb::CreateRunQuestionRequest>,
+        ) -> Result<Response<pb::CreateRunQuestionResponse>, Status> {
+            Err(Status::unimplemented(
+                "create_run_question not needed in test",
+            ))
+        }
+
+        async fn list_run_questions(
+            &self,
+            _: Request<pb::ListRunQuestionsRequest>,
+        ) -> Result<Response<pb::ListRunQuestionsResponse>, Status> {
+            Err(Status::unimplemented("list_run_questions not needed in test"))
+        }
+
+        async fn answer_run_question(
+            &self,
+            _: Request<pb::AnswerRunQuestionRequest>,
+        ) -> Result<Response<pb::AnswerRunQuestionResponse>, Status> {
+            Err(Status::unimplemented(
+                "answer_run_question not needed in test",
+            ))
+        }
+
                 id: req.approval_id,
                 state: req.decision,
                 decided_by: req.decided_by,
