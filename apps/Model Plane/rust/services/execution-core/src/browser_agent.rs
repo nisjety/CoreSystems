@@ -183,6 +183,189 @@ pub struct BrowserObservation {
     pub snapshot_generation: Option<u32>,
     pub snapshot_targets: Vec<BrowserSnapshotTarget>,
     pub error_message: String,
+    /// Quarry's access-state signal for this page. `None` when Quarry sent
+    /// none (an older Quarry, or a page that is an ordinary page).
+    pub challenge: Option<BrowserChallenge>,
+}
+
+/// What Quarry says a page's access state is. Every field is a closed
+/// vocabulary or a number, never page text, so it can reach the planner prompt
+/// without carrying anything the page wrote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserChallenge {
+    pub kind: ChallengeKind,
+    pub strength: ChallengeStrength,
+    /// Set on a strong signal only.
+    pub block_reason: Option<BlockReason>,
+    pub recovery: ChallengeRecovery,
+    /// Quarry's confidence in thousandths (0 to 1000).
+    pub confidence_per_mille: u16,
+}
+
+impl BrowserChallenge {
+    /// Only a strong signal says a bot wall stands in front of the page.
+    #[must_use]
+    pub fn is_strong(&self) -> bool {
+        self.strength == ChallengeStrength::Strong
+    }
+}
+
+impl std::fmt::Display for BrowserChallenge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "kind={} strength={} block_reason={} recovery={} confidence_per_mille={}",
+            self.kind.as_str(),
+            self.strength.as_str(),
+            self.block_reason.map_or("none", BlockReason::as_str),
+            self.recovery.as_str(),
+            self.confidence_per_mille,
+        )
+    }
+}
+
+/// Mirrors Quarry's `ChallengeKind` (`challenge-signal.schema.json`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChallengeKind {
+    Captcha,
+    Waf,
+    Login,
+    Consent,
+    RateLimit,
+    AccessDenied,
+    /// Informational: a paywall is not a bot verdict.
+    Paywall,
+    /// Informational: a regional or legal restriction is not a bot verdict.
+    GeoBlocked,
+    Unknown,
+}
+
+impl ChallengeKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Captcha => "captcha",
+            Self::Waf => "waf",
+            Self::Login => "login",
+            Self::Consent => "consent",
+            Self::RateLimit => "rate_limit",
+            Self::AccessDenied => "access_denied",
+            Self::Paywall => "paywall",
+            Self::GeoBlocked => "geo_blocked",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// A value outside the closed list reads as `Unknown`, which Quarry's own
+    /// list also has, so a newer Quarry never fails the observation.
+    #[must_use]
+    pub fn from_wire(value: &str) -> Self {
+        match value {
+            "captcha" => Self::Captcha,
+            "waf" => Self::Waf,
+            "login" => Self::Login,
+            "consent" => Self::Consent,
+            "rate_limit" => Self::RateLimit,
+            "access_denied" => Self::AccessDenied,
+            "paywall" => Self::Paywall,
+            "geo_blocked" => Self::GeoBlocked,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// Mirrors Quarry's `ChallengeStrength`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChallengeStrength {
+    Strong,
+    Weak,
+    /// An ordinary access state (a login form, a consent banner, a paywall, a
+    /// rate limit, a bare status), named so it is not mistaken for a bot wall.
+    NonSignal,
+}
+
+impl ChallengeStrength {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Strong => "strong",
+            Self::Weak => "weak",
+            Self::NonSignal => "non_signal",
+        }
+    }
+
+    /// A value outside the closed list reads as `Weak`: a hint worth a look,
+    /// never a verdict. A real wall still ends in Quarry's own refusal, so
+    /// guessing `Strong` here would only turn an unknown state into a stop.
+    #[must_use]
+    pub fn from_wire(value: &str) -> Self {
+        match value {
+            "strong" => Self::Strong,
+            "non_signal" => Self::NonSignal,
+            _ => Self::Weak,
+        }
+    }
+}
+
+/// Mirrors Quarry's `BlockReason`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockReason {
+    CaptchaWidget,
+    WafInterstitial,
+    /// The same host challenged again after its one recovery was spent.
+    ChallengeLoop,
+    UnexpectedBotError,
+}
+
+impl BlockReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CaptchaWidget => "captcha_widget",
+            Self::WafInterstitial => "waf_interstitial",
+            Self::ChallengeLoop => "challenge_loop",
+            Self::UnexpectedBotError => "unexpected_bot_error",
+        }
+    }
+
+    /// `None` for a value outside the closed list: a reason is never invented.
+    #[must_use]
+    pub fn from_wire(value: &str) -> Option<Self> {
+        match value {
+            "captcha_widget" => Some(Self::CaptchaWidget),
+            "waf_interstitial" => Some(Self::WafInterstitial),
+            "challenge_loop" => Some(Self::ChallengeLoop),
+            "unexpected_bot_error" => Some(Self::UnexpectedBotError),
+            _ => None,
+        }
+    }
+}
+
+/// Mirrors Quarry's `ChallengeRecovery`: whether the one wait or reload the
+/// planner gets on a strong signal is still there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChallengeRecovery {
+    Available,
+    Exhausted,
+    NotApplicable,
+}
+
+impl ChallengeRecovery {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Available => "available",
+            Self::Exhausted => "exhausted",
+            Self::NotApplicable => "not_applicable",
+        }
+    }
+
+    /// A value outside the closed list reads as `NotApplicable`, so the
+    /// planner is never told a recovery exists that Quarry did not offer.
+    #[must_use]
+    pub fn from_wire(value: &str) -> Self {
+        match value {
+            "available" => Self::Available,
+            "exhausted" => Self::Exhausted,
+            _ => Self::NotApplicable,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -746,6 +929,28 @@ pub async fn run_browser_agent_loop(
                         }
                         pending = Some(obs);
                     }
+                    // A refused bot wall is an observation, not a failure to
+                    // retry: the next planning step stops on its Blocked status.
+                    Err(crate::quarry_agent::AgentClientError::Challenge(challenge)) => {
+                        let page_url = if matches!(action.action_type, ActionType::Goto) {
+                            action.url.clone()
+                        } else {
+                            plan.observations
+                                .last()
+                                .map(|o| o.page_url.clone())
+                                .unwrap_or_default()
+                        };
+                        let obs = crate::quarry_agent::observation_from_challenge_refusal(
+                            challenge,
+                            &action.action_id,
+                            &plan.config.grant_id,
+                            &page_url,
+                        );
+                        if let Some(sink) = sink {
+                            sink.observation_received(&plan.config, &obs).await;
+                        }
+                        pending = Some(obs);
+                    }
                     Err(e) => {
                         plan.status = PlanStatus::Failed;
                         break format!("browser-agent step failed: {e}");
@@ -834,6 +1039,10 @@ async fn decide_next_action(
                 ..action
             },
             Ok(None) => {
+                if let Some(reason) = blocked_by_bot_wall(last_observation) {
+                    plan.status = PlanStatus::Failed;
+                    return PlanStepResult::Failed(reason);
+                }
                 plan.status = PlanStatus::Completed;
                 return PlanStepResult::Completed("agent reported task complete".to_owned());
             }
@@ -845,6 +1054,20 @@ async fn decide_next_action(
     };
 
     gate_risky_action(plan, last_observation, action, sink).await
+}
+
+/// The planner's rule for a strong challenge ends in `done` (the schema has no
+/// separate blocked action). A `done` over a page that still carries a strong
+/// signal is therefore the planner reporting the task blocked, not finished, so
+/// the run fails instead of completing. Typed fields only: no page text.
+fn blocked_by_bot_wall(last_observation: Option<&BrowserObservation>) -> Option<String> {
+    let challenge = last_observation?
+        .challenge
+        .as_ref()
+        .filter(|challenge| challenge.is_strong())?;
+    Some(format!(
+        "blocked: the site refuses automation ({challenge})"
+    ))
 }
 
 /// Phase 5 run-level gate: reusing a persistent, cookie-bearing Quarry
@@ -1190,6 +1413,7 @@ mod tests {
             snapshot_generation: None,
             snapshot_targets: vec![],
             error_message: "element not found".to_owned(),
+            challenge: None,
         };
         let result = plan_next_action(&mut plan, Some(&obs));
         match result {
@@ -1218,6 +1442,7 @@ mod tests {
             snapshot_generation: None,
             snapshot_targets: vec![],
             error_message: String::new(),
+            challenge: None,
         };
         let result = plan_next_action(&mut plan, Some(&obs));
         match result {
@@ -1705,5 +1930,126 @@ mod tests {
             _ => panic!("expected Aborted (fail closed)"),
         }
         assert_eq!(plan.status, PlanStatus::Aborted);
+    }
+
+    fn strong_wall(recovery: ChallengeRecovery) -> BrowserChallenge {
+        BrowserChallenge {
+            kind: ChallengeKind::Waf,
+            strength: ChallengeStrength::Strong,
+            block_reason: Some(BlockReason::WafInterstitial),
+            recovery,
+            confidence_per_mille: 900,
+        }
+    }
+
+    fn page_with_challenge(challenge: Option<BrowserChallenge>) -> BrowserObservation {
+        BrowserObservation {
+            observation_id: "obs_1".to_owned(),
+            action_id: "act_0001".to_owned(),
+            grant_id: "grant_001".to_owned(),
+            status: ObservationStatus::Success,
+            page_url: "https://example.com/".to_owned(),
+            page_title: String::new(),
+            extracted_text: String::new(),
+            screenshot_ref: String::new(),
+            dom_snapshot_ref: String::new(),
+            snapshot_generation: None,
+            snapshot_targets: vec![],
+            error_message: String::new(),
+            challenge,
+        }
+    }
+
+    #[test]
+    fn done_over_a_strong_signal_is_blocked_and_over_anything_else_is_not() {
+        let strong = page_with_challenge(Some(strong_wall(ChallengeRecovery::Exhausted)));
+        let reason = blocked_by_bot_wall(Some(&strong)).expect("a strong signal blocks");
+        assert!(reason.starts_with("blocked: the site refuses automation"), "{reason}");
+        assert!(reason.contains("block_reason=waf_interstitial"), "{reason}");
+
+        // A weak hint, an ordinary access state, no signal and no page at all
+        // are all a normal `done`.
+        for challenge in [
+            Some(BrowserChallenge {
+                strength: ChallengeStrength::Weak,
+                ..strong_wall(ChallengeRecovery::NotApplicable)
+            }),
+            Some(BrowserChallenge {
+                kind: ChallengeKind::Login,
+                strength: ChallengeStrength::NonSignal,
+                block_reason: None,
+                ..strong_wall(ChallengeRecovery::NotApplicable)
+            }),
+            None,
+        ] {
+            assert_eq!(blocked_by_bot_wall(Some(&page_with_challenge(challenge))), None);
+        }
+        assert_eq!(blocked_by_bot_wall(None), None);
+    }
+
+    #[test]
+    fn a_blocked_observation_with_a_challenge_stops_the_plan() {
+        let mut plan = AgentPlan::new(test_config());
+        let mut obs = page_with_challenge(Some(strong_wall(ChallengeRecovery::Exhausted)));
+        obs.status = ObservationStatus::Blocked;
+        obs.error_message = "the site refuses automation".to_owned();
+        match plan_next_action(&mut plan, Some(&obs)) {
+            PlanStepResult::Failed(reason) => assert!(reason.contains("action blocked"), "{reason}"),
+            _ => panic!("expected Failed"),
+        }
+        assert_eq!(plan.status, PlanStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn a_403_challenge_detected_ends_the_loop_blocked_without_a_retry() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/agent/runs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {"run_id": "run_abc", "lease_id": "lease_xyz"},
+                "meta": {}, "error": null
+            })))
+            .mount(&server)
+            .await;
+        // Exactly one step: the refusal is not retried as a transient error.
+        Mock::given(method("POST"))
+            .and(path("/v1/agent/runs/run_abc/step"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "data": null, "meta": {},
+                "error": {
+                    "code": "CHALLENGE_DETECTED",
+                    "message": "the site refuses automation",
+                    "retryable": false,
+                    "details": {"reason": "challenge_loop", "recovery": "exhausted",
+                                "next": "user_takeover_or_other_source"}
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1/agent/runs/run_abc"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let mut config = test_config();
+        config.start_url = Some("https://example.com/about".to_owned());
+        let client = crate::quarry_agent::QuarryAgentClient::new(server.uri(), "tok").unwrap();
+        let result = run_browser_agent_loop(config, Some(&client), None, None, None).await;
+
+        assert_eq!(result.status, PlanStatus::Failed);
+        assert!(result.summary.starts_with("action blocked:"), "{}", result.summary);
+        assert!(!result.summary.contains("step failed"), "{}", result.summary);
+        let last = result.observations.last().expect("the refusal is recorded");
+        assert_eq!(last.status, ObservationStatus::Blocked);
+        assert_eq!(last.page_url, "https://example.com/about");
+        assert_eq!(
+            last.challenge.as_ref().map(|c| (c.is_strong(), c.block_reason)),
+            Some((true, Some(BlockReason::ChallengeLoop)))
+        );
     }
 }

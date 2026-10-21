@@ -2211,6 +2211,19 @@ const BROWSER_SUGGEST_SYSTEM_PROMPT: &str = concat!(
     "press uses key; scroll uses target; wait uses ms; screenshot uses full_page."
 );
 
+/// What a browser planner does with a bot wall (Quarry WS3.J). execution-core's
+/// loop planner carries the same text as its own `BROWSER_CHALLENGE_RULE`; the
+/// two are separate services, so
+/// `execution-core/tests/browser_challenge_rule_contract.rs` keeps them
+/// identical by reading both sources. Edit them together. The rule is one line,
+/// so the text is the same whatever the file's line endings.
+const BROWSER_CHALLENGE_RULE: &str = r"Bot-wall rule. An observation may carry a challenge line of typed fields (kind, strength, block_reason, recovery, confidence_per_mille). Only strength=strong says the site refuses automation. Never solve a captcha, never change identity (another profile, account, proxy or user agent), and never look for a way around the wall. When recovery=available you may take ONE recovery step: a single wait of up to 5 seconds, or a single reload of the same page. When recovery is exhausted or not_applicable, or the signal is still strong after that one step, stop: report the task as blocked (action=done, with a reason that says the site refuses automation) and ask the user to take over the browser or to use another source. A login page, a consent banner, a paywall, a rate limit and a bare 403 are not bot blocks, carry no strong signal, and this rule does not apply to them.";
+
+/// The planner's system prompt: its fixed instructions, then the bot-wall rule.
+fn browser_suggest_system_prompt() -> String {
+    format!("{BROWSER_SUGGEST_SYSTEM_PROMPT} {BROWSER_CHALLENGE_RULE}")
+}
+
 async fn browser_suggest_action(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -2242,7 +2255,7 @@ async fn browser_suggest_action(
                     ChatMessage {
                         compaction_summary: String::new(),
                         role: "system".to_owned(),
-                        content: BROWSER_SUGGEST_SYSTEM_PROMPT.to_owned(),
+                        content: browser_suggest_system_prompt(),
                         name: String::new(),
                     },
                     ChatMessage {
@@ -5329,6 +5342,7 @@ async fn ai_video_models(
 fn capability_contract_value(
     capability: &mp_contracts::model_plane::v1::CapabilityDetail,
 ) -> Value {
+    use mp_contracts::tool_class::{effective_floor, ApprovalFloor, SideEffectClass};
     let state = capability.state.as_str();
     let execution_mode = capability.execution_mode.as_str();
     let cost_class = capability.cost_class.as_str();
@@ -5369,6 +5383,17 @@ fn capability_contract_value(
             "",
         )
     };
+    // The declared class and approval floor ride on every public capability. An
+    // empty or unrecognised value is the strictest (`unclassified`, and
+    // `durable_owner` for the floor), never omitted and never a weaker answer, so
+    // a mixed-version capability-core cannot make a tool look like a read. The
+    // floor is also raised to what the class implies by itself (an unclassified
+    // class implies at least `ask`).
+    let side_effect_class = SideEffectClass::from_wire(&capability.side_effect_class);
+    let approval_floor = effective_floor(
+        side_effect_class,
+        ApprovalFloor::from_wire(&capability.approval_floor),
+    );
     json!({
         "id": capability.capability_id,
         "name": capability.name,
@@ -5385,6 +5410,8 @@ fn capability_contract_value(
         "execution_mode": execution_mode,
         "cost_class": cost_class,
         "health_checked_at": health_checked_at,
+        "side_effect_class": side_effect_class.as_str(),
+        "approval_floor": approval_floor.as_str(),
     })
 }
 
@@ -9793,6 +9820,16 @@ mod browser_suggestion_tests {
     }
 
     #[test]
+    fn browser_planner_prompt_carries_the_bot_wall_rule_after_its_instructions() {
+        let prompt = browser_suggest_system_prompt();
+        assert!(prompt.starts_with(BROWSER_SUGGEST_SYSTEM_PROMPT));
+        assert!(prompt.ends_with(BROWSER_CHALLENGE_RULE));
+        assert!(BROWSER_CHALLENGE_RULE.contains("Never solve a captcha"));
+        assert!(BROWSER_CHALLENGE_RULE.contains("up to 5 seconds"));
+        assert!(BROWSER_CHALLENGE_RULE.contains("bare 403"));
+    }
+
+    #[test]
     fn browser_prompt_truncates_large_observations() {
         let req = BrowserSuggestActionRequest {
             goal: "Inspect page".to_owned(),
@@ -10030,6 +10067,8 @@ mod capability_contract_tests {
             health_checked_at: "2026-07-13T15:00:00Z".to_owned(),
             privacy_tier: 0,
             residency: String::new(),
+            side_effect_class: String::new(),
+            approval_floor: String::new(),
         });
 
         assert_eq!(value["state"], "approval_required");
@@ -10051,6 +10090,78 @@ mod capability_contract_tests {
         assert_eq!(value["reason_code"], "availability_contract_missing");
         assert_eq!(value["execution_mode"], "unavailable");
         assert_eq!(value["cost_class"], "unknown");
+    }
+
+    #[test]
+    fn public_capability_json_carries_the_declared_class_and_floor() {
+        for (class, floor, want_class, want_floor) in [
+            ("read", "none", "read", "none"),
+            ("read", "ask", "read", "ask"),
+            ("context_write", "none", "context_write", "none"),
+            ("external_write", "none", "external_write", "none"),
+            (
+                "owner_effect",
+                "durable_owner",
+                "owner_effect",
+                "durable_owner",
+            ),
+            // An owner effect is never reported below its durable owner floor.
+            ("owner_effect", "none", "owner_effect", "durable_owner"),
+            // An unclassified class is never reported below an ask.
+            ("unclassified", "none", "unclassified", "ask"),
+        ] {
+            let value = capability_contract_value(&CapabilityDetail {
+                capability_id: "cap.x".to_owned(),
+                side_effect_class: class.to_owned(),
+                approval_floor: floor.to_owned(),
+                ..CapabilityDetail::default()
+            });
+            assert_eq!(value["side_effect_class"], want_class, "{class}/{floor}");
+            assert_eq!(value["approval_floor"], want_floor, "{class}/{floor}");
+        }
+    }
+
+    #[test]
+    fn an_empty_or_unknown_class_and_floor_are_emitted_as_the_strictest_never_omitted() {
+        // (class, floor, class reported): every floor here is empty or unknown,
+        // so the floor reported is the strictest whatever the class is.
+        for (class, floor, want_class) in [
+            ("", "", "unclassified"),
+            ("readonly", "required", "unclassified"),
+            ("READ", "NONE", "unclassified"),
+            ("read", "", "read"),
+            ("destructive", "unknown", "destructive"),
+        ] {
+            let value = capability_contract_value(&CapabilityDetail {
+                capability_id: "cap.x".to_owned(),
+                side_effect_class: class.to_owned(),
+                approval_floor: floor.to_owned(),
+                ..CapabilityDetail::default()
+            });
+            let object = value.as_object().expect("capability JSON is an object");
+            assert!(
+                object.contains_key("side_effect_class"),
+                "{class:?}/{floor:?}"
+            );
+            assert!(object.contains_key("approval_floor"), "{class:?}/{floor:?}");
+            assert_eq!(
+                value["side_effect_class"], want_class,
+                "{class:?}/{floor:?}"
+            );
+            assert_eq!(
+                value["approval_floor"], "durable_owner",
+                "{class:?}/{floor:?}"
+            );
+        }
+        // An empty class with a stored floor of none is an unclassified class,
+        // which is never reported below an ask.
+        let value = capability_contract_value(&CapabilityDetail {
+            capability_id: "cap.x".to_owned(),
+            approval_floor: "none".to_owned(),
+            ..CapabilityDetail::default()
+        });
+        assert_eq!(value["side_effect_class"], "unclassified");
+        assert_eq!(value["approval_floor"], "ask");
     }
 
     #[tokio::test]
