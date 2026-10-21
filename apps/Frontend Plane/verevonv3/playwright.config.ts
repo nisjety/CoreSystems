@@ -47,6 +47,12 @@ const LOCAL_BASE_URL = process.env.LOCAL_E2E_BASE_URL || 'http://localhost:5173'
 const LOCAL_STORAGE_STATE = 'tests/e2e/.auth/local-state.json'
 const BROWSER_WORKSPACE_SPECS = /browser-workspace-.*\.spec\.ts/
 /**
+ * The production-mode browser grant contract (L2): API legs against a stack with
+ * quarry-edge in production posture. Run by scripts/tests/browser-grant-prod-contract.sh
+ * on the `local` project; it skips itself without BROWSER_GRANT_PROD_CONTRACT=1.
+ */
+const BROWSER_GRANT_PROD_SPEC = /browser-grants-prod-contract\.spec\.ts/
+/**
  * The chat-workspace suite (phase 10 evaluation suites 1 and 12) runs against
  * the same dockerized DEV stack as the browser-workspace family, for the same
  * reason: that is the stack this checkout actually runs, and `local@verevon.dev`
@@ -89,7 +95,7 @@ export default defineConfig({
     {
       name: 'e2e',
       testMatch: /.*\.spec\.ts/,
-      testIgnore: [BROWSER_WORKSPACE_SPECS, CHAT_WORKSPACE_SPECS, PRODUCT_READINESS_SPECS, PRODUCT_RECORDING_SPEC],
+      testIgnore: [BROWSER_WORKSPACE_SPECS, BROWSER_GRANT_PROD_SPEC, CHAT_WORKSPACE_SPECS, PRODUCT_READINESS_SPECS, PRODUCT_RECORDING_SPEC],
       dependencies: ['setup'],
       use: { ...devices['Desktop Chrome'], storageState: STORAGE_STATE },
     },
@@ -100,7 +106,7 @@ export default defineConfig({
     },
     {
       name: 'local',
-      testMatch: BROWSER_WORKSPACE_SPECS,
+      testMatch: [BROWSER_WORKSPACE_SPECS, BROWSER_GRANT_PROD_SPEC],
       dependencies: ['local-setup'],
       use: { ...devices['Desktop Chrome'], baseURL: LOCAL_BASE_URL, storageState: LOCAL_STORAGE_STATE },
     },

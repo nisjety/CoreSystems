@@ -12,6 +12,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -558,4 +559,67 @@ test('the test-code stripper keeps real production code in the files the reviewe
   assert.doesNotMatch(upstream, /\nmod tests\b/);
   const browser = stripTestCode(read('apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs'));
   assert.ok(browser.length > 100_000, 'browser.rs is scanned past its first cfg(test) item');
+});
+
+// ---- WS1.A2: the credential Quarry validates grants with ----
+
+test('quarry-edge holds browser:read on browser-broker and nothing else there, in the zdr retention lane', () => {
+  const registry = JSON.parse(read('apps/Control Plane/config/plane-service-principals.json'));
+  const edge = registry['quarry-edge'];
+  assert.ok(edge.audiences.includes('browser-broker'), 'quarry-edge may mint for browser-broker');
+  assert.deepEqual(edge.scopesByAudience['browser-broker'], ['browser:read']);
+  assert.equal(edge.retentionByAudience['browser-broker'], 'zdr');
+  assert.ok(edge.scopes.includes('browser:read'), 'the top-level scopes are the union of the per-audience ones');
+  // Nobody else holds anything on the broker audience: Quarry is its only service caller.
+  const holders = Object.entries(registry)
+    .filter(([, entry]) => 'browser-broker' in (entry.scopesByAudience ?? {}))
+    .map(([name]) => name);
+  assert.deepEqual(holders, ['quarry-edge']);
+});
+
+test('the browser-grant-validate manifest row is granted, and the vendored copy is the same bytes as its pin', () => {
+  const manifestPath = 'apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/cross-plane-token-requests.json';
+  const vendoredPath = 'apps/Control Plane/auth-core/src/auth/fixtures/cross-plane-token-requests.json';
+  const manifest = JSON.parse(read(manifestPath));
+  const row = manifest.rows.find((candidate) => candidate.name === 'browser-grant-validate');
+  assert.ok(row, 'the manifest has the browser-grant-validate row');
+  assert.equal(row.granted, true);
+  assert.equal(row.audience, 'browser-broker');
+  assert.equal(row.mint_path, '/api/browser-broker/internal-token');
+  assert.deepEqual(row.scopes, ['browser:read']);
+  assert.equal(row.pending, undefined, 'a granted row is not pending');
+  // The auth-core copy is byte-identical (LF), and both pins say the same digest.
+  assert.equal(read(vendoredPath), read(manifestPath));
+  const digest = createHash('sha256').update(read(manifestPath)).digest('hex');
+  for (const path of [manifestPath, vendoredPath]) {
+    assert.match(read(path + '.sha256'), new RegExp('^' + digest), path + ' is pinned at the manifest\'s digest');
+  }
+});
+
+test('every agent-route call site asks the broker for the run\'s organization, never the org-blind validate', () => {
+  const dir = 'apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes';
+  const files = readdirSync(join(ROOT, dir)).filter((name) => name.endsWith('.rs') && name !== 'tests.rs');
+  let orgAware = 0;
+  for (const name of files) {
+    const text = read(dir + '/' + name);
+    assert.doesNotMatch(
+      text,
+      /grant_validator\s*\.\s*validate\s*\(/,
+      name + ' calls the org-blind grant_validator.validate',
+    );
+    orgAware += (text.match(/grant_validator\s*\.\s*validate_for_org\s*\(/g) ?? []).length;
+  }
+  assert.ok(orgAware >= 3, 'the start, the per-action check and the sensitive approval each call validate_for_org (found ' + orgAware + ')');
+});
+
+test('the production overlay requires the broker address and the contract overlay pins it', () => {
+  const production = read('apps/Ingestion Plane/docker-compose.production.yml');
+  assert.match(
+    production,
+    /QUARRY_EDGE__BROWSER_GRANT_VALIDATOR_GRPC_URL: \$\{QUARRY_EDGE_BROWSER_GRANT_VALIDATOR_GRPC_URL:\?/,
+  );
+  const contract = read('apps/Ingestion Plane/docker-compose.grant-contract.yml');
+  assert.match(contract, /QUARRY_EDGE__BROWSER_GRANT_VALIDATOR_GRPC_URL: http:\/\/browser-broker:9095/);
+  // The hardening comparison itself is scripts/tests/grant-contract-overlay.test.mjs (it renders compose).
+  assert.doesNotMatch(contract.replace(/^\s*#.*$/gm, ''), /read_only|cap_drop|cap_add|tmpfs|security_opt|privileged|ports:|!reset|!override/);
 });

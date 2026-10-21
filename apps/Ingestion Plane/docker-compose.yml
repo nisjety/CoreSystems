@@ -129,6 +129,14 @@ services:
       QUARRY_EDGE__AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
       QUARRY_EDGE__QUARRY_SERVICE_API_KEY: ${QUARRY_SERVICE_API_KEY:?QUARRY_SERVICE_API_KEY is required}
       QUARRY_EDGE__CROSS_PLANE_AUTH_DEV_BYPASS: "${QUARRY_CROSS_PLANE_AUTH_DEV_BYPASS:-0}"
+      # The Model Plane BrowserBroker that validates a run's browser grant, over gRPC
+      # on inter-plane-bus (e.g. http://browser-broker:9095). Empty means no
+      # validator and is only accepted outside production: the production overlay
+      # requires it, and the edge refuses to boot in production with only an HTTP
+      # validator or without the service credential above (crates/quarry-edge/src/
+      # grant_boot.rs). Every check is made with a broker token minted for the run's
+      # organization from that credential.
+      QUARRY_EDGE__BROWSER_GRANT_VALIDATOR_GRPC_URL: ${QUARRY_EDGE_BROWSER_GRANT_VALIDATOR_GRPC_URL:-}
       # Chromium keeps its sandbox: the seccomp profile above lets it build one
       # in a container. 1 is an explicit local opt-out (old kernels, WSL2 without
       # user namespaces); the edge refuses to launch with it in production.

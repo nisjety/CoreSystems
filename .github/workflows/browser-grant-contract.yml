@@ -1,0 +1,118 @@
+name: Browser Grant Contract
+
+# The production-mode browser grant contract (plan 6.4 A, WS1.A2), the part that
+# needs no running stack:
+#
+#   l1     - the file-level checks that span four planes (proto field numbers,
+#            the single grant-minting path, the registry and the manifest row),
+#            the digest gate for the cross-plane token manifest, and the
+#            contract overlay: `docker compose config` renders the Ingestion
+#            Plane base, base + production and base + production + the test-only
+#            overlay, and the diff fails when the overlay lost or weakened any
+#            production hardening key (read_only, cap_drop, tmpfs, ports, the
+#            production and dev-bypass environment, the artifact volume).
+#   quarry - the Quarry side with the gRPC feature, which the workspace job of
+#            quarry-v2-ci.yml does not enable: the validator against a fake
+#            BrowserBroker (service token per organization, one refresh on
+#            Unauthenticated, FailedPrecondition read as an inactive grant), the
+#            boot rules, and tests/browser_grants_prod.rs (the production path
+#            through the real router, including the real binary refusing an
+#            HTTP-only or token-less validator in production).
+#
+# Not here: the live end-to-end leg (L2). It needs the rebuilt production-overlay
+# stack, so scripts/tests/browser-grant-prod-contract.sh is run by hand at the W1
+# exit gate (its --self-test is run here) and its Playwright spec is not part of
+# any CI project.
+
+on:
+  pull_request:
+    paths:
+      - "apps/Ingestion Plane/docker-compose*.yml"
+      - "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/**"
+      - "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/**"
+      - "apps/Control Plane/config/plane-service-principals.json"
+      - "apps/Control Plane/auth-core/src/auth/fixtures/cross-plane-token-requests.json*"
+      - "apps/Model Plane/proto/model_plane/v1/browser.proto"
+      - "apps/Frontend Plane/verevonv3/tests/e2e/browser-grants-prod-contract.spec.ts"
+      - "scripts/tests/browser-grant-contract.test.mjs"
+      - "scripts/tests/grant-contract-overlay.test.mjs"
+      - "scripts/tests/browser-grant-prod-contract.sh"
+      - "scripts/tests/zdr-contract-sync.test.sh"
+      - ".github/workflows/browser-grant-contract.yml"
+  push:
+    branches: [main, develop]
+    paths:
+      - "apps/Ingestion Plane/docker-compose*.yml"
+      - "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/**"
+      - "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/**"
+      - "apps/Control Plane/config/plane-service-principals.json"
+      - "apps/Control Plane/auth-core/src/auth/fixtures/cross-plane-token-requests.json*"
+      - "apps/Model Plane/proto/model_plane/v1/browser.proto"
+      - "apps/Frontend Plane/verevonv3/tests/e2e/browser-grants-prod-contract.spec.ts"
+      - "scripts/tests/browser-grant-contract.test.mjs"
+      - "scripts/tests/grant-contract-overlay.test.mjs"
+      - "scripts/tests/browser-grant-prod-contract.sh"
+      - "scripts/tests/zdr-contract-sync.test.sh"
+      - ".github/workflows/browser-grant-contract.yml"
+
+concurrency:
+  group: browser-grant-contract-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  l1:
+    name: Grant contract (L1) and overlay
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - name: docker compose is available for the render
+        run: docker compose version
+      - name: browser-grant contract and the contract overlay
+        env:
+          # A missing `docker compose` fails the overlay test instead of skipping it.
+          REQUIRE_COMPOSE_RENDER: "1"
+        run: node --test scripts/tests/browser-grant-contract.test.mjs scripts/tests/grant-contract-overlay.test.mjs
+      - name: cross-plane token manifest digests
+        run: bash scripts/tests/zdr-contract-sync.test.sh
+      - name: L2 wrapper self-test (scanner, env reader, registry check)
+        run: bash scripts/tests/browser-grant-prod-contract.sh --self-test
+
+  quarry:
+    name: Quarry grant validator and production path
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: "apps/Ingestion Plane/Quarry-v2"
+    env:
+      # Same linker precaution as quarry-v2-ci.yml: debug info for the edge's
+      # dependency graph fills the runner's disk during a link.
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "apps/Ingestion Plane/Quarry-v2 -> target"
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: "27.x"
+      - name: validator, service tokens and the token-request manifest
+        run: cargo test -p quarry-runtime --features grpc --lib -- grpc::browser_broker service_tokens token_request_contract grant_validator
+      - name: boot rules and the production path (real router, real binary)
+        run: |
+          cargo test -p quarry-edge --features grpc --lib -- grant_boot
+          cargo test -p quarry-edge --features grpc --test browser_grants_prod
+      - name: the agent-route call sites still pass the run's organization
+        run: cargo test -p quarry-edge --features grpc --test start_run_grants
