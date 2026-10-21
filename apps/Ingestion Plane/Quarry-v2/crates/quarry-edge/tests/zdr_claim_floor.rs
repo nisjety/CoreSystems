@@ -51,6 +51,7 @@ use quarry_core::output::DriverKind;
 use quarry_core::QuarryResult;
 use quarry_edge::state::AppState;
 use quarry_runtime::answer::{AnswerPipeline, SimpleHttpMarkdownFetcher};
+use quarry_runtime::artifact_store::{ArtifactStore, InMemoryStore};
 use quarry_runtime::driver::{Driver, FetchHints};
 use quarry_runtime::fetch::FetchResponse;
 use quarry_runtime::serp::{SearchOptions, SearchProvider, SearchResult};
@@ -122,6 +123,11 @@ fn fixture() -> &'static TokenFixture {
         std::env::set_var("AUTH_CORE_JWKS_URL", format!("{jwks_uri}/jwks"));
         std::env::set_var("AUTH_CORE_AUDIENCE", DEPLOYED_AUDIENCE);
         std::env::set_var("AUTH_CORE_ISSUER", DEPLOYED_ISSUER);
+        // The document route reads QUARRY_EDGE__DOC_ROUTING once per process
+        // (DocRouting::cached). Every harness starts with this initializer, so
+        // no request can run before it: the whole binary runs with the route
+        // on. An HTML page takes the same path as before; the PDF test needs it.
+        std::env::set_var(quarry_runtime::DocRouting::ENV, "on");
 
         TokenFixture { private_pem }
     })
@@ -239,6 +245,9 @@ impl UsageMeter for RecordingMeter {
 #[derive(Default)]
 struct RecordingDriver {
     fetch_zdr: Mutex<Vec<bool>>,
+    /// When set, every fetch answers with these bytes as a PDF instead of the
+    /// HTML page (the document route of `/v1/scrape`).
+    document: Mutex<Option<Vec<u8>>>,
 }
 
 #[async_trait]
@@ -260,6 +269,16 @@ impl Driver for RecordingDriver {
             .lock()
             .unwrap()
             .push(hints.privacy.zdr.is_active());
+        if let Some(body) = self.document.lock().unwrap().clone() {
+            return Ok(FetchResponse {
+                status: 200,
+                final_url: url.clone(),
+                headers: vec![("content-type".to_owned(), "application/pdf".to_owned())],
+                body,
+                duration_ms: 1,
+                served_by: DriverKind::Static,
+            });
+        }
         Ok(FetchResponse {
             status: 200,
             final_url: url.clone(),
@@ -683,6 +702,92 @@ async fn scrape_runs_as_zdr_for_a_zdr_org_user_and_not_for_a_registry_zdr_servic
         vec![Some(true), Some(false)]
     );
     assert!(is_page_fetched(&harness.settled_events().await));
+}
+
+/// A one-page PDF with `text` in Helvetica, built in place so the test needs no
+/// fixture file (the same shape the pipeline's own PDF tests use).
+fn minimal_pdf(text: &str) -> Vec<u8> {
+    let content = format!("BT /F1 24 Tf 100 700 Td ({text}) Tj ET");
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>".to_owned(),
+        format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
+    ];
+    let mut out = b"%PDF-1.4\n".to_vec();
+    let mut offsets = Vec::new();
+    for (index, object) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n{object}\nendobj\n", index + 1).as_bytes());
+    }
+    let xref_at = out.len();
+    out.extend_from_slice(
+        format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+    );
+    for offset in offsets {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_at}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    out
+}
+
+/// The document route under ZDR: a PDF is read in memory and its text comes
+/// back inline. Nothing is kept: no artifact, no `scrape_id` to read it back by,
+/// and the page event stays off the durable channel.
+#[tokio::test]
+async fn a_zdr_scrape_of_a_pdf_returns_inline_text_and_persists_nothing() {
+    let store = Arc::new(InMemoryStore::new());
+    let for_state = store.clone();
+    let harness = Harness::start_with(move |state| AppState {
+        artifacts: for_state,
+        ..state
+    })
+    .await;
+    *harness.driver.document.lock().unwrap() = Some(minimal_pdf("Hemmelig dokument"));
+
+    let response = harness
+        .post(
+            &user_in_zdr_org(),
+            "/v1/scrape",
+            json!({ "url": "https://page.test/rapport.pdf", "zdr": false }),
+        )
+        .await;
+    assert_eq!(response.status().as_u16(), 200);
+    let body: Value = response.json().await.expect("a JSON envelope");
+    let data = &body["data"];
+    let markdown = data["markdown"].as_str().unwrap_or_default();
+    assert!(
+        markdown.contains("Hemmelig dokument"),
+        "the PDF's text is inline under ZDR: {body}"
+    );
+    assert!(
+        data["scrape_id"].is_null(),
+        "a ZDR scrape stores no record, so it has no scrape_id: {body}"
+    );
+    assert!(
+        data["formats"]["raw"].is_null(),
+        "the original bytes are not kept under ZDR: {body}"
+    );
+    let stored = store
+        .list(
+            &golden_org("user_in_zdr_org"),
+            &quarry_core::pagination::ListFilter::default(),
+        )
+        .await
+        .expect("list artifacts");
+    assert!(stored.items.is_empty(), "a ZDR document writes no artifact");
+    assert_eq!(harness.fetch_zdr(), vec![true]);
+    assert!(
+        !is_page_fetched(&harness.settled_events().await),
+        "a ZDR document keeps its page events off the durable channel"
+    );
 }
 
 #[tokio::test]
