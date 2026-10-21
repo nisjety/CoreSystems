@@ -181,6 +181,82 @@ pub fn json_keys(value: &serde_json::Value) -> Vec<&str> {
     keys
 }
 
+/// Insert a live agent run owned by `claims` into the registry and return its
+/// handle, so a handler-level test never builds a `RunEntry` literal of its own
+/// (every field a later slice adds is defaulted here, in one place).
+///
+/// The run is an agent-controlled, ephemeral, ungranted run with a five-step
+/// bound and no domain allow-list; a test that needs more sets fields on the
+/// entry through `handle.entry.lock().await`.
+#[cfg(feature = "browser-agent")]
+pub fn insert_live_run(state: &AppState, claims: &Claims) -> crate::agent_routes::RunHandle {
+    use quarry_browser::{BrowserSession, SessionInner};
+    use quarry_core::contracts::AgentConstraints;
+    use quarry_core::ids::Id;
+    use quarry_core::lease::BrowserLease;
+    use quarry_core::zdr::ZdrMode;
+    use quarry_runtime::observation::ObservationContext;
+    use quarry_runtime::step_receipts::{BrowserControlMode, BrowserProfileScope};
+
+    use crate::agent_routes::{BrowserExecutionTier, RunEntry, RunHandle, RunLive};
+
+    let lease = BrowserLease {
+        lease_id: Id::new(),
+        profile_id: Id::new(),
+        session_affinity_key: "test".into(),
+        proxy_affinity: Default::default(),
+        ttl_s: 60,
+        capabilities: vec![],
+        artifact_bucket: String::new(),
+        persist_profile: false,
+        viewport: None,
+        org_id: claims.org_id.clone(),
+    };
+    let entry = RunEntry {
+        run_id: Id::new(),
+        org_id: claims.org_id.clone(),
+        actor_id: claims.actor_id().to_string(),
+        session: BrowserSession {
+            lease: lease.clone(),
+            inner: Arc::new(tokio::sync::Mutex::new(SessionInner::default())),
+        },
+        ctx: ObservationContext::default(),
+        lease,
+        constraints: AgentConstraints {
+            max_steps: 5,
+            allowed_domains: vec![],
+            max_runtime_s: None,
+            max_cost_usd: None,
+        },
+        zdr: ZdrMode::Off,
+        grant_id: None,
+        control_mode: BrowserControlMode::AgentControl,
+        control_epoch: 0,
+        profile_scope: BrowserProfileScope::Ephemeral,
+        execution_tier: BrowserExecutionTier::Chromium,
+        last_observation: None,
+        used_sensitive_approval_grants: Default::default(),
+        budget: None,
+        closed: false,
+        last_rejected_epoch: None,
+        tab_origins: Default::default(),
+    };
+    let run_id = entry.run_id.to_string();
+    let live = RunLive::new(
+        entry.org_id.clone(),
+        entry.actor_id.clone(),
+        entry.control_mode,
+        entry.control_epoch,
+    );
+    let handle = RunHandle::new(entry, live);
+    state
+        .agent_runs
+        .lock()
+        .expect("agent_runs mutex")
+        .insert(run_id, handle.clone());
+    handle
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

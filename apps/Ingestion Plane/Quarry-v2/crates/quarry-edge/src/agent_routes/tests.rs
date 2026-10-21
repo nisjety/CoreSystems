@@ -65,67 +65,9 @@ async fn step_refuses_raw_script_and_consumes_nothing() {
         .expect("static driver"),
     ));
     let claims = crate::test_support::claims_for_org("org");
-    let run_id: RunKind = Id::new();
-    let lease = BrowserLease {
-        lease_id: Id::new(),
-        profile_id: Id::new(),
-        session_affinity_key: "test".into(),
-        proxy_affinity: Default::default(),
-        ttl_s: 60,
-        capabilities: vec![],
-        artifact_bucket: String::new(),
-        persist_profile: false,
-        viewport: None,
-        org_id: "org".into(),
-    };
-    let entry = RunEntry {
-        run_id: run_id.clone(),
-        org_id: "org".into(),
-        actor_id: claims.actor_id().to_string(),
-        session: BrowserSession {
-            lease: lease.clone(),
-            inner: Arc::new(TokioMutex::new(SessionInner::default())),
-        },
-        ctx: ObservationContext {
-            step: 0,
-            current_url: String::new(),
-            page_hash: String::new(),
-            previous_screenshot: None,
-            previous_observation: None,
-            previous_network_keys: vec![],
-            last_egress_sequence: 0,
-            active_snapshot: None,
-            observed_action_count: 0,
-            challenge_observation_count: 0,
-            ..Default::default()
-        },
-        lease,
-        constraints: AgentConstraints {
-            max_steps: 5,
-            allowed_domains: vec![],
-            max_runtime_s: None,
-            max_cost_usd: None,
-        },
-        zdr: ZdrMode::Off,
-        grant_id: None,
-        control_mode: BrowserControlMode::AgentControl,
-        control_epoch: 0,
-        profile_scope: BrowserProfileScope::Ephemeral,
-        execution_tier: BrowserExecutionTier::Chromium,
-        last_observation: None,
-        used_sensitive_approval_grants: HashSet::new(),
-        budget: None,
-        closed: false,
-        last_rejected_epoch: None,
-        tab_origins: HashMap::new(),
-    };
-    let handle = handle_for(entry);
+    let handle = crate::test_support::insert_live_run(&state, &claims);
+    let run_id = handle.entry.lock().await.run_id.clone();
     let entry_arc = handle.entry.clone();
-    state
-        .agent_runs
-        .lock()
-        .expect("agent_runs mutex")
-        .insert(run_id.to_string(), handle);
 
     let result = step(
         State(state.clone()),

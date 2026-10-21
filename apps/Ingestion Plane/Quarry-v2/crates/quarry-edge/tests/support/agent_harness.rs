@@ -201,6 +201,7 @@ pub struct RecordingDriver {
     tab_seq: AtomicU32,
     tab_selects: Mutex<Vec<String>>,
     tab_closes: Mutex<Vec<String>>,
+    evaluate_calls: AtomicU32,
 }
 
 impl RecordingDriver {
@@ -234,6 +235,11 @@ impl RecordingDriver {
     /// does not record it.
     pub fn vanish_tab(&self, tab_id: &str) {
         self.tab_ids.lock().unwrap().retain(|id| id != tab_id);
+    }
+
+    /// How many times the driver was asked to run page script (`evaluate`).
+    pub fn evaluate_calls(&self) -> u32 {
+        self.evaluate_calls.load(Ordering::SeqCst)
     }
 
     /// Make the next `acquire` fail as a driver would.
@@ -351,6 +357,16 @@ impl BrowserDriver for RecordingDriver {
             url: url.map(str::to_owned),
             active: true,
         })
+    }
+
+    /// Counts the call and answers, so a test can prove the edge never got this far.
+    async fn evaluate(
+        &self,
+        _session: &BrowserSession,
+        _script: &str,
+    ) -> QuarryResult<Value> {
+        self.evaluate_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(Value::Null)
     }
 
     async fn select_tab(&self, _session: &BrowserSession, tab_id: &str) -> QuarryResult<()> {
