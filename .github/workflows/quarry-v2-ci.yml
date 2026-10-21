@@ -237,6 +237,13 @@ jobs:
       - name: Test workspace
         run: cargo test --workspace
 
+      - name: Redaction performance budget (release)
+        # redaction_perf_budget is #[ignore] (it needs a release build), so the
+        # step above skips it. 1 MiB of mixed text must redact in under 150 ms; this
+        # is what stands behind the decision not to cap leaf size
+        # (docs/SECRET_REDACTION.md).
+        run: cargo test -p quarry-core --release redaction_perf_budget -- --ignored
+
       - name: Page-cache and ZDR cache gates (Redis)
         # cache_policy.rs (9 cases) and the Redis case of zdr_claim_floor.rs skip
         # when no Redis answers, so the step above passes without asserting them.

@@ -7,7 +7,7 @@ one set of rules is applied before anything Quarry captures reaches a caller, an
 artifact, an event, a receipt, a log or a model prompt, instead of each of those
 places growing its own filter.
 
-Rule set: `RULE_VERSION = "qr-redact/1"`. Marker: `[redacted:<kind>]` with
+Rule set: `RULE_VERSION = "qr-redact/2"` (see "Version history"). Marker: `[redacted:<kind>]` with
 `<kind>` one of `password`, `otp`, `card`, `phone`, `secret`, `token`, `key`,
 `credential`.
 
@@ -92,7 +92,7 @@ Token shapes (both profiles):
 | `shape.openai` | `sk-` (OpenAI, Anthropic style) | `key` |
 | `shape.stripe` | `sk_live_ sk_test_ rk_live_ rk_test_` (a publishable `pk_` key is public and left alone) | `key` |
 | `shape.whsec` | `whsec_` webhook secrets | `secret` |
-| `shape.bearer` | `Bearer <token>` after an `Authorization` header, or a token of 16+ characters with a digit or base64 symbol | `token` |
+| `shape.bearer` | `Bearer <token>` with `Authorization` within 48 bytes before it in the same string, or a token of 16+ characters with a digit or base64 symbol (a long bare word of letters is prose and survives). A header dumped as JSON is covered by the `json.key` header rule below, because the header name is not in the string leaf | `token` |
 | `shape.basic` | `Basic <base64>` after an `Authorization` header, or 12+ characters with a digit, `=`, `+` or `/` | `credential` |
 
 Contextual rules (`Durable` only):
@@ -104,6 +104,7 @@ Contextual rules (`Durable` only):
 | `ctx.pan` | 13 to 19 digits with a known issuer prefix, an issuer-valid length and a passing Luhn sum, written as one run or as 3 to 6 digit groups joined by single spaces or dashes, and not glued to a letter | `card` |
 | `url.query` | the value of `token`, `access_token`, `id_token`, `refresh_token`, `code`, `key`, `api_key`, `apikey`, `sig`, `signature`, `password`, `secret`, `session`, `sid`, `otp`, `jwt`, `x-amz-*` after `?`, `&` or `;` | `token` |
 | `url.fragment` | the value of `access_token`, `id_token`, `refresh_token`, `token`, `code` in a `#fragment` | `token` |
+| `json.key` (header rule, **both profiles**) | the value under an object key `Authorization` or `Proxy-Authorization` (any case), and the `value` of a `{"name": "Authorization", "value": ...}` or `{"key": ...}` pair as HAR and CDP write headers; the whole value is replaced, scheme included | `credential` |
 | `json.key` | the value under an object key that names a secret (`password`, `credential`, `api_key`, `private_key`, `token`, `accessToken`, `secret`, `session_id`, `cookie`, env-style `*_KEY`). Counters (`max_tokens`, `token_count`) and booleans survive; a number, array or object under such a key is replaced whole | per key |
 
 Field rules (`field.*`, the first hit wins): `type=password` is a password and
@@ -126,10 +127,12 @@ table) and `json.key` (the object-key rule).
 **authored**, not generated, and every secret in it is an array of fragments
 that the loader joins, so no secret-shaped literal sits in the repository (and
 `.gitleaks.toml` is not edited). It holds 36 positive cases (18 `live`, 18
-`durable`), 24 negative cases (a 16-digit order number failing Luhn, a UUID, a
+`durable`), 27 negative cases (a 16-digit order number failing Luhn, a UUID, a
 40-hex sha, a 64-hex hash, "pin the tab", a byte-identical `status=completed`
-line, ...), 4 JSON cases and 30 field cases. Each case lists `applies_to`
-(`quarry`, `mp`): the Model Plane scrubber owes only the `live` shapes.
+line, ...), 7 JSON cases and 30 field cases. The positive, negative and JSON cases list `applies_to`
+(`quarry`, `mp`); the field cases do not (they are `quarry` only). `mp` is the set
+the Model Plane scrubber will run: the `live` shapes and the negatives that guard
+its over-redaction.
 
 `crates/quarry-core/tests/redaction_golden.rs` is the loader. It runs every
 case on both profiles (a `durable` case must be left alone by `Live`), checks the
@@ -137,7 +140,9 @@ case on both profiles (a `durable` case must be left alone by `Live`), checks th
 no secret appears joined in the file, a property test that redaction is
 idempotent over 2,000 generated strings (and URLs), the rule-drift test, the
 mode and stamp tests, and a release-only performance budget (1 MiB of mixed
-text under 150 ms).
+text under 150 ms). The budget test is `#[ignore]`, so `cargo test --workspace`
+skips it; the `Redaction performance budget (release)` step of
+`.github/workflows/quarry-v2-ci.yml` runs it with `--ignored`.
 
 ```text
 cd "apps/Ingestion Plane/Quarry-v2"
@@ -154,8 +159,10 @@ and vendors its copy. `REQUIRE_CONTRACT` stays unset in
 
 ## Changing a rule
 
-Any change to a pattern, a key list, a field label, a threshold or the card
-table changes `rule_fingerprint()`, and `redaction_rule_drift_requires_a_version_bump`
+Any change to a pattern, a key list, a field label, a threshold, the card
+table, or what the rules do to the fingerprint's probe corpus (the bearer and
+basic verify rules, the card group-size rule, the JSON header pairs) changes
+`rule_fingerprint()`, and `redaction_rule_drift_requires_a_version_bump`
 fails until you:
 
 1. bump `RULE_VERSION` (for example `qr-redact/2`);
@@ -166,7 +173,20 @@ fails until you:
 4. re-vendor every copy of the golden (the Model Plane `mp-scrub` crate, once it exists).
 
 Add a negative case for every new rule: the label regexes are kept narrow on
-purpose.
+purpose. The fingerprint hashes the data tables and the probe corpus's outcomes,
+not the code: a behaviour change that no probe reaches is caught only by a golden
+case, so give every verify rule and every threshold a positive and a negative case.
+
+## Version history
+
+- `qr-redact/1`: first rule set (WS12.S0, commit d405aa87). Never consumed: nothing
+  calls the module and no copy of the golden was vendored.
+- `qr-redact/2`: `Authorization` and `Proxy-Authorization` JSON object keys and
+  `{name, value}` header pairs are masked under both profiles (a header dumped as
+  JSON was not masked when its token was letters only), the drift fingerprint
+  covers the verify and group-size behaviour, and the golden gained negatives
+  for a bare letters-only `Bearer` word and for 7- and 2-digit groups in a card-like
+  run.
 
 ## Honest limits
 
@@ -181,12 +201,12 @@ purpose.
   masked only up to the first space; `Basic <base64>` outside an `Authorization`
   header is masked only when it carries a digit or a base64 symbol; labels are
   English and Norwegian only; `{"name": "password", "value": ...}` pairs are not
-  covered by the object-key rule (field facts cover them in S1 and S3).
+  covered by the object-key rule (only `Authorization` header pairs are) (field facts cover them in S1 and S3).
 - **Contextual rules over-mask on purpose** under `Durable`: `password: must
   contain 8 characters` loses one word.
 - **Leaves of any size are scanned whole.** The plan sketched a 64 KiB leaf cap;
   truncating would break extraction and skipping would leak, so the cap is not
-  implemented. The engine is linear-time and the 1 MiB budget test is the guard.
+  implemented. The engine is linear-time and the 1 MiB budget test (run in release by the CI step named above) is the guard.
   A JSON value nested deeper than 256 levels is replaced whole (fail closed).
 - **Q10 (does Chromium mask password values in the accessibility tree) is
   answered in S1**, before it merges. Nothing here depends on the answer.
