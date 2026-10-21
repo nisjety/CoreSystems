@@ -5836,7 +5836,7 @@ fn offered_tool_defs() -> Vec<pb::ToolDefinition> {
         // Plan-mode's control tool (chat-wave2-specs plan-gate §2.1). Offered
         // UNCONDITIONALLY, the same way plan mode itself gates risky tools by
         // classification rather than by hiding their definitions
-        // (`is_risky_call`/`is_restricted_context_write` at :1332-1354) — the
+        // (`permission::is_risky_call` and `is_restricted_context_write`) — the
         // description alone signals when it matters, so a non-plan-mode run
         // that calls it anyway still gets a real, structured plan out of it.
         // It is never in the risky/restricted-write classifiers (matching
@@ -5856,6 +5856,17 @@ fn offered_tool_defs() -> Vec<pb::ToolDefinition> {
     // surface this exact schema. Until then, caller and MCP definitions cannot
     // smuggle this reserved name into the model-facing tool set.
     tools
+}
+
+/// Every tool name the loop can offer, for the name-based classification golden
+/// in `permission`. The offer lists stay private; only their names leave here.
+#[cfg(test)]
+pub(crate) fn offerable_tool_names() -> Vec<String> {
+    offered_tool_defs()
+        .into_iter()
+        .chain(process_tool_defs())
+        .map(|def| def.name)
+        .collect()
 }
 
 /// How many characters of one tool's result the model gets to keep.
@@ -8962,17 +8973,6 @@ mod tests {
             }))
         }
 
-        async fn decide_approval(
-            &self,
-            request: Request<pb::DecideApprovalRequest>,
-        ) -> Result<Response<pb::DecideApprovalResponse>, Status> {
-            let req = request.into_inner();
-            self.rec
-                .lock()
-                .unwrap()
-                .decisions
-                .push((req.approval_id.clone(), req.decision));
-            let approval = pb::Approval {
         async fn create_run_question(
             &self,
             _: Request<pb::CreateRunQuestionRequest>,
@@ -8998,6 +8998,17 @@ mod tests {
             ))
         }
 
+        async fn decide_approval(
+            &self,
+            request: Request<pb::DecideApprovalRequest>,
+        ) -> Result<Response<pb::DecideApprovalResponse>, Status> {
+            let req = request.into_inner();
+            self.rec
+                .lock()
+                .unwrap()
+                .decisions
+                .push((req.approval_id.clone(), req.decision));
+            let approval = pb::Approval {
                 id: req.approval_id,
                 state: req.decision,
                 decided_by: req.decided_by,
@@ -14992,7 +15003,7 @@ mod tests {
         // above this one), because `plan.propose` is read-only from the
         // run's own permission-ladder point of view: it is never matched by
         // `permission::is_risky_call`/`is_restricted_context_write`, so the
-        // plan-mode refusal at :1332-1354 never fires for it.
+        // plan-mode refusal in the call loop never fires for it.
         let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
         let session_channel = spawn_session_channel(rec.clone()).await;
         let inference_channel = spawn_inference_channel(vec![

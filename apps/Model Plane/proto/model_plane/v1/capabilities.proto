@@ -75,7 +75,7 @@ message CapabilityDetail {
   // Description for agent context.
   string description = 5;
 
-  // Risk flags: "safe", "read_only", "mutation", "dangerous".
+  // Risk level: "low", "medium", or "high"; capability-core rejects any other value.
   string risk_level = 6;
 
   // Whether full definition must be loaded on demand (progressive disclosure).

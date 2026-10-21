@@ -698,4 +698,126 @@ mod tests {
         check_autonomy_rung(AutonomyRung::ReadOnly, "knowledge_search", "{}")
             .expect("reads still run at read_only, exactly as under plan mode");
     }
+
+    // --- The legacy name-based classification, as a golden (WS05-S0) ---------
+    //
+    // Each line is what the name heuristics answer today for one tool name: the
+    // posture gate under `ask` and `auto`, the rung, the never-auto predicates
+    // and the restricted-context check, over a read and a write argument form.
+    // Only `execute_provider_action` answers differently by its arguments. This
+    // is the oracle that declared side-effect classes must reproduce for every
+    // built-in before the name list is deleted, so a change to a row must be a
+    // deliberate change to a classifier, never a side effect of another edit.
+
+    const READ_CALL: &str = r#"{"connection_id":"c1","operation":"pages.list"}"#;
+    const WRITE_CALL: &str = r#"{"connection_id":"c1","operation":"pages.post"}"#;
+
+    /// Today's answers, one line per name, sorted by name. The leading and
+    /// trailing spaces and the upper-case `MCP__` prefix are legacy gaps: the
+    /// classifiers match the raw name, so those spellings are not risky today.
+    /// The class lookup has to answer them deliberately when it lands.
+    const LEGACY_CLASSIFICATION_GOLDEN: &str = r" mcp__s__t                 risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
+ read_subagent_result      risky=no/no restricted=no rung=read_only/read_only owner=no consent=yes ask=AwaitApproval/AwaitApproval auto=AwaitApproval/AwaitApproval
+ save_memory               risky=no/no restricted=yes rung=workspace_write/workspace_write owner=no consent=no ask=Allow/Allow auto=Allow/Allow
+ tickets.create            risky=yes/yes restricted=no rung=danger_full_access/danger_full_access owner=yes consent=no ask=AwaitApproval/AwaitApproval auto=AwaitApproval/AwaitApproval
+MCP__s__t                  risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
+book_shipment              risky=yes/yes restricted=no rung=danger_full_access/danger_full_access owner=no consent=no ask=AwaitApproval/AwaitApproval auto=Allow/Allow
+browser.act                risky=yes/yes restricted=no rung=danger_full_access/danger_full_access owner=no consent=no ask=AwaitApproval/AwaitApproval auto=Allow/Allow
+browser.observe            risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
+code_interpreter           risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
+company_lookup             risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
+execute_provider_action    risky=no/yes restricted=no rung=read_only/danger_full_access owner=no consent=no ask=Allow/AwaitApproval auto=Allow/Allow
+get_shipping_quotes        risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
+knowledge_search           risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
+list_provider_actions      risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
+list_social_accounts       risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
+list_subagent_results      risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
+mcp__s__t                  risky=yes/yes restricted=no rung=danger_full_access/danger_full_access owner=no consent=no ask=AwaitApproval/AwaitApproval auto=Allow/Allow
+news                       risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
+plan.propose               risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
+process_list               risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
+process_read               risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
+process_signal             risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
+process_start              risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
+process_stdin              risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
+publish_social_post        risky=yes/yes restricted=no rung=danger_full_access/danger_full_access owner=no consent=no ask=AwaitApproval/AwaitApproval auto=Allow/Allow
+read_subagent_result       risky=no/no restricted=no rung=read_only/read_only owner=no consent=yes ask=AwaitApproval/AwaitApproval auto=AwaitApproval/AwaitApproval
+reattach_skill             risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
+recall_memory              risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
+save_memory                risky=no/no restricted=yes rung=workspace_write/workspace_write owner=no consent=no ask=Allow/Allow auto=Allow/Allow
+shipping_carriers          risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
+subagent.research_fan_out  risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
+subagent.task              risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
+tickets.create             risky=yes/yes restricted=no rung=danger_full_access/danger_full_access owner=yes consent=no ask=AwaitApproval/AwaitApproval auto=AwaitApproval/AwaitApproval
+track_shipment             risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
+traffic                    risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
+web.read                   risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
+web.search                 risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
+web_fetch                  risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
+web_search                 risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
+yr_weather                 risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
+";
+
+    fn legacy_golden_line(name: &str) -> String {
+        let yes_no = |answer: bool| if answer { "yes" } else { "no" };
+        let rung = |args: &str| mp_contracts::autonomy::label(rung_required_for(name, args));
+        let posture =
+            |mode: PermissionMode, args: &str| format!("{:?}", evaluate_call(mode, name, args));
+        format!(
+            "{name:<26} risky={}/{} restricted={} rung={}/{} owner={} consent={} ask={}/{} auto={}/{}",
+            yes_no(is_risky_call(name, READ_CALL)),
+            yes_no(is_risky_call(name, WRITE_CALL)),
+            yes_no(is_restricted_context_write(name)),
+            rung(READ_CALL),
+            rung(WRITE_CALL),
+            yes_no(requires_durable_owner_approval(name)),
+            yes_no(requires_consent_to_disclose(name)),
+            posture(PermissionMode::Ask, READ_CALL),
+            posture(PermissionMode::Ask, WRITE_CALL),
+            posture(PermissionMode::Auto, READ_CALL),
+            posture(PermissionMode::Auto, WRITE_CALL),
+        )
+    }
+
+    /// Complete and exact: a changed classifier answer fails here, and so does a
+    /// name that is offered but missing from the golden, so every new tool is
+    /// classified on purpose rather than by whatever substring it contains.
+    #[test]
+    fn legacy_classification_golden() {
+        let mut names: std::collections::BTreeSet<String> =
+            crate::runtime_loop::agent::offerable_tool_names()
+                .into_iter()
+                .collect();
+        // Named rather than offered: `tickets.create` is never offered (its
+        // owner-plane gate is the point), `mcp__s__t` stands for any MCP tool,
+        // and the spellings are the ingress variants the gate can be handed.
+        names.extend(
+            [
+                "tickets.create",
+                "mcp__s__t",
+                "MCP__s__t",
+                " mcp__s__t ",
+                " tickets.create ",
+                " read_subagent_result ",
+                " save_memory ",
+            ]
+            .map(str::to_owned),
+        );
+        let actual: Vec<String> = names.iter().map(|name| legacy_golden_line(name)).collect();
+        let golden: Vec<&str> = LEGACY_CLASSIFICATION_GOLDEN.lines().collect();
+        assert_eq!(
+            actual,
+            golden,
+            "the name-based classification changed: update the golden only in the change that moved a classifier, and name the rows that moved"
+        );
+        for name in &names {
+            for args in [READ_CALL, WRITE_CALL] {
+                assert_eq!(
+                    evaluate_call(PermissionMode::Deny, name, args),
+                    PermissionDecision::Deny,
+                    "`{name}` must be refused under deny whatever its class"
+                );
+            }
+        }
+    }
 }

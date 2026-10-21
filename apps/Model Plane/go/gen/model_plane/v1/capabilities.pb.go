@@ -213,7 +213,7 @@ type CapabilityDetail struct {
 	Version string `protobuf:"bytes,4,opt,name=version,proto3" json:"version,omitempty"`
 	// Description for agent context.
 	Description string `protobuf:"bytes,5,opt,name=description,proto3" json:"description,omitempty"`
-	// Risk flags: "safe", "read_only", "mutation", "dangerous".
+	// Risk level: "low", "medium", or "high"; capability-core rejects any other value.
 	RiskLevel string `protobuf:"bytes,6,opt,name=risk_level,json=riskLevel,proto3" json:"risk_level,omitempty"`
 	// Whether full definition must be loaded on demand (progressive disclosure).
 	LazyLoad bool `protobuf:"varint,7,opt,name=lazy_load,json=lazyLoad,proto3" json:"lazy_load,omitempty"`
