@@ -2688,6 +2688,10 @@ fn quarry_err_to_status(err: QuarryError) -> Status {
             "RATE_LIMITED" => Status::resource_exhausted(message),
             "TIMEOUT" => Status::deadline_exceeded(message),
             "UPSTREAM_BLOCKED" => Status::unavailable(message),
+            // The URL is fine and the edge is healthy: it has no extractor
+            // for what the URL serves (an image, an archive, a spreadsheet).
+            // Retrying cannot help, which is what `internal` would invite.
+            "UNSUPPORTED_MEDIA" => Status::failed_precondition(format!("{code}: {message}")),
             _ => Status::internal(format!("{code}: {message}")),
         },
     }
@@ -2755,6 +2759,7 @@ pub async fn serve_with_readiness(
 mod tests {
     use super::unowned_policy_fields;
     use super::{command_args, command_from_catalog, json_str, task_from_catalog};
+    use super::{quarry_err_to_status, QuarryError};
 
     #[test]
     fn policy_fields_with_no_owning_service_are_named_not_silently_banked() {
@@ -2807,6 +2812,30 @@ mod tests {
         assert!(command_args("").expect("empty is fine").is_empty());
         assert!(command_args("not json").is_err());
         assert!(command_args("[1,2]").unwrap_err().contains("object"));
+    }
+
+    #[test]
+    fn a_quarry_unsupported_media_is_a_failed_precondition_with_its_reason() {
+        let status = quarry_err_to_status(QuarryError::Typed {
+            code: "UNSUPPORTED_MEDIA".to_owned(),
+            message: "image/png has no extractor".to_owned(),
+            status: 415,
+        });
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        assert!(
+            status.message().contains("UNSUPPORTED_MEDIA")
+                && status.message().contains("image/png has no extractor"),
+            "got: {}",
+            status.message()
+        );
+
+        // An unknown code still falls through to internal.
+        let other = quarry_err_to_status(QuarryError::Typed {
+            code: "SOMETHING_NEW".to_owned(),
+            message: "x".to_owned(),
+            status: 500,
+        });
+        assert_eq!(other.code(), tonic::Code::Internal);
     }
 
     #[test]
