@@ -380,20 +380,26 @@
   "quarry-edge": {
     "tenancy": "directory",
     "audiences": [
+      "browser-broker",
       "data-plane"
     ],
     "consumerEnv": "QUARRY_SERVICE_API_KEY",
     "orgIds": [],
     "retentionByAudience": {
+      "browser-broker": "zdr",
       "data-plane": "persistent"
     },
     "scopes": [
+      "browser:read",
       "data:read",
       "data:rerank",
       "documents:write",
       "org:data:read_all"
     ],
     "scopesByAudience": {
+      "browser-broker": [
+        "browser:read"
+      ],
       "data-plane": [
         "data:read",
         "data:rerank",

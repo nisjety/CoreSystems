@@ -1505,7 +1505,8 @@ describeIfPolicy('principal bundle P1: data:rerank for quarry-edge', () => {
       'org:data:read_all',
     ];
     expect(row?.scopesByAudience?.['data-plane']).toEqual(ceiling);
-    expect(row?.scopes).toEqual(ceiling);
+    // The union of the lanes: P2 adds browser:read on browser-broker beside it.
+    expect(row?.scopes).toEqual(['browser:read', ...ceiling]);
     // The grant adds no retention authority, no tenancy and no delegation.
     expect(row?.audiences).toContain('data-plane');
     expect(row?.retentionByAudience?.['data-plane']).toBe('persistent');
@@ -1573,6 +1574,134 @@ describeIfPolicy('principal bundle P1: data:rerank for quarry-edge', () => {
           org_id: 'org-a',
           scopes: [rerankScope],
           zdr: false,
+        });
+        expect(claims).not.toHaveProperty('user_id');
+        expect(claims).not.toHaveProperty('acting_user_id');
+      },
+    );
+  });
+});
+
+// The Control Plane principal bundle "P2" (plan WS1.A2, decision X-1): the one
+// grant Quarry's agent routes need to ask the BrowserBroker whether a run's
+// grant is valid, on behalf of the run's organization.
+//
+//   browser:read   quarry-edge, on browser-broker, alone, as a ZDR token. The
+//                  broker's ValidateGrant needs exactly this scope. Its other
+//                  RPCs (acquire, revoke, derive-run) need `browser:write`,
+//                  which NO principal holds on any audience: the Model Plane
+//                  mints grants as a user, never as a service.
+const browserReadScope = 'browser:read';
+const browserWriteScope = 'browser:write';
+
+describeIfPolicy('principal bundle P2: browser:read for quarry-edge', () => {
+  it('is held by quarry-edge alone, on browser-broker alone, as a ZDR lane beside the scopes it already held', () => {
+    expect(holdersOfScope(browserReadScope)).toEqual(['quarry-edge']);
+    expect(lanesHoldingScope(browserReadScope)).toEqual([
+      'quarry-edge|browser-broker',
+    ]);
+    const row = policy?.['quarry-edge'];
+    expect(row?.scopesByAudience?.['browser-broker']).toEqual([
+      browserReadScope,
+    ]);
+    // The data-plane lane is exactly what P1 pinned, untouched.
+    expect(row?.scopesByAudience?.['data-plane']).toEqual([
+      'data:read',
+      'data:rerank',
+      'documents:write',
+      'org:data:read_all',
+    ]);
+    expect(row?.scopes).toEqual([
+      browserReadScope,
+      'data:read',
+      'data:rerank',
+      'documents:write',
+      'org:data:read_all',
+    ]);
+    expect(row?.audiences).toEqual(['browser-broker', 'data-plane']);
+    // Validation carries no content, so the lane is ZDR; the data lane stays.
+    expect(row?.retentionByAudience).toEqual({
+      'browser-broker': 'zdr',
+      'data-plane': 'persistent',
+    });
+    expect(row?.tenancy).toBe('directory');
+    expect(row?.allowAnyOrg).toBeUndefined();
+    expect(row?.consumerEnv).toBe('QUARRY_SERVICE_API_KEY');
+    expect(row?.tokenExchange).toBeUndefined();
+  });
+
+  it('mints browser:read for quarry-edge on browser-broker, as a ZDR service token for a directory organization', () => {
+    const registry = registryWithTestCredentials();
+    expect(
+      authorizePlaneServicePrincipal(
+        registry,
+        mintRequest('quarry-edge', 'browser-broker', browserReadScope),
+      ),
+    ).toMatchObject({
+      serviceId: 'quarry-edge',
+      subject: 'service:quarry-edge',
+      orgId: 'org-a',
+      orgBinding: 'directory',
+      scopes: [browserReadScope],
+      retention: 'zdr',
+      zdr: true,
+    });
+  });
+
+  it('refuses browser:read to every other principal on every audience, and to quarry-edge on every audience but browser-broker', () => {
+    expectScopeConfinedTo(browserReadScope, ['quarry-edge|browser-broker']);
+  });
+
+  it('gives no principal browser:write on any audience, and refuses it to quarry-edge on browser-broker', () => {
+    expect(holdersOfScope(browserWriteScope)).toEqual([]);
+    expect(lanesHoldingScope(browserWriteScope)).toEqual([]);
+    expectScopeConfinedTo(browserWriteScope, []);
+    const registry = registryWithTestCredentials();
+    // Nor does browser:read open the door to a write beside it.
+    expect(() =>
+      authorizePlaneServicePrincipal(registry, {
+        ...mintRequest('quarry-edge', 'browser-broker', browserReadScope),
+        requestedScopes: [browserReadScope, browserWriteScope],
+      }),
+    ).toThrow(/not authorized/i);
+    expect(everyPlaneAudience).toContain('browser-broker');
+  });
+
+  it('refuses browser:read mixed with a scope the lane does not hold, so the grant cannot ride along with another authority', () => {
+    const registry = registryWithTestCredentials();
+    for (const other of [
+      rerankScope,
+      'data:read',
+      'browser:execute',
+      'models:invoke',
+      'integration:write',
+    ]) {
+      expect(() =>
+        authorizePlaneServicePrincipal(registry, {
+          ...mintRequest('quarry-edge', 'browser-broker', browserReadScope),
+          requestedScopes: [browserReadScope, other],
+        }),
+      ).toThrow(/not authorized/i);
+    }
+  });
+
+  it('mints a real browser-broker token carrying exactly browser:read for service:quarry-edge, with no user and the ZDR mark', async () => {
+    await mintThroughRealController(
+      policy ?? {},
+      {
+        principal: 'quarry-edge',
+        audience: 'browser-broker',
+        scopes: [browserReadScope],
+      },
+      ({ claims }) => {
+        expect(claims).toMatchObject({
+          aud: 'browser-broker',
+          sub: 'service:quarry-edge',
+          principal_type: 'service',
+          service_id: 'service:quarry-edge',
+          org_id: 'org-a',
+          scopes: [browserReadScope],
+          zdr: true,
         });
         expect(claims).not.toHaveProperty('user_id');
         expect(claims).not.toHaveProperty('acting_user_id');
