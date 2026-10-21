@@ -2375,3 +2375,13 @@ Slices built by the batch runner (implement, independent verify, hostile review 
 | B02 | WS14-S3 ask_user question store (dark) | defaa28b, 24ac2a20 | run_questions table (0054), three RPCs, events 27 and 28, validator, gateway and BFF routes, SPA client | DB tests on a real Postgres (715 in the harness); live create, list and answer pending |
 | B02 | WS12-S6 SSE taxonomy gate | 283af93e | generator covers orchestration events and every producer, UTF-8 safe | source-verified; workflow not run on GitHub |
 | B02 | WS12-S1 CI baseline (partial) | cbdff1b5 | develop added to the three workflows, baseline owners recorded | recorded runs on the integration branch need a push |
+| B03 | WS02-S7 execution-core seeding in tier order | 0d64d9b9 | seed_messages over a pure seed_order, tool segments sorted by name, a content-free log line | source-verified; rebuilt-executor run with MODEL_GATEWAY_RUN_CONTEXT=full pending |
+| B03 | WS04-S1 run-control bus seam (partial) | b0cb039a | RunControl Off, Loopback and Nats, mp.v1.runctl subjects and ACL, a two-replica overlay on 28080 and 29090 (K2-5 corrected) | `/readyz` run_control and the five live NATS tests not done |
+| B03 | WS11-S2 OpenAI and Azure effort, code half | fd7c0433 | reasoning_effort behind INFERENCE_CORE_OPENAI_REASONING_EFFORT, byte-identical when off | inference-core rebuilt and healthy with the switch false (2026-10-21); live probe pending |
+| B03 | WS11-S3 Anthropic wire classes, code half | 4b1da1f3 | budget, adaptive or none by class behind INFERENCE_CORE_ANTHROPIC_ADAPTIVE_THINKING | probe P0(iii) pending |
+| B03 | WS12-S4 UI copy and colour gate | 8e88560e | selectors plus a 1,105-finding baseline, error from the first merge, spa-ui-gates job | vitest 61 and eslint green; CI run needs a push |
+| B04 | WS05-S1 tool class registry | 2c877270 | closed class and floor vocabulary, migration 0016, read surface, five review defects fixed | integration tests against a throwaway Postgres pass; capability-core rebuild pending |
+| B04 | WS11-S4 Codex through the ladder, code half | 1103ac7e | Low and High only, priority tier keyed on the resolved level | not proven live |
+| B04 | WS09-S2 incremental Markdown parse | 0aa7f9d4 | frozen sealed blocks, keyed node list, VITE_CHAT_RENDER_LEGACY | 206 vitest tests; Playwright before and after pending |
+| B04 | WS13-S0 approvals characterisation | 42f058d6 | six pins, DecideApproval row corrected | source-verified; ADR-0011 not written |
+| B04 | WS3J-MP browser challenge (Quarry WS3.J, Model Plane half) | e336de32 | challenge on BrowserObservation, planner rule, 403 CHALLENGE_DETECTED to Blocked | wiremock only; live proof owed |
