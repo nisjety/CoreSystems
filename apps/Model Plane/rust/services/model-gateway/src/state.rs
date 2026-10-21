@@ -247,6 +247,10 @@ pub struct AppState {
     /// by `/v1/invoke/stream`; appended to by `POST /v1/invoke/{id}/queue`.
     /// Replaces the SPA silently discarding anything typed while streaming.
     pub queued_inputs: crate::queued_input::QueuedInputRegistry,
+    /// Cancel, queue and probe routed to the replica that owns a stream (build plan WS04-S1).
+    /// Off unless `MODEL_GATEWAY_RUN_CONTROL_BUS=true` and the boot self-test passes; off, the
+    /// two registries above answer for this process alone, as before.
+    pub run_control: crate::run_control::RunControl,
     /// chat-parity §1 — idempotent-regenerate guard for `/v1/invoke`. Keyed by
     /// a client-supplied `idempotency_key`; dedupes double-submit / regenerate
     /// retries so they neither re-run inference nor re-charge budget.
@@ -446,6 +450,7 @@ impl AppState {
             doc_ready: crate::doc_indexed_consumer::DocReadyRegistry::new(),
             cancels: crate::cancel_registry::CancelRegistry::new(),
             queued_inputs: crate::queued_input::QueuedInputRegistry::new(),
+            run_control: crate::run_control::RunControl::off(),
             idempotency: crate::idempotency_registry::IdempotencyRegistry::new(),
             // `Client::new` with empty base_url returns an Unavailable
             // client; the gRPC handlers degrade to Unimplemented in
@@ -794,6 +799,8 @@ impl AppState {
             state.lsp = lsp_client.clone();
             // Redis-backed resume buffer when REDIS_URL is set (multi-replica).
             state.stream_buffers = crate::stream_buffer::StreamBufferStore::from_env().await;
+            // Off unless the switch is `true`; a failed boot check degrades it, never the boot.
+            state.run_control = crate::run_control::RunControl::from_env(Some(url.as_str())).await;
             // plan_mode + team_workers default to empty stores —
             // explicit assignment is unnecessary but kept for symmetry
             // with the dev branch below.
@@ -844,6 +851,7 @@ impl AppState {
             // disabled in dev mode even when LSP_BRIDGE_URL is configured.
             state.lsp = lsp_client;
             state.stream_buffers = crate::stream_buffer::StreamBufferStore::from_env().await;
+            state.run_control = crate::run_control::RunControl::from_env(None).await;
             Ok(state)
         }
     }

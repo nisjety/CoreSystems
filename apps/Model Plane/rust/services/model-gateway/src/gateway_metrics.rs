@@ -72,6 +72,45 @@ pub fn stream_closed() {
     gauge!("gateway_active_streams").decrement(1.0);
 }
 
+/// How a run-control request (cancel, queue, probe) was answered. A closed set, so the
+/// `outcome` label of `run_control_requests_total` cannot grow with request data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunControlOutcome {
+    /// This replica owned the stream and handled it without the bus.
+    Local,
+    /// The replica that owns the stream answered over the bus.
+    Peer,
+    /// Nobody on the bus owns the stream (no responders).
+    NoOwner,
+    /// A subscriber was there but did not answer within the request timeout.
+    Timeout,
+    /// The bus could not carry the request at all.
+    Error,
+}
+
+impl RunControlOutcome {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Peer => "peer",
+            Self::NoOwner => "no_owner",
+            Self::Timeout => "timeout",
+            Self::Error => "error",
+        }
+    }
+}
+
+/// Count one run-control request. `op` is a [`crate::run_control::RunControlOp`] label.
+pub fn run_control_request(op: &'static str, outcome: RunControlOutcome) {
+    counter!(
+        "run_control_requests_total",
+        "op" => op,
+        "outcome" => outcome.as_str()
+    )
+    .increment(1);
+}
+
 /// Handler that renders the Prometheus metrics scrape endpoint.
 pub async fn metrics_handler(
     axum::extract::State(handle): axum::extract::State<PrometheusHandle>,

@@ -163,6 +163,19 @@ func publisherRegistry() []publisherRow {
 			source: "rust/services/model-gateway/src/approvals.rs", needle: `"agents.approval.resolved"`,
 			gap: gatewayGrant + ", and no stream or in-repo consumer exists for it",
 		},
+		// Run control between gateway replicas (WS04-S1): a request to the replica that
+		// owns a stream, answered on the requester's inbox. Off unless
+		// MODEL_GATEWAY_RUN_CONTROL_BUS=true; the ACL grant ships before the switch.
+		{
+			service: "model-gateway", natsUser: gatewayUser, inbox: gatewayBox,
+			subject: "mp.v1.runctl.req.x.cancel", transport: coreNATS, builder: "runctl_request_subject", args: []string{"x", "cancel"},
+			source: "rust/services/model-gateway/src/run_control.rs", needle: "runctl_request_subject(token, op.as_str())",
+		},
+		{
+			service: "model-gateway", natsUser: gatewayUser, inbox: gatewayBox,
+			subject: "mp.v1.runctl.run.x.cancel", transport: coreNATS, builder: "runctl_run_cancel_subject", args: []string{"x"},
+			source: "rust/services/model-gateway/src/run_control.rs", needle: "runctl_run_cancel_subject(token)",
+		},
 
 		// ---- orchestrator-core: core NATS through pkg/natsx. ----
 		{

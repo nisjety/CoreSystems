@@ -74,6 +74,7 @@ pub mod retrieval_metadata;
 pub mod retrieval_tools;
 pub mod run_budget;
 pub mod run_context;
+pub mod run_control;
 pub mod runtime_registries;
 pub mod security_events;
 pub mod semantic_screening;
