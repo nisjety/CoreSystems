@@ -97,9 +97,13 @@ pub struct DriverSignals {
     pub actions: Vec<String>,
     pub screenshot: bool,
     pub pdf: bool,
-    /// Prior blocking signals for this origin. `>= 2` selects the
-    /// browser driver, `== 1` selects the TLS-profile driver.
+    /// Deprecated (WS3.I). Under `QUARRY_BLOCK_ESCALATION=legacy` `>= 2`
+    /// selects the browser driver and `== 1` the TLS-profile driver; under
+    /// `honest`, the edge default, the field is accepted and ignored. A caller
+    /// that wants a browser render for a content reason must not use it:
+    /// use [`DriverSignals::browser`], which sets `profile_required`.
     pub prior_block_signals: u8,
+    /// Selects the browser driver in every escalation mode.
     pub profile_required: bool,
     /// Serialised form of Quarry's `UrlType` enum (externally tagged
     /// unit variants → a bare string). `"Default"` is its `#[default]`.
@@ -122,16 +126,20 @@ impl Default for DriverSignals {
 impl DriverSignals {
     /// Signals that make Quarry's planner pick the **browser** driver.
     ///
-    /// Uses `prior_block_signals = 2`, the documented escalation
-    /// threshold in `quarry-runtime/src/driver_plan.rs`: a static fetch
-    /// that yields no readable text is exactly the soft block that
-    /// threshold exists for. Deliberately does not set `screenshot` /
-    /// `pdf` / `actions`, which would also force a browser but bill an
-    /// artifact we do not want.
+    /// Uses `profile_required = true`, which `plan_from_signals` in
+    /// `quarry-runtime/src/driver_plan.rs` turns into the browser driver in
+    /// every escalation mode. A static fetch that yields no readable text is a
+    /// content condition (a client-rendered page), not an HTTP block, so this
+    /// asks for a render explicitly. It used to send `prior_block_signals = 2`,
+    /// which the edge ignores by default since WS3.I (`honest`), so the retry
+    /// would have repeated the same static fetch and the page cache would no
+    /// longer be bypassed. Deliberately does not set `screenshot` / `pdf` /
+    /// `actions`, which would also force a browser but bill an artifact we do
+    /// not want.
     #[must_use]
     pub fn browser() -> Self {
         Self {
-            prior_block_signals: 2,
+            profile_required: true,
             ..Self::default()
         }
     }
@@ -1314,8 +1322,8 @@ mod tests {
                 "actions": [],
                 "screenshot": false,
                 "pdf": false,
-                "prior_block_signals": 2,
-                "profile_required": false,
+                "prior_block_signals": 0,
+                "profile_required": true,
                 "url_type": "Default",
             })
         );
@@ -1325,7 +1333,7 @@ mod tests {
     fn default_signals_would_not_select_the_browser() {
         // Mirrors `plan_from_signals`: these values produce
         // `static_fetch("no signals")`, which is why the escalation has
-        // to raise `prior_block_signals` rather than only send `render`.
+        // to set `profile_required` rather than only send `render`.
         let json = serde_json::to_value(DriverSignals::default()).expect("signals serialize");
         assert_eq!(json["prior_block_signals"], 0);
         assert_eq!(json["actions"], serde_json::json!([]));
@@ -1396,8 +1404,8 @@ mod tests {
                     "actions": [],
                     "screenshot": false,
                     "pdf": false,
-                    "prior_block_signals": 2,
-                    "profile_required": false,
+                    "prior_block_signals": 0,
+                    "profile_required": true,
                     "url_type": "Default",
                 },
                 "zdr": false,
@@ -1483,8 +1491,8 @@ mod tests {
                     "actions": [],
                     "screenshot": false,
                     "pdf": false,
-                    "prior_block_signals": 2,
-                    "profile_required": false,
+                    "prior_block_signals": 0,
+                    "profile_required": true,
                     "url_type": "Default",
                 },
                 "zdr": false,
@@ -1781,8 +1789,8 @@ mod tests {
                         "actions": [],
                         "screenshot": false,
                         "pdf": false,
-                        "prior_block_signals": 2,
-                        "profile_required": false,
+                        "prior_block_signals": 0,
+                        "profile_required": true,
                         "url_type": "Default",
                     },
                     "zdr": zdr,
