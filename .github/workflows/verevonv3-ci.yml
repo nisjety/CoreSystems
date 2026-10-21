@@ -9,7 +9,7 @@ name: Verevon v3 CI
 # v2/.github/workflows/ci.yml, where GitHub never executed it).
 on:
   pull_request:
-    branches: [main, fix/ui-premium-restore]
+    branches: [main, develop, fix/ui-premium-restore]
     paths:
       - 'apps/Frontend Plane/verevonv3/**'
       # The SPA's @quarry/client is generated from this spec, so a spec change
@@ -18,7 +18,7 @@ on:
       - 'apps/Ingestion Plane/Quarry-v2/sdks/generate.sh'
       - '.github/workflows/verevonv3-ci.yml'
   push:
-    branches: [main, fix/ui-premium-restore]
+    branches: [main, develop, fix/ui-premium-restore]
     paths:
       - 'apps/Frontend Plane/verevonv3/**'
       # The SPA's @quarry/client is generated from this spec, so a spec change
