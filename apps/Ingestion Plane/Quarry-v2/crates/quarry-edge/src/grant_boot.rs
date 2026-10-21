@@ -117,6 +117,34 @@ pub fn decide(inputs: GrantBootInputs) -> Result<ValidatorChoice, GrantBootRefus
     })
 }
 
+/// Builds the gRPC validator the way production wires it, in one place so that a
+/// test drives the same code `main` runs:
+///
+/// - the manifest row the validator mints against (`browser-grant-validate`) is
+///   parsed first, so an invalid row fails the boot, not the first run;
+/// - the connect is eager, so an unreachable broker fails the boot;
+/// - `tokens` (the production credential) makes every `ValidateGrant` carry a
+///   broker token minted for the run's organization;
+/// - only without tokens, and only with the explicit cross-plane dev bypass, a
+///   static development bearer is sent instead ([`decide`] refuses that pair in
+///   production, and this function ignores the bearer unless the bypass is on).
+#[cfg(feature = "grpc")]
+pub async fn build_grpc_validator(
+    url: &str,
+    tokens: Option<quarry_runtime::service_tokens::SharedServiceTokenProvider>,
+    dev_bearer: Option<&str>,
+    dev_bypass: bool,
+) -> quarry_core::error::QuarryResult<quarry_runtime::grpc::GrpcGrantValidator> {
+    quarry_runtime::grpc::browser_broker::browser_grant_token_request()?;
+    let validator = quarry_runtime::grpc::GrpcGrantValidator::connect(url).await?;
+    Ok(match (tokens, dev_bearer) {
+        // The production credential: a broker token minted per organization.
+        (Some(tokens), _) => validator.with_service_tokens(tokens),
+        (None, Some(token)) if dev_bypass => validator.with_bearer_token(token.to_owned()),
+        (None, _) => validator,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

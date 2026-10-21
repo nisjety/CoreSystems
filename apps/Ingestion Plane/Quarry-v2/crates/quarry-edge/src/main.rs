@@ -797,20 +797,18 @@ async fn run() -> anyhow::Result<()> {
             .as_deref()
             .filter(|url| !url.trim().is_empty())
         {
-            // Fail at boot, not on the first run, when the broker cannot be
-            // reached or the manifest row the validator mints against is invalid.
-            quarry_runtime::grpc::browser_broker::browser_grant_token_request()?;
-            let validator = quarry_runtime::grpc::GrpcGrantValidator::connect(url).await?;
-            let validator = match (cross_plane_tokens.clone(), cfg.model_plane_token.as_deref()) {
-                // The production credential: a broker token minted per organization.
-                (Some(tokens), _) => validator.with_service_tokens(tokens),
-                // Development only (grant_boot refuses this combination in production).
-                (None, Some(token)) if cfg.cross_plane_auth_dev_bypass => {
-                    validator.with_bearer_token(token.to_owned())
-                }
-                (None, _) => validator,
-            };
-            Arc::new(validator)
+            // Fails at boot, not on the first run, when the broker cannot be
+            // reached or the manifest row the validator mints against is invalid;
+            // tests/browser_grants_prod.rs builds its validator with this function.
+            Arc::new(
+                grant_boot::build_grpc_validator(
+                    url,
+                    cross_plane_tokens.clone(),
+                    cfg.model_plane_token.as_deref(),
+                    cfg.cross_plane_auth_dev_bypass,
+                )
+                .await?,
+            )
         } else {
             browser_grant_http_validator(&cfg)?
         }

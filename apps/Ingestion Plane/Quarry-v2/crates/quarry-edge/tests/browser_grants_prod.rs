@@ -199,7 +199,6 @@ mod through_the_validator {
         AcquireGrantRequest, AcquireGrantResponse, BrowserHealthRequest, BrowserHealthResponse,
         RevokeGrantRequest, RevokeGrantResponse, ValidateGrantRequest, ValidateGrantResponse,
     };
-    use quarry_runtime::grpc::GrpcGrantValidator;
     use quarry_runtime::service_tokens::AuthCoreServiceTokenProvider;
     use tonic::{Request, Response, Status};
     use wiremock::matchers::{header, method, path};
@@ -329,12 +328,17 @@ mod through_the_validator {
                 .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener)),
         );
 
-        let validator = GrpcGrantValidator::connect(format!("http://{address}"))
-            .await
-            .expect("the validator connects to the fake broker")
-            .with_service_tokens(Arc::new(
+        // The function `main` calls, with the tokens `main` passes in production.
+        let validator = quarry_edge::grant_boot::build_grpc_validator(
+            &format!("http://{address}"),
+            Some(Arc::new(
                 AuthCoreServiceTokenProvider::new(auth_core.uri(), SERVICE_KEY).unwrap(),
-            ));
+            )),
+            None,
+            false,
+        )
+        .await
+        .expect("the validator connects to the fake broker");
         let edge = Edge::start_with(RunLimits::default(), move |state| {
             let mut state = state;
             state.grant_validator = Arc::new(validator);

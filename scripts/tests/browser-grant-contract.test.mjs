@@ -612,6 +612,22 @@ test('every agent-route call site asks the broker for the run\'s organization, n
   assert.ok(orgAware >= 3, 'the start, the per-action check and the sensitive approval each call validate_for_org (found ' + orgAware + ')');
 });
 
+test('main builds the production grant validator with the service tokens, through the function the tests drive', () => {
+  const edge = 'apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/';
+  const main = productionPart(read(edge + 'src/main.rs'));
+  // main hands the shared provider (the production credential) to build_grpc_validator ...
+  assert.match(
+    main,
+    /grant_boot::build_grpc_validator\(\s*url,\s*cross_plane_tokens\.clone\(\),/,
+    'main must pass cross_plane_tokens to build_grpc_validator',
+  );
+  assert.doesNotMatch(main, /GrpcGrantValidator::connect/, 'main must not build the validator by hand');
+  // ... which attaches them, and the production test builds its validator the same way.
+  const boot = read(edge + 'src/grant_boot.rs');
+  assert.match(boot, /\(Some\(tokens\), _\) => validator\.with_service_tokens\(tokens\)/);
+  assert.match(read(edge + 'tests/browser_grants_prod.rs'), /grant_boot::build_grpc_validator\(/);
+});
+
 test('the production overlay requires the broker address and the contract overlay pins it', () => {
   const production = read('apps/Ingestion Plane/docker-compose.production.yml');
   assert.match(
