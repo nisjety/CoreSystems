@@ -72,6 +72,15 @@ pub struct CreateScheduleRequest {
     /// would otherwise be triggering.
     #[serde(default)]
     pub config: serde_json::Value,
+    /// The caller may DECLARE zero data retention for a change-monitor create. A
+    /// declaration only raises the stamp: [`Claims::effective_zdr`] never lets a body
+    /// lower what a user token's floor requires. It is how a user of a standard
+    /// organization says this monitor is ZDR. (A service principal cannot reach this
+    /// route: `require_service_route_scope` answers 403 first.) Never forwarded as is
+    /// (`skip_serializing`): the legacy create path forwards this struct, and
+    /// only the stamped [`ControlScheduleCreate`] carries a posture to control.
+    #[serde(default, skip_serializing)]
+    pub zdr: Option<bool>,
 }
 
 /// Control-plane-facing schedule create body. Matches the Go
@@ -96,9 +105,8 @@ struct ControlScheduleCreate {
     /// The caller's Zero Data Retention posture, STAMPED AT CREATE (WS4.H,
     /// quarry-control migration 023). Always serialised (false is "stamped
     /// standard", which control keeps distinct from an unstamped legacy row).
-    /// It comes only from verified claims via [`Claims::effective_zdr`]:
-    /// [`CreateScheduleRequest`] has no `zdr` field, so a client body can
-    /// never lower it.
+    /// It is [`Claims::effective_zdr`] of the body's declared `zdr`: the body
+    /// can raise the posture, never lower the token's floor.
     zdr: bool,
 }
 
@@ -251,7 +259,7 @@ pub async fn create_schedule(
     let request_id = RequestKind::new().to_string();
     // One posture for both uses: the refusal below and the stamp on the forwarded
     // change-monitor schedule are the same value, so they can never disagree.
-    let zdr = claims.effective_zdr(false);
+    let zdr = claims.effective_zdr(req.zdr.unwrap_or(false));
     crate::zdr_refusal::refuse(
         &state,
         &claims.org_id,
@@ -511,6 +519,7 @@ mod tests {
             preset: None,
             target_ref: None,
             config: serde_json::json!({}),
+            zdr: None,
         };
         // Body still serializes — the route layer rejects, not serde.
         let s = serde_json::to_string(&r).unwrap();

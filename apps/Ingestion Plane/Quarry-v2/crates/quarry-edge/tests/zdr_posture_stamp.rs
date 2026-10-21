@@ -3,8 +3,10 @@
 //! `POST /v1/sources` with `monitor: true`), and the orchestrator later declares that stamp on
 //! `/v1/internal/change/record`, where the edge refuses (flag on) or logs would-refuse (flag off).
 //!
-//! * the stamp comes only from verified claims (`Claims::effective_zdr`): no request body can
-//!   lower it, or raise it;
+//! * the stamp is `Claims::effective_zdr` of the body's declared `zdr`, the one rule every ZDR
+//!   decision follows: a body can raise the posture and never lower the floor of a user token.
+//!   A service principal cannot reach these routes at all (`require_service_route_scope` fails
+//!   unknown service routes closed), so there is no service-stamped schedule to be wrong;
 //! * it is computed once, so the refusal and the stamp cannot disagree;
 //! * the record route trusts the stamp it is given, not the org's posture today. That is the
 //!   documented "org turned ZDR on later" gap, pinned here so it cannot change unnoticed
@@ -28,7 +30,7 @@ mod zdr_harness;
 
 use quarry_edge::state::AppState;
 
-use zdr_harness::{user_in_standard_org, user_in_zdr_org, Harness};
+use zdr_harness::{golden_token, user_in_standard_org, user_in_zdr_org, Harness};
 
 const ZDR_ORG: &str = "org-zdr-golden";
 const INTERNAL_TOKEN: &str = "posture-stamp-internal-token";
@@ -184,11 +186,11 @@ async fn observe_mode_stamps_the_zdr_posture_on_the_forwarded_schedule() {
     );
 }
 
-/// The stamp is the verified posture and nothing a client sends: a `zdr: false` in a ZDR
-/// organization's body does not lower it, and a `zdr: true` in a standard organization's body does
-/// not raise it (the request type has no such field).
+/// A body can raise the stamp and never lower the token's floor: a `zdr: false` in a ZDR
+/// organization's body does not lower it, and a `zdr: true` in a standard organization's body
+/// raises it.
 #[tokio::test]
-async fn a_client_body_cannot_lower_the_stamp() {
+async fn a_client_body_can_raise_the_stamp_but_never_lower_it() {
     let _serial = CAPTURE_LOCK.lock().await;
     capture();
     let control = control_plane().await;
@@ -216,7 +218,94 @@ async fn a_client_body_cannot_lower_the_stamp() {
             .unwrap_or_else(|| panic!("no forward for {target}: {bodies:?}"))
     };
     assert_eq!(stamp("https://page.test/lower"), json!(true), "a body cannot lower the stamp");
-    assert_eq!(stamp("https://page.test/raise"), json!(false), "a body does not set the stamp");
+    assert_eq!(stamp("https://page.test/raise"), json!(true), "a body raises the stamp");
+}
+
+/// Flag off, the declared posture of a caller whose token has no floor: a standard organization's
+/// user that says `zdr: true` gets a schedule stamped true (and the would-be refusal is logged);
+/// without the declaration it is stamped false.
+#[tokio::test]
+async fn observe_mode_a_declared_zdr_body_is_stamped_for_a_standard_user() {
+    let _serial = CAPTURE_LOCK.lock().await;
+    capture();
+    let control = control_plane().await;
+    let harness = edge(control.uri(), false).await;
+    let seen_before = events("zdr.would_refuse").len();
+
+    for (who, bearer) in [("standard", user_in_standard_org())] {
+        let mut declared = monitor_schedule(&format!("https://page.test/declared-{who}"));
+        declared["zdr"] = json!(true);
+        let plain = monitor_schedule(&format!("https://page.test/plain-{who}"));
+        for body in [declared, plain] {
+            let created = harness.post(&bearer, "/v1/schedules", body).await;
+            assert_eq!(created.status().as_u16(), 200, "{who}: flag off serves it");
+        }
+    }
+
+    let bodies = control_bodies(&control, "/v1/schedules").await;
+    let stamp = |target: &str| {
+        bodies
+            .iter()
+            .find(|b| b["target_ref"] == target)
+            .map(|b| b["zdr"].clone())
+            .unwrap_or_else(|| panic!("no forward for {target}: {bodies:?}"))
+    };
+    for who in ["standard"] {
+        assert_eq!(
+            stamp(&format!("https://page.test/declared-{who}")),
+            json!(true),
+            "{who}: a declared zdr is stamped"
+        );
+        assert_eq!(
+            stamp(&format!("https://page.test/plain-{who}")),
+            json!(false),
+            "{who}: no declaration, no stamp"
+        );
+    }
+    assert_eq!(
+        events("zdr.would_refuse").len() - seen_before,
+        1,
+        "the declared create was observed, the plain one was not"
+    );
+}
+
+/// Flag on: the same declared `zdr: true` is refused before Control Plane sees anything, for a
+/// standard organization's user, on both the schedule and the monitored-source routes; the
+/// undeclared create of the standard user is still served.
+#[tokio::test]
+async fn enforced_a_declared_zdr_body_is_refused_for_a_standard_user() {
+    let _serial = CAPTURE_LOCK.lock().await;
+    capture();
+    let control = control_plane().await;
+    let harness = edge(control.uri(), true).await;
+
+    for (who, bearer) in [("standard", user_in_standard_org())] {
+        let mut schedule = monitor_schedule(&format!("https://page.test/refused-{who}"));
+        schedule["zdr"] = json!(true);
+        let mut source = monitor_source(&format!("https://page.test/refused-src-{who}"));
+        source["zdr"] = json!(true);
+        for (route, body) in [("/v1/schedules", schedule), ("/v1/sources", source)] {
+            let refused = harness.post(&bearer, route, body).await;
+            assert_eq!(refused.status().as_u16(), 403, "{who} {route}");
+            let refused: Value = refused.json().await.unwrap();
+            assert_eq!(
+                refused["error"]["details"]["zdr_refusal"]["code"], CODE,
+                "{who} {route}: {refused}"
+            );
+            assert_eq!(
+                refused["error"]["details"]["zdr_refusal"]["action"], "create",
+                "{who} {route}: {refused}"
+            );
+        }
+    }
+    assert!(control_bodies(&control, "/v1/schedules").await.is_empty());
+    assert!(control_bodies(&control, "/v1/sources").await.is_empty());
+
+    let served = harness
+        .post(&user_in_standard_org(), "/v1/schedules", monitor_schedule("https://page.test/ok"))
+        .await;
+    assert_eq!(served.status().as_u16(), 200);
+    assert_eq!(control_bodies(&control, "/v1/schedules").await[0]["zdr"], json!(false));
 }
 
 /// Flag on: the standard organization is unchanged (created, stamped false) and a ZDR one never
@@ -244,11 +333,40 @@ async fn enforced_schedule_create_is_stamped_false_for_standard_and_never_forwar
     assert_eq!(bodies[0]["zdr"], json!(false));
 }
 
+/// The legacy non-preset create (cron or schedule_at, no change monitor) forwards the whole
+/// `CreateScheduleRequest`. A client-declared `zdr` must not reach control on that body: it is
+/// not a change monitor, nothing reads a stamp on it, and only the stamped monitor body carries
+/// a posture. Pins `skip_serializing` on the field, in both flag modes.
+#[tokio::test]
+async fn a_legacy_cron_create_never_forwards_a_declared_zdr() {
+    let _serial = CAPTURE_LOCK.lock().await;
+    capture();
+    for enforce in [false, true] {
+        let control = control_plane().await;
+        let harness = edge(control.uri(), enforce).await;
+        let body = json!({ "name": "legacy", "kind": "scrape", "cron": "*/5 * * * *", "zdr": true });
+        let resp = harness.post(&user_in_standard_org(), "/v1/schedules", body).await;
+        // Enforced, the declaration makes it a ZDR create and the edge refuses it; observing,
+        // it is created. Either way the forwarded body (if any) has no zdr key.
+        assert_eq!(resp.status().as_u16(), if enforce { 403 } else { 200 }, "enforce={enforce}");
+        let bodies = control_bodies(&control, "/v1/schedules").await;
+        assert_eq!(bodies.len(), usize::from(!enforce), "enforce={enforce}: {bodies:?}");
+        for forwarded in &bodies {
+            assert_eq!(forwarded["cron"], "*/5 * * * *", "{forwarded}");
+            assert!(
+                forwarded.get("zdr").is_none(),
+                "the legacy create must not forward a declared zdr: {forwarded}"
+            );
+        }
+    }
+}
+
 // -- sources with monitor: true ------------------------------------------------------------
 
 /// Flag off: a ZDR organization's monitored source is registered as before and its forwarded
 /// body carries the stamp; a standard organization's carries `false`; a plain source (no
-/// monitor) carries no stamp at all; a client-sent `zdr` is ignored in every case.
+/// monitor) carries no stamp at all, whatever the client sent; a client-declared `zdr: true` raises a
+/// standard organization's monitor to true and no declaration lowers a ZDR organization's.
 #[tokio::test]
 async fn observe_mode_stamps_a_source_monitor() {
     let _serial = CAPTURE_LOCK.lock().await;
@@ -271,6 +389,12 @@ async fn observe_mode_stamps_a_source_monitor() {
             .as_u16(),
         200
     );
+    let mut declared = monitor_source("https://page.test/src-declared");
+    declared["zdr"] = json!(true);
+    assert_eq!(
+        harness.post(&user_in_standard_org(), "/v1/sources", declared).await.status().as_u16(),
+        200
+    );
     let mut plain = json!({ "name": "plain", "url": "https://page.test/src-plain", "kind": "scrape" });
     plain["zdr"] = json!(true);
     assert_eq!(
@@ -280,7 +404,7 @@ async fn observe_mode_stamps_a_source_monitor() {
     );
 
     let bodies = control_bodies(&control, "/v1/sources").await;
-    assert_eq!(bodies.len(), 3, "{bodies:?}");
+    assert_eq!(bodies.len(), 4, "{bodies:?}");
     let body = |url: &str| {
         bodies
             .iter()
@@ -290,6 +414,7 @@ async fn observe_mode_stamps_a_source_monitor() {
     };
     assert_eq!(body("https://page.test/src-zdr")["zdr"], json!(true), "a body cannot lower it");
     assert_eq!(body("https://page.test/src-std")["zdr"], json!(false));
+    assert_eq!(body("https://page.test/src-declared")["zdr"], json!(true), "a body raises it");
     assert!(
         body("https://page.test/src-plain").get("zdr").is_none(),
         "a plain source carries no stamp, whatever the client sent: {}",
@@ -297,8 +422,8 @@ async fn observe_mode_stamps_a_source_monitor() {
     );
     assert_eq!(
         events("zdr.would_refuse").len() - seen_before,
-        1,
-        "only the ZDR org's monitored source was observed (a plain source is not a schedule)"
+        2,
+        "the ZDR org's and the declared monitored source were observed (a plain source is not a schedule)"
     );
 }
 
@@ -410,4 +535,29 @@ async fn record_trusts_the_stamp_not_the_current_posture() {
         .post(INTERNAL_TOKEN, "/v1/internal/change/record", internal_record(Some(true)))
         .await;
     assert_eq!(refused.status().as_u16(), 403, "a ZDR stamp is refused with the flag on");
+}
+
+/// A service principal never reaches the change-monitor create routes, in either flag mode, with
+/// or without a declared posture: the route scope middleware answers 403 before the handler, so
+/// no schedule can be stamped by (or for) a service. Pins why the stamp has no service case.
+#[tokio::test]
+async fn a_service_principal_cannot_create_a_monitor_in_either_mode() {
+    let _serial = CAPTURE_LOCK.lock().await;
+    capture();
+    for enforce in [false, true] {
+        let control = control_plane().await;
+        let harness = edge(control.uri(), enforce).await;
+        for case in ["service_model_gateway", "service_execution_core"] {
+            let mut schedule = monitor_schedule("https://page.test/svc");
+            schedule["zdr"] = json!(true);
+            let mut source = monitor_source("https://page.test/svc-src");
+            source["zdr"] = json!(true);
+            for (route, body) in [("/v1/schedules", schedule), ("/v1/sources", source)] {
+                let denied = harness.post(&golden_token(case), route, body).await;
+                assert_eq!(denied.status().as_u16(), 403, "{case} {route} (flag {enforce})");
+            }
+        }
+        assert!(control_bodies(&control, "/v1/schedules").await.is_empty());
+        assert!(control_bodies(&control, "/v1/sources").await.is_empty());
+    }
 }

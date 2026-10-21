@@ -425,11 +425,12 @@ pub struct CreateSourceRequest {
     /// Free-form per-source config (max_pages, include_patterns, …).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<serde_json::Value>,
-    /// The caller's ZDR posture, stamped by the edge on a `monitor: true`
-    /// create so control can put it on the change-monitor schedule it registers
-    /// (WS4.H). Never read from a client body (`skip_deserializing`): the edge
-    /// sets it from verified claims on the forwarded copy only.
-    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    /// The ZDR posture of a `monitor: true` create (WS4.H). In a client body it is
+    /// only a declaration that raises the posture ([`Claims::effective_zdr`] never
+    /// lets it lower the token's floor); the edge replaces it with the effective
+    /// posture on the forwarded copy, so control can stamp it on the change-monitor
+    /// schedule it registers. A plain source forwards none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub zdr: Option<bool>,
 }
 
@@ -548,7 +549,7 @@ pub async fn create_source(
     // and is not touched here. The posture is computed once and stamped on the
     // forwarded copy below.
     let monitor_zdr = if req.monitor {
-        let zdr = claims.effective_zdr(false);
+        let zdr = claims.effective_zdr(req.zdr.unwrap_or(false));
         crate::zdr_refusal::refuse(
             &state,
             &claims.org_id,
