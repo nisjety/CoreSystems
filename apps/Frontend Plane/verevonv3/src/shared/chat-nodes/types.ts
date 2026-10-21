@@ -204,4 +204,16 @@ export type ConversationNodeDefinition<K extends ConversationNodeKind = Conversa
   render: (node: Extract<ConversationNode, { kind: K }>, ctx: ConversationNodeContext) => JSX.Element
 }
 
+/**
+ * One row of a live node list: a node and the context its renderer reads.
+ *
+ * The list re-derives on every change to its turn, so the same row (same
+ * `nodeKey`) gets a new entry object each time. `renderLive` is what lets the
+ * row keep its DOM while its entry changes underneath it.
+ */
+export type ConversationNodeEntry = {
+  node: ConversationNode
+  context: ConversationNodeContext
+}
+
 export type { ChatTurn }

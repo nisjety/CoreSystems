@@ -749,9 +749,87 @@ export function getTaskStepIcon(status: TaskStepStatus): { className: string; no
 const FENCE_OPEN_PATTERN = /^(`{3,})(.*)$/
 
 export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {
-  const lines = markdown.replace(/\r\n/g, '\n').split('\n')
+  return parseBlocksFrom(markdown.replace(/\r\n/g, '\n').split('\n'), 0).blocks
+}
+
+/**
+ * Trailing blocks a longer parse always re-reads. A block only ever changes
+ * through lines near its own end (a paragraph gaining a line, a list an item, a
+ * table a row, a fence its close), and the parser looks at most two lines past
+ * a block to decide where it ends. Two blocks of slack keep every block before
+ * them out of reach of the line being typed.
+ */
+export const FROZEN_TAIL_BLOCKS = 2
+
+/** One parse of a message, with what a later and longer parse needs to resume from it. */
+export type ParsedMarkdown = {
+  /** The CRLF-normalised text the blocks were parsed from. */
+  source: string
+  blocks: MarkdownBlock[]
+  /**
+   * Parallel to `blocks`: the line a parse can restart at to reproduce that
+   * block and every block after it. Null where it cannot, which is a block
+   * that begins on the remainder of a line a `-->` closed: the parser rewrites
+   * that line, so the text a restart would see is not the text that block came from.
+   */
+  restartAt: Array<number | null>
+  /** How many leading blocks are the previous parse's own objects, unchanged. */
+  reused: number
+}
+
+/**
+ * `parseMarkdownBlocks` for a message that only grows, as a streamed answer does.
+ *
+ * Blocks before the last `FROZEN_TAIL_BLOCKS` are handed back as the previous
+ * parse's own objects, so a renderer that keys on identity leaves them alone,
+ * and only the text from the first unfrozen block on is parsed again (and of
+ * those, any block that comes out unchanged is the previous object too). The result
+ * is always exactly what `parseMarkdownBlocks(source)` returns (the differential
+ * test pins that at every prefix). Anything that is not a pure extension of the
+ * previous source, such as a regenerated answer, is parsed in full.
+ */
+export function parseMarkdownIncremental(prev: ParsedMarkdown | undefined, source: string): ParsedMarkdown {
+  const normalized = source.replace(/\r\n/g, '\n')
+  if (prev && normalized === prev.source) return prev
+  const extension = prev !== undefined && normalized.startsWith(prev.source) ? prev : undefined
+  let keep = 0
+  if (extension) {
+    keep = Math.max(extension.blocks.length - FROZEN_TAIL_BLOCKS, 0)
+    while (keep > 0 && extension.restartAt[keep] == null) keep -= 1
+  }
+  // Block 0 starts at line 0, so `keep === 0` is a full parse.
+  const resumeAt = keep > 0 ? (extension?.restartAt[keep] ?? 0) : 0
+  const tail = parseBlocksFrom(normalized.split('\n'), resumeAt)
+  return {
+    source: normalized,
+    blocks: [
+      ...(extension?.blocks.slice(0, keep) ?? []),
+      // A block that was read again but came out the same stays the old object,
+      // so the one before the line being typed does not rebuild its DOM per token.
+      ...tail.blocks.map((block, index) => {
+        const before = extension?.blocks[keep + index]
+        return before && JSON.stringify(before) === JSON.stringify(block) ? before : block
+      }),
+    ],
+    restartAt: [...(extension?.restartAt.slice(0, keep) ?? []), ...tail.restartAt],
+    reused: keep,
+  }
+}
+
+function parseBlocksFrom(
+  lines: string[],
+  start: number,
+): { blocks: MarkdownBlock[]; restartAt: Array<number | null> } {
   const blocks: MarkdownBlock[] = []
-  let index = 0
+  const restartAt: Array<number | null> = []
+  // Lines the comment branch below rewrote: a block that starts on one is not restartable.
+  const rewritten = new Set<number>()
+  let index = start
+  let blockStart = start
+  const emit = (block: MarkdownBlock) => {
+    blocks.push(block)
+    restartAt.push(rewritten.has(blockStart) ? null : blockStart)
+  }
 
   while (index < lines.length) {
     const line = lines[index] ?? ''
@@ -759,6 +837,7 @@ export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {
       index += 1
       continue
     }
+    blockStart = index
 
     const fence = FENCE_OPEN_PATTERN.exec(line.trim())
     if (fence) {
@@ -784,7 +863,7 @@ export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {
       // to mermaid.render.
       const closed = index < lines.length
       if (closed) index += 1
-      blocks.push({ kind: 'code', lang, text: code.join('\n'), closed })
+      emit({ kind: 'code', lang, text: code.join('\n'), closed })
       continue
     }
 
@@ -795,6 +874,7 @@ export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {
       if (index < lines.length) {
         const closing = lines[index] ?? ''
         lines[index] = closing.slice(closing.indexOf('-->') + 3)
+        rewritten.add(index)
         if (!lines[index]?.trim()) index += 1
       }
       continue
@@ -802,13 +882,13 @@ export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {
 
     const math = parseMathBlock(lines, index)
     if (math) {
-      blocks.push(math.block)
+      emit(math.block)
       index = math.next
       continue
     }
 
     if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
-      blocks.push({ kind: 'hr' })
+      emit({ kind: 'hr' })
       index += 1
       continue
     }
@@ -817,7 +897,7 @@ export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {
     if (heading) {
       const marks = heading[1] ?? ''
       const text = heading[2] ?? ''
-      blocks.push({
+      emit({
         kind: 'heading',
         level: marks.length <= 1 ? 1 : marks.length === 2 ? 2 : 3,
         text,
@@ -834,40 +914,46 @@ export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {
         index += 1
         parsedLine = parseQuoteLine(lines[index] ?? '')
       }
-      blocks.push({ kind: 'quote', lines: quoteLines })
+      emit({ kind: 'quote', lines: quoteLines })
       continue
     }
 
     const list = parseList(lines, index)
     if (list) {
-      blocks.push(list.block)
+      emit(list.block)
       index = list.next
       continue
     }
 
     const table = parseTable(lines, index)
     if (table) {
-      blocks.push(table.block)
+      emit(table.block)
       index = table.next
       continue
     }
 
     const details = parseDetails(lines, index)
     if (details) {
-      blocks.push(details.block)
+      emit(details.block)
       index = details.next
       continue
     }
 
-    const paragraph: string[] = []
+    // The first line is taken whatever `isMarkdownBlockStart` says: every branch
+    // above declined it, and the two can disagree on a stray `\r` or U+2028 (the
+    // anchored patterns above stop at it, the unanchored start check does not).
+    // Asking again here made that line an empty paragraph that never advanced
+    // `index`, which a chunk ending between a CR and its LF turned into a hang.
+    const paragraph: string[] = [line]
+    index += 1
     while (index < lines.length && lines[index]?.trim() && !isMarkdownBlockStart(lines[index] ?? '', lines[index + 1])) {
       paragraph.push(lines[index] ?? '')
       index += 1
     }
-    blocks.push({ kind: 'paragraph', text: paragraph.join('\n').trim() })
+    emit({ kind: 'paragraph', text: paragraph.join('\n').trim() })
   }
 
-  return blocks
+  return { blocks, restartAt }
 }
 
 const LIST_ITEM_PATTERN = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/

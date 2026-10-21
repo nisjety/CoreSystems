@@ -57,6 +57,8 @@ import {
   type PlanApprovalStatus,
   type ToolIntent,
 } from '@/shared/chat-nodes'
+// The barrel does not re-export it yet; one more line there when it next changes.
+import { nodeKey } from '@/shared/chat-nodes/derive'
 import type { AutonomyRung, ChatPlanStep, MemoryOrigin, RecalledMemory } from '@/shared/api/chat-client'
 import { readChatThreadHistory } from '../lib/chat-thread-history'
 import { chatAppearanceActive } from '../lib/chat-appearance-preview'
@@ -102,9 +104,11 @@ import {
   hostname,
   parseInline,
   parseMarkdownBlocks,
+  parseMarkdownIncremental,
   prettyModel,
   renderBlockMath,
   truncateText,
+  type ParsedMarkdown,
 } from './chat-media-markdown'
 import { answerExportSize, EXPORT_BUTTON_MIN_CHARS, exportChatAnswer, type ExportFormat } from '../lib/chat-export'
 import {
@@ -200,6 +204,14 @@ export function MessageBlock(props: {
     </Show>
   )
 }
+
+/**
+ * The per-token render path of a streaming answer is incremental: Markdown blocks
+ * and node rows keep their DOM from one token to the next. `VITE_CHAT_RENDER_LEGACY=true`
+ * restores the old path, which rebuilt every node row and every Markdown block per
+ * token, for one release. Exact string, as for `VITE_ALLOW_DEV_AUTH_BYPASS`.
+ */
+const chatRenderLegacy = () => import.meta.env.VITE_CHAT_RENDER_LEGACY === 'true'
 
 /**
  * The chat surface's node renderers.
@@ -562,6 +574,10 @@ export function AssistantMessage(props: {
    * to stand on its own is exported as written.
    */
   const exportDocument = createMemo(() => {
+    // Nothing is exported from an answer still streaming in (`showExportButton`
+    // is false for it and the action row is hidden), and measuring it parses the
+    // whole message: once per token, on top of the Markdown's own tail parse.
+    if (props.message.streaming) return null
     if (answerExportSize(props.message.content) >= EXPORT_BUTTON_MIN_CHARS) return null
     const documents = (props.message.artifacts ?? []).filter(
       (artifact) => artifactRenderKind(artifact) === 'document' && artifact.content.trim(),
@@ -652,9 +668,11 @@ export function AssistantMessage(props: {
         {/*
           Rendered from the derived node list through the keyed registry. Adding
           a node kind means adding a renderer to CHAT_NODE_REGISTRY and a case to
-          `deriveConversationNodes` — not editing this component. `keyed` is off
-          deliberately: nodes are recreated each derivation, and keying on
-          identity would remount every node on every token during streaming.
+          `deriveConversationNodes` — not editing this component. Rows are keyed
+          by `nodeKey`, not by the node object: every derivation builds fresh
+          node objects, so keying on identity rebuilt every node on every token
+          during streaming. A row now keeps its DOM while its entry changes, and
+          `renderLive` is what lets the renderer see the new entry.
 
           Wrapped in its own div (no styling of its own — plain block, same
           layout as before) so "Lagre som PDF" has a stable DOM node to clone:
@@ -664,9 +682,15 @@ export function AssistantMessage(props: {
           could leak into a "clean" PDF).
         */}
         <div class="verevon-chat-message__content" ref={(el) => { contentRef = el }}>
-          <For each={nodeEntries()}>
-            {(entry) => CHAT_NODE_REGISTRY.render(entry.node, entry.context)}
-          </For>
+          {chatRenderLegacy() ? (
+            <For each={nodeEntries()}>
+              {(entry) => CHAT_NODE_REGISTRY.render(entry.node, entry.context)}
+            </For>
+          ) : (
+            <For each={nodeEntries()} keyed={(entry) => nodeKey(entry.node)}>
+              {(entry) => CHAT_NODE_REGISTRY.renderLive(entry)}
+            </For>
+          )}
         </div>
         <Show when={!waiting() && !errored()}>
           <div class="verevon-chat-message-actions">
@@ -1082,11 +1106,29 @@ function describeUserUrl(href: string): { domain: string; label: string } {
 }
 
 export function ChatMarkdown(props: { content: string; citations?: readonly Citation[] }) {
+  const legacy = chatRenderLegacy()
+  // A streamed answer only grows, so each parse resumes from the last one: the
+  // sealed blocks come back as the same objects and only the tail is read again.
+  // Plain closure state, not a signal: it is the memo's own previous value.
+  let parsed: ParsedMarkdown | undefined
+  const blocks = createMemo(() => {
+    if (legacy) return parseMarkdownBlocks(props.content)
+    parsed = parseMarkdownIncremental(parsed, props.content)
+    return parsed.blocks
+  })
   return (
     <div class="verevon-chat-markdown">
-      <For each={parseMarkdownBlocks(props.content)}>
-        {(block) => <MarkdownBlockView block={block} citations={props.citations} />}
-      </For>
+      {legacy ? (
+        <For each={blocks()}>
+          {(block) => <MarkdownBlockView block={block} citations={props.citations} />}
+        </For>
+      ) : (
+        // Rows by position: a sealed block is the same object, so its row is not
+        // touched; only the trailing rows receive a new block.
+        <For each={blocks()} keyed={false}>
+          {(block) => <MarkdownBlockView block={block()} citations={props.citations} />}
+        </For>
+      )}
     </div>
   )
 }
@@ -1215,15 +1257,16 @@ const copyOutcomeCache = new Map<string, { result: 'copied' | 'failed'; at: numb
  */
 function TranscriptCodeBlock(props: { block: Extract<MarkdownBlock, { kind: 'code' }> }) {
   const i18n = useI18n()
-  // `parseMarkdownBlocks` (see `ChatMarkdown`) reparses the whole message on
-  // every incoming token and hands back a brand-new object for every block —
-  // including ones whose own text has not changed — so `<For>` remounts this
-  // component the moment ANYTHING else in a still-streaming message changes,
-  // not only when this particular fence grows. A component-local timer would
-  // therefore have its confirmation wiped back to "idle" well before 1800ms
+  // Under `VITE_CHAT_RENDER_LEGACY` (see `ChatMarkdown`) every incoming token
+  // reparses the whole message into brand-new block objects, so `<For>` remounts
+  // this component the moment ANYTHING else in a still-streaming message
+  // changes, not only when this particular fence grows. A component-local timer
+  // would then have its confirmation wiped back to "idle" well before 1800ms
   // whenever the reply keeps generating after this block has already closed.
   // `copyOutcomeCache` above carries the outcome and its timestamp across
-  // that remount so the confirmation reads for the full window regardless.
+  // that remount so the confirmation reads for the full window regardless. The
+  // incremental path keeps a closed block's row, but a row can still be rebuilt
+  // when the answer is replaced, so the cache stays.
   const cachedOutcome = () => {
     const cached = copyOutcomeCache.get(props.block.text)
     if (!cached) return null

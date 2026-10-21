@@ -78,6 +78,23 @@ function answerState(turn: ChatTurn, displayContent: string): AnswerState {
  */
 export type PlanApprovalStatus = { pending: boolean; error?: string }
 
+/**
+ * Which row of a turn's node list a node is.
+ *
+ * The transcript keys its rows on this, so a node that survives a re-derivation
+ * keeps its DOM instead of being rebuilt: while an answer streams, the answer
+ * region and its Markdown are one row from the first token to the last.
+ *
+ * Every kind derived today occurs at most once per turn, so the kind is the key.
+ * A kind that can occur twice in one turn MUST add an id here
+ * (`${node.kind}:${node.id}`): two nodes with one key are one row, and the
+ * second would take the first's place. `derive.test.ts` fails when a derived
+ * list holds a duplicate key.
+ */
+export function nodeKey(node: ConversationNode): string {
+  return node.kind
+}
+
 export function deriveConversationNodes(
   turn: ChatTurn,
   planApproval?: PlanApprovalStatus,
