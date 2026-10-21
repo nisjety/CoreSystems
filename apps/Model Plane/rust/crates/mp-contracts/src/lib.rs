@@ -5,6 +5,7 @@ pub mod durable_gate;
 pub mod effect_ledger;
 pub mod loop_fold;
 pub mod park_reason;
+pub mod prompt_tier;
 pub mod retention;
 pub mod run_context;
 pub mod skill_recovery;

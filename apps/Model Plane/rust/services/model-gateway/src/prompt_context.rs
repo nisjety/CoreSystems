@@ -19,6 +19,7 @@
 //! keep exactly the prompt they had.
 
 use mp_contracts::model_plane::v1::{ChatMessage, ToolDefinition};
+use mp_contracts::prompt_tier::{plan_of, PromptTier, PromptTierPlan};
 
 /// Operator switch for [`PromptOrder::StablePrefix`], the conditional tools
 /// moved to the end of the tool list, and the final answer resending the tool
@@ -188,8 +189,35 @@ pub enum PromptOrder {
     /// conversation.
     Legacy,
     /// The standing blocks first, then pins, summary and the prior
-    /// conversation, then the per-turn blocks, then the current user turn.
+    /// conversation, then the per-turn blocks (the date notice among them),
+    /// then the current user turn. Every block has a [`PromptTier`] and the
+    /// tiers never decrease from the first message to the last.
     StablePrefix,
+}
+
+/// A prompt in the tiered order: its messages, and the tier each was placed
+/// under.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TieredPrompt {
+    /// The messages, in the order they are sent.
+    pub messages: Vec<ChatMessage>,
+    /// The tier of each message in `messages`, by index.
+    pub tiers: Vec<PromptTier>,
+}
+
+impl TieredPrompt {
+    /// How many leading messages are Stable and Context.
+    #[must_use]
+    pub fn plan(&self) -> PromptTierPlan {
+        plan_of(&self.tiers)
+    }
+
+    fn add(&mut self, tier: PromptTier, messages: impl IntoIterator<Item = ChatMessage>) {
+        for message in messages {
+            self.messages.push(message);
+            self.tiers.push(tier);
+        }
+    }
 }
 
 /// The chat prompt's parts before they are put in order. Each slot holds the
@@ -240,7 +268,17 @@ impl PromptContext {
     pub fn render(self, order: PromptOrder) -> Vec<ChatMessage> {
         match order {
             PromptOrder::Legacy => self.render_legacy(),
-            PromptOrder::StablePrefix => self.render_stable_prefix(),
+            PromptOrder::StablePrefix => self.render_stable_prefix().messages,
+        }
+    }
+
+    /// The prompt with a tier on every message, or `None` for the legacy
+    /// order, which has no tiers and stays exactly what it always was.
+    #[must_use]
+    pub fn render_tiered(self, order: PromptOrder) -> Option<TieredPrompt> {
+        match order {
+            PromptOrder::Legacy => None,
+            PromptOrder::StablePrefix => Some(self.render_stable_prefix()),
         }
     }
 
@@ -294,15 +332,21 @@ impl PromptContext {
         out
     }
 
-    /// Standing blocks, then the prior conversation, then the per-turn
+    /// Stable blocks, Context blocks, the prior conversation, the Volatile
     /// blocks, then the current user turn.
     ///
-    /// The standing blocks keep the order of the stable-first layout the
-    /// cache investigation proposed; the date notice closes them because it
-    /// is the one that changes daily. "The current user turn" is the last
-    /// user message and anything after it, so a thread that somehow ends on
-    /// another role still sends its per-turn blocks before its latest request.
-    fn render_stable_prefix(self) -> Vec<ChatMessage> {
+    /// The Stable tier is the text that is the same for every thread; Context
+    /// is what the org, Space, persona and user wrote, plus who the model is
+    /// talking to. The date notice is Volatile: it changes daily, and ahead of
+    /// the conversation each new day would change every byte after it.
+    /// "The current user turn" is the last user message and anything after it,
+    /// so a thread that somehow ends on another role still sends its per-turn
+    /// blocks before its latest request.
+    ///
+    /// Every slot is destructured and added under its tier below, and
+    /// `execution-core/tests/prompt_tier_contract.rs` reads these `add` calls:
+    /// keep one `out.add(PromptTier::..., slot)` per slot, in tier order.
+    fn render_stable_prefix(self) -> TieredPrompt {
         let Self {
             conversation_scope,
             artifact_inventory,
@@ -326,24 +370,24 @@ impl PromptContext {
             .rposition(|message| message.role == "user")
             .unwrap_or(history.len());
         let current = history.split_off(current_at);
-        let mut out = Vec::new();
-        out.extend(conversation_scope);
-        out.extend(authored_instructions);
-        out.extend(identity);
-        out.extend(response_discipline);
-        out.extend(user_supplied_args);
-        out.extend(verbosity);
-        out.extend(date_notice);
-        out.extend(history);
-        out.extend(artifact_inventory);
-        out.extend(calendar);
-        out.extend(grounding);
-        out.extend(context_assembly);
-        out.extend(memory);
-        out.extend(skills);
-        out.extend(generated_image_state);
-        out.extend(format_guidance);
-        out.extend(current);
+        let mut out = TieredPrompt::default();
+        out.add(PromptTier::Stable, conversation_scope);
+        out.add(PromptTier::Stable, response_discipline);
+        out.add(PromptTier::Context, authored_instructions);
+        out.add(PromptTier::Context, identity);
+        out.add(PromptTier::Context, user_supplied_args);
+        out.add(PromptTier::Context, verbosity);
+        out.add(PromptTier::Conversation, history);
+        out.add(PromptTier::Volatile, date_notice);
+        out.add(PromptTier::Volatile, artifact_inventory);
+        out.add(PromptTier::Volatile, calendar);
+        out.add(PromptTier::Volatile, grounding);
+        out.add(PromptTier::Volatile, context_assembly);
+        out.add(PromptTier::Volatile, memory);
+        out.add(PromptTier::Volatile, skills);
+        out.add(PromptTier::Volatile, generated_image_state);
+        out.add(PromptTier::Volatile, format_guidance);
+        out.add(PromptTier::Current, current);
         out
     }
 }
@@ -562,16 +606,16 @@ mod tests {
             contents,
             [
                 "scope",
+                "discipline",
                 "instructions",
                 "identity",
-                "discipline",
                 "supplied args",
                 "verbosity",
-                "date notice",
                 "[Pinned by the user] user: keep NOK",
                 "Summary of the earlier part of this conversation\nNOK, order 4411",
                 "first question",
                 "first answer",
+                "date notice",
                 "inventory v3",
                 "calendar 24. september",
                 "grounding for query A",
@@ -619,11 +663,11 @@ mod tests {
         let next = next.render(PromptOrder::StablePrefix);
         let shared = first
             .iter()
-            .position(|m| m.content == "inventory v3")
+            .position(|m| m.content == "date notice")
             .expect("per-turn blocks follow the prior history");
         assert_eq!(
-            shared, 11,
-            "7 standing blocks, pins, summary and one prior exchange"
+            shared, 10,
+            "6 standing blocks, pins, summary and one prior exchange"
         );
         assert_eq!(&next[..shared], &first[..shared]);
         assert_eq!(
@@ -639,6 +683,122 @@ mod tests {
         let legacy_first =
             full_context(history_with_pins_and_summary()).render(PromptOrder::Legacy);
         assert_eq!(legacy_first[1].content, "inventory v3");
+    }
+
+    /// The date notice changes daily. Under the tiered order it sits after the
+    /// conversation, so a new day changes nothing ahead of it.
+    #[test]
+    fn a_new_day_changes_only_bytes_after_the_conversation() {
+        let today = full_context(history_with_pins_and_summary());
+        let tomorrow = PromptContext {
+            date_notice: Some(system("date notice, a day later")),
+            ..today.clone()
+        };
+        let today = today.render(PromptOrder::StablePrefix);
+        let tomorrow = tomorrow.render(PromptOrder::StablePrefix);
+        let at = today
+            .iter()
+            .position(|m| m.content == "date notice")
+            .expect("the date notice is sent");
+        assert_eq!(at, 10);
+        assert_eq!(&today[..at], &tomorrow[..at]);
+        assert_eq!(today[at + 1..], tomorrow[at + 1..]);
+        assert!(today[..at].iter().any(|m| m.content == "first answer"));
+    }
+
+    /// Each slot has a tier, no message is left untiered, and the tiers never
+    /// decrease, whatever the history looks like.
+    #[test]
+    fn every_slot_has_a_tier_and_stable_order_never_decreases() {
+        let histories = [
+            Vec::new(),
+            vec![turn("user", "only turn")],
+            history_with_pins_and_summary(),
+            vec![system("pin"), system("summary")],
+            vec![turn("user", "q"), turn("assistant", "partial")],
+        ];
+        for history in histories {
+            let filled = PromptContext {
+                format_guidance: Some(system("chart notice")),
+                ..full_context(history.clone())
+            };
+            let slots = 14 + filled.context_assembly.len();
+            let tiered = filled
+                .render_tiered(PromptOrder::StablePrefix)
+                .expect("the stable-prefix order is tiered");
+            assert_eq!(tiered.messages.len(), tiered.tiers.len());
+            assert_eq!(tiered.messages.len(), slots + history.len());
+            assert!(
+                tiered.tiers.windows(2).all(|pair| pair[0] <= pair[1]),
+                "{:?}",
+                tiered.tiers
+            );
+        }
+    }
+
+    #[test]
+    fn each_slot_lands_in_its_tier() {
+        let tiered = PromptContext {
+            format_guidance: Some(system("chart notice")),
+            ..full_context(history_with_pins_and_summary())
+        }
+        .render_tiered(PromptOrder::StablePrefix)
+        .expect("the stable-prefix order is tiered");
+        let tier_of = |content: &str| {
+            let at = tiered
+                .messages
+                .iter()
+                .position(|m| m.content == content)
+                .unwrap_or_else(|| panic!("{content:?} is sent"));
+            tiered.tiers[at]
+        };
+        for content in ["scope", "discipline"] {
+            assert_eq!(tier_of(content), PromptTier::Stable, "{content}");
+        }
+        for content in ["instructions", "identity", "supplied args", "verbosity"] {
+            assert_eq!(tier_of(content), PromptTier::Context, "{content}");
+        }
+        for content in [
+            "[Pinned by the user] user: keep NOK",
+            "first question",
+            "first answer",
+        ] {
+            assert_eq!(tier_of(content), PromptTier::Conversation, "{content}");
+        }
+        for content in [
+            "date notice",
+            "inventory v3",
+            "calendar 24. september",
+            "grounding for query A",
+            "context block, estimated tokens: 812",
+            "memory recall A",
+            "skills A",
+            "image state",
+            "chart notice",
+        ] {
+            assert_eq!(tier_of(content), PromptTier::Volatile, "{content}");
+        }
+        assert_eq!(tier_of("current question"), PromptTier::Current);
+        assert_eq!(tiered.tiers.last(), Some(&PromptTier::Current));
+        assert_eq!(
+            tiered.plan(),
+            PromptTierPlan {
+                stable: 2,
+                context: 4
+            }
+        );
+    }
+
+    #[test]
+    fn the_legacy_order_is_not_tiered() {
+        let context = full_context(history_with_pins_and_summary());
+        assert!(context.clone().render_tiered(PromptOrder::Legacy).is_none());
+        // The same messages either way: tiering adds nothing to the prompt.
+        let tiered = context
+            .clone()
+            .render_tiered(PromptOrder::StablePrefix)
+            .expect("tiered");
+        assert_eq!(tiered.messages, context.render(PromptOrder::StablePrefix));
     }
 
     /// The formatting-guidance slot is a per-turn block like the others: it
