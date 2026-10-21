@@ -181,16 +181,42 @@ jobs:
       # changed and the docs were not regenerated. `git status` (not `git diff`)
       # so that a page the spec added and nobody committed fails too. Costs no
       # extra generation: this reuses the step above and only compares files.
+      # This job's default working-directory is apps/Frontend Plane/verevonv3, and a
+      # plain pathspec is relative to the cwd: from there it names a directory that
+      # does not exist, matches nothing and exits 0 (the gate could never fail). So
+      # the step runs in the sdks directory and compares '.', which does not depend
+      # on where the repository is checked out. The count line makes an empty
+      # comparison visible in the log.
       - name: Check the committed SDK docs match the spec
+        working-directory: 'apps/Ingestion Plane/Quarry-v2/sdks'
         run: |
-          drift="$(git status --porcelain -- 'apps/Ingestion Plane/Quarry-v2/sdks')"
+          tracked="$(git ls-files -- typescript/docs | wc -l)"
+          echo "Comparing $tracked committed SDK docs pages with the regeneration"
+          if [ "$tracked" -lt 100 ]; then
+            echo "::error::Fewer than 100 committed pages under sdks/typescript/docs: the comparison would prove nothing."
+            exit 1
+          fi
+          drift="$(git status --porcelain -- .)"
           if [ -n "$drift" ]; then
             echo "::error::The committed Quarry SDK docs differ from a regeneration of docs/openapi.yaml."
             echo "Run apps/Ingestion Plane/Quarry-v2/sdks/generate.sh and commit the changed pages of sdks/typescript/docs:"
             echo "$drift"
-            git diff --stat -- 'apps/Ingestion Plane/Quarry-v2/sdks'
+            git diff --stat -- .
             exit 1
           fi
+
+      # The Python SDK smoke tests (sdks/python/tests/test_smoke.py, committed) run
+      # against the package generate.sh just wrote to sdks/python/quarry_client
+      # (git-ignored). They catch a spec change that breaks the Python models, and a
+      # test that constructs a oneOf wrapper wrongly. A throwaway venv keeps the
+      # runner's Python untouched; the cost is one pip install of five small wheels
+      # and a test run of under ten seconds (measured: 28 tests, 8.6 s).
+      - name: Test the generated Quarry Python SDK
+        working-directory: 'apps/Ingestion Plane/Quarry-v2/sdks/python'
+        run: |
+          python3 -m venv "$RUNNER_TEMP/quarry-py"
+          "$RUNNER_TEMP/quarry-py/bin/pip" install --quiet -r requirements.txt pytest
+          PYTHONPATH=. "$RUNNER_TEMP/quarry-py/bin/python" -m pytest tests -q
 
       - name: Build the Quarry TypeScript SDK
         working-directory: 'apps/Ingestion Plane/Quarry-v2/sdks/typescript'
