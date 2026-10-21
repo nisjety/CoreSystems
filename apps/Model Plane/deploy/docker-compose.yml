@@ -294,6 +294,12 @@ services:
       # grant an execute turn runs under lives in this process's memory for 24 hours at most;
       # a restart drops it and the turn is then refused typed (`plan_grant_unavailable`).
       MODEL_GATEWAY_PLAN_EXECUTE_ENABLED: ${MODEL_GATEWAY_PLAN_EXECUTE_ENABLED:-false}
+      # WS04-S1: cancel, queue and probe routed to the replica that owns a stream, over NATS request/reply.
+      # Off by default; only the literal `true` turns it on. Deploy order: the nats.conf ACL (mp.v1.runctl.>)
+      # first, then the gateways, then this switch. A boot self-test that finds the ACL missing leaves the bus
+      # degraded and behaving as off, never the gateway down. Roll back with off plus a restart.
+      MODEL_GATEWAY_RUN_CONTROL_BUS: ${MODEL_GATEWAY_RUN_CONTROL_BUS:-off}
+      MODEL_GATEWAY_RUN_CONTROL_TIMEOUT_MS: ${MODEL_GATEWAY_RUN_CONTROL_TIMEOUT_MS:-750}
       # Kill-switches for the review-latency levers. Empty keeps a lever ON;
       # 0/off/false/no/disabled turns it off at the next restart, no rebuild.
       MODEL_GATEWAY_SOLE_NOTE_PREFETCH: ${MODEL_GATEWAY_SOLE_NOTE_PREFETCH:-}
@@ -918,6 +924,12 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: inference-core
       INFERENCE_PROVIDER_ORDER: ${INFERENCE_PROVIDER_ORDER:-azure,anthropic,openai,cohere}
+      # Reasoning-effort ladder (WS11): the level reaches the provider body only when its switch is the literal
+      # `true`; both are off by default and the request body is then byte-identical to before. The aliases map an
+      # Azure deployment name to its base model (e.g. prod-chat=gpt-5-mini).
+      INFERENCE_CORE_OPENAI_REASONING_EFFORT: ${INFERENCE_CORE_OPENAI_REASONING_EFFORT:-false}
+      INFERENCE_CORE_ANTHROPIC_ADAPTIVE_THINKING: ${INFERENCE_CORE_ANTHROPIC_ADAPTIVE_THINKING:-false}
+      INFERENCE_CORE_EFFORT_MODEL_ALIASES: ${INFERENCE_CORE_EFFORT_MODEL_ALIASES:-}
       # Optional ChatGPT subscription route. Add openai-codex-subscription to
       # INFERENCE_PROVIDER_ORDER only after setting all three variables. This
       # service gets an opaque connection id plus this dedicated service key;
