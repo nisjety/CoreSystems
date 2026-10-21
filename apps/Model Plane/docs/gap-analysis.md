@@ -266,7 +266,7 @@ Phase 0 freezes landed. Remaining closure is execution-focused, tracked in § 12
 
 This section is the canonical list of in-tree stubs that must be replaced with real implementations. Each row names the file, what is fake about it today, and what "real" means for cutover.
 
-### 13.1 Orchestration RPC handlers — 12 Unimplemented
+### 13.1 Orchestration RPC handlers — 12 listed as Unimplemented (see the correction under the table)
 
 Owner: `go/services/orchestrator-core/internal/orchestration/handlers.go`
 
@@ -280,10 +280,12 @@ Owner: `go/services/orchestrator-core/internal/orchestration/handlers.go`
 | `TransitionTodo` | Unimplemented | Write + emit `TODO_TRANSITIONED` event |
 | `ListApprovals` | Unimplemented | Read from orchestration_store approval table |
 | `GetApproval` | Unimplemented | Same |
-| `DecideApproval` | Unimplemented | Write + emit `APPROVAL_DECIDED` event + signal Temporal workflow |
+| `DecideApproval` | Implemented (corrected 2026-10-21, see the note under the table); no `APPROVAL_DECIDED` event and no Temporal signal yet | Emit `APPROVAL_DECIDED` (WS13-S3); the write already exists in session-core |
 | `GetSubagentLineage` | Unimplemented | Read subagent_lineage table |
 | `AttachSubagent` | Unimplemented | Write + emit `SUBAGENT_ATTACHED` event |
 | `StreamRunEvents` | Unimplemented | JetStream consumer multiplexed onto gRPC server stream |
+
+> **Correction 2026-10-21 (WS13-S0), `DecideApproval`.** The row above was stale: the handler is built. The orchestrator-core handler (`go/services/orchestrator-core/internal/orchestration/handlers.go`) proxies to session-core, where `decide_approval` (`rust/services/session-core/src/orchestration_grpc.rs`, store in `rust/services/session-core/src/orchestration_store.rs`) records the decision in one transaction. model-gateway serves the same decision at `POST /v1/orchestration/approvals/:approval_id/decide` (`rust/services/model-gateway/src/http_routes.rs`). Not built: the `APPROVAL_DECIDED` event (`EVENT_TYPE_APPROVAL_DECIDED = 123` in `proto/model_plane/v1/events.proto` is never emitted), and any Temporal signal: `go/services/orchestrator-core/cmd/workflows/interactive_run.go` waits for an `approval` signal, and nothing in this tree sends it. A paused run resumes through `POST /v1/orchestration/runs/:run_id/continue`. The other eleven rows are proxied the same way in `handlers.go`; their status was not re-checked against session-core in this correction.
 
 Source comment: `// All RPCs are stubbed with codes.Unimplemented for now; T4–T6 will fill in`.
 

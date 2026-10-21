@@ -7483,6 +7483,8 @@ mod tests {
         /// `MockOrchestration` observed, for `plan.propose` dispatch tests.
         propose_plan_calls: Vec<(String, String, usize)>,
         decisions: Vec<(String, i32)>,     // (approval_id, decision) — DecideApproval
+        /// Every `DecideApproval` the mock accepted, whole: who decided, and why.
+        decision_requests: Vec<pb::DecideApprovalRequest>,
         /// Fixture for `MockSession::list_agent_skills`; empty unless a
         /// `fetch_skill_context` test populates it.
         agent_skills: Vec<pb::AgentSkill>,
@@ -9077,11 +9079,11 @@ mod tests {
             request: Request<pb::DecideApprovalRequest>,
         ) -> Result<Response<pb::DecideApprovalResponse>, Status> {
             let req = request.into_inner();
-            self.rec
-                .lock()
-                .unwrap()
-                .decisions
-                .push((req.approval_id.clone(), req.decision));
+            {
+                let mut rec = self.rec.lock().unwrap();
+                rec.decisions.push((req.approval_id.clone(), req.decision));
+                rec.decision_requests.push(req.clone());
+            }
             let approval = pb::Approval {
                 id: req.approval_id,
                 state: req.decision,
@@ -13435,6 +13437,323 @@ mod tests {
             r.decisions[0].0.starts_with("appr_"),
             "a real durable approval id is threaded, got {}",
             r.decisions[0].0
+        );
+    }
+
+    // --- Approval characterisation (build plan WS13-S0) ------------------------
+    //
+    // What each pause and each posture record says today: the kind and the reason a
+    // person is shown, and who is recorded as deciding. Approvals v2 changes all three
+    // (closed cause codes, decision provenance, scope), so a change to any pin here is
+    // the named slice's deliberate change, not drift.
+
+    #[test]
+    fn approval_kind_labels_a_disclosure_permission_and_every_other_gate_destructive() {
+        use crate::runtime_loop::subagent_results::READ_TOOL;
+
+        assert_eq!(
+            approval_kind_for(READ_TOOL),
+            pb::ApprovalKind::Permission,
+            "reading a delegated finding is a disclosure, not a destructive act"
+        );
+        assert_eq!(
+            approval_kind_for("delete_records"),
+            pb::ApprovalKind::Destructive
+        );
+        assert_eq!(
+            approval_kind_for("execute_provider_action"),
+            pb::ApprovalKind::Destructive,
+            "a provider write paused under ask is raised with the destructive label"
+        );
+    }
+
+    #[test]
+    fn approval_reason_names_what_a_disclosure_brings_and_otherwise_only_the_mechanism() {
+        use crate::runtime_loop::subagent_results::READ_TOOL;
+
+        assert_eq!(
+            approval_reason_for(READ_TOOL),
+            "'read_subagent_result' would bring what a delegated subagent concluded into this \
+             conversation. Approve to let the agent read that finding."
+        );
+        assert_eq!(
+            approval_reason_for("delete_records"),
+            "tool 'delete_records' requires approval"
+        );
+    }
+
+    /// A gated call under `ask` is raised as a destructive approval whose reason names
+    /// only the mechanism. The idempotency key is the run and the step, so a re-paused
+    /// step collapses onto its own approval.
+    #[tokio::test]
+    async fn a_gated_call_under_ask_is_raised_as_a_destructive_approval() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let inference_channel = spawn_inference_channel(vec![Scripted::ToolCalls {
+            content: String::new(),
+            calls: vec![pb::ToolCall {
+                id: "del-1".to_owned(),
+                name: "delete_records".to_owned(),
+                arguments_json: "{}".to_owned(),
+            }],
+        }])
+        .await;
+        let state = crate::state::StateStore::new();
+        let gated_tools = vec![pb::ToolDefinition {
+            name: "delete_records".to_owned(),
+            description: "Delete records (destructive).".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{}}"#.to_owned(),
+        }];
+
+        let mut req = sample_request();
+        req.mode = "ask".to_owned();
+        let resp = run_agent_with_tools(
+            &state,
+            session_channel,
+            inference_channel,
+            &plain_caller(),
+            req,
+            gated_tools,
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
+        )
+        .await
+        .expect("durable approval should pause the run");
+        assert_eq!(resp.status, "awaiting_approval");
+
+        let r = rec.lock().unwrap();
+        assert_eq!(r.approval_requests.len(), 1, "exactly one approval created");
+        let approval = &r.approval_requests[0];
+        assert_eq!(approval.kind, pb::ApprovalKind::Destructive as i32);
+        assert_eq!(approval.reason, "tool 'delete_records' requires approval");
+        assert_eq!(approval.idempotency_key, "run_test:tool_1_del-1");
+        assert_eq!(approval.org_id, "org_test");
+        assert_eq!(approval.user_id, "user_test");
+        assert!(r.decisions.is_empty(), "a pause decides nothing");
+    }
+
+    /// A disclosure pauses under `auto` as well: the posture that lets an ordinary write
+    /// run does not let a subagent's finding into the conversation unasked.
+    #[tokio::test]
+    async fn a_disclosure_read_pauses_under_auto_as_a_permission_approval() {
+        use crate::runtime_loop::subagent_results::READ_TOOL;
+
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let inference_channel = spawn_inference_channel(vec![Scripted::ToolCalls {
+            content: String::new(),
+            calls: vec![pb::ToolCall {
+                id: "read-1".to_owned(),
+                name: READ_TOOL.to_owned(),
+                arguments_json: r#"{"child_run_id":"run_child"}"#.to_owned(),
+            }],
+        }])
+        .await;
+        let state = crate::state::StateStore::new();
+        let tools = vec![pb::ToolDefinition {
+            name: READ_TOOL.to_owned(),
+            description: "Read what a delegated subagent concluded.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{}}"#.to_owned(),
+        }];
+
+        let mut req = sample_request();
+        req.mode = "auto".to_owned();
+        let resp = run_agent_with_tools(
+            &state,
+            session_channel,
+            inference_channel,
+            &plain_caller(),
+            req,
+            tools,
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
+        )
+        .await
+        .expect("a disclosure must pause the run, even under auto");
+        assert_eq!(resp.status, "awaiting_approval");
+
+        let r = rec.lock().unwrap();
+        assert_eq!(r.approval_requests.len(), 1, "exactly one approval created");
+        let approval = &r.approval_requests[0];
+        assert_eq!(approval.kind, pb::ApprovalKind::Permission as i32);
+        assert_eq!(
+            approval.reason,
+            "'read_subagent_result' would bring what a delegated subagent concluded into this \
+             conversation. Approve to let the agent read that finding."
+        );
+        assert_eq!(approval.idempotency_key, "run_test:tool_1_read-1");
+        assert!(r.decisions.is_empty(), "no posture decides a disclosure");
+    }
+
+    /// The same provider write under `ask` pauses at the destructive gate and decides
+    /// nothing. The `auto` record below labels this operation as a tool-call approval.
+    /// Both labels stay pinned until cause codes give each pause its own.
+    #[tokio::test]
+    async fn an_ask_posture_provider_write_pauses_as_a_destructive_approval_with_no_decision() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let inference_channel = spawn_inference_channel(vec![Scripted::ToolCalls {
+            content: String::new(),
+            calls: vec![pb::ToolCall {
+                id: "pa-1".to_owned(),
+                name: "execute_provider_action".to_owned(),
+                arguments_json:
+                    r#"{"connection_id":"c1","operation":"message.send","body":{"text":"hi"}}"#
+                        .to_owned(),
+            }],
+        }])
+        .await;
+        let state = crate::state::StateStore::new();
+        let tools = vec![pb::ToolDefinition {
+            name: "execute_provider_action".to_owned(),
+            description: "Run one provider operation.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{}}"#.to_owned(),
+        }];
+
+        let mut req = sample_request();
+        req.mode = "ask".to_owned();
+        let resp = run_agent_with_tools(
+            &state,
+            session_channel,
+            inference_channel,
+            &plain_caller(),
+            req,
+            tools,
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
+        )
+        .await
+        .expect("a provider write under ask must pause the run");
+        assert_eq!(resp.status, "awaiting_approval");
+
+        let r = rec.lock().unwrap();
+        assert_eq!(r.approval_requests.len(), 1, "exactly one approval created");
+        let approval = &r.approval_requests[0];
+        assert_eq!(approval.kind, pb::ApprovalKind::Destructive as i32);
+        assert_eq!(
+            approval.reason,
+            "tool 'execute_provider_action' requires approval"
+        );
+        assert_eq!(approval.idempotency_key, "run_test:tool_1_pa-1");
+        assert!(
+            r.decisions.is_empty(),
+            "a pause grants nothing on a human's behalf"
+        );
+    }
+
+    /// The auto-posture record, field by field. The provider write is raised as a
+    /// `TOOL_CALL` approval whose reason names the operation, and the record is a
+    /// `GRANTED` decision by the run's own user carrying the chat reason. Approvals v2
+    /// keeps the grant and must say separately that the posture made it.
+    #[tokio::test]
+    async fn an_auto_posture_provider_write_records_a_granted_decision_on_its_own_approval() {
+        std::env::set_var("INTEGRATION_COREV2_URL", "http://127.0.0.1:1"); // fast connection refuse
+
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let inference_channel = spawn_inference_channel(vec![
+            Scripted::ToolCalls {
+                content: String::new(),
+                calls: vec![pb::ToolCall {
+                    id: "pa-1".to_owned(),
+                    name: "execute_provider_action".to_owned(),
+                    arguments_json:
+                        r#"{"connection_id":"c1","operation":"message.send","body":{"text":"hi"}}"#
+                            .to_owned(),
+                }],
+            },
+            Scripted::Answer("done".to_owned()),
+        ])
+        .await;
+        let state = crate::state::StateStore::new();
+        let tools = vec![pb::ToolDefinition {
+            name: "execute_provider_action".to_owned(),
+            description: "Run one provider operation.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{}}"#.to_owned(),
+        }];
+
+        let mut req = sample_request();
+        req.mode = "auto".to_owned();
+        let resp = run_agent_with_tools(
+            &state,
+            session_channel,
+            inference_channel,
+            &plain_caller(),
+            req,
+            tools,
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
+        )
+        .await
+        .expect("provider write run should succeed");
+        assert_eq!(resp.status, "completed");
+
+        let r = rec.lock().unwrap();
+        assert_eq!(
+            r.approval_requests.len(),
+            1,
+            "one approval created for the write"
+        );
+        let approval = &r.approval_requests[0];
+        assert_eq!(approval.kind, pb::ApprovalKind::ToolCall as i32);
+        assert_eq!(
+            approval.reason,
+            "provider write 'message.send' requires approval"
+        );
+        assert_eq!(approval.idempotency_key, "run_test:tool_1_pa-1");
+        assert_eq!(
+            r.decision_requests.len(),
+            1,
+            "one decision recorded for the write"
+        );
+        let decision = &r.decision_requests[0];
+        assert_eq!(decision.approval_id, "appr_run_test_tool_1_pa-1");
+        assert_eq!(decision.decision, pb::ApprovalState::Granted as i32);
+        assert_eq!(decision.decided_by, "user_test");
+        assert_eq!(decision.org_id, "org_test");
+        assert_eq!(
+            decision.decision_reason,
+            "auto (chat) posture: interactive user is the live approver"
         );
     }
 
