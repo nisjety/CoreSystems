@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use quarry_core::contracts::ChallengeStrength;
 use quarry_core::error::ErrorCode;
 use quarry_core::output::DriverKind;
 use quarry_core::QuarryResult;
@@ -11,6 +12,7 @@ use quarry_tls::TlsProfile;
 use tracing::{info, warn};
 use url::Url;
 
+use crate::challenge::{classify, ChallengeInput, MAX_SCANNED_BYTES};
 use crate::driver::{Driver, FetchHints};
 use crate::escalation::{escalation_allowed, trigger_for_error, EscalationMode, EscalationTrigger};
 use crate::fetch::FetchResponse;
@@ -55,6 +57,32 @@ impl FallbackDriver {
             drivers,
             mode: EscalationMode::current(),
         }
+    }
+
+    /// A strong challenge classified on a body that answered 200 is not a page
+    /// that withheld its content: it is an interstitial or a CAPTCHA widget, and
+    /// a browser could run its script. Under `honest` that is a change of
+    /// identity prompted by a challenge, which ADR-5 refuses
+    /// ([`EscalationTrigger::StrongChallenge`]); the body is returned as it is
+    /// and the scrape path classifies it. Under `legacy` the trigger is allowed
+    /// and this is always false. The classifier is called directly (not through
+    /// `classify_fetched`) so the invariant does not depend on
+    /// `QUARRY_CHALLENGE_CLASSIFIER`. Only the strong class counts; a weak hint
+    /// or a non-signal (a login page, a rate limit) is not a challenge.
+    fn challenge_forbids_escalation(&self, url: &Url, resp: &FetchResponse) -> bool {
+        if escalation_allowed(self.mode, EscalationTrigger::StrongChallenge) {
+            return false;
+        }
+        let head = &resp.body[..resp.body.len().min(MAX_SCANNED_BYTES)];
+        let html = String::from_utf8_lossy(head);
+        classify(&ChallengeInput {
+            url: url.as_str(),
+            title: None,
+            html: Some(&html),
+            text_snippet: None,
+            main_doc_status: Some(resp.status),
+        })
+        .is_some_and(|signal| signal.strength == ChallengeStrength::Strong)
     }
 
     fn attempt_order(&self) -> Vec<DriverKind> {
@@ -134,9 +162,14 @@ impl FallbackDriver {
                     // the embedded JSON yet. When the harvest result becomes
                     // available here, pass it — a `Found` suppresses the
                     // browser round trip entirely.
+                    //
+                    // Not for a challenge page: under `honest` a strong
+                    // challenge never moves the request to another identity
+                    // (see `challenge_forbids_escalation`).
                     if needs_browser_escalation(&resp.body, resp.status, StructuredYield::Unknown)
                         && idx < order.len() - 1
                         && *kind != DriverKind::Browser
+                        && !self.challenge_forbids_escalation(url, &resp)
                     {
                         // A browser must be REGISTERED, not merely named in
                         // the plan's chain. Deployments running
@@ -892,6 +925,98 @@ mod tests {
             EscalationMode::Honest,
             vec![
                 (DriverKind::Static, static_shell.clone()),
+                (DriverKind::Browser, browser.clone()),
+            ],
+        );
+
+        let resp = fb
+            .fetch(&"https://example.com".parse().unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.served_by, DriverKind::Browser);
+        assert_eq!(browser.calls.load(Ordering::Relaxed), 1);
+    }
+
+    /// A 200 challenge interstitial that is also large and text-thin (what the
+    /// shell gate looks for): a script-heavy Cloudflare-style page.
+    fn challenge_interstitial_body() -> Vec<u8> {
+        let mut b = shell_body();
+        b.extend_from_slice(b"<script>window._cf_chl_opt={cvId:'3',cType:'managed'};</script>");
+        b
+    }
+
+    #[test]
+    fn the_challenge_test_body_is_a_shell_and_a_strong_challenge() {
+        // Pins the premise of the two tests below: without it they could pass
+        // for the wrong reason (the body not being a shell at all).
+        let body = challenge_interstitial_body();
+        assert!(needs_browser_escalation(
+            &body,
+            200,
+            StructuredYield::Unknown
+        ));
+        let fb = FallbackDriver::new(DriverKind::Static, vec![], HashMap::new())
+            .with_escalation_mode(EscalationMode::Honest);
+        let resp = FetchResponse {
+            status: 200,
+            final_url: "https://example.com".parse().unwrap(),
+            headers: vec![],
+            body,
+            duration_ms: 1,
+            served_by: DriverKind::Static,
+        };
+        assert!(fb.challenge_forbids_escalation(&"https://example.com".parse().unwrap(), &resp));
+        let legacy = fb.with_escalation_mode(EscalationMode::Legacy);
+        assert!(
+            !legacy.challenge_forbids_escalation(&"https://example.com".parse().unwrap(), &resp)
+        );
+    }
+
+    #[tokio::test]
+    async fn honest_challenge_interstitial_with_200_is_not_escalated_to_browser() {
+        let static_driver = Arc::new(BodyDriver {
+            kind: DriverKind::Static,
+            body: challenge_interstitial_body(),
+            calls: AtomicU32::new(0),
+        });
+        let browser = Arc::new(OkDriver::new(DriverKind::Browser));
+        let fb = chain(
+            EscalationMode::Honest,
+            vec![
+                (DriverKind::Static, static_driver.clone()),
+                (DriverKind::Browser, browser.clone()),
+            ],
+        );
+
+        let resp = fb
+            .fetch(&"https://example.com".parse().unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.served_by, DriverKind::Static);
+        assert_eq!(resp.status, 200);
+        assert_eq!(browser.calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn legacy_challenge_interstitial_with_200_still_escalates_to_browser() {
+        let static_driver = Arc::new(BodyDriver {
+            kind: DriverKind::Static,
+            body: challenge_interstitial_body(),
+            calls: AtomicU32::new(0),
+        });
+        // The browser must render more readable text than the shell, or the
+        // "no better than the shell" rule returns the shell for another reason.
+        let browser = Arc::new(BodyDriver {
+            kind: DriverKind::Browser,
+            body: "<html><body><main><h1>Hygiene for matindustrien</h1><p>Vi leverer hygieneløsninger til næringsmiddelindustrien.</p></main></body></html>".as_bytes().to_vec(),
+            calls: AtomicU32::new(0),
+        });
+        let fb = chain(
+            EscalationMode::Legacy,
+            vec![
+                (DriverKind::Static, static_driver.clone()),
                 (DriverKind::Browser, browser.clone()),
             ],
         );

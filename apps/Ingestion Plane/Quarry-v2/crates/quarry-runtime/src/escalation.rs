@@ -219,9 +219,75 @@ mod tests {
 
     /// The gate for the default: changing `BUILD_DEFAULT` means changing this
     /// line and the "Block escalation" section of docs/RUNBOOKS.md in the same
-    /// commit, on purpose.
+    /// commit, on purpose. It checks the constant and, through
+    /// [`resolved_in_child`], the mode a production constructor really gets
+    /// from [`EscalationMode::current`] with the variable unset.
     #[test]
     fn build_default_matches_the_documented_default() {
         assert_eq!(BUILD_DEFAULT, EscalationMode::Honest);
+        assert_eq!(resolved_in_child(None), "honest");
+    }
+
+    /// The documented rollback: `QUARRY_BLOCK_ESCALATION=legacy` selects the
+    /// pre-WS3.I behaviour through the same `current()` every constructor reads.
+    #[test]
+    fn the_env_var_reaches_current_and_legacy_is_the_rollback() {
+        assert_eq!(resolved_in_child(Some("legacy")), "legacy");
+        assert_eq!(resolved_in_child(Some(" LEGACY ")), "legacy");
+        assert_eq!(resolved_in_child(Some("honest")), "honest");
+        assert_eq!(resolved_in_child(Some("")), "honest");
+        // A typo fails closed.
+        assert_eq!(resolved_in_child(Some("legcay")), "honest");
+    }
+
+    const CHILD_MARKER: &str = "QUARRY_ESCALATION_TEST_CHILD";
+
+    /// Not a test of its own: it does nothing unless the parent re-runs this
+    /// executable with [`CHILD_MARKER`] set, and then prints what the
+    /// process-wide `current()` resolved to. `current()` caches in a
+    /// `OnceLock` and reads the real environment, so each environment needs its
+    /// own process.
+    #[test]
+    fn child_prints_the_resolved_mode() {
+        if std::env::var_os(CHILD_MARKER).is_none() {
+            return;
+        }
+        println!("RESOLVED_MODE={}", EscalationMode::current().as_str());
+    }
+
+    /// Runs this test executable again with `ESCALATION_ENV` set to `value`
+    /// (or removed) and returns the mode name `current()` resolved to there.
+    fn resolved_in_child(value: Option<&str>) -> String {
+        let exe = std::env::current_exe().expect("test executable path");
+        let mut command = std::process::Command::new(exe);
+        command
+            .args([
+                "--exact",
+                "escalation::tests::child_prints_the_resolved_mode",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD_MARKER, "1")
+            .env_remove(ESCALATION_ENV);
+        if let Some(value) = value {
+            command.env(ESCALATION_ENV, value);
+        }
+        let output = command.output().expect("run the child test process");
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        assert!(
+            output.status.success(),
+            "child failed: {stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // libtest prints "test <name> ... " on the same line before the child's
+        // own output, so look for the marker anywhere in the line.
+        const MARKER: &str = "RESOLVED_MODE=";
+        stdout
+            .lines()
+            .find_map(|line| line.find(MARKER).map(|at| &line[at + MARKER.len()..]))
+            .map(|mode| mode.trim().to_owned())
+            .unwrap_or_else(|| {
+                panic!("child printed no mode, so the filter matched no test: {stdout}")
+            })
     }
 }
