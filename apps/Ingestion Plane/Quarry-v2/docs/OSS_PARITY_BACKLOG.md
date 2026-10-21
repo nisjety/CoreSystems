@@ -60,7 +60,7 @@ runtime dep for us (Rust/Go), but its *practice* — read source, not marketing 
 |---|---|---|---|
 | durable request queue + dedupe | PostgresRequestQueue + frontier + checkpoints | ✅ | — |
 | **AutoscaledPool** (global concurrency by CPU/mem) | per-host AIMD only | 🟡 | **P1** global resource-aware autoscaler |
-| SessionPool + auto fingerprint rotation on block | profiles + TLS fp, manual | 🟡 | P1 auto-rotate on block detection |
+| SessionPool + auto fingerprint rotation on block | profiles + TLS fp, manual | ❌ declined (ADR-5, WS3.I) | a block never changes the identity Quarry presents; transport failures still rotate the proxy |
 | **enqueueLinks glob/regex + strategy** (same-domain/subdomain) | domain scope only | ❌ | **P1** crawl include/exclude path patterns |
 | Dataset / KeyValueStore / RequestQueue storages | artifact store + control-plane stores | ✅ | — |
 | statistics / failedRequestHandler | retry + StepReceipts | ✅ | — |
@@ -96,7 +96,7 @@ runtime dep for us (Rust/Go), but its *practice* — read source, not marketing 
 6. **Crawl path include/exclude glob/regex** + enqueue strategy (same-domain/subdomain/all).
 7. **Search highlighting/snippets + facets** (host/date/content-type aggregations).
 8. **AutoscaledPool** — global concurrency governed by CPU/mem, layered over per-host AIMD.
-9. **Auto session/fingerprint rotation on block detection** (429/403 → rotate profile+TLS).
+9. ~~**Auto session/fingerprint rotation on block detection** (429/403 → rotate profile+TLS).~~ Declined by ADR-5 (WS3.I): Quarry classifies a block and refuses; it does not change identity to get past it.
 
 ### P2
 10. Tantivy index lifecycle (snapshot/reindex/aliases) + per-language analyzers + synonyms.

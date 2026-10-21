@@ -17,7 +17,7 @@ Living doc. Source of truth for current build state.
 | 4     | Browser lease model                    | 🟡 In progress  | LeasePool TTL+affinity+cap+metrics; profiles/snapshots/restore endpoints + capture/restore deferred |
 | 5     | Crawl workers to Rust                  | 🟡 Partial      | Crawl BFS lives in Go orchestrator (with dedupe + checkpoints + tests); Rust frontier deferred |
 | 6     | Normalized output + change tracking    | ✅ Done         | Envelope + fingerprint + paragraph semantic diff (`SemanticDiff::is_real_delta`) + text_fingerprint in change events |
-| 7     | Presets + determinism                  | ✅ Done         | Preset catalog (`fast`/`polite`/`stealth`/`deterministic`) + `/v1/presets` + strict-mode roundtrip determinism test |
+| 7     | Presets + determinism                  | ✅ Done         | Preset catalog (`fast`/`polite`/`careful`/`deterministic`; `careful` was `stealth` until WS3.I, the old id stays as a deprecated alias for one release) + `/v1/presets` + strict-mode roundtrip determinism test |
 | 8     | Benchmark + retire                     | 🟡 In progress  | Eval harness foundation shipped (2 fixtures + scoreboard); canary controls done; donor removal pending |
 | 9     | Product parity hardening               | ⬜ New          | Firecrawl/V1 surface parity after benchmark truth |
 
@@ -170,7 +170,7 @@ Firecrawl self-hosting explicitly lacks the full managed Fire Engine advantage. 
 ### Phase 7 — Presets + determinism
 
 **Todo:**
-- [x] Preset catalog + `/v1/presets` endpoint ✅ 2026-04-29 — `services/quarry-control/internal/resources/presets.go` ships 4 presets (`fast`, `polite`, `stealth`, `deterministic`); `POST /v1/jobs` accepts `preset: "<name>"` to materialize the policy; unknown preset names → 400
+- [x] Preset catalog + `/v1/presets` endpoint ✅ 2026-04-29 — `services/quarry-control/internal/resources/presets.go` ships 4 presets (`fast`, `polite`, `careful`, `deterministic`; `careful` was `stealth` until WS3.I, which keeps the old id as a deprecated alias for one release); `POST /v1/jobs` accepts `preset: "<name>"` to materialize the policy; unknown preset names → 400
 - [x] Determinism mode enforcement in runtime ✅ 2026-05-03
 - [x] Strict-mode roundtrip determinism test ✅ 2026-04-29 — `tests/transform.rs::strict_determinism_roundtrip` runs the full HTML→readable→markdown→links→metadata→fingerprint pipeline twice + verifies byte equality, plus a third invocation guard against state-baked-across-calls bugs
 
@@ -298,6 +298,8 @@ Rows dated 2026-10-19 come from two runs. R8a re-ran quarry-edge and quarry-tran
 
 ## Recent changes (reverse chronological)
 
+- **2026-10-21** — WS3.I, honest identity (mechanism; the default flip is its own commit, see below): `crates/quarry-runtime/src/escalation.rs` and `QUARRY_BLOCK_ESCALATION=legacy|honest`. Under `honest` a block status never rotates a proxy (`fetch.rs`), never cools a proxy down (`egress_broker.rs`), never moves the request to the next driver, on the status or on the error path (`fallback_driver.rs`), and `prior_block_signals` is ignored for the driver tier (`driver_plan.rs`); a transport failure still rotates. The rotation label `block_rotation` is `health_rotation`. The `stealth` preset is `careful` (Block `{challenge, abort}`) with `stealth` a deprecated alias for one release (`alias_of`, `deprecated`, `Deprecation` and `Link` headers). Details, the rollback and the evidence that was and was not possible: `docs/RUNBOOKS.md`, "Block escalation". Tests: `escalation`, `egress_broker`, `driver_plan`, `fallback_driver`, `fetch` in `quarry-runtime` (21 new), `TestPresets_*` in `quarry-control`.
+
 - **2026-05-08** — Cycle 14 (P0+P1+P2 gap closure batch — 12 deliverables, +56 tests):
   1. **StructuredExtractClient** (P0/QRY-06) — `crates/quarry-runtime/src/structured_extract.rs` HTTP client to Model Plane `/v1/structured/extract`. ZDR + artifact-ref validation Quarry-side; **cost ceiling enforced post-hoc** (rejects responses with `usage.cost_usd > max_cost_usd`). 6 wiremock tests including budget rejection, ZDR-without-inline-markdown rejection, default-ceiling fallback.
   2. **AgentLoop max_cost_usd enforcement** (P1/QRY-05) — `LoopTermination::MaxCostExceeded { spent_usd, limit_usd }` variant; `record_cost(usd)` accumulates via AtomicU64 micro-USD; `over_budget()` checked at every step boundary. 2 tests (accumulate + terminate, ignore NaN/negative).
@@ -350,7 +352,7 @@ Rows dated 2026-10-19 come from two runs. R8a re-ran quarry-edge and quarry-tran
   4. **Donor URL heuristics ported** — `quarry_security::urlsig::analyze` mirrors `internal/security/heur/urlsig.go`: scheme, suspicious TLD, IP-as-host, homograph (Cyrillic/Georgian/Greek), typosquat (substitution + 1-edit-distance) against 17-domain popularity list, path/query suspicious patterns, length and digit-ratio analysis, URL-shortener detection, phishing keyword scan with trusted-domain bypass; confidence-weighted `suspicion_score` capped at 1.0.
   5. **Semantic-ish paragraph diff** — `quarry_transform::diff::diff_paragraphs` returns `SemanticDiff { ops, added, removed, moved, unchanged }` with `is_real_delta()` gating against pure reorderings or whitespace-only changes. Hashing collapses whitespace before fingerprinting so reflowed paragraphs match.
   6. **Change events carry text_fingerprint** — `pipeline.rs` now emits `text_fingerprint` (whitespace + case-normalized) alongside the byte fingerprint so consumers can suppress boilerplate-only churn at the subscription layer.
-  7. **Preset catalog** — `services/quarry-control/internal/resources/presets.go` ships four presets (`fast`, `polite`, `stealth`, `deterministic`) exposed via `GET /v1/presets` and `GET /v1/presets/{name}`; `POST /v1/jobs` accepts `preset: "<name>"` to materialize the policy. Unknown preset names → 400. 6 new resource tests.
+  7. **Preset catalog** — `services/quarry-control/internal/resources/presets.go` ships four presets (`fast`, `polite`, `careful`, `deterministic`; `careful` was `stealth` until WS3.I, which keeps the old id as a deprecated alias for one release) exposed via `GET /v1/presets` and `GET /v1/presets/{name}`; `POST /v1/jobs` accepts `preset: "<name>"` to materialize the policy. Unknown preset names → 400. 6 new resource tests.
   8. **Strict-mode determinism test** — `tests/transform.rs::strict_determinism_roundtrip` runs the full HTML→readable→markdown→links→metadata→fingerprint pipeline twice + verifies byte equality, plus a third invocation guard against state baked across calls.
   9. **Orchestrator workflow tests** — 5 new tests under `internal/workflows/workflows_test.go` covering `ScrapeJobWF` happy path + failure propagation, `BatchJobWF` per-page failure tolerance, `CrawlJobWF` `MaxPages` boundary (exact visit count) and frontier dedupe.
 

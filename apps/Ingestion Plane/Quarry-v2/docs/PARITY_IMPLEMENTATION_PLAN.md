@@ -105,6 +105,7 @@ _The rotator below had no caller and was deleted; only `is_block_status` and the
 → next profile or None when exhausted), pure `next_index`. Dep-free, 4 tests. **WIRED** into
 `FallbackDriver`: a block STATUS (403/429/503) now falls through to the next (different-fingerprint)
 driver in the chain; exhausted rotation surfaces the block response. +2 driver rotation tests.
+_Superseded for `QUARRY_BLOCK_ESCALATION=honest` by WS3.I (ADR-5): a block status no longer selects the next driver or another proxy; the fall-through above is the `legacy` behaviour._
 
 **CYCLE 2 (P1) COMPLETE** — 2A `/v1/extract`, 2B crawl globs, 2C AutoscaledPool, 2D fingerprint
 rotation, 2E highlight/facets. All green, 0 warnings.

@@ -242,7 +242,7 @@ Gap closure now follows the phase system in Section 14. The `Owner Phase` column
 | Cursor pagination | ❌ | ✅ opaque base64 cursor | ❌ |
 | Event idempotency | ✅ Temporal | ✅ idempotency_key | ❌ |
 | Blocklist persistence | ✅ DB | ✅ Postgres + Bloom filter hint | ❌ |
-| Presets catalog | ❌ | ✅ fast/polite/stealth/deterministic | ❌ |
+| Presets catalog | ❌ | ✅ fast/polite/careful/deterministic (`stealth` is a deprecated alias of `careful` for one release) | ❌ |
 | SSRF guard | ✅ URL heuristics | ✅ DnsGuard + URL signature | Playwright route intercept only |
 | Secrets in source | ❌ (env only) | ❌ (env only) | ❌ (env only) |
 
@@ -463,7 +463,7 @@ The three remote-CDP drivers (`browserbase.rs`, `browserless.rs`, `kernel.rs`) n
 5. **Blake3 fingerprint + semantic paragraph diff** — `SemanticDiff::is_real_delta` filters noise; consumers get structured change objects, not raw hash comparisons.
 6. **Wiki-ready content chunks** — Deterministic fixed-size paragraph chunks with stable IDs; designed for RAG ingestion pipelines.
 7. **DriverPlan typed waterfall** — Engine fallback is a structured type, not ad-hoc if/else; each tier is independently testable.
-8. **Preset catalog** — `fast`/`polite`/`stealth`/`deterministic` presets drive both `DriverPlan` and crawl policy from a single registry.
+8. **Preset catalog** — `fast`/`polite`/`careful`/`deterministic` presets (`stealth` is a deprecated alias of `careful` for one release) drive both `DriverPlan` and crawl policy from a single registry.
 9. **Crawl BFS durability** — 50-page checkpoints in Postgres; crawl jobs resume after restart without re-crawling already-visited pages.
 10. **Security engine separation** — `DnsGuard` resolves the host at the network layer before any fetch; SSRF is blocked at DNS resolution, not just URL parsing.
 11. **Self-hosted document ingest** — text, binary, Wikipedia, and PDF source routing now stays inside the Quarry runtime without a hosted parsing dependency for baseline extraction.

@@ -19,7 +19,7 @@
 - Transform pipeline (markdown, cleaned HTML, raw HTML, links, images, attributes, metadata, change details).
 - Artifact writers (s3/fs backends).
 - Fingerprint/diff engine.
-- Typed `DriverPlan` inspired by Firecrawl's engine waterfall: cache/index, static impersonated HTTP, browser CDP, stealth browser, document/PDF, specialty handlers.
+- Typed `DriverPlan` inspired by Firecrawl's engine waterfall: cache/index, static HTTP, browser CDP, document/PDF, specialty handlers. There is no stealth tier (ADR-5): a block is classified and refused, never escaped.
 
 ## Phase 3 — Fast-path cutover
 - `/v1/scrape` immediate path owned by `quarry-edge-rs`.

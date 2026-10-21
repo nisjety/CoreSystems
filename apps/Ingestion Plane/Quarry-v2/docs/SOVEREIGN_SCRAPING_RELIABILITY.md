@@ -67,7 +67,7 @@ Quarry-v2 already has most of the building blocks:
 | Area | Existing primitive |
 |---|---|
 | Policy gate | `PrivacyPolicy`, ZDR, processor approval, Data Plane privacy metadata |
-| Proxy routing | `EgressBroker`, `ProxyPool`, sticky `(org, host)` ordering, 429 rotation |
+| Proxy routing | `EgressBroker`, `ProxyPool`, sticky `(org, host)` ordering, rotation on transport failure (and on block statuses only under `QUARRY_BLOCK_ESCALATION=legacy`) |
 | Driver fallback | `DriverPlan`, `FallbackDriver`, block-status classification |
 | TLS impersonation | `quarry-tls`, `tls_driver`, browser-like TLS/H2 path |
 | Browser execution | `quarry-browser`, `chromiumoxide`, Browserless, Browserbase scaffolding |

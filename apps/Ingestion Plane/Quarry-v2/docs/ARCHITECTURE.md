@@ -88,11 +88,11 @@ DriverPlan
 Selection inputs:
 
 - Requested formats and actions.
-- Policy preset (`fast`, `polite`, `stealth`, `deterministic`, future custom).
+- Policy preset (`fast`, `polite`, `careful`, `deterministic`, future custom; `stealth` is a deprecated alias of `careful` for one release).
 - URL hints: file extension, known JS-required hosts, known static/API hosts.
 - Cache policy and age.
 - Session/profile requirement.
-- Block signals from prior attempts.
+- Block signals from prior attempts (`prior_block_signals`, deprecated: honoured only under `QUARRY_BLOCK_ESCALATION=legacy`, ignored under `honest`; a block never selects another identity).
 - Budget: timeout, cost tier, max browser time.
 
 Selection outputs:
@@ -100,7 +100,7 @@ Selection outputs:
 - Chosen driver and ordered fallback list.
 - Unsupported feature set per fallback.
 - Driver reason codes for events and `meta.json`.
-- Retry/escalation plan: retry static, escalate to TLS, escalate to browser, or abort.
+- Retry/escalation plan: retry static, escalate to TLS, escalate to browser, or abort. Under `QUARRY_BLOCK_ESCALATION=honest` a block status or a block-class error is not a reason to escalate (the block is returned or refused); a transport failure, a JS shell and an unfollowed redirect still are (`docs/RUNBOOKS.md`, "Block escalation").
 
 The first implementation should keep this deterministic and inspectable: every fallback decision must be visible in events and artifact metadata.
 
