@@ -2385,3 +2385,15 @@ Slices built by the batch runner (implement, independent verify, hostile review 
 | B04 | WS09-S2 incremental Markdown parse | 0aa7f9d4 | frozen sealed blocks, keyed node list, VITE_CHAT_RENDER_LEGACY | 206 vitest tests; Playwright before and after pending |
 | B04 | WS13-S0 approvals characterisation | 42f058d6 | six pins, DecideApproval row corrected | source-verified; ADR-0011 not written |
 | B04 | WS3J-MP browser challenge (Quarry WS3.J, Model Plane half) | e336de32 | challenge on BrowserObservation, planner rule, 403 CHALLENGE_DETECTED to Blocked | wiremock only; live proof owed |
+| B05 | WS13-S1 approval cause codes | 709785fa | ApprovalCause on request and approval (tags 13 and 16), closed vocabulary, stored in approvals.metadata.cause | source-verified, session-core harness 719; live pause pending |
+| B05 | WS11-S5 reasoning level in the gateway (code half) | 5430397f | inference.proto level and catalogue fields, one derivation in thinking.rs behind MODEL_GATEWAY_EFFORT_LADDER | source-verified; live proof pending |
+| B05 | WS09-S3 snapshot throttle | 7f1a4612 | one local transcript write a second, step churn removed | vitest; Playwright before and after pending |
+| B05 | WS05-S2 MCP tool observation (partial) | 9d299857 | digest, TOFU pin, drift to tool_definition_changed, approve by reviewed digest, behind MCP_TOOL_OBSERVATION_ENABLED | integration tests on Postgres pass; live fixture proof pending |
+| B05 | WS03-S9 durable-loop proof runners (partial) | f8f1bfd3 | static and database stages green, live runner built | live run pending |
+| B05 | ZDR fixes: first send of a temporary chat; refusal feature naming | 60748925, 868a23c9 | synchronous temporary marking; feature key carried end to end | vitest |
+| B06 | WS13-S2 localised cause on every approval surface | 771f2f60 | cause projection, scope on the decide body, one copy module | vitest 109 and BFF 668; live card pending |
+| B06 | WS12-S5 English-locale smoke (partial) | 1b752d45 | smoke test and a pinned ratchet of strings still Norwegian | 27 tests |
+| B06 | WS05-S3 signed decision v2 and registry binding | c577d2b7 | v2 claims, ResolveToolBindings, TOOL_CLASS_GATE off/shadow/enforce, shadow observe-only, ceiling floor, tool_not_bound | Go integration on Postgres pass; gate in shadow on a rebuilt stack pending |
+| B06 | WS02-S3 Do-round usage reaches the ledger | 7b0b7d62 | RunUsage legs, in-task publish, route-guard rule, behind MODEL_GATEWAY_AGENT_USAGE_ENVELOPE | execution-core 1206 and model-gateway 2002 and e2e 141; live ledger row pending |
+| B06 | WS27-S0 run-cost meter ADR and characterisation | 49bda016 | usage_meter_contract tests | 2 passed |
+| Deploy | dev stack, 2026-10-22 | 4bf17b08 | capability-core (migration 0016), execution-core, model-gateway, session-core and inference-core rebuilt from the worktree; every switch off | healthy; recreated with the live env chain (see memory worktree-model-plane-deploy-env) |
