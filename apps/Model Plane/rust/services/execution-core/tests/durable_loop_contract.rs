@@ -2678,7 +2678,10 @@ fn gateway_consume_violations(gateway_sources: &[(String, String)]) -> Vec<Strin
                     );
                 }
             }
-            if !Regex::new(r"\bagentic_run_stream\s*\([^;]*\bapproval_spend_for\s*\(\s*resume_enabled\s*\)\s*,?\s*\)")
+            // The spend is found by name, not by position: other slices append arguments to
+            // `agentic_run_stream` (the run context, WS02 S6) and the spend must not depend on
+            // staying last.
+            if !Regex::new(r"\bagentic_run_stream\s*\([^;]*\bapproval_spend_for\s*\(\s*resume_enabled\s*\)\s*[,)]")
                 .expect("pattern")
                 .is_match(&body)
             {
@@ -2918,12 +2921,16 @@ fn spend_gate_violations(gateway_sse: &str) -> Vec<String> {
             continue;
         }
         let arguments = call_arguments(&sse, found.end() - 1);
-        stated.push(
-            arguments
-                .last()
-                .map(|last| last.split_whitespace().collect::<String>())
-                .unwrap_or_default(),
-        );
+        // The spend argument is the one that names the type or its constructor; its position
+        // is not part of the contract (a later slice appends a trailing argument).
+        let spends: Vec<String> = arguments
+            .iter()
+            .map(|argument| argument.split_whitespace().collect::<String>())
+            .filter(|argument| {
+                argument.starts_with("ApprovalSpend::") || argument.starts_with("approval_spend_for(")
+            })
+            .collect();
+        stated.push(if spends.len() == 1 { spends[0].clone() } else { format!("{spends:?}") });
     }
     stated.sort();
     if stated != ["ApprovalSpend::NotSpent", "approval_spend_for(resume_enabled)"] {
