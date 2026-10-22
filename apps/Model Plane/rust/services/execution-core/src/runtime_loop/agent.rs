@@ -480,6 +480,95 @@ struct LoopContext<'a> {
     /// every delegated child's context, so parent and children share ONE limit,
     /// measured from the start of the run, never a clock of their own.
     deadline: crate::run_budget::RunDeadline,
+    /// What this invocation's inference rounds cost. Created with the root
+    /// context and cloned into every delegated child's, so the clones share one
+    /// tally and the response reports the run's rounds and its delegates' together.
+    usage: UsageTally,
+}
+
+/// The inference this invocation of a run has spent, summed across the root loop
+/// and every delegated child (build plan WS02 S3). The response carries its
+/// snapshot so the gateway can put the run on the cost ledger: until then a Do
+/// run's rounds were only logged.
+///
+/// Counts and the serving provider and model only, never content, so it is safe
+/// for a zero-retention run to report it.
+#[derive(Clone, Debug, Default)]
+struct UsageTally {
+    /// One leg per provider and model that served a round, keyed and so ordered by
+    /// provider and then model: the order a snapshot reports them in, whichever
+    /// concurrent delegate recorded first.
+    legs: std::sync::Arc<
+        std::sync::Mutex<std::collections::BTreeMap<(String, String), pb::RunUsageLeg>>,
+    >,
+}
+
+impl UsageTally {
+    /// Count one round that returned a provider response, under the provider and
+    /// model that served it. Called only for a round the route guard accepted, and
+    /// never for a continuation's seeded round, which no provider answered.
+    fn record(&self, response: &pb::InferResponse) {
+        // A negative count is a provider bug; it must not subtract from the run.
+        let count = |tokens: i32| u64::try_from(tokens).unwrap_or(0);
+        let mut legs = self
+            .legs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let leg = legs
+            .entry((response.provider_used.clone(), response.model_used.clone()))
+            .or_insert_with(|| pb::RunUsageLeg {
+                provider_used: response.provider_used.clone(),
+                model_used: response.model_used.clone(),
+                ..Default::default()
+            });
+        leg.input_tokens = leg
+            .input_tokens
+            .saturating_add(count(response.input_tokens));
+        leg.output_tokens = leg
+            .output_tokens
+            .saturating_add(count(response.output_tokens));
+        leg.cache_read_input_tokens = leg
+            .cache_read_input_tokens
+            .saturating_add(count(response.cache_read_input_tokens));
+        leg.cache_creation_input_tokens = leg
+            .cache_creation_input_tokens
+            .saturating_add(count(response.cache_creation_input_tokens));
+        leg.inference_rounds = leg.inference_rounds.saturating_add(1);
+    }
+
+    /// The totals, and the legs they are the sum of, in provider-then-model order.
+    /// The totals name the leg that served the most rounds (the first on a tie).
+    fn snapshot(&self) -> pb::RunUsage {
+        let legs: Vec<pb::RunUsageLeg> = self
+            .legs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .cloned()
+            .collect();
+        let mut total = pb::RunUsage::default();
+        let mut busiest: Option<&pb::RunUsageLeg> = None;
+        for leg in &legs {
+            total.input_tokens = total.input_tokens.saturating_add(leg.input_tokens);
+            total.output_tokens = total.output_tokens.saturating_add(leg.output_tokens);
+            total.cache_read_input_tokens = total
+                .cache_read_input_tokens
+                .saturating_add(leg.cache_read_input_tokens);
+            total.cache_creation_input_tokens = total
+                .cache_creation_input_tokens
+                .saturating_add(leg.cache_creation_input_tokens);
+            total.inference_rounds = total.inference_rounds.saturating_add(leg.inference_rounds);
+            if busiest.is_none_or(|best| leg.inference_rounds > best.inference_rounds) {
+                busiest = Some(leg);
+            }
+        }
+        if let Some(busiest) = busiest {
+            total.provider_used.clone_from(&busiest.provider_used);
+            total.model_used.clone_from(&busiest.model_used);
+        }
+        total.legs = legs;
+        total
+    }
 }
 
 /// Why a round loop stopped — without deciding what to do about it. The root run
@@ -1401,6 +1490,7 @@ async fn run_agent_with_route_parkable(
         step_prefix: resumed.as_ref().map_or_else(String::new, |r| r.step_prefix.clone()),
         child_ceiling,
         deadline,
+        usage: UsageTally::default(),
     };
 
     // 2. The governed ReAct loop.
@@ -1424,12 +1514,15 @@ async fn run_agent_with_route_parkable(
         // assistant message, no receipt, no plan transition) and the sandbox lease below is
         // not released: a resume continues the same run.
         RoundsOutcome::Parked(parked) => {
-            return Ok(super::park::parked_response(
-                &parked,
-                total_rounds,
-                rounds.grounded,
-                compaction_triggered,
-            ));
+            return Ok(pb::RunAgentResponse {
+                usage: Some(context.usage.snapshot()),
+                ..super::park::parked_response(
+                    &parked,
+                    total_rounds,
+                    rounds.grounded,
+                    compaction_triggered,
+                )
+            });
         }
         // `Concluded` is a delegated loop's outcome only (the root run keeps its
         // tools to its last round); the arm exists so the match stays total.
@@ -1465,6 +1558,7 @@ async fn run_agent_with_route_parkable(
         rounds.grounded,
         compaction_triggered,
         refusal.as_ref(),
+        context.usage.snapshot(),
         session_bearer.as_deref(),
         terminal_tokens,
     )
@@ -2548,7 +2642,8 @@ async fn run_rounds(
                 served_provider = %violation.served_provider,
                 served_model = %violation.served_model,
                 requested_model = %ctx.route.model(),
-                "run_agent: a round was not served by the subscription route the run is pinned to; stopping the run"
+                "run_agent: a round was not served by the subscription route the run is pinned to; \
+                 stopping the run (the round is not counted in the run's reported usage)"
             );
             ctx.route.stop();
             return Ok(RoundsResult {
@@ -2558,6 +2653,14 @@ async fn run_rounds(
                 delegated_rounds,
                 grounded,
             });
+        }
+
+        // Counted only now: a round the guard rejected is not billed under the pinned
+        // route's basis (the per-round line above is where it stays reconcilable), and
+        // a continuation's seeded round was never answered by a provider, so it spent
+        // nothing and is not a round that returned a provider response.
+        if !first_of_segment {
+            ctx.usage.record(&response);
         }
 
         // No tool calls → the model is ready to answer.
@@ -3675,7 +3778,7 @@ async fn run_rounds(
                 }
                 _ => None,
             };
-            let paused = pause_for_approval(
+            let mut paused = pause_for_approval(
                 ctx.state,
                 ctx.session_channel,
                 req,
@@ -3690,6 +3793,9 @@ async fn run_rounds(
                 pause_fold,
             )
             .await?;
+            // Built outside the loop, which alone holds the tally: a pause is an
+            // invocation that spent rounds, and the continuation starts its own tally.
+            paused.usage = Some(ctx.usage.snapshot());
             return Ok(RoundsResult {
                 compaction_triggered,
                 outcome: RoundsOutcome::Paused(paused),
@@ -4760,6 +4866,8 @@ async fn run_delegated_child(
         child_ceiling: parent.child_ceiling,
         // The parent's deadline, copied: one limit for the whole run.
         deadline: parent.deadline,
+        // The parent's tally, shared: the delegate's rounds are the run's.
+        usage: parent.usage.clone(),
     };
 
     info!(
@@ -6247,6 +6355,8 @@ async fn pause_for_approval(
         retry_after_ms: None,
         resets_at: String::new(),
         park_reason: String::new(),
+        // The caller that holds the loop's tally sets it.
+        usage: None,
     })
 }
 
@@ -6504,6 +6614,8 @@ async fn finalize(
     // apology would be wrong for a usage limit, and the gateway persists the
     // explanation it words from the code, so the thread carries exactly one.
     refusal: Option<&crate::subscription_refusal::Refusal>,
+    // What the run's rounds spent, reported on the response whatever the outcome.
+    usage: pb::RunUsage,
     bearer: Option<&str>,
     terminal_tokens: &dyn ManagedRunTokenProvider,
 ) -> Result<pb::RunAgentResponse, tonic::Status> {
@@ -6608,6 +6720,7 @@ async fn finalize(
             .and_then(crate::subscription_refusal::Refusal::resets_at_label)
             .unwrap_or_default(),
         park_reason: String::new(),
+        usage: Some(usage),
     })
 }
 
@@ -11516,6 +11629,63 @@ mod tests {
         );
     }
 
+    /// A pause is an invocation that spent rounds: the response says so, and the
+    /// continuation that follows is a new invocation with its own tally, so the
+    /// two never report the same round twice.
+    #[tokio::test]
+    async fn a_paused_run_reports_the_usage_of_its_invocation() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let inference_channel = spawn_inference_channel(vec![Scripted::ToolCalls {
+            content: String::new(),
+            calls: vec![pb::ToolCall {
+                id: "del-1".to_owned(),
+                name: "delete_records".to_owned(),
+                arguments_json: "{}".to_owned(),
+            }],
+        }])
+        .await;
+        let state = crate::state::StateStore::new();
+        let gated_tools = vec![pb::ToolDefinition {
+            name: "delete_records".to_owned(),
+            description: "Delete records (destructive).".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{}}"#.to_owned(),
+        }];
+        let mut req = sample_request();
+        req.mode = "ask".to_owned();
+
+        let resp = run_agent_with_tools(
+            &state,
+            session_channel,
+            inference_channel,
+            &plain_caller(),
+            req,
+            gated_tools,
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
+        )
+        .await
+        .expect("durable approval should pause the run");
+
+        assert_eq!(resp.status, "awaiting_approval");
+        let usage = resp.usage.expect("a paused run reports its usage");
+        assert_eq!(
+            usage.inference_rounds, 1,
+            "the round that asked for the gated call"
+        );
+        assert_eq!((usage.input_tokens, usage.output_tokens), (1, 1));
+    }
+
     #[tokio::test]
     async fn gated_tool_creates_approval_and_returns_early() {
         let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
@@ -16178,6 +16348,398 @@ mod tests {
             output.trim_end(),
             "[data_category=customer_private zdr=false tool=subagent.task]",
             "an exhausted subagent contributes audit metadata only — never a result"
+        );
+    }
+
+    /// What one inference response reports, for the tally's own table.
+    fn round_response(
+        input: i32,
+        output: i32,
+        cache_read: i32,
+        cache_creation: i32,
+        provider: &str,
+        model: &str,
+    ) -> pb::InferResponse {
+        pb::InferResponse {
+            input_tokens: input,
+            output_tokens: output,
+            cache_read_input_tokens: cache_read,
+            cache_creation_input_tokens: cache_creation,
+            provider_used: provider.to_owned(),
+            model_used: model.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_tally_sums_every_round_and_keeps_one_leg_per_provider_and_model() {
+        let tally = UsageTally::default();
+        assert_eq!(
+            tally.snapshot(),
+            pb::RunUsage::default(),
+            "no round yet is zero rounds, not an absent count"
+        );
+        tally.record(&round_response(100, 10, 60, 20, "anthropic", "model-a"));
+        // A shared handle (a delegated child's clone) adds to the same tally.
+        let child = tally.clone();
+        child.record(&round_response(50, 5, 0, 0, "", ""));
+        // A provider's negative count never subtracts from the run.
+        tally.record(&round_response(-7, -7, -7, -7, "openai", "model-b"));
+        // A second round on a route already seen adds to that route's leg.
+        tally.record(&round_response(10, 1, 5, 0, "anthropic", "model-a"));
+        let leg = |provider: &str, model: &str, input, output, read, creation, rounds| {
+            pb::RunUsageLeg {
+                provider_used: provider.to_owned(),
+                model_used: model.to_owned(),
+                input_tokens: input,
+                output_tokens: output,
+                cache_read_input_tokens: read,
+                cache_creation_input_tokens: creation,
+                inference_rounds: rounds,
+            }
+        };
+        assert_eq!(
+            tally.snapshot(),
+            pb::RunUsage {
+                input_tokens: 160,
+                output_tokens: 16,
+                cache_read_input_tokens: 65,
+                cache_creation_input_tokens: 20,
+                inference_rounds: 4,
+                // The leg that served the most rounds names the totals.
+                provider_used: "anthropic".to_owned(),
+                model_used: "model-a".to_owned(),
+                // Provider then model order; a round that named neither is its own leg.
+                legs: vec![
+                    leg("", "", 50, 5, 0, 0, 1),
+                    leg("anthropic", "model-a", 110, 11, 65, 20, 2),
+                    leg("openai", "model-b", 0, 0, 0, 0, 1),
+                ],
+            },
+        );
+    }
+
+    /// Concurrent delegates record in whatever order they finish. The legs, the
+    /// totals and the route they name must not depend on it, or the envelope keys
+    /// (`-AGENT_USAGE-{n}`) would move between a retry and the first publish.
+    #[test]
+    fn the_legs_do_not_depend_on_which_delegate_recorded_first() {
+        let rounds = [
+            round_response(10, 1, 0, 0, "openai", "model-b"),
+            round_response(20, 2, 5, 0, "anthropic", "model-a"),
+            round_response(30, 3, 0, 5, "anthropic", "model-c"),
+            round_response(40, 4, 0, 0, "openai", "model-b"),
+            round_response(50, 5, 0, 0, "anthropic", "model-a"),
+            round_response(60, 6, 0, 0, "azure", "router"),
+        ];
+        let count = rounds.len();
+        let sequential = UsageTally::default();
+        for round in &rounds {
+            sequential.record(round);
+        }
+        for shuffle in 0..4 {
+            let tally = UsageTally::default();
+            let handles: Vec<_> = rounds
+                .iter()
+                .enumerate()
+                .map(|(index, round)| {
+                    let (tally, round) = (tally.clone(), round.clone());
+                    std::thread::spawn(move || {
+                        // Different starts per run reorder the recordings.
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            ((index + shuffle * 2) % count) as u64 * 3,
+                        ));
+                        tally.record(&round);
+                    })
+                })
+                .collect();
+            for handle in handles {
+                handle.join().expect("a recording thread");
+            }
+            assert_eq!(tally.snapshot(), sequential.snapshot(), "shuffle {shuffle}");
+        }
+        let snapshot = sequential.snapshot();
+        assert_eq!(
+            snapshot
+                .legs
+                .iter()
+                .map(|leg| (leg.provider_used.as_str(), leg.model_used.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("anthropic", "model-a"),
+                ("anthropic", "model-c"),
+                ("azure", "router"),
+                ("openai", "model-b"),
+            ]
+        );
+        // Two legs served two rounds; the first of them in order names the totals.
+        assert_eq!(
+            (snapshot.provider_used.as_str(), snapshot.model_used.as_str()),
+            ("anthropic", "model-a")
+        );
+        assert_eq!(snapshot.inference_rounds, 6);
+        assert_eq!(snapshot.input_tokens, 210);
+    }
+
+    #[tokio::test]
+    async fn a_run_reports_the_sum_of_its_rounds_including_delegated_ones() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        // Parent delegates, the delegate runs a tool round and answers, the parent
+        // answers from it: four provider responses, each reporting 1 in and 1 out.
+        let inference_channel = spawn_inference_channel(vec![
+            Scripted::ToolCalls {
+                content: String::new(),
+                calls: vec![subagent_call("sub-1", r#"{"goal":"look it up"}"#)],
+            },
+            Scripted::ToolCalls {
+                content: String::new(),
+                calls: vec![failing_tool_call("wx-1")],
+            },
+            Scripted::Answer("found".to_owned()),
+            Scripted::Answer("done".to_owned()),
+        ])
+        .await;
+        let state = crate::state::StateStore::new();
+
+        let resp = run_agent(
+            &state,
+            session_channel,
+            inference_channel,
+            &plain_caller(),
+            sample_request(),
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
+        )
+        .await
+        .expect("a delegating run completes");
+
+        assert_eq!(resp.status, "completed");
+        let usage = resp.usage.expect("a completed run reports its usage");
+        assert_eq!(
+            usage.inference_rounds, 4,
+            "two parent rounds and the two its delegate spent"
+        );
+        assert_eq!(usage.inference_rounds, resp.rounds_executed);
+        assert_eq!((usage.input_tokens, usage.output_tokens), (4, 4));
+        assert_eq!(usage.model_used, "mock");
+    }
+
+    #[tokio::test]
+    async fn a_failed_round_is_not_counted_as_inference_spent() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let inference_channel = spawn_inference_channel(vec![
+            Scripted::ToolCalls {
+                content: String::new(),
+                calls: vec![failing_tool_call("wx-1")],
+            },
+            Scripted::Error,
+        ])
+        .await;
+        let state = crate::state::StateStore::new();
+
+        let resp = run_agent(
+            &state,
+            session_channel,
+            inference_channel,
+            &plain_caller(),
+            sample_request(),
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
+        )
+        .await
+        .expect("a failed run is a response");
+
+        assert_eq!(resp.status, "failed");
+        let usage = resp.usage.expect("a failed run reports its usage");
+        assert_eq!(
+            usage.inference_rounds, 1,
+            "the round that returned a response is counted, the one that errored is not"
+        );
+    }
+
+    /// A continuation's first round is the seeded one: the approved call proposed as
+    /// if the model had asked for it. No provider answered it, so it is not an
+    /// inference round; counting it added a phantom zero-token round to every
+    /// approval continuation and published a zero-token ledger row for one that
+    /// failed right after it.
+    #[tokio::test]
+    async fn a_continuation_does_not_count_its_seeded_round() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let policy = CountingPolicy::new();
+        let inference_channel =
+            spawn_inference_channel(vec![Scripted::Answer("checked".to_owned())]).await;
+        let resp = drive_continue(
+            &rec,
+            continue_request(2),
+            consume_of("tool_1_del-1", true, false, snapshot_of(|_| {})),
+            true,
+            &policy,
+            inference_channel,
+        )
+        .await
+        .expect("a won consume continues");
+
+        assert_eq!(resp.final_output, "checked");
+        assert!(policy.count() >= 1, "the seeded round's call was dispatched");
+        let usage = resp.usage.expect("a continuation reports its usage");
+        assert_eq!(
+            usage.inference_rounds, 1,
+            "the one round a provider answered, not the seeded one besides"
+        );
+        assert_eq!((usage.input_tokens, usage.output_tokens), (1, 1));
+        assert_eq!(usage.legs.len(), 1, "one route served it");
+    }
+
+    #[tokio::test]
+    async fn a_continuation_whose_only_round_was_the_seeded_one_reports_no_spend() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let policy = CountingPolicy::new();
+        // The released call runs, then the first real round fails.
+        let inference_channel = spawn_inference_channel(vec![Scripted::Error]).await;
+        let resp = drive_continue(
+            &rec,
+            continue_request(2),
+            consume_of("tool_1_del-1", true, false, snapshot_of(|_| {})),
+            true,
+            &policy,
+            inference_channel,
+        )
+        .await
+        .expect("a failed continuation is a response");
+
+        assert_eq!(resp.status, "failed");
+        let usage = resp.usage.expect("a failed continuation reports its usage");
+        assert_eq!(
+            usage,
+            pb::RunUsage::default(),
+            "nothing was spent: no zero-token row for the ledger"
+        );
+    }
+
+    /// A pinned run accepts a round only from its route. The round the guard rejects
+    /// is not billed under the pinned route's basis: the tally keeps the route's own
+    /// rounds and names the route's provider, not the one that answered wrongly.
+    #[tokio::test]
+    async fn a_round_the_route_guard_rejects_is_not_counted_in_the_runs_usage() {
+        let (result, _observed, _rec) = drive_with_route(
+            subscription_request(),
+            SWITCH_ON,
+            COMPOSE_AGENT_MODEL,
+            vec![
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![failing_tool_call("wx-1")],
+                },
+                Scripted::Answer("From the paid route.".to_owned()),
+            ],
+            Serving::EchoThenFallback {
+                healthy_rounds: 1,
+                provider: "azure-openai".to_owned(),
+                model: "model-router".to_owned(),
+            },
+        )
+        .await;
+
+        let response = result.expect("the run ends gracefully");
+        assert_eq!(response.failure_code, "subscription_route_unavailable");
+        let usage = response.usage.expect("a refused run reports its usage");
+        assert_eq!(usage.inference_rounds, 1, "the healthy round only");
+        assert_eq!((usage.input_tokens, usage.output_tokens), (1, 1));
+        assert_eq!(usage.provider_used, "openai-codex-subscription");
+        assert_eq!(usage.model_used, "gpt-5.6-terra");
+        assert_eq!(usage.legs.len(), 1, "{:?}", usage.legs);
+        assert!(
+            !usage.legs.iter().any(|leg| leg.provider_used == "azure-openai"),
+            "the rejected round's provider never reached the tally: {:?}",
+            usage.legs
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pinned_run_whose_only_round_is_rejected_reports_no_spend() {
+        let (result, _observed, _rec) = drive_with_route(
+            subscription_request(),
+            SWITCH_ON,
+            COMPOSE_AGENT_MODEL,
+            vec![Scripted::Answer("From the paid route.".to_owned())],
+            Serving::EchoThenFallback {
+                healthy_rounds: 0,
+                provider: "azure-openai".to_owned(),
+                model: "model-router".to_owned(),
+            },
+        )
+        .await;
+
+        let response = result.expect("the run ends gracefully");
+        assert_eq!(response.failure_code, "subscription_route_unavailable");
+        assert_eq!(
+            response.usage.expect("reported"),
+            pb::RunUsage::default(),
+            "no row to publish, so no metered basis can be put on a subscription run"
+        );
+    }
+
+    /// An unpinned run served by different models across rounds (a fallback) keeps
+    /// each model's spend apart, so each is priced under its own model.
+    #[tokio::test]
+    async fn an_unpinned_run_served_by_two_models_reports_a_leg_for_each() {
+        let (result, _observed, _rec) = drive_with_route(
+            sample_request(),
+            Switches::OFF,
+            COMPOSE_AGENT_MODEL,
+            vec![
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![failing_tool_call("wx-1")],
+                },
+                Scripted::Answer("from the fallback".to_owned()),
+            ],
+            Serving::EchoThenFallback {
+                healthy_rounds: 1,
+                provider: "azure-openai".to_owned(),
+                model: "gpt-5-mini".to_owned(),
+            },
+        )
+        .await;
+
+        let response = result.expect("completes");
+        assert_eq!(response.status, "completed");
+        let usage = response.usage.expect("reported");
+        assert_eq!(usage.inference_rounds, 2);
+        assert_eq!(usage.legs.len(), 2, "{:?}", usage.legs);
+        let fallback = usage
+            .legs
+            .iter()
+            .find(|leg| leg.provider_used == "azure-openai")
+            .expect("the fallback's own leg");
+        assert_eq!(fallback.model_used, "gpt-5-mini");
+        assert_eq!(fallback.inference_rounds, 1);
+        assert_eq!(
+            usage.legs.iter().map(|leg| leg.input_tokens).sum::<u64>(),
+            usage.input_tokens,
+            "the legs sum to the totals"
         );
     }
 
@@ -22308,6 +22870,12 @@ mod tests {
         )
         .await;
         let response = run.result.expect("a parked run is a response, not an error");
+        // The round that was refused spent nothing the provider reported.
+        let usage = response.usage.clone().expect("a parked run reports its usage");
+        assert_eq!(
+            (usage.inference_rounds, usage.input_tokens, usage.output_tokens),
+            (1, 1, 1)
+        );
         assert_eq!(
             response,
             pb::RunAgentResponse {
@@ -22320,6 +22888,7 @@ mod tests {
                 retry_after_ms: None,
                 resets_at: "2099-01-01T00:00:00Z".to_owned(),
                 park_reason: "provider_exhausted".to_owned(),
+                usage: Some(usage),
             },
             "the failed round stays charged, and a park carries no answer and no failure code"
         );

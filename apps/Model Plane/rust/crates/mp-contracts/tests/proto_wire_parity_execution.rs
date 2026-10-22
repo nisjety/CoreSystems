@@ -232,3 +232,131 @@ fn the_run_context_golden_bytes_decode_and_an_absent_context_stays_absent() {
     let decoded = RunAgentRequest::decode(before.encode_to_vec().as_slice()).expect("decode");
     assert!(decoded.run_context.is_none());
 }
+
+// ---- RunAgentResponse.usage (field 9, build plan WS02 S3) ----
+
+/// A completed run after three rounds: tokens with both cache legs, the serving
+/// provider and the model. Pinned so field 9 and the nested numbers cannot drift
+/// unseen between the Rust writer and the Go readers; the same bytes are pinned in
+/// the Go test of the same name.
+const USAGE_WIRE_HEX: &str = "0a09636f6d706c6574656418034a2b08b00910d40218a006206428033209616e7468726f7069633a11636c617564652d736f6e6e65742d352d35";
+/// A run that spent nothing: the message is present and empty (`4a00`), which is
+/// not the same fact as no message at all.
+const ZERO_USAGE_WIRE_HEX: &str = "0a09636f6d706c6574656418034a00";
+
+fn with_usage(usage: Option<mp_contracts::model_plane::v1::RunUsage>) -> RunAgentResponse {
+    RunAgentResponse {
+        status: "completed".to_owned(),
+        rounds_executed: 3,
+        usage,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn a_run_usage_encodes_to_the_golden_bytes() {
+    use mp_contracts::model_plane::v1::RunUsage;
+    let spent = with_usage(Some(RunUsage {
+        input_tokens: 1200,
+        output_tokens: 340,
+        cache_read_input_tokens: 800,
+        cache_creation_input_tokens: 100,
+        inference_rounds: 3,
+        provider_used: "anthropic".to_owned(),
+        model_used: "claude-sonnet-5-5".to_owned(),
+        // No legs adds no bytes: the bytes of a run without them are unchanged.
+        legs: Vec::new(),
+    }));
+    assert_eq!(hex(&spent.encode_to_vec()), USAGE_WIRE_HEX);
+    // Field 9, wire type 2: key byte 0x4a.
+    assert!(unhex(USAGE_WIRE_HEX).contains(&0x4a));
+}
+
+#[test]
+fn the_usage_golden_bytes_decode_and_zero_spend_is_not_absence() {
+    let decoded = RunAgentResponse::decode(unhex(USAGE_WIRE_HEX).as_slice()).expect("decode");
+    let usage = decoded.usage.expect("field 9 present");
+    assert_eq!((usage.input_tokens, usage.output_tokens), (1200, 340));
+    assert_eq!(
+        (usage.cache_read_input_tokens, usage.cache_creation_input_tokens),
+        (800, 100)
+    );
+    assert_eq!(usage.inference_rounds, 3);
+    assert_eq!(usage.provider_used, "anthropic");
+    assert_eq!(usage.model_used, "claude-sonnet-5-5");
+
+    let zero = RunAgentResponse::decode(unhex(ZERO_USAGE_WIRE_HEX).as_slice()).expect("decode");
+    assert_eq!(
+        zero.usage,
+        Some(mp_contracts::model_plane::v1::RunUsage::default()),
+        "a run that spent nothing reports so"
+    );
+    assert_eq!(
+        hex(&with_usage(Some(Default::default())).encode_to_vec()),
+        ZERO_USAGE_WIRE_HEX
+    );
+    // A response written before the field existed has no usage, so an older
+    // execution-core is never read as having spent nothing.
+    let before = RunAgentResponse::decode(with_usage(None).encode_to_vec().as_slice())
+        .expect("decode");
+    assert!(before.usage.is_none());
+}
+
+/// The same run with its spend split in two legs (`RunUsage.legs`, field 8, each a
+/// `RunUsageLeg`): provider, model, tokens, both cache legs and rounds. Pinned
+/// with the Go test of the same name, so the leg numbers cannot drift unseen.
+const USAGE_WITH_LEGS_WIRE_HEX: &str = "0a09636f6d706c6574656418034a7008b00910d40218a006206428033209616e7468726f7069633a11636c617564652d736f6e6e65742d352d35422b0a09616e7468726f7069631211636c617564652d736f6e6e65742d352d3518e80720ac0228a0063064380242160a066f70656e616912056770742d3518c80120283801";
+
+fn usage_with_two_legs() -> mp_contracts::model_plane::v1::RunUsage {
+    use mp_contracts::model_plane::v1::{RunUsage, RunUsageLeg};
+    RunUsage {
+        input_tokens: 1200,
+        output_tokens: 340,
+        cache_read_input_tokens: 800,
+        cache_creation_input_tokens: 100,
+        inference_rounds: 3,
+        provider_used: "anthropic".to_owned(),
+        model_used: "claude-sonnet-5-5".to_owned(),
+        legs: vec![
+            RunUsageLeg {
+                provider_used: "anthropic".to_owned(),
+                model_used: "claude-sonnet-5-5".to_owned(),
+                input_tokens: 1000,
+                output_tokens: 300,
+                cache_read_input_tokens: 800,
+                cache_creation_input_tokens: 100,
+                inference_rounds: 2,
+            },
+            RunUsageLeg {
+                provider_used: "openai".to_owned(),
+                model_used: "gpt-5".to_owned(),
+                input_tokens: 200,
+                output_tokens: 40,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                inference_rounds: 1,
+            },
+        ],
+    }
+}
+
+#[test]
+fn a_run_usage_with_legs_encodes_to_the_golden_bytes_and_decodes_back() {
+    let response = with_usage(Some(usage_with_two_legs()));
+    assert_eq!(hex(&response.encode_to_vec()), USAGE_WITH_LEGS_WIRE_HEX);
+
+    let decoded =
+        RunAgentResponse::decode(unhex(USAGE_WITH_LEGS_WIRE_HEX).as_slice()).expect("decode");
+    let usage = decoded.usage.expect("field 9 present");
+    assert_eq!(usage, usage_with_two_legs());
+    assert_eq!(usage.legs.len(), 2, "legs are repeated field 8, in order");
+    assert_eq!(usage.legs[1].model_used, "gpt-5");
+    assert_eq!(
+        usage.legs.iter().map(|leg| leg.input_tokens).sum::<u64>(),
+        usage.input_tokens,
+        "the legs sum to the totals"
+    );
+    // The legs-free golden still decodes, with none: an executor without legs.
+    let old = RunAgentResponse::decode(unhex(USAGE_WIRE_HEX).as_slice()).expect("decode");
+    assert!(old.usage.expect("usage").legs.is_empty());
+}

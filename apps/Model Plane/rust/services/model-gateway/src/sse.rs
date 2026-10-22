@@ -9228,6 +9228,9 @@ fn spawn_run_dispatch(
     // The composed run context (build plan WS02 S6); `None` with the switch off, for a
     // continuation and for every request built before it existed.
     run_context: Option<mp_contracts::model_plane::v1::RunContext>,
+    // What the run's rounds cost, published by the task itself the moment the executor
+    // answers (build plan WS02 S3), so a follower that has given up cannot lose it.
+    usage_ledger: AgentUsageLedger,
 ) -> Result<tokio::task::JoinHandle<Result<RunAgentResponse, tonic::Status>>, tonic::Status> {
     let mut execution_client = state.execution_client.clone();
     // The graded authority execution-core enforces PER CALL.
@@ -9319,10 +9322,16 @@ fn spawn_run_dispatch(
         sandbox_bearer,
     )?;
     Ok(tokio::spawn(async move {
-        execution_client
+        let result = execution_client
             .run_agent(run_agent_req)
             .await
-            .map(tonic::Response::into_inner)
+            .map(tonic::Response::into_inner);
+        // A failed, paused or parked invocation spent what it spent, and each dispatch
+        // (this request id) reports its own tally once.
+        if let Some(usage) = result.as_ref().ok().and_then(|r| r.usage.as_ref()) {
+            usage_ledger.publish(usage).await;
+        }
+        result
     }))
 }
 
@@ -10024,6 +10033,21 @@ fn agentic_run_stream(
             &route,
             resume.clone(),
             run_context,
+            AgentUsageLedger {
+                publisher: state.publisher.clone(),
+                enabled: agent_usage_envelope_enabled(&|key| std::env::var(key).ok()),
+                run_id: run.run_id.clone(),
+                request_id: request_id.clone(),
+                org_id: org_id.clone(),
+                user_id: user_id.clone(),
+                model: model.clone(),
+                // A waived turn is persistent for its connection but belongs to a
+                // zero-retention org: it leaves no ledger row either.
+                zdr: zdr || retention_class.is_some(),
+                route: route.clone(),
+                min_privacy_tier: min_privacy_tier_wire,
+                start,
+            },
         ) {
             Ok(dispatch) => dispatch,
             Err(error) => {
@@ -10654,23 +10678,27 @@ fn agentic_run_stream(
             }
         }
         // Phase 7 B6 — emit the quality signal for the agentic run so the Agent
-        // Run Console's confidence column goes live. Token-level cost is not
-        // available at this layer (the run records 0 tokens here; its real
-        // per-inference cost is captured by execution-core's usage envelopes →
-        // the cost-core ledger / cost dashboard), so cost_usd stays null rather
-        // than a fabricated 0. Confidence is scored over the run's final answer.
+        // Run Console's confidence column goes live. The tokens are the ones
+        // execution-core summed over the run's rounds and its delegates' (zero from
+        // an executor that predates the field). Their price is not known at this
+        // layer, so cost_usd stays null rather than a fabricated 0. The ledger rows
+        // are not published here: `AgentUsageLedger::publish` publishes them from the
+        // dispatch task itself, the moment the executor answers, because this stream
+        // may have given up at its deadline long before. Confidence is scored over the run's
+        // final answer.
         let latency_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
         // HONESTY_CONTRACT: `grounded` reflects whether a knowledge_search call
         // in this run actually returned org knowledge (execution-core's
         // `run_agent` sets it from a real "status": "ok" tool outcome, not a
         // guess) — see agent.rs::knowledge_search_found_grounding.
+        let run_usage = response.usage.clone().unwrap_or_default();
         let usage_event = crate::sse_events::ChatEvent::Usage {
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
-            input_tokens: 0,
-            output_tokens: 0,
+            cache_read_tokens: saturating_u32(run_usage.cache_read_input_tokens),
+            cache_write_tokens: saturating_u32(run_usage.cache_creation_input_tokens),
+            input_tokens: saturating_u32(run_usage.input_tokens),
+            output_tokens: saturating_u32(run_usage.output_tokens),
             cost_usd: None,
-            // Nor its basis: execution-core's own envelopes carry both.
+            // Nor its basis: no price is established here.
             cost_basis: None,
             latency_ms,
             confidence: crate::confidence::score(
@@ -10679,10 +10707,11 @@ fn agentic_run_stream(
                 1024,
                 crate::confidence::Evidence::from_grounded_flag(response.grounded),
             ),
-            // No final chunk and no provider response reaches this layer:
-            // `RunAgentResponse` carries no provenance, and the rounds were
-            // served inside execution-core. Nothing is stamped rather than
-            // guessed from the route, so a run states no residency at all.
+            // No final chunk and no provider response reaches this layer: the
+            // rounds were served inside execution-core, and its `RunUsage` names
+            // the provider and model but not their residency. Nothing is stamped
+            // rather than guessed from the route, so a run states no residency at
+            // all.
             served_by: None,
             retention_class,
         };
@@ -10797,6 +10826,169 @@ fn build_usage_envelope(
             "cost_basis": cost_basis.as_str(),
         }),
         zdr: false,
+    }
+}
+
+/// Switch for the agentic run's ledger row (build plan WS02 S3). Only the literal
+/// `true` enables it, and it is read per run, so a restart is not needed to turn
+/// it off. Off by default: the cost-core ledger enqueues billing for a metered
+/// entry, so enabling it starts billing Do runs, which waits on Control confirming
+/// the attribution (DEC-18).
+const AGENT_USAGE_ENVELOPE_ENV: &str = "MODEL_GATEWAY_AGENT_USAGE_ENVELOPE";
+
+fn agent_usage_envelope_enabled(lookup: &dyn Fn(&str) -> Option<String>) -> bool {
+    lookup(AGENT_USAGE_ENVELOPE_ENV).as_deref() == Some("true")
+}
+
+fn saturating_u32(tokens: u64) -> u32 {
+    u32::try_from(tokens).unwrap_or(u32::MAX)
+}
+
+/// The idempotency key of the `leg_index`th ledger row of a dispatch. The first
+/// leg keeps the name a single-leg run always had, `{request_id}-AGENT_USAGE`, so it
+/// can never collide with a gateway turn's `{request_id}-USAGE_ENVELOPE` for the
+/// same request; a later leg of the same dispatch appends its position. The legs
+/// are in provider-then-model order, so a retry of the same tally keys every leg
+/// as the first publish did.
+fn agent_usage_idempotency_key(request_id: &str, leg_index: usize) -> String {
+    if leg_index == 0 {
+        format!("{request_id}-AGENT_USAGE")
+    } else {
+        format!("{request_id}-AGENT_USAGE-{leg_index}")
+    }
+}
+
+/// The ledger row of one leg of one dispatch of an agentic run: a `USAGE_ENVELOPE`
+/// (the one event type cost-core accepts) carrying the run's id. The leg is what
+/// one provider and model served, so the row is priced under that model and
+/// that provider's basis. The route is the one the executor reported; the
+/// gateway's own model stands in for a leg whose rounds named none.
+#[allow(clippy::too_many_arguments)] // the ids and the route beside the leg
+fn build_agent_usage_envelope(
+    request_id: &str,
+    run_id: &str,
+    org_id: &str,
+    user_id: &str,
+    model: &str,
+    route: &AgentRoute,
+    min_privacy_tier: i32,
+    latency_ms: u64,
+    leg_index: usize,
+    leg: &mp_contracts::model_plane::v1::RunUsageLeg,
+) -> Envelope {
+    let model_used = if leg.model_used.is_empty() {
+        model
+    } else {
+        &leg.model_used
+    };
+    let cost_basis = crate::pricing::CostBasis::of_route(
+        &route.provider_hint,
+        &route.subscription_connection_id,
+    )
+    .served_by(&leg.provider_used);
+    let mut envelope = build_usage_envelope(
+        request_id,
+        org_id,
+        user_id,
+        model_used,
+        saturating_u32(leg.input_tokens),
+        saturating_u32(leg.output_tokens),
+        latency_ms,
+        min_privacy_tier,
+        leg.provider_used.clone(),
+        // The executor does not report residency, and none is guessed.
+        String::new(),
+        saturating_u32(leg.cache_read_input_tokens),
+        saturating_u32(leg.cache_creation_input_tokens),
+        cost_basis,
+    );
+    envelope.idempotency_key = agent_usage_idempotency_key(request_id, leg_index);
+    envelope.payload["run_id"] = json!(run_id);
+    envelope
+}
+
+/// The legs a dispatch publishes, in provider-then-model order whatever order the
+/// executor sent them in. An executor that sent totals and no legs is one leg; a
+/// leg that served no round has nothing to bill and is dropped before the
+/// positions are counted.
+fn agent_usage_legs(
+    usage: &mp_contracts::model_plane::v1::RunUsage,
+) -> Vec<mp_contracts::model_plane::v1::RunUsageLeg> {
+    let mut legs: Vec<_> = if usage.legs.is_empty() {
+        vec![mp_contracts::model_plane::v1::RunUsageLeg {
+            provider_used: usage.provider_used.clone(),
+            model_used: usage.model_used.clone(),
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cache_read_input_tokens: usage.cache_read_input_tokens,
+            cache_creation_input_tokens: usage.cache_creation_input_tokens,
+            inference_rounds: usage.inference_rounds,
+        }]
+    } else {
+        usage.legs.clone()
+    };
+    legs.retain(|leg| leg.inference_rounds > 0);
+    legs.sort_by(|a, b| {
+        (&a.provider_used, &a.model_used).cmp(&(&b.provider_used, &b.model_used))
+    });
+    legs
+}
+
+/// What the dispatch task needs to put its run's usage on the ledger itself.
+///
+/// The task publishes, not the stream that follows it: the follower gives up at
+/// its deadline and detaches the task, which then runs on and returns the full
+/// tally to nobody. A run that outlives the follower is the longest and dearest
+/// one, so the ledger row cannot depend on the follower still waiting.
+struct AgentUsageLedger {
+    publisher: std::sync::Arc<crate::state::DynPublisher>,
+    enabled: bool,
+    run_id: String,
+    request_id: String,
+    org_id: String,
+    user_id: String,
+    model: String,
+    zdr: bool,
+    route: AgentRoute,
+    min_privacy_tier: i32,
+    start: std::time::Instant,
+}
+
+impl AgentUsageLedger {
+    /// Publish one row per leg of the run's usage when `enabled` (the switch) and the
+    /// run is not zero-retention (a waived run counts as zero-retention). A run that
+    /// spent no round has no leg and so publishes nothing. Best effort, like the
+    /// gateway turn's own envelope: a failed publish is logged and changes nothing the
+    /// client sees, and one leg's failure does not stop the next. Content-free: ids,
+    /// counts and the serving route.
+    async fn publish(&self, usage: &mp_contracts::model_plane::v1::RunUsage) {
+        // A zero-retention envelope would be refused by the ledger anyway; it is
+        // not built, so nothing about the run leaves the gateway.
+        if self.zdr || !self.enabled {
+            return;
+        }
+        let latency_ms = u64::try_from(self.start.elapsed().as_millis()).unwrap_or(u64::MAX);
+        for (index, leg) in agent_usage_legs(usage).iter().enumerate() {
+            let envelope = build_agent_usage_envelope(
+                &self.request_id,
+                &self.run_id,
+                &self.org_id,
+                &self.user_id,
+                &self.model,
+                &self.route,
+                self.min_privacy_tier,
+                latency_ms,
+                index,
+                leg,
+            );
+            if let Err(error) = self
+                .publisher
+                .publish(&subjects::usage_subject(&self.org_id), &envelope)
+                .await
+            {
+                tracing::warn!(%error, run_id = %self.run_id, leg = index, "failed to publish the agent run's usage envelope");
+            }
+        }
     }
 }
 
@@ -12386,6 +12578,285 @@ mod tests {
         assert_eq!(env.payload["cache_creation_input_tokens"], 256);
         // cost-core decodes a missing `cost_usd` as 0; none is sent.
         assert!(env.payload.get("cost_usd").is_none());
+    }
+
+    fn leg(
+        provider: &str,
+        model: &str,
+        input: u64,
+        output: u64,
+        cache_read: u64,
+        cache_creation: u64,
+        rounds: u32,
+    ) -> mp_contracts::model_plane::v1::RunUsageLeg {
+        mp_contracts::model_plane::v1::RunUsageLeg {
+            provider_used: provider.to_owned(),
+            model_used: model.to_owned(),
+            input_tokens: input,
+            output_tokens: output,
+            cache_read_input_tokens: cache_read,
+            cache_creation_input_tokens: cache_creation,
+            inference_rounds: rounds,
+        }
+    }
+
+    /// One leg: a run served by one provider and model throughout.
+    fn run_usage() -> mp_contracts::model_plane::v1::RunUsage {
+        let only = leg("anthropic", "claude-served", 4_200, 380, 3_000, 500, 4);
+        mp_contracts::model_plane::v1::RunUsage {
+            input_tokens: only.input_tokens,
+            output_tokens: only.output_tokens,
+            cache_read_input_tokens: only.cache_read_input_tokens,
+            cache_creation_input_tokens: only.cache_creation_input_tokens,
+            inference_rounds: only.inference_rounds,
+            provider_used: only.provider_used.clone(),
+            model_used: only.model_used.clone(),
+            legs: vec![only],
+        }
+    }
+
+    /// Two legs: an unpinned run that fell back to another model on a later round.
+    fn two_leg_run_usage() -> mp_contracts::model_plane::v1::RunUsage {
+        let (a, b) = (
+            leg("anthropic", "claude-served", 4_200, 380, 3_000, 500, 4),
+            leg("azure-openai", "gpt-fallback", 900, 60, 0, 0, 1),
+        );
+        mp_contracts::model_plane::v1::RunUsage {
+            input_tokens: a.input_tokens + b.input_tokens,
+            output_tokens: a.output_tokens + b.output_tokens,
+            cache_read_input_tokens: a.cache_read_input_tokens,
+            cache_creation_input_tokens: a.cache_creation_input_tokens,
+            inference_rounds: a.inference_rounds + b.inference_rounds,
+            provider_used: a.provider_used.clone(),
+            model_used: a.model_used.clone(),
+            legs: vec![a, b],
+        }
+    }
+
+    /// The ledger row of an agentic run is the one cost-core already accepts, named
+    /// apart from a gateway turn's, and it carries the run.
+    #[test]
+    fn an_agent_usage_envelope_names_the_run_and_cannot_collide_with_a_turns() {
+        let usage = run_usage();
+        let env = super::build_agent_usage_envelope(
+            "req-DO",
+            "run-7",
+            "org-1",
+            "user-1",
+            "gateway-model",
+            &super::AgentRoute::default(),
+            0,
+            9_000,
+            0,
+            &usage.legs[0],
+        );
+        assert_eq!(
+            env.event_type, "USAGE_ENVELOPE",
+            "the one type cost-core decodes"
+        );
+        assert_eq!(env.producer, "model-gateway", "the one producer it allows");
+        assert_eq!(env.idempotency_key, "req-DO-AGENT_USAGE");
+        assert_eq!(env.correlation_id, "req-DO");
+        assert!(!env.zdr);
+        assert_eq!(env.payload["run_id"], "run-7");
+        assert_eq!(env.payload["request_id"], "req-DO");
+        assert_eq!(
+            env.payload["model"], "claude-served",
+            "the model that served the rounds"
+        );
+        assert_eq!(env.payload["provider_used"], "anthropic");
+        assert_eq!(env.payload["input_tokens"], 4_200);
+        assert_eq!(env.payload["output_tokens"], 380);
+        assert_eq!(env.payload["cache_read_input_tokens"], 3_000);
+        assert_eq!(env.payload["cache_creation_input_tokens"], 500);
+        assert_eq!(env.payload["cost_basis"], "metered");
+        // No price is established here: cost-core prices it.
+        assert!(env.payload.get("cost_usd").is_none());
+        let turn = build_usage_envelope(
+            "req-DO",
+            "org-1",
+            "user-1",
+            "gateway-model",
+            1,
+            1,
+            1,
+            0,
+            String::new(),
+            String::new(),
+            0,
+            0,
+            crate::pricing::CostBasis::Metered,
+        );
+        assert_ne!(env.idempotency_key, turn.idempotency_key);
+    }
+
+    #[test]
+    fn an_agent_usage_envelope_falls_back_to_the_gateway_model_and_marks_a_subscription_run() {
+        let mut usage = run_usage();
+        usage.legs[0].model_used = String::new();
+        usage.legs[0].provider_used = "openai-codex-subscription".to_owned();
+        let env = super::build_agent_usage_envelope(
+            "req-DO",
+            "run-7",
+            "org-1",
+            "user-1",
+            "gateway-model",
+            &super::AgentRoute::default(),
+            0,
+            1,
+            0,
+            &usage.legs[0],
+        );
+        assert_eq!(env.payload["model"], "gateway-model");
+        assert_eq!(
+            env.payload["cost_basis"], "subscription",
+            "the provider that served decides, so list prices never apply"
+        );
+    }
+
+    /// The legs a dispatch publishes: ordered by provider then model whatever order
+    /// the executor sent them in, one for totals-only usage, none for no spend.
+    #[test]
+    fn the_legs_of_a_dispatch_are_ordered_and_a_legless_usage_is_one_leg() {
+        let mut shuffled = two_leg_run_usage();
+        shuffled.legs.reverse();
+        let ordered: Vec<_> = super::agent_usage_legs(&shuffled)
+            .iter()
+            .map(|leg| (leg.provider_used.clone(), leg.model_used.clone()))
+            .collect();
+        assert_eq!(
+            ordered,
+            [
+                ("anthropic".to_owned(), "claude-served".to_owned()),
+                ("azure-openai".to_owned(), "gpt-fallback".to_owned())
+            ],
+            "the key of a leg never depends on the executor's order"
+        );
+
+        let mut totals_only = run_usage();
+        totals_only.legs.clear();
+        let legs = super::agent_usage_legs(&totals_only);
+        assert_eq!(legs.len(), 1);
+        assert_eq!(legs[0].input_tokens, 4_200);
+        assert_eq!(legs[0].model_used, "claude-served");
+
+        assert!(
+            super::agent_usage_legs(&mp_contracts::model_plane::v1::RunUsage::default())
+                .is_empty()
+        );
+        let mut idle_leg = run_usage();
+        idle_leg.legs[0].inference_rounds = 0;
+        assert!(
+            super::agent_usage_legs(&idle_leg).is_empty(),
+            "a leg that served no round is not a row"
+        );
+    }
+
+    async fn published_agent_usage(
+        enabled: bool,
+        zdr: bool,
+        usage: &mp_contracts::model_plane::v1::RunUsage,
+    ) -> Vec<(String, mp_events::envelope::Envelope)> {
+        let publisher = std::sync::Arc::new(crate::state::DynPublisher::InMemory(
+            mp_events::publisher::InMemoryPublisher::new(),
+        ));
+        super::AgentUsageLedger {
+            publisher: publisher.clone(),
+            enabled,
+            run_id: "run-7".to_owned(),
+            request_id: "req-DO".to_owned(),
+            org_id: "org-1".to_owned(),
+            user_id: "user-1".to_owned(),
+            model: "gateway-model".to_owned(),
+            zdr,
+            route: super::AgentRoute::default(),
+            min_privacy_tier: 0,
+            start: std::time::Instant::now(),
+        }
+        .publish(usage)
+        .await;
+        publisher.drain()
+    }
+
+    /// The row is published once, on the org's usage subject, and only when the
+    /// switch is on, the run is not zero-retention and a round was spent.
+    #[tokio::test]
+    async fn an_agent_usage_envelope_is_published_only_when_every_condition_holds() {
+        let usage = run_usage();
+        let published = published_agent_usage(true, false, &usage).await;
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].0, "mp.v1.usage.org-1");
+        assert!(published[0].1.payload["latency_ms"].is_u64());
+
+        assert!(
+            published_agent_usage(false, false, &usage).await.is_empty(),
+            "the switch is off"
+        );
+        assert!(
+            published_agent_usage(true, true, &usage).await.is_empty(),
+            "a zero-retention run leaves no ledger row"
+        );
+        assert!(
+            published_agent_usage(true, true, &two_leg_run_usage())
+                .await
+                .is_empty(),
+            "nor does it leave one per leg"
+        );
+        let idle = mp_contracts::model_plane::v1::RunUsage::default();
+        assert!(
+            published_agent_usage(true, false, &idle).await.is_empty(),
+            "a run that spent no round has nothing to bill"
+        );
+    }
+
+    /// Two legs are two rows, each priced under its own model and provider, keyed by
+    /// position so a retry of the same tally cannot publish a row twice.
+    #[tokio::test]
+    async fn two_legs_publish_two_envelopes_each_under_its_own_model() {
+        let usage = two_leg_run_usage();
+        let published = published_agent_usage(true, false, &usage).await;
+        assert_eq!(published.len(), 2);
+        let (first, second) = (&published[0].1, &published[1].1);
+        assert_eq!(first.idempotency_key, "req-DO-AGENT_USAGE");
+        assert_eq!(second.idempotency_key, "req-DO-AGENT_USAGE-1");
+        assert_eq!(first.payload["model"], "claude-served");
+        assert_eq!(first.payload["provider_used"], "anthropic");
+        assert_eq!(first.payload["input_tokens"], 4_200);
+        assert_eq!(first.payload["cache_read_input_tokens"], 3_000);
+        assert_eq!(second.payload["model"], "gpt-fallback");
+        assert_eq!(second.payload["provider_used"], "azure-openai");
+        assert_eq!(second.payload["input_tokens"], 900);
+        assert_eq!(second.payload["cache_read_input_tokens"], 0);
+        for env in [first, second] {
+            assert_eq!(env.payload["run_id"], "run-7");
+            assert_eq!(env.payload["request_id"], "req-DO");
+        }
+
+        // The same tally, legs in the other order, keys every leg the same way.
+        let mut flipped = two_leg_run_usage();
+        flipped.legs.reverse();
+        let again = published_agent_usage(true, false, &flipped).await;
+        let keyed = |rows: &[(String, mp_events::envelope::Envelope)]| {
+            rows.iter()
+                .map(|(_, env)| (env.idempotency_key.clone(), env.payload["model"].clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(keyed(&again), keyed(&published));
+    }
+
+    #[test]
+    fn the_agent_usage_switch_is_strict_and_defaults_off() {
+        let with = |value: Option<&'static str>| {
+            super::agent_usage_envelope_enabled(&|key| {
+                assert_eq!(key, "MODEL_GATEWAY_AGENT_USAGE_ENVELOPE");
+                value.map(str::to_owned)
+            })
+        };
+        assert!(!with(None));
+        for value in ["", "1", "True", "TRUE", "on", "yes", " true", "false"] {
+            assert!(!with(Some(value)), "{value:?} must not enable it");
+        }
+        assert!(with(Some("true")));
     }
 
     /// Real subscription token counts must not start scoring long answers as

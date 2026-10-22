@@ -333,6 +333,63 @@ message RunAgentResponse {
   // `resets_at` carries the earliest time a resume is due (RFC 3339 UTC) and
   // `failure_code` is empty.
   string park_reason = 11;
+
+  // What this invocation of the run's loop spent on inference: every round of the
+  // run and of the subagents it delegated to, summed. Counts and ids only, never
+  // content. Unset when the executor predates the field, which is not the same as
+  // a run that spent nothing (that one reports `inference_rounds` 0). A paused or
+  // parked run reports the usage of the invocation that paused or parked; the
+  // continuation that follows is a new invocation with its own tally.
+  RunUsage usage = 9;
+}
+
+// RunUsage - the inference a run's loop spent in one invocation.
+message RunUsage {
+  // Provider-reported tokens of every round, summed. `input_tokens` already folds
+  // in the cache legs, exactly as `InferResponse.input_tokens` does.
+  uint64 input_tokens = 1;
+  // Provider-reported completion tokens of every round, summed.
+  uint64 output_tokens = 2;
+  // The cache legs of `input_tokens`: served from the provider's prompt cache, and
+  // written to it. Zero where the provider reports none.
+  uint64 cache_read_input_tokens = 3;
+  // Tokens written to the provider's prompt cache (see `cache_read_input_tokens`).
+  uint64 cache_creation_input_tokens = 4;
+  // Rounds that returned a provider response, delegated rounds included. A round
+  // that failed before a response is not counted: it spent nothing reportable.
+  uint32 inference_rounds = 5;
+  // The provider and model of the leg (`legs`) that served the most rounds, the
+  // first in provider-then-model order on a tie, as the provider reported them.
+  // Empty when no round was counted. Not a price basis: an unpinned run can be
+  // served by several, and `legs` carries each one's own spend.
+  string provider_used = 6;
+  // The model of that leg, as the provider reported it.
+  string model_used = 7;
+  // The same spend split by the provider and model that served it, in provider-
+  // then-model order, so concurrent delegates cannot reorder it. The legs sum to
+  // the totals above. Empty from an executor that predates the field; the totals
+  // are then the one leg.
+  repeated RunUsageLeg legs = 8;
+}
+
+// RunUsageLeg - what one provider and model served within a run's invocation.
+// A gateway prices each leg under its own model.
+message RunUsageLeg {
+  // As the provider reported them on the rounds; both empty for a round that
+  // named neither.
+  string provider_used = 1;
+  // The model that served this leg's rounds, as the provider reported it.
+  string model_used = 2;
+  // Same meaning as the fields of `RunUsage`, over this leg's rounds only.
+  uint64 input_tokens = 3;
+  // Completion tokens of this leg's rounds.
+  uint64 output_tokens = 4;
+  // Tokens of this leg served from the provider's prompt cache.
+  uint64 cache_read_input_tokens = 5;
+  // Tokens of this leg written to the provider's prompt cache.
+  uint64 cache_creation_input_tokens = 6;
+  // Rounds of this leg that returned a provider response.
+  uint32 inference_rounds = 7;
 }
 
 // ExecuteStepRequest — request to execute one step in the agent loop.

@@ -4804,6 +4804,10 @@ struct FollowedTurn {
     handles: MockSessionHandles,
     /// The `event_type` of every envelope the gateway published, in order.
     published: Vec<String>,
+    /// Every envelope the gateway published, with its subject, in order.
+    envelopes: Vec<(String, mp_events::envelope::Envelope)>,
+    /// The publisher itself, for what the gateway publishes after the stream has ended.
+    publisher: Arc<DynPublisher>,
 }
 
 fn completed_run_response(answer: &str) -> mpv1::RunAgentResponse {
@@ -4863,16 +4867,18 @@ async fn run_followed_agentic_turn(
     .expect("the stream did not end within 20 s")
     .unwrap();
     let elapsed = started.elapsed();
-    let event_types = publisher
-        .drain()
-        .into_iter()
-        .map(|(_, envelope)| envelope.event_type)
+    let envelopes = publisher.drain();
+    let event_types = envelopes
+        .iter()
+        .map(|(_, envelope)| envelope.event_type.clone())
         .collect();
     FollowedTurn {
         body: String::from_utf8(body.to_vec()).unwrap(),
         elapsed,
         handles,
         published: event_types,
+        envelopes,
+        publisher,
     }
 }
 
@@ -12344,4 +12350,346 @@ async fn agentic_run_context_memory_query_is_redacted_exactly_when_the_policy_re
         plain.memory_queries[0].query,
         "mail anna@example.com about the project codename"
     );
+}
+
+/// A completed run whose rounds, and its delegates', cost two inference rounds.
+fn completed_run_response_with_usage(answer: &str) -> mpv1::RunAgentResponse {
+    mpv1::RunAgentResponse {
+        usage: Some(mpv1::RunUsage {
+            input_tokens: 1_500,
+            output_tokens: 200,
+            cache_read_input_tokens: 900,
+            cache_creation_input_tokens: 100,
+            inference_rounds: 2,
+            provider_used: "anthropic".to_owned(),
+            model_used: "claude-served".to_owned(),
+            legs: vec![mpv1::RunUsageLeg {
+                provider_used: "anthropic".to_owned(),
+                model_used: "claude-served".to_owned(),
+                input_tokens: 1_500,
+                output_tokens: 200,
+                cache_read_input_tokens: 900,
+                cache_creation_input_tokens: 100,
+                inference_rounds: 2,
+            }],
+        }),
+        ..completed_run_response(answer)
+    }
+}
+
+/// The same run when its rounds were served by two models: an unpinned run that
+/// fell back, each model's spend in its own leg, in provider-then-model order.
+fn completed_run_response_with_two_legs(answer: &str) -> mpv1::RunAgentResponse {
+    mpv1::RunAgentResponse {
+        usage: Some(mpv1::RunUsage {
+            input_tokens: 1_700,
+            output_tokens: 250,
+            cache_read_input_tokens: 900,
+            cache_creation_input_tokens: 100,
+            inference_rounds: 3,
+            provider_used: "anthropic".to_owned(),
+            model_used: "claude-served".to_owned(),
+            legs: vec![
+                mpv1::RunUsageLeg {
+                    provider_used: "anthropic".to_owned(),
+                    model_used: "claude-served".to_owned(),
+                    input_tokens: 1_500,
+                    output_tokens: 200,
+                    cache_read_input_tokens: 900,
+                    cache_creation_input_tokens: 100,
+                    inference_rounds: 2,
+                },
+                mpv1::RunUsageLeg {
+                    provider_used: "azure-openai".to_owned(),
+                    model_used: "gpt-fallback".to_owned(),
+                    input_tokens: 200,
+                    output_tokens: 50,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                    inference_rounds: 1,
+                },
+            ],
+        }),
+        ..completed_run_response(answer)
+    }
+}
+
+const USAGE_TURN: &str = r#"{"content":"research the Q3 numbers","model":"m","features":["agentic","usage"]}"#;
+
+fn usage_frame(turn: &FollowedTurn) -> serde_json::Value {
+    sse_frames(&turn.body)
+        .into_iter()
+        .find(|(_, name, _)| name == "usage")
+        .expect("a usage frame")
+        .2
+}
+
+fn usage_envelopes(turn: &FollowedTurn) -> Vec<&(String, mp_events::envelope::Envelope)> {
+    turn.envelopes
+        .iter()
+        .filter(|(_, envelope)| envelope.event_type == "USAGE_ENVELOPE")
+        .collect()
+}
+
+/// `MODEL_GATEWAY_AGENT_USAGE_ENVELOPE=true`: a Do run puts one row on the cost
+/// ledger's subject, carrying its run id, the summed tokens and both cache legs,
+/// and the usage frame shows the same real tokens.
+#[tokio::test]
+#[serial_test::serial]
+async fn agentic_run_publishes_one_usage_envelope_with_run_id() {
+    let _deadline = EnvGuard::set("AGENTIC_RUN_DEADLINE_SECS", None);
+    let _switch = EnvGuard::set("MODEL_GATEWAY_AGENT_USAGE_ENVELOPE", Some("true"));
+    let turn = run_followed_agentic_turn(
+        USAGE_TURN,
+        completed_run_response_with_usage("Svaret er klart."),
+        Duration::from_millis(0),
+        Vec::new(),
+    )
+    .await;
+
+    let rows = usage_envelopes(&turn);
+    assert_eq!(rows.len(), 1, "one ledger row per run: {:?}", turn.published);
+    let (subject, envelope) = rows[0];
+    assert_eq!(subject, "mp.v1.usage.org_placeholder");
+    assert_eq!(envelope.producer, "model-gateway");
+    assert!(!envelope.zdr);
+    assert_eq!(
+        envelope.idempotency_key,
+        format!("{}-AGENT_USAGE", envelope.correlation_id),
+        "keyed by the request id, apart from a gateway turn's row"
+    );
+    let run_id = format!("managed-run-for-{}", prepared_thread_id(&turn.handles));
+    assert_eq!(envelope.payload["run_id"], run_id);
+    assert_eq!(envelope.payload["request_id"], envelope.correlation_id);
+    assert_eq!(envelope.payload["model"], "claude-served");
+    assert_eq!(envelope.payload["provider_used"], "anthropic");
+    assert_eq!(envelope.payload["input_tokens"], 1_500);
+    assert_eq!(envelope.payload["output_tokens"], 200);
+    assert_eq!(envelope.payload["cache_read_input_tokens"], 900);
+    assert_eq!(envelope.payload["cache_creation_input_tokens"], 100);
+    assert_eq!(envelope.payload["cost_basis"], "metered");
+
+    let frame = usage_frame(&turn);
+    assert_eq!(frame["input_tokens"], 1_500);
+    assert_eq!(frame["output_tokens"], 200);
+    assert_eq!(frame["cache_read_tokens"], 900);
+    assert_eq!(frame["cache_write_tokens"], 100);
+    assert!(frame["cost_usd"].is_null(), "no price is stated here: {frame}");
+    clear_model_auth_env();
+}
+
+/// With the switch off (and unset) the ledger sees nothing new, while the frame
+/// states what the executor reported.
+#[tokio::test]
+#[serial_test::serial]
+async fn agentic_run_publishes_no_usage_envelope_with_the_switch_off() {
+    let _deadline = EnvGuard::set("AGENTIC_RUN_DEADLINE_SECS", None);
+    for value in [None, Some("1"), Some("TRUE"), Some("false")] {
+        let _switch = EnvGuard::set("MODEL_GATEWAY_AGENT_USAGE_ENVELOPE", value);
+        let turn = run_followed_agentic_turn(
+            USAGE_TURN,
+            completed_run_response_with_usage("Svaret er klart."),
+            Duration::from_millis(0),
+            Vec::new(),
+        )
+        .await;
+        assert!(
+            usage_envelopes(&turn).is_empty(),
+            "{value:?} must leave the ledger alone: {:?}",
+            turn.published
+        );
+        assert_eq!(usage_frame(&turn)["input_tokens"], 1_500);
+    }
+    clear_model_auth_env();
+}
+
+/// A run that outlives the gateway's deadline still reaches the ledger. The stream
+/// ends with the retryable error and detaches the dispatch; the dispatch task
+/// publishes the row itself when the executor finally answers, so the longest runs
+/// are not the ones that go unbilled.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_run_that_outlives_the_deadline_still_publishes_its_usage_envelope() {
+    let _deadline = EnvGuard::set("AGENTIC_RUN_DEADLINE_SECS", Some("1"));
+    let _switch = EnvGuard::set("MODEL_GATEWAY_AGENT_USAGE_ENVELOPE", Some("true"));
+    let turn = run_followed_agentic_turn(
+        USAGE_TURN,
+        completed_run_response_with_usage("Kommer aldri frem i tide."),
+        Duration::from_secs(3),
+        Vec::new(),
+    )
+    .await;
+
+    let errors = error_frames(&turn.body);
+    assert_eq!(errors.len(), 1, "{}", turn.body);
+    assert_eq!(errors[0]["code"], "agent_dispatch_unavailable", "{}", turn.body);
+    assert!(
+        usage_envelopes(&turn).is_empty(),
+        "the executor had not answered when the stream ended: {:?}",
+        turn.published
+    );
+
+    let give_up = std::time::Instant::now() + Duration::from_secs(10);
+    let late = loop {
+        let rows: Vec<_> = turn
+            .publisher
+            .drain()
+            .into_iter()
+            .filter(|(_, envelope)| envelope.event_type == "USAGE_ENVELOPE")
+            .collect();
+        if !rows.is_empty() || std::time::Instant::now() >= give_up {
+            break rows;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!(late.len(), 1, "the detached run's row was never published");
+    let (subject, envelope) = &late[0];
+    assert_eq!(subject, "mp.v1.usage.org_placeholder");
+    assert_eq!(
+        envelope.idempotency_key,
+        format!("{}-AGENT_USAGE", envelope.correlation_id)
+    );
+    assert_eq!(
+        envelope.payload["run_id"],
+        format!("managed-run-for-{}", prepared_thread_id(&turn.handles))
+    );
+    assert_eq!(envelope.payload["input_tokens"], 1_500);
+    assert_eq!(envelope.payload["cache_read_input_tokens"], 900);
+    // Exactly one: neither the detached task nor anything that follows publishes the
+    // row a second time.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        turn.publisher
+            .drain()
+            .iter()
+            .all(|(_, envelope)| envelope.event_type != "USAGE_ENVELOPE"),
+        "the run's row was published twice"
+    );
+    clear_model_auth_env();
+}
+
+/// A run that fell back to another model on a later round, and outlived the
+/// gateway's deadline, still publishes one row per model, each priced under its
+/// own, with positional keys.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_late_run_served_by_two_models_publishes_one_envelope_per_model() {
+    let _deadline = EnvGuard::set("AGENTIC_RUN_DEADLINE_SECS", Some("1"));
+    let _switch = EnvGuard::set("MODEL_GATEWAY_AGENT_USAGE_ENVELOPE", Some("true"));
+    let turn = run_followed_agentic_turn(
+        USAGE_TURN,
+        completed_run_response_with_two_legs("Kommer aldri frem i tide."),
+        Duration::from_secs(3),
+        Vec::new(),
+    )
+    .await;
+    assert!(usage_envelopes(&turn).is_empty(), "{:?}", turn.published);
+
+    let give_up = std::time::Instant::now() + Duration::from_secs(10);
+    let mut late: Vec<(String, mp_events::envelope::Envelope)> = Vec::new();
+    while late.len() < 2 && std::time::Instant::now() < give_up {
+        late.extend(
+            turn.publisher
+                .drain()
+                .into_iter()
+                .filter(|(_, envelope)| envelope.event_type == "USAGE_ENVELOPE"),
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(late.len(), 2, "one row per leg: {late:?}");
+    let request_id = late[0].1.correlation_id.clone();
+    assert_eq!(late[0].1.idempotency_key, format!("{request_id}-AGENT_USAGE"));
+    assert_eq!(
+        late[1].1.idempotency_key,
+        format!("{request_id}-AGENT_USAGE-1")
+    );
+    assert_eq!(late[0].1.payload["model"], "claude-served");
+    assert_eq!(late[0].1.payload["provider_used"], "anthropic");
+    assert_eq!(late[0].1.payload["input_tokens"], 1_500);
+    assert_eq!(late[1].1.payload["model"], "gpt-fallback");
+    assert_eq!(late[1].1.payload["provider_used"], "azure-openai");
+    assert_eq!(late[1].1.payload["input_tokens"], 200);
+    clear_model_auth_env();
+}
+
+/// A zero-retention turn never becomes a ledger row, whatever the switch says and
+/// whatever the executor reports: the agentic feature is refused under ZDR before
+/// a run exists, so no usage can reach the publisher.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_zero_retention_agentic_turn_publishes_no_usage_envelope() {
+    let _deadline = EnvGuard::set("AGENTIC_RUN_DEADLINE_SECS", None);
+    let _switch = EnvGuard::set("MODEL_GATEWAY_AGENT_USAGE_ENVELOPE", Some("true"));
+    std::env::remove_var("ALLOWED_MODELS");
+    let (_jwks, token) = signed_model_token(true).await;
+    let client = spawn_mock(MockOk::default()).await;
+    let (mock_session, handles) = MockSessionCore::new();
+    let session_client = spawn_session_mock(mock_session).await;
+    let (mut state, publisher) = make_state(client, session_client).await;
+    state.execution_client = spawn_delayed_execution_mock(
+        completed_run_response_with_usage("Svaret er klart."),
+        Duration::from_millis(0),
+    )
+    .await;
+    state.orchestration_client = spawn_scripted_orchestration_mock(Vec::new()).await;
+    let (app, _delegated_jwks) = authenticated_zdr_user_router(
+        build_router(state, None),
+        "org-zdr",
+        "user-zdr",
+    )
+    .await;
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/invoke/stream")
+        .header(AUTHORIZATION, format!("Bearer {token}"))
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(USAGE_TURN))
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = String::from_utf8(
+        to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    clear_model_auth_env();
+
+    assert_eq!(error_frames(&body).len(), 1, "the turn is refused: {body}");
+    assert!(
+        !body.contains("event: connected"),
+        "no run was started: {body}"
+    );
+    assert_eq!(managed_start_count(&handles), 0, "a refused turn prepares no run");
+    assert!(
+        publisher
+            .drain()
+            .iter()
+            .all(|(_, envelope)| envelope.event_type != "USAGE_ENVELOPE"),
+        "a zero-retention turn left a ledger row"
+    );
+}
+
+/// An executor that predates the field reports no usage: nothing is published
+/// even with the switch on, and the frame keeps the zeros it always had.
+#[tokio::test]
+#[serial_test::serial]
+async fn agentic_run_without_reported_usage_publishes_nothing_and_shows_zero() {
+    let _deadline = EnvGuard::set("AGENTIC_RUN_DEADLINE_SECS", None);
+    let _switch = EnvGuard::set("MODEL_GATEWAY_AGENT_USAGE_ENVELOPE", Some("true"));
+    let turn = run_followed_agentic_turn(
+        USAGE_TURN,
+        completed_run_response("Svaret er klart."),
+        Duration::from_millis(0),
+        Vec::new(),
+    )
+    .await;
+    assert!(usage_envelopes(&turn).is_empty(), "{:?}", turn.published);
+    let frame = usage_frame(&turn);
+    assert_eq!(frame["input_tokens"], 0);
+    assert_eq!(frame["output_tokens"], 0);
+    assert!(frame.get("cache_read_tokens").is_none());
+    clear_model_auth_env();
 }
