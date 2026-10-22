@@ -55,6 +55,7 @@ use crate::{
         proxy_model_json_with_data_plane, proxy_model_json_with_session, required_execution_token,
         required_inference_token, required_session_token,
     },
+    envelope::error,
     middleware::{require_session, AuthenticatedUser},
     rate_limit::rate_limit_middleware,
     upstream::{authorized_org_id, proxy_sse_stream_with_data_plane},
@@ -494,7 +495,8 @@ async fn get_lineage(
 /// browser-action decision surface (a granted decision lets execution-core's
 /// in-loop poller in `browser_agent.rs` proceed with the exact action that
 /// was gated; a denial/timeout aborts the run without dispatching it).
-/// Body: `{"decision": "approve" | "reject", "reason"?: string}`.
+/// Body: `{"decision": "approve" | "reject", "reason"?: string, "scope"?: "once"}`; see
+/// [`DecideBody`].
 pub(crate) async fn decide_approval(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -502,14 +504,63 @@ pub(crate) async fn decide_approval(
     Path(approval_id): Path<String>,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
+    let upstream_body = match decide_upstream_body(body) {
+        Ok(upstream_body) => upstream_body,
+        Err(refusal) => return refusal,
+    };
     mg_post_decide_with_retry(
         &state,
         &user,
         &headers,
         &format!("/v1/orchestration/approvals/{}/decide", enc(&approval_id)),
-        body,
+        upstream_body,
     )
     .await
+}
+
+/// The longest reason a decision may carry.
+const DECIDE_REASON_MAX_CHARS: usize = 500;
+
+/// The body a decision accepts (build plan WS13 S2). Nothing else crosses: who decides is the
+/// verified credential's, so a client field naming a decider, a decision source or a grant is
+/// refused, not forwarded. `scope` is how far the decision reaches; only `once` exists until
+/// standing grants do.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DecideBody {
+    decision: String,
+    #[serde(default)]
+    reason: String,
+    #[serde(default)]
+    scope: Option<String>,
+}
+
+/// The upstream body, rebuilt from the accepted fields alone, or the refusal to send. An
+/// unknown key, an unknown decision or an over-long reason is a 400; a scope other than
+/// `once` is a typed 422, so a client never believes it granted more than it did.
+fn decide_upstream_body(raw: Value) -> Result<Value, (StatusCode, Json<Value>)> {
+    let body: DecideBody = serde_json::from_value(raw)
+        .map_err(|_| invalid_chat_request("a decision takes a decision, a reason and a scope"))?;
+    if !matches!(body.decision.as_str(), "approve" | "reject") {
+        return Err(invalid_chat_request("the decision is approve or reject"));
+    }
+    if body.reason.chars().count() > DECIDE_REASON_MAX_CHARS {
+        return Err(invalid_chat_request("the reason is too long"));
+    }
+    let mut upstream = serde_json::json!({ "decision": body.decision, "reason": body.reason });
+    if let Some(scope) = body.scope {
+        if scope != "once" {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(error(
+                    "scope_not_enabled",
+                    "Only a decision for this one call is available.",
+                )),
+            ));
+        }
+        upstream["scope"] = Value::String(scope);
+    }
+    Ok(upstream)
 }
 
 async fn approve_plan(
@@ -821,10 +872,68 @@ mod tests {
     };
 
     use super::{
-        continue_upstream_body, is_retryable_decide_status, mg_post_decide_with_retry_bounded,
-        requires_execution_delegation, verification_metrics_path, ContinueRunBody,
-        CONTINUE_RELAYED_ERRORS,
+        continue_upstream_body, decide_upstream_body, is_retryable_decide_status,
+        mg_post_decide_with_retry_bounded, requires_execution_delegation,
+        verification_metrics_path, ContinueRunBody, CONTINUE_RELAYED_ERRORS,
     };
+
+    #[test]
+    fn a_decision_is_rebuilt_from_its_accepted_fields_alone() {
+        assert_eq!(
+            decide_upstream_body(json!({"decision": "approve"})).expect("accepted"),
+            json!({"decision": "approve", "reason": ""})
+        );
+        assert_eq!(
+            decide_upstream_body(json!({"decision": "reject", "reason": "no", "scope": "once"}))
+                .expect("accepted"),
+            json!({"decision": "reject", "reason": "no", "scope": "once"})
+        );
+    }
+
+    #[test]
+    fn a_decision_with_a_field_the_client_does_not_own_is_a_400() {
+        for extra in [
+            "decided_by",
+            "decision_source",
+            "grant_id",
+            "org_id",
+            "step_up_verified",
+        ] {
+            let mut body = json!({"decision": "approve"});
+            body[extra] = json!("forged");
+            let (status, Json(refusal)) =
+                decide_upstream_body(body).expect_err("an unknown key is refused");
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{extra}");
+            assert_eq!(refusal["error"]["code"], "invalid_request", "{extra}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_decision_or_a_long_reason_is_a_400() {
+        for body in [
+            json!({"decision": "maybe"}),
+            json!({"decision": "Approve"}),
+            json!({"reason": "no decision"}),
+            json!({"decision": "approve", "reason": "x".repeat(501)}),
+        ] {
+            let (status, _) = decide_upstream_body(body.clone()).expect_err("refused");
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        }
+        assert!(
+            decide_upstream_body(json!({"decision": "approve", "reason": "x".repeat(500)})).is_ok()
+        );
+    }
+
+    #[test]
+    fn a_scope_other_than_once_is_a_typed_422_until_grants_exist() {
+        for scope in ["thread", "run", "", "ONCE"] {
+            let (status, Json(refusal)) =
+                decide_upstream_body(json!({"decision": "approve", "scope": scope}))
+                    .expect_err("a standing scope is refused");
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{scope}");
+            assert_eq!(refusal["error"]["code"], "scope_not_enabled", "{scope}");
+        }
+    }
 
     #[test]
     fn verification_metrics_path_omits_the_query_entirely_when_since_is_absent_or_blank() {

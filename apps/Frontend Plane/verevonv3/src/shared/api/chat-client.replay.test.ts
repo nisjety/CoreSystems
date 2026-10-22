@@ -75,6 +75,24 @@ describe('step frame identity', () => {
   })
 })
 
+describe('approval step', () => {
+  it('never carries the raw approval kind token into a step', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => sseResponse([
+      sse('CUSTOM', {
+        type: 'CUSTOM',
+        name: 'approval_state_changed',
+        value: { approval_id: 'appr_1', approval_kind: 'APPROVAL_KIND_TOOL', to: 'PENDING' },
+      }, 9),
+    ])))
+    const steps: ChatStepEvent[] = []
+    await resumeStream('req-1', { onStep: (event) => steps.push(event) })
+
+    expect(steps).toHaveLength(1)
+    expect(steps[0]).toMatchObject({ id: 'appr_1', title: 'Approval', status: 'PENDING' })
+    expect(JSON.stringify(steps)).not.toContain('APPROVAL_KIND')
+  })
+})
+
 describe('assistant message metadata', () => {
   it('never surfaces head_summary, wherever the gateway puts it', async () => {
     const summary = 'Tidligere i samtalen: brukeren ba om et budsjett for Q3.'

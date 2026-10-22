@@ -126,7 +126,7 @@
   },
   "src/features/chat/components/ChatLiveRunPanel.tsx": {
     "no-restricted-syntax": {
-      "count": 25
+      "count": 24
     }
   },
   "src/features/chat/components/ChatMessages.tsx": {
@@ -141,7 +141,7 @@
   },
   "src/features/chat/components/ChatPanels.tsx": {
     "no-restricted-syntax": {
-      "count": 34
+      "count": 33
     }
   },
   "src/features/chat/components/chat-artifacts.ts": {

@@ -92,6 +92,12 @@ import {
 } from '@/features/chat/components/chat-normalizers'
 import type { PrivacyTier } from '@/shared/api/privacy-tier'
 import { useI18n } from '@/shared/i18n'
+import {
+  approvalFallbackLine,
+  approvalHeadline,
+  approvalKindLabel,
+  approvalReason,
+} from '@/shared/approvals/approval-copy'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -519,7 +525,7 @@ export default function AgentRunConsole() {
           id: `approval-${event.approvalId ?? state.timeline.length}-${event.to ?? ''}`,
           kind: 'pause',
           title: i18n.tr('Godkjenning', 'Approval'),
-          detail: `${event.approvalKind ?? i18n.tr('Handling', 'Action')} · ${event.to ?? i18n.tr('forespurt', 'requested')}`,
+          detail: `${approvalKindLabel(event.approvalKind, i18n)} · ${event.to ?? i18n.tr('forespurt', 'requested')}`,
           status: event.to,
           at: event.at ?? new Date().toISOString(),
         })
@@ -1299,10 +1305,10 @@ function ApprovalDeck(props: {
                 <PauseCircle size={13} strokeWidth={2.2} />
                 {i18n.tr('Godkjenning kreves', 'Approval required')}
               </span>
-              <span class="verevon-run-approval__kind">{approval.kind ?? i18n.tr('Sperret handling', 'Gated action')}</span>
+              <span class="verevon-run-approval__kind">{approvalHeadline(approval, i18n)}</span>
             </div>
             <p class="verevon-run-approval__detail">
-              {approval.detail ?? i18n.tr('Agenten venter på avgjørelsen din før neste steg.', 'The agent is waiting for your decision before the next step.')}
+              {approvalReason(approval, i18n) ?? approvalFallbackLine(i18n)}
             </p>
             <Show when={approval.requestedBy}>
               <p class="verevon-run-approval__meta">{i18n.tr(`Forespurt av ${approval.requestedBy}`, `Requested by ${approval.requestedBy}`)}</p>
@@ -1796,7 +1802,7 @@ function ProofApprovalCard(props: { approval: ProofApproval }) {
     <article class="verevon-run-proof__approval">
       <div class="verevon-run-proof__approval-head">
         <span class="verevon-run-proof__kind">
-          {props.approval.kind || i18n.tr('Handling', 'Action')}
+          {approvalKindLabel(props.approval.kind, i18n)}
         </span>
         <Show when={props.approval.status}>
           {(status) => (

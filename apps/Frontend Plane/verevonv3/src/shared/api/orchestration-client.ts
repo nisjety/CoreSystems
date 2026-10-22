@@ -1,5 +1,8 @@
+import { causeCodeOf, type ApprovalCause } from '../approvals/approval-copy'
 import { ApiError, requestJson } from './http'
 import { readSseStream, type SseEvent } from './sse'
+
+export type { ApprovalCause, CauseCode } from '../approvals/approval-copy'
 
 // The closed refusal vocabulary of `continueRun` lives in the action contract; the
 // client re-exports its guards so a caller reads a failure from one place.
@@ -40,8 +43,13 @@ export type Approval = {
   runId?: string
   planId?: string
   stepId?: string
-  /** Approval kind, e.g. tool/plan/command — provider string, rendered as-is. */
+  /**
+   * Approval kind as the provider names it (`APPROVAL_KIND_*`). A token for code, never for a
+   * reader: `shared/approvals/approval-copy` words every surface from `cause` instead.
+   */
   kind?: string
+  /** Why the pause was raised, when the creator stated it. Absent on an older approval. */
+  cause?: ApprovalCause
   /** PENDING | GRANTED | DENIED | EXPIRED (uppercased provider enum name). */
   status?: string
   requestedBy?: string
@@ -82,6 +90,27 @@ function canonicalApprovalStatus(raw: string | undefined): string | undefined {
   return upper
 }
 
+/**
+ * The cause object model-gateway projects on an approval. An absent or malformed cause is
+ * `undefined` (the surfaces then say the generic waiting line); a stated one is read through the
+ * closed vocabulary, so a code this build does not know arrives as `unclassified_gate`.
+ */
+export function normalizeApprovalCause(raw: unknown): ApprovalCause | undefined {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
+  const cause = raw as Record<string, unknown>
+  return {
+    code: causeCodeOf(cause.code),
+    tool: str(cause.tool),
+    effectClass: str(cause.effect_class),
+    riskCategory: str(cause.risk_category),
+    ruleId: str(cause.rule_id),
+    scopeOptions: Array.isArray(cause.scope_options)
+      ? cause.scope_options.filter((scope): scope is string => typeof scope === 'string')
+      : [],
+    stepUpRequired: cause.step_up_required === true,
+  }
+}
+
 /** Normalize a model-gateway approval object (snake_case) to our camelCase shape. */
 function normalizeApproval(raw: RawApproval): Approval | null {
   const id = str(raw.id) ?? str(raw.approval_id)
@@ -92,6 +121,7 @@ function normalizeApproval(raw: RawApproval): Approval | null {
     planId: str(raw.plan_id) ?? str(raw.planId),
     stepId: str(raw.step_id) ?? str(raw.stepId),
     kind: str(raw.kind) ?? str(raw.approval_kind),
+    cause: normalizeApprovalCause(raw.cause),
     status: canonicalApprovalStatus(str(raw.status) ?? str(raw.state)),
     requestedBy: str(raw.requested_by) ?? str(raw.requestedBy),
     detail: str(raw.detail) ?? str(raw.summary) ?? str(raw.reason) ?? str(raw.tool),

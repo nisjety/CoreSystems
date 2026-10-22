@@ -61,6 +61,11 @@ import type {
 import type { ApprovalDecision } from '@/shared/api/orchestration-client'
 import { isBrowserLoopRunning, type BrowserLoopState } from './browser-loop'
 import {
+  browserApprovalStatusLabel,
+  browserRiskLabel,
+} from '@/shared/approvals/approval-copy'
+import { useI18n } from '@/shared/i18n'
+import {
   closeBrowserChromePopover,
   evidenceIsEphemeral,
   initialBrowserChromeState,
@@ -150,30 +155,6 @@ const LOOP_STATUS_LABELS: Record<BrowserLoopState['status'], string> = {
   paused: 'Pauset',
   stopped: 'Stoppet',
   suggesting: 'Foreslår',
-}
-
-/** Phase 5 HITL gate: Bokmål label per risk category self-reported by the
- * planner or derived by execution-core's deterministic backstop classifier.
- * Falls back to a generic label for any category not in this list, since the
- * category is a free-form string from the wire, not a closed union here. */
-const BROWSER_APPROVAL_RISK_LABELS: Record<string, string> = {
-  checkout: 'Utsjekk/betaling',
-  cross_domain_navigation: 'Navigering til nytt domene',
-  destructive: 'Ødeleggende handling',
-  login: 'Innlogging',
-  persistent_cookie_use: 'Bruker vedvarende profil/informasjonskapsler',
-  posting_form: 'Skjemainnsending',
-}
-
-function browserApprovalRiskLabel(riskCategory: string): string {
-  return BROWSER_APPROVAL_RISK_LABELS[riskCategory] ?? 'Risikofylt handling'
-}
-
-const BROWSER_APPROVAL_STATUS_LABELS: Record<BrowserApprovalEntry['status'], string> = {
-  denied: 'Avslått',
-  granted: 'Godkjent',
-  pending: 'Venter på godkjenning',
-  timed_out: 'Tidsavbrutt',
 }
 
 const BROWSER_WHEEL_THROTTLE_MS = 280
@@ -324,6 +305,7 @@ function BrowserApprovalCard(props: {
   deciding: boolean
   onDecide?: (approvalKey: string, decision: ApprovalDecision) => void
 }) {
+  const i18n = useI18n()
   const approval = () => props.approval
   const isPending = () => approval().status === 'pending'
   return (
@@ -342,12 +324,12 @@ function BrowserApprovalCard(props: {
           <Show when={isPending()} fallback={approval().status === 'granted' ? <ShieldCheck class="size-3" /> : <AlertCircle class="size-3" />}>
             <Pause class="size-3" />
           </Show>
-          {BROWSER_APPROVAL_STATUS_LABELS[approval().status]}
+          {browserApprovalStatusLabel(approval().status, i18n)}
         </span>
-        <span class="verevon-run-approval__kind">{browserApprovalRiskLabel(approval().riskCategory)}</span>
+        <span class="verevon-run-approval__kind">{browserRiskLabel(approval().riskCategory, i18n)}</span>
       </div>
       <p class="verevon-run-approval__detail">
-        {approval().reason || 'Handlingen krever godkjenning før den utføres.'}
+        {approval().reason || i18n.tr('Handlingen krever godkjenning før den utføres.', 'The action needs approval before it is carried out.')}
       </p>
       <Show when={approval().url || approval().selector}>
         <p class="verevon-run-approval__meta">
@@ -357,7 +339,7 @@ function BrowserApprovalCard(props: {
         </p>
       </Show>
       <Show when={approval().decidedBy}>
-        <p class="verevon-run-approval__meta">Avgjort av {approval().decidedBy}</p>
+        <p class="verevon-run-approval__meta">{i18n.tr('Avgjort av', 'Decided by')} {approval().decidedBy}</p>
       </Show>
       <Show when={isPending()}>
         <div class="verevon-run-approval__actions">
@@ -370,7 +352,7 @@ function BrowserApprovalCard(props: {
             <Show when={props.deciding}>
               <Loader2 class="size-3.5 verevon-run-spin" />
             </Show>
-            Godkjenn
+            {i18n.tr('Godkjenn', 'Approve')}
           </button>
           <button
             type="button"
@@ -381,7 +363,7 @@ function BrowserApprovalCard(props: {
             <Show when={props.deciding}>
               <Loader2 class="size-3.5 verevon-run-spin" />
             </Show>
-            Avslå
+            {i18n.tr('Avslå', 'Reject')}
           </button>
         </div>
       </Show>
@@ -485,6 +467,7 @@ export function BrowserChrome(props: {
   let lastAutoOpenedApprovalKey = ''
   let wsActionTimer: number | undefined
 
+  const i18n = useI18n()
   const session = () => props.session
   const isLive = () => session().renderMode === 'chromium'
   const controlsDisabled = () => !isLive() || props.browserBusy || wsActionPending() || !session().sessionId
@@ -1776,14 +1759,14 @@ export function BrowserChrome(props: {
                 <div
                   class="knowledge-browser-ai-bubble knowledge-browser-ai-bubble--approval"
                   role="alert"
-                  aria-label="Venter på godkjenning"
+                  aria-label={i18n.tr('Venter på godkjenning', 'Waiting for approval')}
                 >
                   <AlertCircle class="size-3.5" aria-hidden="true" />
                   <div class="knowledge-browser-ai-bubble__body">
                     <span class="knowledge-browser-ai-bubble__kind">
-                      {browserApprovalRiskLabel(approval().riskCategory)}
+                      {browserRiskLabel(approval().riskCategory, i18n)}
                     </span>
-                    <p>{approval().reason || 'Handlingen krever godkjenning før den utføres.'}</p>
+                    <p>{approval().reason || i18n.tr('Handlingen krever godkjenning før den utføres.', 'The action needs approval before it is carried out.')}</p>
                     <Show when={approval().url || approval().selector}>
                       <p class="knowledge-browser-ai-bubble__meta">
                         <Show when={approval().actionType}>{approval().actionType} · </Show>
@@ -1801,7 +1784,7 @@ export function BrowserChrome(props: {
                         <Show when={decidingBrowserApprovalKeys().includes(approval().key)}>
                           <Loader2 class="size-3.5 verevon-run-spin" />
                         </Show>
-                        Godkjenn
+                        {i18n.tr('Godkjenn', 'Approve')}
                       </button>
                       <button
                         type="button"
@@ -1812,7 +1795,7 @@ export function BrowserChrome(props: {
                         <Show when={decidingBrowserApprovalKeys().includes(approval().key)}>
                           <Loader2 class="size-3.5 verevon-run-spin" />
                         </Show>
-                        Avslå
+                        {i18n.tr('Avslå', 'Reject')}
                       </button>
                     </div>
                   </div>

@@ -1103,6 +1103,18 @@ const chatAnswerQuestionInput = z
     message: 'A skip carries no answers, and an answer carries at least one.',
   })
 
+// The decision on a pending approval (build plan WS13 S2). The decider is the verified credential's,
+// never an input, so a field naming one, a decision source or a grant is refused rather than ignored.
+// `scope` is how far the decision reaches; only `once` exists until standing grants do.
+const approvalsDecideInput = z
+  .object({
+    approvalId: z.string().min(1),
+    decision: z.enum(['approve', 'reject']),
+    reason: z.string().max(500).optional(),
+    scope: z.literal('once').optional(),
+  })
+  .strict()
+
 const chatClearThreadsInput = z.object({})
 
 const chatDeleteThreadInput = z.object({
@@ -2952,6 +2964,17 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: false,
     inputSchema: chatAnswerQuestionInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'approvals.decide',
+    label: 'Decide an approval',
+    description: 'Approve or reject one pending approval of a run, for this one call. Only the person the approval is requested of can decide it; the decider is the verified credential, never an input, and a client field naming a decider, a decision source or a grant is refused 400. A scope other than once is refused 422 scope_not_enabled until standing grants exist, so a caller never believes it granted more than it did. A decision is idempotent, and a different second decision is a 412 conflict. Refused typed under zero data retention and for a waived credential, since such a run holds no approval. Never model-executable: an approval is the person\'s own authority, and a model deciding its own approval would void the gate.',
+    ownerPlane: 'model',
+    risk: 'high',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: approvalsDecideInput,
     outputSchema: envelopeStatusOutput,
   },
   {

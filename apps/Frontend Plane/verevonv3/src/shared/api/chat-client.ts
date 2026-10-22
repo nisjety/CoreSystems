@@ -1466,7 +1466,8 @@ function dispatchAgUiEvent(
           handlers.onStep?.({
             id: str(value.approval_id) ?? str(value.approvalId),
             title: 'Approval',
-            detail: str(value.approval_kind) ?? str(value.approvalKind),
+            // The wire kind is an enum token (APPROVAL_KIND_*); this module has no
+            // locale to word it in, so the step carries the state alone.
             status: str(value.to) ?? str(value.state) ?? str(value.status),
           })
           break

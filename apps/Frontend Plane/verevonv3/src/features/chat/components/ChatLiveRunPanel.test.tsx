@@ -334,6 +334,20 @@ describe('ChatLiveRunPanel', () => {
     expect(screen.getByText('Ingen nettleseraktivitet')).toBeTruthy()
   })
 
+  it('words an approval event by its plain kind and never shows the wire token', async () => {
+    const { container } = render(() => (
+      <ChatLiveRunPanel collapsed={false} onToggleCollapsed={() => undefined} runId="run_abc123" zdr={false} />
+    ))
+    await subscribed()
+
+    handlers().onApproval?.({ approvalId: 'appr_1', approvalKind: 'APPROVAL_KIND_TOOL', runId: 'run_abc123', to: 'PENDING' })
+    flush()
+
+    const row = container.querySelector('.verevon-chat-run-activity__row')
+    expect(row?.textContent).toContain('Verktøykall')
+    expect(container.textContent).not.toContain('APPROVAL_KIND')
+  })
+
   describe('"Varsle meg når ferdig" in the header', () => {
     const notify = (container: HTMLElement) =>
       container.querySelector<HTMLButtonElement>('.verevon-chat-run-panel__head button.verevon-run-notify')

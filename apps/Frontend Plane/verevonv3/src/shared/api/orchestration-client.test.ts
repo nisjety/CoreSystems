@@ -107,6 +107,67 @@ describe('listApprovals', () => {
     const approvals = await listApprovals('r')
     expect(approvals.map((a) => a.status)).toEqual(['GRANTED', 'DENIED', 'EXPIRED'])
   })
+
+  it('reads the allowlisted cause model-gateway projects, and nothing it does not project', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        approvals: [
+          {
+            id: 'appr_1',
+            run_id: 'run_1',
+            kind: 'APPROVAL_KIND_DESTRUCTIVE',
+            state: 'APPROVAL_STATE_REQUESTED',
+            cause: {
+              code: 'browser_action_risk',
+              tool: null,
+              effect_class: null,
+              risk_category: 'checkout',
+              rule_id: null,
+              scope_options: ['once'],
+              step_up_required: false,
+            },
+          },
+        ],
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const [approval] = await listApprovals('run_1')
+
+    expect(approval?.cause).toEqual({
+      code: 'browser_action_risk',
+      riskCategory: 'checkout',
+      scopeOptions: ['once'],
+      stepUpRequired: false,
+    })
+  })
+
+  it('reads a code it does not know as unclassified_gate and an absent or malformed cause as none', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        approvals: [
+          { id: 'a', cause: { code: 'a_code_from_a_newer_server' } },
+          { id: 'b' },
+          { id: 'c', cause: null },
+          { id: 'd', cause: 'provider_write' },
+          { id: 'e', cause: ['provider_write'] },
+        ],
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const approvals = await listApprovals('r')
+
+    expect(approvals[0]?.cause?.code).toBe('unclassified_gate')
+    expect(approvals[0]?.cause?.scopeOptions).toEqual([])
+    expect(approvals[0]?.cause?.stepUpRequired).toBe(false)
+    expect(approvals.slice(1).map((approval) => approval.cause)).toEqual([
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    ])
+  })
 })
 
 describe('decideApproval', () => {

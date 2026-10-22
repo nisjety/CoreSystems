@@ -25,6 +25,7 @@ import {
   type Plan,
   type Todo,
 } from '@/shared/api/orchestration-client'
+import { approvalKindLabel } from '@/shared/approvals/approval-copy'
 import { ToolCallCard } from './ChatMessages'
 import { createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Switch } from 'solid-js'
 import { createResource } from '@/shared/lib/create-resource-compat'
@@ -1366,7 +1367,7 @@ function ChatProofApproval(props: { approval: ProofApproval }) {
   return (
     <article class="verevon-run-proof__approval verevon-chat-run-proof__approval">
       <div class="verevon-run-proof__approval-head">
-        <span class="verevon-run-proof__kind">{props.approval.kind || 'Handling'}</span>
+        <span class="verevon-run-proof__kind">{approvalKindLabel(props.approval.kind, i18n)}</span>
         <span class={`verevon-run-proof__pill verevon-run-proof__pill--${statusTone()}`}>{status()}</span>
       </div>
       <Show when={execution()?.receiptId || outcome()?.outcome || verification()?.status}>

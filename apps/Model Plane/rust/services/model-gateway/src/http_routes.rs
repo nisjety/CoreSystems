@@ -19,7 +19,7 @@ use chrono::Utc;
 use metrics_exporter_prometheus::PrometheusHandle;
 use mp_contracts::model_plane::v1::{
     AnalyzeDocumentRequest, AnalyzeImageRequest, AnalyzeLanguageRequest, AnswerRunQuestionRequest,
-    Approval, ApprovalKind, ApprovalProof, ApprovalState, BatchTranslateTextRequest,
+    Approval, ApprovalCause, ApprovalKind, ApprovalProof, ApprovalState, BatchTranslateTextRequest,
     CancelRunRequest, ListRunQuestionsRequest, QuestionAnswerItem, QuestionState, RunQuestion,
     ContinuationExecution, CreateEmbeddingRequest, CreateRealtimeSessionRequest,
     CreateVideoGenerationJobRequest, DecideApprovalRequest, DetectTextLanguageRequest, Event,
@@ -37,6 +37,7 @@ use mp_contracts::model_plane::v1::{
     TransitionPlanRequest, TransitionTodoRequest, TranslateTextRequest, TranslationInput,
     VerificationMetrics, VerificationStatus,
 };
+use mp_contracts::approval_cause::{CauseCode, SCOPE_ONCE};
 use mp_events::{envelope::Envelope, publisher::EventPublisher, subjects};
 use mp_ids::new_ulid;
 use serde::{Deserialize, Serialize};
@@ -1676,6 +1677,26 @@ struct DecideApprovalBody {
     decision: String, // "approve" | "reject"
     #[serde(default)]
     reason: String,
+    /// How far the decision reaches (build plan WS13 S2). Empty means `once`. Standing
+    /// scopes need the grant store (S6), so any other value is refused until it exists.
+    #[serde(default)]
+    scope: String,
+}
+
+/// The decide body's scope: absent or `once` is the one decision that exists today. Anything
+/// else, a well-formed `thread` or `run` included, is refused rather than silently narrowed
+/// to `once`, so a client never believes it granted more than it did.
+fn require_once_scope(scope: &str) -> Result<(), HttpJsonError> {
+    if scope.is_empty() || scope == SCOPE_ONCE {
+        return Ok(());
+    }
+    Err((
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(json!({ "error": {
+            "code": "scope_not_enabled",
+            "message": "Only a decision for this one call is available.",
+        } })),
+    ))
 }
 
 async fn decide_approval(
@@ -1697,6 +1718,7 @@ async fn decide_approval(
             ))
         }
     };
+    require_once_scope(&body.scope)?;
     let prior_approval = if matches!(target_state, ApprovalState::Granted) {
         state
             .orchestration_client
@@ -6404,7 +6426,122 @@ fn approval_value(approval: &Approval) -> Value {
         "requested_of": approval.requested_of,
         "decided_by": empty_to_null(&approval.decided_by),
         "decision_reason": empty_to_null(&approval.decision_reason),
+        // Why the pause was raised (build plan WS13 S2); null when the creator stated none.
+        "cause": approval.cause.as_ref().map_or(Value::Null, approval_cause_value),
     })
+}
+
+/// The part of an approval's cause a browser may read. An allowlist: the stored cause also
+/// holds the call digest and the action key, which are for the gate and the audit trail, and
+/// the approval's `context` (tool arguments) never reaches this projection at all. The code
+/// is read through the closed vocabulary so a stored value this build does not know renders
+/// as `unclassified_gate`, never as a string the copy has no words for.
+fn approval_cause_value(cause: &ApprovalCause) -> Value {
+    json!({
+        "code": CauseCode::from_wire(&cause.code).as_str(),
+        "tool": empty_to_null(&cause.tool),
+        "effect_class": empty_to_null(&cause.effect_class),
+        "risk_category": empty_to_null(&cause.risk_category),
+        "rule_id": empty_to_null(&cause.rule_id),
+        "scope_options": cause.scope_options,
+        "step_up_required": cause.step_up_required,
+    })
+}
+
+#[cfg(test)]
+mod approval_value_tests {
+    use super::*;
+
+    fn approval_with_cause() -> Approval {
+        Approval {
+            id: "appr_1".to_owned(),
+            run_id: "run_1".to_owned(),
+            kind: ApprovalKind::Destructive as i32,
+            state: ApprovalState::Requested as i32,
+            requested_of: "user_1".to_owned(),
+            context: Some(prost_types::Struct {
+                fields: [(
+                    "tool_input".to_owned(),
+                    prost_types::Value {
+                        kind: Some(prost_types::value::Kind::StringValue(
+                            "secret-argument-text".to_owned(),
+                        )),
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            }),
+            cause: Some(ApprovalCause {
+                code: "provider_write".to_owned(),
+                tool: "execute_provider_action".to_owned(),
+                effect_class: "external_write".to_owned(),
+                scope_options: vec!["once".to_owned()],
+                action_key: "execute_provider_action:message.send".to_owned(),
+                call_digest: "digest-of-the-exact-call".to_owned(),
+                ..ApprovalCause::default()
+            }),
+            ..Approval::default()
+        }
+    }
+
+    #[test]
+    fn approval_value_projects_cause_and_never_the_raw_context() {
+        let value = approval_value(&approval_with_cause());
+        assert_eq!(value["cause"]["code"], "provider_write");
+        assert_eq!(value["cause"]["tool"], "execute_provider_action");
+        assert_eq!(value["cause"]["effect_class"], "external_write");
+        assert_eq!(value["cause"]["scope_options"], json!(["once"]));
+        assert_eq!(value["cause"]["step_up_required"], false);
+        assert!(value["cause"]["risk_category"].is_null());
+        assert!(value["cause"]["rule_id"].is_null());
+        let object = value.as_object().expect("an approval is a JSON object");
+        assert!(!object.contains_key("context"), "{value}");
+        assert!(
+            !value.to_string().contains("secret-argument-text"),
+            "{value}"
+        );
+    }
+
+    #[test]
+    fn approval_value_omits_action_key() {
+        let text = approval_value(&approval_with_cause()).to_string();
+        for leaked in [
+            "action_key",
+            "actionKey",
+            "call_digest",
+            "callDigest",
+            "message.send",
+            "digest-of-the-exact-call",
+        ] {
+            assert!(
+                !text.contains(leaked),
+                "{leaked} reached the browser projection: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_decision_scope_other_than_once_is_refused_until_grants_exist() {
+        assert!(require_once_scope("").is_ok());
+        assert!(require_once_scope("once").is_ok());
+        for scope in ["thread", "run", "Once", " once", "forever"] {
+            let (status, Json(body)) =
+                require_once_scope(scope).expect_err("a standing scope must be refused");
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{scope}");
+            assert_eq!(body["error"]["code"], "scope_not_enabled", "{scope}");
+        }
+    }
+
+    #[test]
+    fn an_approval_without_a_cause_projects_null_and_an_unknown_code_degrades() {
+        assert!(approval_value(&Approval::default())["cause"].is_null());
+        let mut approval = approval_with_cause();
+        approval.cause.as_mut().expect("cause").code = "a_code_from_a_newer_executor".to_owned();
+        assert_eq!(
+            approval_value(&approval)["cause"]["code"],
+            "unclassified_gate"
+        );
+    }
 }
 
 /// Serialize a Verevon Proof Bundle. Every stage that did not happen stays

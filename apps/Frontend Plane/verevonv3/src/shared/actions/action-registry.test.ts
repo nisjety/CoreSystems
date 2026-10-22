@@ -291,4 +291,42 @@ describe('action registry', () => {
       answers: [{ itemId: 'notes', text: 'x'.repeat(2001) }],
     }).success).toBe(false)
   })
+
+  it('registers the approval decision as a high-risk, owner-only action the model cannot execute', () => {
+    const decide = getActionDescriptor('approvals.decide')
+
+    expect(decide?.ownerPlane).toBe('model')
+    expect(decide?.risk).toBe('high')
+    expect(decide?.reversible).toBe(false)
+    expect(isModelExecutableAction('approvals.decide')).toBe(false)
+    expect(buildModelContextPack({ route: '/chat', visibleItems: [] }).availableActions).not.toContain(
+      'approvals.decide',
+    )
+
+    const description = decide?.description ?? ''
+    expect(description).toContain('scope_not_enabled')
+    expect(description).toContain('Never model-executable')
+  })
+
+  it('takes a decision for one call and nothing a client does not own', () => {
+    const decide = getActionDescriptor('approvals.decide')
+    const base = { approvalId: 'appr_1', decision: 'approve' as const }
+
+    expect(decide?.inputSchema.safeParse(base).success).toBe(true)
+    expect(decide?.inputSchema.safeParse({ ...base, decision: 'reject', reason: 'not this one' }).success).toBe(true)
+    expect(decide?.inputSchema.safeParse({ ...base, scope: 'once' }).success).toBe(true)
+
+    // A standing scope does not exist yet, and a decision is one of two words.
+    for (const scope of ['thread', 'run', 'forever']) {
+      expect(decide?.inputSchema.safeParse({ ...base, scope }).success).toBe(false)
+    }
+    expect(decide?.inputSchema.safeParse({ ...base, decision: 'maybe' }).success).toBe(false)
+    expect(decide?.inputSchema.safeParse({ ...base, approvalId: '' }).success).toBe(false)
+    expect(decide?.inputSchema.safeParse({ ...base, reason: 'x'.repeat(501) }).success).toBe(false)
+
+    // The decider, the source and a grant are the server's, never a client input.
+    for (const forged of [{ decidedBy: 'user_x' }, { decisionSource: 'POSTURE_AUTO' }, { grantId: 'apg_1' }, { orgId: 'org_x' }]) {
+      expect(decide?.inputSchema.safeParse({ ...base, ...forged }).success).toBe(false)
+    }
+  })
 })

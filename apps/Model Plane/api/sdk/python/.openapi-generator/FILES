@@ -14,6 +14,7 @@ docs/AiRealtimeRequest.md
 docs/AiSpeechRequest.md
 docs/AiTranslateRequest.md
 docs/Approval.md
+docs/ApprovalCause.md
 docs/CancelRun200Response.md
 docs/CapabilitiesApi.md
 docs/Capability.md

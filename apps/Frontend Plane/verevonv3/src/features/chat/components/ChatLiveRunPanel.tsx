@@ -38,6 +38,7 @@ import {
 import {
   BrowserChrome,
 } from '@/features/dashboard/home/BrowserChrome'
+import { approvalKindLabel } from '@/shared/approvals/approval-copy'
 import { listRunEventReplay, streamRunEvents } from '@/shared/api/run-console-client'
 import { controlBrowserAiRun, type BrowserAiRunControlAction } from '@/shared/api/browser-run-client'
 import type {
@@ -340,11 +341,11 @@ export function ChatLiveRunPanel(props: {
         onApproval: (event) => {
           update(runId, (state) => appendActivity(state, {
             at: event.at ?? new Date().toISOString(),
-            detail: event.approvalKind ?? '',
+            detail: event.approvalKind ? approvalKindLabel(event.approvalKind, i18n) : '',
             id: `approval-${event.approvalId ?? state.activity.length}`,
             kind: 'approval',
             status: event.to,
-            title: 'Godkjenning',
+            title: i18n.tr('Godkjenning', 'Approval'),
           }))
           refreshApprovals(event.runId)
         },

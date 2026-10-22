@@ -133,6 +133,7 @@ import type { VersionBadge } from '@/features/chat/lib/chat-versions'
 import { streamActivityLabel, type StreamActivity } from '@/features/chat/lib/stream-activity'
 import { isEffectfulChatTurn } from '@/shared/chat/effect-class'
 import { translateApiError, useI18n } from '@/shared/i18n'
+import { approvalHeadline, approvalReason } from '@/shared/approvals/approval-copy'
 import { createPlayingSpeechId, speechPlayer } from '@/features/voice/speech-playback'
 import { readAloudBlockedMessage, readAloudUnavailableMessage } from '@/features/voice/voice-mode-state'
 
@@ -1939,15 +1940,10 @@ export function ApprovalRequests(props: {
           <div class="verevon-chat-approval">
             <div class="verevon-chat-approval__head">
               <span class="verevon-chat-approval__badge">{i18n.tr('Godkjenning', 'Approval')}</span>
-              <span class="verevon-chat-approval__kind">
-                {approval.kind ?? i18n.tr(
-                  'Agenten venter på godkjenning før neste steg',
-                  'The agent is waiting for approval before the next step',
-                )}
-              </span>
+              <span class="verevon-chat-approval__kind">{approvalHeadline(approval, i18n)}</span>
             </div>
-            <Show when={approval.detail}>
-              <p class="verevon-chat-approval__detail">{approval.detail}</p>
+            <Show when={approvalReason(approval, i18n)}>
+              {(reason) => <p class="verevon-chat-approval__detail">{reason()}</p>}
             </Show>
             <div class="verevon-chat-approval__actions">
               <button

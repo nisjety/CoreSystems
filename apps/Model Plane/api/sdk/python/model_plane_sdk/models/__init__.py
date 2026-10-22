@@ -22,6 +22,7 @@ from model_plane_sdk.models.ai_realtime_request import AiRealtimeRequest
 from model_plane_sdk.models.ai_speech_request import AiSpeechRequest
 from model_plane_sdk.models.ai_translate_request import AiTranslateRequest
 from model_plane_sdk.models.approval import Approval
+from model_plane_sdk.models.approval_cause import ApprovalCause
 from model_plane_sdk.models.cancel_run200_response import CancelRun200Response
 from model_plane_sdk.models.capability import Capability
 from model_plane_sdk.models.chat_message import ChatMessage
