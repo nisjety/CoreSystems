@@ -2704,12 +2704,14 @@ pub async fn invoke_stream_sse(
             }
         }
 
-        // Extended-thinking budget, derived server-side from the client's
-        // effort profile (never a client-supplied raw budget). `standard`/unset
-        // yields 0, which is byte-identical to the pre-existing request.
-        let thinking_budget_tokens = crate::thinking::budget_tokens(
+        // Reasoning request, derived server-side from the client's effort
+        // profile (never a client-supplied raw budget). `standard`/unset yields
+        // none, which is byte-identical to the pre-existing request. With the
+        // ladder off this is the legacy token budget; on, a level and no budget.
+        let thinking_plan = crate::thinking::plan(
             req.effort.as_deref().unwrap_or_default(),
             answer_token_budget(),
+            crate::thinking::ladder_enabled(),
         );
         let mut grpc_req = InferRequest {
             request_id: req_id.clone(),
@@ -2727,7 +2729,8 @@ pub async fn invoke_stream_sse(
             // micro-calls (title, follow-ups, compaction summary) keep their
             // own posture because they carry only already-persisted text.
             min_privacy_tier: min_privacy_tier_wire,
-            thinking_budget_tokens,
+            thinking_budget_tokens: thinking_plan.budget_tokens,
+            reasoning_effort: thinking_plan.effort_wire(),
             ..Default::default()
         };
         // Read before any retry rewrites the request: on a subscription route
@@ -3463,7 +3466,8 @@ pub async fn invoke_stream_sse(
                     // whole stream and carried on this final chunk. `None` for
                     // providers that report no logprobs (Anthropic).
                     let certainty = model_certainty(chunk.token_confidence.as_ref());
-                    let answer_budget = truncation_budget(cost_basis);
+                    let answer_budget =
+                        truncation_budget(cost_basis, thinking_plan.allowance_tokens);
                     let mut weak_retrieval = grounding.as_ref().is_some_and(|g| g.low_confidence);
                     let mut confidence = crate::confidence::score_with_retrieval_confidence(
                         &assistant_output,
@@ -4692,10 +4696,18 @@ fn answer_token_budget() -> i32 {
 /// it. The subscription broker does not (Codex takes no output cap) and
 /// counts reasoning inside its output tokens, so on that route the check gets
 /// no budget (0) and a long answer is not scored as truncated.
-fn truncation_budget(cost_basis: crate::pricing::CostBasis) -> u32 {
+///
+/// `reasoning_allowance` is what the effort level may add to the ceiling (0
+/// without a level): reasoning tokens count toward `output_tokens`, so a
+/// ceiling that ignored them would score every Deep answer as cut off.
+fn truncation_budget(cost_basis: crate::pricing::CostBasis, reasoning_allowance: i32) -> u32 {
     match cost_basis {
         crate::pricing::CostBasis::Subscription => 0,
-        crate::pricing::CostBasis::Metered => u32::try_from(answer_token_budget()).unwrap_or(0),
+        crate::pricing::CostBasis::Metered => u32::try_from(crate::thinking::raised_ceiling(
+            answer_token_budget(),
+            reasoning_allowance,
+        ))
+        .unwrap_or(0),
     }
 }
 
@@ -6583,6 +6595,7 @@ async fn run_infer_fallback(
     // envelope so the fallback stamps the same provenance as the live stream.
     let min_privacy_tier = grpc_req.min_privacy_tier;
     let fallback_zdr = grpc_req.zdr;
+    let reasoning_allowance = crate::thinking::allowance_for_wire(grpc_req.reasoning_effort);
     let subscription_route = !grpc_req.subscription_connection_id.trim().is_empty();
     let route_cost_basis = crate::pricing::CostBasis::of_route(
         &grpc_req.provider_hint,
@@ -6770,7 +6783,7 @@ async fn run_infer_fallback(
             let confidence = crate::confidence::score_with_retrieval_confidence(
                 &resp.content,
                 output_tokens,
-                truncation_budget(cost_basis),
+                truncation_budget(cost_basis, reasoning_allowance),
                 evidence,
                 grounding.as_ref().is_some_and(|g| g.low_confidence),
                 model_certainty(resp.token_confidence.as_ref()),
@@ -7794,7 +7807,7 @@ async fn direct_infer(
             name: String::new(),
         }],
         answer_token_budget(),
-        0,
+        crate::thinking::Plan::NONE,
         String::new(),
         temperature,
         zdr,
@@ -7805,7 +7818,7 @@ async fn direct_infer(
 }
 
 /// One model call of the persistence-free path with the given messages, token
-/// ceiling and thinking budget. The ZDR answer and the compaction summarizer both
+/// ceiling and reasoning plan. The ZDR answer and the compaction summarizer both
 /// come through here or through `direct_infer`, which fixes those three to what
 /// they always were.
 #[allow(clippy::too_many_arguments)]
@@ -7818,7 +7831,7 @@ async fn direct_infer_turn(
     subscription_connection_id: &str,
     messages: Vec<ChatMessage>,
     max_tokens: i32,
-    thinking_budget_tokens: i32,
+    thinking: crate::thinking::Plan,
     structured_output_schema: String,
     temperature: f32,
     zdr: bool,
@@ -7840,8 +7853,9 @@ async fn direct_infer_turn(
                 // the answer never asks for more than the turn was allowed.
                 max_tokens,
                 // Extended thinking, derived from the caller's effort profile
-                // (0 when none was asked for).
-                thinking_budget_tokens,
+                // (none when none was asked for): a legacy budget, or a level.
+                thinking_budget_tokens: thinking.budget_tokens,
+                reasoning_effort: thinking.effort_wire(),
                 structured_output_schema,
                 // GDPR ZDR: honor the run's Zero-Data-Retention flag on the agentic
                 // fallback inference (was hardcoded false, ignoring the run's ZDR).
@@ -8390,7 +8404,9 @@ pub(crate) struct ZdrTurnSettings {
     pub(crate) system: Option<String>,
     /// The answer's token ceiling: the caller's own `max_tokens` when it is lower.
     pub(crate) max_tokens: i32,
-    pub(crate) thinking_budget_tokens: i32,
+    /// The reasoning request of the turn's effort profile, from the same
+    /// derivation as the streamed chat path (`thinking::plan`).
+    pub(crate) thinking: crate::thinking::Plan,
     /// The caller's structured-output schema, sent with the turn ("" when none).
     pub(crate) structured_output_schema: String,
 }
@@ -8422,6 +8438,17 @@ impl ZdrTurnSettings {
 /// instructions. Persona is on for the turn: a ZDR turn has no thread, so the
 /// per-thread override is unknown, and the global switch was applied upstream.
 pub(crate) fn zdr_turn_settings(state: &AppState, req: &InvokeRequest) -> ZdrTurnSettings {
+    zdr_turn_settings_with(state, req, crate::thinking::ladder_enabled())
+}
+
+/// [`zdr_turn_settings`] with the effort-ladder switch passed in, so the ZDR
+/// derivation can be compared with the streamed path's without the process
+/// environment.
+fn zdr_turn_settings_with(
+    state: &AppState,
+    req: &InvokeRequest,
+    ladder_on: bool,
+) -> ZdrTurnSettings {
     let mut sections: Vec<String> = Vec::new();
     if let Some(identity) = crate::zdr_features::identity_framing(req) {
         sections.push(identity);
@@ -8440,9 +8467,10 @@ pub(crate) fn zdr_turn_settings(state: &AppState, req: &InvokeRequest) -> ZdrTur
     ZdrTurnSettings {
         system: (!sections.is_empty()).then(|| sections.join("\n\n")),
         max_tokens,
-        thinking_budget_tokens: crate::thinking::budget_tokens(
+        thinking: crate::thinking::plan(
             req.effort.as_deref().unwrap_or_default(),
             max_tokens,
+            ladder_on,
         ),
         structured_output_schema: req.structured_output_schema.clone().unwrap_or_default(),
     }
@@ -8485,7 +8513,7 @@ async fn zdr_direct_stream(
         &route.subscription_connection_id,
         messages,
         settings.max_tokens,
-        settings.thinking_budget_tokens,
+        settings.thinking,
         settings.structured_output_schema.clone(),
         0.7,
         true,
@@ -11742,6 +11770,36 @@ mod tests {
     // function in this module uses, matching `trajectory.rs`'s precedent for
     // tests that touch `AppState`.
 
+    /// The persistence-free path derives the same reasoning request as the
+    /// streamed path from the same profile, and with the ladder off it is the
+    /// legacy budget and no level.
+    #[tokio::test]
+    async fn zdr_turn_honors_the_effort_level() {
+        let state = state_with_platform_instructions("");
+        for profile in ["quick", "deep", "standard", "xhigh", "wat"] {
+            let req = invoke_request(serde_json::json!({ "effort": profile }));
+            for ladder_on in [false, true] {
+                let settings = super::zdr_turn_settings_with(&state, &req, ladder_on);
+                assert_eq!(
+                    settings.thinking,
+                    crate::thinking::plan(profile, settings.max_tokens, ladder_on),
+                    "{profile} ladder_on={ladder_on}"
+                );
+            }
+        }
+        let deep = invoke_request(serde_json::json!({ "effort": "deep" }));
+        let on = super::zdr_turn_settings_with(&state, &deep, true).thinking;
+        assert_eq!(on.effort, mp_contracts::model_plane::v1::ReasoningEffort::High);
+        assert_eq!(on.budget_tokens, 0);
+        let off = super::zdr_turn_settings_with(&state, &deep, false).thinking;
+        assert_eq!(off.effort, mp_contracts::model_plane::v1::ReasoningEffort::Unspecified);
+        // A caller cap below the ceiling is what the legacy budget is sized
+        // against: `deep` does not fit 2048 with headroom and steps down.
+        let capped = invoke_request(serde_json::json!({ "effort": "deep", "max_tokens": 2048 }));
+        let stepped = super::zdr_turn_settings_with(&state, &capped, false).thinking;
+        assert_eq!(stepped.budget_tokens, 1_024);
+    }
+
     #[tokio::test]
     async fn no_authored_instructions_message_when_every_layer_is_empty() {
         let state = state_with_platform_instructions("");
@@ -12341,8 +12399,9 @@ mod tests {
         let answer = "Oslo har omtrent 720 000 innbyggere.";
         let long = u32::try_from(answer_token_budget()).unwrap() + 1_000;
         let none = Evidence::default();
-        let scored = |tokens, basis| score(answer, tokens, truncation_budget(basis), none);
-        assert_eq!(truncation_budget(CostBasis::Subscription), 0);
+        let scored = |tokens, basis| score(answer, tokens, truncation_budget(basis, 0), none);
+        assert_eq!(truncation_budget(CostBasis::Subscription, 0), 0);
+        assert_eq!(truncation_budget(CostBasis::Subscription, 4_096), 0);
         assert_eq!(
             scored(long, CostBasis::Subscription),
             scored(0, CostBasis::Metered),
@@ -12352,6 +12411,18 @@ mod tests {
             scored(long, CostBasis::Metered) < scored(0, CostBasis::Metered),
             "a metered answer at its budget is still penalized as truncated"
         );
+    }
+
+    /// Reasoning tokens count toward `output_tokens`, so a Deep answer that
+    /// spent its allowance must not be scored as cut off by the answer ceiling.
+    #[test]
+    fn truncation_budget_includes_the_allowance() {
+        use super::{answer_token_budget, truncation_budget};
+        use crate::pricing::CostBasis;
+        let ceiling = u32::try_from(answer_token_budget()).unwrap();
+        assert_eq!(truncation_budget(CostBasis::Metered, 0), ceiling);
+        assert_eq!(truncation_budget(CostBasis::Metered, 4_096), ceiling + 4_096);
+        assert!(truncation_budget(CostBasis::Metered, 16_384) <= 32_768);
     }
 
     #[test]

@@ -96,6 +96,29 @@ enum PrivacyTier {
   PRIVACY_TIER_SOVEREIGN = 4;
 }
 
+// ReasoningEffort — the canonical reasoning-effort ladder, weakest first.
+//
+// One ordered set of levels the caller asks for and the catalogue advertises
+// (`ModelInfo.effort_levels` carries the lowercase names). inference-core
+// clamps a requested level to the nearest level the serving model supports
+// rather than failing, so a level is a request, not a guarantee.
+enum ReasoningEffort {
+  // No level requested. The legacy `thinking_budget_tokens` (if any) decides.
+  REASONING_EFFORT_UNSPECIFIED = 0;
+  // The least reasoning the model supports.
+  REASONING_EFFORT_MINIMAL = 1;
+  // A little reasoning; the fast default for quick answers.
+  REASONING_EFFORT_LOW = 2;
+  // Moderate reasoning.
+  REASONING_EFFORT_MEDIUM = 3;
+  // Deep reasoning for hard problems.
+  REASONING_EFFORT_HIGH = 4;
+  // Deeper than high, where the model supports it.
+  REASONING_EFFORT_XHIGH = 5;
+  // The most reasoning the model supports.
+  REASONING_EFFORT_MAX = 6;
+}
+
 // InferRequest — a single inference request to be routed to a provider.
 message InferRequest {
   // Client-supplied request identifier for tracing.
@@ -172,6 +195,18 @@ message InferRequest {
   // model, provider, privacy floor or subscription connection. Other providers
   // ignore it; unsupported subscription models stay on their normal tier.
   bool prefer_priority_service_tier = 16;
+
+  // Canonical reasoning-effort level for this request. UNSPECIFIED (default)
+  // leaves the decision to the legacy `thinking_budget_tokens` (field 13),
+  // which stays as an input so an older caller is byte-identical to before.
+  // When both are set the level wins and the budget is ignored: the level, not
+  // a token count, is what inference-core renders for each provider.
+  //
+  // A value this build does not know is rejected with `invalid_argument`
+  // rather than treated as UNSPECIFIED, so a newer caller never has its
+  // request silently weakened. Effort is a request parameter only and is never
+  // persisted, so it needs no Zero Data Retention handling.
+  ReasoningEffort reasoning_effort = 17;
 }
 
 // ToolDefinition — a function the model may call (chat-parity §2).
@@ -517,6 +552,12 @@ message ModelInfo {
   // Declared residency label: "global", "eu", or "norway". Empty means the
   // provider declares no residency commitment.
   string residency = 7;
+
+  // Reasoning-effort levels this model accepts, weakest first, as the
+  // lowercase canonical names ("minimal", "low", "medium", "high", "xhigh",
+  // "max"). Empty means the model has no effort control or the provider does
+  // not advertise one yet; a client must offer no effort choice in that case.
+  repeated string effort_levels = 8;
 }
 
 // ListModelsResponse — available models in the active provider chain.

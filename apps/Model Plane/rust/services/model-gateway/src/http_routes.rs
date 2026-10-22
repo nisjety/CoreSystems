@@ -7841,6 +7841,11 @@ struct ModelDescriptor {
     /// Declared residency label ("eu"/"norway"); empty when the provider makes
     /// no residency commitment so absence never renders as a guarantee.
     residency: String,
+    /// Reasoning-effort levels the model accepts, weakest first, as canonical
+    /// names. Left out when the model advertises none, so a deploy with the
+    /// ladder off serves the same JSON as before.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    effort_levels: Vec<String>,
 }
 
 /// Wire-numeric → tier label. Mirrors inference-core's `PrivacyTier::label`;
@@ -7901,6 +7906,7 @@ async fn list_models(
             features: m.features,
             privacy_tier: privacy_tier_label(m.privacy_tier),
             residency: m.residency,
+            effort_levels: m.effort_levels,
         })
         .collect();
 
@@ -9249,7 +9255,8 @@ async fn invoke(
                     messages: settings.messages(&user_content),
                     temperature: 0.7,
                     max_tokens: settings.max_tokens,
-                    thinking_budget_tokens: settings.thinking_budget_tokens,
+                    thinking_budget_tokens: settings.thinking.budget_tokens,
+                    reasoning_effort: settings.thinking.effort_wire(),
                     structured_output_schema: normalized
                         .structured_output_schema
                         .clone()
@@ -10727,6 +10734,28 @@ mod run_owner_publish_tests {
         state.publisher = publisher.clone();
         state.run_client = owner_resolver_client().await;
         (state, publisher)
+    }
+
+    fn descriptor(effort_levels: &[&str]) -> ModelDescriptor {
+        ModelDescriptor {
+            id: "gpt-5-mini".to_owned(),
+            provider: "azure".to_owned(),
+            modality: "chat".to_owned(),
+            streaming: true,
+            features: Vec::new(),
+            privacy_tier: "unspecified",
+            residency: String::new(),
+            effort_levels: effort_levels.iter().map(|level| (*level).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn model_descriptor_lists_effort_levels_only_when_there_are_some() {
+        let with = serde_json::to_value(descriptor(&["low", "medium", "high"])).unwrap();
+        assert_eq!(with["effort_levels"], serde_json::json!(["low", "medium", "high"]));
+        // A model with no effort control serves the JSON it served before.
+        let without = serde_json::to_value(descriptor(&[])).unwrap();
+        assert!(without.get("effort_levels").is_none(), "{without}");
     }
 
     fn claims(org_id: &str, user_id: &str) -> Claims {

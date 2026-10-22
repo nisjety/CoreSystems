@@ -2349,6 +2349,7 @@ async fn run_rounds(
             // dial is a chat-surface control, and a deployed agent's budget
             // is its round budget.
             thinking_budget_tokens: 0,
+            reasoning_effort: 0,
             request_id: req.run_id.clone(),
             org_id: req.org_id.clone(),
             // The run's route, the same on every round of the parent and of

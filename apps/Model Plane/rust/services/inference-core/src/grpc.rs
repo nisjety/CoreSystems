@@ -69,7 +69,32 @@ impl From<provider::ModelInfo> for pb::ModelInfo {
             // claimed" never renders as a real guarantee.
             privacy_tier: model.privacy_tier.as_wire_i32(),
             residency: model.residency_label,
+            effort_levels: model
+                .effort_levels
+                .into_iter()
+                .map(|level| level.as_str().to_owned())
+                .collect(),
         }
+    }
+}
+
+/// Map a wire `ReasoningEffort` onto the internal ladder. UNSPECIFIED is "no
+/// level" so the legacy budget keeps deciding; an unknown numeric fails closed
+/// with `invalid_argument`, because a NEWER client naming a level this build
+/// cannot interpret must not have its request silently weakened to "none".
+fn effort_from_wire(value: i32) -> Result<Option<provider::effort::Level>, Status> {
+    use provider::effort::Level;
+    match pb::ReasoningEffort::try_from(value) {
+        Ok(pb::ReasoningEffort::Unspecified) => Ok(None),
+        Ok(pb::ReasoningEffort::Minimal) => Ok(Some(Level::Minimal)),
+        Ok(pb::ReasoningEffort::Low) => Ok(Some(Level::Low)),
+        Ok(pb::ReasoningEffort::Medium) => Ok(Some(Level::Medium)),
+        Ok(pb::ReasoningEffort::High) => Ok(Some(Level::High)),
+        Ok(pb::ReasoningEffort::Xhigh) => Ok(Some(Level::XHigh)),
+        Ok(pb::ReasoningEffort::Max) => Ok(Some(Level::Max)),
+        Err(_) => Err(Status::invalid_argument(format!(
+            "unknown reasoning effort value: {value}"
+        ))),
     }
 }
 
@@ -1097,7 +1122,7 @@ fn to_internal_request(
 
     Ok(provider::InferRequest {
         thinking_budget_tokens: req.thinking_budget_tokens,
-        reasoning_effort: None,
+        reasoning_effort: effort_from_wire(req.reasoning_effort)?,
         prefer_priority_service_tier: req.prefer_priority_service_tier,
         request_id: req.request_id.clone(),
         provider_hint: req.provider_hint.clone(),
@@ -1565,6 +1590,70 @@ mod tests {
         assert!(internal.zdr, "issuer-enforced ZDR cannot be downgraded");
         // The caller's verified bearer is threaded for the budget check.
         assert_eq!(internal.caller_bearer.as_str(), "test-bearer");
+    }
+
+    fn effort_request(value: i32) -> pb::InferRequest {
+        pb::InferRequest {
+            org_id: "org-signed".to_owned(),
+            reasoning_effort: value,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn proto_level_roundtrips_to_internal() {
+        use provider::effort::Level;
+        let principal = AuthenticatedPrincipal::for_test("org-signed", Some("user-signed"), false);
+        let cases = [
+            (pb::ReasoningEffort::Unspecified, None),
+            (pb::ReasoningEffort::Minimal, Some(Level::Minimal)),
+            (pb::ReasoningEffort::Low, Some(Level::Low)),
+            (pb::ReasoningEffort::Medium, Some(Level::Medium)),
+            (pb::ReasoningEffort::High, Some(Level::High)),
+            (pb::ReasoningEffort::Xhigh, Some(Level::XHigh)),
+            (pb::ReasoningEffort::Max, Some(Level::Max)),
+        ];
+        for (wire, internal) in cases {
+            let mapped = to_internal_request(&effort_request(wire as i32), &principal)
+                .expect("every known level maps onto the internal contract");
+            assert_eq!(mapped.reasoning_effort, internal, "{wire:?}");
+        }
+    }
+
+    #[test]
+    fn a_level_leaves_the_legacy_budget_input_untouched() {
+        let principal = AuthenticatedPrincipal::for_test("org-signed", Some("user-signed"), false);
+        let mut request = effort_request(pb::ReasoningEffort::High as i32);
+        request.thinking_budget_tokens = 1_024;
+        let mapped = to_internal_request(&request, &principal).expect("maps");
+        // Field 13 stays a legacy input; "the level wins" is decided where the
+        // level is resolved, not by erasing the caller's own number here.
+        assert_eq!(mapped.thinking_budget_tokens, 1_024);
+        assert_eq!(mapped.reasoning_effort, Some(provider::effort::Level::High));
+    }
+
+    #[test]
+    fn unknown_enum_value_is_invalid_argument() {
+        let principal = AuthenticatedPrincipal::for_test("org-signed", Some("user-signed"), false);
+        for value in [7, 99, -1] {
+            let error = to_internal_request(&effort_request(value), &principal)
+                .expect_err("a level this build cannot interpret must not be weakened");
+            assert_eq!(error.code(), tonic::Code::InvalidArgument, "{value}");
+        }
+    }
+
+    #[test]
+    fn model_info_carries_effort_levels_as_canonical_names() {
+        use provider::effort::Level;
+        let wire: pb::ModelInfo = provider::ModelInfo {
+            effort_levels: vec![Level::Low, Level::Medium, Level::High, Level::XHigh],
+            ..provider::ModelInfo::default()
+        }
+        .into();
+        assert_eq!(wire.effort_levels, ["low", "medium", "high", "xhigh"]);
+
+        let none: pb::ModelInfo = provider::ModelInfo::default().into();
+        assert!(none.effort_levels.is_empty());
     }
 
     #[tokio::test(start_paused = true)]

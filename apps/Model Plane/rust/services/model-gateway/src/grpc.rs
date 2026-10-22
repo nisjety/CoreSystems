@@ -3022,6 +3022,7 @@ mod tests {
                     features: Vec::new(),
                     privacy_tier: 0,
                     residency: String::new(),
+                    effort_levels: Vec::new(),
                 }],
             }))
         }

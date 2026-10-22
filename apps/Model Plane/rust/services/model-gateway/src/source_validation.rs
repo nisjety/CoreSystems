@@ -2274,7 +2274,16 @@ where
     // A semantic acceptance decision needs reasoning even when the author used
     // a quick chat profile. Inference Core maps this subscription budget to
     // high effort on the SAME selected model; paid-provider routing is unchanged.
-    check.thinking_budget_tokens = if tool_reporting { 0 } else { 4_096 };
+    // With the effort ladder on the same decision is sent as the High level
+    // instead of a budget (`thinking::source_review_plan`).
+    if !tool_reporting {
+        let reasoning = crate::thinking::source_review_plan(crate::thinking::ladder_enabled());
+        check.thinking_budget_tokens = reasoning.budget_tokens;
+        check.reasoning_effort = reasoning.effort_wire();
+    } else {
+        check.thinking_budget_tokens = 0;
+        check.reasoning_effort = 0;
+    }
     // Source review is on the artifact deadline's critical path. Ask the
     // already-selected subscription for its priority tier without lowering
     // high-effort factual judgment or changing the model/provider route.
@@ -2862,6 +2871,7 @@ where
         repair.tool_choice.clear();
         repair.structured_output_schema.clear();
         repair.thinking_budget_tokens = 0;
+        repair.reasoning_effort = 0;
         // The authoring conversation contains an obsolete layout and assistant
         // completions. They are not instructions to recreate the original
         // report. Retain trusted system constraints; pass task history and the

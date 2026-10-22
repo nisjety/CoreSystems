@@ -6795,6 +6795,7 @@ pub async fn run_tool_rounds_for_model(
                     // Spend reasoning before drafting to avoid slower private repair
                     // rounds and keep the existing high-effort review independent.
                     thinking_budget_tokens: 0,
+                    reasoning_effort: 0,
                     prefer_priority_service_tier: priority_project_author,
                     request_id: request_id.to_owned(),
                     org_id: org_id.to_owned(),
