@@ -3541,6 +3541,7 @@ export function useChatController() {
     const shown = streamFailurePresentation(failure.code, failure.message, i18n.tr, {
       retryAfterMs: failure.retryAfterMs,
       resetsAt: failure.resetsAt,
+      feature: failure.feature,
       locale: i18n.locale(),
       now: Date.now(),
     })

@@ -71,9 +71,11 @@ export function extractError(
     }
     if (errorField && typeof errorField === 'object') {
       const e = errorField as Record<string, unknown>
+      const feature = typeof e.feature === 'string' && e.feature.trim() ? e.feature : undefined
       return {
         code: typeof e.code === 'string' ? e.code : null,
         message: typeof e.message === 'string' && e.message.trim() ? e.message : `Request failed (${status})`,
+        ...(feature ? { feature } : {}),
       }
     }
 
@@ -103,7 +105,7 @@ export async function requestJson<T>(path: string, init?: RequestInit): Promise<
   const body = (await response.json().catch(() => null)) as Envelope<T> | Record<string, unknown> | null
 
   if (!response.ok) {
-    const { code, message } = extractError(body, response.status)
+    const { code, message, feature } = extractError(body, response.status)
     // A failed sign-in or 2FA challenge is an expected credential error and
     // must remain on its form. Other gateway `unauthorized` responses mean the
     // existing browser session is no longer accepted, so leaving the user on a
@@ -116,7 +118,7 @@ export async function requestJson<T>(path: string, init?: RequestInit): Promise<
     ) {
       window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT))
     }
-    throw new ApiError(message, response.status, code)
+    throw new ApiError(message, response.status, code, feature ?? null)
   }
 
   return unwrap(body as Envelope<T>)
@@ -148,8 +150,8 @@ export async function requestForm<T>(
   const body = (await response.json().catch(() => null)) as Envelope<T> | Record<string, unknown> | null
 
   if (!response.ok) {
-    const { code, message } = extractError(body, response.status)
-    throw new ApiError(message, response.status, code)
+    const { code, message, feature } = extractError(body, response.status)
+    throw new ApiError(message, response.status, code, feature ?? null)
   }
 
   return unwrap(body as Envelope<T>)

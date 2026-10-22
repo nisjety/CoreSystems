@@ -1280,6 +1280,7 @@ function dispatchAgUiEvent(
         retryable: payload.retryable === true,
         runId,
         requestId,
+        ...failureFeature(payload, undefined),
       })
       return true
     case 'TEXT_MESSAGE_CONTENT':
@@ -1587,6 +1588,7 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
         runId: str(payload.run_id) ?? str(payload.runId),
         requestId: str(payload.request_id) ?? str(payload.requestId),
         ...failureTiming(payload),
+        ...failureFeature(payload, envelope),
       })
       break
     }
