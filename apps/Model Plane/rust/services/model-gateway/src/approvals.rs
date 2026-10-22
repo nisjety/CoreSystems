@@ -71,6 +71,9 @@ pub fn to_create_approval_request(a: &GatewayApproval) -> CreateApprovalRequest 
         // existing durable row instead of duplicating it (D-1 idempotency).
         idempotency_key: idempotency_key(&a.run_id, &a.action_id),
         continuation_descriptor_json: String::new(),
+        // The cache knows a kind and a free-text reason, not which rule held the call, so
+        // it states no cause rather than guessing one (build plan WS13 S1).
+        cause: None,
     }
 }
 
@@ -1455,6 +1458,10 @@ mod tests {
         assert_eq!(req.org_id, "org1");
         assert_eq!(req.kind, ApprovalKind::ToolCall as i32);
         assert_eq!(req.reason, "rm -rf /");
+        assert!(
+            req.cause.is_none(),
+            "the cache cannot say which rule held the call, so it states no cause"
+        );
     }
 
     #[test]
@@ -1527,6 +1534,7 @@ mod tests {
             decided_at: None,
             expires_at: None,
             org_id: org.into(),
+            cause: None,
         }
     }
 

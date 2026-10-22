@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use mp_contracts::approval_cause::{self, CauseCode};
 use mp_contracts::model_plane::v1::{
     self as pb,
     browser_broker_client::BrowserBrokerClient,
@@ -1040,6 +1041,12 @@ impl ExecutionCore for ExecutionService {
                     // (org_id, idempotency_key) ON CONFLICT guard.
                     idempotency_key: format!("{run_id}:{step_id}"),
                     continuation_descriptor_json: String::new(),
+                    cause: Some(approval_cause::for_call(
+                        outcome.cause.unwrap_or(CauseCode::UnclassifiedGate),
+                        &run_id,
+                        &req.tool_name,
+                        &req.tool_input,
+                    )),
                 },
                 session_bearer.as_str(),
             )

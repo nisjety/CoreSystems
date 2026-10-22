@@ -39,6 +39,7 @@
 
 use std::collections::BTreeSet;
 
+use mp_contracts::approval_cause::{self, CauseCode};
 use mp_contracts::model_plane::v1::{
     self as pb, inference_core_client::InferenceCoreClient,
     managed_run_lifecycle_client::ManagedRunLifecycleClient,
@@ -344,6 +345,7 @@ fn unrecorded_effect_outcome(run_id: &str, tool: &str, reason: &str) -> StepOutc
              of time, so it was held back. Try again."
         ),
         compaction_triggered: false,
+        cause: None,
     }
 }
 
@@ -389,6 +391,8 @@ struct PendingPause {
     step_id: String,
     name: String,
     arguments_json: String,
+    /// The gate that held the call, from the step's own outcome.
+    cause: CauseCode,
 }
 
 /// Everything a round loop needs that does not change between its rounds.
@@ -3297,6 +3301,7 @@ async fn run_rounds(
                                 runtime_loop::fold::held_back_text(&call.name)
                             },
                             compaction_triggered: false,
+                            cause: None,
                         });
                     }
                     // The release's pre-reserve could not be recorded (it failed, or its answer
@@ -3355,6 +3360,7 @@ async fn run_rounds(
                                         &call.name,
                                     ),
                                     compaction_triggered: false,
+                                    cause: None,
                                 });
                             }
                             // The action exists under another identity: whatever holds the
@@ -3511,6 +3517,7 @@ async fn run_rounds(
                             step_id,
                             name: call.name.clone(),
                             arguments_json: call.arguments_json.clone(),
+                            cause: outcome.cause.unwrap_or(CauseCode::UnclassifiedGate),
                         });
                     } else {
                         outcomes.push(ToolStepResult {
@@ -3674,6 +3681,7 @@ async fn run_rounds(
                 &pending.step_id,
                 &pending.name,
                 &pending.arguments_json,
+                pending.cause,
                 ctx.permission_wire,
                 rounds_executed.saturating_add(delegated_rounds),
                 ctx.session_bearer,
@@ -6105,6 +6113,8 @@ async fn pause_for_approval(
     step_id: &str,
     tool_name: &str,
     tool_input: &str,
+    // The gate that held the call (build plan WS13 S1), stored beside the approval.
+    cause: CauseCode,
     permission_mode: &str,
     rounds_executed: u32,
     bearer: Option<&str>,
@@ -6174,6 +6184,12 @@ async fn pause_for_approval(
             // a duplicate via the (org_id, idempotency_key) ON CONFLICT guard.
             idempotency_key: format!("{}:{step_id}", req.run_id),
             continuation_descriptor_json,
+            cause: Some(approval_cause::for_call(
+                cause,
+                &req.run_id,
+                tool_name,
+                tool_input,
+            )),
         },
         bearer,
     );
@@ -9453,12 +9469,14 @@ mod tests {
             output: PRIVATE_OUTPUT.to_owned(),
             error: String::new(),
             compaction_triggered: false,
+            cause: None,
         };
         let degraded = StepOutcome {
             status: "failed".to_owned(),
             output: String::new(),
             error: PRIVATE_ERROR.to_owned(),
             compaction_triggered: false,
+            cause: None,
         };
 
         record_tool_step(
@@ -9511,12 +9529,14 @@ mod tests {
             output: TOOL_OUTPUT.to_owned(),
             error: String::new(),
             compaction_triggered: false,
+            cause: None,
         };
         let failure = StepOutcome {
             status: "failed".to_owned(),
             output: String::new(),
             error: TOOL_ERROR.to_owned(),
             compaction_triggered: false,
+            cause: None,
         };
 
         record_tool_step(
@@ -11693,6 +11713,7 @@ mod tests {
             "step-1",
             "delete_records",
             "{}",
+            CauseCode::RiskyEffectUnderAsk,
             "ask",
             0,
             None,
@@ -11732,6 +11753,7 @@ mod tests {
             "step-1",
             "delete_records",
             "{}",
+            CauseCode::RiskyEffectUnderAsk,
             "ask",
             0,
             Some("session-token"),
@@ -13536,6 +13558,14 @@ mod tests {
         let approval = &r.approval_requests[0];
         assert_eq!(approval.kind, pb::ApprovalKind::Destructive as i32);
         assert_eq!(approval.reason, "tool 'delete_records' requires approval");
+        let cause = approval.cause.as_ref().expect("the pause states its cause");
+        assert_eq!(cause.code, "risky_effect_under_ask");
+        assert_eq!(cause.tool, "delete_records");
+        assert_eq!(cause.action_key, "delete_records");
+        assert_eq!(
+            cause.call_digest,
+            approval_cause::call_digest("run_test", "delete_records", "{}")
+        );
         assert_eq!(approval.idempotency_key, "run_test:tool_1_del-1");
         assert_eq!(approval.org_id, "org_test");
         assert_eq!(approval.user_id, "user_test");
@@ -13605,6 +13635,103 @@ mod tests {
         assert!(r.decisions.is_empty(), "no posture decides a disclosure");
     }
 
+    /// The one approval a run raised when the model asked for `tool`, under `mode` and
+    /// the given capability gate, as session-core received it.
+    async fn the_pause_for(
+        tool: &str,
+        arguments: &str,
+        mode: &str,
+        policy: &dyn crate::capability_policy::CapabilityPolicy,
+    ) -> pb::CreateApprovalRequest {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let inference_channel = spawn_inference_channel(vec![one_call(tool, arguments)]).await;
+        let mut req = sample_request();
+        req.mode = mode.to_owned();
+        let tools = vec![pb::ToolDefinition {
+            name: tool.to_owned(),
+            description: "A test tool.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{}}"#.to_owned(),
+        }];
+        let resp = drive_persistent(&rec, req, tools, policy, inference_channel)
+            .await
+            .expect("the run pauses");
+        assert_eq!(
+            resp.status, "awaiting_approval",
+            "{tool} must pause the run"
+        );
+        let r = rec.lock().unwrap();
+        assert_eq!(r.approval_requests.len(), 1, "exactly one approval created");
+        r.approval_requests[0].clone()
+    }
+
+    struct AskCapabilityPolicy;
+
+    #[tonic::async_trait]
+    impl crate::capability_policy::CapabilityPolicy for AskCapabilityPolicy {
+        async fn evaluate(
+            &self,
+            _tool_name: &str,
+            _run_id: &str,
+            _org_id: &str,
+        ) -> Result<crate::capability_policy::CapabilityDecision, Status> {
+            Ok(crate::capability_policy::CapabilityDecision::Ask)
+        }
+    }
+
+    /// An owner-plane effect pauses on every posture, so the cause is the reservation
+    /// and not the posture. The cause names the tool and the call, never the arguments.
+    #[tokio::test]
+    async fn an_owner_effect_pause_carries_owner_effect_reserved() {
+        let arguments = r#"{"conversation_id":"conv_secret_9"}"#;
+        for mode in ["auto", "ask"] {
+            let approval = the_pause_for(
+                crate::ticket_tools::TOOL_NAME,
+                arguments,
+                mode,
+                &ALLOW_CAPABILITY_POLICY,
+            )
+            .await;
+            let cause = approval.cause.expect("the pause states its cause");
+            assert_eq!(cause.code, "owner_effect_reserved", "{mode}");
+            assert_eq!(cause.tool, crate::ticket_tools::TOOL_NAME);
+            assert_eq!(
+                cause.call_digest,
+                approval_cause::call_digest("run_test", crate::ticket_tools::TOOL_NAME, arguments)
+            );
+            assert!(
+                !format!("{cause:?}").contains("conv_secret_9"),
+                "no argument text in the cause: {cause:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_disclosure_pause_carries_consent_to_disclose() {
+        use crate::runtime_loop::subagent_results::READ_TOOL;
+
+        let approval = the_pause_for(
+            READ_TOOL,
+            r#"{"child_run_id":"run_child"}"#,
+            "auto",
+            &ALLOW_CAPABILITY_POLICY,
+        )
+        .await;
+        let cause = approval.cause.expect("the pause states its cause");
+        assert_eq!(cause.code, "consent_to_disclose");
+        assert_eq!(cause.tool, READ_TOOL);
+        assert_eq!(cause.scope_options, vec!["once".to_owned()]);
+    }
+
+    /// A tool the posture would let run is held when capability-core answers `ask`, which
+    /// it does for a high-risk capability.
+    #[tokio::test]
+    async fn a_capability_ask_pause_carries_capability_high_risk() {
+        let approval = the_pause_for("recall_notes", "{}", "auto", &AskCapabilityPolicy).await;
+        let cause = approval.cause.expect("the pause states its cause");
+        assert_eq!(cause.code, "capability_high_risk");
+        assert_eq!(cause.tool, "recall_notes");
+    }
+
     /// The same provider write under `ask` pauses at the destructive gate and decides
     /// nothing. The `auto` record below labels this operation as a tool-call approval.
     /// Both labels stay pinned until cause codes give each pause its own.
@@ -13664,6 +13791,9 @@ mod tests {
             approval.reason,
             "tool 'execute_provider_action' requires approval"
         );
+        let cause = approval.cause.as_ref().expect("the pause states its cause");
+        assert_eq!(cause.code, "provider_write");
+        assert_eq!(cause.action_key, "execute_provider_action:message.send");
         assert_eq!(approval.idempotency_key, "run_test:tool_1_pa-1");
         assert!(
             r.decisions.is_empty(),
@@ -13740,6 +13870,15 @@ mod tests {
             approval.reason,
             "provider write 'message.send' requires approval"
         );
+        let cause = approval
+            .cause
+            .as_ref()
+            .expect("the record states its cause");
+        assert_eq!(
+            cause.code, "auto_posture_provider_write",
+            "the posture's own approval is told apart from a person's pause"
+        );
+        assert_eq!(cause.action_key, "execute_provider_action:message.send");
         assert_eq!(approval.idempotency_key, "run_test:tool_1_pa-1");
         assert_eq!(
             r.decision_requests.len(),

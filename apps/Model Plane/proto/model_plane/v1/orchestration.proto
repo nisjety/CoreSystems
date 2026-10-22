@@ -407,6 +407,46 @@ message Approval {
   // (the default, unchanged), "segment" or "loop" = the durable Do loop, which
   // consumes it once via ConsumeApproval. Loop modes create no delivery row.
   string continuation_mode = 15;
+
+  // Why this approval was asked for, as a closed code (build plan WS13 S1).
+  // Read back from `approvals.metadata.cause`; unset on an approval created
+  // before the cause existed and on one whose creator states none.
+  ApprovalCause cause = 16;
+}
+
+// Why an approval was asked for (build plan WS13 S1). The code is a closed
+// vocabulary (`mp-contracts` approval_cause, `api/contracts/approval-causes.json`);
+// an unknown code is stored as `unclassified_gate`. Never carries argument
+// values: `call_digest` is a run-salted digest, `action_key` names the tool and
+// operation only.
+message ApprovalCause {
+  // Closed cause code, e.g. `owner_effect_reserved`.
+  string code = 1;
+
+  // Tool the pause is on. Empty for a gate that is not a tool call.
+  string tool = 2;
+
+  // Declared side-effect class of the call (`mp-contracts` tool_class). Empty
+  // until the gate reads a declared class.
+  string effect_class = 3;
+
+  // Standing rule that raised the pause. Empty until rules exist (WS13 S7).
+  string rule_id = 4;
+
+  // Browser risk category the Model proposed an action under (`browser_action_risk`).
+  string risk_category = 5;
+
+  // Scopes the decider may grant: `once`, `thread`, `run`. Stubbed to `once`.
+  repeated string scope_options = 6;
+
+  // True when granting needs a recent re-authentication (WS13 S5).
+  bool step_up_required = 7;
+
+  // Tool plus operation, never argument values: the key a standing grant matches.
+  string action_key = 8;
+
+  // Run-salted blake3 digest of the exact (tool, arguments) call.
+  string call_digest = 9;
 }
 
 // A durable todo record.
@@ -707,6 +747,11 @@ message CreateApprovalRequest {
   // Empty = the cold delivery worker, exactly as before. Refused for a
   // zero-retention caller: a loop continuation retains a fold.
   string continuation_mode = 12;
+
+  // Why the approval is asked for (build plan WS13 S1). Stored in the approval's
+  // `metadata.cause`; an unknown code degrades to `unclassified_gate`. Unset keeps
+  // the approval exactly as before.
+  ApprovalCause cause = 13;
 }
 
 // ConsumeApproval claims one granted loop-mode approval for the loop that is

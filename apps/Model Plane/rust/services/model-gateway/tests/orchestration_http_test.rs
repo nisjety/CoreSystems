@@ -469,6 +469,7 @@ impl OrchestrationCoreService for MockOrchestration {
             approvals: vec![Approval {
                 consumed_at: None,
                 continuation_mode: String::new(),
+                cause: None,
                 id: "appr-1".into(),
                 run_id: request.run_id,
                 step_id: request.step_id,
@@ -495,6 +496,7 @@ impl OrchestrationCoreService for MockOrchestration {
             approvals: vec![Approval {
                 consumed_at: None,
                 continuation_mode: String::new(),
+                cause: None,
                 id: "appr-pending-1".into(),
                 run_id: "run-1".into(),
                 step_id: String::new(),
@@ -526,6 +528,7 @@ impl OrchestrationCoreService for MockOrchestration {
             approval: Some(Approval {
                 consumed_at: None,
                 continuation_mode: String::new(),
+                cause: None,
                 id: request.approval_id,
                 run_id: "run-1".into(),
                 step_id: "step-1".into(),
@@ -552,6 +555,7 @@ impl OrchestrationCoreService for MockOrchestration {
             approval: Some(Approval {
                 consumed_at: None,
                 continuation_mode: String::new(),
+                cause: None,
                 id: "appr-mock".into(),
                 run_id: request.run_id,
                 step_id: request.step_id,
@@ -597,6 +601,7 @@ impl OrchestrationCoreService for MockOrchestration {
             approval: Some(Approval {
                 consumed_at: None,
                 continuation_mode,
+                cause: None,
                 id: request.approval_id,
                 run_id: "run-1".into(),
                 step_id: "step-1".into(),
@@ -1497,6 +1502,7 @@ fn owned_approval(state: ApprovalState) -> Approval {
     Approval {
         consumed_at: None,
         continuation_mode: String::new(),
+        cause: None,
         id: "appr-owned".into(),
         run_id: "run-owned".into(),
         step_id: String::new(),

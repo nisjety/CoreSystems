@@ -16,6 +16,7 @@ use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 use futures::{Stream, StreamExt};
+use mp_contracts::approval_cause::{self, CauseCode};
 use mp_contracts::model_plane::v1::{
     self as proto,
     orchestration_core_service_server::{OrchestrationCoreService, OrchestrationCoreServiceServer},
@@ -1262,7 +1263,43 @@ fn approval_from_row(row: &store::ApprovalRow) -> proto::Approval {
         org_id: row.org_id.clone(),
         consumed_at: row.consumed_at.map(ts),
         continuation_mode: row.continuation_mode.clone(),
+        cause: approval_cause::from_metadata(&row.metadata),
     }
+}
+
+/// The `metadata` a new approval row is created with: the reason and the gated step,
+/// and the cause the creator stated (build plan WS13 S1). Also returns the stored cause
+/// code, for the counter.
+///
+/// The cause is checked here and not trusted: a code outside the closed vocabulary is
+/// stored as `unclassified_gate` (and logged, because it means a creator is newer than
+/// this service), the scope options are the code's own, and every field is bounded. A
+/// zero-retention credential stores none, so nothing of an approval's cause outlives a
+/// ZDR caller; an approval with no stated cause is stored exactly as before.
+fn new_approval_metadata(
+    req: &proto::CreateApprovalRequest,
+    zdr: bool,
+) -> (JsonValue, Option<&'static str>) {
+    let mut metadata_map = serde_json::Map::new();
+    if !req.reason.is_empty() {
+        metadata_map.insert("reason".to_owned(), JsonValue::String(req.reason.clone()));
+    }
+    if !req.step_id.is_empty() {
+        metadata_map.insert("step_id".to_owned(), JsonValue::String(req.step_id.clone()));
+    }
+    let mut stored_code = None;
+    if let Some(cause) = req.cause.clone().filter(|_| !zdr) {
+        let (cause, known) = approval_cause::normalized(cause);
+        if !known {
+            warn!(
+                run_id = %req.run_id,
+                "create_approval: unknown approval cause code stored as unclassified_gate"
+            );
+        }
+        stored_code = Some(CauseCode::from_wire(&cause.code).as_str());
+        metadata_map.insert("cause".to_owned(), approval_cause::to_metadata(&cause));
+    }
+    (JsonValue::Object(metadata_map), stored_code)
 }
 
 /// The evidence dimensions the vision's proof model names that this plane
@@ -3077,14 +3114,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             } else {
                 None
             };
-            let mut metadata_map = serde_json::Map::new();
-            if !req.reason.is_empty() {
-                metadata_map.insert("reason".to_owned(), JsonValue::String(req.reason.clone()));
-            }
-            if !req.step_id.is_empty() {
-                metadata_map.insert("step_id".to_owned(), JsonValue::String(req.step_id.clone()));
-            }
-            let metadata = JsonValue::Object(metadata_map);
+            let (metadata, cause_code) = new_approval_metadata(&req, caller.zdr());
 
             let created = store::request_approval(
                 &self.pool,
@@ -3109,6 +3139,11 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
+            // Counted when a row was inserted, so a retried request that collapses onto
+            // an existing approval is not counted twice.
+            if let (Some(_), Some(code)) = (&created, cause_code) {
+                metrics::counter!("mp_session_approval_cause_total", "code" => code).increment(1);
+            }
             // On the `DO NOTHING` no-op path `created` is None and the existing
             // durable row keeps its ORIGINAL id (not the new caller id), so we
             // must resolve it by the idempotency key rather than by `id`.
@@ -4797,6 +4832,90 @@ mod tests {
         assert!(!is_idempotent_approval_retry(
             &row, "granted", "user-2", "approved"
         ));
+    }
+
+    fn create_with_cause(code: &str) -> proto::CreateApprovalRequest {
+        proto::CreateApprovalRequest {
+            run_id: "run-1".to_owned(),
+            step_id: "step-1".to_owned(),
+            reason: "tool 'delete_records' requires approval".to_owned(),
+            cause: Some(proto::ApprovalCause {
+                code: code.to_owned(),
+                tool: "delete_records".to_owned(),
+                action_key: "delete_records".to_owned(),
+                call_digest: "d".repeat(64),
+                scope_options: vec!["once".to_owned()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_stated_cause_is_stored_beside_the_reason_and_read_back() {
+        let (metadata, code) =
+            new_approval_metadata(&create_with_cause("risky_effect_under_ask"), false);
+        assert_eq!(code, Some("risky_effect_under_ask"));
+        assert_eq!(
+            metadata["reason"],
+            "tool 'delete_records' requires approval"
+        );
+        assert_eq!(metadata["step_id"], "step-1");
+        assert_eq!(metadata["cause"]["code"], "risky_effect_under_ask");
+        assert_eq!(metadata["cause"]["tool"], "delete_records");
+
+        let mut row = test_approval("appr_1");
+        row.metadata = metadata;
+        let approval = approval_from_row(&row);
+        let cause = approval.cause.expect("the stored cause comes back");
+        assert_eq!(cause.code, "risky_effect_under_ask");
+        assert_eq!(cause.call_digest, "d".repeat(64));
+        assert_eq!(cause.scope_options, vec!["once".to_owned()]);
+    }
+
+    #[test]
+    fn an_unknown_cause_code_is_stored_as_unclassified_gate() {
+        let mut req = create_with_cause("tainted_egress");
+        req.cause.as_mut().expect("cause").scope_options = vec!["run".to_owned()];
+        let (metadata, code) = new_approval_metadata(&req, false);
+        assert_eq!(code, Some("unclassified_gate"));
+        assert_eq!(metadata["cause"]["code"], "unclassified_gate");
+        assert_eq!(
+            metadata["cause"]["scope_options"],
+            serde_json::json!(["once"]),
+            "a creator cannot widen the scopes it offers"
+        );
+        let (metadata, _) = new_approval_metadata(&create_with_cause(""), false);
+        assert_eq!(metadata["cause"]["code"], "unclassified_gate");
+    }
+
+    #[test]
+    fn a_zero_retention_caller_stores_no_cause() {
+        let (metadata, code) = new_approval_metadata(&create_with_cause("provider_write"), true);
+        assert_eq!(code, None);
+        assert!(metadata.get("cause").is_none(), "{metadata}");
+        assert_eq!(
+            metadata["reason"],
+            "tool 'delete_records' requires approval"
+        );
+    }
+
+    #[test]
+    fn an_approval_with_no_stated_cause_is_stored_exactly_as_before() {
+        let mut req = create_with_cause("provider_write");
+        req.cause = None;
+        let (metadata, code) = new_approval_metadata(&req, false);
+        assert_eq!(code, None);
+        assert_eq!(
+            metadata,
+            serde_json::json!({
+                "reason": "tool 'delete_records' requires approval",
+                "step_id": "step-1",
+            })
+        );
+        let mut row = test_approval("appr_2");
+        row.metadata = metadata;
+        assert!(approval_from_row(&row).cause.is_none());
     }
 
     #[tokio::test]

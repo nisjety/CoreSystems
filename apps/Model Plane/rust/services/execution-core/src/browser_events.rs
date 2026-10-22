@@ -12,6 +12,7 @@
 //! Everything here is best-effort: a failure to publish never surfaces to the
 //! loop (the trait methods return `()` and errors are logged, not propagated).
 
+use mp_contracts::approval_cause::{self, CauseCode};
 use mp_contracts::model_plane::v1::{
     self as pb, orchestration_core_service_client::OrchestrationCoreServiceClient,
     orchestration_event,
@@ -25,6 +26,9 @@ use crate::browser_agent::{
     BrowserEventSink, BrowserObservation, PlanConfig, RiskyActionDetail,
 };
 use crate::state::{RunStatus, StateStore};
+
+/// The tool whose actions the in-loop gate holds, named on the approval's cause.
+const BROWSER_AGENT_TOOL: &str = "browser_agent";
 
 /// Publishes browser-agent events to session-core's orchestration broadcast.
 ///
@@ -294,6 +298,14 @@ impl BrowserEventSink for OrchestrationEventSink {
                 detail.risk_category.as_str()
             ),
             continuation_descriptor_json: String::new(),
+            // The in-loop gate has no tool call to key on, only the category the
+            // risk classifier assigned the Model's proposed action.
+            cause: Some(pb::ApprovalCause {
+                tool: BROWSER_AGENT_TOOL.to_owned(),
+                action_key: BROWSER_AGENT_TOOL.to_owned(),
+                risk_category: detail.risk_category.as_str().to_owned(),
+                ..approval_cause::for_code(CauseCode::BrowserActionRisk)
+            }),
         }) {
             Ok(request) => orchestration.create_approval(request).await,
             Err(error) => Err(error),
@@ -500,6 +512,8 @@ mod tests {
     #[derive(Clone, Default)]
     struct NeverResolvingOrchestration {
         decide_calls: DecideCapture,
+        /// Every `CreateApproval` the gate sent, in order.
+        created: Arc<Mutex<Vec<CreateApprovalRequest>>>,
     }
 
     #[tonic::async_trait]
@@ -565,6 +579,7 @@ mod tests {
             request: TonicRequest<CreateApprovalRequest>,
         ) -> Result<Response<CreateApprovalResponse>, Status> {
             let request = request.into_inner();
+            self.created.lock().unwrap().push(request.clone());
             Ok(Response::new(CreateApprovalResponse {
                 approval: Some(pb::Approval {
                     consumed_at: None,
@@ -582,6 +597,7 @@ mod tests {
                     decided_at: None,
                     expires_at: None,
                     org_id: request.org_id,
+                    cause: request.cause,
                 }),
             }))
         }
@@ -622,6 +638,7 @@ mod tests {
                     decided_at: None,
                     expires_at: None,
                     org_id: "org_test".into(),
+                    cause: None,
                 }),
             }))
         }
@@ -687,6 +704,7 @@ mod tests {
                     decided_at: None,
                     expires_at: None,
                     org_id: "org_test".into(),
+                    cause: None,
                 }),
             }))
         }
@@ -802,6 +820,7 @@ mod tests {
         let decide_calls: DecideCapture = Arc::default();
         let channel = spawn_mock(NeverResolvingOrchestration {
             decide_calls: decide_calls.clone(),
+            ..Default::default()
         })
         .await;
 
@@ -848,6 +867,7 @@ mod tests {
         let decide_calls: DecideCapture = Arc::default();
         let channel = spawn_mock(NeverResolvingOrchestration {
             decide_calls: decide_calls.clone(),
+            ..Default::default()
         })
         .await;
 
@@ -875,6 +895,7 @@ mod tests {
         let decide_calls: DecideCapture = Arc::default();
         let channel = spawn_mock(NeverResolvingOrchestration {
             decide_calls: decide_calls.clone(),
+            ..Default::default()
         })
         .await;
 
@@ -896,5 +917,31 @@ mod tests {
             .expect("decide_approval was called");
         assert_eq!(decision, pb::ApprovalState::TimedOut as i32);
         assert_eq!(decided_by, "system:approval-timeout");
+    }
+
+    #[tokio::test]
+    async fn a_browser_gate_carries_the_typed_risk_category() {
+        let created = Arc::default();
+        let channel = spawn_mock(NeverResolvingOrchestration {
+            created: Arc::clone(&created),
+            ..Default::default()
+        })
+        .await;
+        let sink = OrchestrationEventSink::new(channel, None).with_verified_bearer("test-bearer");
+
+        let outcome = sink.require_approval(&test_config(), &test_detail()).await;
+
+        assert_eq!(outcome, ApprovalOutcome::TimedOut);
+        let sent = created.lock().unwrap();
+        assert_eq!(sent.len(), 1, "one durable approval per gated action");
+        let cause = sent[0].cause.as_ref().expect("the gate states its cause");
+        assert_eq!(cause.code, "browser_action_risk");
+        assert_eq!(cause.risk_category, "login");
+        assert_eq!(cause.tool, "browser_agent");
+        assert_eq!(cause.scope_options, vec!["once".to_owned()]);
+        assert!(
+            cause.call_digest.is_empty() && !cause.action_key.contains("example.com"),
+            "no URL or selector reaches the cause: {cause:?}"
+        );
     }
 }

@@ -16,6 +16,7 @@ pub(crate) mod session_core_rules_double;
 
 use std::path::Path;
 
+use mp_contracts::approval_cause::{self, CauseCode};
 use mp_contracts::model_plane::v1::{
     self as pb, orchestration_core_service_client::OrchestrationCoreServiceClient,
 };
@@ -151,6 +152,9 @@ pub struct StepOutcome {
     pub output: String,
     pub error: String,
     pub compaction_triggered: bool,
+    /// Why the step paused for a person. Set only with `awaiting_approval`, so the
+    /// loop that raises the approval can say which gate held the call.
+    pub cause: Option<CauseCode>,
 }
 
 impl StepOutcome {
@@ -160,6 +164,7 @@ impl StepOutcome {
             output,
             error: String::new(),
             compaction_triggered: false,
+            cause: None,
         }
     }
 
@@ -169,15 +174,17 @@ impl StepOutcome {
             output: String::new(),
             error: error.to_owned(),
             compaction_triggered: false,
+            cause: None,
         }
     }
 
-    fn awaiting_approval() -> Self {
+    fn awaiting_approval(cause: CauseCode) -> Self {
         Self {
             status: "awaiting_approval".to_owned(),
             output: String::new(),
             error: String::new(),
             compaction_triggered: false,
+            cause: Some(cause),
         }
     }
 
@@ -187,6 +194,7 @@ impl StepOutcome {
             output: String::new(),
             error: "permission denied by policy".to_owned(),
             compaction_triggered: false,
+            cause: None,
         }
     }
 
@@ -196,6 +204,7 @@ impl StepOutcome {
             output: String::new(),
             error: reason,
             compaction_triggered: false,
+            cause: None,
         }
     }
 
@@ -205,6 +214,7 @@ impl StepOutcome {
             output: String::new(),
             error: reason,
             compaction_triggered: false,
+            cause: None,
         }
     }
 
@@ -214,6 +224,7 @@ impl StepOutcome {
             output: String::new(),
             error: reason,
             compaction_triggered: false,
+            cause: None,
         }
     }
 
@@ -223,6 +234,7 @@ impl StepOutcome {
             output: String::new(),
             error: reason,
             compaction_triggered: false,
+            cause: None,
         }
     }
 
@@ -232,6 +244,7 @@ impl StepOutcome {
             output: String::new(),
             error: reason,
             compaction_triggered: false,
+            cause: None,
         }
     }
 }
@@ -268,7 +281,26 @@ fn browser_execution_to_step_outcome(
         }
         tool_bridge::BrowserAgentExecution::Cancelled { reason } => StepOutcome::cancelled(reason),
         tool_bridge::BrowserAgentExecution::Aborted { reason } => StepOutcome::aborted(reason),
-        tool_bridge::BrowserAgentExecution::AwaitingApproval => StepOutcome::awaiting_approval(),
+        tool_bridge::BrowserAgentExecution::AwaitingApproval => {
+            StepOutcome::awaiting_approval(CauseCode::BrowserActionRisk)
+        }
+    }
+}
+
+/// Why the permission gate held a call for a person. The gate answers
+/// `AwaitApproval` for exactly three reasons, and this names which: an owner-plane
+/// tool (a durable approval on every posture), a disclosure read (the same), or a
+/// risky call under `ask`. A provider write is the risky call that has its own
+/// code, because its approval record also binds the write to the provider.
+fn permission_pause_cause(tool_name: &str) -> CauseCode {
+    if permission::requires_durable_owner_approval(tool_name) {
+        CauseCode::OwnerEffectReserved
+    } else if permission::requires_consent_to_disclose(tool_name) {
+        CauseCode::ConsentToDisclose
+    } else if tool_name == EXECUTE_PROVIDER_ACTION_TOOL {
+        CauseCode::ProviderWrite
+    } else {
+        CauseCode::RiskyEffectUnderAsk
     }
 }
 
@@ -534,7 +566,9 @@ async fn execute_step_inner(
             if evaluation.decision == crate::capability_policy::CapabilityDecision::Ask =>
         {
             if !released {
-                return StepOutcome::awaiting_approval();
+                // capability-core answers `ask` for a high-risk capability; a tool
+                // policy rule is a different cause and nothing raises it yet.
+                return StepOutcome::awaiting_approval(CauseCode::CapabilityHighRisk);
             }
             // The user approved this exact call: the ask gate is satisfied.
         }
@@ -576,7 +610,9 @@ async fn execute_step_inner(
         hook::HookDecision::Deny { reason } => {
             return StepOutcome::failed(&format!("blocked by pre-tool hook: {reason}"));
         }
-        hook::HookDecision::Ask { .. } if !released => return StepOutcome::awaiting_approval(),
+        hook::HookDecision::Ask { .. } if !released => {
+            return StepOutcome::awaiting_approval(CauseCode::HookAsk);
+        }
         hook::HookDecision::Ask { .. } | hook::HookDecision::Allow => {}
     }
 
@@ -587,7 +623,9 @@ async fn execute_step_inner(
     // tools are gated by name.
     match permission::evaluate_call(mode, tool_name, tool_input) {
         PermissionDecision::Deny => return StepOutcome::permission_denied(),
-        PermissionDecision::AwaitApproval if !released => return StepOutcome::awaiting_approval(),
+        PermissionDecision::AwaitApproval if !released => {
+            return StepOutcome::awaiting_approval(permission_pause_cause(tool_name));
+        }
         PermissionDecision::AwaitApproval | PermissionDecision::Allow => {}
     }
 
@@ -1518,6 +1556,8 @@ async fn execute_book_shipment(
         step_id,
         permission_mode,
         "book_shipment",
+        BOOK_SHIPMENT_TOOL,
+        tool_input,
         session_bearer,
     )
     .await
@@ -1703,6 +1743,8 @@ async fn execute_provider_action(
             step_id,
             permission_mode,
             &input.operation,
+            EXECUTE_PROVIDER_ACTION_TOOL,
+            tool_input,
             session_bearer,
         )
         .await
@@ -1761,6 +1803,9 @@ async fn resolve_write_approval(
     step_id: &str,
     permission_mode: &str,
     operation: &str,
+    // The tool and the raw arguments the model proposed, for the approval's cause only.
+    tool_name: &str,
+    tool_input: &str,
     session_bearer: Option<&str>,
 ) -> Result<String, String> {
     let Some(channel) = session_channel else {
@@ -1781,6 +1826,13 @@ async fn resolve_write_approval(
     let bearer = session_bearer.ok_or_else(|| {
         "provider write blocked: verified session credential is unavailable".to_owned()
     })?;
+    // Under `ask` the person decides; under `auto` the posture records the decision for
+    // them, and the approval says so from the start.
+    let cause = if PermissionMode::from_wire(permission_mode) == PermissionMode::Ask {
+        CauseCode::ProviderWrite
+    } else {
+        CauseCode::AutoPostureProviderWrite
+    };
     // Idempotent: returns the existing durable approval for this (org, run:step)
     // when the HITL pause path already minted one, else creates a fresh record.
     let created = client
@@ -1798,6 +1850,9 @@ async fn resolve_write_approval(
                 client_approval_id: String::new(),
                 idempotency_key: format!("{run_id}:{step_id}"),
                 continuation_descriptor_json: String::new(),
+                cause: Some(approval_cause::for_call(
+                    cause, run_id, tool_name, tool_input,
+                )),
             },
             bearer,
         )?)
@@ -2525,6 +2580,98 @@ mod tests {
         }
     }
 
+    /// One step through the real gate, as the direct `ExecuteStep` path runs it.
+    async fn step_through_the_gate(
+        tool_name: &str,
+        tool_input: &str,
+        permission_mode: &str,
+        hook_context: &str,
+        policy: &dyn crate::capability_policy::CapabilityPolicy,
+    ) -> StepOutcome {
+        execute_step(
+            tool_name,
+            tool_input,
+            permission_mode,
+            hook_context,
+            "org_test",
+            "user_test",
+            "run_test",
+            "step_test",
+            "",
+            None,
+            None,
+            None,
+            false,
+            0,
+            None,
+            None,
+            None,
+            policy,
+            None,
+        )
+        .await
+    }
+
+    /// The cause of the pause the gate raised, failing if it did not pause.
+    async fn held_for(
+        tool_name: &str,
+        tool_input: &str,
+        permission_mode: &str,
+        hook_context: &str,
+        policy: &dyn crate::capability_policy::CapabilityPolicy,
+    ) -> Option<CauseCode> {
+        let outcome =
+            step_through_the_gate(tool_name, tool_input, permission_mode, hook_context, policy)
+                .await;
+        assert_eq!(outcome.status, "awaiting_approval", "{tool_name}");
+        outcome.cause
+    }
+
+    #[tokio::test]
+    async fn every_gate_that_holds_a_step_says_which_one_it_was() {
+        let ask = FixedCapabilityPolicy(crate::capability_policy::CapabilityDecision::Ask);
+        let allow = allow_policy();
+        let write = r#"{"connection_id":"c1","operation":"message.send","body":{}}"#;
+        let hook_asks =
+            r#"{"rules":[{"event":"pre_tool_use","tools":"echo","decision":"ask","reason":"r"}]}"#;
+
+        assert_eq!(
+            held_for("echo", "{}", "auto", "", &ask).await,
+            Some(CauseCode::CapabilityHighRisk)
+        );
+        assert_eq!(
+            held_for("echo", "{}", "auto", hook_asks, &allow).await,
+            Some(CauseCode::HookAsk)
+        );
+        assert_eq!(
+            held_for("delete_records", "{}", "ask", "", &allow).await,
+            Some(CauseCode::RiskyEffectUnderAsk)
+        );
+        assert_eq!(
+            held_for(EXECUTE_PROVIDER_ACTION_TOOL, write, "ask", "", &allow).await,
+            Some(CauseCode::ProviderWrite)
+        );
+        assert_eq!(
+            held_for(crate::ticket_tools::TOOL_NAME, "{}", "auto", "", &allow).await,
+            Some(CauseCode::OwnerEffectReserved)
+        );
+        assert_eq!(
+            held_for(subagent_results::READ_TOOL, "{}", "auto", "", &allow).await,
+            Some(CauseCode::ConsentToDisclose)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_step_that_is_not_held_carries_no_cause() {
+        let allow = allow_policy();
+        let denied = step_through_the_gate("echo", "{}", "deny", "", &allow).await;
+        assert_eq!(denied.status, "permission_denied");
+        assert_eq!(denied.cause, None);
+        let ran = step_through_the_gate("echo", "hi", "auto", "", &allow).await;
+        assert_eq!(ran.status, "completed");
+        assert_eq!(ran.cause, None);
+    }
+
     #[tokio::test]
     async fn ticket_owner_action_never_reaches_its_adapter_from_auto_or_malformed_modes() {
         let policy = allow_policy();
@@ -2844,6 +2991,8 @@ mod tests {
             "step",
             "auto",
             "pages.post",
+            EXECUTE_PROVIDER_ACTION_TOOL,
+            "{}",
             Some("bearer"),
         )
         .await;
@@ -2863,6 +3012,8 @@ mod tests {
             "",
             "auto",
             "pages.post",
+            EXECUTE_PROVIDER_ACTION_TOOL,
+            "{}",
             Some("bearer"),
         )
         .await;
