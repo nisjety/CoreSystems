@@ -300,6 +300,10 @@ services:
       # degraded and behaving as off, never the gateway down. Roll back with off plus a restart.
       MODEL_GATEWAY_RUN_CONTROL_BUS: ${MODEL_GATEWAY_RUN_CONTROL_BUS:-off}
       MODEL_GATEWAY_RUN_CONTROL_TIMEOUT_MS: ${MODEL_GATEWAY_RUN_CONTROL_TIMEOUT_MS:-750}
+      # WS11-S5: derive the reasoning level once in the gateway and send it to inference-core. Off by default; only the
+      # literal `true` turns it on. Roll out in this order: inference-core adapter flags on first, then this switch. With
+      # this on and the adapter flags off, a deep request sends budget 0 and a level nothing renders (no thinking).
+      MODEL_GATEWAY_EFFORT_LADDER: ${MODEL_GATEWAY_EFFORT_LADDER:-false}
       # Kill-switches for the review-latency levers. Empty keeps a lever ON;
       # 0/off/false/no/disabled turns it off at the next restart, no rebuild.
       MODEL_GATEWAY_SOLE_NOTE_PREFETCH: ${MODEL_GATEWAY_SOLE_NOTE_PREFETCH:-}
@@ -744,6 +748,10 @@ services:
       # disables the resolve path — servers with no stored OAuth tokens are
       # unaffected either way.
       MCP_OAUTH_SERVICE_TOKEN: ${MCP_OAUTH_SERVICE_TOKEN:-}
+      # WS05-S2: post each MCP tool definition's digest and annotations to capability-core so a first-seen tool is pinned and a
+      # changed one drifts. Off by default; only the literal `true` turns it on. Needs the same MCP_OAUTH_SERVICE_TOKEN as
+      # capability-core. Skipped for a ZDR turn.
+      MCP_TOOL_OBSERVATION_ENABLED: ${MCP_TOOL_OBSERVATION_ENABLED:-false}
       # ADR-0003 — the platform layer of the authored-instruction hierarchy
       # (`apps/AUTHORED_INSTRUCTIONS_ADR_2026-08-19.md`): deployment-level
       # configuration, deliberately not a database row (no "platform
@@ -1617,6 +1625,8 @@ services:
       # MCP_OAUTH_SERVICE_TOKEN above. Empty disables that one path; the
       # per-user JWT path is unaffected either way.
       MCP_OAUTH_SERVICE_TOKEN: ${MCP_OAUTH_SERVICE_TOKEN:-}
+      # WS05-S2: how long an observation counts as the tool's health attestation (default 1 h, capped at 24 h). Empty is the default.
+      MCP_TOOL_OBSERVATION_TTL: ${MCP_TOOL_OBSERVATION_TTL:-}
       # Backends for the /commands delegation AND — the reason they are now set
       # — the G7 learning-review consumer. startLearningConsumer is a no-op when
       # either address is empty, so with these unset the RUN_COMPLETED consumer
