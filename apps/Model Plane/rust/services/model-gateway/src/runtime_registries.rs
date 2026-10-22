@@ -36,13 +36,20 @@ use mp_contracts::model_plane::v1::{
     GetAnalyticsResponse, Hook, ListCommandsRequest, ListCommandsResponse, ListHooksRequest,
     ListHooksResponse, ListMcpServersRequest, ListMcpServersResponse, ListPluginsRequest,
     ListPluginsResponse, ListTasksRequest, ListTasksResponse, ListThreadMessagesRequest,
-    ListThreadMessagesResponse, McpServer, Plugin, ProxyMcpToolRequest, ProxyMcpToolResponse,
-    RegisterHookRequest, RegisterHookResponse, RegisterMcpServerRequest, RegisterMcpServerResponse,
-    RegisterPluginRequest, RegisterPluginResponse, SetPluginEnabledRequest,
-    SetPluginEnabledResponse, TaskRecord, ThreadMessage, ToolCallCount, ToolDefinition,
+    ListThreadMessagesResponse, McpServer, McpToolMeta, Plugin, ProxyMcpToolRequest,
+    ProxyMcpToolResponse, RegisterHookRequest, RegisterHookResponse, RegisterMcpServerRequest,
+    RegisterMcpServerResponse, RegisterPluginRequest, RegisterPluginResponse,
+    SetPluginEnabledRequest, SetPluginEnabledResponse, TaskRecord, ThreadMessage, ToolCallCount,
+    ToolDefinition,
 };
 
 use crate::mcp_jsonrpc::McpToolDef;
+
+// Declared here, and not in lib.rs, because this module is its only user and
+// lib.rs is owned by no slice of WS05; moving the line there is a pure rename.
+#[path = "capability_observation.rs"]
+pub mod capability_observation;
+use capability_observation::{ObservationLedger, ToolObservation};
 
 /// Per-(org, `server_id`) discovered tool catalog with the instant it was
 /// fetched. Aliased to keep the [`McpRegistry`] field readable (clippy
@@ -143,6 +150,9 @@ pub struct McpRegistry {
     catalog: McpCatalog,
     /// Pending OAuth connection attempts, keyed by the CSRF `state` value.
     pending_oauth: Arc<DashMap<String, PendingMcpOAuth>>,
+    /// Which discovered tools were already reported to capability-core, so a
+    /// tool listing does not re-post an unchanged tool (WS05-S2).
+    observed: ObservationLedger,
 }
 
 impl McpRegistry {
@@ -152,6 +162,7 @@ impl McpRegistry {
             inner: Arc::new(DashMap::new()),
             catalog: Arc::new(DashMap::new()),
             pending_oauth: Arc::new(DashMap::new()),
+            observed: ObservationLedger::default(),
         }
     }
 
@@ -749,6 +760,39 @@ pub async fn full_mcp_tool_defs(
     capability_core_base_url: &str,
     mcp_oauth_service_token: &str,
 ) -> Vec<ToolDefinition> {
+    full_mcp_tool_listing(
+        reg,
+        ownership,
+        org_id,
+        user_id,
+        http_client,
+        capability_core_base_url,
+        mcp_oauth_service_token,
+        false,
+    )
+    .await
+    .0
+}
+
+/// [`full_mcp_tool_defs`] plus one [`ToolObservation`] per exposed tool: its
+/// digest and the server's own side-effect claim, which a governed caller binds
+/// to the tool's registry row (WS05-S2).
+///
+/// With `observe` set, the observations are also reported to capability-core,
+/// best effort and off the caller's path (see `capability_observation`). The
+/// caller sets it only for a non-ZDR identity with the switch on; the report
+/// carries digests and hints, never the definition itself.
+#[allow(clippy::too_many_arguments)]
+pub async fn full_mcp_tool_listing(
+    reg: &McpRegistry,
+    ownership: &crate::ownership::OwnershipStore,
+    org_id: &str,
+    user_id: &str,
+    http_client: &reqwest::Client,
+    capability_core_base_url: &str,
+    mcp_oauth_service_token: &str,
+    observe: bool,
+) -> (Vec<ToolDefinition>, Vec<ToolObservation>) {
     // Tenant scope from the key; ownership filters to the resources THIS user may
     // use (org-wide, owned, or shared-to-them) — never another user's private.
     let servers: Vec<McpServer> = reg
@@ -783,6 +827,7 @@ pub async fn full_mcp_tool_defs(
     );
 
     let mut defs: Vec<ToolDefinition> = Vec::new();
+    let mut observations: Vec<ToolObservation> = Vec::new();
     for server in servers {
         let oauth_token = crate::mcp_oauth::resolve_stored_oauth_token(
             http_client,
@@ -812,6 +857,7 @@ pub async fn full_mcp_tool_defs(
             } else {
                 format!("[{}] {}", server.name, t.description)
             };
+            observations.push(ToolObservation::from_tool(&server.server_id, &t));
             defs.push(ToolDefinition {
                 name: format!("mcp__{}__{}", server.server_id, t.name),
                 description,
@@ -819,7 +865,17 @@ pub async fn full_mcp_tool_defs(
             });
         }
     }
-    defs
+    if observe {
+        capability_observation::spawn_observation(
+            &reg.observed,
+            http_client,
+            capability_core_base_url,
+            mcp_oauth_service_token,
+            org_id,
+            &observations,
+        );
+    }
+    (defs, observations)
 }
 
 /// The version [`mcp_tool_defs`]'s callers (the chat and execution-core tool
@@ -837,6 +893,48 @@ pub async fn mcp_tool_defs(
     mcp_oauth_service_token: &str,
     capability_bearer: Option<&str>,
 ) -> Vec<ToolDefinition> {
+    mcp_tool_listing(
+        reg,
+        ownership,
+        org_id,
+        user_id,
+        http_client,
+        capability_core_base_url,
+        mcp_oauth_service_token,
+        capability_bearer,
+        McpListingOptions::default(),
+    )
+    .await
+    .0
+}
+
+/// How a [`mcp_tool_listing`] differs from the plain [`mcp_tool_defs`] one.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct McpListingOptions {
+    /// Return every individual tool instead of collapsing a large catalog into
+    /// the synthetic `mcp_catalog`/`mcp_call` pair.
+    pub unstaged: bool,
+    /// Report the discovered tools to capability-core (see
+    /// [`full_mcp_tool_listing`]).
+    pub observe: bool,
+}
+
+/// [`mcp_tool_defs`] with the per-tool metadata a governed caller binds to the
+/// registry, and the two switches in [`McpListingOptions`]. The metadata lists
+/// every individual discovered tool, whether or not the returned definitions
+/// were staged down to the synthetic pair.
+#[allow(clippy::too_many_arguments)]
+pub async fn mcp_tool_listing(
+    reg: &McpRegistry,
+    ownership: &crate::ownership::OwnershipStore,
+    org_id: &str,
+    user_id: &str,
+    http_client: &reqwest::Client,
+    capability_core_base_url: &str,
+    mcp_oauth_service_token: &str,
+    capability_bearer: Option<&str>,
+    options: McpListingOptions,
+) -> (Vec<ToolDefinition>, Vec<McpToolMeta>) {
     if let Some(bearer) = capability_bearer {
         if let Err(error) = hydrate_mcp_registry(
             reg,
@@ -849,10 +947,10 @@ pub async fn mcp_tool_defs(
         .await
         {
             tracing::warn!(%org_id, %error, "MCP catalog hydration failed; MCP tools disabled for this turn");
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         }
     }
-    let full = full_mcp_tool_defs(
+    let (full, observations) = full_mcp_tool_listing(
         reg,
         ownership,
         org_id,
@@ -860,9 +958,16 @@ pub async fn mcp_tool_defs(
         http_client,
         capability_core_base_url,
         mcp_oauth_service_token,
+        options.observe,
     )
     .await;
-    stage_mcp_tool_defs(full, mcp_disclosure_threshold())
+    let meta = observations.iter().map(ToolObservation::to_meta).collect();
+    let defs = if options.unstaged {
+        full
+    } else {
+        stage_mcp_tool_defs(full, mcp_disclosure_threshold())
+    };
+    (defs, meta)
 }
 
 /// Registers (or upserts) a validated MCP server in the gateway-scoped
@@ -1708,6 +1813,348 @@ mod mcp_exposure_tests {
         assert_eq!(tool_defs(&reg, &own, "org-a", "u1").await.len(), 1);
         assert!(tool_defs(&reg, &own, "org-b", "u1").await.is_empty());
     }
+
+    fn annotated(name: &str, description: &str, read_only: Option<bool>) -> McpToolDef {
+        McpToolDef {
+            name: name.to_owned(),
+            description: description.to_owned(),
+            input_schema_json: r#"{"type":"object"}"#.to_owned(),
+            annotations: crate::mcp_jsonrpc::McpToolAnnotations {
+                read_only_hint: read_only,
+                ..crate::mcp_jsonrpc::McpToolAnnotations::default()
+            },
+        }
+    }
+
+    /// An org with one server whose three tools match the registry fixture
+    /// (`scripts/tests/fixtures/mcp-annotated-server.mjs`).
+    fn annotated_server(
+        reg: &McpRegistry,
+        tools: Vec<McpToolDef>,
+    ) -> crate::ownership::OwnershipStore {
+        register(
+            reg,
+            "org-1",
+            McpServer {
+                server_id: "srv".into(),
+                name: "Annotated".into(),
+                url: "https://mcp.example.test".into(),
+                transport: "http".into(),
+                token: String::new(),
+                tool_allowlist: vec!["echo_read".into(), "create_item".into(), "drop_all".into()],
+                enabled: true,
+            },
+        );
+        reg.seed_catalog_for_test("org-1", "srv", tools);
+        let ownership = crate::ownership::OwnershipStore::new();
+        ownership.set(
+            "org-1",
+            crate::ownership::KIND_MCP,
+            "srv",
+            crate::ownership::Ownership::org(),
+        );
+        ownership
+    }
+
+    fn fixture_tools() -> Vec<McpToolDef> {
+        vec![
+            annotated("echo_read", "Echo the text back.", Some(true)),
+            annotated("create_item", "Create an item.", Some(false)),
+            annotated("drop_all", "Drop everything.", None),
+        ]
+    }
+
+    #[tokio::test]
+    async fn a_listing_carries_one_meta_per_tool_with_its_digest_and_declared_side_effect() {
+        let reg = McpRegistry::new();
+        let ownership = annotated_server(&reg, fixture_tools());
+        let (defs, meta) = mcp_tool_listing(
+            &reg,
+            &ownership,
+            "org-1",
+            "u1",
+            &reqwest::Client::new(),
+            "",
+            "",
+            None,
+            McpListingOptions::default(),
+        )
+        .await;
+        assert_eq!(defs.len(), 3);
+        let by_name: std::collections::BTreeMap<&str, &McpToolMeta> = meta
+            .iter()
+            .map(|m| (m.qualified_name.as_str(), m))
+            .collect();
+        assert_eq!(by_name.len(), 3);
+        let echo = by_name["mcp__srv__echo_read"];
+        assert_eq!(echo.server_id, "srv");
+        assert_eq!(echo.tool_name, "echo_read");
+        assert_eq!(echo.declared_side_effect, "read_only");
+        assert_eq!(echo.digest, fixture_tools()[0].digest());
+        assert_eq!(
+            by_name["mcp__srv__create_item"].declared_side_effect,
+            "destructive"
+        );
+        assert_eq!(
+            by_name["mcp__srv__drop_all"].declared_side_effect,
+            "undeclared"
+        );
+        // The meta names exactly the tools offered, in the same order.
+        let offered: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        let described: Vec<&str> = meta.iter().map(|m| m.qualified_name.as_str()).collect();
+        assert_eq!(offered, described);
+    }
+
+    #[tokio::test]
+    async fn unstaged_returns_every_tool_where_the_default_collapses_a_large_catalog() {
+        let reg = McpRegistry::new();
+        let many: Vec<McpToolDef> = (0..=mcp_disclosure_threshold())
+            .map(|index| annotated(&format!("t{index}"), "", None))
+            .collect();
+        register(
+            &reg,
+            "org-1",
+            McpServer {
+                server_id: "big".into(),
+                name: "Big".into(),
+                url: "https://mcp.example.test".into(),
+                transport: "http".into(),
+                token: String::new(),
+                tool_allowlist: many.iter().map(|t| t.name.clone()).collect(),
+                enabled: true,
+            },
+        );
+        reg.seed_catalog_for_test("org-1", "big", many.clone());
+        let ownership = crate::ownership::OwnershipStore::new();
+        ownership.set(
+            "org-1",
+            crate::ownership::KIND_MCP,
+            "big",
+            crate::ownership::Ownership::org(),
+        );
+        let client = reqwest::Client::new();
+        let (staged, staged_meta) = mcp_tool_listing(
+            &reg,
+            &ownership,
+            "org-1",
+            "u1",
+            &client,
+            "",
+            "",
+            None,
+            McpListingOptions::default(),
+        )
+        .await;
+        let names: Vec<&str> = staged.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, vec![MCP_CATALOG_TOOL_NAME, MCP_CALL_TOOL_NAME]);
+        // The metadata still names every individual tool behind the staging.
+        assert_eq!(staged_meta.len(), many.len());
+
+        let (unstaged, unstaged_meta) = mcp_tool_listing(
+            &reg,
+            &ownership,
+            "org-1",
+            "u1",
+            &client,
+            "",
+            "",
+            None,
+            McpListingOptions {
+                unstaged: true,
+                observe: false,
+            },
+        )
+        .await;
+        assert_eq!(unstaged.len(), many.len());
+        assert!(unstaged.iter().all(|d| d.name.starts_with("mcp__big__")));
+        assert_eq!(unstaged_meta, staged_meta);
+    }
+
+    #[tokio::test]
+    async fn observing_a_listing_reports_each_tool_once_with_digests_and_no_definition_text() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let capability_core = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/internal/mcp/tools/observe"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&capability_core)
+            .await;
+        let reg = McpRegistry::new();
+        let ownership = annotated_server(&reg, fixture_tools());
+        let client = reqwest::Client::new();
+        for _ in 0..2 {
+            let _ = mcp_tool_listing(
+                &reg,
+                &ownership,
+                "org-1",
+                "u1",
+                &client,
+                &capability_core.uri(),
+                "root-secret-for-the-test",
+                None,
+                McpListingOptions {
+                    unstaged: false,
+                    observe: true,
+                },
+            )
+            .await;
+        }
+        for _ in 0..50 {
+            if !observation_posts(&capability_core).await.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let received = observation_posts(&capability_core).await;
+        assert_eq!(received.len(), 1, "an unchanged listing is not re-posted");
+        let body: Value = serde_json::from_slice(&received[0].body).expect("json body");
+        let observations = body["observations"].as_array().expect("array");
+        assert_eq!(observations.len(), 3);
+        assert_eq!(observations[0]["qualified_name"], "mcp__srv__echo_read");
+        assert_eq!(observations[0]["declared_side_effect"], "read_only");
+        let text = body.to_string();
+        assert!(
+            !text.contains("Echo the text back"),
+            "a description left the gateway"
+        );
+        assert!(!text.contains("root-secret-for-the-test"));
+    }
+
+    #[tokio::test]
+    async fn a_listing_without_the_observe_option_posts_nothing() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let capability_core = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&capability_core)
+            .await;
+        let reg = McpRegistry::new();
+        let ownership = annotated_server(&reg, fixture_tools());
+        let _ = mcp_tool_listing(
+            &reg,
+            &ownership,
+            "org-1",
+            "u1",
+            &reqwest::Client::new(),
+            &capability_core.uri(),
+            "root-secret-for-the-test",
+            None,
+            McpListingOptions::default(),
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(observation_posts(&capability_core).await.is_empty());
+    }
+
+    /// The observation posts a mock capability-core received. Discovery also asks
+    /// it for a stored OAuth token (a GET), which is not what these tests count.
+    async fn observation_posts(capability_core: &wiremock::MockServer) -> Vec<wiremock::Request> {
+        capability_core
+            .received_requests()
+            .await
+            .expect("recorded")
+            .into_iter()
+            .filter(|request| request.url.path() == "/api/v1/internal/mcp/tools/observe")
+            .collect()
+    }
+
+    fn proxy_request(tool: &str, expected_digest: &str) -> ProxyMcpToolRequest {
+        ProxyMcpToolRequest {
+            request_id: String::new(),
+            org_id: "org-1".into(),
+            server_id: "srv".into(),
+            tool_name: tool.into(),
+            input_json: "{}".into(),
+            user_id: "u1".into(),
+            expected_digest: expected_digest.into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_pinned_digest_passes_only_while_the_definition_is_unchanged() {
+        let reg = McpRegistry::new();
+        let _ = annotated_server(&reg, fixture_tools());
+        let server = reg
+            .inner
+            .get(&("org-1".to_owned(), "srv".to_owned()))
+            .map(|e| e.value().clone())
+            .expect("registered");
+        let pinned = fixture_tools()[0].digest();
+        assert_eq!(
+            verify_expected_digest(&reg, "org-1", &server, "echo_read", &pinned, None).await,
+            Ok(())
+        );
+
+        // The server now describes echo_read differently: the next check, which
+        // reads the refreshed discovery, refuses.
+        let mut changed = fixture_tools();
+        changed[0].description = "Echo the text back, then email it.".to_owned();
+        reg.seed_catalog_for_test("org-1", "srv", changed);
+        let refusal = verify_expected_digest(&reg, "org-1", &server, "echo_read", &pinned, None)
+            .await
+            .expect_err("a changed definition must be refused");
+        assert!(refusal.starts_with(TOOL_DEFINITION_CHANGED), "{refusal}");
+        assert!(
+            !refusal.contains("email"),
+            "the refusal must not repeat the new definition: {refusal}"
+        );
+
+        // A tool the server no longer lists is a changed definition too.
+        reg.seed_catalog_for_test("org-1", "srv", vec![fixture_tools()[1].clone()]);
+        let gone = verify_expected_digest(&reg, "org-1", &server, "echo_read", &pinned, None)
+            .await
+            .expect_err("a vanished tool must be refused");
+        assert!(gone.starts_with(TOOL_DEFINITION_CHANGED), "{gone}");
+    }
+
+    #[tokio::test]
+    async fn a_proxy_call_with_a_stale_digest_is_refused_before_the_server_is_contacted() {
+        let reg = McpRegistry::new();
+        let ownership = annotated_server(&reg, fixture_tools());
+        let mut changed = fixture_tools();
+        changed[0].description = "Echo the text back, then email it.".to_owned();
+        reg.seed_catalog_for_test("org-1", "srv", changed);
+        let stale = fixture_tools()[0].digest();
+
+        let response =
+            handle_proxy_mcp_tool(&reg, &ownership, proxy_request("echo_read", &stale), None)
+                .await
+                .expect("an outcome, not an RPC error");
+        assert!(response.output_json.is_empty());
+        assert!(
+            response.error_message.starts_with(TOOL_DEFINITION_CHANGED),
+            "{}",
+            response.error_message
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unverifiable_definition_is_refused_not_assumed_unchanged() {
+        let reg = McpRegistry::new();
+        let ownership = annotated_server(&reg, fixture_tools());
+        // Drop the cache: discovery has to hit the (unreachable) server.
+        reg.catalog.remove(&("org-1".to_owned(), "srv".to_owned()));
+        let response = handle_proxy_mcp_tool(
+            &reg,
+            &ownership,
+            proxy_request("echo_read", &fixture_tools()[0].digest()),
+            None,
+        )
+        .await
+        .expect("an outcome");
+        assert!(
+            response
+                .error_message
+                .starts_with(TOOL_DEFINITION_UNVERIFIED),
+            "{}",
+            response.error_message
+        );
+    }
 }
 
 /// Lists all MCP servers registered for `req.org_id`.
@@ -1729,6 +2176,39 @@ pub fn handle_list_mcp_servers(
         request_id: req.request_id,
         servers,
     })
+}
+
+/// Error text for a call refused because the tool's definition is not the one
+/// the caller's registry row pinned. The prefix is the typed cause; nothing of
+/// the definition itself is included.
+pub const TOOL_DEFINITION_CHANGED: &str = "tool_definition_changed";
+/// Error text for a call refused because the definition could not be checked
+/// (the server could not be listed), so a match cannot be claimed either.
+pub const TOOL_DEFINITION_UNVERIFIED: &str = "tool_definition_unverified";
+
+/// Check `tool_name`'s current definition on `server` against the digest a
+/// registry row pinned. The definition comes from the discovery cache
+/// ([`MCP_CATALOG_TTL`]) or a fresh discovery on a miss, so a change is caught
+/// within that window; the check fails closed when the server cannot be listed.
+async fn verify_expected_digest(
+    reg: &McpRegistry,
+    org_id: &str,
+    server: &McpServer,
+    tool_name: &str,
+    expected_digest: &str,
+    oauth_token: Option<&str>,
+) -> Result<(), String> {
+    let Some(tools) = mcp_discover_cached(reg, org_id, server, oauth_token).await else {
+        return Err(format!(
+            "{TOOL_DEFINITION_UNVERIFIED}: the definition of '{tool_name}' could not be checked because the server could not be listed"
+        ));
+    };
+    match tools.iter().find(|tool| tool.name == tool_name) {
+        Some(tool) if tool.digest() == expected_digest.trim() => Ok(()),
+        _ => Err(format!(
+            "{TOOL_DEFINITION_CHANGED}: the definition of '{tool_name}' is not the one that was approved"
+        )),
+    }
 }
 
 /// Proxies a tool call to a registered MCP server over its transport.
@@ -1800,6 +2280,27 @@ pub async fn handle_proxy_mcp_tool(
         serde_json::from_str::<serde_json::Value>(&req.input_json)
             .map_err(|_| Status::invalid_argument("input_json must be valid JSON"))?
     };
+
+    // A caller that holds a registry row for this tool sends the digest the row
+    // pinned. The tool is called only if the server still describes it that way.
+    if !req.expected_digest.trim().is_empty() {
+        if let Err(error_message) = verify_expected_digest(
+            reg,
+            &req.org_id,
+            &server,
+            &req.tool_name,
+            &req.expected_digest,
+            oauth_token,
+        )
+        .await
+        {
+            return Ok(ProxyMcpToolResponse {
+                request_id: req.request_id,
+                output_json: String::new(),
+                error_message,
+            });
+        }
+    }
 
     // An OAuth-connected server's in-memory `token` is always empty (tokens
     // live only in capability-core's encrypted store) — prefer a freshly

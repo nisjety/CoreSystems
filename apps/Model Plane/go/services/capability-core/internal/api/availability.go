@@ -264,6 +264,14 @@ func (h *CapabilitiesHandler) attestAvailabilityForLane(w http.ResponseWriter, r
 		jsonErr(w, "not found", http.StatusNotFound)
 		return
 	}
+	// A kind=mcp_tool row has one attester: the gateway's observation of the tool
+	// (mcp_tools.go), whose freshness window is the observation TTL. No health
+	// attester, tenant or global, may keep such a tool inside that window or
+	// overwrite the reason a drifted or unapproved tool carries.
+	if row.Kind == models.KindMCPTool {
+		jsonErr(w, "mcp tool health is attested only by tool observation", http.StatusForbidden)
+		return
+	}
 
 	now := time.Now().UTC()
 	normalized, err := normalizeAvailabilityAttestation(row, input, now)

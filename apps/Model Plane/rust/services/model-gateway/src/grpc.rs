@@ -1826,8 +1826,17 @@ impl ModelGateway for GatewayService {
         if !identity.is_service() {
             identity.authorize_user(&request.get_ref().user_id)?;
         }
+        // Observation is a durable write to the registry, so a ZDR caller never
+        // triggers one; an identity whose posture cannot be read is treated as
+        // ZDR rather than guessed. The listing itself is unchanged either way.
+        let observe = runtime_registries::capability_observation::should_observe(
+            runtime_registries::capability_observation::observation_enabled(),
+            identity
+                .zdr_for(&crate::zdr_posture::Route::plain(false))
+                .ok(),
+        );
         let req = request.into_inner();
-        let tools = runtime_registries::mcp_tool_defs(
+        let (tools, meta) = runtime_registries::mcp_tool_listing(
             &self.state.mcp,
             &self.state.ownership,
             &req.org_id,
@@ -1836,11 +1845,16 @@ impl ModelGateway for GatewayService {
             &self.state.capability_core_base_url,
             &self.state.mcp_oauth_service_token,
             None,
+            runtime_registries::McpListingOptions {
+                unstaged: req.unstaged,
+                observe,
+            },
         )
         .await;
         Ok(Response::new(ListMcpToolsResponse {
             request_id: req.request_id,
             tools,
+            meta,
         }))
     }
 

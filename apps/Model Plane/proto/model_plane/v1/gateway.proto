@@ -1126,6 +1126,29 @@ message ListMcpToolsRequest {
   // The run/caller user — exposure is filtered to tools this user may USE
   // (org-wide, owned, or shared-to-them); never another user's private tools.
   string user_id = 3;
+  // WS05-S2: return the individual tool definitions even when their count is
+  // above the disclosure threshold, instead of collapsing them into the
+  // synthetic mcp_catalog/mcp_call pair. A governed caller that binds each tool
+  // to a registry row needs the real names; the model-facing staging stays the
+  // default for everyone else.
+  bool unstaged = 4;
+}
+
+// McpToolMeta — what the gateway knows about one discovered tool beyond its
+// definition, so a caller can bind the tool to its registry row and notice a
+// changed definition. Carries a digest and the server's own side-effect claim,
+// never the description or the schema (WS05-S2).
+message McpToolMeta {
+  // `mcp__<server_id>__<tool>`, identical to the matching tools[].name.
+  string qualified_name = 1;
+  string server_id = 2;
+  string tool_name = 3;
+  // Lowercase hex SHA-256 over the canonical {name, description, inputSchema,
+  // annotations} the server reported. A change to any of them changes it.
+  string digest = 4;
+  // read_only | non_destructive_write | destructive | undeclared: what the
+  // server's annotations amount to under the MCP defaults. A third-party claim.
+  string declared_side_effect = 5;
 }
 
 // ListMcpToolsResponse — agent-facing tool definitions discovered across the
@@ -1134,6 +1157,9 @@ message ListMcpToolsRequest {
 message ListMcpToolsResponse {
   string request_id = 1;
   repeated ToolDefinition tools = 2;
+  // WS05-S2: one entry per individual discovered tool, whether or not `tools`
+  // was staged down to the synthetic pair.
+  repeated McpToolMeta meta = 3;
 }
 
 // ProxyMcpToolRequest — invoke a tool exposed by a registered MCP
@@ -1150,6 +1176,10 @@ message ProxyMcpToolRequest {
   // ListMcpTools applies at discovery. Without it, a client-declared
   // mcp__<other-users-server>__<tool> name bypasses the per-user allowlist.
   string user_id = 6;
+  // WS05-S2: the tool digest the caller's registry row pinned. When set, the
+  // gateway refuses the call with `tool_definition_changed` unless the server's
+  // current definition still hashes to it. Empty keeps today's behaviour.
+  string expected_digest = 7;
 }
 
 message ProxyMcpToolResponse {

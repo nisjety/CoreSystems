@@ -446,8 +446,11 @@ type mcpServerRow struct {
 	Enabled             bool      `json:"enabled"`
 	RolloutState        string    `json:"rollout_state"`
 	RiskLevel           string    `json:"risk_level"`
-	CreatedAt           time.Time `json:"created_at"`
-	UpdatedAt           time.Time `json:"updated_at"`
+	// AnnotationTrusted reports whether the registrant chose to believe this
+	// server's read-only annotations (see mcpServerConfig.AnnotationTrust).
+	AnnotationTrusted bool      `json:"annotation_trusted"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 type mcpServerRegistration struct {
@@ -473,6 +476,27 @@ type mcpServerConfig struct {
 	SecretRef     string   `json:"secret_ref,omitempty"`
 	OwnerUserID   string   `json:"owner_user_id,omitempty"`
 	SharedWith    []string `json:"shared_with,omitempty"`
+	// AnnotationTrust says whether the server's own `readOnlyHint` is believed
+	// when a class is derived for its tools (WS05-S2). A server's annotations are
+	// claims by a third party, so the default, and the meaning of absent, is
+	// untrusted: a read-only claim then derives as an external write. Nil is
+	// "not stated" and keeps what is stored; only an explicit true trusts the
+	// server, and for a server shared beyond one user that takes an admin.
+	AnnotationTrust *bool `json:"annotation_trust,omitempty"`
+}
+
+// annotationsTrusted is the one reading of the tri-state: only an explicit true
+// is trust.
+func (c mcpServerConfig) annotationsTrusted() bool {
+	return c.AnnotationTrust != nil && *c.AnnotationTrust
+}
+
+// mcpServerShared reports whether anyone besides the owner can use a server: a
+// server of any scope but `user` is shared, and a user-scoped one is shared as
+// soon as shared_with names someone. Trusting a server's annotations is an
+// admin's call for a shared server and the owner's own risk otherwise.
+func mcpServerShared(scope string, config mcpServerConfig) bool {
+	return scope != "user" || len(config.SharedWith) > 0
 }
 
 func mcpVerifiedOrganization(request *http.Request, requireWrite bool) (string, bool) {
@@ -598,7 +622,11 @@ func (h *MCPHandler) normalizeMCPRegistration(
 	if input.RiskLevel == "" {
 		input.RiskLevel = "medium"
 	}
-	if !mcpIdentifier.MatchString(input.ID) || !validMCPDisplayName(input.Name) || len(input.Description) > 2_000 {
+	// mcpIdentifier allows `__`, but a tool is addressed as mcp__<server>__<tool>
+	// and anything that parses that name splits on the first `__`: a server id
+	// holding one makes two different (server, tool) pairs share a name.
+	if !mcpIdentifier.MatchString(input.ID) || strings.Contains(input.ID, "__") ||
+		!validMCPDisplayName(input.Name) || len(input.Description) > 2_000 {
 		return mcpServerRow{}, mcpServerConfig{}, errors.New("invalid identity fields")
 	}
 	if input.Transport != "http" {
@@ -875,6 +903,7 @@ func hydrateMCPServerView(server *mcpServerRow) {
 	}
 	server.ToolAllowlist = append([]string(nil), config.ToolAllowlist...)
 	server.SecretConfigured = config.SecretRef != ""
+	server.AnnotationTrusted = config.annotationsTrusted()
 	server.ConfigurationState = "valid"
 	server.ConfigurationReason = ""
 }
@@ -947,6 +976,26 @@ func (h *MCPHandler) Register(mux *http.ServeMux) {
 			}
 			return
 		}
+		// Per-tool registry rows (WS05-S2): the list, and a person's approval of
+		// a tool whose definition changed.
+		if id, tool, ok := parseMCPToolApprovePath(rest); ok {
+			switch r.Method {
+			case http.MethodPost:
+				h.approveTool(w, r, id, tool)
+			default:
+				http.NotFound(w, r)
+			}
+			return
+		}
+		if id := strings.TrimSuffix(rest, "/tools"); id != rest {
+			switch r.Method {
+			case http.MethodGet:
+				h.listTools(w, r, id)
+			default:
+				http.NotFound(w, r)
+			}
+			return
+		}
 		id := rest
 		switch r.Method {
 		case http.MethodGet:
@@ -973,6 +1022,9 @@ func (h *MCPHandler) Register(mux *http.ServeMux) {
 func (h *MCPHandler) RegisterInternal(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/internal/mcp/oauth-token", h.oauthTokenResolveInternal)
 	mux.HandleFunc("/api/v1/internal/mcp/oauth-tokens", h.oauthTokensUpsertInternal)
+	// Tool observation: the gateway reports what it discovered. It can create or
+	// refresh an observation and nothing else (see observeToolsInternal).
+	mux.HandleFunc("/api/v1/internal/mcp/tools/observe", h.observeToolsInternal)
 }
 
 // mcpOAuthTokensUpsertBody is what model-gateway POSTs right after a
@@ -1253,12 +1305,30 @@ func (h *MCPHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 			jsonErr(w, "invalid MCP registration", http.StatusUnprocessableEntity)
 			return
 		}
+		// Trusting a server's read-only claims lowers the class its tools derive
+		// to, so for a server others use it is an admin's call, taken from the
+		// signed scopes. A server only its owner uses is the owner's own risk; a
+		// user-scoped server that names someone in shared_with is not that.
+		if config.annotationsTrusted() && mcpServerShared(s.Scope, config) && !verifiedIsAdmin(r) {
+			jsonErr(w, "only an admin can trust the annotations of a server shared beyond one user", http.StatusForbidden)
+			return
+		}
 		now := time.Now().UTC()
 		cfgJSON, err := json.Marshal(config)
 		if err != nil {
 			jsonErr(w, "invalid MCP registration", http.StatusBadRequest)
 			return
 		}
+		// A registration that does not mention annotation_trust (the gateway's
+		// write-through never does) keeps the stored choice, but only while the scope
+		// and the endpoint are the ones it was made for: pointing the record at
+		// another server, or widening a user-scoped server to a shared scope (which
+		// needs an admin to trust), drops the trust instead of carrying it over.
+		// Sharing a user-scoped server with other users is that same widening: a
+		// non-admin whose registration names someone in shared_with on a server that
+		// had no one in it does not carry the owner's trust along ($15).
+		nonAdminWidening := s.Scope == "user" && len(config.SharedWith) > 0 && !verifiedIsAdmin(r)
+		//
 		// ON CONFLICT (org_id, name) intentionally never touches `id` — a
 		// second registration under the same name (e.g. reconnecting after
 		// model-gateway's ephemeral cache was wiped by a restart, so it
@@ -1272,16 +1342,42 @@ func (h *MCPHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 		// that never existed under that id and 404.
 		var persistedID string
 		err = h.pool.QueryRow(r.Context(), `
+			WITH registered AS (
 			INSERT INTO mcp_servers (id, org_id, name, description, endpoint_url, transport, auth_kind,
 			    config_json, scope, enabled, rollout_state, risk_level, created_at, updated_at)
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
 			ON CONFLICT (org_id, name) WHERE deleted_at IS NULL DO UPDATE SET
 			    description=$4, endpoint_url=$5, transport=$6, auth_kind=$7,
-			    config_json=$8, scope=$9, enabled=$10, rollout_state=$11,
+			    config_json=CASE
+			        WHEN $8::jsonb ? 'annotation_trust' THEN $8::jsonb
+			        WHEN mcp_servers.endpoint_url = $5 AND mcp_servers.scope = $9 AND mcp_servers.config_json ? 'annotation_trust'
+			             AND (NOT $15::boolean OR CASE WHEN jsonb_typeof(mcp_servers.config_json->'shared_with') = 'array'
+			                  THEN jsonb_array_length(mcp_servers.config_json->'shared_with') ELSE 0 END > 0)
+			            THEN $8::jsonb || jsonb_build_object('annotation_trust', mcp_servers.config_json->'annotation_trust')
+			        ELSE $8::jsonb
+			    END,
+			    scope=$9, enabled=$10, rollout_state=$11,
 			    risk_level=$12, updated_at=$14
 			RETURNING id
+			), cascade AS (
+			    -- A registration switches a tool off, in the same statement, when it
+			    -- leaves the server disabled or outside stable/canary rollout, or when
+			    -- the tool is no longer on the allowlist it registers ($16). A tool
+			    -- comes back through the next observation, which checks the same three.
+			    UPDATE capabilities SET enabled=false, availability_state='unavailable',
+			        availability_reason_code='capability_disabled',
+			        availability_reason='The MCP server is disabled or was removed.',
+			        execution_mode='unavailable', updated_at=now()
+			    WHERE kind='mcp_tool' AND org_id=$2 AND deleted_at IS NULL
+			      AND id IN (SELECT ct.capability_id FROM capability_tools ct
+			                 WHERE ct.org_id=$2 AND ct.server_id=(SELECT id FROM registered)
+			                   AND (NOT $10::boolean OR $11::text NOT IN ('stable', 'canary')
+			                        OR NOT (ct.tool_name = ANY($16::text[]))))
+			)
+			SELECT id FROM registered
 		`, s.ID, s.OrgID, s.Name, s.Description, s.EndpointURL, s.Transport, s.AuthKind,
-			cfgJSON, s.Scope, s.Enabled, s.RolloutState, s.RiskLevel, now, now).Scan(&persistedID)
+			cfgJSON, s.Scope, s.Enabled, s.RolloutState, s.RiskLevel, now, now,
+			nonAdminWidening, config.ToolAllowlist).Scan(&persistedID)
 		if err != nil {
 			slog.Error("persist MCP server failed", "error", err)
 			jsonErr(w, "database unavailable", http.StatusInternalServerError)
@@ -1384,7 +1480,14 @@ func (h *MCPHandler) patch(w http.ResponseWriter, r *http.Request, id string) {
 			jsonErr(w, "only the MCP owner may change sharing", http.StatusForbidden)
 			return
 		}
+		wasShared := mcpServerShared(scope, config)
 		config.SharedWith = append([]string(nil), (*update.SharedWith)...)
+		// A trust choice made while the server was only its owner's does not follow
+		// it to other users unless an admin is the one sharing it: a non-admin who
+		// widens shared_with from empty to non-empty leaves it untrusted.
+		if config.annotationsTrusted() && !wasShared && mcpServerShared(scope, config) && !verifiedIsAdmin(r) {
+			config.AnnotationTrust = nil
+		}
 		config, err = normalizeMCPConfig(config, authKind, scope)
 		if err != nil {
 			jsonErr(w, "invalid MCP sharing configuration", http.StatusUnprocessableEntity)
@@ -1401,12 +1504,18 @@ func (h *MCPHandler) patch(w http.ResponseWriter, r *http.Request, id string) {
 	if update.Enabled != nil {
 		enabled = *update.Enabled
 	}
-	result, err := h.pool.Exec(r.Context(), `
+	query := `
 		UPDATE mcp_servers
 		SET enabled=COALESCE($1, enabled), rollout_state=COALESCE(NULLIF($2, ''), rollout_state),
 		    config_json=COALESCE($3, config_json), updated_at=$4
 		WHERE id=$5 AND org_id=$6 AND deleted_at IS NULL
-	`, enabled, update.RolloutState, configJSON, now, id, orgID)
+	`
+	// Taking the server out of service takes its tools out with it, in the same
+	// statement, so no tool row outlives the switch that turned its server off.
+	if (update.Enabled != nil && !*update.Enabled) || update.RolloutState == "quarantine" || update.RolloutState == "deprecated" {
+		query = withMCPToolCascade(query, "$6", "$5")
+	}
+	result, err := h.pool.Exec(r.Context(), query, enabled, update.RolloutState, configJSON, now, id, orgID)
 	if !writeSingleScopedMutation(w, "MCP server", result, err) {
 		return
 	}
@@ -1420,7 +1529,10 @@ func (h *MCPHandler) delete(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	now := time.Now().UTC()
-	result, err := h.pool.Exec(r.Context(), `UPDATE mcp_servers SET deleted_at=$1, updated_at=$1 WHERE id=$2 AND org_id=$3 AND deleted_at IS NULL`, now, id, orgID)
+	result, err := h.pool.Exec(r.Context(), withMCPToolCascade(
+		`UPDATE mcp_servers SET deleted_at=$1, updated_at=$1 WHERE id=$2 AND org_id=$3 AND deleted_at IS NULL`,
+		"$3", "$2",
+	), now, id, orgID)
 	if !writeSingleScopedMutation(w, "MCP server", result, err) {
 		return
 	}

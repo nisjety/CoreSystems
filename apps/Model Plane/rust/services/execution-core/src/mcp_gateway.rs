@@ -54,6 +54,7 @@ impl McpGatewayClient {
                 request_id: String::new(),
                 org_id: org_id.to_owned(),
                 user_id: user_id.to_owned(),
+                unstaged: false,
             })
             .await
         {
@@ -89,6 +90,7 @@ impl McpGatewayClient {
                 input_json: input_json.to_owned(),
                 // Re-authorized per-user gateway-side (defense in depth).
                 user_id: user_id.to_owned(),
+                expected_digest: String::new(),
             })
             .await
             .map_err(|e| format!("mcp proxy transport: {e}"))?
