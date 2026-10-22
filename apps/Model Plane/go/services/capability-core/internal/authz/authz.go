@@ -125,7 +125,13 @@ func AuthorizeHTTP(principal authctx.Principal, request *http.Request) error {
 }
 
 // AuthorizeGRPC applies the same read/write policy and rejects a caller-supplied
-// EvaluatePolicy tenant that conflicts with the signed tenant.
+// EvaluatePolicy or ResolveToolBindings tenant that conflicts with the signed
+// tenant.
+//
+// A user_id on those two requests names the person a run acts for. It is
+// asserted, not proven, by the caller, so only the execution-core workload may
+// assert one (the recorded trust assumption: execution-core takes it from the
+// run it was started for), and a person may only name themselves.
 func AuthorizeGRPC(principal authctx.Principal, method string, request any) error {
 	if principal.OrganizationID == "" || principal.ActorID == "" {
 		return errDenied
@@ -134,10 +140,35 @@ func AuthorizeGRPC(principal authctx.Principal, method string, request any) erro
 		conflicts(evaluate.GetOrgId(), principal.OrganizationID) {
 		return errDenied
 	}
+	if resolve, ok := request.(*mpv1.ResolveToolBindingsRequest); ok &&
+		conflicts(resolve.GetOrgId(), principal.OrganizationID) {
+		return errDenied
+	}
 	if method == mpv1.CapabilityCore_EvaluatePolicy_FullMethodName {
+		evaluate, _ := request.(*mpv1.EvaluatePolicyRequest)
+		if evaluate.GetUserId() != "" && principal.ActorID != ExecutionCoreServiceID {
+			return errDenied
+		}
 		if principal.PrincipalType == "service" &&
 			(principal.HasScope(ReadScope) || principal.HasScope(WriteScope) || principal.HasScope(GlobalWriteScope)) {
 			return nil
+		}
+		return errDenied
+	}
+	if method == mpv1.CapabilityCore_ResolveToolBindings_FullMethodName {
+		resolve, _ := request.(*mpv1.ResolveToolBindingsRequest)
+		switch principal.PrincipalType {
+		case "service":
+			if resolve.GetUserId() != "" && principal.ActorID != ExecutionCoreServiceID {
+				return errDenied
+			}
+			if principal.HasScope(ReadScope) || principal.HasScope(WriteScope) {
+				return nil
+			}
+		case "user":
+			if resolve.GetUserId() == "" || resolve.GetUserId() == principal.ActorID {
+				return nil
+			}
 		}
 		return errDenied
 	}

@@ -28,6 +28,30 @@ const (
 // ScopeWildcard matches any scope in an EnabledForScopes entry.
 const ScopeWildcard = "*"
 
+// Policy sources name what produced a decision. They ride in the signed
+// decision so a later reader can tell a risk-level ask from a class-floor ask
+// without re-deriving it.
+const (
+	// PolicySourceRiskLevel: the capability's own risk level decided.
+	PolicySourceRiskLevel = "risk_level"
+	// PolicySourceApprovalFloor: a tool's class or approval floor raised an
+	// allow to an ask.
+	PolicySourceApprovalFloor = "approval_floor"
+	// PolicySourceToolReview: the tool is not approved, or the registry does not
+	// hold it.
+	PolicySourceToolReview = "tool_review"
+	// PolicySourceCapabilityGate: the capability is out of rollout, unavailable,
+	// outside the requested scope or ungranted.
+	PolicySourceCapabilityGate = "capability_gate"
+)
+
+// Review states of an MCP tool row (capability_tools.review_state). A built-in
+// tool has none.
+const (
+	ReviewStateApproved = "approved"
+	ReviewStateDrifted  = "drifted"
+)
+
 // ScopeResolver checks the durable capability_scopes grant table. It is the
 // tenant-bound org invocation authority layer today: distinct from a capability's static
 // EnabledForScopes array, which only declares which scope *kinds* a capability
@@ -88,6 +112,71 @@ type Result struct {
 	Decision      string
 	Reason        string
 	BudgetContext string
+	// PolicySource is one of the PolicySource constants.
+	PolicySource string
+}
+
+// ToolBinding is the registry's declaration of one tool, resolved by the
+// caller from capability_tools. It is plain data so Decide stays pure.
+type ToolBinding struct {
+	ToolName          string
+	CapabilityID      string
+	CapabilityVersion string
+	SideEffectClass   string
+	ApprovalFloor     string
+	// ToolDigest is the pinned definition digest of an MCP tool; empty for a
+	// built-in tool.
+	ToolDigest string
+	// ReviewState is empty for a built-in tool.
+	ReviewState string
+}
+
+// CeilingBinding is the binding a named tool is held to when the registry holds
+// no row for it anywhere: the capability's own class and approval floor, which is
+// never weaker than any of its tools' declarations. Without it a tool named under
+// an `owner_effect` or `durable_owner` capability but absent from capability_tools
+// would be decided on the capability's risk level alone and signed as a plain
+// allow, with a floor in the evidence that nothing enforced. It has no review
+// state and no digest: it is a ceiling, not a registry row.
+func CeilingBinding(capEntry *models.Capability, toolName string) *ToolBinding {
+	if capEntry == nil {
+		return nil
+	}
+	return &ToolBinding{
+		ToolName:          toolName,
+		CapabilityID:      capEntry.ID,
+		CapabilityVersion: capEntry.Version,
+		SideEffectClass:   models.NormalizeSideEffectClass(capEntry.SideEffectClass),
+		ApprovalFloor:     models.EffectiveApprovalFloor(capEntry.SideEffectClass, capEntry.ApprovalFloor),
+	}
+}
+
+// Decide tightens a capability-level result with the binding of the tool being
+// called. It only ever tightens: a denial stands, a tool that is not approved is
+// denied, and a class or approval floor of `ask` or above turns an allow into an
+// ask. The capability's own risk decision, scope and grant checks are made
+// before and are not repeated here. A nil binding is a capability-level
+// evaluation and returns base unchanged.
+func Decide(base *Result, binding *ToolBinding) *Result {
+	if base == nil || binding == nil || base.Decision == DecisionDeny {
+		return base
+	}
+	if binding.ReviewState != "" && binding.ReviewState != ReviewStateApproved {
+		reason := "tool_not_approved"
+		if binding.ReviewState == ReviewStateDrifted {
+			reason = "tool_definition_changed"
+		}
+		return &Result{Decision: DecisionDeny, Reason: reason, PolicySource: PolicySourceToolReview}
+	}
+	floor := models.EffectiveApprovalFloor(binding.SideEffectClass, binding.ApprovalFloor)
+	if base.Decision == DecisionAllow && models.ApprovalFloorRank(floor) >= models.ApprovalFloorRank(models.ApprovalFloorAsk) {
+		return &Result{
+			Decision:     DecisionAsk,
+			Reason:       fmt.Sprintf("tool %s is declared %s with approval floor %s and requires human approval", binding.ToolName, models.NormalizeSideEffectClass(binding.SideEffectClass), floor),
+			PolicySource: PolicySourceApprovalFloor,
+		}
+	}
+	return base
 }
 
 // EvaluateCapability evaluates a capability snapshot that the caller has
@@ -109,48 +198,63 @@ func (e *Engine) EvaluateCapability(ctx context.Context, capEntry *models.Capabi
 	} else if denial != nil {
 		return denial, nil
 	}
+	result := riskResult(capEntry)
+	attrs := []attribute.KeyValue{
+		attribute.String("decision", result.Decision),
+		attribute.String("risk", string(capEntry.RiskLevel)),
+	}
+	if result.Decision == DecisionDeny {
+		attrs = append(attrs, attribute.String("reason", result.Reason))
+	}
+	telemetry.PolicyDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attrs...))
+	return result, nil
+}
+
+// riskResult is the decision a capability's risk level alone yields: high risk
+// asks, medium and low allow under a budget, anything else is denied. It is the
+// base every other check tightens and has no side effect.
+func riskResult(capEntry *models.Capability) *Result {
 	switch capEntry.RiskLevel {
 	case models.RiskHigh:
-		telemetry.PolicyDecisionsTotal.Add(ctx, 1, metric.WithAttributes(
-			attribute.String("decision", DecisionAsk),
-			attribute.String("risk", string(capEntry.RiskLevel)),
-		))
 		return &Result{
 			Decision:      DecisionAsk,
 			Reason:        fmt.Sprintf("capability %s is high-risk and requires human approval", capEntry.ID),
 			BudgetContext: "",
-		}, nil
+			PolicySource:  PolicySourceRiskLevel,
+		}
 	case models.RiskMedium:
-		telemetry.PolicyDecisionsTotal.Add(ctx, 1, metric.WithAttributes(
-			attribute.String("decision", DecisionAllow),
-			attribute.String("risk", string(capEntry.RiskLevel)),
-		))
 		return &Result{
 			Decision:      DecisionAllow,
 			Reason:        "medium-risk capability allowed under constrained budget",
 			BudgetContext: "tokens=10000,cost_usd=0.50",
-		}, nil
+			PolicySource:  PolicySourceRiskLevel,
+		}
 	case models.RiskLow:
-		telemetry.PolicyDecisionsTotal.Add(ctx, 1, metric.WithAttributes(
-			attribute.String("decision", DecisionAllow),
-			attribute.String("risk", string(capEntry.RiskLevel)),
-		))
 		return &Result{
 			Decision:      DecisionAllow,
 			Reason:        "low-risk capability allowed under default budget",
 			BudgetContext: "tokens=100000,cost_usd=5.00",
-		}, nil
+			PolicySource:  PolicySourceRiskLevel,
+		}
 	default:
-		telemetry.PolicyDecisionsTotal.Add(ctx, 1, metric.WithAttributes(
-			attribute.String("decision", DecisionDeny),
-			attribute.String("risk", string(capEntry.RiskLevel)),
-			attribute.String("reason", "invalid_risk_level"),
-		))
 		return &Result{
-			Decision: DecisionDeny,
-			Reason:   "invalid_risk_level",
-		}, nil
+			Decision:     DecisionDeny,
+			Reason:       "invalid_risk_level",
+			PolicySource: PolicySourceRiskLevel,
+		}
 	}
+}
+
+// EffectivePolicy is what a tool's own declaration lets a call do today: the
+// capability's risk decision tightened by the tool's review state and approval
+// floor. Scope and grant checks are per call and are not part of it, so it is
+// the answer to "may this tool ever run unattended", not a replacement for
+// EvaluateCapability.
+func EffectivePolicy(capEntry *models.Capability, binding *ToolBinding) string {
+	if capEntry == nil {
+		return DecisionDeny
+	}
+	return Decide(riskResult(capEntry), binding).Decision
 }
 
 // denyOnScope returns a Deny Result unless the capability explicitly declares
@@ -173,6 +277,7 @@ func (e *Engine) denyOnScope(ctx context.Context, cap *models.Capability, scope 
 			cap.ID, scope, cap.EnabledForScopes,
 		),
 		BudgetContext: "",
+		PolicySource:  PolicySourceCapabilityGate,
 	}
 }
 
@@ -223,5 +328,6 @@ func (e *Engine) denyOnGrant(ctx context.Context, cap *models.Capability, _ stri
 			cap.ID, scope, scopeValue,
 		),
 		BudgetContext: "",
+		PolicySource:  PolicySourceCapabilityGate,
 	}, nil
 }

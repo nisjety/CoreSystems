@@ -2100,6 +2100,10 @@ impl ModelGateway for GatewayService {
             // Mirrors execution-core's own call (capability_policy.rs) — the
             // two must ask the same question or they can disagree.
             scope: "global".to_owned(),
+            // The gateway's own policy read names neither a user nor a tool: the
+            // per-tool binding and the signed v2 decision are execution-core's
+            // question (WS05-S3), so the two new request fields stay empty here.
+            ..Default::default()
         });
         if !bearer.is_empty() {
             upstream.metadata_mut().insert(

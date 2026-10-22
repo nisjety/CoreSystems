@@ -545,8 +545,17 @@ async fn execute_step_inner(
     release: Option<&resume::ApprovedRelease>,
 ) -> StepOutcome {
     let released = release.is_some_and(|r| r.covers(step_id, tool_name, tool_input));
+    // An MCP tool carries the call's content to a third-party server, so it is
+    // never reached under ZDR or on a waived route. Refused before the registry
+    // is asked about it: once `TOOL_CLASS_GATE` binds `mcp__` names, the
+    // capability gate alone no longer keeps them out.
+    if (zdr || waived) && tool_name.starts_with(MCP_TOOL_PREFIX) {
+        return StepOutcome::failed(
+            &mp_contracts::zdr_refusal::Refusal::feature_not_supported("mcp_execution").message(),
+        );
+    }
     match capability_policy
-        .evaluate_with_evidence(tool_name, run_id, org_id)
+        .evaluate_tool_call(tool_name, run_id, org_id, user_id)
         .await
     {
         Ok(evaluation)
@@ -566,9 +575,17 @@ async fn execute_step_inner(
             if evaluation.decision == crate::capability_policy::CapabilityDecision::Ask =>
         {
             if !released {
-                // capability-core answers `ask` for a high-risk capability; a tool
-                // policy rule is a different cause and nothing raises it yet.
-                return StepOutcome::awaiting_approval(CauseCode::CapabilityHighRisk);
+                // capability-core answers `ask` for a high-risk capability, and,
+                // once the tool class gate names the tool, for a tool whose class
+                // or approval floor asks. The second is the same pause the
+                // permission gate below raises, so it is shown under that gate's
+                // cause rather than as a high-risk capability.
+                let cause = if evaluation.policy_source == "approval_floor" {
+                    permission_pause_cause(tool_name)
+                } else {
+                    CauseCode::CapabilityHighRisk
+                };
+                return StepOutcome::awaiting_approval(cause);
             }
             // The user approved this exact call: the ask gate is satisfied.
         }
@@ -2538,6 +2555,169 @@ mod tests {
 
     fn allow_policy() -> FixedCapabilityPolicy {
         FixedCapabilityPolicy(crate::capability_policy::CapabilityDecision::Allow)
+    }
+
+    /// Records how the gate asked: which users it named, and how many times it
+    /// was consulted at all.
+    #[derive(Default)]
+    struct RecordingPolicy {
+        users: std::sync::Mutex<Vec<String>>,
+        consulted: std::sync::atomic::AtomicUsize,
+    }
+
+    #[tonic::async_trait]
+    impl crate::capability_policy::CapabilityPolicy for RecordingPolicy {
+        async fn evaluate(
+            &self,
+            _tool_name: &str,
+            _run_id: &str,
+            _org_id: &str,
+        ) -> Result<crate::capability_policy::CapabilityDecision, tonic::Status> {
+            self.consulted
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(crate::capability_policy::CapabilityDecision::Deny)
+        }
+
+        async fn evaluate_tool_call(
+            &self,
+            _tool_name: &str,
+            _run_id: &str,
+            _org_id: &str,
+            user_id: &str,
+        ) -> Result<crate::capability_policy::CapabilityEvaluation, tonic::Status> {
+            self.consulted
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.users
+                .lock()
+                .expect("users lock")
+                .push(user_id.to_owned());
+            Ok(crate::capability_policy::CapabilityEvaluation {
+                decision: crate::capability_policy::CapabilityDecision::Deny,
+                decision_id: String::new(),
+                capability_version: String::new(),
+                evidence_verified: true,
+                policy_source: String::new(),
+            })
+        }
+    }
+
+    /// Answers `ask` and says what produced it.
+    struct AskedBy(&'static str);
+
+    #[tonic::async_trait]
+    impl crate::capability_policy::CapabilityPolicy for AskedBy {
+        async fn evaluate(
+            &self,
+            _tool_name: &str,
+            _run_id: &str,
+            _org_id: &str,
+        ) -> Result<crate::capability_policy::CapabilityDecision, tonic::Status> {
+            Ok(crate::capability_policy::CapabilityDecision::Ask)
+        }
+
+        async fn evaluate_tool_call(
+            &self,
+            _tool_name: &str,
+            _run_id: &str,
+            _org_id: &str,
+            _user_id: &str,
+        ) -> Result<crate::capability_policy::CapabilityEvaluation, tonic::Status> {
+            Ok(crate::capability_policy::CapabilityEvaluation {
+                decision: crate::capability_policy::CapabilityDecision::Ask,
+                decision_id: String::new(),
+                capability_version: String::new(),
+                evidence_verified: true,
+                policy_source: self.0.to_owned(),
+            })
+        }
+    }
+
+    /// A class or approval floor that asks is the pause the permission gate raises
+    /// for the same tool, so it keeps that gate's cause; any other `ask` from
+    /// capability-core is a high-risk capability.
+    #[tokio::test]
+    async fn an_ask_from_an_approval_floor_keeps_the_permission_gates_cause() {
+        let floor = AskedBy("approval_floor");
+        assert_eq!(
+            held_for("tickets.create", "{}", "auto", "", &floor).await,
+            Some(CauseCode::OwnerEffectReserved)
+        );
+        assert_eq!(
+            held_for("read_subagent_result", "{}", "auto", "", &floor).await,
+            Some(CauseCode::ConsentToDisclose)
+        );
+        for source in ["risk_level", "capability_gate", ""] {
+            assert_eq!(
+                held_for("tickets.create", "{}", "auto", "", &AskedBy(source)).await,
+                Some(CauseCode::CapabilityHighRisk),
+                "{source:?}"
+            );
+        }
+    }
+
+    /// The person the run acts for is part of what capability-core signs, so the
+    /// step must hand it to the gate rather than let the gate guess.
+    #[tokio::test]
+    async fn the_user_the_run_acts_for_reaches_the_capability_policy() {
+        let policy = RecordingPolicy::default();
+        let out = step_through_the_gate("echo", "{}", "auto", "", &policy).await;
+        assert_eq!(out.status, "permission_denied");
+        assert_eq!(*policy.users.lock().expect("users lock"), ["user_test"]);
+    }
+
+    /// An `mcp__` tool sends content to a third-party server. Binding `mcp__`
+    /// names from the registry must not make one reachable under ZDR or on a
+    /// waived route, so it is refused before the gate is even consulted.
+    #[tokio::test]
+    async fn an_mcp_tool_is_refused_under_zdr_or_a_waived_route_before_the_gate_is_asked() {
+        for (zdr, waived) in [(true, false), (false, true), (true, true)] {
+            let policy = RecordingPolicy::default();
+            let out = execute_step_with_subagent(
+                "mcp__srv__echo",
+                "{}",
+                "auto",
+                "",
+                "org_test",
+                "user_test",
+                "run_test",
+                "step_test",
+                "",
+                None,
+                None,
+                None,
+                zdr,
+                waived,
+                0,
+                None,
+                None,
+                None,
+                &policy,
+                None,
+                None,
+                None,
+            )
+            .await;
+            assert_eq!(out.status, "failed", "zdr={zdr} waived={waived}");
+            assert_eq!(
+                out.error,
+                mp_contracts::zdr_refusal::Refusal::feature_not_supported("mcp_execution")
+                    .message(),
+                "zdr={zdr} waived={waived}"
+            );
+            assert_eq!(
+                policy.consulted.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "zdr={zdr} waived={waived}"
+            );
+        }
+        // A run that is neither ZDR nor waived does reach the gate.
+        let policy = RecordingPolicy::default();
+        let out = step_through_the_gate("mcp__srv__echo", "{}", "auto", "", &policy).await;
+        assert_eq!(out.status, "permission_denied");
+        assert_eq!(
+            policy.consulted.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
     }
 
     #[tokio::test]

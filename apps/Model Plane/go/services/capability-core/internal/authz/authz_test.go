@@ -114,6 +114,48 @@ func TestAuthorizeHTTPRequiresExplicitNonZDRPostureForDurableMutations(t *testin
 	}
 }
 
+// The user a run acts for is asserted by the caller, so only the execution-core
+// workload may assert one and a person may only name themselves. A forged
+// assertion would let a later per-user policy be borrowed.
+func TestAuthorizeGRPCPinsAssertedUserAndToolBindingReads(t *testing.T) {
+	execution := authctx.Principal{OrganizationID: "org-a", ActorID: ExecutionCoreServiceID, PrincipalType: "service", Scopes: []string{ReadScope}}
+	otherService := authctx.Principal{OrganizationID: "org-a", ActorID: "service:other", PrincipalType: "service", Scopes: []string{ReadScope}}
+	unscoped := authctx.Principal{OrganizationID: "org-a", ActorID: ExecutionCoreServiceID, PrincipalType: "service"}
+	user := authctx.Principal{OrganizationID: "org-a", ActorID: "user-a", PrincipalType: "user"}
+	resolve := mpv1.CapabilityCore_ResolveToolBindings_FullMethodName
+	evaluate := mpv1.CapabilityCore_EvaluatePolicy_FullMethodName
+
+	tests := []struct {
+		name      string
+		principal authctx.Principal
+		method    string
+		request   any
+		wantErr   bool
+	}{
+		{name: "execution-core may assert the user on a policy evaluation", principal: execution, method: evaluate, request: &mpv1.EvaluatePolicyRequest{UserId: "user-a", ToolName: "web_fetch"}},
+		{name: "execution-core may evaluate without a user", principal: execution, method: evaluate, request: &mpv1.EvaluatePolicyRequest{ToolName: "web_fetch"}},
+		{name: "another service may not assert a user on a policy evaluation", principal: otherService, method: evaluate, request: &mpv1.EvaluatePolicyRequest{UserId: "user-a"}, wantErr: true},
+		{name: "another service may name a tool without a user", principal: otherService, method: evaluate, request: &mpv1.EvaluatePolicyRequest{ToolName: "web_fetch"}},
+		{name: "execution-core may resolve bindings for a user", principal: execution, method: resolve, request: &mpv1.ResolveToolBindingsRequest{UserId: "user-b", ToolNames: []string{"shell"}}},
+		{name: "another service may not assert a user when resolving", principal: otherService, method: resolve, request: &mpv1.ResolveToolBindingsRequest{UserId: "user-a"}, wantErr: true},
+		{name: "another reading service may resolve without a user", principal: otherService, method: resolve, request: &mpv1.ResolveToolBindingsRequest{ToolNames: []string{"shell"}}},
+		{name: "a service without a read scope may not resolve", principal: unscoped, method: resolve, request: &mpv1.ResolveToolBindingsRequest{}, wantErr: true},
+		{name: "a person may resolve for themselves", principal: user, method: resolve, request: &mpv1.ResolveToolBindingsRequest{UserId: "user-a"}},
+		{name: "a person may resolve without naming a user", principal: user, method: resolve, request: &mpv1.ResolveToolBindingsRequest{}},
+		{name: "a person may not resolve for someone else", principal: user, method: resolve, request: &mpv1.ResolveToolBindingsRequest{UserId: "user-b"}, wantErr: true},
+		{name: "a wrong-tenant resolution is denied", principal: execution, method: resolve, request: &mpv1.ResolveToolBindingsRequest{OrgId: "org-b"}, wantErr: true},
+		{name: "a matching tenant resolution is allowed", principal: execution, method: resolve, request: &mpv1.ResolveToolBindingsRequest{OrgId: "org-a"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := AuthorizeGRPC(tc.principal, tc.method, tc.request)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("AuthorizeGRPC() error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestAuthorizeGRPCPinsEvaluatePolicyAndProtectsPromotion(t *testing.T) {
 	user := authctx.Principal{OrganizationID: "org-a", ActorID: "user-a", PrincipalType: "user"}
 	writer := authctx.Principal{OrganizationID: "org-a", ActorID: "svc-a", PrincipalType: "service", Scopes: []string{"capability:write"}}
