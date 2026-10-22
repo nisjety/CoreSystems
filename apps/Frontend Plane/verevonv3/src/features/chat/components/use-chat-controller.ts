@@ -177,6 +177,26 @@ import { isEffectfulChatTurn } from '@/shared/chat/effect-class'
 import { planExecuteEnabled } from '@/shared/chat/plan-execute'
 import { readPinnedMessages, togglePinnedMessage } from '../lib/chat-pinned-messages'
 import { CHAT_SURFACE_IDS, chatSurfaceSpec, isChatTab } from '../lib/chat-surfaces'
+import { createSnapshotWriter, flushOnPageLifecycle, parseSnapshotThrottleMs } from '../lib/snapshot-throttle'
+
+/**
+ * WS09 S3. `VITE_CHAT_SNAPSHOT_THROTTLE_MS` is the cadence of the local transcript
+ * snapshot while an answer streams (default one second). `0` restores the
+ * per-token behaviour of everything this slice changed: a snapshot per flush, an
+ * unconditional step replacement, a Trace row per `message.delta`.
+ */
+const snapshotThrottleMs = parseSnapshotThrottleMs(import.meta.env.VITE_CHAT_SNAPSHOT_THROTTLE_MS)
+const reduceStreamChurn = snapshotThrottleMs > 0
+
+/** A step whose shown fields are unchanged. `createdAt` is a stamp of the call, not content. */
+function isSameTaskStep(a: AgentTaskStep, b: AgentTaskStep): boolean {
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)])
+  for (const key of keys) {
+    if (key === 'createdAt') continue
+    if (a[key as keyof AgentTaskStep] !== b[key as keyof AgentTaskStep]) return false
+  }
+  return true
+}
 
 /**
  * Stream error codes that describe the CONNECTION, not the run. The browser's
@@ -272,7 +292,23 @@ export function useChatController() {
    * mode an audit record cannot have. The durable replay already paginates to
    * this same ceiling and sets the flag; this makes the live path agree.
    */
-  const appendUiEvent = (event: VerevonUiEvent) => {
+  /**
+   * Streams (a turn, or a resumed segment of it) whose first `message.delta` the
+   * Trace already holds (WS09 S3, D8). A
+   * delta is one token, so recording each one made a long answer thousands of
+   * text-fragment rows against the cap, pushing the lifecycle rows out; the
+   * answer itself is the record of what was streamed. Cleared with the list.
+   */
+  const deltaRecordedTurns = new Set<string>()
+  const resetUiEvents = (next: VerevonUiEvent[] = []) => {
+    deltaRecordedTurns.clear()
+    setUiEvents(next)
+  }
+  const appendUiEvent = (event: VerevonUiEvent, turnId?: string) => {
+    if (reduceStreamChurn && event.type === 'message.delta' && turnId) {
+      if (deltaRecordedTurns.has(turnId)) return
+      deltaRecordedTurns.add(turnId)
+    }
     if (untrack(() => uiEvents().length) >= MAX_TRACE_EVENTS) setTraceReplayTruncated(true)
     setUiEvents((current) => [...current, event].slice(-MAX_TRACE_EVENTS))
   }
@@ -724,6 +760,28 @@ export function useChatController() {
   }
 
   /**
+   * WS09 S3. The persistence effect re-runs on every token; this keeps its local
+   * snapshot to `snapshotThrottleMs`. It carries only the thread id and reads the
+   * transcript when the write happens, so a late write is the latest state, never
+   * an earlier call's. It delays calls to `writeThreadSnapshot` and nothing else:
+   * the temporary / foreign-origin / retention guards at its top still run at the
+   * moment of the write, so a pending write for a thread that turned ZDR meanwhile
+   * is dropped there. The terminal writes below stay direct and synchronous.
+   *
+   * Flushed before the thread in view changes (`loadThread`, `resetChatState`,
+   * `branchAt`, a new send), when the page is hidden or unloaded, and on cleanup.
+   * A write for a thread that is no longer the one in view is dropped: the state
+   * it would read belongs to another thread.
+   */
+  const snapshotWriter = createSnapshotWriter<string>((threadId) => {
+    untrack(() => {
+      if (state.threadId !== threadId || threadId === hydratingThreadId) return
+      writeThreadSnapshot(threadId, state.turns, {}, state.taskSteps, { persistServer: false })
+    })
+  }, { intervalMs: snapshotThrottleMs })
+  const unbindSnapshotLifecycle = flushOnPageLifecycle(snapshotWriter)
+
+  /**
    * Publish a small local hint for the personal thread rail while the
    * authoritative server list catches up. This is presentation-only: the
    * run id/status remain server-owned and all durable controls still read the
@@ -973,7 +1031,7 @@ export function useChatController() {
     }
     setTraceReplayTruncated(truncated)
     if (replayed.length === 0) return
-    setUiEvents(replayed.map((event) => {
+    resetUiEvents(replayed.map((event) => {
       // Cancellation receipts are safe to promote from the envelope-only
       // replay because the event id is the receipt id and Session Core already
       // proved the run/thread ownership before returning this page. Keep every
@@ -1091,6 +1149,9 @@ export function useChatController() {
     // already does; the thread-select path needs it too.
     abortController?.abort()
     abortController = undefined
+    // The snapshot still pending belongs to the thread being left: write it while
+    // the store still holds that thread.
+    snapshotWriter.flush()
     const seq = ++threadLoadSequence
     hydratingThreadId = threadId
     setState((s) => {
@@ -1185,7 +1246,7 @@ export function useChatController() {
         s.turns = turns
         s.taskSteps = cachedTaskSteps
       })
-      setUiEvents([])
+      resetUiEvents()
       setTraceReplayTruncated(false)
       if (turns.length > 0) {
         writeThreadSnapshot(threadId, turns, {}, cachedTaskSteps, { persistServer: false })
@@ -1236,7 +1297,7 @@ export function useChatController() {
         s.turns = fallbackTurns
         s.taskSteps = cachedTaskSteps
       })
-      setUiEvents([])
+      resetUiEvents()
       setTraceReplayTruncated(false)
       if (fallbackTurns.length > 0) {
         writeThreadSnapshot(threadId, fallbackTurns, {}, cachedTaskSteps, { persistServer: false })
@@ -1281,6 +1342,11 @@ export function useChatController() {
   /** Every open wait, so unmounting the chat stops polling for it. */
   const durableWatches = new Set<AbortController>()
   onCleanup(() => {
+    // Before `disposed`: that flag makes `writeThreadSnapshot` refuse, and the
+    // last streamed text must reach storage before the chat goes away.
+    snapshotWriter.flush()
+    snapshotWriter.dispose()
+    unbindSnapshotLifecycle()
     disposed = true
     // The live stream or resume too: left open, it would end later and start
     // a wait of its own, which nothing would abort.
@@ -1686,7 +1752,9 @@ export function useChatController() {
         },
         onUiEvent: (event) => {
           if (!isActiveThread()) return
-          appendUiEvent(event)
+          // A resumed connection is its own segment of the turn: its first delta
+          // is recorded again, which marks where the stream picked up.
+          appendUiEvent(event, `${assistantId}:resume`)
         },
         onMessage: ({ content: delta }) => {
           if (!isActiveThread()) return
@@ -1821,7 +1889,7 @@ export function useChatController() {
       turns: deep(state.turns),
       taskSteps: deep(state.taskSteps),
     }),
-    ({ threadId, turns, taskSteps }) => {
+    ({ threadId, turns }) => {
       if (!threadId || turns.length === 0) return
       // While a thread switch is hydrating, `state.turns` still belongs to the
       // PREVIOUS thread — persisting that pair is the overwrite bug loadThread's
@@ -1832,11 +1900,13 @@ export function useChatController() {
       // lifecycle signals (temporary/foreign ownership); keep those reads out
       // of Solid 2's untracked effect callback while retaining the reactive
       // dependency collection in the compute phase above.
-      untrack(() => writeThreadSnapshot(threadId, turns, {}, taskSteps, { persistServer: false }))
+      // The writer reads the transcript itself when it writes (see `snapshotWriter`).
+      snapshotWriter.schedule(threadId)
     },
   )
 
   const resetChatState = () => {
+    snapshotWriter.flush()
     abortController?.abort()
     // A mount-time (or previously selected) transcript load can still be
     // awaiting its server response. Invalidate it before clearing state so it
@@ -1854,7 +1924,7 @@ export function useChatController() {
       branchCount: 0,
       queuedInputs: [],
       }))
-    setUiEvents([])
+    resetUiEvents()
     setTraceReplayTruncated(false)
     setInput('')
     setActiveTab('chat')
@@ -2434,6 +2504,8 @@ export function useChatController() {
     // `loadThread`, so resuming such a thread remains appendable.
     const requestedSpaceRef = scopedThreadRefs.get(activeThreadId)
     if (isNewThread) {
+      // A pending snapshot belongs to the thread being left.
+      snapshotWriter.flush()
       setState((s) => { s.threadId = activeThreadId })
       startingThreadIds.add(activeThreadId)
       if (options.zdr) markThreadTemporary(activeThreadId)
@@ -2508,7 +2580,7 @@ export function useChatController() {
 
     setActiveTab('chat')
     setState((s) => { s.turns = nextTurns })
-    setUiEvents([])
+    resetUiEvents()
     setTraceReplayTruncated(false)
     // A new conversation starts with a provisional client id. Persist its
     // local transcript immediately, but do not enqueue a server PUT until the
@@ -2720,7 +2792,7 @@ export function useChatController() {
         silencedAfterStop({
           onUiEvent: (event) => {
             if (!projection.accepts()) return
-            appendUiEvent(event)
+            appendUiEvent(event, assistantId)
           },
           onConnected: (connected) => {
             if (stopBeforeConnect) {
@@ -3942,6 +4014,7 @@ export function useChatController() {
     // look like part of the branch's fresh history; the preceding user turn is
     // the safe, reproducible boundary.
     const index = safeBranchBoundary(turns, requestedIndex)
+    snapshotWriter.flush()
     abortController?.abort()
     const sourceWasTemporary = isTemporaryThread(state.threadId)
     const nextThreadId = createId('thread')
@@ -4001,6 +4074,10 @@ export function useChatController() {
         s.taskSteps = [...s.taskSteps, step]
         return
       }
+      // The answer and reasoning steps are upserted on every token with the same
+      // content. Replacing the array for an unchanged step re-runs everything that
+      // reads the steps (the Steps panel, the snapshot effect) once per token.
+      if (reduceStreamChurn && isSameTaskStep(s.taskSteps[index] as AgentTaskStep, { ...s.taskSteps[index], ...step })) return
       s.taskSteps = s.taskSteps.map((item, itemIndex) => itemIndex === index ? { ...item, ...step } : item)
     })
   }

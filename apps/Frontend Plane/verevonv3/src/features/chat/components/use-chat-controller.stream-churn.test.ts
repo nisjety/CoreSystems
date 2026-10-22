@@ -19,11 +19,12 @@
  *
  * Only lengths are recorded, never the stored text: nothing here keeps content.
  *
- * WHAT IS ASSERTED. Baseline pins of today's behaviour, as structural counts
- * (never milliseconds), each with an "S3 target" note. S3 flips exactly those
- * lines (transcript writes at most one per second, one write per terminal,
- * steps replaced once, one Trace row per turn for `message.delta`), and the
- * ZDR case at the bottom stays as it is: a temporary thread writes nothing.
+ * WHAT IS ASSERTED. Structural counts (never milliseconds). S1 pinned the
+ * per-token behaviour; WS09 S3 flipped exactly those lines to their targets
+ * (transcript writes at most one per second, steps replaced once, one Trace row
+ * per stream for `message.delta`). The ZDR cases at the bottom never changed: a
+ * temporary thread writes nothing. `VITE_CHAT_SNAPSHOT_THROTTLE_MS=0` restores
+ * the per-token numbers and is covered in `use-chat-controller.snapshot-throttle`.
  */
 
 import { createRoot, flush } from 'solid-js'
@@ -207,7 +208,7 @@ afterEach(() => {
 })
 
 describe('stream churn: what one token costs outside the renderer', () => {
-  it('rewrites the whole transcript to both storages on every delta (S3 flips this)', async () => {
+  it('writes the transcript to both storages at most once per second, not once per delta', async () => {
     const { controller, dispose } = mount()
     const live = await startTurn(controller)
     // The send itself queues one server snapshot (500 ms debounce); let it land
@@ -233,25 +234,25 @@ describe('stream churn: what one token costs outside the renderer', () => {
     const streamWrites = { local: { ...storage.writes.local }, session: { ...storage.writes.session } }
     const serverSnapshotsMidStream = mocks.saveChatThreadSnapshot.mock.calls.length
 
-    // One write per delta to EACH storage: the controller's persistence effect
-    // re-runs on every token and `writeThreadSnapshot` has no cadence of its own.
-    // S3 target: at most one per second, so at most ceil(duration) writes.
-    expect(streamWrites.local.count).toBe(all.length)
-    expect(streamWrites.session.count).toBe(all.length)
-    // The value written grows with the transcript, so total bytes are quadratic
-    // in the answer: about deltas/2 times the final value. S3 target: bounded by
-    // the seconds of stream, not the delta count.
-    const finalValueBytes = perDeltaBytes.at(-1) ?? 0
-    expect(perDeltaBytes.every((bytes, index) => index === 0 || bytes >= (perDeltaBytes[index - 1] ?? 0))).toBe(true)
-    expect(streamWrites.local.bytes / finalValueBytes).toBeGreaterThan(all.length / 4)
+    // The persistence effect still re-runs on every token, but the snapshot
+    // writer lets one write through per second: at most ceil(duration) + 1
+    // (the first call of the stream, then one per window), to EACH storage.
+    const streamSeconds = (all.length * FRAME_MS) / 1000
+    expect(streamWrites.local.count).toBeGreaterThanOrEqual(1)
+    expect(streamWrites.local.count).toBeLessThanOrEqual(Math.ceil(streamSeconds) + 1)
+    expect(streamWrites.session.count).toBe(streamWrites.local.count)
+    // Total bytes are bounded by the seconds of stream, not the delta count: far
+    // below the old "about deltas/2 times the final value".
+    const finalValueBytes = Math.max(...perDeltaBytes, 1)
+    expect(streamWrites.local.bytes / finalValueBytes).toBeLessThan(all.length / 10)
     // The per-delta writes pass `persistServer: false`, so the server copy is
     // saved only at submit and at the terminal event: nothing mid-stream, and the
     // local snapshot is the only copy of a long answer until it ends.
     expect(serverSnapshotsMidStream).toBe(0)
-    // Steps: the array and the unchanged "Compose response" step are replaced by
-    // equal copies on every delta. S3 target: replaced once per turn.
-    expect(new Set(stepsArrayRef).size).toBeGreaterThan(all.length * 0.9)
-    expect(new Set(stepRef).size).toBeGreaterThan(all.length * 0.9)
+    // Steps: the unchanged "Compose response" step is no longer replaced by an
+    // equal copy on every delta, so the array and the step keep their identity.
+    expect(new Set(stepsArrayRef).size).toBeLessThanOrEqual(2)
+    expect(new Set(stepRef).size).toBeLessThanOrEqual(2)
     expect(controller.state.taskSteps.filter((step) => step.title === 'Compose response')).toHaveLength(1)
 
     live.emit(frame('done', { request_id: 'req-1' }))
@@ -273,7 +274,7 @@ describe('stream churn: what one token costs outside the renderer', () => {
     dispose()
   })
 
-  it('records one Trace row per delta (S3 flips this)', async () => {
+  it('records the first message.delta of a stream in the Trace, not one row per delta', async () => {
     const { controller, dispose } = mount()
     const live = await startTurn(controller)
     const before = controller.uiEvents().length
@@ -285,19 +286,19 @@ describe('stream churn: what one token costs outside the renderer', () => {
     const rows = controller.uiEvents().slice(before)
     const deltaRows = rows.filter((row) => row.type === 'message.delta')
 
-    // The Trace panel gets a row for every token, so a long answer is thousands
-    // of rows of text fragments against a 5,000-row cap. S3 target: the first
-    // `message.delta` of the turn only (lifecycle rows are untouched).
-    expect(deltaRows).toHaveLength(all.length)
-    expect(rows).toHaveLength(all.length)
+    // The Trace used to get a row for every token, so a long answer was thousands
+    // of text-fragment rows against a 5,000-row cap. It now keeps the first
+    // `message.delta` of the stream only (lifecycle rows are untouched).
+    expect(deltaRows).toHaveLength(1)
+    expect(rows).toHaveLength(1)
     console.info('[stream-churn] trace', JSON.stringify({ deltas: all.length, uiEventRows: rows.length }))
     dispose()
   })
 
-  // ZDR across the whole stream and every flush trigger the controller has today
-  // (each delta, the terminal event, the 500 ms server debounce). S3 keeps these
-  // green and adds its own trigger cases (visibility, pagehide, thread switch)
-  // beside its writer.
+  // ZDR across the whole stream and every flush trigger the controller has (each
+  // delta, the terminal event, the 500 ms server debounce). The trigger cases of
+  // the snapshot writer (visibility, pagehide, thread switch, cleanup) are in
+  // `use-chat-controller.snapshot-throttle.test.ts`.
   const zdrCases: Array<[string, () => { zdr?: boolean }]> = [
     ['a temporary (ZDR) thread', () => ({ zdr: true })],
     ['an org whose ZDR posture is on', () => {
@@ -318,7 +319,7 @@ describe('stream churn: what one token costs outside the renderer', () => {
     await tick()
   }
 
-  it.each(zdrCases)('writes nothing from the connected frame to the terminal for %s (stays true after S3)', async (_name, arrange) => {
+  it.each(zdrCases)('writes nothing from the connected frame to the terminal for %s', async (_name, arrange) => {
     // A new thread: the temporary marking is made at the first send of a thread.
     mocks.listChatThreads.mockResolvedValue([])
     const { controller, dispose } = mount()
