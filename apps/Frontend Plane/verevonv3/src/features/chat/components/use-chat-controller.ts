@@ -536,16 +536,27 @@ export function useChatController() {
     if (serverSnapshotTimer !== undefined) window.clearTimeout(serverSnapshotTimer)
   })
 
+  // The synchronous half of the temporary marking. `setTemporaryThreadIds` is a
+  // signal write and Solid 2 applies it at the next flush, so a read made in the
+  // same synchronous run (the first send marks the thread and writes its first
+  // snapshot with no flush between) still sees the unmarked set. This plain set
+  // is written at the same moment as the signal and is what makes the marking
+  // visible to the persistence guards immediately. It is never a dependency and
+  // never read for reactivity: the signal stays the reactive source.
+  const temporaryThreadsNow = new Set<string>()
+
   /** True once this thread has actually sent a ZDR (temporary chat) turn. */
   const isTemporaryThread = (threadId: string | null | undefined): boolean =>
-    Boolean(threadId) && temporaryThreadIds().has(threadId as string)
+    Boolean(threadId) && (temporaryThreadIds().has(threadId as string) || temporaryThreadsNow.has(threadId as string))
 
   const markThreadTemporary = (threadId: string) => {
+    temporaryThreadsNow.add(threadId)
     setTemporaryThreadIds((prev) => (prev.has(threadId) ? prev : new Set(prev).add(threadId)))
   }
 
   /** The provisional client-generated thread id is replaced by the server's real one; carry the temporary marking across that rename so the lock survives it. */
   const renameTemporaryThread = (fromId: string, toId: string) => {
+    if (temporaryThreadsNow.delete(fromId)) temporaryThreadsNow.add(toId)
     setTemporaryThreadIds((prev) => {
       if (!prev.has(fromId)) return prev
       const next = new Set(prev)

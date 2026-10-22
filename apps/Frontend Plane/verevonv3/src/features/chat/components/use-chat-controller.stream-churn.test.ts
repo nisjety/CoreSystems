@@ -345,15 +345,16 @@ describe('stream churn: what one token costs outside the renderer', () => {
     dispose()
   })
 
-  // KNOWN GAP, found by this slice's measurement and not fixed here (the fix is
-  // in `use-chat-controller.ts`, outside S1). `sendContent` marks a new
-  // temporary thread (`markThreadTemporary`, a signal write) and then, with no
-  // flush between, writes the first-turn snapshot (`writeThreadSnapshot`), whose
-  // `isTemporaryThread` guard still reads the unmarked set. The user's first
-  // message is stored under the provisional thread id in both storages. When the
-  // fix lands this test passes, vitest reports it as an unexpected pass, and the
-  // `.fails` marker is deleted.
-  it.fails('a temporary thread keeps the first send out of local storage too', async () => {
+  // This was a known gap, found by this slice's measurement. `sendContent` marks
+  // a new temporary thread (`markThreadTemporary`, a signal write) and then, with
+  // no flush between, wrote the first-turn snapshot (`writeThreadSnapshot`),
+  // whose `isTemporaryThread` guard still read the unmarked set, so the user's
+  // first message was stored under the provisional thread id in both storages.
+  // The marking is now also held in a synchronous set the guard reads at once
+  // (`temporaryThreadsNow` in `use-chat-controller.ts`); the trigger cases and
+  // the guard against over-blocking are in
+  // `use-chat-controller.snapshot-throttle.test.ts`.
+  it('a temporary thread keeps the first send out of local storage too', async () => {
     mocks.listChatThreads.mockResolvedValue([])
     const { controller, dispose } = mount()
     const storage = watchStorage(CHAT_THREAD_TRANSCRIPTS_KEY)

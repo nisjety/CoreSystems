@@ -18,7 +18,11 @@ import { createRoot, flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { RunDetail } from '@/shared/api/runs-client'
 import type { SseEvent } from '@/shared/api/sse'
-import { CHAT_THREAD_TRANSCRIPTS_KEY } from '@/features/chat/lib/chat-thread-history'
+import {
+  CHAT_ACTIVE_THREAD_CHANGED_EVENT,
+  CHAT_THREAD_HISTORY_KEY,
+  CHAT_THREAD_TRANSCRIPTS_KEY,
+} from '@/features/chat/lib/chat-thread-history'
 
 type Frame = { event: string; data: Record<string, unknown>; id?: string }
 
@@ -348,6 +352,165 @@ describe('ZDR across every flush trigger', () => {
     expect(storage.writes.session).toBe(0)
     expect(stored(token(0))).toBe(false)
     expect(stored(token(7))).toBe(false)
+  })
+})
+
+/**
+ * The first send of a NEW thread. The temporary marking is a signal write that
+ * Solid applies at the next flush, and the send writes its first snapshot in the
+ * same synchronous run, so the guard used to read the unmarked set and stored the
+ * user's first message under the provisional thread id in both storages. These
+ * cases watch EVERY key of both storages from before the send, so the first send
+ * and each flush trigger are covered, not only the transcripts key.
+ *
+ * Only a boolean per write (and key names) is kept: the tests hold no content.
+ */
+describe('ZDR on the first send of a new thread', () => {
+  const carriesContent = (value: string): boolean => value.includes(QUESTION) || value.includes(token(0))
+
+  /** Every `setItem` on either storage, whatever the key: how many carried the text. */
+  function watchAllStorageWrites() {
+    const tally = { writes: 0, withContent: 0, keysWithContent: new Set<string>() }
+    const wrap = (storage: Storage) => {
+      const original = storage.setItem.bind(storage)
+      vi.spyOn(storage, 'setItem').mockImplementation((name: string, value: string) => {
+        tally.writes += 1
+        if (carriesContent(value)) {
+          tally.withContent += 1
+          tally.keysWithContent.add(name)
+        }
+        original(name, value)
+      })
+    }
+    wrap(window.localStorage)
+    wrap(window.sessionStorage)
+    return tally
+  }
+
+  /** The keys, in either storage, whose stored value holds the text right now. */
+  function keysHoldingContent(): string[] {
+    const found: string[] = []
+    for (const [label, storage] of [['local', window.localStorage], ['session', window.sessionStorage]] as const) {
+      for (let index = 0; index < storage.length; index += 1) {
+        const name = storage.key(index)
+        if (name !== null && carriesContent(storage.getItem(name) ?? '')) found.push(`${label}:${name}`)
+      }
+    }
+    return found
+  }
+
+  const triggers: Array<[string, (controller: Controller, live: OpenStream) => Promise<void>]> = [
+    ['the terminal frame', async (_controller, live) => {
+      live.emit(frame('done', { request_id: 'req-1' }))
+      await tick()
+      vi.advanceTimersByTime(600)
+      await tick()
+    }],
+    ['visibilitychange to hidden', async () => {
+      setVisibility('hidden')
+      document.dispatchEvent(new Event('visibilitychange'))
+    }],
+    ['pagehide', async () => {
+      window.dispatchEvent(new Event('pagehide'))
+    }],
+    ['a thread switch (new chat)', async (controller) => {
+      controller.startNewChat()
+      await tick()
+    }],
+  ]
+
+  it.each(triggers)('a temporary thread\'s first send writes no content to any storage, at %s', async (_name, trigger) => {
+    mocks.listChatThreads.mockResolvedValue([])
+    const { controller, dispose } = mount((await load()).useChatController)
+    const watched = watchAllStorageWrites()
+    const live = await startTurn(controller, { zdr: true })
+    // The first send alone, before any trigger: this is the write that used to leak.
+    expect(watched.withContent).toBe(0)
+    expect(keysHoldingContent()).toEqual([])
+
+    await streamTokens(live, 4)
+    await trigger(controller, live)
+    vi.advanceTimersByTime(2000)
+    await tick()
+
+    expect(watched.withContent).toBe(0)
+    expect([...watched.keysWithContent]).toEqual([])
+    expect(keysHoldingContent()).toEqual([])
+    expect(window.localStorage.getItem(CHAT_THREAD_TRANSCRIPTS_KEY) ?? '').not.toContain(QUESTION)
+    expect(window.sessionStorage.getItem(CHAT_THREAD_TRANSCRIPTS_KEY) ?? '').not.toContain(QUESTION)
+    expect(mocks.saveChatThreadSnapshot).not.toHaveBeenCalled()
+    dispose()
+    // Unmount is the last trigger: its flush must not write either.
+    expect(watched.withContent).toBe(0)
+    expect(keysHoldingContent()).toEqual([])
+  })
+
+  it('a normal (non-temporary) first send still persists the transcript to both storages, as before', async () => {
+    mocks.listChatThreads.mockResolvedValue([])
+    const { controller, dispose } = mount((await load()).useChatController)
+    const watched = watchAllStorageWrites()
+    await tick()
+    await controller.handleComposerSubmit({ actions: [], attachments: [], text: QUESTION, tools: [] })
+    await tick()
+
+    // At once, under the provisional id, before the gateway has said anything.
+    expect(watched.withContent).toBeGreaterThan(0)
+    expect(window.localStorage.getItem(CHAT_THREAD_TRANSCRIPTS_KEY) ?? '').toContain(QUESTION)
+    expect(window.sessionStorage.getItem(CHAT_THREAD_TRANSCRIPTS_KEY) ?? '').toContain(QUESTION)
+    expect(window.localStorage.getItem(CHAT_THREAD_HISTORY_KEY) ?? '').toContain(QUESTION.slice(0, 20))
+    expect(mocks.saveChatThreadSnapshot).not.toHaveBeenCalled()
+
+    // Then the durable id arrives: the transcript and the server copy follow it.
+    const live = sse.streams.at(-1)
+    if (!live) throw new Error('no stream opened')
+    live.emit(frame('connected', { ok: true, request_id: 'req-1', thread_id: THREAD, run_id: RUN_ID }, 1))
+    await tick()
+    expect(window.localStorage.getItem(CHAT_THREAD_TRANSCRIPTS_KEY) ?? '').toContain(THREAD)
+    vi.advanceTimersByTime(600)
+    await tick()
+    expect(mocks.saveChatThreadSnapshot).toHaveBeenCalledTimes(1)
+
+    await streamTokens(live, 8)
+    live.emit(frame('done', { request_id: 'req-1' }))
+    await tick()
+    expect(stored(token(7))).toBe(true)
+    dispose()
+  })
+
+  it('a temporary thread that becomes the active thread again after navigation does not leak', async () => {
+    mocks.listChatThreads.mockResolvedValue([])
+    const { controller, dispose } = mount((await load()).useChatController)
+    const watched = watchAllStorageWrites()
+    const live = await startTurn(controller, { zdr: true })
+    const provisional = controller.state.threadId
+    if (!provisional) throw new Error('the send named no thread')
+    await streamTokens(live, 4)
+
+    // Away to a new chat, then back to the temporary thread, whose messages are
+    // handed to the page this time, so the load has content it could persist.
+    controller.startNewChat()
+    await tick()
+    mocks.getThreadMessages.mockResolvedValue([
+      { id: 'msg-q', role: 'user', content: QUESTION, createdAt: '' },
+      { id: 'msg-a', role: 'assistant', content: `${token(0)} `, createdAt: '' },
+    ])
+    window.dispatchEvent(new CustomEvent(CHAT_ACTIVE_THREAD_CHANGED_EVENT, { detail: { threadId: provisional } }))
+    await tick(10)
+    vi.advanceTimersByTime(2000)
+    await tick()
+
+    // The load really ran (the thread is open and holds the messages) ...
+    expect(controller.state.threadId).toBe(provisional)
+    expect(controller.state.turns.length).toBeGreaterThan(0)
+    expect(controller.isActiveThreadTemporary()).toBe(true)
+    // ... and nothing was stored for it, on any trigger.
+    setVisibility('hidden')
+    document.dispatchEvent(new Event('visibilitychange'))
+    window.dispatchEvent(new Event('pagehide'))
+    dispose()
+    expect(watched.withContent).toBe(0)
+    expect(keysHoldingContent()).toEqual([])
+    expect(mocks.saveChatThreadSnapshot).not.toHaveBeenCalled()
   })
 })
 
