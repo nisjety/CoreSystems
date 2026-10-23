@@ -40,4 +40,4 @@ Crate: apps/Ingestion Plane/Quarry-v2/crates/quarry-core.
 - ScrapeFormat is PartialEq only (no Eq, no Hash). ResolvedScrapeOptions and EffectiveScrapeOptions are PartialEq only.
 - ScrapeFormat has manual Serialize (names), Deserialize (names, default options for screenshot and pdf) and JsonSchema (anyOf) impls.
 - WS13.4b must set ScrapeLimits.captures_enabled and actions_enabled from QUARRY_EDGE__SCRAPE_CAPTURE and QUARRY_EDGE__SCRAPE_ACTIONS, and read the env caps through CaptureLimits::lowered and ActionLimits::lowered.
-- Depth bullets: .plan-work/quarry-w1w2/depth/W2-U09.md (16 bullets).
+- Depth bullets: .plan-work/quarry-w1w2/depth/W2-U09.md (17 bullets).
