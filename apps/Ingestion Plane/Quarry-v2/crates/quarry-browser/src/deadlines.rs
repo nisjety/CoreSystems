@@ -25,11 +25,14 @@
 //!
 //! # What is not in the table (the named exceptions)
 //!
-//! Every CDP call in `chromiumoxide.rs` runs inside one of the wrappers above (the
-//! `cdp_calls_are_bounded` test scans the source call by call, so a bare call next to a
-//! wrapped one is reported too, and names the three functions whose bound comes from
-//! their caller). It cannot see a call whose future is built first and wrapped later;
-//! that is what the review of a diff is for. These durations are written elsewhere on purpose:
+//! Every CDP call in `chromiumoxide.rs` runs inside one of the wrappers above. The
+//! `cdp_calls_are_bounded` test scans the production source call by call: every method
+//! call on a `page`, an `element` or a `browser` is a CDP round trip unless the test's
+//! `NOT_CDP` list names it (with the reason), so a bare call next to a wrapped one is
+//! reported, a new CDP method nobody listed is reported, and the three functions whose
+//! bound comes from their caller are checked at their call sites. It cannot see a call whose
+//! future is built first and wrapped later; that is what the review of a diff is for.
+//! These durations are written elsewhere on purpose:
 //!
 //! - `BROWSER_EXIT_WAIT` (5 s): how long a retired browser process gets to exit before
 //!   its directories are deleted. It waits on a child process, not on a CDP call.
@@ -95,11 +98,14 @@ pub(crate) enum Op {
     /// logged; a stuck answer must not hold every later request of the page behind it for
     /// the library's 40 s.
     GuardResolve,
+    /// `Performance.getMetrics` for the telemetry sample (`page.metrics()`). Effect-less;
+    /// the sample is optional, so a timeout leaves the observation without renderer metrics.
+    Metrics,
 }
 
 impl Op {
     #[cfg(test)]
-    pub(crate) const ALL: [Op; 23] = [
+    pub(crate) const ALL: [Op; 24] = [
         Op::Launch,
         Op::TabAttach,
         Op::Navigate,
@@ -123,6 +129,7 @@ impl Op {
         Op::TabMetadata,
         Op::LiveFrame,
         Op::GuardResolve,
+        Op::Metrics,
     ];
 
     pub(crate) const fn name(self) -> &'static str {
@@ -150,6 +157,7 @@ impl Op {
             Op::TabMetadata => "tab_metadata",
             Op::LiveFrame => "live_frame",
             Op::GuardResolve => "guard_resolve",
+            Op::Metrics => "metrics",
         }
     }
 
@@ -189,6 +197,7 @@ impl Op {
             Op::TabMetadata => 3_000,
             Op::LiveFrame => 5_000,
             Op::GuardResolve => 5_000,
+            Op::Metrics => 3_000,
         }
     }
 }

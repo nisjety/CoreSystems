@@ -97,6 +97,14 @@ const SHUTDOWN_LOCK_WAIT: Duration = Duration::from_secs(10);
 /// zygote and crash handler can write into them for a moment after the main process exits.
 const LAUNCH_DIR_REMOVE_ATTEMPTS: u32 = 25;
 const LAUNCH_DIR_REMOVE_PAUSE: Duration = Duration::from_millis(200);
+/// The same for the retry thread that nobody waits for (a drop, a relaunch): it can afford
+/// to outlast a renderer that takes its time to notice the browser is gone, which the live
+/// lane saw take longer than five seconds on a loaded host.
+const LAUNCH_DIR_BACKGROUND_ATTEMPTS: u32 = 75;
+/// After the directories are gone, how long they must stay gone: a renderer that is still
+/// dying can create them again (a cache or a profile file written with `create_dir_all`),
+/// and a removal that is not checked a second time leaves them behind for good.
+const LAUNCH_DIR_SETTLE: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone)]
 struct CachedLiveFrame {
@@ -289,6 +297,9 @@ pub struct ChromiumoxideDriver {
     /// The reaper and the prober, started at the first `acquire`.
     background: Arc<std::sync::Mutex<Vec<JoinHandle<()>>>>,
     background_started: Arc<AtomicBool>,
+    /// Set by `shutdown`, cleared by the next `acquire`: while it is set the reaper and
+    /// the prober do nothing, so nothing launches a browser behind a shutdown.
+    shut_down: Arc<AtomicBool>,
     /// False for the views the background tasks hold: only the driver itself
     /// tears down on drop.
     owner: bool,
@@ -361,6 +372,7 @@ impl ChromiumoxideDriver {
             attach_locks: Arc::new(Mutex::new(HashMap::new())),
             background: Arc::new(std::sync::Mutex::new(Vec::new())),
             background_started: Arc::new(AtomicBool::new(false)),
+            shut_down: Arc::new(AtomicBool::new(false)),
             owner: true,
             teardowns: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(test)]
@@ -466,6 +478,7 @@ impl ChromiumoxideDriver {
             attach_locks: self.attach_locks.clone(),
             background: self.background.clone(),
             background_started: self.background_started.clone(),
+            shut_down: self.shut_down.clone(),
             owner: false,
             teardowns: self.teardowns.clone(),
             #[cfg(test)]
@@ -552,6 +565,9 @@ impl ChromiumoxideDriver {
     /// do; with `1` it tears the sessions down (without saving their profile:
     /// an abandoned session's state is not a checkpoint anyone asked for).
     async fn reaper_tick(&self) {
+        if self.shut_down.load(Ordering::SeqCst) {
+            return;
+        }
         if self.pool.reaper != ReaperMode::On {
             for reaped in self.book().reap_idle(Instant::now(), false) {
                 tracing::info!(
@@ -590,6 +606,11 @@ impl ChromiumoxideDriver {
     /// `/ready` 503 (and so gets no traffic) can still recover. An unhealthy
     /// slot that holds sessions is never killed; an empty one is recycled.
     async fn probe_tick(&self) {
+        // After `shutdown` there is nothing to keep alive: a tick that found no browser would
+        // count failed probes and relaunch one. The next `acquire` clears this.
+        if self.shut_down.load(Ordering::SeqCst) {
+            return;
+        }
         let Some((status, generation)) = self
             .book()
             .slot(SLOT)
@@ -1453,8 +1474,8 @@ impl ChromiumoxideDriver {
                 .iter_mut()
                 .find(|tab| tab.tab_id == tab_id)
             {
-                tab.url_hint = url;
-                tab.title_hint = title;
+                keep_last_known(&mut tab.url_hint, url);
+                keep_last_known(&mut tab.title_hint, title);
             }
         }
     }
@@ -1831,7 +1852,10 @@ impl ChromiumLaunchDirs {
         for attempt in 0..LAUNCH_DIR_REMOVE_ATTEMPTS {
             self.remove();
             if !self.user_data.exists() && !self.crash_dumps.exists() {
-                return;
+                tokio::time::sleep(LAUNCH_DIR_SETTLE).await;
+                if !self.user_data.exists() && !self.crash_dumps.exists() {
+                    return;
+                }
             }
             if attempt + 1 < LAUNCH_DIR_REMOVE_ATTEMPTS {
                 tokio::time::sleep(LAUNCH_DIR_REMOVE_PAUSE).await;
@@ -1843,35 +1867,44 @@ impl ChromiumLaunchDirs {
     /// only just been sent the kill and may still be exiting: its
     /// renderer, zygote and crash handler can write into these directories for a moment,
     /// so the first removal can fail with "not empty". Remove once now, and when something
-    /// is left behind, keep trying from a background thread (every 200 ms, for five
-    /// seconds, the same time a retired browser gets to exit).
+    /// is left behind, keep trying from a background thread (every 200 ms, for fifteen
+    /// seconds).
     fn remove_after_kill(self) {
         self.remove();
-        if self.user_data.exists() || self.crash_dumps.exists() {
-            // A named, bounded thread (at most 25 x 200 ms); if it cannot start, the
-            // next process's sweep removes what is left.
-            let _ = std::thread::Builder::new()
-                .name("quarry-launch-dir-cleanup".to_owned())
-                .spawn(move || {
-                    remove_paths_retrying(
-                        &[self.user_data.as_path(), self.crash_dumps.as_path()],
-                        LAUNCH_DIR_REMOVE_ATTEMPTS,
-                        LAUNCH_DIR_REMOVE_PAUSE,
-                    );
-                });
-        }
+        // Always from a thread, even when the first removal worked: a child that is still
+        // dying can create the directories again (see `LAUNCH_DIR_SETTLE`). A named, bounded
+        // thread (at most 75 x 200 ms and the settle time); if it cannot start, the next
+        // process's sweep removes what is left.
+        let _ = std::thread::Builder::new()
+            .name("quarry-launch-dir-cleanup".to_owned())
+            .spawn(move || {
+                remove_paths_retrying(
+                    &[self.user_data.as_path(), self.crash_dumps.as_path()],
+                    LAUNCH_DIR_BACKGROUND_ATTEMPTS,
+                    LAUNCH_DIR_REMOVE_PAUSE,
+                    LAUNCH_DIR_SETTLE,
+                );
+            });
     }
 }
 
 /// Remove each directory, trying again after `pause` up to `attempts` times in all, until
-/// none of them exists. True when they are all gone.
-fn remove_paths_retrying(paths: &[&Path], attempts: u32, pause: Duration) -> bool {
+/// none of them exists, and then until they have stayed gone for `settle` (a dying child can
+/// create them again; a recreated one is removed on the next attempt). True when they are
+/// all gone.
+fn remove_paths_retrying(paths: &[&Path], attempts: u32, pause: Duration, settle: Duration) -> bool {
     for attempt in 0..attempts {
         for path in paths {
             let _ = std::fs::remove_dir_all(path);
         }
         if paths.iter().all(|path| !path.exists()) {
-            return true;
+            if settle.is_zero() {
+                return true;
+            }
+            std::thread::sleep(settle);
+            if paths.iter().all(|path| !path.exists()) {
+                return true;
+            }
         }
         if attempt + 1 < attempts {
             std::thread::sleep(pause);
@@ -2708,12 +2741,27 @@ fn finite_metric_u64(value: f64, scale: f64) -> Option<u64> {
 /// The page's current URL, or `None` when it cannot be read within the table's bound
 /// (`Op::TabMetadata`); the caller keeps its last known value.
 async fn page_url(page: &Page) -> Option<String> {
-    with_deadline(Op::TabMetadata, async {
-        Ok(page.url().await.ok().flatten())
-    })
-    .await
-    .ok()
-    .flatten()
+    bounded_hint(Op::TabMetadata, async { page.url().await.ok().flatten() }).await
+}
+
+/// `read` under `op`'s deadline; `None` when it does not answer in time, as when it
+/// has nothing to say.
+async fn bounded_hint<F>(op: Op, read: F) -> Option<String>
+where
+    F: std::future::Future<Output = Option<String>>,
+{
+    with_deadline(op, async { Ok(read.await) })
+        .await
+        .ok()
+        .flatten()
+}
+
+/// A tab's stored url or title after a read: what was read, or the last known value when
+/// the read did not answer (a timeout, a closed target) or had nothing to say.
+fn keep_last_known(last: &mut Option<String>, read: Option<String>) {
+    if read.is_some() {
+        *last = read;
+    }
 }
 
 async fn page_title(page: &Page) -> Option<String> {
@@ -3129,6 +3177,7 @@ impl BrowserDriver for ChromiumoxideDriver {
         // Given back if this call does not finish (an error, or the caller
         // dropping it during a cold launch) and no other acquire holds it.
         let mut rollback = AdmissionRollback::new(self, session_key.clone(), admission_id);
+        self.shut_down.store(false, Ordering::SeqCst);
         self.start_background();
         let startup_mode = if self.browser.read().await.is_some() && !needs_launch {
             BrowserStartupMode::Warm
@@ -3159,11 +3208,27 @@ impl BrowserDriver for ChromiumoxideDriver {
     /// to exit, and remove its profile and crash-dump directories until they are gone. This is
     /// the teardown production relies on (the edge calls it after the run drain); `Drop` is
     /// only the backstop for a driver that is dropped without it, because `Drop` cannot wait
-    /// for a lock or for the exit and skips what it cannot take at that instant. Idempotent,
-    /// and a driver that is used afterwards launches a fresh browser.
+    /// for a lock or for the exit and skips what it cannot take at that instant. Idempotent.
+    ///
+    /// Nothing brings a browser back afterwards: the reaper and the prober are stopped (they
+    /// are started again by the next `acquire`, which is also what launches a fresh browser),
+    /// and the event-loop task is stopped while the browser lock is held, so a launch that was
+    /// under way finishes first and is the one that is killed, and its loss is never reported
+    /// to a slot that would relaunch it.
     async fn shutdown(&self) {
-        if let Some(handle) = self.handler.lock().await.take() {
-            handle.abort();
+        self.shut_down.store(true, Ordering::SeqCst);
+        let tasks: Vec<JoinHandle<()>> = self
+            .background
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .drain(..)
+            .collect();
+        self.background_started.store(false, Ordering::SeqCst);
+        for task in tasks {
+            task.abort();
+            // Let it stop, so a tick that was in the middle of a relaunch has let go of the
+            // browser lock below; an aborted task ends at its next await.
+            let _ = tokio::time::timeout(SHUTDOWN_LOCK_WAIT, task).await;
         }
         // CDP calls in flight hold the read side and each ends at its own deadline, so this
         // wait is short; if it is not, leave the rest to `Drop`.
@@ -3172,6 +3237,9 @@ impl BrowserDriver for ChromiumoxideDriver {
             tracing::warn!("chromiumoxide shutdown: the browser lock stayed busy; leaving the teardown to drop");
             return;
         };
+        if let Some(handle) = self.handler.lock().await.take() {
+            handle.abort();
+        }
         let browser = guard.take();
         let dirs = self.launch_dirs.lock().await.take();
         if let Some(browser) = browser {
@@ -3180,6 +3248,11 @@ impl BrowserDriver for ChromiumoxideDriver {
         drop(guard);
         if let Some(dirs) = dirs {
             dirs.remove_retrying().await;
+            // A child that outlives the wait: what is left goes from a thread, as on a drop,
+            // instead of staying until the next process's sweep.
+            if dirs.user_data.exists() || dirs.crash_dumps.exists() {
+                dirs.remove_after_kill();
+            }
         }
     }
 
@@ -3972,13 +4045,16 @@ impl BrowserDriver for ChromiumoxideDriver {
             .cloned()
             .unwrap_or_default();
         let page = self.current_page(session).await?;
-        let metrics = page.metrics().await.map_err(|error| {
-            QuarryError::new(
-                ErrorCode::DriverFailed,
-                "chromiumoxide performance metrics query failed",
-            )
-            .with_details(json!({ "error": error.to_string() }))
-        })?;
+        let metrics = with_deadline(Op::Metrics, async {
+            page.metrics().await.map_err(|error| {
+                QuarryError::new(
+                    ErrorCode::DriverFailed,
+                    "chromiumoxide performance metrics query failed",
+                )
+                .with_details(json!({ "error": error.to_string() }))
+            })
+        })
+        .await?;
         let scaled_metric = |name: &str, scale: f64| {
             metrics
                 .iter()
@@ -6632,13 +6708,15 @@ mod tests {
         // The lost browser's children can still be writing into its directories when the
         // relaunch removes them, so what is left goes shortly after (the retry thread).
         assert!(
-            eventually(Duration::from_secs(10), || async {
+            eventually(Duration::from_secs(25), || async {
                 (count("profiles"), count("crashpad")) == (1, 1)
             })
             .await,
-            "the relaunch retired the lost browser's directories: now {} profile and {} crash-dump",
+            "the relaunch retired the lost browser's directories: now {} profile and {} crash-dump ({:?}, {:?})",
             count("profiles"),
-            count("crashpad")
+            count("crashpad"),
+            std::fs::read_dir(root.path().join("profiles")).map(|e| e.flatten().map(|e| e.file_name()).collect::<Vec<_>>()),
+            std::fs::read_dir(root.path().join("crashpad")).map(|e| e.flatten().map(|e| e.file_name()).collect::<Vec<_>>())
         );
         driver.release(third).await.expect("release");
         // The production teardown waits: when shutdown returns, nothing of the launch is left,
@@ -6674,7 +6752,7 @@ mod tests {
         driver.release(session).await.expect("release");
         drop(driver);
         assert!(
-            eventually(Duration::from_secs(10), || async {
+            eventually(Duration::from_secs(25), || async {
                 (count("profiles"), count("crashpad")) == (0, 0)
             })
             .await,
@@ -6682,6 +6760,54 @@ mod tests {
             count("profiles"),
             count("crashpad")
         );
+    }
+
+    /// After `shutdown` returned, nothing brings a browser back: not the prober (it used to
+    /// find no browser, count two failed probes and relaunch one with a new directory pair),
+    /// and not the loss report of a browser that shutdown itself killed. Several probe
+    /// intervals pass with a 200 ms probe, and then a later `acquire` starts everything again.
+    #[tokio::test]
+    async fn no_browser_comes_back_after_shutdown() {
+        if !live_enabled() {
+            return;
+        }
+        let root = tempfile::tempdir().expect("a temp root");
+        let pool = BrowserPoolConfig {
+            reaper: ReaperMode::Off,
+            probe_interval: Duration::from_millis(200),
+            ..BrowserPoolConfig::default()
+        };
+        let driver = live_driver().with_pool_config(pool).with_profile_root(root.path());
+        let count = |sub: &str| {
+            std::fs::read_dir(root.path().join(sub)).map_or(0, |entries| entries.flatten().count())
+        };
+        let session = live_session_sized(&driver, "after-shutdown", None, "one").await;
+        assert_eq!(driver.launch_count(), 1);
+        driver.release(session).await.expect("release");
+
+        driver.shutdown().await;
+        assert_eq!((count("profiles"), count("crashpad")), (0, 0), "shutdown removed them");
+        // Ten probe intervals: two failed probes were enough to relaunch before.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(driver.launch_count(), 1, "no relaunch behind shutdown");
+        assert!(driver.browser.read().await.is_none(), "no browser");
+        assert_eq!((count("profiles"), count("crashpad")), (0, 0), "no directory pair");
+        assert_ne!(
+            driver.book().slot(SLOT).map(|slot| slot.status),
+            Some(SlotStatus::Dead),
+            "the lost-browser path did not fire for the browser shutdown killed"
+        );
+
+        // The next acquire is the explicit start: a fresh browser, one pair, and the
+        // background tasks run again.
+        let again = live_session_sized(&driver, "after-shutdown-2", None, "two").await;
+        assert_eq!(driver.launch_count(), 2);
+        assert_eq!((count("profiles"), count("crashpad")), (1, 1));
+        assert!(!driver.shut_down.load(Ordering::SeqCst));
+        assert_eq!(driver.background.lock().unwrap().len(), 1, "the prober runs again");
+        driver.release(again).await.expect("release");
+        driver.shutdown().await;
+        assert_eq!((count("profiles"), count("crashpad")), (0, 0));
     }
 
     // WS3.K: live fixtures for trusted input and the actionability pipeline.
@@ -6715,11 +6841,30 @@ mod bounded_calls_and_launch_dirs {
     /// The wrappers of `deadlines.rs`, and the one direct use of the table
     /// (`tokio::time::timeout(deadline(Op::X), call)`). A call is bounded when it sits
     /// inside the argument list of one of these.
-    const BOUNDS: [&str; 4] = [
+    const BOUNDS: [&str; 5] = [
         "with_deadline(",
         "read_with_retry(",
         "best_effort(",
+        "bounded_hint(",
         "timeout(deadline(Op::",
+    ];
+
+    /// What a call on these names is, by default: a CDP round trip. They are how a page, an
+    /// element and a browser (or the guard that holds one) are named in this file.
+    const RECEIVERS: [&str; 5] = ["page", "guarded_page", "dialog_page", "element", "browser"];
+
+    /// The methods on a receiver that are not a CDP round trip, with why.
+    const NOT_CDP: [(&str, &str); 10] = [
+        ("clone", "a handle copy"),
+        ("take", "Option"),
+        ("get_mut_child", "the browser's child process handle"),
+        ("event_listener", "subscribes on the handler's channel; nothing is asked of Chromium"),
+        ("read", "the browser lock"),
+        ("write", "the browser lock"),
+        ("try_write", "the browser lock"),
+        ("kill", "the browser process, waited for under BROWSER_EXIT_WAIT"),
+        ("wait", "the browser process, waited for under BROWSER_EXIT_WAIT"),
+        ("try_wait", "the browser process"),
     ];
 
     /// Functions that make CDP calls without a bound of their own because every caller
@@ -6787,44 +6932,81 @@ mod bounded_calls_and_launch_dirs {
             .collect()
     }
 
-    /// The index of the `)` that closes the `(` at `open`, skipping string, raw-string and
-    /// char literals so a bracket inside one does not count. An unbalanced body yields its
+    fn is_word(byte: u8) -> bool {
+        byte.is_ascii_alphanumeric() || byte == b'_'
+    }
+
+    /// If a string, raw-string or char literal starts at `index`, the index of its last byte.
+    fn literal_end(body: &str, index: usize) -> Option<usize> {
+        let bytes = body.as_bytes();
+        let last = bytes.len() - 1;
+        match bytes[index] {
+            b'r' if (index == 0 || !is_word(bytes[index - 1]))
+                && matches!(bytes.get(index + 1), Some(b'"' | b'#')) =>
+            {
+                let hashes = bytes[index + 1..].iter().take_while(|b| **b == b'#').count();
+                if bytes.get(index + 1 + hashes) != Some(&b'"') {
+                    return None;
+                }
+                let closing = format!("\"{}", "#".repeat(hashes));
+                let from = index + 2 + hashes;
+                Some(body[from..].find(&closing).map_or(last, |at| from + at + closing.len() - 1))
+            }
+            b'"' => {
+                let mut end = index + 1;
+                while end < bytes.len() && bytes[end] != b'"' {
+                    end += if bytes[end] == b'\\' { 2 } else { 1 };
+                }
+                Some(end.min(last))
+            }
+            b'\'' if bytes.get(index + 2) == Some(&b'\'') => Some(index + 2),
+            b'\'' if bytes.get(index + 1) == Some(&b'\\') => {
+                let mut end = index + 2;
+                while end < bytes.len() && bytes[end] != b'\'' {
+                    end += 1;
+                }
+                Some(end.min(last))
+            }
+            _ => None,
+        }
+    }
+
+    /// `body` with every literal reduced to `""`: the JavaScript this driver sends (which
+    /// calls `element.click()` and the like) is not a call this scan is about, and a bracket
+    /// inside a string must not count.
+    fn without_literals(body: &str) -> String {
+        let mut out = String::with_capacity(body.len());
+        let mut index = 0;
+        while index < body.len() {
+            if let Some(end) = literal_end(body, index) {
+                out.push_str("\"\"");
+                index = end + 1;
+            } else {
+                let ch = body[index..].chars().next().expect("a char at a boundary");
+                out.push(ch);
+                index += ch.len_utf8();
+            }
+        }
+        out
+    }
+
+    /// The index of the `)` that closes the `(` at `open`. An unbalanced body yields its
     /// end, which can only make a call look bounded, never the reverse.
     fn matching_paren(body: &str, open: usize) -> usize {
         let bytes = body.as_bytes();
-        let is_word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
         let mut depth = 0usize;
         let mut index = open;
         while index < bytes.len() {
+            if let Some(end) = literal_end(body, index) {
+                index = end + 1;
+                continue;
+            }
             match bytes[index] {
                 b'(' => depth += 1,
                 b')' => {
-                    depth -= 1;
+                    depth = depth.saturating_sub(1);
                     if depth == 0 {
                         return index;
-                    }
-                }
-                b'r' if (index == 0 || !is_word(bytes[index - 1]))
-                    && matches!(bytes.get(index + 1), Some(b'"' | b'#')) =>
-                {
-                    let hashes = bytes[index + 1..].iter().take_while(|b| **b == b'#').count();
-                    if bytes.get(index + 1 + hashes) == Some(&b'"') {
-                        let closing = format!("\"{}", "#".repeat(hashes));
-                        let from = index + 2 + hashes;
-                        index = body[from..].find(&closing).map_or(bytes.len(), |at| from + at + closing.len() - 1);
-                    }
-                }
-                b'"' => {
-                    index += 1;
-                    while index < bytes.len() && bytes[index] != b'"' {
-                        index += if bytes[index] == b'\\' { 2 } else { 1 };
-                    }
-                }
-                b'\'' if bytes.get(index + 2) == Some(&b'\'') => index += 2,
-                b'\'' if bytes.get(index + 1) == Some(&b'\\') => {
-                    index += 2;
-                    while index < bytes.len() && bytes[index] != b'\'' {
-                        index += 1;
                     }
                 }
                 _ => {}
@@ -6834,10 +7016,9 @@ mod bounded_calls_and_launch_dirs {
         bytes.len()
     }
 
-    /// The CDP-shaped calls in `body` that do not sit inside the argument list of a bound.
-    /// One bare call is reported even when the same function has wrapped ones.
-    fn bare_cdp_calls(body: &str) -> Vec<&'static str> {
-        let mut covered: Vec<(usize, usize)> = Vec::new();
+    /// The argument lists of the bounds in `body` (already without literals), as (open, close).
+    fn covered_ranges(body: &str) -> Vec<(usize, usize)> {
+        let mut covered = Vec::new();
         for bound in BOUNDS {
             let paren = bound.find('(').expect("every bound opens a call");
             for (at, _) in body.match_indices(bound) {
@@ -6845,28 +7026,90 @@ mod bounded_calls_and_launch_dirs {
                 covered.push((open, matching_paren(body, open)));
             }
         }
-        CDP_CALLS
-            .iter()
-            .copied()
-            .filter(|call| {
-                body.match_indices(call)
-                    .any(|(at, _)| !covered.iter().any(|(open, close)| at > *open && at < *close))
-            })
-            .collect()
+        covered
     }
 
-    /// WS3.D's definition of done: every `page.execute` / `evaluate` / ... call in the
-    /// driver sits inside a deadline wrapper (or `timeout(deadline(Op::X), ..)`), except
-    /// in the few functions named above with the bound their callers set. The scan is
-    /// per call, not per function, so a bare call next to a wrapped one is reported, and
-    /// it also catches the next function someone adds. It cannot see a call made through
-    /// a helper (that helper's own body is scanned instead) or one whose future is built
-    /// first and wrapped later; the fixture below pins what it does see.
+    fn is_covered(covered: &[(usize, usize)], at: usize) -> bool {
+        covered.iter().any(|(open, close)| at > *open && at < *close)
+    }
+
+    /// Every `receiver.method(` and `receiver.method::<T>(` in `body` (without literals):
+    /// the receiver, the method and where it starts.
+    fn receiver_calls(body: &str) -> Vec<(&'static str, String, usize)> {
+        let bytes = body.as_bytes();
+        let mut calls = Vec::new();
+        for receiver in RECEIVERS {
+            let needle = format!("{receiver}.");
+            for (at, _) in body.match_indices(&needle) {
+                if at > 0 && is_word(bytes[at - 1]) {
+                    continue;
+                }
+                let rest = &body[at + needle.len()..];
+                let name: String = rest.chars().take_while(|c| c.is_ascii() && is_word(*c as u8)).collect();
+                let after = &rest[name.len()..];
+                if !name.is_empty() && (after.starts_with('(') || after.starts_with("::")) {
+                    calls.push((receiver, name, at));
+                }
+            }
+        }
+        calls
+    }
+
+    /// The CDP calls in `body` that do not sit inside the argument list of a bound: a method
+    /// on a page, element or browser that `NOT_CDP` does not clear, and the named
+    /// `CDP_CALLS` on anything. One bare call is reported even when the same function has
+    /// wrapped ones.
+    fn bare_cdp_calls(body: &str) -> Vec<String> {
+        let body = without_literals(body);
+        let covered = covered_ranges(&body);
+        let mut bare: Vec<String> = receiver_calls(&body)
+            .into_iter()
+            .filter(|(_, name, at)| {
+                !NOT_CDP.iter().any(|(known, _)| known == name) && !is_covered(&covered, *at)
+            })
+            .map(|(receiver, name, _)| format!("{receiver}.{name}"))
+            .collect();
+        for call in CDP_CALLS {
+            if body
+                .match_indices(call)
+                .any(|(at, _)| !is_covered(&covered, at))
+            {
+                bare.push(call.to_string());
+            }
+        }
+        bare.sort();
+        bare.dedup();
+        bare
+    }
+
+    /// How many times `name(` is called in `body`, and how many of those calls sit outside
+    /// every bound. The definition of a function of that name is not a call.
+    fn call_sites(body: &str, name: &str) -> (usize, usize) {
+        let body = without_literals(body);
+        let covered = covered_ranges(&body);
+        let needle = format!("{name}(");
+        let sites: Vec<usize> = body
+            .match_indices(&needle)
+            .map(|(at, _)| at)
+            .filter(|at| !body[..*at].ends_with("fn"))
+            .collect();
+        let uncovered = sites.iter().filter(|at| !is_covered(&covered, **at)).count();
+        (sites.len(), uncovered)
+    }
+
+    /// WS3.D's definition of done: every CDP call in the driver sits inside a deadline
+    /// wrapper (or `timeout(deadline(Op::X), ..)`). The scan is per call, not per function,
+    /// so a bare call next to a wrapped one is reported; and it goes by receiver, not by a
+    /// list of method names, so a method nobody thought of (`page.metrics()`, `element.click()`)
+    /// is a CDP call until `NOT_CDP` says otherwise. The functions in `BOUNDED_BY_THE_CALLER`
+    /// are exempt only as long as every call site of theirs is inside a bound. The scan cannot
+    /// see a call made through a helper (that helper's own body is scanned instead) or one
+    /// whose future is built first and wrapped later; the fixture below pins what it does see.
     #[test]
     fn cdp_calls_are_bounded() {
         let functions = production_functions();
         assert!(functions.len() > 100, "the scan found {} functions", functions.len());
-        let unbounded: Vec<(&str, Vec<&str>)> = functions
+        let unbounded: Vec<(&str, Vec<String>)> = functions
             .iter()
             .map(|(name, body)| (name.as_str(), bare_cdp_calls(body)))
             .filter(|(name, bare)| {
@@ -6876,13 +7119,41 @@ mod bounded_calls_and_launch_dirs {
         assert!(
             unbounded.is_empty(),
             "CDP calls outside a deadline wrapper (wrap them, or name the caller's bound in \
-             BOUNDED_BY_THE_CALLER): {unbounded:?}"
+             BOUNDED_BY_THE_CALLER, or, for a call that is no round trip, add it to NOT_CDP): \
+             {unbounded:?}"
         );
-        // The list cannot go stale: each named function still exists and is still unwrapped.
+        // The lists cannot go stale: each named function still exists and is still unwrapped...
         for (known, _) in BOUNDED_BY_THE_CALLER {
             let found = functions.iter().find(|(name, _)| name == known);
             let (_, body) = found.unwrap_or_else(|| panic!("{known} no longer exists"));
             assert!(!bare_cdp_calls(body).is_empty(), "{known} is bounded now: take it off the list");
+            // ...and every call of it, in any function, is inside a bound.
+            let (mut sites, mut uncovered) = (0, Vec::new());
+            for (caller, body) in &functions {
+                let (found, bare) = call_sites(body, known);
+                sites += found;
+                if bare > 0 {
+                    uncovered.push(caller.as_str());
+                }
+            }
+            assert!(sites > 0, "{known} is never called");
+            assert!(
+                uncovered.is_empty(),
+                "{known} is bounded by its callers, and these call it outside a bound: {uncovered:?}"
+            );
+        }
+        // The scan is not blind: it sees calls on every receiver it is told about, and every
+        // entry of NOT_CDP is in use.
+        let seen: Vec<(&str, String)> = functions
+            .iter()
+            .flat_map(|(_, body)| receiver_calls(&without_literals(body)))
+            .map(|(receiver, name, _)| (receiver, name))
+            .collect();
+        for receiver in RECEIVERS {
+            assert!(seen.iter().any(|(r, _)| *r == receiver), "no call on `{receiver}` was seen");
+        }
+        for (known, _) in NOT_CDP {
+            assert!(seen.iter().any(|(_, name)| name == known), "`{known}` is not used: take it off NOT_CDP");
         }
     }
 
@@ -6932,6 +7203,45 @@ async fn timeout_form(page: &Page) {
     let _ = tokio::time::timeout(deadline(Op::Content), page.evaluate(\"document.title\")).await;
 }
 
+async fn bare_metrics(page: &Page) -> QuarryResult<()> {
+    let _ = page.metrics().await;
+    Ok(())
+}
+
+async fn bare_click(element: &Element) {
+    element
+        .click()
+        .await
+        .ok();
+}
+
+async fn wrapped_click(element: &Element) -> QuarryResult<()> {
+    with_deadline(Op::Input, async { Ok(element.click().await?) }).await
+}
+
+async fn not_a_round_trip(page: &Page, browser: &Browser) {
+    let _handle = page.clone();
+    let _events = page.event_listener::<EventConsoleApiCalled>().await;
+    let _ = browser.try_wait();
+    let _ = \"element.click() in a string, page.metrics() too\";
+    let _ = r#\"page.pdf( and an unbalanced ) in a raw string\"#;
+}
+
+async fn through_the_hint_helper(page: &Page) -> Option<String> {
+    bounded_hint(Op::TabMetadata, async { page.url().await.ok().flatten() }).await
+}
+
+async fn calls_a_caller_bounded_helper(page: &Page) -> QuarryResult<()> {
+    with_deadline(Op::ProfileCapture, capture_snapshot(&page)).await?;
+    capture_snapshot(&page).await?;
+    Ok(())
+}
+
+async fn capture_snapshot(page: &Page) -> QuarryResult<()> {
+    page.get_cookies().await.ok();
+    Ok(())
+}
+
 // page.execute(commented_out)
 fn no_calls() {}
 
@@ -6951,6 +7261,13 @@ async fn test_only(page: &Page) {
                 "half_wrapped",
                 "paren_in_a_string",
                 "timeout_form",
+                "bare_metrics",
+                "bare_click",
+                "wrapped_click",
+                "not_a_round_trip",
+                "through_the_hint_helper",
+                "calls_a_caller_bounded_helper",
+                "capture_snapshot",
                 "no_calls"
             ]
         );
@@ -6961,7 +7278,112 @@ async fn test_only(page: &Page) {
             .collect();
         // A bare call next to a wrapped one of the same kind, and one after a string that
         // holds a bracket, are both reported; the `timeout(deadline(..), call)` form is not.
-        assert_eq!(unbounded, ["bare", "half_wrapped", "paren_in_a_string"]);
+        // A method nobody listed (`metrics`, `click`) is a CDP call; a clone, a listener, a
+        // process wait and anything inside a literal are not. The caller-bounded helper's own
+        // body is bare, its call sites are checked on their own.
+        assert_eq!(
+            unbounded,
+            [
+                "bare",
+                "half_wrapped",
+                "paren_in_a_string",
+                "bare_metrics",
+                "bare_click",
+                "capture_snapshot"
+            ]
+        );
+        assert_eq!(
+            bare_cdp_calls(
+                &functions.iter().find(|(name, _)| name == "bare_metrics").unwrap().1
+            ),
+            ["page.metrics"]
+        );
+        assert_eq!(
+            bare_cdp_calls(
+                &functions.iter().find(|(name, _)| name == "bare_click").unwrap().1
+            ),
+            ["element.click"]
+        );
+        // `capture_snapshot` is called twice, once inside a bound and once outside it; its
+        // definition is not a call.
+        let sites: Vec<(usize, usize)> = functions
+            .iter()
+            .map(|(_, body)| call_sites(body, "capture_snapshot"))
+            .collect();
+        assert_eq!(sites.iter().map(|(found, _)| found).sum::<usize>(), 2);
+        assert_eq!(sites.iter().map(|(_, bare)| bare).sum::<usize>(), 1);
+    }
+
+    /// A tab's url or title read that does not answer keeps what the tab had: the same
+    /// rule `list_tabs` follows, and `update_tab_metadata` now follows it too (it used to
+    /// store the `None`).
+    #[tokio::test(start_paused = true)]
+    async fn a_tab_read_that_does_not_answer_keeps_the_last_known_value() {
+        let started = tokio::time::Instant::now();
+        let read = bounded_hint(Op::TabMetadata, std::future::pending::<Option<String>>()).await;
+        assert_eq!(read, None, "nothing answered within the bound");
+        assert!(started.elapsed() >= deadline(Op::TabMetadata));
+        assert!(started.elapsed() < Duration::from_secs(10));
+
+        let mut url = Some("https://a.test/".to_owned());
+        let mut title = Some("A".to_owned());
+        keep_last_known(&mut url, read.clone());
+        keep_last_known(&mut title, read);
+        assert_eq!(url.as_deref(), Some("https://a.test/"));
+        assert_eq!(title.as_deref(), Some("A"));
+
+        let answered = bounded_hint(Op::TabMetadata, async { Some("https://b.test/".to_owned()) }).await;
+        keep_last_known(&mut url, answered);
+        assert_eq!(url.as_deref(), Some("https://b.test/"), "an answer replaces it");
+        let mut never_read: Option<String> = None;
+        keep_last_known(&mut never_read, None);
+        assert_eq!(never_read, None);
+    }
+
+    /// `shutdown` stops the reaper and the prober and leaves a flag that makes a late tick a
+    /// no-op, so a slot that is dead (or a prober that finds no browser) does not bring a
+    /// browser, a profile directory and a crash-dump directory back after shutdown returned.
+    /// The live twin is `no_browser_comes_back_after_shutdown`.
+    #[tokio::test]
+    async fn shutdown_stops_the_prober_and_a_late_tick_launches_nothing() {
+        let root = tempfile::tempdir().expect("a temp root");
+        let pool = BrowserPoolConfig {
+            reaper: ReaperMode::Off,
+            probe_interval: Duration::from_millis(20),
+            ..BrowserPoolConfig::default()
+        };
+        let driver = ChromiumoxideDriver::new()
+            .with_pool_config(pool)
+            .with_profile_root(root.path());
+        let tasks = |driver: &ChromiumoxideDriver| {
+            driver
+                .background
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .len()
+        };
+        driver.start_background();
+        assert_eq!(tasks(&driver), 1, "the prober runs (the reaper is off)");
+
+        driver.shutdown().await;
+        assert_eq!(tasks(&driver), 0, "shutdown stopped it");
+        assert!(!driver.background_started.load(Ordering::SeqCst), "the next acquire starts it again");
+        assert!(driver.shut_down.load(Ordering::SeqCst));
+
+        // A launched slot that is dead is what a prober relaunches. Mark it only now, so
+        // nothing before shutdown could have acted on it.
+        let generation = driver.book().launched(SLOT);
+        driver.book().mark_dead(SLOT, generation, Instant::now());
+        // A tick that was already scheduled does nothing...
+        driver.probe_tick().await;
+        driver.reaper_tick().await;
+        // ...and no task is left to run one: several probe intervals pass.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            !root.path().join("profiles").exists() && !root.path().join("crashpad").exists(),
+            "nothing tried to launch a browser after shutdown"
+        );
+        assert_eq!(driver.launch_count(), 0);
     }
 
     #[tokio::test(start_paused = true)]
@@ -7043,10 +7465,10 @@ async fn test_only(page: &Page) {
             std::fs::remove_file(&path).expect("the obstacle goes away");
         });
         let started = std::time::Instant::now();
-        let first_try_alone = remove_paths_retrying(&[in_the_way.as_path()], 1, Duration::ZERO);
+        let first_try_alone = remove_paths_retrying(&[in_the_way.as_path()], 1, Duration::ZERO, Duration::ZERO);
         assert!(!first_try_alone, "one attempt cannot remove a file with remove_dir_all");
         assert!(
-            remove_paths_retrying(&[in_the_way.as_path()], 40, Duration::from_millis(50)),
+            remove_paths_retrying(&[in_the_way.as_path()], 40, Duration::from_millis(50), Duration::ZERO),
             "a later attempt finds the obstacle gone"
         );
         helper.join().expect("helper");
@@ -7054,7 +7476,37 @@ async fn test_only(page: &Page) {
 
         let stuck = root.path().join("stays");
         std::fs::write(&stuck, b"x").expect("a file that stays");
-        assert!(!remove_paths_retrying(&[stuck.as_path()], 3, Duration::from_millis(5)));
+        assert!(!remove_paths_retrying(
+            &[stuck.as_path()],
+            3,
+            Duration::from_millis(5),
+            Duration::ZERO
+        ));
+    }
+
+    /// A child that is still dying creates the directory again after the first removal
+    /// worked: the live lane saw a profile directory come back that way and stay for good.
+    /// The settle check removes it again; without it the function returned at the first
+    /// success and the directory was there afterwards.
+    #[test]
+    fn a_directory_a_dying_child_creates_again_is_removed_again() {
+        let root = tempfile::tempdir().expect("a temp root");
+        let dir = root.path().join("profile");
+        std::fs::create_dir_all(dir.join("Default")).expect("the directory");
+        let path = dir.clone();
+        let child = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            std::fs::create_dir_all(path.join("Default").join("Cache")).expect("the child writes again");
+        });
+        let gone = remove_paths_retrying(
+            &[dir.as_path()],
+            20,
+            Duration::from_millis(50),
+            Duration::from_millis(500),
+        );
+        child.join().expect("child");
+        assert!(gone, "the second attempt removed what the child made");
+        assert!(!dir.exists(), "and it stays removed");
     }
 
     /// A process that died without retiring its browser leaves a pair behind; the next
