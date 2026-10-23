@@ -103,6 +103,19 @@ The id is a support-lookup key only. It is not unique across tenants, so it is n
 
 Every key comes from a closed vocabulary: status classes `2xx`..`5xx` or `other`; drivers `static`, `browser`, `tls` or `other`; error categories `network`, `timeout`, `server_5xx`, `client_4xx`, `validation`, `blocklist`, `auth` or `unknown`. It never carries a URL, a title, a fingerprint or an error message. Empty breakdowns are omitted, and control drops a `statistics` value that is not an object or is over 4 KiB. A crawl is refused under ZDR, so no ZDR job has statistics.
 
+### Agent run trace: `seq`, replay and resume (WS10.S3, built, NOT run)
+
+An open agent run has its own trace. Its events are numbered densely per run from 1 (the `AgentStarted` of a run is `seq` 1). The number is minted together with the event id, under one lock that also writes the event into the run's replay ring and into the live channel, so a resume that replays and then tails sees no gap and no duplicate.
+
+- The SSE `id:` of `GET /v1/agent/runs/{run_id}/events/stream` is the event's `seq`. Resume with `Last-Event-ID` (or `?from_seq=`, which wins). Replay returns the retained events with a greater `seq`.
+- `replay_gap` is sent first when the resume point is older than the ring: `{requested, oldest_retained, fallback: "browser-session/timeline"}`. The durable timeline covers the older part.
+- `done` with `run_closed` follows the terminal event when the run closes.
+- The envelope's `type` field is the snake_case serde name (`agent_started`, `action_started`). The SSE event name is the dotted name the App Shell dispatches on (`agent.started`, `action.started`); both spellings are in use, and the dotted list above is the SSE name, not the envelope value.
+- The NATS subject receives the same event id and seq as the SSE path (the transport is handed the minted event). A ZDR event never reaches the durable HTTP publisher or NATS; it stays in the in-memory ring for the run's lifetime and is never persisted.
+- Runs that were never opened keep the global counter and have no replay.
+
+Flags: `QUARRY_EDGE__TRACE_RING_EVENTS` (default 512; `0` disables the ring, so a resume that missed events gets `replay_gap`) and `QUARRY_EDGE__TRACE_RING_MAX_BYTES` (default 1 MiB, must be at least 1). An unparsable value aborts boot.
+
 ## 4. Webhook payload
 
 ```json

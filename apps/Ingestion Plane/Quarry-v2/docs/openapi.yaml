@@ -973,6 +973,66 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Envelope_ProcedureImpact'
+  /v1/agent/runs/{run_id}/events/stream:
+    get:
+      operationId: streamAgentRunEvents
+      summary: Typed agent-run events as Server-Sent Events, with resume (WS10.S3)
+      description: >-
+        Streams the run's user-facing events (agent.started, action.started, action.completed,
+        action.failed, observation.ready, agent.completed, agent.expired, agent.failed) in the
+        order of the run's trace. Each SSE `id:` is the event's per-run `seq` (dense, starting
+        at 1 for an agent run). Resume with the `Last-Event-ID` header a reconnecting EventSource
+        sends, or with `from_seq`; `from_seq` wins when both are present. The stream replays the
+        run's in-memory replay ring after that seq, then tails the live channel with no gap and no
+        duplicate. The ring holds `QUARRY_EDGE__TRACE_RING_EVENTS` events (default 512; 0 disables
+        it) within `QUARRY_EDGE__TRACE_RING_MAX_BYTES` (default 1 MiB) and lives only as long as the
+        run. A `replay_gap` event comes first when the ring no longer holds the events after the
+        resume point; its fallback is the durable browser-session timeline. The stream ends with
+        `event: done` and `data: run_closed` when the run closes, or `data: max_events` when
+        `max_events` is reached. A slow consumer gets `event: lagged` and the stream resumes from
+        the ring. Only the owner of the run may read it; any other caller gets 404.
+      tags:
+      - agent
+      parameters:
+      - $ref: '#/components/parameters/AgentRunId'
+      - name: from_seq
+        in: query
+        required: false
+        description: Replay the retained events with seq greater than this value before the live tail. Wins over Last-Event-ID.
+        schema:
+          type: integer
+          minimum: 0
+      - name: max_events
+        in: query
+        required: false
+        description: Close the stream after this many user-facing events (0 or absent: no cap).
+        schema:
+          type: integer
+          minimum: 0
+      - name: Last-Event-ID
+        in: header
+        required: false
+        description: The seq of the last event the client received. Used when from_seq is absent.
+        schema:
+          type: integer
+          minimum: 0
+      responses:
+        '200':
+          description: >-
+            text/event-stream. Named events: agent.started, action.started, action.completed,
+            action.failed, observation.ready, agent.completed, agent.expired, agent.failed (data is
+            the Event envelope, id is seq), replay_gap (data is {requested, oldest_retained,
+            fallback}), lagged (data is {skipped}), done (data is run_closed or max_events).
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '404':
+          description: Run not found, or not owned by the caller
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
   /v1/agent/runs/{run_id}:
     delete:
       operationId: closeAgentRun

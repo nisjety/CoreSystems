@@ -1120,12 +1120,21 @@ What changed on top of the 77374adc gate: a step response of an agent run carrie
 - Rollback: `QUARRY_EDGE__BUDGET_ENFORCEMENT=off` restores the request-cap behaviour for everyone (no ledger, no `meta.budget`). Nothing persisted needs reverting: the column and checkpoint fields are defaulted or nullable.
 - Known gaps (see the unit depth notes): the WebSocket reply has no `meta.budget`; the Model Plane does not map the 402 yet (execution-core reports the step failed); the WS10 trace row for `agent_budget_exhausted` is not built; no concurrent-run cap; no per-organization allowance.
 
-## Page captures on the fetch response: WS13.4a (U26, built, NOT run, 2026-10-23)
+## Agent event trace: per-run seq, replay ring and resume (WS10.S3, unit W2-U25, built, NOT run, 2026-10-23)
 
-- What changed: `FetchResponse` carries `captures: Option<Box<PageCaptures>>` (quarry-runtime `src/capture.rs`). Every driver sets it to `None`, and no request path fills it yet, so responses are unchanged. `FetchResponse::new(status, final_url, headers, body, duration_ms, served_by)` builds a response with `captures: None`.
-- Flags and wire: none. No contract, openapi or golden change. Nothing is persisted and nothing is logged from the new field.
-- Build note: a struct literal of `FetchResponse` must now name `captures` (or use `FetchResponse::new`). A literal without the field fails to compile.
-- Check: `cargo check --tests -p quarry-runtime -p quarry-edge` (built, compile check only). Test `fetch_response_new_defaults_captures_to_none` is written in `quarry-runtime/src/fetch.rs` and not run.
-- Evidence owed (test phase, not run): `POST /v1/scrape` of `https://example.com` returns a body identical (ignoring `run_id`, timestamps and `duration_ms`) before and after the rebuild of `quarry-edge`.
-- Rollback: revert the commit. Nothing persisted needs reverting.
+What changed for an operator: the SSE `id:` of `GET /v1/agent/runs/{run_id}/events/stream` is now the run's `seq`, dense from 1 per run (the run's `agent.started` is 1). A reconnect with `Last-Event-ID` (or `?from_seq=`, which wins) replays the events after that seq from the run's in-memory ring and then tails the live channel, with no gap and no duplicate. When the ring no longer holds the events after the resume point, the stream first sends `replay_gap` `{requested, oldest_retained, fallback: "browser-session/timeline"}`: read the durable timeline for the missed part. The ring is memory only, lives as long as the run, and never reaches Postgres. A ZDR event is kept in the ring and never reaches the durable publisher or NATS.
 
+Flags (read once at boot, env only, `crates/quarry-edge/src/trace_config.rs`):
+
+- `QUARRY_EDGE__TRACE_RING_EVENTS`, default `512`. `0` disables the ring: a resume that missed events then gets `replay_gap`, and the live tail is unchanged.
+- `QUARRY_EDGE__TRACE_RING_MAX_BYTES`, default `1048576` (1 MiB, estimated). Must be at least `1`. An unparsable value, or `0`, aborts boot and names the variable.
+
+Memory: each open run holds at most `QUARRY_EDGE__TRACE_RING_EVENTS` events and about `QUARRY_EDGE__TRACE_RING_MAX_BYTES` of estimated payload per run. The byte count is an estimate (payload text length plus key plus 192 bytes per event), not heap size. Runs are released at `close_run` (owner close and sweeper expiry).
+
+Rollback: set `QUARRY_EDGE__TRACE_RING_EVENTS=0` and restart quarry-edge (resumes then report a gap, the live stream is as before), or revert the commits. A resumed run (`resume_run_id` after a restart) starts its trace at seq 1 again: a client that kept an id from before the restart should start a fresh stream.
+
+Checks (compile only, this unit did not run the tests): `cargo check --tests -p quarry-runtime -p quarry-edge`; gateway `cargo check --tests` in `apps/Frontend Plane/verevonv3/apps/gateway`. Tests written, not run: `cargo test -p quarry-runtime events` (the plan's names, plus the dense, ring-bound, replay-filter, gap, lag, close and ZDR cases); `cargo test -p quarry-edge --lib trace_config`; `cargo test -p quarry-edge --test agent_events_replay` (reconnect, from_seq precedence, replay_gap first, non-owner 404, closed-run done, and the doc-comment source scan); gateway `cargo test browser_events_stream`; `pnpm typecheck` for `browser-client.ts`.
+
+Evidence owed (test phase, on a deployed stack, not run): rebuild quarry-edge and the gateway image; create a session; `curl -N` the events stream; drive five steps; kill the stream after `id: 3`; reconnect with `Last-Event-ID: 3` and check the first event is `id: 4`, consecutive, no repeats; `Last-Event-ID: 0` after about 600 steps gives `replay_gap` first; closing the run ends the stream with `event: done` / `data: run_closed`. With `RUST_LOG=quarry_runtime=debug`, the `open_runs` count returns to 0 after a batch closes.
+
+Known gaps: the SPA has the typed reader (`streamBrowserEvents` in `shared/api/browser-client.ts`) but no UI uses it yet; agent events still reach NATS raw for non-ZDR runs until WS10.S4 (see the unit depth notes); the gateway forwards the query string as it arrives (Quarry reads only `from_seq` and `max_events`). See `.plan-work/quarry-w1w2/depth/W2-U25.md`.
