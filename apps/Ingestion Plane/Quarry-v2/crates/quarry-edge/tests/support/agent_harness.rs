@@ -202,6 +202,17 @@ pub struct RecordingDriver {
     tab_selects: Mutex<Vec<String>>,
     tab_closes: Mutex<Vec<String>>,
     evaluate_calls: AtomicU32,
+    /// How the next `goto` holds before it fails with the deadline `Timeout`.
+    timeout_next_goto: Mutex<Option<GotoHold>>,
+    /// How many `goto` calls have started (the call is then running, so the step that made
+    /// it holds the run lock): tests wait on this instead of sleeping and hoping.
+    goto_entered: AtomicU32,
+}
+
+/// What ends a held `goto`: a fixed time, or a gate the test opens itself.
+enum GotoHold {
+    After(Duration),
+    Gate(Arc<tokio::sync::Notify>),
 }
 
 impl RecordingDriver {
@@ -240,6 +251,44 @@ impl RecordingDriver {
     /// How many times the driver was asked to run page script (`evaluate`).
     pub fn evaluate_calls(&self) -> u32 {
         self.evaluate_calls.load(Ordering::SeqCst)
+    }
+
+    /// Make the next `goto` fail the way the real driver's navigation deadline does: a
+    /// typed `Timeout` naming `navigate`, effect unknown, not retryable. It fails at once.
+    pub fn time_out_next_goto(&self) {
+        self.time_out_next_goto_after(Duration::ZERO);
+    }
+
+    /// Like [`Self::time_out_next_goto`], but the call is still running (it holds the run
+    /// lock and the in-flight count of the step that made it) for `hold` before the
+    /// deadline fires, the way a navigation stuck against its deadline does.
+    pub fn time_out_next_goto_after(&self, hold: Duration) {
+        *self.timeout_next_goto.lock().unwrap() = Some(GotoHold::After(hold));
+    }
+
+    /// Like [`Self::time_out_next_goto_after`], but the call is held until the test calls
+    /// `notify_one` on the returned gate (the permit is kept, so opening it early is fine).
+    /// Nothing depends on a clock: the call is running until the test says otherwise.
+    pub fn time_out_next_goto_when_released(&self) -> Arc<tokio::sync::Notify> {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        *self.timeout_next_goto.lock().unwrap() = Some(GotoHold::Gate(gate.clone()));
+        gate
+    }
+
+    /// How many `goto` calls have started on the driver.
+    pub fn goto_entered(&self) -> u32 {
+        self.goto_entered.load(Ordering::SeqCst)
+    }
+
+    /// Wait (at most 20 s, then panic with `what`) until `goto_entered` is at least `count`.
+    pub async fn wait_goto_entered(&self, count: u32, what: &str) {
+        let waited = tokio::time::timeout(Duration::from_secs(20), async {
+            while self.goto_entered() < count {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        assert!(waited.is_ok(), "the driver never reached goto #{count}: {what}");
     }
 
     /// Make the next `acquire` fail as a driver would.
@@ -297,6 +346,19 @@ impl BrowserDriver for RecordingDriver {
     }
 
     async fn goto(&self, _session: &BrowserSession, _url: &str) -> QuarryResult<()> {
+        self.goto_entered.fetch_add(1, Ordering::SeqCst);
+        let hold = self.timeout_next_goto.lock().unwrap().take();
+        if let Some(hold) = hold {
+            match hold {
+                GotoHold::After(hold) if hold.is_zero() => {}
+                GotoHold::After(hold) => tokio::time::sleep(hold).await,
+                GotoHold::Gate(gate) => gate.notified().await,
+            }
+            let mut error = QuarryError::new(ErrorCode::Timeout, "browser operation navigate timed out")
+                .with_details(json!({ "op": "navigate", "deadline_ms": 30_000, "effect": "unknown" }));
+            error.retryable = false;
+            return Err(error);
+        }
         Ok(())
     }
 
