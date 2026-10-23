@@ -353,6 +353,21 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D2-116 | WS26-S2.code | risk | P2 | Release 4 MiB benign scan is about 156 ms here, against a 250 ms budget (margin about 1.6x). fold() is now the largest stage at about 60 ms (strip, NFKC quick check, lowercase, whitespace collapse). Watch the budget on CI hardware. | open |
 | D2-117 | WS26-S2.code | follow-up | P3 | 10 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-03.json | open |
 
+
+### Wave-mode batch W2-03 (2026-10-23)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D2-118 | WS20-S1 | risk | P1 | Capability-core sweeper inserts fire_key unconditionally; against a database without migration 0056 the insert fails. Flag-off is not byte-identical at the DB level until the migration ships first. | open |
+| D2-119 | WS20-S1 | risk | P1 | The capability-core sweeper now inserts cron_fires.fire_key unconditionally (sweeper.go fireOne, both INSERT INTO cron_fires statements), so against a database without migration 0056 every fire insert fails and schedules stop firing; flag-off is therefore not identical at the DB level. The lead must gate the rollout: session-core migration 0056 applied before capability-core starts this sweeper. | open |
+| D2-120 | WS20-S1 | risk | P1 | The code comment in session-core grpc.rs (append_scheduled_result_in_tx) says a scheduled answer runs no memory extraction, but dreaming.rs load_pending_messages only skips threads with source_scope = 'conversation' (about line 223 and 1268), and a scheduled thread keeps the default 'workspace', so its answer is picked up for extraction; the Dreaming predicate in K3-5 must exclude origin 'space' schedule threads, or the comment must be corrected, before SESSION_CORE_SCHEDULED_RESULT_PERSIST is turned on. | open |
+| D2-121 | WS20-S1 | decision | P1 | GET /api/v1/cron/{id}/fires is org-scoped (listFires checks only cron_schedules id and org_id), so any org member can list another member's schedule fires with run_id and thread_id; the S1 row asks for creator-scoping 'like get :995', but get itself is org-scoped (workplane_apis.go about line 1076), so the row and the code disagree and the owner must decide before S3 shows the listing. | open |
+| D2-122 | WS20-S1 | live-proof | P1 | Lead-only: run the new DB tests against a disposable Postgres with session-core migrations: cd "apps/Model Plane/rust" && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -p session-core --bin session-core record_scheduled -- --ignored --test-threads=1 with DATABASE_URL set. The implementer's report lists the same command; I did not run it. | open |
+| D2-123 | WS20-S1 | live-proof | P1 | Lead-only: run scripts/tests/scheduled-step-receipt-postgres-test.sh and scripts/tests/scheduled-step-proof.sh (docker). | open |
+| D2-124 | WS20-S1 | live-proof | P1 | Lead-only: add the golden row scheduled_run (refuse for ZDR and waived cells) to zdr-posture-matrix.json (not owned) and the ZDR.md text (SESSION_CORE_SCHEDULED_RESULT_PERSIST; persisted only when true; refused for zdr and zdr_waived). | open |
+| D2-125 | WS20-S1 | live-proof | P1 | Lead-only: regenerate apps/Model Plane/go/gen/model_plane/v1/sessions.pb.go and sessions_grpc.pb.go after the proto change (no Go code uses the new types yet). | open |
+| D2-126 | WS20-S1 | follow-up | P3 | 19 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-03.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
@@ -389,3 +404,4 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 
 | D2-020 | WS26-S2.code | decision | P1 | The scanner rule `injection.override_the_system_prompt` is a plain phrase, so a benign business sentence such as "The team will override the system prompt in the staging config." is flagged while the normaliser is on by default; attacks atk-231 to atk-240 depend on that rule. Owner decision: narrow or drop the marker, or accept the hit. A single hyphen- or dot-joined token (`new-system-prompt`) still joins. | open |
 | WS26-S2.code | policy, zdr | W2-03 | no |
+| WS20-S1 | zdr, audit | W2-03 | no |
