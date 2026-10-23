@@ -229,10 +229,7 @@ mod tests {
             redact_credentials("redis://user:s3cret@host/0"),
             "redis://***@host/0"
         );
-        assert_eq!(
-            redact_credentials("redis://host:6379/0"),
-            "redis://host:6379/0"
-        );
+        assert_eq!(redact_credentials("redis://host:6379/0"), "redis://host:6379/0");
     }
 
     use super::*;
