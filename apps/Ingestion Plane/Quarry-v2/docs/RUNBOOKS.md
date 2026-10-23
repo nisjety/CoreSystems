@@ -731,3 +731,27 @@ The service token is not bound to the grant's owner: owner binding stays Quarry'
 - **Migration guard no longer type-blind (review finding).** `TestMigration024HoldsOnlyAnOrgIDAndATimestamp` matched only `TEXT`, `TIMESTAMPTZ`, `INT` and `NUMERIC` columns, so `reason JSONB`, `body VARCHAR(200)` or `hits BIGINT` added to the table passed. It now parses the `CREATE TABLE` body (balanced parentheses, table constraints skipped) and compares every column definition, whatever its type, with the golden list `org_id TEXT`, `erased_at TIMESTAMPTZ`. Migration `015`'s guard uses the same parser for its column names.
 - **CI.** The sweeper tests (retention cutoff, marker floor, dry-run guard, huge retention), the in-memory store tests (erased-org refusal, marker switch) and the `cmd/control` posture test ran only in the report-only `go-coverage` job. The required `quarry-go-zdr-stamp-chain` job now runs `go test ./internal/janitor/... ./internal/store ./cmd/control/...` too (the Postgres store was already in its own required job). A required check still needs branch protection to bite; the repository does not show whether that is configured.
 - **Mutation checks (workspace COPY, never the tree).** Native Go: the memory store writing a marker whatever the switch, the receiver flag always true, the posture ignoring the HMAC secret, the posture not switching the marker on, the posture on by default, migration `024` with an extra `reason JSONB`, `body VARCHAR(200)`, `hits BIGINT` or `reason TEXT` column, `erased_at` retyped to JSONB, migration `015` with an extra `note JSONB` column: all killed (log `mut6-go.log`). Postgres: see the commit message for the second batch (no slot limit, 16 slots, no put timeout, `PurgeOrg` writing the marker whatever the switch, `PurgeOrg` never writing it).
+
+## Evidence probe scripts for WS4.D, WS4.E and WS4.G (built, NOT run)
+
+Built in the wave that follows the "build first, depth later" strategy. They are recipes for a
+side-by-side evidence stack; nothing here was run against any stack, and a run is owed. Each
+prints `PASS`, `FAIL` or `NOT-RUN` per check and a `RESULT` line; `--self-test` checks the
+helpers on canned data without a network.
+
+- `scripts/evidence/ws4-image-probes.sh` (WS4.D, WS4.E): against a private rebuilt edge at
+  `RUST_LOG=debug`: a ZDR scrape, a ZDR `scrape/stream`, a ZDR search with SearXNG dead and a ZDR
+  agent start plus navigate each leave 0 occurrences of their unique marker in the edge log;
+  the standard-identity scrape (control) leaves at least 1; the ZDR search still logs a
+  `search.upstream` line with outcome `error`. `GET /v1/change/latest?url=` and
+  `/v1/search/suggest` need `ZDR_TOKEN_FILE` (a GET has no body flag); suggest is a
+  documented Gap row and is reported, not asserted. The script refuses a log source or URL
+  that names the live edge.
+- `scripts/evidence/ws4g-live-zdr-token-probe.sh` (WS4.G): with a bearer of a ZDR-organization
+  user read from a file, `POST /v1/crawl`, `/v1/batch` and an agent start with a persistent
+  profile return 403 with a ZDR message; `POST /v1/schedules` returns 200 today (the documented
+  Gap, the probe deletes the schedule it made) or 403 with
+  `zdr_durable_mutation_forbidden` once WS4.H stage B is on. Seeded dev organization only.
+- The gateway probes (WS4.A clippy triage, the four deploy probes, the `/metrics` read) and
+  the WS4.B and WS4.C scripts are under `apps/Frontend Plane/verevonv3/scripts/` and described in
+  `docs/runbooks/gateway-search-cache-tenant-incident.md`.
