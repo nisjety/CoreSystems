@@ -60,6 +60,22 @@ pub struct GrantValidation {
     /// `QUARRY_EDGE__GRANT_BUDGET_CLAIM`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget: Option<GrantBudget>,
+    /// The navigation mode the broker granted (WS8.B): "" or "allowlist" (the
+    /// exact host list in `allowed_domains`) or "open_web" (any public host not in
+    /// `denied_domains`). Empty from a broker that predates it, which reads as
+    /// "allowlist". Never derived from the caller.
+    #[serde(default)]
+    pub policy_mode: String,
+    /// Denied hosts of an open-web grant. Empty for an allow-list grant.
+    #[serde(default)]
+    pub denied_domains: Vec<String>,
+    /// The grant's absolute cap (WS8.B): a human-browse grant renews until this
+    /// instant and no further. `None` on every other grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub absolute_expires_at: Option<DateTime<Utc>>,
+    /// The resource a derived attach grant is bound to (WS8.C/WS8.F). Empty otherwise.
+    #[serde(default)]
+    pub resource_id: String,
 }
 
 /// A grant's budget claim, as the broker stored it. A bound of 0 means that
@@ -111,6 +127,17 @@ impl GrantBudget {
 }
 
 impl GrantValidation {
+    /// The navigation authority this grant gives a run, or the reason it is
+    /// refused. Fails closed: an unknown mode, or a list shape that does not match
+    /// the mode, is an error, never a widening.
+    pub fn nav_policy(&self) -> Result<quarry_browser::BrokerNavPolicy, String> {
+        quarry_browser::BrokerNavPolicy::from_validation(
+            &self.policy_mode,
+            &self.allowed_domains,
+            &self.denied_domains,
+        )
+    }
+
     pub fn is_usable(&self) -> bool {
         if !self.active {
             return false;
@@ -217,6 +244,10 @@ impl GrantValidator for NoopGrantValidator {
             owner_id: String::new(),
             zdr: false,
             budget: None,
+            policy_mode: String::new(),
+            denied_domains: Vec::new(),
+            absolute_expires_at: None,
+            resource_id: String::new(),
         })
     }
 }
@@ -300,6 +331,10 @@ impl GrantValidator for HttpGrantValidator {
                 owner_id: String::new(),
                 zdr: false,
                 budget: None,
+                policy_mode: String::new(),
+                denied_domains: Vec::new(),
+                absolute_expires_at: None,
+                resource_id: String::new(),
             });
         }
         if !status.is_success() {
@@ -343,6 +378,10 @@ mod tests {
             owner_id: String::new(),
             zdr: false,
             budget: None,
+            policy_mode: String::new(),
+            denied_domains: Vec::new(),
+            absolute_expires_at: None,
+            resource_id: String::new(),
         };
         assert!(!g.is_usable());
     }
@@ -363,6 +402,10 @@ mod tests {
             owner_id: String::new(),
             zdr: false,
             budget: None,
+            policy_mode: String::new(),
+            denied_domains: Vec::new(),
+            absolute_expires_at: None,
+            resource_id: String::new(),
         };
         assert!(!g.is_usable());
     }
@@ -383,6 +426,10 @@ mod tests {
             owner_id: String::new(),
             zdr: false,
             budget: None,
+            policy_mode: String::new(),
+            denied_domains: Vec::new(),
+            absolute_expires_at: None,
+            resource_id: String::new(),
         };
         assert!(g.is_usable());
     }
@@ -403,6 +450,10 @@ mod tests {
             owner_id: String::new(),
             zdr: false,
             budget: None,
+            policy_mode: String::new(),
+            denied_domains: Vec::new(),
+            absolute_expires_at: None,
+            resource_id: String::new(),
         };
         assert!(g.is_usable());
     }

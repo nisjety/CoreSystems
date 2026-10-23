@@ -303,6 +303,10 @@ pub(crate) fn inactive_validation(grant_id: &str) -> GrantValidation {
         owner_id: String::new(),
         zdr: false,
         budget: None,
+        policy_mode: String::new(),
+        denied_domains: Vec::new(),
+        absolute_expires_at: None,
+        resource_id: String::new(),
     }
 }
 
@@ -329,6 +333,10 @@ pub(crate) fn validation_from_response(resp: ValidateGrantResponse) -> GrantVali
             resp.budget_source,
             resp.budget_minted_at_unix,
         ),
+        policy_mode: resp.policy_mode,
+        denied_domains: resp.denied_domains,
+        absolute_expires_at: resp.absolute_expires_at.and_then(prost_ts_to_chrono),
+        resource_id: resp.resource_id,
     }
 }
 

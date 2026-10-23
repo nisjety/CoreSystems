@@ -93,4 +93,12 @@ message ValidateGrantResponse {
   // Stamped by the broker when the claim is stored; a request that sets it
   // is refused.
   int64 budget_minted_at_unix = 44;
+
+  // Navigation policy (WS8.B; field numbers 50-59 are the broker's human-browse
+  // block of R-6). "" or "allowlist": allowed_domains is the exact host list.
+  // "open_web": allowed_domains is empty and denied_domains is the deny list.
+  string policy_mode = 50;
+  repeated string denied_domains = 51;
+  google.protobuf.Timestamp absolute_expires_at = 52;
+  string resource_id = 53;
 }
