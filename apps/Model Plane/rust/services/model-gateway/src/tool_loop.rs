@@ -3031,6 +3031,22 @@ async fn dispatch_tool_with_cost(
                         zdr || data_plane_mode.is_some(),
                     )
                     .await;
+                    // Over the inline bound, the hits are parked whole when extended parking is
+                    // on; the handle is the model's way to read the rest by `result_query`.
+                    let output = match park_extended_result(
+                        state,
+                        org_id,
+                        user_id,
+                        external_parking_allowed(zdr || data_plane_mode.is_some()),
+                        &call.name,
+                        crate::tool_result_handles::ResultKind::Json,
+                        &output,
+                        MAX_TOOL_OUTPUT_CHARS,
+                        &provenance,
+                    ) {
+                        Some(handle) => handle.to_model_json(),
+                        None => output,
+                    };
                     ToolOutcome {
                         call_id: call.id.clone(),
                         name: call.name.clone(),
@@ -3145,11 +3161,34 @@ async fn dispatch_tool_with_cost(
                         zdr || data_plane_mode.is_some(),
                     )
                     .await;
-                    let out = serde_json::json!({
-                        "final_url": r.final_url,
-                        "title": r.title,
-                        "content": truncate_chars(&body, MAX_FETCH_CHARS),
-                    });
+                    // Under `RESULT_HANDLES_EXTENDED` the complete screened page is parked, so
+                    // the part past the cut is reachable by `result_query` range. The first
+                    // 4,000 characters stay inline either way.
+                    let head = truncate_chars(&body, MAX_FETCH_CHARS);
+                    let parked = park_extended_result(
+                        state,
+                        org_id,
+                        user_id,
+                        external_parking_allowed(zdr || data_plane_mode.is_some()),
+                        &call.name,
+                        crate::tool_result_handles::ResultKind::Text,
+                        &body,
+                        MAX_FETCH_CHARS,
+                        &provenance,
+                    );
+                    let out = match parked {
+                        Some(handle) => serde_json::json!({
+                            "final_url": r.final_url,
+                            "title": r.title,
+                            "content": head,
+                            "handle": handle.to_model_value(),
+                        }),
+                        None => serde_json::json!({
+                            "final_url": r.final_url,
+                            "title": r.title,
+                            "content": head,
+                        }),
+                    };
                     ToolOutcome {
                         call_id: call.id.clone(),
                         name: call.name.clone(),
@@ -3555,12 +3594,26 @@ async fn dispatch_tool_with_cost(
                     }
                     let output =
                         serde_json::to_string(&envelope).unwrap_or_else(|_| "{}".to_owned());
+                    let provenance =
+                        crate::moderation::ToolProvenance::unscreened(&call.name, &output);
+                    let output = match park_extended_result(
+                        state,
+                        org_id,
+                        user_id,
+                        external_parking_allowed(zdr || data_plane_mode.is_some()),
+                        &call.name,
+                        crate::tool_result_handles::ResultKind::Json,
+                        &output,
+                        MAX_TOOL_OUTPUT_CHARS,
+                        &provenance,
+                    ) {
+                        Some(handle) => handle.to_model_json(),
+                        None => output,
+                    };
                     ToolOutcome {
                         call_id: call.id.clone(),
                         name: call.name.clone(),
-                        provenance: crate::moderation::ToolProvenance::unscreened(
-                            &call.name, &output,
-                        ),
+                        provenance,
                         output,
                         error: None,
                     }
@@ -3833,7 +3886,18 @@ async fn dispatch_tool_with_cost(
                 Ok(query) => query,
                 Err(message) => return err_outcome(call, message),
             };
-            let slice = match crate::tool_result_handles::apply_query(&resolved.payload, &query) {
+            let slice = match resolved.kind {
+                crate::tool_result_handles::ResultKind::Json => {
+                    crate::tool_result_handles::apply_query(&resolved.payload, &query)
+                }
+                crate::tool_result_handles::ResultKind::Text => {
+                    crate::tool_result_handles::apply_text_query(
+                        resolved.payload.as_str().unwrap_or_default(),
+                        &query,
+                    )
+                }
+            };
+            let slice = match slice {
                 Ok(slice) => slice,
                 Err(message) => return err_outcome(call, message),
             };
@@ -3872,16 +3936,7 @@ async fn dispatch_tool_with_cost(
                     &content,
                     version,
                 );
-                // Classified from the ORIGINAL tool that produced the parked
-                // payload (`resolved.capability_id`), not from "result_query"
-                // itself — a handle produced by an untrusted source must
-                // still read as untrusted on every later read-back. See
-                // `verevon_read_outcome`'s docs: today every parked payload
-                // is org-internal, so this is the cheap path; a future
-                // caller parking third-party content MUST screen it before
-                // parking, not here.
-                let provenance =
-                    crate::moderation::ToolProvenance::unscreened(&resolved.capability_id, &output);
+                let provenance = read_back_provenance(&resolved, &output);
                 return ToolOutcome {
                     call_id: call.id.clone(),
                     name: call.name.clone(),
@@ -3891,8 +3946,7 @@ async fn dispatch_tool_with_cost(
                 };
             }
             let output = truncate_chars(&slice.to_string(), MAX_TOOL_OUTPUT_CHARS);
-            let provenance =
-                crate::moderation::ToolProvenance::unscreened(&resolved.capability_id, &output);
+            let provenance = read_back_provenance(&resolved, &output);
             ToolOutcome {
                 call_id: call.id.clone(),
                 name: call.name.clone(),
@@ -3932,12 +3986,6 @@ fn handle_or_inline_output(
     };
     let size_bytes = output.len();
     let payload = crate::tool_result_handles::unwrap_mcp_content(&parsed);
-    let expires_at = chrono::Utc::now()
-        .checked_add_signed(
-            chrono::Duration::from_std(crate::tool_result_handles::HANDLE_TTL)
-                .unwrap_or_else(|_| chrono::Duration::seconds(900)),
-        )
-        .map(|at| at.to_rfc3339());
     state
         .tool_results
         .insert(
@@ -3946,9 +3994,84 @@ fn handle_or_inline_output(
             capability_id,
             payload,
             size_bytes,
-            expires_at,
+            handle_expires_at(),
         )
         .to_model_json()
+}
+
+/// The instant a handle parked now stops resolving, in RFC3339.
+fn handle_expires_at() -> Option<String> {
+    chrono::Utc::now()
+        .checked_add_signed(
+            chrono::Duration::from_std(crate::tool_result_handles::HANDLE_TTL)
+                .unwrap_or_else(|_| chrono::Duration::seconds(900)),
+        )
+        .map(|at| at.to_rfc3339())
+}
+
+/// Whether an external result may be parked under a handle at all: the
+/// `RESULT_HANDLES_EXTENDED` switch is on and the turn keeps no content. A
+/// ZDR or waived turn never parks, because a handle would hold the result in
+/// gateway memory past the turn.
+fn external_parking_allowed(zdr_or_waived: bool) -> bool {
+    !zdr_or_waived && crate::tool_result_handles::extended_enabled()
+}
+
+/// Park a result over `threshold` characters under a handle and return it, or
+/// return `None` so the caller keeps its existing bound. Nothing is parked when
+/// `may_park` is false, when the content reached the model unscreened, or when
+/// the payload cannot be held in the form `kind` names.
+#[allow(clippy::too_many_arguments)]
+fn park_extended_result(
+    state: &AppState,
+    org_id: &str,
+    user_id: &str,
+    may_park: bool,
+    capability_id: &str,
+    kind: crate::tool_result_handles::ResultKind,
+    text: &str,
+    threshold: usize,
+    provenance: &crate::moderation::ToolProvenance,
+) -> Option<crate::tool_result_handles::ToolResultHandle> {
+    use crate::tool_result_handles::{ParkedResult, ResultKind};
+
+    if !may_park
+        || text.chars().count() <= threshold
+        || crate::tool_result_handles::screening_skipped(provenance)
+    {
+        return None;
+    }
+    let payload = match kind {
+        ResultKind::Text => Value::String(text.to_owned()),
+        ResultKind::Json => serde_json::from_str::<Value>(text).ok()?,
+    };
+    let parked = ParkedResult {
+        payload,
+        kind,
+        size_bytes: text.len(),
+    };
+    Some(state.tool_results.insert_external(
+        org_id,
+        user_id,
+        capability_id,
+        parked,
+        handle_expires_at(),
+        provenance.clone(),
+    ))
+}
+
+/// The provenance a `result_query` read reports. A handle parked with a
+/// screening verdict replays that verdict and trust label on every read, so an
+/// injection-flagged page stays flagged however many ranges are read back. The
+/// classification follows the tool that produced the payload, never the bytes
+/// of the read. A handle with no verdict is org-internal and reads as unscreened.
+fn read_back_provenance(
+    resolved: &crate::tool_result_handles::ResolvedResult,
+    output: &str,
+) -> crate::moderation::ToolProvenance {
+    resolved.provenance.clone().unwrap_or_else(|| {
+        crate::moderation::ToolProvenance::unscreened(&resolved.capability_id, output)
+    })
 }
 
 /// Parse a `result_query` call's arguments into a validated
@@ -3960,7 +4083,9 @@ fn handle_or_inline_output(
 fn parse_handle_query(
     arguments_json: &str,
 ) -> Result<crate::tool_result_handles::HandleQuery, String> {
-    use crate::tool_result_handles::{Aggregate, AggregateOp, FilterOp, HandleQuery, RowFilter};
+    use crate::tool_result_handles::{
+        Aggregate, AggregateOp, FilterOp, HandleQuery, RowFilter, TextRange,
+    };
 
     let select = arg_value(arguments_json, "select")
         .and_then(|value| value.as_array().cloned())
@@ -4011,6 +4136,19 @@ fn parse_handle_query(
     let offset =
         usize::try_from(arg_i64(arguments_json, "offset").unwrap_or(0).max(0)).unwrap_or(0);
     let limit = usize::try_from(arg_i64(arguments_json, "limit").unwrap_or(0).max(0)).unwrap_or(0);
+    let range = match arg_value(arguments_json, "range") {
+        Some(Value::Object(window)) => {
+            let read = |key: &str| {
+                usize::try_from(window.get(key).and_then(Value::as_i64).unwrap_or(0).max(0))
+                    .unwrap_or(0)
+            };
+            Some(TextRange {
+                offset: read("offset"),
+                length: read("length"),
+            })
+        }
+        _ => None,
+    };
 
     Ok(HandleQuery {
         select,
@@ -4018,6 +4156,7 @@ fn parse_handle_query(
         aggregate,
         offset,
         limit,
+        range,
     })
 }
 
@@ -4399,7 +4538,7 @@ pub fn history_was_compacted(messages: &[ChatMessage]) -> bool {
 
 #[must_use]
 pub fn builtin_tool_defs() -> Vec<ToolDefinition> {
-    vec![
+    let mut defs = vec![
         ToolDefinition {
             name: "count_words".to_owned(),
             description: "Count words locally in one or more complete prose bodies. Use this instead of code_interpreter for word counts. Submit all requested pieces together in one call; exclude separate headings, subject/preview and internal source notes. Reuse the exact counted prose in the deliverable. This only counts words; it does not verify facts, style or formatting.".to_owned(),
@@ -4547,7 +4686,25 @@ pub fn builtin_tool_defs() -> Vec<ToolDefinition> {
             description: "List the organization's own social campaigns with name, goal, status, target platforms, and start/end dates. Use this for 'what campaigns are running', 'what was our Q3 campaign', or when the user asks how a named campaign is set up. Do NOT use it for the individual posts inside a campaign (use social_list_posts) or for connected accounts (use social_list_accounts). Read-only: creating or changing a campaign requires the approval-gated agentic path.".to_owned(),
             parameters_json: r#"{"type":"object","properties":{"status":{"type":"string","enum":["draft","active","completed","archived"],"description":"Optional status filter. Omit for all statuses."},"limit":{"type":"integer","description":"Max campaigns to return, 1-100 (default 25)"}}}"#.to_owned(),
         },
-    ]
+    ];
+    advertise_text_range(&mut defs, crate::tool_result_handles::extended_enabled());
+    defs
+}
+
+/// Adds the character `range` argument to `result_query` when extended parking
+/// is on, so a parked page can be read by window. With the switch off the
+/// advertised schema is exactly what it was.
+fn advertise_text_range(defs: &mut [ToolDefinition], enabled: bool) {
+    if !enabled {
+        return;
+    }
+    for def in defs.iter_mut().filter(|def| def.name == "result_query") {
+        def.parameters_json = def.parameters_json.replacen(
+            r#"{"type":"object","properties":{"#,
+            r#"{"type":"object","properties":{"range":{"type":"object","description":"For a parked text result, such as a fetched page: the window to read, as offset and length in characters. At most 4000 characters a read. Omit to read from the start.","properties":{"offset":{"type":"integer"},"length":{"type":"integer"}}},"#,
+            1,
+        );
+    }
 }
 
 /// Frame a round of tool outcomes as a context message appended to the
@@ -8159,6 +8316,7 @@ mod tests {
                 }),
                 offset: 0,
                 limit: 0,
+                range: None,
             },
         )
         .expect("count over a row payload must succeed");
@@ -13379,5 +13537,288 @@ mod tests {
             // The test module names each needle once, in the array above, split.
             assert_eq!(mentions, 0, "tool_loop.rs mentions `{needle}`");
         }
+    }
+
+    /// A page of `chars` ASCII characters with the screening verdict the fetch
+    /// arm would have recorded on the complete body.
+    fn screened_page(
+        posture: crate::moderation::ScreeningPosture,
+        chars: usize,
+    ) -> (String, crate::moderation::ToolProvenance) {
+        let page: String = (0..chars)
+            .map(|i| char::from(b'a' + u8::try_from(i % 26).unwrap_or(0)))
+            .collect();
+        let provenance = crate::moderation::ToolProvenance {
+            trust: crate::moderation::TrustClass::ExternalWeb,
+            screening: crate::moderation::ScreeningOutcome {
+                posture,
+                content_hash: crate::moderation::content_hash(page.as_bytes()),
+                rule_ids: Vec::new(),
+            },
+        };
+        (page, provenance)
+    }
+
+    #[tokio::test]
+    async fn a_fetched_page_over_the_cut_is_readable_by_range() {
+        use crate::moderation::ScreeningPosture;
+        use crate::tool_result_handles::{HandleQuery, ResultKind, TextRange};
+
+        let state = crate::state::AppState::new();
+        let (page, provenance) = screened_page(ScreeningPosture::Clean, 10_000);
+
+        let handle = park_extended_result(
+            &state,
+            "org",
+            "user",
+            true,
+            "fetch_url",
+            ResultKind::Text,
+            &page,
+            MAX_FETCH_CHARS,
+            &provenance,
+        )
+        .expect("a page past the cut is parked");
+        assert_eq!(handle.kind, ResultKind::Text);
+
+        let resolved = state
+            .tool_results
+            .resolve("org", "user", &handle.handle_id)
+            .expect("the handle resolves for the user that fetched it");
+        let window = crate::tool_result_handles::apply_text_query(
+            resolved.payload.as_str().unwrap_or_default(),
+            &HandleQuery {
+                range: Some(TextRange {
+                    offset: 4_000,
+                    length: 4_000,
+                }),
+                ..HandleQuery::default()
+            },
+        )
+        .expect("a range read of a text result");
+        assert_eq!(window["returned_chars"], 4_000);
+        assert_eq!(window["has_more"], true);
+        assert_eq!(window["text"], &page[4_000..8_000]);
+    }
+
+    #[tokio::test]
+    async fn an_injection_flagged_page_stays_flagged_on_every_read_back() {
+        use crate::moderation::{ScreeningPosture, TrustClass};
+        use crate::tool_result_handles::ResultKind;
+
+        let state = crate::state::AppState::new();
+        let (page, mut provenance) = screened_page(ScreeningPosture::Flagged, 10_000);
+        provenance.screening.rule_ids = vec!["injection_marker"];
+        let handle = park_extended_result(
+            &state,
+            "org",
+            "user",
+            true,
+            "fetch_url",
+            ResultKind::Text,
+            &page,
+            MAX_FETCH_CHARS,
+            &provenance,
+        )
+        .expect("parked");
+
+        // Two separate read-backs, as two `result_query` ranges would be.
+        for _ in 0..2 {
+            let resolved = state
+                .tool_results
+                .resolve("org", "user", &handle.handle_id)
+                .expect("resolves");
+            let replayed = read_back_provenance(&resolved, "a slice of the page");
+            assert_eq!(replayed.screening.posture, ScreeningPosture::Flagged);
+            assert_eq!(replayed.screening.rule_ids, vec!["injection_marker"]);
+            assert_eq!(replayed.trust, TrustClass::ExternalWeb);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_zdr_fetch_is_never_parked() {
+        use crate::moderation::ScreeningPosture;
+        use crate::tool_result_handles::ResultKind;
+
+        let state = crate::state::AppState::new();
+        let (page, provenance) = screened_page(ScreeningPosture::Clean, 10_000);
+
+        // A ZDR or waived turn never gets the switch, whatever it is set to.
+        assert!(!external_parking_allowed(true));
+        let parked = park_extended_result(
+            &state,
+            "org",
+            "user",
+            external_parking_allowed(true),
+            "fetch_url",
+            ResultKind::Text,
+            &page,
+            MAX_FETCH_CHARS,
+            &provenance,
+        );
+        assert!(parked.is_none());
+        assert!(state.tool_results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_colleague_cannot_read_another_users_page_handle() {
+        use crate::moderation::ScreeningPosture;
+        use crate::tool_result_handles::ResultKind;
+
+        let state = crate::state::AppState::new();
+        let (page, provenance) = screened_page(ScreeningPosture::Clean, 10_000);
+        let handle = park_extended_result(
+            &state,
+            "org",
+            "user_a",
+            true,
+            "fetch_url",
+            ResultKind::Text,
+            &page,
+            MAX_FETCH_CHARS,
+            &provenance,
+        )
+        .expect("parked");
+
+        assert!(state
+            .tool_results
+            .resolve("org", "user_a", &handle.handle_id)
+            .is_some());
+        assert!(state
+            .tool_results
+            .resolve("org", "user_b", &handle.handle_id)
+            .is_none());
+        assert!(state
+            .tool_results
+            .resolve("org_b", "user_a", &handle.handle_id)
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn an_external_page_with_no_real_scan_is_never_parked() {
+        use crate::moderation::ScreeningPosture;
+        use crate::tool_result_handles::ResultKind;
+
+        let state = crate::state::AppState::new();
+        for posture in [
+            ScreeningPosture::NotApplicable,
+            ScreeningPosture::PolicyDisabled,
+        ] {
+            let (page, provenance) = screened_page(posture, 10_000);
+            let parked = park_extended_result(
+                &state,
+                "org",
+                "user",
+                true,
+                "fetch_url",
+                ResultKind::Text,
+                &page,
+                MAX_FETCH_CHARS,
+                &provenance,
+            );
+            assert!(parked.is_none(), "{posture:?} must stay inline");
+        }
+        assert!(state.tool_results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_result_within_the_cut_or_not_queryable_stays_inline() {
+        use crate::moderation::ScreeningPosture;
+        use crate::tool_result_handles::ResultKind;
+
+        let state = crate::state::AppState::new();
+        let (short, provenance) = screened_page(ScreeningPosture::Clean, MAX_FETCH_CHARS);
+        assert!(park_extended_result(
+            &state,
+            "org",
+            "user",
+            true,
+            "fetch_url",
+            ResultKind::Text,
+            &short,
+            MAX_FETCH_CHARS,
+            &provenance,
+        )
+        .is_none());
+
+        // A JSON handle over text that does not parse could promise no query surface.
+        let (unparseable, provenance) = screened_page(ScreeningPosture::Clean, 10_000);
+        assert!(park_extended_result(
+            &state,
+            "org",
+            "user",
+            true,
+            "web_search",
+            ResultKind::Json,
+            &unparseable,
+            MAX_TOOL_OUTPUT_CHARS,
+            &provenance,
+        )
+        .is_none());
+        assert!(state.tool_results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_oversized_web_search_result_parks_as_a_queryable_json_handle() {
+        use crate::moderation::ScreeningPosture;
+        use crate::tool_result_handles::{FilterOp, HandleQuery, ResultKind, RowFilter};
+
+        let state = crate::state::AppState::new();
+        let text = oversized_rows_json();
+        let (_, provenance) = screened_page(ScreeningPosture::Clean, 1);
+        let handle = park_extended_result(
+            &state,
+            "org",
+            "user",
+            true,
+            "web_search",
+            ResultKind::Json,
+            &text,
+            MAX_TOOL_OUTPUT_CHARS,
+            &provenance,
+        )
+        .expect("parked");
+        assert_eq!(handle.row_count, Some(400));
+
+        let resolved = state
+            .tool_results
+            .resolve("org", "user", &handle.handle_id)
+            .expect("resolves");
+        let slice = crate::tool_result_handles::apply_query(
+            &resolved.payload,
+            &HandleQuery {
+                filter: Some(RowFilter {
+                    field: "id".to_owned(),
+                    op: FilterOp::Eq,
+                    value: serde_json::json!(7),
+                }),
+                ..HandleQuery::default()
+            },
+        )
+        .expect("row query");
+        assert_eq!(slice["matched_rows"], 1);
+    }
+
+    #[test]
+    fn the_range_argument_is_advertised_only_when_extended_parking_is_on() {
+        let untouched = builtin_tool_defs();
+        let mut off = builtin_tool_defs();
+        advertise_text_range(&mut off, false);
+        for (before, after) in untouched.iter().zip(off.iter()) {
+            assert_eq!(before.parameters_json, after.parameters_json);
+        }
+
+        let mut on = builtin_tool_defs();
+        advertise_text_range(&mut on, true);
+        let mut seen = 0;
+        for def in on.iter().filter(|def| def.name == "result_query") {
+            seen += 1;
+            let schema: Value = serde_json::from_str(&def.parameters_json).expect("json schema");
+            assert_eq!(
+                schema["properties"]["range"]["properties"]["length"]["type"],
+                "integer"
+            );
+        }
+        assert!(seen > 0, "result_query is advertised");
     }
 }

@@ -38,6 +38,16 @@
 //! gateway memory past the turn that produced it, which is exactly the
 //! retention a ZDR turn promises not to do. ZDR keeps the pre-existing
 //! inline-truncation behavior instead.
+//!
+//! ## Extended parking (`RESULT_HANDLES_EXTENDED`)
+//!
+//! Behind that switch, the external reads `fetch_url`, `web_search` and
+//! `knowledge_search` park their oversized output too. A fetched page is
+//! parked as [`ResultKind::Text`] and read by character range, and the
+//! screening verdict and trust label recorded on the full payload travel with
+//! the handle, so every read back reports the same provenance. Parking never
+//! happens under ZDR, and external content whose screening was skipped is
+//! left inline.
 
 use std::collections::BTreeSet;
 use std::hash::{Hash as _, Hasher as _};
@@ -46,6 +56,8 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use serde_json::{json, Map, Value};
+
+use crate::moderation::{ScreeningPosture, ToolProvenance};
 
 /// How long a handle stays resolvable. Long enough for a multi-round tool
 /// loop to page through a result, short enough that gateway memory is not a
@@ -67,6 +79,52 @@ pub const MAX_PAGE_LIMIT: usize = 200;
 /// Longest projection-hint list carried on a handle. A wide result (hundreds
 /// of columns) must not reintroduce the bloat the handle exists to avoid.
 const MAX_PROJECTION_HINTS: usize = 40;
+
+/// Characters one `result_query` read returns from a parked text result. The
+/// handle keeps a long page out of model context, so each read is bounded and
+/// the rest is reached by `range`.
+pub const MAX_TEXT_READ_CHARS: usize = 4_000;
+
+/// Characters of a parked text result quoted in its handle summary.
+const TEXT_HEAD_CHARS: usize = 200;
+
+/// Environment switch for parking external results under a handle. Off keeps
+/// today's truncation.
+pub const EXTENDED_ENV: &str = "RESULT_HANDLES_EXTENDED";
+
+/// Whether extended parking is switched on in this process.
+#[must_use]
+pub fn extended_enabled() -> bool {
+    parse_extended(std::env::var(EXTENDED_ENV).ok().as_deref())
+}
+
+/// Only the literal `true` enables; `1`, `on` and anything else stay off.
+#[must_use]
+pub fn parse_extended(raw: Option<&str>) -> bool {
+    raw.map(str::trim) == Some("true")
+}
+
+/// Whether external content reached the model without a real scan: the trust
+/// class is external and the screening posture is `PolicyDisabled` or
+/// `NotApplicable`. Such content is never parked, because a handle would hold
+/// it unscreened for as long as it resolves.
+#[must_use]
+pub fn screening_skipped(provenance: &ToolProvenance) -> bool {
+    provenance.trust.is_external()
+        && matches!(
+            provenance.screening.posture,
+            ScreeningPosture::PolicyDisabled | ScreeningPosture::NotApplicable
+        )
+}
+
+/// What a stored result is, which decides how `result_query` reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResultKind {
+    /// A JSON document, read by projection, filter, page and aggregate.
+    Json,
+    /// Plain text, such as a fetched page, read by character range only.
+    Text,
+}
 
 /// §23.6's `ToolResultHandle`, field-for-field.
 ///
@@ -102,6 +160,12 @@ pub struct ToolResultHandle {
     pub projection_hints: Vec<String>,
     /// RFC3339 instant after which this handle no longer resolves.
     pub expires_at: Option<String>,
+    /// Whether the held result is JSON or text.
+    pub kind: ResultKind,
+    /// The screening verdict and trust label recorded on the complete payload
+    /// before it was parked. Every read replays it. `None` for org-internal
+    /// results, which are not screened.
+    pub provenance: Option<ToolProvenance>,
 }
 
 impl ToolResultHandle {
@@ -111,6 +175,13 @@ impl ToolResultHandle {
     /// carries data.
     #[must_use]
     pub fn to_model_json(&self) -> String {
+        self.to_model_value().to_string()
+    }
+
+    /// The model-facing envelope as a value, so a caller can embed the handle
+    /// in a larger result.
+    #[must_use]
+    pub fn to_model_value(&self) -> Value {
         let mut envelope = Map::new();
         envelope.insert("handle_id".to_owned(), json!(self.handle_id));
         envelope.insert("capability_id".to_owned(), json!(self.capability_id));
@@ -131,16 +202,22 @@ impl ToolResultHandle {
         if !self.projection_hints.is_empty() {
             envelope.insert("projection_hints".to_owned(), json!(self.projection_hints));
         }
-        envelope.insert(
-            "note".to_owned(),
-            json!(
+        let note = match self.kind {
+            ResultKind::Json => {
                 "The COMPLETE result is held under this handle — it was not truncated. Use the \
                  result_query tool with this handle_id to read it: `select` to pick fields, \
                  `where` to filter, `offset`/`limit` to page, or `aggregate` for a count/sum/\
                  min/max/avg without reading rows."
-            ),
-        );
-        Value::Object(envelope).to_string()
+            }
+            ResultKind::Text => {
+                envelope.insert("kind".to_owned(), json!("text"));
+                "The COMPLETE text is held under this handle — it was not truncated, and only its \
+                 start is shown above. Use the result_query tool with this handle_id and a `range` \
+                 of {offset, length} in characters to read the rest, at most 4000 characters a read."
+            }
+        };
+        envelope.insert("note".to_owned(), json!(note));
+        Value::Object(envelope)
     }
 }
 
@@ -243,6 +320,24 @@ pub fn describe_payload(payload: &Value, size_bytes: usize) -> ResultShape {
     }
 }
 
+/// Derive a text handle's descriptive fields: the size in characters and lines,
+/// and the start of the text, so the model can tell what the page is before it
+/// reads anything.
+#[must_use]
+pub fn describe_text(text: &str, size_bytes: usize) -> ResultShape {
+    let head: String = text.chars().take(TEXT_HEAD_CHARS).collect();
+    ResultShape {
+        row_count: None,
+        projection_hints: Vec::new(),
+        schema_id: None,
+        summary: format!(
+            "A text result of {} characters on {} lines ({size_bytes} bytes), held complete under this handle. It begins: {head}",
+            text.chars().count(),
+            text.lines().count()
+        ),
+    }
+}
+
 fn value_kind(value: &Value) -> &'static str {
     match value {
         Value::Null => "empty",
@@ -278,6 +373,16 @@ pub struct HandleQuery {
     pub aggregate: Option<Aggregate>,
     pub offset: usize,
     pub limit: usize,
+    /// Character window for a text result. A row result refuses it.
+    pub range: Option<TextRange>,
+}
+
+/// `length` characters starting at character `offset`. A zero length means
+/// the default read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextRange {
+    pub offset: usize,
+    pub length: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -360,6 +465,13 @@ pub struct Aggregate {
 /// Returns `Err` when the payload is not row-shaped but the query asks for a
 /// row operation, or when an aggregate names no field where one is required.
 pub fn apply_query(payload: &Value, query: &HandleQuery) -> Result<Value, String> {
+    if query.range.is_some() {
+        return Err(
+            "range applies to a text result only — this result is a list of records, so page it \
+             with offset and limit"
+                .to_owned(),
+        );
+    }
     let Some(rows) = rows_of(payload) else {
         if query.aggregate.is_some() || !query.select.is_empty() || query.filter.is_some() {
             return Err(
@@ -402,6 +514,48 @@ pub fn apply_query(payload: &Value, query: &HandleQuery) -> Result<Value, String
         // Stated explicitly so a page is never mistaken for the whole set —
         // the same reason bounded_tool_output spells out "INCOMPLETE".
         "has_more": query.offset.saturating_add(returned) < matched,
+    }))
+}
+
+/// Read a text result by character window. Every read is capped at
+/// [`MAX_TEXT_READ_CHARS`], so a page cannot be pulled back into context whole;
+/// `has_more` says whether a further range remains.
+///
+/// # Errors
+/// Returns `Err` when the query names a row operation or a row page, which a
+/// text result does not have.
+pub fn apply_text_query(text: &str, query: &HandleQuery) -> Result<Value, String> {
+    if !query.select.is_empty()
+        || query.filter.is_some()
+        || query.aggregate.is_some()
+        || query.offset != 0
+        || query.limit != 0
+    {
+        return Err(
+            "this result is text, so select/where/aggregate/offset/limit do not apply — read it \
+             with a range {offset, length} in characters"
+                .to_owned(),
+        );
+    }
+    let window = query.range.unwrap_or(TextRange {
+        offset: 0,
+        length: MAX_TEXT_READ_CHARS,
+    });
+    let length = match window.length {
+        0 => MAX_TEXT_READ_CHARS,
+        requested => requested.min(MAX_TEXT_READ_CHARS),
+    };
+    let total = text.chars().count();
+    let slice: String = text.chars().skip(window.offset).take(length).collect();
+    let returned = slice.chars().count();
+    Ok(json!({
+        "text": slice,
+        "offset": window.offset,
+        "returned_chars": returned,
+        "total_chars": total,
+        // Stated explicitly, as for a page of rows: a window is never mistaken
+        // for the whole text.
+        "has_more": window.offset.saturating_add(returned) < total,
     }))
 }
 
@@ -575,8 +729,18 @@ struct StoredResult {
     stored_at: Instant,
     capability_id: String,
     payload: Value,
+    kind: ResultKind,
     size_bytes: usize,
     artifact_ref: Option<String>,
+    provenance: Option<ToolProvenance>,
+}
+
+/// A result about to be parked: its payload (a `Value::String` for
+/// [`ResultKind::Text`]), its kind and its size as received.
+pub struct ParkedResult {
+    pub payload: Value,
+    pub kind: ResultKind,
+    pub size_bytes: usize,
 }
 
 /// Live handles, keyed by `(org_id, user_id, handle_id)`.
@@ -608,17 +772,63 @@ impl ToolResultStore {
         size_bytes: usize,
         expires_at: Option<String>,
     ) -> ToolResultHandle {
+        let parked = ParkedResult {
+            payload,
+            kind: ResultKind::Json,
+            size_bytes,
+        };
+        self.park(org_id, user_id, capability_id, parked, expires_at, None)
+    }
+
+    /// Store an external result together with the screening verdict recorded
+    /// on its complete payload, which every later read replays.
+    pub fn insert_external(
+        &self,
+        org_id: &str,
+        user_id: &str,
+        capability_id: &str,
+        parked: ParkedResult,
+        expires_at: Option<String>,
+        provenance: ToolProvenance,
+    ) -> ToolResultHandle {
+        self.park(
+            org_id,
+            user_id,
+            capability_id,
+            parked,
+            expires_at,
+            Some(provenance),
+        )
+    }
+
+    fn park(
+        &self,
+        org_id: &str,
+        user_id: &str,
+        capability_id: &str,
+        parked: ParkedResult,
+        expires_at: Option<String>,
+        provenance: Option<ToolProvenance>,
+    ) -> ToolResultHandle {
         self.prune();
         let handle_id = format!("res_{}", mp_ids::new_ulid());
-        let shape = describe_payload(&payload, size_bytes);
+        let shape = match parked.kind {
+            ResultKind::Json => describe_payload(&parked.payload, parked.size_bytes),
+            ResultKind::Text => describe_text(
+                parked.payload.as_str().unwrap_or_default(),
+                parked.size_bytes,
+            ),
+        };
         self.inner.insert(
             (org_id.to_owned(), user_id.to_owned(), handle_id.clone()),
             StoredResult {
                 stored_at: Instant::now(),
                 capability_id: capability_id.to_owned(),
-                payload,
-                size_bytes,
+                payload: parked.payload,
+                kind: parked.kind,
+                size_bytes: parked.size_bytes,
                 artifact_ref: None,
+                provenance: provenance.clone(),
             },
         );
         ToolResultHandle {
@@ -627,10 +837,12 @@ impl ToolResultStore {
             artifact_ref: None,
             schema_id: shape.schema_id,
             row_count: shape.row_count,
-            size_bytes,
+            size_bytes: parked.size_bytes,
             summary: shape.summary,
             projection_hints: shape.projection_hints,
             expires_at,
+            kind: parked.kind,
+            provenance,
         }
     }
 
@@ -647,8 +859,10 @@ impl ToolResultStore {
         Some(ResolvedResult {
             capability_id: entry.capability_id.clone(),
             payload: entry.payload.clone(),
+            kind: entry.kind,
             size_bytes: entry.size_bytes,
             artifact_ref: entry.artifact_ref.clone(),
+            provenance: entry.provenance.clone(),
         })
     }
 
@@ -710,8 +924,10 @@ impl ToolResultStore {
 pub struct ResolvedResult {
     pub capability_id: String,
     pub payload: Value,
+    pub kind: ResultKind,
     pub size_bytes: usize,
     pub artifact_ref: Option<String>,
+    pub provenance: Option<ToolProvenance>,
 }
 
 #[cfg(test)]
@@ -1033,5 +1249,133 @@ mod tests {
 
         assert_eq!(AggregateOp::parse("mean").unwrap(), AggregateOp::Avg);
         assert!(AggregateOp::parse("median").unwrap_err().contains("avg"));
+    }
+
+    fn text_window(offset: usize, length: usize) -> HandleQuery {
+        HandleQuery {
+            range: Some(TextRange { offset, length }),
+            ..HandleQuery::default()
+        }
+    }
+
+    #[test]
+    fn a_text_read_is_a_window_capped_at_the_read_limit() {
+        let text = "a".repeat(10_000);
+        let first = apply_text_query(&text, &text_window(0, 99_999)).expect("text");
+        assert_eq!(first["returned_chars"], MAX_TEXT_READ_CHARS);
+        assert_eq!(first["has_more"], true);
+
+        let last = apply_text_query(&text, &text_window(9_000, 4_000)).expect("text");
+        assert_eq!(last["returned_chars"], 1_000);
+        assert_eq!(last["has_more"], false);
+        assert_eq!(last["total_chars"], 10_000);
+    }
+
+    #[test]
+    fn a_text_read_counts_characters_not_bytes() {
+        let text = "åæø".repeat(10);
+        let window = apply_text_query(&text, &text_window(3, 4)).expect("text");
+        assert_eq!(window["text"], "åæøå");
+        assert_eq!(window["returned_chars"], 4);
+    }
+
+    #[test]
+    fn a_text_read_refuses_row_operations_and_a_row_read_refuses_a_range() {
+        let refused = HandleQuery {
+            select: vec!["a".to_owned()],
+            ..HandleQuery::default()
+        };
+        assert!(apply_text_query("text", &refused)
+            .unwrap_err()
+            .contains("range"));
+        assert!(apply_query(&rows_payload(), &text_window(0, 10))
+            .unwrap_err()
+            .contains("text result only"));
+    }
+
+    #[test]
+    fn describe_text_reports_size_lines_and_the_start_of_the_text() {
+        let shape = describe_text("first line\nsecond line", 23);
+        assert_eq!(shape.row_count, None);
+        assert_eq!(shape.schema_id, None);
+        assert!(shape.summary.contains("22 characters on 2 lines"));
+        assert!(shape.summary.contains("It begins: first line"));
+    }
+
+    #[test]
+    fn a_text_handle_says_it_is_read_by_range_and_keeps_its_verdict() {
+        let store = ToolResultStore::new();
+        let provenance = flagged_external_provenance();
+        let handle = store.insert_external(
+            "org_a",
+            "user_a",
+            "fetch_url",
+            ParkedResult {
+                payload: Value::String("page body".to_owned()),
+                kind: ResultKind::Text,
+                size_bytes: 9,
+            },
+            None,
+            provenance.clone(),
+        );
+        let envelope = handle.to_model_value();
+        assert_eq!(envelope["kind"], "text");
+        assert!(envelope["note"].as_str().expect("note").contains("range"));
+        assert!(envelope.get("row_count").is_none());
+
+        let resolved = store
+            .resolve("org_a", "user_a", &handle.handle_id)
+            .expect("resolves");
+        assert_eq!(resolved.kind, ResultKind::Text);
+        assert_eq!(resolved.provenance, Some(provenance));
+    }
+
+    #[test]
+    fn a_json_handle_carries_no_kind_key_so_its_envelope_is_unchanged() {
+        let store = ToolResultStore::new();
+        let handle = store.insert("org_a", "user_a", "mcp__s__t", rows_payload(), 512, None);
+        assert_eq!(handle.kind, ResultKind::Json);
+        assert!(handle.to_model_value().get("kind").is_none());
+    }
+
+    #[test]
+    fn only_the_literal_true_enables_extended_parking() {
+        assert!(parse_extended(Some("true")));
+        assert!(parse_extended(Some(" true ")));
+        for raw in [
+            None,
+            Some(""),
+            Some("1"),
+            Some("on"),
+            Some("TRUE"),
+            Some("yes"),
+        ] {
+            assert!(!parse_extended(raw), "{raw:?} must stay off");
+        }
+    }
+
+    #[test]
+    fn external_content_with_no_real_scan_is_skipped() {
+        let mut provenance = flagged_external_provenance();
+        assert!(!screening_skipped(&provenance));
+        provenance.screening.posture = ScreeningPosture::NotApplicable;
+        assert!(screening_skipped(&provenance));
+        provenance.screening.posture = ScreeningPosture::PolicyDisabled;
+        assert!(screening_skipped(&provenance));
+        // Org-internal content is never screened, and that is not a skip.
+        provenance.trust = crate::moderation::TrustClass::OrgInternal;
+        provenance.screening.posture = ScreeningPosture::NotApplicable;
+        assert!(!screening_skipped(&provenance));
+    }
+
+    fn flagged_external_provenance() -> ToolProvenance {
+        ToolProvenance {
+            trust: crate::moderation::TrustClass::ExternalWeb,
+            screening: crate::moderation::ScreeningOutcome {
+                posture: ScreeningPosture::Flagged,
+                content_hash: crate::moderation::content_hash(b"page body"),
+                rule_ids: vec!["injection_marker"],
+            },
+        }
     }
 }
