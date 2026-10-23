@@ -87,6 +87,15 @@ pub enum EventType {
     /// `unit`, `estimated`, `limit_source`. Not user-facing: it reaches the run
     /// trace only through a projection row (WS10).
     AgentBudgetExhausted,
+    /// WS15.L2: a caller asked for a pause, resume or cancel of a job. Written by
+    /// control when the request is recorded; the workflow acts on it later.
+    /// Payload: `action`, `actor`, `actor_type`.
+    ControlRequested,
+    /// WS15.L2: a job's workflow ran past its execution timeout. Payload:
+    /// `timeout_type`, `limit_s`.
+    RunTimedOut,
+    /// WS15.S4 mirror: a scheduled fire that did not start a job. Payload: `reason`.
+    ScheduleSkipped,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

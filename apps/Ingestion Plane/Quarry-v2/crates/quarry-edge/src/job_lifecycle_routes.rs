@@ -331,3 +331,200 @@ pub async fn ongoing_batch(State(state): State<AppState>, Extension(claims): Ext
     let request_id = crate::request_id::current();
     respond(request_id, ongoing_for(&state, &claims, "batch").await)
 }
+
+// ---- Job control (WS15.L2) ----------------------------------------------------
+
+/// Turns the control verbs on. Off, every verb answers 501 before control is called.
+pub const ENV_JOB_CONTROL: &str = "QUARRY_EDGE__JOB_CONTROL";
+
+/// Whether the control verbs are enabled. Read per request: it is one environment
+/// variable and a control request is rare, so the read costs nothing.
+pub fn job_control_enabled() -> bool {
+    std::env::var(ENV_JOB_CONTROL)
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
+}
+
+/// A control verb as the caller names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlVerb {
+    Pause,
+    Resume,
+    Cancel,
+}
+
+impl ControlVerb {
+    /// The action word control records.
+    fn action(self) -> &'static str {
+        match self {
+            Self::Pause => "pause",
+            Self::Resume => "resume",
+            Self::Cancel => "cancel",
+        }
+    }
+
+    /// The phase a caller sees while the request is pending.
+    fn pending_phase(self) -> &'static str {
+        match self {
+            Self::Pause => "pausing",
+            Self::Resume => "resuming",
+            Self::Cancel => "cancelling",
+        }
+    }
+}
+
+/// Who may control a job. One function, so a later rule (the creator only, or a
+/// role) changes one place. Org-wide today. A service principal is refused here as
+/// well as by the route scope in `auth::require_service_route_scope`.
+pub fn authorize_control(claims: &Claims) -> Result<(), QuarryError> {
+    if claims.is_service() {
+        return Err(QuarryError::new(
+            ErrorCode::Forbidden,
+            "service principals cannot control jobs",
+        ));
+    }
+    Ok(())
+}
+
+/// The answer to a control request: the phase after it and what was asked.
+/// `control.pending` stays true until the orchestrator applies the request.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct JobControlAccepted {
+    pub job_id: String,
+    pub status: String,
+    pub phase: String,
+    pub control: JobControlState,
+}
+
+/// The answer built from control's job record after a request was written.
+fn accepted_view(job: ControlJob, verb: ControlVerb) -> JobControlAccepted {
+    let pending = job.desired_seq > job.applied_seq;
+    let phase = if is_terminal(&job.status) {
+        job.status.clone()
+    } else {
+        verb.pending_phase().to_string()
+    };
+    JobControlAccepted {
+        job_id: job.id,
+        status: job.status,
+        phase,
+        control: JobControlState {
+            desired: Some(verb.action().to_string()),
+            pending,
+        },
+    }
+}
+
+/// Writes one control request to control. The job must exist for the org and be of
+/// the kind the path names; control decides whether the state allows the verb.
+async fn control_request(
+    state: &AppState,
+    claims: &Claims,
+    id: &str,
+    kind: &str,
+    verb: ControlVerb,
+) -> Result<JobControlAccepted, QuarryError> {
+    if !job_control_enabled() {
+        return Err(QuarryError::new(ErrorCode::Unsupported, "job control is not enabled"));
+    }
+    authorize_control(claims)?;
+    let summary = load_summary(state, claims, id).await?;
+    if summary.job.kind != kind {
+        return Err(QuarryError::new(ErrorCode::NotFound, "not found"));
+    }
+    let body = serde_json::json!({
+        "action": verb.action(),
+        "actor": claims.actor_id(),
+        "actor_type": if claims.is_service() { "service" } else { "user" },
+    });
+    let raw = control_client::send_json(
+        state,
+        reqwest::Method::POST,
+        &format!("/v1/jobs/{id}/control"),
+        &claims.org_id,
+        &body,
+        None,
+    )
+    .await?;
+    let job: ControlJob = serde_json::from_value(raw)
+        .map_err(|_| QuarryError::new(ErrorCode::Internal, "control answer unreadable"))?;
+    Ok(accepted_view(job, verb))
+}
+
+/// Renders a control request: 202 while the orchestrator has yet to apply it, 200
+/// once the job's state already reflects it.
+async fn control_verb(
+    state: &AppState,
+    claims: &Claims,
+    id: &str,
+    kind: &str,
+    verb: ControlVerb,
+) -> Response {
+    let request_id = crate::request_id::current();
+    match control_request(state, claims, id, kind, verb).await {
+        Ok(view) => {
+            let code = if view.control.pending {
+                StatusCode::ACCEPTED
+            } else {
+                StatusCode::OK
+            };
+            (code, Json(Envelope::ok(request_id, view))).into_response()
+        }
+        Err(err) => fail(&request_id, err).into_response(),
+    }
+}
+
+/// `DELETE /v1/crawl/:id`: cancel a crawl. An accepted crawl is cancelled at once;
+/// a running one is cancelled within a page and the control loop's period.
+pub async fn cancel_crawl(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Path(id): Path<String>,
+) -> Response {
+    control_verb(&state, &claims, &id, "crawl", ControlVerb::Cancel).await
+}
+
+/// `POST /v1/crawl/:id/pause`.
+pub async fn pause_crawl(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Path(id): Path<String>,
+) -> Response {
+    control_verb(&state, &claims, &id, "crawl", ControlVerb::Pause).await
+}
+
+/// `POST /v1/crawl/:id/resume`.
+pub async fn resume_crawl(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Path(id): Path<String>,
+) -> Response {
+    control_verb(&state, &claims, &id, "crawl", ControlVerb::Resume).await
+}
+
+/// `DELETE /v1/batch/:id`: cancel a batch (the batch alias of `cancel_crawl`).
+pub async fn cancel_batch(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Path(id): Path<String>,
+) -> Response {
+    control_verb(&state, &claims, &id, "batch", ControlVerb::Cancel).await
+}
+
+/// `POST /v1/batch/:id/pause`.
+pub async fn pause_batch(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Path(id): Path<String>,
+) -> Response {
+    control_verb(&state, &claims, &id, "batch", ControlVerb::Pause).await
+}
+
+/// `POST /v1/batch/:id/resume`.
+pub async fn resume_batch(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Path(id): Path<String>,
+) -> Response {
+    control_verb(&state, &claims, &id, "batch", ControlVerb::Resume).await
+}

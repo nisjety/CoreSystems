@@ -432,6 +432,9 @@ fn event_type_token(t: &EventType) -> &'static str {
         EventType::BrandingExtracted => "branding_extracted",
         EventType::PageExtracted => "page_extracted",
         EventType::AgentBudgetExhausted => "agent_budget_exhausted",
+        EventType::ControlRequested => "control_requested",
+        EventType::RunTimedOut => "run_timed_out",
+        EventType::ScheduleSkipped => "schedule_skipped",
     }
 }
 
