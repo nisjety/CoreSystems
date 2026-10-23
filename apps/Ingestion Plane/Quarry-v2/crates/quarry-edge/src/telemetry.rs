@@ -44,6 +44,12 @@ pub fn init_telemetry() {
         .filter(|endpoint| !endpoint.trim().is_empty())
         .is_some()
     {
+        if !quarry_edge::otel_zdr::export_enabled() {
+            // `QUARRY_TELEMETRY_EXPORT=off`: no exporter, no provider, no sampler.
+            crate::zdr_log::production_subscriber(std::io::stdout, env_filter()).init();
+            tracing::info!("telemetry export disabled by flag");
+            return;
+        }
         match try_init_otel() {
             Ok(provider) => {
                 let tracer = provider.tracer("quarry-edge");
@@ -56,7 +62,12 @@ pub fn init_telemetry() {
                     std::io::stdout,
                     env_filter(),
                     env_filter(),
-                    tracing_opentelemetry::layer().with_tracer(tracer),
+                    // The OTel layer is wrapped so a span that records `zdr = true`
+                    // (late, after creation) flags its trace for the exporter.
+                    quarry_edge::otel_zdr::ZdrFlagLayer::new(
+                        tracing_opentelemetry::layer().with_tracer(tracer),
+                        quarry_edge::otel_zdr::shared_registry(),
+                    ),
                 )
                 .init();
                 tracing::info!("OTEL tracing enabled");
@@ -73,8 +84,15 @@ pub fn init_telemetry() {
 
 fn try_init_otel() -> Result<SdkTracerProvider, Box<dyn std::error::Error>> {
     let exporter = SpanExporter::builder().with_tonic().build()?;
+    // WS10.S8: the sampler decides at span creation, the processor at span end.
+    // Both judge against the same process-wide registry, so a trace flagged ZDR
+    // by any span is dropped from then on. The batch processor is built explicitly
+    // (not via `with_batch_exporter`) so the ZDR processor can wrap it.
+    let registry = quarry_edge::otel_zdr::shared_registry();
+    let batch = opentelemetry_sdk::trace::BatchSpanProcessor::builder(exporter).build();
     let provider = SdkTracerProvider::builder()
-        .with_batch_exporter(exporter)
+        .with_sampler(quarry_edge::otel_zdr::ZdrSampler::new(registry.clone(), true))
+        .with_span_processor(quarry_edge::otel_zdr::ZdrSpanProcessor::new(batch, registry))
         .build();
     Ok(provider)
 }
