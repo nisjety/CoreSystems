@@ -28,10 +28,10 @@ from eval_lab.types import (
 
 def test_baseline_suite_loads_and_validates() -> None:
     cases = load_cases(CASES_DIR)
-    assert len(cases) == 16, (
-        f"suite must hold 16 cases (12 baseline + 2 compaction + 2 run-context), got {len(cases)}"
+    assert len(cases) == 17, (
+        f"suite must hold 17 cases (12 baseline + 2 compaction + 3 run-context), got {len(cases)}"
     )
-    assert len({case.id for case in cases}) == 16
+    assert len({case.id for case in cases}) == 17
 
 
 def test_deployed_agent_cases_request_the_agentic_feature() -> None:

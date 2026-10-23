@@ -9620,6 +9620,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn space_instructions_are_stamped_on_a_plan_mode_turn_and_withheld_from_a_non_member() {
+        // A Do turn (plan mode, agentic) in a project gets the Space layer the same
+        // way an Ask turn does: the flag is not what decides it, membership is.
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (state, _application, _user_core) = authored_instructions_test_state(
+            json!({"instructions": "Org rule."}),
+            json!({"instructions": "Space rule."}),
+        )
+        .await;
+        let mut member_turn = json!({
+            "content": "make the plan",
+            "space_ref": "space-1",
+            "plan_mode": true,
+            "features": ["agentic"],
+        });
+        let result =
+            inject_authored_instructions(&state, &authenticated_user(), "org-1", &mut member_turn)
+                .await;
+
+        assert!(result.is_ok());
+        assert_eq!(member_turn["space_instructions"], "Space rule.");
+        assert_eq!(
+            member_turn["plan_mode"], true,
+            "the Space layer rides the turn; it does not change its mode"
+        );
+
+        let mut non_member_turn = json!({
+            "content": "make the plan",
+            "space_ref": "someone-elses-space",
+            "plan_mode": true,
+            "features": ["agentic"],
+        });
+        let result = inject_authored_instructions(
+            &state,
+            &authenticated_user(),
+            "org-1",
+            &mut non_member_turn,
+        )
+        .await;
+
+        assert!(result.is_err(), "a non-member's plan-mode turn fails closed");
+        assert!(
+            non_member_turn.get("space_instructions").is_none(),
+            "no Space text reaches a caller Control never confirmed as a member"
+        );
+    }
+
+    #[tokio::test]
     async fn a_client_supplied_instructions_field_never_survives_uninspected() {
         let _env = crate::config::TEST_ENV_LOCK.lock().await;
         let (state, _application, _user_core) =

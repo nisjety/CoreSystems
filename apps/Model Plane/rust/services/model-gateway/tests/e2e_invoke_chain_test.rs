@@ -1131,6 +1131,8 @@ struct MockSessionHandles {
     /// `GetContextAssembly` never answers: it is counted, then the call stalls, as
     /// a session-core replica that accepted the connection and wedged would.
     context_assembly_hangs: Arc<AtomicBool>,
+    /// Every `ListConversation` call: the thread-history read a `full` run context makes.
+    list_conversation_count: Arc<AtomicUsize>,
 }
 
 struct MockSessionCore {
@@ -1171,6 +1173,7 @@ impl MockSessionCore {
             append_rpc_captures: Arc::new(Mutex::new(Vec::new())),
             run_context_captures: Arc::new(Mutex::new(Vec::new())),
             context_assembly_hangs: Arc::new(AtomicBool::new(false)),
+            list_conversation_count: Arc::new(AtomicUsize::new(0)),
         };
         (
             Self {
@@ -1262,6 +1265,18 @@ impl SessionCore for MockSessionCore {
     ) -> Result<Response<StartRunResponse>, Status> {
         Err(Status::unimplemented(
             "scheduled StartRun is not part of the gateway test path",
+        ))
+    }
+
+    async fn record_scheduled_run_result(
+        &self,
+        _: TReq<mp_contracts::model_plane::v1::RecordScheduledRunResultRequest>,
+    ) -> Result<
+        Response<mp_contracts::model_plane::v1::RecordScheduledRunResultResponse>,
+        Status,
+    > {
+        Err(Status::unimplemented(
+            "record_scheduled_run_result is not part of the gateway test path",
         ))
     }
 
@@ -1371,6 +1386,9 @@ impl SessionCore for MockSessionCore {
         &self,
         request: TReq<ListConversationRequest>,
     ) -> Result<Response<ListConversationResponse>, Status> {
+        self.handles
+            .list_conversation_count
+            .fetch_add(1, Ordering::SeqCst);
         let req = request.into_inner();
         let messages = self
             .handles
@@ -11936,6 +11954,8 @@ struct RunContextTurn {
     run_agent: mpv1::RunAgentRequest,
     session: MockSessionHandles,
     memory_queries: Vec<mpv1::SearchMemoryRequest>,
+    /// The stream as sent, for the typed refusal a ZDR turn answers with.
+    body: String,
 }
 
 /// What differs between the run-context turns: the session-core and capability-core
@@ -11947,6 +11967,8 @@ struct RunContextTurnOptions {
     /// The org's safety policies are readable and hold no PII filter, so the turn
     /// is not redacted. Unset, the policy cannot be read and the turn is redacted.
     pii_policy_off: bool,
+    /// The turn comes in on a signed zero-retention token, not the dev bypass.
+    zdr: bool,
 }
 
 /// One agentic turn on a thread that already holds two turns, with a platform
@@ -11995,12 +12017,27 @@ async fn run_context_turn_with(body: &str, options: RunContextTurnOptions) -> Ru
             .await;
         state.capability_core_base_url = capability_core.uri();
     }
-    let (app, _delegated_jwks) = authenticated_user_router(
-        build_router(state, None),
-        "org_placeholder",
-        "user_placeholder",
-    )
-    .await;
+    // A ZDR turn's ingress token and delegated bearers both carry `zdr: true`. The
+    // token's JWKS server is held to the end of the turn.
+    let ingress = if options.zdr {
+        Some(signed_model_token(true).await)
+    } else {
+        None
+    };
+    let authorization = match &ingress {
+        Some((_jwks, token)) => format!("Bearer {token}"),
+        None => "Bearer dev".to_owned(),
+    };
+    let (app, _delegated_jwks) = if options.zdr {
+        authenticated_zdr_user_router(build_router(state, None), "org-zdr", "user-zdr").await
+    } else {
+        authenticated_user_router(
+            build_router(state, None),
+            "org_placeholder",
+            "user_placeholder",
+        )
+        .await
+    };
     let app = if options.pii_policy_off {
         // The delegated bearer Capability Core's policy read needs (default audience).
         let now = token_now();
@@ -12030,23 +12067,31 @@ async fn run_context_turn_with(body: &str, options: RunContextTurnOptions) -> Ru
     let req = Request::builder()
         .method("POST")
         .uri("/v1/invoke/stream")
-        .header(AUTHORIZATION, "Bearer dev")
+        .header(AUTHORIZATION, authorization)
         .header(CONTENT_TYPE, "application/json")
         .body(Body::from(body.to_owned()))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let _ = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8(to_bytes(resp.into_body(), usize::MAX).await.unwrap().to_vec())
+        .unwrap();
     let run_agent = {
         let captured = captured.lock().unwrap();
-        assert_eq!(captured.len(), 1, "exactly one RunAgent dispatch");
-        captured[0].clone()
+        if options.zdr {
+            // A refused turn starts no run, so nothing is dispatched.
+            assert!(captured.is_empty(), "a ZDR turn dispatched a run: {body}");
+            mpv1::RunAgentRequest::default()
+        } else {
+            assert_eq!(captured.len(), 1, "exactly one RunAgent dispatch");
+            captured[0].clone()
+        }
     };
     let memory_queries = memory_queries.lock().unwrap().clone();
     RunContextTurn {
         run_agent,
         session: session_handles,
         memory_queries,
+        body,
     }
 }
 
@@ -12357,6 +12402,115 @@ async fn agentic_run_context_memory_query_is_redacted_exactly_when_the_policy_re
     assert_eq!(
         plain.memory_queries[0].query,
         "mail anna@example.com about the project codename"
+    );
+}
+
+/// A Do run in a project carries the Space layer the BFF stamped for it: after
+/// the org layer and before the user's persona, composed by the same function an
+/// Ask turn uses. Nothing else about the run moves.
+#[tokio::test]
+#[serial_test::serial]
+async fn agentic_dispatch_carries_the_space_layer_after_org_and_before_persona() {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+    let _history = EnvGuard::set("MODEL_GATEWAY_RUN_CONTEXT_HISTORY_TOKENS", None);
+    let _switch = EnvGuard::set("MODEL_GATEWAY_RUN_CONTEXT", Some("full"));
+    let turn = run_context_turn(
+        r#"{"content":"what is my project codename?","model":"m","thread_id":"thread-existing","features":["agentic"],"org_instructions":"Org rule.","space_instructions":"Space rule.","persona_instructions":"Always be terse."}"#,
+    )
+    .await;
+
+    let context = turn
+        .run_agent
+        .run_context
+        .clone()
+        .expect("full sends a run context");
+    let text = &context.authored_instructions;
+    let at = |needle: &str| {
+        text.find(needle)
+            .unwrap_or_else(|| panic!("{needle} missing from {text}"))
+    };
+    assert!(at("Platform rule.") < at("Org rule."));
+    assert!(at("Org rule.") < at("Space rule."), "{text}");
+    assert!(at("Space rule.") < at("Always be terse."), "{text}");
+    assert!(text.contains("Space instructions"), "{text}");
+
+    use mpv1::RunContextState::Included;
+    assert_eq!(
+        part_of(&context.status, |s| &s.instructions),
+        Some((Included as i32, 1, 0, String::new()))
+    );
+}
+
+/// A zero-retention agentic turn never reaches the run-context composition. The
+/// ZDR refusal lands before any run exists, so nothing is read or recorded: no
+/// persona toggle read, no thread history, no memory recall, no `RecordRunContext`,
+/// and nothing is dispatched. The sibling test runs the ordinary turn and sees each
+/// of those, so this guard cannot pass vacuously.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_zdr_turn_never_reaches_run_context_composition() {
+    std::env::remove_var("ALLOWED_MODELS");
+    let _history = EnvGuard::set("MODEL_GATEWAY_RUN_CONTEXT_HISTORY_TOKENS", None);
+    let _switch = EnvGuard::set("MODEL_GATEWAY_RUN_CONTEXT", Some("full"));
+    let turn = run_context_turn_with(
+        RUN_CONTEXT_TURN,
+        RunContextTurnOptions {
+            zdr: true,
+            ..RunContextTurnOptions::default()
+        },
+    )
+    .await;
+    clear_model_auth_env();
+
+    let errors = error_frames(&turn.body);
+    assert_eq!(errors.len(), 1, "{}", turn.body);
+    assert_eq!(errors[0]["code"], "zdr_feature_not_supported", "{}", turn.body);
+    assert_eq!(errors[0]["feature"], "agentic", "{}", turn.body);
+    assert!(!turn.body.contains("event: connected"), "{}", turn.body);
+    assert_eq!(
+        turn.session.context_assembly_count.load(Ordering::SeqCst),
+        0,
+        "no persona toggle read"
+    );
+    assert_eq!(
+        turn.session.list_conversation_count.load(Ordering::SeqCst),
+        0,
+        "no thread history read"
+    );
+    assert!(turn.memory_queries.is_empty(), "no memory recall");
+    assert!(
+        turn.session.run_context_captures.lock().unwrap().is_empty(),
+        "no RecordRunContext"
+    );
+}
+
+/// The control for the guard above: the same agentic turn without zero retention
+/// makes every read and write the guard counts, so a silent harness cannot make
+/// the guard pass.
+#[tokio::test]
+#[serial_test::serial]
+async fn an_ordinary_agentic_turn_makes_each_read_the_zdr_guard_counts() {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+    let _history = EnvGuard::set("MODEL_GATEWAY_RUN_CONTEXT_HISTORY_TOKENS", None);
+    let _switch = EnvGuard::set("MODEL_GATEWAY_RUN_CONTEXT", Some("full"));
+    let turn = run_context_turn(RUN_CONTEXT_TURN).await;
+
+    assert!(turn.run_agent.run_context.is_some(), "the run carries a context");
+    assert!(
+        turn.session.context_assembly_count.load(Ordering::SeqCst) >= 1,
+        "the persona toggle read"
+    );
+    assert!(
+        turn.session.list_conversation_count.load(Ordering::SeqCst) >= 1,
+        "the thread history read"
+    );
+    assert_eq!(turn.memory_queries.len(), 1, "the memory recall");
+    assert_eq!(
+        turn.session.run_context_captures.lock().unwrap().len(),
+        1,
+        "one RecordRunContext call"
     );
 }
 
