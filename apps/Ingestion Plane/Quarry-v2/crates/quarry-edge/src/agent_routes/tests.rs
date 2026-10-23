@@ -201,6 +201,7 @@ fn step_budget_is_fail_closed_once_limit_is_reached() {
                 viewport: None,
                 org_id: "org".into(),
             },
+            tab_pin: None,
             inner: Arc::new(TokioMutex::new(SessionInner::default())),
         },
         ctx: ObservationContext {
@@ -271,6 +272,7 @@ fn entry_with_budget(budget: Option<crate::budget::RunBudget>) -> RunEntry {
         actor_id: "user".into(),
         session: BrowserSession {
             lease: lease.clone(),
+            tab_pin: None,
             inner: Arc::new(TokioMutex::new(SessionInner::default())),
         },
         ctx: ObservationContext {

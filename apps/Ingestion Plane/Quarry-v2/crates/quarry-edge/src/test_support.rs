@@ -235,6 +235,7 @@ pub fn insert_live_run(state: &AppState, claims: &Claims) -> crate::agent_routes
         actor_id: claims.actor_id().to_string(),
         session: BrowserSession {
             lease: lease.clone(),
+            tab_pin: None,
             inner: Arc::new(tokio::sync::Mutex::new(SessionInner::default())),
         },
         ctx: ObservationContext::default(),

@@ -162,6 +162,7 @@ mod tests {
             self.acquires.fetch_add(1, Ordering::SeqCst);
             Ok(BrowserSession {
                 lease: lease.clone(),
+                tab_pin: None,
                 inner: Arc::new(Mutex::new(SessionInner::default())),
             })
         }

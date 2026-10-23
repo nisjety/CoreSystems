@@ -457,6 +457,7 @@ mod tests {
             self.call_order.lock().await.push("acquire");
             Ok(BrowserSession {
                 lease: lease.clone(),
+                tab_pin: None,
                 inner: Arc::new(TokioMutex::new(SessionInner::default())),
             })
         }
@@ -675,6 +676,7 @@ mod tests {
         async fn acquire(&self, lease: &BrowserLease) -> QuarryResult<BrowserSession> {
             Ok(BrowserSession {
                 lease: lease.clone(),
+                tab_pin: None,
                 inner: Arc::new(TokioMutex::new(SessionInner::default())),
             })
         }
@@ -780,6 +782,7 @@ mod tests {
         async fn acquire(&self, lease: &BrowserLease) -> QuarryResult<BrowserSession> {
             Ok(BrowserSession {
                 lease: lease.clone(),
+                tab_pin: None,
                 inner: Arc::new(TokioMutex::new(SessionInner::default())),
             })
         }
@@ -882,6 +885,7 @@ mod tests {
         async fn acquire(&self, lease: &BrowserLease) -> QuarryResult<BrowserSession> {
             Ok(BrowserSession {
                 lease: lease.clone(),
+                tab_pin: None,
                 inner: Arc::new(TokioMutex::new(SessionInner::default())),
             })
         }

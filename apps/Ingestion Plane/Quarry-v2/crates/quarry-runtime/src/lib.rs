@@ -228,6 +228,7 @@ pub(crate) mod tests {
         async fn acquire(&self, lease: &BrowserLease) -> QuarryResult<BrowserSession> {
             Ok(BrowserSession {
                 lease: lease.clone(),
+                tab_pin: None,
                 inner: Arc::new(Mutex::new(SessionInner::default())),
             })
         }

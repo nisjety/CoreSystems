@@ -3311,6 +3311,7 @@ mod tests {
         ) -> QuarryResult<quarry_browser::BrowserSession> {
             Ok(quarry_browser::BrowserSession {
                 lease: lease.clone(),
+                tab_pin: None,
                 inner: Arc::new(tokio::sync::Mutex::new(
                     quarry_browser::SessionInner::default(),
                 )),

@@ -499,6 +499,7 @@ impl BrowserDriver for KernelDriver {
         self.ensure_browser(lease).await?;
         Ok(BrowserSession {
             lease: lease.clone(),
+            tab_pin: None,
             inner: Arc::new(Mutex::new(SessionInner {
                 connected: true,
                 pages_served: 0,

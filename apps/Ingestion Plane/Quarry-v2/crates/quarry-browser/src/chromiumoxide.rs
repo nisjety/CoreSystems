@@ -30,6 +30,7 @@ use ::chromiumoxide::cdp::browser_protocol::log::EventEntryAdded;
 use ::chromiumoxide::cdp::browser_protocol::network::{
     CookieParam, ErrorReason, EventRequestWillBeSent, EventResponseReceived,
 };
+use ::chromiumoxide::cdp::browser_protocol::target::TargetId;
 use ::chromiumoxide::cdp::browser_protocol::target::{
     CreateBrowserContextParams, CreateTargetParamsBuilder,
 };
@@ -74,6 +75,10 @@ use crate::session::{Cookie, ProfileStore, SessionSnapshot, Viewport};
 use crate::slots::{
     Admission, BrowserPoolConfig, LossReason, PageRefusal, ReaperMode, SlotBook, SlotId,
     SlotStatus,
+};
+use crate::tab_control::{
+    addressed_tab_id, resolve_tab_egress_policy, visible_through_pin, OpenTabOptions,
+    PINNED_TAB_CLOSED_REASON,
 };
 use crate::{
     BrowserDevtoolsEvent, BrowserDownloadedFile, BrowserDriver, BrowserDriverCapabilities,
@@ -319,6 +324,9 @@ pub struct ChromiumoxideDriver {
     /// appear to have skipped receipts created by an unrelated tenant.
     egress_sequence: Arc<Mutex<HashMap<String, u64>>>,
     egress_policies: Arc<Mutex<HashMap<String, BrowserEgressPolicy>>>,
+    /// Per-tab egress policy (WS8.E), keyed by (session key, tab id). The guard
+    /// consults it before the session policy.
+    tab_egress_policies: Arc<Mutex<HashMap<(String, String), BrowserEgressPolicy>>>,
     pinned_egress_proxy: Option<Arc<dyn BrowserEgressProxyProvider>>,
     proxy_receipt_cursors: Arc<Mutex<HashMap<String, u64>>>,
     /// Startup data is recorded per lease. Renderer metrics are sampled only
@@ -384,6 +392,7 @@ impl ChromiumoxideDriver {
             egress_receipts: Arc::new(Mutex::new(HashMap::new())),
             egress_sequence: Arc::new(Mutex::new(HashMap::new())),
             egress_policies: Arc::new(Mutex::new(HashMap::new())),
+            tab_egress_policies: Arc::new(Mutex::new(HashMap::new())),
             pinned_egress_proxy: None,
             proxy_receipt_cursors: Arc::new(Mutex::new(HashMap::new())),
             session_telemetry: Arc::new(Mutex::new(HashMap::new())),
@@ -490,6 +499,7 @@ impl ChromiumoxideDriver {
             egress_receipts: self.egress_receipts.clone(),
             egress_sequence: self.egress_sequence.clone(),
             egress_policies: self.egress_policies.clone(),
+            tab_egress_policies: self.tab_egress_policies.clone(),
             pinned_egress_proxy: self.pinned_egress_proxy.clone(),
             proxy_receipt_cursors: self.proxy_receipt_cursors.clone(),
             session_telemetry: self.session_telemetry.clone(),
@@ -832,6 +842,7 @@ impl ChromiumoxideDriver {
         self.egress_receipts.lock().await.clear();
         self.egress_sequence.lock().await.clear();
         self.egress_policies.lock().await.clear();
+        self.tab_egress_policies.lock().await.clear();
         self.proxy_receipt_cursors.lock().await.clear();
         self.session_telemetry.lock().await.clear();
         self.dialogs.lock().await.clear();
@@ -1075,6 +1086,10 @@ impl ChromiumoxideDriver {
         self.egress_receipts.lock().await.remove(&session_key);
         self.egress_sequence.lock().await.remove(&session_key);
         self.egress_policies.lock().await.remove(&session_key);
+        self.tab_egress_policies
+            .lock()
+            .await
+            .retain(|key, _| key.0 != session_key);
         self.proxy_receipt_cursors.lock().await.remove(&session_key);
         self.session_telemetry.lock().await.remove(&session_key);
         if let Some(provider) = &self.pinned_egress_proxy {
@@ -1159,16 +1174,30 @@ impl ChromiumoxideDriver {
         Ok(())
     }
 
+    /// The CDP target of a pinned handle's tab, or None when the pin is closed.
+    async fn pinned_target(&self, session_key: &str, session: &BrowserSession) -> Option<TargetId> {
+        let pin = session.tab_pin()?;
+        let pages = self.pages.lock().await;
+        pages
+            .get(session_key)?
+            .tabs
+            .iter()
+            .find(|tab| tab.tab_id == pin)
+            .map(|tab| tab.page.target_id().clone())
+    }
+
     async fn active_tab_page(&self, session: &BrowserSession) -> Option<(String, Page)> {
         let session_key = Self::session_key(session);
         let found = {
             let pages = self.pages.lock().await;
             let session_pages = pages.get(&session_key)?;
-            let active_tab_id = session_pages.active_tab_id.as_ref()?;
+            // A pinned handle addresses its pin and never the active tab (WS8.E).
+            let tab_id =
+                addressed_tab_id(session.tab_pin(), session_pages.active_tab_id.as_deref())?;
             session_pages
                 .tabs
                 .iter()
-                .find(|tab| &tab.tab_id == active_tab_id)
+                .find(|tab| tab.tab_id == tab_id)
                 .map(|tab| (tab.tab_id.clone(), tab.page.clone()))
         };
         if found.is_some() {
@@ -1186,6 +1215,11 @@ impl ChromiumoxideDriver {
         }
         let key = Self::session_key(session);
         let loss = self.book().loss(&key, Instant::now());
+        if loss.is_none() {
+            if let Some(pin) = session.tab_pin() {
+                return Err(pinned_tab_closed_error(pin));
+            }
+        }
         Err(match loss {
             Some(reason) => session_lost_error(reason),
             None => {
@@ -1208,6 +1242,8 @@ impl ChromiumoxideDriver {
         &self,
         session: &BrowserSession,
         url: Option<&str>,
+        activate: bool,
+        egress_policy: Option<BrowserEgressPolicy>,
     ) -> QuarryResult<(String, Page)> {
         let initial_url = url.unwrap_or("about:blank");
         guard_navigation_target(initial_url).await?;
@@ -1338,6 +1374,14 @@ impl ChromiumoxideDriver {
             ),
         )
         .await?;
+        // The tab's own policy is in place before the guard below can decide
+        // any of its requests (WS8.E). It is removed with the tab or the session.
+        if let Some(policy) = egress_policy {
+            self.tab_egress_policies
+                .lock()
+                .await
+                .insert((session_key.clone(), tab_id.clone()), policy);
+        }
         self.install_devtools_collectors(session_key.clone(), tab_id.clone(), &page)
             .await;
         install_dialog_collector(
@@ -1355,6 +1399,7 @@ impl ChromiumoxideDriver {
             self.egress_receipts.clone(),
             self.egress_sequence.clone(),
             self.egress_policies.clone(),
+            self.tab_egress_policies.clone(),
         )
         .await?;
         if initial_url != "about:blank" {
@@ -1420,7 +1465,11 @@ impl ChromiumoxideDriver {
             title_hint: None,
             url_hint: Some(initial_url.to_owned()),
         });
-        session_pages.active_tab_id = Some(tab_id.clone());
+        // A background open keeps the active tab. A session with none yet
+        // activates the new tab, so it always has a tab to act on.
+        if activate || session_pages.active_tab_id.is_none() {
+            session_pages.active_tab_id = Some(tab_id.clone());
+        }
         attach.disarm();
         Ok((tab_id, page))
     }
@@ -1625,6 +1674,7 @@ async fn install_network_guard(
     receipts: Arc<Mutex<HashMap<String, Vec<BrowserEgressReceipt>>>>,
     sequence: Arc<Mutex<HashMap<String, u64>>>,
     policies: Arc<Mutex<HashMap<String, BrowserEgressPolicy>>>,
+    tab_policies: Arc<Mutex<HashMap<(String, String), BrowserEgressPolicy>>>,
 ) -> QuarryResult<()> {
     let mut events = page
         .event_listener::<EventRequestPaused>()
@@ -1662,16 +1712,18 @@ async fn install_network_guard(
             let request_id = event.request_id.clone();
             let request_url = event.request.url.clone();
             let method = event.request.method.clone();
-            let policy_allows_url = policies
+            // The tab's own policy, then the session's, else deny-all (WS8.E).
+            // A page can start emitting Fetch events as soon as its CDP target is
+            // attached: a missing policy must never mean unconstrained.
+            let tab_policy = tab_policies
                 .lock()
                 .await
-                .get(&session_key)
-                .cloned()
-                // A page can start emitting Fetch events as soon as its CDP
-                // target is attached. Missing session policy must be deny-all
-                // rather than the legacy unconstrained default.
-                .unwrap_or_else(BrowserEgressPolicy::deny_all)
-                .allows_url(&request_url);
+                .get(&(session_key.clone(), tab_id.clone()))
+                .cloned();
+            let session_policy = policies.lock().await.get(&session_key).cloned();
+            let policy_allows_url =
+                resolve_tab_egress_policy(tab_policy.as_ref(), session_policy.as_ref())
+                    .allows_url(&request_url);
             let (decision, policy, command_result) = if !policy_allows_url {
                 (
                     BrowserEgressDecision::Block,
@@ -3098,6 +3150,12 @@ impl BrowserDriver for ChromiumoxideDriver {
             security_evidence: self.pinned_egress_proxy.is_some(),
             atomic_target_actions: true,
             trusted_input: self.trusted_input,
+            // WS8.E: background opens, pinned handles and per-tab egress are
+            // implemented here; per-tab egress is enforced by the same CDP Fetch
+            // guard as the session policy, so it needs the pinned proxy too.
+            background_tabs: true,
+            tab_pinning: true,
+            per_tab_egress: self.pinned_egress_proxy.is_some(),
         }
     }
 
@@ -3187,6 +3245,7 @@ impl BrowserDriver for ChromiumoxideDriver {
         self.ensure_browser().await?;
         let session = BrowserSession {
             lease: lease.clone(),
+            tab_pin: None,
             inner: Arc::new(Mutex::new(SessionInner {
                 connected: true,
                 pages_served: 0,
@@ -3274,7 +3333,10 @@ impl BrowserDriver for ChromiumoxideDriver {
         let (tab_id, page, created) = match self.active_tab_page(session).await {
             Some((tab_id, page)) => (tab_id, page, false),
             None => {
-                let (tab_id, page) = self.open_tab_page(session, Some(url)).await?;
+                if let Some(pin) = session.tab_pin() {
+                    return Err(pinned_tab_closed_error(pin));
+                }
+                let (tab_id, page) = self.open_tab_page(session, Some(url), true, None).await?;
                 (tab_id, page, true)
             }
         };
@@ -3864,10 +3926,33 @@ impl BrowserDriver for ChromiumoxideDriver {
         session: &BrowserSession,
         url: Option<&str>,
     ) -> QuarryResult<BrowserTab> {
+        self.open_tab(
+            session,
+            OpenTabOptions {
+                url: url.map(str::to_owned),
+                activate: true,
+                egress_policy: None,
+            },
+        )
+        .await
+    }
+
+    async fn open_tab(
+        &self,
+        session: &BrowserSession,
+        options: OpenTabOptions,
+    ) -> QuarryResult<BrowserTab> {
         let owner = self.admission(session);
         self.refuse_lost(session)?;
         self.require_configured_egress(session).await?;
-        let (tab_id, page) = self.open_tab_page(session, url).await?;
+        let (tab_id, page) = self
+            .open_tab_page(
+                session,
+                options.url.as_deref(),
+                options.activate,
+                options.egress_policy,
+            )
+            .await?;
         let session_key = Self::session_key(session);
         self.update_tab_metadata(&session_key, &tab_id, &page).await;
         self.invalidate_live_frame_cache(session, owner).await;
@@ -3880,6 +3965,41 @@ impl BrowserDriver for ChromiumoxideDriver {
                     "chromiumoxide new_tab disappeared after creation",
                 )
             })
+    }
+
+    async fn configure_tab_egress_policy(
+        &self,
+        session: &BrowserSession,
+        tab_id: &str,
+        policy: BrowserEgressPolicy,
+    ) -> QuarryResult<()> {
+        let session_key = Self::session_key(session);
+        // Checked and inserted under the pages lock, the lock close_tab takes
+        // to remove the tab, so a closed tab never keeps a policy (WS8.E).
+        let pages = self.pages.lock().await;
+        let exists = pages
+            .get(&session_key)
+            .is_some_and(|session_pages| session_pages.tabs.iter().any(|tab| tab.tab_id == tab_id));
+        if !exists {
+            return Err(
+                QuarryError::new(ErrorCode::NotFound, "chromiumoxide: tab not found")
+                    .with_details(json!({ "tab_id": tab_id })),
+            );
+        }
+        self.tab_egress_policies
+            .lock()
+            .await
+            .insert((session_key, tab_id.to_owned()), policy);
+        drop(pages);
+        Ok(())
+    }
+
+    async fn active_tab_id(&self, session: &BrowserSession) -> QuarryResult<Option<String>> {
+        let session_key = Self::session_key(session);
+        let pages = self.pages.lock().await;
+        Ok(pages
+            .get(&session_key)
+            .and_then(|session_pages| session_pages.active_tab_id.clone()))
     }
 
     async fn select_tab(&self, session: &BrowserSession, tab_id: &str) -> QuarryResult<()> {
@@ -3925,6 +4045,10 @@ impl BrowserDriver for ChromiumoxideDriver {
                         .with_details(json!({ "tab_id": tab_id }))
                 })?;
             let removed = session_pages.tabs.remove(index);
+            self.tab_egress_policies
+                .lock()
+                .await
+                .remove(&(session_key.clone(), tab_id.to_owned()));
             if session_pages.active_tab_id.as_deref() == Some(tab_id) {
                 session_pages.active_tab_id =
                     session_pages.tabs.first().map(|tab| tab.tab_id.clone());
@@ -3990,6 +4114,7 @@ impl BrowserDriver for ChromiumoxideDriver {
                 events
                     .iter()
                     .filter(|event| event.sequence > after_sequence)
+                    .filter(|event| visible_through_pin(session.tab_pin(), event.tab_id.as_deref()))
                     .take(limit)
                     .cloned()
                     .collect()
@@ -4030,6 +4155,7 @@ impl BrowserDriver for ChromiumoxideDriver {
         Ok(receipts
             .iter()
             .filter(|receipt| receipt.sequence > after_sequence)
+            .filter(|receipt| visible_through_pin(session.tab_pin(), receipt.tab_id.as_deref()))
             .take(limit)
             .cloned()
             .collect())
@@ -4125,13 +4251,30 @@ impl BrowserDriver for ChromiumoxideDriver {
 
     async fn dialogs(&self, session: &BrowserSession) -> QuarryResult<Vec<BrowserDialog>> {
         let session_key = Self::session_key(session);
-        Ok(self
+        let all = self
             .dialogs
             .lock()
             .await
             .get(&session_key)
             .cloned()
-            .unwrap_or_default())
+            .unwrap_or_default();
+        if session.tab_pin().is_none() {
+            return Ok(all);
+        }
+        // A pinned handle lists only the dialogs owned by its pinned tab (WS8.E).
+        let Some(target) = self.pinned_target(&session_key, session).await else {
+            return Ok(Vec::new());
+        };
+        let owners = self.dialog_pages.lock().await;
+        let owned = owners.get(&session_key);
+        Ok(all
+            .into_iter()
+            .filter(|dialog| {
+                owned
+                    .and_then(|pages| pages.get(&dialog.dialog_id))
+                    .is_some_and(|page| page.target_id() == &target)
+            })
+            .collect())
     }
 
     async fn respond_dialog(
@@ -4151,6 +4294,22 @@ impl BrowserDriver for ChromiumoxideDriver {
                 return Err(QuarryError::new(
                     ErrorCode::TargetRepairRequired,
                     "dialog is no longer active; observe the browser again",
+                ));
+            }
+        }
+        if session.tab_pin().is_some() {
+            let pinned = self.pinned_target(&session_key, session).await;
+            let owner = self
+                .dialog_pages
+                .lock()
+                .await
+                .get(&session_key)
+                .and_then(|pages| pages.get(dialog_id))
+                .map(|page| page.target_id().clone());
+            if pinned.is_none() || pinned != owner {
+                return Err(QuarryError::new(
+                    ErrorCode::TargetRepairRequired,
+                    "dialog is not on the pinned tab; observe the pinned tab again",
                 ));
             }
         }
@@ -4750,6 +4909,18 @@ impl Drop for AttachGuard {
             drop(download_dir);
         });
     }
+}
+
+/// A pinned tab that is closed or unknown: NOT_FOUND, and never a fallback to
+/// another tab of the session (WS8.E).
+fn pinned_tab_closed_error(tab_id: &str) -> QuarryError {
+    let mut error = QuarryError::new(
+        ErrorCode::NotFound,
+        "chromiumoxide: the pinned tab is closed",
+    )
+    .with_details(json!({ "reason": PINNED_TAB_CLOSED_REASON, "tab_id": tab_id }));
+    error.retryable = false;
+    error
 }
 
 fn browser_missing() -> QuarryError {
@@ -5731,6 +5902,7 @@ mod tests {
     fn bare_session(key: &str) -> BrowserSession {
         BrowserSession {
             lease: make_lease_with_key(key),
+            tab_pin: None,
             inner: Arc::new(Mutex::new(SessionInner {
                 connected: true,
                 pages_served: 0,
@@ -6145,6 +6317,421 @@ mod tests {
             "the old session's late close freed the new session's page"
         );
         driver.release(new).await.expect("release");
+    }
+
+    // ---- WS8.E tab control. Live lane: `--features chromiumoxide -- --ignored`
+    // with CHROMIUMOXIDE_TEST=1. Each test skips without the gate. ----
+
+    /// Opening a background tab leaves the session's active tab where it was.
+    #[tokio::test]
+    #[ignore = "WS8.E live lane: needs Chromium (CHROMIUMOXIDE_TEST=1)"]
+    async fn background_tab_leaves_active_tab_unchanged() {
+        if !live_enabled() {
+            return;
+        }
+        let driver = live_driver();
+        let session = live_session(&driver, "ws8e-background-active").await;
+        let first = driver.new_tab(&session, None).await.expect("first tab");
+        let before = driver.active_tab_id(&session).await.expect("active before");
+        let background = driver
+            .open_tab(
+                &session,
+                OpenTabOptions {
+                    url: None,
+                    activate: false,
+                    egress_policy: None,
+                },
+            )
+            .await
+            .expect("background tab");
+        let after = driver.active_tab_id(&session).await.expect("active after");
+        assert_eq!(before.as_deref(), Some(first.tab_id.as_str()));
+        assert_eq!(
+            after, before,
+            "a background open must not move the active tab"
+        );
+        assert_ne!(background.tab_id, first.tab_id);
+        assert!(!background.active);
+        driver.release(session).await.expect("release");
+    }
+
+    /// A handle pinned to a tab reads and acts on that tab while another tab
+    /// is the session's active tab.
+    #[tokio::test]
+    #[ignore = "WS8.E live lane: needs Chromium (CHROMIUMOXIDE_TEST=1)"]
+    async fn pinned_session_clicks_pinned_tab_not_active_tab() {
+        if !live_enabled() {
+            return;
+        }
+        let driver = live_driver();
+        let session = live_session(&driver, "ws8e-pinned-acts").await;
+        let pinned = driver.new_tab(&session, None).await.expect("pinned tab");
+        let other = driver.new_tab(&session, None).await.expect("other tab");
+        driver
+            .select_tab(&session, &pinned.tab_id)
+            .await
+            .expect("select pinned");
+        driver
+            .current_page(&session)
+            .await
+            .expect("pinned page")
+            .set_content("<html><body><p id=\"who\">pinned</p></body></html>")
+            .await
+            .expect("mark pinned");
+        driver
+            .select_tab(&session, &other.tab_id)
+            .await
+            .expect("select other");
+        driver
+            .current_page(&session)
+            .await
+            .expect("other page")
+            .set_content("<html><body><p id=\"who\">other</p></body></html>")
+            .await
+            .expect("mark other");
+
+        let handle = session.pinned_to(&pinned.tab_id);
+        assert_eq!(
+            driver.active_tab_id(&session).await.expect("active"),
+            Some(other.tab_id.clone())
+        );
+        let who_pinned = "document.getElementById('who').textContent";
+        assert_eq!(eval_string(&driver, &handle, who_pinned).await, "pinned");
+        assert_eq!(eval_string(&driver, &session, who_pinned).await, "other");
+        let content = driver.content(&handle).await.expect("pinned content");
+        assert!(String::from_utf8_lossy(&content).contains("pinned"));
+        driver.release(session).await.expect("release");
+    }
+
+    /// The agent tab's narrow policy blocks a third host; the same request
+    /// from that tab is the only thing the policy decides.
+    #[tokio::test]
+    #[ignore = "WS8.E live lane: needs Chromium (CHROMIUMOXIDE_TEST=1)"]
+    async fn per_tab_policy_blocks_third_host_in_agent_tab_only() {
+        if !live_enabled() {
+            return;
+        }
+        let driver = live_driver();
+        let session = live_session(&driver, "ws8e-per-tab-block").await;
+        // The session policy is open web; only the agent tab is narrowed.
+        driver
+            .configure_egress_policy(&session, BrowserEgressPolicy::from_allowed_domains(&[]))
+            .await
+            .expect("open session policy");
+        let agent = driver
+            .open_tab(
+                &session,
+                OpenTabOptions {
+                    url: None,
+                    activate: false,
+                    egress_policy: Some(BrowserEgressPolicy::from_allowed_domains(&[
+                        "agent.example.test".to_owned(),
+                    ])),
+                },
+            )
+            .await
+            .expect("agent tab");
+        let human = driver.new_tab(&session, None).await.expect("human tab");
+        for tab in [&agent, &human] {
+            driver
+                .current_page(&session.pinned_to(&tab.tab_id))
+                .await
+                .expect("tab page")
+                .set_content(
+                    "<html><body><img src=\"https://third.example.test/pixel.png\"></body></html>",
+                )
+                .await
+                .expect("inject third-party image");
+        }
+        let mut blocked = false;
+        for _ in 0..150 {
+            let receipts = driver
+                .egress_receipts(&session, 0, 512)
+                .await
+                .expect("receipts");
+            if receipts.iter().any(|receipt| {
+                receipt.tab_id.as_deref() == Some(agent.tab_id.as_str())
+                    && receipt.policy == "domain_grant_blocked"
+            }) {
+                blocked = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(
+            blocked,
+            "the agent tab's narrow policy must block the third host"
+        );
+        let receipts = driver
+            .egress_receipts(&session, 0, 512)
+            .await
+            .expect("receipts");
+        assert!(
+            !receipts.iter().any(|receipt| {
+                receipt.tab_id.as_deref() == Some(human.tab_id.as_str())
+                    && receipt.policy == "domain_grant_blocked"
+            }),
+            "the human tab is not under the agent tab's policy"
+        );
+        driver.release(session).await.expect("release");
+    }
+
+    /// The human tab keeps the open session policy while the agent tab is
+    /// narrow: its third-host request reaches the DNS guard, not the grant.
+    #[tokio::test]
+    #[ignore = "WS8.E live lane: needs Chromium (CHROMIUMOXIDE_TEST=1)"]
+    async fn human_tab_keeps_open_web_while_agent_tab_is_narrow() {
+        if !live_enabled() {
+            return;
+        }
+        let driver = live_driver();
+        let session = live_session(&driver, "ws8e-human-open").await;
+        driver
+            .configure_egress_policy(&session, BrowserEgressPolicy::from_allowed_domains(&[]))
+            .await
+            .expect("open session policy");
+        let agent = driver
+            .open_tab(
+                &session,
+                OpenTabOptions {
+                    url: None,
+                    activate: false,
+                    egress_policy: Some(BrowserEgressPolicy::from_allowed_domains(&[
+                        "agent.example.test".to_owned(),
+                    ])),
+                },
+            )
+            .await
+            .expect("agent tab");
+        let human = driver.new_tab(&session, None).await.expect("human tab");
+        for tab in [&agent, &human] {
+            driver
+                .current_page(&session.pinned_to(&tab.tab_id))
+                .await
+                .expect("tab page")
+                .set_content(
+                    "<html><body><img src=\"https://third.example.test/pixel.png\"></body></html>",
+                )
+                .await
+                .expect("inject third-party image");
+        }
+        let mut human_policy: Option<String> = None;
+        for _ in 0..150 {
+            let receipts = driver
+                .egress_receipts(&session, 0, 512)
+                .await
+                .expect("receipts");
+            if let Some(receipt) = receipts
+                .iter()
+                .find(|receipt| receipt.tab_id.as_deref() == Some(human.tab_id.as_str()))
+            {
+                human_policy = Some(receipt.policy.clone());
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let human_policy = human_policy.expect("the human tab's request was decided");
+        assert_ne!(human_policy, "domain_grant_blocked");
+        driver.release(session).await.expect("release");
+    }
+
+    /// Closing the pinned tab leaves a handle that fails with NOT_FOUND,
+    /// `pinned_tab_closed`, even though another tab is active.
+    #[tokio::test]
+    #[ignore = "WS8.E live lane: needs Chromium (CHROMIUMOXIDE_TEST=1)"]
+    async fn closing_pinned_tab_does_not_fall_back_to_active() {
+        if !live_enabled() {
+            return;
+        }
+        let driver = live_driver();
+        let session = live_session(&driver, "ws8e-no-fallback").await;
+        let pinned = driver.new_tab(&session, None).await.expect("pinned tab");
+        let other = driver.new_tab(&session, None).await.expect("other tab");
+        let handle = session.pinned_to(&pinned.tab_id);
+        driver
+            .close_tab(&session, &pinned.tab_id)
+            .await
+            .expect("close pinned tab");
+        assert_eq!(
+            driver.active_tab_id(&session).await.expect("active"),
+            Some(other.tab_id.clone())
+        );
+        let error = driver
+            .content(&handle)
+            .await
+            .expect_err("a closed pin must not act on the active tab");
+        assert_eq!(error.code, ErrorCode::NotFound, "{error:?}");
+        let details = error.details.as_ref().expect("pinned details");
+        assert_eq!(details["reason"], PINNED_TAB_CLOSED_REASON);
+        driver.release(session).await.expect("release");
+    }
+
+    /// A pinned handle's devtools events, egress receipts and dialogs all
+    /// belong to its own tab; other tabs' observations never appear.
+    #[tokio::test]
+    #[ignore = "WS8.E live lane: needs Chromium (CHROMIUMOXIDE_TEST=1)"]
+    async fn pinned_observation_never_contains_other_tab_events() {
+        if !live_enabled() {
+            return;
+        }
+        let driver = live_driver();
+        let session = live_session(&driver, "ws8e-observe-pin").await;
+        let pinned = driver.new_tab(&session, None).await.expect("pinned tab");
+        let other = driver.new_tab(&session, None).await.expect("other tab");
+        let handle = session.pinned_to(&pinned.tab_id);
+        let other_handle = session.pinned_to(&other.tab_id);
+
+        driver
+            .current_page(&handle)
+            .await
+            .expect("pinned page")
+            .evaluate("console.log('from-pinned-tab')")
+            .await
+            .expect("pinned console");
+        driver
+            .current_page(&other_handle)
+            .await
+            .expect("other page")
+            .evaluate("console.log('from-other-tab')")
+            .await
+            .expect("other console");
+        driver
+            .current_page(&other_handle)
+            .await
+            .expect("other page")
+            .set_content(
+                "<html><body><img src=\"https://third.example.test/pixel.png\"></body></html>",
+            )
+            .await
+            .expect("other third-party image");
+        driver
+            .current_page(&other_handle)
+            .await
+            .expect("other page")
+            .evaluate("setTimeout(function () { alert('other tab'); }, 0)")
+            .await
+            .expect("other dialog");
+
+        let mut seen_pinned = false;
+        let mut dialog = None;
+        for _ in 0..100 {
+            let events = driver
+                .devtools_events(&handle, 0, 512)
+                .await
+                .expect("pinned events");
+            seen_pinned |= events.iter().any(|event| {
+                event
+                    .text
+                    .as_deref()
+                    .is_some_and(|text| text.contains("from-pinned-tab"))
+            });
+            let listed = driver.dialogs(&session).await.expect("session dialogs");
+            if let Some(found) = listed.into_iter().next() {
+                dialog = Some(found);
+            }
+            if seen_pinned && dialog.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(
+            seen_pinned,
+            "the pinned tab's own console event must be visible"
+        );
+
+        let events = driver
+            .devtools_events(&handle, 0, 512)
+            .await
+            .expect("pinned events");
+        assert!(
+            events
+                .iter()
+                .all(|event| event.tab_id.as_deref() == Some(pinned.tab_id.as_str())),
+            "a pinned handle must see only its own tab's events"
+        );
+        assert!(!events.iter().any(|event| event
+            .text
+            .as_deref()
+            .is_some_and(|text| text.contains("from-other-tab"))));
+        let receipts = driver
+            .egress_receipts(&handle, 0, 512)
+            .await
+            .expect("pinned receipts");
+        assert!(
+            receipts
+                .iter()
+                .all(|receipt| receipt.tab_id.as_deref() == Some(pinned.tab_id.as_str())),
+            "a pinned handle must see only its own tab's egress receipts"
+        );
+
+        let dialog = dialog.expect("the other tab's dialog opened");
+        assert!(
+            driver
+                .dialogs(&handle)
+                .await
+                .expect("pinned dialogs")
+                .is_empty(),
+            "the other tab's dialog is not the pinned tab's"
+        );
+        let refused = driver
+            .respond_dialog(&handle, &dialog.dialog_id, true, None)
+            .await
+            .expect_err("a pinned handle must not answer another tab's dialog");
+        assert_eq!(refused.code, ErrorCode::TargetRepairRequired, "{refused:?}");
+        driver
+            .respond_dialog(&session, &dialog.dialog_id, true, None)
+            .await
+            .expect("the session answers its own dialog");
+        driver.release(session).await.expect("release");
+    }
+
+    /// A background tab keeps its timers near their cadence (WS8.A spike,
+    /// made permanent). Unthrottled is about 20 ticks in 2 s at 100 ms; the
+    /// assertion uses a floor of 10 so a loaded runner does not flake.
+    #[tokio::test]
+    #[ignore = "WS8.E live lane: needs Chromium (CHROMIUMOXIDE_TEST=1)"]
+    async fn background_tab_is_not_throttled() {
+        if !live_enabled() {
+            return;
+        }
+        let driver = live_driver();
+        let session = live_session(&driver, "ws8e-background-throttle").await;
+        let background = driver
+            .open_tab(
+                &session,
+                OpenTabOptions {
+                    url: None,
+                    activate: false,
+                    egress_policy: None,
+                },
+            )
+            .await
+            .expect("background tab");
+        let _foreground = driver
+            .new_tab(&session, None)
+            .await
+            .expect("foreground tab");
+        let page = driver
+            .current_page(&session.pinned_to(&background.tab_id))
+            .await
+            .expect("background page");
+        page.set_content(
+            "<html><body><script>window.__ticks = 0; setInterval(function () { window.__ticks++; }, 100);</script></body></html>",
+        )
+        .await
+        .expect("inject ticker");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let ticks = page
+            .evaluate("window.__ticks")
+            .await
+            .expect("ticks")
+            .into_value::<i64>()
+            .expect("tick number");
+        assert!(
+            ticks >= 10,
+            "background timers throttled: {ticks} ticks in 2 s"
+        );
+        driver.release(session).await.expect("release");
     }
 
     /// A page is reserved for the entry the key is admitted under now, and

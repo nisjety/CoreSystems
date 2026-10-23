@@ -222,6 +222,7 @@ impl BrowserDriver for BrowserlessDriver {
 
         Ok(BrowserSession {
             lease: lease.clone(),
+            tab_pin: None,
             inner: Arc::new(Mutex::new(SessionInner {
                 connected: true,
                 pages_served: 0,

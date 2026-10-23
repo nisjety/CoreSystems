@@ -168,10 +168,12 @@ pub mod persistent_session;
 pub mod pool;
 pub mod session;
 pub mod slots;
+pub mod tab_control;
 
 #[cfg(feature = "kernel")]
 pub use kernel::{KernelConfig, KernelDriver};
 pub use persistent_session::{PersistentSession, PersistentSessionRegistry};
+pub use tab_control::OpenTabOptions;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LiveFrameFormat {
@@ -296,6 +298,18 @@ pub struct BrowserDriverCapabilities {
     /// Additive on the wire: an older peer omits it and reads as `false`.
     #[serde(default)]
     pub trusted_input: bool,
+    /// WS8.E: the driver can open a tab without making it the active tab
+    /// (`OpenTabOptions::activate == false`). Additive on the wire.
+    #[serde(default)]
+    pub background_tabs: bool,
+    /// WS8.E: a handle pinned to one tab (`BrowserSession::pinned_to`) addresses
+    /// that tab and never the active tab. Additive on the wire.
+    #[serde(default)]
+    pub tab_pinning: bool,
+    /// WS8.E: an egress policy can be installed for one tab, not only for the
+    /// session. Additive on the wire.
+    #[serde(default)]
+    pub per_tab_egress: bool,
 }
 
 /// Browser-authored page state for an agent observation. Drivers return only
@@ -613,6 +627,35 @@ pub trait BrowserDriver: Send + Sync {
         Err(QuarryError::unsupported_action("new_tab"))
     }
 
+    /// Open a tab with its own options (WS8.E). `activate: false` leaves the
+    /// session's active tab where it is; `egress_policy` governs this tab only.
+    /// Default: Unsupported.
+    async fn open_tab(
+        &self,
+        _session: &BrowserSession,
+        _options: OpenTabOptions,
+    ) -> QuarryResult<BrowserTab> {
+        Err(QuarryError::unsupported_action("open_tab"))
+    }
+
+    /// Install the egress policy of one tab (WS8.E). A tab's policy takes
+    /// precedence over the session policy for requests made from that tab.
+    /// Default: Unsupported.
+    async fn configure_tab_egress_policy(
+        &self,
+        _session: &BrowserSession,
+        _tab_id: &str,
+        _policy: BrowserEgressPolicy,
+    ) -> QuarryResult<()> {
+        Err(QuarryError::unsupported_action("configure_tab_egress_policy"))
+    }
+
+    /// The session's active tab id, the tab an unpinned handle acts on
+    /// (WS8.E). A pinned handle may name a different tab. Default: Unsupported.
+    async fn active_tab_id(&self, _session: &BrowserSession) -> QuarryResult<Option<String>> {
+        Err(QuarryError::unsupported_action("active_tab_id"))
+    }
+
     /// Select an existing tab as the active page for actions/frames. Default: Unsupported.
     async fn select_tab(&self, _session: &BrowserSession, _tab_id: &str) -> QuarryResult<()> {
         Err(QuarryError::unsupported_action("select_tab"))
@@ -766,6 +809,26 @@ pub trait BrowserDriver: Send + Sync {
 pub struct BrowserSession {
     pub lease: BrowserLease,
     pub inner: Arc<Mutex<SessionInner>>,
+    /// The tab this handle addresses when it is pinned (WS8.E). `None` means
+    /// the session's active tab.
+    pub tab_pin: Option<Arc<str>>,
+}
+
+impl BrowserSession {
+    /// A handle on the same session whose actions address `tab_id` and never
+    /// another tab, even when `tab_id` is closed (no fallback to the active tab).
+    pub fn pinned_to(&self, tab_id: &str) -> Self {
+        Self {
+            lease: self.lease.clone(),
+            inner: self.inner.clone(),
+            tab_pin: Some(Arc::from(tab_id)),
+        }
+    }
+
+    /// The pinned tab id, if this handle is pinned.
+    pub fn tab_pin(&self) -> Option<&str> {
+        self.tab_pin.as_deref()
+    }
 }
 
 #[derive(Debug, Default)]

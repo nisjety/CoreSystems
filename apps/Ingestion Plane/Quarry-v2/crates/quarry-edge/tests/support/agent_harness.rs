@@ -325,6 +325,7 @@ impl BrowserDriver for RecordingDriver {
             .push(lease.session_affinity_key.clone());
         Ok(BrowserSession {
             lease: lease.clone(),
+            tab_pin: None,
             inner: Arc::new(tokio::sync::Mutex::new(SessionInner::default())),
         })
     }

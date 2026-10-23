@@ -245,6 +245,7 @@ impl BrowserDriver for BrowserbaseDriver {
         self.ensure_session().await?;
         Ok(BrowserSession {
             lease: lease.clone(),
+            tab_pin: None,
             inner: Arc::new(Mutex::new(SessionInner {
                 connected: true,
                 pages_served: 0,
@@ -360,6 +361,7 @@ mod tests {
     fn unstarted_session() -> BrowserSession {
         BrowserSession {
             lease: make_lease(),
+            tab_pin: None,
             inner: Arc::new(Mutex::new(SessionInner {
                 connected: true,
                 pages_served: 0,
