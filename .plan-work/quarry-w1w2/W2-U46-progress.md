@@ -13,7 +13,7 @@ Dependencies on disk (all committed): WS9.A (a3c2b6f3c), WS9.B (b57e3edb6), WS9.
 
 ## Compile and test evidence
 
-- `pnpm exec tsc --noEmit -p tsconfig.app.json` (apps/Frontend Plane/verevonv3): zero errors in features/browser/evidence, BrowserChrome.tsx and errors.ts. 31 pre-existing errors remain in other files (RemoteSupportPage.tsx, quarry-client.ts, session/use-browser-session-controller.ts).
+- `pnpm exec tsc --noEmit -p tsconfig.app.json` (apps/Frontend Plane/verevonv3): zero errors in features/browser/evidence, BrowserChrome.tsx and errors.ts. 33 pre-existing errors remain in other files (RemoteSupportPage.tsx, quarry-client.ts, session/use-browser-session-controller.ts).
 - `pnpm exec eslint src/features/browser/evidence src/features/dashboard/home/BrowserChrome.tsx tests/e2e/browser-workspace-evidence.spec.ts`: exit 0 after one fix (untrack on the initial draft). Two warnings in BrowserChrome.tsx pre-exist (line 541, selectedTimelineStep), not from this change.
 - `pnpm exec tsc --ignoreConfig --noEmit --strict ... tests/e2e/browser-workspace-evidence.spec.ts`: exit 0.
 - `pnpm exec vitest run src/features/browser/evidence/use-browser-evidence.test.ts`: 4 passed (4), rc 0.
