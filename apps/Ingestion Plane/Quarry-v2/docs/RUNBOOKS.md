@@ -1271,3 +1271,34 @@ Checks (for the test phase, not run here):
 - Evidence (on the rebuilt edge image with `on`): a persistent run that sets a canary cookie; then `select enc_v, key_id, snapshot is null, length(envelope) from quarry_profiles where profile_id='<id>'` returns `1|env:v1|t|<n>`, and `select encode(envelope,'escape') from quarry_profiles` contains no canary; Redis keys under `quarry:profile:v2:*` hold no canary; a second run restores the cookie; a throwaway edge with a wrong master key returns 503 (`RuntimeNotReady`) and leaves `rev` unchanged.
 
 Open items (depth file `.plan-work/quarry-w1w2/depth/W2-U36.md`): the pinned known-answer ciphertext; external review of `profile_crypto.rs` and `envelope_profile_store.rs` before `REQUIRED` in production; restore latency evidence; the org_core provider (WS17.E2).
+
+## WS13.3: driver capture API, JPEG screenshot kind, single-capture limit (W2-U40, built, NOT run, 2026-10-23)
+
+What: `BrowserDriver::capture_screenshot`, `capture_pdf` and `current_url` (`crates/quarry-browser/src/lib.rs`). The defaults serve legacy options (the viewport PNG, the default PDF) and refuse every other option with `unsupported`. `ChromiumoxideDriver` overrides them; it sets the capability flags `scrape_actions` and `capture_options`. Planning is pure in `crates/quarry-browser/src/capture_plan.rs`. `ArtifactKind::ScreenshotJpeg` (`screenshot_jpeg`, `.jpg`, `image/jpeg`) is a new kind; `kind_from_str` accepts `screenshot_jpeg` and `screenshot.jpg`. `wait_for`, `click`, `type_text` and `select` now carry `details.reason` (`element_not_found`, `wait_timeout`, `driver_error`).
+
+Flag: none. No caller reads these methods until WS13.4b. Rollback: revert.
+
+Limit: `SINGLE_CAPTURE_MAX_DEVICE_PX` is 16000 and PROVISIONAL. The spike that sets it is not run. The spike table is in `docs/SCRAPE_CAPTURE.md`; do not raise the value or rely on a tall full-page capture until that table is filled in.
+
+Checks (test phase, not run here):
+- Planning and header reads: `cargo test -p quarry-browser plan_screenshot png_header`.
+- Defaults delegate and refuse: `cargo test -p quarry-browser capture_default_tests`.
+- Artifact kind: `cargo test -p quarry-core artifact` (`jpeg_screenshot_has_jpg_extension_and_image_jpeg_type`).
+- Live (Chromium), one name per run: `CHROMIUMOXIDE_TEST=1 QUARRY_BROWSER_NO_SANDBOX=1 CHROME=/usr/bin/chromium cargo test -p quarry-browser --features chromiumoxide -- --ignored --test-threads=1 <name>` with `<name>` one of `captures_full_page_clip_and_jpeg_on_a_fixture_page`, `pdf_starts_with_percent_pdf_and_honours_max_pages`, `viewport_override_is_restored_after_capture_even_on_error`, `capture_does_not_navigate_or_mutate_the_page`.
+
+## Browser and crawl usage metering (WS6.C-e)
+
+Switch: `QUARRY_EDGE__USAGE_BROWSER_METRICS` = `off` (default), `shadow`, `on`. Read once at boot by
+`usage_attrs::browser_metrics_mode_from_env`; a value that is not one of the three is `off` and logged.
+
+Order of rollout:
+
+1. Confirm the Lago billable-metric codes for the seven metrics exist (none do in the repository).
+2. Set `shadow`, restart the edge. Watch `quarry_usage_shadow_events_total` by metric: a segment close
+   produces `browser.second.*` and `agent.run` for an agent, one `browser.second.interactive` for a session.
+   Nothing is published in this mode.
+3. Set `on`. The corrected rules for the existing metrics start with this step (see BILLING.md). Check the
+   billing rows for one agent run and one manual session with `psql` on `billing_usage_events`.
+
+Rollback: set `off` and restart the edge. The existing metrics go back to their legacy rules at the same
+time; events already published are not withdrawn.
