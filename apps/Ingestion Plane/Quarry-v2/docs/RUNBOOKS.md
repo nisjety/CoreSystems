@@ -1468,3 +1468,37 @@ no secret.
 
 Not built here: the receipt, checkpoint and procedure masking (WS12.S3), the Model Plane scrub (WS12.S4), the screenshot
 masking (WS12.S5).
+
+## Scrape captures: `screenshot` and `pdf` on `POST /v1/scrape` (WS13.4b, unit W2-U45, built, NOT run, 2026-10-24)
+
+What it does. A scrape may ask for a screenshot (`{"type":"screenshot","fullPage":true,"quality":80}`) or a PDF
+(`"pdf"` or `{"type":"pdf","format":"A4"}`) in `formats`. The browser takes them after the page has settled and
+before the session is released. A failed capture is a warning (`screenshot_failed`, `pdf_failed`,
+`screenshot_truncated`), never an error: the page still returns. Not ZDR: each capture is an artifact, read at
+`formats.screenshot` or `formats.pdf` (`{artifact_id, bytes}`), fetched with `GET /v1/artifacts/{id}` (PNG, JPEG or
+PDF by kind). ZDR: nothing is stored or emitted; the bytes come back inline in `data.screenshot` or `data.pdf` as
+base64 (`content_type`, `bytes`, `width`, `height`, `data_base64`), under the inline cap. `data.captures` reports
+the sizes, the tile count and `blocked_requests` (a count only) in both modes.
+
+Flags. `QUARRY_EDGE__SCRAPE_CAPTURE` (`off` committed; only the exact value `on` enables it; anything else refuses
+the formats as a 400 field error `feature_disabled` at `formats`). `QUARRY_EDGE__SCRAPE_CAPTURE_INLINE_MAX_BYTES`
+(default `6291456`, the model gateway's screenshot cap; clamped to 16 MiB). Rollback: set the switch back to `off`,
+or revert. No data migration; nothing is written that a rollback must undo.
+
+Refusals. A browser that cannot take captures answers 501 `UNSUPPORTED` with `details.reason =
+"browser_capability_unavailable"`, refused before any lease or session is taken. An over-cap ZDR capture is left
+out with warning `capture_exceeds_inline_cap` and listed in `omitted`. `POST /v1/scrape/stream` refuses a
+`screenshot` or `pdf` entry with an error event carrying `details.reason = "unsupported_in_stream"`; it does not
+drop the format silently.
+
+Cache. A request with a capture neither reads nor writes the page cache (a capture changes what the page holds).
+
+Reading a capture that failed. `warnings[].message` names the typed reason (for example `capture_too_large`), never
+the raw driver error. A page that blocked requests reports only the count in `data.captures.blocked_requests`.
+
+Not built here. The `actions` format (WS13.5), stitching of tall pages (WS13.6; a page taller than the
+single-capture limit is cropped with `truncated: true`, and the single-capture limit is provisional, see the W2-U40
+depth file), the meter's capture counts (usage_attrs owns its closed key set), and the gateway SPA wiring (WS13.7).
+Evidence owed: a rebuilt `quarry-edge` with the switch `on` against a real Chromium: the PNG and PDF magic bytes,
+the IHDR size against `captures.screenshot.width/height`, the 501 path with a browser that lacks the capability,
+and the ZDR inline bytes with no artifact list change.

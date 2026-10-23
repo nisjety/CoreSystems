@@ -794,3 +794,21 @@ allowance for any organization, so every response below is what it was before, p
 
 Goldens: none changed. The OpenAPI changes are `CrawlBound.remaining`, `entitlement` in `clamped_by`,
 `BatchUrlsBound` (new) and the 402 on `/v1/crawl` and `/v1/batch` (all additive).
+
+## Scrape captures: `screenshot` and `pdf` formats (WS13.4b, unit W2-U45, built, NOT run, 2026-10-24)
+
+Additive to section 10 of this document. Request: `formats` may carry `"pdf"` or `{"type":"pdf","format":"A4"}`
+and `{"type":"screenshot", ...}` (at most one of each; the counts of captures and actions share one cap of eight).
+Refused with a 400 field error `feature_disabled` at `formats` while `QUARRY_EDGE__SCRAPE_CAPTURE` is not `on`.
+
+Response (`ScrapeResponse`, all optional, absent unless asked):
+- `formats.screenshot` and `formats.pdf`: `{artifact_id, bytes}`; not ZDR only.
+- `screenshot`: `{content_type, bytes, width?, height?, data_base64}`; ZDR only (`image/png` or `image/jpeg`).
+- `pdf`: `{content_type: "application/pdf", bytes, data_base64}`; ZDR only.
+- `captures`: `{screenshot?: {content_type, width, height, bytes, tiles, stitched, truncated}, pdf?: {bytes},
+  blocked_requests}`; both modes; counts and sizes only, never a URL.
+- `warnings[]` codes added: `screenshot_failed`, `pdf_failed`, `screenshot_truncated`, `capture_exceeds_inline_cap`.
+- `omitted[]` may name `screenshot` or `pdf` (over the ZDR inline cap).
+
+Errors: 501 `UNSUPPORTED` `details.reason = "browser_capability_unavailable"` (a browser that cannot capture);
+`/v1/scrape/stream` refuses capture formats with `details.reason = "unsupported_in_stream"`. No new `ErrorCode`.
