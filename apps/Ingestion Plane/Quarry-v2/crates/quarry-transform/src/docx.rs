@@ -18,6 +18,10 @@ const MAX_DOCX_BYTES: usize = 25 * 1024 * 1024;
 const MAX_DOCUMENT_XML_BYTES: u64 = 32 * 1024 * 1024;
 /// More entries than any real document has.
 const MAX_DOCX_ENTRIES: usize = 4096;
+/// Most bytes all the parts of one DOCX may declare together (the sum of their
+/// uncompressed sizes, read from the central directory). A cap per part is not
+/// enough: a bomb can sit in a part the extractor never reads.
+const MAX_DOCX_DECLARED_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Extract plain text from DOCX bytes.
 pub fn extract_text(body: &[u8]) -> QuarryResult<String> {
@@ -39,6 +43,37 @@ pub fn extract_text(body: &[u8]) -> QuarryResult<String> {
             format!(
                 "docx has {} entries, which exceeds {MAX_DOCX_ENTRIES}",
                 zip.len()
+            ),
+        ));
+    }
+    // The declared sizes come from the central directory: nothing is inflated yet.
+    // A part that declares a huge word/document.xml is refused here, and the parts
+    // together are capped, so a bomb hidden in a part the extractor never reads is
+    // refused too. The streamed cap below stays the real limit: a declared size can lie.
+    let mut declared_total: u64 = 0;
+    for index in 0..zip.len() {
+        let part = zip.by_index_raw(index).map_err(|e| {
+            QuarryError::new(
+                ErrorCode::BadRequest,
+                format!("not a valid docx (zip): {e}"),
+            )
+        })?;
+        if part.name() == "word/document.xml" && part.size() > MAX_DOCUMENT_XML_BYTES {
+            return Err(QuarryError::new(
+                ErrorCode::BadRequest,
+                format!(
+                    "docx word/document.xml declares {} bytes, which exceeds {MAX_DOCUMENT_XML_BYTES}",
+                    part.size()
+                ),
+            ));
+        }
+        declared_total = declared_total.saturating_add(part.size());
+    }
+    if declared_total > MAX_DOCX_DECLARED_BYTES {
+        return Err(QuarryError::new(
+            ErrorCode::BadRequest,
+            format!(
+                "docx parts declare {declared_total} bytes in total, which exceeds {MAX_DOCX_DECLARED_BYTES}"
             ),
         ));
     }
@@ -211,6 +246,60 @@ mod tests {
         let error = extract_text(&buf).unwrap_err();
         assert_eq!(error.code, ErrorCode::BadRequest);
         assert!(error.message.contains("entries"), "{}", error.message);
+    }
+
+    /// A zip holding `parts` as `(name, bytes)`, each deflated.
+    fn docx_with_parts(parts: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            for (name, bytes) in parts {
+                zw.start_file(*name, opts).unwrap();
+                zw.write_all(bytes).unwrap();
+            }
+            zw.finish().unwrap();
+        }
+        buf
+    }
+
+    const BODY_XML: &[u8] = br#"<w:document><w:body><w:p><w:r><w:t>Contract text</w:t></w:r></w:p></w:body></w:document>"#;
+
+    #[test]
+    fn parts_that_declare_too_much_in_total_are_refused_before_any_is_inflated() {
+        // Two 150 MiB parts beside a real body: 300 MiB declared, past the 256 MiB total.
+        // The body is read from its own part, so the total is what refuses this.
+        let bomb_a = vec![0u8; 150 * 1024 * 1024];
+        let bomb_b = vec![0u8; 150 * 1024 * 1024];
+        let docx = docx_with_parts(&[
+            ("word/document.xml", BODY_XML),
+            ("word/embeddings/one.bin", bomb_a.as_slice()),
+            ("word/embeddings/two.bin", bomb_b.as_slice()),
+        ]);
+        assert!(docx.len() < 4 * 1024 * 1024, "the bomb is small: {}", docx.len());
+        let error = extract_text(&docx).expect_err("the parts together declare too much");
+        assert_eq!(error.code, ErrorCode::BadRequest);
+        assert!(error.message.contains("in total"), "{}", error.message);
+    }
+
+    #[test]
+    fn a_document_xml_that_declares_too_much_is_refused_before_it_is_read() {
+        // 33 MiB of zeros in a deflated part: the declared size alone refuses it.
+        let payload = vec![0u8; MAX_DOCUMENT_XML_BYTES as usize + 1024];
+        let docx = docx_with_parts(&[("word/document.xml", payload.as_slice())]);
+        let error = extract_text(&docx).expect_err("the declared size is past the cap");
+        assert_eq!(error.code, ErrorCode::BadRequest);
+        assert!(error.message.contains("declares"), "{}", error.message);
+    }
+
+    #[test]
+    fn a_docx_with_a_media_part_within_the_budgets_still_extracts() {
+        // A real document carries media parts; they count toward the total but not toward
+        // the body's cap, and a document of this size is well within both.
+        let media: Vec<u8> = (0..2 * 1024 * 1024u32).map(|i| (i.wrapping_mul(31) % 251) as u8).collect();
+        let docx = docx_with_parts(&[("word/document.xml", BODY_XML), ("word/media/image1.png", media.as_slice())]);
+        assert_eq!(extract_text(&docx).expect("within the budgets"), "Contract text");
     }
 
     #[test]
