@@ -1728,3 +1728,70 @@ pub(super) async fn crawl_job_events(
     )
     .await
 }
+
+/// WS15.L3: the knowledge job-event proxy forwards `follow=true` in the query and
+/// the caller's `Last-Event-ID` header to quarry-edge, and returns the upstream
+/// SSE bytes unchanged.
+#[cfg(test)]
+mod job_event_tests {
+    use super::*;
+    use wiremock::matchers::{
+        header as wm_header, method as wm_method, path as wm_path, query_param,
+    };
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const JOB: &str = "job_01J9SSSSSSSSSSSSSSSSSSSSSS";
+
+    fn user() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.invalid".to_owned(),
+            user_name: "User".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn crawl_job_events_forwards_follow_and_last_event_id() {
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path(format!("/v1/jobs/{JOB}/events")))
+            .and(query_param("follow", "true"))
+            .and(wm_header("last-event-id", "7"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string("id: 8\nevent: page_fetched\ndata: {}\n\ndata: done\n\n"),
+            )
+            .mount(&quarry)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+
+        let uri: Uri = format!("/api/v1/knowledge/jobs/{JOB}/events?follow=true")
+            .parse()
+            .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("last-event-id", "7".parse().unwrap());
+        let response = crawl_job_events(
+            State(state),
+            Extension(user()),
+            headers,
+            Path(JOB.to_owned()),
+            uri,
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let body = String::from_utf8_lossy(&bytes);
+        assert!(body.contains("id: 8"), "{body}");
+        assert!(body.contains("data: done"), "{body}");
+    }
+}
