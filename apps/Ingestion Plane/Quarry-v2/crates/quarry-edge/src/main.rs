@@ -714,9 +714,14 @@ async fn run() -> anyhow::Result<()> {
                     Ok(pool) => {
                         profiles_durable = true;
                         tracing::info!("ProfileStore: PostgresProfileStore (durable)");
-                        Arc::new(
-                            quarry_runtime::postgres_profile_store::PostgresProfileStore::new(pool),
-                        )
+                        let store =
+                            quarry_runtime::postgres_profile_store::PostgresProfileStore::new(pool);
+                        // WS17.P1: hourly sweep of expired profile deletion tombstones.
+                        let _tombstone_sweeper =
+                            quarry_runtime::postgres_profile_store::spawn_tombstone_sweeper(
+                                store.clone(),
+                            );
+                        Arc::new(store)
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "PgPool connect failed; falling back to InMemoryProfileStore");

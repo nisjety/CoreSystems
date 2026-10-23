@@ -11,7 +11,9 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use quarry_browser::session::{ProfileMetadata, ProfileScope, ProfileSummary, SessionSnapshot};
+use quarry_browser::session::{
+    ProfileMetadata, ProfileScope, ProfileSummary, SaveMeta, SessionSnapshot,
+};
 use quarry_core::envelope::Envelope;
 use quarry_core::error::{ErrorCode, QuarryError};
 use quarry_core::ids::kinds::ProfileKind;
@@ -119,11 +121,22 @@ pub async fn save_profile(
         None => quarry_core::ids::Id::new(),
     };
 
-    state
+    // Ordering stamp = request arrival (WS17.P1). An ignored save means a newer
+    // capture or delete already holds the profile; the caller still gets the id,
+    // as before, and the edge logs the class only.
+    let outcome = state
         .profiles
-        .save(&claims.org_id, &profile_id, &req.snapshot)
+        .save(
+            &claims.org_id,
+            &profile_id,
+            &req.snapshot,
+            &SaveMeta::now(Some(claims.actor_id().to_owned())),
+        )
         .await
         .map_err(|e| err_response(&request_id, e))?;
+    if !outcome.is_stored() {
+        tracing::info!(reason = outcome.reason_class(), "profile save ignored");
+    }
 
     Ok(Json(Envelope::ok(
         request_id,
@@ -220,15 +233,14 @@ pub async fn update_profile(
     }
 
     // A profile that predates this metadata (or was never explicitly
-    // named) still exists via its snapshot — `load` confirms it's real
+    // named) still exists via its snapshot — `exists` confirms it's real
     // before we allow a rename, rather than silently creating a
     // metadata-only row for an id nobody asked for.
     let exists = state
         .profiles
-        .load(&claims.org_id, &parsed)
+        .exists(&claims.org_id, &parsed)
         .await
-        .map_err(|e| err_response(&request_id, e))?
-        .is_some();
+        .map_err(|e| err_response(&request_id, e))?;
     if !exists {
         return Err(err_response(
             &request_id,

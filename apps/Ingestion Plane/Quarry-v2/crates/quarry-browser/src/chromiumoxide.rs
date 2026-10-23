@@ -1653,11 +1653,22 @@ impl ChromiumoxideDriver {
         let Some((_tab_id, page)) = self.active_tab_page(session).await else {
             return Ok(());
         };
+        // Ordering stamp = capture START (WS17.P1): a capture that began before a
+        // delete or a newer capture must not overwrite either.
+        let captured_at = chrono::Utc::now();
         let mut snapshot = with_deadline(Op::ProfileCapture, capture_snapshot(&page)).await?;
         snapshot.viewport = session.lease.viewport.map(session_viewport);
-        store
-            .save(&session.lease.org_id, &session.lease.profile_id, &snapshot)
-            .await
+        let meta = crate::session::SaveMeta {
+            saved_at: captured_at,
+            owner: None,
+        };
+        let outcome = store
+            .save(&session.lease.org_id, &session.lease.profile_id, &snapshot, &meta)
+            .await?;
+        if !outcome.is_stored() {
+            tracing::info!(reason = outcome.reason_class(), "browser profile capture ignored");
+        }
+        Ok(())
     }
 }
 
@@ -7054,7 +7065,7 @@ mod tests {
             timezone: None,
         };
         profile_store
-            .save(&lease.org_id, &profile_id, &snapshot)
+            .save(&lease.org_id, &profile_id, &snapshot, &crate::session::SaveMeta::now(None))
             .await
             .expect("seed profile snapshot");
 

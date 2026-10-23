@@ -543,6 +543,9 @@ impl BrowserDriver for KernelDriver {
         // lose the capture than block release for the default 60s when
         // Kernel hangs. Release MUST be fast because callers hold the
         // lease until it returns.
+        // Ordering stamp = capture START (WS17.P1): a capture that began before a
+        // delete or a newer capture must not overwrite either.
+        let captured_at = chrono::Utc::now();
         let captured = if self.profiles.is_some() {
             let id_opt = self.state.lock().await.browser_id.clone();
             if let Some(id) = id_opt {
@@ -583,11 +586,21 @@ impl BrowserDriver for KernelDriver {
         drop(state);
 
         if let (Some(store), Some(snapshot)) = (&self.profiles, captured) {
-            if let Err(e) = store
-                .save(&session.lease.org_id, &session.lease.profile_id, &snapshot)
+            let meta = crate::session::SaveMeta {
+                saved_at: captured_at,
+                owner: None,
+            };
+            match store
+                .save(&session.lease.org_id, &session.lease.profile_id, &snapshot, &meta)
                 .await
             {
-                tracing::warn!(error_class = e.code.wire_name(), "kernel session capture save failed");
+                Ok(outcome) if !outcome.is_stored() => {
+                    tracing::info!(reason = outcome.reason_class(), "kernel session capture ignored");
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(error_class = e.code.wire_name(), "kernel session capture save failed");
+                }
             }
         }
         Ok(())
@@ -1112,6 +1125,7 @@ mod tests {
                     user_agent: Some("CustomUA/1.0".into()),
                     ..Default::default()
                 },
+                &crate::session::SaveMeta::now(None),
             )
             .await
             .unwrap();

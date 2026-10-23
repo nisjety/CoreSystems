@@ -7,8 +7,11 @@
 //! `quarry:profile:{org_id}:{profile_id}` with a 1-hour TTL.
 //!
 //! Read-through: `load` checks Redis first; on miss it falls back to
-//! the inner store and populates the cache. Write-through: `save`
-//! and `delete` keep Redis in sync. `list` is pass-through (we don't
+//! the inner store and populates the cache. Invalidate-on-write (WS17.P1):
+//! `save` and `delete` drop the Redis key after the inner store has
+//! answered, and never write a payload themselves. A write-through `set_ex`
+//! after an ignored (stale or tombstoned) save would cache a payload the
+//! inner store had just refused, for a full TTL. `list` is pass-through (we don't
 //! cache the org's id-set because it can grow unboundedly and is
 //! cheap to compute against Postgres anyway).
 //!
@@ -24,7 +27,9 @@ use async_trait::async_trait;
 use redis::aio::ConnectionManager;
 use redis::AsyncCommands;
 
-use quarry_browser::session::{ProfileMetadata, ProfileStore, ProfileSummary, SessionSnapshot};
+use quarry_browser::session::{
+    ProfileMetadata, ProfileStore, ProfileSummary, SaveMeta, SaveOutcome, SessionSnapshot,
+};
 use quarry_core::error::QuarryResult;
 use quarry_core::ids::kinds::ProfileKind;
 
@@ -82,27 +87,17 @@ impl ProfileStore for CachedProfileStore {
         org_id: &str,
         profile_id: &ProfileKind,
         snapshot: &SessionSnapshot,
-    ) -> QuarryResult<()> {
-        // Write-through: authoritative inner first; Redis second.
-        // Order matters — if Redis succeeds but Postgres fails, the
-        // cache holds a value that doesn't exist in durable storage.
-        // Reversing the order keeps consistency on partial failure.
-        self.inner.save(org_id, profile_id, snapshot).await?;
-        let json = match serde_json::to_vec(snapshot) {
-            Ok(b) => b,
-            Err(e) => {
-                // Failing to cache is non-fatal — the inner write
-                // already succeeded. Log + return Ok.
-                // zdr-log-ok: the profile cache only ever holds persistent profiles, which a ZDR request is refused (agent_persistent_profile); this is a Redis or serde error, not page content
-                tracing::warn!(error = %e, "profile snapshot encode for Redis failed");
-                return Ok(());
-            }
-        };
+        meta: &SaveMeta,
+    ) -> QuarryResult<SaveOutcome> {
+        // The inner store is authoritative and decides whether this save is
+        // stored (it may ignore a stale or tombstoned one). Inner first: if
+        // Redis were touched first and Postgres then failed, the cache would
+        // hold a value that is not durable. Afterwards only the key is
+        // dropped, so the next load reads the inner store's answer.
+        let outcome = self.inner.save(org_id, profile_id, snapshot, meta).await?;
         let mut redis = self.redis.clone();
-        let _: redis::RedisResult<()> = redis
-            .set_ex(cache_key(org_id, profile_id), json, self.ttl.as_secs())
-            .await;
-        Ok(())
+        let _: redis::RedisResult<()> = redis.del(cache_key(org_id, profile_id)).await;
+        Ok(outcome)
     }
 
     async fn load(
@@ -141,6 +136,12 @@ impl ProfileStore for CachedProfileStore {
         let mut redis = self.redis.clone();
         let _: redis::RedisResult<()> = redis.del(cache_key(org_id, profile_id)).await;
         Ok(())
+    }
+
+    async fn exists(&self, org_id: &str, profile_id: &ProfileKind) -> QuarryResult<bool> {
+        // Existence is not cached: it is a cheap inner probe and the cache
+        // holds snapshots, not row presence.
+        self.inner.exists(org_id, profile_id).await
     }
 
     async fn list(&self, org_id: &str) -> QuarryResult<Vec<ProfileSummary>> {
@@ -261,8 +262,9 @@ mod tests {
             org_id: &str,
             profile_id: &ProfileKind,
             snapshot: &SessionSnapshot,
-        ) -> QuarryResult<()> {
-            self.inner.save(org_id, profile_id, snapshot).await
+            meta: &SaveMeta,
+        ) -> QuarryResult<SaveOutcome> {
+            self.inner.save(org_id, profile_id, snapshot, meta).await
         }
         async fn load(
             &self,
@@ -336,7 +338,7 @@ mod tests {
         // guaranteed hit regardless of the read-through path under test.
         // Seeding `inner` directly leaves the cache genuinely cold so the
         // first `store.load()` below exercises a real cache miss.
-        inner.save("org_a", &id, &snap).await.unwrap();
+        inner.save("org_a", &id, &snap, &SaveMeta::now(None)).await.unwrap();
         let _ = store.load("org_a", &id).await.unwrap();
         let _ = store.load("org_a", &id).await.unwrap();
         let _ = store.load("org_a", &id).await.unwrap();
@@ -357,7 +359,7 @@ mod tests {
         // cold cache makes the first `store.load()` a real, countable
         // inner hit instead of an immediate write-through cache hit.
         inner
-            .save("org_a", &id, &SessionSnapshot::default())
+            .save("org_a", &id, &SessionSnapshot::default(), &SaveMeta::now(None))
             .await
             .unwrap();
         let _ = store.load("org_a", &id).await.unwrap();
@@ -370,6 +372,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cache_is_invalidated_not_populated_on_ignored_save() {
+        let Some(redis) = redis_manager().await else {
+            eprintln!("skipping: REDIS_URL not set");
+            return;
+        };
+        let inner = Arc::new(InMemoryProfileStore::new());
+        let store = CachedProfileStore::new(inner.clone(), redis);
+        let id: ProfileKind = quarry_core::ids::Id::new();
+        let now = chrono::Utc::now();
+        // A newer capture reaches the inner store first.
+        let newer = SessionSnapshot {
+            user_agent: Some("newer".into()),
+            ..SessionSnapshot::default()
+        };
+        inner
+            .save("org_a", &id, &newer, &SaveMeta { saved_at: now, owner: None })
+            .await
+            .unwrap();
+        // An older capture arrives through the cache wrapper and is ignored.
+        let older = SessionSnapshot {
+            user_agent: Some("older".into()),
+            ..SessionSnapshot::default()
+        };
+        let outcome = store
+            .save(
+                "org_a",
+                &id,
+                &older,
+                &SaveMeta {
+                    saved_at: now - chrono::Duration::seconds(10),
+                    owner: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome, SaveOutcome::IgnoredStale);
+        // The ignored payload must not be cached: the next load reads the newer row.
+        let loaded = store.load("org_a", &id).await.unwrap().unwrap();
+        assert_eq!(loaded.user_agent.as_deref(), Some("newer"));
+    }
+
+    #[tokio::test]
     async fn metadata_methods_pass_through_to_inner_uncached() {
         let Some(redis) = redis_manager().await else {
             eprintln!("skipping: REDIS_URL not set");
@@ -379,7 +423,7 @@ mod tests {
         let store = CachedProfileStore::new(inner.clone(), redis);
         let id: ProfileKind = quarry_core::ids::Id::new();
         store
-            .save("org_a", &id, &SessionSnapshot::default())
+            .save("org_a", &id, &SessionSnapshot::default(), &SaveMeta::now(None))
             .await
             .unwrap();
 

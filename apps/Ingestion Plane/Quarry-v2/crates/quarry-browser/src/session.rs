@@ -138,6 +138,65 @@ pub struct ProfileSummary {
     pub scope: ProfileScope,
 }
 
+/// Ordering metadata for one `ProfileStore::save`. `saved_at` is the START
+/// time of the capture (not the commit time): an older capture never replaces
+/// a newer one, and a capture that started before a delete cannot resurrect
+/// the profile. `owner` is stamped on INSERT only (WS17.P1; the owner check
+/// itself is WS17.P2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SaveMeta {
+    pub saved_at: chrono::DateTime<chrono::Utc>,
+    pub owner: Option<String>,
+}
+
+impl SaveMeta {
+    /// Ordering metadata for a save whose capture starts now.
+    pub fn now(owner: Option<String>) -> Self {
+        Self {
+            saved_at: chrono::Utc::now(),
+            owner,
+        }
+    }
+}
+
+/// Largest amount a `saved_at` may run ahead of the store's clock. Pods can
+/// disagree about the time; a far-future stamp would otherwise lock a profile
+/// against every later save.
+pub const SAVED_AT_MAX_FUTURE_SKEW_S: i64 = 5;
+
+/// `saved_at` clamped to `now + SAVED_AT_MAX_FUTURE_SKEW_S`.
+pub fn clamp_saved_at(
+    saved_at: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> chrono::DateTime<chrono::Utc> {
+    saved_at.min(now + chrono::Duration::seconds(SAVED_AT_MAX_FUTURE_SKEW_S))
+}
+
+/// What a `ProfileStore::save` did. An ignored save is not an error: the
+/// store kept a newer capture (`IgnoredStale`) or a newer delete
+/// (`IgnoredByTombstone`). Callers log `reason_class()` and carry on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaveOutcome {
+    Stored { rev: i64 },
+    IgnoredStale,
+    IgnoredByTombstone,
+}
+
+impl SaveOutcome {
+    pub fn is_stored(self) -> bool {
+        matches!(self, Self::Stored { .. })
+    }
+
+    /// A short class for logs. Never carries a profile id or any payload.
+    pub fn reason_class(self) -> &'static str {
+        match self {
+            Self::Stored { .. } => "stored",
+            Self::IgnoredStale => "stale",
+            Self::IgnoredByTombstone => "tombstone",
+        }
+    }
+}
+
 /// Tenant-scoped profile storage. Every method takes the verified
 /// `org_id` so the store can never return another tenant's session state
 /// (cookies, storage, viewport). The trait is intentionally a leaky
@@ -150,7 +209,8 @@ pub trait ProfileStore: Send + Sync {
         org_id: &str,
         profile_id: &ProfileKind,
         snapshot: &SessionSnapshot,
-    ) -> QuarryResult<()>;
+        meta: &SaveMeta,
+    ) -> QuarryResult<SaveOutcome>;
     async fn load(
         &self,
         org_id: &str,
@@ -180,6 +240,12 @@ pub trait ProfileStore: Send + Sync {
         org_id: &str,
         profile_id: &ProfileKind,
     ) -> QuarryResult<Option<ProfileMetadata>>;
+
+    /// Whether a snapshot row exists for this profile. Stores that can answer
+    /// without decoding the snapshot override this.
+    async fn exists(&self, org_id: &str, profile_id: &ProfileKind) -> QuarryResult<bool> {
+        Ok(self.load(org_id, profile_id).await?.is_some())
+    }
 }
 
 pub struct InMemoryProfileStore {
@@ -191,6 +257,25 @@ pub struct InMemoryProfileStore {
     /// Same composite-key scheme, kept as an independent map so naming
     /// or rescoping a profile never touches its captured snapshot.
     metadata: tokio::sync::RwLock<std::collections::HashMap<String, ProfileMetadata>>,
+    /// Ordering state (WS17.P1), the in-memory mirror of `saved_at`, `rev`,
+    /// `owner_user_id` and `quarry_profile_tombstones`.
+    order: tokio::sync::RwLock<OrderBook>,
+}
+
+/// Ordering state for one `(org, profile)` key.
+#[derive(Debug, Clone, Default)]
+struct RowOrder {
+    saved_at: Option<chrono::DateTime<chrono::Utc>>,
+    rev: i64,
+    owner: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct OrderBook {
+    rows: std::collections::HashMap<String, RowOrder>,
+    /// `deleted_at` per key. Tombstones never expire in memory (dev and test
+    /// only). The Postgres store sweeps them after 7 days.
+    tombstones: std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>,
 }
 
 impl InMemoryProfileStore {
@@ -198,6 +283,7 @@ impl InMemoryProfileStore {
         Self {
             store: tokio::sync::RwLock::new(std::collections::HashMap::new()),
             metadata: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+            order: tokio::sync::RwLock::new(OrderBook::default()),
         }
     }
 
@@ -219,12 +305,41 @@ impl ProfileStore for InMemoryProfileStore {
         org_id: &str,
         profile_id: &ProfileKind,
         snapshot: &SessionSnapshot,
-    ) -> QuarryResult<()> {
-        self.store
-            .write()
-            .await
-            .insert(Self::key(org_id, profile_id), snapshot.clone());
-        Ok(())
+        meta: &SaveMeta,
+    ) -> QuarryResult<SaveOutcome> {
+        let key = Self::key(org_id, profile_id);
+        let saved_at = clamp_saved_at(meta.saved_at, chrono::Utc::now());
+        // Lock order: order book, then store (`delete` takes them in this order).
+        let mut book = self.order.write().await;
+        if book
+            .tombstones
+            .get(&key)
+            .is_some_and(|deleted_at| *deleted_at >= saved_at)
+        {
+            return Ok(SaveOutcome::IgnoredByTombstone);
+        }
+        if book
+            .rows
+            .get(&key)
+            .and_then(|row| row.saved_at)
+            .is_some_and(|prev| prev >= saved_at)
+        {
+            return Ok(SaveOutcome::IgnoredStale);
+        }
+        let existed = {
+            let mut store = self.store.write().await;
+            let existed = store.contains_key(&key);
+            store.insert(key.clone(), snapshot.clone());
+            existed
+        };
+        let row = book.rows.entry(key).or_default();
+        if !existed {
+            // Owner is stamped on INSERT only, like the SQL upsert.
+            row.owner = meta.owner.clone();
+        }
+        row.saved_at = Some(saved_at);
+        row.rev += 1;
+        Ok(SaveOutcome::Stored { rev: row.rev })
     }
 
     async fn load(
@@ -242,9 +357,24 @@ impl ProfileStore for InMemoryProfileStore {
 
     async fn delete(&self, org_id: &str, profile_id: &ProfileKind) -> QuarryResult<()> {
         let key = Self::key(org_id, profile_id);
+        let now = chrono::Utc::now();
+        let mut book = self.order.write().await;
+        let tomb = book.tombstones.entry(key.clone()).or_insert(now);
+        if *tomb < now {
+            *tomb = now;
+        }
+        book.rows.remove(&key);
         self.store.write().await.remove(&key);
         self.metadata.write().await.remove(&key);
         Ok(())
+    }
+
+    async fn exists(&self, org_id: &str, profile_id: &ProfileKind) -> QuarryResult<bool> {
+        Ok(self
+            .store
+            .read()
+            .await
+            .contains_key(&Self::key(org_id, profile_id)))
     }
 
     async fn list(&self, org_id: &str) -> QuarryResult<Vec<ProfileSummary>> {
@@ -353,7 +483,7 @@ mod tests {
             timezone: Some("America/New_York".into()),
         };
 
-        store.save("org_a", &profile_id, &snapshot).await.unwrap();
+        store.save("org_a", &profile_id, &snapshot, &SaveMeta::now(None)).await.unwrap();
         let loaded = store.load("org_a", &profile_id).await.unwrap().unwrap();
 
         assert_eq!(loaded.cookies.len(), 1);
@@ -389,7 +519,7 @@ mod tests {
             locale: None,
             timezone: None,
         };
-        store.save("org_a", &pid, &snapshot).await.unwrap();
+        store.save("org_a", &pid, &snapshot, &SaveMeta::now(None)).await.unwrap();
 
         // Cross-tenant load: must miss.
         assert!(store.load("org_b", &pid).await.unwrap().is_none());
@@ -414,7 +544,7 @@ mod tests {
         let profile_id: ProfileKind = Id::new();
         let snapshot = SessionSnapshot::default();
 
-        store.save("org_a", &profile_id, &snapshot).await.unwrap();
+        store.save("org_a", &profile_id, &snapshot, &SaveMeta::now(None)).await.unwrap();
         assert!(store.load("org_a", &profile_id).await.unwrap().is_some());
 
         store.delete("org_a", &profile_id).await.unwrap();
@@ -428,11 +558,11 @@ mod tests {
         let p2: ProfileKind = Id::new();
 
         store
-            .save("org_a", &p1, &SessionSnapshot::default())
+            .save("org_a", &p1, &SessionSnapshot::default(), &SaveMeta::now(None))
             .await
             .unwrap();
         store
-            .save("org_a", &p2, &SessionSnapshot::default())
+            .save("org_a", &p2, &SessionSnapshot::default(), &SaveMeta::now(None))
             .await
             .unwrap();
 
@@ -445,7 +575,7 @@ mod tests {
         let store = InMemoryProfileStore::new();
         let profile_id: ProfileKind = Id::new();
         store
-            .save("org_a", &profile_id, &SessionSnapshot::default())
+            .save("org_a", &profile_id, &SessionSnapshot::default(), &SaveMeta::now(None))
             .await
             .unwrap();
 
@@ -479,11 +609,11 @@ mod tests {
         let named: ProfileKind = Id::new();
         let unnamed: ProfileKind = Id::new();
         store
-            .save("org_a", &named, &SessionSnapshot::default())
+            .save("org_a", &named, &SessionSnapshot::default(), &SaveMeta::now(None))
             .await
             .unwrap();
         store
-            .save("org_a", &unnamed, &SessionSnapshot::default())
+            .save("org_a", &unnamed, &SessionSnapshot::default(), &SaveMeta::now(None))
             .await
             .unwrap();
         store
@@ -520,7 +650,7 @@ mod tests {
         let store = InMemoryProfileStore::new();
         let pid: ProfileKind = Id::new();
         store
-            .save("org_a", &pid, &SessionSnapshot::default())
+            .save("org_a", &pid, &SessionSnapshot::default(), &SaveMeta::now(None))
             .await
             .unwrap();
         store
@@ -543,7 +673,7 @@ mod tests {
         let store = InMemoryProfileStore::new();
         let pid: ProfileKind = Id::new();
         store
-            .save("org_a", &pid, &SessionSnapshot::default())
+            .save("org_a", &pid, &SessionSnapshot::default(), &SaveMeta::now(None))
             .await
             .unwrap();
         store
@@ -611,6 +741,145 @@ mod tests {
         let restored: SessionSnapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.cookies[0].name, "sid");
         assert!(restored.viewport.unwrap().is_mobile);
+    }
+
+    fn meta_at(saved_at: chrono::DateTime<chrono::Utc>) -> SaveMeta {
+        SaveMeta { saved_at, owner: None }
+    }
+
+    #[tokio::test]
+    async fn save_with_older_saved_at_is_ignored() {
+        let store = InMemoryProfileStore::new();
+        let pid: ProfileKind = Id::new();
+        let now = chrono::Utc::now();
+        let newer = SessionSnapshot {
+            user_agent: Some("newer".into()),
+            ..SessionSnapshot::default()
+        };
+        let older = SessionSnapshot {
+            user_agent: Some("older".into()),
+            ..SessionSnapshot::default()
+        };
+        let outcome = store.save("org_a", &pid, &newer, &meta_at(now)).await.unwrap();
+        assert!(outcome.is_stored());
+        let stale = store
+            .save("org_a", &pid, &older, &meta_at(now - chrono::Duration::seconds(10)))
+            .await
+            .unwrap();
+        assert_eq!(stale, SaveOutcome::IgnoredStale);
+        let loaded = store.load("org_a", &pid).await.unwrap().unwrap();
+        assert_eq!(loaded.user_agent.as_deref(), Some("newer"));
+    }
+
+    #[tokio::test]
+    async fn save_after_delete_with_older_saved_at_is_ignored_by_tombstone() {
+        let store = InMemoryProfileStore::new();
+        let pid: ProfileKind = Id::new();
+        let capture_started = chrono::Utc::now();
+        store
+            .save("org_a", &pid, &SessionSnapshot::default(), &meta_at(capture_started))
+            .await
+            .unwrap();
+        store.delete("org_a", &pid).await.unwrap();
+        let outcome = store
+            .save("org_a", &pid, &SessionSnapshot::default(), &meta_at(capture_started))
+            .await
+            .unwrap();
+        assert_eq!(outcome, SaveOutcome::IgnoredByTombstone);
+        assert!(store.load("org_a", &pid).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn save_after_delete_with_newer_saved_at_creates_a_new_row() {
+        let store = InMemoryProfileStore::new();
+        let pid: ProfileKind = Id::new();
+        store
+            .save("org_a", &pid, &SessionSnapshot::default(), &SaveMeta::now(None))
+            .await
+            .unwrap();
+        store.delete("org_a", &pid).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        let outcome = store
+            .save("org_a", &pid, &SessionSnapshot::default(), &SaveMeta::now(None))
+            .await
+            .unwrap();
+        assert!(outcome.is_stored());
+        assert!(store.load("org_a", &pid).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn saved_at_is_clamped_to_now_plus_5s() {
+        let store = InMemoryProfileStore::new();
+        let pid: ProfileKind = Id::new();
+        let far_future = chrono::Utc::now() + chrono::Duration::hours(1);
+        let outcome = store
+            .save("org_a", &pid, &SessionSnapshot::default(), &meta_at(far_future))
+            .await
+            .unwrap();
+        assert!(outcome.is_stored());
+        // The stored stamp is now + 5 s, so a save stamped now + 1 s is older.
+        let just_ahead = chrono::Utc::now() + chrono::Duration::seconds(1);
+        let stale = store
+            .save("org_a", &pid, &SessionSnapshot::default(), &meta_at(just_ahead))
+            .await
+            .unwrap();
+        assert_eq!(stale, SaveOutcome::IgnoredStale);
+    }
+
+    #[tokio::test]
+    async fn rev_increments_only_on_stored() {
+        let store = InMemoryProfileStore::new();
+        let pid: ProfileKind = Id::new();
+        let now = chrono::Utc::now();
+        let first = store
+            .save("org_a", &pid, &SessionSnapshot::default(), &meta_at(now))
+            .await
+            .unwrap();
+        assert_eq!(first, SaveOutcome::Stored { rev: 1 });
+        let stale = store
+            .save("org_a", &pid, &SessionSnapshot::default(), &meta_at(now - chrono::Duration::seconds(10)))
+            .await
+            .unwrap();
+        assert_eq!(stale, SaveOutcome::IgnoredStale);
+        let second = store
+            .save("org_a", &pid, &SessionSnapshot::default(), &meta_at(now + chrono::Duration::seconds(1)))
+            .await
+            .unwrap();
+        assert_eq!(second, SaveOutcome::Stored { rev: 2 });
+    }
+
+    #[tokio::test]
+    async fn owner_is_stamped_on_insert_only() {
+        let store = InMemoryProfileStore::new();
+        let pid: ProfileKind = Id::new();
+        let now = chrono::Utc::now();
+        store
+            .save("org_a", &pid, &SessionSnapshot::default(), &SaveMeta { saved_at: now, owner: Some("user_1".into()) })
+            .await
+            .unwrap();
+        store
+            .save("org_a", &pid, &SessionSnapshot::default(), &SaveMeta { saved_at: now + chrono::Duration::seconds(1), owner: Some("user_2".into()) })
+            .await
+            .unwrap();
+        let book = store.order.read().await;
+        let row = book.rows.get(&InMemoryProfileStore::key("org_a", &pid)).unwrap();
+        assert_eq!(row.owner.as_deref(), Some("user_1"));
+        assert_eq!(row.rev, 2);
+    }
+
+    #[tokio::test]
+    async fn exists_matches_load() {
+        let store = InMemoryProfileStore::new();
+        let pid: ProfileKind = Id::new();
+        assert!(!store.exists("org_a", &pid).await.unwrap());
+        store
+            .save("org_a", &pid, &SessionSnapshot::default(), &SaveMeta::now(None))
+            .await
+            .unwrap();
+        assert!(store.exists("org_a", &pid).await.unwrap());
+        assert!(!store.exists("org_b", &pid).await.unwrap());
+        store.delete("org_a", &pid).await.unwrap();
+        assert!(!store.exists("org_a", &pid).await.unwrap());
     }
 }
 

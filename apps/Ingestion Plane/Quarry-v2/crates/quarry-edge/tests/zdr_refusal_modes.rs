@@ -28,7 +28,7 @@ mod support;
 mod zdr_harness;
 
 use quarry_browser::session::{
-    InMemoryProfileStore, ProfileMetadata, ProfileScope, ProfileStore, SessionSnapshot,
+    InMemoryProfileStore, ProfileMetadata, ProfileScope, ProfileStore, SaveMeta, SessionSnapshot,
 };
 use quarry_core::ids::kinds::ProfileKind;
 use quarry_edge::state::AppState;
@@ -320,7 +320,7 @@ async fn observe_mode_serves_a_zdr_org_as_before_and_logs_one_content_free_event
     let profiles = Arc::new(InMemoryProfileStore::new());
     let held: ProfileKind = quarry_core::ids::Id::new();
     profiles
-        .save(ZDR_ORG, &held, &SessionSnapshot::default())
+        .save(ZDR_ORG, &held, &SessionSnapshot::default(), &SaveMeta::now(None))
         .await
         .expect("seed a profile the organization already holds");
     let harness = edge(control.uri(), false, profiles.clone()).await;
@@ -479,7 +479,7 @@ async fn enforced_zdr_org_is_refused_every_durable_write_and_control_plane_sees_
     let profiles = Arc::new(InMemoryProfileStore::new());
     let held: ProfileKind = quarry_core::ids::Id::new();
     profiles
-        .save(ZDR_ORG, &held, &SessionSnapshot::default())
+        .save(ZDR_ORG, &held, &SessionSnapshot::default(), &SaveMeta::now(None))
         .await
         .expect("seed a profile the organization already holds");
     profiles
@@ -631,7 +631,7 @@ async fn enforced_zdr_org_can_still_wind_down() {
     let profiles = Arc::new(InMemoryProfileStore::new());
     let held: ProfileKind = quarry_core::ids::Id::new();
     profiles
-        .save(ZDR_ORG, &held, &SessionSnapshot::default())
+        .save(ZDR_ORG, &held, &SessionSnapshot::default(), &SaveMeta::now(None))
         .await
         .expect("seed a profile the organization already holds");
     let harness = edge(control.uri(), true, profiles).await;

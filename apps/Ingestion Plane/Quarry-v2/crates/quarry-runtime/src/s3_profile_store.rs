@@ -11,7 +11,9 @@
 
 use async_trait::async_trait;
 
-use quarry_browser::session::{ProfileMetadata, ProfileStore, ProfileSummary, SessionSnapshot};
+use quarry_browser::session::{
+    ProfileMetadata, ProfileStore, ProfileSummary, SaveMeta, SaveOutcome, SessionSnapshot,
+};
 use quarry_core::error::{ErrorCode, QuarryError};
 use quarry_core::ids::kinds::ProfileKind;
 use quarry_core::QuarryResult;
@@ -70,7 +72,12 @@ impl ProfileStore for S3ProfileStore {
         org_id: &str,
         profile_id: &ProfileKind,
         snapshot: &SessionSnapshot,
-    ) -> QuarryResult<()> {
+        meta: &SaveMeta,
+    ) -> QuarryResult<SaveOutcome> {
+        // S3 keeps no ordering state, so `meta` is not consulted: every save is
+        // stored and `rev` is reported as 0. Ordered saves and tombstones need
+        // the Postgres store (WS17.P1). S3 is archival, not the live path.
+        let _ = meta;
         let body = serde_json::to_vec(snapshot).map_err(|e| {
             QuarryError::new(ErrorCode::Internal, format!("snapshot encode failed: {e}"))
         })?;
@@ -96,7 +103,7 @@ impl ProfileStore for S3ProfileStore {
                 QuarryError::new(ErrorCode::Internal, format!("s3 put profile index: {e}"))
             })?;
 
-        Ok(())
+        Ok(SaveOutcome::Stored { rev: 0 })
     }
 
     async fn load(
