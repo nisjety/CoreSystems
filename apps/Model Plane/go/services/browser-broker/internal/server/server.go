@@ -138,6 +138,7 @@ func (s *Server) AcquireGrant(ctx context.Context, req *AcquireGrantRequest) (*A
 		return nil, mapErr(err)
 	}
 	telemetry.GrantsIssuedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "created")))
+	logGrantIssued(ctx, g)
 	return &AcquireGrantResponse{
 		GrantId:            g.ID,
 		Endpoint:           s.baseURL + "/grants/" + g.ID,
@@ -175,6 +176,7 @@ func (s *Server) RevokeGrant(ctx context.Context, req *RevokeGrantRequest) (*Rev
 		return nil, mapErr(err)
 	}
 	telemetry.GrantsRevokedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "revoked")))
+	logGrantRevoked(ctx, req.GetGrantId())
 	return &RevokeGrantResponse{Revoked: true}, nil
 }
 
