@@ -42,6 +42,9 @@ impl PostgresStepReceiptStore {
             .try_get("observation")
             .map_err(|error| db_err("decode observation", error))?;
         Ok(StepReceipt {
+            redaction_rule_version: row
+                .try_get::<Option<String>, _>("redaction_rule_version")
+                .map_err(|error| db_err("decode redaction_rule_version", error))?,
             cost_source: row
                 .try_get::<Option<String>, _>("cost_source")
                 .map_err(|error| db_err("decode cost_source", error))?
@@ -178,8 +181,8 @@ impl StepReceiptStore for PostgresStepReceiptStore {
             "INSERT INTO quarry_step_receipts
              (receipt_id, run_id, org_id, actor_id, step, started_at, finished_at, action,
               outcome, observation, correction_of, cost_micro_usd, initiated_by, control_epoch,
-              initiated_agent, cost_source)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+              initiated_agent, cost_source, redaction_rule_version)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
              ON CONFLICT (receipt_id) DO NOTHING",
         )
         .bind(&receipt.receipt_id)
@@ -207,6 +210,7 @@ impl StepReceiptStore for PostgresStepReceiptStore {
                 .ok()
                 .and_then(|value| value.as_str().map(str::to_owned))
         }))
+        .bind(&receipt.redaction_rule_version)
         .execute(&self.pool)
         .await
         .map_err(|error| db_err("append receipt", error))?;
@@ -227,7 +231,8 @@ impl StepReceiptStore for PostgresStepReceiptStore {
         let rows = sqlx::query(
             "SELECT receipt_id, run_id, org_id, actor_id, step, started_at, finished_at,
                     action, outcome, observation, correction_of, cost_micro_usd,
-                    initiated_by, control_epoch, initiated_agent, cost_source
+                    initiated_by, control_epoch, initiated_agent, cost_source,
+                    redaction_rule_version
              FROM quarry_step_receipts
              WHERE org_id = $1 AND run_id = $2
              ORDER BY step ASC, finished_at ASC",
@@ -255,7 +260,8 @@ impl StepReceiptStore for PostgresStepReceiptStore {
         let rows = sqlx::query(
             "SELECT receipt_id, run_id, org_id, actor_id, step, started_at, finished_at,
                     action, outcome, observation, correction_of, cost_micro_usd,
-                    initiated_by, control_epoch, initiated_agent, cost_source
+                    initiated_by, control_epoch, initiated_agent, cost_source,
+                    redaction_rule_version
              FROM quarry_step_receipts
              WHERE org_id = $1 AND actor_id = $2 AND run_id = $3
              ORDER BY step ASC, finished_at ASC",
@@ -273,7 +279,8 @@ impl StepReceiptStore for PostgresStepReceiptStore {
         let row = sqlx::query(
             "SELECT receipt_id, run_id, org_id, actor_id, step, started_at, finished_at,
                     action, outcome, observation, correction_of, cost_micro_usd,
-                    initiated_by, control_epoch, initiated_agent, cost_source
+                    initiated_by, control_epoch, initiated_agent, cost_source,
+                    redaction_rule_version
              FROM quarry_step_receipts WHERE receipt_id = $1",
         )
         .bind(receipt_id)
@@ -750,6 +757,7 @@ mod tests {
             include_str!("../migrations/0010_step_receipt_initiator_epoch.sql"),
             include_str!("../migrations/0011_step_receipt_initiator_agent.sql"),
             include_str!("../migrations/0012_step_receipt_cost_source.sql"),
+            include_str!("../migrations/0013_step_receipt_redaction_version.sql"),
         ] {
             (&pool)
                 .execute(sql)
@@ -766,12 +774,12 @@ mod tests {
 
         // Each column exists once, and its CHECK still holds after the second apply.
         let columns: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM information_schema.columns              WHERE table_schema = current_schema() AND table_name = 'quarry_step_receipts'              AND column_name IN ('initiated_by', 'control_epoch', 'initiated_agent', 'cost_source')",
+            "SELECT count(*) FROM information_schema.columns              WHERE table_schema = current_schema() AND table_name = 'quarry_step_receipts'              AND column_name IN ('initiated_by', 'control_epoch', 'initiated_agent', 'cost_source', 'redaction_rule_version')",
         )
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(columns, 4);
+        assert_eq!(columns, 5);
         for bad in [
             "UPDATE quarry_step_receipts SET initiated_by = 'robot'",
             "UPDATE quarry_step_receipts SET control_epoch = -1",
@@ -783,6 +791,71 @@ mod tests {
                 "the CHECK refuses: {bad}"
             );
         }
+    }
+
+    /// WS12.S3: the rule version a receipt was masked under is stored and read back.
+    #[tokio::test]
+    async fn append_persists_redaction_rule_version() {
+        let Some(pool) = fresh_pool().await else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let store = PostgresStepReceiptStore::new(pool.clone());
+        let run_id: RunKind = Id::new();
+        let stamped = ReceiptBuilder::start(run_id.to_string(), 1)
+            .org_id("org_a")
+            .actor_id("user_a")
+            .redaction_mode(quarry_core::redaction::Mode::Enforce)
+            .complete(action(), None, 0.0);
+        assert_eq!(
+            stamped.redaction_rule_version.as_deref(),
+            Some(quarry_core::redaction::RULE_VERSION)
+        );
+        store.append(stamped.clone()).await.unwrap();
+
+        let listed = store.list_for_org("org_a", &run_id).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            listed[0].redaction_rule_version,
+            stamped.redaction_rule_version
+        );
+        let column: Option<String> = sqlx::query_scalar(
+            "SELECT redaction_rule_version FROM quarry_step_receipts WHERE receipt_id = $1",
+        )
+        .bind(&stamped.receipt_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(column.as_deref(), Some(quarry_core::redaction::RULE_VERSION));
+    }
+
+    /// WS12.S3: a row written before the column existed reads back with no version.
+    #[tokio::test]
+    async fn legacy_null_version_decodes() {
+        use sqlx::Executor;
+
+        let Some(pool) = fresh_pool().await else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let store = PostgresStepReceiptStore::new(pool.clone());
+        let run_id: RunKind = Id::new();
+        let receipt = ReceiptBuilder::start(run_id.to_string(), 1)
+            .org_id("org_a")
+            .actor_id("user_a")
+            .redaction_mode(quarry_core::redaction::Mode::Enforce)
+            .complete(action(), None, 0.0);
+        store.append(receipt.clone()).await.unwrap();
+        // A legacy row has no stamp.
+        (&pool)
+            .execute("UPDATE quarry_step_receipts SET redaction_rule_version = NULL")
+            .await
+            .unwrap();
+        let listed = store.list_for_org("org_a", &run_id).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].redaction_rule_version, None);
+        let by_id = store.get(&receipt.receipt_id).await.unwrap().unwrap();
+        assert_eq!(by_id.redaction_rule_version, None);
     }
 
     /// The expiry's `system` initiator survives the JSON column; an owner's close and a

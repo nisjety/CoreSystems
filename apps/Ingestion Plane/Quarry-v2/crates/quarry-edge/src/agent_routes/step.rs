@@ -69,6 +69,10 @@ pub async fn step(
     let receipt_step = entry.ctx.step;
     let receipt_run_id = entry.run_id.to_string();
     let receipt_action = req.action.clone();
+    // WS12.S3: the kind of the control a typing action goes to, read from the snapshot the
+    // action names. `execute` replaces `ctx.active_snapshot`, so this is read before it runs.
+    let typed_kind =
+        quarry_runtime::observation::typed_field_kind(entry.ctx.active_snapshot.as_ref(), &req.action);
 
     let runner = ObservationRunner {
         browser: state.agent_driver.clone(),
@@ -105,6 +109,7 @@ pub async fn step(
                 .initiator(admitted.initiator, admitted.control_epoch)
                 .agent(admitted.agent.clone())
                 .cost_source(cost_source)
+                .typed_field(typed_kind)
                 .complete_maybe_metadata(metadata_only, receipt_action, Some(obs.clone()), cost_usd);
             if receipt_plan != super::human_browse::ReceiptPlan::Skip {
                 state
@@ -128,6 +133,7 @@ pub async fn step(
                 .agent(admitted.agent.clone())
                 .failed_cost(flat_usd)
                 .cost_source(CostSource::FlatTable)
+                .typed_field(typed_kind)
                 .fail_maybe_metadata(metadata_only, receipt_action, &error);
             if receipt_plan != super::human_browse::ReceiptPlan::Skip {
                 state
@@ -217,6 +223,10 @@ pub(super) async fn execute_ws_action(
     };
     let receipt_step = entry.ctx.step;
     let receipt_action = req.action.clone();
+    // WS12.S3: the kind of the control a typing action goes to, read from the snapshot the
+    // action names. `execute` replaces `ctx.active_snapshot`, so this is read before it runs.
+    let typed_kind =
+        quarry_runtime::observation::typed_field_kind(entry.ctx.active_snapshot.as_ref(), &req.action);
     let receipt_run_id = entry.run_id.to_string();
     let runner = ObservationRunner {
         browser: state.agent_driver.clone(),
@@ -243,6 +253,7 @@ pub(super) async fn execute_ws_action(
                     .actor_id(entry.actor_id.clone())
                     .initiator(admitted.initiator, admitted.control_epoch)
                     .agent(admitted.agent.clone())
+                    .typed_field(typed_kind)
                     .complete_maybe_metadata(
                         metadata_only,
                         receipt_action.clone(),
@@ -267,6 +278,7 @@ pub(super) async fn execute_ws_action(
                     .actor_id(entry.actor_id.clone())
                     .initiator(admitted.initiator, admitted.control_epoch)
                     .agent(admitted.agent.clone())
+                    .typed_field(typed_kind)
                     .fail_maybe_metadata(metadata_only, receipt_action, &error);
                 state.receipts.append(receipt).await?;
             }

@@ -53,6 +53,16 @@ pub async fn list_receipts(
         }
         receipts
     };
+    // WS12.S3: stored evidence is never rewritten, so a receipt written before the masking
+    // existed (or while it was not enforcing) may hold raw text. Every read masks it; a
+    // receipt already stamped with the current rule version passes through untouched.
+    let receipts = receipts
+        .into_iter()
+        .map(|mut receipt| {
+            receipt.redact_for_read();
+            receipt
+        })
+        .collect::<Vec<_>>();
     Ok(Json(Envelope::ok(request_id, receipts)))
 }
 
@@ -82,6 +92,14 @@ pub async fn compile_run_procedure(
             "agent run has no durable receipts",
         ));
     }
+    // A legacy row that holds raw typed text must not become a procedure step: mask on read first.
+    let receipts = receipts
+        .into_iter()
+        .map(|mut receipt| {
+            receipt.redact_for_read();
+            receipt
+        })
+        .collect::<Vec<_>>();
     let procedure_id = body
         .procedure_id
         .filter(|value| !value.trim().is_empty())

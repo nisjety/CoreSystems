@@ -29,7 +29,13 @@ use quarry_core::contracts::{AgentAction, AgentConstraints, BrowserObservation};
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 use quarry_core::ids::kinds::RunKind;
 use quarry_core::lease::BrowserViewport;
-use quarry_core::redaction::action::redacted_for_record;
+use quarry_core::redaction::action::{
+    record_policy as process_record_policy, redact_observation_durable, redacted_for_human_receipt,
+    redacted_for_record, RecordBranch, RecordPolicy,
+};
+use quarry_core::redaction::{
+    self, redact_text_with, FieldKind, Mode, Profile, Tally, RULE_VERSION,
+};
 use quarry_core::zdr::ZdrMode;
 
 use crate::action_cost::CostSource;
@@ -370,6 +376,70 @@ pub struct StepReceipt {
     /// on a receipt with no recorded source (written before WS6.B, or a skip).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_source: Option<CostSource>,
+    /// The version of the secret-redaction rule set the stored action, observation
+    /// and failure text were masked under (WS12.S3). Absent on a receipt written
+    /// before it existed (the stored text may be raw; every read masks it) and on
+    /// one written while masking was not enforcing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redaction_rule_version: Option<String>,
+}
+
+impl StepReceipt {
+    /// Mask this receipt for a reader, under the process-wide redaction mode and
+    /// receipt text policy (WS12.S3). Stored evidence is never rewritten: a legacy
+    /// row that holds raw text is returned masked.
+    ///
+    /// Idempotent. A receipt stamped with the current [`RULE_VERSION`] is returned
+    /// as it is. A receipt with no stamp may hold raw typed text and an unknown
+    /// control kind, so its ref-addressed typing actions are masked as secrets; a
+    /// receipt stamped with an older version was masked by control kind when it was
+    /// written, so it only passes the `Durable` text rules again.
+    pub fn redact_for_read(&mut self) {
+        self.redact_for_read_with(redaction::mode(), process_record_policy());
+    }
+
+    /// [`Self::redact_for_read`] under an explicit mode and policy.
+    pub fn redact_for_read_with(&mut self, mode: Mode, policy: RecordPolicy) {
+        if self.redaction_rule_version.as_deref() == Some(RULE_VERSION) {
+            return;
+        }
+        let typed = if self.redaction_rule_version.is_none() {
+            None
+        } else {
+            Some(FieldKind::Unknown)
+        };
+        let mut tally = Tally::new();
+        self.action = redacted_for_record(
+            RecordBranch::Typed,
+            &self.action,
+            typed,
+            policy,
+            mode,
+            &mut tally,
+        );
+        self.observation = self
+            .observation
+            .take()
+            .and_then(|observation| redact_observation_durable(&observation, mode, &mut tally));
+        mask_outcome_text(&mut self.outcome, mode, &mut tally);
+        if mode == Mode::Enforce {
+            self.redaction_rule_version = Some(RULE_VERSION.to_owned());
+        }
+    }
+}
+
+/// The free text of an outcome (a failure message, a skip reason) under the
+/// `Durable` text rules.
+fn mask_outcome_text(outcome: &mut StepOutcome, mode: Mode, tally: &mut Tally) {
+    match outcome {
+        StepOutcome::Failed { message, .. } => {
+            *message = redact_text_with(mode, message, Profile::Durable, tally).into_owned();
+        }
+        StepOutcome::Skipped { reason } => {
+            *reason = redact_text_with(mode, reason, Profile::Durable, tally).into_owned();
+        }
+        StepOutcome::Completed { .. } => {}
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -630,6 +700,11 @@ pub struct ReceiptBuilder {
     cost_source: Option<CostSource>,
     /// The flat cost of a failed attempt (the budget charges it; WS6.B).
     failed_cost_micro_usd: u64,
+    /// The kind of the control a typing action went to, read from the snapshot
+    /// before the action ran (WS12.S3). `None` when it is not known.
+    typed_field: Option<FieldKind>,
+    record_policy: RecordPolicy,
+    redaction_mode: Mode,
 }
 
 impl ReceiptBuilder {
@@ -646,7 +721,48 @@ impl ReceiptBuilder {
             agent: None,
             cost_source: None,
             failed_cost_micro_usd: 0,
+            typed_field: None,
+            record_policy: process_record_policy(),
+            redaction_mode: redaction::mode(),
         }
+    }
+
+    /// The kind of the control a typing action went to (`typed_field_kind` on the
+    /// snapshot, read before the action ran). Call before `complete`, `fail` or
+    /// `skip`. Without it a ref-addressed typing action is masked as a secret.
+    pub fn typed_field(mut self, kind: Option<FieldKind>) -> Self {
+        self.typed_field = kind;
+        self
+    }
+
+    /// Which text this receipt keeps (default: the process-wide policy).
+    pub fn record_policy(mut self, policy: RecordPolicy) -> Self {
+        self.record_policy = policy;
+        self
+    }
+
+    /// The redaction mode this receipt is built under (default: the process-wide mode).
+    pub fn redaction_mode(mut self, mode: Mode) -> Self {
+        self.redaction_mode = mode;
+        self
+    }
+
+    /// The action as this builder's receipt may carry it.
+    fn masked_action(&self, action: &AgentAction, tally: &mut Tally) -> AgentAction {
+        redacted_for_record(
+            RecordBranch::Typed,
+            action,
+            self.typed_field,
+            self.record_policy,
+            self.redaction_mode,
+            tally,
+        )
+    }
+
+    /// The stamp: set only when the rules were enforcing, so a receipt written with
+    /// masking off or in shadow is masked again on every read.
+    fn rule_version_stamp(&self) -> Option<String> {
+        (self.redaction_mode == Mode::Enforce).then(|| RULE_VERSION.to_owned())
     }
 
     /// Where the cost of a completed step came from. Call before `complete`.
@@ -690,11 +806,30 @@ impl ReceiptBuilder {
         self
     }
 
+    /// A completed step's receipt. The action is masked by the control kind and the
+    /// text policy, the observation passes the `Durable` rules over every string
+    /// leaf, and the receipt carries the rule version it was masked under.
     pub fn complete(
         self,
         action: AgentAction,
         observation: Option<BrowserObservation>,
         cost_usd: f64,
+    ) -> StepReceipt {
+        let mut tally = Tally::new();
+        let action = self.masked_action(&action, &mut tally);
+        let observation = observation.and_then(|observation| {
+            redact_observation_durable(&observation, self.redaction_mode, &mut tally)
+        });
+        let stamp = self.rule_version_stamp();
+        self.finish_completed(action, observation, cost_usd, stamp)
+    }
+
+    fn finish_completed(
+        self,
+        action: AgentAction,
+        observation: Option<BrowserObservation>,
+        cost_usd: f64,
+        redaction_rule_version: Option<String>,
     ) -> StepReceipt {
         let finished_at = Utc::now();
         let latency_ms = (finished_at - self.started_at).num_milliseconds().max(0) as u64;
@@ -715,6 +850,7 @@ impl ReceiptBuilder {
             initiated_by: self.initiated_by,
             control_epoch: self.control_epoch,
             agent: self.agent,
+            redaction_rule_version,
         }
     }
 
@@ -741,12 +877,12 @@ impl ReceiptBuilder {
         action: AgentAction,
         err: &QuarryError,
     ) -> StepReceipt {
-        let action = if metadata_only {
-            redacted_for_record(&action)
+        if metadata_only {
+            let action = redacted_for_human_receipt(&action);
+            self.finish_failed(action, err, Some(RULE_VERSION.to_owned()))
         } else {
-            action
-        };
-        self.fail(action, err)
+            self.fail(action, err)
+        }
     }
 
     /// A human step's receipt on a non-ZDR run (WS8.B): metadata only. The action
@@ -754,11 +890,38 @@ impl ReceiptBuilder {
     /// `[redacted]`; a navigation keeps scheme, host and path) and no observation
     /// is stored.
     pub fn complete_metadata_only(self, action: AgentAction, cost_usd: f64) -> StepReceipt {
-        self.complete(redacted_for_record(&action), None, cost_usd)
+        self.finish_completed(
+            redacted_for_human_receipt(&action),
+            None,
+            cost_usd,
+            Some(RULE_VERSION.to_owned()),
+        )
     }
 
+    /// A failed attempt's receipt. The action is masked from the pre-action control
+    /// kind exactly as a completed step's is, and the failure message passes the
+    /// `Durable` text rules: an error can quote the text that was typed.
     pub fn fail(self, action: AgentAction, err: &QuarryError) -> StepReceipt {
+        let mut tally = Tally::new();
+        let action = self.masked_action(&action, &mut tally);
+        let stamp = self.rule_version_stamp();
+        self.finish_failed(action, err, stamp)
+    }
+
+    fn finish_failed(
+        self,
+        action: AgentAction,
+        err: &QuarryError,
+        redaction_rule_version: Option<String>,
+    ) -> StepReceipt {
         let finished_at = Utc::now();
+        let message = redact_text_with(
+            self.redaction_mode,
+            &err.message,
+            Profile::Durable,
+            &mut Tally::new(),
+        )
+        .into_owned();
         StepReceipt {
             org_id: self.org_id,
             actor_id: self.actor_id,
@@ -773,7 +936,7 @@ impl ReceiptBuilder {
                 // the Rust identifier (SECURITYBLOCKED). Rows already stored keep
                 // their old spelling.
                 error_code: err.code.wire_name().to_owned(),
-                message: err.message.clone(),
+                message,
             },
             observation: None,
             correction_of: self.correction_of,
@@ -782,10 +945,14 @@ impl ReceiptBuilder {
             initiated_by: self.initiated_by,
             control_epoch: self.control_epoch,
             agent: self.agent,
+            redaction_rule_version,
         }
     }
 
     pub fn skip(self, action: AgentAction, reason: impl Into<String>) -> StepReceipt {
+        let mut tally = Tally::new();
+        let action = self.masked_action(&action, &mut tally);
+        let redaction_rule_version = self.rule_version_stamp();
         let finished_at = Utc::now();
         StepReceipt {
             org_id: self.org_id,
@@ -806,6 +973,7 @@ impl ReceiptBuilder {
             initiated_by: self.initiated_by,
             control_epoch: self.control_epoch,
             agent: self.agent,
+            redaction_rule_version,
         }
     }
 }
@@ -1368,5 +1536,212 @@ mod human_receipt_tests {
             receipt.action,
             AgentAction::Navigate { ref url } if url == "https://example.com/a"
         ));
+    }
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::*;
+    use quarry_core::contracts::{ActionOutcome, BrowserTelemetry};
+    use quarry_core::ids::Id;
+
+    // Assembled at run time so no secret-shaped literal exists in the repository.
+    fn jwt() -> String {
+        format!(
+            "{}.{}.{}",
+            ["eyJ", "hbGciOiJIUzI1NiJ9"].concat(),
+            ["eyJ", "zdWIiOiIxMjM0NTY3ODkwIn0"].concat(),
+            ["SflKxwRJSM", "eKKF2QT4fwpMeJf36POk6yJV_adQssw5c"].concat()
+        )
+    }
+
+    fn password() -> String {
+        ["S3cret", "P@ss-0451"].concat()
+    }
+
+    fn type_ref(text: &str) -> AgentAction {
+        AgentAction::TypeRef {
+            snapshot_id: "snap_x".to_owned(),
+            generation: 1,
+            ref_id: "@e1".to_owned(),
+            text: text.to_owned(),
+        }
+    }
+
+    fn observation() -> BrowserObservation {
+        BrowserObservation {
+            run_id: Id::new(),
+            step: 1,
+            url: format!("https://example.test/cb?access_token={}&page=2", jwt()),
+            title: Some(format!("Welcome {}", jwt())),
+            snapshot: None,
+            dom_summary: None,
+            screenshot_artifact_id: None,
+            visual_observation_artifact_id: None,
+            evidence_delta_artifact_id: None,
+            console_summary: vec![],
+            network_summary: vec![],
+            egress_receipts: vec![],
+            dialogs: vec![],
+            policy_denials: vec![],
+            action_outcome: ActionOutcome::verified("typed"),
+            observation_delta: None,
+            challenge: None,
+            extraction_profile: None,
+            extraction_result: None,
+            proof_bundle: None,
+            target_resolution: None,
+            telemetry: BrowserTelemetry::default(),
+            redaction: None,
+            observed_at: Utc::now(),
+        }
+    }
+
+    fn text_of(action: &AgentAction) -> &str {
+        match action {
+            AgentAction::TypeRef { text, .. } | AgentAction::Type { text, .. } => text,
+            other => panic!("not a typing action: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn complete_masks_action_and_observation() {
+        let receipt = ReceiptBuilder::start("run_x", 1)
+            .redaction_mode(Mode::Enforce)
+            .record_policy(RecordPolicy::SensitiveOnly)
+            .typed_field(Some(FieldKind::Password))
+            .complete(type_ref(&password()), Some(observation()), 0.0);
+        assert_eq!(text_of(&receipt.action), "[redacted:password]");
+        let stored = serde_json::to_string(&receipt).unwrap();
+        assert!(!stored.contains(&password()));
+        assert!(!stored.contains("eyJ"));
+        let masked = receipt.observation.as_ref().expect("observation is kept");
+        assert!(masked.url.contains("example.test/cb"));
+        assert!(masked.url.contains("page=2"));
+        assert!(masked.title.as_deref().unwrap().starts_with("Welcome "));
+    }
+
+    #[test]
+    fn agent_receipts_keep_benign_text_under_the_sensitive_policy() {
+        let receipt = ReceiptBuilder::start("run_x", 1)
+            .redaction_mode(Mode::Enforce)
+            .record_policy(RecordPolicy::SensitiveOnly)
+            .typed_field(Some(FieldKind::Unknown))
+            .complete(type_ref("wireless headphones"), None, 0.0);
+        assert_eq!(text_of(&receipt.action), "wireless headphones");
+        let strict = ReceiptBuilder::start("run_x", 1)
+            .redaction_mode(Mode::Enforce)
+            .record_policy(RecordPolicy::AllTyped)
+            .typed_field(Some(FieldKind::Unknown))
+            .complete(type_ref("wireless headphones"), None, 0.0);
+        assert_eq!(text_of(&strict.action), "[redacted:secret]");
+    }
+
+    #[test]
+    fn fail_receipt_masks_typed_text_from_the_pre_action_snapshot() {
+        let error = QuarryError::new(
+            ErrorCode::BadRequest,
+            format!("the page rejected {}", jwt()),
+        );
+        let receipt = ReceiptBuilder::start("run_x", 1)
+            .redaction_mode(Mode::Enforce)
+            .record_policy(RecordPolicy::SensitiveOnly)
+            .typed_field(Some(FieldKind::Password))
+            .fail(type_ref(&password()), &error);
+        assert_eq!(text_of(&receipt.action), "[redacted:password]");
+        let StepOutcome::Failed { message, .. } = &receipt.outcome else {
+            panic!("not a failure");
+        };
+        assert!(message.starts_with("the page rejected "));
+        assert!(!message.contains("eyJ"));
+        assert_eq!(receipt.redaction_rule_version.as_deref(), Some(RULE_VERSION));
+    }
+
+    #[test]
+    fn a_skipped_typing_action_is_masked_too() {
+        let receipt = ReceiptBuilder::start("run_x", 1)
+            .redaction_mode(Mode::Enforce)
+            .typed_field(Some(FieldKind::Password))
+            .skip(type_ref(&password()), "user_took_over");
+        assert_eq!(text_of(&receipt.action), "[redacted:password]");
+        assert_eq!(receipt.redaction_rule_version.as_deref(), Some(RULE_VERSION));
+    }
+
+    #[test]
+    fn receipt_stamp_is_set() {
+        let enforcing = ReceiptBuilder::start("run_x", 1)
+            .redaction_mode(Mode::Enforce)
+            .complete(type_ref("x"), None, 0.0);
+        assert_eq!(enforcing.redaction_rule_version.as_deref(), Some(RULE_VERSION));
+        // Masking that did not run is not claimed.
+        for mode in [Mode::Off, Mode::Shadow] {
+            let receipt = ReceiptBuilder::start("run_x", 1)
+                .redaction_mode(mode)
+                .complete(type_ref("x"), None, 0.0);
+            assert_eq!(receipt.redaction_rule_version, None);
+        }
+        // A person's metadata-only receipt is final as written.
+        let human = ReceiptBuilder::start("run_x", 1)
+            .initiator(BrowserTimelineInitiator::Human, 0)
+            .complete_metadata_only(type_ref(&password()), 0.0);
+        assert_eq!(human.redaction_rule_version.as_deref(), Some(RULE_VERSION));
+        assert_eq!(text_of(&human.action), "[redacted]");
+    }
+
+    #[test]
+    fn the_stamp_is_serialised_and_a_legacy_receipt_without_it_still_reads() {
+        let stamped = ReceiptBuilder::start("run_x", 1)
+            .redaction_mode(Mode::Enforce)
+            .complete(type_ref("x"), None, 0.0);
+        let mut json = serde_json::to_value(&stamped).unwrap();
+        assert_eq!(json["redaction_rule_version"], RULE_VERSION);
+        json.as_object_mut().unwrap().remove("redaction_rule_version");
+        let legacy: StepReceipt = serde_json::from_value(json).unwrap();
+        assert_eq!(legacy.redaction_rule_version, None);
+    }
+
+    #[test]
+    fn legacy_receipt_is_masked_on_read_and_idempotent() {
+        // Written before the stamp existed: raw typed text, raw page text.
+        let mut receipt = ReceiptBuilder::start("run_x", 1)
+            .redaction_mode(Mode::Off)
+            .complete(type_ref(&password()), Some(observation()), 0.0);
+        assert_eq!(receipt.redaction_rule_version, None);
+        assert_eq!(text_of(&receipt.action), password());
+
+        receipt.redact_for_read_with(Mode::Enforce, RecordPolicy::SensitiveOnly);
+        // The control kind is unknown, so the typed text is masked as a secret.
+        assert_eq!(text_of(&receipt.action), "[redacted:secret]");
+        let stored = serde_json::to_string(&receipt).unwrap();
+        assert!(!stored.contains(&password()));
+        assert!(!stored.contains("eyJ"));
+        assert_eq!(receipt.redaction_rule_version.as_deref(), Some(RULE_VERSION));
+
+        let once = serde_json::to_value(&receipt).unwrap();
+        receipt.redact_for_read_with(Mode::Enforce, RecordPolicy::SensitiveOnly);
+        assert_eq!(serde_json::to_value(&receipt).unwrap(), once);
+    }
+
+    #[test]
+    fn a_receipt_stamped_with_an_older_version_keeps_its_benign_text_on_read() {
+        let mut receipt = ReceiptBuilder::start("run_x", 1)
+            .redaction_mode(Mode::Enforce)
+            .typed_field(Some(FieldKind::Unknown))
+            .complete(type_ref("wireless headphones"), None, 0.0);
+        receipt.redaction_rule_version = Some("qr-redact/1".to_owned());
+        receipt.redact_for_read_with(Mode::Enforce, RecordPolicy::SensitiveOnly);
+        assert_eq!(text_of(&receipt.action), "wireless headphones");
+        assert_eq!(receipt.redaction_rule_version.as_deref(), Some(RULE_VERSION));
+    }
+
+    #[test]
+    fn the_observation_pass_masks_every_leaf_and_counts() {
+        let raw = observation();
+        let mut tally = Tally::new();
+        let masked = redact_observation_durable(&raw, Mode::Enforce, &mut tally)
+            .expect("an observation of this shape rebuilds");
+        let json = serde_json::to_string(&masked).unwrap();
+        assert!(!json.contains("eyJ"));
+        assert!(!tally.is_empty());
     }
 }

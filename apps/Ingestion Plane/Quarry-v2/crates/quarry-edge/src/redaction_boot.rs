@@ -14,13 +14,31 @@
 //!   configuration path turns masking off in production. Rolling back is
 //!   redeploying the previous image.
 //! - An unparsable value refuses to boot in every environment.
+//!
+//! WS12.S3 adds the receipt text policy, read by the same boot call:
+//!
+//! - `QUARRY_EDGE__RECEIPT_TEXT_MODE` is `sensitive` (the default) or `all`,
+//!   case-insensitive. Unset or blank is `sensitive`.
+//! - `sensitive` keeps text typed into an ordinary control (a search query) in a
+//!   stored agent receipt, so the audit trail and a compiled procedure stay
+//!   useful; text typed into a password, one-time-code, card, phone or labelled
+//!   secret control is always masked. `all` masks every typed text, selected value
+//!   and dialog prompt, and makes a compiled procedure unable to replay without its
+//!   input. Both are accepted in production. A person's step under
+//!   `QUARRY_EDGE__HUMAN_RECEIPT_MODE=metadata` is stricter than either and wins.
+//! - An unparsable value refuses to boot in every environment. The policy is
+//!   static: it cannot change while the process serves.
 
 use std::fmt;
 
+use quarry_core::redaction::action::{self as record, RecordPolicy};
 use quarry_core::redaction::{self, Mode, RULE_VERSION};
 
 /// The environment variable that carries the mode.
 pub const ENV_VAR: &str = "QUARRY_EDGE__REDACTION_MODE";
+
+/// The environment variable that carries the receipt text policy (WS12.S3).
+pub const RECEIPT_TEXT_ENV_VAR: &str = "QUARRY_EDGE__RECEIPT_TEXT_MODE";
 
 /// Why the edge must not start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +49,10 @@ pub enum RedactionBootError {
     NotPermittedInProduction(Mode),
     /// A different mode was already pinned in this process.
     AlreadyPinned(Mode),
+    /// `QUARRY_EDGE__RECEIPT_TEXT_MODE` is not `sensitive` or `all`.
+    ReceiptTextUnparsable,
+    /// A different receipt text policy was already pinned in this process.
+    ReceiptTextAlreadyPinned(RecordPolicy),
 }
 
 impl fmt::Display for RedactionBootError {
@@ -46,6 +68,14 @@ impl fmt::Display for RedactionBootError {
                 f,
                 "the redaction mode was already pinned to {} before boot set it",
                 mode_label(*mode)
+            ),
+            Self::ReceiptTextUnparsable => {
+                write!(f, "{RECEIPT_TEXT_ENV_VAR} must be sensitive or all")
+            }
+            Self::ReceiptTextAlreadyPinned(policy) => write!(
+                f,
+                "the receipt text policy was already pinned to {} before boot set it",
+                policy.as_str()
             ),
         }
     }
@@ -109,12 +139,54 @@ pub fn init_with(raw: Option<&str>, production: bool) -> Result<Mode, RedactionB
     Ok(mode)
 }
 
-/// [`init_with`] on `QUARRY_EDGE__REDACTION_MODE`.
+/// [`init_with`] on `QUARRY_EDGE__REDACTION_MODE`, then the receipt text policy
+/// on `QUARRY_EDGE__RECEIPT_TEXT_MODE`.
 ///
 /// # Errors
-/// See [`init_with`].
+/// See [`init_with`] and [`init_record_policy_from_env`].
 pub fn init_from_env(production: bool) -> Result<Mode, RedactionBootError> {
-    init_with(std::env::var(ENV_VAR).ok().as_deref(), production)
+    let mode = init_with(std::env::var(ENV_VAR).ok().as_deref(), production)?;
+    init_record_policy_from_env()?;
+    Ok(mode)
+}
+
+/// Decide the receipt text policy from the raw value. Unset or blank is
+/// `sensitive`.
+///
+/// # Errors
+/// [`RedactionBootError::ReceiptTextUnparsable`] for an unknown value.
+pub fn decide_record_policy(raw: Option<&str>) -> Result<RecordPolicy, RedactionBootError> {
+    match raw.map(str::trim).filter(|value| !value.is_empty()) {
+        None => Ok(RecordPolicy::SensitiveOnly),
+        Some(value) => {
+            RecordPolicy::parse(value).ok_or(RedactionBootError::ReceiptTextUnparsable)
+        }
+    }
+}
+
+/// Decide the receipt text policy and pin it for the process. Logs it once.
+///
+/// # Errors
+/// What [`decide_record_policy`] refuses, or
+/// [`RedactionBootError::ReceiptTextAlreadyPinned`] when the process already runs
+/// under a different policy.
+pub fn init_record_policy(raw: Option<&str>) -> Result<RecordPolicy, RedactionBootError> {
+    let policy = decide_record_policy(raw)?;
+    match record::init_record_policy(policy) {
+        Ok(()) => {}
+        Err(pinned) if pinned == policy => {}
+        Err(pinned) => return Err(RedactionBootError::ReceiptTextAlreadyPinned(pinned)),
+    }
+    tracing::info!(receipt_text = policy.as_str(), "receipt text policy set");
+    Ok(policy)
+}
+
+/// [`init_record_policy`] on `QUARRY_EDGE__RECEIPT_TEXT_MODE`.
+///
+/// # Errors
+/// See [`init_record_policy`].
+pub fn init_record_policy_from_env() -> Result<RecordPolicy, RedactionBootError> {
+    init_record_policy(std::env::var(RECEIPT_TEXT_ENV_VAR).ok().as_deref())
 }
 
 #[cfg(test)]
@@ -155,6 +227,31 @@ mod tests {
             Err(RedactionBootError::Unparsable)
         );
         assert_eq!(decide(Some("0"), true), Err(RedactionBootError::Unparsable));
+    }
+
+    #[test]
+    fn the_receipt_text_policy_defaults_to_sensitive_and_parses_both_words() {
+        assert_eq!(decide_record_policy(None), Ok(RecordPolicy::SensitiveOnly));
+        assert_eq!(
+            decide_record_policy(Some("  ")),
+            Ok(RecordPolicy::SensitiveOnly)
+        );
+        assert_eq!(
+            decide_record_policy(Some("Sensitive")),
+            Ok(RecordPolicy::SensitiveOnly)
+        );
+        assert_eq!(decide_record_policy(Some(" ALL ")), Ok(RecordPolicy::AllTyped));
+    }
+
+    #[test]
+    fn an_unknown_receipt_text_policy_refuses_and_never_echoes_the_value() {
+        assert_eq!(
+            decide_record_policy(Some("metadata")),
+            Err(RedactionBootError::ReceiptTextUnparsable)
+        );
+        let text = RedactionBootError::ReceiptTextUnparsable.to_string();
+        assert!(text.contains(RECEIPT_TEXT_ENV_VAR));
+        assert!(!text.contains("metadata"));
     }
 
     #[test]

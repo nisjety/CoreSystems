@@ -24,7 +24,8 @@ use quarry_browser::{BrowserNativeProjection, ProjectionRedaction};
 use quarry_core::contracts::{
     AgentAction, BrowserDialog, ChallengeSignal, ConsoleLine, DomSummary, ExtractionResult,
 };
-use quarry_core::redaction::field::{classify_field, mask_with, Classification, FieldFacts};
+use quarry_core::redaction::action::{redacted_for_record, RecordBranch, RecordPolicy};
+use quarry_core::redaction::field::{mask_with, Classification};
 use quarry_core::redaction::{
     self, redact_json_with, redact_text_with, redact_url_with, FieldKind, Mode, ProbeState,
     Profile, RedactionStamp, Tally,
@@ -269,53 +270,17 @@ pub fn action_for_event(
     mode: Mode,
     tally: &mut Tally,
 ) -> Option<Value> {
-    let mut out = action.clone();
-    match &mut out {
-        AgentAction::Type { selector, text } => {
-            let kind = typed.or_else(|| {
-                let facts = FieldFacts {
-                    name_attr: Some(selector.clone()),
-                    id_attr: Some(selector.clone()),
-                    ..FieldFacts::default()
-                };
-                Some(classify_field(&facts))
-            });
-            *text = typed_text(mode, text, kind, tally);
-        }
-        AgentAction::TypeRef { text, .. }
-        | AgentAction::FrameTypeRef { text, .. }
-        | AgentAction::TypeSemantic { text, .. } => {
-            *text = typed_text(mode, text, typed, tally);
-        }
-        AgentAction::Select { value, .. }
-        | AgentAction::SelectRef { value, .. }
-        | AgentAction::FrameSelectRef { value, .. }
-        | AgentAction::SelectSemantic { value, .. } => {
-            *value = redact_text_with(mode, value, Profile::Durable, tally).into_owned();
-        }
-        AgentAction::Navigate { url } => {
-            *url = redact_url_with(mode, url, Profile::Durable, tally).into_owned();
-        }
-        AgentAction::RespondDialog { prompt_text, .. } => {
-            if let Some(text) = prompt_text.take() {
-                *prompt_text =
-                    Some(redact_text_with(mode, &text, Profile::Durable, tally).into_owned());
-            }
-        }
-        AgentAction::Evaluate { script } => {
-            *script = redact_text_with(mode, script, Profile::Durable, tally).into_owned();
-        }
-        _ => {}
-    }
+    // WS12.S3: the one function every stored or emitted action goes through (the
+    // receipt builder calls it too). An event keeps the default text policy.
+    let out = redacted_for_record(
+        RecordBranch::Typed,
+        action,
+        typed,
+        RecordPolicy::SensitiveOnly,
+        mode,
+        tally,
+    );
     serde_json::to_value(&out).ok()
-}
-
-fn typed_text(mode: Mode, text: &str, kind: Option<FieldKind>, tally: &mut Tally) -> String {
-    let masked = match kind {
-        Some(kind) if kind.is_sensitive() => mask_with(mode, classification(kind), text, tally),
-        _ => Cow::Borrowed(text),
-    };
-    redact_text_with(mode, &masked, Profile::Durable, tally).into_owned()
 }
 
 /// A URL for an event (`Durable`): secret query and fragment values and userinfo
