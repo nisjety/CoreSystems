@@ -12,6 +12,7 @@ Compile-checked, NOT run (build-first rule, 2026-10-23 strategy). Nothing deploy
   apps/Ingestion Plane/docker-compose.yml (2 lines). NOTE: its routes.rs blob reverted WS6.D-s (see next).
 - 52cd874c8 fix(quarry-edge): restore the routes.rs WS6.D-s changes lost in 11c22dae (WS13.4b). Restores routes.rs
   to cfdc8a07a plus the six WS13.4b hunks only.
+- f3592a47a fix(quarry-edge): refuse a capture with 501 when no browser is wired (WS13.4b). Closes a static fallback: a browser plan with no browser registered reached the default driver, which dropped the capture with 200.
 - 26a212c0 docs(quarry-v2): WS13.4b capture formats in CONTRACTS and RUNBOOKS (W2-U45). CONTRACTS.md, RUNBOOKS.md.
 
 ## Not committed by this unit (other units' hunks left in the tree)
