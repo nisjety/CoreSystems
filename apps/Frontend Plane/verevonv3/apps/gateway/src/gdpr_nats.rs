@@ -544,4 +544,140 @@ mod tests {
             other => panic!("a user erasure must stay user-scoped, got {other:?}"),
         }
     }
+
+    /// End to end through a real JetStream and a real Redis (WS4.C evidence).
+    ///
+    /// Publishes organization erasure events on `verevon.gdpr.erasure.requested`
+    /// and runs the production consumer loop ([`run_once`]) against a
+    /// PROVISIONED durable on `AQENCIA_CONTROLPLANE`. Asserts that org A's
+    /// result-cache keys are gone and that org B's, a longer org id that merely
+    /// starts with org A's, and an identity-cache key survive, even though a
+    /// glob-character org id was published first.
+    ///
+    /// Skipped unless BOTH `GATEWAY_TEST_NATS_URL` and `GATEWAY_TEST_REDIS_URL`
+    /// are set (optional `GATEWAY_TEST_NATS_USER` / `GATEWAY_TEST_NATS_PASSWORD`
+    /// for a broker with auth). The scratch broker comes from
+    /// `scripts/gateway-gdpr-nats-scratch.sh`, which creates the stream and the
+    /// durable; this test never creates JetStream topology (the production
+    /// credential cannot either).
+    #[tokio::test]
+    async fn a_published_org_erasure_purges_result_cache_keys_through_a_real_jetstream() {
+        use crate::cache::{cache_key, scoped_key, ResultCache};
+        let (Ok(nats_url), Ok(redis_url)) = (
+            std::env::var("GATEWAY_TEST_NATS_URL"),
+            std::env::var("GATEWAY_TEST_REDIS_URL"),
+        ) else {
+            eprintln!("skipping: GATEWAY_TEST_NATS_URL and GATEWAY_TEST_REDIS_URL not both set");
+            return;
+        };
+        let nats_user = std::env::var("GATEWAY_TEST_NATS_USER").unwrap_or_default();
+        let nats_password = std::env::var("GATEWAY_TEST_NATS_PASSWORD").unwrap_or_default();
+
+        let cache = ResultCache::connect(Some(&redis_url)).await;
+        let Some(mut conn) = cache.connection() else {
+            panic!("GATEWAY_TEST_REDIS_URL is set but Redis is unreachable");
+        };
+        let run = format!(
+            "{:x}{:x}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let org_a = format!("it-a-{run}");
+        let org_ab = format!("it-a-{run}-more");
+        let org_b = format!("it-b-{run}");
+        let a_keys: Vec<String> = (0..40)
+            .map(|index| {
+                let namespace = if index % 2 == 0 {
+                    "search-web"
+                } else {
+                    "scrape-preview"
+                };
+                scoped_key(namespace, &org_a, &[&index.to_string()])
+            })
+            .collect();
+        let keep: Vec<String> = vec![
+            scoped_key("search-web", &org_b, &["x"]),
+            scoped_key("scrape-preview", &org_b, &["x"]),
+            scoped_key("search-web", &org_ab, &["x"]),
+            cache_key("session-context", &[&run]),
+        ];
+        for key in a_keys.iter().chain(keep.iter()) {
+            cache.store(key, &serde_json::json!({ "it": key })).await;
+        }
+
+        // Publish: a hostile org id first, then org A. The stream is ordered, so
+        // once org A's keys are gone the hostile event has been handled too.
+        let mut options = if nats_user.is_empty() {
+            async_nats::ConnectOptions::new()
+        } else {
+            async_nats::ConnectOptions::with_user_and_password(
+                nats_user.clone(),
+                nats_password.clone(),
+            )
+        };
+        options = options.custom_inbox_prefix("_INBOX.VEREVON_GATEWAY_GDPR_IT");
+        let publisher = options.connect(&nats_url).await.expect("connect publisher");
+        let js = jetstream::new(publisher);
+        for org in ["*", org_a.as_str()] {
+            js.publish(SUBJECT, org_erasure(org).into())
+                .await
+                .expect("publish erasure event")
+                .await
+                .expect("stream stored the erasure event (is AQENCIA_CONTROLPLANE provisioned?)");
+        }
+
+        // Run the production consumer loop against the provisioned durable.
+        let mut state = crate::tests::test_state(false);
+        state.cache = cache.clone();
+        let consumer_task = {
+            let (url, user, password) =
+                (nats_url.clone(), nats_user.clone(), nats_password.clone());
+            tokio::spawn(async move { run_once(&state, &url, &user, &password).await })
+        };
+
+        let pattern = format!("verevon:gw:*:o:{org_a}:*");
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let remaining = loop {
+            let left: Vec<String> = redis::cmd("KEYS")
+                .arg(&pattern)
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+            if left.is_empty() || std::time::Instant::now() > deadline {
+                break left;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        };
+        if consumer_task.is_finished() {
+            // run_once returns only on an error (bind or filter mismatch).
+            let result = consumer_task.await.expect("consumer task panicked");
+            panic!("the consumer stopped before the purge: {result:?}");
+        }
+        consumer_task.abort();
+
+        let mut survivors = Vec::new();
+        for key in &keep {
+            let present: bool = redis::cmd("EXISTS")
+                .arg(key)
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+            survivors.push((key.clone(), present));
+            cache.delete(key).await;
+        }
+        for key in &a_keys {
+            cache.delete(key).await;
+        }
+        assert!(
+            remaining.is_empty(),
+            "org A still has {} result-cache keys after the erasure event",
+            remaining.len()
+        );
+        for (key, present) in survivors {
+            assert!(present, "{key} must survive org A's erasure");
+        }
+    }
 }

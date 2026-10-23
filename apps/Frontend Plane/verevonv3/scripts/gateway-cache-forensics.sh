@@ -16,12 +16,31 @@
 # For a containerised Redis: REDIS_CLI="docker exec -i <container> redis-cli -n 4".
 # Needs jq. The Redis instance can be shared (rate-limit and session keys live
 # next to these), so the patterns are narrow and the script never flushes.
+#
+# The script refuses a Redis that does not look throwaway (a scratch- or sbs- named
+# container, or a loopback host; see gateway-cache-guard.lib.sh) unless
+# --allow-non-throwaway is passed. That flag is the operator's explicit step on a real
+# deployment (runbook step 1).
 set -euo pipefail
+
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=gateway-cache-guard.lib.sh
+. "$HERE/gateway-cache-guard.lib.sh"
+
+ALLOW_NON_THROWAWAY=0
+for arg in "$@"; do
+  case "$arg" in
+    --allow-non-throwaway) ALLOW_NON_THROWAWAY=1 ;;
+    -h | --help) sed -n '2,24p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    *) echo "unknown argument: $arg (only --allow-non-throwaway)" >&2; exit 2 ;;
+  esac
+done
 
 REDIS_CLI=${REDIS_CLI:-redis-cli}
 NAMESPACES=${NAMESPACES:-"search-web scrape-preview"}
 
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 2; }
+gateway_cache_require_throwaway "$REDIS_CLI" "$ALLOW_NON_THROWAWAY" || exit $?
 
 for ns in $NAMESPACES; do
   legacy=0

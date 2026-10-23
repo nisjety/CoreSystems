@@ -15,12 +15,30 @@
 # flush would sign users out and reset limits. Run it only after the fixed
 # gateway (WS4.A) is on every replica, otherwise a replica still on the old
 # image writes new legacy keys behind the purge.
+#
+# The script refuses a Redis that does not look throwaway (a scratch- or sbs- named
+# container, or a loopback host; see gateway-cache-guard.lib.sh), dry run included,
+# unless --allow-non-throwaway is passed. That flag is the operator's explicit step on
+# a real deployment (runbook step 4); the flags may come in either order.
 set -euo pipefail
+
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=gateway-cache-guard.lib.sh
+. "$HERE/gateway-cache-guard.lib.sh"
 
 REDIS_CLI=${REDIS_CLI:-redis-cli}
 NAMESPACES=${NAMESPACES:-"search-web scrape-preview"}
 APPLY=0
-[ "${1:-}" = "--apply" ] && APPLY=1
+ALLOW_NON_THROWAWAY=0
+for arg in "$@"; do
+  case "$arg" in
+    --apply) APPLY=1 ;;
+    --allow-non-throwaway) ALLOW_NON_THROWAWAY=1 ;;
+    -h | --help) sed -n '2,26p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    *) echo "unknown argument: $arg (only --apply and --allow-non-throwaway)" >&2; exit 2 ;;
+  esac
+done
+gateway_cache_require_throwaway "$REDIS_CLI" "$ALLOW_NON_THROWAWAY" || exit $?
 
 batch=()
 flush() {

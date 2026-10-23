@@ -51,4 +51,14 @@ after=$(bash "$HERE/../gateway-cache-purge.sh")
 echo "$after" | grep -q "would be removed: 0" || fail "re-run is not 0"
 
 $REDIS_CLI DEL "verevon:gw:search-web:o:org-x:$H" verevon:gw:ratelimit:interactive:org:org-x >/dev/null
+
+# The guard: a target that does not look throwaway is refused (exit 2) before anything
+# is read or written. These commands never reach a Redis.
+for cli in "docker exec -i verevon-redis redis-cli" "redis-cli -h redis.prod.example"; do
+  for script in gateway-cache-forensics.sh gateway-cache-purge.sh; do
+    rc=0
+    REDIS_CLI="$cli" bash "$HERE/../$script" >/dev/null 2>&1 || rc=$?
+    [ "$rc" = "2" ] || fail "$script did not refuse a non-throwaway target ($cli): rc=$rc"
+  done
+done
 echo "OK: forensics reports aggregates only, purge dry-run and apply behave, new-shape and neighbour keys survive"
