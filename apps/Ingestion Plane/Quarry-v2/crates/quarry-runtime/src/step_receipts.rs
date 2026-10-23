@@ -29,6 +29,7 @@ use quarry_core::contracts::{AgentAction, AgentConstraints, BrowserObservation};
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 use quarry_core::ids::kinds::RunKind;
 use quarry_core::lease::BrowserViewport;
+use quarry_core::redaction::action::redacted_for_record;
 use quarry_core::zdr::ZdrMode;
 
 use crate::action_cost::CostSource;
@@ -79,6 +80,11 @@ pub struct AgentRunCheckpoint {
     /// written before budgets existed, or with enforcement off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget: Option<BudgetCheckpoint>,
+    /// The navigation policy mode of the run's grant (WS8.B): `allowlist` or
+    /// `open_web`. Absent on a checkpoint written before human browsing existed
+    /// (read as `allowlist`). A resume whose grant disagrees is refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_mode: Option<String>,
 }
 
 /// The budget ledger of a run, stored with its checkpoint so a resume restores
@@ -222,6 +228,31 @@ pub enum BrowserTimelineInitiator {
     Human,
     Agent,
     System,
+}
+
+/// The timeline kinds this build understands. A row written by a later release
+/// with another kind is skipped rather than failing the whole read (WS8.B ships
+/// this decode one release before WS8.F writes new kinds: rollback safety).
+pub const KNOWN_TIMELINE_KINDS: &[&str] = &["control", "tab", "devtools", "lifecycle"];
+
+/// Decode one stored timeline event body. `Ok(None)` for a kind this build does
+/// not know; an error only for a known kind whose body is malformed.
+pub fn decode_timeline_event_body(
+    body: serde_json::Value,
+) -> QuarryResult<Option<BrowserTimelineEventKind>> {
+    let known = body
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|kind| KNOWN_TIMELINE_KINDS.contains(&kind));
+    if !known {
+        return Ok(None);
+    }
+    serde_json::from_value(body).map(Some).map_err(|error| {
+        QuarryError::new(
+            ErrorCode::Internal,
+            format!("decode browser timeline event: {error}"),
+        )
+    })
 }
 
 /// How an [`AgentIdentity`] was established.
@@ -677,6 +708,45 @@ impl ReceiptBuilder {
         }
     }
 
+    /// [`Self::complete`], or for a metadata-only plan [`Self::complete_metadata_only`].
+    pub fn complete_maybe_metadata(
+        self,
+        metadata_only: bool,
+        action: AgentAction,
+        observation: Option<BrowserObservation>,
+        cost_usd: f64,
+    ) -> StepReceipt {
+        if metadata_only {
+            self.complete_metadata_only(action, cost_usd)
+        } else {
+            self.complete(action, observation, cost_usd)
+        }
+    }
+
+    /// [`Self::fail`], with the action redacted on a metadata-only plan. A failure
+    /// never stores an observation.
+    pub fn fail_maybe_metadata(
+        self,
+        metadata_only: bool,
+        action: AgentAction,
+        err: &QuarryError,
+    ) -> StepReceipt {
+        let action = if metadata_only {
+            redacted_for_record(&action)
+        } else {
+            action
+        };
+        self.fail(action, err)
+    }
+
+    /// A human step's receipt on a non-ZDR run (WS8.B): metadata only. The action
+    /// is redacted (typed text, selected values and key presses become
+    /// `[redacted]`; a navigation keeps scheme, host and path) and no observation
+    /// is stored.
+    pub fn complete_metadata_only(self, action: AgentAction, cost_usd: f64) -> StepReceipt {
+        self.complete(redacted_for_record(&action), None, cost_usd)
+    }
+
     pub fn fail(self, action: AgentAction, err: &QuarryError) -> StepReceipt {
         let finished_at = Utc::now();
         StepReceipt {
@@ -819,6 +889,7 @@ mod tests {
             control_mode: BrowserControlMode::AgentControl,
             control_epoch: 0,
             budget: None,
+            policy_mode: None,
         };
         store.save_run_checkpoint(checkpoint).await.unwrap();
         assert!(store
@@ -1233,5 +1304,57 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+}
+
+#[cfg(test)]
+mod human_receipt_tests {
+    use super::*;
+
+    #[test]
+    fn timeline_decode_skips_unknown_kind() {
+        let future = serde_json::json!({"kind": "from_a_later_release", "x": 1});
+        assert!(decode_timeline_event_body(future).unwrap().is_none());
+        let known = serde_json::json!({"kind": "lifecycle", "state": "closed"});
+        assert!(matches!(
+            decode_timeline_event_body(known).unwrap(),
+            Some(BrowserTimelineEventKind::Lifecycle { .. })
+        ));
+        // A known kind with a malformed body is still an error, not a silent skip.
+        let broken = serde_json::json!({"kind": "lifecycle"});
+        assert!(decode_timeline_event_body(broken).is_err());
+    }
+
+    #[test]
+    fn human_receipt_has_no_observation_and_redacted_text() {
+        let receipt = ReceiptBuilder::start("run_x", 1)
+            .initiator(BrowserTimelineInitiator::Human, 0)
+            .complete_metadata_only(
+                AgentAction::Type {
+                    selector: "#pw".to_owned(),
+                    text: "hunter2".to_owned(),
+                },
+                0.0,
+            );
+        assert!(receipt.observation.is_none());
+        assert!(matches!(
+            receipt.action,
+            AgentAction::Type { ref text, .. } if text == "[redacted]"
+        ));
+        assert_eq!(receipt.initiated_by, Some(BrowserTimelineInitiator::Human));
+    }
+
+    #[test]
+    fn human_receipt_navigate_drops_query() {
+        let receipt = ReceiptBuilder::start("run_x", 1).initiator(BrowserTimelineInitiator::Human, 0).complete_metadata_only(
+            AgentAction::Navigate {
+                url: "https://example.com/a?session=abc".to_owned(),
+            },
+            0.0,
+        );
+        assert!(matches!(
+            receipt.action,
+            AgentAction::Navigate { ref url } if url == "https://example.com/a"
+        ));
     }
 }

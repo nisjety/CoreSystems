@@ -338,12 +338,18 @@ impl StepReceiptStore for PostgresStepReceiptStore {
         .fetch_all(&self.pool)
         .await
         .map_err(|error| db_err("list browser timeline events", error))?;
-        rows.into_iter()
-            .map(|row| {
+        // A row whose kind this build does not know is skipped (WS8.B tolerant decode).
+        let decoded: Vec<Option<BrowserTimelineEvent>> = rows
+            .into_iter()
+            .map(|row| -> QuarryResult<Option<BrowserTimelineEvent>> {
                 let event_body: serde_json::Value = row
                     .try_get("event")
                     .map_err(|error| db_err("decode browser timeline event", error))?;
-                Ok(BrowserTimelineEvent {
+                let Some(event) = crate::step_receipts::decode_timeline_event_body(event_body)?
+                else {
+                    return Ok(None);
+                };
+                Ok(Some(BrowserTimelineEvent {
                     event_id: row
                         .try_get("event_id")
                         .map_err(|error| db_err("decode browser timeline event id", error))?,
@@ -359,15 +365,11 @@ impl StepReceiptStore for PostgresStepReceiptStore {
                     occurred_at: row
                         .try_get("occurred_at")
                         .map_err(|error| db_err("decode browser timeline timestamp", error))?,
-                    event: serde_json::from_value(event_body).map_err(|error| {
-                        QuarryError::new(
-                            ErrorCode::Internal,
-                            format!("decode browser timeline event: {error}"),
-                        )
-                    })?,
-                })
+                    event,
+                }))
             })
-            .collect()
+            .collect::<QuarryResult<Vec<Option<BrowserTimelineEvent>>>>()?;
+        Ok(decoded.into_iter().flatten().collect())
     }
 
     async fn save_run_checkpoint(&self, checkpoint: AgentRunCheckpoint) -> QuarryResult<()> {
@@ -650,6 +652,7 @@ mod tests {
             control_mode: BrowserControlMode::HumanTakeover,
             control_epoch: 7,
             budget: None,
+            policy_mode: None,
         };
         store.save_run_checkpoint(checkpoint).await.unwrap();
 
