@@ -228,7 +228,7 @@ With `QUARRY_JOB_ADMISSION=on` (control; default `off`):
 
 Roll out: deploy control, then the orchestrator and edge, then set `QUARRY_JOB_ADMISSION=on`; roll back by setting it `off` (no data change; `claimed_until` is only read while admission is on). Migration 019 adds `jobs.claimed_until` and an index.
 
-Limits to know: the caps are per job row, taken from `params.admission` if present and otherwise the control defaults, so a plan-dependent cap needs the edge to stamp it at submit time (not built; no plan data is read yet). The claim statement is one query without row locking, so run a single dispatcher; two concurrent claimers can each lease up to a batch past a cap. A job whose workflow was started but whose "mark running" write was lost comes back after its lease and is marked running then.
+Limits to know: the caps are per job row, taken from `params.admission` if present and otherwise the control defaults, so a plan-dependent cap needs the edge to stamp it at submit time (not built; no plan data is read yet). The claim takes a transaction-scoped advisory lock, so two dispatchers cannot lease past a cap together (see the WS6.H claim section below). A job whose workflow was started but whose "mark running" write was lost comes back after its lease and is marked running then.
 
 ## Stopping the edge (drain)
 
@@ -1185,3 +1185,11 @@ A refusal is a typed 403 `FORBIDDEN` with `details.reason` `policy_denied` (with
 Known gaps (see `.plan-work/quarry-w1w2/depth/W2-U29.md`): a resumed run does not carry the original ask (high); no egress deny for an unconstrained run (WS7.G 6a); the landed-URL check runs after the action (WS7.G final-URL preflight); the organisation layer is absent (WS7.H, WS7.J).
 
 Tests written, not run: `cargo test -p quarry-edge --lib agent_policy_gate` (four unit tests) and `cargo test -p quarry-edge --test web_policy_agent` (seven tests through the real router). Upload, download, resume and grant-equality cases are not written (see the depth file).
+
+## Job claim serialisation and the team concurrency read (WS6.H, unit W2-U32, built, NOT run, 2026-10-23)
+
+- **Claims are serialised.** `ClaimAccepted` (control, `services/quarry-control/internal/store/pg/resources.go`) runs in one transaction that first takes `pg_advisory_xact_lock(7245110311)` (`jobClaimLockKey`), then the claim statement. Two dispatchers can no longer each read the same in-use count and each lease up to the cap. The lock is one lock for every organization, which is simple and fine at dispatcher tick rates; per-organization locks are the next step if claim latency ever shows.
+- **Team concurrency counts leased jobs.** `TeamUsage().Concurrency` (`resources_v2.go`) counts running jobs plus accepted jobs whose `claimed_until` is in the future, because a leased job takes a cap slot. With admission off no accepted job is leased, so the number is unchanged.
+- **Flags.** None new. `QUARRY_JOB_ADMISSION` still governs the claim endpoint (404 when off). Rollback: set it `off`; the dispatcher then lists as before and takes no lock.
+- **Tests written, not run.** `TestPostgres_ConcurrentClaimsNeverExceedTheCap` and `TestPostgres_ConcurrencyCountsLeasedAcceptedJobs` (`store/pg/job_claim_race_test.go`, need `QUARRY_TEST_DSN`); the edge test `zdr_crawl_is_still_refused_so_no_backlog_row_exists` (`crates/quarry-edge/tests/job_admission.rs`). The contract cases (round robin, per-org cap with leases, no starvation, lease expiry) run as subtests of `storetest.AdmissionConformance` against both stores.
+- **Still not done.** A plan-dependent cap stamped at submit time (needs the WS6.D plan values). Until then every job takes `QUARRY_JOB_CAP_DEFAULT` unless the submitter stamped `params.admission.cap`.
