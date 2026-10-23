@@ -59,7 +59,7 @@ func New(ctx context.Context, dsn string) (store.DB, error) {
 	db.events = &eventLog{pool: pool}
 	db.teamUsage = &teamUsageStore{pool: pool}
 	db.snapshotsV2 = &snapshotsV2Store{pool: pool}
-	db.zdrTombs = &zdrTombstonesStore{pool: pool}
+	db.zdrTombs = newZdrTombstonesStore(pool)
 	return db, nil
 }
 

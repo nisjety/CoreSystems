@@ -172,6 +172,7 @@ func TestOrgErasureRemovesTombstones(t *testing.T) {
 func TestErasedOrgGetsNoLateTombstone(t *testing.T) {
 	t.Parallel()
 	db := NewMemory()
+	db.ZdrTombstones().SetErasureMarkers(true)
 	now := time.Now().UTC()
 	if inserted, err := db.ZdrTombstones().Put(goodTombstone("run_pre", "org_a", now)); err != nil || !inserted {
 		t.Fatalf("put before erasure: inserted=%v err=%v", inserted, err)
@@ -197,6 +198,7 @@ func TestErasedOrgGetsNoLateTombstone(t *testing.T) {
 func TestSweepDeletesMarkersPastTheCutoff(t *testing.T) {
 	t.Parallel()
 	db := NewMemory()
+	db.ZdrTombstones().SetErasureMarkers(true)
 	if _, err := db.PurgeOrg("org_a"); err != nil {
 		t.Fatal(err)
 	}
@@ -220,6 +222,7 @@ func TestSweepDeletesMarkersPastTheCutoff(t *testing.T) {
 func TestErasureMarkerOnlyForATombstoneShapedOrgID(t *testing.T) {
 	t.Parallel()
 	m := newMemZdrTombstones()
+	m.SetErasureMarkers(true)
 	m.purgeByOrg("org with spaces")
 	m.purgeByOrg(strings.Repeat("a", 65))
 	m.purgeByOrg("")
@@ -229,5 +232,37 @@ func TestErasureMarkerOnlyForATombstoneShapedOrgID(t *testing.T) {
 	m.purgeByOrg("org_ok-1")
 	if _, ok := m.erased["org_ok-1"]; !ok || len(m.erased) != 1 {
 		t.Fatalf("the shaped id got no marker: %v", m.erased)
+	}
+}
+
+// An erasure leaves no marker, so retains no trace of the erased org id, until the
+// marker write is switched on (cmd/control does that only with the receiver flag,
+// which counsel review gates). With the switch off a later tombstone is not refused:
+// nothing sends one while the edge flag is off, and the receiver is not mounted.
+func TestErasureWritesNoMarkerUnlessSwitchedOn(t *testing.T) {
+	t.Parallel()
+	db := NewMemory()
+	now := time.Now().UTC()
+	if _, err := db.PurgeOrg("org_a"); err != nil {
+		t.Fatal(err)
+	}
+	if inserted, err := db.ZdrTombstones().Put(goodTombstone("run_1", "org_a", now)); err != nil || !inserted {
+		t.Fatalf("with the marker write off an erased org id must leave no trace: inserted=%v err=%v", inserted, err)
+	}
+	// Switching it on affects only later erasures.
+	db.ZdrTombstones().SetErasureMarkers(true)
+	if _, err := db.PurgeOrg("org_a"); err != nil {
+		t.Fatal(err)
+	}
+	if inserted, _ := db.ZdrTombstones().Put(goodTombstone("run_2", "org_a", now)); inserted {
+		t.Fatal("the marker was not written after the switch was turned on")
+	}
+	// And switching it off again stops new markers (org_b was never marked).
+	db.ZdrTombstones().SetErasureMarkers(false)
+	if _, err := db.PurgeOrg("org_b"); err != nil {
+		t.Fatal(err)
+	}
+	if inserted, err := db.ZdrTombstones().Put(goodTombstone("run_3", "org_b", now)); err != nil || !inserted {
+		t.Fatalf("a marker was written with the switch off: inserted=%v err=%v", inserted, err)
 	}
 }

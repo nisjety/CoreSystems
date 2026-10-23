@@ -151,6 +151,7 @@ func TestTombstoneCutoffNeverLandsInTheFuture(t *testing.T) {
 // however short the tombstone retention is.
 func TestSweepKeepsErasureMarkersForAtLeastTheMinimum(t *testing.T) {
 	db := store.NewMemory()
+	db.ZdrTombstones().SetErasureMarkers(true)
 	if _, err := db.PurgeOrg("org_a"); err != nil {
 		t.Fatal(err)
 	}
@@ -184,6 +185,7 @@ func TestSweepKeepsErasureMarkersForAtLeastTheMinimum(t *testing.T) {
 // A dry run deletes no marker either.
 func TestSweepDryRunKeepsErasureMarkers(t *testing.T) {
 	db := store.NewMemory()
+	db.ZdrTombstones().SetErasureMarkers(true)
 	if _, err := db.PurgeOrg("org_a"); err != nil {
 		t.Fatal(err)
 	}
@@ -198,5 +200,28 @@ func TestSweepDryRunKeepsErasureMarkers(t *testing.T) {
 	})
 	if err != nil || inserted {
 		t.Fatalf("a dry run swept the marker: inserted=%v err=%v", inserted, err)
+	}
+}
+
+// The receiver (and with it the erasure marker) is OFF unless QUARRY_ZDR_TOMBSTONE_RECEIVER
+// is a truthy value: a mistyped or empty value must not turn it on.
+func TestTombstoneReceiverIsOffByDefault(t *testing.T) {
+	env := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
+	for _, v := range []string{"", "0", "false", "off", "no", "tru", "enabled", " "} {
+		if TombstoneReceiverEnabled(env(map[string]string{"QUARRY_ZDR_TOMBSTONE_RECEIVER": v})) {
+			t.Fatalf("%q enabled the receiver", v)
+		}
+	}
+	if TombstoneReceiverEnabled(env(nil)) {
+		t.Fatal("an unset variable enabled the receiver")
+	}
+	for _, v := range []string{"true", "1", "yes", "on", "TRUE", " On "} {
+		if !TombstoneReceiverEnabled(env(map[string]string{"QUARRY_ZDR_TOMBSTONE_RECEIVER": v})) {
+			t.Fatalf("%q did not enable the receiver", v)
+		}
+	}
+	// The other tombstone variables never enable it.
+	if TombstoneReceiverEnabled(env(map[string]string{"QUARRY_ZDR_TOMBSTONE_RETENTION_DAYS": "1", "QUARRY_ZDR_TOMBSTONE_DRY_RUN": "true"})) {
+		t.Fatal("an unrelated tombstone variable enabled the receiver")
 	}
 }

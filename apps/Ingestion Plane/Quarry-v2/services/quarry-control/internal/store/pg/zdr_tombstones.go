@@ -9,16 +9,56 @@ package pg
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/store"
 )
 
-type zdrTombstonesStore struct{ pool *pgxpool.Pool }
+// The bounds on a tombstone Put. A Put waits on the org's advisory lock while an
+// erasure of that org holds it (PurgeOrg is one large transaction). Without bounds,
+// a burst of Puts for the erased org (a sweeper expiring many agent runs at once)
+// would each hold one of the shared pool's 16 connections until the purge commits
+// and starve the rest of quarry-control. So: at most zdrPutSlots Puts run at once
+// (the rest wait for a slot without a connection), a Put gives up on the lock after
+// zdrPutLockTimeout, and the whole Put is bounded by zdrPutTimeout.
+const (
+	zdrPutSlots       = 4
+	zdrPutLockTimeout = 2 * time.Second
+	zdrPutTimeout     = 5 * time.Second
+)
+
+// ErrZdrTombstoneBusy is returned by Put when it could not get a slot or the org
+// lock in time. The receiver answers 500 and the edge counts the delivery as failed
+// (emission is fail-open); nothing is stored.
+var ErrZdrTombstoneBusy = errors.New("pg: zdr tombstone busy (org erasure in progress or too many writers)")
+
+type zdrTombstonesStore struct {
+	pool *pgxpool.Pool
+	// markers is the SetErasureMarkers switch read by PurgeOrg; false writes none.
+	markers atomic.Bool
+	slots   chan struct{}
+	// lockTimeout and putTimeout are fields so a test can shorten them.
+	lockTimeout time.Duration
+	putTimeout  time.Duration
+}
+
+func newZdrTombstonesStore(pool *pgxpool.Pool) *zdrTombstonesStore {
+	return &zdrTombstonesStore{
+		pool:        pool,
+		slots:       make(chan struct{}, zdrPutSlots),
+		lockTimeout: zdrPutLockTimeout,
+		putTimeout:  zdrPutTimeout,
+	}
+}
+
+func (s *zdrTombstonesStore) SetErasureMarkers(on bool) { s.markers.Store(on) }
 
 // orgLockSQL serialises a tombstone Put with the org's erasure (PurgeOrg takes the
 // same transaction-scoped advisory lock). Without it a Put could read "no marker"
@@ -29,13 +69,32 @@ func (s *zdrTombstonesStore) Put(t store.ZdrTombstone) (bool, error) {
 	if err := t.Validate(); err != nil {
 		return false, err
 	}
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), s.putTimeout)
+	defer cancel()
+	// A slot first, so a burst waits here without holding a pool connection.
+	select {
+	case s.slots <- struct{}{}:
+		defer func() { <-s.slots }()
+	case <-ctx.Done():
+		return false, ErrZdrTombstoneBusy
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
+		if ctx.Err() != nil {
+			return false, ErrZdrTombstoneBusy
+		}
 		return false, fmt.Errorf("pg: zdr tombstone begin: %w", err)
 	}
-	defer func() { _ = tx.Rollback(ctx) }() // no-op once Commit succeeds
+	defer func() { _ = tx.Rollback(context.Background()) }() // no-op once Commit succeeds
+	// Bound the wait on the org lock (and on any row lock) inside this transaction.
+	if _, err := tx.Exec(ctx, `SELECT set_config('lock_timeout', $1, true)`,
+		fmt.Sprintf("%dms", s.lockTimeout.Milliseconds())); err != nil {
+		return false, fmt.Errorf("pg: zdr tombstone lock timeout: %w", err)
+	}
 	if _, err := tx.Exec(ctx, orgLockSQL, t.OrgID); err != nil {
+		if isLockWaitGivenUp(err) || ctx.Err() != nil {
+			return false, ErrZdrTombstoneBusy
+		}
 		return false, fmt.Errorf("pg: zdr tombstone org lock: %w", err)
 	}
 	// An erased org (a marker row) gets no new tombstone; the answer is the same
@@ -55,6 +114,12 @@ func (s *zdrTombstonesStore) Put(t store.ZdrTombstone) (bool, error) {
 		return false, fmt.Errorf("pg: zdr tombstone commit: %w", err)
 	}
 	return tag.RowsAffected() == 1, nil
+}
+
+// isLockWaitGivenUp reports SQLSTATE 55P03 (lock_not_available), what lock_timeout raises.
+func isLockWaitGivenUp(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "55P03"
 }
 
 func (s *zdrTombstonesStore) DeleteErasureMarkersBefore(cutoff time.Time) (int64, error) {

@@ -12,8 +12,12 @@
 -- an id of the same shape the tombstone table accepts. Own migration (not an edit of 015)
 -- because 015 may already be recorded in schema_migrations on a database that ran it.
 --
--- OFF BY DEFAULT with the rest of WS4.J: nothing writes a tombstone, so nothing reads
--- this table, until counsel review allows QUARRY_EDGE__ZDR_TOMBSTONE. Idempotent.
+-- OFF BY DEFAULT with the rest of WS4.J, in quarry-control as well as on the edge: the
+-- table is created by every deploy (an empty table retains nothing), but PurgeOrg writes
+-- a marker, and the receiver is mounted, only when QUARRY_ZDR_TOMBSTONE_RECEIVER is set,
+-- which counsel review gates together with QUARRY_EDGE__ZDR_TOMBSTONE. A marker keeps an
+-- erased org's id for at least 7 days (the sweeper), and indefinitely under
+-- QUARRY_ZDR_TOMBSTONE_DRY_RUN, so it is part of the counsel review scope. Idempotent.
 
 CREATE TABLE IF NOT EXISTS zdr_tombstone_erasures (
     org_id    TEXT PRIMARY KEY

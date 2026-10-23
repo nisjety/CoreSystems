@@ -185,11 +185,17 @@ func main() {
 		resources.MountChangeWebhook(r, db, notifySink)
 		// WS4.J: the ZDR run tombstone receiver. A new egress path under ZDR, so
 		// it is mounted only when this process has an HMAC secret (a trust-the-
-		// network control plane has no receiver at all). OFF BY DEFAULT end to
-		// end: the edge emits nothing unless QUARRY_EDGE__ZDR_TOMBSTONE is on,
-		// and counsel review gates turning that on.
-		if hmacVerifier.HasSecret() {
+		// network control plane has no receiver at all) AND
+		// QUARRY_ZDR_TOMBSTONE_RECEIVER is on. OFF BY DEFAULT on both sides: the
+		// edge emits nothing unless QUARRY_EDGE__ZDR_TOMBSTONE is on, and this
+		// side neither receives nor writes an erasure marker (a retention of an
+		// erased org's id) until its own flag is on. Counsel review gates turning
+		// either on.
+		if zdrTombstoneReceiverPosture(os.Getenv, hmacVerifier.HasSecret(), db) {
 			resources.MountZdrTombstones(r, db)
+			log.Warn().Msg("ZDR tombstone receiver is ON (QUARRY_ZDR_TOMBSTONE_RECEIVER): erasures now leave a marker row")
+		} else {
+			log.Info().Msg("ZDR tombstone receiver is off (default): no route, no erasure marker")
 		}
 		resources.MountBlocklists(r, db)
 		resources.MountWebhookDeliveries(r, db)
@@ -294,6 +300,19 @@ func main() {
 		gdprNC.Close()
 	}
 	log.Info().Msg("shutdown complete")
+}
+
+// zdrTombstoneReceiverPosture decides whether the tombstone receiver is mounted and,
+// when it is, switches on PurgeOrg's erasure marker. Both are OFF unless
+// QUARRY_ZDR_TOMBSTONE_RECEIVER is truthy AND the process has an HMAC secret; with
+// either missing no marker is ever written, so a fresh deploy retains nothing of an
+// erased org's id. Counsel review gates setting the flag.
+func zdrTombstoneReceiverPosture(getenv func(string) string, hasSecret bool, db store.DB) bool {
+	if !janitor.TombstoneReceiverEnabled(getenv) || !hasSecret {
+		return false
+	}
+	db.ZdrTombstones().SetErasureMarkers(true)
+	return true
 }
 
 func envOr(k, d string) string {

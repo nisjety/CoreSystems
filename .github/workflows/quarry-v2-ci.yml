@@ -588,6 +588,14 @@ jobs:
         working-directory: 'apps/Ingestion Plane/Quarry-v2/services/quarry-control'
         run: go test -count=1 ./internal/resources/...
 
+      # WS4.J: the ZDR tombstone sweeper (retention cutoff, marker floor, dry-run guard,
+      # huge-retention clamp) and the in-memory store (erased-org refusal, marker switch).
+      # Until now only the report-only go-coverage job ran them. The Postgres store is
+      # tested in its own required job above.
+      - name: quarry-control (ZDR tombstone sweeper, store and receiver posture)
+        working-directory: 'apps/Ingestion Plane/Quarry-v2/services/quarry-control'
+        run: go test -count=1 ./internal/janitor/... ./internal/store ./cmd/control/...
+
       - name: quarry-orchestrator (activities, workflows, schedule reconciler)
         working-directory: 'apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator'
         run: go test -count=1 ./internal/activities/... ./internal/workflows/... ./internal/schedules/...

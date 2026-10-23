@@ -31,6 +31,7 @@ const tombstonePath = "/v1/internal/zdr-tombstones"
 func newTombstoneServer(t *testing.T, require bool) (http.Handler, store.DB) {
 	t.Helper()
 	db := store.NewMemory()
+	db.ZdrTombstones().SetErasureMarkers(true) // what cmd/control does with the receiver flag
 	verifier := httpx.NewHMACVerifier(testSecret, require)
 	r := chi.NewRouter()
 	r.Use(httpx.RequestID)

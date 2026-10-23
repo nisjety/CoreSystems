@@ -14,7 +14,13 @@
 //     (the evidence run uses it). A value that is not a non-negative integer logs
 //     and falls back to 30; it never disables the sweeper.
 //   - QUARRY_ZDR_TOMBSTONE_DRY_RUN: true, 1, yes or on logs the count it would delete and
-//     deletes nothing. Default false.
+//     deletes nothing. Default false. A dry run also leaves the erasure markers alone,
+//     so under a permanent dry run an erased org's id stays in
+//     zdr_tombstone_erasures indefinitely; do not leave it on.
+//   - QUARRY_ZDR_TOMBSTONE_RECEIVER: true, 1, yes or on mounts the tombstone receiver
+//     and makes PurgeOrg write an erasure marker. Default OFF, and counsel review
+//     gates turning it on: with it off the receiver answers 404 and no erasure
+//     leaves any trace of the org id behind (see TombstoneReceiverEnabled).
 //
 // Deletion is batched (oldest first, TombstoneBatch rows at a time) so a large
 // backlog never holds one long statement. Logs carry counts only.
@@ -69,6 +75,15 @@ func TombstoneOptionsFromEnv(getenv func(string) string) (TombstoneOptions, bool
 		}
 	}
 	return opts, invalid
+}
+
+// TombstoneReceiverEnabled reports whether QUARRY_ZDR_TOMBSTONE_RECEIVER is set to
+// a truthy value. Default false. It is the single quarry-control switch for the
+// tombstone half: cmd/control mounts the receiver and turns on the erasure marker
+// write only when it is true, so the marker (a retention of an erased org's id for at
+// least store.MinErasureMarkerDays) is not live on deploy.
+func TombstoneReceiverEnabled(getenv func(string) string) bool {
+	return truthy(getenv("QUARRY_ZDR_TOMBSTONE_RECEIVER"))
 }
 
 // truthy reads the dry-run flag leniently (true, 1, yes, on): a mistyped value must

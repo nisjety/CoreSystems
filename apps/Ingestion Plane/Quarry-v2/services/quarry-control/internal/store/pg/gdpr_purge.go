@@ -80,7 +80,7 @@ func (d *postgresDB) PurgeOrg(orgID string) (store.PurgeResult, error) {
 	if res.ZdrTombstonesDeleted, derr = del(`DELETE FROM zdr_run_tombstones WHERE org_id = $1`); derr != nil {
 		return store.PurgeResult{}, fmt.Errorf("pg: PurgeOrg zdr_run_tombstones: %w", derr)
 	}
-	if zdrOrgIDShape.MatchString(orgID) {
+	if d.zdrTombs.markers.Load() && zdrOrgIDShape.MatchString(orgID) {
 		if _, err := tx.Exec(ctx, `INSERT INTO zdr_tombstone_erasures (org_id) VALUES ($1)
 			ON CONFLICT (org_id) DO UPDATE SET erased_at = now()`, orgID); err != nil {
 			return store.PurgeResult{}, fmt.Errorf("pg: PurgeOrg zdr_tombstone_erasures: %w", err)

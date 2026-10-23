@@ -3,9 +3,9 @@ package pg
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"reflect"
-	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -24,7 +24,72 @@ func readMigration015(t *testing.T) string {
 	return strings.ReplaceAll(string(b), "\r\n", "\n")
 }
 
-var columnLine = regexp.MustCompile(`(?m)^ {4}([a-z_]+)\s+(?:TEXT|TIMESTAMPTZ|INT|NUMERIC)`)
+// tableColumns parses the CREATE TABLE IF NOT EXISTS <table> (...) statement in sql
+// and returns every column name with its upper-cased base type, whatever the type
+// is (TEXT, JSONB, VARCHAR(200), BIGINT, ...). Table constraints are skipped. Comment
+// lines are dropped first. It fails the test if the statement is missing or its
+// parentheses do not balance, so a column can never hide from the guard by its type.
+func tableColumns(t *testing.T, sql, table string) map[string]string {
+	t.Helper()
+	var code strings.Builder
+	for _, line := range strings.Split(sql, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "--") {
+			continue
+		}
+		code.WriteString(line + "\n")
+	}
+	body := code.String()
+	head := "CREATE TABLE IF NOT EXISTS " + table + " ("
+	start := strings.Index(body, head)
+	if start < 0 {
+		t.Fatalf("no %q in the migration", head)
+	}
+	rest := body[start+len(head):]
+	depth, end := 1, -1
+	var items []string
+	cur := strings.Builder{}
+	for i := 0; i < len(rest) && end < 0; i++ {
+		c := rest[i]
+		switch {
+		case c == '(':
+			depth++
+			cur.WriteByte(c)
+		case c == ')':
+			depth--
+			if depth == 0 {
+				end = i
+				continue
+			}
+			cur.WriteByte(c)
+		case c == ',' && depth == 1:
+			items = append(items, cur.String())
+			cur.Reset()
+		default:
+			cur.WriteByte(c)
+		}
+	}
+	if end < 0 {
+		t.Fatalf("unbalanced parentheses in the CREATE TABLE for %s", table)
+	}
+	items = append(items, cur.String())
+	skip := map[string]bool{"CONSTRAINT": true, "PRIMARY": true, "UNIQUE": true, "CHECK": true, "FOREIGN": true, "EXCLUDE": true, "LIKE": true}
+	cols := map[string]string{}
+	for _, it := range items {
+		f := strings.Fields(it)
+		if len(f) == 0 || skip[strings.ToUpper(f[0])] {
+			continue
+		}
+		if len(f) < 2 {
+			t.Fatalf("column definition %q has no type", strings.TrimSpace(it))
+		}
+		typ := strings.ToUpper(f[1])
+		if i := strings.IndexByte(typ, '('); i >= 0 {
+			typ = typ[:i]
+		}
+		cols[f[0]] = typ
+	}
+	return cols
+}
 
 // The migration's columns are exactly the schema's keys plus created_at, its CHECK
 // lists carry every closed vocabulary, and it has the immutability trigger on UPDATE
@@ -58,8 +123,8 @@ func TestMigration015MatchesTheAllowlistSchema(t *testing.T) {
 	sort.Strings(want)
 
 	var got []string
-	for _, m := range columnLine.FindAllStringSubmatch(body, -1) {
-		got = append(got, m[1])
+	for name := range tableColumns(t, sql, "zdr_run_tombstones") {
+		got = append(got, name)
 	}
 	sort.Strings(got)
 	if !reflect.DeepEqual(got, want) {
@@ -105,6 +170,8 @@ func tombstonePool(t *testing.T) (store.DB, *postgresDB) {
 	if !ok {
 		t.Skip("not a postgres DB")
 	}
+	// What cmd/control does with QUARRY_ZDR_TOMBSTONE_RECEIVER; the default is off.
+	db.ZdrTombstones().SetErasureMarkers(true)
 	return db, p
 }
 
@@ -373,9 +440,10 @@ func readMigration024(t *testing.T) string {
 	return strings.ReplaceAll(string(b), "\r\n", "\n")
 }
 
-// The erasure marker table holds an org id and a timestamp and nothing else: no
-// content column can ever be added by accident without this test noticing. Needs no
-// database, so it holds in every CI lane.
+// The erasure marker table holds an org id and a timestamp and nothing else: a column
+// of ANY type (TEXT, JSONB, VARCHAR, BIGINT, ...) added by accident fails this test,
+// because every column definition in the CREATE TABLE is compared with a golden list
+// of names and types. Needs no database, so it holds in every CI lane.
 func TestMigration024HoldsOnlyAnOrgIDAndATimestamp(t *testing.T) {
 	var code strings.Builder
 	for _, line := range strings.Split(readMigration024(t), "\n") {
@@ -384,13 +452,9 @@ func TestMigration024HoldsOnlyAnOrgIDAndATimestamp(t *testing.T) {
 		}
 		code.WriteString(line + "\n")
 	}
-	var got []string
-	for _, m := range columnLine.FindAllStringSubmatch(code.String(), -1) {
-		got = append(got, m[1])
-	}
-	sort.Strings(got)
-	if !reflect.DeepEqual(got, []string{"erased_at", "org_id"}) {
-		t.Fatalf("zdr_tombstone_erasures columns = %v, want exactly [erased_at org_id]", got)
+	got := tableColumns(t, readMigration024(t), "zdr_tombstone_erasures")
+	if !reflect.DeepEqual(got, map[string]string{"org_id": "TEXT", "erased_at": "TIMESTAMPTZ"}) {
+		t.Fatalf("zdr_tombstone_erasures columns = %v, want exactly org_id TEXT and erased_at TIMESTAMPTZ", got)
 	}
 	upper := strings.ToUpper(code.String())
 	for _, banned := range []string{"REFERENCES", "TRIGGER", "DROP "} {
@@ -550,4 +614,112 @@ func TestPostgresPurgeOrgBlocksOnTheOrgLock(t *testing.T) {
 		t.Fatal("PurgeOrg never returned after the lock was released")
 	}
 	_, _ = p.pool.Exec(ctx, `DELETE FROM zdr_tombstone_erasures WHERE org_id = $1`, org)
+}
+
+// With the marker write off (the default) PurgeOrg leaves no row in
+// zdr_tombstone_erasures and a Put for the org is stored: a fresh deploy retains
+// nothing of an erased org's id.
+func TestPostgresPurgeOrgWritesNoMarkerByDefault(t *testing.T) {
+	db := openOrSkip(t)
+	p, ok := db.(*postgresDB)
+	if !ok {
+		t.Skip("not a postgres DB")
+	}
+	if p.zdrTombs.markers.Load() {
+		t.Fatal("the marker write is on by default")
+	}
+	ctx := context.Background()
+	org := uniq("org_nomark")
+	if _, err := db.PurgeOrg(org); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := p.pool.QueryRow(ctx, `SELECT count(*) FROM zdr_tombstone_erasures WHERE org_id = $1`, org).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("a marker was written with the switch off: n=%d err=%v", n, err)
+	}
+	if inserted, err := db.ZdrTombstones().Put(pgTombstone(uniq("run_nomark"), org, time.Now().UTC())); err != nil || !inserted {
+		t.Fatalf("a Put after an unmarked erasure: inserted=%v err=%v", inserted, err)
+	}
+	_, _ = db.PurgeOrg(org)
+}
+
+// While an erasure holds an org's lock, a burst of Puts for that org (many more than
+// the pool has connections) must neither wait for the erasure to commit nor take the
+// pool's connections: the rest of quarry-control keeps running, every Put gives up
+// with ErrZdrTombstoneBusy, and the pool never has more than 4 connections in use by
+// them (a quarter of its 16).
+func TestPostgresPutBurstBehindAnErasureCannotStarveThePool(t *testing.T) {
+	db, p := tombstonePool(t)
+	ctx := context.Background()
+	org := uniq("org_burst")
+	p.zdrTombs.lockTimeout = 400 * time.Millisecond
+	p.zdrTombs.putTimeout = 2 * time.Second
+
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, orgLockSQL, org); err != nil {
+		t.Fatal(err)
+	}
+
+	const burst = 48 // three times the pool's 16 connections
+	errs := make(chan error, burst)
+	start := time.Now()
+	for i := 0; i < burst; i++ {
+		go func(i int) {
+			_, err := db.ZdrTombstones().Put(pgTombstone(uniq("run_burst"), org, time.Now().UTC()))
+			errs <- err
+		}(i)
+	}
+
+	// While the burst waits, the pool still serves everything else, and the Puts hold
+	// at most zdrPutSlots connections.
+	maxHeld := int32(0)
+	deadline := time.Now().Add(1500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if held := p.pool.Stat().AcquiredConns() - 1; held > maxHeld { // minus the erasure tx
+			maxHeld = held
+		}
+		qctx, cancel := context.WithTimeout(ctx, time.Second)
+		var one int
+		if err := p.pool.QueryRow(qctx, `SELECT 1`).Scan(&one); err != nil || one != 1 {
+			cancel()
+			t.Fatalf("the pool was starved by the burst: %v", err)
+		}
+		cancel()
+		time.Sleep(50 * time.Millisecond)
+	}
+	// A literal, not zdrPutSlots: the bound the runbook promises is 4, and the test must
+	// fail if the constant is raised toward the pool size.
+	if maxHeld > 4 {
+		t.Fatalf("Puts held %d connections, want at most 4", maxHeld)
+	}
+
+	for i := 0; i < burst; i++ {
+		select {
+		case err := <-errs:
+			if !errors.Is(err, ErrZdrTombstoneBusy) {
+				t.Fatalf("a Put behind the erasure returned %v, want ErrZdrTombstoneBusy", err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("Put %d never returned although the erasure still held the lock", i)
+		}
+	}
+	if took := time.Since(start); took > 6*time.Second {
+		t.Fatalf("the burst took %v, the bound is the put timeout", took)
+	}
+	if rows, _ := db.ZdrTombstones().ListByOrg(org, 100); len(rows) != 0 {
+		t.Fatalf("%d rows were stored behind the lock", len(rows))
+	}
+	// Released, the next Put works again.
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	p.zdrTombs.lockTimeout, p.zdrTombs.putTimeout = zdrPutLockTimeout, zdrPutTimeout
+	if inserted, err := db.ZdrTombstones().Put(pgTombstone(uniq("run_after"), org, time.Now().UTC())); err != nil || !inserted {
+		t.Fatalf("a Put after the lock was released: inserted=%v err=%v", inserted, err)
+	}
+	_, _ = db.PurgeOrg(org)
 }

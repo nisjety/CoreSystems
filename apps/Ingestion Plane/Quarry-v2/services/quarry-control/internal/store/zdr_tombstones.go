@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -128,6 +129,13 @@ type ZdrTombstoneStore interface {
 	// no-op answer covers an org that was erased (PurgeOrg leaves a marker): a run
 	// that ends after its org's erasure must not re-create a row for that org.
 	Put(t ZdrTombstone) (inserted bool, err error)
+	// SetErasureMarkers turns the write of an erasure marker by PurgeOrg on or off.
+	// It is OFF until something turns it on: a marker keeps an erased org's id for at
+	// least MinErasureMarkerDays, which is a new retention of an identifier after a
+	// GDPR erasure and is therefore part of what counsel review gates. cmd/control
+	// turns it on only together with the tombstone receiver
+	// (QUARRY_ZDR_TOMBSTONE_RECEIVER).
+	SetErasureMarkers(on bool)
 	// DeleteErasureMarkersBefore removes the erasure markers older than cutoff
 	// (the sweeper passes a cutoff at least MinErasureMarkerDays old) and returns
 	// how many it removed.
@@ -147,7 +155,11 @@ type memZdrTombstones struct {
 	mu     sync.Mutex
 	items  map[string]ZdrTombstone
 	erased map[string]time.Time // org id -> when PurgeOrg ran
+	// markers is the SetErasureMarkers switch; false means PurgeOrg writes none.
+	markers atomic.Bool
 }
+
+func (m *memZdrTombstones) SetErasureMarkers(on bool) { m.markers.Store(on) }
 
 func newMemZdrTombstones() *memZdrTombstones {
 	return &memZdrTombstones{items: map[string]ZdrTombstone{}, erased: map[string]time.Time{}}
@@ -247,7 +259,7 @@ func (m *memZdrTombstones) DeleteErasureMarkersBefore(cutoff time.Time) (int64, 
 func (m *memZdrTombstones) purgeByOrg(orgID string) int64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if zdrTombstoneID.MatchString(orgID) {
+	if m.markers.Load() && zdrTombstoneID.MatchString(orgID) {
 		m.erased[orgID] = time.Now().UTC()
 	}
 	var removed int64
