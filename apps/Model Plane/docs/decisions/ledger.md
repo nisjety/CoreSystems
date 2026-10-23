@@ -5021,3 +5021,89 @@ mismatch. capability-core and user-core build, vet and test green apart from
 capability-core's one known pre-existing CRLF failure in `internal/registry`.
 
 Full detail: design doc §8 and §9 step 3.
+
+## Browser broker restart semantics (WS1.C): what a broker restart does to a grant (2026-10-23)
+
+The broker keeps grants in two places. A non-ZDR grant is a row in `browser_grants` on the
+dedicated `browser_broker` database of Quarry's Postgres. A Zero Data Retention grant lives
+only in the broker's memory under a `z_` id (X-2): the table has no zdr column and a CHECK
+(`browser_grants_no_zdr_id_check`) refuses a `z_` id, and `grant.Routed` routes by that
+prefix, so a routing bug fails an insert instead of persisting a ZDR grant. The L1 test
+`the grants migration has no zdr column and keeps the z_ id CHECK` pins both.
+
+| Situation | What a caller sees | Why |
+|---|---|---|
+| Broker restarts, grant is non-ZDR and unexpired | The next `/step` is 200; the row is unchanged | The row is durable; the expiry is the row's `expires_at`, not the process |
+| Broker restarts, grant is ZDR | The next `/step` is 403 (grant inactive: the broker answers NotFound, Quarry maps it to `active:false`); the user opens a new session | Memory only; by design nothing survives, and nothing was ever written |
+| Quarry validates while the broker is still starting | 5xx after Quarry's three attempts (50 ms, 200 ms backoff) on `Unavailable`; never a fail-open | Quarry retries only `Unavailable`, `Internal` and `DeadlineExceeded`, then reports a driver failure |
+| Broker up, Postgres down | Non-ZDR calls answer `Unavailable`; `/readyz` is 503 `grant store unavailable`; ZDR grants still validate | `ErrStoreUnavailable` maps to `Unavailable`; `/readyz` pings the store with a 2 s deadline |
+| Broker cannot reach Postgres at boot | No `DATABASE_URL`: the process exits 1 unless `BROWSER_BROKER_ALLOW_EPHEMERAL_DEVELOPMENT=true` (development only). `DATABASE_URL` set but the database not answering yet: the broker starts and `/readyz` reports 503 until it answers | Production never silently falls back to memory |
+| Grant expired while the broker was down | 403 `inactive` on the first call after the restart | Expiry is checked on read; a purge loop deletes rows expired more than 24 h |
+
+Recipe to see it on a side-by-side stack (written down here, NOT run for this entry; record
+counts and statuses only, never print a grant id into a shared log):
+
+1. Open a non-ZDR UI session and note the HTTP status of one `/step` (200).
+2. `psql` on the `browser_broker` database: `SELECT count(*) FROM browser_grants WHERE revoked_at IS NULL;` (call it n).
+3. Restart the broker container only, wait for `/readyz` 200 (`ok`).
+4. Same session, next `/step`: 200. The count query still returns n.
+5. Repeat with a ZDR session: after the restart `/step` is 403, and the count is unchanged
+   (a ZDR grant never had a row).
+6. Stop Postgres on the same stack: `/readyz` 503, a non-ZDR `/step` is 5xx. Start it again.
+
+Not decided here: the production rollout of the durable store (X-2) is not in the approved
+list of open questions. The code already implements its recommended default, and the
+rollout waits.
+
+## Browser broker grants for Quarry (WS1.A1): the decisions D1, D2, D5, D6 left in the broker, and the proto field allocation R-6 (2026-10-23)
+
+Written after the build, from the code on branch `quarryv2-next`, so a later reader
+can find why the broker looks the way it does. Plan: `docs/plans/quarry-browser-build-plan-2026-10-14.md`,
+WS1.A1, WS1.B, WS1.C and the allocation ledger (R-6).
+
+**D1, grants: the broker is the only place a browser grant is issued, and the grant carries the whole policy.**
+A grant has a kind (`session`, `run`, `sensitive_approval`), an owner, a ZDR flag and a
+bounded host list. Nothing outside the broker mints one: the model-gateway grant route is
+the single `AcquireGrant` caller and the model-gateway browser run route is the single
+`DeriveRunGrant` caller (both pinned by `scripts/tests/browser-grant-contract.test.mjs`).
+The TTL is `BROWSER_BROKER_GRANT_TTL_SECONDS` (900 by default, clamped to 30-3600); a run
+grant expires at `min(now + ttl, parent.ExpiresAt)`, so a run never outlives its session
+grant. Caps: 8 session hosts, 8 run hosts, 20 live session grants per owner, 8 live run
+grants per session grant. A derive that would widen its parent is refused
+(`ErrDeriveWidensParent`); a derive from any parent kind other than `session` needs an
+explicit non-empty host list of at most 8 (R-16, ships stricter from day one). Quarry holds
+`browser:read` on the broker and nothing else (X-1); no service principal holds
+`browser:write`. Production Quarry validates every action's grant through the broker with an
+org-scoped token.
+
+**D2, run control: grants do not widen what a run may do.** The broker has no script-hash
+scope and `/step` discards a script's return value, so `Evaluate` is rejected in Quarry
+rather than approved through a grant; the grant says where a run may go, not what code it
+may run. Grants carry no tab or takeover state: who controls a live run is Quarry's local
+gate (`USER_TOOK_OVER`), checked before the grant is revalidated (R-7 order).
+
+**D5, scrape: no broker contract.** Scrape is stateless fetch and takes no grant, so D5
+claims no `browser.proto` field. R-6 lists none for it.
+
+**D6, budgets: the claim rides on the grant, in the 40-44 block.** `budget_micro_usd=40`,
+`budget_max_steps=41`, `budget_max_runtime_s=42`, `budget_source=43`,
+`budget_minted_at_unix=44` on `AcquireGrantRequest`/`Response`, `ValidateGrantResponse` and
+`DeriveRunGrantRequest`/`Response` (45-49 reserved). The L1 test pins all five on every
+message that carries them.
+
+**R-6, `browser.proto` allocation (live messages used 1-9).** 10-19 WS1: `AcquireGrantRequest.zdr=10`;
+`AcquireGrantResponse.kind=10, zdr=11`; `ValidateGrantResponse.kind=10, owner_id=11, zdr=12`;
+the `DeriveRunGrant` messages (request `parent_grant_id=1, session_key=2, org_id=3,
+allowed_domains=4, purpose=5, ttl_seconds=6`; response `grant_id=1, endpoint=2, expires_at=3,
+allowed_domains=4, parent_grant_id=5, kind=6, zdr=7`). 20 WS7 `WebPolicy` (21-39 for its
+sub-fields); 40-44 WS6 (D6 above); 50-59 WS8 (`policy_mode`, `denied_domains`,
+`absolute_expires_at`, `resource_id`, `RenewGrant`). No `reserved` statements are added.
+Quarry vendors a subset of the file by hand (`crates/quarry-runtime/proto/browser.proto`);
+the L1 test fails when a vendored field differs in name, number or type. Go bindings are
+regenerated Go-only (`buf generate --template buf.gen.go-only.yaml`); the Python and
+TypeScript trees stay stale on purpose.
+
+**The broker's log lines.** The broker writes one line per grant issued and one per grant
+revoked (`grantlog.go`): kind, ZDR flag, host COUNT, and the grant id for a non-ZDR grant. A
+host, scope URL, organization or owner is never logged, and a ZDR grant's id is left out as
+well. `ValidateGrant` writes no line: it runs once per browser action.

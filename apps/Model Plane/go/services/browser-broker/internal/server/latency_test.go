@@ -6,6 +6,9 @@ import (
 	"sort"
 	"testing"
 	"time"
+
+	"github.com/triodelab/model-plane/pkg/authctx"
+	"github.com/triodelab/model-plane/services/browser-broker/internal/grant"
 )
 
 // TestAcquireGrant_P95Latency asserts that the p95 latency of AcquireGrant
@@ -16,7 +19,13 @@ func TestAcquireGrant_P95Latency(t *testing.T) {
 		p95Target  = 200 * time.Millisecond
 	)
 
-	srv := newTestServer()
+	// The latency run issues far more grants for one owner than the per-owner cap allows.
+	cfg := DefaultConfig()
+	cfg.MaxActivePerOwner = iterations + 1
+	srv := NewServerWithConfig(grant.NewMemoryRepository(), cfg)
+	srv.principal = func(context.Context) (authctx.Principal, error) {
+		return authctx.Principal{OrganizationID: "org1", ActorID: "user1", PrincipalType: "user"}, nil
+	}
 	ctx := context.Background()
 
 	durations := make([]time.Duration, 0, iterations)

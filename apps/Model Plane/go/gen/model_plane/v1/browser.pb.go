@@ -43,8 +43,30 @@ type AcquireGrantRequest struct {
 	// Required for a sensitive approval. It binds that one-time authority to
 	// the ordinary BrowserBroker grant held by the target Quarry run.
 	ParentGrantId string `protobuf:"bytes,9,opt,name=parent_grant_id,json=parentGrantId,proto3" json:"parent_grant_id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// Request a Zero Data Retention grant. The broker treats this as a floor:
+	// a verified principal whose token carries zdr=true always gets a ZDR grant,
+	// and a request can raise but never lower it. A ZDR grant has a "z_" id
+	// prefix and is never persisted by a durable store.
+	Zdr bool `protobuf:"varint,10,opt,name=zdr,proto3" json:"zdr,omitempty"`
+	// Budget claim (WS6.E, field numbers 40-44 are the budget ledger entry of R-6;
+	// 45-49 are reserved for follow-ons). An upper bound a run under this grant
+	// may spend, which can only tighten: a consumer takes the smaller of the
+	// claim and what its own request or default gives, never the larger. Zero
+	// means no bound on that dimension; all zero and an empty source means no
+	// claim. budget_source is "request", "org_default" or "entitlement" and is
+	// required exactly when some dimension is set.
+	BudgetMicroUsd int64 `protobuf:"varint,40,opt,name=budget_micro_usd,json=budgetMicroUsd,proto3" json:"budget_micro_usd,omitempty"`
+	// Step bound; zero means no bound.
+	BudgetMaxSteps int32 `protobuf:"varint,41,opt,name=budget_max_steps,json=budgetMaxSteps,proto3" json:"budget_max_steps,omitempty"`
+	// Wall-clock bound in seconds; zero means no bound.
+	BudgetMaxRuntimeS int32 `protobuf:"varint,42,opt,name=budget_max_runtime_s,json=budgetMaxRuntimeS,proto3" json:"budget_max_runtime_s,omitempty"`
+	// Where the claim came from: "request", "org_default" or "entitlement".
+	BudgetSource string `protobuf:"bytes,43,opt,name=budget_source,json=budgetSource,proto3" json:"budget_source,omitempty"`
+	// Stamped by the broker when the claim is stored; a request that sets it
+	// is refused.
+	BudgetMintedAtUnix int64 `protobuf:"varint,44,opt,name=budget_minted_at_unix,json=budgetMintedAtUnix,proto3" json:"budget_minted_at_unix,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *AcquireGrantRequest) Reset() {
@@ -140,6 +162,48 @@ func (x *AcquireGrantRequest) GetParentGrantId() string {
 	return ""
 }
 
+func (x *AcquireGrantRequest) GetZdr() bool {
+	if x != nil {
+		return x.Zdr
+	}
+	return false
+}
+
+func (x *AcquireGrantRequest) GetBudgetMicroUsd() int64 {
+	if x != nil {
+		return x.BudgetMicroUsd
+	}
+	return 0
+}
+
+func (x *AcquireGrantRequest) GetBudgetMaxSteps() int32 {
+	if x != nil {
+		return x.BudgetMaxSteps
+	}
+	return 0
+}
+
+func (x *AcquireGrantRequest) GetBudgetMaxRuntimeS() int32 {
+	if x != nil {
+		return x.BudgetMaxRuntimeS
+	}
+	return 0
+}
+
+func (x *AcquireGrantRequest) GetBudgetSource() string {
+	if x != nil {
+		return x.BudgetSource
+	}
+	return ""
+}
+
+func (x *AcquireGrantRequest) GetBudgetMintedAtUnix() int64 {
+	if x != nil {
+		return x.BudgetMintedAtUnix
+	}
+	return 0
+}
+
 type AcquireGrantResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Grant identifier (ULID).
@@ -155,6 +219,28 @@ type AcquireGrantResponse struct {
 	AllowedDialogIds   []string `protobuf:"bytes,7,rep,name=allowed_dialog_ids,json=allowedDialogIds,proto3" json:"allowed_dialog_ids,omitempty"`
 	AllowedArtifactIds []string `protobuf:"bytes,8,rep,name=allowed_artifact_ids,json=allowedArtifactIds,proto3" json:"allowed_artifact_ids,omitempty"`
 	ParentGrantId      string   `protobuf:"bytes,9,opt,name=parent_grant_id,json=parentGrantId,proto3" json:"parent_grant_id,omitempty"`
+	// "session" or "sensitive_approval" (a "run" grant is derived from a session
+	// grant, not acquired). Consumers must treat an unknown value as not valid.
+	Kind string `protobuf:"bytes,10,opt,name=kind,proto3" json:"kind,omitempty"`
+	// True when the grant is a Zero Data Retention grant (its id starts "z_").
+	Zdr bool `protobuf:"varint,11,opt,name=zdr,proto3" json:"zdr,omitempty"`
+	// Budget claim (WS6.E, field numbers 40-44 are the budget ledger entry of R-6;
+	// 45-49 are reserved for follow-ons). An upper bound a run under this grant
+	// may spend, which can only tighten: a consumer takes the smaller of the
+	// claim and what its own request or default gives, never the larger. Zero
+	// means no bound on that dimension; all zero and an empty source means no
+	// claim. budget_source is "request", "org_default" or "entitlement" and is
+	// required exactly when some dimension is set.
+	BudgetMicroUsd int64 `protobuf:"varint,40,opt,name=budget_micro_usd,json=budgetMicroUsd,proto3" json:"budget_micro_usd,omitempty"`
+	// Step bound; zero means no bound.
+	BudgetMaxSteps int32 `protobuf:"varint,41,opt,name=budget_max_steps,json=budgetMaxSteps,proto3" json:"budget_max_steps,omitempty"`
+	// Wall-clock bound in seconds; zero means no bound.
+	BudgetMaxRuntimeS int32 `protobuf:"varint,42,opt,name=budget_max_runtime_s,json=budgetMaxRuntimeS,proto3" json:"budget_max_runtime_s,omitempty"`
+	// Where the claim came from: "request", "org_default" or "entitlement".
+	BudgetSource string `protobuf:"bytes,43,opt,name=budget_source,json=budgetSource,proto3" json:"budget_source,omitempty"`
+	// Stamped by the broker when the claim is stored; a request that sets it
+	// is refused.
+	BudgetMintedAtUnix int64 `protobuf:"varint,44,opt,name=budget_minted_at_unix,json=budgetMintedAtUnix,proto3" json:"budget_minted_at_unix,omitempty"`
 	unknownFields      protoimpl.UnknownFields
 	sizeCache          protoimpl.SizeCache
 }
@@ -250,6 +336,55 @@ func (x *AcquireGrantResponse) GetParentGrantId() string {
 		return x.ParentGrantId
 	}
 	return ""
+}
+
+func (x *AcquireGrantResponse) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *AcquireGrantResponse) GetZdr() bool {
+	if x != nil {
+		return x.Zdr
+	}
+	return false
+}
+
+func (x *AcquireGrantResponse) GetBudgetMicroUsd() int64 {
+	if x != nil {
+		return x.BudgetMicroUsd
+	}
+	return 0
+}
+
+func (x *AcquireGrantResponse) GetBudgetMaxSteps() int32 {
+	if x != nil {
+		return x.BudgetMaxSteps
+	}
+	return 0
+}
+
+func (x *AcquireGrantResponse) GetBudgetMaxRuntimeS() int32 {
+	if x != nil {
+		return x.BudgetMaxRuntimeS
+	}
+	return 0
+}
+
+func (x *AcquireGrantResponse) GetBudgetSource() string {
+	if x != nil {
+		return x.BudgetSource
+	}
+	return ""
+}
+
+func (x *AcquireGrantResponse) GetBudgetMintedAtUnix() int64 {
+	if x != nil {
+		return x.BudgetMintedAtUnix
+	}
+	return 0
 }
 
 type RevokeGrantRequest struct {
@@ -493,6 +628,31 @@ type ValidateGrantResponse struct {
 	AllowedDialogIds   []string `protobuf:"bytes,7,rep,name=allowed_dialog_ids,json=allowedDialogIds,proto3" json:"allowed_dialog_ids,omitempty"`
 	AllowedArtifactIds []string `protobuf:"bytes,8,rep,name=allowed_artifact_ids,json=allowedArtifactIds,proto3" json:"allowed_artifact_ids,omitempty"`
 	ParentGrantId      string   `protobuf:"bytes,9,opt,name=parent_grant_id,json=parentGrantId,proto3" json:"parent_grant_id,omitempty"`
+	// Same values as AcquireGrantResponse.kind.
+	Kind string `protobuf:"bytes,10,opt,name=kind,proto3" json:"kind,omitempty"`
+	// The user (or service actor) the grant was issued to. A consumer may bind a
+	// run to it; it is not a credential.
+	OwnerId string `protobuf:"bytes,11,opt,name=owner_id,json=ownerId,proto3" json:"owner_id,omitempty"`
+	// True for a Zero Data Retention grant. Consumers must not persist anything
+	// about the run beyond its lifetime when this is set.
+	Zdr bool `protobuf:"varint,12,opt,name=zdr,proto3" json:"zdr,omitempty"`
+	// Budget claim (WS6.E, field numbers 40-44 are the budget ledger entry of R-6;
+	// 45-49 are reserved for follow-ons). An upper bound a run under this grant
+	// may spend, which can only tighten: a consumer takes the smaller of the
+	// claim and what its own request or default gives, never the larger. Zero
+	// means no bound on that dimension; all zero and an empty source means no
+	// claim. budget_source is "request", "org_default" or "entitlement" and is
+	// required exactly when some dimension is set.
+	BudgetMicroUsd int64 `protobuf:"varint,40,opt,name=budget_micro_usd,json=budgetMicroUsd,proto3" json:"budget_micro_usd,omitempty"`
+	// Step bound; zero means no bound.
+	BudgetMaxSteps int32 `protobuf:"varint,41,opt,name=budget_max_steps,json=budgetMaxSteps,proto3" json:"budget_max_steps,omitempty"`
+	// Wall-clock bound in seconds; zero means no bound.
+	BudgetMaxRuntimeS int32 `protobuf:"varint,42,opt,name=budget_max_runtime_s,json=budgetMaxRuntimeS,proto3" json:"budget_max_runtime_s,omitempty"`
+	// Where the claim came from: "request", "org_default" or "entitlement".
+	BudgetSource string `protobuf:"bytes,43,opt,name=budget_source,json=budgetSource,proto3" json:"budget_source,omitempty"`
+	// Stamped by the broker when the claim is stored; a request that sets it
+	// is refused.
+	BudgetMintedAtUnix int64 `protobuf:"varint,44,opt,name=budget_minted_at_unix,json=budgetMintedAtUnix,proto3" json:"budget_minted_at_unix,omitempty"`
 	unknownFields      protoimpl.UnknownFields
 	sizeCache          protoimpl.SizeCache
 }
@@ -590,11 +750,361 @@ func (x *ValidateGrantResponse) GetParentGrantId() string {
 	return ""
 }
 
+func (x *ValidateGrantResponse) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *ValidateGrantResponse) GetOwnerId() string {
+	if x != nil {
+		return x.OwnerId
+	}
+	return ""
+}
+
+func (x *ValidateGrantResponse) GetZdr() bool {
+	if x != nil {
+		return x.Zdr
+	}
+	return false
+}
+
+func (x *ValidateGrantResponse) GetBudgetMicroUsd() int64 {
+	if x != nil {
+		return x.BudgetMicroUsd
+	}
+	return 0
+}
+
+func (x *ValidateGrantResponse) GetBudgetMaxSteps() int32 {
+	if x != nil {
+		return x.BudgetMaxSteps
+	}
+	return 0
+}
+
+func (x *ValidateGrantResponse) GetBudgetMaxRuntimeS() int32 {
+	if x != nil {
+		return x.BudgetMaxRuntimeS
+	}
+	return 0
+}
+
+func (x *ValidateGrantResponse) GetBudgetSource() string {
+	if x != nil {
+		return x.BudgetSource
+	}
+	return ""
+}
+
+func (x *ValidateGrantResponse) GetBudgetMintedAtUnix() int64 {
+	if x != nil {
+		return x.BudgetMintedAtUnix
+	}
+	return 0
+}
+
+type DeriveRunGrantRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The session grant the run derives from. It must be active, of kind
+	// "session", owned by the caller (users) inside the caller's organization.
+	ParentGrantId string `protobuf:"bytes,1,opt,name=parent_grant_id,json=parentGrantId,proto3" json:"parent_grant_id,omitempty"`
+	// The run's idempotency key. A repeat with the same parent and key returns
+	// the same grant; a repeat with different hosts is ALREADY_EXISTS.
+	SessionKey string `protobuf:"bytes,2,opt,name=session_key,json=sessionKey,proto3" json:"session_key,omitempty"`
+	// Tenant identifier; must equal the verified token's organization.
+	OrgId string `protobuf:"bytes,3,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	// Optional narrowing. Empty inherits the parent's hosts (refused when the
+	// parent holds more than the broker's run-domain bound); otherwise every
+	// host must equal or be a subdomain of a parent host.
+	AllowedDomains []string `protobuf:"bytes,4,rep,name=allowed_domains,json=allowedDomains,proto3" json:"allowed_domains,omitempty"`
+	// Why the run grant is derived. Only "ai_run" is accepted today.
+	Purpose string `protobuf:"bytes,5,opt,name=purpose,proto3" json:"purpose,omitempty"`
+	// Requested lifetime in seconds; 0 uses the broker default. The expiry is
+	// never later than the parent's.
+	TtlSeconds int32 `protobuf:"varint,6,opt,name=ttl_seconds,json=ttlSeconds,proto3" json:"ttl_seconds,omitempty"`
+	// Budget claim (WS6.E, field numbers 40-44 are the budget ledger entry of R-6;
+	// 45-49 are reserved for follow-ons). An upper bound a run under this grant
+	// may spend. On a derive it can only tighten the parent's claim: a consumer takes the smaller of the
+	// claim and what its own request or default gives, never the larger. Zero
+	// means no bound on that dimension; all zero and an empty source means no
+	// claim. budget_source is "request", "org_default" or "entitlement" and is
+	// required exactly when some dimension is set.
+	BudgetMicroUsd int64 `protobuf:"varint,40,opt,name=budget_micro_usd,json=budgetMicroUsd,proto3" json:"budget_micro_usd,omitempty"`
+	// Step bound; zero means no bound.
+	BudgetMaxSteps int32 `protobuf:"varint,41,opt,name=budget_max_steps,json=budgetMaxSteps,proto3" json:"budget_max_steps,omitempty"`
+	// Wall-clock bound in seconds; zero means no bound.
+	BudgetMaxRuntimeS int32 `protobuf:"varint,42,opt,name=budget_max_runtime_s,json=budgetMaxRuntimeS,proto3" json:"budget_max_runtime_s,omitempty"`
+	// Where the claim came from: "request", "org_default" or "entitlement".
+	BudgetSource string `protobuf:"bytes,43,opt,name=budget_source,json=budgetSource,proto3" json:"budget_source,omitempty"`
+	// Stamped by the broker when the claim is stored; a request that sets it
+	// is refused.
+	BudgetMintedAtUnix int64 `protobuf:"varint,44,opt,name=budget_minted_at_unix,json=budgetMintedAtUnix,proto3" json:"budget_minted_at_unix,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
+}
+
+func (x *DeriveRunGrantRequest) Reset() {
+	*x = DeriveRunGrantRequest{}
+	mi := &file_model_plane_v1_browser_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeriveRunGrantRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeriveRunGrantRequest) ProtoMessage() {}
+
+func (x *DeriveRunGrantRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_browser_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeriveRunGrantRequest.ProtoReflect.Descriptor instead.
+func (*DeriveRunGrantRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_browser_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *DeriveRunGrantRequest) GetParentGrantId() string {
+	if x != nil {
+		return x.ParentGrantId
+	}
+	return ""
+}
+
+func (x *DeriveRunGrantRequest) GetSessionKey() string {
+	if x != nil {
+		return x.SessionKey
+	}
+	return ""
+}
+
+func (x *DeriveRunGrantRequest) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+func (x *DeriveRunGrantRequest) GetAllowedDomains() []string {
+	if x != nil {
+		return x.AllowedDomains
+	}
+	return nil
+}
+
+func (x *DeriveRunGrantRequest) GetPurpose() string {
+	if x != nil {
+		return x.Purpose
+	}
+	return ""
+}
+
+func (x *DeriveRunGrantRequest) GetTtlSeconds() int32 {
+	if x != nil {
+		return x.TtlSeconds
+	}
+	return 0
+}
+
+func (x *DeriveRunGrantRequest) GetBudgetMicroUsd() int64 {
+	if x != nil {
+		return x.BudgetMicroUsd
+	}
+	return 0
+}
+
+func (x *DeriveRunGrantRequest) GetBudgetMaxSteps() int32 {
+	if x != nil {
+		return x.BudgetMaxSteps
+	}
+	return 0
+}
+
+func (x *DeriveRunGrantRequest) GetBudgetMaxRuntimeS() int32 {
+	if x != nil {
+		return x.BudgetMaxRuntimeS
+	}
+	return 0
+}
+
+func (x *DeriveRunGrantRequest) GetBudgetSource() string {
+	if x != nil {
+		return x.BudgetSource
+	}
+	return ""
+}
+
+func (x *DeriveRunGrantRequest) GetBudgetMintedAtUnix() int64 {
+	if x != nil {
+		return x.BudgetMintedAtUnix
+	}
+	return 0
+}
+
+type DeriveRunGrantResponse struct {
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	GrantId   string                 `protobuf:"bytes,1,opt,name=grant_id,json=grantId,proto3" json:"grant_id,omitempty"`
+	Endpoint  string                 `protobuf:"bytes,2,opt,name=endpoint,proto3" json:"endpoint,omitempty"`
+	ExpiresAt *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	// Canonical hosts of the run grant.
+	AllowedDomains []string `protobuf:"bytes,4,rep,name=allowed_domains,json=allowedDomains,proto3" json:"allowed_domains,omitempty"`
+	ParentGrantId  string   `protobuf:"bytes,5,opt,name=parent_grant_id,json=parentGrantId,proto3" json:"parent_grant_id,omitempty"`
+	// Always "run".
+	Kind string `protobuf:"bytes,6,opt,name=kind,proto3" json:"kind,omitempty"`
+	// Inherited from the parent; never lower than the parent's.
+	Zdr bool `protobuf:"varint,7,opt,name=zdr,proto3" json:"zdr,omitempty"`
+	// Budget claim (WS6.E, field numbers 40-44 are the budget ledger entry of R-6;
+	// 45-49 are reserved for follow-ons). An upper bound a run under this grant
+	// may spend, which can only tighten: a consumer takes the smaller of the
+	// claim and what its own request or default gives, never the larger. Zero
+	// means no bound on that dimension; all zero and an empty source means no
+	// claim. budget_source is "request", "org_default" or "entitlement" and is
+	// required exactly when some dimension is set.
+	BudgetMicroUsd int64 `protobuf:"varint,40,opt,name=budget_micro_usd,json=budgetMicroUsd,proto3" json:"budget_micro_usd,omitempty"`
+	// Step bound; zero means no bound.
+	BudgetMaxSteps int32 `protobuf:"varint,41,opt,name=budget_max_steps,json=budgetMaxSteps,proto3" json:"budget_max_steps,omitempty"`
+	// Wall-clock bound in seconds; zero means no bound.
+	BudgetMaxRuntimeS int32 `protobuf:"varint,42,opt,name=budget_max_runtime_s,json=budgetMaxRuntimeS,proto3" json:"budget_max_runtime_s,omitempty"`
+	// Where the claim came from: "request", "org_default" or "entitlement".
+	BudgetSource string `protobuf:"bytes,43,opt,name=budget_source,json=budgetSource,proto3" json:"budget_source,omitempty"`
+	// Stamped by the broker when the claim is stored; a request that sets it
+	// is refused.
+	BudgetMintedAtUnix int64 `protobuf:"varint,44,opt,name=budget_minted_at_unix,json=budgetMintedAtUnix,proto3" json:"budget_minted_at_unix,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
+}
+
+func (x *DeriveRunGrantResponse) Reset() {
+	*x = DeriveRunGrantResponse{}
+	mi := &file_model_plane_v1_browser_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeriveRunGrantResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeriveRunGrantResponse) ProtoMessage() {}
+
+func (x *DeriveRunGrantResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_browser_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeriveRunGrantResponse.ProtoReflect.Descriptor instead.
+func (*DeriveRunGrantResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_browser_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *DeriveRunGrantResponse) GetGrantId() string {
+	if x != nil {
+		return x.GrantId
+	}
+	return ""
+}
+
+func (x *DeriveRunGrantResponse) GetEndpoint() string {
+	if x != nil {
+		return x.Endpoint
+	}
+	return ""
+}
+
+func (x *DeriveRunGrantResponse) GetExpiresAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ExpiresAt
+	}
+	return nil
+}
+
+func (x *DeriveRunGrantResponse) GetAllowedDomains() []string {
+	if x != nil {
+		return x.AllowedDomains
+	}
+	return nil
+}
+
+func (x *DeriveRunGrantResponse) GetParentGrantId() string {
+	if x != nil {
+		return x.ParentGrantId
+	}
+	return ""
+}
+
+func (x *DeriveRunGrantResponse) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *DeriveRunGrantResponse) GetZdr() bool {
+	if x != nil {
+		return x.Zdr
+	}
+	return false
+}
+
+func (x *DeriveRunGrantResponse) GetBudgetMicroUsd() int64 {
+	if x != nil {
+		return x.BudgetMicroUsd
+	}
+	return 0
+}
+
+func (x *DeriveRunGrantResponse) GetBudgetMaxSteps() int32 {
+	if x != nil {
+		return x.BudgetMaxSteps
+	}
+	return 0
+}
+
+func (x *DeriveRunGrantResponse) GetBudgetMaxRuntimeS() int32 {
+	if x != nil {
+		return x.BudgetMaxRuntimeS
+	}
+	return 0
+}
+
+func (x *DeriveRunGrantResponse) GetBudgetSource() string {
+	if x != nil {
+		return x.BudgetSource
+	}
+	return ""
+}
+
+func (x *DeriveRunGrantResponse) GetBudgetMintedAtUnix() int64 {
+	if x != nil {
+		return x.BudgetMintedAtUnix
+	}
+	return 0
+}
+
 var File_model_plane_v1_browser_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\n" +
-	"\x1cmodel_plane/v1/browser.proto\x12\x0emodel_plane.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xe7\x02\n" +
+	"\x1cmodel_plane/v1/browser.proto\x12\x0emodel_plane.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xd6\x04\n" +
 	"\x13AcquireGrantRequest\x12\x1f\n" +
 	"\vsession_key\x18\x01 \x01(\tR\n" +
 	"sessionKey\x12\x12\n" +
@@ -605,7 +1115,14 @@ const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\x11allowed_frame_ids\x18\x06 \x03(\tR\x0fallowedFrameIds\x12,\n" +
 	"\x12allowed_dialog_ids\x18\a \x03(\tR\x10allowedDialogIds\x120\n" +
 	"\x14allowed_artifact_ids\x18\b \x03(\tR\x12allowedArtifactIds\x12&\n" +
-	"\x0fparent_grant_id\x18\t \x01(\tR\rparentGrantId\"\x8e\x03\n" +
+	"\x0fparent_grant_id\x18\t \x01(\tR\rparentGrantId\x12\x10\n" +
+	"\x03zdr\x18\n" +
+	" \x01(\bR\x03zdr\x12(\n" +
+	"\x10budget_micro_usd\x18( \x01(\x03R\x0ebudgetMicroUsd\x12(\n" +
+	"\x10budget_max_steps\x18) \x01(\x05R\x0ebudgetMaxSteps\x12/\n" +
+	"\x14budget_max_runtime_s\x18* \x01(\x05R\x11budgetMaxRuntimeS\x12#\n" +
+	"\rbudget_source\x18+ \x01(\tR\fbudgetSource\x121\n" +
+	"\x15budget_minted_at_unix\x18, \x01(\x03R\x12budgetMintedAtUnix\"\x91\x05\n" +
 	"\x14AcquireGrantResponse\x12\x19\n" +
 	"\bgrant_id\x18\x01 \x01(\tR\agrantId\x12\x1a\n" +
 	"\bendpoint\x18\x02 \x01(\tR\bendpoint\x129\n" +
@@ -616,7 +1133,15 @@ const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\x11allowed_frame_ids\x18\x06 \x03(\tR\x0fallowedFrameIds\x12,\n" +
 	"\x12allowed_dialog_ids\x18\a \x03(\tR\x10allowedDialogIds\x120\n" +
 	"\x14allowed_artifact_ids\x18\b \x03(\tR\x12allowedArtifactIds\x12&\n" +
-	"\x0fparent_grant_id\x18\t \x01(\tR\rparentGrantId\"G\n" +
+	"\x0fparent_grant_id\x18\t \x01(\tR\rparentGrantId\x12\x12\n" +
+	"\x04kind\x18\n" +
+	" \x01(\tR\x04kind\x12\x10\n" +
+	"\x03zdr\x18\v \x01(\bR\x03zdr\x12(\n" +
+	"\x10budget_micro_usd\x18( \x01(\x03R\x0ebudgetMicroUsd\x12(\n" +
+	"\x10budget_max_steps\x18) \x01(\x05R\x0ebudgetMaxSteps\x12/\n" +
+	"\x14budget_max_runtime_s\x18* \x01(\x05R\x11budgetMaxRuntimeS\x12#\n" +
+	"\rbudget_source\x18+ \x01(\tR\fbudgetSource\x121\n" +
+	"\x15budget_minted_at_unix\x18, \x01(\x03R\x12budgetMintedAtUnix\"G\n" +
 	"\x12RevokeGrantRequest\x12\x19\n" +
 	"\bgrant_id\x18\x01 \x01(\tR\agrantId\x12\x16\n" +
 	"\x06reason\x18\x02 \x01(\tR\x06reason\"/\n" +
@@ -626,7 +1151,7 @@ const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\x15BrowserHealthResponse\x12\x16\n" +
 	"\x06status\x18\x01 \x01(\tR\x06status\"1\n" +
 	"\x14ValidateGrantRequest\x12\x19\n" +
-	"\bgrant_id\x18\x01 \x01(\tR\agrantId\"\x8b\x03\n" +
+	"\bgrant_id\x18\x01 \x01(\tR\agrantId\"\xa9\x05\n" +
 	"\x15ValidateGrantResponse\x12\x19\n" +
 	"\bgrant_id\x18\x01 \x01(\tR\agrantId\x12\x16\n" +
 	"\x06active\x18\x02 \x01(\bR\x06active\x129\n" +
@@ -637,11 +1162,49 @@ const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\x11allowed_frame_ids\x18\x06 \x03(\tR\x0fallowedFrameIds\x12,\n" +
 	"\x12allowed_dialog_ids\x18\a \x03(\tR\x10allowedDialogIds\x120\n" +
 	"\x14allowed_artifact_ids\x18\b \x03(\tR\x12allowedArtifactIds\x12&\n" +
-	"\x0fparent_grant_id\x18\t \x01(\tR\rparentGrantId2\xf7\x02\n" +
+	"\x0fparent_grant_id\x18\t \x01(\tR\rparentGrantId\x12\x12\n" +
+	"\x04kind\x18\n" +
+	" \x01(\tR\x04kind\x12\x19\n" +
+	"\bowner_id\x18\v \x01(\tR\aownerId\x12\x10\n" +
+	"\x03zdr\x18\f \x01(\bR\x03zdr\x12(\n" +
+	"\x10budget_micro_usd\x18( \x01(\x03R\x0ebudgetMicroUsd\x12(\n" +
+	"\x10budget_max_steps\x18) \x01(\x05R\x0ebudgetMaxSteps\x12/\n" +
+	"\x14budget_max_runtime_s\x18* \x01(\x05R\x11budgetMaxRuntimeS\x12#\n" +
+	"\rbudget_source\x18+ \x01(\tR\fbudgetSource\x121\n" +
+	"\x15budget_minted_at_unix\x18, \x01(\x03R\x12budgetMintedAtUnix\"\xb8\x03\n" +
+	"\x15DeriveRunGrantRequest\x12&\n" +
+	"\x0fparent_grant_id\x18\x01 \x01(\tR\rparentGrantId\x12\x1f\n" +
+	"\vsession_key\x18\x02 \x01(\tR\n" +
+	"sessionKey\x12\x15\n" +
+	"\x06org_id\x18\x03 \x01(\tR\x05orgId\x12'\n" +
+	"\x0fallowed_domains\x18\x04 \x03(\tR\x0eallowedDomains\x12\x18\n" +
+	"\apurpose\x18\x05 \x01(\tR\apurpose\x12\x1f\n" +
+	"\vttl_seconds\x18\x06 \x01(\x05R\n" +
+	"ttlSeconds\x12(\n" +
+	"\x10budget_micro_usd\x18( \x01(\x03R\x0ebudgetMicroUsd\x12(\n" +
+	"\x10budget_max_steps\x18) \x01(\x05R\x0ebudgetMaxSteps\x12/\n" +
+	"\x14budget_max_runtime_s\x18* \x01(\x05R\x11budgetMaxRuntimeS\x12#\n" +
+	"\rbudget_source\x18+ \x01(\tR\fbudgetSource\x121\n" +
+	"\x15budget_minted_at_unix\x18, \x01(\x03R\x12budgetMintedAtUnix\"\xde\x03\n" +
+	"\x16DeriveRunGrantResponse\x12\x19\n" +
+	"\bgrant_id\x18\x01 \x01(\tR\agrantId\x12\x1a\n" +
+	"\bendpoint\x18\x02 \x01(\tR\bendpoint\x129\n" +
+	"\n" +
+	"expires_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\x12'\n" +
+	"\x0fallowed_domains\x18\x04 \x03(\tR\x0eallowedDomains\x12&\n" +
+	"\x0fparent_grant_id\x18\x05 \x01(\tR\rparentGrantId\x12\x12\n" +
+	"\x04kind\x18\x06 \x01(\tR\x04kind\x12\x10\n" +
+	"\x03zdr\x18\a \x01(\bR\x03zdr\x12(\n" +
+	"\x10budget_micro_usd\x18( \x01(\x03R\x0ebudgetMicroUsd\x12(\n" +
+	"\x10budget_max_steps\x18) \x01(\x05R\x0ebudgetMaxSteps\x12/\n" +
+	"\x14budget_max_runtime_s\x18* \x01(\x05R\x11budgetMaxRuntimeS\x12#\n" +
+	"\rbudget_source\x18+ \x01(\tR\fbudgetSource\x121\n" +
+	"\x15budget_minted_at_unix\x18, \x01(\x03R\x12budgetMintedAtUnix2\xd8\x03\n" +
 	"\rBrowserBroker\x12Y\n" +
 	"\fAcquireGrant\x12#.model_plane.v1.AcquireGrantRequest\x1a$.model_plane.v1.AcquireGrantResponse\x12V\n" +
 	"\vRevokeGrant\x12\".model_plane.v1.RevokeGrantRequest\x1a#.model_plane.v1.RevokeGrantResponse\x12\\\n" +
-	"\rValidateGrant\x12$.model_plane.v1.ValidateGrantRequest\x1a%.model_plane.v1.ValidateGrantResponse\x12U\n" +
+	"\rValidateGrant\x12$.model_plane.v1.ValidateGrantRequest\x1a%.model_plane.v1.ValidateGrantResponse\x12_\n" +
+	"\x0eDeriveRunGrant\x12%.model_plane.v1.DeriveRunGrantRequest\x1a&.model_plane.v1.DeriveRunGrantResponse\x12U\n" +
 	"\x06Health\x12$.model_plane.v1.BrowserHealthRequest\x1a%.model_plane.v1.BrowserHealthResponseB\xb4\x01\n" +
 	"\x12com.model_plane.v1B\fBrowserProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3"
 
@@ -657,34 +1220,39 @@ func file_model_plane_v1_browser_proto_rawDescGZIP() []byte {
 	return file_model_plane_v1_browser_proto_rawDescData
 }
 
-var file_model_plane_v1_browser_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
+var file_model_plane_v1_browser_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
 var file_model_plane_v1_browser_proto_goTypes = []any{
-	(*AcquireGrantRequest)(nil),   // 0: model_plane.v1.AcquireGrantRequest
-	(*AcquireGrantResponse)(nil),  // 1: model_plane.v1.AcquireGrantResponse
-	(*RevokeGrantRequest)(nil),    // 2: model_plane.v1.RevokeGrantRequest
-	(*RevokeGrantResponse)(nil),   // 3: model_plane.v1.RevokeGrantResponse
-	(*BrowserHealthRequest)(nil),  // 4: model_plane.v1.BrowserHealthRequest
-	(*BrowserHealthResponse)(nil), // 5: model_plane.v1.BrowserHealthResponse
-	(*ValidateGrantRequest)(nil),  // 6: model_plane.v1.ValidateGrantRequest
-	(*ValidateGrantResponse)(nil), // 7: model_plane.v1.ValidateGrantResponse
-	(*timestamppb.Timestamp)(nil), // 8: google.protobuf.Timestamp
+	(*AcquireGrantRequest)(nil),    // 0: model_plane.v1.AcquireGrantRequest
+	(*AcquireGrantResponse)(nil),   // 1: model_plane.v1.AcquireGrantResponse
+	(*RevokeGrantRequest)(nil),     // 2: model_plane.v1.RevokeGrantRequest
+	(*RevokeGrantResponse)(nil),    // 3: model_plane.v1.RevokeGrantResponse
+	(*BrowserHealthRequest)(nil),   // 4: model_plane.v1.BrowserHealthRequest
+	(*BrowserHealthResponse)(nil),  // 5: model_plane.v1.BrowserHealthResponse
+	(*ValidateGrantRequest)(nil),   // 6: model_plane.v1.ValidateGrantRequest
+	(*ValidateGrantResponse)(nil),  // 7: model_plane.v1.ValidateGrantResponse
+	(*DeriveRunGrantRequest)(nil),  // 8: model_plane.v1.DeriveRunGrantRequest
+	(*DeriveRunGrantResponse)(nil), // 9: model_plane.v1.DeriveRunGrantResponse
+	(*timestamppb.Timestamp)(nil),  // 10: google.protobuf.Timestamp
 }
 var file_model_plane_v1_browser_proto_depIdxs = []int32{
-	8, // 0: model_plane.v1.AcquireGrantResponse.expires_at:type_name -> google.protobuf.Timestamp
-	8, // 1: model_plane.v1.ValidateGrantResponse.expires_at:type_name -> google.protobuf.Timestamp
-	0, // 2: model_plane.v1.BrowserBroker.AcquireGrant:input_type -> model_plane.v1.AcquireGrantRequest
-	2, // 3: model_plane.v1.BrowserBroker.RevokeGrant:input_type -> model_plane.v1.RevokeGrantRequest
-	6, // 4: model_plane.v1.BrowserBroker.ValidateGrant:input_type -> model_plane.v1.ValidateGrantRequest
-	4, // 5: model_plane.v1.BrowserBroker.Health:input_type -> model_plane.v1.BrowserHealthRequest
-	1, // 6: model_plane.v1.BrowserBroker.AcquireGrant:output_type -> model_plane.v1.AcquireGrantResponse
-	3, // 7: model_plane.v1.BrowserBroker.RevokeGrant:output_type -> model_plane.v1.RevokeGrantResponse
-	7, // 8: model_plane.v1.BrowserBroker.ValidateGrant:output_type -> model_plane.v1.ValidateGrantResponse
-	5, // 9: model_plane.v1.BrowserBroker.Health:output_type -> model_plane.v1.BrowserHealthResponse
-	6, // [6:10] is the sub-list for method output_type
-	2, // [2:6] is the sub-list for method input_type
-	2, // [2:2] is the sub-list for extension type_name
-	2, // [2:2] is the sub-list for extension extendee
-	0, // [0:2] is the sub-list for field type_name
+	10, // 0: model_plane.v1.AcquireGrantResponse.expires_at:type_name -> google.protobuf.Timestamp
+	10, // 1: model_plane.v1.ValidateGrantResponse.expires_at:type_name -> google.protobuf.Timestamp
+	10, // 2: model_plane.v1.DeriveRunGrantResponse.expires_at:type_name -> google.protobuf.Timestamp
+	0,  // 3: model_plane.v1.BrowserBroker.AcquireGrant:input_type -> model_plane.v1.AcquireGrantRequest
+	2,  // 4: model_plane.v1.BrowserBroker.RevokeGrant:input_type -> model_plane.v1.RevokeGrantRequest
+	6,  // 5: model_plane.v1.BrowserBroker.ValidateGrant:input_type -> model_plane.v1.ValidateGrantRequest
+	8,  // 6: model_plane.v1.BrowserBroker.DeriveRunGrant:input_type -> model_plane.v1.DeriveRunGrantRequest
+	4,  // 7: model_plane.v1.BrowserBroker.Health:input_type -> model_plane.v1.BrowserHealthRequest
+	1,  // 8: model_plane.v1.BrowserBroker.AcquireGrant:output_type -> model_plane.v1.AcquireGrantResponse
+	3,  // 9: model_plane.v1.BrowserBroker.RevokeGrant:output_type -> model_plane.v1.RevokeGrantResponse
+	7,  // 10: model_plane.v1.BrowserBroker.ValidateGrant:output_type -> model_plane.v1.ValidateGrantResponse
+	9,  // 11: model_plane.v1.BrowserBroker.DeriveRunGrant:output_type -> model_plane.v1.DeriveRunGrantResponse
+	5,  // 12: model_plane.v1.BrowserBroker.Health:output_type -> model_plane.v1.BrowserHealthResponse
+	8,  // [8:13] is the sub-list for method output_type
+	3,  // [3:8] is the sub-list for method input_type
+	3,  // [3:3] is the sub-list for extension type_name
+	3,  // [3:3] is the sub-list for extension extendee
+	0,  // [0:3] is the sub-list for field type_name
 }
 
 func init() { file_model_plane_v1_browser_proto_init() }
@@ -698,7 +1266,7 @@ func file_model_plane_v1_browser_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_browser_proto_rawDesc), len(file_model_plane_v1_browser_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   8,
+			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

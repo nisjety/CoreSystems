@@ -5,6 +5,7 @@ pub mod artifacts;
 pub mod audit;
 pub mod auth;
 pub mod author_guidance;
+pub mod browser_grants;
 pub mod browser_run;
 pub mod budget;
 pub mod calibration;

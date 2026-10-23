@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
 use mp_contracts::model_plane::v1::{
     AppendMessageRequest, AutonomyRung, CancelRunRequest, CompleteDirectRunWithMessageRequest,
-    CompleteDirectRunWithMessageResponse, CreateThreadRequest, GetThreadGrantRequest,
-    GetThreadGrantResponse, HeartbeatManagedRunRequest, ManagedRunSource,
-    RecordTerminalOutcomeRequest, ResolveRunOwnerRequest, StartManagedRunRequest, StartRunRequest,
-    TerminalOutcome,
+    CompleteDirectRunWithMessageResponse, CreateThreadRequest, GetRunRequest,
+    GetThreadGrantRequest, GetThreadGrantResponse, HeartbeatManagedRunRequest, ManagedRunSource,
+    RecordTerminalOutcomeRequest, ResolveRunOwnerRequest, StartManagedRunRequest,
+    StartRunRequest, TerminalOutcome,
 };
 use mp_ids::new_ulid;
 use std::time::Duration;
@@ -443,6 +443,108 @@ pub(crate) async fn prepare_managed_run_with_token(
     .await
 }
 
+/// Start, or replay, a standalone browser-agent managed run under a client
+/// idempotency key (`POST /v1/browser/runs` with `Idempotency-Key`).
+///
+/// `start_key` is derived from the caller's key (see `browser_run`) and names
+/// the thread, the managed run and the run grant alike. A plain start appends
+/// the prompt and then starts the run, so a retry of it would append the
+/// prompt a second time before Session Core says the run already exists. This
+/// order differs for that reason: the thread is found by `start_key`
+/// (`CreateThread` is idempotent on `(org, user, session_key)`), the managed
+/// run is started (idempotent on the same key, and refused with
+/// `AlreadyExists` when the goal differs), and only a run that is new gets its
+/// prompt appended. A replay returns `already_started` with the original run
+/// and thread and writes nothing.
+///
+/// A new run whose prompt cannot be appended is cancelled before the error is
+/// returned, so a later replay of the same key finds a terminal run (the
+/// caller's liveness check refuses it) rather than a live run that was never
+/// dispatched.
+///
+/// # Errors
+/// Returns an error when Session Core rejects or cannot complete any step. An
+/// `AlreadyExists` from the managed start stays downcastable to
+/// `tonic::Status`.
+pub(crate) async fn prepare_idempotent_browser_run(
+    state: &AppState,
+    org_id: &str,
+    user_id: &str,
+    goal: &str,
+    start_key: &str,
+    bearer: &VerifiedSessionBearer,
+) -> Result<SessionRun> {
+    let bearer_str = Some(bearer.as_str());
+    let mut session_client = state.session_client.clone();
+    let thread_id = create_thread(
+        &mut session_client,
+        Some(start_key),
+        org_id,
+        user_id,
+        bearer_str,
+        None,
+    )
+    .await?;
+
+    let mut lifecycle = state.managed_run_client.clone();
+    let response = lifecycle
+        .start_managed_run(authenticated_request(
+            StartManagedRunRequest {
+                thread_id: thread_id.clone(),
+                parent_run_id: String::new(),
+                agent_id: "browser-agent".to_owned(),
+                goal: managed_goal(goal),
+                mode: "execute".to_owned(),
+                org_id: org_id.to_owned(),
+                user_id: user_id.to_owned(),
+                start_key: start_key.to_owned(),
+                terminal_source: ManagedRunSource::GatewayBrowser as i32,
+            },
+            bearer_str,
+        )?)
+        .await
+        .context("session-core start_managed_run failed")?
+        .into_inner();
+    if response.thread_id != thread_id {
+        anyhow::bail!("session-core managed start returned a different durable thread");
+    }
+
+    if !response.already_started {
+        if let Err(error) = append_user_message(
+            &mut session_client,
+            &thread_id,
+            goal,
+            bearer_str,
+            None,
+            false,
+            None,
+        )
+        .await
+        {
+            // Best effort: the run exists but will never be dispatched.
+            if let Err(cancel_error) = cancel_run_with_bearer(
+                state,
+                &response.run_id,
+                "browser_run_start_failed",
+                bearer_str,
+            )
+            .await
+            {
+                tracing::warn!(%cancel_error, run_id = %response.run_id, "undispatched browser run could not be cancelled");
+            }
+            return Err(error).context("session-core append_message(user) failed");
+        }
+    }
+
+    Ok(SessionRun {
+        thread_id: response.thread_id,
+        run_id: response.run_id,
+        org_id: org_id.to_owned(),
+        already_started: response.already_started,
+        terminal_source: ManagedRunSource::GatewayBrowser,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn prepare_managed_run_with_bearer(
     state: &AppState,
@@ -815,6 +917,45 @@ pub async fn ensure_browser_agent_run_liveness(state: &AppState, run: &SessionRu
         anyhow::bail!("managed browser run is already terminal");
     }
     Ok(())
+}
+
+/// Read-only liveness of a standalone-browser managed run, for the replay of
+/// a keyed start. Unlike `heartbeat_browser_agent_run` it does NOT renew the
+/// run's terminalization lease: a replay must not keep alive a run whose
+/// dispatch task is gone (a process that died after the managed start), or the
+/// client's retries would extend the lease for ever and the run would never be
+/// terminalized. `true` = queued, running or awaiting approval; `false` = in a
+/// terminal state. A status this code does not know is an error (the replay is
+/// then refused as unverified), not a guess.
+///
+/// # Errors
+/// Returns an error when Session Core cannot be reached within the heartbeat
+/// timeout, refuses the read, or reports an unrecognised status.
+pub(crate) async fn browser_agent_run_is_live(
+    state: &AppState,
+    run: &SessionRun,
+    bearer: &VerifiedSessionBearer,
+) -> Result<bool> {
+    require_gateway_owned_source(run, ManagedRunSource::GatewayBrowser)?;
+    let mut client = state.run_client.clone();
+    let detail = tokio::time::timeout(
+        MANAGED_RUN_HEARTBEAT_TIMEOUT,
+        client.get_run(authenticated_request(
+            GetRunRequest {
+                run_id: run.run_id.clone(),
+            },
+            Some(bearer.as_str()),
+        )?),
+    )
+    .await
+    .context("session-core get_run timed out")?
+    .context("session-core get_run failed")?
+    .into_inner();
+    match detail.status.as_str() {
+        "queued" | "running" | "awaiting_approval" | "paused" => Ok(true),
+        "completed" | "failed" | "cancelled" | "timed_out" | "interrupted" => Ok(false),
+        _ => anyhow::bail!("session-core reported an unrecognised run status"),
+    }
 }
 
 fn direct_terminal_outcome(terminal: DirectInferenceTerminal) -> (TerminalOutcome, &'static str) {

@@ -18,6 +18,12 @@ service BrowserBroker {
   // Validate a browser grant is active and not revoked/expired.
   rpc ValidateGrant(ValidateGrantRequest) returns (ValidateGrantResponse);
 
+  // Derive a run grant for one agent run from an active session grant. The
+  // run grant is never wider than its parent: same owner and tenant, hosts
+  // equal to or below the parent's, ZDR inherited, expiry capped by the
+  // parent's, revoked with it. Idempotent on (parent_grant_id, session_key).
+  rpc DeriveRunGrant(DeriveRunGrantRequest) returns (DeriveRunGrantResponse);
+
   // Health check.
   rpc Health(BrowserHealthRequest) returns (BrowserHealthResponse);
 }
@@ -47,6 +53,30 @@ message AcquireGrantRequest {
   // Required for a sensitive approval. It binds that one-time authority to
   // the ordinary BrowserBroker grant held by the target Quarry run.
   string parent_grant_id = 9;
+
+  // Request a Zero Data Retention grant. The broker treats this as a floor:
+  // a verified principal whose token carries zdr=true always gets a ZDR grant,
+  // and a request can raise but never lower it. A ZDR grant has a "z_" id
+  // prefix and is never persisted by a durable store.
+  bool zdr = 10;
+
+  // Budget claim (WS6.E, field numbers 40-44 are the budget ledger entry of R-6;
+  // 45-49 are reserved for follow-ons). An upper bound a run under this grant
+  // may spend, which can only tighten: a consumer takes the smaller of the
+  // claim and what its own request or default gives, never the larger. Zero
+  // means no bound on that dimension; all zero and an empty source means no
+  // claim. budget_source is "request", "org_default" or "entitlement" and is
+  // required exactly when some dimension is set.
+  int64 budget_micro_usd = 40;
+  // Step bound; zero means no bound.
+  int32 budget_max_steps = 41;
+  // Wall-clock bound in seconds; zero means no bound.
+  int32 budget_max_runtime_s = 42;
+  // Where the claim came from: "request", "org_default" or "entitlement".
+  string budget_source = 43;
+  // Stamped by the broker when the claim is stored; a request that sets it
+  // is refused.
+  int64 budget_minted_at_unix = 44;
 }
 
 message AcquireGrantResponse {
@@ -66,6 +96,31 @@ message AcquireGrantResponse {
   repeated string allowed_dialog_ids = 7;
   repeated string allowed_artifact_ids = 8;
   string parent_grant_id = 9;
+
+  // "session" or "sensitive_approval" (a "run" grant is derived from a session
+  // grant, not acquired). Consumers must treat an unknown value as not valid.
+  string kind = 10;
+
+  // True when the grant is a Zero Data Retention grant (its id starts "z_").
+  bool zdr = 11;
+
+  // Budget claim (WS6.E, field numbers 40-44 are the budget ledger entry of R-6;
+  // 45-49 are reserved for follow-ons). An upper bound a run under this grant
+  // may spend, which can only tighten: a consumer takes the smaller of the
+  // claim and what its own request or default gives, never the larger. Zero
+  // means no bound on that dimension; all zero and an empty source means no
+  // claim. budget_source is "request", "org_default" or "entitlement" and is
+  // required exactly when some dimension is set.
+  int64 budget_micro_usd = 40;
+  // Step bound; zero means no bound.
+  int32 budget_max_steps = 41;
+  // Wall-clock bound in seconds; zero means no bound.
+  int32 budget_max_runtime_s = 42;
+  // Where the claim came from: "request", "org_default" or "entitlement".
+  string budget_source = 43;
+  // Stamped by the broker when the claim is stored; a request that sets it
+  // is refused.
+  int64 budget_minted_at_unix = 44;
 }
 
 message RevokeGrantRequest {
@@ -111,4 +166,107 @@ message ValidateGrantResponse {
   repeated string allowed_dialog_ids = 7;
   repeated string allowed_artifact_ids = 8;
   string parent_grant_id = 9;
+
+  // Same values as AcquireGrantResponse.kind.
+  string kind = 10;
+
+  // The user (or service actor) the grant was issued to. A consumer may bind a
+  // run to it; it is not a credential.
+  string owner_id = 11;
+
+  // True for a Zero Data Retention grant. Consumers must not persist anything
+  // about the run beyond its lifetime when this is set.
+  bool zdr = 12;
+
+  // Budget claim (WS6.E, field numbers 40-44 are the budget ledger entry of R-6;
+  // 45-49 are reserved for follow-ons). An upper bound a run under this grant
+  // may spend, which can only tighten: a consumer takes the smaller of the
+  // claim and what its own request or default gives, never the larger. Zero
+  // means no bound on that dimension; all zero and an empty source means no
+  // claim. budget_source is "request", "org_default" or "entitlement" and is
+  // required exactly when some dimension is set.
+  int64 budget_micro_usd = 40;
+  // Step bound; zero means no bound.
+  int32 budget_max_steps = 41;
+  // Wall-clock bound in seconds; zero means no bound.
+  int32 budget_max_runtime_s = 42;
+  // Where the claim came from: "request", "org_default" or "entitlement".
+  string budget_source = 43;
+  // Stamped by the broker when the claim is stored; a request that sets it
+  // is refused.
+  int64 budget_minted_at_unix = 44;
+}
+
+message DeriveRunGrantRequest {
+  // The session grant the run derives from. It must be active, of kind
+  // "session", owned by the caller (users) inside the caller's organization.
+  string parent_grant_id = 1;
+
+  // The run's idempotency key. A repeat with the same parent and key returns
+  // the same grant; a repeat with different hosts is ALREADY_EXISTS.
+  string session_key = 2;
+
+  // Tenant identifier; must equal the verified token's organization.
+  string org_id = 3;
+
+  // Optional narrowing. Empty inherits the parent's hosts (refused when the
+  // parent holds more than the broker's run-domain bound); otherwise every
+  // host must equal or be a subdomain of a parent host.
+  repeated string allowed_domains = 4;
+
+  // Why the run grant is derived. Only "ai_run" is accepted today.
+  string purpose = 5;
+
+  // Requested lifetime in seconds; 0 uses the broker default. The expiry is
+  // never later than the parent's.
+  int32 ttl_seconds = 6;
+
+  // Budget claim (WS6.E, field numbers 40-44 are the budget ledger entry of R-6;
+  // 45-49 are reserved for follow-ons). An upper bound a run under this grant
+  // may spend. On a derive it can only tighten the parent's claim: a consumer takes the smaller of the
+  // claim and what its own request or default gives, never the larger. Zero
+  // means no bound on that dimension; all zero and an empty source means no
+  // claim. budget_source is "request", "org_default" or "entitlement" and is
+  // required exactly when some dimension is set.
+  int64 budget_micro_usd = 40;
+  // Step bound; zero means no bound.
+  int32 budget_max_steps = 41;
+  // Wall-clock bound in seconds; zero means no bound.
+  int32 budget_max_runtime_s = 42;
+  // Where the claim came from: "request", "org_default" or "entitlement".
+  string budget_source = 43;
+  // Stamped by the broker when the claim is stored; a request that sets it
+  // is refused.
+  int64 budget_minted_at_unix = 44;
+}
+
+message DeriveRunGrantResponse {
+  string grant_id = 1;
+  string endpoint = 2;
+  google.protobuf.Timestamp expires_at = 3;
+  // Canonical hosts of the run grant.
+  repeated string allowed_domains = 4;
+  string parent_grant_id = 5;
+  // Always "run".
+  string kind = 6;
+  // Inherited from the parent; never lower than the parent's.
+  bool zdr = 7;
+
+  // Budget claim (WS6.E, field numbers 40-44 are the budget ledger entry of R-6;
+  // 45-49 are reserved for follow-ons). An upper bound a run under this grant
+  // may spend, which can only tighten: a consumer takes the smaller of the
+  // claim and what its own request or default gives, never the larger. Zero
+  // means no bound on that dimension; all zero and an empty source means no
+  // claim. budget_source is "request", "org_default" or "entitlement" and is
+  // required exactly when some dimension is set.
+  int64 budget_micro_usd = 40;
+  // Step bound; zero means no bound.
+  int32 budget_max_steps = 41;
+  // Wall-clock bound in seconds; zero means no bound.
+  int32 budget_max_runtime_s = 42;
+  // Where the claim came from: "request", "org_default" or "entitlement".
+  string budget_source = 43;
+  // Stamped by the broker when the claim is stored; a request that sets it
+  // is refused.
+  int64 budget_minted_at_unix = 44;
 }

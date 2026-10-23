@@ -25,6 +25,8 @@ func TestMapErr(t *testing.T) {
 		{"grant-not-found", grant.ErrGrantNotFound, codes.NotFound},
 		{"grant-revoked", grant.ErrGrantRevoked, codes.FailedPrecondition},
 		{"grant-expired", grant.ErrGrantExpired, codes.FailedPrecondition},
+		{"approval-parent-invalid", grant.ErrApprovalParentInvalid, codes.FailedPrecondition},
+		{"approval-parent-invalid-wrapped", fmt.Errorf("create approval: %w", grant.ErrApprovalParentInvalid), codes.FailedPrecondition},
 		{"unknown", errors.New("boom"), codes.Internal},
 	}
 	for _, tc := range cases {

@@ -168,6 +168,11 @@ pub struct AppState {
     /// no org ceiling is applied, and `SetPolicy` refuses the cap fields rather
     /// than pretending to store them.
     pub org_core_service_token: String,
+    /// `MODEL_GATEWAY_BROWSER_BUDGET_CLAIM` (WS6.E) pinned for this state.
+    /// `None` (production) reads the variable on each browser run start; a
+    /// test sets it so the route does not depend on the process environment,
+    /// which parallel tests share.
+    pub browser_budget_claim: Option<bool>,
     pub insight_core_base_url: String,
     /// Base URL of social-core's HTTP API (Application Plane social accounts,
     /// posts, and campaigns), e.g. "<http://social-core:3162>". Used by the
@@ -425,6 +430,7 @@ impl AppState {
             org_core_base_url: "http://localhost:3010".to_owned(),
             org_core_service_id: "model-gateway".to_owned(),
             org_core_service_token: String::new(),
+            browser_budget_claim: None,
             insight_core_base_url: "http://localhost:3163".to_owned(),
             social_core_base_url: "http://localhost:3162".to_owned(),
             conversation_core_base_url: "http://localhost:3160".to_owned(),

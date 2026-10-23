@@ -19,23 +19,30 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-const defaultGrantTTL = 15 * time.Minute
-
-// Server is the default implementation backed by an in-memory grant store.
+// Server implements the BrowserBroker gRPC service over a grant Repository.
 type Server struct {
 	mpv1.UnimplementedBrowserBrokerServer
-	grants    *grant.Store
+	grants    grant.Repository
+	cfg       Config
 	baseURL   string
 	principal func(context.Context) (authctx.Principal, error)
 }
 
-// NewServer constructs a Server with the provided grant store.
-func NewServer(grants *grant.Store) *Server {
+// NewServer constructs a Server with the default Config.
+func NewServer(grants grant.Repository) *Server {
+	return NewServerWithConfig(grants, DefaultConfig())
+}
+
+// NewServerWithConfig constructs a Server with explicit limits.
+func NewServerWithConfig(grants grant.Repository, cfg Config) *Server {
 	baseURL := strings.TrimRight(os.Getenv("BROWSER_BROKER_BASE_URL"), "/")
 	if baseURL == "" {
 		baseURL = "https://browser-broker.local"
 	}
-	return &Server{grants: grants, baseURL: baseURL, principal: authz.Principal}
+	if cfg.Policy == nil {
+		cfg.Policy = grant.StaticPolicy{MaxDomains: cfg.MaxSessionDomains}
+	}
+	return &Server{grants: grants, cfg: cfg, baseURL: baseURL, principal: authz.Principal}
 }
 
 // AcquireGrant mints a new browser grant using the proto-defined session/mode contract.
@@ -47,6 +54,9 @@ func (s *Server) AcquireGrant(ctx context.Context, req *AcquireGrantRequest) (*A
 	}
 	if req.GetSessionKey() == "" {
 		return nil, status.Error(codes.InvalidArgument, "session_key is required")
+	}
+	if len(req.GetSessionKey()) > maxSessionKeyBytes || strings.ContainsFunc(req.GetSessionKey(), isControl) {
+		return nil, status.Error(codes.InvalidArgument, "session_key must be a bounded, printable key")
 	}
 	if req.GetOrgId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "org_id is required")
@@ -62,6 +72,13 @@ func (s *Server) AcquireGrant(ctx context.Context, req *AcquireGrantRequest) (*A
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "allowed_domains must contain bounded hostnames")
 	}
+	if err := s.cfg.Policy.CheckSession(ctx, principal.OrganizationID, allowedDomains); err != nil {
+		telemetry.GrantsIssuedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", grantOutcome(err))))
+		return nil, mapErr(err)
+	}
+	// ZDR is a floor: the verified token can raise it, the request can raise
+	// it, nothing here can lower it.
+	zdr := req.GetZdr() || principal.ZeroDataRetention
 	allowedActions, allowedFrameIDs, allowedDialogIDs, allowedArtifactIDs :=
 		req.GetAllowedActions(), req.GetAllowedFrameIds(), req.GetAllowedDialogIds(), req.GetAllowedArtifactIds()
 	if _, err := grant.NormalizeSensitiveScopes(
@@ -72,27 +89,56 @@ func (s *Server) AcquireGrant(ctx context.Context, req *AcquireGrantRequest) (*A
 	); err != nil {
 		return nil, status.Error(codes.InvalidArgument, "invalid sensitive browser approval scope")
 	}
+	budget, err := budgetFromRequest(
+		req.GetBudgetMicroUsd(), req.GetBudgetMaxSteps(), req.GetBudgetMaxRuntimeS(),
+		req.GetBudgetSource(), req.GetBudgetMintedAtUnix(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	// A sensitive approval is single-action authority; a spend bound on it
+	// would mean nothing and is refused rather than ignored.
+	if len(allowedActions) != 0 && budget.IsSet() {
+		return nil, status.Error(codes.InvalidArgument, "a sensitive browser approval cannot carry a budget claim")
+	}
 	var g *grant.Grant
 	if len(allowedActions) == 0 {
-		g, err = s.grants.Create(
-			principal.OrganizationID, principal.ActorID, req.GetSessionKey(), scopeURL,
-			allowedDomains, defaultGrantTTL,
-		)
+		g, err = s.grants.CreateSession(ctx, grant.CreateSessionParams{
+			OrgID:             principal.OrganizationID,
+			OwnerID:           principal.ActorID,
+			SessionKey:        req.GetSessionKey(),
+			ScopeURL:          scopeURL,
+			AllowedDomains:    allowedDomains,
+			TTL:               s.cfg.TTL,
+			Zdr:               zdr,
+			Budget:            budget,
+			MaxActivePerOwner: s.cfg.MaxActivePerOwner,
+		})
 	} else {
 		if req.GetParentGrantId() == "" {
 			return nil, status.Error(codes.InvalidArgument, "sensitive browser approval requires parent_grant_id")
 		}
-		g, err = s.grants.CreateScopedSensitiveApproval(
-			principal.OrganizationID, principal.ActorID, req.GetSessionKey(), scopeURL,
-			allowedDomains, allowedActions, allowedFrameIDs, allowedDialogIDs, allowedArtifactIDs,
-			req.GetParentGrantId(), defaultGrantTTL,
-		)
+		g, err = s.grants.CreateScopedSensitiveApproval(ctx, grant.ApprovalParams{
+			OrgID:              principal.OrganizationID,
+			OwnerID:            principal.ActorID,
+			SessionKey:         req.GetSessionKey(),
+			ScopeURL:           scopeURL,
+			AllowedDomains:     allowedDomains,
+			AllowedActions:     allowedActions,
+			AllowedFrameIDs:    allowedFrameIDs,
+			AllowedDialogIDs:   allowedDialogIDs,
+			AllowedArtifactIDs: allowedArtifactIDs,
+			ParentGrantID:      req.GetParentGrantId(),
+			TTL:                s.cfg.TTL,
+			Zdr:                zdr,
+		})
 	}
 	if err != nil {
 		telemetry.GrantsIssuedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", grantOutcome(err))))
 		return nil, mapErr(err)
 	}
 	telemetry.GrantsIssuedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "created")))
+	logGrantIssued(ctx, g)
 	return &AcquireGrantResponse{
 		GrantId:            g.ID,
 		Endpoint:           s.baseURL + "/grants/" + g.ID,
@@ -103,6 +149,13 @@ func (s *Server) AcquireGrant(ctx context.Context, req *AcquireGrantRequest) (*A
 		AllowedDialogIds:   append([]string(nil), g.AllowedDialogIDs...),
 		AllowedArtifactIds: append([]string(nil), g.AllowedArtifactIDs...),
 		ParentGrantId:      g.ParentGrantID,
+		Kind:               string(g.Kind),
+		Zdr:                g.Zdr,
+		BudgetMicroUsd:     g.Budget.MicroUSD,
+		BudgetMaxSteps:     g.Budget.MaxSteps,
+		BudgetMaxRuntimeS:  g.Budget.MaxRuntimeS,
+		BudgetSource:       g.Budget.Source,
+		BudgetMintedAtUnix: g.Budget.MintedAtUnix,
 	}, nil
 }
 
@@ -116,11 +169,14 @@ func (s *Server) RevokeGrant(ctx context.Context, req *RevokeGrantRequest) (*Rev
 	if req.GetGrantId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "grant_id is required")
 	}
-	if err := s.grants.RevokeScoped(req.GetGrantId(), principal.OrganizationID, authz.OwnerFilter(principal)); err != nil {
+	if err := s.grants.RevokeScoped(
+		ctx, req.GetGrantId(), principal.OrganizationID, authz.OwnerFilter(principal), req.GetReason(),
+	); err != nil {
 		telemetry.GrantsRevokedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", grantOutcome(err))))
 		return nil, mapErr(err)
 	}
 	telemetry.GrantsRevokedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "revoked")))
+	logGrantRevoked(ctx, req.GetGrantId())
 	return &RevokeGrantResponse{Revoked: true}, nil
 }
 
@@ -134,7 +190,7 @@ func (s *Server) ValidateGrant(ctx context.Context, req *ValidateGrantRequest) (
 	if req.GetGrantId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "grant_id is required")
 	}
-	g, err := s.grants.GetScoped(req.GetGrantId(), principal.OrganizationID, authz.OwnerFilter(principal))
+	g, err := s.grants.GetScoped(ctx, req.GetGrantId(), principal.OrganizationID, authz.OwnerFilter(principal))
 	if err != nil {
 		telemetry.GrantsValidatedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", grantOutcome(err))))
 		return nil, mapErr(err)
@@ -150,8 +206,128 @@ func (s *Server) ValidateGrant(ctx context.Context, req *ValidateGrantRequest) (
 		AllowedDialogIds:   append([]string(nil), g.AllowedDialogIDs...),
 		AllowedArtifactIds: append([]string(nil), g.AllowedArtifactIDs...),
 		ParentGrantId:      g.ParentGrantID,
+		Kind:               string(g.Kind),
+		OwnerId:            g.OwnerID,
+		Zdr:                g.Zdr,
+		BudgetMicroUsd:     g.Budget.MicroUSD,
+		BudgetMaxSteps:     g.Budget.MaxSteps,
+		BudgetMaxRuntimeS:  g.Budget.MaxRuntimeS,
+		BudgetSource:       g.Budget.Source,
+		BudgetMintedAtUnix: g.Budget.MintedAtUnix,
 	}, nil
 }
+
+// derivePurposeAIRun is the only DeriveRunGrant purpose accepted today. A new
+// purpose (attach, WS8.C) is an explicit addition, never an accidental pass.
+const derivePurposeAIRun = "ai_run"
+
+// maxSessionKeyBytes bounds a run's idempotency key.
+const maxSessionKeyBytes = 256
+
+// DeriveRunGrant issues a run grant for one agent run from an active session
+// grant. The grant layer enforces that the run grant is never wider than its
+// parent; this handler checks the request shape and the verified tenant.
+func (s *Server) DeriveRunGrant(ctx context.Context, req *DeriveRunGrantRequest) (*DeriveRunGrantResponse, error) {
+	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "DeriveRunGrant")))
+	principal, err := s.principal(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if req.GetParentGrantId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "parent_grant_id is required")
+	}
+	sessionKey := req.GetSessionKey()
+	if strings.TrimSpace(sessionKey) == "" || len(sessionKey) > maxSessionKeyBytes || strings.ContainsFunc(sessionKey, isControl) {
+		return nil, status.Error(codes.InvalidArgument, "session_key must be a bounded, printable key")
+	}
+	if req.GetOrgId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "org_id is required")
+	}
+	if req.GetOrgId() != principal.OrganizationID {
+		return nil, status.Error(codes.PermissionDenied, "organization does not match verified identity")
+	}
+	if req.GetPurpose() != derivePurposeAIRun {
+		return nil, status.Error(codes.InvalidArgument, "purpose must be ai_run")
+	}
+	ttl, err := s.deriveTTL(req.GetTtlSeconds())
+	if err != nil {
+		return nil, err
+	}
+	budget, err := budgetFromRequest(
+		req.GetBudgetMicroUsd(), req.GetBudgetMaxSteps(), req.GetBudgetMaxRuntimeS(),
+		req.GetBudgetSource(), req.GetBudgetMintedAtUnix(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	g, err := s.grants.Derive(ctx, grant.DeriveParams{
+		OrgID:             principal.OrganizationID,
+		OwnerID:           authz.OwnerFilter(principal),
+		ParentGrantID:     req.GetParentGrantId(),
+		SessionKey:        sessionKey,
+		RunDomains:        req.GetAllowedDomains(),
+		TTL:               ttl,
+		PrincipalZdr:      principal.ZeroDataRetention,
+		Budget:            budget,
+		MaxRunDomains:     s.cfg.MaxRunDomains,
+		Policy:            s.cfg.Policy,
+	})
+	if err != nil {
+		telemetry.GrantsIssuedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", grantOutcome(err))))
+		return nil, mapErr(err)
+	}
+	telemetry.GrantsIssuedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "derived")))
+	return &DeriveRunGrantResponse{
+		GrantId:        g.ID,
+		Endpoint:       s.baseURL + "/grants/" + g.ID,
+		ExpiresAt:      timestamppb.New(g.ExpiresAt),
+		AllowedDomains: append([]string(nil), g.AllowedDomains...),
+		ParentGrantId:  g.ParentGrantID,
+		Kind:           string(g.Kind),
+		Zdr:            g.Zdr,
+		// The run grant's claim as stored: the request's, tightened by the
+		// parent's, or the parent's when the request set none.
+		BudgetMicroUsd:     g.Budget.MicroUSD,
+		BudgetMaxSteps:     g.Budget.MaxSteps,
+		BudgetMaxRuntimeS:  g.Budget.MaxRuntimeS,
+		BudgetSource:       g.Budget.Source,
+		BudgetMintedAtUnix: g.Budget.MintedAtUnix,
+	}, nil
+}
+
+// budgetFromRequest reads the budget claim fields of a request. The stamp is
+// the broker's: a request that sets it is refused rather than overwritten, so
+// a caller cannot believe it chose the claim's age. Shape errors (negative
+// bound, unknown source, a source with nothing to bound) are InvalidArgument.
+func budgetFromRequest(microUSD int64, maxSteps, maxRuntimeS int32, source string, mintedAtUnix int64) (grant.Budget, error) {
+	budget, err := grant.NormalizeBudget(grant.Budget{
+		MicroUSD:     microUSD,
+		MaxSteps:     maxSteps,
+		MaxRuntimeS:  maxRuntimeS,
+		Source:       source,
+		MintedAtUnix: mintedAtUnix,
+	})
+	if err != nil {
+		return grant.Budget{}, status.Error(codes.InvalidArgument, "invalid budget claim: bounds must not be negative, budget_source must be request, org_default or entitlement exactly when a bound is set, and budget_minted_at_unix is set by the broker")
+	}
+	return budget, nil
+}
+
+// deriveTTL resolves a requested run-grant lifetime: 0 is the configured
+// default, a value under the minimum is refused, anything else is clamped to
+// the broker maximum. The parent's expiry caps it again in the grant layer.
+func (s *Server) deriveTTL(seconds int32) (time.Duration, error) {
+	switch {
+	case seconds == 0:
+		return s.cfg.TTL, nil
+	case seconds < 0 || time.Duration(seconds)*time.Second < grant.MinDerivedLifetime:
+		return 0, status.Error(codes.InvalidArgument, "ttl_seconds is below the minimum run grant lifetime")
+	default:
+		return min(time.Duration(seconds)*time.Second, MaxGrantTTL), nil
+	}
+}
+
+func isControl(r rune) bool { return r <= 0x1f || r == 0x7f }
 
 // Health returns service health status.
 func (s *Server) Health(ctx context.Context, _ *BrowserHealthRequest) (*BrowserHealthResponse, error) {
