@@ -5,6 +5,7 @@ pub mod agents;
 pub mod agents_runs;
 pub mod ai;
 pub mod audit;
+pub mod audit_compliance;
 pub mod auth;
 pub mod billing;
 pub mod briefs;

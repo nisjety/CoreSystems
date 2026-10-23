@@ -1396,6 +1396,57 @@ const ticketConfigOutput = z.object({
 // field to the top of the execution envelope the way tickets.* promotes
 // ticketId — only the always-present envelope status is asserted here,
 // matching the same minimal-claim posture as ticketOutput.
+// Audit compliance (WS06-S6). Owner/admin only at the gateway and again in
+// audit-core / org-core; no org id here, the session names the org. None of
+// these is model-eligible (model-eligibility.ts stays an allowlist): an agent
+// never reads or administers the audit log.
+const auditVerifyChainInput = z.object({
+  fromSeq: z.number().int().min(0).optional(),
+  fromHash: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  maxRows: z.number().int().min(1).max(1_000_000).optional(),
+})
+
+const auditExportLogInput = z.object({
+  event: z.string().trim().max(128).optional(),
+  userId: z.string().trim().max(128).optional(),
+  plane: z.string().trim().max(128).optional(),
+  outcome: z.string().trim().max(128).optional(),
+  since: z.string().datetime().optional(),
+  until: z.string().datetime().optional(),
+})
+
+const auditSiemEventFilter = z.object({
+  events: z.array(z.string().trim().min(1).max(128)).max(128).optional(),
+  planes: z.array(z.string().trim().min(1).max(128)).max(128).optional(),
+})
+
+const auditCreateSiemDestinationInput = z.object({
+  kind: z.enum(['ndjson_webhook', 'splunk_hec']),
+  url: z.string().url().max(2048).refine((value) => {
+    try {
+      return new URL(value).protocol === 'https:'
+    } catch {
+      return false
+    }
+  }, 'url must use https'),
+  secret: z.string().min(1).max(512),
+  enabled: z.boolean().optional(),
+  eventFilter: auditSiemEventFilter.optional(),
+})
+
+const auditUpdateSiemDestinationInput = z.object({
+  destinationId: z.string().min(1).max(64),
+  expectedRevision: z.number().int().min(0),
+  url: z.string().url().max(2048).optional(),
+  secret: z.string().min(1).max(512).optional(),
+  enabled: z.boolean().optional(),
+  eventFilter: auditSiemEventFilter.optional(),
+})
+
+const auditDeleteSiemDestinationInput = z.object({
+  destinationId: z.string().min(1).max(64),
+})
+
 const envelopeStatusOutput = z.object({
   status: z.string(),
 })
@@ -3314,6 +3365,61 @@ export const actionRegistry = [
     requiresApproval: true,
     reversible: true,
     inputSchema: routerPolicyUpdateInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'audit.verify_chain',
+    label: 'Verify audit log integrity',
+    description: 'Recompute the organization\'s audit hash chain and report verified, verified_with_legacy, broken (with the first broken position), partial or key_unavailable. Read-only; owner or admin, human sessions only. The run is itself recorded in the audit log.',
+    ownerPlane: 'control',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: auditVerifyChainInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'audit.export_log',
+    label: 'Export audit log',
+    description: 'Page the organization\'s full chained audit log, each row carrying its hash and previous hash so it can be verified offline. Owner or admin, human sessions only; every read is recorded in the audit log.',
+    ownerPlane: 'control',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: auditExportLogInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'audit.create_siem_destination',
+    label: 'Add SIEM destination',
+    description: 'Register an https endpoint (NDJSON webhook or Splunk HEC) that receives the organization\'s audit log. The secret is write-only and sealed by Control. Owner or admin, human sessions only; plan-gated.',
+    ownerPlane: 'control',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: auditCreateSiemDestinationInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'audit.update_siem_destination',
+    label: 'Update SIEM destination',
+    description: 'Change, pause or resume one SIEM destination, guarded by the revision it was read at. Owner or admin, human sessions only.',
+    ownerPlane: 'control',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: auditUpdateSiemDestinationInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'audit.delete_siem_destination',
+    label: 'Remove SIEM destination',
+    description: 'Remove one SIEM destination and its sealed secret. Rows already delivered stay with the receiver. Owner or admin, human sessions only.',
+    ownerPlane: 'control',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: auditDeleteSiemDestinationInput,
     outputSchema: envelopeStatusOutput,
   },
 ] as const satisfies readonly ActionDescriptor[]
