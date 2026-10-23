@@ -33,6 +33,7 @@ pub mod resource_routes;
 pub mod retry_after;
 pub mod routes;
 pub mod run_limits;
+pub mod schedule_preflight;
 pub mod schedule_routes;
 pub mod scrape_contract;
 pub mod scrape_routes;

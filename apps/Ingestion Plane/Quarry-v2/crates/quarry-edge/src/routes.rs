@@ -120,6 +120,12 @@ pub fn router(state: AppState) -> Router {
         // (stamped by the orchestrator from the schedule memo, verified at
         // schedule-creation). The handler enforces the token itself.
         .route("/v1/internal/run_page", post(internal_run_page))
+        // Fire-time preflight of an executable scheduled job (WS15.S2). Runtime token
+        // plus the schedule run binding; S2 always allows (S4 adds the checks).
+        .route(
+            "/v1/internal/schedules/preflight",
+            post(crate::schedule_preflight::preflight),
+        )
         // WS17.E3: org erasure of the profile families. Shared internal token, counts only.
         .route(
             "/v1/internal/orgs/:org/profiles",
