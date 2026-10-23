@@ -913,6 +913,18 @@ fn refuse_while_draining(request_id: &str) -> Result<(), (StatusCode, Json<Envel
     }
 }
 
+/// WS6.D-s: a refusal from the limits resolver (a spent allowance, or an unreadable one
+/// under fail mode `closed`) as the response of a handoff. Nothing was created yet.
+fn limits_refusal(
+    request_id: &str,
+    error: QuarryError,
+) -> (StatusCode, Json<Envelope<()>>) {
+    (
+        StatusCode::from_u16(error.code.http_status()).unwrap_or(StatusCode::SERVICE_UNAVAILABLE),
+        Json(Envelope::<()>::err(request_id, error)),
+    )
+}
+
 async fn crawl_handoff(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
@@ -941,6 +953,17 @@ async fn crawl_handoff(
     // The resolved values are what the orchestrator receives and what the
     // response reports, so a clamp is never silent.
     let limits = crate::limits::crawl_limits().resolve(req.max_pages, req.max_depth);
+    // WS6.D-s: and never past what the organization has left of its configured page allowance.
+    // A spent allowance is a 402 `org_allowance` before any job exists; an organization with
+    // no allowance policy keeps the floor (the static source is always this case).
+    let org_limits = state
+        .limits
+        .org_limits(&org_id)
+        .await
+        .map_err(|error| limits_refusal(&request_id, error))?;
+    let limits = limits
+        .clamp_pages_to(org_limits.crawl_pages)
+        .map_err(|exhausted| limits_refusal(&request_id, exhausted.into_error()))?;
 
     // Cycle 19 / cluster #19: emit HostDiscovered for autocomplete-core
     // consumption when this seed URL introduces a brand-new host. The
@@ -1038,7 +1061,7 @@ async fn crawl_handoff(
     }
     match ack {
         Ok(mut v) => {
-            v.limits = Some(limits);
+            v.limits = Some(limits.into());
             Ok(Json(Envelope::ok(request_id, v)))
         }
         Err(err) => Err((
@@ -1080,6 +1103,18 @@ async fn batch_handoff(
     .map_err(|error| crate::web_policy_edge::envelope_error(&request_id, error))?;
     crate::web_policy_edge::gate_urls(&decision, req.urls.iter().map(String::as_str))
         .map_err(|error| crate::web_policy_edge::envelope_error(&request_id, error))?;
+    // WS6.D-s: the batch keeps the first URLs that fit the organization's remaining
+    // `quarry.batch.url` allowance (all of them when none is configured); a spent allowance
+    // is a 402 `org_allowance` before any job exists. The ack reports counts only.
+    let org_limits = state
+        .limits
+        .org_limits(&claims.org_id)
+        .await
+        .map_err(|error| limits_refusal(&request_id, error))?;
+    let urls_bound = crate::limits::clamp_batch_urls(req.urls.len(), org_limits.batch_urls)
+        .map_err(|exhausted| limits_refusal(&request_id, exhausted.into_error()))?;
+    let mut req = req;
+    req.urls.truncate(urls_bound.accepted);
     let origin = crate::handoff::run_origin_from_request(&claims, &headers);
     let idempotency_key = crate::handoff::idempotency_key_from_request(&headers);
     let ack = crate::handoff::forward_job_signed(
@@ -1141,7 +1176,10 @@ async fn batch_handoff(
             .await;
     }
     match ack {
-        Ok(v) => Ok(Json(Envelope::ok(request_id, v))),
+        Ok(mut v) => {
+            v.limits = Some(urls_bound.into());
+            Ok(Json(Envelope::ok(request_id, v)))
+        }
         Err(err) => Err((
             StatusCode::from_u16(err.code.http_status()).unwrap_or(StatusCode::BAD_GATEWAY),
             Json(Envelope::<()>::err(&request_id, err)),
@@ -1161,9 +1199,10 @@ pub struct HandoffAck {
     pub run_id: Option<String>,
     pub accepted_at: chrono::DateTime<chrono::Utc>,
     /// The page and depth bounds this crawl will actually run with, and why they
-    /// differ from the request. Set by `/v1/crawl`; absent for other kinds.
+    /// differ from the request (`/v1/crawl`), or the URLs a batch accepted and dropped
+    /// (`/v1/batch`, WS6.D-s). Absent for other kinds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub limits: Option<crate::limits::CrawlLimitsAck>,
+    pub limits: Option<crate::limits::HandoffLimits>,
 }
 
 /// Internal endpoint called by orchestrator activities.
@@ -1988,6 +2027,7 @@ mod tests {
             answer_pipeline: None,
             local_index: None,
             usage: Arc::new(NoopUsageMeter),
+            limits: Arc::new(crate::limits::StaticFloor),
             policy: crate::policy_baseline::PolicyBaseline::default(),
             scheduler: None,
             internal_signer: None,
