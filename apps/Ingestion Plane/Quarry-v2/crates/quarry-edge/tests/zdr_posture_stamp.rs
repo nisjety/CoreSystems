@@ -631,6 +631,17 @@ async fn settle() {
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
 }
 
+/// Polls (up to 15 s) until `done` holds, so a positive control never depends on the runner being
+/// fast: only the "nothing happened" side of a test waits a fixed `settle()`.
+async fn wait_for(mut done: impl FnMut() -> bool) {
+    for _ in 0..150 {
+        if done() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
 fn changed_record() -> ChangeRecord {
     let now = Utc::now();
     ChangeRecord {
@@ -838,7 +849,11 @@ async fn run_page_with_a_zdr_stamp_persists_no_artifact_event_or_index_write() {
             .run_page(run_page_body(&format!("https://page.test/control-{n}"), zdr))
             .await;
         assert_eq!(served.status().as_u16(), 200, "control {n}: {:?}", served.text().await);
-        settle().await;
+        wait_for(|| {
+            let now = edge.persisted();
+            now.0 > before.0 && now.1 > before.1 && now.2 > before.2
+        })
+        .await;
         let after = edge.persisted();
         assert!(after.0 > before.0, "control {n}: an artifact file is written {before:?} -> {after:?}");
         assert!(after.1 > before.1, "control {n}: a durable event is emitted {before:?} -> {after:?}");
