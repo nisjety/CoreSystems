@@ -28,6 +28,8 @@ Written 2026-10-23 by unit w2-queue-writer. Branch `quarryv2-next`, worktree `C:
   12. **WS10.S1 codemod count:** census counts 66 `RequestKind::new()` call sites in `quarry-edge/src`; the plan says 65. Use the grep result at build time.
   13. **Disk checks that match the census:** `agent_routes/` is a directory (mod.rs, admission.rs, budget.rs, close.rs, control.rs, lifecycle.rs, live.rs, projection.rs, queries.rs, receipts.rs, router.rs, run_live.rs, run_registry.rs, run_sweeper.rs, sensitive_approval.rs, step.rs, tabs.rs, tests.rs, types.rs, ws.rs); `tab_ledger.rs` and `attach.rs` are absent (WS8.F). `redaction/` exists (WS12.S0 built). `web_policy`, `capture.rs`, `scrape_actions.rs`, `crawl_scope.rs`, `usage_attrs.rs`, `policy_baseline.rs`, `field_probe.rs`, `profile_cdp_spike.rs`, `browser_evidence.rs` (gateway) are absent. `crawl_denial.rs` exists (WS14.S2 adds a variant only). `statistics.go` exists (WS6.K).
 
+> CORRECTION 2026-10-23 (owner-delegated decision 8): WS1.A2 is built at integration level (14 commits, W1 closeout). The gate on it is LIFTED for code work (E3.1-b, E3.2-e1, E3.7.10 and any unit that waited on it), behind default-off flags. No production-effect or deployment claim until X-1 and an L2 run exist. Where a row below says "WAITING-OTHER: WS1.A2" or "gated on WS1.A2", read it as buildable now (dark).
+
 ## 1. W2 slice table
 
 Generated from the census (122 rows: 112 scheduled, 6 optional, 1 conditional, 3 unscheduled). Totals below. Full-slice days; "remaining" = sched, not built.
