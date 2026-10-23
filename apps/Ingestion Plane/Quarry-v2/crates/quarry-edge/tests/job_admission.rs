@@ -105,3 +105,38 @@ async fn another_control_429_or_failure_is_still_an_upstream_error() {
     assert_eq!(status, 502, "{envelope}");
     assert_eq!(envelope["error"]["code"], "UPSTREAM_BLOCKED");
 }
+
+#[tokio::test]
+async fn zdr_crawl_is_still_refused_so_no_backlog_row_exists() {
+    // A ZDR crawl is refused in the edge before any handoff, so control never
+    // sees it: no job row is stored and no backlog slot is taken for it.
+    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = hits.clone();
+    let app = Router::new().route(
+        "/v1/jobs",
+        post(move || {
+            let seen = seen.clone();
+            async move {
+                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                (StatusCode::CREATED, Json(json!({ "data": null })))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let control_addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let edge = spawn_edge(format!("http://{control_addr}")).await;
+
+    let (status, envelope) = post_json(
+        edge,
+        "/v1/crawl",
+        json!({ "url": "https://example.com/", "zdr": true }),
+    )
+    .await;
+    assert_eq!(status, 403, "{envelope}");
+    assert_eq!(
+        hits.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a refused ZDR crawl reached control"
+    );
+}
