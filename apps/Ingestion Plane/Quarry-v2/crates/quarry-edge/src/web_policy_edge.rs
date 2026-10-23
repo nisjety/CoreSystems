@@ -13,7 +13,7 @@ use axum::{
 };
 use quarry_core::envelope::Envelope;
 use quarry_core::error::{ErrorCode, QuarryError};
-use quarry_core::web_policy::{LayerError, PolicyDenial, Principal, RequestAsk};
+use quarry_core::web_policy::{LayerError, OrgInput, PolicyDenial, Principal, RequestAsk};
 use serde_json::json;
 
 use crate::auth::Claims;
@@ -31,12 +31,35 @@ pub fn principal(claims: &Claims) -> Principal {
     }
 }
 
-/// Decide the policy for one request. The ask's shape is checked first, in every
-/// enforcement mode (a malformed ask is a 400, not a policy decision); then the
-/// baseline's mode decides what the ask and the baseline do.
+/// Decide the policy for one request of a caller with a token. The org layer is the token's
+/// `web_policy` claim (WS7.J). The ask's shape is checked first, in every enforcement mode (a
+/// malformed ask is a 400, not a policy decision); then the baseline's mode decides what the
+/// claim, the ask and the baseline do.
 pub fn decide(
     baseline: &PolicyBaseline,
+    claims: &Claims,
+    zdr: bool,
+    ask: Option<&RequestAsk>,
+) -> Result<Decision, QuarryError> {
+    let org = baseline.org_input(claims.web_policy_claim());
+    decide_with(baseline, principal(claims), org, zdr, ask)
+}
+
+/// [`decide`] for a caller with no token: the orchestrator's internal route. The baseline and
+/// the invariants apply, with no org layer.
+pub fn decide_for_principal(
+    baseline: &PolicyBaseline,
     principal: Principal,
+    zdr: bool,
+    ask: Option<&RequestAsk>,
+) -> Result<Decision, QuarryError> {
+    decide_with(baseline, principal, OrgInput::Absent, zdr, ask)
+}
+
+fn decide_with(
+    baseline: &PolicyBaseline,
+    principal: Principal,
+    org: OrgInput,
     zdr: bool,
     ask: Option<&RequestAsk>,
 ) -> Result<Decision, QuarryError> {
@@ -44,12 +67,17 @@ pub fn decide(
         Some(ask) => Some(ask.into_layer().map_err(ask_error)?),
         None => None,
     };
-    baseline
-        .decide(principal, zdr, request)
+    let decision = baseline
+        .decide_with_org(principal, zdr, org, request)
         .map_err(|denial| {
             record_denial(&denial, true);
             quarry_error(&denial)
-        })
+        })?;
+    // Under `observe` a shadow that could not be resolved is a would-be denial: counted, never enforced.
+    if let Some(shadow) = decision.shadow_denial() {
+        record_denial(shadow, false);
+    }
+    Ok(decision)
 }
 
 /// Gate one URL of the request. Under `observe` the shadow decision is checked first
@@ -76,6 +104,93 @@ pub fn is_default(decision: &Decision) -> bool {
     quarry_runtime::RunPolicy::from(decision.policy())
         .web_policy
         .is_none()
+}
+
+/// The capability whose downgrade the counter and the response name (WS7.E).
+const PAID_PROVIDER: &str = "search.paid_provider";
+
+/// The paid-provider permission of one search request after the web policy. A request
+/// that asked for paid providers and lost them to the policy (not to ZDR, which stays
+/// the floor it always was) is a downgrade: the search runs without them and the
+/// response says so. It is never a 403.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaidProvider {
+    /// Whether paid providers may be dispatched for this request.
+    pub allowed: bool,
+    /// The layer that removed a permission the request asked for, when the policy (and
+    /// not ZDR) removed it.
+    pub downgraded_by: Option<&'static str>,
+}
+
+/// Decide the paid-provider permission of a search. `requested` is the body flag and
+/// `zdr` the effective posture; the policy can only take the permission away.
+pub fn paid_provider(decision: &Decision, requested: bool, zdr: bool) -> PaidProvider {
+    let policy_allows = decision.policy().allows(quarry_core::web_policy::CapKey::SearchPaidProvider);
+    let allowed = requested && !zdr && policy_allows;
+    let downgraded_by = if requested && !zdr && !policy_allows {
+        let source = decision
+            .policy()
+            .mode(quarry_core::web_policy::CapKey::SearchPaidProvider)
+            .map_or("unknown", |(_, source)| source.as_str());
+        record_downgrade(PAID_PROVIDER, source);
+        Some(source)
+    } else {
+        None
+    };
+    PaidProvider {
+        allowed,
+        downgraded_by,
+    }
+}
+
+/// Count one downgrade. Both labels are closed sets (a capability name and a decision
+/// source), so the counter carries nothing from the caller.
+pub fn record_downgrade(capability: &'static str, decision_source: &'static str) {
+    metrics::counter!(
+        "web_policy_downgraded_total",
+        "capability" => capability,
+        "decision_source" => decision_source
+    )
+    .increment(1);
+    tracing::info!(
+        target: "quarry.web_policy",
+        capability,
+        decision_source,
+        "policy.downgraded"
+    );
+}
+
+/// Gate the URLs of a request that takes a list (extract, batch) before any I/O. The
+/// first denial decides the refusal. The details carry the capability, the decision
+/// source and the number of denied URLs; no URL and no host is ever returned.
+pub fn gate_urls<'a>(
+    decision: &Decision,
+    urls: impl IntoIterator<Item = &'a str>,
+) -> Result<(), QuarryError> {
+    let mut first: Option<PolicyDenial> = None;
+    let mut denied = 0usize;
+    for url in urls {
+        if let Some(shadow) = decision.shadow() {
+            if let Err(denial) = shadow.check_url(url) {
+                record_denial(&denial, false);
+            }
+        }
+        if let Err(denial) = decision.policy().check_url(url) {
+            record_denial(&denial, true);
+            denied += 1;
+            first.get_or_insert(denial);
+        }
+    }
+    let Some(denial) = first else {
+        return Ok(());
+    };
+    let mut error = quarry_error(&denial);
+    let mut details = error.details.take().unwrap_or_else(|| json!({}));
+    if let Some(object) = details.as_object_mut() {
+        object.remove("host");
+    }
+    details["denied_count"] = json!(denied);
+    Err(error.with_details(details))
 }
 
 /// The capability whose downgrade the counter and the response name (WS7.E).
