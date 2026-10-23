@@ -715,3 +715,17 @@ type or status filter), 409 `CONFLICT` (a terminal job, or a failed `if_status`)
 `FORBIDDEN` (ZDR floor on errors).
 
 Goldens: none changed. The OpenAPI paths are in `docs/openapi.yaml`.
+
+## Agent run budgets: `meta.budget`, `cost_source`, `usage` and `agent.budget_exhausted` (WS6.B, W2-U21, built, NOT run)
+
+An agent-class run (a service principal, or `initiated_by: "agent"`) is bounded in steps, attempts, active runtime and estimated cost. A person's session is never capped. Enforcement is `QUARRY_EDGE__BUDGET_ENFORCEMENT` = `off` | `shadow` (default) | `on`; in `shadow` nothing is refused. The gate sits at position 9 of the admission order (after the budget-free checks, before the sensitive approval).
+
+- **`meta.budget`** on a REST step response (`POST /v1/agent/runs/{id}/step`) of an agent-class run: `{class, steps, attempts, max_steps?, max_attempts?, elapsed_s, max_runtime_s?, spent_usd, max_cost_usd?, estimated: true, cost_source, exhausted?}`. The `max_*` bounds and `exhausted` are absent for a person. `cost_source` is `flat_table` (the flat action table) or `provider_billed` (the driver reported the figure). Absent when enforcement is `off`. The WebSocket reply carries no `meta.budget` yet (not done in W2-U21).
+- **Receipts** carry `cost_source` (`flat_table` | `provider_billed`; the column `quarry_step_receipts.cost_source`, migration `0012`). A failed attempt is charged the flat cost and its receipt now carries that cost too (it used to record 0); a skipped receipt has no cost and no source. A receipt written before migration `0012` has no `cost_source`.
+- **`DELETE /v1/agent/runs/{id}`** returns `data.usage` for an agent-class run: `{class, spent_usd, steps, attempts, active_s, exhausted?}`. A person's session returns `{closed: true}` without `usage`.
+- **`agent.budget_exhausted`** (`EventType::AgentBudgetExhausted`, durable type token `agent_budget_exhausted`): emitted once per segment of a run, when `on` refuses. Payload `{dimension, limit, spent, unit, estimated, limit_source}`; a ZDR run emits it through `emit_for_zdr` (nothing persisted). It is not in the App Shell SSE allow-list (`is_user_facing_event`); its path to the run trace is a WS10 projection row, not built here. The refusal also writes a checkpoint with the exhaustion latch, so a resume refuses at once and cannot refill.
+- **Legacy request cap.** `constraints.max_steps` still refuses with `429 RATE_LIMITED` ("agent step budget exhausted") where the gate does not own the bound: when enforcement is `off` (for everyone), and for an agent run while enforcement is `shadow`. In `on` the typed `402 BUDGET_EXHAUSTED` replaces it for agent runs, and a person's session is never refused for its own step count (a UI session that sends `max_steps: 12` is no longer refused at the 13th action when enforcement is `on` or `shadow`).
+
+**Error reasons.** `BUDGET_EXHAUSTED` (402, not retryable) is unchanged from the WS6.B gate; its `details` are `{dimension, limit, spent, unit, estimated, limit_source, resumable: false}`.
+
+Goldens: none changed. The OpenAPI schemas are `BudgetMeta` (new), `Envelope_BrowserObservation.meta` and the `DELETE` response `usage` (additive).

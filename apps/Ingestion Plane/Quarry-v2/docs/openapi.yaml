@@ -3472,6 +3472,65 @@ components:
           type: boolean
         data:
           $ref: '#/components/schemas/BrowserObservation'
+        meta:
+          type: object
+          description: Present on a step response of an agent-class run (WS6.B); absent for a person's session and when budgets are off.
+          properties:
+            budget:
+              $ref: '#/components/schemas/BudgetMeta'
+    BudgetMeta:
+      type: object
+      description: >-
+        The budget ledger of an agent-class run after a step (WS6.B). Cost is estimated
+        from the flat action table plus a browser-time term, never billed usage.
+        Enforcement is QUARRY_EDGE__BUDGET_ENFORCEMENT (shadow by default: the bounds
+        are reported and what would be refused is recorded, nothing is refused).
+      required:
+      - class
+      - steps
+      - attempts
+      - elapsed_s
+      - spent_usd
+      - estimated
+      - cost_source
+      properties:
+        class:
+          type: string
+          enum: [interactive, agent]
+        steps:
+          type: integer
+          description: Completed steps.
+        attempts:
+          type: integer
+          description: Attempts, completed or failed.
+        max_steps:
+          type: integer
+          description: The step bound. Absent for an interactive run.
+        max_attempts:
+          type: integer
+          description: The attempt bound. Absent for an interactive run.
+        elapsed_s:
+          type: number
+          description: Active time in seconds; a human takeover does not count.
+        max_runtime_s:
+          type: integer
+          description: The runtime bound. Absent for an interactive run.
+        spent_usd:
+          type: number
+        max_cost_usd:
+          type: number
+          description: The cost bound. Absent for an interactive run.
+        estimated:
+          type: boolean
+          enum: [true]
+        cost_source:
+          type: string
+          enum: [flat_table, estimated, provider_billed]
+          description: Where the cost of the step this response answers came from.
+        exhausted:
+          type: string
+          enum: [steps, attempts, runtime, cost]
+          description: The dimension reached, once one was.
     BrowserObservation:
       type: object
       required:
@@ -4957,6 +5016,28 @@ components:
           properties:
             closed:
               type: boolean
+            usage:
+              description: >-
+                An agent-class run's spend, as it stood when the run ended (WS6.B).
+                Absent for a person's session, which has no budget.
+              type: object
+              properties:
+                class:
+                  type: string
+                  enum: [interactive, agent]
+                spent_usd:
+                  type: number
+                  description: Estimated, from the flat action table plus a browser-time term.
+                steps:
+                  type: integer
+                attempts:
+                  type: integer
+                active_s:
+                  type: number
+                exhausted:
+                  type: string
+                  nullable: true
+                  enum: [steps, attempts, runtime, cost, null]
     SearchRequest:
       type: object
       required:
