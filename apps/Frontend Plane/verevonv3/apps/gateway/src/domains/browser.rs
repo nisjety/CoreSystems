@@ -737,6 +737,16 @@ pub(crate) async fn run_action(
         }
     };
     let actor = body.actor;
+    if reload_refused_for_actor(&action, actor) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "browser_action_denied",
+                "Reload is available to people, not to agents.",
+            )),
+        )
+            .into_response();
+    }
     if !is_valid_path_segment(&session_id) {
         return (
             StatusCode::BAD_REQUEST,
@@ -2937,7 +2947,7 @@ fn browser_response(
                 "eventCount": metadata.replay_events.len()
             },
             "zdr": metadata.zdr,
-            "capabilities": ["navigate", "back", "forward", "click", "click_point", "type", "press", "scroll", "mouse_wheel", "wait_for", "select", "inspect_dom", "control_state", "human_takeover", "agent_control", "tabs", "live_frame", "live_frame_stream", "live_frame_ws", "devtools_events", "devtools_stream", "replay_timeline", "screenshot_artifact", "visual_observation", "visual_change", "annotate", "persistent_profile"]
+            "capabilities": ["navigate", "back", "forward", "reload", "hard_reload", "click", "click_point", "type", "press", "scroll", "mouse_wheel", "wait_for", "select", "inspect_dom", "control_state", "human_takeover", "agent_control", "tabs", "live_frame", "live_frame_stream", "live_frame_ws", "devtools_events", "devtools_stream", "replay_timeline", "screenshot_artifact", "visual_observation", "visual_change", "annotate", "persistent_profile"]
         },
         "observation": observation
     })
@@ -3059,7 +3069,7 @@ fn browser_response_from_owner_projection(projection: &Value, observation: Optio
             "timeline": [],
             "replay": { "events": [], "eventCount": 0 },
             "zdr": projection.get("zdr").and_then(Value::as_bool).unwrap_or(false),
-            "capabilities": ["navigate", "back", "forward", "click", "click_point", "type", "press", "scroll", "mouse_wheel", "wait_for", "select", "inspect_dom", "control_state", "human_takeover", "agent_control", "tabs", "live_frame", "live_frame_stream", "devtools_events", "screenshot_artifact", "visual_observation", "visual_change", "annotate", "persistent_profile"]
+            "capabilities": ["navigate", "back", "forward", "reload", "hard_reload", "click", "click_point", "type", "press", "scroll", "mouse_wheel", "wait_for", "select", "inspect_dom", "control_state", "human_takeover", "agent_control", "tabs", "live_frame", "live_frame_stream", "devtools_events", "screenshot_artifact", "visual_observation", "visual_change", "annotate", "persistent_profile"]
         },
         "observation": observation
     })
@@ -4061,6 +4071,13 @@ fn normalize_optional_public_url(raw: Option<&str>) -> Result<Option<String>, St
     normalize_public_http_url(raw).map(Some)
 }
 
+/// Reload is a human-only wire action (WS9.B). An agent-actor request for it
+/// is refused before any Quarry call.
+fn reload_refused_for_actor(action: &Value, actor: BrowserActionActor) -> bool {
+    actor == BrowserActionActor::Agent
+        && action.get("type").and_then(Value::as_str) == Some("reload")
+}
+
 fn sanitize_action(mut action: Value) -> Result<Value, (&'static str, String)> {
     let action_type = action
         .get("type")
@@ -4109,6 +4126,33 @@ fn sanitize_action(mut action: Value) -> Result<Value, (&'static str, String)> {
                 ));
             }
             Ok(action)
+        }
+        "reload" => {
+            let known_keys = action
+                .as_object()
+                .map(|object| {
+                    object
+                        .keys()
+                        .all(|key| key == "type" || key == "ignore_cache")
+                })
+                .unwrap_or(false);
+            if !known_keys {
+                return Err((
+                    "invalid_browser_action",
+                    "Reload accepts only ignore_cache.".to_owned(),
+                ));
+            }
+            let ignore_cache = match action.get("ignore_cache") {
+                None => false,
+                Some(Value::Bool(value)) => *value,
+                Some(_) => {
+                    return Err((
+                        "invalid_browser_action",
+                        "ignore_cache must be a boolean.".to_owned(),
+                    ))
+                }
+            };
+            Ok(json!({ "type": "reload", "ignore_cache": ignore_cache }))
         }
         "evaluate" => Err((
             "browser_action_denied",
@@ -7638,6 +7682,34 @@ pub(crate) mod tests {
         let err = sanitize_action(json!({ "type": "evaluate", "script": "document.cookie" }))
             .expect_err("evaluate should be denied");
         assert_eq!(err.0, "browser_action_denied");
+    }
+
+    #[test]
+    fn sanitize_action_allows_reload_without_extra_keys() {
+        let hard = sanitize_action(json!({ "type": "reload", "ignore_cache": true }))
+            .expect("valid action");
+        assert_eq!(hard, json!({ "type": "reload", "ignore_cache": true }));
+        let soft = sanitize_action(json!({ "type": "reload" })).expect("valid action");
+        assert_eq!(soft, json!({ "type": "reload", "ignore_cache": false }));
+    }
+
+    #[test]
+    fn sanitize_action_rejects_reload_with_url() {
+        let err = sanitize_action(json!({ "type": "reload", "url": "https://example.com" }))
+            .expect_err("reload with a url must be refused");
+        assert_eq!(err.0, "invalid_browser_action");
+        let typed = sanitize_action(json!({ "type": "reload", "ignore_cache": "yes" }))
+            .expect_err("non-boolean ignore_cache must be refused");
+        assert_eq!(typed.0, "invalid_browser_action");
+    }
+
+    #[test]
+    fn reload_is_refused_for_agent_actor_only() {
+        let reload = json!({ "type": "reload", "ignore_cache": true });
+        assert!(reload_refused_for_actor(&reload, BrowserActionActor::Agent));
+        assert!(!reload_refused_for_actor(&reload, BrowserActionActor::Human));
+        let back = json!({ "type": "back" });
+        assert!(!reload_refused_for_actor(&back, BrowserActionActor::Agent));
     }
 
     #[test]
