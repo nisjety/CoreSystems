@@ -221,13 +221,42 @@ paths:
               schema:
                 $ref: '#/components/schemas/Envelope_Error'
         '429':
-          description: Rate limited
+          description: >-
+            Rate limited. With actions, details.reason heavy_browser_busy means the
+            browser's heavy lane is held by another action run; retry shortly.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '501':
+          description: >-
+            The browser cannot do what was asked: a capture or actions on a browser that
+            cannot run them, or no browser wired on the endpoint. Code UNSUPPORTED,
+            details.reason browser_capability_unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '504':
+          description: >-
+            The run hit a deadline. Without actions: code TIMEOUT with details.op scrape
+            and deadline_ms. With actions (the handler bound is 115 s and the route allows
+            125 s): details.reason actions_deadline. A single wait over its limit
+            (wait_too_long) or a run over the wait budget (wait_budget_exhausted) fails
+            that action; under actions_on_error abort the request then answers 502
+            action_failed.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Envelope_Error'
         '502':
-          description: Upstream fetch failed
+          description: >-
+            Upstream fetch failed. With actions, an action that failed under abort answers
+            DRIVER_FAILED with details.reason action_failed, details.action_index,
+            details.action_type and details.actions: the outcome of each action in order
+            (index, kind, status, duration_ms, and an error code and message). Page text
+            and typed values are never in it. details.reason no_browser_session means the
+            run held no browser session.
           content:
             application/json:
               schema:
@@ -5958,12 +5987,23 @@ components:
             `rawHtml` (the document as fetched), `links` and `metadata` (the
             last two are in every response already). Naming formats makes the
             request non-default: it neither reads nor writes the page cache. Under
-            ZDR the default is `["markdown"]`. `json`, `screenshot`, `summary`,
-            `question` and `highlights` are reserved and rejected with
-            `reserved_format`.
+            ZDR the default is `["markdown"]`. `json`, `summary`, `question` and
+            `highlights` are reserved and rejected with `reserved_format`.
+            `screenshot` and `pdf` are captures (WS13.4b), given as a string or as an
+            object `{"type": "screenshot"}` or `{"type": "pdf"}` with options (see
+            CONTRACTS.md section 10). Refused with 400 `feature_disabled` at `formats`
+            while QUARRY_EDGE__SCRAPE_CAPTURE is not `on`.
           items:
-            type: string
-            enum: [markdown, html, rawHtml, links, metadata]
+            oneOf:
+            - type: string
+              enum: [markdown, html, rawHtml, links, metadata, screenshot, pdf]
+            - type: object
+              required:
+              - type
+              properties:
+                type:
+                  type: string
+                  enum: [screenshot, pdf]
         only_main_content:
           type: boolean
           default: true
@@ -6003,6 +6043,43 @@ components:
           maximum: 8388608
           default: 1048576
           description: Cap for each inline field. Over it, a non-ZDR field is left out (listed in omitted), a ZDR field is cut (listed in truncated). Alias maxInlineBytes.
+        actions:
+          type: array
+          nullable: true
+          maxItems: 50
+          description: >-
+            Actions run in order on the page the scrape opened (WS13.5). Off by
+            default: QUARRY_EDGE__SCRAPE_ACTIONS must admit the caller (`user` admits
+            user tokens, dev only; `on` also admits a service principal with
+            scrape:interact). Each item is an object whose `type` is one of wait
+            (`milliseconds`, or `selector` with `timeoutMs`), click (`selector`), write
+            (`selector` and `text`; the text is never echoed), press (`key`: a named key
+            such as Enter, Tab or Escape, or one printable character), scroll (`to` top
+            or bottom, or `selector`, or `direction` up or down with `pixels`), select
+            (`selector` and `value`), screenshot and pdf (their options, as in formats).
+            At most 50 actions; the total wait is at most 60 s and one wait at most 30 s.
+            The types executeJavascript, evaluate, navigate, back, forward, clickPoint,
+            mouseWheel, upload, download and dialog are refused by name (action_denied).
+            A request labelled initiated_by "agent" is refused with 403
+            scrape_interact_scope_required whatever the token. Not served on
+            /v1/scrape/stream (400 unsupported_in_stream).
+          items:
+            type: object
+            required:
+            - type
+            properties:
+              type:
+                type: string
+                enum: [wait, click, write, press, scroll, select, screenshot, pdf]
+        actions_on_error:
+          type: string
+          enum: [abort, continue]
+          default: abort
+          description: >-
+            What to do when an action fails. abort stops the run and answers with the
+            outcome of every action in error.details.actions; continue goes on to the
+            next action. There is no retry: a replayed click or type can submit twice.
+            Alias actionsOnError.
       description: >-
         Fields not listed here are unknown: ignored with an unknown_field warning
         (and Deprecation and Sunset headers) unless the edge runs strict, where they
@@ -6652,7 +6729,7 @@ components:
             description: Inline fields left out for exceeding max_inline_bytes (not ZDR); read the matching formats.* artifact.
           effective_options:
             type: object
-            description: The options the response was produced with, including ignored_fields, cache_state (hit, miss, bypass), doc_routing and strict.
+            description: The options the response was produced with, including ignored_fields, cache_state (hit, miss, bypass), doc_routing and strict. With actions, `actions` is a summary (count, types, total_wait_ms, capture_count, on_error), never a selector or a typed text.
           warnings:
             type: array
             items:
@@ -6669,6 +6746,31 @@ components:
                 field:
                   type: string
                   description: The request field a warning is about (unknown_field).
+          screenshot:
+            type: object
+            nullable: true
+            description: >-
+              WS13.4b. The page screenshot, inline: content_type image/png or image/jpeg,
+              bytes, width, height and the base64 data in data_base64. Under ZDR only,
+              since nothing is stored to point at; otherwise read formats.screenshot.
+          pdf:
+            type: object
+            nullable: true
+            description: >-
+              WS13.4b. The page PDF, inline: content_type application/pdf, bytes and
+              data_base64. Under ZDR only; otherwise read formats.pdf.
+          captures:
+            type: object
+            nullable: true
+            description: >-
+              What the captures measured, in both modes: the screenshot's content_type,
+              width, height, bytes, tiles, stitched and truncated; the PDF's bytes; and
+              blocked_requests. Counts and sizes only, never a URL. Absent when the
+              request captured nothing.
+          scrape_id:
+            type: string
+            nullable: true
+            description: The stored record of this scrape, for GET /v1/scrape/{id}. Absent under ZDR and when records are off.
     Envelope_ScrapeResponse:
       type: object
       required:
