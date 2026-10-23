@@ -22,4 +22,13 @@ Unit: test-go-node. Phase: run once, report, no fixes, no retries. No commits an
 - PARITY: bash scripts/tests/principal-registry-parity.test.sh at the root (stub docker, CORE_ROOT_OVERRIDE sandboxes). Log: parity.log, marker WT_DONE_PARITY.
 
 ## Results
-(to be filled in from the logs; see the final JSON)
+- BROKER: go vet rc 0; go test rc 0. 4 packages ok (cmd, internal/authz, internal/grant, internal/server); internal/telemetry has no test files; 0 failed. Log broker.log.
+- ORCH: GOWORK=off go test rc 0. 7 packages ok; internal/controlauth has no test files; 0 failed. Log orch.log.
+- CONTROL: GOWORK=off go test rc 0. 15 packages ok; notify, store/storetest, temporal have no test files; 0 failed. Log control.log.
+- NODE-ROOT: node --test rc 0. 138 tests: 138 pass, 0 fail, 0 skipped. Log node-root.log.
+- NODE-QUARRY: node --test rc 0. 23 tests: 23 pass, 0 fail. Log node-quarry.log.
+- ZDR: zdr-contract-sync.test.sh rc 0. 65 passed, 0 failed (the pending consumers it lists are informational, not failures). Log zdr-sync.log.
+- PARITY: TIMEOUT. Killed by timeout 1000 s (exit 124). 21 ok and 0 not ok before the kill; the shadowing-launcher check and the three bootstrap runs were not reached. Log parity.log. Depth bullet appended to .plan-work/quarry-w1w2/depth/W1-tests.md.
+- Leftover processes after the kill: none found (process listing).
+- go.work.sum mtime is 19 Oct 2026, before this run, so these tests did not rewrite it.
+- No commits. No tracked file was edited by this unit. Nothing was run against Docker containers; the root node suite ran docker compose render commands only.
