@@ -158,6 +158,7 @@ pub mod browserless;
 #[cfg(feature = "chromiumoxide")]
 pub mod chromiumoxide;
 #[cfg(feature = "chromiumoxide")]
+pub mod capture_plan;
 mod deadlines;
 #[cfg(feature = "chromiumoxide")]
 pub mod live_gate;
@@ -311,6 +312,15 @@ pub struct BrowserDriverCapabilities {
     /// session. Additive on the wire.
     #[serde(default)]
     pub per_tab_egress: bool,
+    /// WS13.3: the driver can run scrape-time `actions[]` on one page. Additive
+    /// on the wire: an older peer omits it and reads as `false`.
+    #[serde(default)]
+    pub scrape_actions: bool,
+    /// WS13.3: the driver takes screenshots and PDFs with options (clip, JPEG,
+    /// viewport, paper size), not only the legacy viewport PNG and default PDF.
+    /// Additive on the wire.
+    #[serde(default)]
+    pub capture_options: bool,
 }
 
 /// Browser-authored page state for an agent observation. Drivers return only
@@ -631,6 +641,61 @@ pub trait BrowserDriver: Send + Sync {
     }
     async fn pdf(&self, session: &BrowserSession) -> QuarryResult<bytes::Bytes>;
 
+    /// WS13.3: a screenshot with options. Legacy options (every option at its
+    /// default: the viewport, PNG) delegate to `screenshot`; any other option
+    /// needs a driver that overrides this method, and is refused here rather than
+    /// silently dropped.
+    async fn capture_screenshot(
+        &self,
+        session: &BrowserSession,
+        options: &quarry_core::capture::ScreenshotOptions,
+        limits: &quarry_core::capture::CaptureLimits,
+    ) -> QuarryResult<quarry_core::capture::CapturedImage> {
+        if !options.is_legacy() {
+            return Err(QuarryError::unsupported_action("capture_screenshot_options"));
+        }
+        let bytes = self.screenshot(session, false).await?;
+        crate::capture_plan::check_capture_size(bytes.len(), limits)?;
+        let Some((width_px, height_px)) = crate::capture_plan::image_dimensions(&bytes) else {
+            return Err(
+                QuarryError::new(ErrorCode::DriverFailed, "screenshot is not a PNG or JPEG")
+                    .with_details(serde_json::json!({ "reason": "screenshot_unreadable" })),
+            );
+        };
+        Ok(quarry_core::capture::CapturedImage {
+            bytes: bytes.to_vec(),
+            format: quarry_core::capture::ImageFormat::Png,
+            width_px,
+            height_px,
+            tiles: 1,
+            stitched: false,
+            truncated: false,
+        })
+    }
+
+    /// WS13.3: a PDF with options. The default options delegate to `pdf`; any
+    /// other option needs a driver that overrides this method.
+    async fn capture_pdf(
+        &self,
+        session: &BrowserSession,
+        options: &quarry_core::capture::PdfOptions,
+        limits: &quarry_core::capture::CaptureLimits,
+    ) -> QuarryResult<quarry_core::capture::CapturedPdf> {
+        if !options.is_default() {
+            return Err(QuarryError::unsupported_action("capture_pdf_options"));
+        }
+        let bytes = self.pdf(session).await?;
+        crate::capture_plan::check_capture_size(bytes.len(), limits)?;
+        Ok(quarry_core::capture::CapturedPdf {
+            bytes: bytes.to_vec(),
+        })
+    }
+
+    /// WS13.3: the URL the page is on now, or `None` when the driver cannot say.
+    async fn current_url(&self, _session: &BrowserSession) -> QuarryResult<Option<String>> {
+        Ok(None)
+    }
+
     /// List live tabs bound to this browser session. Default: Unsupported.
     async fn list_tabs(&self, _session: &BrowserSession) -> QuarryResult<Vec<BrowserTab>> {
         Err(QuarryError::unsupported_action("list_tabs"))
@@ -859,6 +924,127 @@ impl BrowserSession {
 pub struct SessionInner {
     pub connected: bool,
     pub pages_served: u64,
+}
+
+#[cfg(test)]
+mod capture_default_tests {
+    use crate::{BrowserDriver, BrowserSession, SessionInner};
+    use async_trait::async_trait;
+    use quarry_core::capture::{CaptureLimits, ImageFormat, PdfOptions, ScreenshotOptions};
+    use quarry_core::error::{ErrorCode, QuarryResult};
+    use quarry_core::ids::kinds;
+    use quarry_core::lease::{BrowserLease, ProxyAffinity};
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    /// A PNG header for a 3 by 2 picture. The planning code reads only the header.
+    fn png_3x2() -> Vec<u8> {
+        let mut bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        bytes.extend_from_slice(&13u32.to_be_bytes());
+        bytes.extend_from_slice(b"IHDR");
+        bytes.extend_from_slice(&3u32.to_be_bytes());
+        bytes.extend_from_slice(&2u32.to_be_bytes());
+        bytes.extend_from_slice(&[8, 6, 0, 0, 0]);
+        bytes
+    }
+
+    /// Implements only the methods a driver must have. The capture methods are
+    /// the trait defaults under test.
+    struct DefaultsOnly;
+
+    #[async_trait]
+    impl BrowserDriver for DefaultsOnly {
+        async fn acquire(&self, lease: &BrowserLease) -> QuarryResult<BrowserSession> {
+            Ok(BrowserSession {
+                lease: lease.clone(),
+                tab_pin: None,
+                inner: Arc::new(Mutex::new(SessionInner::default())),
+            })
+        }
+        async fn release(&self, _session: BrowserSession) -> QuarryResult<()> {
+            Ok(())
+        }
+        async fn goto(&self, _session: &BrowserSession, _url: &str) -> QuarryResult<()> {
+            Ok(())
+        }
+        async fn content(&self, _session: &BrowserSession) -> QuarryResult<bytes::Bytes> {
+            Ok(bytes::Bytes::new())
+        }
+        async fn screenshot(
+            &self,
+            _session: &BrowserSession,
+            _full_page: bool,
+        ) -> QuarryResult<bytes::Bytes> {
+            Ok(bytes::Bytes::from(png_3x2()))
+        }
+        async fn pdf(&self, _session: &BrowserSession) -> QuarryResult<bytes::Bytes> {
+            Ok(bytes::Bytes::from_static(b"%PDF-1.7"))
+        }
+    }
+
+    fn lease() -> BrowserLease {
+        BrowserLease {
+            lease_id: kinds::LeaseKind::new(),
+            profile_id: kinds::ProfileKind::new(),
+            session_affinity_key: "capture-defaults".to_owned(),
+            proxy_affinity: ProxyAffinity {
+                pool: "default".into(),
+                sticky_key: None,
+            },
+            ttl_s: 60,
+            capabilities: vec![],
+            artifact_bucket: "test".into(),
+            persist_profile: false,
+            viewport: None,
+            org_id: "test_org".into(),
+        }
+    }
+
+    /// WS13.3: a driver that does not override the capture methods serves the
+    /// legacy options through `screenshot` and `pdf`, and refuses every other
+    /// option with `unsupported`. Nothing is dropped silently.
+    #[tokio::test]
+    async fn default_capture_methods_delegate_for_legacy_options_and_refuse_others() {
+        let driver = DefaultsOnly;
+        let session = driver.acquire(&lease()).await.expect("acquire");
+        let limits = CaptureLimits::default();
+
+        let image = driver
+            .capture_screenshot(&session, &ScreenshotOptions::default(), &limits)
+            .await
+            .expect("legacy screenshot");
+        assert_eq!((image.width_px, image.height_px), (3, 2));
+        assert_eq!(image.format, ImageFormat::Png);
+        assert_eq!((image.tiles, image.stitched, image.truncated), (1, false, false));
+
+        let jpeg = ScreenshotOptions {
+            quality: Some(80),
+            ..ScreenshotOptions::default()
+        };
+        let refused = driver
+            .capture_screenshot(&session, &jpeg, &limits)
+            .await
+            .expect_err("jpeg is refused by the default method");
+        assert!(matches!(refused.code, ErrorCode::Unsupported));
+
+        let pdf = driver
+            .capture_pdf(&session, &PdfOptions::default(), &limits)
+            .await
+            .expect("default pdf");
+        assert!(pdf.bytes.starts_with(b"%PDF-"));
+        let landscape = PdfOptions {
+            landscape: true,
+            ..PdfOptions::default()
+        };
+        let refused = driver
+            .capture_pdf(&session, &landscape, &limits)
+            .await
+            .expect_err("landscape is refused by the default method");
+        assert!(matches!(refused.code, ErrorCode::Unsupported));
+
+        assert_eq!(driver.current_url(&session).await.expect("url"), None);
+        driver.release(session).await.expect("release");
+    }
 }
 
 #[cfg(test)]

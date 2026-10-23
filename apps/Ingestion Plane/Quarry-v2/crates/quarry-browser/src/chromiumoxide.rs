@@ -27,6 +27,7 @@ use ::chromiumoxide::cdp::browser_protocol::input::{
     DispatchMouseEventParams, DispatchMouseEventPointerType, DispatchMouseEventType, MouseButton,
 };
 use ::chromiumoxide::cdp::browser_protocol::log::EventEntryAdded;
+use ::chromiumoxide::cdp::browser_protocol::page::{GetLayoutMetricsParams, Viewport as CdpViewport};
 use ::chromiumoxide::cdp::browser_protocol::network::{
     CookieParam, ErrorReason, EventRequestWillBeSent, EventResponseReceived,
 };
@@ -65,9 +66,13 @@ use quarry_core::contracts::{
     BrowserEgressReceipt, BrowserFrame, BrowserStartupMode, BrowserTelemetry,
 };
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
+use quarry_core::capture::{
+    CaptureLimits, CapturedImage, CapturedPdf, ImageFormat, PdfOptions, ScreenshotOptions,
+};
 use quarry_core::lease::{BrowserLease, BrowserViewport};
 
 use crate::actionability::{self, DialogWatch};
+use crate::capture_plan;
 use crate::actions::ScrollTarget;
 use crate::deadlines::{best_effort, deadline, read_with_retry, timeout_error, with_deadline, Op};
 use crate::navigation::{guard_navigation_target, guard_page_request_target};
@@ -3087,6 +3092,99 @@ fn viewport_emulation_error(error: impl std::fmt::Display) -> QuarryError {
     .with_details(json!({ "reason": "viewport_emulation_failed", "error": error.to_string() }))
 }
 
+/// WS13.3: set the viewport for one capture. Every failure is the typed
+/// viewport-emulation error, the same one the lease's viewport gets on open.
+async fn set_capture_viewport(page: &Page, viewport: BrowserViewport) -> QuarryResult<()> {
+    with_deadline(Op::Screenshot, async {
+        page.execute(SetDeviceMetricsOverrideParams::new(
+            i64::from(viewport.width),
+            i64::from(viewport.height),
+            viewport.device_scale_factor,
+            viewport.is_mobile,
+        ))
+        .await
+        .map(|_| ())
+        .map_err(viewport_emulation_error)
+    })
+    .await
+}
+
+/// WS13.3: one screenshot of a page whose viewport is already set. Reads the
+/// content size, plans the clip, captures, and measures the image Chromium sent.
+async fn capture_screenshot_on(
+    page: &Page,
+    options: &ScreenshotOptions,
+    device_scale_factor: f64,
+    limits: &CaptureLimits,
+) -> QuarryResult<CapturedImage> {
+    let layout = with_deadline(Op::Screenshot, async {
+        page.execute(GetLayoutMetricsParams::default())
+            .await
+            .map_err(|_| {
+                QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide layout metrics failed")
+                    .with_details(json!({ "reason": "driver_error" }))
+            })
+    })
+    .await?;
+    let content = layout.result.css_content_size;
+    let plan = capture_plan::plan_screenshot(
+        content.width,
+        content.height,
+        options,
+        device_scale_factor,
+    )?;
+    let format = options.format();
+    let mut params = CaptureScreenshotParamsBuilder::default()
+        .format(match format {
+            ImageFormat::Png => CaptureScreenshotFormat::Png,
+            ImageFormat::Jpeg => CaptureScreenshotFormat::Jpeg,
+        })
+        .capture_beyond_viewport(plan.capture_beyond_viewport);
+    if let Some(quality) = options.quality {
+        params = params.quality(i64::from(quality));
+    }
+    if let Some(clip) = plan.clip {
+        params = params.clip(CdpViewport {
+            x: clip.x,
+            y: clip.y,
+            width: clip.width,
+            height: clip.height,
+            scale: 1.0,
+        });
+    }
+    let bytes = with_deadline(Op::Screenshot, async {
+        page.screenshot(params.build()).await.map_err(|_| {
+            QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide screenshot failed")
+                .with_details(json!({ "reason": "driver_error" }))
+        })
+    })
+    .await?;
+    let (width_px, height_px) = capture_plan::image_dimensions(&bytes).ok_or_else(|| {
+        QuarryError::new(ErrorCode::DriverFailed, "screenshot is not a PNG or JPEG")
+            .with_details(json!({ "reason": "screenshot_unreadable" }))
+    })?;
+    capture_plan::check_capture_size(bytes.len(), limits)?;
+    Ok(CapturedImage {
+        bytes,
+        format,
+        width_px,
+        height_px,
+        tiles: 1,
+        stitched: false,
+        truncated: plan.truncated,
+    })
+}
+
+/// WS13.3: the typed `details.reason` for a failed in-page script. Only the one
+/// message the driver throws itself is mapped; anything else is `driver_error`.
+fn script_failure_reason(message: &str, not_found: &str) -> &'static str {
+    if message.contains(not_found) {
+        "element_not_found"
+    } else {
+        "driver_error"
+    }
+}
+
 /// Make a fresh page behave like a visible, focused window of `viewport`'s size.
 ///
 /// Emulation is per page, and a headless Chromium with several contexts open
@@ -3169,6 +3267,9 @@ impl BrowserDriver for ChromiumoxideDriver {
             background_tabs: true,
             tab_pinning: true,
             per_tab_egress: self.pinned_egress_proxy.is_some(),
+            // WS13.3: scrape-time actions and capture options run on this driver.
+            scrape_actions: true,
+            capture_options: true,
         }
     }
 
@@ -3889,6 +3990,88 @@ impl BrowserDriver for ChromiumoxideDriver {
         Ok(Bytes::from(pdf))
     }
 
+    async fn capture_screenshot(
+        &self,
+        session: &BrowserSession,
+        options: &ScreenshotOptions,
+        limits: &CaptureLimits,
+    ) -> QuarryResult<CapturedImage> {
+        let page = self.current_page(session).await?;
+        let lease_viewport = resolve_viewport(session.lease.viewport);
+        // A viewport this capture asks for is applied for this capture only. The
+        // lease's own viewport goes back on every path after it, failures included.
+        let Some(viewport) = options.viewport.map(|requested| BrowserViewport {
+            width: requested.width,
+            height: requested.height,
+            device_scale_factor: requested.device_scale_factor,
+            is_mobile: false,
+        }) else {
+            return capture_screenshot_on(
+                &page,
+                options,
+                lease_viewport.device_scale_factor,
+                limits,
+            )
+            .await;
+        };
+        let captured = match set_capture_viewport(&page, viewport).await {
+            Ok(()) => {
+                capture_screenshot_on(&page, options, viewport.device_scale_factor, limits).await
+            }
+            Err(error) => Err(error),
+        };
+        let restored = set_capture_viewport(&page, lease_viewport).await;
+        match (captured, restored) {
+            (Ok(image), Ok(())) => Ok(image),
+            (Ok(_), Err(error)) => Err(error),
+            (Err(error), Ok(())) => Err(error),
+            (Err(error), Err(_)) => {
+                tracing::warn!("capture viewport could not be restored after a failed capture");
+                Err(error)
+            }
+        }
+    }
+
+    async fn capture_pdf(
+        &self,
+        session: &BrowserSession,
+        options: &PdfOptions,
+        limits: &CaptureLimits,
+    ) -> QuarryResult<CapturedPdf> {
+        let page = self.current_page(session).await?;
+        let (paper_width, paper_height) = options.format.inches();
+        let params = PrintToPdfParams {
+            landscape: Some(options.landscape),
+            print_background: Some(options.print_background),
+            scale: Some(options.scale),
+            paper_width: Some(paper_width),
+            paper_height: Some(paper_height),
+            page_ranges: Some(capture_plan::pdf_page_ranges(options.max_pages)),
+            prefer_css_page_size: Some(false),
+            ..PrintToPdfParams::default()
+        };
+        let bytes = with_deadline(Op::Pdf, async {
+            page.pdf(params).await.map_err(|_| {
+                QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide pdf failed")
+                    .with_details(json!({ "reason": "driver_error" }))
+            })
+        })
+        .await?;
+        if !bytes.starts_with(b"%PDF-") {
+            return Err(
+                QuarryError::new(ErrorCode::DriverFailed, "pdf is not a PDF")
+                    .with_details(json!({ "reason": "pdf_unreadable" })),
+            );
+        }
+        capture_plan::check_capture_size(bytes.len(), limits)?;
+        Ok(CapturedPdf { bytes })
+    }
+
+    async fn current_url(&self, session: &BrowserSession) -> QuarryResult<Option<String>> {
+        let page = self.current_page(session).await?;
+        Ok(bounded_hint(Op::TabMetadata, async { page.url().await.ok().flatten() }).await)
+    }
+
     async fn list_tabs(&self, session: &BrowserSession) -> QuarryResult<Vec<BrowserTab>> {
         let session_key = Self::session_key(session);
         let (active_tab_id, tabs) = {
@@ -4412,6 +4595,7 @@ impl BrowserDriver for ChromiumoxideDriver {
                     )
                     .with_details(json!({
                         "selector": selector,
+                        "reason": "wait_timeout",
                         "timeout_ms": timeout_ms,
                         "error": e.to_string(),
                     })));
@@ -4426,14 +4610,14 @@ impl BrowserDriver for ChromiumoxideDriver {
         let element = with_deadline(Op::Input, async {
             page.find_element(selector).await.map_err(|e| {
                 QuarryError::new(ErrorCode::DriverFailed, "click: element not found")
-                    .with_details(json!({ "selector": selector, "error": e.to_string() }))
+                    .with_details(json!({ "selector": selector, "reason": "element_not_found", "error": e.to_string() }))
             })
         })
         .await?;
         with_deadline(Op::Input, async {
             element.click().await.map_err(|e| {
                 QuarryError::new(ErrorCode::DriverFailed, "click failed")
-                    .with_details(json!({ "selector": selector, "error": e.to_string() }))
+                    .with_details(json!({ "selector": selector, "reason": "driver_error", "error": e.to_string() }))
             })
         })
         .await?;
@@ -4455,21 +4639,21 @@ impl BrowserDriver for ChromiumoxideDriver {
         let element = with_deadline(Op::Input, async {
             page.find_element(selector).await.map_err(|e| {
                 QuarryError::new(ErrorCode::DriverFailed, "type: element not found")
-                    .with_details(json!({ "selector": selector, "error": e.to_string() }))
+                    .with_details(json!({ "selector": selector, "reason": "element_not_found", "error": e.to_string() }))
             })
         })
         .await?;
         with_deadline(Op::Input, async {
             element.focus().await.map_err(|e| {
                 QuarryError::new(ErrorCode::DriverFailed, "type: focus failed")
-                    .with_details(json!({ "selector": selector, "error": e.to_string() }))
+                    .with_details(json!({ "selector": selector, "reason": "driver_error", "error": e.to_string() }))
             })
         })
         .await?;
         with_deadline(Op::Input, async {
             element.type_str(text).await.map_err(|e| {
                 QuarryError::new(ErrorCode::DriverFailed, "type failed")
-                    .with_details(json!({ "selector": selector, "error": e.to_string() }))
+                    .with_details(json!({ "selector": selector, "reason": "driver_error", "error": e.to_string() }))
             })
         })
         .await?;
@@ -4621,7 +4805,7 @@ impl BrowserDriver for ChromiumoxideDriver {
         with_deadline(Op::Input, async {
             page.evaluate(script).await.map_err(|e| {
                 QuarryError::new(ErrorCode::DriverFailed, "select failed").with_details(
-                    json!({ "selector": selector, "value": value, "error": e.to_string() }),
+                    json!({ "selector": selector, "value": value, "reason": script_failure_reason(&e.to_string(), "select: element not found"), "error": e.to_string() }),
                 )
             })
         })
@@ -7469,6 +7653,8 @@ mod tests {
     include!("trusted_input_live.rs");
     // WS12.S1: the field-facts probe against a real Chromium.
     include!("field_probe_live.rs");
+    // WS13.3: scrape-time captures against a real Chromium.
+    include!("capture_live.rs");
 }
 
 /// WS3.D and WS3.F, the parts that need no browser: every CDP call is bounded, the
