@@ -45,6 +45,10 @@ const MAX_SCOPE_LEN: usize = 128;
 const SHAPE_DENY_KEYS: &[&str] = &[
     "headers",
     "actions",
+    "actionsOnError",
+    "viewport",
+    "capture",
+    "captures",
     "profile",
     "profile_id",
     "profileId",

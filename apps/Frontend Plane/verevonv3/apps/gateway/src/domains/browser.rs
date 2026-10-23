@@ -363,7 +363,7 @@ const DEFAULT_VIEWPORT: Viewport = Viewport {
     width: 1280,
     height: 800,
 };
-const MAX_BROWSER_ARTIFACT_BYTES: u64 = 24 * 1024 * 1024;
+pub(super) const MAX_BROWSER_ARTIFACT_BYTES: u64 = 24 * 1024 * 1024;
 const MAX_MODEL_SCREENSHOT_BYTES: u64 = 6 * 1024 * 1024;
 const MAX_MODEL_VISUAL_JSON_BYTES: u64 = 1024 * 1024;
 #[cfg(test)]
@@ -1761,9 +1761,11 @@ pub(crate) async fn control_ai_run(
 /// authorized by [`owned_browser_artifact_run`]; neither can read the other
 /// tenant's evidence.
 ///
-/// Quarry's own `GET /v1/artifacts/:id` applies no tenant scoping, so the
-/// ownership gate below is the *only* isolation boundary on this path and must
-/// run before any upstream call.
+/// Quarry's `GET /v1/artifacts/:id` binds the artifact to the caller's org
+/// (`resource_routes.rs` `get_artifact`, from the verified claims), so an id
+/// from another tenant reads as not found. The ownership gate below adds the
+/// per-run and per-user binding inside the org, and must run before any upstream
+/// call.
 async fn get_artifact(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -4620,7 +4622,7 @@ pub(super) fn cookie_header(headers: &HeaderMap) -> String {
 /// or a transport/upstream failure (`5xx`). A ZDR run must land here, never on
 /// either of those.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BrowserArtifactAbsence {
+pub(super) enum BrowserArtifactAbsence {
     /// Zero Data Retention run: Quarry refused the artifact write at capture
     /// time, so nothing was ever stored and nothing ever will be.
     Withheld,
@@ -4630,7 +4632,7 @@ enum BrowserArtifactAbsence {
 }
 
 impl BrowserArtifactAbsence {
-    fn into_response(self) -> Response {
+    pub(super) fn into_response(self) -> Response {
         let (code, message) = match self {
             Self::Withheld => (
                 "browser_artifact_withheld",
@@ -4855,7 +4857,7 @@ pub(super) fn is_valid_path_segment(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
 }
 
-fn is_valid_artifact_id(value: &str) -> bool {
+pub(super) fn is_valid_artifact_id(value: &str) -> bool {
     value
         .strip_prefix("art_")
         .is_some_and(|suffix| !suffix.is_empty() && is_valid_path_segment(value))
@@ -4882,6 +4884,27 @@ fn safe_browser_artifact_content_type(value: Option<&str>, bytes: &[u8]) -> Head
         "application/problem+json" => HeaderValue::from_static("application/json"),
         _ if looks_like_json_payload(bytes) => HeaderValue::from_static("application/json"),
         _ => HeaderValue::from_static("image/png"),
+    }
+}
+
+/// The content type a knowledge scrape artifact may be served as (WS13.7). Only
+/// the three image types and `application/pdf` pass; an unknown or missing type is
+/// `None` and the caller refuses it. Unlike `safe_browser_artifact_content_type`
+/// there is no `image/png` fallback, so a capture stored under another type is
+/// never served as an image.
+pub(super) fn scrape_artifact_content_type(value: Option<&str>) -> Option<&'static str> {
+    match value
+        .unwrap_or_default()
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+    {
+        "image/png" => Some("image/png"),
+        "image/jpeg" => Some("image/jpeg"),
+        "image/webp" => Some("image/webp"),
+        "application/pdf" => Some("application/pdf"),
+        _ => None,
     }
 }
 

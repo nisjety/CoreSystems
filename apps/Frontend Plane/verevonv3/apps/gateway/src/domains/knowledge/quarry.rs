@@ -1,6 +1,7 @@
 use axum::{
+    body::Body,
     extract::{Extension, Path, State},
-    http::{HeaderMap, StatusCode, Uri},
+    http::{header, HeaderMap, StatusCode, Uri},
     response::{IntoResponse, Response},
     Json,
 };
@@ -11,6 +12,10 @@ use std::time::{Duration, Instant};
 use crate::{
     cache_admission::{variant_digest, CacheAdmission},
     config::AppState,
+    domains::browser::{
+        is_valid_artifact_id, scrape_artifact_content_type, BrowserArtifactAbsence,
+        MAX_BROWSER_ARTIFACT_BYTES,
+    },
     domains::knowledge::shared,
     envelope::{error, ok},
     middleware::AuthenticatedUser,
@@ -85,6 +90,9 @@ pub(super) async fn scrape_preview(
         }
     };
     body["url"] = Value::String(target.clone());
+    // WS13.7: the cached preview is text only (no actions, viewport or capture
+    // formats), so the cache key and the browser-failure retry never see them.
+    strip_preview_only_fields(&mut body);
     // Ask for the text inline. Without `formats` quarry-edge answers a
     // non-ZDR scrape with an artifact reference, which costs a second
     // `/v1/extract` call below to read back; a caller that sent its own
@@ -214,6 +222,184 @@ pub(super) async fn scrape_preview(
         crate::observability::record_result_cache("scrape-preview", "store");
     }
     (StatusCode::OK, Json(ok(preview))).into_response()
+}
+
+/// `GET /api/v1/knowledge/scrape-artifacts/{artifact_id}` (WS13.7): one artifact of
+/// a scrape capture (a screenshot or a PDF) as bytes the SPA can show or download.
+///
+/// Quarry's `GET /v1/artifacts/{id}` answers only for the caller's own org, so the
+/// org-scoped token is the isolation boundary here. A capture belongs to an org, not
+/// to a browser run, so the browser route's per-run gate does not apply. Quarry's
+/// refusals are normalised: a missing or aged-out artifact (and another org's id) is
+/// one 404, and a ZDR org gets the `withheld` shape. Only the image types and
+/// `application/pdf` are served, with no-store caching.
+pub(super) async fn scrape_artifact(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(artifact_id): Path<String>,
+) -> Response {
+    if !is_valid_artifact_id(&artifact_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_scrape_artifact",
+                "The requested scrape artifact id is invalid.",
+            )),
+        )
+            .into_response();
+    }
+    // Zero Data Retention: Quarry writes no artifact for a ZDR org, so there is
+    // nothing to fetch. The posture is read before anything is sent upstream, and
+    // an unknown posture counts as ZDR (`crate::zdr::org_zdr_enabled`).
+    if crate::zdr::org_zdr_enabled(&state, &user).await {
+        return BrowserArtifactAbsence::Withheld.into_response();
+    }
+
+    let cookie = shared::cookie_header(&headers);
+    let token = shared::quarry_token(&state, &user, &cookie).await;
+    let url = format!(
+        "{}/v1/artifacts/{}",
+        state.quarry_edge_url,
+        urlencoding::encode(&artifact_id)
+    );
+    let mut req =
+        crate::request_id::apply(state.client.get(&url)).header("x-user-id", &user.user_id);
+    if let Some(token) = token {
+        req = req.bearer_auth(token);
+    }
+    let upstream = match req.send().await {
+        Ok(upstream) => upstream,
+        Err(_) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(crate::envelope::upstream_unavailable()),
+            )
+                .into_response()
+        }
+    };
+    let status = upstream.status();
+    if matches!(status.as_u16(), 404 | 410) {
+        return scrape_artifact_not_found();
+    }
+    if !status.is_success() {
+        return scrape_artifact_failed();
+    }
+    if upstream
+        .content_length()
+        .is_some_and(|length| length > MAX_BROWSER_ARTIFACT_BYTES)
+    {
+        return scrape_artifact_too_large();
+    }
+    let upstream_content_type = upstream
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let Some(content_type) = scrape_artifact_content_type(upstream_content_type.as_deref()) else {
+        return (
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            Json(error(
+                "scrape_artifact_unsupported",
+                "This artifact type cannot be shown or downloaded.",
+            )),
+        )
+            .into_response();
+    };
+    let bytes = match upstream.bytes().await {
+        Ok(bytes) => bytes,
+        Err(_) => return scrape_artifact_failed(),
+    };
+    if bytes.len() as u64 > MAX_BROWSER_ARTIFACT_BYTES {
+        return scrape_artifact_too_large();
+    }
+
+    let mut response = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CACHE_CONTROL, "private, no-store")
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff");
+    if content_type == "application/pdf" {
+        // A PDF is downloaded, never rendered inline by the SPA, and a browser that
+        // opens it anyway runs it under the sandbox policy.
+        response = response
+            .header(
+                header::CONTENT_DISPOSITION,
+                r#"attachment; filename="page.pdf""#,
+            )
+            .header(header::CONTENT_SECURITY_POLICY, "sandbox");
+    }
+    response
+        .body(Body::from(bytes))
+        .unwrap_or_else(|_| scrape_artifact_failed())
+}
+
+fn scrape_artifact_not_found() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(error(
+            "scrape_artifact_not_found",
+            "The scrape artifact is no longer available.",
+        )),
+    )
+        .into_response()
+}
+
+fn scrape_artifact_failed() -> Response {
+    (
+        StatusCode::BAD_GATEWAY,
+        Json(error(
+            "scrape_artifact_failed",
+            "The scrape artifact could not be returned.",
+        )),
+    )
+        .into_response()
+}
+
+fn scrape_artifact_too_large() -> Response {
+    (
+        StatusCode::PAYLOAD_TOO_LARGE,
+        Json(error(
+            "scrape_artifact_too_large",
+            "The scrape artifact is too large to show.",
+        )),
+    )
+        .into_response()
+}
+
+/// Keys a cached scrape preview never forwards (WS13.7). Browser actions, the
+/// viewport and the capture options make the response depend on per-request browser
+/// state, and the browser-failure retry in `scrape_preview` would replay them. The
+/// captures are served by `/v1/knowledge/scrape`, which is not cached.
+const PREVIEW_DROPPED_KEYS: [&str; 4] = ["actions", "actionsOnError", "viewport", "capture"];
+
+/// The `formats` entries that request a capture. A non-string format (an options
+/// object such as `{"type":"pdf"}`) is dropped as well.
+const PREVIEW_DROPPED_FORMATS: [&str; 2] = ["screenshot", "pdf"];
+
+/// Remove the preview-only-excluded fields from a scrape-preview body. A `formats`
+/// list left empty is removed, so the default `["markdown"]` applies again.
+fn strip_preview_only_fields(body: &mut Value) {
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+    for key in PREVIEW_DROPPED_KEYS {
+        object.remove(key);
+    }
+    let formats_empty = match object.get_mut("formats").and_then(Value::as_array_mut) {
+        Some(formats) => {
+            formats.retain(|format| {
+                format
+                    .as_str()
+                    .is_some_and(|name| !PREVIEW_DROPPED_FORMATS.contains(&name))
+            });
+            formats.is_empty()
+        }
+        None => false,
+    };
+    if formats_empty {
+        object.remove("formats");
+    }
 }
 
 /// `details.block_reason` values Quarry sends on a scrape's `403
@@ -1908,5 +2094,277 @@ mod job_event_tests {
         let body = String::from_utf8_lossy(&bytes);
         assert!(body.contains("id: 8"), "{body}");
         assert!(body.contains("data: done"), "{body}");
+    }
+}
+
+#[cfg(test)]
+mod scrape_artifact_tests {
+    use super::*;
+    use axum::body::to_bytes;
+    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn caller() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.invalid".to_owned(),
+            user_name: "User".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: Some(crate::middleware::AuthorizedMembership {
+                organization_id: "org-1".to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    /// State whose org-core answers the org's ZDR posture and whose Quarry is the
+    /// given mock. The posture lookup is mocked because an unknown posture counts
+    /// as ZDR (fail closed).
+    async fn state_for(quarry: &MockServer, zdr: bool) -> (AppState, MockServer) {
+        let org_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/organizations/org-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "org-1",
+                "metadata": { "interactiveRetention": { "zdr": zdr } }
+            })))
+            .mount(&org_core)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.org_core_url = org_core.uri();
+        state.quarry_edge_url = quarry.uri();
+        (state, org_core)
+    }
+
+    async fn body_of(response: Response) -> (StatusCode, HeaderMap, Value) {
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        let body = serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null);
+        (status, headers, body)
+    }
+
+    #[tokio::test]
+    async fn scrape_artifact_serves_png_with_nosniff() {
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/artifacts/art_01"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/png")
+                    .set_body_bytes(vec![0x89, b'P', b'N', b'G']),
+            )
+            .mount(&quarry)
+            .await;
+        let (state, _org_core) = state_for(&quarry, false).await;
+
+        let response = scrape_artifact(
+            State(state),
+            Extension(caller()),
+            HeaderMap::new(),
+            Path("art_01".to_owned()),
+        )
+        .await;
+        let (status, headers, _) = body_of(response).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers.get("content-type").unwrap(), "image/png");
+        assert_eq!(headers.get("x-content-type-options").unwrap(), "nosniff");
+        assert_eq!(headers.get("cache-control").unwrap(), "private, no-store");
+        assert!(headers.get("content-disposition").is_none());
+    }
+
+    #[tokio::test]
+    async fn scrape_artifact_serves_pdf_as_attachment_with_csp_sandbox() {
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/artifacts/art_02"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/pdf")
+                    .set_body_bytes(b"%PDF-1.7\n".to_vec()),
+            )
+            .mount(&quarry)
+            .await;
+        let (state, _org_core) = state_for(&quarry, false).await;
+
+        let response = scrape_artifact(
+            State(state),
+            Extension(caller()),
+            HeaderMap::new(),
+            Path("art_02".to_owned()),
+        )
+        .await;
+        let (status, headers, _) = body_of(response).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers.get("content-type").unwrap(), "application/pdf");
+        assert_eq!(
+            headers.get("content-disposition").unwrap(),
+            r#"attachment; filename="page.pdf""#
+        );
+        assert_eq!(headers.get("content-security-policy").unwrap(), "sandbox");
+        assert_eq!(headers.get("x-content-type-options").unwrap(), "nosniff");
+    }
+
+    #[tokio::test]
+    async fn scrape_artifact_rejects_unknown_content_type_with_415() {
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/artifacts/art_03"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/html")
+                    .set_body_bytes(b"<script>x</script>".to_vec()),
+            )
+            .mount(&quarry)
+            .await;
+        let (state, _org_core) = state_for(&quarry, false).await;
+
+        let response = scrape_artifact(
+            State(state),
+            Extension(caller()),
+            HeaderMap::new(),
+            Path("art_03".to_owned()),
+        )
+        .await;
+        let (status, _, body) = body_of(response).await;
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(body["error"]["code"], "scrape_artifact_unsupported");
+    }
+
+    #[tokio::test]
+    async fn scrape_artifact_never_falls_back_to_image_png() {
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/artifacts/art_04"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/octet-stream")
+                    .set_body_bytes(b"\x89PNG\r\n\x1a\n".to_vec()),
+            )
+            .mount(&quarry)
+            .await;
+        let (state, _org_core) = state_for(&quarry, false).await;
+
+        let response = scrape_artifact(
+            State(state),
+            Extension(caller()),
+            HeaderMap::new(),
+            Path("art_04".to_owned()),
+        )
+        .await;
+        let (status, headers, _) = body_of(response).await;
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        // The refusal is a JSON error, never the PNG bytes under an image type.
+        assert!(!headers.get("content-type").is_some_and(|value| value == "image/png"));
+    }
+
+    #[tokio::test]
+    async fn foreign_org_artifact_is_normalised_to_not_found() {
+        // Quarry binds the artifact to the caller's org and answers 404 for another
+        // tenant's id; the gateway returns the same not-found shape as a missing one.
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/artifacts/art_05"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+                "error": { "code": "NOT_FOUND", "message": "internal org-2 detail" }
+            })))
+            .mount(&quarry)
+            .await;
+        let (state, _org_core) = state_for(&quarry, false).await;
+
+        let response = scrape_artifact(
+            State(state),
+            Extension(caller()),
+            HeaderMap::new(),
+            Path("art_05".to_owned()),
+        )
+        .await;
+        let (status, _, body) = body_of(response).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "scrape_artifact_not_found");
+        assert!(!body.to_string().contains("org-2"));
+    }
+
+    #[tokio::test]
+    async fn zdr_org_gets_withheld() {
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/artifacts/art_06"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&quarry)
+            .await;
+        let (state, _org_core) = state_for(&quarry, true).await;
+
+        let response = scrape_artifact(
+            State(state),
+            Extension(caller()),
+            HeaderMap::new(),
+            Path("art_06".to_owned()),
+        )
+        .await;
+        let (status, _, body) = body_of(response).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "browser_artifact_withheld");
+        quarry.verify().await;
+    }
+
+    #[tokio::test]
+    async fn invalid_artifact_id_is_400() {
+        let quarry = MockServer::start().await;
+        let (state, _org_core) = state_for(&quarry, false).await;
+
+        let response = scrape_artifact(
+            State(state),
+            Extension(caller()),
+            HeaderMap::new(),
+            Path("../etc/passwd".to_owned()),
+        )
+        .await;
+        let (status, _, body) = body_of(response).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "invalid_scrape_artifact");
+    }
+
+    #[test]
+    fn scrape_preview_strips_actions_and_capture_keys_before_cache_and_retry() {
+        let mut body = json!({
+            "url": "https://example.com/",
+            "formats": ["markdown", "screenshot", { "type": "pdf" }],
+            "actions": [{ "type": "click" }],
+            "actionsOnError": true,
+            "viewport": { "width": 1280, "height": 720 },
+            "capture": { "screenshot": true }
+        });
+        strip_preview_only_fields(&mut body);
+        assert!(body.get("actions").is_none());
+        assert!(body.get("actionsOnError").is_none());
+        assert!(body.get("viewport").is_none());
+        assert!(body.get("capture").is_none());
+        assert_eq!(body["formats"], json!(["markdown"]));
+
+        // The retry body is built from the stripped body, so it cannot replay them.
+        let retry = without_browser_rendering(&body);
+        assert!(retry.get("actions").is_none());
+        assert!(retry.get("viewport").is_none());
+    }
+
+    #[test]
+    fn scrape_preview_cache_key_is_unchanged_for_plain_bodies() {
+        let original = json!({ "url": "https://example.com/", "formats": ["markdown"] });
+        let mut body = original.clone();
+        strip_preview_only_fields(&mut body);
+        assert_eq!(body, original);
+        assert_eq!(variant_digest(&body), variant_digest(&original));
+    }
+
+    #[test]
+    fn scrape_preview_drops_formats_list_that_only_held_captures() {
+        let mut body = json!({ "url": "https://example.com/", "formats": ["pdf"] });
+        strip_preview_only_fields(&mut body);
+        assert!(body.get("formats").is_none());
     }
 }

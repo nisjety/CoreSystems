@@ -38,6 +38,10 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         )
         .route("/api/v1/knowledge/scrape", post(quarry::scrape))
         .route(
+            "/api/v1/knowledge/scrape-artifacts/{artifact_id}",
+            get(quarry::scrape_artifact),
+        )
+        .route(
             "/api/v1/knowledge/scrape/products",
             post(products::extract_products),
         )
