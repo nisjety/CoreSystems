@@ -85,6 +85,15 @@ impl FallbackDriver {
         .is_some_and(|signal| signal.strength == ChallengeStrength::Strong)
     }
 
+    /// True when this response is one `honest` refuses to change identity on:
+    /// a block status, or a 200 that is a strong challenge. Always false under
+    /// `legacy`.
+    fn refuses_rotation(&self, url: &Url, resp: &FetchResponse) -> bool {
+        (crate::fingerprint_rotation::is_block_status(resp.status)
+            && !escalation_allowed(self.mode, EscalationTrigger::BlockStatus(resp.status)))
+            || self.challenge_forbids_escalation(url, resp)
+    }
+
     fn attempt_order(&self) -> Vec<DriverKind> {
         let mut order = vec![self.primary];
         for k in &self.chain {
@@ -222,9 +231,8 @@ impl FallbackDriver {
                     // body is always "thinner" than a shell, and rotating on
                     // that would hand the page that just refused this identity
                     // to the browser, which is the status-driven change of
-                    // identity the first branch above forbids. The refusal is
-                    // returned as it is, `served_by` names the driver that got
-                    // it (WS3.I). Under `legacy` a block status never reaches
+                    // identity the first branch above forbids. The gate below
+                    // then returns the shell (WS3.I). Under `legacy` a block status never reaches
                     // here with a driver ahead (the first branch took it), so
                     // this changes nothing there.
                     if *kind != DriverKind::Browser && idx < order.len() - 1 {
@@ -233,12 +241,7 @@ impl FallbackDriver {
                             .as_ref()
                             .map(|b| visible_text_len(&resp.body) <= visible_text_len(&b.body))
                             .unwrap_or(false)
-                            && !(crate::fingerprint_rotation::is_block_status(resp.status)
-                                && !escalation_allowed(
-                                    self.mode,
-                                    EscalationTrigger::BlockStatus(resp.status),
-                                ))
-                            && !self.challenge_forbids_escalation(url, &resp);
+                            && !self.refuses_rotation(url, &resp);
                         if is_redirect || thinner {
                             attempts.push((
                                 *kind,
@@ -260,6 +263,29 @@ impl FallbackDriver {
                                 best_shell = Some(resp);
                             }
                             continue;
+                        }
+                    }
+                    // A block status or a strong challenge from a later driver
+                    // that `honest` refuses to rotate on, while a shell from an
+                    // earlier driver is already held: the browser is not
+                    // called (the branches above forbid it), and the content
+                    // that was already fetched is not thrown away either. The
+                    // shell is returned, exactly as the error arm below does
+                    // when a later driver fails; its page still has a title,
+                    // links and metadata. Under `legacy` this is never true:
+                    // a block status or a challenge was rotated on above.
+                    if *kind != DriverKind::Browser
+                        && best_shell.is_some()
+                        && self.refuses_rotation(url, &resp)
+                    {
+                        if let Some(shell) = best_shell.take() {
+                            warn!(
+                                driver = ?kind,
+                                status = resp.status,
+                                shell_text_chars = visible_text_len(&shell.body),
+                                "block or challenge refused under honest after a JS shell; returning the shell response"
+                            );
+                            return Ok(shell);
                         }
                     }
                     if *kind == DriverKind::Browser {
@@ -1063,9 +1089,11 @@ mod tests {
     /// shell (kept as `best_shell`), TLS answers 403. The 403 body is always
     /// thinner than the shell, so the "not an improvement" branch used to hand
     /// the page that had just refused the TLS identity to the browser: a
-    /// status-driven change of identity under `honest`.
+    /// status-driven change of identity under `honest`. The browser is not
+    /// called, and the shell that was already fetched is returned (the same
+    /// outcome as a TLS error after a shell).
     #[tokio::test]
-    async fn honest_block_from_tls_after_a_shell_is_returned_not_sent_to_the_browser() {
+    async fn honest_block_from_tls_after_a_shell_returns_the_shell_not_the_browser() {
         let static_shell = body_driver(DriverKind::Static, shell_body());
         let tls = Arc::new(BlockDriver::new(DriverKind::Tls));
         let browser = body_driver(DriverKind::Browser, rendered_body());
@@ -1083,8 +1111,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(resp.status, 403, "the block is surfaced as it is");
-        assert_eq!(resp.served_by, DriverKind::Tls);
+        assert_eq!(resp.status, 200, "the shell that was already fetched");
+        assert_eq!(resp.served_by, DriverKind::Static);
+        assert_eq!(&resp.body[..], shell_body().as_slice());
         assert_eq!(tls.calls.load(Ordering::Relaxed), 1);
         assert_eq!(browser.calls.load(Ordering::Relaxed), 0);
     }
@@ -1113,7 +1142,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn honest_strong_challenge_from_tls_after_a_shell_is_returned_not_sent_to_the_browser() {
+    async fn honest_strong_challenge_from_tls_after_a_shell_returns_the_shell_not_the_browser() {
         let static_shell = body_driver(DriverKind::Static, shell_body());
         let tls = body_driver(DriverKind::Tls, challenge_interstitial_body());
         let browser = body_driver(DriverKind::Browser, rendered_body());
@@ -1131,8 +1160,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(resp.served_by, DriverKind::Tls);
+        assert_eq!(resp.served_by, DriverKind::Static);
         assert_eq!(resp.status, 200);
+        assert_eq!(&resp.body[..], shell_body().as_slice());
         assert_eq!(tls.calls.load(Ordering::Relaxed), 1);
         assert_eq!(browser.calls.load(Ordering::Relaxed), 0);
     }

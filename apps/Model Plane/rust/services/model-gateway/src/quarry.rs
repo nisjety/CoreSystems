@@ -339,6 +339,13 @@ pub struct ScrapeResult {
     pub raw: Value,
 }
 
+/// The statuses the Quarry edge treats as an origin block
+/// (`quarry_runtime::fingerprint_rotation::is_block_status`). Kept in step by
+/// hand: this crate does not depend on Quarry's workspace.
+fn is_block_status(status: u16) -> bool {
+    matches!(status, 401 | 403 | 407 | 429 | 503)
+}
+
 /// Construction options for [`Client`].
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -500,10 +507,17 @@ impl Client {
     /// fast path stays one static fetch: the browser is only paid for
     /// when the cheap path demonstrably produced no text.
     ///
-    /// Escalation happens **only** for an empty HTML body — never for an
-    /// error (a 403/timeout is not fixed by rendering, and retrying it
-    /// would double the cost of every genuinely broken URL, a typed
-    /// `UNSUPPORTED_MEDIA` included), never for a body the edge detected
+    /// Escalation happens **only** for an empty HTML body that answered
+    /// with a success status — never for an error (a 403/timeout is not
+    /// fixed by rendering, and retrying it would double the cost of every
+    /// genuinely broken URL, a typed `UNSUPPORTED_MEDIA` included), never
+    /// for a page the origin answered with a block status (401, 403, 407,
+    /// 429, 503: a direct-egress block is returned by the edge as a normal
+    /// envelope whose `data.status` carries it, not as an error, and the
+    /// edge's own block escalation refuses to change identity on it, so this
+    /// retry must not either; the browser retry is for a page that
+    /// withheld its content, not for one that refused the request), never
+    /// for a body the edge detected
     /// as something other than HTML (a browser cannot read a PNG any
     /// better than the static fetch did) and never more than once. If the
     /// rendered retry is also empty (or itself fails) the first result is
@@ -538,6 +552,23 @@ impl Client {
                 %url,
                 content_kind = kind,
                 "quarry scrape returned no readable text for a non-html body; not escalating"
+            );
+            return Ok(first);
+        }
+
+        // A block status is not a page that withheld its content: the origin
+        // refused the request. Rendering it in a browser would be a status
+        // driven change of identity (ADR-5), so the refusal is returned as it
+        // is and the caller reports the page as unread. The scrape output
+        // carries no challenge marker for a 200 interstitial (the edge
+        // classifies and counts it, or refuses it with CHALLENGE_DETECTED,
+        // which arrives above as an error), so the status is the only signal
+        // this client has.
+        if is_block_status(first.status) {
+            tracing::debug!(
+                %url,
+                status = first.status,
+                "quarry scrape answered with a block status and no readable text; not escalating"
             );
             return Ok(first);
         }
@@ -1466,6 +1497,59 @@ mod tests {
             .await
             .expect_err("error must propagate");
         assert!(matches!(error, QuarryError::Typed { status: 403, .. }));
+    }
+
+    /// A block status that the edge returned as a normal envelope (a
+    /// direct-egress 403, 429 or 503 is `{data:{status:N}}`, not an error)
+    /// is not a page that withheld its content: it must not be re-fetched
+    /// through the browser. Exactly one request, and the browser-escalation
+    /// body is mounted with `expect(0)`.
+    #[tokio::test]
+    async fn readable_scrape_does_not_escalate_a_block_status_page() {
+        for status in [401_u16, 403, 407, 429, 503] {
+            let quarry = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/scrape"))
+                .and(body_json(
+                    serde_json::json!({"url": "https://blocked.example", "zdr": false, "formats": ["markdown"]}),
+                ))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({"data": {"status": status}})),
+                )
+                .expect(1)
+                .mount(&quarry)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/v1/scrape"))
+                .and(body_json(serde_json::json!({
+                    "url": "https://blocked.example",
+                    "render": {"waitForSelector": "body", "waitForTimeoutMs": 2_500},
+                    "signals": {
+                        "actions": [],
+                        "screenshot": false,
+                        "pdf": false,
+                        "prior_block_signals": 0,
+                        "profile_required": true,
+                        "url_type": "Default",
+                    },
+                    "zdr": false,
+                    "formats": ["markdown"],
+                })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "data": {"status": 200, "formats": {"markdown": "# rendered content"}}
+                })))
+                .expect(0)
+                .mount(&quarry)
+                .await;
+
+            let result = test_client(quarry.uri())
+                .scrape_readable("https://blocked.example", "org-a", false)
+                .await
+                .expect("a block status page is a result, not an error");
+            assert_eq!(result.status, status);
+            assert!(result.text.trim().is_empty(), "status {status}");
+        }
     }
 
     /// If the escalated retry itself fails, the first (empty) result is
