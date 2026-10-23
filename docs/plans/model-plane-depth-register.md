@@ -517,6 +517,30 @@ Built so far (batches B01 to B07): WS01-S0, WS01-S1 (partial), WS01-S6; WS02-S1,
 | D1-388 | WS06-S5 | live-proof | P1 | Nothing grants audit:compliance:read:self yet: docker-compose.yml, run-control-plane.sh, validate-release-credentials.sh and any compose-contract text tests need the scope on the verevon-gateway principal only. Deploy order is audit-core image first, then compose (an old image rejects the unknown scope and will not boot); use scripts/run-control-plane.sh. | open |
 | D1-389 | WS06-S5 | follow-up | P3 | 15 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-09.json | open |
 
+
+### Wave-mode batch W1-10 (2026-10-24)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D1-390 | WS06-S6 | risk | P1 | The audit-core compliance routes are scoped by the audit:compliance:read:self credential in the compose block. The gateway sends the standard verevon-gateway v3 delegation, so the live proof must confirm that scope is granted to the gateway principal; I could not check the compose block from this slice. | open |
+| D1-391 | WS06-S6 | live-proof | P1 | Live proof (lead): rebuild gateway image per Frontend compose; as owner, admin and member call GET /api/v1/audit/compliance/events, /manifest, /keys and POST /verify; expect 200/200/403 and the compliance_audit_read and compliance_audit_verify self-audit rows in the chain. Needs S5 audit-core image deployed. | open |
+| D1-392 | WS06-S6 | live-proof | P1 | Shared edit (lead): mount <AuditComplianceSection /> in WorkspaceSettingsPage.tsx after <TrustCenterSection /> (not an owned file), then re-run WorkspaceSettingsPage.negative-render.test.tsx. | open |
+| D1-393 | WS06-S6 | live-proof | P1 | Confirm the audit-core compose credential block grants audit:compliance:read:self to the verevon-gateway principal (S5 compose work). | open |
+| D1-394 | WS06-S6 | live-proof | P1 | Repo-wide pnpm typecheck and pnpm lint diffed against HEAD failing set not run by me; implementer reports pre-existing quarry-client typecheck failures. | open |
+| D1-395 | WS06-S6 | live-proof | P1 | Run pnpm lint repo-wide and diff the failing set against HEAD; I only linted my own files. | open |
+| D1-396 | WS06-S6 | test-gap | P2 | The gateway has no test for the 402 plan_upgrade_required answer org-core gives on SIEM create. The client shows it as a generic error, so the UI should show an upgrade message. Add one when D3 (the commercial gate) is settled. | open |
+| D1-397 | WS06-S6 | follow-up | P2 | The exportComplianceEvents helper and the UI export buffer the whole log in memory before download. This is fine for the current volume, but a large org needs streamed or chunked download, and the UI export should show progress. | open |
+| D1-398 | WS06-S6 | follow-up | P3 | 8 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-10.json | open |
+| D1-399 | WS06-S8 | follow-up | P1 | Before AUDIT_SIEM_EXPORT_ENABLED is switched on for any org, the S2 details guard must move from observe to enforce (or the golden content-free check run on live rows): the exporter ships `details` exactly as stored, so a producer that puts content in details would leave the database for a customer SIEM. | open |
+| D1-400 | WS06-S8 | live-proof | P1 | Egress guard, signature, ordering, lag alert and dedup are proven only against in-process fakes and httptest TLS servers; the plan's live evidence (real receiver, real org-core destination via gateway, audit-verify over received NDJSON plus head record, lag alert firing and clearing) has not been run. | open |
+| D1-401 | WS06-S8 | follow-up | P1 | Before AUDIT_SIEM_EXPORT_ENABLED is turned on for any org, the S2 details guard must be enforcing or the export-content-free golden check must run on live rows, because the exporter ships `details` exactly as stored. | open |
+| D1-402 | WS06-S8 | live-proof | P1 | The egress guard, HMAC, ordering, dedup and lag alert are proven only against in-process fakes and httptest TLS servers; the plan's live evidence is outstanding. | open |
+| D1-403 | WS06-S8 | live-proof | P1 | Migration 010 is not in the store.Migrate list (migrate.go: add the //go:embed, the var and the list entry). Until the lead applies it, GET /export-status returns 500 query_failed on a real store; before this slice it returned an empty 200. The lead must apply it with this slice, ahead of or with the image roll. | open |
+| D1-404 | WS06-S8 | live-proof | P1 | The base compose service audit-siem-exporter is not in docker-compose.yml (lead_todo shared edit). docker-compose.production.yml now carries an override for a service that does not yet exist, so a compose config with the production override would be invalid until the base service lands. Apply both together. | open |
+| D1-405 | WS06-S8 | live-proof | P1 | promtool was unavailable: check rules and test rules for audit-core.rules.yml and audit-core.rules.test.yml have not run. I read the new rule expressions and their six unit tests by eye and they look consistent. | open |
+| D1-406 | WS06-S8 | live-proof | P1 | DB tests (TestPGCursorsAdvanceOnlyForwardAndResetTheFailureStreak, TestExportStatusReadsTheCursorsOfOneOrgOnly) skipped without TEST_DATABASE_URL; they need postgres:16 through docker, lead only. | open |
+| D1-407 | WS06-S8 | follow-up | P3 | 17 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-10.json | open |
+
 ## Wave 2 (WS13 to WS27)
 
 Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS27-S0, WS27-S1. Wave 2 is not started as a wave: these came in with Wave 1 batches because they were Wave 1 prerequisites.
@@ -829,3 +853,5 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS06-S4 | audit | W1-08 | no |
 | WS02-S11 | audit | W1-08 | no |
 | WS06-S5 | auth, audit, policy | W1-09 | no |
+| WS06-S6 | auth, audit | W1-10 | no |
+| WS06-S8 | audit, zdr, auth | W1-10 | no |
