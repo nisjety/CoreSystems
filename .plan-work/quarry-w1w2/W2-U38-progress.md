@@ -12,7 +12,8 @@ Plan: docs/plans/quarry-browser-build-plan-2026-10-14.md, "Slice WS15.S2 detail"
 | 1aa3d0a7f | feat(control): executable scrape, crawl and batch schedules behind a kill switch (WS15.S2) | resources/schedule_runs.go (flag, register route, skipped event), schedule_runs_test.go, schedule_wire.go (ScheduledJobWF mapping, wire fields), schedules.go (route mount) |
 | beb4ab33e | chore(compose): QUARRY_SCHEDULED_JOBS_ENABLED on control, default 0 (WS15.S2) | apps/Ingestion Plane/docker-compose.yml (control env line only; hunk-only, WS17.E3's hunk left uncommitted) |
 | a699ae2af | docs(quarry): RUNBOOKS section for executable schedules (WS15.S2) | docs/RUNBOOKS.md (one appended section; hunk-only against the HEAD blob) |
-| efbe8cd46 | feat(edge): fire-time preflight for executable scheduled jobs (WS15.S2) | crates/quarry-edge/src/schedule_preflight.rs (NEW), tests/schedule_preflight.rs (NEW), lib.rs (one mod line, hunk-only), routes.rs (one route, hunk-only) |
+| efbe8cd46 | feat(edge): fire-time preflight for executable scheduled jobs (WS15.S2) |
+| 233b61994 | test(orchestrator): scheduled-job wrapper, builders, reconciler and dispatcher tests (WS15.S2) | the four orchestrator test files (written, compile-checked, not run) | crates/quarry-edge/src/schedule_preflight.rs (NEW), tests/schedule_preflight.rs (NEW), lib.rs (one mod line, hunk-only), routes.rs (one route, hunk-only) |
 
 Shared files (edge): lib.rs, routes.rs and main.rs in quarry-edge carry other units' uncommitted hunks (internal_routes, usage_attrs, and others). The edge commit takes only the S2 hunks, via qcommit-patch.sh against the HEAD blob.
 
