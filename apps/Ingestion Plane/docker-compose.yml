@@ -318,6 +318,11 @@ services:
       # admission". Deploy control first (claim is inert), then the orchestrator
       # and edge, then turn it on.
       QUARRY_JOB_ADMISSION: ${QUARRY_JOB_ADMISSION:-off}
+      # Executable scrape, crawl and batch schedules (WS15.S2). Off by default: with 0
+      # these kinds stay unmapped and create nothing. Keep 0 until WS14 scope is
+      # deployed and WS6.A is live. Turning it off pauses the Temporal schedules on the
+      # next reconcile pass (30 s); it does not delete them.
+      QUARRY_SCHEDULED_JOBS_ENABLED: ${QUARRY_SCHEDULED_JOBS_ENABLED:-0}
       QUARRY_JOB_CAP_DEFAULT: ${QUARRY_JOB_CAP_DEFAULT:-3}
       QUARRY_JOB_BACKLOG_DEFAULT: ${QUARRY_JOB_BACKLOG_DEFAULT:-200}
       QUARRY_JOB_BACKLOG_TTL: ${QUARRY_JOB_BACKLOG_TTL:-24h}
