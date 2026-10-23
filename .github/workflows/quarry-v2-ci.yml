@@ -562,3 +562,32 @@ jobs:
           QUARRY_TEST_DSN: postgres://postgres:quarry@127.0.0.1:5434/quarry_test?sslmode=disable
           QUARRY_REQUIRE_DB: "1"
         run: go test -count=1 ./internal/store/pg/...
+
+  # The Go unit tests of the WS4.H posture-stamp chain. go-coverage above is the only other job
+  # that runs go test over these modules and it is report-only (continue-on-error), so a
+  # regression in the schedule create handlers, the reconciler, ChangeMonitorWF, CheckChange or
+  # RunPage (a stamp dropped on the way to /v1/internal/change/record) merged green. This job is
+  # REQUIRED (no continue-on-error) and runs only the packages that carry the chain, so unrelated
+  # coverage debt cannot block it. A required check still needs branch protection to bite; the
+  # repository does not show whether that is configured.
+  quarry-go-zdr-stamp-chain:
+    name: quarry Go ZDR stamp chain
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache-dependency-path: |
+            apps/Ingestion Plane/Quarry-v2/services/quarry-control/go.sum
+            apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/go.sum
+
+      - name: quarry-control (schedule and source create handlers)
+        working-directory: 'apps/Ingestion Plane/Quarry-v2/services/quarry-control'
+        run: go test -count=1 ./internal/resources/...
+
+      - name: quarry-orchestrator (activities, workflows, schedule reconciler)
+        working-directory: 'apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator'
+        run: go test -count=1 ./internal/activities/... ./internal/workflows/... ./internal/schedules/...
