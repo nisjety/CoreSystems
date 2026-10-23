@@ -1,0 +1,51 @@
+name: Integration Core v2 Go CI
+
+# CI gate for apps/Ingestion Plane/integration-corev2 (build plan WS23-S2). Before
+# this file integration-corev2 had no CI, so the provider read golden
+# (internal/actions/testdata/provider-read-operations.json) was only checked by
+# hand. The golden test reads the executor's switch and the capability table
+# from source, and compares the Rust copy under apps/Model Plane, so a change
+# on either side of the plane boundary runs here.
+#
+# Modelled on audit-core-ci.yml, without the Postgres service: these packages
+# have no database-backed suites.
+
+on:
+  push:
+    branches: [main, develop, model-plane]
+    paths:
+      - "apps/Ingestion Plane/integration-corev2/**"
+      - "apps/Model Plane/rust/crates/mp-contracts/tests/fixtures/provider-read-operations.json"
+      - ".github/workflows/integration-corev2-go.yml"
+  pull_request:
+    paths:
+      - "apps/Ingestion Plane/integration-corev2/**"
+      - "apps/Model Plane/rust/crates/mp-contracts/tests/fixtures/provider-read-operations.json"
+      - ".github/workflows/integration-corev2-go.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: "apps/Ingestion Plane/integration-corev2"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: "apps/Ingestion Plane/integration-corev2/go.mod"
+          cache-dependency-path: "apps/Ingestion Plane/integration-corev2/go.sum"
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Test actions and api
+        run: go test ./internal/actions/... ./internal/api/...
+
+      - name: Vet
+        run: go vet ./...

@@ -101,18 +101,26 @@ const CATALOG: &[(&str, &[CatalogOp])] = &[
         "google",
         &[
             CatalogOp { operation: "gmail.send", is_write: true, summary: "Send an email via Gmail. body.{to,subject,bodyText}." },
-            CatalogOp { operation: "gmail.messages", is_write: false, summary: "Read-only: list Gmail message ids in the mailbox (Gmail users.messages.list — id + threadId only, no subject/snippet). params.maxResults (default 10, max 100). No server-side query/search filter is implemented yet." },
-            CatalogOp { operation: "calendar.events", is_write: false, summary: "List upcoming Google Calendar events." },
-            CatalogOp { operation: "drive.files", is_write: false, summary: "List Google Drive files." },
+            CatalogOp { operation: "gmail.messages", is_write: false, summary: "Read-only: list Gmail messages (ids and threadIds; with headers=true also subject, from, to, cc, date, snippet, labelIds). params.query (Gmail search syntax), from, since and until (YYYY-MM-DD), folder (inbox | sent | drafts | archive | deleted), unread, headers, maxResults (default 10, max 100), pageToken." },
+            CatalogOp { operation: "gmail.messages.get", is_write: false, summary: "Read-only: read one Gmail message (headers and body text). params.id, the message id from gmail.messages." },
+            CatalogOp { operation: "calendar.events", is_write: false, summary: "Read-only: list Google Calendar events. params.since and until (YYYY-MM-DD, or a local date-time in Europe/Oslo), query, maxResults (default 10, max 100), pageToken." },
+            CatalogOp { operation: "drive.files", is_write: false, summary: "Read-only: list Google Drive files. params.query, match (name | text, default name), folderId, driveId (one shared drive), maxResults (default 10, max 100), pageToken." },
+            CatalogOp { operation: "drive.file.content", is_write: false, summary: "Read-only: read one Drive file as base64. Docs, Sheets and Slides export as text with exportAs=text. params.fileId (from drive.files), mimeType, exportAs." },
+            CatalogOp { operation: "profile", is_write: false, summary: "Read-only: the connected Google account profile (OpenID userinfo)." },
         ],
     ),
     (
         "microsoft",
         &[
             CatalogOp { operation: "mail.send", is_write: true, summary: "Send an Outlook email. body.{to,subject,bodyText}." },
-            CatalogOp { operation: "mail.messages", is_write: false, summary: "Read-only: list recent Outlook messages (Microsoft Graph /me/messages — id, subject, from, receivedDateTime, webLink). params.maxResults (default 10, max 100). No server-side query/search filter is implemented yet." },
-            CatalogOp { operation: "drive.files", is_write: false, summary: "Read-only: list files in the connected OneDrive root folder (Microsoft Graph /me/drive/root/children — id, name, webUrl, file/folder metadata, lastModifiedDateTime). params.maxResults (default 10, max 100)." },
-            CatalogOp { operation: "calendar.events", is_write: false, summary: "List Outlook calendar events." },
+            CatalogOp { operation: "mail.messages", is_write: false, summary: "Read-only: list recent Outlook messages (id, subject, from, receivedDateTime, webLink, bodyPreview). params.query, from, since and until (YYYY-MM-DD), folder (inbox | sent | drafts | archive | deleted), unread, maxResults (default 10, max 100), pageToken." },
+            CatalogOp { operation: "mail.messages.get", is_write: false, summary: "Read-only: read one Outlook message (headers, body and attachment metadata). params.messageId, the id from mail.messages." },
+            CatalogOp { operation: "drive.files", is_write: false, summary: "Read-only: list files in the connected OneDrive, or in one SharePoint library when driveId is given. params.query, folderId, driveId, maxResults (default 10, max 100), pageToken." },
+            CatalogOp { operation: "drive.file.content", is_write: false, summary: "Read-only: read one OneDrive or SharePoint file as base64. params.itemId (from drive.files), driveId." },
+            CatalogOp { operation: "sharepoint.sites", is_write: false, summary: "Read-only: list the SharePoint sites the user can see. params.query (default all sites), pageToken." },
+            CatalogOp { operation: "sharepoint.drives", is_write: false, summary: "Read-only: list the document libraries of one SharePoint site. params.siteId (from sharepoint.sites), pageToken." },
+            CatalogOp { operation: "profile", is_write: false, summary: "Read-only: the connected Microsoft account profile (id, displayName, mail)." },
+            CatalogOp { operation: "calendar.events", is_write: false, summary: "Read-only: list Outlook calendar events. params.since and until (YYYY-MM-DD, or a local date-time in Europe/Oslo), query, maxResults (default 10, max 100), pageToken." },
         ],
     ),
     (
@@ -1079,6 +1087,17 @@ mod tests {
             "google.gmail.messages",
             "drive.files",
             "calendar.events",
+            "mail.messages.get",
+            "microsoft.mail.messages.get",
+            "gmail.messages.get",
+            "google.gmail.messages.get",
+            "drive.file.content",
+            "microsoft.drive.file.content",
+            "sharepoint.sites",
+            "sharepoint.drives",
+            "profile",
+            "microsoft.profile",
+            "google.profile",
         ] {
             assert_eq!(operation_is_write(read), Some(false), "{read} must stay a read");
             assert!(
@@ -1088,14 +1107,9 @@ mod tests {
         }
 
         for uncatalogued in [
-            "mail.messages.get",
-            "gmail.messages.get",
-            "drive.file.content",
-            "sharepoint.sites",
-            "sharepoint.drives",
-            "profile",
-            "microsoft.profile",
-            "google.profile",
+            "drive.file.delete",
+            "sharepoint.sites.create",
+            "profile.update",
         ] {
             assert_eq!(
                 operation_is_write(uncatalogued),
@@ -1110,6 +1124,34 @@ mod tests {
 
         assert_eq!(operation_is_write("mail.send"), Some(true));
         assert!(is_risky_call("execute_provider_action", &input("mail.send")));
+    }
+
+    /// The golden in integration-corev2 (copied into mp-contracts) names the Microsoft and
+    /// Google reads the executor serves. The catalogue must offer exactly those for those
+    /// providers: a golden read left out would be gated as a write, and a catalogued read the
+    /// golden does not name would be ungated without the executor having been checked for it.
+    #[test]
+    fn catalog_reads_match_contract_table() {
+        use mp_contracts::provider_reads::READ_OPERATIONS;
+        use std::collections::BTreeSet;
+
+        let covered: BTreeSet<&str> = READ_OPERATIONS.iter().map(|read| read.provider).collect();
+        let contract: BTreeSet<(&str, &str)> = READ_OPERATIONS
+            .iter()
+            .map(|read| (read.provider, read.operation))
+            .collect();
+        let catalogued: BTreeSet<(&str, &str)> = CATALOG
+            .iter()
+            .filter(|(provider, _)| covered.contains(provider))
+            .flat_map(|(provider, ops)| {
+                ops.iter()
+                    .filter(|op| !op.is_write)
+                    .map(move |op| (*provider, op.operation))
+            })
+            .collect();
+
+        assert_eq!(catalogued, contract);
+        assert_eq!(contract.len(), READ_OPERATIONS.len(), "golden rows are unique");
     }
 
     // -------------------------------------------------------------------
