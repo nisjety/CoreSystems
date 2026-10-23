@@ -105,6 +105,11 @@ pub struct BudgetCheckpoint {
     /// Time under agent control, in milliseconds.
     #[serde(default)]
     pub active_ms: u64,
+    /// WS6.C-e: the run segment this checkpoint was written in. 0 for the first start; a
+    /// resume is one more. Usage events are keyed by it, so a resumed run never reuses an
+    /// event id. Absent (0) on a checkpoint written before segments existed.
+    #[serde(default, skip_serializing_if = "is_first_segment")]
+    pub segment: u32,
     /// The dimension that was reached, once one was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exhausted: Option<String>,
@@ -113,6 +118,11 @@ pub struct BudgetCheckpoint {
     /// or for a run no claim applied to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claim: Option<crate::grant_validator::GrantBudget>,
+}
+
+/// serde skip rule: the first segment is the default and is not written.
+fn is_first_segment(segment: &u32) -> bool {
+    *segment == 0
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -1230,6 +1240,7 @@ mod tests {
     fn legacy_checkpoint_without_budget_fields_deserialises() {
         let run_id: RunKind = Id::new();
         let checkpoint = AgentRunCheckpoint {
+            policy_mode: None,
             org_id: "org_a".into(),
             actor_id: "user_a".into(),
             run_id: run_id.to_string(),
@@ -1258,6 +1269,7 @@ mod tests {
                 attempts: 2,
                 spent_micro_usd: 2_000,
                 active_ms: 900,
+                segment: 0,
                 exhausted: None,
                 claim: None,
             }),

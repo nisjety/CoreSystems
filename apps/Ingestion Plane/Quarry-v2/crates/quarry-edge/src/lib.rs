@@ -41,6 +41,7 @@ pub mod search_routes;
 pub mod source_registrar;
 pub mod state;
 pub mod trace_config;
+pub mod usage_attrs;
 pub mod zdr_log;
 pub mod zdr_refusal;
 pub mod web_policy_edge;

@@ -34,6 +34,7 @@
 //! (`POST /api/v1/billing/orgs/:orgId/usage`) is the operator's
 //! recovery surface if NATS replay isn't enough.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use async_nats::jetstream;
@@ -41,6 +42,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use tokio::sync::Notify;
 
 use crate::nats_event_bus::NatsEventBus;
 
@@ -82,6 +84,63 @@ impl UsageEvent {
     }
 }
 
+/// Longest event id billing-core accepts (`MaxUsageEventIDLength`).
+pub const MAX_EVENT_ID_BYTES: usize = 128;
+
+/// Why a keyed event id was refused. Callers log the variant, never the id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageIdError {
+    TooLong,
+    BadCharacters,
+}
+
+/// The billing-core event id rule: `^[A-Za-z0-9][A-Za-z0-9._:-]*$`, at most 128 bytes.
+pub fn validate_event_id(event_id: &str) -> Result<(), UsageIdError> {
+    if event_id.len() > MAX_EVENT_ID_BYTES {
+        return Err(UsageIdError::TooLong);
+    }
+    let mut chars = event_id.chars();
+    let first_ok = chars.next().is_some_and(|c| c.is_ascii_alphanumeric());
+    if !first_ok || !chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-'))
+    {
+        return Err(UsageIdError::BadCharacters);
+    }
+    Ok(())
+}
+
+impl UsageEvent {
+    /// WS6.C-e: an event whose id is `quarry:<part>:<part>:<metric>`, for usage that has no
+    /// single request (a run segment, a crawl page). Each part is a closed identifier (a run
+    /// id, a segment label, a short hash). The id is checked against billing-core's rule, so a
+    /// malformed part is refused rather than sent.
+    pub fn keyed(
+        parts: &[&str],
+        org_id: impl Into<String>,
+        metric: impl Into<String>,
+        quantity: f64,
+        metadata: serde_json::Value,
+    ) -> Result<Self, UsageIdError> {
+        let metric = metric.into();
+        let mut event_id = String::from("quarry");
+        for part in parts {
+            event_id.push(':');
+            event_id.push_str(part);
+        }
+        event_id.push(':');
+        event_id.push_str(&metric);
+        validate_event_id(&event_id)?;
+        Ok(Self {
+            event_id,
+            org_id: org_id.into(),
+            metric,
+            quantity,
+            source: "quarry-edge".to_string(),
+            occurred_at: Utc::now(),
+            metadata,
+        })
+    }
+}
+
 /// Canonical metric strings. Free-form per billing-core's contract but
 /// centralised here so producers don't drift. Update Lago billable
 /// metric codes to match before shipping a new metric to production.
@@ -91,6 +150,31 @@ pub mod metrics {
     pub const SEARCH_QUERY: &str = "quarry.search.query";
     pub const ANSWER_SYNTH: &str = "quarry.answer.synth";
     pub const BATCH_URL: &str = "quarry.batch.url";
+    /// WS6.C-e: browser seconds of an agent run segment (whole seconds).
+    pub const BROWSER_SECOND_AGENT: &str = "quarry.browser.second.agent";
+    /// WS6.C-e: browser seconds of a person's manual session segment (whole seconds).
+    pub const BROWSER_SECOND_INTERACTIVE: &str = "quarry.browser.second.interactive";
+    /// WS6.C-e: one agent run segment.
+    pub const AGENT_RUN: &str = "quarry.agent.run";
+    /// WS6.C-e: completed agent steps in a run segment.
+    pub const AGENT_STEP: &str = "quarry.agent.step";
+    /// WS6.C-e: one crawl page the orchestrator fetched (keyed by run and URL hash).
+    pub const CRAWL_PAGE: &str = "quarry.crawl.page";
+    /// WS6.C-e: URLs fetched or extracted by `/v1/extract`.
+    pub const EXTRACT_URL: &str = "quarry.extract.url";
+    /// WS6.C-e: one `/v1/map` call.
+    pub const MAP_CALL: &str = "quarry.map.call";
+    /// The seven metrics that `QUARRY_EDGE__USAGE_BROWSER_METRICS` governs. The five
+    /// metrics above are not in this list: the switch never drops them.
+    pub const BROWSER_METRICS: [&str; 7] = [
+        BROWSER_SECOND_AGENT,
+        BROWSER_SECOND_INTERACTIVE,
+        AGENT_RUN,
+        AGENT_STEP,
+        CRAWL_PAGE,
+        EXTRACT_URL,
+        MAP_CALL,
+    ];
 }
 
 /// Pluggable usage emitter. Production wires `NatsUsageMeter`. Tests +
@@ -98,6 +182,47 @@ pub mod metrics {
 #[async_trait]
 pub trait UsageMeter: Send + Sync {
     async fn meter(&self, event: UsageEvent);
+
+    /// WS6.C-e: wait, at most `deadline`, for the publishes this meter has started. The
+    /// default meter has none to wait for.
+    async fn flush(&self, _deadline: std::time::Duration) {}
+
+    /// WS6.C-e: the mode of the browser metrics. The default does not gate them and reports
+    /// `Off`; the call sites then keep the legacy rules for the existing metrics.
+    fn browser_metrics_mode(&self) -> BrowserMetricsMode {
+        BrowserMetricsMode::Off
+    }
+}
+
+/// How the seven browser and crawl metrics are emitted (`QUARRY_EDGE__USAGE_BROWSER_METRICS`).
+/// `Off` drops them; `Shadow` counts them without publishing; `On` publishes them and applies
+/// the corrected rules to the existing metrics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BrowserMetricsMode {
+    #[default]
+    Off,
+    Shadow,
+    On,
+}
+
+impl BrowserMetricsMode {
+    /// `off` (also the empty value), `shadow` or `on`. Anything else is `None`.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "" | "off" => Some(Self::Off),
+            "shadow" => Some(Self::Shadow),
+            "on" => Some(Self::On),
+            _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Shadow => "shadow",
+            Self::On => "on",
+        }
+    }
 }
 
 /// No-op meter — silently discards every event. Used when NATS is not
@@ -118,6 +243,8 @@ impl UsageMeter for NoopUsageMeter {
 /// client (one TCP connection per process) — cheap to clone.
 pub struct NatsUsageMeter {
     js: jetstream::Context,
+    /// Publishes started and not yet acknowledged, so `flush` can wait for them.
+    inflight: Arc<PublishTracker>,
 }
 
 impl NatsUsageMeter {
@@ -126,7 +253,10 @@ impl NatsUsageMeter {
         // JetStream context off the same connection (Context is cheap —
         // just a wrapper around a Client reference).
         let js = jetstream::new(bus.client().clone());
-        Self { js }
+        Self {
+            js,
+            inflight: Arc::new(PublishTracker::default()),
+        }
     }
 
     /// Subject derivation. Each metric gets its own subject under the
@@ -146,7 +276,10 @@ impl UsageMeter for NatsUsageMeter {
         // immediately. Billing outage / broker latency never bottlenecks
         // user-facing request paths.
         let js = self.js.clone();
+        let guard = self.inflight.begin();
         tokio::spawn(async move {
+            // Held until this publish ends, on every path below.
+            let _guard = guard;
             let subject = Self::subject_for(&event.metric);
             let bytes = match serde_json::to_vec(&event) {
                 Ok(b) => Bytes::from(b),
@@ -178,6 +311,56 @@ impl UsageMeter for NatsUsageMeter {
                 }
             }
         });
+    }
+
+    async fn flush(&self, deadline: std::time::Duration) {
+        let _drained = self.inflight.wait_idle(deadline).await;
+    }
+}
+
+/// Counts the publishes a meter has started and not yet finished, so `flush` can wait for them.
+#[derive(Debug, Default)]
+pub(crate) struct PublishTracker {
+    in_flight: AtomicUsize,
+    idle: Notify,
+}
+
+impl PublishTracker {
+    /// Marks one publish as started. It ends when the returned guard is dropped.
+    pub(crate) fn begin(self: &Arc<Self>) -> PublishGuard {
+        self.in_flight.fetch_add(1, Ordering::SeqCst);
+        PublishGuard {
+            tracker: Arc::clone(self),
+        }
+    }
+
+    /// Waits until no publish is in flight or `deadline` passes. Returns whether it drained.
+    pub(crate) async fn wait_idle(&self, deadline: std::time::Duration) -> bool {
+        let until = tokio::time::Instant::now() + deadline;
+        loop {
+            // Register for the wake-up before reading the count, so a publish that ends
+            // in between cannot be missed.
+            let notified = self.idle.notified();
+            if self.in_flight.load(Ordering::SeqCst) == 0 {
+                return true;
+            }
+            if tokio::time::timeout_at(until, notified).await.is_err() {
+                return self.in_flight.load(Ordering::SeqCst) == 0;
+            }
+        }
+    }
+}
+
+/// One started publish. Dropping it marks the publish as finished.
+pub(crate) struct PublishGuard {
+    tracker: Arc<PublishTracker>,
+}
+
+impl Drop for PublishGuard {
+    fn drop(&mut self) {
+        if self.tracker.in_flight.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.tracker.idle.notify_waiters();
+        }
     }
 }
 
@@ -296,5 +479,96 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].metric, "quarry.answer.synth");
         assert_eq!(events[0].org_id, "org_alpha");
+    }
+}
+
+#[cfg(test)]
+mod metering_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn keyed_id_joins_parts_and_metric() {
+        let evt = UsageEvent::keyed(
+            &["run_abc", "s0"],
+            "org_a",
+            metrics::AGENT_RUN,
+            1.0,
+            json!({}),
+        )
+        .unwrap();
+        assert_eq!(evt.event_id, "quarry:run_abc:s0:quarry.agent.run");
+        assert_eq!(evt.source, "quarry-edge");
+    }
+
+    #[test]
+    fn keyed_id_refuses_bad_characters_and_long_ids() {
+        assert_eq!(
+            validate_event_id("quarry:a b:x"),
+            Err(UsageIdError::BadCharacters)
+        );
+        assert_eq!(
+            validate_event_id(":leading"),
+            Err(UsageIdError::BadCharacters)
+        );
+        let long = "a".repeat(MAX_EVENT_ID_BYTES + 1);
+        assert_eq!(validate_event_id(&long), Err(UsageIdError::TooLong));
+        assert!(validate_event_id(&"a".repeat(MAX_EVENT_ID_BYTES)).is_ok());
+        assert!(
+            UsageEvent::keyed(&["run_x", "a b"], "o", metrics::AGENT_RUN, 1.0, json!({})).is_err()
+        );
+    }
+
+    #[test]
+    fn browser_metric_list_is_the_seven_new_names() {
+        assert_eq!(metrics::BROWSER_METRICS.len(), 7);
+        assert!(!metrics::BROWSER_METRICS.contains(&metrics::SCRAPE_PAGE));
+        assert!(metrics::BROWSER_METRICS.contains(&metrics::CRAWL_PAGE));
+    }
+
+    #[test]
+    fn mode_parses_the_closed_set_only() {
+        assert_eq!(BrowserMetricsMode::parse(""), Some(BrowserMetricsMode::Off));
+        assert_eq!(
+            BrowserMetricsMode::parse(" shadow "),
+            Some(BrowserMetricsMode::Shadow)
+        );
+        assert_eq!(
+            BrowserMetricsMode::parse("on"),
+            Some(BrowserMetricsMode::On)
+        );
+        assert_eq!(BrowserMetricsMode::parse("ON"), None);
+        assert_eq!(BrowserMetricsMode::parse("yes"), None);
+    }
+
+    #[tokio::test]
+    async fn flush_waits_for_inflight_publish() {
+        let tracker = Arc::new(PublishTracker::default());
+        let guard = tracker.begin();
+        let started = tokio::time::Instant::now();
+        let release = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+            drop(guard);
+        });
+        assert!(tracker.wait_idle(std::time::Duration::from_secs(5)).await);
+        assert!(started.elapsed() >= std::time::Duration::from_millis(50));
+        release.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn flush_gives_up_at_its_deadline() {
+        let tracker = Arc::new(PublishTracker::default());
+        let _held = tracker.begin();
+        assert!(
+            !tracker
+                .wait_idle(std::time::Duration::from_millis(30))
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn flush_returns_at_once_when_idle() {
+        let tracker = PublishTracker::default();
+        assert!(tracker.wait_idle(std::time::Duration::from_millis(1)).await);
     }
 }

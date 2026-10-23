@@ -185,6 +185,7 @@ func runPage(
 	org string,
 	userID string,
 	ingest bool,
+	kind string,
 	url string,
 ) (activities.RunPageResult, error) {
 	var res activities.RunPageResult
@@ -194,6 +195,7 @@ func runPage(
 		OrgID:  org,
 		UserID: userID,
 		Ingest: ingest,
+		Kind:   kind,
 	}).Get(ctx, &res)
 	if err != nil {
 		cat := errs.CategoryUnknown
@@ -289,7 +291,7 @@ func ScrapeJobWF(ctx workflow.Context, in ScrapeJobInput, a *activities.Activiti
 		return err
 	}
 
-	if _, err := runPage(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, in.URL); err != nil {
+	if _, err := runPage(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, "", in.URL); err != nil {
 		_ = emitEvent(ctx, a, ids, quarrycontracts.EvtRunFailed, map[string]any{
 			"url":   in.URL,
 			"error": err.Error(),
@@ -417,7 +419,7 @@ func BatchJobWF(ctx workflow.Context, in BatchJobInput, a *activities.Activities
 				break
 			}
 		}
-		res, err := runPage(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, url)
+		res, err := runPage(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, "batch", url)
 		if err != nil {
 			failed++
 			stats.recordFailure(err)
@@ -568,7 +570,7 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 		cur := frontier[0]
 		frontier = frontier[1:]
 
-		res, err := runPage(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, cur.URL)
+		res, err := runPage(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, "crawl", cur.URL)
 		if err != nil {
 			pagesFailed++
 			stats.recordFailure(err)
@@ -704,7 +706,7 @@ func crawlJobDurableFrontier(
 			break
 		}
 		depth := frontierPayloadDepth(item.Payload)
-		res, pageErr := runPage(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, item.URL)
+		res, pageErr := runPage(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, "crawl", item.URL)
 		if pageErr != nil {
 			pagesFailed++
 			stats.recordFailure(pageErr)

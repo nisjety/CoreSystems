@@ -184,6 +184,10 @@ type RunPageInput struct {
 	// schedule that predates the stamp, a job, a crawl) leaves the body
 	// byte-identical to before.
 	Zdr *bool `json:"zdr,omitempty"`
+	// Kind is the job kind the page belongs to: "crawl" or "batch". Empty (a scrape or a
+	// monitor) leaves the body byte-identical to before. The edge meters only a crawl page
+	// (quarry.crawl.page, WS6.C-e).
+	Kind string `json:"kind,omitempty"`
 }
 
 // RunPageResult is returned by the runtime after a successful page execution.
@@ -219,6 +223,9 @@ func (a *Activities) RunPage(ctx context.Context, in RunPageInput) (RunPageResul
 	payload := map[string]any{"url": in.URL, "org_id": in.OrgID, "user_id": in.UserID, "ingest": in.Ingest}
 	if in.Zdr != nil {
 		payload["zdr"] = *in.Zdr
+	}
+	if in.Kind != "" {
+		payload["kind"] = in.Kind
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {

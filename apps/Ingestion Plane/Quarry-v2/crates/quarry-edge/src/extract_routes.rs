@@ -388,23 +388,48 @@ async fn extract_run(
             .into_response();
     }
 
-    // Usage metering — one unit per source attempted.
-    let run_id: quarry_core::ids::kinds::RunKind = quarry_core::ids::Id::new();
-    state
-        .usage
-        .meter(quarry_runtime::UsageEvent::new(
-            run_id.to_string(),
-            claims.org_id.clone(),
-            quarry_runtime::usage_metrics::SEARCH_QUERY,
-            targets.len() as f64,
-            serde_json::json!({
-                "op": "extract",
-                "user_id": claims.user_id,
-                "urls": targets.len(),
-                "structured": req.schema.is_some(),
-            }),
-        ))
-        .await;
+    // Usage metering. WS6.C-e: `quarry.extract.url` counts the URLs fetched or extracted (failures
+    // are free). The gate decides whether it is published (`on`), counted (`shadow`) or dropped
+    // (`off`). Until `on`, the extract is still billed as one search query, as before.
+    let request_id = crate::request_id::current();
+    let billed_urls = results
+        .iter()
+        .filter(|item| matches!(item.status.as_str(), "ok" | "fetched"))
+        .count();
+    let mut attrs = crate::usage_attrs::UsageAttrs::new(
+        crate::usage_attrs::Outcome::Ok,
+        crate::usage_attrs::surface_for(&claims, None),
+    );
+    attrs.user_id = Some(claims.user_id.clone());
+    attrs.counts = Some(serde_json::json!({ "urls": targets.len(), "items": billed_urls }));
+    crate::usage_attrs::emit(
+        &*state.usage,
+        &[request_id.as_str()],
+        &claims.org_id,
+        quarry_runtime::usage_metrics::EXTRACT_URL,
+        billed_urls as f64,
+        &attrs,
+        zdr.is_active(),
+    )
+    .await;
+    if !crate::usage_attrs::corrected_rules(&*state.usage) {
+        let run_id: quarry_core::ids::kinds::RunKind = quarry_core::ids::Id::new();
+        state
+            .usage
+            .meter(quarry_runtime::UsageEvent::new(
+                run_id.to_string(),
+                claims.org_id.clone(),
+                quarry_runtime::usage_metrics::SEARCH_QUERY,
+                targets.len() as f64,
+                serde_json::json!({
+                    "op": "extract",
+                    "user_id": claims.user_id,
+                    "urls": targets.len(),
+                    "structured": req.schema.is_some(),
+                }),
+            ))
+            .await;
+    }
 
     let count = results.len();
     (

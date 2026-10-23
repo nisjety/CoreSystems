@@ -126,8 +126,31 @@ pub(super) async fn finish_run(
         .budget
         .as_ref()
         .map(|budget| budget.usage(std::time::Instant::now()));
+    // WS6.C-e: this segment's usage, emitted once the entry is released below.
+    let segment_usage = entry
+        .budget
+        .as_ref()
+        .map(|budget| budget.segment_usage(std::time::Instant::now()));
+    let usage_org = entry.org_id.clone();
+    let usage_actor = entry.actor_id.clone();
     let session = entry.session.clone();
     drop(entry);
+    if let Some(segment) = segment_usage.as_ref() {
+        let outcome = match reason {
+            CloseReason::Explicit => crate::usage_attrs::Outcome::Ok,
+            CloseReason::Expired(_) => crate::usage_attrs::Outcome::Expired,
+        };
+        crate::usage_attrs::emit_run_segment(
+            &*state.usage,
+            &rid.to_string(),
+            &usage_org,
+            &usage_actor,
+            zdr.is_active(),
+            segment,
+            outcome,
+        )
+        .await;
+    }
     if let Err(error) = state.agent_driver.release(session).await {
         tracing::warn!(run_id, error_class = crate::zdr_log::class(&error), "releasing a run's browser session failed");
     }

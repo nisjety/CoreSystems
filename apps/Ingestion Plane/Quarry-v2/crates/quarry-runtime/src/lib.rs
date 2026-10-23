@@ -17,6 +17,7 @@ pub mod artifact_store;
 pub mod browser_driver;
 pub mod browser_egress_proxy;
 pub mod browser_procedure;
+pub mod capture;
 pub mod cas_store;
 pub mod challenge;
 pub mod dns_guard;
@@ -189,7 +190,10 @@ pub use step_receipts::{
 pub use structured_extract::StructuredExtractClient;
 pub use tls_driver::TlsProfileDriver;
 pub use transport_fallback_driver::TransportFallbackDriver;
-pub use usage::{metrics as usage_metrics, NatsUsageMeter, NoopUsageMeter, UsageEvent, UsageMeter};
+pub use usage::{
+    metrics as usage_metrics, BrowserMetricsMode, NatsUsageMeter, NoopUsageMeter, UsageEvent,
+    UsageIdError, UsageMeter,
+};
 pub use vector_index::{DataPlaneVectorIndex, NoopVectorIndex, VectorHit, VectorIndex};
 pub use vision::{
     SidecarVisualProcessor, VisualChangeArtifact, VisualObservationArtifact,

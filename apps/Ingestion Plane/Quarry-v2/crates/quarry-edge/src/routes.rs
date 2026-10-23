@@ -757,7 +757,7 @@ async fn scrape_with(
                     org_id.clone(),
                     quarry_runtime::usage_metrics::SCRAPE_PAGE,
                     1.0,
-                    scrape_meter_metadata(&claims.user_id, &out, zdr, &privacy),
+                    scrape_usage_metadata(&state.usage, &claims, &out, zdr, &privacy),
                 ))
                 .await;
             let mut warnings = unknown_warnings;
@@ -984,7 +984,27 @@ async fn crawl_handoff(
     // refused because the organization's queue is full created no job, so it
     // is not billed.
     let queue_full = matches!(&ack, Err(error) if error.code == ErrorCode::RateLimited);
-    if !queue_full {
+    if crate::usage_attrs::corrected_rules(&*state.usage) {
+        // WS6.C-e: from `on`, a seed that the handoff failed to create is not billed.
+        if ack.is_ok() {
+            let mut attrs = crate::usage_attrs::UsageAttrs::new(
+                crate::usage_attrs::Outcome::Ok,
+                crate::usage_attrs::surface_for(&claims, None),
+            );
+            attrs.user_id = Some(claims.user_id.clone());
+            attrs.counts = Some(serde_json::json!({ "max_pages": limits.max_pages.effective }));
+            crate::usage_attrs::emit(
+                &*state.usage,
+                &[request_id.as_str()],
+                &org_id,
+                quarry_runtime::usage_metrics::CRAWL_SEED,
+                1.0,
+                &attrs,
+                false,
+            )
+            .await;
+        }
+    } else if !queue_full {
         state
             .usage
             .meter(quarry_runtime::UsageEvent::new(
@@ -1069,7 +1089,27 @@ async fn batch_handoff(
     // refused because the organization's queue is full created no job, so it
     // is not billed.
     let queue_full = matches!(&ack, Err(error) if error.code == ErrorCode::RateLimited);
-    if !queue_full {
+    if crate::usage_attrs::corrected_rules(&*state.usage) {
+        // WS6.C-e: from `on`, a batch the handoff failed to create is not billed.
+        if ack.is_ok() {
+            let mut attrs = crate::usage_attrs::UsageAttrs::new(
+                crate::usage_attrs::Outcome::Ok,
+                crate::usage_attrs::surface_for(&claims, None),
+            );
+            attrs.user_id = Some(claims.user_id.clone());
+            attrs.counts = Some(serde_json::json!({ "url_count": req.urls.len() }));
+            crate::usage_attrs::emit(
+                &*state.usage,
+                &[request_id.as_str()],
+                &claims.org_id,
+                quarry_runtime::usage_metrics::BATCH_URL,
+                req.urls.len() as f64,
+                &attrs,
+                false,
+            )
+            .await;
+        }
+    } else if !queue_full {
         state
             .usage
             .meter(quarry_runtime::UsageEvent::new(
@@ -1144,6 +1184,10 @@ pub struct InternalRunPage {
     /// that names its fields, not a rejection of the whole body.
     #[serde(default)]
     pub crawl: Option<serde_json::Value>,
+    /// WS6.C-e: the job kind the orchestrator fetched this page for (`crawl`, `batch`, or absent).
+    /// Only a crawl page is metered (`quarry.crawl.page`).
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1477,6 +1521,7 @@ async fn internal_run_page(
     if !zdr.is_active() && should_read(&req.cache) {
         if let (Some(prev), Some(cache)) = (req.prev_fingerprint.as_ref(), state.cache.as_ref()) {
             if let Some(cached) = cache.get(&org_id, prev).await {
+                meter_crawl_page(&state, req.kind.as_deref(), &req.url, req.user_id.as_deref(), &run_id, &org_id, zdr).await;
                 return Ok(Json(with_crawl(
                     InternalRunPageResult::from_output(run_id.to_string(), &cached),
                     &cached.url.final_url,
@@ -1498,6 +1543,7 @@ async fn internal_run_page(
                     }
                 }
             }
+            meter_crawl_page(&state, req.kind.as_deref(), &req.url, req.user_id.as_deref(), &run_id, &org_id, zdr).await;
             Ok(Json(with_crawl(
                 InternalRunPageResult::from_output(run_id.to_string(), &out),
                 &out.url.final_url,
@@ -1514,6 +1560,42 @@ async fn internal_run_page(
 
 #[allow(dead_code)]
 fn _keep(_a: Arc<()>) {}
+
+/// WS6.C-e: one `quarry.crawl.page` event for a page the orchestrator fetched for a crawl, off
+/// ZDR. The id is keyed by the run and a short hash of the page URL, so a retried page activity
+/// adds no second row. A batch page and a single scrape are not metered here.
+async fn meter_crawl_page(
+    state: &AppState,
+    kind: Option<&str>,
+    url: &str,
+    user_id: Option<&str>,
+    run_id: &RunKind,
+    org_id: &str,
+    zdr: ZdrMode,
+) {
+    use sha2::{Digest, Sha256};
+    if zdr.is_active() || kind != Some("crawl") {
+        return;
+    }
+    let digest = format!("{:x}", Sha256::digest(url.as_bytes()));
+    let page = &digest[..16];
+    let run = run_id.to_string();
+    let mut attrs = crate::usage_attrs::UsageAttrs::new(
+        crate::usage_attrs::Outcome::Ok,
+        crate::usage_attrs::Surface::Internal,
+    );
+    attrs.user_id = user_id.map(str::to_owned);
+    crate::usage_attrs::emit(
+        &*state.usage,
+        &[run.as_str(), page],
+        org_id,
+        quarry_runtime::usage_metrics::CRAWL_PAGE,
+        1.0,
+        &attrs,
+        false,
+    )
+    .await;
+}
 
 async fn scrape_stream(
     State(state): State<AppState>,
@@ -1700,6 +1782,26 @@ async fn scrape_stream(
 /// still bills and audits (status, `zdr: true`, privacy posture) but names
 /// neither the page nor its content fingerprint: billing-core persists
 /// metadata, so a URL here is a durable copy of what ZDR forbids keeping.
+/// The scrape event's metadata. Off `on` it is the legacy shape, unchanged. From `on` it is the
+/// closed set of `usage_attrs` (no URL, fingerprint or privacy fields, under ZDR or not).
+fn scrape_usage_metadata(
+    meter: &Arc<dyn quarry_runtime::UsageMeter>,
+    claims: &crate::auth::Claims,
+    out: &NormalizedOutput,
+    zdr: ZdrMode,
+    privacy: &PrivacyPolicy,
+) -> serde_json::Value {
+    if !crate::usage_attrs::corrected_rules(&**meter) {
+        return scrape_meter_metadata(&claims.user_id, out, zdr, privacy);
+    }
+    let mut attrs = crate::usage_attrs::UsageAttrs::new(
+        crate::usage_attrs::Outcome::Ok,
+        crate::usage_attrs::surface_for(claims, None),
+    );
+    attrs.user_id = Some(claims.user_id.clone());
+    crate::usage_attrs::metadata(&attrs, zdr.is_active())
+}
+
 fn scrape_meter_metadata(
     user_id: &str,
     out: &NormalizedOutput,

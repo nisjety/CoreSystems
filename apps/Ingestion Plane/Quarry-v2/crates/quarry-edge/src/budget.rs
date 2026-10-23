@@ -644,6 +644,8 @@ impl BudgetLedger {
             active_ms: self.active_ms(now),
             exhausted: self.exhausted.map(|dimension| dimension.label().to_owned()),
             claim: None,
+            // The run budget stamps its segment (WS6.C-e).
+            segment: 0,
         }
     }
 
@@ -852,6 +854,26 @@ pub struct RunBudget {
     pub claim: Option<GrantBudget>,
     /// The refusal the last `gate` made in `On` mode, until it is announced (WS6.B).
     refusal: Option<Exhausted>,
+    /// WS6.C-e: the segment this start or resume opened (0 for the first start).
+    pub segment: u32,
+    /// What the resumed checkpoint already carried, so a segment reports only its own spend.
+    base_steps: u32,
+    base_active_ms: u64,
+    /// The surface that started this segment (`usage_attrs::surface_for`).
+    pub surface: crate::usage_attrs::Surface,
+}
+
+/// What one run segment spent, for its usage events (WS6.C-e). `steps` and `active_ms` are
+/// the segment's own: the spend of the checkpoint it resumed is subtracted.
+#[derive(Debug, Clone, Copy)]
+pub struct SegmentUsage {
+    pub class: RunClass,
+    pub segment: u32,
+    pub surface: crate::usage_attrs::Surface,
+    pub steps: u32,
+    pub active_ms: u64,
+    /// A bound latched during the segment (the budget's exhaustion latch).
+    pub exhausted: bool,
 }
 
 impl RunBudget {
@@ -904,6 +926,10 @@ impl RunBudget {
             ledger,
             claim,
             refusal: None,
+            segment: resumed.map_or(0, |checkpoint| checkpoint.segment.saturating_add(1)),
+            base_steps: resumed.map_or(0, |checkpoint| checkpoint.steps),
+            base_active_ms: resumed.map_or(0, |checkpoint| checkpoint.active_ms),
+            surface: crate::usage_attrs::Surface::Api,
         }
     }
 
@@ -911,6 +937,7 @@ impl RunBudget {
     pub fn snapshot(&self, now: Instant) -> BudgetCheckpoint {
         let mut checkpoint = self.ledger.snapshot(now);
         checkpoint.claim = self.claim.clone();
+        checkpoint.segment = self.segment;
         checkpoint
     }
 
@@ -999,6 +1026,25 @@ impl RunBudget {
             "active_s": self.ledger.active_ms(now) as f64 / 1000.0,
             "exhausted": self.ledger.exhausted().map(|dimension| dimension.label()),
         })
+    }
+
+    /// WS6.C-e: the surface that started this segment, set by the start or resume route.
+    #[must_use]
+    pub fn with_surface(mut self, surface: crate::usage_attrs::Surface) -> Self {
+        self.surface = surface;
+        self
+    }
+
+    /// WS6.C-e: what this segment alone spent, read once by the path that ends it.
+    pub fn segment_usage(&self, now: Instant) -> SegmentUsage {
+        SegmentUsage {
+            class: self.class,
+            segment: self.segment,
+            surface: self.surface,
+            steps: self.ledger.steps.saturating_sub(self.base_steps),
+            active_ms: self.ledger.active_ms(now).saturating_sub(self.base_active_ms),
+            exhausted: self.ledger.exhausted().is_some(),
+        }
     }
 
     /// Record an executed action: `completed` is false for a failed attempt.
@@ -1838,5 +1884,46 @@ mod tests {
         let error = ClaimMode::parse("on").unwrap_err();
         assert!(error.contains(ENV_CLAIM_MODE), "{error}");
         assert_eq!(ClaimMode::Enforce.label(), "enforce");
+    }
+}
+
+#[cfg(test)]
+mod segment_tests {
+    use super::*;
+    use quarry_core::contracts::AgentConstraints;
+    use std::time::Duration;
+
+    #[test]
+    fn resumed_segment_reports_only_its_own_spend() {
+        let t0 = Instant::now();
+        let checkpoint = BudgetCheckpoint {
+            class: "agent".into(),
+            steps: 4,
+            attempts: 4,
+            spent_micro_usd: 0,
+            active_ms: 9_000,
+            exhausted: None,
+            claim: None,
+            segment: 0,
+        };
+        let constraints = AgentConstraints {
+            max_steps: 50,
+            allowed_domains: vec![],
+            max_runtime_s: None,
+            max_cost_usd: None,
+        };
+        let mut budget = RunBudget::start(
+            &BudgetLimits::default(),
+            RunClass::Agent,
+            &constraints,
+            Some(&checkpoint),
+            t0,
+        );
+        assert_eq!(budget.segment, 1, "a resume opens the next segment");
+        budget.charge(true, 0);
+        let usage = budget.segment_usage(t0 + Duration::from_secs(3));
+        assert_eq!(usage.steps, 1);
+        assert_eq!(usage.active_ms, 3_000);
+        assert_eq!(budget.snapshot(t0).segment, 1);
     }
 }

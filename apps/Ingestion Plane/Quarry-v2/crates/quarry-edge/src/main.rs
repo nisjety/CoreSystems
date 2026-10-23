@@ -71,6 +71,7 @@ mod search_routes;
 mod source_registrar;
 mod state;
 mod trace_config;
+mod usage_attrs;
 mod zdr_log;
 mod zdr_refusal;
 mod web_policy_edge;
@@ -648,7 +649,7 @@ async fn run() -> anyhow::Result<()> {
     // usage meter. When NATS is up we publish to `usage.>` subjects;
     // otherwise we noop so dev / offline boots silently. Billing-core's
     // HTTP recovery endpoint covers any gap if NATS drops mid-flight.
-    let usage: Arc<dyn quarry_runtime::UsageMeter> = match shared_nats_bus.as_ref() {
+    let inner_usage: Arc<dyn quarry_runtime::UsageMeter> = match shared_nats_bus.as_ref() {
         Some(bus) => {
             tracing::info!("usage meter: NATS (publishes to usage.>)");
             Arc::new(quarry_runtime::NatsUsageMeter::from_bus(bus))
@@ -658,6 +659,14 @@ async fn run() -> anyhow::Result<()> {
             Arc::new(quarry_runtime::NoopUsageMeter)
         }
     };
+    // WS6.C-e: the gate in front of the meter applies QUARRY_EDGE__USAGE_BROWSER_METRICS to the
+    // seven browser metrics (default off); every other event passes through unchanged.
+    let browser_metrics = usage_attrs::browser_metrics_mode_from_env();
+    tracing::info!(mode = browser_metrics.label(), "usage browser metrics mode");
+    let usage: Arc<dyn quarry_runtime::UsageMeter> = Arc::new(usage_attrs::ShadowMeter::new(
+        inner_usage,
+        browser_metrics,
+    ));
 
     let cache = redis
         .as_ref()

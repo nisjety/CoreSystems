@@ -95,6 +95,7 @@ pub(super) fn resumed_run_class(
 pub async fn start_run(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<StartRunBody>,
 ) -> Result<Json<Envelope<StartRunData>>, ApiErr> {
     let request_id = crate::request_id::current();
@@ -104,6 +105,13 @@ pub async fn start_run(
     let org_id = claims.org_id.clone();
     let actor_id = claims.actor_id().to_owned();
     let execution_tier = body.execution_tier;
+    // WS6.C-e: the surface of this start (or resume) is the surface of its usage segment.
+    let surface = crate::usage_attrs::surface_for(
+        &claims,
+        headers
+            .get(crate::usage_attrs::SURFACE_HEADER)
+            .and_then(|value| value.to_str().ok()),
+    );
 
     if execution_tier.is_ephemeral_evidence() && !experimental_lite_enabled() {
         return Err(status_err(
@@ -492,6 +500,7 @@ pub async fn start_run(
                 .and_then(|checkpoint| checkpoint.budget.as_ref()),
             std::time::Instant::now(),
         )
+        .with_surface(surface)
     });
     let budget_view = budget
         .as_ref()

@@ -307,24 +307,46 @@ pub async fn map(
 
     let count = links.len();
 
-    // Usage metering — one unit per map call.
-    let run_id: quarry_core::ids::kinds::RunKind = quarry_core::ids::Id::new();
-    state
-        .usage
-        .meter(quarry_runtime::UsageEvent::new(
-            run_id.to_string(),
-            claims.org_id.clone(),
-            quarry_runtime::usage_metrics::SEARCH_QUERY,
-            1.0,
-            serde_json::json!({
-                "op": "map",
-                "user_id": claims.user_id,
-                "host": seed_host,
-                "result_count": count,
-                "ranked": ranked,
-            }),
-        ))
-        .await;
+    // Usage metering. WS6.C-e: `quarry.map.call` is one call (the gate decides whether it is
+    // published, counted or dropped). Until `on`, a map is still billed as one search query.
+    let request_id = crate::request_id::current();
+    let zdr = claims.effective_zdr(false);
+    let mut attrs = crate::usage_attrs::UsageAttrs::new(
+        crate::usage_attrs::Outcome::Ok,
+        crate::usage_attrs::surface_for(&claims, None),
+    );
+    attrs.user_id = Some(claims.user_id.clone());
+    attrs.host = Some(seed_host.clone());
+    attrs.counts = Some(serde_json::json!({ "result_count": count, "ranked": ranked }));
+    crate::usage_attrs::emit(
+        &*state.usage,
+        &[request_id.as_str()],
+        &claims.org_id,
+        quarry_runtime::usage_metrics::MAP_CALL,
+        1.0,
+        &attrs,
+        zdr,
+    )
+    .await;
+    if !crate::usage_attrs::corrected_rules(&*state.usage) {
+        let run_id: quarry_core::ids::kinds::RunKind = quarry_core::ids::Id::new();
+        state
+            .usage
+            .meter(quarry_runtime::UsageEvent::new(
+                run_id.to_string(),
+                claims.org_id.clone(),
+                quarry_runtime::usage_metrics::SEARCH_QUERY,
+                1.0,
+                serde_json::json!({
+                    "op": "map",
+                    "user_id": claims.user_id,
+                    "host": seed_host,
+                    "result_count": count,
+                    "ranked": ranked,
+                }),
+            ))
+            .await;
+    }
 
     (
         StatusCode::OK,
