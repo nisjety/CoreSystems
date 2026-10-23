@@ -379,6 +379,39 @@ Built so far (batches B01 to B07): WS01-S0, WS01-S1 (partial), WS01-S6; WS02-S1,
 | D1-280 | WS05-S6.code | live-proof | P1 | Call sites in grpc.rs, agent.rs, runtime_loop/mod.rs and resume.rs must be switched to RunGate methods by the slice that owns those files. | open |
 | D1-281 | WS05-S6.code | follow-up | P3 | 9 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-04.json | open |
 
+
+### Wave-mode batch W1-06 (2026-10-23)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D1-282 | WS04-S5 | live-proof | P1 | Needed before the switch is flipped in S9: with two replicas on the shared Redis/Dragonfly, stream a turn on A and rate it on B, and confirm the feedback envelope carries the skill ids. Also confirm the breaker-open path (Redis down) degrades to turn_not_rateable / run-only without delaying the rating. | open |
+| D1-283 | WS04-S5 | live-proof | P1 | docker-compose.yml needs MODEL_GATEWAY_SHARED_TURN_RECORD default false (owned by S1/S9), flipped on in S9. | open |
+| D1-284 | WS04-S5 | live-proof | P1 | Plan row command `cargo test -q -p model-gateway --all-targets` not run on Windows (only --lib); non-lib targets are known to fail on Windows. | open |
+| D1-285 | WS04-S5 | live-proof | P1 | Flip MODEL_GATEWAY_SHARED_TURN_RECORD to on in docker-compose.yml only in S9, together with the two-replica live proof listed in depth_findings. Add the env key there (default off) when S1/S9 own that file; I did not touch deploy files. | open |
+| D1-286 | WS04-S5 | live-proof | P1 | Run `cargo test -q -p model-gateway --all-targets` per the plan row where the platform allows. On Windows only --lib was run; the pre-existing non-lib target failures were not checked. | open |
+| D1-287 | WS04-S5 | test-gap | P2 | No test drives ingest_feedback end to end with the flag on, because test_state uses the in-memory StreamBufferStore and the env switch is process-global. The adopt-then-resolve composition is tested, but the handler wiring and the sse.rs call-in are not. | open |
+| D1-288 | WS04-S5 | test-gap | P2 | There is no real-Redis test for kv_set/kv_get (key and TTL round trip), and none that the in-memory-backend no-op holds when REDIS_URL is unset. | open |
+| D1-289 | WS04-S5 | risk | P2 | mirror_chat_turn spawns an unbounded tokio task per turn with the flag on. The breaker caps each at 250 ms, but a burst during a Redis stall queues many tasks until the breaker opens. Acceptable now; revisit if the stream buffer ever gets a bounded writer. | open |
+| D1-290 | WS04-S5 | follow-up | P3 | 5 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-06.json | open |
+| D1-291 | WS06-S2 | risk | P1 | Until S3, chained rows are never purged (Purge skips chain_seq IS NOT NULL), so the audit table grows unbounded once the flag is on; S3's chain-safe purge must ship before long-running use. | open |
+| D1-292 | WS06-S2 | risk | P1 | A rolling deploy lets an old-image replica insert an unchained row with ingested_at just before an org's activated_at, so it is silently classed legacy_unchained and never chained; a stop-the-world image swap or an activation grace window is needed before the flag is switched on. | open |
+| D1-293 | WS06-S2 | live-proof | P1 | None of the 15 Postgres-backed tests ran (no local Postgres, docker not allowed); the migration SQL, the guard trigger's to_jsonb comparison, the pgx batch and the head-lock race are unproven until the lead runs the harness. | open |
+| D1-294 | WS06-S2 | risk | P1 | Migration 007 installs the DELETE/UPDATE guard trigger on first boot even with the switch off, so an old-image replica running Purge will fail its delete until replaced; roll audit-core as one image swap. | open |
+| D1-295 | WS06-S2 | live-proof | P1 | Run the audit-core DB tests against Postgres 16 via the harness (docker run ac-pg, then go vet and go test with TEST_DATABASE_URL); all 15 new/updated DB tests are unrun. | open |
+| D1-296 | WS06-S2 | live-proof | P1 | Apply the shared edit to apps/Control Plane/docker-compose.yml: AUDIT_CHAIN_ENABLED: "${AUDIT_CHAIN_ENABLED:-0}" in the audit-core environment block. | open |
+| D1-297 | WS06-S2 | live-proof | P1 | Live proof per the plan: rebuild audit-core via scripts/run-control-plane.sh, flag on, one governed tool action, psql shows contiguous chain_seq, prev_hash == previous row_hash, head == last row; restart mid-stream with no gap; capture the audit_core_chain_head_lock_wait_seconds histogram. | open |
+| D1-298 | WS06-S2 | live-proof | P1 | Run the audit-core DB tests through the harness (no -race, needs cgo): `docker run --rm -d --name ac-pg -p 55432:5432 -e POSTGRES_PASSWORD=t postgres:16`, then `cd "apps/Control Plane/audit-core" && TEST_DATABASE_URL="postgres://postgres:t@localhost:55432/postgres?sslmode=disable" go vet ./... && go test ./...`. Fix anything the unrun SQL and trigger code gets wrong; the likeliest places are the guard trigger's to_jsonb comparison, the pgx batch parameter typing, and the FOR UPDATE head upsert race. | open |
+| D1-299 | WS06-S2 | follow-up | P3 | 11 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-06.json | open |
+| D1-300 | WS01-S12.code | risk | P1 | scripts/coresystem-cross-plane-preflight.sh check_evidence_open prints state=recorded when rg is missing (the failing rg falls into the else branch), so a missing tool reads as evidence recorded; it should fail closed with a command -v rg check. | open |
+| D1-301 | WS01-S12.code | follow-up | P1 | CAPABILITY_PROMOTION_LEDGER.tsv lacks five capability IDs seeded by capability-core migrations (cap.agent.lineage.read, cap.memory.index, cap.memory.search, cap.process.background, cap.skill.summarize), making conformance report capability_promotion_ledger_invalid and failing coresystem-conformance-test.sh; add them as source_only rows. | open |
+| D1-302 | WS01-S12.code | live-proof | P1 | S12 operator proof is not done: no signed baseline, candidate, rehearsal file or conformance artifact exists; a dev-keyed pipeline run on Linux with ephemeral keys is the cheapest next step and must be labelled DEV-KEYED. | open |
+| D1-303 | WS01-S12.code | live-proof | P1 | No signed baseline, candidate, rehearsal file or conformance artifact exists yet; the pipeline is documented and unit-tested but never exercised, and the evidence doc says so honestly. | open |
+| D1-304 | WS01-S12.code | live-proof | P1 | Dev-keyed (or production-keyed) end-to-end run of build, verify, restore, rehearsal, and candidate/baseline/candidate deploys: needs docker and a Linux host, so not done. | open |
+| D1-305 | WS01-S12.code | live-proof | P1 | release-contract-test.sh, release-runtime-partition-test.sh and release-input-security-test.sh cannot run on Windows (O_NOFOLLOW); run them on Linux or in the ops-gates CI job. | open |
+| D1-306 | WS01-S12.code | live-proof | P1 | scripts/coresystem-conformance.sh --profile runtime reading ready on a clean candidate tree: blocked until a clean tree, signed artifacts, rehearsal evidence and a valid capability ledger exist. | open |
+| D1-307 | WS01-S12.code | live-proof | P1 | Committed evidence files (rollback-rehearsal-<date>.txt, conformance JSON, manifest digests) and the key ceremony: operator work. | open |
+| D1-308 | WS01-S12.code | follow-up | P3 | 10 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-06.json | open |
+
 ## Wave 2 (WS13 to WS27)
 
 Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS27-S0, WS27-S1. Wave 2 is not started as a wave: these came in with Wave 1 batches because they were Wave 1 prerequisites.
@@ -655,3 +688,6 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS06-S0 | audit | W1-04 | no |
 | WS06-S1 | audit | W1-04 | no |
 | WS05-S6.code | authority, policy | W1-04 | no |
+| WS04-S5 | zdr, auth | W1-06 | no |
+| WS06-S2 | audit, zdr | W1-06 | no |
+| WS01-S12.code | authority, policy | W1-06 | no |
