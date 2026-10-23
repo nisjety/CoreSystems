@@ -363,9 +363,15 @@ services:
     container_name: quarry-orchestrator
     restart: unless-stopped
     init: true
+    # A stop cancels in-flight activities and waits up to
+    # QUARRY_ORCH_WORKER_STOP_TIMEOUT_S (20 s per base worker, two workers, plus
+    # 5 s slack: at most 55 s with the bound at its 25 s maximum). The grace
+    # period must stay above that total, or the platform kills it first.
+    stop_grace_period: 60s
     environment:
       TEMPORAL_ADDR: temporal:7233
       TEMPORAL_NAMESPACE: default
+      QUARRY_ORCH_WORKER_STOP_TIMEOUT_S: "${QUARRY_ORCH_WORKER_STOP_TIMEOUT_S:-20}"
       RUNTIME_BASE_URL: http://quarry-edge:8082
       CONTROL_BASE_URL: http://quarry-control:8081
       # How many jobs one claim asks control for (used when control has job
