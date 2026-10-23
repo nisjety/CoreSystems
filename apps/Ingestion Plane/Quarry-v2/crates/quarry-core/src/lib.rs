@@ -28,6 +28,7 @@ pub mod redaction;
 pub mod resources;
 pub mod scrape;
 pub mod tracked_snapshot;
+pub mod web_policy;
 pub mod zdr;
 pub mod zdr_matrix;
 
