@@ -20,6 +20,7 @@ pub mod links;
 pub mod markdown;
 pub mod metadata;
 pub mod pdf;
+pub mod pii;
 pub mod readability;
 pub mod robots;
 pub mod sitemap;
