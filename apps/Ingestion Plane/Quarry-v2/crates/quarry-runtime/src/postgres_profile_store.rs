@@ -32,6 +32,8 @@ use quarry_browser::session::{
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 use quarry_core::ids::kinds::ProfileKind;
 
+use crate::profile_blob_store::{BlobPayload, BlobRow, ProfileBlobStore};
+
 fn db_err(label: &str, e: sqlx::Error) -> QuarryError {
     QuarryError::new(ErrorCode::Internal, format!("postgres {label}: {e}"))
 }
@@ -84,6 +86,155 @@ impl PostgresProfileStore {
     }
 }
 
+impl PostgresProfileStore {
+    /// Ordered upsert of one payload (WS17.P1 rules, WS17.E1 columns). Shared by
+    /// the plaintext `ProfileStore::save` (legacy payload) and the envelope blob
+    /// store. One statement decides: the clamp, the tombstone check, the insert
+    /// and the ordered upsert share one `saved_at`. A stale or tombstoned save
+    /// writes nothing. Owner is stamped on INSERT only.
+    pub(crate) async fn upsert_payload(
+        &self,
+        org_id: &str,
+        profile_id: &ProfileKind,
+        payload: &BlobPayload,
+        meta: &SaveMeta,
+    ) -> QuarryResult<SaveOutcome> {
+        let (json, envelope, enc_v, key_id): (
+            Option<serde_json::Value>,
+            Option<Vec<u8>>,
+            Option<i16>,
+            Option<String>,
+        ) = match payload {
+            BlobPayload::Legacy { json } => (Some(json.clone()), None, None, None),
+            BlobPayload::Envelope {
+                envelope,
+                enc_v,
+                key_id,
+            } => (None, Some(envelope.clone()), Some(*enc_v), Some(key_id.clone())),
+        };
+        let stored: Option<(i64,)> = sqlx::query_as(
+            "WITH s AS ( \
+                 SELECT LEAST($3::timestamptz, NOW() + INTERVAL '5 seconds') AS saved_at \
+             ) \
+             INSERT INTO quarry_profiles \
+                 (org_id, profile_id, snapshot, envelope, enc_v, key_id, saved_at, rev, owner_user_id, created_at, updated_at) \
+             SELECT $1::text, $2::text, $4::jsonb, $6::bytea, $7::smallint, $8::text, s.saved_at, 1, $5::text, NOW(), NOW() FROM s \
+             WHERE NOT EXISTS ( \
+                 SELECT 1 FROM quarry_profile_tombstones t \
+                 WHERE t.org_id = $1::text AND t.profile_id = $2::text \
+                   AND t.deleted_at >= s.saved_at \
+             ) \
+             ON CONFLICT (org_id, profile_id) DO UPDATE SET \
+                 snapshot   = EXCLUDED.snapshot, \
+                 envelope   = EXCLUDED.envelope, \
+                 enc_v      = EXCLUDED.enc_v, \
+                 key_id     = EXCLUDED.key_id, \
+                 saved_at   = EXCLUDED.saved_at, \
+                 rev        = quarry_profiles.rev + 1, \
+                 updated_at = NOW() \
+             WHERE quarry_profiles.saved_at IS NULL \
+                OR quarry_profiles.saved_at < EXCLUDED.saved_at \
+             RETURNING rev",
+        )
+        .bind(org_id)
+        .bind(profile_id.to_string())
+        .bind(meta.saved_at)
+        .bind(json)
+        .bind(meta.owner.as_deref())
+        .bind(envelope)
+        .bind(enc_v)
+        .bind(key_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| db_err("save", e))?;
+
+        if let Some((rev,)) = stored {
+            return Ok(SaveOutcome::Stored { rev });
+        }
+        // Nothing was written. Diagnose only the reason, for the log class.
+        let (tombstoned,): (bool,) = sqlx::query_as(
+            "SELECT EXISTS ( \
+                 SELECT 1 FROM quarry_profile_tombstones \
+                 WHERE org_id = $1 AND profile_id = $2 \
+                   AND deleted_at >= LEAST($3::timestamptz, NOW() + INTERVAL '5 seconds') \
+             )",
+        )
+        .bind(org_id)
+        .bind(profile_id.to_string())
+        .bind(meta.saved_at)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| db_err("save:diagnose", e))?;
+        Ok(if tombstoned {
+            SaveOutcome::IgnoredByTombstone
+        } else {
+            SaveOutcome::IgnoredStale
+        })
+    }
+
+    /// The row's payload columns and ordering state (WS17.E1 blob read).
+    pub(crate) async fn fetch_blob_row(
+        &self,
+        org_id: &str,
+        profile_id: &ProfileKind,
+    ) -> QuarryResult<Option<BlobRow>> {
+        let row: Option<(
+            Option<serde_json::Value>,
+            Option<Vec<u8>>,
+            Option<chrono::DateTime<chrono::Utc>>,
+            i64,
+            Option<i16>,
+            Option<String>,
+        )> = sqlx::query_as(
+            "SELECT snapshot, envelope, saved_at, rev, enc_v, key_id \
+             FROM quarry_profiles WHERE org_id = $1 AND profile_id = $2",
+        )
+        .bind(org_id)
+        .bind(profile_id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| db_err("blob_get", e))?;
+        Ok(row.map(
+            |(legacy_json, envelope, saved_at, rev, enc_v, key_id)| BlobRow {
+                envelope,
+                legacy_json,
+                saved_at,
+                rev,
+                enc_v,
+                key_id,
+            },
+        ))
+    }
+
+    /// Compare-and-set re-seal: the payload becomes the envelope only while the
+    /// row is still at `expected_rev`. `rev` and `saved_at` do not move.
+    pub(crate) async fn reseal_row(
+        &self,
+        org_id: &str,
+        profile_id: &ProfileKind,
+        expected_rev: i64,
+        envelope: Vec<u8>,
+        enc_v: i16,
+        key_id: &str,
+    ) -> QuarryResult<bool> {
+        let done = sqlx::query(
+            "UPDATE quarry_profiles \
+             SET envelope = $3, enc_v = $4, key_id = $5, snapshot = NULL, updated_at = NOW() \
+             WHERE org_id = $1 AND profile_id = $2 AND rev = $6",
+        )
+        .bind(org_id)
+        .bind(profile_id.to_string())
+        .bind(envelope)
+        .bind(enc_v)
+        .bind(key_id)
+        .bind(expected_rev)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| db_err("blob_reseal", e))?;
+        Ok(done.rows_affected() == 1)
+    }
+}
+
 /// Start the hourly tombstone sweep. The edge calls this once at boot, next
 /// to the store it builds (see `main.rs`). The first tick runs immediately.
 pub fn spawn_tombstone_sweeper(store: PostgresProfileStore) -> tokio::task::JoinHandle<()> {
@@ -116,62 +267,8 @@ impl ProfileStore for PostgresProfileStore {
         let json = serde_json::to_value(snapshot).map_err(|e| {
             QuarryError::new(ErrorCode::Internal, format!("snapshot encode failed: {e}"))
         })?;
-        // One statement decides. The clamp, the tombstone check, the insert and
-        // the ordered upsert share one `saved_at`. A save that is stale (the row
-        // has a newer `saved_at`) or tombstoned (a delete is at least as new)
-        // writes nothing and returns no row. Owner is stamped on INSERT only.
-        let stored: Option<(i64,)> = sqlx::query_as(
-            "WITH s AS ( \
-                 SELECT LEAST($3::timestamptz, NOW() + INTERVAL '5 seconds') AS saved_at \
-             ) \
-             INSERT INTO quarry_profiles \
-                 (org_id, profile_id, snapshot, saved_at, rev, owner_user_id, created_at, updated_at) \
-             SELECT $1::text, $2::text, $4::jsonb, s.saved_at, 1, $5::text, NOW(), NOW() FROM s \
-             WHERE NOT EXISTS ( \
-                 SELECT 1 FROM quarry_profile_tombstones t \
-                 WHERE t.org_id = $1::text AND t.profile_id = $2::text \
-                   AND t.deleted_at >= s.saved_at \
-             ) \
-             ON CONFLICT (org_id, profile_id) DO UPDATE SET \
-                 snapshot   = EXCLUDED.snapshot, \
-                 saved_at   = EXCLUDED.saved_at, \
-                 rev        = quarry_profiles.rev + 1, \
-                 updated_at = NOW() \
-             WHERE quarry_profiles.saved_at IS NULL \
-                OR quarry_profiles.saved_at < EXCLUDED.saved_at \
-             RETURNING rev",
-        )
-        .bind(org_id)
-        .bind(profile_id.to_string())
-        .bind(meta.saved_at)
-        .bind(&json)
-        .bind(meta.owner.as_deref())
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| db_err("save", e))?;
-
-        if let Some((rev,)) = stored {
-            return Ok(SaveOutcome::Stored { rev });
-        }
-        // Nothing was written. Diagnose only the reason, for the log class.
-        let (tombstoned,): (bool,) = sqlx::query_as(
-            "SELECT EXISTS ( \
-                 SELECT 1 FROM quarry_profile_tombstones \
-                 WHERE org_id = $1 AND profile_id = $2 \
-                   AND deleted_at >= LEAST($3::timestamptz, NOW() + INTERVAL '5 seconds') \
-             )",
-        )
-        .bind(org_id)
-        .bind(profile_id.to_string())
-        .bind(meta.saved_at)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|e| db_err("save:diagnose", e))?;
-        Ok(if tombstoned {
-            SaveOutcome::IgnoredByTombstone
-        } else {
-            SaveOutcome::IgnoredStale
-        })
+        self.upsert_payload(org_id, profile_id, &BlobPayload::Legacy { json }, meta)
+            .await
     }
 
     async fn load(
@@ -326,6 +423,83 @@ impl ProfileStore for PostgresProfileStore {
             scope: scope.parse::<ProfileScope>().unwrap_or_default(),
             owner,
         }))
+    }
+}
+
+/// Postgres `ProfileBlobStore` (WS17.E1, renamed from the plan's
+/// `PostgresProfileBlobStore` split): the same table and ordering rules as
+/// `PostgresProfileStore`, with the envelope columns. Wrapped in
+/// `CachedBlobStore` when Redis is configured.
+#[derive(Clone)]
+pub struct PostgresProfileBlobStore {
+    inner: PostgresProfileStore,
+}
+
+impl PostgresProfileBlobStore {
+    pub fn new(store: PostgresProfileStore) -> Self {
+        Self { inner: store }
+    }
+}
+
+#[async_trait]
+impl ProfileBlobStore for PostgresProfileBlobStore {
+    async fn put(
+        &self,
+        org_id: &str,
+        profile_id: &ProfileKind,
+        payload: BlobPayload,
+        meta: &SaveMeta,
+    ) -> QuarryResult<SaveOutcome> {
+        self.inner
+            .upsert_payload(org_id, profile_id, &payload, meta)
+            .await
+    }
+
+    async fn reseal(
+        &self,
+        org_id: &str,
+        profile_id: &ProfileKind,
+        expected_rev: i64,
+        envelope: Vec<u8>,
+        enc_v: i16,
+        key_id: &str,
+    ) -> QuarryResult<bool> {
+        self.inner
+            .reseal_row(org_id, profile_id, expected_rev, envelope, enc_v, key_id)
+            .await
+    }
+
+    async fn get(&self, org_id: &str, profile_id: &ProfileKind) -> QuarryResult<Option<BlobRow>> {
+        self.inner.fetch_blob_row(org_id, profile_id).await
+    }
+
+    async fn delete(&self, org_id: &str, profile_id: &ProfileKind) -> QuarryResult<()> {
+        ProfileStore::delete(&self.inner, org_id, profile_id).await
+    }
+
+    async fn exists(&self, org_id: &str, profile_id: &ProfileKind) -> QuarryResult<bool> {
+        ProfileStore::exists(&self.inner, org_id, profile_id).await
+    }
+
+    async fn list(&self, org_id: &str) -> QuarryResult<Vec<ProfileSummary>> {
+        ProfileStore::list(&self.inner, org_id).await
+    }
+
+    async fn save_metadata(
+        &self,
+        org_id: &str,
+        profile_id: &ProfileKind,
+        metadata: &ProfileMetadata,
+    ) -> QuarryResult<()> {
+        ProfileStore::save_metadata(&self.inner, org_id, profile_id, metadata).await
+    }
+
+    async fn load_metadata(
+        &self,
+        org_id: &str,
+        profile_id: &ProfileKind,
+    ) -> QuarryResult<Option<ProfileMetadata>> {
+        ProfileStore::load_metadata(&self.inner, org_id, profile_id).await
     }
 }
 
@@ -687,5 +861,61 @@ mod tests {
         // Most-recent first → b before a.
         assert_eq!(ids[0].profile_id.to_string(), b.to_string());
         assert_eq!(ids[1].profile_id.to_string(), a.to_string());
+    }
+}
+
+#[cfg(test)]
+mod blob_tests {
+    use super::*;
+
+    /// Envelope rows on Postgres (WS17.E1): NULL snapshot, envelope bytes kept
+    /// as written, and the re-seal compare-and-set on rev. Skips without a
+    /// DATABASE_URL, like the other store tests.
+    #[tokio::test]
+    async fn envelope_row_roundtrip_and_reseal_cas() {
+        let Some(pool) = crate::postgres_test_support::isolated_pool("profile blob store").await
+        else {
+            return;
+        };
+        let _ = sqlx::query("TRUNCATE TABLE quarry_profiles")
+            .execute(&pool)
+            .await;
+        let store = PostgresProfileBlobStore::new(PostgresProfileStore::new(pool));
+        let id: ProfileKind = quarry_core::ids::Id::new();
+        let envelope = br#"{"enc_v":1}"#.to_vec();
+        let out = store
+            .put(
+                "org_a",
+                &id,
+                BlobPayload::Envelope {
+                    envelope: envelope.clone(),
+                    enc_v: 1,
+                    key_id: "env:v1".into(),
+                },
+                &SaveMeta::now(None),
+            )
+            .await
+            .unwrap();
+        assert!(out.is_stored());
+        let row = store.get("org_a", &id).await.unwrap().expect("row");
+        assert!(row.legacy_json.is_none(), "snapshot column is NULL for envelope rows");
+        assert_eq!(row.envelope.as_deref(), Some(envelope.as_slice()));
+        assert_eq!(row.key_id.as_deref(), Some("env:v1"));
+        assert!(
+            !store
+                .reseal("org_a", &id, row.rev + 1, b"x".to_vec(), 1, "env:v2")
+                .await
+                .unwrap(),
+            "a stale rev loses the compare-and-set"
+        );
+        assert!(store
+            .reseal("org_a", &id, row.rev, b"x".to_vec(), 1, "env:v2")
+            .await
+            .unwrap());
+        assert_eq!(
+            store.get("org_a", &id).await.unwrap().unwrap().rev,
+            row.rev,
+            "reseal does not bump rev"
+        );
     }
 }

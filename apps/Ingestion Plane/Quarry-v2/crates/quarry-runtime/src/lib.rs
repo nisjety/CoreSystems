@@ -49,6 +49,10 @@ pub mod fetch;
 pub mod fingerprint_rotation;
 pub mod fusion;
 pub mod grant_validator;
+pub mod envelope_profile_store;
+pub mod profile_blob_store;
+pub mod profile_crypto;
+pub mod profile_keys;
 #[cfg(feature = "grpc")]
 pub mod grpc;
 #[cfg(feature = "http3")]

@@ -37,6 +37,11 @@ chrono = { workspace = true }
 futures = { workspace = true }
 async-stream = { workspace = true }
 blake3 = { workspace = true }
+# WS17.E1: envelope encryption of profile blobs (AES-256-GCM via ring; DEK zeroizing; gzip above 4 KiB).
+ring = "0.17"
+zeroize = "1"
+moka = { version = "0.12", features = ["sync"] }
+flate2 = "1"
 tempfile = "3"
 aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "default-https-client", "behavior-version-latest"] }
 aws-config = { version = "1", default-features = false, features = ["rt-tokio", "default-https-client", "behavior-version-latest"] }

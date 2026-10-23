@@ -34,6 +34,11 @@ use quarry_browser::session::{
 use quarry_core::error::QuarryResult;
 use quarry_core::ids::kinds::ProfileKind;
 
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine as _;
+
+use crate::profile_blob_store::{BlobPayload, BlobRow, ProfileBlobStore};
+
 /// Default TTL for cached snapshot blobs. 1 hour balances:
 ///   - too long → stale state after a `save` from a peer instance
 ///     that didn't bust this instance's Redis (we DO write-through
@@ -163,6 +168,170 @@ impl ProfileStore for CachedProfileStore {
         // low-frequency admin actions, not the hot restore path this
         // cache exists for. Caching them would also risk a stale name/
         // scope surviving past a rename until TTL expiry.
+        self.inner.save_metadata(org_id, profile_id, metadata).await
+    }
+
+    async fn load_metadata(
+        &self,
+        org_id: &str,
+        profile_id: &ProfileKind,
+    ) -> QuarryResult<Option<ProfileMetadata>> {
+        self.inner.load_metadata(org_id, profile_id).await
+    }
+}
+
+/// Cache key for envelope rows (WS17.E1). The `v2` segment keeps these keys
+/// apart from the legacy plaintext keys (`quarry:profile:{org}:{profile}`),
+/// which the envelope layer never reads.
+pub fn blob_cache_key(org_id: &str, profile_id: &ProfileKind) -> String {
+    format!("quarry:profile:v2:{org_id}:{profile_id}")
+}
+
+/// What the cache holds for one envelope row: the envelope bytes (base64 of
+/// the `EnvelopeV1` JSON) and the header fields. Never a plaintext payload.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CachedEnvelopeRow {
+    rev: i64,
+    enc_v: i16,
+    key_id: String,
+    saved_at_ms: Option<i64>,
+    envelope_b64: String,
+}
+
+/// Redis cache in front of a `ProfileBlobStore` for envelope rows (WS17.E1).
+///
+/// Only rows with an envelope are cached. A legacy plaintext row is read from
+/// the inner store every time, so plaintext never reaches Redis through this
+/// layer. Writes (`put`, `reseal`, `delete`) drop the key after the inner store
+/// has answered, the same invalidate-on-write rule as `CachedProfileStore`.
+pub struct CachedBlobStore {
+    inner: Arc<dyn ProfileBlobStore>,
+    redis: ConnectionManager,
+    ttl: Duration,
+}
+
+impl CachedBlobStore {
+    pub fn new(inner: Arc<dyn ProfileBlobStore>, redis: ConnectionManager) -> Self {
+        Self {
+            inner,
+            redis,
+            ttl: Duration::from_secs(DEFAULT_TTL_S),
+        }
+    }
+
+    pub fn with_ttl(mut self, ttl: Duration) -> Self {
+        self.ttl = ttl;
+        self
+    }
+
+    async fn drop_key(&self, org_id: &str, profile_id: &ProfileKind) {
+        let mut redis = self.redis.clone();
+        let _: redis::RedisResult<()> = redis.del(blob_cache_key(org_id, profile_id)).await;
+    }
+}
+
+fn row_from_cache(c: CachedEnvelopeRow) -> Option<BlobRow> {
+    let envelope = B64.decode(c.envelope_b64.as_bytes()).ok()?;
+    Some(BlobRow {
+        envelope: Some(envelope),
+        legacy_json: None,
+        saved_at: c
+            .saved_at_ms
+            .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis),
+        rev: c.rev,
+        enc_v: Some(c.enc_v),
+        key_id: Some(c.key_id),
+    })
+}
+
+#[async_trait]
+impl ProfileBlobStore for CachedBlobStore {
+    async fn put(
+        &self,
+        org_id: &str,
+        profile_id: &ProfileKind,
+        payload: BlobPayload,
+        meta: &SaveMeta,
+    ) -> QuarryResult<SaveOutcome> {
+        // Inner first: the store decides, then the key is dropped.
+        let outcome = self.inner.put(org_id, profile_id, payload, meta).await?;
+        self.drop_key(org_id, profile_id).await;
+        Ok(outcome)
+    }
+
+    async fn reseal(
+        &self,
+        org_id: &str,
+        profile_id: &ProfileKind,
+        expected_rev: i64,
+        envelope: Vec<u8>,
+        enc_v: i16,
+        key_id: &str,
+    ) -> QuarryResult<bool> {
+        let done = self
+            .inner
+            .reseal(org_id, profile_id, expected_rev, envelope, enc_v, key_id)
+            .await?;
+        self.drop_key(org_id, profile_id).await;
+        Ok(done)
+    }
+
+    async fn get(&self, org_id: &str, profile_id: &ProfileKind) -> QuarryResult<Option<BlobRow>> {
+        let key = blob_cache_key(org_id, profile_id);
+        let mut redis = self.redis.clone();
+        let cached: redis::RedisResult<Option<Vec<u8>>> = redis.get(&key).await;
+        if let Ok(Some(bytes)) = cached {
+            if let Some(row) = serde_json::from_slice::<CachedEnvelopeRow>(&bytes)
+                .ok()
+                .and_then(row_from_cache)
+            {
+                return Ok(Some(row));
+            }
+            // Unreadable entry: drop it and fall through to the inner store.
+            let _: redis::RedisResult<()> = redis.del(&key).await;
+        }
+        let row = self.inner.get(org_id, profile_id).await?;
+        if let Some(r) = &row {
+            if let (Some(envelope), Some(enc_v), Some(key_id)) = (&r.envelope, r.enc_v, &r.key_id) {
+                let entry = CachedEnvelopeRow {
+                    rev: r.rev,
+                    enc_v,
+                    key_id: key_id.clone(),
+                    saved_at_ms: r.saved_at.map(|t| t.timestamp_millis()),
+                    envelope_b64: B64.encode(envelope),
+                };
+                if let Ok(bytes) = serde_json::to_vec(&entry) {
+                    let _: redis::RedisResult<()> = self
+                        .redis
+                        .clone()
+                        .set_ex(&key, bytes, self.ttl.as_secs())
+                        .await;
+                }
+            }
+        }
+        Ok(row)
+    }
+
+    async fn delete(&self, org_id: &str, profile_id: &ProfileKind) -> QuarryResult<()> {
+        self.inner.delete(org_id, profile_id).await?;
+        self.drop_key(org_id, profile_id).await;
+        Ok(())
+    }
+
+    async fn exists(&self, org_id: &str, profile_id: &ProfileKind) -> QuarryResult<bool> {
+        self.inner.exists(org_id, profile_id).await
+    }
+
+    async fn list(&self, org_id: &str) -> QuarryResult<Vec<ProfileSummary>> {
+        self.inner.list(org_id).await
+    }
+
+    async fn save_metadata(
+        &self,
+        org_id: &str,
+        profile_id: &ProfileKind,
+        metadata: &ProfileMetadata,
+    ) -> QuarryResult<()> {
         self.inner.save_metadata(org_id, profile_id, metadata).await
     }
 
@@ -470,5 +639,89 @@ mod tests {
         let list = store.list("org_a").await.unwrap();
         let summary = list.iter().find(|s| s.profile_id == id).unwrap();
         assert_eq!(summary.name.as_deref(), Some("Shared support inbox"));
+    }
+}
+
+#[cfg(test)]
+mod blob_tests {
+    use super::*;
+    use crate::profile_blob_store::InMemoryBlobStore;
+
+    async fn redis_manager() -> Option<ConnectionManager> {
+        let url = std::env::var("REDIS_URL").ok().filter(|s| !s.is_empty())?;
+        let client = redis::Client::open(url.as_str()).ok()?;
+        ConnectionManager::new(client).await.ok()
+    }
+
+    fn meta() -> SaveMeta {
+        SaveMeta::now(None)
+    }
+
+    #[tokio::test]
+    async fn cache_holds_envelope_bytes_and_never_cookie_values() {
+        let Some(redis) = redis_manager().await else {
+            eprintln!("skipping: REDIS_URL not set");
+            return;
+        };
+        let inner: Arc<dyn ProfileBlobStore> = Arc::new(InMemoryBlobStore::new());
+        let store = CachedBlobStore::new(inner.clone(), redis.clone());
+        let p = ProfileKind::new();
+        let env = br#"{"enc_v":1,"alg":"A256GCM","key_id":"env:v1","wrapped_dek":"AA==","snapshot_id":"snap_x","z":"none","nonce":"AA==","ct":"AA=="}"#.to_vec();
+        store
+            .put("org_a", &p, BlobPayload::Envelope { envelope: env.clone(), enc_v: 1, key_id: "env:v1".into() }, &meta())
+            .await
+            .unwrap();
+        let _ = store.get("org_a", &p).await.unwrap();
+        let mut conn = redis.clone();
+        let raw: Option<Vec<u8>> = conn.get(blob_cache_key("org_a", &p)).await.unwrap();
+        let raw = raw.expect("envelope row is cached");
+        assert!(!raw.windows(6).any(|w| w == b"CANARY"));
+        let back = serde_json::from_slice::<CachedEnvelopeRow>(&raw).expect("cache entry parses");
+        assert_eq!(B64.decode(back.envelope_b64.as_bytes()).unwrap(), env);
+        let _: () = conn.del(blob_cache_key("org_a", &p)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn legacy_rows_are_never_cached() {
+        let Some(redis) = redis_manager().await else {
+            eprintln!("skipping: REDIS_URL not set");
+            return;
+        };
+        let inner: Arc<dyn ProfileBlobStore> = Arc::new(InMemoryBlobStore::new());
+        let store = CachedBlobStore::new(inner, redis.clone());
+        let p = ProfileKind::new();
+        store
+            .put("org_a", &p, BlobPayload::Legacy { json: serde_json::json!({"cookies": []}) }, &meta())
+            .await
+            .unwrap();
+        let _ = store.get("org_a", &p).await.unwrap();
+        let mut conn = redis.clone();
+        let raw: Option<Vec<u8>> = conn.get(blob_cache_key("org_a", &p)).await.unwrap();
+        assert!(raw.is_none(), "plaintext rows must not reach the cache");
+    }
+
+    #[tokio::test]
+    async fn delete_and_reseal_invalidate_the_blob_cache() {
+        let Some(redis) = redis_manager().await else {
+            eprintln!("skipping: REDIS_URL not set");
+            return;
+        };
+        let inner: Arc<dyn ProfileBlobStore> = Arc::new(InMemoryBlobStore::new());
+        let store = CachedBlobStore::new(inner, redis.clone());
+        let p = ProfileKind::new();
+        store
+            .put("org_a", &p, BlobPayload::Envelope { envelope: b"{}".to_vec(), enc_v: 1, key_id: "env:v1".into() }, &meta())
+            .await
+            .unwrap();
+        let _ = store.get("org_a", &p).await.unwrap();
+        let rev = store.get("org_a", &p).await.unwrap().unwrap().rev;
+        assert!(store.reseal("org_a", &p, rev, b"{\"x\":1}".to_vec(), 1, "env:v1").await.unwrap());
+        let mut conn = redis.clone();
+        let raw: Option<Vec<u8>> = conn.get(blob_cache_key("org_a", &p)).await.unwrap();
+        assert!(raw.is_none(), "reseal drops the key");
+        let _ = store.get("org_a", &p).await.unwrap();
+        store.delete("org_a", &p).await.unwrap();
+        let raw: Option<Vec<u8>> = conn.get(blob_cache_key("org_a", &p)).await.unwrap();
+        assert!(raw.is_none(), "delete drops the key");
     }
 }

@@ -1,3 +1,6 @@
+//! WS17.E1: PLAINTEXT archive store. Do not wire this into production: it writes
+//! unencrypted snapshots to S3. The envelope layer (`envelope_profile_store`) is the
+//! production path; a source-scan test in that module keeps this store unconstructed.
 //! S3-backed `ProfileStore` so session snapshots survive restarts.
 //!
 //! Tenant-scoped layout (P0 / cluster #auth+tenancy):
