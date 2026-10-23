@@ -73,7 +73,7 @@ pub async fn set_browser_session_control(
     Path(run_id): Path<String>,
     Json(body): Json<BrowserSessionControlBody>,
 ) -> Result<Json<Envelope<BrowserSessionProjectionData>>, ApiErr> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let Some(handle) = lookup_run(&state, &run_id) else {
         return Err(status_err(
             StatusCode::NOT_FOUND,

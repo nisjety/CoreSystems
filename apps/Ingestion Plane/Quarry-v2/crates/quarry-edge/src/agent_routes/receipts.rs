@@ -8,7 +8,7 @@ pub async fn list_receipts(
     Extension(claims): Extension<crate::auth::Claims>,
     Path(run_id): Path<String>,
 ) -> Result<Json<Envelope<Vec<StepReceipt>>>, ApiErr> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let entry_arc = {
         let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
         map.get(&run_id).map(|handle| {
@@ -66,7 +66,7 @@ pub async fn compile_run_procedure(
     Path(run_id): Path<String>,
     Json(body): Json<CompileProcedureBody>,
 ) -> Result<Json<Envelope<BrowserProcedure>>, ApiErr> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let parsed_run_id = run_id
         .parse::<RunKind>()
         .map_err(|_| status_err(StatusCode::NOT_FOUND, &request_id, "agent run not found"))?;
@@ -99,7 +99,7 @@ pub async fn replay_check(
     Extension(_claims): Extension<crate::auth::Claims>,
     Json(body): Json<ReplayCheckBody>,
 ) -> Json<Envelope<ReplayDecision>> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     Json(Envelope::ok(
         request_id,
         compare_replay(&body.procedure, &body.actions),
@@ -113,7 +113,7 @@ pub async fn procedure_quality_check(
     Extension(_claims): Extension<crate::auth::Claims>,
     Json(procedure): Json<BrowserProcedure>,
 ) -> Json<Envelope<ProcedureQualityReport>> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     Json(Envelope::ok(request_id, assess_quality(&procedure)))
 }
 
@@ -124,7 +124,7 @@ pub async fn procedure_impact_check(
     Extension(_claims): Extension<crate::auth::Claims>,
     Json(body): Json<ProcedureImpactBody>,
 ) -> Json<Envelope<ProcedureImpactReport>> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     Json(Envelope::ok(
         request_id,
         analyze_impact(&body.procedure, &body.changed_urls),

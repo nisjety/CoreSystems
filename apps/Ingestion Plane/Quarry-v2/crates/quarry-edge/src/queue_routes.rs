@@ -141,7 +141,7 @@ pub async fn enqueue(
     headers: HeaderMap,
     Json(body): Json<QueueEnqueue>,
 ) -> Result<Json<Envelope<QueueMutation>>, ApiErr> {
-    let request_id = quarry_core::ids::Id::<quarry_core::ids::RequestKind>::new().to_string();
+    let request_id = crate::request_id::current();
     auth_and_scope(&state, &headers, &body.org_id, &queue_name)
         .map_err(|e| error(&request_id, e))?;
     let queue = bind(&state, &body.org_id, &queue_name)
@@ -161,7 +161,7 @@ pub async fn pop(
     headers: HeaderMap,
     Json(body): Json<QueueOrgRequest>,
 ) -> Result<Json<Envelope<Option<QueuedRequest>>>, ApiErr> {
-    let request_id = quarry_core::ids::Id::<quarry_core::ids::RequestKind>::new().to_string();
+    let request_id = crate::request_id::current();
     auth_and_scope(&state, &headers, &body.org_id, &queue_name)
         .map_err(|e| error(&request_id, e))?;
     let queue = bind(&state, &body.org_id, &queue_name)
@@ -178,7 +178,7 @@ pub async fn ack(
     headers: HeaderMap,
     Json(body): Json<QueueAck>,
 ) -> Result<Json<Envelope<QueueMutation>>, ApiErr> {
-    let request_id = quarry_core::ids::Id::<quarry_core::ids::RequestKind>::new().to_string();
+    let request_id = crate::request_id::current();
     auth_and_scope(&state, &headers, &body.org_id, &queue_name)
         .map_err(|e| error(&request_id, e))?;
     let queue = bind(&state, &body.org_id, &queue_name)

@@ -22,6 +22,7 @@ pub mod map_routes;
 pub mod metrics;
 pub mod profile_routes;
 pub mod queue_routes;
+pub mod request_id;
 pub mod resource_routes;
 pub mod retry_after;
 pub mod routes;

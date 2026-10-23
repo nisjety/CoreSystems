@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use quarry_browser::session::{ProfileMetadata, ProfileScope, ProfileSummary, SessionSnapshot};
 use quarry_core::envelope::Envelope;
 use quarry_core::error::{ErrorCode, QuarryError};
-use quarry_core::ids::kinds::{ProfileKind, RequestKind};
+use quarry_core::ids::kinds::ProfileKind;
 
 use crate::state::AppState;
 
@@ -104,7 +104,7 @@ pub async fn save_profile(
     Extension(claims): Extension<crate::auth::Claims>,
     Json(req): Json<SaveProfileRequest>,
 ) -> Result<Json<Envelope<SaveProfileResponse>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     crate::zdr_refusal::refuse_for_claims(
         &state,
         &claims,
@@ -138,7 +138,7 @@ pub async fn create_profile(
     Extension(claims): Extension<crate::auth::Claims>,
     Json(req): Json<CreateProfileRequest>,
 ) -> Result<Json<Envelope<ProfileSummaryResponse>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     crate::zdr_refusal::refuse_for_claims(
         &state,
         &claims,
@@ -192,7 +192,7 @@ pub async fn update_profile(
     Path(profile_id): Path<String>,
     Json(req): Json<UpdateProfileRequest>,
 ) -> Result<Json<Envelope<ProfileSummaryResponse>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     crate::zdr_refusal::refuse_for_claims(
         &state,
         &claims,
@@ -294,7 +294,7 @@ pub async fn load_profile(
     Extension(claims): Extension<crate::auth::Claims>,
     Path(profile_id): Path<String>,
 ) -> Result<Json<Envelope<LoadProfileResponse>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
 
     let parsed = parse_id(&profile_id).map_err(|e| err_response(&request_id, e))?;
 
@@ -327,7 +327,7 @@ pub async fn delete_profile(
     Extension(claims): Extension<crate::auth::Claims>,
     Path(profile_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
 
     let parsed = parse_id(&profile_id).map_err(|e| err_response(&request_id, e))?;
 
@@ -388,7 +388,7 @@ pub async fn restore_probe(
     Path(profile_id): Path<String>,
     Json(req): Json<RestoreProbeRequest>,
 ) -> Result<Json<Envelope<RestoreProbeResponse>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let parsed = parse_id(&profile_id).map_err(|e| err_response(&request_id, e))?;
     if req.url.trim().is_empty() {
         return Err(err_response(
@@ -457,7 +457,7 @@ pub async fn list_profiles(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
 ) -> Result<Json<Envelope<ListProfilesResponse>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
 
     let summaries = state
         .profiles

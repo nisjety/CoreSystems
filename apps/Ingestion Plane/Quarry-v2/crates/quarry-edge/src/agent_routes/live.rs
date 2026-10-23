@@ -110,7 +110,7 @@ pub async fn live_frame(
     Path(run_id): Path<String>,
     Query(query): Query<FrameQuery>,
 ) -> Result<Json<Envelope<LiveFrameData>>, ApiErr> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     if !state.agent_driver.capabilities().full_visual_fidelity {
         return Err(driver_err(
             &request_id,
@@ -181,7 +181,7 @@ pub async fn live_view(
     Extension(claims): Extension<crate::auth::Claims>,
     Path(run_id): Path<String>,
 ) -> Result<Json<Envelope<Option<quarry_core::driver_meta::LiveViewRef>>>, ApiErr> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let entry_arc = {
         let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
         map.get(&run_id).map(|handle| {
@@ -237,7 +237,7 @@ pub async fn agent_events_stream(
     Path(run_id): Path<String>,
     Query(query): Query<AgentEventsQuery>,
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, ApiErr> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let parsed_run: RunKind =
         run_id
             .parse()
@@ -371,7 +371,7 @@ pub async fn live_frame_stream(
     Path(run_id): Path<String>,
     Query(query): Query<FrameStreamQuery>,
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, ApiErr> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     if !state.agent_driver.capabilities().full_visual_fidelity {
         return Err(driver_err(
             &request_id,

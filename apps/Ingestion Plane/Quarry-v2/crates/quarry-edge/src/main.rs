@@ -51,6 +51,7 @@ mod map_routes;
 mod metrics;
 mod profile_routes;
 mod queue_routes;
+mod request_id;
 mod resource_routes;
 mod retry_after;
 mod routes;

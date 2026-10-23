@@ -6,7 +6,7 @@ pub async fn list_tabs(
     Extension(claims): Extension<crate::auth::Claims>,
     Path(run_id): Path<String>,
 ) -> Result<Json<Envelope<BrowserTabsData>>, ApiErr> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let entry_arc = {
         let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
         map.get(&run_id).map(|handle| {
@@ -100,7 +100,7 @@ pub async fn new_tab(
     Path(run_id): Path<String>,
     Json(body): Json<NewTabBody>,
 ) -> Result<Json<Envelope<BrowserTabData>>, ApiErr> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let handle = lookup_run(&state, &run_id);
     let Some(handle) = handle else {
         return Err(run_gone_err(&state, &claims, &request_id, &run_id).await);
@@ -234,7 +234,7 @@ pub async fn select_tab(
     Path((run_id, tab_id)): Path<(String, String)>,
     Query(call): Query<TabCallQuery>,
 ) -> Result<Json<Envelope<BrowserTabsData>>, ApiErr> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let handle = lookup_run(&state, &run_id);
     let Some(handle) = handle else {
         return Err(run_gone_err(&state, &claims, &request_id, &run_id).await);
@@ -300,7 +300,7 @@ pub async fn close_tab(
     Path((run_id, tab_id)): Path<(String, String)>,
     Query(call): Query<TabCallQuery>,
 ) -> Result<Json<Envelope<BrowserTabsData>>, ApiErr> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let handle = lookup_run(&state, &run_id);
     let Some(handle) = handle else {
         return Err(run_gone_err(&state, &claims, &request_id, &run_id).await);
@@ -367,7 +367,7 @@ pub async fn devtools_events(
     Path(run_id): Path<String>,
     Query(query): Query<DevtoolsQuery>,
 ) -> Result<Json<Envelope<DevtoolsEventsData>>, ApiErr> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let entry_arc = {
         let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
         map.get(&run_id).map(|handle| {
@@ -433,7 +433,7 @@ pub async fn egress_receipts(
     Path(run_id): Path<String>,
     Query(query): Query<DevtoolsQuery>,
 ) -> Result<Json<Envelope<EgressReceiptsData>>, ApiErr> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let entry_arc = {
         let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
         map.get(&run_id).map(|handle| {

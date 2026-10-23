@@ -25,7 +25,6 @@ use serde::{Deserialize, Serialize};
 use quarry_core::change_history::{BaselineSnapshot, ChangeRecord};
 use quarry_core::envelope::Envelope;
 use quarry_core::error::{ErrorCode, QuarryError};
-use quarry_core::ids::kinds::RequestKind;
 #[cfg(feature = "postgres-queue")]
 use quarry_core::ids::kinds::SnapshotKind;
 #[cfg(feature = "postgres-queue")]
@@ -79,7 +78,7 @@ pub async fn check(
     Extension(claims): Extension<crate::auth::Claims>,
     Json(req): Json<CheckRequest>,
 ) -> Result<Json<Envelope<ChangeRecord>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     crate::zdr_refusal::refuse_for_claims(
         &state,
         &claims,
@@ -128,7 +127,7 @@ pub async fn latest(
     Extension(claims): Extension<crate::auth::Claims>,
     Query(q): Query<UrlQuery>,
 ) -> Result<Json<Envelope<BaselineSnapshot>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     validate_url(&q.url).map_err(|e| err_response(&request_id, e))?;
 
     #[cfg(feature = "postgres-queue")]
@@ -158,7 +157,7 @@ pub async fn history(
     Extension(claims): Extension<crate::auth::Claims>,
     Query(q): Query<HistoryQuery>,
 ) -> Result<Json<Envelope<Vec<BaselineSnapshot>>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     validate_url(&q.url).map_err(|e| err_response(&request_id, e))?;
     let limit = q.limit.unwrap_or(50).clamp(1, 1000);
 
@@ -203,7 +202,7 @@ pub async fn promote_snapshot(
     Extension(claims): Extension<crate::auth::Claims>,
     Query(q): Query<PromoteQuery>,
 ) -> Result<Json<Envelope<Snapshot>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     crate::zdr_refusal::refuse_for_claims(
         &state,
         &claims,
@@ -257,7 +256,7 @@ pub async fn promote_snapshot(
     Extension(claims): Extension<crate::auth::Claims>,
     Query(q): Query<UrlQuery>,
 ) -> Result<Json<Envelope<()>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     crate::zdr_refusal::refuse_for_claims(
         &state,
         &claims,
@@ -313,7 +312,7 @@ pub async fn schedule_refresh(
     use quarry_runtime::postgres_queue::PostgresRequestQueue;
     use quarry_runtime::request_queue::{Priority, RequestQueue};
 
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     crate::zdr_refusal::refuse_for_claims(
         &state,
         &claims,
@@ -367,7 +366,7 @@ pub async fn schedule_refresh(
     Extension(claims): Extension<crate::auth::Claims>,
     Json(req): Json<serde_json::Value>,
 ) -> Result<Json<Envelope<()>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     crate::zdr_refusal::refuse_for_claims(
         &state,
         &claims,
@@ -495,7 +494,7 @@ pub async fn record_internal(
     headers: HeaderMap,
     Json(req): Json<RecordRequest>,
 ) -> Result<Json<RecordResponse>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     verify_internal_token(&headers).map_err(|e| err_response(&request_id, e))?;
     validate_url(&req.url).map_err(|e| err_response(&request_id, e))?;
     if req.org_id.trim().is_empty() {

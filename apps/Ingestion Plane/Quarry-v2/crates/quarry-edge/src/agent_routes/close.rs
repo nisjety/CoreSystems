@@ -10,7 +10,7 @@ pub async fn close_run(
     Extension(claims): Extension<crate::auth::Claims>,
     Path(run_id): Path<String>,
 ) -> Result<Json<Envelope<serde_json::Value>>, ApiErr> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
 
     let Some(handle) = lookup_run(&state, &run_id) else {
         return Err(status_err(

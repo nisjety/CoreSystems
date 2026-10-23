@@ -14,7 +14,7 @@ pub async fn live_frame_ws(
     Query(query): Query<FrameStreamQuery>,
     ws: WebSocketUpgrade,
 ) -> Result<impl IntoResponse, ApiErr> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     if !state.agent_driver.capabilities().full_visual_fidelity {
         return Err(driver_err(
             &request_id,

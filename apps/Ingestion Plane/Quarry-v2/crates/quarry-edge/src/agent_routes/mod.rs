@@ -155,7 +155,7 @@ use quarry_core::error::{ErrorCode, QuarryError};
 #[cfg(feature = "browser-agent")]
 use quarry_core::event::EventType;
 #[cfg(feature = "browser-agent")]
-use quarry_core::ids::kinds::{LeaseKind, ProfileKind, RequestKind, RunKind};
+use quarry_core::ids::kinds::{LeaseKind, ProfileKind, RunKind};
 #[cfg(feature = "browser-agent")]
 use quarry_core::ids::Id;
 #[cfg(feature = "browser-agent")]

@@ -120,7 +120,7 @@ pub async fn list_artifacts(
     Extension(claims): Extension<crate::auth::Claims>,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Envelope<Page<ArtifactSummary>>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let filter = q.into_filter().map_err(|e| err_response(&request_id, e))?;
     let page = state
         .artifacts
@@ -142,7 +142,7 @@ pub async fn get_artifact(
     Extension(claims): Extension<crate::auth::Claims>,
     Path(id): Path<String>,
 ) -> Response {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let artifact_id = match id.parse::<ArtifactKind>() {
         Ok(value) => value,
         Err(err) => return err_response(&request_id, err).into_response(),
@@ -197,7 +197,7 @@ pub async fn get_page_image(
     State(state): State<AppState>,
     Path((org, doc, page, hash)): Path<(String, String, i64, String)>,
 ) -> Response {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let Some(renderer) = state.page_renderer.as_ref() else {
         return err_response(
             &request_id,
@@ -384,7 +384,7 @@ pub async fn list_sources(
     Extension(claims): Extension<crate::auth::Claims>,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Envelope<Page<Source>>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let filter = q.into_filter().map_err(|e| err_response(&request_id, e))?;
     let page = forward_list::<Source>(&state, &request_id, &claims.org_id, "/v1/sources", &filter)
         .await
@@ -541,7 +541,7 @@ pub async fn create_source(
     Extension(claims): Extension<crate::auth::Claims>,
     Json(req): Json<CreateSourceRequest>,
 ) -> Result<Json<Envelope<serde_json::Value>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
 
     // A `monitor: true` source registers a recurring change-monitor schedule in
     // control: a durable resource, the same one `POST /v1/schedules` refuses for a
@@ -664,7 +664,7 @@ pub async fn delete_source(
     Extension(claims): Extension<crate::auth::Claims>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let path = format!("/v1/sources/{id}");
     forward_mutation(&state, reqwest::Method::DELETE, &path, &claims.org_id, b"")
         .await
@@ -677,7 +677,7 @@ pub async fn list_snapshots(
     Extension(claims): Extension<crate::auth::Claims>,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Envelope<Page<Snapshot>>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let filter = q.into_filter().map_err(|e| err_response(&request_id, e))?;
     let page = forward_list::<Snapshot>(
         &state,
@@ -764,7 +764,7 @@ pub async fn list_jobs(
     Path(kind): Path<String>,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Envelope<Page<JobSummary>>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let resource_kind = JobResourceKind::from_path_segment(&kind).ok_or_else(|| {
         err_response(
             &request_id,
@@ -788,7 +788,7 @@ pub async fn list_request_queues(
     Extension(claims): Extension<crate::auth::Claims>,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Envelope<Page<RequestQueueSummary>>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let filter = q.into_filter().map_err(|e| err_response(&request_id, e))?;
     let page = forward_list::<RequestQueueSummary>(
         &state,
@@ -807,7 +807,7 @@ pub async fn list_benchmarks(
     Extension(claims): Extension<crate::auth::Claims>,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Envelope<Page<BenchmarkSummary>>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let filter = q.into_filter().map_err(|e| err_response(&request_id, e))?;
     let page = forward_list::<BenchmarkSummary>(
         &state,
@@ -826,7 +826,7 @@ pub async fn list_schedules(
     Extension(claims): Extension<crate::auth::Claims>,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Envelope<Page<serde_json::Value>>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let filter = q.into_filter().map_err(|e| err_response(&request_id, e))?;
     // control's /v1/schedules serves the orchestrator-facing `scheduleWire`
     // projection (id / target_kind / target_ref / enabled / created_at-as-unix),
@@ -867,7 +867,7 @@ pub async fn team_credit_usage(
     Extension(claims): Extension<crate::auth::Claims>,
     Query(q): Query<TeamQuery>,
 ) -> Result<Json<Envelope<TeamCreditUsage>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let period = team_period(&q);
     let body = forward_one::<TeamCreditUsage>(
         &state,
@@ -893,7 +893,7 @@ pub async fn team_token_usage(
     Extension(claims): Extension<crate::auth::Claims>,
     Query(q): Query<TeamQuery>,
 ) -> Result<Json<Envelope<TeamTokenUsage>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let period = team_period(&q);
     let body = forward_one::<TeamTokenUsage>(
         &state,
@@ -919,7 +919,7 @@ pub async fn team_concurrency(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
 ) -> Result<Json<Envelope<TeamConcurrency>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let body = forward_one::<TeamConcurrency>(
         &state,
         &request_id,
@@ -942,7 +942,7 @@ pub async fn team_queue_status(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
 ) -> Result<Json<Envelope<TeamQueueStatus>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let body = forward_one::<TeamQueueStatus>(
         &state,
         &request_id,
@@ -966,7 +966,7 @@ pub async fn team_activity(
     Extension(claims): Extension<crate::auth::Claims>,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Envelope<Page<TeamActivityEntry>>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let filter = q.into_filter().map_err(|e| err_response(&request_id, e))?;
     let page = forward_list::<TeamActivityEntry>(
         &state,
@@ -1011,7 +1011,7 @@ pub async fn list_run_events(
     Json<Envelope<Page<quarry_core::job_history::JobHistoryEvent>>>,
     (StatusCode, Json<Envelope<()>>),
 > {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let parsed_run_id: quarry_core::ids::kinds::RunKind =
         run_id
             .parse()
@@ -1089,7 +1089,7 @@ pub async fn list_job_events(
     Path(job_id): Path<String>,
     Query(q): Query<RunEventsQuery>,
 ) -> Response {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     // Validate the id is a job id (job_*) so we never proxy garbage / a
     // run id (which belongs on /v1/runs/:id/events) to control.
     if let Err(e) = job_id.parse::<quarry_core::ids::kinds::JobKind>() {

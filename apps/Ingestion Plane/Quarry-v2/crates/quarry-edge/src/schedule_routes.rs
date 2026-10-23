@@ -30,7 +30,6 @@ use serde::{Deserialize, Serialize};
 
 use quarry_core::envelope::Envelope;
 use quarry_core::error::{ErrorCode, QuarryError};
-use quarry_core::ids::kinds::RequestKind;
 use quarry_core::resources::{JobResourceKind, OverlapPolicy};
 
 use crate::state::AppState;
@@ -256,7 +255,7 @@ pub async fn create_schedule(
     Extension(claims): Extension<crate::auth::Claims>,
     Json(req): Json<CreateScheduleRequest>,
 ) -> Result<Json<Envelope<serde_json::Value>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     // One posture for both uses: the refusal below and the stamp on the forwarded
     // change-monitor schedule are the same value, so they can never disagree.
     let zdr = claims.effective_zdr(req.zdr.unwrap_or(false));
@@ -371,7 +370,7 @@ pub async fn pause_schedule(
     Extension(claims): Extension<crate::auth::Claims>,
     Path(id): Path<String>,
 ) -> Result<Json<Envelope<serde_json::Value>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let path = format!("/v1/schedules/{id}/pause");
     let summary = forward_json::<(), serde_json::Value>(
         &state,
@@ -390,7 +389,7 @@ pub async fn unpause_schedule(
     Extension(claims): Extension<crate::auth::Claims>,
     Path(id): Path<String>,
 ) -> Result<Json<Envelope<serde_json::Value>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     crate::zdr_refusal::refuse_for_claims(
         &state,
         &claims,
@@ -417,7 +416,7 @@ pub async fn trigger_schedule(
     Extension(claims): Extension<crate::auth::Claims>,
     Path(id): Path<String>,
 ) -> Result<Json<Envelope<serde_json::Value>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     crate::zdr_refusal::refuse_for_claims(
         &state,
         &claims,
@@ -445,7 +444,7 @@ pub async fn backfill_schedule(
     Path(id): Path<String>,
     Json(req): Json<BackfillRequest>,
 ) -> Result<Json<Envelope<serde_json::Value>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     crate::zdr_refusal::refuse_for_claims(
         &state,
         &claims,
@@ -481,7 +480,7 @@ pub async fn delete_schedule(
     Extension(claims): Extension<crate::auth::Claims>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let path = format!("/v1/schedules/{id}");
     // DELETE returns no body — use forward_json with `serde_json::Value`
     // and ignore the parsed result.

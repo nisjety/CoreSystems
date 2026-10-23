@@ -16,7 +16,7 @@ use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use quarry_core::envelope::Envelope;
 use quarry_core::error::{ErrorCode, QuarryError};
-use quarry_core::ids::kinds::{ArtifactKind, RequestKind};
+use quarry_core::ids::kinds::ArtifactKind;
 use quarry_core::output::NormalizedOutput;
 use quarry_core::scrape::{EffectiveScrapeOptions, ScrapeResponse};
 
@@ -48,7 +48,7 @@ pub async fn get_scrape(
     Extension(claims): Extension<crate::auth::Claims>,
     Path(id): Path<String>,
 ) -> Response {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     if claims.effective_zdr_mode(None).is_active() {
         return fail(
             &request_id,

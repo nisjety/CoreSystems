@@ -78,6 +78,7 @@ pub mod postgres_step_receipts;
 #[cfg(all(test, feature = "postgres-queue"))]
 mod postgres_test_support;
 pub mod proxy_pool;
+pub mod request_context;
 pub mod publisher;
 pub mod request_queue;
 pub mod rerank;

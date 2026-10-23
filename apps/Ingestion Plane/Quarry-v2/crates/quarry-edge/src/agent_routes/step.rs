@@ -9,7 +9,7 @@ pub async fn step(
     Path(run_id): Path<String>,
     Json(body): Json<StepBody>,
 ) -> Result<Json<Envelope<BrowserObservation>>, ApiErr> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
 
     let Some(handle) = lookup_run(&state, &run_id) else {
         return Err(run_gone_err(&state, &claims, &request_id, &run_id).await);

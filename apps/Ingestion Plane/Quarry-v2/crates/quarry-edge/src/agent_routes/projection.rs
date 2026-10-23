@@ -172,7 +172,7 @@ pub async fn browser_session(
     Extension(claims): Extension<crate::auth::Claims>,
     Path(run_id): Path<String>,
 ) -> Result<Json<Envelope<BrowserSessionProjectionData>>, ApiErr> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let parsed_run_id = run_id.parse::<RunKind>().map_err(|_| {
         status_err(StatusCode::BAD_REQUEST, &request_id, "invalid agent run id")
     })?;
@@ -243,7 +243,7 @@ pub async fn browser_session_timeline(
     Path(run_id): Path<String>,
     Query(query): Query<BrowserTimelineQuery>,
 ) -> Result<Json<Envelope<BrowserTimelineData>>, ApiErr> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let parsed_run_id = run_id.parse::<RunKind>().map_err(|_| {
         status_err(StatusCode::BAD_REQUEST, &request_id, "invalid agent run id")
     })?;

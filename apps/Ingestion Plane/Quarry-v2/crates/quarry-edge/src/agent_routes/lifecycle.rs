@@ -97,7 +97,7 @@ pub async fn start_run(
     Extension(claims): Extension<crate::auth::Claims>,
     Json(body): Json<StartRunBody>,
 ) -> Result<Json<Envelope<StartRunData>>, ApiErr> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     if let Some(error) = crate::drain::refusal() {
         return Err(driver_err(&request_id, error));
     }

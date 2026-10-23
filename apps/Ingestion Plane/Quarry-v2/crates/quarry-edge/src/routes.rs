@@ -19,7 +19,7 @@ use url::Url;
 use quarry_core::cache::{CacheMode, CachePolicy};
 use quarry_core::envelope::Envelope;
 use quarry_core::error::{ErrorCode, QuarryError};
-use quarry_core::ids::kinds::{RequestKind, RunKind};
+use quarry_core::ids::kinds::RunKind;
 use quarry_core::output::NormalizedOutput;
 use quarry_core::privacy::PrivacyPolicy;
 use quarry_core::zdr::ZdrMode;
@@ -310,11 +310,15 @@ pub fn router(state: AppState) -> Router {
         // query string included.
         .layer(
             TraceLayer::new_for_http().make_span_with(|request: &axum::http::Request<_>| {
-                crate::zdr_log::make_request_span(request)
+                crate::request_id::make_request_span(request)
             }),
         )
         .layer(body_limit)
         .layer(timeout)
+        // WS10.S1: outermost, so the span above sees the id and the
+        // x-request-id header is echoed on every answer (timeout and body-limit
+        // answers included).
+        .layer(middleware::from_fn(crate::request_id::layer))
         .with_state(state)
 }
 
@@ -491,7 +495,7 @@ async fn scrape_with(
 ) -> Result<axum::response::Response, (StatusCode, axum::response::Response)> {
     use quarry_core::scrape::{CacheState, EffectiveScrapeOptions, ScrapeFormat};
 
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     let parsed = crate::scrape_contract::parse_body(body, settings, chrono::Utc::now())
         .map_err(|fields| contract_error(&request_id, fields))?;
     let req: ScrapeRequest = serde_json::from_value(parsed.value.clone()).map_err(|error| {
@@ -850,7 +854,7 @@ async fn crawl_handoff(
     Extension(claims): Extension<crate::auth::Claims>,
     Json(req): Json<CrawlRequest>,
 ) -> Result<Json<Envelope<HandoffAck>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     refuse_durable_job_under_zdr(&claims, req.zdr, &request_id, "crawl")?;
     refuse_while_draining(&request_id)?;
     let org_id = claims.org_id.clone();
@@ -959,7 +963,7 @@ async fn batch_handoff(
     Extension(claims): Extension<crate::auth::Claims>,
     Json(req): Json<BatchRequest>,
 ) -> Result<Json<Envelope<HandoffAck>>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     refuse_durable_job_under_zdr(&claims, req.zdr, &request_id, "batch")?;
     refuse_while_draining(&request_id)?;
     let ack = crate::handoff::forward_to_orchestrator(
@@ -1187,7 +1191,7 @@ async fn internal_run_page(
     headers: HeaderMap,
     Json(req): Json<InternalRunPage>,
 ) -> Result<Json<InternalRunPageResult>, (StatusCode, Json<Envelope<()>>)> {
-    let request_id = RequestKind::new().to_string();
+    let request_id = crate::request_id::current();
     // Internal orchestrator route (NOT a per-tenant JWT surface): enforce the
     // shared runtime service token. The originating org travels in the request
     // body, stamped by the orchestrator from the schedule memo (verified at
