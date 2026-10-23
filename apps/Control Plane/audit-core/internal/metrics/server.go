@@ -74,6 +74,35 @@ var (
 		},
 		[]string{"bus", "kind"},
 	)
+	// The chain series carry no org label: an org id per series would grow the
+	// label set with tenants, and the per-org picture is in the head table.
+	chainAppends = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "audit_core_chain_appends_total",
+			Help: "Audit rows handled by the chained insert by result (appended, duplicate, catchup, error).",
+		},
+		[]string{"result"},
+	)
+	chainHeadLockWait = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "audit_core_chain_head_lock_wait_seconds",
+			Help:    "Time a chained insert waited to take its org's chain head lock.",
+			Buckets: []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 10},
+		},
+	)
+	chainBroken = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "audit_core_chain_broken_total",
+			Help: "Org chains found broken by the head spot-check at insert time (counted once per org transition).",
+		},
+	)
+	detailsGuard = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "audit_core_details_guard_total",
+			Help: "Observe-only check of audit details at ingest by result (ok, oversize, denied_key).",
+		},
+		[]string{"result"},
+	)
 )
 
 func init() {
@@ -86,7 +115,28 @@ func init() {
 		consumerPending,
 		consumerAckPending,
 		consumerRedelivered,
+		chainAppends,
+		chainHeadLockWait,
+		chainBroken,
+		detailsGuard,
 	)
+}
+
+// RecordChainAppend counts one chained-insert outcome.
+func RecordChainAppend(result string) {
+	chainAppends.WithLabelValues(result).Inc()
+}
+
+func ObserveChainHeadLockWait(wait time.Duration) {
+	chainHeadLockWait.Observe(wait.Seconds())
+}
+
+func RecordChainBroken() {
+	chainBroken.Inc()
+}
+
+func RecordDetailsGuard(result string) {
+	detailsGuard.WithLabelValues(result).Inc()
 }
 
 func SetConsumerState(bus, kind string, pending uint64, ackPending, redelivered int) {

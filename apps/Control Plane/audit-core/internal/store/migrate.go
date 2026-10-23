@@ -27,6 +27,9 @@ var usageSourceIdentitySQL string
 //go:embed migrations/006_v2_producer_authority.sql
 var v2ProducerAuthoritySQL string
 
+//go:embed migrations/007_audit_chain.sql
+var auditChainSQL string
+
 type migration struct {
 	version string
 	name    string
@@ -40,6 +43,7 @@ var migrations = []migration{
 	{version: "004_logical_usage_idempotency", name: "logical usage idempotency", sql: logicalUsageIdempotencySQL},
 	{version: "005_usage_source_identity", name: "usage producer identity", sql: usageSourceIdentitySQL},
 	{version: "006_v2_producer_authority", name: "v2 producer authority identity", sql: v2ProducerAuthoritySQL},
+	{version: "007_audit_chain", name: "per-org audit hash chain", sql: auditChainSQL},
 }
 
 // Migrate applies the bundled SQL schema exactly once, tracking it in a

@@ -1808,6 +1808,51 @@ func TestLoadConfigParsesStableCredentialedExtraBuses(t *testing.T) {
 	}
 }
 
+func TestLoadConfigAuditChainSwitchIsStrictAndOffByDefault(t *testing.T) {
+	for raw, want := range map[string]bool{
+		"": false, "0": false, "true": false, "TRUE": false, "yes": false, "on": false,
+		" 1": false, "1 ": false, "01": false, "1": true,
+	} {
+		setMinimumConfig(t)
+		t.Setenv("AUDIT_CHAIN_ENABLED", raw)
+		cfg, err := loadConfig()
+		if err != nil {
+			t.Fatalf("AUDIT_CHAIN_ENABLED=%q: %v", raw, err)
+		}
+		if cfg.ChainEnabled != want {
+			t.Errorf("AUDIT_CHAIN_ENABLED=%q: ChainEnabled=%v, want %v", raw, cfg.ChainEnabled, want)
+		}
+	}
+}
+
+// The chain switch must ship off: the compose block (once it carries the
+// variable) and the example env both default it to 0.
+func TestAuditChainSwitchShipsOff(t *testing.T) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("resolve test path")
+	}
+	controlRoot := filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", ".."))
+	composeBytes, err := os.ReadFile(filepath.Join(controlRoot, "docker-compose.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, err := composeServiceBlock(string(composeBytes), "audit-core")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(block, "AUDIT_CHAIN_ENABLED") && !strings.Contains(block, "${AUDIT_CHAIN_ENABLED:-0}") {
+		t.Fatal("audit-core compose must default AUDIT_CHAIN_ENABLED to 0")
+	}
+	example, err := os.ReadFile(filepath.Join(controlRoot, "audit-core", ".env.example"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !regexp.MustCompile(`(?m)^AUDIT_CHAIN_ENABLED=0\r?$`).Match(example) {
+		t.Fatal("audit-core/.env.example must set AUDIT_CHAIN_ENABLED=0")
+	}
+}
+
 func TestLoadConfigRejectsAmbiguousOrUnsafeExtraBuses(t *testing.T) {
 	tests := []struct {
 		name   string

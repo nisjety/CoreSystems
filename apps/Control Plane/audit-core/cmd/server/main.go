@@ -54,7 +54,24 @@ func main() {
 	}
 	log.Info().Msg("schema migrated (idempotent CREATE IF NOT EXISTS)")
 
-	st := store.New(pool)
+	var storeOpts []store.Option
+	if cfg.ChainEnabled {
+		storeOpts = append(storeOpts, store.WithChain())
+	}
+	st := store.New(pool, storeOpts...)
+	if cfg.ChainEnabled {
+		// Before the subscriber starts, so rows that landed unchained while the
+		// chain was off are chained ahead of new traffic. A failure leaves them
+		// for the next boot; live appends chain correctly either way.
+		catchUpCtx, catchUpCancel := context.WithTimeout(ctx, 5*time.Minute)
+		chained, err := st.CatchUp(catchUpCtx)
+		catchUpCancel()
+		if err != nil {
+			log.Error().Err(err).Int64("chained", chained).Msg("audit chain catch-up failed")
+		} else {
+			log.Info().Int64("chained", chained).Msg("audit chain catch-up complete")
+		}
+	}
 
 	natsOpts := []nats.Option{
 		nats.Name("audit-core"),
@@ -196,7 +213,14 @@ type config struct {
 	MetricsPort        int
 	ServiceCredentials string
 	RetentionDays      int
+	ChainEnabled       bool
 	ExtraNATSBuses     []extraNATSBus
+}
+
+// parseChainEnabled is strict: only the literal "1" turns the audit hash chain
+// on, so an unset, empty or misspelled value leaves it off.
+func parseChainEnabled(raw string) bool {
+	return raw == "1"
 }
 
 func loadConfig() (*config, error) {
@@ -272,6 +296,7 @@ func loadConfig() (*config, error) {
 		MetricsPort:        metricsPort,
 		ServiceCredentials: serviceCredentials,
 		RetentionDays:      retentionDays,
+		ChainEnabled:       parseChainEnabled(os.Getenv("AUDIT_CHAIN_ENABLED")),
 		ExtraNATSBuses:     extraNATSBuses,
 	}, nil
 }
