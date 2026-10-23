@@ -325,7 +325,7 @@ pub async fn start_run(
     // the operator baseline and the request's `policy` ask. A refusal here consumes nothing.
     let web_decision = crate::agent_policy_gate::resolve_for_start(
         &state.policy,
-        crate::web_policy_edge::principal(&claims),
+        &claims,
         zdr.is_active(),
         body.policy.as_ref(),
         persist_profile,

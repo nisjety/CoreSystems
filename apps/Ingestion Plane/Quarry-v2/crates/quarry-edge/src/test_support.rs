@@ -170,6 +170,7 @@ pub fn test_state_with_grants(
 /// Verified-looking JWT claims scoped to `org_id` (dev-bypass equivalent).
 pub fn claims_for_org(org_id: &str) -> Claims {
     Claims {
+        web_policy: None,
         sub: "u1".into(),
         iss: "auth-core".into(),
         exp: i64::MAX,

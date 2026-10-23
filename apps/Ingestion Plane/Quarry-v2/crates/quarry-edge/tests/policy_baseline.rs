@@ -8,7 +8,7 @@
 
 use quarry_core::web_policy::{CapKey, DecisionSource, Mode, Principal, RequestAsk};
 use quarry_edge::policy_baseline::{Enforcement, PolicyBaseline, BASELINE_ENV, ENFORCEMENT_ENV};
-use quarry_edge::web_policy_edge::{decide, gate_url, is_default};
+use quarry_edge::web_policy_edge::{decide_for_principal, gate_url, is_default};
 use quarry_runtime::{policy_fingerprint, RunPolicy};
 
 /// A lookup over a fixed set of variables.
@@ -30,7 +30,7 @@ fn default_baseline_equals_todays_behaviour() {
     let baseline = PolicyBaseline::default();
     assert_eq!(baseline.enforcement(), Enforcement::Enforce);
 
-    let decision = decide(&baseline, Principal::Human, false, None).expect("default decides");
+    let decision = decide_for_principal(&baseline, Principal::Human, false, None).expect("default decides");
     assert!(decision.shadow().is_none());
     gate_url(&decision, "https://example.org/").expect("the default admits any URL");
     assert!(is_default(&decision));
@@ -71,7 +71,7 @@ fn observe_never_denies_but_counts() {
     .expect("observe parses");
     assert_eq!(baseline.enforcement(), Enforcement::Observe);
 
-    let decision = decide(&baseline, Principal::Human, false, None).expect("observe decides");
+    let decision = decide_for_principal(&baseline, Principal::Human, false, None).expect("observe decides");
     // The run is admitted: observe never denies.
     gate_url(&decision, "https://example.net/").expect("observe admits the denied host");
     // The decision enforce would take is kept beside the run, and it denies.
@@ -94,7 +94,7 @@ fn off_still_enforces_invariants() {
         deny_domains: vec!["example.org".into()],
         ..Default::default()
     };
-    let decision = decide(&baseline, Principal::Human, false, Some(&ask)).expect("off decides");
+    let decision = decide_for_principal(&baseline, Principal::Human, false, Some(&ask)).expect("off decides");
     gate_url(&decision, "https://example.org/").expect("off ignores the ask");
     gate_url(&decision, "https://example.net/").expect("off ignores the baseline");
 
@@ -107,7 +107,7 @@ fn off_still_enforces_invariants() {
     assert_eq!(source, DecisionSource::Invariant);
 
     // The ZDR floor still applies: profile persistence is off under ZDR.
-    let zdr = decide(&baseline, Principal::Human, true, None).expect("off decides under zdr");
+    let zdr = decide_for_principal(&baseline, Principal::Human, true, None).expect("off decides under zdr");
     assert!(!zdr.policy().allows(CapKey::ProfilePersistent));
 }
 
@@ -118,7 +118,7 @@ fn enforce_denies_an_asked_domain_with_the_request_as_source() {
         deny_domains: vec!["example.org".into()],
         ..Default::default()
     };
-    let decision = decide(&baseline, Principal::Human, false, Some(&ask)).expect("enforce decides");
+    let decision = decide_for_principal(&baseline, Principal::Human, false, Some(&ask)).expect("enforce decides");
 
     let error = gate_url(&decision, "https://example.org/page")
         .expect_err("enforce refuses the asked host");
@@ -130,7 +130,7 @@ fn enforce_denies_an_asked_domain_with_the_request_as_source() {
 
     // The same ask under observe is admitted.
     let observe = PolicyBaseline::from_lookup(env(&[(ENFORCEMENT_ENV, "observe")])).unwrap();
-    let decision = decide(&observe, Principal::Human, false, Some(&ask_for("example.org")))
+    let decision = decide_for_principal(&observe, Principal::Human, false, Some(&ask_for("example.org")))
         .expect("observe decides");
     gate_url(&decision, "https://example.org/page").expect("observe admits");
 }
@@ -144,7 +144,7 @@ fn an_unknown_capability_in_the_ask_is_a_bad_request_in_every_mode() {
             disable: vec!["browser.not_a_key".into()],
             ..Default::default()
         };
-        let error = decide(&baseline, Principal::Human, false, Some(&ask))
+        let error = decide_for_principal(&baseline, Principal::Human, false, Some(&ask))
             .expect_err("a malformed ask is refused");
         assert_eq!(error.code.http_status(), 400, "mode={mode}");
         let details = error.details.expect("the refusal carries details");

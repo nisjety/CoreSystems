@@ -231,6 +231,7 @@ async fn service_token_gets_403_on_lifecycle_routes() {
     }
     async fn as_model_gateway(mut req: Request, next: Next) -> Response {
         req.extensions_mut().insert(Claims {
+            web_policy: None,
             sub: "service:model-gateway".into(),
             iss: "auth-core".into(),
             exp: i64::MAX,
@@ -272,6 +273,7 @@ async fn service_token_gets_403_on_lifecycle_routes() {
 #[test]
 fn a_model_plane_service_origin_is_an_agent_with_its_run_id() {
     let claims = Claims {
+        web_policy: None,
         sub: "service:execution-core".into(),
         iss: "auth-core".into(),
         exp: i64::MAX,
@@ -292,6 +294,7 @@ fn a_model_plane_service_origin_is_an_agent_with_its_run_id() {
 
     // A user token never carries a run reference, whatever the header says.
     let user = Claims {
+        web_policy: None,
         principal_type: Some("user".into()),
         service_id: None,
         ..claims
@@ -432,6 +435,7 @@ async fn service_token_cannot_control() {
     }
     async fn as_model_gateway(mut req: Request, next: Next) -> Response {
         req.extensions_mut().insert(Claims {
+            web_policy: None,
             sub: "service:model-gateway".into(),
             iss: "auth-core".into(),
             exp: i64::MAX,
@@ -480,6 +484,7 @@ async fn zdr_caller_can_cancel_but_not_read_errors() {
     enable_job_control();
     async fn as_zdr_user(mut req: Request, next: Next) -> Response {
         req.extensions_mut().insert(Claims {
+            web_policy: None,
             sub: "user_placeholder".into(),
             iss: "auth-core".into(),
             exp: i64::MAX,

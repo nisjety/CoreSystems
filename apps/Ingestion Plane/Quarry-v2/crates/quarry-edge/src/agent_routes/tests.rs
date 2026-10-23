@@ -151,6 +151,7 @@ fn non_zdr_run_may_request_a_persistent_profile() {
 #[test]
 fn browser_session_projection_requires_exact_tenant_and_actor() {
     let claims = crate::auth::Claims {
+        web_policy: None,
         sub: "user-owner".to_owned(),
         iss: "https://auth.example.test".to_owned(),
         exp: i64::MAX,

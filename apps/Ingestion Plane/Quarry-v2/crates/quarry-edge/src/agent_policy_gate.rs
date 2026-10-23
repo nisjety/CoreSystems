@@ -25,6 +25,7 @@ use quarry_core::QuarryResult;
 use crate::agent_routes::RunLive;
 use crate::policy_baseline::{Decision, PolicyBaseline};
 use crate::state::AppState;
+use crate::auth::Claims;
 use crate::web_policy_edge::{self, quarry_error, record_denial};
 
 /// Resolve the run's decision at start, before the browser is acquired.
@@ -34,14 +35,14 @@ use crate::web_policy_edge::{self, quarry_error, record_denial};
 /// is typed and consumes nothing: no lease, no slot, no checkpoint.
 pub fn resolve_for_start(
     baseline: &PolicyBaseline,
-    principal: Principal,
+    claims: &Claims,
     zdr: bool,
     ask: Option<&RequestAsk>,
     persist_profile: bool,
     artifact_uploads: bool,
     artifact_downloads: bool,
 ) -> QuarryResult<Decision> {
-    let decision = web_policy_edge::decide(baseline, principal, zdr, ask)?;
+    let decision = web_policy_edge::decide(baseline, claims, zdr, ask)?;
     gate_decision(&decision, |policy| {
         if persist_profile {
             policy.require(CapKey::ProfilePersistent, "persist_profile")?;

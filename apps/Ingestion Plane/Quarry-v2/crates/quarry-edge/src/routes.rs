@@ -576,7 +576,7 @@ async fn scrape_with(
     // gated before the cache is read, so a denied page is never served from it.
     let decision = crate::web_policy_edge::decide(
         &state.policy,
-        crate::web_policy_edge::principal(&claims),
+        &claims,
         zdr.is_active(),
         req.policy.as_ref(),
     )
@@ -1377,7 +1377,7 @@ async fn internal_run_page(
 
     // WS7.C: no JWT on this route. The caller is the orchestrator, an autonomous
     // principal, so the decision is the baseline and the invariants (no ask).
-    let decision = crate::web_policy_edge::decide(
+    let decision = crate::web_policy_edge::decide_for_principal(
         &state.policy,
         quarry_core::web_policy::Principal::Autonomous,
         zdr.is_active(),
@@ -1497,7 +1497,7 @@ async fn scrape_stream(
     let request_id = crate::request_id::current();
     let decision = crate::web_policy_edge::decide(
         &state.policy,
-        crate::web_policy_edge::principal(&claims),
+        &claims,
         zdr.is_active(),
         req.policy.as_ref(),
     );
@@ -1847,6 +1847,7 @@ mod tests {
 
     fn claims_for_org(org_id: &str) -> crate::auth::Claims {
         crate::auth::Claims {
+            web_policy: None,
             sub: "u1".into(),
             iss: "auth-core".into(),
             exp: i64::MAX,

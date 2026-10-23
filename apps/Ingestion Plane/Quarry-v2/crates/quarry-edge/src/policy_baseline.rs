@@ -21,10 +21,15 @@ use quarry_core::web_policy::{
     resolve, OrgInput, PolicyDenial, PolicyInputs, PolicyLayer, Principal, ResolvedPolicy,
 };
 
+use crate::auth::WebPolicyClaim;
+
 /// The operator baseline, as a [`PolicyLayer`] wire document.
 pub const BASELINE_ENV: &str = "QUARRY_EDGE__WEB_POLICY_BASELINE_JSON";
 /// `off`, `observe` or `enforce`.
 pub const ENFORCEMENT_ENV: &str = "QUARRY_EDGE__WEB_POLICY_ENFORCEMENT";
+/// `1`/`true` or `0`/`false`. On: a request whose token has no `web_policy` claim is refused
+/// (403 `policy_unreadable`) under `enforce`; under `observe` the refusal is only counted.
+pub const REQUIRE_CLAIM_ENV: &str = "QUARRY_EDGE__WEB_POLICY_REQUIRE_CLAIM";
 
 /// What a decision does with the policy it resolves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +64,7 @@ impl Enforcement {
 pub struct PolicyBaseline {
     layer: PolicyLayer,
     enforcement: Enforcement,
+    require_claim: bool,
 }
 
 impl Default for PolicyBaseline {
@@ -67,6 +73,7 @@ impl Default for PolicyBaseline {
         Self {
             layer: PolicyLayer::default(),
             enforcement: Enforcement::Enforce,
+            require_claim: false,
         }
     }
 }
@@ -84,7 +91,15 @@ impl PolicyBaseline {
                 .map_err(|_| format!("{BASELINE_ENV} is not a valid web policy layer"))?,
             _ => PolicyLayer::default(),
         };
-        Ok(Self { layer, enforcement })
+        let require_claim = match lookup(REQUIRE_CLAIM_ENV) {
+            Some(raw) => parse_flag(&raw)?,
+            None => false,
+        };
+        Ok(Self {
+            layer,
+            enforcement,
+            require_claim,
+        })
     }
 
     /// [`PolicyBaseline::from_lookup`] over the process environment.
@@ -98,6 +113,28 @@ impl PolicyBaseline {
 
     pub fn baseline(&self) -> &PolicyLayer {
         &self.layer
+    }
+
+    /// Whether a token without the `web_policy` claim is refused (WS7.J).
+    pub fn requires_claim(&self) -> bool {
+        self.require_claim
+    }
+
+    /// WS7.J: the org layer for one request, read from the token's `web_policy` claim.
+    ///
+    /// A readable claim is the org layer. An absent claim is no org layer, unless the baseline
+    /// requires the claim, which refuses the request. An unreadable claim is `Unreadable`: it
+    /// refuses under `enforce` and is only counted under `observe`.
+    pub fn org_input(&self, claim: Result<Option<WebPolicyClaim>, PolicyDenial>) -> OrgInput {
+        match claim {
+            Ok(Some(claim)) => OrgInput::Present {
+                layer: claim.layer,
+                rev: claim.rev,
+            },
+            Ok(None) if self.require_claim => OrgInput::Unreadable,
+            Ok(None) => OrgInput::Absent,
+            Err(_) => OrgInput::Unreadable,
+        }
     }
 
     /// Resolve the policy for one request. `request` is the ask already converted
@@ -115,11 +152,22 @@ impl PolicyBaseline {
         zdr: bool,
         request: Option<PolicyLayer>,
     ) -> Result<Decision, PolicyDenial> {
+        self.decide_with_org(principal, zdr, OrgInput::Absent, request)
+    }
+
+    /// [`PolicyBaseline::decide`] with the org layer given (WS7.J: from the token's claim).
+    pub fn decide_with_org(
+        &self,
+        principal: Principal,
+        zdr: bool,
+        org: OrgInput,
+        request: Option<PolicyLayer>,
+    ) -> Result<Decision, PolicyDenial> {
         let full = PolicyInputs {
             principal,
             zdr,
             baseline: self.layer.clone(),
-            org: OrgInput::Absent,
+            org,
             grant: None,
             request,
         };
@@ -135,16 +183,36 @@ impl PolicyBaseline {
             Enforcement::Enforce => Ok(Decision {
                 policy: resolve(&full)?,
                 shadow: None,
+                shadow_denial: None,
             }),
-            Enforcement::Observe => Ok(Decision {
-                policy: resolve(&relaxed)?,
-                shadow: Some(resolve(&full)?),
-            }),
+            Enforcement::Observe => {
+                // The shadow never refuses the run: a shadow that cannot be resolved (an
+                // unreadable claim) is kept as the would-be denial and counted by the edge.
+                let (shadow, shadow_denial) = match resolve(&full) {
+                    Ok(shadow) => (Some(shadow), None),
+                    Err(denial) => (None, Some(denial)),
+                };
+                Ok(Decision {
+                    policy: resolve(&relaxed)?,
+                    shadow,
+                    shadow_denial,
+                })
+            }
             Enforcement::Off => Ok(Decision {
                 policy: resolve(&relaxed)?,
                 shadow: None,
+                shadow_denial: None,
             }),
         }
+    }
+}
+
+/// `1`/`true` or `0`/`false`, case-insensitive. Anything else fails the boot.
+fn parse_flag(raw: &str) -> Result<bool, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" => Ok(true),
+        "0" | "false" => Ok(false),
+        _ => Err(format!("{REQUIRE_CLAIM_ENV} must be 1 or 0")),
     }
 }
 
@@ -154,6 +222,7 @@ impl PolicyBaseline {
 pub struct Decision {
     policy: ResolvedPolicy,
     shadow: Option<ResolvedPolicy>,
+    shadow_denial: Option<PolicyDenial>,
 }
 
 impl Decision {
@@ -165,6 +234,12 @@ impl Decision {
     /// Under `observe`, the policy that `enforce` would have applied. Never enforced.
     pub fn shadow(&self) -> Option<&ResolvedPolicy> {
         self.shadow.as_ref()
+    }
+
+    /// Under `observe`, the denial that `enforce` would have raised when the shadow itself
+    /// cannot be resolved (an unreadable org claim). Never enforced.
+    pub fn shadow_denial(&self) -> Option<&PolicyDenial> {
+        self.shadow_denial.as_ref()
     }
 }
 
@@ -179,6 +254,17 @@ mod tests {
         assert_eq!(Enforcement::parse("enforce").unwrap(), Enforcement::Enforce);
         assert!(Enforcement::parse("ENFORCE").is_err());
         assert!(Enforcement::parse("sometimes").is_err());
+    }
+
+    #[test]
+    fn require_claim_flag_defaults_off_and_parses_strictly() {
+        assert!(!PolicyBaseline::from_lookup(|_| None).unwrap().requires_claim());
+        let on = |_: &str| Some("1".to_owned());
+        assert!(PolicyBaseline::from_lookup(on).unwrap().requires_claim());
+        assert!(PolicyBaseline::from_lookup(|name| (name == REQUIRE_CLAIM_ENV).then(|| "TRUE".to_owned()))
+            .unwrap()
+            .requires_claim());
+        assert!(PolicyBaseline::from_lookup(|name| (name == REQUIRE_CLAIM_ENV).then(|| "yes".to_owned())).is_err());
     }
 
     #[test]

@@ -53,6 +53,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::{error, warn};
 
+use quarry_core::web_policy::PolicyDenial;
 use quarry_core::zdr::ZdrMode;
 
 /// Claims extracted from a verified JWT. Every token requires `org_id` plus
@@ -88,6 +89,11 @@ pub struct Claims {
     /// the principal; go through [`Claims::zdr_floor`] / [`Claims::effective_zdr`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub zdr: Option<bool>,
+    /// WS7.J: the org web-policy claim, as the issuer wrote it. Untyped on purpose: a malformed
+    /// claim must not fail authentication. [`Claims::web_policy_claim`] reads it where a route
+    /// decides, and an unreadable claim fails closed there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_policy: Option<serde_json::Value>,
 }
 
 impl Claims {
@@ -196,6 +202,154 @@ impl Claims {
             Err(StatusCode::FORBIDDEN)
         }
     }
+}
+
+/// WS7.J: the org web-policy claim as the edge reads it.
+///
+/// `rev` is the issuer's revision as a number (the claim carries up to 12 hex digits, or
+/// `"0"` for no policy). `unknown_keys` counts the capability keys and top-level fields this
+/// build does not know: they are ignored, never applied, and counted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebPolicyClaim {
+    pub layer: quarry_core::web_policy::PolicyLayer,
+    pub rev: u64,
+    pub unknown_keys: usize,
+}
+
+/// The only claim version this build reads. Any other version fails closed.
+pub const WEB_POLICY_CLAIM_VERSION: u64 = 1;
+
+/// The top-level fields of a version 1 claim. Anything else is an unknown key.
+const KNOWN_CLAIM_FIELDS: [&str; 6] = ["v", "rev", "caps", "robots_max", "proxy_max", "domains"];
+
+impl Claims {
+    /// The org web-policy layer this token carries (WS7.J).
+    ///
+    /// `Ok(None)` when the claim is absent (a token from an issuer that does not mint it yet).
+    /// What absence means is the caller's decision (see `PolicyBaseline::org_input`).
+    /// `Err(PolicyUnreadable)` when the claim is present but cannot be read: malformed JSON
+    /// shape, a version other than 1, or a rule a layer may not state. Such a claim fails
+    /// closed under `enforce`. The `web_policy` field is untyped so that none of this can fail
+    /// authentication itself.
+    pub fn web_policy_claim(&self) -> Result<Option<WebPolicyClaim>, PolicyDenial> {
+        let Some(raw) = &self.web_policy else {
+            return Ok(None);
+        };
+        let claim = parse_web_policy_claim(raw).map_err(|()| {
+            metrics::counter!("web_policy_claim_unreadable_total").increment(1);
+            PolicyDenial::PolicyUnreadable
+        })?;
+        if claim.unknown_keys > 0 {
+            metrics::counter!("web_policy_claim_unknown_key_total")
+                .increment(claim.unknown_keys as u64);
+        }
+        Ok(Some(claim))
+    }
+}
+
+/// Parse a version 1 claim. `Err(())` for anything this build will not apply. The error
+/// carries no detail on purpose: the caller counts it and refuses, and the claim is
+/// never logged.
+fn parse_web_policy_claim(raw: &serde_json::Value) -> Result<WebPolicyClaim, ()> {
+    use quarry_core::web_policy::{CapKey, Mode, PolicyLayer, ProxyMax, RobotsMax};
+    use serde_json::Value;
+
+    let obj = raw.as_object().ok_or(())?;
+    if obj.get("v").and_then(Value::as_u64) != Some(WEB_POLICY_CLAIM_VERSION) {
+        return Err(());
+    }
+    let rev = parse_claim_rev(obj.get("rev").and_then(Value::as_str).ok_or(())?)?;
+    let mut unknown_keys = obj
+        .keys()
+        .filter(|key| !KNOWN_CLAIM_FIELDS.contains(&key.as_str()))
+        .count();
+
+    let mut robots: Option<RobotsMax> = match obj.get("robots_max") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(parse_ceiling(value)?),
+    };
+    let mut proxy: Option<ProxyMax> = match obj.get("proxy_max") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(parse_ceiling(value)?),
+    };
+    let mut modes = std::collections::BTreeMap::new();
+    if let Some(caps) = obj.get("caps") {
+        let caps = caps.as_object().ok_or(())?;
+        for (name, value) in caps {
+            match CapKey::parse(name) {
+                // A key this build does not know: ignored and counted (forward compatibility).
+                None => unknown_keys += 1,
+                Some(CapKey::RobotsMaxMode) => robots = tighter(robots, Some(parse_ceiling(value)?)),
+                Some(CapKey::ProxyMaxTier) => proxy = tighter(proxy, Some(parse_ceiling(value)?)),
+                // Domain rules travel in `domains`, never in `caps`.
+                Some(CapKey::DomainsAllow | CapKey::DomainsDeny) => return Err(()),
+                Some(key) => {
+                    let mode: Mode = serde_json::from_value(value.clone()).map_err(|_| ())?;
+                    modes.insert(key, mode);
+                }
+            }
+        }
+    }
+
+    let (allow, deny) = match obj.get("domains") {
+        None | Some(Value::Null) => (None, Vec::new()),
+        Some(domains) => {
+            let domains = domains.as_object().ok_or(())?;
+            unknown_keys += domains
+                .keys()
+                .filter(|key| !matches!(key.as_str(), "allow" | "deny"))
+                .count();
+            let allow = match domains.get("allow") {
+                None | Some(Value::Null) => None,
+                // The claim lists only non-baseline entries, so an empty allow list
+                // means no allow rule, not "allow nothing".
+                Some(list) => Some(string_list(list)?).filter(|hosts| !hosts.is_empty()),
+            };
+            let deny = match domains.get("deny") {
+                None | Some(Value::Null) => Vec::new(),
+                Some(list) => string_list(list)?,
+            };
+            (allow, deny)
+        }
+    };
+
+    let layer = PolicyLayer::new(modes, robots, proxy, allow, deny).map_err(|_| ())?;
+    Ok(WebPolicyClaim {
+        layer,
+        rev,
+        unknown_keys,
+    })
+}
+
+/// The claim `rev`: `"0"` or 1 to 12 hex digits.
+fn parse_claim_rev(raw: &str) -> Result<u64, ()> {
+    if raw.is_empty() || raw.len() > 12 || !raw.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(());
+    }
+    u64::from_str_radix(raw, 16).map_err(|_| ())
+}
+
+/// A robots or proxy ceiling, read from its wire name (`respect`, `none`, ...).
+fn parse_ceiling<T: serde::de::DeserializeOwned>(value: &serde_json::Value) -> Result<T, ()> {
+    serde_json::from_value(value.clone()).map_err(|_| ())
+}
+
+/// The more restrictive of two optional ceilings (the lower, since ceilings order least
+/// permissive first).
+fn tighter<T: Ord + Copy>(a: Option<T>, b: Option<T>) -> Option<T> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.min(y)),
+        (x, None) => x,
+        (None, y) => y,
+    }
+}
+
+fn string_list(list: &serde_json::Value) -> Result<Vec<String>, ()> {
+    list.as_array()
+        .ok_or(())?
+        .iter()
+        .map(|item| item.as_str().map(str::to_owned).ok_or(()))
+        .collect()
 }
 
 struct CachedJwks {
@@ -430,6 +584,7 @@ async fn verify_jwt_bearer(token: &str) -> Result<Claims, StatusCode> {
 /// NEVER used for a bearer that verifies successfully — see [`require_auth`].
 fn dev_bypass_stub_claims() -> Claims {
     Claims {
+        web_policy: None,
         sub: "user_placeholder".to_owned(),
         iss: "dev".to_owned(),
         exp: i64::MAX,
@@ -661,6 +816,7 @@ mod tests {
     #[test]
     fn claims_serde_roundtrip_default_fields_omitted() {
         let c = Claims {
+            web_policy: None,
             sub: "u1".into(),
             iss: "auth-core".into(),
             exp: 1_700_000_000,
@@ -686,6 +842,7 @@ mod tests {
     #[test]
     fn claims_has_scope_and_require_org() {
         let c = Claims {
+            web_policy: None,
             sub: "u1".into(),
             iss: "auth-core".into(),
             exp: i64::MAX,
@@ -707,6 +864,7 @@ mod tests {
     #[test]
     fn canonical_service_principal_derives_actor_from_signed_service_id() {
         let mut claims = Claims {
+            web_policy: None,
             sub: "service:model-gateway".into(),
             iss: "auth-core".into(),
             exp: i64::MAX,
@@ -747,6 +905,7 @@ mod tests {
     #[test]
     fn ambiguous_service_principal_is_rejected() {
         let mut claims = Claims {
+            web_policy: None,
             sub: "service:model-gateway".into(),
             iss: "auth-core".into(),
             exp: i64::MAX,
@@ -781,6 +940,7 @@ mod tests {
 
     fn service_claims(scopes: &[&str]) -> Claims {
         Claims {
+            web_policy: None,
             sub: "service:model-gateway".into(),
             iss: "auth-core".into(),
             exp: i64::MAX,
@@ -861,6 +1021,7 @@ mod tests {
     #[tokio::test]
     async fn service_route_scope_is_least_privilege_and_unknown_routes_fail_closed() {
         let claims = Claims {
+            web_policy: None,
             sub: "service:model-gateway".into(),
             iss: "auth-core".into(),
             exp: i64::MAX,
@@ -903,6 +1064,7 @@ mod tests {
     #[tokio::test]
     async fn service_scope_middleware_preserves_interactive_user_routes() {
         let claims = Claims {
+            web_policy: None,
             sub: "user-1".into(),
             iss: "auth-core".into(),
             exp: i64::MAX,
@@ -1095,6 +1257,7 @@ mod tests {
         std::env::set_var("AUTH_CORE_JWKS_URL", format!("{}/jwks", server.uri()));
 
         let claims = Claims {
+            web_policy: None,
             sub: "user-real".into(),
             iss: "auth-core".into(),
             exp: now_secs() + 3600,
@@ -1146,6 +1309,7 @@ mod tests {
         // Signed with a kid the JWKS mock never advertises — verification
         // must fail (no matching JWK even after a forced refresh).
         let claims = Claims {
+            web_policy: None,
             sub: "user-real".into(),
             iss: "auth-core".into(),
             exp: now_secs() + 3600,
@@ -1185,6 +1349,7 @@ mod tests {
     fn claims_with(principal_type: Option<&str>, zdr: Option<bool>) -> Claims {
         let service = principal_type == Some("service");
         Claims {
+            web_policy: None,
             sub: if service {
                 "service:model-gateway".into()
             } else {

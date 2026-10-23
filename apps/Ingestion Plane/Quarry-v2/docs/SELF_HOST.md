@@ -58,6 +58,9 @@ Set the following environment variables:
 | `BROWSERBASE_API_KEY` | — | Browserbase cloud browser |
 | `KERNEL_URL` / `KERNEL_API_KEY` | — | Kernel cloud browser |
 | `BRAVE_SEARCH_KEY` / `SERPER_KEY` / `SEARXNG_URL` | — | SERP search providers |
+| `QUARRY_EDGE__WEB_POLICY_ENFORCEMENT` | `enforce` | Web policy mode: `enforce`, `observe` (count only) or `off`; see RUNBOOKS "Web policy" |
+| `QUARRY_EDGE__WEB_POLICY_BASELINE_JSON` | — | Operator web-policy baseline, a `PolicyLayer` document; unset means no layer |
+| `QUARRY_EDGE__WEB_POLICY_REQUIRE_CLAIM` | `0` | `1` refuses a token without the `web_policy` claim (403); turn on only after auth-core mints the claim |
 
 ## 4. Run Quarry
 

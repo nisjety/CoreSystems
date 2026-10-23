@@ -184,6 +184,7 @@ async fn activate_is_forwarded_for_a_user_token() {
 async fn activate_ignored_for_service_token() {
     async fn as_service(mut req: Request, next: Next) -> Response {
         req.extensions_mut().insert(Claims {
+            web_policy: None,
             sub: "service:model-gateway".into(),
             iss: "auth-core".into(),
             exp: i64::MAX,

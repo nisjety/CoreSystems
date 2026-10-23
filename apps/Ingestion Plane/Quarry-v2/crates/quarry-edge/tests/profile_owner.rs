@@ -35,6 +35,7 @@ const BOB: &str = "user_bob";
 
 fn claims(user: &str) -> Claims {
     Claims {
+        web_policy: None,
         sub: user.to_owned(),
         iss: "test".to_owned(),
         exp: i64::MAX,
