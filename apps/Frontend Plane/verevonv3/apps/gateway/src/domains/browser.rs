@@ -653,7 +653,7 @@ async fn get_session(
 /// Read the sole owner projection for a direct Quarry browser run. All callers
 /// use this after an owner-authorized mutation instead of rebuilding session
 /// state from BFF-local observations, tabs, or control flags.
-async fn owner_browser_session_projection(
+pub(super) async fn owner_browser_session_projection(
     state: &AppState,
     user: &AuthenticatedUser,
     token: Option<&str>,
@@ -2074,6 +2074,17 @@ async fn get_devtools_events(
     Path(session_id): Path<String>,
     uri: Uri,
 ) -> Response {
+    // WS9.C: only the typed filters and cursor reach Quarry; unknown keys are dropped.
+    let devtools_query = match super::browser_evidence::safe_devtools_query(&uri) {
+        Ok(query) => query,
+        Err(message) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(error("invalid_devtools_query", message)),
+            )
+                .into_response();
+        }
+    };
     if !is_valid_path_segment(&session_id) {
         return (
             StatusCode::BAD_REQUEST,
@@ -2104,7 +2115,7 @@ async fn get_devtools_events(
         &format!(
             "/v1/agent/runs/{}/devtools{}",
             urlencoding::encode(&session_id),
-            query_suffix(&uri)
+            devtools_query
         ),
         None,
         token.as_deref(),
@@ -2127,6 +2138,7 @@ async fn get_devtools_events(
         StatusCode::OK,
         Json(ok(json!({
             "events": events,
+            "nextSequence": data.get("nextSequence").cloned().unwrap_or(Value::Null),
             "session": response["session"],
             "zdr": data
                 .get("zdr")
@@ -4083,7 +4095,7 @@ fn validate_wheel_delta(action: &Value, field: &'static str) -> Result<(), (&'st
     }
 }
 
-async fn quarry_call(
+pub(super) async fn quarry_call(
     state: &AppState,
     method: Method,
     path: &str,
@@ -4096,7 +4108,7 @@ async fn quarry_call(
     (status, value)
 }
 
-async fn quarry_token(state: &AppState, user: &AuthenticatedUser, cookie: &str) -> Option<String> {
+pub(super) async fn quarry_token(state: &AppState, user: &AuthenticatedUser, cookie: &str) -> Option<String> {
     if let Some(token) = get_audience_token(state, &user.user_id, cookie, "quarry").await {
         return Some(token);
     }
@@ -4483,7 +4495,7 @@ fn projection_grant_id(projection: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn cookie_header(headers: &HeaderMap) -> String {
+pub(super) fn cookie_header(headers: &HeaderMap) -> String {
     headers
         .get("cookie")
         .and_then(|v| v.to_str().ok())
@@ -4655,7 +4667,7 @@ fn browser_site_blocked_response(body: &Value) -> Option<Response> {
     Some((StatusCode::FORBIDDEN, Json(response)).into_response())
 }
 
-fn forward_quarry_failure(status: StatusCode, body: Value) -> Response {
+pub(super) fn forward_quarry_failure(status: StatusCode, body: Value) -> Response {
     if status == StatusCode::TOO_MANY_REQUESTS {
         if let Some(response) = browser_capacity_response(&body) {
             return response;
@@ -4727,7 +4739,7 @@ fn hostname(value: &str) -> Option<String> {
         .and_then(|url| url.host_str().map(str::to_owned))
 }
 
-fn is_valid_path_segment(value: &str) -> bool {
+pub(super) fn is_valid_path_segment(value: &str) -> bool {
     let len = value.len();
     (3..=128).contains(&len)
         && value
@@ -4788,7 +4800,7 @@ fn looks_like_json_payload(bytes: &[u8]) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -7299,7 +7311,7 @@ mod tests {
         }
     }
 
-    fn test_app_state() -> AppState {
+    pub(crate) fn test_app_state() -> AppState {
         let cache = crate::cache::ResultCache::disabled();
         AppState {
             client: reqwest::Client::new(),

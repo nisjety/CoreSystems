@@ -1126,6 +1126,11 @@ const browserOmniboxSuggestInput = z.object({
   query: z.string().trim().min(1).max(200),
 })
 
+const browserEvidenceCompileProcedureInput = z.object({
+  sessionId: z.string().trim().min(1).max(128),
+  procedureId: z.string().trim().min(1).max(64).optional(),
+})
+
 const browserProfileScopeEnum = z.enum(['user_private', 'org_shared', 'run_scoped'])
 
 const browserCreateSessionInput = z.object({
@@ -3048,6 +3053,17 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: true,
     inputSchema: browserOmniboxSuggestInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'browser_evidence.compile_procedure',
+    label: 'Compile browser procedure',
+    description: 'Compile a replay candidate from the receipts of a browser session and show its promotion check. Typed text is never shown. Human-only, and unavailable to zero-data-retention sessions.',
+    ownerPlane: 'ingestion',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: browserEvidenceCompileProcedureInput,
     outputSchema: envelopeStatusOutput,
   },
   {

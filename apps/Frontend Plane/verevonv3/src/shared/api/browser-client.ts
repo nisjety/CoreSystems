@@ -290,8 +290,77 @@ export type BrowserTabsResponse = {
 
 export type BrowserDevtoolsResponse = {
   events: BrowserDevtoolsEvent[]
+  /** Resume cursor: the last event the read examined (WS9.C). */
+  nextSequence?: number
   session?: BrowserSession
   zdr?: boolean
+}
+
+/** A receipt as the browser may see it (WS9.C). Observations and typed text are never sent. */
+export type BrowserReceiptView = {
+  receiptId: string
+  step: number
+  startedAt?: string
+  finishedAt?: string
+  actionType: string
+  actionLabel: string
+  url?: string
+  outcome: { status: string; latencyMs?: number; errorCode?: string }
+  costMicroUsd?: number
+  actionOutcome?: string
+  correctionOf?: string
+  initiatedBy?: string
+  controlEpoch?: number
+}
+
+export type BrowserReceiptsResponse = {
+  receipts: BrowserReceiptView[]
+  truncated: boolean
+  zdr: boolean
+}
+
+/** A redacted egress decision (WS9.C). The URL keeps only origin and path. */
+export type BrowserEgressReceiptView = {
+  sequence: number
+  tabId?: string
+  method: string
+  url: string
+  decision: 'allow' | 'block'
+  policy: string
+  timestampMs: number
+}
+
+export type BrowserEgressReceiptsResponse = {
+  receipts: BrowserEgressReceiptView[]
+  counts: { allow: number; block: number }
+  nextSequence: number
+  zdr: boolean
+}
+
+export type BrowserProcedureStepView = {
+  step: number
+  /** The action; a typed `text` is replaced by `{ redacted: true, length }`. */
+  action: Record<string, unknown>
+  expectedOutcome: string
+}
+
+export type BrowserProcedureView = {
+  procedureId: string
+  version: number
+  sourceReceiptIds: string[]
+  steps: BrowserProcedureStepView[]
+}
+
+export type BrowserProcedureQuality = {
+  stepCount: number
+  verifiedStepCount: number
+  promotionAllowed: boolean
+  reasons?: string[]
+}
+
+export type BrowserProcedureResponse = {
+  procedure: BrowserProcedureView
+  quality: BrowserProcedureQuality
 }
 
 export type BrowserSuggestedAction = {
@@ -497,20 +566,93 @@ export async function closeBrowserTab(
   )
 }
 
+/** Filters for the devtools read (WS9.C). Levels are normalised by the server. */
+export type BrowserDevtoolsFilterOptions = {
+  afterSequence?: number
+  limit?: number
+  levels?: string[]
+  filter?: string
+  category?: 'console' | 'network' | 'lifecycle'
+  tabId?: string
+}
+
 export async function getBrowserDevtoolsEvents(
   orgId: string,
   sessionId: string,
-  options?: { afterSequence?: number; limit?: number },
+  options?: BrowserDevtoolsFilterOptions,
   signal?: AbortSignal,
 ): Promise<BrowserDevtoolsResponse> {
   const params = new URLSearchParams()
   if (typeof options?.afterSequence === 'number') params.set('afterSequence', String(options.afterSequence))
   if (typeof options?.limit === 'number') params.set('limit', String(options.limit))
+  if (options?.levels && options.levels.length > 0) params.set('levels', options.levels.join(','))
+  if (options?.filter) params.set('filter', options.filter)
+  if (options?.category) params.set('category', options.category)
+  if (options?.tabId) params.set('tabId', options.tabId)
   const query = params.toString()
   return requestJson<BrowserDevtoolsResponse>(
     `/api/v1/browser/sessions/${encodeURIComponent(sessionId)}/devtools${query ? `?${query}` : ''}`,
     {
       method: 'GET',
+      headers: orgHeaders(orgId),
+      signal,
+    },
+  )
+}
+
+/** The receipts of a session, newest `limit` only (WS9.C). Refused for ZDR sessions. */
+export async function listBrowserReceipts(
+  orgId: string,
+  sessionId: string,
+  options?: { limit?: number },
+  signal?: AbortSignal,
+): Promise<BrowserReceiptsResponse> {
+  const params = new URLSearchParams()
+  if (typeof options?.limit === 'number') params.set('limit', String(options.limit))
+  const query = params.toString()
+  return requestJson<BrowserReceiptsResponse>(
+    `/api/v1/browser/sessions/${encodeURIComponent(sessionId)}/receipts${query ? `?${query}` : ''}`,
+    {
+      method: 'GET',
+      headers: orgHeaders(orgId),
+      signal,
+    },
+  )
+}
+
+/** Redacted live egress decisions after a cursor (WS9.C). Allowed for ZDR sessions. */
+export async function listBrowserEgressReceipts(
+  orgId: string,
+  sessionId: string,
+  options?: { afterSequence?: number; limit?: number },
+  signal?: AbortSignal,
+): Promise<BrowserEgressReceiptsResponse> {
+  const params = new URLSearchParams()
+  if (typeof options?.afterSequence === 'number') params.set('afterSequence', String(options.afterSequence))
+  if (typeof options?.limit === 'number') params.set('limit', String(options.limit))
+  const query = params.toString()
+  return requestJson<BrowserEgressReceiptsResponse>(
+    `/api/v1/browser/sessions/${encodeURIComponent(sessionId)}/egress-receipts${query ? `?${query}` : ''}`,
+    {
+      method: 'GET',
+      headers: orgHeaders(orgId),
+      signal,
+    },
+  )
+}
+
+/** Compile and promotion-check a replay procedure from the session's receipts (WS9.C). */
+export async function compileBrowserProcedure(
+  orgId: string,
+  sessionId: string,
+  body?: { procedureId?: string },
+  signal?: AbortSignal,
+): Promise<BrowserProcedureResponse> {
+  return requestJson<BrowserProcedureResponse>(
+    `/api/v1/browser/sessions/${encodeURIComponent(sessionId)}/procedure`,
+    {
+      method: 'POST',
+      body: JSON.stringify(body ?? {}),
       headers: orgHeaders(orgId),
       signal,
     },

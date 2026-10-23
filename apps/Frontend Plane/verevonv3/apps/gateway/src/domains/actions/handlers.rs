@@ -402,6 +402,9 @@ pub(super) async fn execute_action(
         "browser_omnibox.suggest" => {
             dispatch_browser_omnibox_suggest(&state, &user, &headers, &body.input).await
         }
+        "browser_evidence.compile_procedure" => {
+            crate::domains::browser_evidence::dispatch_compile_procedure(&state, &user, &headers, &body.input).await
+        }
         "browser_profile.create" => {
             dispatch_browser_create_profile(&state, &user, &headers, &body.input).await
         }

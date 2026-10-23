@@ -9,6 +9,7 @@ pub mod auth;
 pub mod billing;
 pub mod briefs;
 pub mod browser;
+pub mod browser_evidence;
 pub mod chat;
 pub mod cost;
 pub mod eval;
