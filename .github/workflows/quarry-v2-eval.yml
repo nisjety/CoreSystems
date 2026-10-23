@@ -1,0 +1,140 @@
+name: Quarry-v2 eval (fixtures, bakeoff, release matrix)
+
+# E3.9.1 (audit F-t2-044, P0). Before this job, nothing in CI ran the Quarry-v2
+# eval binaries: quarry-v2-ci.yml runs `cargo check` and `cargo test` only, so
+# lab/evals never executed on a commit. This job runs the three release-gate
+# binaries in order on the commit under test:
+#
+#   1. quarry-eval            fixture suite (lab/evals/fixtures), writes scoreboard.json
+#   2. quarry-bakeoff         solo report (no baseline is checked in yet), writes bakeoff.{json,md}
+#   3. quarry-release-matrix  gate roll-up, writes release_matrix.{json,md} and release_score.json
+#
+# quarry-eval exits 1 when any fixture fails and release-matrix exits 1 when any
+# gate fails, so the job fails on either. The later steps run under `if: always()`
+# so the score file is still produced and uploaded when an earlier gate fails.
+#
+# Scope limits, on purpose:
+# - Synthetic fixtures only. No provider credentials, no tenant data, no network
+#   egress beyond the cargo registry. The provider matrix is not run here: it needs
+#   PROVIDERS_PATH and live endpoints, so it belongs to the Tier C runner with a spend cap.
+# - No Chromium. The browser suites (WS11 Tier B and up) are later slices (E3.9.2+).
+#   Chromium is labelled or scheduled, never per push, because it is unstable on hosted runners.
+#
+# Stale outputs: lab/evals/scoreboard.json, bakeoff.json and release_matrix.json are
+# committed from an old local run. The "Clear stale eval outputs" step deletes them
+# before anything runs, so the release matrix can never pass on a previous run's numbers.
+#
+# Disk: the free-disk and CARGO_PROFILE_DEV_DEBUG settings follow quarry-v2-ci.yml.
+# The quarry-evals bins link quarry-runtime's whole dependency graph, which is the
+# same linker disk-exhaustion case documented there. $AGENT_TOOLSDIRECTORY is not
+# deleted, because setup-protoc installs into it.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'apps/Ingestion Plane/Quarry-v2/**'
+      - '.github/workflows/quarry-v2-eval.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'apps/Ingestion Plane/Quarry-v2/**'
+      - '.github/workflows/quarry-v2-eval.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: quarry-v2-eval-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  eval:
+    name: Eval gates (fixtures, bakeoff, release matrix)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: 'apps/Ingestion Plane/Quarry-v2'
+    env:
+      # Debug info is most of a debug binary's size; the eval bins need none.
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      # Stamped into release_score.json so the SCOREBOARD row can cite the commit.
+      QUARRY_RELEASE_COMMIT: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: 'apps/Ingestion Plane/Quarry-v2 -> target'
+
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: '27.x'
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
+          sudo docker image prune --all --force || true
+          df -h /
+
+      - name: Build the eval binaries
+        # Only the three gate binaries. quarry-browser-benchmark is left out on
+        # purpose: it is a mock-driver microbenchmark, not a gate, and it
+        # constructs quarry-browser's BrowserSession directly, so an in-flight
+        # change to that struct breaks it without touching the gates.
+        run: >-
+          cargo build -p quarry-evals
+          --bin quarry-eval --bin quarry-bakeoff --bin quarry-release-matrix
+
+      - name: Clear stale eval outputs
+        run: |
+          rm -f lab/evals/scoreboard.json lab/evals/bakeoff.json lab/evals/bakeoff.md \
+            lab/evals/release_matrix.json lab/evals/release_matrix.md \
+            lab/evals/release_score.json lab/evals/provider_matrix.report.json
+
+      - name: Gate 1 - fixture suite (quarry-eval)
+        run: cargo run -q -p quarry-evals --bin quarry-eval
+
+      - name: Gate 2 - bakeoff vs baseline (solo until a baseline is checked in)
+        if: always()
+        run: >-
+          cargo run -q -p quarry-evals --bin quarry-bakeoff --
+          --challenger lab/evals/scoreboard.json
+          --challenger-label quarry
+
+      - name: Gate 3 - release matrix and score file
+        if: always()
+        run: cargo run -q -p quarry-evals --bin quarry-release-matrix
+
+      - name: Publish the score to the job summary
+        if: always()
+        run: |
+          {
+            echo "### Quarry-v2 eval score"
+            echo ""
+            echo '```json'
+            cat lab/evals/release_score.json 2>/dev/null || echo '{"error":"release_score.json was not written"}'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the eval outputs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: quarry-v2-eval-${{ github.sha }}
+          path: |
+            apps/Ingestion Plane/Quarry-v2/lab/evals/scoreboard.json
+            apps/Ingestion Plane/Quarry-v2/lab/evals/bakeoff.json
+            apps/Ingestion Plane/Quarry-v2/lab/evals/bakeoff.md
+            apps/Ingestion Plane/Quarry-v2/lab/evals/release_matrix.json
+            apps/Ingestion Plane/Quarry-v2/lab/evals/release_matrix.md
+            apps/Ingestion Plane/Quarry-v2/lab/evals/release_score.json
+          if-no-files-found: warn
+          retention-days: 90
