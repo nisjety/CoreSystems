@@ -1302,3 +1302,27 @@ Order of rollout:
 
 Rollback: set `off` and restart the edge. The existing metrics go back to their legacy rules at the same
 time; events already published are not withdrawn.
+
+## WS15.S2: executable scrape, crawl and batch schedules (W2-U38, built, NOT run, 2026-10-23)
+
+Scope: a scrape, crawl or batch schedule fires as a tracked control job with origin `schedule`. Built dark. Nothing fires until the flag is on and the S5 go-live gate (WS14 scope deployed and WS6.A live) is met.
+
+- **Flag.** `QUARRY_SCHEDULED_JOBS_ENABLED` (control, default `0`, read at serialize time). Off: scrape, crawl and batch schedules stay unmapped and no Temporal schedule is created for them. A Temporal schedule of such a kind that already exists is paused on the next reconcile pass (about 30 s). It is not deleted. Turning the flag on maps the kinds on the next pass.
+- **Deploy order.** Control, then the orchestrator, then the edge. The orchestrator and the edge do not read the flag.
+- **Per fire.** The orchestrator's `ScheduledJobWF` (the schedule action) runs these steps in order:
+  1. `POST /v1/internal/schedules/preflight` on the edge (runtime bearer token plus `X-Quarry-Run-Sig` over `org_id` and `schedule:<id>`). S2 answers `allow: true`, `posture: unchecked`, `entitlement: floor`. S4 adds the ZDR and entitlement checks here.
+  2. `POST /v1/internal/schedules/{id}/runs` on control, HMAC signed, with `Idempotency-Key: sched:<id>:<run_key>`. Body: `run_key`, `run_id`, `status` (`running` or `skipped`), `reason`, `workflow_id`. Org, kind and params come from the schedule row. A denied fire is a terminal `skipped` job with `terminal_reason: schedule_skipped` and a `schedule_skipped` event.
+  3. The matching job workflow (`ScrapeJobWF`, `CrawlJobWF` or `BatchJobWF`) runs as a child with workflow id `quarry-job-<jobID>` and `REQUEST_CANCEL` on parent close. The child's input comes from the shared builders in `workflows/inputs.go`, the same builders the dispatcher uses.
+- **Overlap.** Stored policy `skip`, `allow` or `cancel` maps to Temporal `SKIP`, `ALLOW_ALL` or `CANCEL_OTHER`. With `cancel`, the wrapper signals its child `cancel` on a disconnected context and waits at most 2 minutes.
+- **Failure.** A child error writes `run_failed`, or `run_timed_out` for a Temporal timeout. The payload carries `schedule_id`, `org_id`, `created_by` and a reason class, with no URL. The wrapper returns the error, so the schedule's pause-on-failure option can see it.
+- **Crawl bounds.** The reconciler resolves a crawl schedule's `max_pages` and `max_depth` with the orchestrator's `QUARRY_CRAWL_*` limits, and writes them into the fire's params. The execution timeout (`QUARRY_JOB_TIMEOUT_*`) is written into the fire's args the same way. A change in either is a spec change and is applied on the next pass.
+- **Reconcile.** The reconciler reads the desired set from `/v1/internal/schedules/desired`. It compares what Temporal holds (`Describe`) with the desired spec and calls `Update` only when they differ. It pauses or unpauses only when the state differs. It never deletes a schedule without an org memo, and never reaps across orgs.
+- **Check a fire.** `GET /v1/schedules/{id}/runs` lists the fire's jobs. `GET /v1/crawl/{job}` shows `origin.type: schedule` and `origin.actor: <schedule id>`.
+
+Not run in this wave. The deployment evidence (flag on, one minute cron, Oslo time zone, overlap skip, cancel through `DELETE /v1/crawl/<job>`, flag off pauses the schedule, one fire each for batch and scrape) is owed at the stack phase. The Temporal replay fixture `testdata/scheduled_job_history.json` is owed too.
+
+Test phase checks (not run):
+
+- `cd services/quarry-orchestrator && go test ./internal/workflows/ ./internal/schedules/ ./internal/jobs/ ./internal/activities/ -count=1`
+- `cd services/quarry-control && go test ./internal/resources/ -run "Schedule|WorkflowFor|RegisterRun" -count=1`
+- `cargo test -p quarry-edge --test schedule_preflight` and `cargo test -p quarry-edge --lib schedule_preflight`
