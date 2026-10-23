@@ -303,7 +303,9 @@ async fn the_browser_socket_refuses_evaluate_with_an_error_frame() {
 
 /// The denial is logged once per refusal, by class, and the script reaches no line.
 /// The warn line is the proof the refusal ran (a log with no line at all would pass
-/// the absence check by itself).
+/// the absence check by itself). The count is of the lines that name THIS run: the log
+/// is process-wide and the binary's other tests refuse their own evaluates in parallel,
+/// so a count of all denial lines could be satisfied by someone else's refusals.
 #[tokio::test]
 async fn the_denial_is_logged_without_the_script() {
     capture();
@@ -314,7 +316,13 @@ async fn the_denial_is_logged_without_the_script() {
         TestSocket::connect(&edge, &person, &format!("/v1/agent/runs/{run}/frames/ws")).await;
 
     let marker = "raw page script execution denied";
-    let lines_before = captured().matches(marker).count();
+    let own_lines = || {
+        captured()
+            .lines()
+            .filter(|line| line.contains(marker) && line.contains(run.as_str()))
+            .count()
+    };
+    assert_eq!(own_lines(), 0, "nothing was refused on this run yet");
     let _ = edge.step(&person, &run, evaluate_action(), None).await;
     let _ = edge
         .post(
@@ -332,9 +340,10 @@ async fn the_denial_is_logged_without_the_script() {
     drop(socket);
 
     let log = captured();
-    assert!(
-        log.matches(marker).count() >= lines_before + 3,
-        "each of the three refusals logs the warn line"
+    assert_eq!(
+        own_lines(),
+        3,
+        "each of the three refusals (step, interact, WebSocket) logs one warn line naming the run"
     );
     for needle in MARKERS {
         assert!(!log.contains(needle), "the script reached the log: {needle}");
