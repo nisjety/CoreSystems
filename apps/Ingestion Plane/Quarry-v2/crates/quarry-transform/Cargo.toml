@@ -13,6 +13,8 @@ url = { workspace = true }
 scraper = { workspace = true }
 html2md = { workspace = true }
 blake3 = { workspace = true }
+# SHA-256 key for the (org, sha256) parse cache (E3.6-9); the workspace pin is shared with quarry-runtime.
+sha2 = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
 regex = "1"

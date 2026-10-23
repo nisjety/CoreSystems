@@ -19,6 +19,7 @@ pub mod lang;
 pub mod links;
 pub mod markdown;
 pub mod metadata;
+pub mod parse_cache;
 pub mod pdf;
 pub mod pii;
 pub mod readability;
