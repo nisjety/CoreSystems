@@ -31,6 +31,8 @@ use quarry_core::ids::kinds::RunKind;
 use quarry_core::lease::BrowserViewport;
 use quarry_core::zdr::ZdrMode;
 
+use crate::action_cost::CostSource;
+
 /// Durable continuation descriptor for a governed browser run. It deliberately
 /// contains no browser process/session handle: after a crash, Quarry reacquires
 /// a lease using the persisted profile and resumes only after the caller
@@ -323,6 +325,10 @@ pub struct StepReceipt {
     /// person and on receipts written before agents were recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<AgentIdentity>,
+    /// Where `cost_micro_usd` came from (`flat_table`, `provider_billed`). Absent
+    /// on a receipt with no recorded source (written before WS6.B, or a skip).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_source: Option<CostSource>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -580,6 +586,9 @@ pub struct ReceiptBuilder {
     initiated_by: Option<BrowserTimelineInitiator>,
     control_epoch: Option<u64>,
     agent: Option<AgentIdentity>,
+    cost_source: Option<CostSource>,
+    /// The flat cost of a failed attempt (the budget charges it; WS6.B).
+    failed_cost_micro_usd: u64,
 }
 
 impl ReceiptBuilder {
@@ -594,7 +603,22 @@ impl ReceiptBuilder {
             initiated_by: None,
             control_epoch: None,
             agent: None,
+            cost_source: None,
+            failed_cost_micro_usd: 0,
         }
+    }
+
+    /// Where the cost of a completed step came from. Call before `complete`.
+    pub fn cost_source(mut self, source: CostSource) -> Self {
+        self.cost_source = Some(source);
+        self
+    }
+
+    /// The flat cost of a failed attempt, in USD. Call before `fail`: a failed attempt
+    /// is charged against the budget, so its receipt carries the same cost.
+    pub fn failed_cost(mut self, cost_usd: f64) -> Self {
+        self.failed_cost_micro_usd = (cost_usd * 1_000_000.0).max(0.0) as u64;
+        self
     }
 
     /// Record which agent drove the step (call after `initiator`).
@@ -646,6 +670,7 @@ impl ReceiptBuilder {
             observation,
             correction_of: self.correction_of,
             cost_micro_usd: (cost_usd * 1_000_000.0).max(0.0) as u64,
+            cost_source: self.cost_source,
             initiated_by: self.initiated_by,
             control_epoch: self.control_epoch,
             agent: self.agent,
@@ -672,7 +697,8 @@ impl ReceiptBuilder {
             },
             observation: None,
             correction_of: self.correction_of,
-            cost_micro_usd: 0,
+            cost_micro_usd: self.failed_cost_micro_usd,
+            cost_source: self.cost_source,
             initiated_by: self.initiated_by,
             control_epoch: self.control_epoch,
             agent: self.agent,
@@ -696,6 +722,7 @@ impl ReceiptBuilder {
             observation: None,
             correction_of: self.correction_of,
             cost_micro_usd: 0,
+            cost_source: None,
             initiated_by: self.initiated_by,
             control_epoch: self.control_epoch,
             agent: self.agent,
@@ -1088,6 +1115,91 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn failure_receipt_carries_the_flat_cost_it_was_charged() {
+        let err = QuarryError::new(ErrorCode::Internal, "driver failed");
+        let failed = ReceiptBuilder::start("run_x", 1)
+            .failed_cost(0.0001)
+            .cost_source(CostSource::FlatTable)
+            .fail(sample_action(), &err);
+        assert_eq!(failed.cost_micro_usd, 100);
+        assert_eq!(failed.cost_source, Some(CostSource::FlatTable));
+        // A skip is never priced.
+        let skipped = ReceiptBuilder::start("run_x", 2).skip(sample_action(), "user_took_over");
+        assert_eq!(skipped.cost_micro_usd, 0);
+        assert_eq!(skipped.cost_source, None);
+    }
+
+    #[test]
+    fn receipt_roundtrips_cost_source_and_serialises_it_as_the_column_value() {
+        let receipt = ReceiptBuilder::start("run_x", 1)
+            .cost_source(CostSource::ProviderBilled)
+            .complete(sample_action(), None, 0.002);
+        let value = serde_json::to_value(&receipt).unwrap();
+        assert_eq!(value["cost_source"], "provider_billed");
+        let back: StepReceipt = serde_json::from_value(value).unwrap();
+        assert_eq!(back.cost_source, Some(CostSource::ProviderBilled));
+        assert_eq!(back.cost_micro_usd, 2_000);
+    }
+
+    #[test]
+    fn legacy_receipt_without_cost_source_deserialises_to_none() {
+        let receipt = ReceiptBuilder::start("run_x", 1).complete(sample_action(), None, 0.001);
+        let mut value = serde_json::to_value(&receipt).unwrap();
+        // Written before WS6.B: the key is absent, not null.
+        value.as_object_mut().unwrap().remove("cost_source");
+        let back: StepReceipt = serde_json::from_value(value).unwrap();
+        assert_eq!(back.cost_source, None);
+        assert_eq!(back.cost_micro_usd, 1_000);
+    }
+
+    #[test]
+    fn legacy_checkpoint_without_budget_fields_deserialises() {
+        let run_id: RunKind = Id::new();
+        let checkpoint = AgentRunCheckpoint {
+            org_id: "org_a".into(),
+            actor_id: "user_a".into(),
+            run_id: run_id.to_string(),
+            lease_id: "lease_01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
+            profile_id: "prof_01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
+            step: 2,
+            current_url: "https://example.com".into(),
+            page_hash: "blake3:abc".into(),
+            constraints: AgentConstraints {
+                max_steps: 5,
+                allowed_domains: vec!["example.com".into()],
+                max_runtime_s: Some(60),
+                max_cost_usd: None,
+            },
+            persist_profile: false,
+            profile_scope: BrowserProfileScope::Ephemeral,
+            viewport: None,
+            zdr: ZdrMode::Off,
+            grant_id: None,
+            status: AgentRunStatus::Active,
+            control_mode: BrowserControlMode::AgentControl,
+            control_epoch: 0,
+            budget: Some(BudgetCheckpoint {
+                class: "agent".into(),
+                steps: 2,
+                attempts: 2,
+                spent_micro_usd: 2_000,
+                active_ms: 900,
+                exhausted: None,
+                claim: None,
+            }),
+        };
+        let mut value = serde_json::to_value(&checkpoint).unwrap();
+        // A checkpoint written before budgets existed has no `budget` key at all.
+        value.as_object_mut().unwrap().remove("budget");
+        let back: AgentRunCheckpoint = serde_json::from_value(value).unwrap();
+        assert!(back.budget.is_none());
+        assert_eq!(back.step, 2);
+        // A partial ledger (fields absent) reads with defaults, not an error.
+        let partial: BudgetCheckpoint = serde_json::from_value(serde_json::json!({"steps": 3})).unwrap();
+        assert_eq!((partial.steps, partial.attempts, partial.spent_micro_usd), (3, 0, 0));
     }
 
     #[tokio::test]

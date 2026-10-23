@@ -82,6 +82,11 @@ pub enum EventType {
     /// into its snippet cards so a crawl shows real titles and text instead
     /// of `N utdrag samlet` over empty excerpts.
     PageExtracted,
+    /// WS6.B: an agent run reached a budget bound while enforcement is `on`
+    /// (once per segment of the run). Payload: `dimension`, `limit`, `spent`,
+    /// `unit`, `estimated`, `limit_source`. Not user-facing: it reaches the run
+    /// trace only through a projection row (WS10).
+    AgentBudgetExhausted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

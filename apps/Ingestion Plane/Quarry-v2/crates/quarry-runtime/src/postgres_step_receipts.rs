@@ -42,6 +42,10 @@ impl PostgresStepReceiptStore {
             .try_get("observation")
             .map_err(|error| db_err("decode observation", error))?;
         Ok(StepReceipt {
+            cost_source: row
+                .try_get::<Option<String>, _>("cost_source")
+                .map_err(|error| db_err("decode cost_source", error))?
+                .and_then(|value| serde_json::from_value(serde_json::Value::String(value)).ok()),
             org_id: Some(
                 row.try_get("org_id")
                     .map_err(|error| db_err("decode org_id", error))?,
@@ -174,8 +178,8 @@ impl StepReceiptStore for PostgresStepReceiptStore {
             "INSERT INTO quarry_step_receipts
              (receipt_id, run_id, org_id, actor_id, step, started_at, finished_at, action,
               outcome, observation, correction_of, cost_micro_usd, initiated_by, control_epoch,
-              initiated_agent)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+              initiated_agent, cost_source)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
              ON CONFLICT (receipt_id) DO NOTHING",
         )
         .bind(&receipt.receipt_id)
@@ -198,6 +202,11 @@ impl StepReceiptStore for PostgresStepReceiptStore {
         )
         .bind(receipt.control_epoch.map(|value| value as i64))
         .bind(agent)
+        .bind(receipt.cost_source.and_then(|source| {
+            serde_json::to_value(source)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned))
+        }))
         .execute(&self.pool)
         .await
         .map_err(|error| db_err("append receipt", error))?;
@@ -218,7 +227,7 @@ impl StepReceiptStore for PostgresStepReceiptStore {
         let rows = sqlx::query(
             "SELECT receipt_id, run_id, org_id, actor_id, step, started_at, finished_at,
                     action, outcome, observation, correction_of, cost_micro_usd,
-                    initiated_by, control_epoch, initiated_agent
+                    initiated_by, control_epoch, initiated_agent, cost_source
              FROM quarry_step_receipts
              WHERE org_id = $1 AND run_id = $2
              ORDER BY step ASC, finished_at ASC",
@@ -246,7 +255,7 @@ impl StepReceiptStore for PostgresStepReceiptStore {
         let rows = sqlx::query(
             "SELECT receipt_id, run_id, org_id, actor_id, step, started_at, finished_at,
                     action, outcome, observation, correction_of, cost_micro_usd,
-                    initiated_by, control_epoch, initiated_agent
+                    initiated_by, control_epoch, initiated_agent, cost_source
              FROM quarry_step_receipts
              WHERE org_id = $1 AND actor_id = $2 AND run_id = $3
              ORDER BY step ASC, finished_at ASC",
@@ -264,7 +273,7 @@ impl StepReceiptStore for PostgresStepReceiptStore {
         let row = sqlx::query(
             "SELECT receipt_id, run_id, org_id, actor_id, step, started_at, finished_at,
                     action, outcome, observation, correction_of, cost_micro_usd,
-                    initiated_by, control_epoch, initiated_agent
+                    initiated_by, control_epoch, initiated_agent, cost_source
              FROM quarry_step_receipts WHERE receipt_id = $1",
         )
         .bind(receipt_id)
@@ -737,6 +746,7 @@ mod tests {
         for sql in [
             include_str!("../migrations/0010_step_receipt_initiator_epoch.sql"),
             include_str!("../migrations/0011_step_receipt_initiator_agent.sql"),
+            include_str!("../migrations/0012_step_receipt_cost_source.sql"),
         ] {
             (&pool)
                 .execute(sql)
@@ -753,16 +763,17 @@ mod tests {
 
         // Each column exists once, and its CHECK still holds after the second apply.
         let columns: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM information_schema.columns              WHERE table_schema = current_schema() AND table_name = 'quarry_step_receipts'              AND column_name IN ('initiated_by', 'control_epoch', 'initiated_agent')",
+            "SELECT count(*) FROM information_schema.columns              WHERE table_schema = current_schema() AND table_name = 'quarry_step_receipts'              AND column_name IN ('initiated_by', 'control_epoch', 'initiated_agent', 'cost_source')",
         )
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(columns, 3);
+        assert_eq!(columns, 4);
         for bad in [
             "UPDATE quarry_step_receipts SET initiated_by = 'robot'",
             "UPDATE quarry_step_receipts SET control_epoch = -1",
             "UPDATE quarry_step_receipts SET initiated_agent = '[]'::jsonb",
+            "UPDATE quarry_step_receipts SET cost_source = 'robot'",
         ] {
             assert!(
                 (&pool).execute(bad).await.is_err(),

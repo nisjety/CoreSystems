@@ -406,6 +406,7 @@ fn event_type_token(t: &EventType) -> &'static str {
         EventType::HostDiscovered => "host_discovered",
         EventType::BrandingExtracted => "branding_extracted",
         EventType::PageExtracted => "page_extracted",
+        EventType::AgentBudgetExhausted => "agent_budget_exhausted",
     }
 }
 

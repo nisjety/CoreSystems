@@ -914,6 +914,43 @@ pub struct AgentConstraints {
     pub max_cost_usd: Option<f64>,
 }
 
+/// `meta.budget` on a browser step response (WS6.B): what an agent run has used
+/// and the bounds it runs under. Cost is estimated (the flat action table plus a
+/// browser-time term) unless the driver supplied a provider-billed figure.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BudgetMeta {
+    /// `interactive` (a person, never capped) or `agent`.
+    pub class: String,
+    /// Completed steps.
+    pub steps: u32,
+    /// Attempts, completed or failed.
+    pub attempts: u32,
+    /// The step bound. Absent for an interactive run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_steps: Option<u32>,
+    /// The attempt bound. Absent for an interactive run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_attempts: Option<u32>,
+    /// Active time in seconds; a human takeover does not count.
+    pub elapsed_s: f64,
+    /// The runtime bound. Absent for an interactive run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_runtime_s: Option<u32>,
+    /// Spent so far, in USD (estimated).
+    pub spent_usd: f64,
+    /// The cost bound. Absent for an interactive run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_cost_usd: Option<f64>,
+    /// Always true: cost is not billed usage.
+    pub estimated: bool,
+    /// `flat_table` or `provider_billed`: where the cost of the step this response
+    /// answers came from.
+    pub cost_source: String,
+    /// The dimension that was reached (`steps`, `attempts`, `runtime`, `cost`), once one was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exhausted: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // §3  DataPlaneIngest  (Quarry → Data Plane)
 // ---------------------------------------------------------------------------

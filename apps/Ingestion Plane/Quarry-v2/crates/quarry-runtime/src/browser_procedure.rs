@@ -238,6 +238,7 @@ mod tests {
             finished_at: Utc::now(),
             action,
             outcome: StepOutcome::Completed { latency_ms: 1 },
+            cost_source: None,
             observation: Some(BrowserObservation {
                 run_id: Id::new(),
                 step: 0,
