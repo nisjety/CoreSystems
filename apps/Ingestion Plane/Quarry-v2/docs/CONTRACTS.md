@@ -219,22 +219,24 @@ Additive profile/snapshot metadata. The binary snapshot body is an artifact refe
     "status": "valid | stale | expired | unknown"
   },
   "storage": {
-    "backend": "s3 | minio | fs",
-    "bucket": "quarry-snapshots",
-    "key": "org=org_.../profile=prof_.../snapshot=snap_.../state.bin.enc"
+    "backend": "postgres: quarry_profiles row (WS17.E1)",
+    "row": "org_id=org_... profile_id=prof_...",
+    "envelope": "bytea, NULL snapshot when encryption is on",
+    "enc_v": 1,
+    "key_id": "env:v1 | oc:<n> (oc is reserved for WS17.E2)"
   },
   "encryption": {
-    "scheme": "xchacha20poly1305 | aes-256-gcm",
-    "key_source": "env:QUARRY_PROFILE_KEY | kms:<key-id>",
-    "nonce": "base64...",
-    "aad": "org=org_...;profile=prof_...;snapshot=snap_..."
+    "scheme": "aes-256-gcm (ring), envelope JSON with enc_v 1 and alg A256GCM",
+    "dek": "one per profile, wrapped by the key provider, new DEK on every 256th stored save",
+    "nonce": "base64 of 12 random bytes, one per seal",
+    "aad": "\"quarry-profile\0v1\0\" || len32(org) || org || len32(profile) || len32(snapshot_id) || snapshot_id || enc_v (u16 BE)"
   }
 }
 ```
 
 Browserless-style session URLs (`connect`, `browserQL`, `stop`, reconnect URL) are secrets. They may be stored only in encrypted snapshot metadata or a secret store, never in public event payloads.
 
-Production snapshot storage uses real S3. Local development and tests use MinIO-compatible S3 APIs. `QUARRY_PROFILE_KEY` is the required first key source; KMS integration is additive later.
+Production snapshot storage is the `quarry_profiles` Postgres table. With `QUARRY_EDGE__PROFILE_ENCRYPTION=on` the snapshot is an envelope and the plaintext column is NULL; the interim key provider is the edge environment (`QUARRY_PROFILE_MASTER_KEYS`, `QUARRY_PROFILE_MASTER_KEY_ACTIVE`). The Control Plane key provider (`org_core`, WS17.E2) is not built. The S3 archive store is plaintext and is not wired.
 
 ## 9. Normalized output envelope (runtime → edge/control)
 

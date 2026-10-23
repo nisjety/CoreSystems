@@ -1234,3 +1234,40 @@ Checks to run in the wave's test phase (not run here):
 Rollback. Set `QUARRY_EDGE__WEB_POLICY_ENFORCEMENT=off` (the baseline and the org layer stop applying; invariants and the ZDR floor stay), or revert the commit. Callers that never send a denied URL see no change.
 
 Not done in this slice: the route-level tests above; the ZDR consolidation PR; WS7.G's answer candidate filter; save and update of profiles; resumed runs; the deployment evidence of the plan.
+
+## WS17.E1: profile envelope encryption (W2-U36)
+
+Status: built, flag off by default. Tests written and compile-checked; the test suites and the deployment evidence are NOT run yet (test phase of wave 2).
+
+What it does: the profile snapshot (cookies, storage, IndexedDB) is sealed with AES-256-GCM before it reaches Postgres or Redis. Each profile has its own data-encryption key (DEK), wrapped by a master key. A new DEK is used every 256th stored save. The AAD binds the ciphertext to the org, the profile and the snapshot id. Plaintext above 4 KiB is gzipped first. Redis caches envelope bytes only.
+
+Settings (edge environment):
+
+| Setting | Values | Default | Effect |
+|---|---|---|---|
+| `QUARRY_EDGE__PROFILE_ENCRYPTION` | `off`, `compat`, `on` | `off` | `off`: plaintext, as before. `compat`: reads both, writes plaintext. `on`: reads both, writes envelopes only, lazy re-seal of plaintext rows. |
+| `QUARRY_EDGE__PROFILE_ENCRYPTION_REQUIRED` | `true` / `false` | `false` | Boot refuses any mode below `on`. Set only in the production overlay after the backfill (WS17.E3). |
+| `QUARRY_EDGE__PROFILE_KEY_PROVIDER` | `env` | `env` | `org_core` is refused at boot (WS17.E2 is not built). |
+| `QUARRY_PROFILE_MASTER_KEYS` | JSON `{"v1":"<base64 of 32 bytes>"}` | unset | Required for `compat` and `on`. Minted once; listed in the secrets ledger, never in a committed file. |
+| `QUARRY_PROFILE_MASTER_KEY_ACTIVE` | a key id, for example `v1` | unset | Required for `compat` and `on`. Must name a configured key. |
+
+Boot refusals (the edge stops, the message names the setting and never the value): an unknown mode; `org_core`; `REQUIRED` with a mode below `on`; `compat` or `on` without master keys or without an active id; a master key that is not 32 bytes; an active id that is not configured. `on` with the env provider logs a WARN: there is no crypto-shredding until WS17.E2.
+
+Encryption needs the Postgres profile store (`QUARRY_EDGE__PROFILE_STORE_KIND=postgres` and `QUARRY_EDGE__DATABASE_URL`). Without it the edge refuses to start with encryption on.
+
+Rollout, one step per fully rolled-out release:
+1. Ship the code with `off`. Migration 0016 adds `envelope`, `enc_v` and `key_id` (idempotent, no data change).
+2. `compat` on every pod. Writes stay plaintext; the fleet can run mixed.
+3. `on` after every pod runs the new code. Old pods cannot read rows whose `snapshot` is NULL, which is why `on` waits for a full new fleet. Plaintext rows are re-sealed lazily on load (compare-and-set on `rev`; a row that moved on is left alone).
+4. `REQUIRED=true` after the E3 backfill reports zero plaintext rows.
+
+Rollback from `on`: set `compat`. Envelope rows stay readable by the new pods; `compat` writes plaintext again. Rollback past `compat` to `off` is not supported while envelope rows exist.
+
+Key loss: losing `QUARRY_PROFILE_MASTER_KEYS` (every key id that wrapped a DEK) makes every profile it wrapped unreadable. A load then fails with `RuntimeNotReady` (HTTP 503 class; the message reads `profile key unavailable`). The route layer does not yet set a `details.reason` field (depth). It never starts a profile fresh, and the row is not changed. Keep the master key in the secrets ledger and in a second place before `on`.
+
+Checks (for the test phase, not run here):
+- Unit: `cargo test -p quarry-runtime profile` (crypto, keys, blob store, envelope store, Redis cache with `REDIS_URL`, Postgres blob row with `DATABASE_URL`).
+- Boot: `cargo test -p quarry-edge profile_encryption`.
+- Evidence (on the rebuilt edge image with `on`): a persistent run that sets a canary cookie; then `select enc_v, key_id, snapshot is null, length(envelope) from quarry_profiles where profile_id='<id>'` returns `1|env:v1|t|<n>`, and `select encode(envelope,'escape') from quarry_profiles` contains no canary; Redis keys under `quarry:profile:v2:*` hold no canary; a second run restores the cookie; a throwaway edge with a wrong master key returns 503 (`RuntimeNotReady`) and leaves `rev` unchanged.
+
+Open items (depth file `.plan-work/quarry-w1w2/depth/W2-U36.md`): the pinned known-answer ciphertext; external review of `profile_crypto.rs` and `envelope_profile_store.rs` before `REQUIRED` in production; restore latency evidence; the org_core provider (WS17.E2).
