@@ -1077,3 +1077,17 @@ Check after a deploy (not run in this unit): `docker stop quarry-orchestrator` e
 - Codes: `browser_receipts_unavailable_zdr` (409) for receipts and procedure of a ZDR session, given before Quarry is asked; `browser_procedure_not_compilable` (409) when Quarry refuses the compile; the owner gate passes Quarry's 404 through for a session the caller does not own. Egress is allowed for ZDR (live decisions only).
 - Check after a deploy (when the evidence stack is up): `curl` the gateway devtools route with `?levels=error&filter=boom` and then `?levels=info`; the first returns the page error, the second does not. A ZDR session's receipts route returns `browser_receipts_unavailable_zdr`.
 - Tests (written, compile-checked, NOT run in this build): Quarry `cargo test -p quarry-edge devtools_filter` (four tests in `agent_routes/tabs.rs`). Gateway `cargo test --manifest-path "apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml" browser_evidence` (wiremock Quarry, ten tests in `domains/browser_evidence.rs`).
+
+## Crawl scope on run_page: WS14.S2 (U20, built, NOT run, 2026-10-23)
+
+`POST /v1/internal/run_page` takes an optional `crawl` object. It scopes the links of the one page it fetches and attaches a report. Nothing sends `crawl` yet: the orchestrator is WS14.S3. Until then the route answers exactly as before, so there is no flag and no rollout step.
+
+- Request: `crawl: {v: 1, kind: crawl|batch, depth, max_depth (0 = unlimited), seed_hosts[], seed_url?, scope: {allow_subdomains, allow_external_links, crawl_entire_domain, include_paths[], exclude_paths[], deny_extensions (null = built-in list), legacy}, scope_mode: enforce|observe, robots: respect|ignore}`. Defaults: same host (`www.` equivalent), no subdomains, no external links, whole domain.
+- Response with `crawl`: `links` are the allowed links (enforce, normalised: fragment dropped, empty path set to `/`) or every href as sent (observe). `crawl.denials` has `counts` by code, at most 3 `samples` per code and 20 per page, and `robots` entries (at most 50). `kind: batch` returns no links.
+- Malformed input (unknown key, bad host, bad version, over-cap list, regex that does not compile) is a 400 with `details.fields[] {path, code, message}`, for example `crawl.scope.include_paths[1]`. Nothing is fetched.
+- Caps: 100 patterns across include and exclude, 512 characters each, 8192 in total, 5000 links evaluated per page (the rest are counted as `links_unevaluated`).
+- Pattern grammar: `re:` regex on the path, `re_url:` regex on the URL, `url:` prefix on the URL, a plain pattern with `*` or `?` an anchored glob, any other plain pattern a path prefix. A matching exclude beats any include.
+- Robots: the edge does not consult robots rules here yet (WS14.S4 adds the cached-rules lookup), so `robots_disallowed` and `robots_unreachable` do not appear from this route yet.
+- Tests (written, compile-checked, NOT run): `cargo test -p quarry-runtime crawl_filter` (host rule, patterns, caps, depth, redirects, observe, batch, and the proptest host differential) and `cargo test -p quarry-core crawl_` plus `cargo test -p quarry-edge --test crawl_scope_robots`.
+- Rollback: none needed for callers that omit `crawl`. A revert of the three U20 commits removes the field from the route.
+- Evidence owed (not done): the signed `run_page` call against the fixture site with and without `crawl`, and a golden of the no-crawl body recorded from the pre-U20 handler. See `.plan-work/quarry-w1w2/depth/W2-U20.md`.
