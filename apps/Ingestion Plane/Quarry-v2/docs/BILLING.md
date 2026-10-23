@@ -124,3 +124,54 @@ emitted shape without spinning up NATS.
 - **Per-search SERP-provider cost** — split `search.query` into
   `search.query.brave` / `search.query.serper` so paid providers can
   attribute their unit cost to the right tenant.
+
+## Browser and crawl metrics (WS6.C-e)
+
+Seven metrics are added by `QUARRY_EDGE__USAGE_BROWSER_METRICS` (`off`, `shadow`, `on`;
+default `off`). They are gated by `usage_attrs::ShadowMeter` in front of the meter, so the
+call sites emit them unconditionally and the mode decides what happens:
+
+| Constant                                 | String                              | Emitted by                                                | Quantity                          |
+| ---------------------------------------- | ----------------------------------- | --------------------------------------------------------- | --------------------------------- |
+| `usage_metrics::BROWSER_SECOND_AGENT`    | `quarry.browser.second.agent`       | agent run segment close (`finish_run`)                    | whole seconds of active time, floored |
+| `usage_metrics::BROWSER_SECOND_INTERACTIVE` | `quarry.browser.second.interactive` | manual session segment close                              | whole seconds, floored            |
+| `usage_metrics::AGENT_RUN`               | `quarry.agent.run`                  | agent run segment close                                   | `1.0`                             |
+| `usage_metrics::AGENT_STEP`              | `quarry.agent.step`                 | agent run segment close                                   | completed steps of the segment    |
+| `usage_metrics::CRAWL_PAGE`              | `quarry.crawl.page`                 | `/v1/internal/run_page` with `kind=crawl`, off ZDR        | `1.0` per page                    |
+| `usage_metrics::EXTRACT_URL`             | `quarry.extract.url`                | `/v1/extract`                                             | URLs fetched or extracted (failures free) |
+| `usage_metrics::MAP_CALL`                | `quarry.map.call`                   | `/v1/map`                                                | `1.0` per call                    |
+
+**Event ids.** Run segments use `quarry:<run_id>:s<segment>:<metric>`; the segment is `0` for the
+first start and goes up by one on each resume, so a resumed run never reuses an id. Other events
+use `quarry:<request_id>:<metric>` (extract, map), `quarry:<run_id>:<sha256(url)[:16]>:quarry.crawl.page`
+(crawl page: a retried page activity adds no second row), or the legacy request id (crawl seed,
+batch). Every id is checked against billing-core's rule (`^[A-Za-z0-9][A-Za-z0-9._:-]*$`, at most
+128 bytes) before it is sent; a refused id is logged by class and not sent.
+
+**Metadata.** The closed set is `outcome` (`ok`, `error`, `refused`, `cancelled`, `timeout`,
+`budget_exhausted`, `expired`), `surface`, `class` (`agent` or `interactive`), `driver`,
+`estimated`, `zdr`, `user_id`, `counts`; off ZDR also `host` (map only), `paid_provider` and
+`llm_format`. Under ZDR the only keys are `zdr, outcome, class, surface, driver, estimated, counts,
+user_id`: no URL, host, title or fingerprint is written. `surface` is `api` for any user token;
+a service token names its surface in `x-verevon-surface` (closed set `chat`, `browser_ui`,
+`space`, `api`, `schedule`, `mcp`, `internal`), and an absent or unknown value is `internal`.
+Only the agent start route reads the header; the other routes derive `surface` from the token.
+
+**Modes.**
+
+- `off` (default): the seven metrics are dropped. The existing metrics keep their legacy rules.
+- `shadow`: the seven metrics are counted in `quarry_usage_shadow_events_total{metric}` and published
+  nothing. The existing metrics keep their legacy rules. Use it for a week before `on`.
+- `on`: the seven metrics are published. The corrected rules for the existing metrics apply:
+  a crawl seed or batch is billed only when the orchestrator accepted the job (no seed on a failed
+  handoff); a scrape event carries the closed metadata set (no `url`, no `fingerprint`); `/v1/extract`
+  is billed per URL as `quarry.extract.url` rather than as `quarry.search.query`; `/v1/map` is billed as
+  `quarry.map.call` rather than as `quarry.search.query`.
+
+**Prerequisite.** Each new metric needs one Lago billable-metric code before `on` reaches invoices. No
+such code exists in the repository; billing-core's `usage_test.go` pin for the id shape stays with the
+billing owner (WAITING-OTHER). Rollback is `off`.
+
+**Not in this change.** Usage is emitted at segment close only, so a segment that ends with a crash is
+not billed (ZDR runs are unbilled by design, ADR-4). The shutdown drain flush is WS6.J. Segment usage
+needs budget enforcement not `off`, because the budget ledger is the clock.

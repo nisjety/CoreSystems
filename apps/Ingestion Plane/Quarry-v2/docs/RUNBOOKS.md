@@ -1376,3 +1376,20 @@ Refusals (403, the message is the reason): `human_browse_disabled`, `human_brows
 Rollback. `QUARRY_EDGE__HUMAN_BROWSE=0`: new starts with a human grant are refused. The image rollback is safe (the tolerant decode and the policy column are additive).
 
 Not done in this unit (see the depth file): the broker side (WS8.C: `human_browse` issuance, `RenewGrant`, the policy column); idle 900 s and absolute 4 h lifetimes (a human run uses the default TTL); the integration test `tests/human_browse.rs`; deployment evidence.
+
+## Browser and crawl usage metering (WS6.C-e)
+
+Switch: `QUARRY_EDGE__USAGE_BROWSER_METRICS` = `off` (default), `shadow`, `on`. Read once at boot by
+`usage_attrs::browser_metrics_mode_from_env`; a value that is not one of the three is `off` and logged.
+
+Order of rollout:
+
+1. Confirm the Lago billable-metric codes for the seven metrics exist (none do in the repository).
+2. Set `shadow`, restart the edge. Watch `quarry_usage_shadow_events_total` by metric: a segment close
+   produces `browser.second.*` and `agent.run` for an agent, one `browser.second.interactive` for a session.
+   Nothing is published in this mode.
+3. Set `on`. The corrected rules for the existing metrics start with this step (see BILLING.md). Check the
+   billing rows for one agent run and one manual session with `psql` on `billing_usage_events`.
+
+Rollback: set `off` and restart the edge. The existing metrics go back to their legacy rules at the same
+time; events already published are not withdrawn.

@@ -744,3 +744,19 @@ An agent-class run (a service principal, or `initiated_by: "agent"`) is bounded 
 **Error reasons.** `BUDGET_EXHAUSTED` (402, not retryable) is unchanged from the WS6.B gate; its `details` are `{dimension, limit, spent, unit, estimated, limit_source, resumable: false}`.
 
 Goldens: none changed. The OpenAPI schemas are `BudgetMeta` (new), `Envelope_BrowserObservation.meta` and the `DELETE` response `usage` (additive).
+
+## Usage events for browser, agent and crawl work (WS6.C-e)
+
+The usage event shape is unchanged (`UsageEvent`, `event_id`, `metadata`). New here:
+
+- Seven metric names (`quarry.browser.second.agent`, `quarry.browser.second.interactive`,
+  `quarry.agent.run`, `quarry.agent.step`, `quarry.crawl.page`, `quarry.extract.url`,
+  `quarry.map.call`), published only under `QUARRY_EDGE__USAGE_BROWSER_METRICS=on`. Full table and
+  mode rules in `BILLING.md`, section "Browser and crawl metrics (WS6.C-e)".
+- Event ids for run segments are `quarry:<run_id>:s<segment>:<metric>`. `segment` is a checkpoint
+  field (`budget.segment`, absent on a checkpoint written before it existed and read as `0`).
+- The orchestrator's run_page body may carry `kind` (`crawl` or `batch`). Absent means a scrape or a
+  monitor. Only `crawl` is metered (`quarry.crawl.page`). The field is not in `openapi.yaml` as a
+  documented request property yet (depth item).
+- The `x-verevon-surface` header is read on the agent start route and honoured only on a service
+  token, from the closed set in `BILLING.md`.
