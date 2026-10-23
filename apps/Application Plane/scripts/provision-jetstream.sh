@@ -35,8 +35,7 @@ echo "== streams =="
 for spec in \
   "VEREVON_APPLICATION:verevon.application.>" \
   "VEREVON_INGESTION:verevon.ingestion.>" \
-  "VEREVON_MODEL:verevon.model.>" \
-  "VEREVON_AUDIT:verevon.audit.>"; do
+  "VEREVON_MODEL:verevon.model.>"; do
   name=${spec%%:*}; subj=${spec##*:}
   if nb "stream info $name" | grep -q "Information for Stream"; then
     echo "  = $name (exists)"
@@ -44,6 +43,39 @@ for spec in \
     nb "stream add $name --subjects='$subj' --storage=file --retention=limits \
       --discard=old --max-msgs=-1 --max-bytes=-1 --max-age=72h --dupe-window=2m \
       --replicas=1 --defaults" >/dev/null && echo "  + $name ($subj)"
+  fi
+done
+
+echo "== audit-core stream (plane application) =="
+# Same topology as scripts/jetstream-provision-entrypoint.sh (see there for the
+# why); scripts/tests/audit-stream-contract-test.sh pins both. A failure here
+# stops the script: an audit stream that silently does not exist loses events.
+audit_stream=VEREVON_CONTROL_OBSERVABILITY
+if nb "stream info VEREVON_AUDIT" | grep -q 'verevon\.audit\.>'; then
+  nb "stream edit VEREVON_AUDIT --subjects='verevon.audit.retired.>' --force" >/dev/null \
+    || { echo "could not narrow VEREVON_AUDIT" >&2; exit 1; }
+  echo "  ~ VEREVON_AUDIT (narrowed to verevon.audit.retired.>)"
+fi
+if nb "stream info $audit_stream" | grep -q "Information for Stream"; then
+  echo "  = $audit_stream (exists)"
+else
+  nb "stream add $audit_stream \
+    --subjects='verevon.audit.v1.application.>,verevon.usage.v1.application.>,verevon.audit.v2.application.>,verevon.usage.v2.application.>,verevon.dlq.audit-core.>' \
+    --storage=file --retention=limits --discard=old --max-msgs=2000000 --max-bytes=-1 \
+    --max-age=720h --dupe-window=2m --replicas=1 --defaults" >/dev/null \
+    || { echo "could not create $audit_stream" >&2; exit 1; }
+  echo "  + $audit_stream"
+fi
+for kind in audit usage; do
+  durable="audit-core-application-v3-$kind"
+  if nb "consumer info $audit_stream $durable" | grep -q "Information for Consumer"; then
+    echo "  = $audit_stream/$durable (exists)"
+  else
+    nb "consumer add $audit_stream $durable --filter='verevon.$kind.v2.application.>' \
+      --target='_VEREVON.AUDIT.DELIVER.application.$kind-v2' --deliver-group='$durable' \
+      --ack=explicit --wait=30s --max-deliver=5 --deliver=all --replay=instant --defaults" >/dev/null \
+      || { echo "could not create $audit_stream/$durable" >&2; exit 1; }
+    echo "  + $audit_stream/$durable"
   fi
 done
 
