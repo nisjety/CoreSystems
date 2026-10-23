@@ -216,6 +216,8 @@ pub async fn start_run(
     // touch it, so a later validate cannot widen the run.
     let mut grant_budget: Option<quarry_runtime::grant_validator::GrantBudget> = None;
     let mut grant_is_run_kind = false;
+    // A person's `human_browse` grant, admitted once the run's ZDR posture is known (WS8.B).
+    let mut human_grant: Option<quarry_runtime::GrantValidation> = None;
     if let Some(grant_id) = grant_id.as_deref() {
         let grant = state
             .grant_validator
@@ -232,7 +234,9 @@ pub async fn start_run(
         grant_is_zdr = grant.zdr;
         grant_budget = grant.budget.clone().filter(|claim| claim.is_set());
         grant_is_run_kind = grant.kind == "run";
-        if let Some(broker_domains) =
+        if grant.kind == super::human_browse::GRANT_KIND_HUMAN_BROWSE {
+            human_grant = Some(grant.clone());
+        } else if let Some(broker_domains) =
             bind_validated_grant(&grant, &claims, state.require_browser_grants)
                 .map_err(|reason| status_err(StatusCode::FORBIDDEN, &request_id, &reason))?
         {
@@ -287,6 +291,35 @@ pub async fn start_run(
             &request_id,
             "a ZDR browser grant cannot back a non-ZDR run",
         ));
+    }
+
+    // WS8.B: a person's open-web run. Its grant is admitted here (switch, person, owner,
+    // ZDR posture, open-web policy). The run takes no domains from the caller and no step,
+    // time or cost bound from the request; the broker's policy is its only host authority.
+    let mut nav_policy = super::human_browse::RunNavPolicy::Allowlist;
+    if let Some(human) = human_grant.as_ref() {
+        nav_policy = super::human_browse::admit_start(
+            crate::run_limits::human_browse_enabled(),
+            claims.is_service(),
+            claims.actor_id(),
+            human,
+            zdr.is_active(),
+        )
+        .map_err(|reason| status_err(StatusCode::FORBIDDEN, &request_id, reason))?;
+        constraints.allowed_domains = Vec::new();
+        constraints.max_steps = 0;
+        constraints.max_runtime_s = None;
+        constraints.max_cost_usd = None;
+    }
+    // A resumed run keeps the navigation mode it started with. An unknown stored mode fails closed.
+    if let Some(checkpoint) = resume_checkpoint.as_ref() {
+        if !super::human_browse::resume_policy_matches(checkpoint.policy_mode.as_deref(), &nav_policy) {
+            return Err(status_err(
+                StatusCode::FORBIDDEN,
+                &request_id,
+                "resumed run policy no longer matches its broker grant",
+            ));
+        }
     }
     let ttl_s = constraints.max_runtime_s.unwrap_or(120);
     let viewport = normalize_viewport(
@@ -399,7 +432,10 @@ pub async fn start_run(
         .agent_driver
         .configure_egress_policy(
             &session,
-            crate::agent_policy_gate::egress_policy(&web_decision, &constraints.allowed_domains),
+            super::human_browse::open_web_egress(
+                &nav_policy,
+                crate::agent_policy_gate::egress_policy(&web_decision, &constraints.allowed_domains),
+            ),
         )
         .await
     {
@@ -415,7 +451,7 @@ pub async fn start_run(
             let recovery_action = AgentAction::Navigate {
                 url: checkpoint.current_url.clone(),
             };
-            if !domain_allowed(&checkpoint.current_url, &constraints.allowed_domains) {
+            if !nav_policy.allows(&checkpoint.current_url, &constraints.allowed_domains) {
                 let _ = state.agent_driver.release(session).await;
                 return Err(status_err(
                     StatusCode::FORBIDDEN,
@@ -516,6 +552,7 @@ pub async fn start_run(
         closed: false,
         last_rejected_epoch: None,
         tab_origins: HashMap::new(),
+        nav_policy,
     };
     let live = RunLive::new(
         entry.org_id.clone(),

@@ -39,6 +39,8 @@ mod admission;
 mod sensitive_approval;
 #[cfg(feature = "browser-agent")]
 mod budget;
+
+pub(crate) mod human_browse;
 #[cfg(feature = "browser-agent")]
 mod control;
 #[cfg(feature = "browser-agent")]

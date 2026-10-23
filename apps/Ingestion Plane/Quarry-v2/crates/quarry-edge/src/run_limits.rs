@@ -35,6 +35,60 @@ pub fn takeover_enforced() -> bool {
         .unwrap_or(false)
 }
 
+/// The switch for human-browse grants (WS8.B, D8-5). Off by default: a grant of
+/// kind `human_browse` is refused while it is off. An unreadable value is off here
+/// and stops the edge at boot (`RunLimits::from_lookup`).
+pub const ENV_HUMAN_BROWSE: &str = "QUARRY_EDGE__HUMAN_BROWSE";
+
+/// How a person's step is recorded on a non-ZDR run (WS8.B): `metadata` (the
+/// default: redacted action, no observation), `full` (today's storage, for dev and
+/// procedure recording) or `none` (no receipt). ZDR runs write nothing either way.
+pub const ENV_HUMAN_RECEIPT_MODE: &str = "QUARRY_EDGE__HUMAN_RECEIPT_MODE";
+
+/// Parse the human-browse switch: unset, empty, `0`, `false` or `off` is off;
+/// `1`, `true` or `on` is on; anything else is an error naming the variable.
+pub fn parse_human_browse(raw: Option<&str>) -> Result<bool, String> {
+    match raw.map(|value| value.trim().to_ascii_lowercase()).as_deref() {
+        None | Some("") | Some("0") | Some("false") | Some("off") => Ok(false),
+        Some("1") | Some("true") | Some("on") => Ok(true),
+        Some(other) => Err(format!(
+            "{ENV_HUMAN_BROWSE} must be 0, 1, on, off, true or false, got {other:?}"
+        )),
+    }
+}
+
+/// The recording mode of a person's step (see `ENV_HUMAN_RECEIPT_MODE`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HumanReceiptMode {
+    Metadata,
+    Full,
+    None,
+}
+
+/// Parse the human receipt mode; unset or empty is `metadata`.
+pub fn parse_human_receipt_mode(raw: Option<&str>) -> Result<HumanReceiptMode, String> {
+    match raw.map(|value| value.trim().to_ascii_lowercase()).as_deref() {
+        None | Some("") | Some("metadata") => Ok(HumanReceiptMode::Metadata),
+        Some("full") => Ok(HumanReceiptMode::Full),
+        Some("none") => Ok(HumanReceiptMode::None),
+        Some(other) => Err(format!(
+            "{ENV_HUMAN_RECEIPT_MODE} must be metadata, full or none, got {other:?}"
+        )),
+    }
+}
+
+/// Whether human-browse grants are accepted now. Read at each start, so a test or an
+/// operator changing the variable is seen by the next start; unreadable is off.
+pub fn human_browse_enabled() -> bool {
+    parse_human_browse(std::env::var(ENV_HUMAN_BROWSE).ok().as_deref()).unwrap_or(false)
+}
+
+/// The receipt mode for a person's step now; unreadable is `metadata`.
+pub fn human_receipt_mode() -> HumanReceiptMode {
+    parse_human_receipt_mode(std::env::var(ENV_HUMAN_RECEIPT_MODE).ok().as_deref())
+        .unwrap_or(HumanReceiptMode::Metadata)
+}
+
 /// Ceiling on an agent run's absolute lifetime, whatever it asks for.
 pub const AGENT_MAX_TTL_CEILING_S: u64 = 3600;
 
@@ -110,6 +164,9 @@ impl RunLimits {
 
     /// Read every value through `get` (the environment in production).
     pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Self, String> {
+        // The human-browse switches fail loud at boot, like the bounds below.
+        parse_human_browse(get(ENV_HUMAN_BROWSE).as_deref())?;
+        parse_human_receipt_mode(get(ENV_HUMAN_RECEIPT_MODE).as_deref())?;
         let defaults = Self::default();
         let flag = |name: &str, default: bool| -> Result<bool, String> {
             let full = format!("QUARRY_EDGE__{name}");

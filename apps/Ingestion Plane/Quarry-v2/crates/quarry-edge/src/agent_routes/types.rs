@@ -43,6 +43,9 @@ pub struct RunEntry {
     /// instead of dropping the tab (see `tabs::remember_tab_opener`).
     /// A tab the browser opened itself (the first one, a popup) has no entry.
     pub tab_origins: HashMap<String, TabOrigin>,
+    /// The navigation authority this run holds (WS8.B): its own allow-list, or open
+    /// web minus the broker's denied list for a person's `human_browse` run.
+    pub nav_policy: super::human_browse::RunNavPolicy,
 }
 
 /// Who opened a tab: the initiator class and, for an agent, which one. The owner

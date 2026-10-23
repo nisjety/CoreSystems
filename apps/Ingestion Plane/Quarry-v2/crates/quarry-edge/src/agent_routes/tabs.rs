@@ -147,6 +147,7 @@ pub async fn new_tab(
             &entry.org_id,
             grant_id,
             &entry.constraints.allowed_domains,
+            &entry.nav_policy,
         )
         .await
             .map_err(|error| driver_err(&request_id, error))?;
@@ -159,7 +160,7 @@ pub async fn new_tab(
     }
 
     if let Some(url) = body.url.as_deref() {
-        if !domain_allowed(url, &entry.constraints.allowed_domains) {
+        if !entry.nav_policy.allows(url, &entry.constraints.allowed_domains) {
             return Err(status_err(
                 StatusCode::FORBIDDEN,
                 &request_id,

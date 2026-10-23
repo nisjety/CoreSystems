@@ -248,6 +248,7 @@ fn step_budget_is_fail_closed_once_limit_is_reached() {
         closed: false,
         last_rejected_epoch: None,
         tab_origins: HashMap::new(),
+        nav_policy: super::human_browse::RunNavPolicy::Allowlist,
     };
     assert!(enforce_step_budget(&entry).is_err());
     entry.constraints.max_steps = 0;
@@ -308,6 +309,7 @@ fn entry_with_budget(budget: Option<crate::budget::RunBudget>) -> RunEntry {
         closed: false,
         last_rejected_epoch: None,
         tab_origins: HashMap::new(),
+        nav_policy: super::human_browse::RunNavPolicy::Allowlist,
     }
 }
 
@@ -1910,6 +1912,7 @@ fn gone_checkpoint(run_id: &RunKind, actor: &str, zdr: ZdrMode, status: AgentRun
         control_mode: BrowserControlMode::AgentControl,
         control_epoch: 0,
         budget: None,
+        policy_mode: None,
     }
 }
 
@@ -2085,6 +2088,10 @@ fn broker_grant(owner: &str, domains: &[&str], zdr: bool) -> quarry_runtime::Gra
         owner_id: owner.into(),
         zdr,
         budget: None,
+        policy_mode: String::new(),
+        denied_domains: Vec::new(),
+        absolute_expires_at: None,
+        resource_id: String::new(),
     }
 }
 

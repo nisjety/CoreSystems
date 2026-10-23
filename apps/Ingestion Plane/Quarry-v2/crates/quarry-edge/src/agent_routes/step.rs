@@ -48,6 +48,14 @@ pub async fn step(
     )
     .await
     .map_err(|error| driver_err(&request_id, error))?;
+    // WS8.B: the receipt plan and the budget exemption of this step.
+    let receipt_plan = super::human_browse::receipt_plan(
+        admitted.initiator,
+        entry.zdr.is_active(),
+        crate::run_limits::human_receipt_mode(),
+    );
+    let metadata_only = receipt_plan == super::human_browse::ReceiptPlan::Metadata;
+    let counts_budget = super::human_browse::counts_against_step_budget(admitted.initiator);
 
     let req = AgentActionRequest {
         run_id: entry.run_id.clone(),
@@ -88,15 +96,17 @@ pub async fn step(
             // budgets are enforceable.
             let cost_usd = receipt_cost_usd(&obs.telemetry, &receipt_action);
             let cost_source = receipt_cost_source(&obs.telemetry);
-            budget_charge(&mut entry, true, cost_usd);
+            if counts_budget {
+                budget_charge(&mut entry, true, cost_usd);
+            }
             let receipt = ReceiptBuilder::start(receipt_run_id.clone(), receipt_step)
                 .org_id(entry.org_id.clone())
                 .actor_id(entry.actor_id.clone())
                 .initiator(admitted.initiator, admitted.control_epoch)
                 .agent(admitted.agent.clone())
                 .cost_source(cost_source)
-                .complete(receipt_action, Some(obs.clone()), cost_usd);
-            if !entry.zdr.is_active() {
+                .complete_maybe_metadata(metadata_only, receipt_action, Some(obs.clone()), cost_usd);
+            if receipt_plan != super::human_browse::ReceiptPlan::Skip {
                 state
                     .receipts
                     .append(receipt)
@@ -108,7 +118,9 @@ pub async fn step(
         Err(error) => {
             // A failed attempt is charged the flat cost, so its receipt carries it too (WS6.B).
             let flat_usd = estimated_action_cost_usd(&receipt_action);
-            budget_charge(&mut entry, false, flat_usd);
+            if counts_budget {
+                budget_charge(&mut entry, false, flat_usd);
+            }
             let receipt = ReceiptBuilder::start(receipt_run_id, receipt_step)
                 .org_id(entry.org_id.clone())
                 .actor_id(entry.actor_id.clone())
@@ -116,8 +128,8 @@ pub async fn step(
                 .agent(admitted.agent.clone())
                 .failed_cost(flat_usd)
                 .cost_source(CostSource::FlatTable)
-                .fail(receipt_action, &error);
-            if !entry.zdr.is_active() {
+                .fail_maybe_metadata(metadata_only, receipt_action, &error);
+            if receipt_plan != super::human_browse::ReceiptPlan::Skip {
                 state
                     .receipts
                     .append(receipt)
@@ -143,7 +155,7 @@ pub async fn step(
             .map_err(|error| driver_err(&request_id, error))?;
     }
 
-    if !domain_allowed(&obs.url, &entry.constraints.allowed_domains) {
+    if !entry.nav_policy.allows(&obs.url, &entry.constraints.allowed_domains) {
         return Err(status_err(
             StatusCode::FORBIDDEN,
             &request_id,
@@ -186,6 +198,14 @@ pub(super) async fn execute_ws_action(
         },
     )
     .await?;
+    // WS8.B: the receipt plan and the budget exemption of this step.
+    let receipt_plan = super::human_browse::receipt_plan(
+        admitted.initiator,
+        entry.zdr.is_active(),
+        crate::run_limits::human_receipt_mode(),
+    );
+    let metadata_only = receipt_plan == super::human_browse::ReceiptPlan::Metadata;
+    let counts_budget = super::human_browse::counts_against_step_budget(admitted.initiator);
     let req = AgentActionRequest {
         run_id: entry.run_id.clone(),
         lease_id: entry.lease.lease_id.clone(),
@@ -214,31 +234,40 @@ pub(super) async fn execute_ws_action(
     {
         Ok(observation) => {
             let cost_usd = receipt_cost_usd(&observation.telemetry, &receipt_action);
-            budget_charge(&mut entry, true, cost_usd);
-            if !entry.zdr.is_active() {
+            if counts_budget {
+                budget_charge(&mut entry, true, cost_usd);
+            }
+            if receipt_plan != super::human_browse::ReceiptPlan::Skip {
                 let receipt = ReceiptBuilder::start(receipt_run_id.clone(), receipt_step)
                     .org_id(entry.org_id.clone())
                     .actor_id(entry.actor_id.clone())
                     .initiator(admitted.initiator, admitted.control_epoch)
                     .agent(admitted.agent.clone())
-                    .complete(receipt_action.clone(), Some(observation.clone()), cost_usd);
+                    .complete_maybe_metadata(
+                        metadata_only,
+                        receipt_action.clone(),
+                        Some(observation.clone()),
+                        cost_usd,
+                    );
                 state.receipts.append(receipt).await?;
             }
             observation
         }
         Err(error) => {
-            budget_charge(
-                &mut entry,
-                false,
-                estimated_action_cost_usd(&receipt_action),
-            );
-            if !entry.zdr.is_active() {
+            if counts_budget {
+                budget_charge(
+                    &mut entry,
+                    false,
+                    estimated_action_cost_usd(&receipt_action),
+                );
+            }
+            if receipt_plan != super::human_browse::ReceiptPlan::Skip {
                 let receipt = ReceiptBuilder::start(receipt_run_id, receipt_step)
                     .org_id(entry.org_id.clone())
                     .actor_id(entry.actor_id.clone())
                     .initiator(admitted.initiator, admitted.control_epoch)
                     .agent(admitted.agent.clone())
-                    .fail(receipt_action, &error);
+                    .fail_maybe_metadata(metadata_only, receipt_action, &error);
                 state.receipts.append(receipt).await?;
             }
             return Err(error);
@@ -251,7 +280,7 @@ pub(super) async fn execute_ws_action(
             .save_run_checkpoint(checkpoint_for_entry(&entry))
             .await?;
     }
-    if !domain_allowed(&observation.url, &entry.constraints.allowed_domains) {
+    if !entry.nav_policy.allows(&observation.url, &entry.constraints.allowed_domains) {
         return Err(QuarryError::new(
             ErrorCode::SecurityBlocked,
             "browser action reached a domain outside the run's allowed domains",

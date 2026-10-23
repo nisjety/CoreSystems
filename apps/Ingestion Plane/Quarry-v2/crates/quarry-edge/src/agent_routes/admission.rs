@@ -35,6 +35,7 @@ pub(super) async fn validate_run_grant(
     org_id: &str,
     grant_id: &str,
     run_domains: &[String],
+    run_nav: &super::human_browse::RunNavPolicy,
 ) -> QuarryResult<()> {
     let grant = state.grant_validator.validate_for_org(org_id, grant_id).await?;
     if !grant.is_usable() {
@@ -44,10 +45,13 @@ pub(super) async fn validate_run_grant(
         ));
     }
     if state.require_browser_grants {
-        let broker_domains =
-            BrowserEgressPolicy::canonical_broker_domains(&grant.allowed_domains)
-                .map_err(|reason| QuarryError::new(ErrorCode::SecurityBlocked, reason))?;
-        if broker_domains != run_domains {
+        // The broker's mode decides the comparison (WS8.B): an allow-list is the
+        // exact host list, an open-web grant is the same denied list. Any other
+        // pairing, or an unknown mode, is a mismatch.
+        let broker = grant
+            .nav_policy()
+            .map_err(|reason| QuarryError::new(ErrorCode::SecurityBlocked, reason))?;
+        if !super::human_browse::broker_matches_run(&broker, run_nav, run_domains) {
             return Err(QuarryError::new(
                 ErrorCode::SecurityBlocked,
                 "browser run domain policy no longer matches its broker grant",
@@ -384,6 +388,7 @@ pub(super) async fn admit_action(
             &entry.org_id,
             grant_id,
             &entry.constraints.allowed_domains,
+            &entry.nav_policy,
         )
         .await?;
     } else if state.require_browser_grants {
@@ -407,13 +412,15 @@ pub(super) async fn admit_action(
 
     // 9. budget: the request's own step cap where the gate does not own it, then the
     // gate, whose first refusal per segment is announced before the 402 is returned.
-    if crate::budget::legacy_step_cap_applies(entry.budget.as_ref(), crate::budget::current_mode()) {
-        enforce_step_budget(entry)
-            .map_err(|message| QuarryError::new(ErrorCode::RateLimited, message))?;
-    }
-    if let Err(error) = budget_gate(entry, action) {
-        announce_budget_refusal(state, entry).await;
-        return Err(error);
+    if super::human_browse::counts_against_step_budget(input.initiator.class) {
+        if crate::budget::legacy_step_cap_applies(entry.budget.as_ref(), crate::budget::current_mode()) {
+            enforce_step_budget(entry)
+                .map_err(|message| QuarryError::new(ErrorCode::RateLimited, message))?;
+        }
+        if let Err(error) = budget_gate(entry, action) {
+            announce_budget_refusal(state, entry).await;
+            return Err(error);
+        }
     }
 
     // 10. sensitive approval (the only gate that consumes state)
@@ -432,7 +439,7 @@ pub(super) async fn admit_action(
 
     // 11. navigation domain
     if let AgentAction::Navigate { url } = action {
-        if !domain_allowed(url, &entry.constraints.allowed_domains) {
+        if !entry.nav_policy.allows(url, &entry.constraints.allowed_domains) {
             return Err(QuarryError::new(
                 ErrorCode::SecurityBlocked,
                 "browser navigation is outside the run's allowed domains",
