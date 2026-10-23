@@ -1067,7 +1067,7 @@ paths:
       - name: max_events
         in: query
         required: false
-        description: Close the stream after this many user-facing events (0 or absent: no cap).
+        description: Close the stream after this many user-facing events (0 or absent, no cap).
         schema:
           type: integer
           minimum: 0
@@ -6531,7 +6531,7 @@ components:
           items:
             type: string
             maxLength: 512
-          description: Include and exclude lists together hold at most 100 patterns. re: matches the URL path with a regex, re_url: the full URL with a regex, url: the full URL, and a plain pattern with * or ? is an anchored glob. Other plain patterns are prefixes.
+          description: "Include and exclude lists together hold at most 100 patterns. re: matches the URL path with a regex, re_url: the full URL with a regex, url: the full URL, and a plain pattern with * or ? is an anchored glob. Other plain patterns are prefixes."
         exclude_paths:
           type: array
           maxItems: 100
