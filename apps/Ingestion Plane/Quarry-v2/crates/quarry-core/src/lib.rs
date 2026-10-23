@@ -11,6 +11,7 @@ pub mod capture;
 pub mod change_history;
 pub mod contracts;
 pub mod crawl_denial;
+pub mod crawl_scope;
 pub mod driver_meta;
 pub mod envelope;
 pub mod error;
