@@ -795,6 +795,37 @@ const mcpShareServerInput = z.object({
   userIds: z.array(z.string().min(1)),
 })
 
+// A tool is approved by naming the digest of the definition the person reviewed,
+// never "whatever is observed now": the owner pins only a digest that is still the
+// observed one, so a definition that changed after the person looked is not pinned
+// unseen. The org is never an input; it comes from the verified session.
+const mcpApproveToolInput = z
+  .object({
+    serverId: z.string().min(1),
+    tool: z.string().min(1),
+    approvedDigest: z.string().regex(/^[0-9a-f]{64}$/),
+  })
+  .strict()
+
+// A per-tool policy. `allow` is the only decision that relaxes an approval, so it
+// alone names the digest of the tool definition the person reviewed (the owner
+// pins it and reads an allow for a changed definition as an ask); `ask` and
+// `never` only tighten and take none. `scope` defaults to the caller's own; an
+// org-wide policy needs an org admin and is checked by the owner, not here.
+const toolsSetPolicyInput = z
+  .object({
+    capabilityId: z.string().min(1),
+    scope: z.enum(['user', 'org']).optional(),
+    decision: z.enum(['allow', 'ask', 'never']),
+    pinnedDigest: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+    reason: z.string().max(500).optional(),
+  })
+  .strict()
+  .refine((input) => (input.decision === 'allow') === (input.pinnedDigest !== undefined), {
+    message: 'pinnedDigest is required for an allow and refused for ask and never',
+    path: ['pinnedDigest'],
+  })
+
 const monitoringCheckNowInput = z.object({
   url: z.string().url(),
 })
@@ -2524,6 +2555,28 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: true,
     inputSchema: mcpShareServerInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'mcp.approve_tool',
+    label: 'Approve MCP tool',
+    description: 'Accept the definition of one tool of an MCP server that the person reviewed, so a tool whose definition changed can be used again. The body names the digest the person saw (approvedDigest); it is pinned only if it is still the observed one, otherwise the call is refused 409 and the person reviews the tool again. Allowed for the owner of a user-scoped server and for an admin of a shared one, derived by the owner from the verified credential. Refused typed under zero data retention. Never model-executable: a model does not approve the tools it is offered.',
+    ownerPlane: 'model',
+    risk: 'high',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: mcpApproveToolInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'tools.set_policy',
+    label: 'Set tool policy',
+    description: 'Set an allow, ask or never policy on the tools of a capability, for the caller or, for an org admin, for the whole org. never and ask tighten and apply to every tool; allow relaxes and is accepted only for an approved MCP tool the scope may relax, never for a built-in tool, an owner effect or an unclassified tool, and it must carry the digest of the definition the person reviewed: a changed definition is asked about again. The strictest policy in force wins, whoever set it. Refused typed under zero data retention, and a policy only takes effect where the deployment has switched policies on. Never model-executable: a model does not set the rules it runs under.',
+    ownerPlane: 'model',
+    risk: 'high',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: toolsSetPolicyInput,
     outputSchema: envelopeStatusOutput,
   },
   {

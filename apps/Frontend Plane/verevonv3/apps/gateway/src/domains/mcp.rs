@@ -7,6 +7,14 @@
 //! server's secret `token` from responses, POST registers a new server, DELETE
 //! removes one, and `/share` replaces a user-owned server's share set.
 //!
+//! The same router also carries the per-tool surface of those servers
+//! (`GET /v1/mcp/servers/{server_id}/tools`, `POST .../tools/{tool}/approve`) and
+//! the per-tool allow/ask/never policies (`/api/v1/tool-policies`). Both are thin
+//! proxies: capability-core decides who may approve a tool (the server's owner, or
+//! an admin for a shared server) and who may set a policy, from the signed
+//! principal. The only gate here is defense in depth: an org-scope policy write
+//! by a non-admin is refused before it is proxied, as an org-wide server is.
+//!
 //! Ownership/sharing: servers are private (`scope == "user"`) by default;
 //! org-wide servers (`scope == "org"`) require an org admin — gated here before
 //! proxying — and model-gateway re-derives admin/owner authoritatively from the
@@ -20,13 +28,14 @@
 //! path `server_id`.
 
 use axum::{
-    extract::{Path, RawQuery, State},
+    extract::{Path, Query, RawQuery, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Redirect, Response},
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
     Extension, Json, Router,
 };
 use reqwest::{header::LOCATION, Method};
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::{
@@ -52,6 +61,16 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route("/api/v1/mcp/servers/oauth/start", post(oauth_start))
         .route("/api/v1/mcp/servers/oauth/callback", get(oauth_callback))
         .route("/api/v1/mcp/servers/connect", post(connect_server))
+        .route("/api/v1/mcp/servers/{server_id}/tools", get(list_server_tools))
+        .route(
+            "/api/v1/mcp/servers/{server_id}/tools/{tool}/approve",
+            post(approve_server_tool),
+        )
+        .route("/api/v1/tool-policies", get(list_tool_policies))
+        .route(
+            "/api/v1/tool-policies/{capability_id}",
+            put(set_tool_policy).delete(revoke_tool_policy),
+        )
         // Per-org/user rate limiting, ordered like `agents_runs.rs`:
         // `require_session` (written last → outer) runs first and inserts
         // `AuthenticatedUser`, so `rate_limit_middleware` (written first → inner)
@@ -306,6 +325,161 @@ async fn connect_server(
     (status, body).into_response()
 }
 
+/// The registry rows of one server's tools: class, approval floor, review state
+/// and digests, never a description or a schema.
+async fn list_server_tools(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(server_id): Path<String>,
+) -> Response {
+    let url = format!(
+        "{}/v1/mcp/servers/{}/tools",
+        state.model_gateway_url,
+        urlencoding::encode(&server_id)
+    );
+    proxy_tool_surface(&state, &user, &headers, Method::GET, &url, None).await
+}
+
+/// A person accepts the definition of a tool they reviewed. Body
+/// `{ "approved_digest": "<observed digest shown to them>" }` is forwarded
+/// verbatim. No role gate here: the owner of a user-scoped server may approve its
+/// tools and an admin those of a shared one, which capability-core derives from
+/// the signed principal and the server's own record, so an admin-only gate in
+/// this layer would lock owners out.
+async fn approve_server_tool(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path((server_id, tool)): Path<(String, String)>,
+    Json(body): Json<Value>,
+) -> Response {
+    let url = format!(
+        "{}/v1/mcp/servers/{}/tools/{}/approve",
+        state.model_gateway_url,
+        urlencoding::encode(&server_id),
+        urlencoding::encode(&tool)
+    );
+    proxy_tool_surface(&state, &user, &headers, Method::POST, &url, Some(body)).await
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ToolPolicyQuery {
+    capability_id: Option<String>,
+    scope: Option<String>,
+}
+
+/// The org's tool policies and the caller's own, optionally for one capability.
+async fn list_tool_policies(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Query(query): Query<ToolPolicyQuery>,
+) -> Response {
+    let mut url = format!("{}/v1/tool-policies", state.model_gateway_url);
+    if let Some(capability_id) = query.capability_id.as_deref().filter(|id| !id.is_empty()) {
+        url.push_str("?capability_id=");
+        url.push_str(&urlencoding::encode(capability_id));
+    }
+    proxy_tool_surface(&state, &user, &headers, Method::GET, &url, None).await
+}
+
+/// Set the caller's own allow/ask/never policy for a capability's tools, or, when
+/// the body asks for `"scope": "org"`, the org's. An org policy needs an org
+/// admin: refused here before it is proxied, and re-derived from the signed token
+/// scopes by capability-core, which also checks the tool's class and the reviewed
+/// digest of an `allow`. The org id is never taken from the body.
+async fn set_tool_policy(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(capability_id): Path<String>,
+    Json(body): Json<Value>,
+) -> Response {
+    let scope = body.get("scope").and_then(Value::as_str);
+    if let Some(refusal) = org_policy_forbidden(&state, &user, scope).await {
+        return refusal.into_response();
+    }
+    let url = format!(
+        "{}/v1/tool-policies/{}",
+        state.model_gateway_url,
+        urlencoding::encode(&capability_id)
+    );
+    proxy_tool_surface(&state, &user, &headers, Method::PUT, &url, Some(body)).await
+}
+
+/// Revoke the caller's own policy for a capability, or, with `?scope=org`, the
+/// org's (admin only, as for `set_tool_policy`).
+async fn revoke_tool_policy(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(capability_id): Path<String>,
+    Query(query): Query<ToolPolicyQuery>,
+) -> Response {
+    if let Some(refusal) = org_policy_forbidden(&state, &user, query.scope.as_deref()).await {
+        return refusal.into_response();
+    }
+    let mut url = format!(
+        "{}/v1/tool-policies/{}",
+        state.model_gateway_url,
+        urlencoding::encode(&capability_id)
+    );
+    if let Some(scope) = query.scope.as_deref().filter(|scope| !scope.is_empty()) {
+        url.push_str("?scope=");
+        url.push_str(&urlencoding::encode(scope));
+    }
+    proxy_tool_surface(&state, &user, &headers, Method::DELETE, &url, None).await
+}
+
+/// The refusal for an org-scope tool-policy request from someone who is not an
+/// org admin, or `None` when the request may be proxied.
+async fn org_policy_forbidden(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    scope: Option<&str>,
+) -> Option<(StatusCode, Json<Value>)> {
+    let wants_org = scope.is_some_and(|scope| scope.eq_ignore_ascii_case("org"));
+    if wants_org && !is_org_admin(state, user).await {
+        return Some((
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "forbidden",
+                "Only organization admins can set org-wide tool policies.",
+            )),
+        ));
+    }
+    None
+}
+
+/// Forward one request of the per-tool surface with the caller's model-gateway
+/// and capability-core credentials, exactly as the server routes above do.
+async fn proxy_tool_surface(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    method: Method,
+    url: &str,
+    body: Option<Value>,
+) -> Response {
+    let token = model_token(state, user, headers).await;
+    let capability = match required_capability_token(state, user, headers).await {
+        Ok(token) => token,
+        Err(error) => return delegated_auth_unavailable(error).into_response(),
+    };
+    let (status, body) = proxy_model_json_with_capability(
+        state,
+        method,
+        url,
+        body,
+        token.as_deref(),
+        Some(&capability),
+        user,
+    )
+    .await;
+    (status, body).into_response()
+}
+
 /// Where the external authorization server redirects the browser back to
 /// after consent. A plain top-level navigation — no fetch, no bearer
 /// header of its own — so the caller's identity comes from the same
@@ -400,4 +574,114 @@ async fn oauth_callback(
     };
     response.headers_mut().insert(LOCATION, location);
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::HeaderMap;
+
+    use super::*;
+    use crate::middleware::AuthorizedMembership;
+
+    fn member(role: &str) -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.test".to_owned(),
+            user_name: "User".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("user".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: Some(AuthorizedMembership {
+                organization_id: "org-1".to_owned(),
+                role: role.to_owned(),
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_org_scope_policy_needs_an_org_admin() {
+        let state = crate::tests::test_state(false);
+        for scope in ["org", "ORG", "Org"] {
+            let refusal = org_policy_forbidden(&state, &member("member"), Some(scope))
+                .await
+                .expect("a member may not set an org policy");
+            assert_eq!(refusal.0, StatusCode::FORBIDDEN, "{scope}");
+            assert!(
+                org_policy_forbidden(&state, &member("admin"), Some(scope))
+                    .await
+                    .is_none(),
+                "{scope}"
+            );
+            assert!(
+                org_policy_forbidden(&state, &member("owner"), Some(scope))
+                    .await
+                    .is_none(),
+                "{scope}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_personal_policy_needs_no_role() {
+        let state = crate::tests::test_state(false);
+        for scope in [None, Some(""), Some("user")] {
+            assert!(
+                org_policy_forbidden(&state, &member("member"), scope)
+                    .await
+                    .is_none(),
+                "{scope:?}"
+            );
+        }
+    }
+
+    // The refusal is answered before a credential is minted or anything is
+    // forwarded: every upstream URL of the test state is a closed port, so a
+    // forwarded request would surface as a gateway error, not a 403.
+    #[tokio::test]
+    async fn a_member_cannot_set_or_revoke_an_org_policy_through_the_routes() {
+        let state = crate::tests::test_state(false);
+        let set = set_tool_policy(
+            State(state.clone()),
+            Extension(member("member")),
+            HeaderMap::new(),
+            Path("cap.mcp_tool.x".to_owned()),
+            Json(serde_json::json!({"scope": "org", "decision": "never"})),
+        )
+        .await;
+        assert_eq!(set.status(), StatusCode::FORBIDDEN);
+        let revoke = revoke_tool_policy(
+            State(state),
+            Extension(member("member")),
+            HeaderMap::new(),
+            Path("cap.mcp_tool.x".to_owned()),
+            Query(ToolPolicyQuery {
+                capability_id: None,
+                scope: Some("org".to_owned()),
+            }),
+        )
+        .await;
+        assert_eq!(revoke.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn the_per_tool_routes_are_registered_behind_the_session_gate() {
+        // Source-text pin: the routes and their session gate live in one router,
+        // so a tool route can never be mounted outside `require_session`.
+        let source = include_str!("mcp.rs");
+        let router = source
+            .split("pub(crate) fn router")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}").next())
+            .expect("the router function");
+        for route in [
+            "/api/v1/mcp/servers/{server_id}/tools\"",
+            "/api/v1/mcp/servers/{server_id}/tools/{tool}/approve",
+            "/api/v1/tool-policies\"",
+            "/api/v1/tool-policies/{capability_id}",
+            "from_fn_with_state(state, require_session)",
+        ] {
+            assert!(router.contains(route), "{route}");
+        }
+    }
 }

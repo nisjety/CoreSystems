@@ -329,4 +329,54 @@ describe('action registry', () => {
       expect(decide?.inputSchema.safeParse({ ...base, ...forged }).success).toBe(false)
     }
   })
+
+  it('registers the tool policy and the tool approval as high-risk, owner-only actions the model cannot execute', () => {
+    for (const id of ['tools.set_policy', 'mcp.approve_tool'] as const) {
+      const action = getActionDescriptor(id)
+
+      expect(action?.ownerPlane).toBe('model')
+      expect(action?.risk).toBe('high')
+      expect(isModelExecutableAction(id)).toBe(false)
+      expect(buildModelContextPack({ route: '/chat', visibleItems: [] }).availableActions).not.toContain(id)
+      expect(action?.description ?? '').toContain('Never model-executable')
+      expect(action?.description ?? '').toContain('zero data retention')
+    }
+  })
+
+  it('lets only an allow carry the reviewed digest, and takes no org from the client', () => {
+    const set = getActionDescriptor('tools.set_policy')
+    const digest = 'a'.repeat(64)
+    const base = { capabilityId: 'cap.mcp_tool.x' }
+
+    expect(set?.inputSchema.safeParse({ ...base, decision: 'allow', pinnedDigest: digest }).success).toBe(true)
+    expect(set?.inputSchema.safeParse({ ...base, decision: 'allow', pinnedDigest: digest, scope: 'org' }).success).toBe(true)
+    expect(set?.inputSchema.safeParse({ ...base, decision: 'ask' }).success).toBe(true)
+    expect(set?.inputSchema.safeParse({ ...base, decision: 'never', scope: 'user', reason: 'no' }).success).toBe(true)
+
+    // An allow without the reviewed digest, and a tightening policy with one.
+    expect(set?.inputSchema.safeParse({ ...base, decision: 'allow' }).success).toBe(false)
+    expect(set?.inputSchema.safeParse({ ...base, decision: 'ask', pinnedDigest: digest }).success).toBe(false)
+    expect(set?.inputSchema.safeParse({ ...base, decision: 'never', pinnedDigest: digest }).success).toBe(false)
+    expect(set?.inputSchema.safeParse({ ...base, decision: 'allow', pinnedDigest: 'abc' }).success).toBe(false)
+    expect(set?.inputSchema.safeParse({ ...base, decision: 'allow', pinnedDigest: digest.toUpperCase() }).success).toBe(false)
+
+    expect(set?.inputSchema.safeParse({ ...base, decision: 'deny' }).success).toBe(false)
+    expect(set?.inputSchema.safeParse({ ...base, decision: 'ask', scope: 'thread' }).success).toBe(false)
+    expect(set?.inputSchema.safeParse({ ...base, capabilityId: '', decision: 'ask' }).success).toBe(false)
+    expect(set?.inputSchema.safeParse({ ...base, decision: 'ask', reason: 'x'.repeat(501) }).success).toBe(false)
+    for (const forged of [{ orgId: 'org_x' }, { userId: 'user_x' }, { setBy: 'user_x' }]) {
+      expect(set?.inputSchema.safeParse({ ...base, decision: 'ask', ...forged }).success).toBe(false)
+    }
+  })
+
+  it('approves a tool by the digest that was reviewed and nothing else', () => {
+    const approve = getActionDescriptor('mcp.approve_tool')
+    const base = { serverId: 'srv', tool: 'echo_read', approvedDigest: 'b'.repeat(64) }
+
+    expect(approve?.inputSchema.safeParse(base).success).toBe(true)
+    expect(approve?.inputSchema.safeParse({ ...base, approvedDigest: '' }).success).toBe(false)
+    expect(approve?.inputSchema.safeParse({ ...base, approvedDigest: 'nope' }).success).toBe(false)
+    expect(approve?.inputSchema.safeParse({ ...base, tool: '' }).success).toBe(false)
+    expect(approve?.inputSchema.safeParse({ ...base, orgId: 'org_x' }).success).toBe(false)
+  })
 })

@@ -11,7 +11,7 @@ use axum::{
     http::{header::CONTENT_TYPE, HeaderMap, HeaderValue, StatusCode},
     middleware,
     response::{IntoResponse, Redirect, Response},
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
     Extension, Json, Router,
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -357,6 +357,23 @@ fn proxy_routes() -> Router<AppState> {
         // choice is ever asked for. Preferred over the two routes above,
         // which remain for direct/explicit use.
         .route("/v1/mcp/servers/connect", post(mcp_connect))
+        // What an MCP server's tools are, and a person's review of one whose
+        // definition changed (WS05-S2); capability-core decides who may approve.
+        .route(
+            "/v1/mcp/servers/:server_id/tools",
+            get(list_mcp_server_tools_proxy),
+        )
+        .route(
+            "/v1/mcp/servers/:server_id/tools/:tool/approve",
+            post(approve_mcp_tool_proxy),
+        )
+        // Per-tool allow / ask / never policies, for the caller and (admins) the
+        // org (WS05-S5). capability-core owns the rules and the audit.
+        .route("/v1/tool-policies", get(list_tool_policies_proxy))
+        .route(
+            "/v1/tool-policies/:capability_id",
+            put(set_tool_policy_proxy).delete(revoke_tool_policy_proxy),
+        )
         // Tasks
         .route("/v1/tasks", get(list_tasks_proxy).post(create_task_proxy))
         .route("/v1/tasks/:id", get(get_task_proxy).patch(patch_task_proxy))
@@ -5523,6 +5540,10 @@ async fn proxy_to_capability_core(
             let b = body.cloned().unwrap_or(json!({}));
             client.patch(&url).json(&b)
         }
+        "PUT" => {
+            let b = body.cloned().unwrap_or(json!({}));
+            client.put(&url).json(&b)
+        }
         "DELETE" => client.delete(&url),
         _ => {
             return Err((
@@ -5626,6 +5647,131 @@ async fn cancel_task_proxy(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
     proxy_to_capability_core(&s, &c, &bearer, &format!("tasks/{id}/cancel"), "POST", None).await
+}
+
+/// Whether `value` may stand as one path segment of a capability-core URL: the
+/// registry's own identifier alphabet. Axum hands a handler the decoded segment,
+/// so without this a `%2F..%2F` in an id would walk the forwarded request to
+/// another capability-core route under the caller's bearer.
+fn is_registry_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    value.len() <= 200
+        && chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '-'))
+}
+
+fn require_registry_identifier(value: &str, what: &str) -> Result<(), HttpJsonError> {
+    if is_registry_identifier(value) {
+        return Ok(());
+    }
+    Err((
+        StatusCode::BAD_REQUEST,
+        Json(json!({ "error": format!("{what} is not a valid identifier") })),
+    ))
+}
+
+/// `GET /v1/mcp/servers/:server_id/tools` — the registry rows of one server's
+/// tools (class, floor, review state, digests; never a description or schema).
+async fn list_mcp_server_tools_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(server_id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    require_registry_identifier(&server_id, "server_id")?;
+    proxy_to_capability_core(
+        &s,
+        &c,
+        &bearer,
+        &format!("mcp/{server_id}/tools"),
+        "GET",
+        None,
+    )
+    .await
+}
+
+/// `POST /v1/mcp/servers/:server_id/tools/:tool/approve` — a person accepts the
+/// definition of a tool they reviewed. The body names the digest they saw; whether
+/// they may approve (server owner, or an admin for a shared server) is
+/// capability-core's decision on the signed principal, not this route's.
+async fn approve_mcp_tool_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path((server_id, tool)): Path<(String, String)>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, HttpJsonError> {
+    require_registry_identifier(&server_id, "server_id")?;
+    require_registry_identifier(&tool, "tool")?;
+    proxy_to_capability_core(
+        &s,
+        &c,
+        &bearer,
+        &format!("mcp/{server_id}/tools/{tool}/approve"),
+        "POST",
+        Some(&body),
+    )
+    .await
+}
+
+/// `GET /v1/tool-policies?capability_id=` — the org's policies and the caller's own.
+async fn list_tool_policies_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Value>, HttpJsonError> {
+    let capability_id = q
+        .get("capability_id")
+        .map(String::as_str)
+        .unwrap_or_default();
+    if !capability_id.is_empty() {
+        require_registry_identifier(capability_id, "capability_id")?;
+    }
+    let path = capability_query_path("tool-policies", &[("capability_id", capability_id)]);
+    proxy_to_capability_core(&s, &c, &bearer, &path, "GET", None).await
+}
+
+/// `PUT /v1/tool-policies/:capability_id` — set the caller's (or, for an admin,
+/// the org's) allow / ask / never policy. The body is forwarded as sent:
+/// capability-core decodes it strictly and checks the scope, the admin claim, the
+/// tool's class and the digest. A ZDR caller is refused here before anything is
+/// forwarded.
+async fn set_tool_policy_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(capability_id): Path<String>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, HttpJsonError> {
+    require_registry_identifier(&capability_id, "capability_id")?;
+    proxy_to_capability_core(
+        &s,
+        &c,
+        &bearer,
+        &format!("tool-policies/{capability_id}"),
+        "PUT",
+        Some(&body),
+    )
+    .await
+}
+
+/// `DELETE /v1/tool-policies/:capability_id?scope=user|org` — revoke the caller's
+/// (or, for an admin, the org's) policy.
+async fn revoke_tool_policy_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(capability_id): Path<String>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Value>, HttpJsonError> {
+    require_registry_identifier(&capability_id, "capability_id")?;
+    let scope = q.get("scope").map(String::as_str).unwrap_or_default();
+    let path = capability_query_path(
+        &format!("tool-policies/{capability_id}"),
+        &[("scope", scope)],
+    );
+    proxy_to_capability_core(&s, &c, &bearer, &path, "DELETE", None).await
 }
 
 /// Optional `space_ref` narrows the org's schedules to one room's.
@@ -12529,5 +12675,279 @@ mod set_run_mode_retry_tests {
         assert_eq!(result.expect_err("refused").code(), tonic::Code::PermissionDenied);
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
         assert_eq!(started.elapsed(), Duration::ZERO);
+    }
+}
+
+#[cfg(test)]
+mod tool_policy_proxy_tests {
+    use super::*;
+    use crate::auth::VerifiedCapabilityBearer;
+    use std::sync::{Arc, Mutex};
+    use tokio::net::TcpListener;
+
+    fn claims(zdr: bool) -> Claims {
+        Claims {
+            sub: "user-a".to_owned(),
+            iss: "test-issuer".to_owned(),
+            exp: i64::MAX,
+            org_id: "org-a".to_owned(),
+            user_id: "user-a".to_owned(),
+            nbf: None,
+            aud: Some("model-gateway".to_owned()),
+            scopes: Vec::new(),
+            zdr,
+            sovereign: None,
+            org_zdr: None,
+            zdr_waiver: None,
+            principal_type: Some("user".to_owned()),
+            service_id: None,
+            reason: None,
+        }
+    }
+
+    /// A stand-in capability-core that records `METHOD path?query` and the body.
+    async fn recorder() -> (
+        String,
+        Arc<Mutex<Vec<(String, Value)>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let seen: Arc<Mutex<Vec<(String, Value)>>> = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new().fallback(axum::routing::any({
+            let seen = Arc::clone(&seen);
+            move |method: axum::http::Method, uri: axum::http::Uri, body: String| {
+                let seen = Arc::clone(&seen);
+                async move {
+                    let body = serde_json::from_str(&body).unwrap_or(Value::Null);
+                    seen.lock()
+                        .expect("recorder lock")
+                        .push((format!("{method} {uri}"), body));
+                    Json(json!([]))
+                }
+            }
+        }));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind recorder");
+        let address = listener.local_addr().expect("recorder address");
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve recorder");
+        });
+        (format!("http://{address}"), seen, task)
+    }
+
+    #[test]
+    fn registry_identifiers_cannot_redirect_a_forwarded_request() {
+        for ok in [
+            "cap.mcp_tool.0123abcd",
+            "cap.command.shell",
+            "srv",
+            "a",
+            "echo_read",
+            "tool:v1-x",
+        ] {
+            assert!(is_registry_identifier(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            ".",
+            "..",
+            "../x",
+            "a/b",
+            "a/../b",
+            "a%2Fb",
+            "a b",
+            "a?b=1",
+            "a#b",
+            "a\\b",
+            "_x",
+            "-x",
+            ".hidden",
+            "é",
+            &"x".repeat(201),
+        ] {
+            assert!(!is_registry_identifier(bad), "{bad:?}");
+        }
+        assert!(is_registry_identifier(&"x".repeat(200)));
+    }
+
+    #[tokio::test]
+    async fn the_routes_forward_to_the_registry_paths_with_the_callers_own_bearer() {
+        let (base_url, seen, task) = recorder().await;
+        let mut state = AppState::new();
+        state.capability_core_base_url = base_url;
+        let bearer = VerifiedCapabilityBearer::for_test("capability-test-bearer");
+        let claims = claims(false);
+
+        let _ = list_tool_policies_proxy(
+            State(state.clone()),
+            Extension(claims.clone()),
+            bearer.clone(),
+            Query(
+                [("capability_id".to_owned(), "cap.mcp_tool.x".to_owned())]
+                    .into_iter()
+                    .collect(),
+            ),
+        )
+        .await
+        .expect("list");
+        let body = json!({"scope": "org", "decision": "allow", "pinned_digest": "d"});
+        let _ = set_tool_policy_proxy(
+            State(state.clone()),
+            Extension(claims.clone()),
+            bearer.clone(),
+            Path("cap.mcp_tool.x".to_owned()),
+            Json(body.clone()),
+        )
+        .await
+        .expect("set");
+        let _ = revoke_tool_policy_proxy(
+            State(state.clone()),
+            Extension(claims.clone()),
+            bearer.clone(),
+            Path("cap.mcp_tool.x".to_owned()),
+            Query(
+                [("scope".to_owned(), "org".to_owned())]
+                    .into_iter()
+                    .collect(),
+            ),
+        )
+        .await
+        .expect("revoke");
+        let _ = list_mcp_server_tools_proxy(
+            State(state.clone()),
+            Extension(claims.clone()),
+            bearer.clone(),
+            Path("srv".to_owned()),
+        )
+        .await
+        .expect("tools");
+        let approval = json!({"approved_digest": "d"});
+        let _ = approve_mcp_tool_proxy(
+            State(state),
+            Extension(claims),
+            bearer,
+            Path(("srv".to_owned(), "echo_read".to_owned())),
+            Json(approval.clone()),
+        )
+        .await
+        .expect("approve");
+
+        let seen = seen.lock().expect("lock").clone();
+        let requests: Vec<&str> = seen.iter().map(|(line, _)| line.as_str()).collect();
+        assert_eq!(
+            requests,
+            [
+                "GET /api/v1/tool-policies?capability_id=cap.mcp_tool.x",
+                "PUT /api/v1/tool-policies/cap.mcp_tool.x",
+                "DELETE /api/v1/tool-policies/cap.mcp_tool.x?scope=org",
+                "GET /api/v1/mcp/srv/tools",
+                "POST /api/v1/mcp/srv/tools/echo_read/approve",
+            ]
+        );
+        // The body is forwarded as sent: the scope, the decision and the digest
+        // are capability-core's to check, and nothing is added to it.
+        assert_eq!(seen[1].1, body);
+        assert_eq!(seen[4].1, approval);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_zdr_caller_is_refused_every_write_before_anything_is_forwarded() {
+        let (base_url, seen, task) = recorder().await;
+        let mut state = AppState::new();
+        state.capability_core_base_url = base_url;
+        let bearer = VerifiedCapabilityBearer::for_test("capability-test-bearer");
+        let zdr = claims(true);
+
+        let set = set_tool_policy_proxy(
+            State(state.clone()),
+            Extension(zdr.clone()),
+            bearer.clone(),
+            Path("cap.mcp_tool.x".to_owned()),
+            Json(json!({"decision": "never"})),
+        )
+        .await
+        .expect_err("a ZDR set must be refused");
+        assert_eq!(set.0, StatusCode::PRECONDITION_FAILED);
+        let revoke = revoke_tool_policy_proxy(
+            State(state.clone()),
+            Extension(zdr.clone()),
+            bearer.clone(),
+            Path("cap.mcp_tool.x".to_owned()),
+            Query(Default::default()),
+        )
+        .await
+        .expect_err("a ZDR revoke must be refused");
+        assert_eq!(revoke.0, StatusCode::PRECONDITION_FAILED);
+        let approve = approve_mcp_tool_proxy(
+            State(state.clone()),
+            Extension(zdr.clone()),
+            bearer.clone(),
+            Path(("srv".to_owned(), "echo_read".to_owned())),
+            Json(json!({"approved_digest": "d"})),
+        )
+        .await
+        .expect_err("a ZDR approval must be refused");
+        assert_eq!(approve.0, StatusCode::PRECONDITION_FAILED);
+        assert!(
+            seen.lock().expect("lock").is_empty(),
+            "a ZDR write was forwarded"
+        );
+
+        // Reading is not a durable mutation and stays available under ZDR.
+        let _ = list_tool_policies_proxy(
+            State(state),
+            Extension(zdr),
+            bearer,
+            Query(Default::default()),
+        )
+        .await
+        .expect("a ZDR caller may read the policies in force");
+        assert_eq!(seen.lock().expect("lock").len(), 1);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn an_identifier_that_is_not_a_registry_id_is_refused_before_forwarding() {
+        let (base_url, seen, task) = recorder().await;
+        let mut state = AppState::new();
+        state.capability_core_base_url = base_url;
+        let bearer = VerifiedCapabilityBearer::for_test("capability-test-bearer");
+
+        let refused = set_tool_policy_proxy(
+            State(state.clone()),
+            Extension(claims(false)),
+            bearer.clone(),
+            Path("../internal/mcp/oauth-token".to_owned()),
+            Json(json!({"decision": "never"})),
+        )
+        .await
+        .expect_err("a path-walking id must be refused");
+        assert_eq!(refused.0, StatusCode::BAD_REQUEST);
+        let refused = approve_mcp_tool_proxy(
+            State(state.clone()),
+            Extension(claims(false)),
+            bearer.clone(),
+            Path(("srv".to_owned(), "a/../../x".to_owned())),
+            Json(json!({"approved_digest": "d"})),
+        )
+        .await
+        .expect_err("a path-walking tool name must be refused");
+        assert_eq!(refused.0, StatusCode::BAD_REQUEST);
+        let refused = list_tool_policies_proxy(
+            State(state),
+            Extension(claims(false)),
+            bearer,
+            Query(
+                [("capability_id".to_owned(), "a&org_id=org-b".to_owned())]
+                    .into_iter()
+                    .collect(),
+            ),
+        )
+        .await
+        .expect_err("an injected query must be refused");
+        assert_eq!(refused.0, StatusCode::BAD_REQUEST);
+        assert!(seen.lock().expect("lock").is_empty());
+        task.abort();
     }
 }

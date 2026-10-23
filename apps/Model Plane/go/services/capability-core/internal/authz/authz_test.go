@@ -194,3 +194,48 @@ func TestAuthorizeGRPCPinsEvaluatePolicyAndProtectsPromotion(t *testing.T) {
 		t.Fatal("unscoped service read was authorized")
 	}
 }
+
+// Tool policies (WS05-S5) are durable state: a person may read the policies in
+// force for them, but writing or revoking one needs the signed write scope and an
+// explicit non-ZDR posture, exactly as any other registry mutation. Whether the
+// writer is a person and, for an org policy, an admin is the handler's check on
+// the signed principal; these pins keep the route from ever being quarantined
+// into a read or opened to a ZDR principal.
+func TestAuthorizeHTTPPinsToolPolicyRoutes(t *testing.T) {
+	person := authctx.Principal{OrganizationID: "org-a", ActorID: "user-a", PrincipalType: "user", Scopes: []string{WriteScope}, RetentionPolicyPresent: true}
+	zdrPerson := person
+	zdrPerson.ZeroDataRetention = true
+	unstatedPerson := person
+	unstatedPerson.RetentionPolicyPresent = false
+	readOnlyPerson := person
+	readOnlyPerson.Scopes = nil
+	readOnlyZDRPerson := readOnlyPerson
+	readOnlyZDRPerson.ZeroDataRetention = true
+
+	tests := []struct {
+		name      string
+		principal authctx.Principal
+		method    string
+		target    string
+		wantErr   bool
+	}{
+		{name: "a person lists the policies in force", principal: readOnlyPerson, method: http.MethodGet, target: "/api/v1/tool-policies?capability_id=cap.mcp_tool.x"},
+		{name: "a ZDR person may still read them", principal: readOnlyZDRPerson, method: http.MethodGet, target: "/api/v1/tool-policies"},
+		{name: "a forged org on the list is denied", principal: readOnlyPerson, method: http.MethodGet, target: "/api/v1/tool-policies?org_id=org-b", wantErr: true},
+		{name: "a forged user on the list is denied", principal: readOnlyPerson, method: http.MethodGet, target: "/api/v1/tool-policies?user_id=user-b", wantErr: true},
+		{name: "a writer sets a policy", principal: person, method: http.MethodPut, target: "/api/v1/tool-policies/cap.mcp_tool.x"},
+		{name: "a writer revokes a policy", principal: person, method: http.MethodDelete, target: "/api/v1/tool-policies/cap.mcp_tool.x?scope=org"},
+		{name: "a person without the write scope may not set one", principal: readOnlyPerson, method: http.MethodPut, target: "/api/v1/tool-policies/cap.mcp_tool.x", wantErr: true},
+		{name: "a ZDR person may not set one", principal: zdrPerson, method: http.MethodPut, target: "/api/v1/tool-policies/cap.mcp_tool.x", wantErr: true},
+		{name: "a ZDR person may not revoke one", principal: zdrPerson, method: http.MethodDelete, target: "/api/v1/tool-policies/cap.mcp_tool.x", wantErr: true},
+		{name: "an unstated posture may not set one", principal: unstatedPerson, method: http.MethodPut, target: "/api/v1/tool-policies/cap.mcp_tool.x", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := AuthorizeHTTP(tc.principal, httptest.NewRequest(tc.method, tc.target, nil))
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("AuthorizeHTTP() error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}

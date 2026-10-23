@@ -43,6 +43,11 @@ const (
 	// PolicySourceCapabilityGate: the capability is out of rollout, unavailable,
 	// outside the requested scope or ungranted.
 	PolicySourceCapabilityGate = "capability_gate"
+	// PolicySourceToolPolicyNever, Ask and Allow: a stored per-tool policy (user or
+	// org) decided. They are also the decision's reason code.
+	PolicySourceToolPolicyNever = "tool_policy_never"
+	PolicySourceToolPolicyAsk   = "tool_policy_ask"
+	PolicySourceToolPolicyAllow = "tool_policy_allow"
 )
 
 // Review states of an MCP tool row (capability_tools.review_state). A built-in
@@ -94,6 +99,10 @@ func IsSupportedScope(scope string) bool {
 type Engine struct {
 	reg    *registry.Registry
 	scopes ScopeResolver
+	// toolPolicies is read only when policiesEnforced; with it off a stored policy
+	// is never loaded, so it cannot change a decision.
+	toolPolicies     ToolPolicySource
+	policiesEnforced bool
 }
 
 // WithScopeResolver attaches a durable scope-grant resolver. Returns the same
@@ -101,6 +110,15 @@ type Engine struct {
 // preserving the prior static-only scope semantics.
 func (e *Engine) WithScopeResolver(r ScopeResolver) *Engine {
 	e.scopes = r
+	return e
+}
+
+// WithToolPolicies attaches the store of per-tool policies. They are honoured
+// only when enforced is true, which main wires from TOOL_POLICY_ENFORCED; a nil
+// source can never be enforced.
+func (e *Engine) WithToolPolicies(source ToolPolicySource, enforced bool) *Engine {
+	e.toolPolicies = source
+	e.policiesEnforced = enforced && source != nil
 	return e
 }
 
@@ -179,11 +197,165 @@ func Decide(base *Result, binding *ToolBinding) *Result {
 	return base
 }
 
+// ToolPolicyEnforcedEnv switches per-tool policies on. Off, they are stored and
+// ignored.
+const ToolPolicyEnforcedEnv = "TOOL_POLICY_ENFORCED"
+
+// ToolPolicyEnforcedFromLookup reads ToolPolicyEnforcedEnv strictly: only the
+// literal "true" enables, so a typo or a stray "1" can never switch a policy
+// layer on by accident.
+func ToolPolicyEnforcedFromLookup(lookup func(string) string) bool {
+	return lookup(ToolPolicyEnforcedEnv) == "true"
+}
+
+// The decisions and scope kinds of a stored tool policy.
+const (
+	ToolPolicyAllow = "allow"
+	ToolPolicyAsk   = "ask"
+	ToolPolicyNever = "never"
+
+	ToolPolicyScopeOrg  = "org"
+	ToolPolicyScopeUser = "user"
+)
+
+// ToolPolicy is one active stored policy on a capability's tools.
+type ToolPolicy struct {
+	// ScopeKind is ToolPolicyScopeOrg or ToolPolicyScopeUser.
+	ScopeKind string
+	// Decision is ToolPolicyAllow, ToolPolicyAsk or ToolPolicyNever.
+	Decision string
+	// PinnedDigest is the tool definition an `allow` was given for; empty for a
+	// tightening policy.
+	PinnedDigest string
+}
+
+// ToolPolicySource loads the active policies that apply to one person's call of
+// a capability: the org's own and, when userID is not empty, that person's.
+type ToolPolicySource interface {
+	ActiveToolPolicies(ctx context.Context, orgID, userID, capabilityID string) ([]ToolPolicy, error)
+}
+
+// CanRelax reports whether a policy of scopeKind may relax a tool of this class
+// and floor to `allow`. A person may relax for themselves up to an external
+// write and an org admin for the org up to a destructive tool; an owner effect,
+// an unclassified tool and anything with an approval floor are never relaxed by
+// anyone. An unknown scope kind relaxes nothing.
+func CanRelax(scopeKind, class, floor string) bool {
+	var ceiling string
+	switch scopeKind {
+	case ToolPolicyScopeOrg:
+		ceiling = models.SideEffectDestructive
+	case ToolPolicyScopeUser:
+		ceiling = models.SideEffectExternalWrite
+	default:
+		return false
+	}
+	return models.SideEffectClassRank(class) <= models.SideEffectClassRank(ceiling) &&
+		models.EffectiveApprovalFloor(class, floor) == models.ApprovalFloorNone
+}
+
+// relaxedBudget is the budget an `allow` policy grants to a tool whose risk
+// level would otherwise ask: the medium-risk one, never the generous low one.
+const relaxedBudget = "tokens=10000,cost_usd=0.50"
+
+// DecideWithPolicies is Decide followed by the stored per-tool policies.
+//
+// Tightening applies to every row: any `never` denies, and any `ask` turns an
+// allow into an ask, whichever scope set it, so an org `never` beats a person's
+// `allow` and a person's `ask` stands under an org `allow`. Relaxing is narrower:
+// an `allow` turns the risk-level ask of an `mcp_tool` row into an allow only
+// when the tool's class and floor are within what the policy's scope may relax
+// (CanRelax) and the policy is pinned to the definition the registry pins now. An
+// `allow` for a definition that has since changed is read as an `ask`; an `allow`
+// on a built-in tool, or on a class it may not relax, is ignored. A denial from
+// Decide (a tool not approved, a gate) is never relaxed.
+func DecideWithPolicies(base *Result, capEntry *models.Capability, binding *ToolBinding, policies []ToolPolicy) *Result {
+	result := Decide(base, binding)
+	if result == nil || result.Decision == DecisionDeny || len(policies) == 0 {
+		return result
+	}
+	relaxable := capEntry != nil && capEntry.Kind == models.KindMCPTool && binding != nil
+	var never, ask, allow bool
+	for _, p := range policies {
+		switch p.Decision {
+		case ToolPolicyNever:
+			never = true
+		case ToolPolicyAsk:
+			ask = true
+		case ToolPolicyAllow:
+			if !relaxable || !CanRelax(p.ScopeKind, binding.SideEffectClass, binding.ApprovalFloor) {
+				continue
+			}
+			if p.PinnedDigest == "" || p.PinnedDigest != binding.ToolDigest {
+				ask = true
+				continue
+			}
+			allow = true
+		default:
+			// A decision outside the vocabulary can only add a pause.
+			ask = true
+		}
+	}
+	switch {
+	case never:
+		return &Result{Decision: DecisionDeny, Reason: PolicySourceToolPolicyNever, PolicySource: PolicySourceToolPolicyNever}
+	case ask:
+		if result.Decision == DecisionAllow {
+			return &Result{Decision: DecisionAsk, Reason: PolicySourceToolPolicyAsk, PolicySource: PolicySourceToolPolicyAsk}
+		}
+	case allow:
+		if result.Decision == DecisionAsk && result.PolicySource == PolicySourceRiskLevel {
+			return &Result{Decision: DecisionAllow, Reason: PolicySourceToolPolicyAllow, BudgetContext: relaxedBudget, PolicySource: PolicySourceToolPolicyAllow}
+		}
+	}
+	return result
+}
+
 // EvaluateCapability evaluates a capability snapshot that the caller has
 // already resolved through a tenant-aware registry lookup. Keeping lookup and
 // evaluation separate lets authenticated boundaries avoid re-reading a mixed
 // process-wide registry after authorization.
 func (e *Engine) EvaluateCapability(ctx context.Context, capEntry *models.Capability, runID, agentID, orgID, scope string) (*Result, error) {
+	denial, err := e.gate(ctx, capEntry, runID, agentID, orgID, scope)
+	if err != nil || denial != nil {
+		return denial, err
+	}
+	result := riskResult(capEntry)
+	recordDecision(ctx, capEntry, result, capEntry.SideEffectClass)
+	return result, nil
+}
+
+// EvaluateTool is EvaluateCapability for one tool of the capability: the same
+// request and gate checks, then the capability's risk decision tightened by the
+// tool's registry binding (Decide) and, when TOOL_POLICY_ENFORCED is on, by the
+// stored policies of the org and of userID (DecideWithPolicies). A nil binding is
+// a capability-level evaluation, which the policies can still tighten. The
+// policies are read after the gate and only when enforced; if they cannot be read
+// the evaluation fails rather than deciding without them.
+func (e *Engine) EvaluateTool(ctx context.Context, capEntry *models.Capability, binding *ToolBinding, userID, runID, agentID, orgID, scope string) (*Result, error) {
+	denial, err := e.gate(ctx, capEntry, runID, agentID, orgID, scope)
+	if err != nil || denial != nil {
+		return denial, err
+	}
+	var policies []ToolPolicy
+	if e.policiesEnforced {
+		if policies, err = e.toolPolicies.ActiveToolPolicies(ctx, orgID, userID, capEntry.ID); err != nil {
+			return nil, fmt.Errorf("load tool policies: %w", err)
+		}
+	}
+	result := DecideWithPolicies(riskResult(capEntry), capEntry, binding, policies)
+	class := capEntry.SideEffectClass
+	if binding != nil {
+		class = binding.SideEffectClass
+	}
+	recordDecision(ctx, capEntry, result, class)
+	return result, nil
+}
+
+// gate validates the request and runs the checks every evaluation shares: the
+// capability's declared scopes and the durable scope grant. It returns the denial
+// (already counted) or nil when the capability may be evaluated for this scope.
+func (e *Engine) gate(ctx context.Context, capEntry *models.Capability, runID, agentID, orgID, scope string) (*Result, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -193,21 +365,26 @@ func (e *Engine) EvaluateCapability(ctx context.Context, capEntry *models.Capabi
 	if denial := e.denyOnScope(ctx, capEntry, scope); denial != nil {
 		return denial, nil
 	}
-	if denial, derr := e.denyOnGrant(ctx, capEntry, agentID, orgID, scope); derr != nil {
-		return nil, derr
-	} else if denial != nil {
-		return denial, nil
+	denial, err := e.denyOnGrant(ctx, capEntry, agentID, orgID, scope)
+	if err != nil {
+		return nil, err
 	}
-	result := riskResult(capEntry)
+	return denial, nil
+}
+
+// recordDecision counts one evaluation outcome with the class it was made for and
+// what produced it.
+func recordDecision(ctx context.Context, capEntry *models.Capability, result *Result, class string) {
 	attrs := []attribute.KeyValue{
 		attribute.String("decision", result.Decision),
 		attribute.String("risk", string(capEntry.RiskLevel)),
+		attribute.String("class", models.NormalizeSideEffectClass(class)),
+		attribute.String("policy_source", result.PolicySource),
 	}
 	if result.Decision == DecisionDeny {
 		attrs = append(attrs, attribute.String("reason", result.Reason))
 	}
 	telemetry.PolicyDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attrs...))
-	return result, nil
 }
 
 // riskResult is the decision a capability's risk level alone yields: high risk
