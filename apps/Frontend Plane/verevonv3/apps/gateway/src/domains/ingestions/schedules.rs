@@ -7,13 +7,18 @@
 
 use axum::{
     extract::{Extension, State},
-    response::Response,
+    http::StatusCode,
+    response::{IntoResponse, Response},
     Json,
 };
 use reqwest::Method;
 use serde_json::{json, Value};
 
-use crate::{config::AppState, envelope::unwrap_data, middleware::AuthenticatedUser};
+use crate::{
+    config::{AppState, ScheduleCapabilities},
+    envelope::{error, unwrap_data},
+    middleware::AuthenticatedUser,
+};
 
 use super::shared::{
     array_at, cookie_header, created, date_millis, first_str, forward, normalize_batch_urls,
@@ -103,12 +108,14 @@ pub(crate) async fn create_schedule(
     Json(body): Json<Value>,
 ) -> Response {
     let cookie = cookie_header(&headers);
-    let token = quarry_token(&state, &user, &cookie).await;
 
     let (Some(name), Some(kind)) = (first_str(&body, &["name"]), first_str(&body, &["kind"]))
     else {
         return validation("Schedule name and kind are required.");
     };
+    if let Some(rejected) = kind_rejection(&state.schedule_capabilities, &kind) {
+        return rejected;
+    }
     let cron = first_str(&body, &["cron"]);
     let schedule_at = first_str(&body, &["scheduleAt", "schedule_at"]);
     if cron.is_none() && schedule_at.is_none() {
@@ -129,15 +136,18 @@ pub(crate) async fn create_schedule(
     if let Some(schedule_at) = schedule_at {
         request.insert("schedule_at".into(), Value::String(schedule_at));
     }
-    request.insert(
-        "overlap_policy".into(),
-        Value::String(
-            first_str(&body, &["overlapPolicy", "overlap_policy"])
-                .unwrap_or_else(|| "skip".to_owned()),
-        ),
-    );
+    if state.schedule_capabilities.overlap {
+        request.insert(
+            "overlap_policy".into(),
+            Value::String(
+                first_str(&body, &["overlapPolicy", "overlap_policy"])
+                    .unwrap_or_else(|| "skip".to_owned()),
+            ),
+        );
+    }
     request.insert("config".into(), config);
 
+    let token = quarry_token(&state, &user, &cookie).await;
     let (status, resp) = quarry_call(
         &state,
         Method::POST,
@@ -229,6 +239,9 @@ pub(crate) async fn schedule_actions(
             .await
         }
         "trigger_schedule" => {
+            if !state.schedule_capabilities.trigger {
+                return action_unavailable();
+            }
             action_post(
                 &state,
                 &format!("/v1/schedules/{encoded}/trigger"),
@@ -239,6 +252,9 @@ pub(crate) async fn schedule_actions(
             .await
         }
         "backfill_schedule" => {
+            if !state.schedule_capabilities.backfill {
+                return action_unavailable();
+            }
             let (Some(start), Some(end)) = (
                 first_str(&body, &["startAt", "start_at"]),
                 first_str(&body, &["endAt", "end_at"]),
@@ -286,6 +302,195 @@ async fn action_post(
         return forward(status, resp);
     }
     okay(unwrap_data(&resp))
+}
+
+// ── Capabilities (WS15.S0) ───────────────────────────────────────────────────
+
+/// `GET /api/ingestions/schedules/capabilities`: what this installation can
+/// honour. The SPA hides every control whose flag is off, so no control can
+/// produce a 501 or a kinds 400.
+pub(super) async fn schedule_capabilities(State(state): State<AppState>) -> Response {
+    let caps = &state.schedule_capabilities;
+    okay(json!({
+        "trigger": caps.trigger,
+        "backfill": caps.backfill,
+        "overlap": caps.overlap,
+        "kinds": caps.kinds,
+        "needsActivation": caps.needs_activation,
+    }))
+}
+
+/// `Some(400)` unless `kind` is on the enabled list. It is checked before any
+/// token mint or upstream call, so a refused kind never reaches quarry.
+fn kind_rejection(caps: &ScheduleCapabilities, kind: &str) -> Option<Response> {
+    if caps.kinds.iter().any(|enabled| enabled == kind) {
+        return None;
+    }
+    Some(
+        (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "unsupported_schedule_kind",
+                "This schedule kind is not enabled on this installation.",
+            )),
+        )
+            .into_response(),
+    )
+}
+
+/// Typed 501 for a control verb whose backend is not enabled on this installation.
+fn action_unavailable() -> Response {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(error(
+            "schedule_action_unavailable",
+            "This schedule action is not enabled on this installation.",
+        )),
+    )
+        .into_response()
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use axum::{
+        extract::{Extension, State},
+        http::{HeaderMap, StatusCode},
+        response::Response,
+        Json,
+    };
+    use serde_json::{json, Value};
+
+    use super::{create_schedule, kind_rejection, schedule_actions, schedule_capabilities};
+    use crate::{
+        config::{schedule_capabilities_from_env, ScheduleCapabilities},
+        middleware::AuthenticatedUser,
+    };
+
+    fn caller() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-ws15-s0".into(),
+            user_email: "ws15-s0@example.test".into(),
+            user_name: "WS15 S0".into(),
+            user_image: None,
+            email_verified: true,
+            auth_role: None,
+            active_org_id: Some("org-ws15-s0".into()),
+            authorized_membership: None,
+        }
+    }
+
+    async fn body_json(response: Response) -> Value {
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        serde_json::from_slice(&bytes).expect("json body")
+    }
+
+    #[test]
+    fn schedule_capabilities_default_is_all_false() {
+        let defaults = ScheduleCapabilities::default();
+        assert!(!defaults.trigger);
+        assert!(!defaults.backfill);
+        assert!(!defaults.overlap);
+        assert!(!defaults.needs_activation);
+        assert!(defaults.kinds.is_empty());
+
+        assert_eq!(schedule_capabilities_from_env(None), defaults);
+        assert_eq!(schedule_capabilities_from_env(Some("   ")), defaults);
+        assert_eq!(schedule_capabilities_from_env(Some("{not json")), defaults);
+
+        let crawl_only = schedule_capabilities_from_env(Some(r#"{"kinds":["crawl"]}"#));
+        assert_eq!(crawl_only.kinds, vec!["crawl".to_owned()]);
+        assert!(!crawl_only.trigger);
+        assert!(!crawl_only.overlap);
+    }
+
+    #[test]
+    fn kind_rejection_follows_the_enabled_list() {
+        let caps = ScheduleCapabilities {
+            kinds: vec!["crawl".into()],
+            ..Default::default()
+        };
+        assert!(kind_rejection(&caps, "crawl").is_none());
+        assert!(kind_rejection(&caps, "batch").is_some());
+        assert!(kind_rejection(&ScheduleCapabilities::default(), "crawl").is_some());
+    }
+
+    #[tokio::test]
+    async fn create_schedule_rejects_kind_outside_capabilities() {
+        let mut state = crate::tests::test_state(false);
+        state.schedule_capabilities = ScheduleCapabilities {
+            kinds: vec!["crawl".into()],
+            ..Default::default()
+        };
+        let response = create_schedule(
+            State(state),
+            Extension(caller()),
+            HeaderMap::new(),
+            Json(json!({
+                "name": "Nightly",
+                "kind": "batch",
+                "cron": "0 2 * * *",
+                "urls": ["https://vg.no/a"],
+            })),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = body_json(response).await;
+        assert_eq!(body["error"]["code"], "unsupported_schedule_kind");
+    }
+
+    #[tokio::test]
+    async fn trigger_is_501_typed_when_disabled() {
+        let state = crate::tests::test_state(false);
+        assert!(!state.schedule_capabilities.trigger);
+        assert!(!state.schedule_capabilities.backfill);
+
+        let trigger = schedule_actions(
+            State(state.clone()),
+            Extension(caller()),
+            HeaderMap::new(),
+            Json(json!({ "action": "trigger_schedule", "scheduleId": "sched_1" })),
+        )
+        .await;
+        assert_eq!(trigger.status(), StatusCode::NOT_IMPLEMENTED);
+        let body = body_json(trigger).await;
+        assert_eq!(body["error"]["code"], "schedule_action_unavailable");
+
+        let backfill = schedule_actions(
+            State(state),
+            Extension(caller()),
+            HeaderMap::new(),
+            Json(json!({
+                "action": "backfill_schedule",
+                "scheduleId": "sched_1",
+                "startAt": "2026-10-01T00:00:00Z",
+                "endAt": "2026-10-02T00:00:00Z",
+            })),
+        )
+        .await;
+        assert_eq!(backfill.status(), StatusCode::NOT_IMPLEMENTED);
+        let body = body_json(backfill).await;
+        assert_eq!(body["error"]["code"], "schedule_action_unavailable");
+    }
+
+    #[tokio::test]
+    async fn capabilities_endpoint_reports_the_configured_flags() {
+        let mut state = crate::tests::test_state(false);
+        state.schedule_capabilities = ScheduleCapabilities {
+            kinds: vec!["crawl".into()],
+            needs_activation: true,
+            ..Default::default()
+        };
+        let response = schedule_capabilities(State(state)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_json(response).await;
+        assert_eq!(body["data"]["trigger"], false);
+        assert_eq!(body["data"]["backfill"], false);
+        assert_eq!(body["data"]["overlap"], false);
+        assert_eq!(body["data"]["kinds"], json!(["crawl"]));
+        assert_eq!(body["data"]["needsActivation"], true);
+    }
 }
 
 #[cfg(test)]

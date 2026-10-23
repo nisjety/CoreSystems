@@ -755,3 +755,19 @@ helpers on canned data without a network.
 - The gateway probes (WS4.A clippy triage, the four deploy probes, the `/metrics` read) and
   the WS4.B and WS4.C scripts are under `apps/Frontend Plane/verevonv3/scripts/` and described in
   `docs/runbooks/gateway-search-cache-tenant-incident.md`.
+
+## WS15.S0 schedule capabilities: hide what the backend cannot honour (U04, built, NOT run, 2026-10-23)
+
+The Ingestions Schedules surface offers only what the gateway says this installation can run. Every flag is off by default. Nothing here changes Quarry-v2 itself; the switch lives in the gateway environment.
+
+- Gateway env `QUARRY_SCHEDULE_CAPABILITIES` (JSON object, read once at startup, never per request). Unset, blank or malformed input means all off. A malformed value logs a warning without the raw value.
+  - Shape: `{"trigger":false,"backfill":false,"overlap":false,"kinds":[],"needs_activation":false}`.
+  - Example to offer crawl schedules only: `QUARRY_SCHEDULE_CAPABILITIES={"kinds":["crawl"]}`.
+- `GET /api/ingestions/schedules/capabilities` (behind the session) returns `{trigger, backfill, overlap, kinds, needsActivation}` inside the `data` envelope.
+- Refusals while the flags are off:
+  - `POST /api/ingestions/schedules` with a kind outside `kinds` returns 400 `unsupported_schedule_kind`. The check runs before any token mint or quarry call.
+  - `POST /api/ingestions/actions` with `trigger_schedule` (or `backfill_schedule`) returns 501 `schedule_action_unavailable` unless that flag is on.
+  - `overlapPolicy` is not forwarded to quarry unless `overlap` is on; quarry then defaults to `skip`.
+- SPA: with `kinds: []` the composer shows the notice "No schedule types are enabled" and Save is disabled. Trigger is hidden unless `trigger` is on. If the capability read fails, the page treats everything as off.
+- Rollback: unset `QUARRY_SCHEDULE_CAPABILITIES` (or set `{}`) and restart the gateway. Later slices (S1 kinds, S2 overlap, S3 trigger and backfill) turn a flag on by changing this value only.
+- Deployment check (owed, not run): rebuild the gateway image, restart the Vite dev server (HMR does not see host edits), open Schedules: the notice shows, Save is disabled, no Trigger. Set `{"kinds":["crawl"]}`, reload: crawl appears.

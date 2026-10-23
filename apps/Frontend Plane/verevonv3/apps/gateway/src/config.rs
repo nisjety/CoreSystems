@@ -98,6 +98,9 @@ pub(crate) struct AppState {
     pub(crate) remote_support_server_public_key: String,
     pub(crate) zammad_api_token: String,
     pub(crate) audience_token_cache: AudienceTokenCache,
+    /// WS15.S0: what the Ingestions schedules surface may offer. Read once at
+    /// startup from `QUARRY_SCHEDULE_CAPABILITIES`, never per request.
+    pub(crate) schedule_capabilities: ScheduleCapabilities,
     /// Retained only for legacy browser-domain unit fixtures. Runtime browser
     /// authority and presentation state live in Quarry-v2.
     #[cfg(test)]
@@ -130,6 +133,39 @@ pub(crate) struct AppState {
     /// gap, not an oversight, and what unblocks it.
     pub(crate) mail_task_pipeline:
         Option<std::sync::Arc<dyn crate::domains::mail_task::MailTaskPipeline>>,
+}
+
+/// Which optional parts of the Ingestions schedules surface this installation
+/// can honour (WS15.S0). Every flag is off by default, and a flag is turned on
+/// by configuration only once the backend behind it exists: `kinds` when a
+/// schedule kind has a workflow (S1), `overlap` when overlap policy is enforced
+/// (S2), `trigger` and `backfill` when the control verbs are implemented (S3).
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(default)]
+pub(crate) struct ScheduleCapabilities {
+    pub(crate) trigger: bool,
+    pub(crate) backfill: bool,
+    pub(crate) overlap: bool,
+    pub(crate) kinds: Vec<String>,
+    pub(crate) needs_activation: bool,
+}
+
+/// Parse `QUARRY_SCHEDULE_CAPABILITIES` (a JSON object). Unset, blank or
+/// malformed input yields the all-off default, so a broken value can never
+/// switch a capability on. The raw value is not logged, only the failure.
+pub(crate) fn schedule_capabilities_from_env(raw: Option<&str>) -> ScheduleCapabilities {
+    let Some(raw) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return ScheduleCapabilities::default();
+    };
+    match serde_json::from_str::<ScheduleCapabilities>(raw) {
+        Ok(capabilities) => capabilities,
+        Err(_) => {
+            tracing::warn!(
+                "QUARRY_SCHEDULE_CAPABILITIES is not valid JSON; all schedule capabilities stay off"
+            );
+            ScheduleCapabilities::default()
+        }
+    }
 }
 
 pub(crate) async fn build_state() -> Result<AppState> {
@@ -271,6 +307,9 @@ pub(crate) async fn build_state() -> Result<AppState> {
         ),
         cache,
         studio_store: crate::domains::studio::StudioStore::new(),
+        schedule_capabilities: schedule_capabilities_from_env(
+            env::var("QUARRY_SCHEDULE_CAPABILITIES").ok().as_deref(),
+        ),
         allow_dev_actor_headers: dev_only_flag("ALLOW_DEV_ACTOR_HEADERS"),
         allow_dev_auth_bypass: dev_only_flag("ALLOW_DEV_AUTH_BYPASS"),
         mail_task_ingest_service_token: optional_env("MAIL_TASK_INGEST_SERVICE_TOKEN"),

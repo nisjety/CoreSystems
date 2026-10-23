@@ -7288,6 +7288,7 @@ mod tests {
             cache: cache.clone(),
             rate_limiter: crate::rate_limit::RateLimiter::from_cache(&cache),
             studio_store: crate::domains::studio::StudioStore::new(),
+            schedule_capabilities: crate::config::ScheduleCapabilities::default(),
             allow_dev_actor_headers: true,
             allow_dev_auth_bypass: true,
             mail_task_ingest_service_token: "mail-task-test-secret-at-least-32-bytes".into(),

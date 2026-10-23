@@ -385,6 +385,7 @@ mod tests {
                 &crate::cache::ResultCache::disabled(),
             ),
             studio_store: crate::domains::studio::StudioStore::new(),
+            schedule_capabilities: crate::config::ScheduleCapabilities::default(),
             allow_dev_actor_headers,
             allow_dev_auth_bypass: allow_dev_actor_headers,
             mail_task_ingest_service_token: "mail-task-test-secret-at-least-32-bytes".into(),
