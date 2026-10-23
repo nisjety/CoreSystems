@@ -57,6 +57,7 @@ type Service struct {
 	sharedPublisher SharedPublisher    // cross-plane events on verevon-nats
 	auditPublisher  AuditPublisher     // durable verevon.audit.v2.* dispatch on local controlplane-nats
 	cache           *rediscache.Client // optional, nil if Redis disabled
+	siemSealer      *SIEMSealer        // nil unless ORG_SIEM_DESTINATIONS_ENABLED (WS06-S7)
 }
 
 func NewService(repo *Repository, publisher Publisher, cache ...*rediscache.Client) *Service {
@@ -173,6 +174,14 @@ func (s *Service) GetEntitlements(ctx context.Context, id string) ([]Entitlement
 			Key:     InteractiveZdrEntitlementKey,
 			Enabled: PlanAllowsZeroDataRetention(current.Plan),
 		})
+		// Reported only once SIEM destinations are switched on, so the response
+		// is unchanged while the feature is off.
+		if s.SIEMDestinationsEnabled() {
+			ents = append(ents, Entitlement{
+				Key:     SIEMExportEntitlementKey,
+				Enabled: PlanAllowsSIEMExport(current.Plan),
+			})
+		}
 	}
 
 	return ents, nil

@@ -31,6 +31,11 @@ type Server struct {
 	// how its admin routes learn the caller's role from the membership table.
 	modelEntitlements modelEntitlementService
 	callerRoles       callerRoleReader
+
+	// siemEnabled mounts the SIEM destination routes (WS06-S7,
+	// ORG_SIEM_DESTINATIONS_ENABLED); siem is the service behind them.
+	siemEnabled bool
+	siem        siemDestinationService
 }
 
 func NewServer(port int, orgService *orgcore.Service, rbacRepo *rbac.Repository, authServiceURL, userServiceURL string) *Server {
@@ -59,6 +64,19 @@ func NewServer(port int, orgService *orgcore.Service, rbacRepo *rbac.Repository,
 		// would defeat the handler's nil check.
 		s.retentionPosture = orgService
 		s.callerRoles = orgService
+	}
+	if siemDestinationsEnabled(os.Getenv) {
+		s.siemEnabled = true
+		if orgService != nil {
+			// Without a usable seal key the routes stay mounted and answer 503: a
+			// destination secret is never stored unsealed.
+			if sealer, err := orgcore.NewSIEMSealerFromEnv(os.Getenv); err != nil {
+				log.Printf("org-core SIEM destinations unavailable: %v", err)
+			} else {
+				orgService.EnableSIEMDestinations(sealer)
+				s.siem = orgService
+			}
+		}
 	}
 	s.setupRoutes()
 	s.httpServer = &http.Server{
@@ -134,6 +152,16 @@ func (s *Server) setupRoutes() {
 	s.router.PUT("/orgs/:id/model-entitlement", guard, s.putModelEntitlement)
 	s.router.GET("/orgs/:id/model-entitlement/explain", s.explainModelEntitlement)
 
+	// SIEM destination config (WS06-S7): owner/admin CRUD. Every path answers 404
+	// until ORG_SIEM_DESTINATIONS_ENABLED is on. The handlers check the caller's
+	// role against the membership table; the guard is the second layer the other
+	// mutations use.
+	siemGate := s.requireSIEMEnabled()
+	s.router.GET("/orgs/:id/siem-destinations", siemGate, s.listSIEMDestinations)
+	s.router.POST("/orgs/:id/siem-destinations", siemGate, guard, s.createSIEMDestination)
+	s.router.PATCH("/orgs/:id/siem-destinations/:destinationId", siemGate, guard, s.updateSIEMDestination)
+	s.router.DELETE("/orgs/:id/siem-destinations/:destinationId", siemGate, guard, s.deleteSIEMDestination)
+
 	// Read-only projection/RBAC catalog. Membership, role assignment, and custom
 	// policy mutations are intentionally not mounted for the secure MVP: Auth
 	// Core is the sole membership authority, while fine-grained policy editing is
@@ -184,6 +212,11 @@ func (s *Server) setupRoutes() {
 	// The resolved chat model policy for one org and user, for inference-core's
 	// pull (WS10-S2). Own scope org:model-entitlement:read:any; no-store.
 	internal.GET("/orgs/:orgId/model-entitlement", s.getModelEntitlementInternal)
+	// The exporter's read of every enabled SIEM destination, secret unsealed
+	// (WS06-S7). Own scope org:siem:read:any, held by audit-core only; no-store.
+	// Registered even while the feature is off so the path cannot fall through to
+	// /orgs/:orgId and be read as an organisation id.
+	internal.GET("/orgs/siem-destinations", siemGate, s.listSIEMDestinationsInternal)
 	internal.GET("/orgs/:orgId/roles/:roleName/capabilities", s.getEffectiveCapabilities)
 	internal.GET("/orgs/by-tenant", s.getOrganizationByTenant)
 	internal.POST("/orgs/ensure-from-tenant", s.ensureOrganizationFromTenant)

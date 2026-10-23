@@ -22,6 +22,7 @@ const (
 	serviceCredentialAudience = "org-core"
 	serviceCredentialEnv      = "ORG_CORE_SERVICE_CREDENTIALS"
 	gatewayServicePrincipal   = "verevon-gateway"
+	siemExporterPrincipal     = "audit-core"
 	serviceDelegationMaxAge   = 30 * time.Second
 	serviceDelegationSkew     = 5 * time.Second
 	serviceDelegationMaxBody  = 1 << 20
@@ -53,6 +54,12 @@ var orgServiceScopeAllowlist = map[string]struct{}{
 	// by inference-core (the enforcement point, ADR-0005) and by model-gateway
 	// for explain; deliberately not org:read:any.
 	"org:model-entitlement:read:any": {},
+	// SIEM destination administration (WS06-S7): owner/admin CRUD through the
+	// gateway on behalf of a signed user, and the exporter's read of every
+	// enabled destination with its unsealed secret. The read is held by audit-core
+	// alone (validateServiceCredential); neither is org:read:any.
+	"org:siem:manage:self": {},
+	"org:siem:read:any":    {},
 }
 
 type serviceCredential struct {
@@ -147,6 +154,11 @@ func validateServiceCredential(credential serviceCredential, principals map[stri
 			return fmt.Errorf("scope %s is not valid for principal %s", scope, credential.Principal)
 		}
 		if strings.HasSuffix(scope, ":any") && credential.Principal == gatewayServicePrincipal {
+			return fmt.Errorf("scope %s is not valid for principal %s", scope, credential.Principal)
+		}
+		// The exporter read returns plaintext destination secrets, so unlike the
+		// other :any scopes it is pinned to one principal.
+		if scope == "org:siem:read:any" && credential.Principal != siemExporterPrincipal {
 			return fmt.Errorf("scope %s is not valid for principal %s", scope, credential.Principal)
 		}
 		scopes[scope] = struct{}{}
@@ -341,6 +353,12 @@ func organizationProxyScopes(method string, rest []string) []string {
 		return []string{"org:settings:write:self"}
 	case len(rest) == 3 && method == http.MethodGet && rest[1] == "model-entitlement" && rest[2] == "explain":
 		return []string{"org:read:self"}
+	// SIEM destinations are administered on behalf of a signed owner or admin
+	// only (:self); no :any holder reaches them through this path.
+	case len(rest) == 2 && rest[1] == "siem-destinations" && (method == http.MethodGet || method == http.MethodPost):
+		return []string{"org:siem:manage:self"}
+	case len(rest) == 3 && rest[1] == "siem-destinations" && (method == http.MethodPatch || method == http.MethodDelete):
+		return []string{"org:siem:manage:self"}
 	case len(rest) == 2 && method == http.MethodPost && rest[1] == "plan":
 		return []string{"org:settings:write:self"}
 	case len(rest) == 2 && method == http.MethodPatch && (rest[1] == "capabilities" || rest[1] == "settings"):
@@ -370,6 +388,10 @@ func internalOrganizationScopes(method string, rest []string) []string {
 		return []string{"org:read:any"}
 	case len(rest) == 1 && rest[0] == "by-tenant" && method == http.MethodGet:
 		return []string{"org:tenant:read:any"}
+	// Before the generic one-segment read below: org:read:any must not open the
+	// route that returns destination secrets.
+	case len(rest) == 1 && rest[0] == "siem-destinations" && method == http.MethodGet:
+		return []string{"org:siem:read:any"}
 	case len(rest) == 1 && method == http.MethodGet:
 		return []string{"org:read:any"}
 	case len(rest) == 1 && rest[0] == "ensure-from-tenant" && method == http.MethodPost:

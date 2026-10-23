@@ -216,6 +216,15 @@ fi
 # itself returns unavailable and an approval can never even be requested.
 persist_if_missing SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY "$(openssl rand -base64 32)"
 
+# AES-256-GCM key org-core uses to seal SIEM destination secrets (WS06-S7).
+# Padded standard base64 of 32 random bytes, like the key above; org-core also
+# accepts the other base64 spellings but hard-requires exactly 32 bytes. Without
+# it, or with ORG_SIEM_DESTINATIONS_ENABLED off, the destination routes stay off.
+# The key id travels with every sealed secret, so a later key can be introduced
+# under a new id without losing track of what the old one sealed.
+persist_if_missing ORG_CORE_SIEM_SEAL_KEY "$(openssl rand -base64 32)"
+persist_if_missing ORG_CORE_SIEM_SEAL_KEY_ID v1
+
 # Keep local database URLs internally consistent with the generated database
 # password. Existing non-empty service-local values always win.
 db_user=$(lookup_value DB_USER || database_value_from_urls user || printf 'coresystem')
@@ -419,6 +428,11 @@ required_credentials=(
   APPLICATION_ORG_CORE_SERVICE_TOKEN
   AUDIT_APPLICATION_NATS_PASSWORD
   AUDIT_CONTROL_NATS_PASSWORD AUDIT_MODEL_NATS_PASSWORD AUTH_BILLING_CORE_SERVICE_TOKEN
+  # audit-core's org-core principal (scope org:siem:read:any only), which the
+  # SIEM exporter presents to read the enabled destinations (WS06-S7). Minted
+  # here because org-core validates it in ORG_CORE_SERVICE_CREDENTIALS and
+  # audit-core presents it.
+  AUDIT_ORG_CORE_SERVICE_TOKEN
   AUTH_NATS_PASSWORD AUTH_ORG_CORE_SERVICE_TOKEN AUTH_SHARED_NATS_PASSWORD
   AUTH_USER_CORE_GRPC_SERVICE_TOKEN BILLING_NATS_PASSWORD BILLING_ORG_CORE_SERVICE_TOKEN
   BILLING_SHARED_NATS_PASSWORD CONTROL_NATS_PROVISIONER_PASSWORD CONTROL_SHARED_BRIDGE_PASSWORD
