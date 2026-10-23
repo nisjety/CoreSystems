@@ -319,6 +319,66 @@ Built so far (batches B01 to B07): WS01-S0, WS01-S1 (partial), WS01-S6; WS02-S1,
 | D1-226 | WS01-S7.code | live-proof | P1 | Four new files are untracked and need committing (all LF, ASCII). | open |
 | D1-227 | WS01-S7.code | follow-up | P3 | 13 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-05.json | open |
 
+
+### Wave-mode batch W1-04 (2026-10-23)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D1-228 | WS04-S2 | live-proof | P1 | The two-replica Stop has not run over real NATS: with the bus on, a slow-tool turn on one replica stopped from the other needs the `stopped` frame, `outcome=peer` on both replicas and `gateway_active_streams` returning to 0. This also depends on the ACL deploy and the five ignored NATS live tests from S1, including the unverified no-responders mapping. | open |
+| D1-229 | WS04-S2 | risk | P1 | `agentic_run_stream` registers nothing with the cancel registry (WS03 owns this), so `/continue` segments are not reachable over the run-keyed subject until WS03 registers the stream and calls `attach`. | open |
+| D1-230 | WS04-S2 | live-proof | P1 | The cross-replica Stop has not run over real NATS: a slow-tool turn on one replica stopped from the other, with the `stopped` frame, `outcome=peer` on both replicas and `gateway_active_streams` back to 0, plus a NATS-down 503. This needs the ACL deployed before the flag is turned on. | open |
+| D1-231 | WS04-S2 | live-proof | P1 | Live two-replica proof over real NATS: needs docker and the replica overlay; the lead runs it. | open |
+| D1-232 | WS04-S2 | live-proof | P1 | NATS ACL deployed before MODEL_GATEWAY_RUN_CONTROL_BUS is turned on, plus the S1 ignored live NATS tests (including the unverified no-responders mapping). | open |
+| D1-233 | WS04-S2 | live-proof | P1 | Re-check sse_events_payload_golden and zdr_refusal_inventory once the other slices land; both fail outside this slice's files. | open |
+| D1-234 | WS04-S2 | live-proof | P1 | Ledger entry for S2 and the correction to the S1 note on /readyz. | open |
+| D1-235 | WS04-S2 | live-proof | P1 | Failures in files this slice did not touch: `sse_events::payload_contract::sse_event_payload_golden` (sse_events.rs, modified by another slice) and `zdr_refusal_inventory` flagging `browser_run.rs:802`. Re-check them after the other slices land. | open |
+| D1-236 | WS04-S2 | follow-up | P3 | 13 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-04.json | open |
+| D1-237 | WS01-S11 | risk | P1 | The rehearsal evidence file records no candidate or rollback manifest digest, so the gate cannot tie a PASSED rehearsal to the artifacts under review; rollback-rehearsal.sh should write the two manifest digests and the gate should compare them. | open |
+| D1-238 | WS01-S11 | follow-up | P1 | The thresholds are file-only. No script reads live metrics (gateway error ratio, p95, audit lag, terminal rows, ZDR days to review) and compares them to approved targets, so the 7-day baseline plus an enforcement step is still to build before any row can move to approved. | open |
+| D1-239 | WS01-S11 | live-proof | P1 | CI green on a PR and the workflow run URL as evidence: the lead must push and confirm both jobs go green, including that the session-core migrations apply on postgres:16. | open |
+| D1-240 | WS01-S11 | live-proof | P1 | Run the three release-*.sh tests on Linux or WSL: they fail on Windows on O_NOFOLLOW, so they are unverified locally. | open |
+| D1-241 | WS01-S11 | live-proof | P1 | Runtime conformance reads ready on a clean candidate tree only after S12: a signed candidate and rollback artifact, the verify key path, and a committed rollback-rehearsal evidence file. | open |
+| D1-242 | WS01-S11 | live-proof | P1 | Optional shared edit, scripts/coresystem-conformance-artifact.sh: pass --profile runtime to the conformance script. CORESYSTEM_CONFORMANCE_PROFILE=runtime does the same today without editing it. | open |
+| D1-243 | WS01-S11 | live-proof | P1 | After the first PR run, confirm the workflow YAML parses and both jobs go green; the audit job needs the session-core migrations to apply on postgres:16. | open |
+| D1-244 | WS01-S11 | live-proof | P1 | S12: set MODEL_PLANE_CANDIDATE_ARTIFACT_DIR, MODEL_PLANE_ROLLBACK_ARTIFACT_DIR and MODEL_PLANE_ARTIFACT_VERIFY_KEY (path only), commit a rollback-rehearsal evidence file, then run 'bash scripts/coresystem-conformance.sh --json --profile runtime' on a clean tree to confirm it reads ready. | open |
+| D1-245 | WS01-S11 | follow-up | P3 | 6 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-04.json | open |
+| D1-246 | WS12-S12 | follow-up | P1 | vite.config.ts test.exclude needs 'scripts/**/*.test.mjs' before the first push; without it pnpm test (vitest run) in spa-verify collects the node:test file and fails (reproduced). | open |
+| D1-247 | WS12-S12 | follow-up | P1 | bundle-budget.json ceilings are null, so the budget only warns and passes; the lead must record the first CI measurement (the spa-verify log line 'assets/index-*.js: N gzip bytes; K JS files: M gzip bytes') before the gate enforces anything. | open |
+| D1-248 | WS12-S12 | live-proof | P1 | spa-browser-fixtures has never run on GitHub; the chunk-recovery spec (3 tests) is only listed, not run. Its route matches **/assets/AuthPage-*.js, so the lazy chunk name must still match the build, and it depends on vite preview answering /api without a backend. | open |
+| D1-249 | WS12-S12 | live-proof | P1 | The red proof is not run: a ~200 KB import into the entry must turn the spa-verify budget step red on a throwaway branch. Only the function-level growth case is unit-tested. | open |
+| D1-250 | WS12-S12 | follow-up | P1 | Ceilings are null, so the gate enforces nothing until the first CI measurement is recorded. | open |
+| D1-251 | WS12-S12 | live-proof | P1 | Lead applies the shared edit to apps/Frontend Plane/verevonv3/vite.config.ts: add 'scripts/**/*.test.mjs' to test.exclude, otherwise pnpm test in spa-verify collects the node:test file and fails. Do this before the first push. | open |
+| D1-252 | WS12-S12 | live-proof | P1 | spa-browser-fixtures has not run on GitHub; the chunk-recovery project's 3 tests need a green CI run (docker/CI only). | open |
+| D1-253 | WS12-S12 | live-proof | P1 | The --base-ref step's 'git fetch --depth=1 origin <base sha>' is unproven until the first pull request run. | open |
+| D1-254 | WS12-S12 | follow-up | P3 | 14 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-04.json | open |
+| D1-255 | WS06-S0 | live-proof | P1 | Prove the S0 DoD on the running stack: after bash scripts/run-control-plane.sh up -d controlplane-prometheus, /api/v1/rules must list group control-audit-core with five rules, and a forged-subject event on the Control bus must put ControlAuditCoreAuthorityMismatch in firing state in /api/v1/alerts. Keep both captures. | open |
+| D1-256 | WS06-S0 | live-proof | P1 | The row's evidence (running Prometheus lists the group, forged-subject alert captured) is not yet produced; promtool results are also pending. | open |
+| D1-257 | WS06-S0 | live-proof | P1 | promtool check rules and promtool test rules (8 cases) have not run; the lead must run them in Docker with prom/prometheus:v2.54.1. | open |
+| D1-258 | WS06-S0 | live-proof | P1 | Live proof is open: /api/v1/rules must list group control-audit-core with five rules, and a forged-subject event on the Control bus must put ControlAuditCoreAuthorityMismatch in /api/v1/alerts (pending or firing). Capture both. | open |
+| D1-259 | WS06-S0 | live-proof | P1 | Commit of the two untracked rule files is lead-only. | open |
+| D1-260 | WS06-S0 | live-proof | P1 | promtool check rules (lead, Docker): docker run --rm --entrypoint promtool -v "$PWD/apps/Control Plane/observability/rules:/o" -w /o prom/prometheus:v2.54.1 check rules audit-core.rules.yml. Expect exit 0. | open |
+| D1-261 | WS06-S0 | live-proof | P1 | Live proof (row DoD, lead's decision on the forged-subject publish): from C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b run bash scripts/run-control-plane.sh up -d controlplane-prometheus. Confirm /api/v1/rules lists group control-audit-core with five rules. Publish a forged-subject audit event on the Control bus and capture /api/v1/alerts with ControlAuditCoreAuthorityMismatch firing. Rollback: delete the two rule files and restart the prometheus container. | open |
+| D1-262 | WS06-S0 | live-proof | P1 | Commit (lead): the two untracked rule files, LF per .gitattributes. Suggested subject: feat(control-plane): alert on audit-core refusals, backlog and bus disconnects (WS06-S0). | open |
+| D1-263 | WS06-S0 | follow-up | P3 | 13 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-04.json | open |
+| D1-264 | WS06-S1 | live-proof | P1 | Open a PR or push the branch so audit-core-ci.yml runs green; the CI run URL is the S1 evidence (the plan exempts CI-only slices from docker evidence). | open |
+| D1-265 | WS06-S1 | live-proof | P1 | Integrator confirms or assigns the ADR number (DEC-39) and renames the ADR file or title if it is not 0013. | open |
+| D1-266 | WS06-S1 | live-proof | P1 | Commit the five S1 files only (internal/chain/{chain.go,chain_test.go,testdata/vectors.json}, .github/workflows/audit-core-ci.yml, apps/AUDIT_INTEGRITY_ADR_2026-10-23.md). | open |
+| D1-267 | WS06-S1 | live-proof | P1 | Open a PR (or push the branch) so .github/workflows/audit-core-ci.yml runs; capture the CI run URL as the S1 evidence and add it to the ADR if wanted. | open |
+| D1-268 | WS06-S1 | live-proof | P1 | Have the integrator confirm or assign the ADR number (DEC-39) and rename or retitle the ADR if it is not 0013. | open |
+| D1-269 | WS06-S1 | live-proof | P1 | If the repo's autocrlf or gitattributes could rewrite testdata/vectors.json line endings, the pinned test normalises CRLF to LF, so no action is needed; the ADR hash is of the LF bytes. | open |
+| D1-270 | WS06-S1 | live-proof | P2 | audit-core-ci.yml has never run on GitHub; the plan's evidence for S1 is a green CI run URL on a PR, which only the lead can produce (and promtool in the job needs the docker image prom/prometheus:v2.54.1). | open |
+| D1-271 | WS06-S1 | decision | P2 | The workflow push trigger lists model-plane as the integration branch (the current local branch); the owner should confirm that branch name before the workflow is pushed. | open |
+| D1-272 | WS06-S1 | follow-up | P3 | 9 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-04.json | open |
+| D1-273 | WS05-S6.code | risk | P1 | Under TOOL_CLASS_GATE=enforce a tool declared with the ask floor reads as requires_consent_to_disclose: it labels the approval as a disclosure (approval_kind Permission) instead of a destructive operation. The seeded built-ins are correct, but a future MCP or policy row with floor ask but a risky class would be mislabelled. Decide whether the disclosure marker needs its own column before MCP rows can carry an ask floor. | open |
+| D1-274 | WS05-S6.code | follow-up | P1 | The requires_*_with variants and the RunGate methods have no production caller yet: grpc.rs, agent.rs, runtime_loop/mod.rs and resume.rs still call the name predicates. Until they are switched (files not owned here) the owner and disclosure markers do not move with TOOL_CLASS_GATE; the posture gate does through evaluate_call_with_class. | open |
+| D1-275 | WS05-S6.code | follow-up | P1 | requires_durable_owner_approval_with, requires_consent_to_disclose_with and the RunGate methods have no production caller: grpc.rs, runtime_loop/agent.rs, runtime_loop/mod.rs and resume.rs still call the name predicates. The owner and disclosure markers do not follow TOOL_CLASS_GATE until those call sites are switched (files not owned by this slice), and that must happen before enforce is meaningful for them. | open |
+| D1-276 | WS05-S6.code | live-proof | P1 | Soak start gate not met and not runnable here: two weeks of TOOL_CLASS_GATE=shadow on the proof stack with zero built-in tool_class_divergence_total (points now include owner_approval and disclosure_consent) plus MCP-read evidence. Until then is_risky_tool, the mcp__ blanket and the off path stay. | open |
+| D1-277 | WS05-S6.code | live-proof | P1 | Deletion of is_risky_tool and the mcp__ blanket, and the compose default TOOL_CLASS_GATE=enforce, wait for the two-week shadow soak with zero built-in divergence on the proof stack (docker, live). | open |
+| D1-278 | WS05-S6.code | live-proof | P1 | Ledger and matrix doc updates (shared files): the implementer's lead_todo lines are to be applied by the lead. Entries move to implemented only after the soak. | open |
+| D1-279 | WS05-S6.code | live-proof | P1 | Full gates (cargo test --workspace --no-fail-fast, cargo fmt --all --check, cargo check --workspace --all-targets) were not run by the implementer. I ran the targeted tests and cargo check. fmt fails on pre-existing files. | open |
+| D1-280 | WS05-S6.code | live-proof | P1 | Call sites in grpc.rs, agent.rs, runtime_loop/mod.rs and resume.rs must be switched to RunGate methods by the slice that owns those files. | open |
+| D1-281 | WS05-S6.code | follow-up | P3 | 9 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-04.json | open |
+
 ## Wave 2 (WS13 to WS27)
 
 Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS27-S0, WS27-S1. Wave 2 is not started as a wave: these came in with Wave 1 batches because they were Wave 1 prerequisites.
@@ -591,3 +651,7 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS06-S7 | auth, policy, audit | W1-03 | no |
 | WS12-S9 | authority | W1-05 | no |
 | WS01-S7.code | zdr, authority | W1-05 | no |
+| WS04-S2 | authority, zdr | W1-04 | no |
+| WS06-S0 | audit | W1-04 | no |
+| WS06-S1 | audit | W1-04 | no |
+| WS05-S6.code | authority, policy | W1-04 | no |
