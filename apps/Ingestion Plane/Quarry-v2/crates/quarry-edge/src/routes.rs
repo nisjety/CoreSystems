@@ -445,6 +445,10 @@ pub struct ScrapeRequest {
     /// CDN-fronted origins.
     #[serde(default)]
     pub prefer_http3: bool,
+    /// WS7.C: the request's web-policy ask. It can only tighten; an unknown
+    /// capability or key is a 400 (see `quarry_core::web_policy::RequestAsk`).
+    #[serde(default)]
+    pub policy: Option<quarry_core::web_policy::RequestAsk>,
 }
 
 /// Wire-level shape for [`RenderHints`]. Kept separate from the runtime
@@ -561,6 +565,18 @@ async fn scrape_with(
         )
     })?;
 
+    // WS7.C: the web policy for this request, decided before any I/O, and the URL
+    // gated before the cache is read, so a denied page is never served from it.
+    let decision = crate::web_policy_edge::decide(
+        &state.policy,
+        crate::web_policy_edge::principal(&claims),
+        zdr.is_active(),
+        req.policy.as_ref(),
+    )
+    .map_err(|error| crate::web_policy_edge::error_response(&request_id, error))?;
+    crate::web_policy_edge::gate_url(&decision, &req.url)
+        .map_err(|error| crate::web_policy_edge::error_response(&request_id, error))?;
+
     let doc_routing = quarry_runtime::DocRouting::cached();
     let doc_routing_label = format!("{doc_routing:?}").to_ascii_lowercase();
     let effective = |cache_state: CacheState| {
@@ -592,6 +608,7 @@ async fn scrape_with(
     // the cache is consulted, so the gate can see it.
     let plan = plan_from_signals(req.signals.unwrap_or_default());
     let cache_allowed = resolved.is_default()
+        && crate::web_policy_edge::is_default(&decision)
         && plan.driver != quarry_core::output::DriverKind::Browser
         && quarry_core::zdr::guard(zdr, quarry_core::zdr::WriteKind::Cache).is_ok();
     let mut cache_state = CacheState::Bypass;
@@ -627,7 +644,7 @@ async fn scrape_with(
         privacy: privacy.clone(),
         cancel_token: None,
         local_index: state.local_index.clone(),
-        policy: quarry_runtime::RunPolicy::default(),
+        policy: quarry_runtime::RunPolicy::from(decision.policy()),
         scheduler: state.scheduler.clone(),
         autoscale: Some(quarry_runtime::global_autoscale()),
         render: req
@@ -1289,6 +1306,18 @@ async fn internal_run_page(
         )
     })?;
 
+    // WS7.C: no JWT on this route. The caller is the orchestrator, an autonomous
+    // principal, so the decision is the baseline and the invariants (no ask).
+    let decision = crate::web_policy_edge::decide(
+        &state.policy,
+        quarry_core::web_policy::Principal::Autonomous,
+        zdr.is_active(),
+        None,
+    )
+    .map_err(|error| crate::web_policy_edge::envelope_error(&request_id, error))?;
+    crate::web_policy_edge::gate_url(&decision, &req.url)
+        .map_err(|error| crate::web_policy_edge::envelope_error(&request_id, error))?;
+
     let plan = plan_from_signals(req.signals.unwrap_or_default());
     let driver = pick_driver(&state, &plan, req.prefer_http3);
 
@@ -1310,7 +1339,7 @@ async fn internal_run_page(
         privacy,
         cancel_token: None,
         local_index: state.local_index.clone(),
-        policy: quarry_runtime::RunPolicy::default(),
+        policy: quarry_runtime::RunPolicy::from(decision.policy()),
         scheduler: state.scheduler.clone(),
         autoscale: Some(quarry_runtime::global_autoscale()),
         render: req
@@ -1353,7 +1382,7 @@ async fn internal_run_page(
     let prev_fp = req.prev_fingerprint.clone();
     match runner.run(&run_id, &url, prev_fp).await {
         Ok(out) => {
-            if !zdr.is_active() && should_write(&req.cache) {
+            if !zdr.is_active() && crate::web_policy_edge::is_default(&decision) && should_write(&req.cache) {
                 if let Some(cache) = state.cache.as_ref() {
                     let ttl = effective_ttl(&req.cache, DEFAULT_TTL_SECS);
                     if let Err(e) = cache.put_with_ttl(&org_id, &out.fingerprint, &out, ttl).await {
@@ -1392,6 +1421,15 @@ async fn scrape_stream(
     // `tokio::spawn` does not inherit the caller's span, so without this the
     // runner would log without the ZDR mark and the event filter could not see it.
     let request_span = tracing::Span::current();
+    // WS7.C: the policy is decided before the stream starts. A refusal is the
+    // stream's first event (an `error` event carrying the 403 or 400 envelope).
+    let request_id = crate::request_id::current();
+    let decision = crate::web_policy_edge::decide(
+        &state.policy,
+        crate::web_policy_edge::principal(&claims),
+        zdr.is_active(),
+        req.policy.as_ref(),
+    );
     let stream = async_stream::stream! {
         let url = match req.url.parse::<Url>() {
             Ok(u) => u,
@@ -1400,7 +1438,19 @@ async fn scrape_stream(
                 return;
             }
         };
-        if !zdr.is_active() && should_read(&req.cache) {
+        let decision = match decision {
+            Ok(decision) => decision,
+            Err(error) => {
+                yield Ok(Event::default().event("error").data(crate::web_policy_edge::stream_error_data(&request_id, error)));
+                return;
+            }
+        };
+        if let Err(error) = crate::web_policy_edge::gate_url(&decision, req.url.as_str()) {
+            yield Ok(Event::default().event("error").data(crate::web_policy_edge::stream_error_data(&request_id, error)));
+            return;
+        }
+        let cache_default = crate::web_policy_edge::is_default(&decision);
+        if !zdr.is_active() && cache_default && should_read(&req.cache) {
             if let (Some(prev), Some(cache)) = (req.prev_fingerprint.as_ref(), state.cache.as_ref()) {
                 if let Some(cached) = cache.get(&org_id, prev).await {
                     let data = serde_json::to_string(&cached).unwrap_or_default();
@@ -1431,7 +1481,7 @@ async fn scrape_stream(
             privacy: privacy.clone(),
             cancel_token: None,
             local_index: state.local_index.clone(),
-            policy: quarry_runtime::RunPolicy::default(),
+            policy: quarry_runtime::RunPolicy::from(decision.policy()),
             scheduler: state.scheduler.clone(),
             autoscale: Some(quarry_runtime::global_autoscale()),
             render: req.render.clone().map(RenderHints::from).unwrap_or_default(),
@@ -1479,7 +1529,7 @@ async fn scrape_stream(
                 },
             );
             if let Ok(ref out) = res {
-                if !zdr.is_active() && should_write(&policy) {
+                if !zdr.is_active() && cache_default && should_write(&policy) {
                     if let Some(c) = cache.as_ref() {
                         let ttl = effective_ttl(&policy, DEFAULT_TTL_SECS);
                         if let Err(e) = c.put_with_ttl(&cache_org_id, &out.fingerprint, out, ttl).await {
@@ -1581,7 +1631,7 @@ mod tests {
     use quarry_runtime::driver::{Driver, FetchHints};
     use quarry_runtime::driver_registry::DriverRegistry;
     use quarry_runtime::fetch::FetchResponse;
-    use quarry_runtime::{EventSink, NoopUsageMeter, RunPolicy};
+    use quarry_runtime::{EventSink, NoopUsageMeter};
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
     use tokio::sync::mpsc;
@@ -1699,7 +1749,7 @@ mod tests {
             answer_pipeline: None,
             local_index: None,
             usage: Arc::new(NoopUsageMeter),
-            policy: RunPolicy::default(),
+            policy: crate::policy_baseline::PolicyBaseline::default(),
             scheduler: None,
             internal_signer: None,
             tombstones: None,

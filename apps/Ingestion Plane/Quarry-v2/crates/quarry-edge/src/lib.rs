@@ -22,6 +22,7 @@ pub mod job_lifecycle_routes;
 pub mod limits;
 pub mod map_routes;
 pub mod metrics;
+pub mod policy_baseline;
 pub mod profile_routes;
 pub mod queue_routes;
 pub mod request_id;
@@ -37,6 +38,7 @@ pub mod source_registrar;
 pub mod state;
 pub mod zdr_log;
 pub mod zdr_refusal;
+pub mod web_policy_edge;
 pub mod zdr_tombstone;
 #[cfg(test)]
 pub mod test_support;

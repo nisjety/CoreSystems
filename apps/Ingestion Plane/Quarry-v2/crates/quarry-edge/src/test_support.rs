@@ -19,7 +19,7 @@ use quarry_runtime::artifact_store::InMemoryStore;
 use quarry_runtime::driver::{Driver, FetchHints};
 use quarry_runtime::driver_registry::DriverRegistry;
 use quarry_runtime::fetch::FetchResponse;
-use quarry_runtime::{EventSink, NoopUsageMeter, RunPolicy};
+use quarry_runtime::{EventSink, NoopUsageMeter};
 
 use crate::auth::Claims;
 use crate::state::AppState;
@@ -126,7 +126,7 @@ pub fn test_state(static_driver: Arc<dyn Driver>) -> AppState {
         answer_pipeline: None,
         local_index: None,
         usage: Arc::new(NoopUsageMeter),
-        policy: RunPolicy::default(),
+        policy: crate::policy_baseline::PolicyBaseline::default(),
         scheduler: None,
         internal_signer: None,
         tombstones: None,

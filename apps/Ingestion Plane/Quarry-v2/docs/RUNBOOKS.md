@@ -974,3 +974,24 @@ Not done: the Tier B corpus and the Chromium job (E3.9.2 onward), the scheduled 
 - Synthetic only: the corpus holds test pages and the TestSite seed account (`test_site_alice`, a test value that matches `quarry-runtime/src/test_site.rs`). `base_url_is_local` is the hook for the loop to refuse any base URL that is not loopback or a `.test` or `.localhost` name.
 - Not done: the Tier B loop that writes observations (needs WS11 S0 `ScriptedPlanner` and `FakeQuarry`, a sibling, and a stub grant validator); the CI wiring into `quarry-v2-eval.yml`; the threshold ratification; the scheduled Tier C run. Nothing has been run against a stack. The tests are written and compile-checked only.
 - Trap: `cargo check -p quarry-evals --tests` stops on `lab/evals/src/browser_benchmark.rs:221` (the `BrowserSession` literal lacks `tab_pin`, from an uncommitted `quarry-browser` change in the shared tree). That file is not owned here and was not touched. `--keep-going` reaches the other targets. `quarry-browser-benchmark` stays out of the release gate, as in the E3.9.1 section above.
+
+## Web policy on the scrape family: baseline, enforcement and the request ask (WS7.C, U13, built, NOT run, 2026-10-23)
+
+The scrape family (`POST /v1/scrape`, `POST /v1/scrape/stream`, and the internal `run_page` route) resolves a web policy per request with `quarry_core::web_policy::resolve` and gates every URL before the page cache is read. Code: `crates/quarry-edge/src/policy_baseline.rs` (the operator baseline and the mode), `crates/quarry-edge/src/web_policy_edge.rs` (decide, gate, error shapes, counters), and `RunPolicy::from(&ResolvedPolicy)` in `crates/quarry-runtime/src/policy.rs` (a run stamps `web_policy` only when its policy differs from the catalogue default).
+
+- Flags. `QUARRY_EDGE__WEB_POLICY_BASELINE_JSON`: a `PolicyLayer` wire document (`{"modes":{...},"robots_max":...,"domains":{"deny":[...]}}`); unset means no operator layer. `QUARRY_EDGE__WEB_POLICY_ENFORCEMENT`: `enforce` (default), `observe` or `off`. A value that does not parse fails the boot with a message that names the variable and not its value.
+- Modes. `enforce`: the baseline and the request ask both apply; a denied URL is a 403. `observe`: the run proceeds as under `off`; the decision `enforce` would take is counted as `web_policy_would_deny_total{capability,decision_source}`. `off`: the baseline and the ask are ignored; invariants (raw script) and the ZDR floor still apply.
+- Request ask. `policy` on the body of `/v1/scrape` and `/v1/scrape/stream` (`RequestAsk` in `docs/openapi.yaml`). It can only tighten. An unknown key or capability is a 400 in every mode (`details.reason` `unknown_capability`, the name capped at 64 characters). A denied host is a 403 with `details.reason` `policy_denied` or `domain_denied`, `capability` `domains.deny`, and `decision_source` naming the layer (`request` for an ask, `baseline` for the operator layer).
+- Stream. A refusal on `/v1/scrape/stream` is the first SSE event, `event: error`, carrying the same envelope.
+- Logs and metrics. `policy.denied` and `policy.would_deny` log the capability, the decision source and the reason only. No URL, host, path or query is logged. The host appears in the response only when ZDR is off.
+- Internal `run_page`. No JWT on this route, so it is decided as an autonomous principal with the baseline and the invariants and no ask.
+- Cache. A non-default policy neither reads nor writes the page cache (the cache holds default results).
+
+Checks to run in the wave's test phase (not run here):
+- `cargo test -p quarry-runtime policy` (includes `default_resolved_policy_has_the_same_policy_fingerprint_as_best_effort` and `strict_ask_changes_the_fingerprint`).
+- `cargo test -p quarry-edge --test policy_baseline`.
+- Dev deploy: with `QUARRY_EDGE__WEB_POLICY_BASELINE_JSON={"domains":{"deny":["example.net"]}}`, `POST /v1/scrape {"url":"https://example.net/"}` is 403 with `decision_source` `baseline`; `https://example.org/` is 200 with the same `determinism.policy_fp` as before the change.
+
+Rollback. Set `QUARRY_EDGE__WEB_POLICY_ENFORCEMENT=off` (the ask and the baseline stop applying; invariants stay), or unset the baseline variable, or revert the commit. Nothing else depends on the module until WS7.D and WS7.E.
+
+Not done in this slice: the organisation layer (`OrgInput::Absent`, WS7.H to WS7.J), the grant layer, the agent path (WS7.D), the remaining routes (WS7.E), the claim intake and its required-claim mode (WS7.J), the integration test file `tests/web_policy_scrape.rs` named by the plan (it needs the real-token harness of `zdr_claim_floor.rs`), and the regeneration of the TypeScript and Python SDKs (`sdks/generate.sh`).

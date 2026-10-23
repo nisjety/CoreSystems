@@ -99,11 +99,10 @@ pub struct AppState {
     /// that Control Plane's billing-core consumes. Tests / dev wire
     /// `NoopUsageMeter`. Always populated; never `Option`.
     pub usage: Arc<dyn UsageMeter>,
-    /// Cycle 21 / cluster #2 — default RunPolicy applied to every
-    /// scrape unless the handler overrides it. Defaults to
-    /// `best_effort`; operators flip to `strict` via config for
-    /// reproducibility-critical workloads.
-    pub policy: quarry_runtime::RunPolicy,
+    /// WS7.C — the web-policy baseline and enforcement mode. Each request's
+    /// resolved policy (and the RunPolicy it implies) is decided per request
+    /// from this; see `crate::policy_baseline`.
+    pub policy: crate::policy_baseline::PolicyBaseline,
     /// Cycle 21 / cluster #3 — per-host adaptive scheduler shared
     /// across handlers so concurrent scrapes coordinate. `None`
     /// disables throttling (test harnesses).

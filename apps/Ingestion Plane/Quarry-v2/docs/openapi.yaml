@@ -5171,6 +5171,47 @@ components:
             type: array
             items:
               type: string
+    RequestAsk:
+      type: object
+      description: >-
+        WS7.C web-policy ask on a scrape request. It can only tighten what the
+        operator baseline and the organisation's policy allow; it cannot loosen
+        anything. A domain it denies is a 403 with details.reason policy_denied
+        (capability domains.deny, decision_source request). An unknown capability
+        in disable is a 400 with details.reason unknown_capability. Under
+        QUARRY_EDGE__WEB_POLICY_ENFORCEMENT=observe the ask is only counted, never
+        enforced.
+      additionalProperties: false
+      properties:
+        disable:
+          type: array
+          items:
+            type: string
+          description: Capability keys to disable for this request (the catalogue names, for example browser.act.upload).
+        robots_max:
+          type: string
+          enum:
+          - strict
+          - respect
+          - ignore
+          description: Lower the robots.txt ceiling for this request.
+        proxy_max:
+          type: string
+          enum:
+          - none
+          - pool
+          description: Lower the proxy tier ceiling for this request.
+        deny_domains:
+          type: array
+          items:
+            type: string
+          description: Hosts to refuse for this request (exact host or dot-suffix match).
+        allow_domains:
+          type: array
+          nullable: true
+          items:
+            type: string
+          description: Hosts to allow for this request. Applies to autonomous (service) callers only.
     ScrapeRequest:
       type: object
       additionalProperties: true
@@ -5207,6 +5248,8 @@ components:
           type: boolean
           default: false
           description: Prefer HTTP/3 when the edge was built and configured for it.
+        policy:
+          $ref: '#/components/schemas/RequestAsk'
         url:
           type: string
           format: uri

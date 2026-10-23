@@ -51,6 +51,7 @@ mod job_lifecycle_routes;
 mod limits;
 mod map_routes;
 mod metrics;
+mod policy_baseline;
 mod profile_routes;
 mod queue_routes;
 mod request_id;
@@ -66,6 +67,7 @@ mod source_registrar;
 mod state;
 mod zdr_log;
 mod zdr_refusal;
+mod web_policy_edge;
 mod zdr_tombstone;
 #[cfg(test)]
 mod test_support;
@@ -240,6 +242,13 @@ async fn run() -> anyhow::Result<()> {
     // How long a shutdown waits for in-flight requests before closing the rest.
     let drain_deadline = drain::deadline_from_env(|name| std::env::var(name).ok())
         .map_err(|e| anyhow::anyhow!("drain: {e}"))?;
+    // WS7.C: the web-policy baseline and enforcement mode. An unparsable value fails the boot.
+    let web_policy = policy_baseline::PolicyBaseline::from_env()
+        .map_err(|e| anyhow::anyhow!("web policy: {e}"))?;
+    tracing::info!(
+        enforcement = web_policy.enforcement().as_str(),
+        "web policy baseline loaded"
+    );
     let environment = std::env::var("ENVIRONMENT")
         .or_else(|_| std::env::var("APP_ENV"))
         .unwrap_or_default()
@@ -1564,11 +1573,9 @@ async fn run() -> anyhow::Result<()> {
         baseline_store,
         internal_signer,
         tombstones,
-        // Cycle 21 / cluster #2 — best-effort policy by default.
-        // Operators wanting `strict` reproducibility set
-        // `QUARRY_EDGE__RUN_POLICY=strict` (future config wiring; for
-        // now the runtime knob lives at code level).
-        policy: quarry_runtime::RunPolicy::default(),
+        // WS7.C — web policy baseline and enforcement (see `policy_baseline`).
+        // Each run's RunPolicy is derived from its resolved web policy per request.
+        policy: web_policy,
         // Cycle 21 / cluster #3 — single shared HostScheduler with
         // default AIMD config. Cheap to share via Arc; per-host state
         // lives behind a tokio::Mutex<HashMap<host, slot>>.
