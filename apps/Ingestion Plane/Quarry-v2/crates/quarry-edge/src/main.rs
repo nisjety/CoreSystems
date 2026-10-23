@@ -480,6 +480,44 @@ async fn run() -> anyhow::Result<()> {
     } else {
         DefaultEngine::new()
     };
+    // W3-B3-01 (E3.8.6): reputation hot reload. Dark by default: the watcher
+    // starts only when QUARRY_EDGE__SECURITY_SNAPSHOT_WATCH_S is a positive
+    // number of seconds and a snapshot path is configured. Subdomain matching
+    // is a separate opt-in (QUARRY_EDGE__SECURITY_SNAPSHOT_SUBDOMAINS).
+    let security = security.with_subdomain_matching(env_flag(
+        "QUARRY_EDGE__SECURITY_SNAPSHOT_SUBDOMAINS",
+    ));
+    let reputation_watch_s = std::env::var("QUARRY_EDGE__SECURITY_SNAPSHOT_WATCH_S")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|secs| *secs > 0);
+    if let (Some(path), Some(secs)) = (
+        cfg.security_snapshot_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|path| !path.is_empty()),
+        reputation_watch_s,
+    ) {
+        let boot = security.list_counts().await;
+        ::metrics::gauge!("quarry_security_reputation_entries", "list" => "blocklist")
+            .set(boot.blocklist as f64);
+        ::metrics::gauge!("quarry_security_reputation_entries", "list" => "allowlist")
+            .set(boot.allowlist as f64);
+        tracing::info!(interval_s = secs, "reputation snapshot hot reload enabled");
+        let _reputation_watch = quarry_security::preflight::spawn_snapshot_watch(
+            &security,
+            path,
+            Duration::from_secs(secs),
+            |result| {
+                if let Ok(counts) = result {
+                    ::metrics::gauge!("quarry_security_reputation_entries", "list" => "blocklist")
+                        .set(counts.blocklist as f64);
+                    ::metrics::gauge!("quarry_security_reputation_entries", "list" => "allowlist")
+                        .set(counts.allowlist as f64);
+                }
+            },
+        );
+    }
     // Normalise ONCE and use the result for both the durability flag and the
     // selection below. The flag used to lowercase while the `match` did not, so
     // `ARTIFACT_BACKEND=S3` counted as durable (production gate passes) yet fell

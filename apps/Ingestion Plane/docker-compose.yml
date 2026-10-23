@@ -223,6 +223,12 @@ services:
       QUARRY_EDGE__METRICS_ENABLED: "${QUARRY_EDGE_METRICS_ENABLED:-0}"
       QUARRY_EDGE__METRICS_TOKEN: "${QUARRY_EDGE_METRICS_TOKEN:-}"
       QUARRY_EDGE__SECURITY_SNAPSHOT_PATH: ${QUARRY_SECURITY_SNAPSHOT_PATH:-/app/data/security-feeds/quarry-security.json}
+      # W3-B3-01 (E3.8.6): reputation hot reload, dark by default. A positive
+      # number of seconds makes quarry-edge re-read the snapshot when its mtime
+      # changes (the feed sync rewrites it at most every 10 minutes). Subdomain
+      # matching (a listed host also blocks its subdomains) is a second opt-in.
+      QUARRY_EDGE__SECURITY_SNAPSHOT_WATCH_S: "${QUARRY_SECURITY_SNAPSHOT_WATCH_S:-0}"
+      QUARRY_EDGE__SECURITY_SNAPSHOT_SUBDOMAINS: "${QUARRY_SECURITY_SNAPSHOT_SUBDOMAINS:-0}"
       # Wave 7 — wire the optional HTTP/3 driver. Default `1` because
       # the edge image is now built with `--features http3` so the
       # cost of having the driver available is paid at build time;
