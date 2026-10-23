@@ -198,6 +198,49 @@ jobs:
             exit 1
           fi
 
+  # WS12 S11 (D11): an optional clippy warning-count ratchet. It never denies a
+  # warning. It is off unless the repo variable MODEL_PLANE_CLIPPY_RATCHET is the
+  # literal "true"; then it fails only when the count rises above the repo
+  # variable MODEL_PLANE_CLIPPY_WARNING_CEILING, which is set from a measured run
+  # and lowered as warnings are burned down.
+  clippy-count:
+    name: Clippy warning count (optional ratchet)
+    if: vars.MODEL_PLANE_CLIPPY_RATCHET == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "apps/Model Plane/rust -> target"
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "27.x"
+
+      - name: Count clippy warnings against the ceiling
+        env:
+          CEILING: ${{ vars.MODEL_PLANE_CLIPPY_WARNING_CEILING }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$CEILING" =~ ^[0-9]+$ ]]; then
+            echo "::error::set the repo variable MODEL_PLANE_CLIPPY_WARNING_CEILING to a whole number"
+            exit 1
+          fi
+          # A compile error fails the step here; only warnings are counted.
+          cargo clippy --workspace --all-targets --message-format=json > clippy.json
+          count=$(jq -s '[.[] | select(.reason == "compiler-message" and .message.level == "warning" and ((.message.code.code // "") | startswith("clippy::")))] | length' clippy.json)
+          echo "clippy warnings: $count (ceiling $CEILING)"
+          if [ "$count" -gt "$CEILING" ]; then
+            echo "::error::clippy warnings rose above the ceiling"
+            exit 1
+          fi
+
 # Deliberately NOT in this workflow, so nobody mistakes its green for
 # coverage it does not provide:
 #
@@ -206,7 +249,8 @@ jobs:
 #     day one. `cargo clippy --workspace --all-targets` does exit 0 today (no
 #     hard errors), but a non-denying clippy step costs a full build for
 #     almost no signal over `cargo check`. Burning down the 304 is its own
-#     task; add the denying step when it lands.
+#     task; add the denying step when it lands. The count-only `clippy-count`
+#     job above is the optional WS12 S11 ratchet: off by default, never denying.
 #
 #   * RUSTFLAGS: "-D warnings" (which dataplane-v2-ci.yml sets). Same reason
 #     at the rustc level: this workspace has live dead_code warnings
