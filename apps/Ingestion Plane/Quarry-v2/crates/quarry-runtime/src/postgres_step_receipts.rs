@@ -701,4 +701,123 @@ mod tests {
             }
         );
     }
+    /// Migrations 0010 (initiator and epoch) and 0011 (the agent identity) can be applied
+    /// again without harm and without touching a row: the runner skips an applied
+    /// version, and the statements themselves are `ADD COLUMN IF NOT EXISTS`, so a
+    /// database whose ledger row is missing (applied by hand, or restored from a dump
+    /// taken between the statement and the ledger write) survives a second apply. Nothing
+    /// is backfilled, and the CHECK constraints still refuse a value outside their set.
+    #[tokio::test]
+    async fn migrations_0010_and_0011_apply_twice_and_leave_rows_alone() {
+        use sqlx::Executor;
+
+        let Some(pool) = fresh_pool().await else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let store = PostgresStepReceiptStore::new(pool.clone());
+        let run_id: RunKind = Id::new();
+        let agent = ReceiptBuilder::start(run_id.to_string(), 1)
+            .org_id("org_a")
+            .actor_id("svc_agent")
+            .initiator(BrowserTimelineInitiator::Agent, 2)
+            .complete(action(), None, 0.0);
+        let legacy = ReceiptBuilder::start(run_id.to_string(), 2)
+            .org_id("org_a")
+            .actor_id("user_a")
+            .complete(action(), None, 0.0);
+        store.append(agent.clone()).await.unwrap();
+        store.append(legacy.clone()).await.unwrap();
+
+        // The runner again: every version is already recorded, so it is a no-op.
+        crate::migrations::run_migrations(&pool)
+            .await
+            .expect("a second run of the migration set is a no-op");
+        // The statements again, as if the ledger row were missing.
+        for sql in [
+            include_str!("../migrations/0010_step_receipt_initiator_epoch.sql"),
+            include_str!("../migrations/0011_step_receipt_initiator_agent.sql"),
+        ] {
+            (&pool)
+                .execute(sql)
+                .await
+                .expect("the migration statements are idempotent");
+        }
+
+        let listed = store.list_for_org("org_a", &run_id).await.unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].initiated_by, Some(BrowserTimelineInitiator::Agent));
+        assert_eq!(listed[0].control_epoch, Some(2));
+        assert_eq!(listed[1].initiated_by, None, "no backfill for an old row");
+        assert_eq!(listed[1].control_epoch, None, "no backfill for an old row");
+
+        // Each column exists once, and its CHECK still holds after the second apply.
+        let columns: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM information_schema.columns              WHERE table_schema = current_schema() AND table_name = 'quarry_step_receipts'              AND column_name IN ('initiated_by', 'control_epoch', 'initiated_agent')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(columns, 3);
+        for bad in [
+            "UPDATE quarry_step_receipts SET initiated_by = 'robot'",
+            "UPDATE quarry_step_receipts SET control_epoch = -1",
+            "UPDATE quarry_step_receipts SET initiated_agent = '[]'::jsonb",
+        ] {
+            assert!(
+                (&pool).execute(bad).await.is_err(),
+                "the CHECK refuses: {bad}"
+            );
+        }
+    }
+
+    /// The expiry's `system` initiator survives the JSON column; an owner's close and a
+    /// start (no initiator) read back without one.
+    #[tokio::test]
+    async fn lifecycle_event_round_trip_keeps_the_system_initiator_on_an_expiry() {
+        use crate::step_receipts::BrowserTimelineLifecycle;
+
+        let Some(pool) = fresh_pool().await else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let store = PostgresStepReceiptStore::new(pool);
+        let run_id: RunKind = Id::new();
+        let kinds = [
+            (BrowserTimelineLifecycle::Started, None),
+            (
+                BrowserTimelineLifecycle::Expired,
+                Some(BrowserTimelineInitiator::System),
+            ),
+        ];
+        for (state, initiated_by) in kinds {
+            store
+                .append_browser_timeline_event(BrowserTimelineEvent::new(
+                    "org_a",
+                    "user_a",
+                    run_id.to_string(),
+                    BrowserTimelineEventKind::Lifecycle { state, initiated_by },
+                ))
+                .await
+                .unwrap();
+        }
+        let events = store
+            .list_browser_timeline_events("org_a", "user_a", &run_id)
+            .await
+            .unwrap();
+        let read: Vec<_> = events.iter().map(|event| event.event.clone()).collect();
+        assert_eq!(
+            read,
+            vec![
+                BrowserTimelineEventKind::Lifecycle {
+                    state: BrowserTimelineLifecycle::Started,
+                    initiated_by: None,
+                },
+                BrowserTimelineEventKind::Lifecycle {
+                    state: BrowserTimelineLifecycle::Expired,
+                    initiated_by: Some(BrowserTimelineInitiator::System),
+                },
+            ]
+        );
+    }
 }

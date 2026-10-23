@@ -148,8 +148,8 @@ pub(super) fn browser_timeline_event(event: BrowserTimelineEvent) -> BrowserTime
             event_count,
             last_sequence,
         },
-        BrowserTimelineEventKind::Lifecycle { state } => {
-            BrowserTimelineItemDetail::Lifecycle { state }
+        BrowserTimelineEventKind::Lifecycle { state, initiated_by } => {
+            BrowserTimelineItemDetail::Lifecycle { state, initiated_by }
         }
     };
     BrowserTimelineItem {

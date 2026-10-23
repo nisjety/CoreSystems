@@ -27,14 +27,19 @@
 mod agent_harness;
 mod support;
 
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::Arc;
+
 use agent_harness::*;
+use async_trait::async_trait;
+use quarry_core::QuarryResult;
 use quarry_edge::agent_routes::RunHandle;
 use quarry_edge::budget::RunClass;
 use quarry_edge::run_limits::{
     parse_takeover_enforcement, takeover_enforced, RunLimits, ENV_TAKEOVER_ENFORCEMENT,
 };
 use quarry_runtime::step_receipts::BrowserControlMode;
-use quarry_runtime::StepReceiptStore;
+use quarry_runtime::{GrantValidation, GrantValidator, StepReceiptStore};
 use serde_json::{json, Value};
 use serial_test::serial;
 
@@ -1722,4 +1727,197 @@ async fn a_tab_that_disappears_without_a_close_call_loses_its_opener() {
     edge.driver.vanish_tab(&third);
     let fourth = open("opener-d").await;
     assert_eq!(recorded().await, vec![fourth]);
+}
+
+// ── when the takeover began, and handing the browser back to a service ──────
+
+/// Hand the browser back on the live handle the way the control route does. A service
+/// principal's run cannot be handed back over HTTP (no route lets a service change the
+/// mode), so the test that needs it does it here and says so.
+async fn give_back_live(edge: &Edge, run_id: &str) -> u64 {
+    let handle: RunHandle = edge.live(run_id).expect("the run is live");
+    let (changed, epoch) = handle
+        .live
+        .set_mode(BrowserControlMode::AgentControl, None)
+        .expect("no expected epoch to compare");
+    assert!(changed, "the run was in a takeover");
+    let mut entry = handle.entry.lock().await;
+    entry.control_mode = BrowserControlMode::AgentControl;
+    entry.control_epoch = epoch;
+    epoch
+}
+
+fn taken_over_at(reply: &Reply) -> chrono::DateTime<chrono::Utc> {
+    let text = reply.details()["taken_over_at"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the 409 names when the takeover began: {}", reply.body));
+    chrono::DateTime::parse_from_rfc3339(text)
+        .unwrap_or_else(|error| panic!("taken_over_at is RFC 3339 ({text}): {error}"))
+        .with_timezone(&chrono::Utc)
+}
+
+/// The 409 carries `taken_over_at` beside the mode and the epoch, on a step and on a tab
+/// call, and the time is the one the person's request set: a second takeover has its own.
+#[tokio::test]
+#[serial]
+async fn a_takeover_refusal_says_when_the_person_took_the_browser() {
+    set_takeover_enforcement(Some("1"));
+
+    let edge = Edge::start(RunLimits::default()).await;
+    let person = member_token();
+    let run = edge.start_run(&person, json!({})).await;
+
+    let before = chrono::Utc::now() - chrono::Duration::seconds(1);
+    assert_eq!(flip(&edge, &person, &run, "human_takeover").await, 1);
+    let after = chrono::Utc::now() + chrono::Duration::seconds(1);
+
+    let step = edge.step(&person, &run, wait_action(), Some("agent")).await;
+    assert_eq!(step.status, 409, "{}", step.body);
+    assert_eq!(step.code(), "USER_TOOK_OVER");
+    assert_eq!(step.details()["control_mode"], "human_takeover");
+    assert_eq!(step.details()["control_epoch"], 1);
+    let first = taken_over_at(&step);
+    assert!(
+        first >= before && first <= after,
+        "{first} is not between {before} and {after}"
+    );
+
+    let tab = edge.new_tab(&person, &run, Some("agent")).await;
+    assert_eq!(tab.status, 409, "{}", tab.body);
+    assert_eq!(taken_over_at(&tab), first, "the same takeover, the same time");
+
+    // Handed back: no refusal, and the next takeover is a new one with its own time.
+    assert_eq!(flip(&edge, &person, &run, "agent_control").await, 2);
+    let ran = edge.step(&person, &run, wait_action(), Some("agent")).await;
+    assert_eq!(ran.status, 200, "{}", ran.body);
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    assert_eq!(flip(&edge, &person, &run, "human_takeover").await, 3);
+    let again = edge.step(&person, &run, wait_action(), Some("agent")).await;
+    assert_eq!(again.status, 409, "{}", again.body);
+    assert_eq!(again.details()["control_epoch"], 3);
+    assert!(taken_over_at(&again) > first, "the second takeover has a later time");
+}
+
+/// A service principal is refused during a takeover and admitted again once the browser
+/// is handed back, as an agent, in the new epoch. The service cannot change the mode, so
+/// the takeover and the hand-back are made on the live handle (see `give_back_live`); the
+/// refusal and the admission are the real routes.
+#[tokio::test]
+#[serial]
+async fn a_service_principal_is_admitted_again_after_the_browser_is_handed_back() {
+    set_takeover_enforcement(Some("1"));
+
+    let edge = Edge::start(RunLimits::default()).await;
+    let service = service_token();
+    let run = edge.start_run(&service, json!({})).await;
+    assert_eq!(take_over_live(&edge, &run).await, 1);
+
+    let refused = edge.step(&service, &run, wait_action(), None).await;
+    assert_eq!(refused.status, 409, "{}", refused.body);
+    assert_eq!(refused.code(), "USER_TOOK_OVER");
+    assert_eq!(refused.details()["control_epoch"], 1);
+    let _ = taken_over_at(&refused);
+    let tab = edge.new_tab(&service, &run, None).await;
+    assert_eq!(tab.status, 409, "a service's tab call is an agent's: {}", tab.body);
+
+    assert_eq!(give_back_live(&edge, &run).await, 2);
+
+    let ran = edge.step(&service, &run, wait_action(), None).await;
+    assert_eq!(ran.status, 200, "{}", ran.body);
+    let opened = edge.new_tab(&service, &run, None).await;
+    assert_eq!(opened.status, 200, "{}", opened.body);
+
+    let receipts = edge.receipts(&service, &run).await;
+    let skips = skipped(&receipts);
+    assert_eq!(skips.len(), 1, "one skipped receipt for the takeover: {receipts:?}");
+    assert_eq!(skips[0]["initiated_by"], "agent");
+    assert_eq!(skips[0]["control_epoch"], 1);
+    let done = completed(&receipts);
+    assert_eq!(done.len(), 1, "{receipts:?}");
+    assert_eq!(done[0]["initiated_by"], "agent");
+    assert_eq!(done[0]["control_epoch"], 2);
+}
+
+// ── the tab routes and the grant ────────────────────────────────────────────
+
+/// A broker whose grant can be revoked mid-run, and which counts every check.
+struct RevocableBroker {
+    active: Arc<AtomicBool>,
+    checks: Arc<AtomicU32>,
+}
+
+#[async_trait]
+impl GrantValidator for RevocableBroker {
+    async fn validate(&self, grant_id: &str) -> QuarryResult<GrantValidation> {
+        self.checks.fetch_add(1, Ordering::SeqCst);
+        Ok(serde_json::from_value(json!({
+            "grant_id": grant_id,
+            "active": self.active.load(Ordering::SeqCst),
+            "kind": "run",
+        }))
+        .expect("a grant validation"))
+    }
+}
+
+/// The documented exception to "every action surface goes through `admit_action`": a tab
+/// route has no action to check, so it takes the closed and control gates, and a tab OPEN
+/// (which can load a page) also revalidates the grant, the domains and the URL itself. A
+/// tab SELECT or CLOSE moves no data and loads nothing, so it does not ask the broker: a
+/// run whose grant was revoked or has expired can still close its tabs, and the grant is
+/// asked again at the next action. This pins both halves, and that an action does ask.
+#[tokio::test]
+#[serial]
+async fn a_revoked_grant_stops_a_tab_open_and_an_action_but_not_a_tab_select_or_close() {
+    set_takeover_enforcement(None);
+
+    let active = Arc::new(AtomicBool::new(true));
+    let checks = Arc::new(AtomicU32::new(0));
+    let broker = RevocableBroker {
+        active: active.clone(),
+        checks: checks.clone(),
+    };
+    let edge = Edge::start_with(RunLimits::default(), move |state| {
+        let mut state = state;
+        state.grant_validator = Arc::new(broker);
+        state
+    })
+    .await;
+    let person = member_token();
+    let run = edge
+        .start_run(&person, json!({ "grant_id": "grant-revocable" }))
+        .await;
+
+    let opened = edge.new_tab(&person, &run, None).await;
+    assert_eq!(opened.status, 200, "{}", opened.body);
+    let tab = opened.data()["tab"]["tabId"].as_str().unwrap().to_owned();
+
+    active.store(false, Ordering::SeqCst);
+
+    let refused_open = edge.new_tab(&person, &run, None).await;
+    assert_eq!(refused_open.status, 403, "{}", refused_open.body);
+    assert_eq!(refused_open.code(), "SECURITY_BLOCKED", "{}", refused_open.body);
+    let refused_step = edge.step(&person, &run, wait_action(), None).await;
+    assert_eq!(refused_step.code(), "SECURITY_BLOCKED", "{}", refused_step.body);
+
+    let asked = checks.load(Ordering::SeqCst);
+    let select = edge
+        .send(
+            reqwest::Method::POST,
+            &person,
+            &format!("/v1/agent/runs/{run}/tabs/{tab}/select"),
+            None,
+        )
+        .await;
+    assert_eq!(select.status, 200, "{}", select.body);
+    let close = edge
+        .delete(&person, &format!("/v1/agent/runs/{run}/tabs/{tab}"))
+        .await;
+    assert_eq!(close.status, 200, "{}", close.body);
+    assert_eq!(
+        checks.load(Ordering::SeqCst),
+        asked,
+        "select and close did not ask the broker"
+    );
+    assert_eq!(edge.driver.selected_tabs(), vec![tab.clone()]);
+    assert_eq!(edge.driver.closed_tabs(), vec![tab]);
 }

@@ -266,16 +266,26 @@ pub(super) struct AdmitInput<'a> {
     pub enforce_takeover: bool,
 }
 
-/// 409 `USER_TOOK_OVER` with the state that caused it.
-pub(super) fn user_took_over(snapshot: ControlSnapshot) -> QuarryError {
+/// 409 `USER_TOOK_OVER` with the state that caused it: `control_mode`, `control_epoch`
+/// and, when the edge knows it, `taken_over_at` (RFC 3339, when the person took the
+/// browser; absent for a run resumed into a takeover, whose start the checkpoint does
+/// not carry).
+pub(super) fn user_took_over(snapshot: ControlSnapshot, taken_over_at_ms: Option<u64>) -> QuarryError {
+    let mut details = serde_json::json!({
+        "control_mode": "human_takeover",
+        "control_epoch": snapshot.epoch,
+    });
+    if let Some(at) = taken_over_at_ms
+        .and_then(|ms| i64::try_from(ms).ok())
+        .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis)
+    {
+        details["taken_over_at"] = serde_json::json!(at.to_rfc3339());
+    }
     QuarryError::new(
         ErrorCode::UserTookOver,
         "the person using the browser has taken control; this action was not run",
     )
-    .with_details(serde_json::json!({
-        "control_mode": "human_takeover",
-        "control_epoch": snapshot.epoch,
-    }))
+    .with_details(details)
 }
 
 /// The control gate shared by actions and tab operations: while a person holds
@@ -292,7 +302,7 @@ pub(super) fn takeover_gate(
     let snapshot = handle.live.snapshot();
     if snapshot.mode == BrowserControlMode::HumanTakeover && initiator != StepInitiator::Human {
         if enforce {
-            return Err(user_took_over(snapshot));
+            return Err(user_took_over(snapshot, handle.live.taken_over_at_ms()));
         }
         tracing::warn!(
             run_id = %entry.run_id,

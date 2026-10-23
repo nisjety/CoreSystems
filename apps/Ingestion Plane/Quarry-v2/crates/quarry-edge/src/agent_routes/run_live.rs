@@ -194,6 +194,10 @@ pub struct RunLive {
     org_id: String,
     actor_id: String,
     control: AtomicU64,
+    /// When the current takeover began (ms since the epoch); 0 when none is open or the
+    /// start is not known (a run resumed into a takeover). Written after the control
+    /// word changes, so a reader can see the new mode a moment before the time.
+    taken_over_ms: AtomicU64,
     class: RunClass,
     started_ms: u64,
     last_activity_ms: AtomicU64,
@@ -216,6 +220,7 @@ impl RunLive {
             org_id: org_id.into(),
             actor_id: actor_id.into(),
             control: AtomicU64::new(Self::pack(epoch, mode)),
+            taken_over_ms: AtomicU64::new(0),
             class: RunClass::Interactive,
             started_ms: now_ms(),
             last_activity_ms: AtomicU64::new(now_ms()),
@@ -315,13 +320,13 @@ impl RunLive {
                     return None;
                 }
                 if self.snapshot().mode == BrowserControlMode::HumanTakeover {
-                    (idle_s >= limits.takeover_idle_ttl_s).then(|| ExpireVerdict {
+                    (idle_s >= limits.takeover_idle_ttl_s).then_some(ExpireVerdict {
                         reason: ExpireReason::TakeoverIdle,
                         idle_s,
                         age_s,
                     })
                 } else {
-                    (idle_s >= limits.interactive_idle_ttl_s).then(|| ExpireVerdict {
+                    (idle_s >= limits.interactive_idle_ttl_s).then_some(ExpireVerdict {
                         reason: ExpireReason::Idle,
                         idle_s,
                         age_s,
@@ -376,7 +381,11 @@ impl RunLive {
                 Some(Self::pack(snapshot.epoch + 1, mode))
             });
         match result {
-            Ok(previous) => Ok((true, Self::unpack(previous).epoch + 1)),
+            Ok(previous) => {
+                let at = if mode == BrowserControlMode::HumanTakeover { now_ms() } else { 0 };
+                self.taken_over_ms.store(at, Ordering::Release);
+                Ok((true, Self::unpack(previous).epoch + 1))
+            }
             Err(current) => match refused_at {
                 Some(epoch) => Err(epoch),
                 None => Ok((false, Self::unpack(current).epoch)),
@@ -387,6 +396,16 @@ impl RunLive {
     /// Put back a checkpointed state when a run is resumed.
     pub fn restore(&self, epoch: u64, mode: BrowserControlMode) {
         self.control.store(Self::pack(epoch, mode), Ordering::Release);
+        // The checkpoint does not carry when the takeover began.
+        self.taken_over_ms.store(0, Ordering::Release);
+    }
+
+    /// When the open takeover began, if one is open and its start is known.
+    pub fn taken_over_at_ms(&self) -> Option<u64> {
+        if self.snapshot().mode != BrowserControlMode::HumanTakeover {
+            return None;
+        }
+        Some(self.taken_over_ms.load(Ordering::Acquire)).filter(|ms| *ms > 0)
     }
 
     /// Whether the verified caller owns this run (same rule as

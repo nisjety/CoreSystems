@@ -85,7 +85,7 @@ async fn step_refuses_raw_script_and_consumes_nothing() {
         }),
     )
     .await;
-    let (status, Json(envelope)) = result.err().expect("evaluate must be refused");
+    let (status, Json(envelope)) = result.expect_err("evaluate must be refused");
     assert_eq!(status, StatusCode::FORBIDDEN);
     let rendered = serde_json::to_value(&envelope).unwrap();
     assert_eq!(rendered["error"]["code"], "FORBIDDEN");
@@ -515,8 +515,13 @@ fn test_driver() -> Arc<dyn quarry_browser::BrowserDriver> {
     Arc::new(quarry_browser::chromiumoxide::ChromiumoxideDriver::new())
 }
 
+// These drain tests use a driver with no browser, so they check the report, the registry and
+// the closed flag. That the driver is actually asked to release each idle run (and not the
+// busy one) is checked against the recording driver in
+// `tests/run_sweeper_integration.rs`
+// (`the_shutdown_drain_releases_every_idle_runs_session_and_leaves_a_busy_one`).
 #[tokio::test]
-async fn a_drain_releases_every_live_session_and_empties_the_registry() {
+async fn a_drain_reports_every_live_run_and_empties_the_registry() {
     let (runs, _) = live_runs(5);
     let report = drain_runs(&runs, &test_driver(), std::time::Duration::from_secs(5)).await;
     assert_eq!(
@@ -534,7 +539,9 @@ async fn a_drain_releases_every_live_session_and_empties_the_registry() {
 }
 
 #[tokio::test]
-async fn a_run_a_request_still_holds_is_counted_not_released_and_does_not_block_the_rest() {
+async fn a_run_a_request_still_holds_a_clone_of_is_drained_and_closed_all_the_same() {
+    // A request that looked the run up keeps an Arc to it; that used to make the drain
+    // skip the run and leave its browser to die with the process.
     let (runs, ids) = live_runs(3);
     let held = runs
         .lock()
@@ -543,10 +550,43 @@ async fn a_run_a_request_still_holds_is_counted_not_released_and_does_not_block_
         .cloned()
         .expect("registered");
     let report = drain_runs(&runs, &test_driver(), std::time::Duration::from_secs(5)).await;
-    assert_eq!(report.released, 2);
-    assert_eq!(report.in_use, 1);
+    assert_eq!(
+        report,
+        DrainReport {
+            released: 3,
+            failed: 0,
+            in_use: 0
+        }
+    );
     assert!(runs.lock().unwrap().is_empty());
-    drop(held);
+    assert!(
+        held.entry.lock().await.closed,
+        "a request queued behind the drain is refused, not run on a released session"
+    );
+}
+
+#[tokio::test]
+async fn a_run_whose_action_outlasts_the_deadline_is_counted_in_use_and_does_not_block_the_rest() {
+    let (runs, ids) = live_runs(3);
+    let busy = runs
+        .lock()
+        .unwrap()
+        .get(&ids[1])
+        .cloned()
+        .expect("registered");
+    // An action holds the run lock for the whole drain.
+    let action = busy.entry.lock().await;
+    let report = drain_runs(&runs, &test_driver(), std::time::Duration::from_millis(200)).await;
+    assert_eq!(
+        report,
+        DrainReport {
+            released: 2,
+            failed: 0,
+            in_use: 1
+        }
+    );
+    assert!(runs.lock().unwrap().is_empty());
+    assert!(!action.closed, "the busy run was left alone");
 }
 
 #[tokio::test]
@@ -554,6 +594,37 @@ async fn draining_an_empty_registry_is_a_no_op() {
     let (runs, _) = live_runs(0);
     let report = drain_runs(&runs, &test_driver(), std::time::Duration::from_secs(1)).await;
     assert_eq!(report, DrainReport::default());
+}
+
+#[test]
+fn the_takeover_time_is_set_by_a_takeover_kept_by_a_repeat_and_unknown_after_a_restore() {
+    let live = RunLive::new("org", "user", BrowserControlMode::AgentControl, 0);
+    assert_eq!(live.taken_over_at_ms(), None);
+    live.set_mode(BrowserControlMode::HumanTakeover, None).unwrap();
+    let at = live.taken_over_at_ms().expect("a takeover has a start");
+    assert!(at > 0);
+    // A repeated request changes nothing, so the start does not move.
+    live.set_mode(BrowserControlMode::HumanTakeover, None).unwrap();
+    assert_eq!(live.taken_over_at_ms(), Some(at));
+    live.set_mode(BrowserControlMode::AgentControl, None).unwrap();
+    assert_eq!(live.taken_over_at_ms(), None);
+    // A checkpoint does not carry the start, so a resumed takeover has none.
+    live.restore(5, BrowserControlMode::HumanTakeover);
+    assert_eq!(live.taken_over_at_ms(), None);
+}
+
+#[test]
+fn the_user_took_over_details_name_the_start_only_when_it_is_known() {
+    let snapshot = ControlSnapshot {
+        mode: BrowserControlMode::HumanTakeover,
+        epoch: 3,
+    };
+    let known = user_took_over(snapshot, Some(1_700_000_000_000)).details.expect("details");
+    assert_eq!(known["control_mode"], "human_takeover");
+    assert_eq!(known["control_epoch"], 3);
+    assert_eq!(known["taken_over_at"], "2023-11-14T22:13:20+00:00");
+    let unknown = user_took_over(snapshot, None).details.expect("details");
+    assert!(unknown.get("taken_over_at").is_none(), "{unknown}");
 }
 
 #[test]
@@ -1333,7 +1404,7 @@ async fn agent_cannot_change_control_mode() {
         }),
     )
     .await;
-    let (status, _) = result.err().expect("an agent cannot hand the browser back to itself");
+    let (status, _) = result.expect_err("an agent cannot hand the browser back to itself");
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(
         handle.live.snapshot().mode,
@@ -1363,7 +1434,7 @@ async fn stale_expected_epoch_returns_conflict() {
         }),
     )
     .await;
-    let (status, Json(envelope)) = result.err().expect("stale epoch");
+    let (status, Json(envelope)) = result.expect_err("stale epoch");
     assert_eq!(status, StatusCode::CONFLICT);
     let rendered = serde_json::to_value(&envelope).unwrap();
     assert_eq!(rendered["error"]["details"]["control_epoch"], 4);
@@ -1706,7 +1777,10 @@ async fn sweep_releases_an_idle_run_once_and_leaves_the_checkpoint_active() {
         .unwrap();
     assert!(timeline.iter().any(|event| matches!(
         &event.event,
-        BrowserTimelineEventKind::Lifecycle { state: BrowserTimelineLifecycle::Expired }
+        BrowserTimelineEventKind::Lifecycle {
+            state: BrowserTimelineLifecycle::Expired,
+            initiated_by: Some(BrowserTimelineInitiator::System),
+        }
     )));
     let event = events.try_recv().expect("agent.expired was emitted");
     assert_eq!(event.event_type, EventType::AgentExpired);
@@ -1919,7 +1993,7 @@ async fn a_step_on_a_released_run_carries_the_hint() {
         }),
     )
     .await;
-    let (status, Json(envelope)) = result.err().expect("the run is not live");
+    let (status, Json(envelope)) = result.expect_err("the run is not live");
     assert_eq!(status, StatusCode::NOT_FOUND);
     let rendered = serde_json::to_value(&envelope).unwrap();
     assert_eq!(rendered["error"]["details"]["resumable"], true);

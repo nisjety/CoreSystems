@@ -16,6 +16,11 @@
 //! The whole feature is gated behind `browser-agent` (on by default), which
 //! pulls in the real chromiumoxide CDP driver via `quarry-browser/chromiumoxide`.
 
+// Every handler and helper here returns `Result<_, ApiErr>`: the refusal IS the response (a
+// status and a typed envelope), built on the cold path only, so the size of the `Err` variant
+// costs nothing worth boxing.
+#![allow(clippy::result_large_err)]
+
 // The route handlers, request types and helpers live in the sibling files. This file keeps
 // the feature gate, the imports they share (each starts with `use super::*;`) and the
 // re-exports that give `crate::agent_routes::*` the paths it had before the split (WS2.B).
@@ -40,6 +45,10 @@ mod control;
 mod projection;
 #[cfg(feature = "browser-agent")]
 mod lifecycle;
+#[cfg(feature = "browser-agent")]
+mod close;
+#[cfg(feature = "browser-agent")]
+mod queries;
 #[cfg(feature = "browser-agent")]
 mod step;
 #[cfg(feature = "browser-agent")]
@@ -75,6 +84,10 @@ pub use self::control::*;
 pub use self::projection::*;
 #[cfg(feature = "browser-agent")]
 pub use self::lifecycle::*;
+#[cfg(feature = "browser-agent")]
+pub use self::close::*;
+#[cfg(feature = "browser-agent")]
+pub use self::queries::*;
 #[cfg(feature = "browser-agent")]
 pub use self::step::*;
 #[cfg(feature = "browser-agent")]

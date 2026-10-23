@@ -516,7 +516,8 @@ paths:
             (re-observe before acting), or USER_TOOK_OVER: the person using the
             browser has taken it over and this action was proposed by an agent
             (a service principal, or `initiated_by: agent`). `error.details` is
-            `{control_mode: "human_takeover", control_epoch}`. Not retryable until
+            `{control_mode: "human_takeover", control_epoch, taken_over_at}` (`taken_over_at`,
+            RFC 3339, is absent for a run resumed into a takeover). Not retryable until
             control is handed back. Enforced only when
             QUARRY_EDGE__TAKEOVER_ENFORCEMENT=1; otherwise the edge logs what it
             would have refused.
@@ -610,7 +611,8 @@ paths:
           description: >-
             USER_TOOK_OVER: the person using the browser has taken it over and this
             call is an agent's. `error.details` is
-            `{control_mode: "human_takeover", control_epoch}`. Enforced only when
+            `{control_mode: "human_takeover", control_epoch, taken_over_at}` (`taken_over_at`,
+            RFC 3339, is absent for a run resumed into a takeover). Enforced only when
             QUARRY_EDGE__TAKEOVER_ENFORCEMENT is on.
           content:
             application/json:

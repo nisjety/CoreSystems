@@ -202,6 +202,11 @@ pub enum BrowserTimelineEventKind {
     },
     Lifecycle {
         state: BrowserTimelineLifecycle,
+        /// Who ended the run when its owner did not: `system` for the sweeper's
+        /// expiry. Absent for `started`, for an owner's close and on events written
+        /// before this field existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        initiated_by: Option<BrowserTimelineInitiator>,
     },
 }
 
@@ -972,6 +977,35 @@ mod tests {
             }
             other => panic!("not a tab event: {other:?}"),
         }
+    }
+
+    /// A lifecycle event stored before the expiry carried an initiator has no
+    /// `initiated_by`; it reads as `None`, and a `None` is not written back out.
+    #[test]
+    fn legacy_lifecycle_event_without_an_initiator_deserialises_and_an_expiry_roundtrips() {
+        let legacy: BrowserTimelineEventKind =
+            serde_json::from_str(r#"{"kind":"lifecycle","state":"expired"}"#).unwrap();
+        assert_eq!(
+            legacy,
+            BrowserTimelineEventKind::Lifecycle {
+                state: BrowserTimelineLifecycle::Expired,
+                initiated_by: None,
+            }
+        );
+        let started = serde_json::to_value(BrowserTimelineEventKind::Lifecycle {
+            state: BrowserTimelineLifecycle::Started,
+            initiated_by: None,
+        })
+        .unwrap();
+        assert!(started.get("initiated_by").is_none(), "{started}");
+
+        let expired = BrowserTimelineEventKind::Lifecycle {
+            state: BrowserTimelineLifecycle::Expired,
+            initiated_by: Some(BrowserTimelineInitiator::System),
+        };
+        let wire = serde_json::to_value(&expired).unwrap();
+        assert_eq!(wire["initiated_by"], "system");
+        assert_eq!(serde_json::from_value::<BrowserTimelineEventKind>(wire).unwrap(), expired);
     }
 
     #[test]

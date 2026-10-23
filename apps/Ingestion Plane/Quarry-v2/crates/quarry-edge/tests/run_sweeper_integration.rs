@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use agent_harness::*;
 use quarry_core::event::EventType;
-use quarry_edge::agent_routes::{sweep_once, SweepReport};
+use quarry_edge::agent_routes::{drain_runs, sweep_once, DrainReport, SweepReport};
 use quarry_edge::run_limits::RunLimits;
 use quarry_runtime::step_receipts::{
     AgentRunStatus, BrowserTimelineEventKind, BrowserTimelineLifecycle,
@@ -73,7 +73,7 @@ async fn lifecycle_states(edge: &Edge, run_id: &str) -> Vec<BrowserTimelineLifec
         .expect("timeline")
         .into_iter()
         .filter_map(|event| match event.event {
-            BrowserTimelineEventKind::Lifecycle { state } => Some(state),
+            BrowserTimelineEventKind::Lifecycle { state, .. } => Some(state),
             _ => None,
         })
         .collect()
@@ -308,6 +308,21 @@ async fn an_idle_run_is_released_exactly_once_and_its_checkpoint_stays_resumable
         "{states:?}"
     );
 
+    // The owner timeline says the system ended it, not a person or an agent; the
+    // start carries no initiator.
+    let items = edge.timeline(&person, &run).await;
+    let lifecycle: Vec<&Value> = items.iter().filter(|item| item["kind"] == "lifecycle").collect();
+    let expired_item = lifecycle
+        .iter()
+        .find(|item| item["state"] == "expired")
+        .expect("the expiry is on the owner timeline");
+    assert_eq!(expired_item["initiatedBy"], "system", "{expired_item}");
+    let started_item = lifecycle
+        .iter()
+        .find(|item| item["state"] == "started")
+        .expect("the start is on the owner timeline");
+    assert!(started_item.get("initiatedBy").is_none(), "{started_item}");
+
     let durable = edge.durable_events().await;
     let expired: Vec<&Value> = durable
         .iter()
@@ -321,6 +336,25 @@ async fn an_idle_run_is_released_exactly_once_and_its_checkpoint_stays_resumable
         "the expiry carries no URL: {}",
         expired[0]
     );
+}
+
+/// The owner's own close is not the system's: its `closed` item carries no initiator.
+#[tokio::test]
+async fn an_owners_close_is_not_recorded_as_the_systems() {
+    let edge = Edge::start(idle_limits(60)).await;
+    let person = member_token();
+    let run = edge.start_run(&person, json!({})).await;
+    let closed = edge
+        .delete(&person, &format!("/v1/agent/runs/{run}"))
+        .await;
+    assert_eq!(closed.status, 200, "{}", closed.body);
+
+    let items = edge.timeline(&person, &run).await;
+    let closed_item = items
+        .iter()
+        .find(|item| item["kind"] == "lifecycle" && item["state"] == "closed")
+        .expect("the close is on the owner timeline");
+    assert!(closed_item.get("initiatedBy").is_none(), "{closed_item}");
 }
 
 /// A ZDR run is released exactly once too, and nothing is written for it: no
@@ -1179,4 +1213,52 @@ async fn a_resumed_agent_run_keeps_its_stored_runtime_not_the_resume_requests() 
         late.expired, 1,
         "40 s is past the stored 30 s plus grace; the request's 3000 s does not apply"
     );
+}
+
+/// The shutdown drain through the real registry and the recording driver: every idle run's
+/// browser session is released (the driver sees the release, once, for that run), the
+/// registry is emptied, and a run an action is still running on is neither released nor
+/// counted as released (the browser dies with the process).
+#[tokio::test]
+async fn the_shutdown_drain_releases_every_idle_runs_session_and_leaves_a_busy_one() {
+    let edge = Edge::start(idle_limits(600)).await;
+    let person = member_token();
+    let first = edge.start_run(&person, json!({})).await;
+    let second = edge.start_run(&person, json!({})).await;
+    let busy = edge.start_run(&person, json!({})).await;
+
+    // The busy run's navigation holds the run lock until this test opens the gate, so the
+    // lock is held for the whole drain however slow the machine is: the drain is started only
+    // once the driver reports it is inside the navigation, and gives it 300 ms.
+    let gate = edge.driver.time_out_next_goto_when_released();
+    let stuck_step = edge.step(
+        &person,
+        &busy,
+        json!({ "type": "navigate", "url": "https://example.test/slow" }),
+        None,
+    );
+    let draining = async {
+        edge.driver.wait_goto_entered(1, "the busy run's navigation").await;
+        let report = drain_runs(&edge.state.agent_runs, &edge.state.agent_driver, Duration::from_millis(300)).await;
+        gate.notify_one();
+        report
+    };
+    let (stuck, report) = tokio::join!(stuck_step, draining);
+
+    assert_eq!(
+        report,
+        DrainReport { released: 2, failed: 0, in_use: 1 },
+        "two idle runs released, one left to the exit"
+    );
+    let mut released = edge.driver.released();
+    released.sort();
+    let mut expected = vec![first.clone(), second.clone()];
+    expected.sort();
+    assert_eq!(released, expected, "the driver saw exactly the idle runs' releases, once each");
+    assert!(
+        !edge.driver.released().contains(&busy),
+        "the run an action was still running on keeps its session"
+    );
+    assert!(edge.live(&first).is_none() && edge.live(&second).is_none(), "the registry is empty");
+    assert_eq!(stuck.status, 504, "the stuck navigation still ends with its own typed timeout");
 }
