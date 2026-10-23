@@ -26,3 +26,17 @@ jobs:
           python-version: '3.12'
       - name: buf lint ratchet unit tests
         run: python3 -m unittest scripts/tests/test_buf_lint_ratchet.py
+  log-content:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: log-content gate unit tests
+        run: python3 -m unittest scripts/tests/test_log_content.py
+      # Advisory for the first three runs (rollout convention): record the failing
+      # set, then drop continue-on-error so the gate blocks.
+      - name: log-content gate
+        continue-on-error: true
+        run: python3 scripts/gates/log-content.py --check
