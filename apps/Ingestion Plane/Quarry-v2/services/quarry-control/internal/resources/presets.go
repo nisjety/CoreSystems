@@ -14,11 +14,16 @@ import (
 // Phase 7: callers attach a preset by name to job creation; control resolves
 // the policy and stamps it onto the job.
 type Preset struct {
-	Name        string                    `json:"name"`
-	Title       string                    `json:"title"`
-	Description string                    `json:"description"`
-	Tags        []string                  `json:"tags,omitempty"`
-	Policy      quarrycontracts.RunPolicy `json:"policy"`
+	Name        string   `json:"name"`
+	Title       string   `json:"title"`
+	Description string   `json:"description"`
+	Tags        []string `json:"tags,omitempty"`
+	// Requires names the web-policy capability keys (`key=value`, the names of
+	// quarry_core::web_policy) that the policy needs above the baseline. WS7.F
+	// declares them; job creation does not enforce them yet (WS7.C wires the
+	// edge, WS7.I mints the claim that unlocks them).
+	Requires []string                  `json:"requires,omitempty"`
+	Policy   quarrycontracts.RunPolicy `json:"policy"`
 	// AliasOf names the preset this entry is an alias of. An alias resolves to
 	// the same policy; it exists so an id that shipped keeps working for one
 	// release after a rename (WS3.I: stealth -> careful).
@@ -76,6 +81,7 @@ func defaultPresets() []Preset {
 			Title:       "Fast scrape",
 			Description: "Aggressive concurrency, no delay, no jitter. For permissive APIs and partner sites.",
 			Tags:        []string{"fast", "low-respect"},
+			Requires:    []string{"robots.max_mode=ignore"},
 			Policy: quarrycontracts.RunPolicy{
 				Concurrency: quarrycontracts.Concurrency{PerRun: 32, PerDomain: 8},
 				Delay:       quarrycontracts.Delay{MinMs: 0, MaxMs: 0, Jitter: false},
@@ -100,6 +106,7 @@ func defaultPresets() []Preset {
 			Title:       "Careful scrape",
 			Description: "Slow and steady. Sticky proxy, longer jittered delays, robots respected. Quarry does not change identity to get past a challenge. The policy records Block {challenge, abort}, but no runtime reader enforces it yet: it is advisory, and a run is not stopped by a challenge.",
 			Tags:        []string{"careful", "slow"},
+			Requires:    []string{"proxy.max_tier=pool"},
 			Policy: quarrycontracts.RunPolicy{
 				Concurrency: quarrycontracts.Concurrency{PerRun: 4, PerDomain: 1},
 				Delay:       quarrycontracts.Delay{MinMs: 1500, MaxMs: 5000, Jitter: true},
@@ -146,6 +153,7 @@ func defaultPresets() []Preset {
 			alias.Name = old
 			alias.Description = "Deprecated alias of `" + successor + "`, kept for one release. " + p.Description
 			alias.Tags = append([]string(nil), p.Tags...)
+			alias.Requires = append([]string(nil), p.Requires...)
 			alias.AliasOf = successor
 			alias.Deprecated = true
 			presets = append(presets, alias)

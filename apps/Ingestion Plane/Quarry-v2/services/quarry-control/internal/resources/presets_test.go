@@ -290,3 +290,92 @@ func TestResolvePreset_DirectLookup(t *testing.T) {
 		t.Errorf("polite preset diverges from default policy: %+v vs %+v", p, def)
 	}
 }
+
+// baselineExcess lists the web-policy keys a preset's policy needs above the
+// baseline (DefaultRunPolicy). A robots mode more permissive than respect needs
+// robots.max_mode=ignore; any proxy strategy other than none needs a pooled
+// proxy tier, proxy.max_tier=pool (the baseline proxy tier is none).
+func baselineExcess(p quarrycontracts.RunPolicy) []string {
+	var out []string
+	if p.Robots == quarrycontracts.RobotsIgnore {
+		out = append(out, "robots.max_mode=ignore")
+	}
+	if p.Proxy.Strategy != quarrycontracts.ProxyNone {
+		out = append(out, "proxy.max_tier=pool")
+	}
+	return out
+}
+
+func requiresContain(list []string, want string) bool {
+	for _, v := range list {
+		if v == want {
+			return true
+		}
+	}
+	return false
+}
+
+// WS7.F: every preset whose policy exceeds the baseline declares the excess in
+// requires, and every declared requirement is one its policy really exceeds.
+func TestEveryPresetThatExceedsTheBaselineDeclaresRequires(t *testing.T) {
+	t.Parallel()
+	if got := baselineExcess(quarrycontracts.DefaultRunPolicy()); len(got) != 0 {
+		t.Fatalf("the baseline policy exceeds the baseline: %v", got)
+	}
+	exceeding := 0
+	for _, p := range defaultPresets() {
+		want := baselineExcess(p.Policy)
+		if len(want) > 0 {
+			exceeding++
+		}
+		for _, w := range want {
+			if !requiresContain(p.Requires, w) {
+				t.Errorf("preset %q exceeds the baseline (%s) but requires is %v", p.Name, w, p.Requires)
+			}
+		}
+		for _, r := range p.Requires {
+			if !requiresContain(want, r) {
+				t.Errorf("preset %q declares %q, which its policy does not exceed", p.Name, r)
+			}
+		}
+	}
+	// Guard against a vacuous pass: the catalogue has exceeding presets today.
+	if exceeding == 0 {
+		t.Fatal("no preset exceeds the baseline; the requires check would pass vacuously")
+	}
+}
+
+// WS7.F: requires is on the wire for presets that declare it, and absent for
+// the baseline preset (omitempty).
+func TestPresets_RequiresOnTheWire(t *testing.T) {
+	t.Parallel()
+	h, _ := newPresetServer(t)
+	cases := map[string][]any{
+		"fast":   {"robots.max_mode=ignore"},
+		"polite": nil,
+	}
+	for name, want := range cases {
+		req := httptest.NewRequest(http.MethodGet, "/v1/presets/"+name, nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d; body=%s", name, w.Code, w.Body.String())
+		}
+		var env map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+			t.Fatal(err)
+		}
+		data, _ := env["data"].(map[string]any)
+		got, has := data["requires"]
+		if want == nil {
+			if has {
+				t.Errorf("%s: requires must be absent, got %v", name, got)
+			}
+			continue
+		}
+		list, _ := got.([]any)
+		if len(list) != len(want) || (len(list) > 0 && list[0] != want[0]) {
+			t.Errorf("%s: requires = %v, want %v", name, got, want)
+		}
+	}
+}

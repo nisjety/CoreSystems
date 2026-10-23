@@ -197,7 +197,9 @@ func main() {
 		} else {
 			log.Info().Msg("ZDR tombstone receiver is off (default): no route, no erasure marker")
 		}
-		resources.MountBlocklists(r, db)
+		// WS7.F: /v1/blocklists answers 410 Gone. The CRUD mount is
+		// resources.MountBlocklists(r, db); one-line rollback.
+		resources.MountBlocklistsGone(r)
 		resources.MountWebhookDeliveries(r, db)
 		resources.MountPresets(r)
 
