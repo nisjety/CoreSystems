@@ -2142,8 +2142,20 @@ paths:
   /v1/jobs/{job_id}/events:
     get:
       operationId: list_job_events
-      summary: Durable events keyed by handoff job_id
-      description: Forwards to control's /v1/jobs/{id}/events and re-emits as JSON (or SSE for the SPA gateway).
+      summary: Durable events keyed by handoff job_id, or a live tail with follow=true
+      description: >-
+        Without follow (the legacy drain): every event of the job after after_seq
+        (or Last-Event-ID), read page by page until caught up, then a terminal
+        "done" frame. With follow=true and the edge flag QUARRY_EDGE__JOB_STREAM_FOLLOW=1:
+        a live tail. The first frame is "event: snapshot" (status, phase, counts,
+        last_seq, deadline_at, origin, control; its id is the start cursor). Every
+        event frame carries "id: <seq>" and "event: <type>". The stream ends with
+        "data: done" after a terminal event (run_completed, run_failed,
+        run_cancelled, run_timed_out) or when the job record is terminal and the
+        log is caught up. After QUARRY_EDGE__JOB_STREAM_MAX_AGE_S (default 1800) it
+        ends with "event: reconnect"; a failed control read ends it with
+        "event: error". Over the per-org or per-instance cap of open streams:
+        429 RATE_LIMITED with retry_after_seconds. A foreign id is 404 before any frame.
       tags:
       - resources
       security:
@@ -2154,18 +2166,120 @@ paths:
         required: true
         schema:
           type: string
+      - name: follow
+        in: query
+        required: false
+        description: "`true` or `1` keeps the stream open. Ignored while the edge flag is off."
+        schema:
+          type: string
+      - name: replay
+        in: query
+        required: false
+        description: "`all` (default) starts from the first event; `none` starts at the snapshot. Other values are 400. Follow only."
+        schema:
+          type: string
+          enum: [all, none]
+      - name: after_seq
+        in: query
+        required: false
+        description: Events after this seq. A Last-Event-ID header wins over it.
+        schema:
+          type: integer
+          minimum: 0
+      - name: limit
+        in: query
+        required: false
+        description: Page size of the legacy drain (default 500, at most 1000).
+        schema:
+          type: integer
+      - name: Last-Event-ID
+        in: header
+        required: false
+        description: Resume after this seq (follow and legacy).
+        schema:
+          type: integer
+          minimum: 0
       responses:
         '200':
-          description: JSON event array or SSE re-emission
+          description: SSE re-emission (legacy drain or live tail)
           content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/JobHistoryEvent'
             text/event-stream:
               schema:
                 type: string
+        '404':
+          description: Foreign id, or a job of another kind on the crawl and batch paths.
+        '429':
+          description: Over the per-org or per-instance cap of open streams (follow only). Body carries code RATE_LIMITED and retry_after_seconds.
+  /v1/crawl/{job_id}/events:
+    get:
+      operationId: list_crawl_events
+      summary: Job events of a crawl job (same contract as /v1/jobs/{job_id}/events)
+      description: A batch id on this path is 404. The follow, replay, after_seq, limit and Last-Event-ID rules are those of list_job_events.
+      tags:
+      - resources
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: job_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: follow
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: replay
+        in: query
+        required: false
+        schema:
+          type: string
+          enum: [all, none]
+      responses:
+        '200':
+          description: SSE re-emission (legacy drain or live tail)
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '404':
+          description: Foreign id, or a job that is not a crawl.
+  /v1/batch/{job_id}/events:
+    get:
+      operationId: list_batch_events
+      summary: Job events of a batch job (same contract as /v1/jobs/{job_id}/events)
+      description: A crawl id on this path is 404. The follow, replay, after_seq, limit and Last-Event-ID rules are those of list_job_events.
+      tags:
+      - resources
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: job_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: follow
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: replay
+        in: query
+        required: false
+        schema:
+          type: string
+          enum: [all, none]
+      responses:
+        '200':
+          description: SSE re-emission (legacy drain or live tail)
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '404':
+          description: Foreign id, or a job that is not a batch.
   /v1/change/check:
     post:
       operationId: change_check

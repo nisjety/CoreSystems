@@ -1199,6 +1199,18 @@ The token's `web_policy` claim (minted by auth-core under WS7.I, which is not bu
 - Routes. Scrape (`POST /v1/scrape`, `/v1/scrape/stream`) and agent run start (`POST /v1/agent/runs`) read the claim. The internal `run_page` route has no token and is decided with no org layer.
 - Test phase (written, NOT run): `cargo test -p quarry-edge --test web_policy_claim` (twelve tests) and `cargo test -p quarry-edge --test zdr_claim_floor` (unchanged, must stay green).
 
+## Live job-event tail: follow=true (WS15.L3, unit W2-U31, built, NOT run, 2026-10-23)
+
+- What: `GET /v1/jobs/{id}/events`, and the aliases `GET /v1/crawl/{id}/events` and `GET /v1/batch/{id}/events` (a kind mismatch is 404), gain `follow=true`. The stream opens with `event: snapshot` (status, phase, counts, last_seq, deadline_at, origin, control; its `id` is the start cursor), then one frame per event with `id: <seq>` and `event: <type>`, and ends with `data: done` after a terminal event or once the job record is terminal and the log is caught up. Code: `crates/quarry-edge/src/job_stream.rs` (permits, poll, snapshot, the stream) and `resource_routes.rs` (`job_events`, `follow_job`, `legacy_events`).
+- Flag: `QUARRY_EDGE__JOB_STREAM_FOLLOW` (default off; `1` enables). Off means `follow` is ignored and the response is the legacy drain.
+- Other knobs: `QUARRY_EDGE__JOB_STREAM_MAX_PER_ORG` (default 20), `QUARRY_EDGE__JOB_STREAM_MAX` (default 500, per instance), `QUARRY_EDGE__JOB_STREAM_MAX_AGE_S` (default 1800; then `event: reconnect`).
+- Cursor: `Last-Event-ID` wins over `after_seq`. With neither, `replay=all` (default) starts at 0 and `replay=none` starts at the job's last seq. Any other `replay` value is 400.
+- Refusals before any frame: a foreign or wrong-kind id is 404; over a cap it is 429 with `code: RATE_LIMITED` and `retry_after_seconds: 30`.
+- Legacy drain change: without `follow` the route now reads every page (500 events each) until the log is caught up, instead of one page. Frames are unchanged. Gateway: `/api/v1/knowledge/jobs/{id}/events` forwards the query and `Last-Event-ID` as before; no gateway code changed.
+- Failure frames: a failed control read ends the stream with `event: error` and `{ "code": <wire name> }`; no internal text is sent.
+- Rollback: unset the flag (or set it to 0). Clients that send `follow=true` then get the legacy drain.
+- Not done here: the SPA controls and the `knowledge-client` follow use are WS15.L5. Under zero data retention the follow path does not apply the errors route's refusal (see depth). Deployment evidence (curl against a slow crawl with a `Last-Event-ID` resume and the 21st-stream 429; the browser network panel) is owed in the stack phase and is not claimed here.
+
 ## Web policy on the remaining routes: search, extract, map, crawl, batch, profile create (WS7.E, unit W2-U33, built, NOT run, 2026-10-23)
 
 The remaining routes resolve the web policy with the same `web_policy_edge::decide` the scrape family uses, under the caller's token (its org layer from the `web_policy` claim, as WS7.J wires it). Each route gates its URLs before any I/O.
