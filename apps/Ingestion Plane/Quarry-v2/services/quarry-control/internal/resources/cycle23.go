@@ -306,7 +306,12 @@ func scheduleTrigger(db store.DB, tc temporalclient.Client) http.HandlerFunc {
 			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, err.Error(), nil)
 			return
 		}
-		sched, ok := db.Schedules().Get(id)
+		org := orgFromQuery(r)
+		if org == "" {
+			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, "org_id required", nil)
+			return
+		}
+		sched, ok := db.Schedules().GetByOrg(id, org)
 		if !ok {
 			httpx.WriteErr(w, r, quarrycontracts.CodeNotFound, "not found", map[string]any{"id": id})
 			return
@@ -341,7 +346,12 @@ func scheduleBackfill(db store.DB, tc temporalclient.Client) http.HandlerFunc {
 			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, err.Error(), nil)
 			return
 		}
-		sched, ok := db.Schedules().Get(id)
+		org := orgFromQuery(r)
+		if org == "" {
+			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, "org_id required", nil)
+			return
+		}
+		sched, ok := db.Schedules().GetByOrg(id, org)
 		if !ok {
 			httpx.WriteErr(w, r, quarrycontracts.CodeNotFound, "not found", map[string]any{"id": id})
 			return

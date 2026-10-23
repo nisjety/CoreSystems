@@ -801,34 +801,107 @@ func (s *profilesStore) Delete(id quarrycontracts.ID) error {
 
 type schedulesStore struct{ pool *pgxpool.Pool }
 
+// scheduleCols is the one column list every schedule SELECT uses. scanSchedule
+// reads it back in the same order (WS15.S1, migration 017).
+const scheduleCols = `id, org_id, name, config, cron, target_kind, target_ref, timezone, overlap_policy,
+	catchup_window_s, pause_on_failure, jitter_s, enabled, created_at, updated_at, created_by, zdr,
+	last_run_at, next_run_at, skipped_overlap_count`
+
+// rowScanner is the part of pgx.Row and pgx.Rows that scanSchedule needs.
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanSchedule(row rowScanner) (store.Schedule, error) {
+	var (
+		v      store.Schedule
+		config []byte
+	)
+	if err := row.Scan(&v.ID, &v.OrgID, &v.Name, &config, &v.Cron, &v.TargetKind, &v.TargetRef,
+		&v.Timezone, &v.OverlapPolicy, &v.CatchupWindowS, &v.PauseOnFailure, &v.JitterS, &v.Enabled,
+		&v.CreatedAt, &v.UpdatedAt, &v.CreatedBy, &v.Zdr,
+		&v.LastRunAt, &v.NextRunAt, &v.SkippedOverlapCount); err != nil {
+		return store.Schedule{}, err
+	}
+	if len(config) > 0 {
+		if err := json.Unmarshal(config, &v.Config); err != nil {
+			return store.Schedule{}, fmt.Errorf("schedule %s config: %w", v.ID, err)
+		}
+	}
+	return v, nil
+}
+
 func (s *schedulesStore) Create(v store.Schedule) error {
-	_, err := s.pool.Exec(context.Background(),
-		`INSERT INTO schedules(id, org_id, cron, target_kind, target_ref, enabled, created_at, created_by, zdr)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-		string(v.ID), v.OrgID, v.Cron, v.TargetKind, v.TargetRef, v.Enabled, v.CreatedAt, v.CreatedBy, v.Zdr)
+	v.ApplyDefaults(time.Now().Unix())
+	config, err := json.Marshal(v.Config)
+	if err != nil {
+		return err
+	}
+	_, err = s.pool.Exec(context.Background(),
+		`INSERT INTO schedules(id, org_id, name, config, cron, target_kind, target_ref, timezone, overlap_policy,
+		   catchup_window_s, pause_on_failure, jitter_s, enabled, created_at, updated_at, created_by, zdr)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+		string(v.ID), v.OrgID, v.Name, string(config), v.Cron, v.TargetKind, v.TargetRef, v.Timezone,
+		v.OverlapPolicy, v.CatchupWindowS, v.PauseOnFailure, v.JitterS, v.Enabled, v.CreatedAt,
+		v.UpdatedAt, v.CreatedBy, v.Zdr)
 	return mapPgErr(err)
 }
 
+// Get is unscoped. Only the orchestrator reconciler and the internal source
+// monitor path reach it; the edge goes through GetByOrg.
 func (s *schedulesStore) Get(id quarrycontracts.ID) (store.Schedule, bool) {
-	var v store.Schedule
-	err := s.pool.QueryRow(context.Background(),
-		`SELECT id, org_id, cron, target_kind, target_ref, enabled, created_at, created_by, zdr
-		 FROM schedules WHERE id=$1`, string(id),
-	).Scan(&v.ID, &v.OrgID, &v.Cron, &v.TargetKind, &v.TargetRef, &v.Enabled, &v.CreatedAt, &v.CreatedBy, &v.Zdr)
+	v, err := scanSchedule(s.pool.QueryRow(context.Background(),
+		`SELECT `+scheduleCols+` FROM schedules WHERE id=$1`, string(id)))
 	if err != nil {
 		return store.Schedule{}, false
 	}
 	return v, true
 }
 
+func (s *schedulesStore) GetByOrg(id quarrycontracts.ID, orgID string) (store.Schedule, bool) {
+	v, err := scanSchedule(s.pool.QueryRow(context.Background(),
+		`SELECT `+scheduleCols+` FROM schedules WHERE id=$1 AND org_id=$2`, string(id), orgID))
+	if err != nil {
+		return store.Schedule{}, false
+	}
+	return v, true
+}
+
+// List is unscoped (the legacy GET /v1/schedules without org_id, and the
+// orchestrator's reconcile read).
 func (s *schedulesStore) List(limit int, cur string) ([]store.Schedule, string) {
+	return s.page(false, "", limit, cur)
+}
+
+func (s *schedulesStore) ListByOrg(orgID string, limit int, cur string) ([]store.Schedule, string) {
+	return s.page(true, orgID, limit, cur)
+}
+
+func (s *schedulesStore) ListDesired(limit int, cur string) ([]store.Schedule, string) {
+	return s.page(false, "", limit, cur)
+}
+
+// page is the keyset page over (created_at, id), newest first. When scoped,
+// the query carries org_id in the WHERE clause, so no row of another org can
+// be returned.
+func (s *schedulesStore) page(scoped bool, orgID string, limit int, cur string) ([]store.Schedule, string) {
 	limit = pageLimit(limit, defaultMaxPage)
 	c, _ := decodeCursor(cur)
-	q := `SELECT id, org_id, cron, target_kind, target_ref, enabled, created_at, created_by, zdr FROM schedules`
-	args := []any{}
+	var (
+		args  []any
+		where []string
+	)
+	if scoped {
+		args = append(args, orgID)
+		where = append(where, fmt.Sprintf("org_id = $%d", len(args)))
+	}
 	if c != nil {
-		q += ` WHERE (created_at, id) < ($1, $2)`
 		args = append(args, c.CreatedAt, c.ID)
+		where = append(where, fmt.Sprintf("(created_at, id) < ($%d, $%d)", len(args)-1, len(args)))
+	}
+	q := `SELECT ` + scheduleCols + ` FROM schedules`
+	if len(where) > 0 {
+		q += ` WHERE ` + strings.Join(where, ` AND `)
 	}
 	q += fmt.Sprintf(` ORDER BY created_at DESC, id DESC LIMIT %d`, limit+1)
 	rows, err := s.pool.Query(context.Background(), q, args...)
@@ -838,8 +911,8 @@ func (s *schedulesStore) List(limit int, cur string) ([]store.Schedule, string) 
 	defer rows.Close()
 	out := make([]store.Schedule, 0, limit)
 	for rows.Next() {
-		var v store.Schedule
-		if err := rows.Scan(&v.ID, &v.OrgID, &v.Cron, &v.TargetKind, &v.TargetRef, &v.Enabled, &v.CreatedAt, &v.CreatedBy, &v.Zdr); err != nil {
+		v, err := scanSchedule(rows)
+		if err != nil {
 			return nil, ""
 		}
 		out = append(out, v)
@@ -864,9 +937,50 @@ func (s *schedulesStore) Delete(id quarrycontracts.ID) error {
 	return nil
 }
 
+func (s *schedulesStore) DeleteByOrg(id quarrycontracts.ID, orgID string) error {
+	ct, err := s.pool.Exec(context.Background(),
+		`DELETE FROM schedules WHERE id=$1 AND org_id=$2`, string(id), orgID)
+	if err != nil {
+		return mapPgErr(err)
+	}
+	if ct.RowsAffected() == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+// UpdateEnabled stamps updated_at. The migration keys on updated_at = 0, so a
+// row someone re-enabled is never disabled again by a re-run of the guard.
 func (s *schedulesStore) UpdateEnabled(id quarrycontracts.ID, enabled bool) error {
 	ct, err := s.pool.Exec(context.Background(),
-		`UPDATE schedules SET enabled=$2 WHERE id=$1`, string(id), enabled)
+		`UPDATE schedules SET enabled=$2, updated_at=$3 WHERE id=$1`,
+		string(id), enabled, time.Now().Unix())
+	if err != nil {
+		return mapPgErr(err)
+	}
+	if ct.RowsAffected() == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+func (s *schedulesStore) UpdateEnabledByOrg(id quarrycontracts.ID, orgID string, enabled bool) error {
+	ct, err := s.pool.Exec(context.Background(),
+		`UPDATE schedules SET enabled=$2, updated_at=$3 WHERE id=$1 AND org_id=$4`,
+		string(id), enabled, time.Now().Unix(), orgID)
+	if err != nil {
+		return mapPgErr(err)
+	}
+	if ct.RowsAffected() == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+func (s *schedulesStore) UpdateRuntime(id quarrycontracts.ID, lastRunAt, nextRunAt *int64, skippedOverlap int64) error {
+	ct, err := s.pool.Exec(context.Background(),
+		`UPDATE schedules SET last_run_at=$2, next_run_at=$3, skipped_overlap_count=$4 WHERE id=$1`,
+		string(id), lastRunAt, nextRunAt, skippedOverlap)
 	if err != nil {
 		return mapPgErr(err)
 	}

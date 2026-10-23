@@ -83,9 +83,37 @@ type WebhookDeliveryStore interface {
 	ClaimDue(now int64, limit int) ([]WebhookDelivery, error)
 }
 
+// SchedulesStore is the schedule table. The tenant methods (GetByOrg,
+// ListByOrg, DeleteByOrg, UpdateEnabledByOrg) are the only ones the edge
+// reaches; a row that belongs to another org answers exactly like a missing
+// one. The unscoped methods (Get, List, Delete, UpdateEnabled, ListDesired)
+// serve the orchestrator reconciler and the internal source-monitor path.
 type SchedulesStore interface {
 	ResourceStore[Schedule]
 	UpdateEnabled(id quarrycontracts.ID, enabled bool) error
+	GetByOrg(id quarrycontracts.ID, orgID string) (Schedule, bool)
+	ListByOrg(orgID string, limit int, cursor string) ([]Schedule, string)
+	DeleteByOrg(id quarrycontracts.ID, orgID string) error
+	UpdateEnabledByOrg(id quarrycontracts.ID, orgID string, enabled bool) error
+	// ListDesired is the orchestrator's all-orgs read (internal path only).
+	ListDesired(limit int, cursor string) ([]Schedule, string)
+	// UpdateRuntime writes the executor's bookkeeping (WS15.S2 writes it; the
+	// method exists now so the column contract is one place).
+	UpdateRuntime(id quarrycontracts.ID, lastRunAt, nextRunAt *int64, skippedOverlap int64) error
+}
+
+// ValidationError is a schedule definition that cannot be stored. Reason is
+// a stable machine token (invalid_timezone, cadence_too_frequent, ...) that
+// the handler returns in error.details.reason; Message is for people.
+type ValidationError struct {
+	Reason  string
+	Message string
+}
+
+func (e *ValidationError) Error() string { return e.Message }
+
+func invalid(reason, format string, args ...any) error {
+	return &ValidationError{Reason: reason, Message: fmt.Sprintf(format, args...)}
 }
 
 // SourcesStore is the durable registry of recurring ingestion targets a
@@ -562,6 +590,55 @@ type Schedule struct {
 	// literal 5-field cron. It is never persisted (no DB column) — only
 	// the resolved Cron is stored.
 	Preset string `json:"preset,omitempty"`
+	// Name is the operator-facing label (WS15.S1, migration 017). Empty for
+	// legacy rows; the tenant view falls back to the target.
+	Name string `json:"name,omitempty"`
+	// Config is the per-kind payload: {url} for scrape and crawl, {urls} for
+	// batch, plus max_pages, max_depth and ingest. JSONB in the table.
+	Config map[string]any `json:"config,omitempty"`
+	// Timezone is an IANA zone the cron is read in. Default UTC.
+	Timezone string `json:"timezone,omitempty"`
+	// OverlapPolicy is skip | allow | cancel. Default skip.
+	OverlapPolicy string `json:"overlap_policy,omitempty"`
+	// CatchupWindowS is how far back a missed fire may be replayed (0..86400).
+	CatchupWindowS int64 `json:"catchup_window_s,omitempty"`
+	// PauseOnFailure pauses the schedule after a failed fire.
+	PauseOnFailure bool `json:"pause_on_failure,omitempty"`
+	// JitterS spreads each fire by up to this many seconds.
+	JitterS int64 `json:"jitter_s,omitempty"`
+	// UpdatedAt is unix seconds of the last create or enable/disable stamp.
+	// 0 means a pre-017 row (the migration keys on it).
+	UpdatedAt int64 `json:"updated_at,omitempty"`
+	// LastRunAt and NextRunAt are written by the executor (WS15.S2).
+	LastRunAt *int64 `json:"last_run_at,omitempty"`
+	NextRunAt *int64 `json:"next_run_at,omitempty"`
+	// SkippedOverlapCount counts fires skipped because a run was in flight.
+	SkippedOverlapCount int64 `json:"skipped_overlap_count,omitempty"`
+	// Activate is INPUT-ONLY. A create starts the schedule enabled only when
+	// the body carries activate:true; the edge sets it for user tokens only.
+	// It is never persisted: the stored state is Enabled.
+	Activate bool `json:"activate,omitempty"`
+}
+
+// ApplyDefaults fills the fields a create leaves empty, so every stored row
+// has the same shape whichever path created it (the source-monitor path does
+// not go through Validate). now is unix seconds.
+func (s *Schedule) ApplyDefaults(now int64) {
+	if s.Config == nil {
+		s.Config = map[string]any{}
+	}
+	if s.Timezone == "" {
+		s.Timezone = "UTC"
+	}
+	if s.OverlapPolicy == "" {
+		s.OverlapPolicy = "skip"
+	}
+	if s.CreatedAt == 0 {
+		s.CreatedAt = now
+	}
+	if s.UpdatedAt == 0 {
+		s.UpdatedAt = s.CreatedAt
+	}
 }
 
 // Source is a user-registered recurring ingestion target (Cycle 23
@@ -667,6 +744,12 @@ func (d *memDB) Events() EventLog                          { return d.events }
 
 type memSchedules struct{ *genericStore[Schedule] }
 
+// Create applies the same defaults the pg store applies (ApplyDefaults).
+func (m *memSchedules) Create(s Schedule) error {
+	s.ApplyDefaults(time.Now().Unix())
+	return m.genericStore.Create(s)
+}
+
 func (m *memSchedules) UpdateEnabled(id quarrycontracts.ID, enabled bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -675,8 +758,103 @@ func (m *memSchedules) UpdateEnabled(id quarrycontracts.ID, enabled bool) error 
 		return ErrNotFound
 	}
 	it.Enabled = enabled
+	it.UpdatedAt = time.Now().Unix()
 	m.items[id] = it
 	return nil
+}
+
+func (m *memSchedules) GetByOrg(id quarrycontracts.ID, orgID string) (Schedule, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	it, ok := m.items[id]
+	if !ok || it.OrgID != orgID {
+		return Schedule{}, false
+	}
+	return it, true
+}
+
+func (m *memSchedules) ListByOrg(orgID string, limit int, cursor string) ([]Schedule, string) {
+	m.mu.RLock()
+	all := make([]Schedule, 0, len(m.items))
+	for _, it := range m.items {
+		if it.OrgID == orgID {
+			all = append(all, it)
+		}
+	}
+	m.mu.RUnlock()
+	return pageSchedulesMem(all, limit, cursor)
+}
+
+func (m *memSchedules) ListDesired(limit int, cursor string) ([]Schedule, string) {
+	m.mu.RLock()
+	all := make([]Schedule, 0, len(m.items))
+	for _, it := range m.items {
+		all = append(all, it)
+	}
+	m.mu.RUnlock()
+	return pageSchedulesMem(all, limit, cursor)
+}
+
+// DeleteByOrg checks the org and then deletes. The two steps are not atomic
+// in this dev store; the pg store does it in one WHERE clause.
+func (m *memSchedules) DeleteByOrg(id quarrycontracts.ID, orgID string) error {
+	if _, ok := m.GetByOrg(id, orgID); !ok {
+		return ErrNotFound
+	}
+	return m.genericStore.Delete(id)
+}
+
+func (m *memSchedules) UpdateEnabledByOrg(id quarrycontracts.ID, orgID string, enabled bool) error {
+	if _, ok := m.GetByOrg(id, orgID); !ok {
+		return ErrNotFound
+	}
+	return m.UpdateEnabled(id, enabled)
+}
+
+func (m *memSchedules) UpdateRuntime(id quarrycontracts.ID, lastRunAt, nextRunAt *int64, skippedOverlap int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	it, ok := m.items[id]
+	if !ok {
+		return ErrNotFound
+	}
+	it.LastRunAt, it.NextRunAt, it.SkippedOverlapCount = lastRunAt, nextRunAt, skippedOverlap
+	m.items[id] = it
+	return nil
+}
+
+// pageSchedulesMem sorts newest first (created_at desc, id desc, as the pg
+// store does) and pages by the last id of the previous page.
+func pageSchedulesMem(all []Schedule, limit int, cursor string) ([]Schedule, string) {
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].CreatedAt != all[j].CreatedAt {
+			return all[i].CreatedAt > all[j].CreatedAt
+		}
+		return all[i].ID > all[j].ID
+	})
+	if limit <= 0 {
+		limit = 50
+	}
+	start := 0
+	if cursor != "" {
+		start = len(all)
+		for i, s := range all {
+			if string(s.ID) == cursor {
+				start = i + 1
+				break
+			}
+		}
+	}
+	end := start + limit
+	if end > len(all) {
+		end = len(all)
+	}
+	out := append([]Schedule(nil), all[start:end]...)
+	next := ""
+	if end < len(all) && len(out) > 0 {
+		next = string(out[len(out)-1].ID)
+	}
+	return out, next
 }
 
 // memSources is the dev-only in-memory SourcesStore. Unlike genericStore it

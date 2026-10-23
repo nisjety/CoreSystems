@@ -53,7 +53,7 @@ func TestScheduleTrigger_NilClient_Returns501(t *testing.T) {
 		t.Fatalf("seed schedule: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/schedules/"+string(id)+"/trigger", nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/schedules/"+string(id)+"/trigger?org_id=org_a", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -83,7 +83,7 @@ func TestScheduleBackfill_NilClient_Returns501(t *testing.T) {
 	}
 
 	body := `{"start_at":"2026-01-01T00:00:00Z","end_at":"2026-01-02T00:00:00Z","overlap_policy":"skip"}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/schedules/"+string(id)+"/backfill", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/v1/schedules/"+string(id)+"/backfill?org_id=org_a", strings.NewReader(body))
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -105,7 +105,7 @@ func TestScheduleBackfill_NilClient_Returns501(t *testing.T) {
 // wired. Locks the lookup order: ID-existence before client check.
 func TestScheduleTrigger_MissingSchedule_Returns404(t *testing.T) {
 	h, _ := scheduleAliasTestServer(t)
-	req := httptest.NewRequest(http.MethodPost, "/v1/schedules/sch_does_not_exist/trigger", nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/schedules/sch_does_not_exist/trigger?org_id=org_a", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 	if w.Code != http.StatusNotFound {

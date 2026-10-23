@@ -1,6 +1,10 @@
 package resources
 
-import "github.com/triodelab/quarry-v2/services/quarry-control/internal/store"
+import (
+	"time"
+
+	"github.com/triodelab/quarry-v2/services/quarry-control/internal/store"
+)
 
 // scheduleWire is the orchestrator-facing serialization of a schedule. The
 // orchestrator's reconciler (quarry-orchestrator/internal/schedules) decodes
@@ -74,4 +78,91 @@ func toScheduleWire(s store.Schedule) scheduleWire {
 		Args:       args,
 		Paused:     !s.Enabled,
 	}
+}
+
+// scheduleView is the tenant projection of a schedule (WS15.S1), returned by
+// GET /v1/schedules?org_id=, GET /v1/schedules/{id} and POST /v1/schedules. It
+// carries the fields the gateway's ScheduleItem and the edge's ScheduleSummary
+// read. The legacy fields (id, target_kind, target_ref, enabled) stay for the
+// monitoring filter and other existing readers.
+type scheduleView struct {
+	ScheduleID     string `json:"schedule_id"`
+	Name           string `json:"name"`
+	Kind           string `json:"kind"`
+	Cron           string `json:"cron"`
+	Timezone       string `json:"timezone"`
+	OverlapPolicy  string `json:"overlap_policy"`
+	CatchupWindowS int64  `json:"catchup_window_s"`
+	PauseOnFailure bool   `json:"pause_on_failure"`
+	JitterS        int64  `json:"jitter_s"`
+	Status         string `json:"status"`
+	// NeedsActivation is true for a non-monitor schedule that was created
+	// disabled and never toggled (updated_at still equals created_at). Two
+	// operations in the same second are indistinguishable here; the column
+	// cannot record more without a new migration.
+	NeedsActivation     bool           `json:"needs_activation"`
+	Config              map[string]any `json:"config"`
+	CreatedAt           string         `json:"created_at"`
+	UpdatedAt           string         `json:"updated_at"`
+	LastRunAt           *string        `json:"last_run_at"`
+	NextRunAt           *string        `json:"next_run_at"`
+	SkippedOverlapCount int64          `json:"skipped_overlap_count"`
+
+	ID         string `json:"id"`
+	TargetKind string `json:"target_kind"`
+	TargetRef  string `json:"target_ref"`
+	Enabled    bool   `json:"enabled"`
+}
+
+// toScheduleView renders a stored schedule for its tenant. A schedule with no
+// name shows its target, so the list never shows an empty label.
+func toScheduleView(s store.Schedule) scheduleView {
+	name := s.Name
+	if name == "" {
+		name = s.TargetRef
+	}
+	cfg := s.Config
+	if cfg == nil {
+		cfg = map[string]any{}
+	}
+	status := "paused"
+	if s.Enabled {
+		status = "active"
+	}
+	return scheduleView{
+		ScheduleID:     string(s.ID),
+		Name:           name,
+		Kind:           s.TargetKind,
+		Cron:           s.Cron,
+		Timezone:       s.Timezone,
+		OverlapPolicy:  s.OverlapPolicy,
+		CatchupWindowS: s.CatchupWindowS,
+		PauseOnFailure: s.PauseOnFailure,
+		JitterS:        s.JitterS,
+		Status:         status,
+		NeedsActivation: !s.Enabled && s.TargetKind != store.TargetKindChangeMonitor &&
+			s.UpdatedAt == s.CreatedAt,
+		Config:              cfg,
+		CreatedAt:           rfc3339(s.CreatedAt),
+		UpdatedAt:           rfc3339(s.UpdatedAt),
+		LastRunAt:           rfc3339Ptr(s.LastRunAt),
+		NextRunAt:           rfc3339Ptr(s.NextRunAt),
+		SkippedOverlapCount: s.SkippedOverlapCount,
+		ID:                  string(s.ID),
+		TargetKind:          s.TargetKind,
+		TargetRef:           s.TargetRef,
+		Enabled:             s.Enabled,
+	}
+}
+
+func rfc3339(unix int64) string {
+	return time.Unix(unix, 0).UTC().Format(time.RFC3339)
+}
+
+func rfc3339Ptr(unix *int64) *string {
+	if unix == nil {
+		return nil
+	}
+	s := rfc3339(*unix)
+	return &s
 }
