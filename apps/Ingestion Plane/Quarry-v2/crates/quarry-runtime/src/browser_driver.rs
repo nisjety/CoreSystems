@@ -65,6 +65,15 @@ fn looks_unhydrated(body: &[u8]) -> bool {
         || crate::fallback_driver::visible_text_len(body) < SETTLE_MIN_TEXT_CHARS
 }
 
+/// The page URL as it may appear in a log line (WS12.S6): userinfo and secret
+/// query or fragment values are masked by the WS12 Durable URL rules before the
+/// URL is formatted into a `tracing` field.
+fn log_url(url: &str) -> String {
+    let mut tally = quarry_core::redaction::Tally::new();
+    quarry_core::redaction::redact_url(url, quarry_core::redaction::Profile::Durable, &mut tally)
+        .into_owned()
+}
+
 /// Adapts a [`quarry_browser::BrowserDriver`] into the [`Driver`] trait.
 ///
 /// The adapter acquires a browser session, executes the fetch, then
@@ -363,7 +372,7 @@ impl BrowserDriverAdapter {
                 last_text = last_text.max(text);
             }
             tracing::info!(
-                url = %url,
+                url = %log_url(url.as_str()),
                 polls,
                 budget_ms = budget.as_millis() as u64,
                 text_chars = last_text,
