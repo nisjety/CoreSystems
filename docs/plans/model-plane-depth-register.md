@@ -629,6 +629,30 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D2-161 | WS18-S1 | test-gap | P2 | crates/mp-contracts/tests/run_context_posture.rs has no Space row, which the row requires; that file is not owned by this slice. | open |
 | D2-162 | WS18-S1 | follow-up | P3 | 9 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-03.json | open |
 
+
+### Wave-mode batch W2-05 (2026-10-23)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D2-163 | WS15-S1 | risk | P1 | The reverse AG-UI adapter (ag-ui-client.ts toAgUiEvent) has no AG-UI name for lifecycle.* and needs the lead's shared edit; until it lands the SPA does not typecheck (TS2366 at ag-ui-client.ts(126,53)). | open |
+| D2-164 | WS15-S1 | risk | P1 | lifecycle::enabled() and ENABLED_ENV have no production consumer in S1, so MODEL_GATEWAY_LIFECYCLE_EVENTS is inert until S2 wires it; the switch defaults off as required, but the S1 gate cannot show it is honoured yet. | open |
+| D2-165 | WS15-S1 | live-proof | P1 | Lead: compose wiring not present. The plan's common section requires `MODEL_GATEWAY_LIFECYCLE_EVENTS: ${MODEL_GATEWAY_LIFECYCLE_EVENTS:-false}` in the model-gateway block of the Model Plane deploy compose file, plus a compose-contract assertion. The code default is already off (strict literal parser), so this is not blocking, but the switch is not visible or asserted in deployment yet. | open |
+| D2-166 | WS15-S1 | live-proof | P1 | Lead: ledger entry 'Lifecycle events are typed, counts-only, ephemeral (2026-10-23)' with the D1 reversal is not yet appended to apps/Model Plane/docs/decisions/ledger.md. Required before S2 relies on the D1 reversal. | open |
+| D2-167 | WS15-S1 | live-proof | P1 | No live proof: S1 adds vocabulary only, nothing emits the variants yet, so no SSE capture or rebuilt-image evidence exists. Those belong to S2/S3. No docker was run here, by instruction. | open |
+| D2-168 | WS15-S1 | live-proof | P1 | The retry_scheduled scope set ['tool'] is an implementer deviation from the plan (no scope set was listed); the owner must confirm it. | open |
+| D2-169 | WS15-S1 | live-proof | P1 | Lead: the shared-edit lines in lead_todo are not verified by this verifier because the files are not owned; re-run tsc and the golden test after the lead applies them. | open |
+| D2-170 | WS15-S1 | live-proof | P1 | compose wiring (not in this slice's file list): in the model-gateway block of the Model Plane compose file add `MODEL_GATEWAY_LIFECYCLE_EVENTS: ${MODEL_GATEWAY_LIFECYCLE_EVENTS:-false}` plus a compose-contract assertion modelled on scripts/tests/letta-tool-search-compose-contract-test.sh. Not opened by me. | open |
+| D2-171 | WS15-S1 | follow-up | P3 | 17 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-05.json | open |
+| D2-172 | WS23-S1.code | risk | P1 | Until the lead applies the trust.rs rows, execute_provider_action and read_provider_action results are OrgInternal: no UNTRUSTED framing, no injection screen. Do not enable any connector read before that edit lands. | open |
+| D2-173 | WS23-S1.code | live-proof | P1 | Live proof of the counts-only and verdict-only STEP_COMPLETED payloads, the personal audit rows and the ZDR refusal on a rebuilt execution-core (lead only, docker). | open |
+| D2-174 | WS23-S1.code | live-proof | P1 | Lead must apply the shared-file edits (trust.rs, zdr-contract-sync.test.sh, SPA vendored copy, ledger entry) and then re-run the named tests before this slice is marked done. | open |
+| D2-175 | WS23-S1.code | live-proof | P1 | Cargo results for execution-core --lib, compaction_parity_contract, mp-contracts and model-gateway --lib were started but not collected before this verdict. | open |
+| D2-176 | WS23-S1.code | live-proof | P1 | re-vendor the SPA copy: copy apps/Model Plane/api/contracts/zdr-refusals.json to apps/Frontend Plane/verevonv3/src/shared/api/contracts/zdr-refusals.json and apps/Model Plane/api/contracts/zdr-refusals.json.sha256 to the same folder (sha 15b12d17d34c49270889ce7a3b5fc66471bce3646499888ef7e7ee2cc1178cf1); then pnpm exec vitest run src/shared/api/zdr-refusals.test.ts should be green | open |
+| D2-177 | WS23-S1.code | live-proof | P1 | Live proof, not run (lead only): rebuild execution-core; with a Do run calling execute_provider_action with a write operation, confirm STEP_COMPLETED holds only `[connector_write op=... content_redacted=true]` plus the verdict line, with no Result body; with a read operation confirm the counts line; under a ZDR run confirm the call is refused with zdr_feature_not_supported before any gateway call. Both need the trust.rs edit first. | open |
+| D2-178 | WS23-S1.code | risk | P2 | The write verdict line is bounded and single-line, but its detail can carry text the provider chose (a status it reported, a record field used in the comparison). That text now reaches the durable record as the only write trace. Accepted as the verdict trace; WS23-S8 / K3-16 should decide whether the detail is reduced further to a closed token. | open |
+| D2-179 | WS23-S1.code | follow-up | P2 | WS23-S5 must add the connector_read refusal to the model-gateway Ask loop, and the matrix rows and feature shape, before any MG loop offers a provider tool. | open |
+| D2-180 | WS23-S1.code | follow-up | P3 | 18 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-05.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
@@ -691,3 +715,5 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS04-S5 | zdr, auth | W1-06 | no |
 | WS06-S2 | audit, zdr | W1-06 | no |
 | WS01-S12.code | authority, policy | W1-06 | no |
+| WS15-S1 | zdr | W2-05 | no |
+| WS23-S1.code | zdr, audit, policy | W2-05 | no |
