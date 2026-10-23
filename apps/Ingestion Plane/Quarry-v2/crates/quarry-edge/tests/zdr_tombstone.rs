@@ -414,6 +414,7 @@ impl Driver for StubPageDriver {
             body: b"<html><head><title>Hidden title</title></head><body><main><p>Hidden page text that is long enough to read as content.</p></main></body></html>".to_vec(),
             duration_ms: 1,
             served_by: DriverKind::Static,
+            captures: None,
         })
     }
 }

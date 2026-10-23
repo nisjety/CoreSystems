@@ -194,6 +194,7 @@ impl Driver for EchoDriver {
             .into_bytes(),
             duration_ms: 1,
             served_by: DriverKind::Static,
+            captures: None,
         })
     }
 }

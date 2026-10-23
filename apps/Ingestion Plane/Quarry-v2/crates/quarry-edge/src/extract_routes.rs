@@ -419,6 +419,7 @@ mod tests {
                 body: self.0.clone().into_bytes(),
                 duration_ms: 1,
                 served_by: DriverKind::Static,
+                captures: None,
             })
         }
     }

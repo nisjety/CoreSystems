@@ -441,6 +441,7 @@ impl quarry_runtime::driver::Driver for ShellDriver {
             body: js_shell_page(),
             duration_ms: 1,
             served_by: self.kind,
+            captures: None,
         })
     }
 }

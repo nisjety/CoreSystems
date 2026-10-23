@@ -94,6 +94,7 @@ impl Driver for LoopbackDriver {
             body,
             duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
             served_by: DriverKind::Static,
+            captures: None,
         })
     }
 }

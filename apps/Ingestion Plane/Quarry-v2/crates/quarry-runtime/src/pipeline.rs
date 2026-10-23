@@ -1657,6 +1657,7 @@ mod page_extracted_tests {
                 body: PAGE.as_bytes().to_vec(),
                 duration_ms: 3,
                 served_by: DriverKind::Browser,
+                captures: None,
             })
         }
     }
@@ -1794,6 +1795,7 @@ mod local_index_writeback_tests {
                 body: PAGE.as_bytes().to_vec(),
                 duration_ms: 2,
                 served_by: DriverKind::Static,
+                captures: None,
             })
         }
     }
@@ -2025,6 +2027,7 @@ mod content_routing_tests {
                 body: self.body.clone(),
                 duration_ms: 1,
                 served_by: DriverKind::Static,
+                captures: None,
             })
         }
     }
@@ -2618,6 +2621,7 @@ mod scrape_challenge_tests {
                 body: self.body.clone(),
                 duration_ms: 1,
                 served_by: DriverKind::Static,
+                captures: None,
             })
         }
     }

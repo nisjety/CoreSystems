@@ -82,6 +82,7 @@ mod tests {
                 body: format!("from {:?}", self.0).into_bytes(),
                 duration_ms: 1,
                 served_by: self.0,
+                captures: None,
             })
         }
     }

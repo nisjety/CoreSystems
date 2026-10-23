@@ -1753,6 +1753,7 @@ mod tests {
                     body: body.to_vec(),
                     duration_ms: 1,
                     served_by: self.kind,
+                    captures: None,
                 }),
                 TestResult::Err(code) => Err(QuarryError::new(code, "simulated transport failure")),
             }

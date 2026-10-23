@@ -87,6 +87,7 @@ fn into_fetch_response(response: quarry_tls::TlsFetchResponse) -> FetchResponse 
         body: response.body,
         duration_ms: response.duration_ms,
         served_by: DriverKind::Tls,
+        captures: None,
     }
 }
 

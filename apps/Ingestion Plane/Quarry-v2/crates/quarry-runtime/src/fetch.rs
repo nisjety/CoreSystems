@@ -11,6 +11,7 @@ use quarry_core::output::DriverKind;
 use quarry_core::QuarryResult;
 use serde_json::json;
 
+use crate::capture::PageCaptures;
 use crate::dns_guard::{resolve_public_url, PinnedDnsResolver};
 use crate::driver::{Driver, FetchHints};
 use crate::egress_broker::{EgressBroker, EgressDecision, EgressIdentity};
@@ -31,6 +32,33 @@ pub struct FetchResponse {
     /// the driver they hold — after chain rotation the wrapper's
     /// `kind()` still reports the planned primary.
     pub served_by: DriverKind,
+    /// Captures a browser fetch made beside the page body (WS13.4a). `None`
+    /// for every driver until the browser capture (WS13.3) fills it. Never
+    /// serialized.
+    pub captures: Option<Box<PageCaptures>>,
+}
+
+impl FetchResponse {
+    /// Builds a response with no captures. Prefer this to a struct literal so
+    /// that a new field defaults in one place.
+    pub fn new(
+        status: u16,
+        final_url: Url,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+        duration_ms: u64,
+        served_by: DriverKind,
+    ) -> Self {
+        Self {
+            status,
+            final_url,
+            headers,
+            body,
+            duration_ms,
+            served_by,
+            captures: None,
+        }
+    }
 }
 
 /// Redirect-hop ceiling for `do_fetch`. Real sites commonly chain
@@ -418,6 +446,7 @@ impl StaticDriver {
             body,
             duration_ms: start.elapsed().as_millis() as u64,
             served_by: DriverKind::Static,
+            captures: None,
         }))
     }
 }
@@ -557,6 +586,20 @@ mod tests {
     use quarry_core::privacy::PrivacyPolicy;
     use wiremock::matchers::any;
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn fetch_response_new_defaults_captures_to_none() {
+        let response = FetchResponse::new(
+            200,
+            Url::parse("https://example.com/").expect("static url"),
+            Vec::new(),
+            b"ok".to_vec(),
+            1,
+            DriverKind::Static,
+        );
+        assert_eq!(response.status, 200);
+        assert!(response.captures.is_none());
+    }
 
     fn approved_hints_for_org(org_id: String) -> FetchHints {
         FetchHints {

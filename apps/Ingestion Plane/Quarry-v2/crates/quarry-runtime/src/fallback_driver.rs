@@ -729,6 +729,7 @@ mod tests {
                 body: b"ok".to_vec(),
                 duration_ms: 1,
                 served_by: self.kind,
+                captures: None,
             })
         }
     }
@@ -790,6 +791,7 @@ mod tests {
                 body: b"blocked".to_vec(),
                 duration_ms: 1,
                 served_by: self.kind,
+                captures: None,
             })
         }
     }
@@ -1008,6 +1010,7 @@ mod tests {
             body,
             duration_ms: 1,
             served_by: DriverKind::Static,
+            captures: None,
         };
         assert!(fb.challenge_forbids_escalation(&"https://example.com".parse().unwrap(), &resp));
         let legacy = fb.with_escalation_mode(EscalationMode::Legacy);
@@ -1475,6 +1478,7 @@ mod tests {
                 body: self.body.clone(),
                 duration_ms: 1,
                 served_by: self.kind,
+                captures: None,
             })
         }
     }
@@ -1779,6 +1783,7 @@ mod tests {
                 body: self.body.clone(),
                 duration_ms: 1,
                 served_by: self.kind,
+                captures: None,
             })
         }
     }

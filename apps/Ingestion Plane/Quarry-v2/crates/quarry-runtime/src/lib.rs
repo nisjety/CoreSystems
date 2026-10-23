@@ -17,6 +17,7 @@ pub mod artifact_store;
 pub mod browser_driver;
 pub mod browser_egress_proxy;
 pub mod browser_procedure;
+pub mod capture;
 pub mod cas_store;
 pub mod challenge;
 pub mod dns_guard;

@@ -198,6 +198,7 @@ mod tests {
                     body: body.to_vec(),
                     duration_ms: 1,
                     served_by: self.kind,
+                    captures: None,
                 }),
                 StubOutcome::Err(code) => Err(QuarryError::new(code, "simulated failure")),
             }

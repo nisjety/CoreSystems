@@ -279,6 +279,7 @@ impl Driver for RecordingDriver {
                 body,
                 duration_ms: 1,
                 served_by: DriverKind::Static,
+                captures: None,
             });
         }
         Ok(FetchResponse {
@@ -293,6 +294,7 @@ impl Driver for RecordingDriver {
             .into_bytes(),
             duration_ms: 1,
             served_by: DriverKind::Static,
+            captures: None,
         })
     }
 }

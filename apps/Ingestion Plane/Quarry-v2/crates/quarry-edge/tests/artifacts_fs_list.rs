@@ -165,6 +165,7 @@ impl Driver for FixedPage {
             body: PAGE.as_bytes().to_vec(),
             duration_ms: 1,
             served_by: DriverKind::Static,
+            captures: None,
         })
     }
 }

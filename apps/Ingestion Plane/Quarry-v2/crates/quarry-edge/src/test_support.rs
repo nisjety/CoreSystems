@@ -78,6 +78,7 @@ impl Driver for StubDriver {
                 body: b"<html><body>plain text, no anchors</body></html>".to_vec(),
                 duration_ms: 1,
                 served_by: DriverKind::Static,
+                captures: None,
             }),
         }
     }

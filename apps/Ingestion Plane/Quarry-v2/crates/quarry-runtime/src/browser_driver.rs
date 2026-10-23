@@ -513,6 +513,7 @@ impl BrowserDriverAdapter {
             body: body_bytes.to_vec(),
             duration_ms: start.elapsed().as_millis() as u64,
             served_by: DriverKind::Browser,
+            captures: None,
         };
 
         held.finish(false).await?;
