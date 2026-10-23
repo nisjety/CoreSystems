@@ -69,6 +69,18 @@ Built so far (batches B01 to B07): WS01-S0, WS01-S1 (partial), WS01-S6; WS02-S1,
 | D1-023 | WS12-S5 | test-gap | P2 | Remove each leak pin when its translation lands (`RECEIPT_HEADER_LEAKS`, `RECEIPT_EFFECT_LEAKS`, `SPARSE_RECEIPT_LEAKS`, four artifact pins); run the mutation proof on `PlanApprovalControl`'s grant label; run the full `pnpm test`. | open |
 | D1-024 | WS11-S5 | live-proof | P1 | One-route live proof (quick then deep on a route the dev stack has: `effort_resolved` Low then High, distinct cache keys, `/v1/models` carries `effort_levels`). Rollout: inference-core adapter flags first, then `MODEL_GATEWAY_EFFORT_LADDER`. | open |
 
+### Round-2 leftovers and integration notes (2026-10-23)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D1-025 | WS04-S4, WS14-S2 | risk | **P0** | With `MODEL_GATEWAY_DURABLE_PLAN_GRANT` OFF (the default) the gRPC `ExitPlanMode` does not compare the caller's `session_id` with the run's own thread: the owner of any run can plant an in-memory grant (up to `danger_full_access`) on another thread of the org on that replica, and `RUN_PLAN_MODE_EXITED` names it. The path exists since WS14-S2a. Fix: call `read_run_detail` regardless of the flag, refuse a `session_id` that differs from `detail.thread_id`, pass `detail.thread_id` into the handler (the flag-on path already does). Found by the round-2 re-review; not fixed under the wave strategy. | open |
+| D1-026 | WS04-S4 | risk | P1 | `with_local_fallback` consults memory only when Session Core holds no grant, so a newer, narrower in-memory grant (a waived approval, or a transient `SetRunMode` failure) loses to an older, broader durable grant for up to 24 h. Fix: stamp the memory entry and compare with a `granted_at` from `GetThreadGrant`, or take the narrower rung. | open |
+| D1-027 | WS04-S4 | risk | P2 | `RUN_PLAN_MODE_EXITED` (rung, justification, plan id) is published before the `SetRunMode` result is known, so a refused write leaves an audit event naming a grant that exists nowhere; `ExitPlanModeResponse` has no `persisted` field. | open |
+| D1-028 | WS04-S4 | risk | P2 | `set_run_mode_retryable` retries `Code::Unknown` but `set_run_mode_failure_is_transient` excludes it, so an approval that failed with `Unknown` is retried four times and then kept nowhere (stranded, fails closed). Use one predicate. | open |
+| D1-029 | WS05-S4 | test-gap | P2 | The second-round fixes (built-in classes learned by ZDR and waived runs, merge-style hydrate, fail-closed on transport errors and 5xx) were not re-reviewed: the re-review was stopped to save time. | open |
+| D1-030 | cross | live-proof | P1 | The Model Plane paths of `quarryv2-next` were imported (commit `5ca40750`); the Rust compile check of model-gateway and the browser-broker Go tests, the Postgres store tests and the end-to-end harness have not been run. A full merge of `quarryv2-next` (Quarry, Ingestion, Frontend parts included) is still ahead and conflicts today in about 8 non-Model-Plane files. | open |
+| D1-031 | WS05-S4 | follow-up | P2 | `MCP_DO_TOOLS=all` stays blocked; the two-week shadow soak and the deletion of the name heuristics (WS05-S6) come later. | open |
+
 ## Wave 2 (WS13 to WS27)
 
 Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS27-S0, WS27-S1. Wave 2 is not started as a wave: these came in with Wave 1 batches because they were Wave 1 prerequisites.
@@ -91,6 +103,7 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 |---|---|---|---|---|
 | D0-001 | risk | P1 | A dev-stack NATS password was printed into a session transcript on 2026-10-22 (a grep matched `deploy/.env`). Rotate it. Env files are never grepped. | open |
 | D0-002 | live-proof | P1 | The BFF gateway and the :5173 frontend were not rebuilt (they serve the main checkout); every SPA slice's live check waits for a second dev server. | open |
+| D0-004 | cleanup | P3 | The main checkout (`C:/dev/CoresSystem`, branch `main`, 146 commits behind) has 78 uncommitted Model Plane files, all already on `model-plane` (checked file by file: 42 identical, the other 13 equal to the versions committed by WS01-S0). Nothing is unlanded there; resetting it is the owner's call and never done by an agent. The `vigorous-perlman` worktree holds an uncommitted `go.work.sum`. | open |
 | D0-003 | cleanup | P2 | Pre-existing, not from the build: `pnpm typecheck` has 33 errors (`quarry-client.ts` cannot find `@quarry/client`; `RemoteSupportPage.tsx`), `zdr-contract-sync.test.sh` has 22 failures from other planes' goldens and CRLF `.sha256` copies, `cargo fmt --all --check` fails on about 120 files, and some model-gateway non-lib test targets fail on Windows. | open |
 
 ## Strict slices built without a hostile review
