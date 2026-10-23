@@ -28,6 +28,7 @@ pub mod policy_baseline;
 pub mod profile_guard;
 pub mod profile_routes;
 pub mod queue_routes;
+pub mod redaction_boot;
 pub mod request_id;
 pub mod resource_routes;
 pub mod retry_after;

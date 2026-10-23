@@ -596,6 +596,8 @@ pub(super) async fn run_closed_err(
 }
 
 pub(super) fn driver_err(request_id: &str, err: QuarryError) -> ApiErr {
+    // WS12.S2: a driver or target error can echo page text; it leaves the process masked.
+    let err = err.redacted();
     (
         StatusCode::from_u16(err.code.http_status())
             .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),

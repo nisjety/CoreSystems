@@ -207,6 +207,9 @@ services:
       # quarry-edge's own /v1/internal/page-images serve route, reachable
       # because both containers sit on the inter-plane bus.
       QUARRY_EDGE__EDGE_INTERNAL_BASE_URL: ${QUARRY_EDGE_INTERNAL_BASE_URL:-http://quarry-edge:8082}
+      # WS12.S2: secret-redaction mode. enforce (default) masks; shadow only counts and off does
+      # nothing, both for development and staging: a production edge refuses to boot with either.
+      QUARRY_EDGE__REDACTION_MODE: ${QUARRY_REDACTION_MODE:-enforce}
       # Data Plane broker token (PageRenderer::connect reads it from env,
       # mirroring nats-connection-rs — credentials stay out of the URL).
       DATAPLANE_NATS_TOKEN: ${DATAPLANE_NATS_TOKEN:-}

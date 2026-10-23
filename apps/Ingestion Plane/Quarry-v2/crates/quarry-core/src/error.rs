@@ -127,6 +127,22 @@ impl QuarryError {
         self
     }
 
+    /// WS12.S2: the error as it may leave the process. The message and every
+    /// string in `details` pass the Live secret-redaction rules, so a driver
+    /// or parser message that echoes page-derived text cannot carry a token or a
+    /// card number to the caller. The code, the status and the retryability are
+    /// unchanged, and so is the envelope shape. A no-op under `Mode::Off`.
+    #[must_use]
+    pub fn redacted(mut self) -> Self {
+        use crate::redaction::{redact_json, redact_text, Profile, Tally};
+        let mut tally = Tally::new();
+        self.message = redact_text(&self.message, Profile::Live, &mut tally).into_owned();
+        if let Some(details) = self.details.as_mut() {
+            redact_json(details, Profile::Live, &mut tally);
+        }
+        self
+    }
+
     /// Raw page script execution (`AgentAction::Evaluate`) is refused on every
     /// agent entry point: it runs in the page's main world and can express any
     /// action (submit, delete, read a sensitive field) without passing the typed

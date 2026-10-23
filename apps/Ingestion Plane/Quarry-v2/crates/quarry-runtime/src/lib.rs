@@ -69,6 +69,7 @@ pub mod local_index;
 pub mod migrations;
 pub mod mp_client;
 pub mod observation;
+pub mod observation_redaction;
 pub mod pipeline;
 pub mod planner;
 pub mod policy;

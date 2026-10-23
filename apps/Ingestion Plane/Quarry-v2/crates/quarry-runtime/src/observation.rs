@@ -25,12 +25,14 @@ use quarry_core::contracts::{
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 use quarry_core::event::EventType;
 use quarry_core::ids::kinds::ArtifactKind;
+use quarry_core::redaction::{self, FieldKind, Tally, RULE_VERSION};
 use quarry_core::zdr::{self, WriteKind, ZdrMode};
 use serde_json::{json, Value};
 
 use crate::artifact_store::ArtifactStore;
 use crate::challenge::{self, BlockEpisodes, ChallengeConfig, ChallengeInput, ClassifierMode, EnforceMode};
 use crate::events::EventSink;
+use crate::observation_redaction::{self, Redactor};
 use crate::vision::{VisualChangeArtifact, VisualObservationInput, VisualObservationProcessor};
 
 pub struct ObservationRunner {
@@ -372,6 +374,9 @@ impl ObservationRunner {
         ctx.block_episodes
             .note_recovery_action(&request.action, &ctx.current_url, request.zdr);
 
+        // WS12.S2: the field kind of the control a typing action goes to, read from the
+        // snapshot the action names; `ctx.active_snapshot` is replaced further down.
+        let typed_kind = typed_field_kind(ctx.active_snapshot.as_ref(), &request.action);
         let (effective_action, target_resolution, verified_target_action, transfer_target) = self
             .resolve_snapshot_action(&request.action, session, ctx)
             .await?;
@@ -382,7 +387,15 @@ impl ObservationRunner {
                     request.zdr,
                     run_id.clone(),
                     EventType::ActionStarted,
-                    json!({ "step": ctx.step, "action": serde_json::to_value(&request.action).ok() }),
+                    json!({
+                        "step": ctx.step,
+                        "action": observation_redaction::action_for_event(
+                            &request.action,
+                            typed_kind,
+                            redaction::mode(),
+                            &mut Tally::new(),
+                        ),
+                    }),
                     format!("{}:action:{}:started", run_id, ctx.step),
                 )
                 .await;
@@ -601,7 +614,10 @@ impl ObservationRunner {
         if let Some(last_receipt) = egress_receipts.last() {
             ctx.last_egress_sequence = ctx.last_egress_sequence.max(last_receipt.sequence);
         }
-        let dialogs = self.browser.dialogs(session).await.unwrap_or_default();
+        // WS12.S2: everything below that is returned to the caller passes the Live profile.
+        let mut redactor = Redactor::new();
+        let mut dialogs = self.browser.dialogs(session).await.unwrap_or_default();
+        redactor.dialogs(&mut dialogs);
 
         let html_bytes = self.browser.content(session).await.ok();
         if let Some(bytes) = html_bytes.as_ref() {
@@ -610,11 +626,14 @@ impl ObservationRunner {
             ctx.page_hash = format!("blake3:{}", blake3::hash(bytes).to_hex());
         }
 
-        let dom_summary = html_bytes.as_ref().map(|bytes| {
+        let mut dom_summary = html_bytes.as_ref().map(|bytes| {
             let html_str = String::from_utf8_lossy(bytes);
             build_dom_summary(&html_str)
         });
-        let native_projection = match self.browser.native_page_projection(session).await {
+        if let Some(summary) = dom_summary.as_mut() {
+            redactor.dom_summary(summary);
+        }
+        let mut native_projection = match self.browser.native_page_projection(session).await {
             Ok(projection) => Some(projection),
             // Older/read-only drivers can continue to expose the explicitly
             // marked compatibility snapshot. A driver that advertises native
@@ -623,6 +642,9 @@ impl ObservationRunner {
             Err(error) if error.code == ErrorCode::Unsupported => None,
             Err(error) => return Err(error),
         };
+        if let Some(projection) = native_projection.as_mut() {
+            redactor.projection(projection);
+        }
         let active_snapshot = (dom_summary.is_some() || native_projection.is_some()).then(|| {
             build_active_snapshot(
                 run_id,
@@ -635,19 +657,23 @@ impl ObservationRunner {
         let snapshot = active_snapshot.as_ref().map(|state| state.snapshot.clone());
         ctx.active_snapshot = active_snapshot;
 
-        let title = page_state.title.or_else(|| {
+        let mut title = page_state.title.or_else(|| {
             html_bytes.as_ref().and_then(|bytes| {
                 let html_str = String::from_utf8_lossy(bytes);
                 extract_title(&html_str)
             })
         });
+        redactor.title(&mut title);
 
         let extraction_profile = request.extraction_profile.clone();
-        let extraction_result = extraction_profile.as_ref().and_then(|profile| {
+        let mut extraction_result = extraction_profile.as_ref().and_then(|profile| {
             html_bytes
                 .as_ref()
                 .and_then(|bytes| extract_profile(bytes, profile))
         });
+        if let Some(result) = extraction_result.as_mut() {
+            redactor.extraction(result);
+        }
 
         if screenshot_artifact_id.is_none() {
             if let Ok(bytes) = self.browser.screenshot(session, false).await {
@@ -902,7 +928,7 @@ impl ObservationRunner {
         let text_snippet = dom_summary
             .as_ref()
             .and_then(|summary| summary.text_snippet.as_deref());
-        let challenge = match ctx.block_episodes.config().classifier {
+        let mut challenge = match ctx.block_episodes.config().classifier {
             ClassifierMode::Legacy => {
                 challenge::classify_legacy(&ctx.current_url, title.as_deref(), text_snippet)
             }
@@ -926,6 +952,9 @@ impl ObservationRunner {
                     .observe(&host, request.zdr, classified, &fingerprint)
             }
         };
+        if let Some(signal) = challenge.as_mut() {
+            redactor.challenge(signal);
+        }
         ctx.observed_action_count = ctx.observed_action_count.saturating_add(1);
         if challenge
             .as_ref()
@@ -973,7 +1002,7 @@ impl ObservationRunner {
         }
         let proof_bundle = Some(ProofBundle {
             proof_id: format!("proof_{}_{}", run_id, ctx.step),
-            source_url: ctx.current_url.clone(),
+            source_url: redactor.live_url(&ctx.current_url),
             run_id: run_id.clone(),
             step: ctx.step,
             action_outcome: action_outcome.clone(),
@@ -982,19 +1011,34 @@ impl ObservationRunner {
             challenge: challenge.clone(),
             target_resolution: target_resolution.clone(),
             evidence_delta_artifact_id: evidence_delta_artifact_id.clone(),
+            redaction_rule_version: Some(RULE_VERSION.to_owned()),
             observed_at: Utc::now(),
         });
+        let observation_url = redactor.live_url(&ctx.current_url);
+        let mut console_summary = console_summary_from_devtools(&devtools_events);
+        redactor.console(&mut console_summary);
+        let redaction_stamp = redactor.stamp();
+        if redaction_stamp.values_masked > 0 {
+            // zdr-log-ok: counts and the process mode only, no page-derived value
+            tracing::info!(
+                values_masked = redaction_stamp.values_masked,
+                rule_count = redaction_stamp.by_rule.len(),
+                probe_ms = redaction_stamp.probe_ms,
+                shadow = redaction_stamp.mode == redaction::Mode::Shadow,
+                "quarry.redaction.observation"
+            );
+        }
         let observation = BrowserObservation {
             run_id: run_id.clone(),
             step: ctx.step,
-            url: ctx.current_url.clone(),
+            url: observation_url,
             title,
             snapshot,
             dom_summary,
             screenshot_artifact_id,
             visual_observation_artifact_id,
             evidence_delta_artifact_id,
-            console_summary: console_summary_from_devtools(&devtools_events),
+            console_summary,
             network_summary,
             egress_receipts,
             dialogs,
@@ -1007,6 +1051,7 @@ impl ObservationRunner {
             proof_bundle,
             target_resolution,
             telemetry,
+            redaction: Some(redaction_stamp),
             observed_at: Utc::now(),
         };
 
@@ -1025,7 +1070,11 @@ impl ObservationRunner {
                     EventType::ObservationReady,
                     json!({
                         "step": ctx.step,
-                        "url": &observation.url,
+                        "url": observation_redaction::event_url(
+                            &observation.url,
+                            redaction::mode(),
+                            &mut Tally::new(),
+                        ),
                         "has_screenshot": observation.screenshot_artifact_id.is_some(),
                         "has_evidence_delta": observation.evidence_delta_artifact_id.is_some(),
                     }),
@@ -1475,7 +1524,12 @@ impl ObservationRunner {
         kind: &str,
         value: &T,
     ) -> QuarryResult<Option<ArtifactKind>> {
-        let body = serde_json::to_vec(value).map_err(|e| {
+        let body = observation_redaction::redact_json_artifact(
+            value,
+            redaction::mode(),
+            &mut Tally::new(),
+        )
+        .map_err(|e| {
             QuarryError::new(
                 ErrorCode::Internal,
                 format!("serialize visual artifact {kind}: {e}"),
@@ -1737,6 +1791,48 @@ fn native_target_fingerprint(target: &BrowserNativeTarget) -> ElementFingerprint
         structural_path: format!("ax:{}", target.ax_node_id),
         logical_id: Some(target.ax_node_id.clone()),
     }
+}
+
+/// WS12.S2 (D12-7): the field kind of the control a typing action goes to, read
+/// from the snapshot the action names. Call it before the action resolves:
+/// `execute` replaces `ctx.active_snapshot` with the post-action snapshot.
+///
+/// A native target carries the kind the field probe decided (`None` for a
+/// control that takes no typed text). A scanner target (a driver without a
+/// native projection) has no `type` attribute to read, so only its labels
+/// classify it; an input or textarea the labels do not explain is `Secret`,
+/// which fails closed. `None` for an action that does not type into a snapshot
+/// target, or when the snapshot does not hold the target.
+pub fn typed_field_kind(
+    snapshot: Option<&ActiveSnapshot>,
+    action: &AgentAction,
+) -> Option<FieldKind> {
+    let snapshot = snapshot?;
+    let ref_id = match action {
+        AgentAction::TypeRef { ref_id, .. } | AgentAction::FrameTypeRef { ref_id, .. } => {
+            ref_id.clone()
+        }
+        AgentAction::TypeSemantic { locator, .. } => resolve_semantic_ref(snapshot, locator).ok()?,
+        _ => return None,
+    };
+    let held = snapshot.targets.get(&ref_id)?;
+    if let Some(native) = &held.native_target {
+        return native.field_kind;
+    }
+    let target = &held.target;
+    let facts = quarry_core::redaction::FieldFacts {
+        placeholder: target.placeholder.clone(),
+        accessible_name: target.name.clone().or_else(|| target.text.clone()),
+        ..Default::default()
+    };
+    let kind = quarry_core::redaction::classify_field(&facts);
+    if kind.is_sensitive() {
+        return Some(kind);
+    }
+    if matches!(target.tag.as_str(), "input" | "textarea") {
+        return Some(FieldKind::Secret);
+    }
+    Some(FieldKind::Unknown)
 }
 
 fn resolve_semantic_ref(

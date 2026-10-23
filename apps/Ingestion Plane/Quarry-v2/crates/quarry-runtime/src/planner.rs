@@ -80,6 +80,7 @@ mod tests {
             proof_bundle: None,
             target_resolution: None,
             telemetry: quarry_core::contracts::BrowserTelemetry::default(),
+            redaction: None,
             observed_at: Utc::now(),
         }
     }

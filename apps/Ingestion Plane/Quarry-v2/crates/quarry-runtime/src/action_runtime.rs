@@ -196,9 +196,19 @@ impl ActionRuntime {
             } else {
                 EventType::PageFailed
             };
+            // WS12.S2: an action's error text can echo page content; the event is
+            // kept beyond the caller, so it passes the Durable rules.
+            let error = result.error.as_deref().map(|error| {
+                quarry_core::redaction::redact_text(
+                    error,
+                    quarry_core::redaction::Profile::Durable,
+                    &mut quarry_core::redaction::Tally::new(),
+                )
+                .into_owned()
+            });
             let payload = json!({
                 "action_index": result.index,
-                "error": result.error,
+                "error": error,
                 "artifact_id": result.artifact_id.as_ref().map(|a| a.to_string()),
             });
             let idempotency_key = format!("{}:{}", run_id, result.index);

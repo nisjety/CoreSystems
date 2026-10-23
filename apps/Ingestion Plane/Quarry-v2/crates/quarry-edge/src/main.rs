@@ -58,6 +58,7 @@ mod profile_encryption;
 mod profile_guard;
 mod profile_routes;
 mod queue_routes;
+mod redaction_boot;
 mod request_id;
 mod resource_routes;
 mod retry_after;
@@ -278,6 +279,11 @@ async fn run() -> anyhow::Result<()> {
             anyhow::anyhow!("invalid QUARRY_EDGE__INTERNAL_SECRET in production: {error}")
         })?;
     }
+
+    // WS12.S2: the secret-redaction mode. `shadow` and `off` are development and staging
+    // modes; production refuses to boot with either, and so does an unparsable value.
+    redaction_boot::init_from_env(matches!(environment.as_str(), "prod" | "production"))
+        .map_err(|e| anyhow::anyhow!("secret redaction: {e}"))?;
 
     if cfg.cross_plane_auth_dev_bypass && matches!(environment.as_str(), "prod" | "production") {
         anyhow::bail!(

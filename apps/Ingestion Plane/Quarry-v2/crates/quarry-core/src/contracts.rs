@@ -88,6 +88,12 @@ pub struct BrowserObservation {
     /// meter; absence is never a zero-cost or zero-resource claim.
     #[serde(default)]
     pub telemetry: BrowserTelemetry,
+    /// WS12.S2: what the secret-redaction pass did to this observation: the
+    /// rule version, the profile and mode, and counts per rule id. It carries
+    /// no content and no lengths. `None` on an observation that did not pass
+    /// through the runner (a fixture, an older peer).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redaction: Option<crate::redaction::RedactionStamp>,
     pub observed_at: DateTime<Utc>,
 }
 
@@ -404,6 +410,10 @@ pub struct ProofBundle {
     pub target_resolution: Option<ResolvedTargetProof>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence_delta_artifact_id: Option<kinds::ArtifactKind>,
+    /// WS12.S2: the rule version (`qr-redact/N`) the observation this proof
+    /// belongs to was masked under, so a stored proof says which rules ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redaction_rule_version: Option<String>,
     pub observed_at: DateTime<Utc>,
 }
 
