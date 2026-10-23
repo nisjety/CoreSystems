@@ -561,3 +561,298 @@ async fn a_service_principal_cannot_create_a_monitor_in_either_mode() {
         assert!(control_bodies(&control, "/v1/sources").await.is_empty());
     }
 }
+
+// -- the orchestrator's two other calls: what a declared stamp suppresses ---------------------
+//
+// Round 7. The record tests above stop at 501 (this harness has no Postgres baseline store), so
+// they never reach the fan-out after the baseline write, and nothing sent `zdr` to
+// `/v1/internal/run_page`. The two tests below drive both effects directly.
+
+use std::path::{Path, PathBuf};
+
+use async_trait::async_trait;
+use chrono::Utc;
+use hmac::{Hmac, Mac};
+use quarry_core::change_history::{BaselineSnapshot, ChangeRecord, ChangeStatus};
+use quarry_core::output::DriverKind;
+use quarry_core::zdr::ZdrMode;
+use quarry_core::QuarryResult;
+use quarry_edge::internal_auth::InternalSigner;
+use quarry_runtime::artifact_store::FilesystemStore;
+use quarry_runtime::driver::Driver;
+use quarry_runtime::fetch::FetchResponse;
+use quarry_runtime::local_index::TantivyLocalIndex;
+use quarry_runtime::EventSink;
+use tokio::sync::mpsc;
+use url::Url;
+
+const SIGNING_SECRET: &str = "posture-stamp-signing-secret-0123456789abcdef";
+const RUNTIME_TOKEN: &str = "posture-stamp-runtime-token";
+const PAGE: &str = "<html><head><title>Stamp page</title></head><body><main><p>Page text for the posture stamp test, long enough to read as page content and to be indexed.</p></main></body></html>";
+
+/// Serves every URL with `PAGE`. No network.
+struct FixedPage;
+
+#[async_trait]
+impl Driver for FixedPage {
+    fn kind(&self) -> DriverKind {
+        DriverKind::Static
+    }
+
+    async fn fetch(&self, url: &Url) -> QuarryResult<FetchResponse> {
+        Ok(FetchResponse {
+            status: 200,
+            final_url: url.clone(),
+            headers: vec![("content-type".into(), "text/html; charset=utf-8".into())],
+            body: PAGE.as_bytes().to_vec(),
+            duration_ms: 1,
+            served_by: DriverKind::Static,
+        })
+    }
+}
+
+/// An event sink whose durable channel is collected, so a test can count what reached it.
+/// `emit_ephemeral` (the ZDR path) never reaches the channel.
+fn observing_sink() -> (EventSink, Arc<Mutex<Vec<quarry_core::event::Event>>>) {
+    let (tx, mut rx) = mpsc::channel::<quarry_core::event::Event>(1024);
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let collected = seen.clone();
+    tokio::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            collected.lock().unwrap().push(event);
+        }
+    });
+    (EventSink::new(tx), seen)
+}
+
+/// Long enough for a fire-and-forget task or the collector to have run; used only before a
+/// "nothing happened" assertion that a positive control in the same test makes non-vacuous.
+async fn settle() {
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+}
+
+fn changed_record() -> ChangeRecord {
+    let now = Utc::now();
+    ChangeRecord {
+        source_url: "https://page.test/changed".into(),
+        org_id: ZDR_ORG.into(),
+        status: ChangeStatus::Changed,
+        new_baseline: Some(BaselineSnapshot {
+            baseline_id: "bln_new".into(),
+            org_id: ZDR_ORG.into(),
+            source_url: "https://page.test/changed".into(),
+            fingerprint: "blake3:new".into(),
+            artifact_id: None,
+            prev_baseline_id: Some("bln_old".into()),
+            captured_at: now,
+            run_id: None,
+        }),
+        prev_baseline: None,
+        diff_id: Some("diff_1".into()),
+        checked_at: now,
+    }
+}
+
+/// A `Changed` record fanned out with the given posture: the durable `ChangeDetected` events
+/// that reached the sink and the webhook calls that reached Control Plane.
+async fn fan_out(zdr: bool) -> (usize, usize) {
+    let control = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/webhooks/change"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&control)
+        .await;
+    let (sink, seen) = observing_sink();
+    let state = AppState {
+        control_base_url: control.uri(),
+        internal_signer: Some(Arc::new(InternalSigner::new(SIGNING_SECRET).unwrap())),
+        ..support::base_state(Arc::new(FixedPage), sink)
+    };
+
+    // The same call `record_check` makes after the baseline is written, with the posture it
+    // derives from the body (`ZdrMode::from(req.zdr.unwrap_or(false))`).
+    quarry_edge::change_webhook::emit_change_side_effects(
+        &state,
+        &changed_record(),
+        None,
+        ZdrMode::from(zdr),
+    )
+    .await;
+
+    // Positive controls wait for the asynchronous webhook; the ZDR case waits the settle time.
+    if zdr {
+        settle().await;
+    } else {
+        for _ in 0..50 {
+            if !control.received_requests().await.unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        settle().await;
+    }
+    let events = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| e.event_type == quarry_core::event::EventType::ChangeDetected)
+        .count();
+    let webhooks = control
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| r.url.path() == "/v1/webhooks/change")
+        .count();
+    (events, webhooks)
+}
+
+/// A change record that declares `zdr: true` suppresses the durable `ChangeDetected` event
+/// (and so its NATS fan-out) and the signed change webhook; the same record with `zdr` false
+/// produces both. The false case is the control that proves the harness can see them.
+#[tokio::test]
+async fn a_declared_zdr_change_record_suppresses_the_change_event_and_the_webhook() {
+    let _serial = CAPTURE_LOCK.lock().await;
+    capture();
+
+    let (events, webhooks) = fan_out(false).await;
+    assert_eq!(
+        (events, webhooks),
+        (1, 1),
+        "control: a standard record emits one durable event and one webhook"
+    );
+
+    let (events, webhooks) = fan_out(true).await;
+    assert_eq!(events, 0, "a ZDR record emits no durable change event");
+    assert_eq!(webhooks, 0, "a ZDR record sends no change webhook");
+}
+
+struct RunPageEdge {
+    addr: std::net::SocketAddr,
+    client: reqwest::Client,
+    root: PathBuf,
+    events: Arc<Mutex<Vec<quarry_core::event::Event>>>,
+    index: TantivyLocalIndex,
+}
+
+impl RunPageEdge {
+    async fn start(root: &Path) -> Self {
+        // `verify_runtime_token` latches this value once per process; every test here uses the same one.
+        std::env::set_var("QUARRY_EDGE__RUNTIME_AUTH_TOKEN", RUNTIME_TOKEN);
+        let (sink, events) = observing_sink();
+        let index = TantivyLocalIndex::in_memory().expect("in-memory local index");
+        let state = AppState {
+            artifacts: Arc::new(FilesystemStore::new(root.to_path_buf()).expect("artifact store")),
+            internal_signer: Some(Arc::new(InternalSigner::new(SIGNING_SECRET).unwrap())),
+            local_index: Some(index.clone()),
+            ..support::base_state(Arc::new(FixedPage), sink)
+        };
+        let app = quarry_edge::routes::router(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        Self {
+            addr,
+            client: reqwest::Client::new(),
+            root: root.to_path_buf(),
+            events,
+            index,
+        }
+    }
+
+    /// `POST /v1/internal/run_page` the way the orchestrator does: the runtime bearer token and
+    /// the HMAC org binding over `org_id \n url`.
+    async fn run_page(&self, body: Value) -> reqwest::Response {
+        let org = body["org_id"].as_str().unwrap().to_owned();
+        let url = body["url"].as_str().unwrap().to_owned();
+        let mut mac = Hmac::<sha2::Sha256>::new_from_slice(SIGNING_SECRET.as_bytes()).unwrap();
+        mac.update(format!("{org}\n{url}").as_bytes());
+        let signature = format!("{:x}", mac.finalize().into_bytes());
+        self.client
+            .post(format!("http://{}/v1/internal/run_page", self.addr))
+            .bearer_auth(RUNTIME_TOKEN)
+            .header("x-quarry-run-sig", signature)
+            .json(&body)
+            .send()
+            .await
+            .expect("request reaches the edge")
+    }
+
+    /// (files in the artifact store, durable events, index documents written or pending).
+    fn persisted(&self) -> (usize, usize, u64) {
+        (
+            files_under(&self.root).len(),
+            self.events.lock().unwrap().len(),
+            self.index.doc_count() + self.index.pending_writes(),
+        )
+    }
+}
+
+/// Every regular file under `dir`, at any depth.
+fn files_under(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return files;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            files.extend(files_under(&path));
+        } else {
+            files.push(path);
+        }
+    }
+    files
+}
+
+fn run_page_body(url: &str, zdr: Option<bool>) -> Value {
+    let mut body = json!({
+        "url": url,
+        "org_id": ZDR_ORG,
+        "run_id": "posture-stamp-run-page",
+        "ingest": false,
+    });
+    if let Some(zdr) = zdr {
+        body["zdr"] = json!(zdr);
+    }
+    body
+}
+
+/// The orchestrator's page fetch for a stamped-ZDR monitor persists nothing: no artifact file,
+/// no durable event, no local-index write. The same call without the stamp (and with an explicit
+/// `zdr: false`) persists all three, which is the control that makes the zero meaningful.
+#[tokio::test]
+async fn run_page_with_a_zdr_stamp_persists_no_artifact_event_or_index_write() {
+    let _serial = CAPTURE_LOCK.lock().await;
+    capture();
+    let root = std::env::temp_dir().join(format!("quarry-posture-run-page-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let edge = RunPageEdge::start(&root).await;
+
+    // Controls: unstamped (a legacy schedule) and stamped false both persist.
+    for (n, zdr) in [(1, None), (2, Some(false))] {
+        let before = edge.persisted();
+        let served = edge
+            .run_page(run_page_body(&format!("https://page.test/control-{n}"), zdr))
+            .await;
+        assert_eq!(served.status().as_u16(), 200, "control {n}: {:?}", served.text().await);
+        settle().await;
+        let after = edge.persisted();
+        assert!(after.0 > before.0, "control {n}: an artifact file is written {before:?} -> {after:?}");
+        assert!(after.1 > before.1, "control {n}: a durable event is emitted {before:?} -> {after:?}");
+        assert!(after.2 > before.2, "control {n}: the page is written to the local index {before:?} -> {after:?}");
+    }
+
+    // The stamped ZDR fetch leaves all three counters where they were.
+    let before = edge.persisted();
+    let served = edge
+        .run_page(run_page_body("https://page.test/stamped", Some(true)))
+        .await;
+    assert_eq!(served.status().as_u16(), 200, "{:?}", served.text().await);
+    settle().await;
+    assert_eq!(edge.persisted(), before, "a stamped-ZDR run_page persists nothing");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
