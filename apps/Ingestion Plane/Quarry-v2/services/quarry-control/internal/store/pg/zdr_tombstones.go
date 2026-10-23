@@ -20,21 +20,50 @@ import (
 
 type zdrTombstonesStore struct{ pool *pgxpool.Pool }
 
+// orgLockSQL serialises a tombstone Put with the org's erasure (PurgeOrg takes the
+// same transaction-scoped advisory lock). Without it a Put could read "no marker"
+// just before the erasure commits and insert its row just after the erasure's DELETE.
+const orgLockSQL = `SELECT pg_advisory_xact_lock(hashtext('zdr_tombstone_org:' || $1::text))`
+
 func (s *zdrTombstonesStore) Put(t store.ZdrTombstone) (bool, error) {
 	if err := t.Validate(); err != nil {
 		return false, err
 	}
-	tag, err := s.pool.Exec(context.Background(), `
+	ctx := context.Background()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("pg: zdr tombstone begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // no-op once Commit succeeds
+	if _, err := tx.Exec(ctx, orgLockSQL, t.OrgID); err != nil {
+		return false, fmt.Errorf("pg: zdr tombstone org lock: %w", err)
+	}
+	// An erased org (a marker row) gets no new tombstone; the answer is the same
+	// no-op as a duplicate run id.
+	tag, err := tx.Exec(ctx, `
 		INSERT INTO zdr_run_tombstones
 		  (run_id, org_id, kind, retention_class, outcome, driver, started_at, ended_at, step_count, cost_units, error_class)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+		WHERE NOT EXISTS (SELECT 1 FROM zdr_tombstone_erasures WHERE org_id = $2)
 		ON CONFLICT (run_id) DO NOTHING`,
 		t.RunID, t.OrgID, t.Kind, t.RetentionClass, t.Outcome, t.Driver,
 		t.StartedAt, t.EndedAt.UTC(), t.StepCount, t.CostUnits, t.ErrorClass)
 	if err != nil {
 		return false, fmt.Errorf("pg: zdr tombstone insert: %w", err)
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("pg: zdr tombstone commit: %w", err)
+	}
 	return tag.RowsAffected() == 1, nil
+}
+
+func (s *zdrTombstonesStore) DeleteErasureMarkersBefore(cutoff time.Time) (int64, error) {
+	tag, err := s.pool.Exec(context.Background(),
+		`DELETE FROM zdr_tombstone_erasures WHERE erased_at < $1`, cutoff.UTC())
+	if err != nil {
+		return 0, fmt.Errorf("pg: zdr tombstone erasure marker delete: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 func (s *zdrTombstonesStore) DeleteBefore(cutoff time.Time, limit int) (int64, error) {

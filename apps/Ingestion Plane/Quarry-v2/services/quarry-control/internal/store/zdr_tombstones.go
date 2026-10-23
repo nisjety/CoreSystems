@@ -124,8 +124,14 @@ func inList(list []string, v string) bool {
 type ZdrTombstoneStore interface {
 	// Put inserts the tombstone. A second Put for the same run_id is a no-op that
 	// reports inserted=false (first write wins), so a retry never errors and a
-	// caller learns nothing about whether a run id already existed.
+	// caller learns nothing about whether a run id already existed. The same
+	// no-op answer covers an org that was erased (PurgeOrg leaves a marker): a run
+	// that ends after its org's erasure must not re-create a row for that org.
 	Put(t ZdrTombstone) (inserted bool, err error)
+	// DeleteErasureMarkersBefore removes the erasure markers older than cutoff
+	// (the sweeper passes a cutoff at least MinErasureMarkerDays old) and returns
+	// how many it removed.
+	DeleteErasureMarkersBefore(cutoff time.Time) (int64, error)
 	// DeleteBefore removes up to limit tombstones whose ended_at is before cutoff,
 	// oldest first, and returns how many it removed. limit <= 0 removes nothing.
 	DeleteBefore(cutoff time.Time, limit int) (int64, error)
@@ -138,13 +144,18 @@ type ZdrTombstoneStore interface {
 
 // memZdrTombstones is the in-memory backend (dev and tests).
 type memZdrTombstones struct {
-	mu    sync.Mutex
-	items map[string]ZdrTombstone
+	mu     sync.Mutex
+	items  map[string]ZdrTombstone
+	erased map[string]time.Time // org id -> when PurgeOrg ran
 }
 
 func newMemZdrTombstones() *memZdrTombstones {
-	return &memZdrTombstones{items: map[string]ZdrTombstone{}}
+	return &memZdrTombstones{items: map[string]ZdrTombstone{}, erased: map[string]time.Time{}}
 }
+
+// MinErasureMarkerDays is the least time an erasure marker is kept, however short
+// the tombstone retention is: long past any run that was in flight at erasure.
+const MinErasureMarkerDays = 7
 
 func (m *memZdrTombstones) Put(t ZdrTombstone) (bool, error) {
 	if err := t.Validate(); err != nil {
@@ -153,6 +164,9 @@ func (m *memZdrTombstones) Put(t ZdrTombstone) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, exists := m.items[t.RunID]; exists {
+		return false, nil
+	}
+	if _, erased := m.erased[t.OrgID]; erased {
 		return false, nil
 	}
 	if t.CreatedAt.IsZero() {
@@ -215,10 +229,27 @@ func (m *memZdrTombstones) ListByOrg(orgID string, limit int) ([]ZdrTombstone, e
 	return out, nil
 }
 
-// purgeByOrg is the org-erasure path: it removes every tombstone of the org.
+func (m *memZdrTombstones) DeleteErasureMarkersBefore(cutoff time.Time) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var n int64
+	for org, at := range m.erased {
+		if at.Before(cutoff) {
+			delete(m.erased, org)
+			n++
+		}
+	}
+	return n, nil
+}
+
+// purgeByOrg is the org-erasure path: it removes every tombstone of the org and
+// leaves a marker so a later Put for the org is refused.
 func (m *memZdrTombstones) purgeByOrg(orgID string) int64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if zdrTombstoneID.MatchString(orgID) {
+		m.erased[orgID] = time.Now().UTC()
+	}
 	var removed int64
 	for id, t := range m.items {
 		if t.OrgID == orgID {

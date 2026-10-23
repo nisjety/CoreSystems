@@ -283,3 +283,271 @@ func TestPostgresOrgErasureRemovesTombstones(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A run that ends after its org was erased must not re-create a row (review finding),
+// against the real statements, including the marker's sweep.
+func TestPostgresTombstoneAfterOrgErasureIsNotStored(t *testing.T) {
+	db, p := tombstonePool(t)
+	org, other := uniq("org_late"), uniq("org_late_other")
+	now := time.Now().UTC()
+	if inserted, err := db.ZdrTombstones().Put(pgTombstone(uniq("run_pre"), org, now)); err != nil || !inserted {
+		t.Fatalf("put before erasure: inserted=%v err=%v", inserted, err)
+	}
+	if res, err := db.PurgeOrg(org); err != nil || res.ZdrTombstonesDeleted != 1 {
+		t.Fatalf("PurgeOrg: %+v err=%v", res, err)
+	}
+	inserted, err := db.ZdrTombstones().Put(pgTombstone(uniq("run_post"), org, now))
+	if err != nil || inserted {
+		t.Fatalf("a tombstone for an erased org: inserted=%v err=%v, want the silent no-op", inserted, err)
+	}
+	if rows, _ := db.ZdrTombstones().ListByOrg(org, 10); len(rows) != 0 {
+		t.Fatalf("the erased org has rows again: %+v", rows)
+	}
+	if inserted, err := db.ZdrTombstones().Put(pgTombstone(uniq("run_other"), other, now)); err != nil || !inserted {
+		t.Fatalf("another org must still store: inserted=%v err=%v", inserted, err)
+	}
+	// A repeat erasure refreshes the marker (no unique-violation) and stays a zero result.
+	if res, err := db.PurgeOrg(org); err != nil || res.Total() != 0 {
+		t.Fatalf("repeat PurgeOrg: %+v err=%v", res, err)
+	}
+	// A fresh marker survives a sweep with a cutoff in the past.
+	if _, err := db.ZdrTombstones().DeleteErasureMarkersBefore(now.Add(-time.Hour)); err != nil {
+		t.Fatalf("sweep with a past cutoff: %v", err)
+	}
+	var markers int
+	if err := p.pool.QueryRow(context.Background(), `SELECT count(*) FROM zdr_tombstone_erasures WHERE org_id = $1`, org).Scan(&markers); err != nil || markers != 1 {
+		t.Fatalf("the fresh marker must survive a past cutoff: markers=%d err=%v", markers, err)
+	}
+	// An old one is swept, and the org stores again.
+	if _, err := db.ZdrTombstones().DeleteErasureMarkersBefore(time.Now().UTC().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if inserted, err := db.ZdrTombstones().Put(pgTombstone(uniq("run_again"), org, now)); err != nil || !inserted {
+		t.Fatalf("after the marker is swept the org stores again: inserted=%v err=%v", inserted, err)
+	}
+	_, _ = db.PurgeOrg(org)
+	_, _ = db.PurgeOrg(other)
+	_, _ = p.pool.Exec(context.Background(), `DELETE FROM zdr_tombstone_erasures WHERE org_id IN ($1, $2)`, org, other)
+}
+
+// Put and PurgeOrg for the same org are serialised: whatever order they interleave
+// in, no row for the org survives once the last erasure has committed and no Put is
+// still running.
+func TestPostgresPutRacingOrgErasureLeavesNoRow(t *testing.T) {
+	db, p := tombstonePool(t)
+	org := uniq("org_race")
+	now := time.Now().UTC()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 40; i++ {
+			_, _ = db.ZdrTombstones().Put(pgTombstone(uniq("run_race"), org, now))
+		}
+	}()
+	for i := 0; i < 10; i++ {
+		if _, err := db.PurgeOrg(org); err != nil {
+			t.Fatal(err)
+		}
+	}
+	<-done
+	// The last Put may have run before the first erasure; one more erasure now removes
+	// anything that landed, and after it nothing can land.
+	if _, err := db.PurgeOrg(org); err != nil {
+		t.Fatal(err)
+	}
+	if inserted, err := db.ZdrTombstones().Put(pgTombstone(uniq("run_race_late"), org, now)); err != nil || inserted {
+		t.Fatalf("a Put after the erasure stored a row: inserted=%v err=%v", inserted, err)
+	}
+	if rows, _ := db.ZdrTombstones().ListByOrg(org, 100); len(rows) != 0 {
+		t.Fatalf("%d rows for an erased org", len(rows))
+	}
+	_, _ = p.pool.Exec(context.Background(), `DELETE FROM zdr_tombstone_erasures WHERE org_id = $1`, org)
+}
+
+func readMigration024(t *testing.T) string {
+	t.Helper()
+	b, err := migrationFS.ReadFile("migrations/024_zdr_tombstone_erasures.sql")
+	if err != nil {
+		t.Fatalf("read 024: %v", err)
+	}
+	return strings.ReplaceAll(string(b), "\r\n", "\n")
+}
+
+// The erasure marker table holds an org id and a timestamp and nothing else: no
+// content column can ever be added by accident without this test noticing. Needs no
+// database, so it holds in every CI lane.
+func TestMigration024HoldsOnlyAnOrgIDAndATimestamp(t *testing.T) {
+	var code strings.Builder
+	for _, line := range strings.Split(readMigration024(t), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "--") {
+			continue
+		}
+		code.WriteString(line + "\n")
+	}
+	var got []string
+	for _, m := range columnLine.FindAllStringSubmatch(code.String(), -1) {
+		got = append(got, m[1])
+	}
+	sort.Strings(got)
+	if !reflect.DeepEqual(got, []string{"erased_at", "org_id"}) {
+		t.Fatalf("zdr_tombstone_erasures columns = %v, want exactly [erased_at org_id]", got)
+	}
+	upper := strings.ToUpper(code.String())
+	for _, banned := range []string{"REFERENCES", "TRIGGER", "DROP "} {
+		if strings.Contains(upper, banned) {
+			t.Fatalf("migration 024 must stay a plain idempotent CREATE ... IF NOT EXISTS, found %q", banned)
+		}
+	}
+	for _, create := range []string{"CREATE TABLE IF NOT EXISTS", "CREATE INDEX IF NOT EXISTS"} {
+		if !strings.Contains(upper, create) {
+			t.Fatalf("migration 024 lost %q (it must be idempotent)", create)
+		}
+	}
+}
+
+func TestMigration024AppliesTwice(t *testing.T) {
+	db, p := tombstonePool(t)
+	sql := readMigration024(t)
+	org := uniq("org_m24")
+	ctx := context.Background()
+	if _, err := db.PurgeOrg(org); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := p.pool.Exec(ctx, sql); err != nil {
+			t.Fatalf("re-apply %d: %v", i, err)
+		}
+	}
+	var n int
+	if err := p.pool.QueryRow(ctx, `SELECT count(*) FROM zdr_tombstone_erasures WHERE org_id = $1`, org).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("the marker did not survive a re-apply: n=%d err=%v", n, err)
+	}
+	// The shape CHECK refuses an id a tombstone could never carry.
+	if _, err := p.pool.Exec(ctx, `INSERT INTO zdr_tombstone_erasures (org_id) VALUES ('https://example.org/x')`); err == nil {
+		t.Fatal("the marker table accepted an org id outside the tombstone shape")
+	}
+	_, _ = p.pool.Exec(ctx, `DELETE FROM zdr_tombstone_erasures WHERE org_id = $1`, org)
+}
+
+// An org id that no tombstone can carry gets no marker (the erasure still succeeds).
+func TestPostgresErasureMarkerOnlyForATombstoneShapedOrgID(t *testing.T) {
+	db, p := tombstonePool(t)
+	ctx := context.Background()
+	odd := "org with spaces " + uniq("x")
+	if _, err := db.PurgeOrg(odd); err != nil {
+		t.Fatalf("PurgeOrg of a non-tombstone-shaped id must still succeed: %v", err)
+	}
+	var n int
+	if err := p.pool.QueryRow(ctx, `SELECT count(*) FROM zdr_tombstone_erasures WHERE org_id = $1`, odd).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("a marker was written for a non-tombstone-shaped id: n=%d err=%v", n, err)
+	}
+}
+
+// Put takes the same advisory lock as PurgeOrg. While an erasure transaction holds it
+// (marker written, not yet committed) a Put must wait, and once the erasure commits
+// the Put reports the refused no-op. Without the lock the Put would read "no marker"
+// from before the commit and store its row after the erasure's DELETE.
+func TestPostgresPutBlocksOnTheOrgLockHeldByAnErasure(t *testing.T) {
+	db, p := tombstonePool(t)
+	ctx := context.Background()
+	org := uniq("org_lock")
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, orgLockSQL, org); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO zdr_tombstone_erasures (org_id) VALUES ($1)`, org); err != nil {
+		t.Fatal(err)
+	}
+	type result struct {
+		inserted bool
+		err      error
+	}
+	res := make(chan result, 1)
+	go func() {
+		inserted, err := db.ZdrTombstones().Put(pgTombstone(uniq("run_lock"), org, time.Now().UTC()))
+		res <- result{inserted, err}
+	}()
+	select {
+	case r := <-res:
+		t.Fatalf("Put returned while the erasure held the org lock: %+v", r)
+	case <-time.After(700 * time.Millisecond):
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case r := <-res:
+		if r.err != nil || r.inserted {
+			t.Fatalf("after the erasure committed the Put must be the refused no-op: %+v", r)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("Put never returned after the erasure committed")
+	}
+	if rows, _ := db.ZdrTombstones().ListByOrg(org, 10); len(rows) != 0 {
+		t.Fatalf("a row exists for the erased org: %+v", rows)
+	}
+	_, _ = p.pool.Exec(ctx, `DELETE FROM zdr_tombstone_erasures WHERE org_id = $1`, org)
+}
+
+// Erasure markers are swept by age only.
+func TestPostgresErasureMarkerSweepIsByAge(t *testing.T) {
+	db, p := tombstonePool(t)
+	ctx := context.Background()
+	oldOrg, newOrg := uniq("org_old"), uniq("org_new")
+	if _, err := p.pool.Exec(ctx, `INSERT INTO zdr_tombstone_erasures (org_id, erased_at) VALUES ($1, now() - interval '40 days'), ($2, now())`, oldOrg, newOrg); err != nil {
+		t.Fatal(err)
+	}
+	n, err := db.ZdrTombstones().DeleteErasureMarkersBefore(time.Now().UTC().Add(-30 * 24 * time.Hour))
+	if err != nil || n < 1 {
+		t.Fatalf("sweep: n=%d err=%v, want the 40-day-old marker removed", n, err)
+	}
+	var old, fresh int
+	_ = p.pool.QueryRow(ctx, `SELECT count(*) FROM zdr_tombstone_erasures WHERE org_id = $1`, oldOrg).Scan(&old)
+	_ = p.pool.QueryRow(ctx, `SELECT count(*) FROM zdr_tombstone_erasures WHERE org_id = $1`, newOrg).Scan(&fresh)
+	if old != 0 || fresh != 1 {
+		t.Fatalf("old=%d fresh=%d, want 0 and 1", old, fresh)
+	}
+	_, _ = p.pool.Exec(ctx, `DELETE FROM zdr_tombstone_erasures WHERE org_id = $1`, newOrg)
+}
+
+// PurgeOrg takes the same lock: it must wait for a Put (or anything) that holds it,
+// so the erasure's DELETE and marker never interleave with a tombstone insert.
+func TestPostgresPurgeOrgBlocksOnTheOrgLock(t *testing.T) {
+	db, p := tombstonePool(t)
+	ctx := context.Background()
+	org := uniq("org_plock")
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, orgLockSQL, org); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := db.PurgeOrg(org)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("PurgeOrg returned while the org lock was held: err=%v", err)
+	case <-time.After(700 * time.Millisecond):
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("PurgeOrg after the lock was released: %v", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("PurgeOrg never returned after the lock was released")
+	}
+	_, _ = p.pool.Exec(ctx, `DELETE FROM zdr_tombstone_erasures WHERE org_id = $1`, org)
+}

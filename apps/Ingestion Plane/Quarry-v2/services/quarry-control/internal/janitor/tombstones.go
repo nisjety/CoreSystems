@@ -34,6 +34,12 @@ import (
 // DefaultTombstoneRetentionDays is the retention when nothing valid is configured.
 const DefaultTombstoneRetentionDays = 30
 
+// MaxTombstoneRetentionDays bounds the configured retention (100 years). A larger
+// value is treated as invalid: multiplying it into a time.Duration overflows int64
+// from 106752 days, which would put the cutoff in the future and delete every
+// tombstone, the opposite of what a long retention asks for.
+const MaxTombstoneRetentionDays = 36500
+
 // TombstoneOptions controls the tombstone sweeper.
 type TombstoneOptions struct {
 	RetentionDays int
@@ -56,7 +62,7 @@ func TombstoneOptionsFromEnv(getenv func(string) string) (TombstoneOptions, bool
 	}
 	invalid := false
 	if raw := strings.TrimSpace(getenv("QUARRY_ZDR_TOMBSTONE_RETENTION_DAYS")); raw != "" {
-		if n, err := strconv.Atoi(raw); err == nil && n >= 0 {
+		if n, err := strconv.Atoi(raw); err == nil && n >= 0 && n <= MaxTombstoneRetentionDays {
 			opts.RetentionDays = n
 		} else {
 			invalid = true
@@ -108,7 +114,7 @@ func SweepTombstones(ctx context.Context, db store.DB, opts TombstoneOptions, lo
 	if opts.Now != nil {
 		now = opts.Now
 	}
-	cutoff := now().UTC().Add(-time.Duration(opts.RetentionDays) * 24 * time.Hour)
+	cutoff := tombstoneCutoff(now().UTC(), opts.RetentionDays)
 	tombs := db.ZdrTombstones()
 
 	if opts.DryRun {
@@ -137,8 +143,35 @@ func SweepTombstones(ctx context.Context, db store.DB, opts TombstoneOptions, lo
 			break
 		}
 	}
+	// Erasure markers outlive the tombstones by at least MinErasureMarkerDays, so a
+	// short retention does not reopen the window for a run that ends after an
+	// erasure.
+	markerDays := opts.RetentionDays
+	if markerDays < store.MinErasureMarkerDays {
+		markerDays = store.MinErasureMarkerDays
+	}
+	if n, err := tombs.DeleteErasureMarkersBefore(tombstoneCutoff(now().UTC(), markerDays)); err != nil {
+		logger.Warn().Err(err).Msg("zdr tombstone erasure marker sweep failed")
+	} else if n > 0 {
+		logger.Info().Int64("deleted", n).Msg("zdr tombstone erasure markers swept")
+	}
 	if total > 0 {
 		logger.Info().Int64("deleted", total).Int("retention_days", opts.RetentionDays).Msg("zdr tombstone sweep complete")
 	}
 	return total
+}
+
+// tombstoneCutoff is the instant before which a tombstone is due for deletion. It
+// never lands in the future: a negative count is the default, and a count above
+// MaxTombstoneRetentionDays is clamped to it (which keeps rows longer, never
+// shorter). The date arithmetic is calendar arithmetic, so there is no Duration
+// to overflow.
+func tombstoneCutoff(now time.Time, days int) time.Time {
+	if days < 0 {
+		days = DefaultTombstoneRetentionDays
+	}
+	if days > MaxTombstoneRetentionDays {
+		days = MaxTombstoneRetentionDays
+	}
+	return now.AddDate(0, 0, -days)
 }

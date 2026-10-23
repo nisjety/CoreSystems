@@ -42,13 +42,19 @@ func newTombstoneServer(t *testing.T, require bool) (http.Handler, store.DB) {
 }
 
 func signedTombstonePost(body []byte, nonce string) *http.Request {
+	return signedRequest(http.MethodPost, tombstonePath, body, nonce)
+}
+
+// signedRequest signs method + target (path with query) + body the way the edge does
+// (the canonical string the verifier rebuilds in httpx/hmac.go).
+func signedRequest(method, target string, body []byte, nonce string) *http.Request {
 	ts := time.Now().Unix()
 	bodyHash := sha256.Sum256(body)
-	canonical := http.MethodPost + "\n" + tombstonePath + "\n" + hex.EncodeToString(bodyHash[:]) +
+	canonical := method + "\n" + target + "\n" + hex.EncodeToString(bodyHash[:]) +
 		"\n" + strconv.FormatInt(ts, 10) + "\n" + nonce
 	mac := hmac.New(sha256.New, []byte(testSecret))
 	_, _ = mac.Write([]byte(canonical))
-	req := httptest.NewRequest(http.MethodPost, tombstonePath, bytes.NewReader(body))
+	req := httptest.NewRequest(method, target, bytes.NewReader(body))
 	req.Header.Set(httpx.HMACHeaderSig, "sig_v1="+base64.StdEncoding.EncodeToString(mac.Sum(nil)))
 	req.Header.Set(httpx.HMACHeaderTS, strconv.FormatInt(ts, 10))
 	req.Header.Set(httpx.HMACHeaderNonce, nonce)
@@ -270,18 +276,43 @@ func TestZdrTombstoneForgedSignatureIs401AndReplayIsRefused(t *testing.T) {
 	}
 }
 
-// There is no HTTP read of tombstones: nothing answers a GET.
+// There is no HTTP read of tombstones. The requests below are SIGNED, so they pass
+// the verifier and reach the router: a GET handler added to the group would answer
+// 2xx here (an unsigned GET is refused by the verifier first and would prove
+// nothing). A second check reads the route table itself.
 func TestZdrTombstoneHasNoReadRoute(t *testing.T) {
-	h, _ := newTombstoneServer(t, true)
-	for _, path := range []string{tombstonePath, tombstonePath + "/run_3f9c1", tombstonePath + "?org_id=org_a"} {
-		req := httptest.NewRequest(http.MethodGet, path, nil)
-		rec := serve(h, req)
-		if rec.Code != http.StatusNotFound && rec.Code != http.StatusMethodNotAllowed && rec.Code != http.StatusUnauthorized {
-			t.Fatalf("GET %s must not be served, got %d", path, rec.Code)
+	h, db := newTombstoneServer(t, true)
+	if _, err := db.ZdrTombstones().Put(store.ZdrTombstone{
+		RunID: "run_3f9c1", OrgID: "org_a", Kind: "scrape", RetentionClass: store.ZdrTombstoneRetentionClass,
+		Outcome: "ok", EndedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodPut, http.MethodPatch, http.MethodDelete} {
+		for _, target := range []string{tombstonePath, tombstonePath + "/run_3f9c1", tombstonePath + "?org_id=org_a"} {
+			rec := serve(h, signedRequest(method, target, nil, nextNonce()))
+			if rec.Code >= 200 && rec.Code < 300 {
+				t.Fatalf("a signed %s %s was served: %d %s", method, target, rec.Code, rec.Body.String())
+			}
+			if strings.Contains(rec.Body.String(), "run_3f9c1") {
+				t.Fatalf("a signed %s %s leaked a tombstone: %s", method, target, rec.Body.String())
+			}
 		}
-		if rec.Code == http.StatusOK {
-			t.Fatalf("GET %s answered 200", path)
+	}
+	// The route table: the only handler under the tombstone path is POST.
+	r := chi.NewRouter()
+	MountZdrTombstones(r, db)
+	var seen []string
+	if err := chi.Walk(r, func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
+		if strings.Contains(route, "zdr-tombstones") {
+			seen = append(seen, method+" "+route)
 		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(seen, []string{"POST " + tombstonePath}) {
+		t.Fatalf("the tombstone route table must be exactly POST %s, got %v", tombstonePath, seen)
 	}
 }
 
@@ -381,5 +412,24 @@ func TestZdrTombstoneStructMatchesSchema(t *testing.T) {
 	}
 	if err := json.Unmarshal(doc.Properties["retention_class"], &rc); err != nil || rc.Const != store.ZdrTombstoneRetentionClass {
 		t.Fatalf("retention_class const %q differs from %q", rc.Const, store.ZdrTombstoneRetentionClass)
+	}
+}
+
+// A signed tombstone for an org that was erased answers 204 like any other and stores
+// nothing: the route must not become an oracle for "this org was erased".
+func TestZdrTombstoneForAnErasedOrgAnswers204AndStoresNothing(t *testing.T) {
+	h, db := newTombstoneServer(t, true)
+	if rec := serve(h, signedTombstonePost(tombstoneBody(t, nil), nextNonce())); rec.Code != http.StatusNoContent {
+		t.Fatalf("first post: %d", rec.Code)
+	}
+	if _, err := db.PurgeOrg("org_a"); err != nil {
+		t.Fatal(err)
+	}
+	late := tombstoneBody(t, func(m map[string]any) { m["run_id"] = "run_after_erasure" })
+	if rec := serve(h, signedTombstonePost(late, nextNonce())); rec.Code != http.StatusNoContent {
+		t.Fatalf("a tombstone for an erased org must still answer 204, got %d", rec.Code)
+	}
+	if n := countTombstones(t, db, "org_a"); n != 0 {
+		t.Fatalf("an erased org has %d tombstones again", n)
 	}
 }

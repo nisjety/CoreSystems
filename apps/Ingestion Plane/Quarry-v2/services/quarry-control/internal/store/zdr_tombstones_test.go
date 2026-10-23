@@ -167,3 +167,67 @@ func TestOrgErasureRemovesTombstones(t *testing.T) {
 		t.Fatalf("a repeat erasure must be a zero result, got %+v err=%v", again, err)
 	}
 }
+
+// An erased org gets no late tombstone, and another org is unaffected.
+func TestErasedOrgGetsNoLateTombstone(t *testing.T) {
+	t.Parallel()
+	db := NewMemory()
+	now := time.Now().UTC()
+	if inserted, err := db.ZdrTombstones().Put(goodTombstone("run_pre", "org_a", now)); err != nil || !inserted {
+		t.Fatalf("put before erasure: inserted=%v err=%v", inserted, err)
+	}
+	if _, err := db.PurgeOrg("org_a"); err != nil {
+		t.Fatal(err)
+	}
+	inserted, err := db.ZdrTombstones().Put(goodTombstone("run_post", "org_a", now))
+	if err != nil || inserted {
+		t.Fatalf("a tombstone for an erased org: inserted=%v err=%v, want the silent no-op", inserted, err)
+	}
+	if rows, _ := db.ZdrTombstones().ListByOrg("org_a", 10); len(rows) != 0 {
+		t.Fatalf("the erased org has rows again: %+v", rows)
+	}
+	if inserted, err := db.ZdrTombstones().Put(goodTombstone("run_other", "org_b", now)); err != nil || !inserted {
+		t.Fatalf("another org must still store: inserted=%v err=%v", inserted, err)
+	}
+}
+
+// A marker is only swept when it is older than the cutoff; a zero-day retention does
+// not reach it here because the sweeper floors the marker age (janitor tests), but the
+// store itself deletes by age only.
+func TestSweepDeletesMarkersPastTheCutoff(t *testing.T) {
+	t.Parallel()
+	db := NewMemory()
+	if _, err := db.PurgeOrg("org_a"); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if n, err := db.ZdrTombstones().DeleteErasureMarkersBefore(now.Add(-time.Hour)); err != nil || n != 0 {
+		t.Fatalf("a fresh marker must survive a past cutoff: n=%d err=%v", n, err)
+	}
+	if inserted, _ := db.ZdrTombstones().Put(goodTombstone("run_1", "org_a", now)); inserted {
+		t.Fatal("the fresh marker stopped refusing")
+	}
+	if n, err := db.ZdrTombstones().DeleteErasureMarkersBefore(now.Add(time.Hour)); err != nil || n != 1 {
+		t.Fatalf("an old marker must be swept: n=%d err=%v", n, err)
+	}
+	if inserted, err := db.ZdrTombstones().Put(goodTombstone("run_2", "org_a", now)); err != nil || !inserted {
+		t.Fatalf("after the sweep the org stores again: inserted=%v err=%v", inserted, err)
+	}
+}
+
+// Only an org id of the shape a tombstone can carry gets a marker: any other id can
+// never hold a tombstone, so a marker for it would only be noise.
+func TestErasureMarkerOnlyForATombstoneShapedOrgID(t *testing.T) {
+	t.Parallel()
+	m := newMemZdrTombstones()
+	m.purgeByOrg("org with spaces")
+	m.purgeByOrg(strings.Repeat("a", 65))
+	m.purgeByOrg("")
+	if len(m.erased) != 0 {
+		t.Fatalf("markers for ids no tombstone can carry: %v", m.erased)
+	}
+	m.purgeByOrg("org_ok-1")
+	if _, ok := m.erased["org_ok-1"]; !ok || len(m.erased) != 1 {
+		t.Fatalf("the shaped id got no marker: %v", m.erased)
+	}
+}

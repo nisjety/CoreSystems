@@ -20,10 +20,15 @@ package pg
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/store"
 )
+
+// zdrOrgIDShape is the org id shape a tombstone can carry (store.ZdrTombstone.Validate
+// and the table CHECK); only such an id gets an erasure marker.
+var zdrOrgIDShape = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 // PurgeOrg hard-deletes every row for orgID across jobs, schedules,
 // quarry_sources, quarry_benchmarks, quarry_idempotency_keys and
@@ -40,6 +45,12 @@ func (d *postgresDB) PurgeOrg(orgID string) (store.PurgeResult, error) {
 		return store.PurgeResult{}, fmt.Errorf("pg: PurgeOrg begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }() // no-op once Commit succeeds
+
+	// Serialise with a concurrent tombstone Put for this org (see orgLockSQL); the
+	// erasure marker written below refuses a tombstone whose run ends after this.
+	if _, err := tx.Exec(ctx, orgLockSQL, orgID); err != nil {
+		return store.PurgeResult{}, fmt.Errorf("pg: PurgeOrg org lock: %w", err)
+	}
 
 	del := func(query string) (int64, error) {
 		tag, err := tx.Exec(ctx, query, orgID)
@@ -68,6 +79,12 @@ func (d *postgresDB) PurgeOrg(orgID string) (store.PurgeResult, error) {
 	}
 	if res.ZdrTombstonesDeleted, derr = del(`DELETE FROM zdr_run_tombstones WHERE org_id = $1`); derr != nil {
 		return store.PurgeResult{}, fmt.Errorf("pg: PurgeOrg zdr_run_tombstones: %w", derr)
+	}
+	if zdrOrgIDShape.MatchString(orgID) {
+		if _, err := tx.Exec(ctx, `INSERT INTO zdr_tombstone_erasures (org_id) VALUES ($1)
+			ON CONFLICT (org_id) DO UPDATE SET erased_at = now()`, orgID); err != nil {
+			return store.PurgeResult{}, fmt.Errorf("pg: PurgeOrg zdr_tombstone_erasures: %w", err)
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
