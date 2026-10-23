@@ -1129,6 +1129,39 @@ What changed on top of the 77374adc gate: a step response of an agent run carrie
 - Evidence owed (test phase, not run): `POST /v1/scrape` of `https://example.com` returns a body identical (ignoring `run_id`, timestamps and `duration_ms`) before and after the rebuild of `quarry-edge`.
 - Rollback: revert the commit. Nothing persisted needs reverting.
 
+## Agent event trace: per-run seq, replay ring and resume (WS10.S3, unit W2-U25, built, NOT run, 2026-10-23)
+
+What changed for an operator: the SSE `id:` of `GET /v1/agent/runs/{run_id}/events/stream` is now the run's `seq`, dense from 1 per run (the run's `agent.started` is 1). A reconnect with `Last-Event-ID` (or `?from_seq=`, which wins) replays the events after that seq from the run's in-memory ring and then tails the live channel, with no gap and no duplicate. When the ring no longer holds the events after the resume point, the stream first sends `replay_gap` `{requested, oldest_retained, fallback: "browser-session/timeline"}`: read the durable timeline for the missed part. The ring is memory only, lives as long as the run, and never reaches Postgres. A ZDR event is kept in the ring and never reaches the durable publisher or NATS.
+
+Flags (read once at boot, env only, `crates/quarry-edge/src/trace_config.rs`):
+
+- `QUARRY_EDGE__TRACE_RING_EVENTS`, default `512`. `0` disables the ring: a resume that missed events then gets `replay_gap`, and the live tail is unchanged.
+- `QUARRY_EDGE__TRACE_RING_MAX_BYTES`, default `1048576` (1 MiB, estimated). Must be at least `1`. An unparsable value, or `0`, aborts boot and names the variable.
+
+Memory: each open run holds at most `QUARRY_EDGE__TRACE_RING_EVENTS` events and about `QUARRY_EDGE__TRACE_RING_MAX_BYTES` of estimated payload per run. The byte count is an estimate (payload text length plus key plus 192 bytes per event), not heap size. Runs are released at `close_run` (owner close and sweeper expiry).
+
+Rollback: set `QUARRY_EDGE__TRACE_RING_EVENTS=0` and restart quarry-edge (resumes then report a gap, the live stream is as before), or revert the commits. A resumed run (`resume_run_id` after a restart) starts its trace at seq 1 again: a client that kept an id from before the restart should start a fresh stream.
+
+Checks (compile only, this unit did not run the tests): `cargo check --tests -p quarry-runtime -p quarry-edge`; gateway `cargo check --tests` in `apps/Frontend Plane/verevonv3/apps/gateway`. Tests written, not run: `cargo test -p quarry-runtime events` (the plan's names, plus the dense, ring-bound, replay-filter, gap, lag, close and ZDR cases); `cargo test -p quarry-edge --lib trace_config`; `cargo test -p quarry-edge --test agent_events_replay` (reconnect, from_seq precedence, replay_gap first, non-owner 404, closed-run done, and the doc-comment source scan); gateway `cargo test browser_events_stream`; `pnpm typecheck` for `browser-client.ts`.
+
+Evidence owed (test phase, on a deployed stack, not run): rebuild quarry-edge and the gateway image; create a session; `curl -N` the events stream; drive five steps; kill the stream after `id: 3`; reconnect with `Last-Event-ID: 3` and check the first event is `id: 4`, consecutive, no repeats; `Last-Event-ID: 0` after about 600 steps gives `replay_gap` first; closing the run ends the stream with `event: done` / `data: run_closed`. With `RUST_LOG=quarry_runtime=debug`, the `open_runs` count returns to 0 after a batch closes.
+
+Known gaps: the SPA has the typed reader (`streamBrowserEvents` in `shared/api/browser-client.ts`) but no UI uses it yet; agent events still reach NATS raw for non-ZDR runs until WS10.S4 (see the unit depth notes); the gateway forwards the query string as it arrives (Quarry reads only `from_seq` and `max_events`). See `.plan-work/quarry-w1w2/depth/W2-U25.md`.
+
+## Cancel, pause and resume a job: control loop and typed timeouts (WS15.L2, unit W2-U28, built, NOT run, 2026-10-23)
+
+- What it is: `DELETE /v1/crawl/{id}` and `DELETE /v1/batch/{id}` cancel; `POST /v1/crawl/{id}/pause|resume` and the batch aliases pause and resume. The edge writes a desired state to the job record in control (`POST /v1/jobs/{id}/control`). The orchestrator's control loop reads the pending requests, signals the Temporal workflow and acknowledges them. Control never talks to Temporal.
+- Flags: `QUARRY_EDGE__JOB_CONTROL=1` on the edge (off answers 501 before control is called). `QUARRY_JOB_CONTROL_LOOP=1` on the orchestrator (off: no signals, no sweep, and the dispatcher keeps its 30-minute workflow execution timeout). `QUARRY_CANCEL_GRACE_S` (default 120) is how long an unapplied cancel waits before it is forced. `QUARRY_JOB_TIMEOUT_SCRAPE_S` (300), `QUARRY_JOB_TIMEOUT_BATCH_S` (20 s per URL, at most 7200), `QUARRY_JOB_TIMEOUT_CRAWL_S` (10 s per page, at most 21600, 1800 when the page bound is unknown) override the typed execution timeouts. Every value is capped at 6 hours and floored at 60 seconds.
+- Deploy order: control first (it has the new routes and the job record already carries the columns of migration 016), then the orchestrator with the loop on, then the edge with the verbs on. Rollback: turn the edge flag off (verbs answer 501), then the loop flag off. Pending rows are harmless. In-flight workflows replay through the `lifecycle-v1` and `batch-control-v1` version markers.
+- Answers: `DELETE` and `POST` return `{data: {job_id, status, phase, control: {desired, pending}}}`: 202 while the request is pending, 200 when the job already reflects it. `phase` is `cancelling`, `pausing` or `resuming` while pending, and the job's status once it has ended.
+- Errors: 404 for a foreign or missing id, or a crawl id on the batch path. 409 when the job ended or the verb does not fit its state (`not_running` for a pause, `not_paused` for a resume, `not_controllable` for any verb on a scrape other than a cancel before it started). A service principal gets 403.
+- Symptom: a run will not cancel. Check in order:
+  1. `control.pending` is true and `desired` is `cancel`: the orchestrator has not applied it. Check that `QUARRY_JOB_CONTROL_LOOP=1` is set on the orchestrator and that its log shows `job control loop started`. The loop reads `GET /v1/internal/jobs/pending-control` on control every 2 s.
+  2. The loop logs `job control: signal failed` for the job: the workflow is still running but refused the signal. After `QUARRY_CANCEL_GRACE_S` the loop terminates the workflow and finalizes the job as `cancelled` with `run_cancelled {forced: true}`. Wait for the grace period before escalating by hand.
+  3. The job is `timed_out` with a `run_timed_out` event: the execution timeout for its kind ended the workflow. The timeout is in `deadline_at` on the job. Raise the matching `QUARRY_JOB_TIMEOUT_*` variable if the work legitimately needs longer.
+  4. `temporal workflow describe -w quarry-job-<id>` shows the workflow state. A closed workflow that the job record still shows as running is corrected by the sweep (every 30 s), which finalizes it from the Temporal status.
+- Not done here: the Model Plane registry actions (`ingestions.cancel_run` and the others) and the SPA controls are WS15.L5. The job event tail is WS15.L3. Deployment evidence (the 5000-page crawl with pause, resume and cancel, and the timeout check) is owed in the wave's stack phase and is not claimed by this section.
+
 ## Reload and the navigation error card: WS9.B (W2-U27, built, NOT run, 2026-10-23)
 
 - What changed: the wire action `reload { ignore_cache: bool }` (default false) is added to `AgentAction` (quarry-core `contracts.rs`, appended at the end of the enum), to the browser `Action` (quarry-browser `actions.rs`) and to the driver trait (`BrowserDriver::reload`, default Unsupported). The chromiumoxide driver runs CDP `Page.reload{ignoreCache}`. A soft reload from the SPA is still a GET navigate to the session URL; only the hard reload uses the new action.
