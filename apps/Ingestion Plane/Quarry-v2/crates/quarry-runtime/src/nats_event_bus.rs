@@ -212,60 +212,19 @@ impl EventBus for NatsEventBus {
         })?;
         let payload_bytes = Bytes::from(bytes);
 
-        let primary_subject = self.subject_for(&run_id, &event_type);
-        let aggregate_subject = self.aggregate_subject_for(&event_type);
+        self.publish_encoded(&run_id, event_type, payload_bytes).await
+    }
 
-        // Publish per-run AND aggregate concurrently — neither should block
-        // the other. Both must succeed for the call to return Ok; partial
-        // success returns Err but logs which side failed so operators can
-        // recover. We don't enforce a per-subject ordering: JetStream
-        // guarantees per-subject FIFO already, and our seq numbers let
-        // consumers detect gaps across subjects.
-        let primary_pub = self
-            .js
-            .publish(primary_subject.clone(), payload_bytes.clone());
-        let aggregate_pub = self
-            .js
-            .publish(aggregate_subject.clone(), payload_bytes.clone());
-
-        let (primary_ack, aggregate_ack) = tokio::join!(primary_pub, aggregate_pub);
-
-        let primary_err = match primary_ack {
-            Ok(ack) => match ack.await {
-                Ok(_) => None,
-                Err(e) => Some(format!("primary ack: {e}")),
-            },
-            Err(e) => Some(format!("primary publish: {e}")),
+    async fn publish_event(&self, event: Event) -> QuarryResult<()> {
+        let Some(run_id) = event.run_id.clone() else {
+            return Ok(());
         };
-        let aggregate_err = match aggregate_ack {
-            Ok(ack) => match ack.await {
-                Ok(_) => None,
-                Err(e) => Some(format!("aggregate ack: {e}")),
-            },
-            Err(e) => Some(format!("aggregate publish: {e}")),
-        };
-
-        match (primary_err, aggregate_err) {
-            (None, None) => Ok(()),
-            (Some(p_err), None) => {
-                // zdr-log-ok: a NATS client error (subject, connection state); the event payload is not part of it
-                tracing::warn!(error = %p_err, subject = %primary_subject, "primary subject failed; aggregate ok");
-                Err(QuarryError::new(
-                    ErrorCode::DriverFailed,
-                    format!("nats publish primary-subject failed: {p_err}"),
-                ))
-            }
-            (None, Some(a_err)) => {
-                // zdr-log-ok: a NATS client error (subject, connection state); the event payload is not part of it
-                tracing::warn!(error = %a_err, subject = %aggregate_subject, "aggregate subject failed; primary ok");
-                // Per-run consumers got the event; degrade gracefully.
-                Ok(())
-            }
-            (Some(p_err), Some(a_err)) => Err(QuarryError::new(
-                ErrorCode::DriverFailed,
-                format!("nats publish both subjects failed (primary: {p_err}; aggregate: {a_err})"),
-            )),
-        }
+        let event_type = event.event_type;
+        let bytes = serde_json::to_vec(&event).map_err(|e| {
+            QuarryError::new(ErrorCode::Internal, format!("event serialize failed: {e}"))
+        })?;
+        self.publish_encoded(&run_id, event_type, Bytes::from(bytes))
+            .await
     }
 
     async fn subscribe(&self, run_id: &RunKind) -> QuarryResult<Box<dyn EventReceiver>> {
@@ -366,6 +325,72 @@ struct NatsReceiver {
 impl EventReceiver for NatsReceiver {
     async fn recv(&mut self) -> Option<Event> {
         self.rx.recv().await
+    }
+}
+
+impl NatsEventBus {
+    /// Publish one encoded event on its per-run subject and on the aggregate subject
+    /// (WS10.S3: shared by `publish` and `publish_event`).
+    async fn publish_encoded(
+        &self,
+        run_id: &RunKind,
+        event_type: EventType,
+        payload_bytes: Bytes,
+    ) -> QuarryResult<()> {
+        let primary_subject = self.subject_for(run_id, &event_type);
+        let aggregate_subject = self.aggregate_subject_for(&event_type);
+
+        // Publish per-run AND aggregate concurrently — neither should block
+        // the other. Both must succeed for the call to return Ok; partial
+        // success returns Err but logs which side failed so operators can
+        // recover. We don't enforce a per-subject ordering: JetStream
+        // guarantees per-subject FIFO already, and our seq numbers let
+        // consumers detect gaps across subjects.
+        let primary_pub = self
+            .js
+            .publish(primary_subject.clone(), payload_bytes.clone());
+        let aggregate_pub = self
+            .js
+            .publish(aggregate_subject.clone(), payload_bytes.clone());
+
+        let (primary_ack, aggregate_ack) = tokio::join!(primary_pub, aggregate_pub);
+
+        let primary_err = match primary_ack {
+            Ok(ack) => match ack.await {
+                Ok(_) => None,
+                Err(e) => Some(format!("primary ack: {e}")),
+            },
+            Err(e) => Some(format!("primary publish: {e}")),
+        };
+        let aggregate_err = match aggregate_ack {
+            Ok(ack) => match ack.await {
+                Ok(_) => None,
+                Err(e) => Some(format!("aggregate ack: {e}")),
+            },
+            Err(e) => Some(format!("aggregate publish: {e}")),
+        };
+
+        match (primary_err, aggregate_err) {
+            (None, None) => Ok(()),
+            (Some(p_err), None) => {
+                // zdr-log-ok: a NATS client error (subject, connection state); the event payload is not part of it
+                tracing::warn!(error = %p_err, subject = %primary_subject, "primary subject failed; aggregate ok");
+                Err(QuarryError::new(
+                    ErrorCode::DriverFailed,
+                    format!("nats publish primary-subject failed: {p_err}"),
+                ))
+            }
+            (None, Some(a_err)) => {
+                // zdr-log-ok: a NATS client error (subject, connection state); the event payload is not part of it
+                tracing::warn!(error = %a_err, subject = %aggregate_subject, "aggregate subject failed; primary ok");
+                // Per-run consumers got the event; degrade gracefully.
+                Ok(())
+            }
+            (Some(p_err), Some(a_err)) => Err(QuarryError::new(
+                ErrorCode::DriverFailed,
+                format!("nats publish both subjects failed (primary: {p_err}; aggregate: {a_err})"),
+            )),
+        }
     }
 }
 
