@@ -1326,3 +1326,39 @@ Test phase checks (not run):
 - `cd services/quarry-orchestrator && go test ./internal/workflows/ ./internal/schedules/ ./internal/jobs/ ./internal/activities/ -count=1`
 - `cd services/quarry-control && go test ./internal/resources/ -run "Schedule|WorkflowFor|RegisterRun" -count=1`
 - `cargo test -p quarry-edge --test schedule_preflight` and `cargo test -p quarry-edge --lib schedule_preflight`
+
+## WS17.E3: profile backfill, erasure hop and plaintext removal (W2-U41, built, NOT run, 2026-10-23)
+
+Built to scope; the tests are written and compile-checked, not run. Deployment evidence (a live stack, a restore after backfill, a canary check in Postgres and Redis) is not run. Plan: `docs/plans/quarry-browser-build-plan-2026-10-14.md`, "Slice WS17.E3 detail". Migration `0017_profile_plaintext_null.sql`.
+
+What ships, and what is dark:
+
+- `profiles_backfill` (quarry-edge binary, `--features postgres-queue`): seals every plaintext profile row under the current master key with a compare-and-set on `rev`, then unlinks the legacy plaintext cache keys (`quarry:profile:*`, never the v2 keys). Operator-run, resumable, idempotent, counts only.
+- `DELETE /v1/internal/orgs/:org/profiles` on quarry-edge: the org erasure of the profile family (rows, tombstones, Redis keys `quarry:profile:v2:{org}:*` and `quarry:profile:{org}:*`, cached DEKs in that process). Outside `require_auth`; the shared token `QUARRY_EDGE_INTERNAL_TOKEN` gates it. Idempotent: a repeat answers zeros.
+- quarry-control, the GDPR consumer: for an `organization` erasure event it purges its own store, then calls the edge route. Any failure naks, so JetStream redelivers. The hop is OFF while `QUARRY_EDGE_URL` is empty (compose default). A set URL with no token, or a non-http(s) URL, fails every erasure and logs why. Nothing is silently skipped.
+- Migration 0017: `UPDATE ... SET snapshot = NULL WHERE envelope IS NOT NULL AND snapshot IS NOT NULL` (changes no row in a consistent store) and a `CHECK (snapshot IS NULL OR envelope IS NULL) NOT VALID` constraint. It runs on the next edge boot (sqlx). It does NOT prove that no plaintext row is left; that is the gate below.
+
+Order to enable (after WS17.E1 `compat` and `on` are live):
+
+1. Gate on the backfill, not on the migration. Before REQUIRED, count the rows that still hold plaintext (expect 0 after the backfill):
+   `SELECT count(*) FROM quarry_profiles WHERE envelope IS NULL AND snapshot IS NOT NULL;`
+2. Back up `quarry_profiles` and `quarry_profile_tombstones` (migration 0017 is irreversible).
+3. Run the backfill once per environment, with the same master keys the edge uses:
+   `QUARRY_EDGE__DATABASE_URL=... QUARRY_PROFILE_MASTER_KEYS=... QUARRY_PROFILE_MASTER_KEY_ACTIVE=... QUARRY_EDGE__REDIS_URL=... profiles_backfill --batch 200 --pause-ms 50`
+   It prints one JSON line (scanned, sealed, moved_on, failed, legacy_cache_keys_unlinked). Exit 0 means failed = 0. A `moved_on` row was changed by a live save: re-run until step 1 shows 0. A failed row is not logged; re-run after fixing the cause (the stored JSON is not a snapshot, or the key failed).
+4. Repeat step 1. Only then set `QUARRY_EDGE__PROFILE_ENCRYPTION_REQUIRED=1` in the release that follows.
+5. Turn on the erasure hop: set `QUARRY_EDGE_URL=http://quarry-edge:8082` and the same `QUARRY_EDGE_INTERNAL_TOKEN` on quarry-control and on quarry-edge. Check with one call and read the counts, then repeat it and expect zeros:
+   `curl -s -X DELETE -H "Authorization: Bearer $QUARRY_EDGE_INTERNAL_TOKEN" http://quarry-edge:8082/v1/internal/orgs/<org>/profiles`
+
+Rollback and what is not reversible:
+
+- The erasure hop: unset `QUARRY_EDGE_URL` on quarry-control. The control store still purges its own rows. The edge profile rows of that org stay until a manual call to the route. Record the org ids of any erasure that ran while the hop was off.
+- The backfill has no rollback to plaintext. Once a row is sealed, `off` mode cannot read it (its `snapshot` is NULL). Read-back needs `compat` or `on` with the master keys. Losing the master keys loses those profiles: no plaintext copy exists after step 3.
+- A pre-0016 binary cannot read envelope rows and fails the new CHECK on a write that sets both payloads. It is not a supported rollback target once `on` has run.
+- Keep every master key that wrapped a DEK still in use. Cryptographic erasure of one org is NOT achieved by this slice (the env provider has no per-org key; that waits for WS17.E2).
+
+Test phase checks (not run):
+
+- `cargo test -p quarry-runtime --features postgres-queue profile_backfill org_erasure` (the Redis-gated cases need `REDIS_URL`; the Postgres-lane cases need `DATABASE_URL`).
+- `go test ./internal/gdpr/...` in `services/quarry-control` (the new tests are `edge_purger_test.go` and the `HandleErasureWithEdge` cases in `erasure_test.go`).
+- Stack evidence: backfill a canary profile, confirm no canary in `quarry_profiles` or in Redis, erase the org through the control event, confirm the rows, tombstones and `quarry:profile:v2:*` keys are gone and a second erasure reports zeros.

@@ -344,6 +344,10 @@ services:
       NATS_SHARED_URL: nats://control-shared-nats:4222
       NATS_SHARED_USER: quarry-control-gdpr
       NATS_SHARED_PASSWORD: ${QUARRY_CONTROL_GDPR_NATS_PASSWORD:?QUARRY_CONTROL_GDPR_NATS_PASSWORD is required}
+      # WS17.E3: the org-erasure hop to quarry-edge (profiles). Off while QUARRY_EDGE_URL is empty.
+      # The token must equal the quarry-edge QUARRY_EDGE_INTERNAL_TOKEN. Set both when enabling.
+      QUARRY_EDGE_URL: ${QUARRY_EDGE_URL:-}
+      QUARRY_EDGE_INTERNAL_TOKEN: ${QUARRY_EDGE_INTERNAL_TOKEN:-}
     entrypoint:
       - /bin/sh
       - -ec
