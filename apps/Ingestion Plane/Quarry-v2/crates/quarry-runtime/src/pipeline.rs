@@ -50,6 +50,26 @@ pub struct InlineParts {
     /// Fields left out for being over the cap (not ZDR: read the artifact).
     pub omitted: Vec<String>,
     pub warnings: Vec<quarry_core::scrape::ScrapeWarning>,
+    /// WS13.4b: the screenshot inline. Under ZDR only.
+    pub screenshot: Option<quarry_core::scrape::InlineCapture>,
+    /// WS13.4b: the PDF inline. Under ZDR only.
+    pub pdf: Option<quarry_core::scrape::InlineCapture>,
+    /// WS13.4b: what the captures measured, in both modes.
+    pub captures: Option<quarry_core::scrape::CapturesReport>,
+}
+
+/// What [`PageRunner::persist_captures`] made of one run's captures. The refs
+/// go on the output's `formats`. The inline parts and warnings join the
+/// [`InlineParts`] the caller reads.
+#[derive(Debug, Clone, Default)]
+pub struct CaptureOutput {
+    pub screenshot_ref: Option<FormatRef>,
+    pub pdf_ref: Option<FormatRef>,
+    pub inline_screenshot: Option<quarry_core::scrape::InlineCapture>,
+    pub inline_pdf: Option<quarry_core::scrape::InlineCapture>,
+    pub captures: Option<quarry_core::scrape::CapturesReport>,
+    pub omitted: Vec<String>,
+    pub warnings: Vec<quarry_core::scrape::ScrapeWarning>,
 }
 
 /// What a caller wants returned inline, and how much.
@@ -495,6 +515,150 @@ impl PageRunner {
                 Err(e)
             }
         }
+    }
+
+    /// WS13.4b: store or inline what the browser captured for this run.
+    /// Not ZDR: each capture is an artifact under a label of its own
+    /// (`final.screenshot`, `final.pdf`), with one content-free
+    /// `ArtifactWritten` per capture. ZDR: nothing is written or emitted, and
+    /// the bytes travel inline under the cap. A capture over the cap is omitted
+    /// with `capture_exceeds_inline_cap`.
+    async fn persist_captures(
+        &self,
+        run_id: &RunKind,
+        resp: &crate::fetch::FetchResponse,
+        fingerprint: &str,
+    ) -> QuarryResult<CaptureOutput> {
+        use base64::Engine as _;
+        let mut out = CaptureOutput::default();
+        let Some(caps) = resp.captures.as_deref() else {
+            return Ok(out);
+        };
+        out.warnings = caps
+            .warnings
+            .iter()
+            .map(|w| quarry_core::scrape::ScrapeWarning::new(&w.code, w.message.clone()))
+            .collect();
+        let mut report = quarry_core::scrape::CapturesReport {
+            blocked_requests: caps.blocked_requests,
+            ..Default::default()
+        };
+        let store = zdr::guard(self.zdr, WriteKind::Artifact).is_ok();
+        let org = self.org_id.clone().unwrap_or_default();
+        let inline_cap = self
+            .render
+            .capture_inline_max_bytes
+            .unwrap_or(crate::capture::DEFAULT_INLINE_CAPTURE_MAX_BYTES)
+            .min(crate::capture::MAX_INLINE_CAPTURE_BYTES);
+        let mut inline_used = 0usize;
+
+        if let Some(image) = caps.screenshot.as_ref() {
+            let (kind, content_type) = match image.format {
+                quarry_core::capture::ImageFormat::Png => ("screenshot", "image/png"),
+                quarry_core::capture::ImageFormat::Jpeg => ("screenshot_jpeg", "image/jpeg"),
+            };
+            report.screenshot = Some(quarry_core::scrape::ScreenshotReport {
+                content_type: content_type.to_owned(),
+                width: image.width_px,
+                height: image.height_px,
+                bytes: image.bytes.len() as u64,
+                tiles: image.tiles,
+                stitched: image.stitched,
+                truncated: image.truncated,
+            });
+            if store {
+                let label = quarry_core::artifact::page_hash(
+                    resp.final_url.as_ref(),
+                    &format!("{fingerprint}#cap:final.{kind}"),
+                );
+                let handle = self
+                    .artifacts
+                    .put(&org, run_id, &label, kind, image.bytes.clone())
+                    .await?;
+                self.event_sink
+                    .emit(
+                        run_id.clone(),
+                        EventType::ArtifactWritten,
+                        json!({
+                            "url": resp.final_url.to_string(),
+                            "format": "screenshot",
+                            "artifact_id": handle.artifact_id.to_string(),
+                            "bytes": handle.bytes,
+                        }),
+                        format!("{}:{}:artifact:screenshot", run_id, resp.final_url),
+                    )
+                    .await;
+                out.screenshot_ref = Some(FormatRef {
+                    artifact_id: handle.artifact_id,
+                    bytes: handle.bytes,
+                });
+            } else if image.bytes.len() <= inline_cap.saturating_sub(inline_used) {
+                inline_used += image.bytes.len();
+                out.inline_screenshot = Some(quarry_core::scrape::InlineCapture {
+                    content_type: content_type.to_owned(),
+                    bytes: image.bytes.len() as u64,
+                    width: Some(image.width_px),
+                    height: Some(image.height_px),
+                    data_base64: base64::engine::general_purpose::STANDARD.encode(&image.bytes),
+                });
+            } else {
+                out.omitted.push("screenshot".to_owned());
+                out.warnings.push(quarry_core::scrape::ScrapeWarning::new(
+                    "capture_exceeds_inline_cap",
+                    "the screenshot is larger than the inline cap and is left out",
+                ));
+            }
+        }
+
+        if let Some(pdf) = caps.pdf.as_ref() {
+            report.pdf = Some(quarry_core::scrape::PdfReport {
+                bytes: pdf.bytes.len() as u64,
+            });
+            if store {
+                let label = quarry_core::artifact::page_hash(
+                    resp.final_url.as_ref(),
+                    &format!("{fingerprint}#cap:final.pdf"),
+                );
+                let handle = self
+                    .artifacts
+                    .put(&org, run_id, &label, "pdf", pdf.bytes.clone())
+                    .await?;
+                self.event_sink
+                    .emit(
+                        run_id.clone(),
+                        EventType::ArtifactWritten,
+                        json!({
+                            "url": resp.final_url.to_string(),
+                            "format": "pdf",
+                            "artifact_id": handle.artifact_id.to_string(),
+                            "bytes": handle.bytes,
+                        }),
+                        format!("{}:{}:artifact:pdf", run_id, resp.final_url),
+                    )
+                    .await;
+                out.pdf_ref = Some(FormatRef {
+                    artifact_id: handle.artifact_id,
+                    bytes: handle.bytes,
+                });
+            } else if pdf.bytes.len() <= inline_cap.saturating_sub(inline_used) {
+                out.inline_pdf = Some(quarry_core::scrape::InlineCapture {
+                    content_type: "application/pdf".to_owned(),
+                    bytes: pdf.bytes.len() as u64,
+                    width: None,
+                    height: None,
+                    data_base64: base64::engine::general_purpose::STANDARD.encode(&pdf.bytes),
+                });
+            } else {
+                out.omitted.push("pdf".to_owned());
+                out.warnings.push(quarry_core::scrape::ScrapeWarning::new(
+                    "capture_exceeds_inline_cap",
+                    "the PDF is larger than the inline cap and is left out",
+                ));
+            }
+        }
+
+        out.captures = Some(report);
+        Ok(out)
     }
 
     async fn run_inner(
@@ -951,6 +1115,8 @@ impl PageRunner {
         // Canonical page hash combines normalized URL with content fingerprint,
         // giving a stable artifact key that is independent of run_id.
         let page_hash = quarry_core::artifact::page_hash(resp.final_url.as_ref(), &fp.0);
+        // WS13.4b: the captures this run took (no-op unless the request asked).
+        let mut captured = self.persist_captures(run_id, &resp, &fp.0).await?;
 
         // Artifacts — skip durable writes when ZDR is active. Every artifact is
         // stamped with the run's org so `GET /v1/artifacts/{id}` can bind the
@@ -1065,8 +1231,8 @@ impl PageRunner {
                 markdown: md_fmt.clone(),
                 raw: if is_doc { html_fmt.clone() } else { None },
                 links: link_list,
-                screenshot: None,
-                pdf: None,
+                screenshot: captured.screenshot_ref.clone(),
+                pdf: captured.pdf_ref.clone(),
                 extract: None,
             },
             change: ChangeInfo {
@@ -1219,6 +1385,11 @@ impl PageRunner {
         let inline = {
             let mut parts = InlineParts::default();
             let zdr = self.zdr.is_active();
+            parts.screenshot = captured.inline_screenshot.take();
+            parts.pdf = captured.inline_pdf.take();
+            parts.captures = captured.captures.take();
+            parts.omitted.append(&mut captured.omitted);
+            parts.warnings.append(&mut captured.warnings);
             let cap = inline_request.max_bytes;
             if inline_request.markdown {
                 offer_inline(
@@ -2980,5 +3151,176 @@ mod scrape_challenge_tests {
         .is_none());
         // Bytes that are not UTF-8 do not panic.
         assert!(crate::challenge::classify_fetched(config, "https://x.example/", 200, None, &[0xff, 0xfe, 0x00, 0xc3]).is_none());
+    }
+}
+
+#[cfg(test)]
+mod capture_pipeline_tests {
+    use super::*;
+    use crate::artifact_store::InMemoryStore;
+    use crate::driver::Driver;
+    use crate::fetch::FetchResponse;
+    use async_trait::async_trait;
+    use quarry_core::capture::{CapturedImage, CapturedPdf, ImageFormat};
+    use quarry_core::output::DriverKind;
+    use tokio::sync::mpsc;
+
+    const PAGE: &str = "<html><head><title>Capture page</title></head><body><main><h1>Capture</h1><p>Some body text for the capture test page, long enough to be extracted as the main content of the page.</p></main></body></html>";
+
+    /// A driver whose fetch carries the captures it is given.
+    struct CaptureDriver {
+        captures: crate::capture::PageCaptures,
+    }
+
+    #[async_trait]
+    impl Driver for CaptureDriver {
+        fn kind(&self) -> DriverKind {
+            DriverKind::Browser
+        }
+        async fn fetch(&self, url: &Url) -> QuarryResult<FetchResponse> {
+            Ok(FetchResponse {
+                status: 200,
+                final_url: url.clone(),
+                headers: vec![("content-type".into(), "text/html; charset=utf-8".into())],
+                body: PAGE.as_bytes().to_vec(),
+                duration_ms: 3,
+                served_by: DriverKind::Browser,
+                captures: Some(Box::new(self.captures.clone())),
+            })
+        }
+    }
+
+    fn png(bytes: usize) -> CapturedImage {
+        CapturedImage {
+            bytes: vec![0x89; bytes],
+            format: ImageFormat::Png,
+            width_px: 1280,
+            height_px: 720,
+            tiles: 1,
+            stitched: false,
+            truncated: false,
+        }
+    }
+
+    fn captures(screenshot: Option<CapturedImage>, pdf: Option<CapturedPdf>) -> crate::capture::PageCaptures {
+        crate::capture::PageCaptures {
+            screenshot,
+            pdf,
+            ..Default::default()
+        }
+    }
+
+    fn runner(
+        tx: mpsc::Sender<quarry_core::event::Event>,
+        zdr: ZdrMode,
+        driver: CaptureDriver,
+        render: RenderHints,
+    ) -> PageRunner {
+        PageRunner {
+            driver: Arc::new(driver),
+            security: Arc::new(
+                quarry_security::preflight::DefaultEngine::new().with_allow_private_hosts(true),
+            ),
+            artifacts: Arc::new(InMemoryStore::new()),
+            event_sink: EventSink::new(tx),
+            zdr,
+            ingest: None,
+            org_id: Some("org_capture".into()),
+            user_id: None,
+            privacy: PrivacyPolicy::default(),
+            cancel_token: None,
+            local_index: None,
+            policy: RunPolicy::default(),
+            scheduler: None,
+            autoscale: None,
+            render,
+            page_renderer: None,
+            source_registrar: None,
+            title_enricher: None,
+            doc_routing: DocRouting::Off,
+        }
+    }
+
+    fn both_render() -> RenderHints {
+        RenderHints {
+            capture: Some(quarry_core::capture::CapturePlan {
+                screenshot: Some(Default::default()),
+                pdf: Some(Default::default()),
+            }),
+            ..RenderHints::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn capture_refs_fill_output_formats() {
+        let (tx, _rx) = mpsc::channel(64);
+        let driver = CaptureDriver {
+            captures: captures(
+                Some(png(64)),
+                Some(CapturedPdf {
+                    bytes: b"%PDF-1.7 test".to_vec(),
+                }),
+            ),
+        };
+        let runner = runner(tx, ZdrMode::Off, driver, both_render());
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://www.example.com/".parse().unwrap();
+        let out = runner.run(&run_id, &url, None).await.expect("run ok");
+
+        let shot = out.formats.screenshot.expect("screenshot ref");
+        assert_eq!(shot.bytes, 64);
+        let pdf = out.formats.pdf.expect("pdf ref");
+        assert_eq!(pdf.bytes, 13);
+    }
+
+    #[tokio::test]
+    async fn zdr_capture_is_inline_and_writes_no_artifact_event_or_index() {
+        let (tx, mut rx) = mpsc::channel(64);
+        let driver = CaptureDriver {
+            captures: captures(Some(png(64)), None),
+        };
+        let runner = runner(tx, ZdrMode::On, driver, both_render());
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://www.example.com/".parse().unwrap();
+        let (out, inline) = runner
+            .run_with_inline_request(&run_id, &url, None, &InlineRequest::default_for(ZdrMode::On))
+            .await
+            .expect("run ok");
+
+        assert!(out.formats.screenshot.is_none(), "nothing is stored under ZDR");
+        let shot = inline.screenshot.expect("inline screenshot");
+        assert_eq!(shot.bytes, 64);
+        assert_eq!(shot.content_type, "image/png");
+        assert!(!shot.data_base64.is_empty());
+        while let Ok(event) = rx.try_recv() {
+            assert!(
+                !matches!(event.event_type, EventType::ArtifactWritten),
+                "no artifact event for a capture under ZDR"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn over_cap_zdr_capture_is_omitted_with_a_warning() {
+        let (tx, _rx) = mpsc::channel(64);
+        let driver = CaptureDriver {
+            captures: captures(Some(png(64)), None),
+        };
+        let mut render = both_render();
+        render.capture_inline_max_bytes = Some(16);
+        let runner = runner(tx, ZdrMode::On, driver, render);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://www.example.com/".parse().unwrap();
+        let (_out, inline) = runner
+            .run_with_inline_request(&run_id, &url, None, &InlineRequest::default_for(ZdrMode::On))
+            .await
+            .expect("run ok");
+
+        assert!(inline.screenshot.is_none());
+        assert!(inline.omitted.iter().any(|field| field == "screenshot"));
+        assert!(inline
+            .warnings
+            .iter()
+            .any(|w| w.code == "capture_exceeds_inline_cap"));
     }
 }

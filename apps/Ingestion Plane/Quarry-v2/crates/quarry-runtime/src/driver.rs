@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+use quarry_core::capture::{CaptureLimits, CapturePlan};
 use quarry_core::output::DriverKind;
 use quarry_core::privacy::PrivacyPolicy;
 use quarry_core::QuarryResult;
@@ -76,6 +77,32 @@ pub struct RenderHints {
     /// Timeout for `wait_for_selector` in milliseconds. Falls back to a
     /// driver-defined default (typically 5000 ms) when unset.
     pub wait_for_timeout_ms: Option<u32>,
+    /// WS13.4b: what to capture from the page once it has settled (a
+    /// screenshot, a PDF). `None` (default): no capture. Only the browser
+    /// driver takes captures; any other driver refuses the request.
+    pub capture: Option<CapturePlan>,
+    /// The caps the captures run under. Never raised past the built-in values.
+    pub capture_limits: CaptureLimits,
+    /// Under ZDR, the inline cap for the capture bytes a response carries.
+    /// `None` uses `capture::DEFAULT_INLINE_CAPTURE_MAX_BYTES`.
+    pub capture_inline_max_bytes: Option<usize>,
+}
+
+impl RenderHints {
+    /// Whether this render needs a browser: a capture is asked for.
+    pub fn needs_browser(&self) -> bool {
+        self.capture.is_some()
+    }
+}
+
+/// What a driver can do for a scrape beyond a plain fetch. The default driver
+/// can do neither.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScrapeCapabilities {
+    /// Scrape-time actions (WS13.5). Not in this slice.
+    pub actions: bool,
+    /// Scrape-time screenshots and PDFs (WS13.4b).
+    pub capture: bool,
 }
 
 #[async_trait]
@@ -104,6 +131,11 @@ pub trait Driver: Send + Sync {
     /// for `/ready`. `None`: the driver has no browser.
     async fn browser_health(&self) -> Option<quarry_browser::BrowserHealth> {
         None
+    }
+    /// What this driver can do for a scrape beyond a plain fetch (WS13.4b).
+    /// Default: nothing.
+    fn scrape_capabilities(&self) -> ScrapeCapabilities {
+        ScrapeCapabilities::default()
     }
 }
 

@@ -10,6 +10,7 @@ use tokio::sync::Semaphore;
 use url::Url;
 
 use quarry_browser::{BrowserDriver as BrowserDriverTrait, BrowserEgressPolicy, BrowserSession};
+use quarry_core::capture::{CaptureLimits, CapturePlan};
 use quarry_core::output::DriverKind;
 use quarry_core::{
     ids::kinds,
@@ -18,7 +19,8 @@ use quarry_core::{
 };
 
 use crate::{
-    driver::{Driver, FetchHints},
+    capture::{CaptureWarning, PageCaptures},
+    driver::{Driver, FetchHints, ScrapeCapabilities},
     fetch::FetchResponse,
     lease_pool::{LeaseGuard, RuntimeLeasePool},
 };
@@ -78,6 +80,94 @@ fn log_url(url: &str) -> String {
 /// Environment variable for per-fetch session isolation (WS13.1). On by
 /// default; `0` or `false` restores the legacy host-keyed affinity key.
 pub const ENV_SESSION_ISOLATION: &str = "QUARRY_SCRAPE_SESSION_ISOLATION";
+
+/// WS13.4b: the refusal for a capture on a browser that cannot take one.
+fn capture_unavailable() -> QuarryError {
+    QuarryError::new(
+        ErrorCode::Unsupported,
+        "this browser cannot take screenshots or PDFs",
+    )
+    .with_details(serde_json::json!({ "reason": "browser_capability_unavailable" }))
+}
+
+/// The typed reason a capture failed: the driver's `details.reason` when it
+/// set one, else the stable error code. Never the raw message, which can carry
+/// page-controlled text.
+fn capture_failure_reason(error: &QuarryError) -> String {
+    error
+        .details
+        .as_ref()
+        .and_then(|details| details.get("reason"))
+        .and_then(serde_json::Value::as_str)
+        .map_or_else(|| error.code.wire_name().to_owned(), str::to_owned)
+}
+
+/// Egress decisions scanned for the blocked-request count. A bound: a page
+/// that makes more requests than this under-counts.
+const CAPTURE_EGRESS_SCAN: usize = 1024;
+
+/// WS13.4b: take what the request asked for from the settled page. Each
+/// capture is independent. A failure is a warning, never an error, so the
+/// extracted page is still returned.
+async fn take_captures(
+    inner: &(dyn BrowserDriverTrait + Send + Sync),
+    session: &BrowserSession,
+    plan: &CapturePlan,
+    limits: &CaptureLimits,
+    url: &Url,
+) -> PageCaptures {
+    let mut out = PageCaptures::default();
+    if let Some(options) = plan.screenshot.as_ref() {
+        match inner.capture_screenshot(session, options, limits).await {
+            Ok(image) => {
+                if image.truncated {
+                    out.warnings.push(CaptureWarning {
+                        code: "screenshot_truncated".into(),
+                        message: "the page is taller than one capture; the image stops at the limit"
+                            .into(),
+                    });
+                }
+                out.screenshot = Some(image);
+            }
+            Err(error) => out.warnings.push(CaptureWarning {
+                code: "screenshot_failed".into(),
+                message: format!(
+                    "the screenshot was not taken: {}",
+                    capture_failure_reason(&error)
+                ),
+            }),
+        }
+    }
+    if let Some(options) = plan.pdf.as_ref() {
+        match inner.capture_pdf(session, options, limits).await {
+            Ok(pdf) => out.pdf = Some(pdf),
+            Err(error) => out.warnings.push(CaptureWarning {
+                code: "pdf_failed".into(),
+                message: format!("the PDF was not made: {}", capture_failure_reason(&error)),
+            }),
+        }
+    }
+    // Counts only: the blocked URLs never leave the driver.
+    out.blocked_requests = match inner.egress_receipts(session, 0, CAPTURE_EGRESS_SCAN).await {
+        Ok(receipts) => receipts
+            .iter()
+            .filter(|receipt| {
+                matches!(
+                    receipt.decision,
+                    quarry_core::contracts::BrowserEgressDecision::Block
+                )
+            })
+            .count()
+            .try_into()
+            .unwrap_or(u32::MAX),
+        Err(_) => 0,
+    };
+    out.final_url = match inner.current_url(session).await {
+        Ok(Some(raw)) => raw.parse::<Url>().ok().filter(|reached| reached != url),
+        _ => None,
+    };
+    out
+}
 
 /// Environment variable for the heavy lane (WS13.1): how many requests may hold
 /// the heavy permit at once. Default 1, clamped to the pool size.
@@ -318,6 +408,14 @@ impl Driver for BrowserDriverAdapter {
         DriverKind::Browser
     }
 
+    fn scrape_capabilities(&self) -> ScrapeCapabilities {
+        let caps = self.inner.capabilities();
+        ScrapeCapabilities {
+            actions: caps.scrape_actions,
+            capture: caps.capture_options,
+        }
+    }
+
     async fn fetch(&self, url: &Url) -> QuarryResult<FetchResponse> {
         self.do_fetch(url, &FetchHints::default()).await
     }
@@ -346,6 +444,11 @@ impl BrowserDriverAdapter {
             hints
                 .privacy
                 .guard_third_party_processing("browser", processor_id)?;
+        }
+        // WS13.4b: a capture needs a browser that can take one. Refused before
+        // the pool is touched, so the refusal costs no lease and no session.
+        if hints.render.capture.is_some() && !self.inner.capabilities().capture_options {
+            return Err(capture_unavailable());
         }
         let key = url.host_str().unwrap_or("default").to_string();
         let mut guard = self
@@ -496,6 +599,22 @@ impl BrowserDriverAdapter {
             );
         }
 
+        // WS13.4b: capture what the request asked for while the page is still
+        // open, before the session is released.
+        let captures = match hints.render.capture.as_ref() {
+            Some(plan) => Some(Box::new(
+                take_captures(
+                    self.inner.as_ref(),
+                    session,
+                    plan,
+                    &hints.render.capture_limits,
+                    url,
+                )
+                .await,
+            )),
+            None => None,
+        };
+
         let response = FetchResponse {
             status: 200,
             final_url: url.clone(),
@@ -513,7 +632,7 @@ impl BrowserDriverAdapter {
             body: body_bytes.to_vec(),
             duration_ms: start.elapsed().as_millis() as u64,
             served_by: DriverKind::Browser,
-            captures: None,
+            captures,
         };
 
         held.finish(false).await?;
@@ -737,6 +856,7 @@ mod tests {
             render: RenderHints {
                 wait_for_selector: Some("#hydrated".into()),
                 wait_for_timeout_ms: Some(2_500),
+                ..RenderHints::default()
             },
             ..FetchHints::default()
         };
@@ -766,6 +886,7 @@ mod tests {
             render: RenderHints {
                 wait_for_selector: Some(".ready".into()),
                 wait_for_timeout_ms: None,
+                ..RenderHints::default()
             },
             ..FetchHints::default()
         };
@@ -1224,5 +1345,255 @@ mod tests {
         assert_eq!(heavy_permits_from(Some("3"), 4), 3);
         assert_eq!(heavy_permits_from(Some("9"), 4), 4);
         assert_eq!(heavy_permits_from(Some("0"), 4), 1);
+    }
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+    use crate::driver::RenderHints;
+    use bytes::Bytes;
+    use quarry_browser::{BrowserSession, SessionInner};
+    use quarry_core::capture::{
+        CaptureLimits, CapturePlan, CapturedImage, CapturedPdf, ImageFormat, PdfOptions,
+        ScreenshotOptions,
+    };
+    use quarry_core::contracts::BrowserEgressReceipt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Mutex as TokioMutex;
+
+    /// A browser that records the order of calls. Captures can be made to
+    /// fail, the browser can be told it cannot capture, and it reports a
+    /// number of blocked requests.
+    struct CaptureMock {
+        capture_options: bool,
+        fail_screenshot: bool,
+        blocked: usize,
+        acquire_count: AtomicUsize,
+        call_order: TokioMutex<Vec<&'static str>>,
+    }
+
+    impl CaptureMock {
+        fn new(capture_options: bool, fail_screenshot: bool, blocked: usize) -> Self {
+            Self {
+                capture_options,
+                fail_screenshot,
+                blocked,
+                acquire_count: AtomicUsize::new(0),
+                call_order: TokioMutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl BrowserDriverTrait for CaptureMock {
+        fn capabilities(&self) -> quarry_browser::BrowserDriverCapabilities {
+            quarry_browser::BrowserDriverCapabilities {
+                capture_options: self.capture_options,
+                ..Default::default()
+            }
+        }
+        async fn configure_egress_policy(
+            &self,
+            _session: &BrowserSession,
+            _policy: BrowserEgressPolicy,
+        ) -> QuarryResult<()> {
+            self.call_order.lock().await.push("configure_egress_policy");
+            Ok(())
+        }
+        async fn acquire(&self, lease: &BrowserLease) -> QuarryResult<BrowserSession> {
+            self.acquire_count.fetch_add(1, Ordering::SeqCst);
+            self.call_order.lock().await.push("acquire");
+            Ok(BrowserSession {
+                lease: lease.clone(),
+                tab_pin: None,
+                inner: Arc::new(TokioMutex::new(SessionInner::default())),
+            })
+        }
+        async fn release(&self, _session: BrowserSession) -> QuarryResult<()> {
+            self.call_order.lock().await.push("release");
+            Ok(())
+        }
+        async fn goto(&self, _session: &BrowserSession, _url: &str) -> QuarryResult<()> {
+            self.call_order.lock().await.push("goto");
+            Ok(())
+        }
+        async fn content(&self, _session: &BrowserSession) -> QuarryResult<Bytes> {
+            self.call_order.lock().await.push("content");
+            Ok(Bytes::from_static(b"<html><body>ok</body></html>"))
+        }
+        async fn screenshot(&self, _session: &BrowserSession, _full_page: bool) -> QuarryResult<Bytes> {
+            Ok(Bytes::new())
+        }
+        async fn pdf(&self, _session: &BrowserSession) -> QuarryResult<Bytes> {
+            Ok(Bytes::new())
+        }
+        async fn wait_for(
+            &self,
+            _session: &BrowserSession,
+            _selector: &str,
+            _timeout_ms: u32,
+        ) -> QuarryResult<()> {
+            Ok(())
+        }
+        async fn capture_screenshot(
+            &self,
+            _session: &BrowserSession,
+            _options: &ScreenshotOptions,
+            _limits: &CaptureLimits,
+        ) -> QuarryResult<CapturedImage> {
+            self.call_order.lock().await.push("capture_screenshot");
+            if self.fail_screenshot {
+                return Err(QuarryError::new(ErrorCode::DriverFailed, "raw page text")
+                    .with_details(serde_json::json!({ "reason": "capture_too_large" })));
+            }
+            Ok(CapturedImage {
+                bytes: vec![0x89, b'P', b'N', b'G'],
+                format: ImageFormat::Png,
+                width_px: 800,
+                height_px: 600,
+                tiles: 1,
+                stitched: false,
+                truncated: false,
+            })
+        }
+        async fn capture_pdf(
+            &self,
+            _session: &BrowserSession,
+            _options: &PdfOptions,
+            _limits: &CaptureLimits,
+        ) -> QuarryResult<CapturedPdf> {
+            self.call_order.lock().await.push("capture_pdf");
+            Ok(CapturedPdf {
+                bytes: b"%PDF-1.7".to_vec(),
+            })
+        }
+        async fn egress_receipts(
+            &self,
+            _session: &BrowserSession,
+            _after_sequence: u64,
+            _limit: usize,
+        ) -> QuarryResult<Vec<BrowserEgressReceipt>> {
+            Ok((0..self.blocked)
+                .map(|index| BrowserEgressReceipt {
+                    sequence: index as u64,
+                    tab_id: None,
+                    method: "GET".into(),
+                    url: "https://blocked.example/".into(),
+                    decision: quarry_core::contracts::BrowserEgressDecision::Block,
+                    policy: "deny_all".into(),
+                    timestamp_ms: 0,
+                })
+                .collect())
+        }
+    }
+
+    fn capture_hints(plan: CapturePlan) -> FetchHints {
+        FetchHints {
+            render: RenderHints {
+                capture: Some(plan),
+                ..RenderHints::default()
+            },
+            ..FetchHints::default()
+        }
+    }
+
+    fn both() -> CapturePlan {
+        CapturePlan {
+            screenshot: Some(ScreenshotOptions::default()),
+            pdf: Some(PdfOptions::default()),
+        }
+    }
+
+    fn page_url() -> Url {
+        Url::parse("https://example.com/").unwrap()
+    }
+
+    #[tokio::test]
+    async fn capture_runs_after_content_and_before_release() {
+        let mock = Arc::new(CaptureMock::new(true, false, 0));
+        let adapter = BrowserDriverAdapter::new(mock.clone(), Arc::new(RuntimeLeasePool::new(4)));
+        let resp = adapter
+            .fetch_conditional(&page_url(), &capture_hints(both()))
+            .await
+            .expect("fetch ok");
+
+        let order = mock.call_order.lock().await.clone();
+        assert_eq!(
+            order,
+            vec![
+                "acquire",
+                "configure_egress_policy",
+                "goto",
+                "content",
+                "capture_screenshot",
+                "capture_pdf",
+                "release"
+            ]
+        );
+        let captures = resp.captures.expect("captures carried on the response");
+        assert!(captures.screenshot.is_some());
+        assert!(captures.pdf.is_some());
+        assert!(captures.warnings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn capture_failure_is_a_warning_and_the_page_still_returns() {
+        let mock = Arc::new(CaptureMock::new(true, true, 0));
+        let adapter = BrowserDriverAdapter::new(mock.clone(), Arc::new(RuntimeLeasePool::new(4)));
+        let resp = adapter
+            .fetch_conditional(&page_url(), &capture_hints(both()))
+            .await
+            .expect("the page still returns when a capture fails");
+
+        assert_eq!(resp.status, 200);
+        assert!(!resp.body.is_empty());
+        let captures = resp.captures.expect("captures carried on the response");
+        assert!(captures.screenshot.is_none());
+        assert!(captures.pdf.is_some(), "the other capture is unaffected");
+        let warning = captures
+            .warnings
+            .iter()
+            .find(|w| w.code == "screenshot_failed")
+            .expect("screenshot_failed warning");
+        // The message names the typed reason, never the raw error text.
+        assert!(warning.message.contains("capture_too_large"));
+        assert!(!warning.message.contains("raw page text"));
+    }
+
+    #[tokio::test]
+    async fn driver_without_capture_capability_is_refused_before_acquire() {
+        let mock = Arc::new(CaptureMock::new(false, false, 0));
+        let adapter = BrowserDriverAdapter::new(mock.clone(), Arc::new(RuntimeLeasePool::new(4)));
+        match adapter
+            .fetch_conditional(&page_url(), &capture_hints(both()))
+            .await
+        {
+            Err(error) => {
+                assert_eq!(error.code, ErrorCode::Unsupported);
+                assert_eq!(
+                    error.details.as_ref().and_then(|d| d.get("reason")).and_then(|r| r.as_str()),
+                    Some("browser_capability_unavailable")
+                );
+            }
+            Ok(_) => panic!("a browser without the capability must refuse the capture"),
+        }
+        assert_eq!(mock.acquire_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn blocked_requests_are_counted_without_urls() {
+        let mock = Arc::new(CaptureMock::new(true, false, 2));
+        let adapter = BrowserDriverAdapter::new(mock.clone(), Arc::new(RuntimeLeasePool::new(4)));
+        let resp = adapter
+            .fetch_conditional(&page_url(), &capture_hints(CapturePlan {
+                screenshot: Some(ScreenshotOptions::default()),
+                pdf: None,
+            }))
+            .await
+            .expect("fetch ok");
+        let captures = resp.captures.expect("captures carried on the response");
+        assert_eq!(captures.blocked_requests, 2);
+        assert!(captures.final_url.is_none(), "the mock reports no current url");
     }
 }

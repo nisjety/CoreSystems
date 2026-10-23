@@ -1,11 +1,10 @@
 //! Page captures carried beside a fetch response (WS13.4a).
 //!
 //! A `FetchResponse` may carry the screenshot, PDF, action outcomes and
-//! capture warnings that a browser fetch produced. This module only defines
-//! the carrier. Nothing fills it yet: the field defaults to `None` for every
-//! driver, and the browser capture (WS13.3) and the scrape formats wiring
-//! (WS13.4b) come later. Captured bytes are held in memory until the response
-//! is built and are never serialized by this type.
+//! capture warnings that a browser fetch produced. The browser driver fills it
+//! when a scrape asks for a capture (WS13.4b); every other driver leaves it
+//! `None`. Captured bytes are held in memory until the response is built and
+//! are never serialized by this type.
 
 use quarry_core::capture::{CapturedImage, CapturedPdf};
 use quarry_core::scrape_actions::ActionOutcome;
@@ -45,3 +44,13 @@ pub struct PageCaptures {
     /// Non-fatal capture problems, for example `screenshot_failed`.
     pub warnings: Vec<CaptureWarning>,
 }
+
+/// WS13.4b: the default inline cap for capture bytes returned under Zero Data
+/// Retention (6 MiB, the model gateway's screenshot cap). Nothing is stored
+/// under ZDR, so the bytes travel in the response; an over-cap capture is
+/// omitted with `capture_exceeds_inline_cap`.
+pub const DEFAULT_INLINE_CAPTURE_MAX_BYTES: usize = 6 * 1024 * 1024;
+
+/// The highest inline cap an operator can set (16 MiB). A larger setting is
+/// clamped down to this.
+pub const MAX_INLINE_CAPTURE_BYTES: usize = 16 * 1024 * 1024;
