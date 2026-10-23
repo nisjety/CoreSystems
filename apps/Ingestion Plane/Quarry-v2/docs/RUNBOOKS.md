@@ -933,3 +933,13 @@ Traps for the next reader:
 - A background open still runs `require_configured_egress`: a session needs its own policy before a tab can open, even when the tab carries its own.
 - `goto` on a pinned handle with a closed pin returns `pinned_tab_closed`; it never opens a stand-in tab.
 - Tab policies are removed with the tab (`close_tab`) and with the session (`teardown_locked`, `ensure_browser`). A tab whose attach fails keeps its entry until the session ends; tab ids are not reused within a session.
+
+## Quarry-v2 eval CI gates (E3.9.1, W3-B1-01)
+
+Workflow: `.github/workflows/quarry-v2-eval.yml`. Runs on pull requests and pushes to `main` that touch Quarry-v2, and on demand. It runs three binaries in order, from the Quarry-v2 root: `quarry-eval` (fixtures, writes `lab/evals/scoreboard.json`), `quarry-bakeoff --challenger lab/evals/scoreboard.json` (solo until a baseline is checked in, writes `bakeoff.json` and `bakeoff.md`), and `quarry-release-matrix` (writes `release_matrix.json`, `release_matrix.md` and `release_score.json`). The job fails when a fixture fails or a gate fails.
+
+Run it locally: `cargo run -p quarry-evals --bin quarry-eval`, then `cargo run -p quarry-evals --bin quarry-bakeoff -- --challenger lab/evals/scoreboard.json --challenger-label quarry`, then `cargo run -p quarry-evals --bin quarry-release-matrix`. The score file records `unknown` as its commit unless `QUARRY_RELEASE_COMMIT` is set.
+
+Gotchas: the job deletes the committed `lab/evals/*.json` outputs before it runs, so the matrix can never pass on an old run. It builds only the three gate binaries, not `quarry-browser-benchmark`, because that bin constructs the `BrowserSession` struct of `quarry-browser` directly and breaks when that struct changes. The provider matrix and Chromium are not run here.
+
+Not done: the Tier B corpus and the Chromium job (E3.9.2 onward), the scheduled Tier C run, and the default-on gate thresholds, which are still `[placeholder, ratify]`.
