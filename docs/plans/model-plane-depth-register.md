@@ -368,6 +368,30 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D2-125 | WS20-S1 | live-proof | P1 | Lead-only: regenerate apps/Model Plane/go/gen/model_plane/v1/sessions.pb.go and sessions_grpc.pb.go after the proto change (no Go code uses the new types yet). | open |
 | D2-126 | WS20-S1 | follow-up | P3 | 19 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-03.json | open |
 
+
+### Wave-mode batch W2-02 (2026-10-23)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D2-127 | WS26-S9 | decision | P1 | The stored run goal is still raw on the Do path: `sse.rs:1349` passes `&req.content` into `prepare_managed_run_authenticated`, whose `goal` is stored as the session run goal (`session_flow.rs:496`, `618-631`) and appended as the user message (`session_flow.rs:588`, `604`, `745`), so the DoD clause 'stored run goals hold no raw email' is not met. The Ask path has the same raw session prep, so the owner must decide between redacting before prepare (this changes the retry digest and the stored thread text) or narrowing the DoD to executor input. | open |
+| D2-128 | WS26-S9 | risk | P1 | The uncommitted `sessions.proto` RPC (+36 lines in the working tree) breaks the `model-gateway` lib test target on HEAD until the `grpc.rs` mock stub lands, so the proto and the stub must be committed together or every model-gateway lib test breaks. | open |
+| D2-129 | WS26-S9 | live-proof | P1 | Stored run goal holds no raw email: the DoD clause is unmet because `sse.rs:1349` stores the raw `req.content` as the session run goal (see the P1 finding); needs an owner decision. | open |
+| D2-130 | WS26-S9 | live-proof | P1 | Live Do-run proof with the org PII policy on (run record goal field and executor input), needs docker and the lead. | open |
+| D2-131 | WS26-S9 | live-proof | P1 | The plan's test has not passed in this tree because of the grpc.rs compile break; the test cannot be claimed until it runs green after the stub lands. | open |
+| D2-132 | WS26-S9 | live-proof | P1 | WS01-S0 live-baseline landing is not verifiable from the tree; the lead must confirm it before closing WS26-S9. | open |
+| D2-133 | WS26-S9 | live-proof | P1 | Add the missing record_scheduled_run_result stub to MockSessionCore in apps/Model Plane/rust/services/model-gateway/src/grpc.rs (or land it with the sessions.proto change), then rerun: cd "apps/Model Plane/rust" && CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib sse::tests::agentic_goal_is_redacted_when_pii_policy_on | open |
+| D2-134 | WS26-S9 | live-proof | P1 | Owner decision needed on the P1 stored-goal issue (sse.rs:1355, prepare_managed_run_authenticated receives the raw req.content) before the DoD sentence about stored goals can be claimed. | open |
+| D2-135 | WS26-S9 | follow-up | P3 | 7 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-02.json | open |
+| D2-136 | WS27-S8 | risk | P1 | Model-gateway lib tests cannot compile in this shared worktree: the uncommitted sessions.proto change adds an rpc that MockSessionCore in model-gateway/src/grpc.rs does not implement. This blocks every model-gateway test-target run, not only this slice. | open |
+| D2-137 | WS27-S8 | risk | P1 | Enabling MODEL_GATEWAY_BUDGET_WINDOW before cost-core is redeployed makes every budgeted request fail closed (old cost-core 400, gateway 503). | open |
+| D2-138 | WS27-S8 | decision | P1 | Control must confirm the windowed semantics (DEC-18 D2) before the flag is switched on, because capped orgs are admitted again at each reset and that changes spend authority. | open |
+| D2-139 | WS27-S8 | test-gap | P1 | reset_period_daily_sends_start_of_utc_day and the org_quota tests were not confirmed in the real model-gateway test target; I started a scratch crate (budget.rs, org_quota.rs copied, stub normalize, worktree Cargo.lock) in the scratchpad but its result was not collected before this report. | open |
+| D2-140 | WS27-S8 | risk | P1 | Widest-period rule in org_quota.rs limits_from_rows: a daily cost cap combined with a token row whose reset_period is none is enforced over lifetime spend, so a capped org is never re-admitted. Fail-closed, not an overspend, but it breaks the headline for that configuration; Control must decide per-cap windows vs widest before MODEL_GATEWAY_BUDGET_WINDOW is switched on. | open |
+| D2-141 | WS27-S8 | live-proof | P1 | Live proof (lead, docker): rebuild cost-core first, then model-gateway; seed one org with entries dated last month and this month; POST /api/v1/budget/check with and without since, with MODEL_GATEWAY_BUDGET_WINDOW on and off; confirm a capped org with last month's spend is admitted this month. | open |
+| D2-142 | WS27-S8 | live-proof | P1 | Compose: apply shared-edit to apps/Model Plane/deploy/docker-compose.yml, insert after line 296 the line ` MODEL_GATEWAY_BUDGET_WINDOW: ${MODEL_GATEWAY_BUDGET_WINDOW:-false}` (6-space indent, CRLF to match file). Not present in the file yet. | open |
+| D2-143 | WS27-S8 | live-proof | P1 | Deploy order: cost-core before model-gateway; an old cost-core rejects since with 400 under DisallowUnknownFields and the gateway fails closed with 503. | open |
+| D2-144 | WS27-S8 | follow-up | P3 | 13 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-02.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
@@ -405,3 +429,4 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | D2-020 | WS26-S2.code | decision | P1 | The scanner rule `injection.override_the_system_prompt` is a plain phrase, so a benign business sentence such as "The team will override the system prompt in the staging config." is flagged while the normaliser is on by default; attacks atk-231 to atk-240 depend on that rule. Owner decision: narrow or drop the marker, or accept the hit. A single hyphen- or dot-joined token (`new-system-prompt`) still joins. | open |
 | WS26-S2.code | policy, zdr | W2-03 | no |
 | WS20-S1 | zdr, audit | W2-03 | no |
+| WS27-S8 | money, authority | W2-02 | no |
