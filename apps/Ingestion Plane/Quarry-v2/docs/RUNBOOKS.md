@@ -1676,3 +1676,25 @@ Metrics: `quarry_agent_run_expired_total{reason="shutdown"}` counts the runs thi
 **Rollback.** Revert the commit; the earlier drain (release without events or usage) is the previous behaviour. No migration, no schema or wire change beyond one more `done` reason (`shutdown`) on the live streams.
 
 **Not done.** A boot-time settlement of orphaned non-ZDR `Active` checkpoints after a crash (plan S9b, design level; a crashed ZDR run is unbilled by design, ADR-4); `job_stream` and `scrape_stream` do not yet end on `close_streams` (the deadline still bounds them).
+
+## Scrape captures and actions: flags, the e2e target and what is owed (WS13.8, unit W2-U56, built, NOT run, 2026-10-24)
+
+Flags (each read once at process start; all off by default):
+
+| Variable | Default | Effect |
+|---|---|---|
+| `QUARRY_EDGE__SCRAPE_CAPTURE` | `off` | only `on` admits the `screenshot` and `pdf` formats (WS13.4b) |
+| `QUARRY_EDGE__SCRAPE_ACTIONS` | `off` | `user`: user tokens may send actions (dev only); `on`: also service principals with `scrape:interact` (needs the ADR-6 ruling); any other value is off (WS13.5) |
+| `QUARRY_EDGE__SCRAPE_STITCH` | `off` | `on` tiles and stitches a tall full-page screenshot (WS13.6) |
+| `QUARRY_EDGE__SCRAPE_CAPTURE_INLINE_MAX_BYTES` | 6 MiB (16 MiB ceiling) | the ZDR inline cap for one capture |
+| `QUARRY_SCRAPE_HEAVY_PERMITS`, `QUARRY_SCRAPE_SESSION_ISOLATION` | see the sections above | the browser lanes that captures and actions use |
+
+Rollback: unset the switches (or set them to `off`). The default response then has no capture or action field, and the router deadline on `POST /v1/scrape` is 60 s again.
+
+The e2e target (opt-in; it is not part of `ci-test`):
+
+    make test-scrape-capture     (run in apps/Ingestion Plane)
+
+It runs `Quarry-v2/scripts/e2e-scrape-capture.sh` against a running stack. It needs `E2E_FIXTURE_URL` (reachable from the edge container), a token (`E2E_TOKEN`, or `E2E_COOKIE_JAR` with the gateway URL in `E2E_GATEWAY`), and the edge set to `QUARRY_EDGE__SCRAPE_CAPTURE=on`, `QUARRY_EDGE__SCRAPE_ACTIONS=user`; add `QUARRY_EDGE__SCRAPE_STITCH=on` and `E2E_EXPECT_STITCH=1` for the tall-page check. It exits non-zero on the first failed check.
+
+Built and compile-checked only (W2-U56 ran none of it): the e2e script (`bash -n` only), the OpenAPI additions and the docs. Owed before any flag goes on anywhere: the named cargo tests and the live Chromium tests (`screenshot_mask_live`, `stitch_live`, `scrape_actions_live`); `make test-scrape-capture` on a clean stack, with the transcript; the ADR-6 ruling and the HTTP check of the user-token-with-agent-label refusal; the proxy read timeout in front of the edge (at least 125 s with actions on; plan X-20, unverified); and the gateway per-request timeout for scrape actions (not built; the WS13.5 depth note records the gateway default as 25 s).

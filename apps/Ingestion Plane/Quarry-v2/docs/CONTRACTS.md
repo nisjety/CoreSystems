@@ -607,6 +607,40 @@ Rules:
 
 Contracts frozen at `v1`. Additive only. Breaking change ⇒ `v2` path (`/v2/scrape`). Deprecate via `Sunset` header + event.
 
+### Scrape captures and actions: the closed set and the flags (WS13.8, built, NOT run, 2026-10-24)
+
+Everything here is off by default and additive to v1, except the refusals listed under "Changed refusals". The OpenAPI file (`docs/openapi.yaml`, `ScrapeRequest` and `ScrapeResponse`) describes the same fields.
+
+Flags, each read once at process start:
+- `QUARRY_EDGE__SCRAPE_CAPTURE`: only `on` admits the `screenshot` and `pdf` formats (WS13.4b).
+- `QUARRY_EDGE__SCRAPE_ACTIONS`: `off` (the default); `user` admits user tokens only (dev only); `on` also admits a service principal that holds `scrape:interact` (not to be set before the ADR-6 ruling). WS13.5.
+- `QUARRY_EDGE__SCRAPE_STITCH`: `on` tiles and stitches a full-page screenshot taller than one capture; off crops it and sets the `screenshot_truncated` warning (WS13.6).
+- `QUARRY_EDGE__SCRAPE_CAPTURE_INLINE_MAX_BYTES`: the ZDR inline cap for one capture, 6 MiB by default, 16 MiB at most.
+
+Request keys (new, all optional):
+- `formats`: `screenshot` and `pdf`, as a string or as an object with `type` and options. Screenshot options: `fullPage`, `clip`, `quality` (JPEG when set), `viewport`. PDF options: `format`, `landscape`, `printBackground`, `scale` (0.1 to 2.0), `maxPages` (100 by default, 200 at most). At most one of each kind.
+- `actions`: an array of at most 50 items of the closed set `wait`, `click`, `write`, `press`, `scroll`, `select`, `screenshot`, `pdf`. A selector or time wait uses the wire type `wait` (`milliseconds`, or `selector` with `timeoutMs`). The types `executeJavascript`, `evaluate`, `navigate`, `back`, `forward`, `clickPoint`, `mouseWheel`, `upload`, `download` and `dialog` are refused by name with `action_denied`; any other unknown type is `unknown_action_type`. A `write` or `select` whose selector looks like a credential field is refused (a heuristic, ADR-2). The total wait budget is 60 s and one wait is at most 30 s; a selector wait without `timeoutMs` waits 5 s; a selector is at most 512 bytes; one `write` text at most 4096 bytes and all of them 16384 bytes; a `scroll` at most 20000 px. The environment can only lower these caps.
+- `actions_on_error`: `abort` (the default) or `continue`. There is no retry.
+- `initiated_by`: a tighten-only label. `"agent"` (a Model-proposed list relayed under the user's token) is refused for `actions` with 403 `scrape_interact_scope_required`, whatever the token. The edge reads it. It is not yet a row of the contract key table, so it can appear in `warnings` as `unknown_field`; that is a known gap.
+- Captures and actions share one cap of eight: `too_many_captures` when `formats` and `actions` together ask for more.
+
+Field errors (400, in `errors[]` with a `path` and a `code`; a value is never echoed): `feature_disabled` (at `formats` or `actions` while its flag is off), `too_many` (two screenshots or two PDFs), `too_many_captures`, `unsupported_format` (an object without `type` `screenshot` or `pdf`), `too_many_actions`, `unknown_action_type`, `action_denied`, `invalid_action` (a missing or empty selector, or a wait or scroll with the wrong fields), `selector_too_long`, `text_too_long`, and the option decode error for an unknown key or a wrong value type inside an option object.
+
+Response (`data`, all optional):
+- `screenshot` and `pdf`: inline `{content_type, bytes, width?, height?, data_base64}` under ZDR only; otherwise read `formats.screenshot` or `formats.pdf`.
+- `captures`: in both modes, the measured `{screenshot?: {content_type, width, height, bytes, tiles, stitched, truncated}, pdf?: {bytes}, blocked_requests}`; counts and sizes only, never a URL.
+- `scrape_id`: the stored record for a non-ZDR scrape, for `GET /v1/scrape/{id}`.
+- `effective_options.actions`: `{count, types, total_wait_ms, capture_count, on_error}`. Never a selector or a text.
+- `warnings[]` codes for captures: `screenshot_failed`, `pdf_failed`, `screenshot_truncated`, `capture_exceeds_inline_cap`. `omitted[]` may name `screenshot` or `pdf` (over the ZDR cap).
+
+Not built yet: the per-action outcomes `data.actions[]` of a successful run, and the bytes of a screenshot or PDF that an action makes, are neither stored nor returned. On a failed run under `abort` the outcomes are in `error.details.actions`.
+
+Changed refusals (an edge that had enabled the WS5 options flag sees these):
+- `formats: ["screenshot"]` was `400 reserved_format`; it is now `400 feature_disabled` while `QUARRY_EDGE__SCRAPE_CAPTURE` is not `on`.
+- `actions` was an unknown key (ignored with a warning); it is now `400 feature_disabled` at `actions` while `QUARRY_EDGE__SCRAPE_ACTIONS` is `off`.
+
+Errors: the `details.reason` values and their status codes are in `docs/ERROR_REASONS.md` (section "Scrape captures and actions"). `UNSUPPORTED` (501) means the browser cannot capture or act. `/v1/scrape/stream` refuses captures and actions with `unsupported_in_stream`.
+
 ## Who holds the browser: `USER_TOOK_OVER` (409)
 
 A run has a control mode (`agent_control` or `human_takeover`) and an epoch that counts real mode changes (it never goes down). While a person holds the browser, an action proposed by an agent is refused with `409 USER_TOOK_OVER`, `details {control_mode: "human_takeover", control_epoch, taken_over_at}` (`taken_over_at` is RFC 3339 and is absent for a run resumed into a takeover, whose start the checkpoint does not carry); a person's own actions go through. The initiator is derived, never taken on trust: a service principal is always an agent; a person's token is a person unless the request says `initiated_by: "agent"` (or, on the WebSocket, `actor`), which can only tighten. A tab open takes the same hint as `initiatedBy` in its body, and a tab select or close (they have no body) as the `initiatedBy` query, `?initiatedBy=agent`; a value that is neither `human` nor `agent` is a `400` in the tab select/close query and a `422` in a body, and both spellings in one body or one query are refused too (`422` in a body; a `4xx` in the select/close query). Only a person may change the mode (`403 control_transition_requires_human` otherwise), and `expected_epoch` on the control request makes the change a compare-and-set (`409 CONFLICT` with the current epoch). Receipts carry `initiated_by` and `control_epoch`, and the owner timeline items (which are camelCase throughout) carry `initiatedBy` and `controlEpoch`; a refused agent action leaves one `skipped` receipt per takeover. Enforcement is `QUARRY_EDGE__TAKEOVER_ENFORCEMENT` (default off: the edge logs `would_reject` and refuses nothing until the planner side maps the 409).
@@ -614,6 +648,8 @@ A run has a control mode (`agent_control` or `human_takeover`) and an epoch that
 Which agent opened a tab. Every request that carries the initiator hint takes it as `initiated_by` or `initiatedBy` (a tab open, a step, a run start, a socket action, and the tab select/close query); both in one body is a `422`, never a silent pick. Quarry records who did each tab open, select and close, and who drove each step: the class (`human` or `agent`) and, for an agent, an `agent` object of ids and classes only, never a URL or a title. `agent.basis` is `service_principal` when the call carried a service principal's own token, and then `agent.principalId` is that token's signed service id: the one verified part, which no request field can set. A person's token with the `agent` hint gives basis `user_session` and no `principalId`: the token proves the person, not which agent. The request fields `aiRunId` and `agentLabel` (body fields or query parameters; `ai_run_id` and `agent_label` accepted) are what the caller said, recorded as `agent.aiRunId` and `agent.label`: advisory, kept only when identifier-shaped (`[A-Za-z0-9._:-]`, 1 to 64 characters, otherwise dropped), and never used to decide anything. The record is on the timeline items (`agent` next to `initiatedBy` on a tab item and on an action item), on the step receipt (`agent`, with `initiated_by`), and on the owner projection's tab as `openedBy: {initiatedBy, agent?}` for a tab opened through the tab routes (a tab the browser opened itself, such as the first one, has none; the record is process-local and dropped when the tab is closed; it keeps at most 256 full records, and a tab opened after that has `openedBy: {initiatedBy, unattributed: true}`, the class without the agent ids, so it is not mistaken for a tab the browser opened itself). The Verevon gateway forwards the headers `X-Agent-Run-Id` and `X-Agent-Label` as the advisory fields, on an agent's call only. The tab routes are in `openapi.yaml`.
 
 ## 9.1 `POST /v1/scrape` request options (WS5.D)
+
+> WS13.8: this section lists the inline formats of v1. `screenshot` and `pdf` (WS13.4b) and `actions` (WS13.5) are described in section 10 below. Each is refused with 400 `feature_disabled` at its field until its flag is on.
 
 Root-level, all optional, snake_case with a camelCase alias: `formats` (`markdown`, `html`, `rawHtml`, `links`, `metadata`; `links` and `metadata` change nothing, since both are already in every response), `only_main_content`, `include_tags`, `exclude_tags`, `remove_base64_images`, `extractor` (`readability`, `clean_full`, `raw`), `timeout_ms` (1000 to 55000, default 55000), `max_inline_bytes` (1 to 8 MiB, default 1 MiB).
 
