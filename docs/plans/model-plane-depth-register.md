@@ -323,6 +323,21 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D2-098 | WS21-S1 | live-proof | P1 | Flag vocabulary: the slice row says only the value 1 enables the flag, while the computed task text says the strict parser pattern where only the literal true enables. The lead should confirm which is intended. The code follows the slice row (exact "1"). | open |
 | D2-099 | WS21-S1 | follow-up | P3 | 13 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-02.json | open |
 
+
+### Wave-mode batch W2-03 (2026-10-23)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D2-100 | WS19-S2 | risk | P1 | check.py reads whole zip parts into memory via archive.read() and trusts the header file_size for its total-size guard, so a crafted deflate bomb can exhaust sandbox memory (no cgroup memory cap in the bwrap argv). Add a streamed, byte-capped read per part before the flag is switched on. | open |
+| D2-101 | WS19-S2 | live-proof | P1 | The sandboxed path (bwrap argv for WorkspaceWrite over the per-file workspace, timeout kill, cleanup under the real policy) has not been run; it is Linux-only and needs the rust:1 container and a rebuilt image. | open |
+| D2-102 | WS19-S2 | test-gap | P1 | The final execution-core lib rerun and the model-gateway code_interpreter test run are still blocked by concurrent batches, so the last execution-core edit and the MG summary test are unverified. | open |
+| D2-103 | WS19-S2 | risk | P1 | check.py reads each zip part with archive.read() and parses it with xml.etree, bounded only by a 256 MiB total of header-declared sizes, and the bwrap argv sets no memory cap, so a crafted package can exhaust sandbox memory through the DOM; add a streamed per-part byte cap and a much smaller XML size cap before CODE_INTERPRETER_OFFICE_VERIFY is switched on. | open |
+| D2-104 | WS19-S2 | live-proof | P1 | The sandboxed path (WorkspaceWrite argv over the per-file workspace, network disabled, timeout kill, workspace removal under the real policy) has not run; it needs the Linux rust:1 container and a live Ask turn with a corrupt .docx (failed verdict, repair call, second passed, no verevon-code-office-verify-* directory left). | open |
+| D2-105 | WS19-S2 | live-proof | P1 | Linux rust:1 container run of cargo test -q -p execution-core --all-targets and -p model-gateway --all-targets, including the bwrap-gated sandboxed checker and timeout-kill path. | open |
+| D2-106 | WS19-S2 | live-proof | P1 | Worktree rerun of execution-core --lib office_verify (expect 12) and model-gateway --lib code_interpreter (expect the summary test to pass) after the other batch fixes sandbox_manager_client.rs:201 and the SessionCore mock; both passed only in the isolated copy with scratch-only shims. | open |
+| D2-107 | WS19-S2 | live-proof | P1 | Live proof, lead-run: rebuild execution-core and model-gateway with CODE_INTERPRETER_OFFICE_VERIFY=structural, then an Ask turn writing a corrupt .docx, expecting failed, a repair call, a second passed result, and no verevon-code-office-verify-* directory left. | open |
+| D2-108 | WS19-S2 | follow-up | P3 | 22 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-03.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
@@ -355,3 +370,4 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS10-S2 | authority, auth, audit, policy | W1-02 | no |
 
 | D1-040 | WS10-S2 | test-gap | P2 | `go test ./internal/http/` in org-core aborts partway with `ORG_CORE_SERVICE_CREDENTIALS is required` (a test that builds the server without the credential block calls log.Fatal); each ZDR-seed test passes alone. Check whether the full-package run fails at HEAD without the slice (likely a CI-environment dependency), and fix the test setup. The fake service tokens in `model_entitlement_handlers_test.go` were replaced by low-entropy repeated letters because the gitleaks `generic-api-key` rule blocked the commit. | open |
+| WS19-S2 | authority, zdr | W2-03 | no |
