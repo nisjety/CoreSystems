@@ -353,3 +353,5 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS01-S4 | audit | W1-02 | no |
 | WS10-S2 | authority, auth, audit, policy | W1-02 | no |
 | WS10-S2 | authority, auth, audit, policy | W1-02 | no |
+
+| D1-040 | WS10-S2 | test-gap | P2 | `go test ./internal/http/` in org-core aborts partway with `ORG_CORE_SERVICE_CREDENTIALS is required` (a test that builds the server without the credential block calls log.Fatal); each ZDR-seed test passes alone. Check whether the full-package run fails at HEAD without the slice (likely a CI-environment dependency), and fix the test setup. The fake service tokens in `model_entitlement_handlers_test.go` were replaced by low-entropy repeated letters because the gitleaks `generic-api-key` rule blocked the commit. | open |
