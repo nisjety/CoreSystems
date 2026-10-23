@@ -21,6 +21,7 @@
 //! identified by [`RULE_VERSION`]; a change to a rule bumps it (see
 //! [`rule_fingerprint`] for what the drift test can and cannot see).
 
+pub mod action;
 pub mod field;
 pub mod json;
 pub mod luhn;
