@@ -2242,6 +2242,7 @@ fn native_projection_from_cdp(
         }),
         frames,
         targets,
+        redaction: None,
     }
 }
 
@@ -2286,6 +2287,7 @@ fn raw_nodes_to_native_targets(ax_tree: &serde_json::Value) -> Vec<BrowserNative
                 role,
                 name,
                 value,
+                field_kind: None,
             })
         })
         .take(AX_PROJECTION_NODE_LIMIT)
@@ -4246,7 +4248,26 @@ impl BrowserDriver for ChromiumoxideDriver {
             )
             .with_details(json!({ "error": error.to_string() }))
         })?;
-        Ok(native_projection_from_cdp(ax_tree, frame_tree))
+        // WS12.S1: read the field facts of every editable control, then mask the
+        // projection before it leaves the driver. Off means no probe and every
+        // editable value masked (fail closed).
+        let probe_targets = crate::field_probe::collect_probe_targets(&ax_tree);
+        let setting = crate::field_probe::probe_setting();
+        let probe = match setting {
+            crate::field_probe::ProbeSetting::On => {
+                crate::field_probe::run_probe(&page, &probe_targets, crate::field_probe::PROBE_BUDGET)
+                    .await
+            }
+            crate::field_probe::ProbeSetting::Off => crate::field_probe::ProbeOutcome::default(),
+        };
+        let mut projection = native_projection_from_cdp(ax_tree, frame_tree);
+        crate::field_probe::mask_projection(
+            &mut projection,
+            &probe,
+            setting,
+            quarry_core::redaction::mode(),
+        );
+        Ok(projection)
     }
 
     async fn dialogs(&self, session: &BrowserSession) -> QuarryResult<Vec<BrowserDialog>> {
@@ -7399,6 +7420,8 @@ mod tests {
 
     // WS3.K: live fixtures for trusted input and the actionability pipeline.
     include!("trusted_input_live.rs");
+    // WS12.S1: the field-facts probe against a real Chromium.
+    include!("field_probe_live.rs");
 }
 
 /// WS3.D and WS3.F, the parts that need no browser: every CDP call is bounded, the

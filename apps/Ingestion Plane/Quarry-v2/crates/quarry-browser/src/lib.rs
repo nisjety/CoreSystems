@@ -169,6 +169,7 @@ pub mod pool;
 pub mod session;
 pub mod slots;
 pub mod tab_control;
+mod field_probe;
 
 #[cfg(feature = "kernel")]
 pub use kernel::{KernelConfig, KernelDriver};
@@ -322,6 +323,19 @@ pub struct BrowserNativeProjection {
     /// projection. This is deliberately not serialized into an observation:
     /// Model Plane receives only `@e…` refs, never CDP node handles.
     pub targets: Vec<BrowserNativeTarget>,
+    /// WS12.S1: what the field-facts probe and the masking did to this projection.
+    /// `None` only for a projection that was not produced by the masking pass.
+    pub redaction: Option<ProjectionRedaction>,
+}
+
+/// WS12.S1 stamp for one native projection: counts and rule ids only, never
+/// content. The observation-level stamp (WS12.S2) is built from it.
+#[derive(Debug, Clone, Default)]
+pub struct ProjectionRedaction {
+    pub probe: quarry_core::redaction::ProbeState,
+    pub probe_ms: u32,
+    pub values_masked: u32,
+    pub by_rule: std::collections::BTreeMap<String, u32>,
 }
 
 /// A short-lived renderer binding for one accessible DOM node. The binding is
@@ -339,6 +353,10 @@ pub struct BrowserNativeTarget {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
+    /// WS12.S1: the field kind the probe decided for an editable control; `None`
+    /// for every other role. Crate-internal: never serialised into an observation.
+    #[serde(skip)]
+    pub field_kind: Option<quarry_core::redaction::FieldKind>,
 }
 
 /// A browser download that has completed inside Quarry's private per-session

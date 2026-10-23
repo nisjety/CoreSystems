@@ -80,6 +80,7 @@ async fn target_of_selector(
         role: None,
         name: None,
         value: None,
+        field_kind: None,
     }
 }
 

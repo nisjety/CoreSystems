@@ -127,6 +127,7 @@ impl TestSite {
             .route("/login", get(login_page).post(login_submit))
             .route("/dashboard", get(dashboard))
             .route("/search", get(search))
+            .route("/secrets-lab", get(secrets_lab))
             .with_state(state)
     }
 }
@@ -220,6 +221,25 @@ async fn search(State(state): State<SiteState>, Query(q): Query<SearchQuery>) ->
   <li><a href="/result/1">Result 1 about {safe_q}</a></li>
   <li><a href="/result/2">Result 2 about {safe_q}</a></li>
 </ul>
+</body></html>"#
+    ))
+}
+
+/// WS12.S1 fixture for the field-facts probe: a password with a value, an empty
+/// password, a card number, a phone number, an OTP field and a plain text input.
+/// The secret is joined from fragments so no secret-shaped literal is in the source.
+async fn secrets_lab(State(state): State<SiteState>) -> Html<String> {
+    record(&state, "GET /secrets-lab").await;
+    let canary = concat!("S3cret", "P@ss-0451");
+    Html(format!(
+        r#"<!doctype html><html lang="en"><head><title>Secrets lab</title></head>
+<body><h1>Secrets lab</h1>
+<label for="pw">Password</label><input id="pw" type="password" value="{canary}">
+<label for="pw2">New password</label><input id="pw2" type="password">
+<label for="cc">Card number</label><input id="cc" autocomplete="cc-number" value="4111111111111111">
+<label for="tel">Phone</label><input id="tel" type="tel" value="+4799999999">
+<label for="otp">Verification code</label><input id="otp" autocomplete="one-time-code">
+<label for="plain">Visible</label><input id="plain" value="visible-text">
 </body></html>"#
     ))
 }
