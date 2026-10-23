@@ -25,6 +25,7 @@ import {
   Image as ImageIcon,
   Presentation,
 } from '@/shared/icons'
+import { Dynamic } from '@solidjs/web'
 import {
   For,
   Match,
@@ -35,6 +36,7 @@ import {
   createSignal,
   onCleanup,
 } from 'solid-js'
+import { extraArtifactRenderers } from './artifact-renderers'
 import {
   ChatMarkdown,
   DiffView,
@@ -205,6 +207,8 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
     return diffText(previous.content, revision().content)
   })
   const renderKind = createMemo(() => artifactRenderKind(displayed()))
+  /** A registered extra viewer, if one claims this revision. It takes the body; the header stays on the built-in kind. */
+  const extraRenderer = createMemo(() => extraArtifactRenderers.resolve(displayed()))
   const missing = createMemo(() => artifactContentMissing(displayed().content))
   const fileMeta = createMemo(() => artifactFileMeta(displayed(), renderKind(), props.item.file))
   const title = createMemo(() => artifactDisplayTitle({ ...props.item, artifact: displayed() }, renderKind(), i18n.tr))
@@ -416,6 +420,9 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
             fallback={<DiffView result={revisionDiff()!} />}
           >
           <Switch fallback={<ArtifactPlainText content={displayed().content} />}>
+            <Match when={extraRenderer()?.component}>
+              {(component) => <Dynamic component={component()} artifact={displayed()} />}
+            </Match>
             <Match when={renderKind() === 'code'}>
               <ArtifactCodeView content={displayed().content} language={artifactLanguage(displayed())} />
             </Match>

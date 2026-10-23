@@ -2,9 +2,10 @@
  * Artifact/canvas domain logic for the chat surface.
  *
  * Deliberately JSX-free and a LEAF in the module graph — it imports only
- * `./chat-types`, never `./chat-media-markdown` or `./chat-normalizers` (those
- * two already form a cycle between themselves). That keeps every rule here
- * directly unit-testable without pulling in the renderer.
+ * `./chat-types` and the JSX-free `./artifact-renderers`, never
+ * `./chat-media-markdown` or `./chat-normalizers` (those two already form a
+ * cycle between themselves). That keeps every rule here directly unit-testable
+ * without pulling in the renderer.
  *
  * The backend contract this implements (model-gateway SSE):
  *   artifact: { id, kind, title, content, version }
@@ -14,6 +15,7 @@
  * artifact — that is how canvas iteration works — so every revision is kept in
  * `ChatArtifact.history` and the top-level fields always mirror the newest one.
  */
+import { type ArtifactRenderer, pickArtifactRenderer } from './artifact-renderers'
 import {
   type ChatArtifact,
   type ChatArtifactVersion,
@@ -42,6 +44,9 @@ export type ArtifactFileMeta = {
   mime: string
   mimeLabel: string
 }
+
+/** `kind` values that mean "an image", whatever the content holds. */
+const IMAGE_ARTIFACT_KINDS = new Set(['image', 'screenshot', 'screen'])
 
 /** `kind` values that mean "a complete HTML document to preview". */
 export const HTML_ARTIFACT_KINDS = new Set(['html', 'htm', 'webpage', 'website'])
@@ -189,23 +194,44 @@ function normalizeKind(kind: string): string {
 }
 
 /**
+ * Built-in viewers, highest priority first. The order is the one the original
+ * if-chain encoded, and it is load-bearing: a `binary` kind with image content
+ * must stay binary, and an unknown kind with image content must stay an image.
+ * `image` and `binary` appear twice because each has a kind-based claim and a
+ * content-based fallback that sit at different points in that order.
+ */
+const BUILT_IN_ARTIFACT_RENDERERS: ReadonlyArray<ArtifactRenderer<ArtifactRenderKind>> = [
+  { id: 'image', priority: 90, match: (artifact) => IMAGE_ARTIFACT_KINDS.has(normalizeKind(artifact.kind)) },
+  { id: 'html', priority: 80, match: (artifact) => HTML_ARTIFACT_KINDS.has(normalizeKind(artifact.kind)) },
+  {
+    id: 'document',
+    priority: 70,
+    match: (artifact) => {
+      const kind = normalizeKind(artifact.kind)
+      return kind === 'document' || kind === 'markdown' || PROSE_ARTIFACT_KINDS.has(kind)
+    },
+  },
+  { id: 'code', priority: 60, match: (artifact) => CODE_ARTIFACT_KINDS.has(normalizeKind(artifact.kind)) },
+  // A pdf artifact the browser can open is a viewer, not a download. Checked
+  // before the binary set, which still owns every unopenable body.
+  {
+    id: 'pdf',
+    priority: 50,
+    match: (artifact) => normalizeKind(artifact.kind) === 'pdf' && looksLikePdfContent(artifact.content),
+  },
+  { id: 'binary', priority: 40, match: (artifact) => BINARY_ARTIFACT_KINDS.has(normalizeKind(artifact.kind)) },
+  { id: 'image', priority: 30, match: (artifact) => looksLikeImageContent(artifact.content) },
+  { id: 'binary', priority: 20, match: (artifact) => parseDataUri(artifact.content) !== null },
+  { id: 'text', priority: 0, match: () => true },
+]
+
+/**
  * Kind → renderer. Explicit kinds win; an unknown or missing kind falls back to
  * what the content actually is, so a `kind`-less artifact still renders (that is
  * the pre-existing behavior for text/markdown artifacts and must not regress).
  */
 export function artifactRenderKind(artifact: ChatArtifact): ArtifactRenderKind {
-  const kind = normalizeKind(artifact.kind)
-  if (kind === 'image' || kind === 'screenshot' || kind === 'screen') return 'image'
-  if (HTML_ARTIFACT_KINDS.has(kind)) return 'html'
-  if (kind === 'document' || kind === 'markdown' || PROSE_ARTIFACT_KINDS.has(kind)) return 'document'
-  if (CODE_ARTIFACT_KINDS.has(kind)) return 'code'
-  // A pdf artifact the browser can open is a viewer, not a download. Checked
-  // before the binary set, which still owns every unopenable body.
-  if (kind === 'pdf' && looksLikePdfContent(artifact.content)) return 'pdf'
-  if (BINARY_ARTIFACT_KINDS.has(kind)) return 'binary'
-  if (looksLikeImageContent(artifact.content)) return 'image'
-  if (parseDataUri(artifact.content)) return 'binary'
-  return 'text'
+  return pickArtifactRenderer(BUILT_IN_ARTIFACT_RENDERERS, artifact)?.id ?? 'text'
 }
 
 /**

@@ -13,6 +13,7 @@ vi.mock('../lib/chat-export', async (importOriginal) => ({
 }))
 
 import { ArtifactsPanel } from './ChatArtifactPanel'
+import { extraArtifactRenderers } from './artifact-renderers'
 import { mergeArtifactVersion } from './chat-artifacts'
 import { collectArtifactItems } from './chat-media-markdown'
 import type { ArtifactPanelItem, ChatArtifact, ChatTurn } from './chat-types'
@@ -413,5 +414,43 @@ describe('ArtifactsPanel in English', () => {
     expect(screen.getByText('The artifact could not be loaded')).toBeTruthy()
     expect(screen.getByText(/Verevon reported an artifact of type «spreadsheet»/)).toBeTruthy()
     expect(screen.queryByText('Download')).toBeNull()
+  })
+})
+
+describe('ArtifactsPanel extra viewers', () => {
+  afterEach(() => {
+    cleanup()
+  })
+
+  it('draws a registered extra viewer in the body and keeps the built-in header label', () => {
+    const unregister = extraArtifactRenderers.register({
+      id: 'grid',
+      priority: 10,
+      match: (value) => value.kind === 'grid',
+      component: (props) => <p>Rutenett: {props.artifact.title}</p>,
+    })
+    try {
+      const grid: ChatArtifact = { content: 'a,b\n1,2', id: 'grid-1', kind: 'grid', title: 'Tall.csv', version: 1 }
+      const { container } = render(() => <ArtifactsPanel items={[item(grid)]} />)
+      expect(screen.getByText('Rutenett: Tall.csv')).toBeTruthy()
+      expect(container.querySelector('.verevon-chat-artifact-code--plain')).toBeNull()
+      expect(container.querySelector('.verevon-chat-artifact-view__title em')?.textContent).toBe('grid')
+    } finally {
+      unregister()
+    }
+  })
+
+  it('falls back to the built-in body once the extra viewer is removed', () => {
+    const unregister = extraArtifactRenderers.register({
+      id: 'grid',
+      priority: 10,
+      match: (value) => value.kind === 'grid',
+      component: () => <p>Rutenett</p>,
+    })
+    unregister()
+    const grid: ChatArtifact = { content: 'a,b\n1,2', id: 'grid-1', kind: 'grid', title: 'Tall.csv', version: 1 }
+    const { container } = render(() => <ArtifactsPanel items={[item(grid)]} />)
+    expect(screen.queryByText('Rutenett')).toBeNull()
+    expect(container.querySelector('.verevon-chat-artifact-code--plain')).toBeTruthy()
   })
 })
