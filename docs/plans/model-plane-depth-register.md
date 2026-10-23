@@ -295,6 +295,30 @@ Built so far (batches B01 to B07): WS01-S0, WS01-S1 (partial), WS01-S6; WS02-S1,
 | D1-208 | WS06-S7 | risk | P1 | gdpr_hard_delete_organization (003) does not purge organization_siem_audit_outbox, which has no FK. Rows carrying org_id, actor id and destination host survive erasure; decide purge versus keep and extend the erasure function in a later migration. | open |
 | D1-209 | WS06-S7 | follow-up | P3 | 22 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-03.json | open |
 
+
+### Wave-mode batch W1-05 (2026-10-23)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D1-210 | WS12-S9 | risk | P0 | apps/Model Plane/deploy/docker-compose.yml:1829: the browser-broker DATABASE_URL connects directly to the Ingestion Plane's Postgres host ingestion-postgres (role browser_broker; comments at lines 1819 and 1839 say so), which CLAUDE.md forbids (no direct database crossing between planes); design section 2.3's claim that every plane uses only plane-local hosts is wrong. | open |
+| D1-211 | WS12-S9 | risk | P0 | apps/Model Plane/deploy/docker-compose.yml:1829 gives browser-broker a DATABASE_URL on the Ingestion Plane host ingestion-postgres, a direct cross-plane database connection that the gate now flags and the owner must resolve. | open |
+| D1-212 | WS12-S9 | decision | P1 | The gate is red on the tree with 14 problems, all existing and all listed in the check output: the P0 link above; Control Plane auth-core/.env.example:12 and user-core/.env.example:13 name the shared host coresystem-postgres-local (ENVIRONMENT_FILES.md calls these names stale); apps/Control Plane/user-core/go.mod:21 replaces into apps/Model Plane/go/gen; apps/Infra Plane/core-gateway/internal/config/config.go:233 default host postgres; and nine \connect lines in apps/Ingestion Plane/init-databases.sql. Blocking mode needs the owner to fix each or record a reviewed db_exceptions/manifest_exceptions entry with a reason. | open |
+| D1-213 | WS12-S9 | risk | P1 | apps/Infra Plane/core-gateway/internal/config/config.go:233 is a Viper default DSN that names the legacy coresystem database and embeds a literal password value in source (value deliberately not reproduced here); the Viper default applies when DATABASE_POSTGRESURL is unset. Remove the literal and the default. | open |
+| D1-214 | WS12-S9 | risk | P1 | The allowlist can be edited in the same change that adds a violation, because the gate has no base-ref relaxation check like size-ratchet has; add that check, and a CODEOWNERS entry for scripts/gates/plane-boundary.json (DEC-39 D2), before the step blocks. | open |
+| D1-215 | WS12-S9 | decision | P1 | The gate is red on the tree with 14 existing violations, so the row's DoD 'green on tree' is not met; the repo-gates.yml step is continue-on-error (advisory) and each item needs a fix or a reviewed exception in plane-boundary.json before it can block. | open |
+| D1-216 | WS12-S9 | risk | P1 | apps/Infra Plane/core-gateway/internal/config/config.go:233 holds a Viper default DSN with a literal password in source; the gate output does not echo it, but the literal should be removed. | open |
+| D1-217 | WS12-S9 | live-proof | P1 | Row DoD 'green on tree' not met: 14 genuine violations need owner fix or reviewed exception; CI job is advisory until then. | open |
+| D1-218 | WS12-S9 | follow-up | P3 | 16 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-05.json | open |
+| D1-219 | WS01-S7.code | risk | P1 | Counter deltas are stack-global (no org filter): any other traffic during the turn makes zdr-live-proof.sh --phase after fail; add an org-scoped variant once the threads/messages/runs/outbox org columns are confirmed, or run on a quiet stack. | open |
+| D1-220 | WS01-S7.code | live-proof | P1 | The spec's refusal-frame parsing (HTTP error body versus RUN_ERROR frame, field name 'code') and the 'not sent to a model' text were written from chat-client.ts and zdr-refusals.ts, not observed on a live stack; the first live run may need a selector or frame-shape tweak. | open |
+| D1-221 | WS01-S7.code | live-proof | P1 | Live ordered deploy (rebuild-service.sh x4 + SPA pinning/FE gateway + frontend restart) and zdr-live-proof.sh preflight/before/after on the dev stack not run (docker; lead). | open |
+| D1-222 | WS01-S7.code | live-proof | P1 | Dry-run with a non-ZDR org (spec and preflight must refuse) not run. | open |
+| D1-223 | WS01-S7.code | live-proof | P1 | DB-backed session-core zdr_receipt tests (>=8 pass) not run (DB harness; lead). | open |
+| D1-224 | WS01-S7.code | live-proof | P1 | Playwright zdr-org-switch-gate.spec.ts (incl. ZDR_GATE_LIVE_PATCH=1) and zdr-seed-test-org.mjs --apply, and switching the test org back off: operator steps. | open |
+| D1-225 | WS01-S7.code | live-proof | P1 | Evidence file docs/compliance/evidence/live-reads-zdr-<date>.txt is created only by the live run; ZDR.md Z-60 rows, decisions/ledger.md flip and runbooks/README.md link are shared edits for the lead after the live run passes. | open |
+| D1-226 | WS01-S7.code | live-proof | P1 | Four new files are untracked and need committing (all LF, ASCII). | open |
+| D1-227 | WS01-S7.code | follow-up | P3 | 13 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-05.json | open |
+
 ## Wave 2 (WS13 to WS27)
 
 Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS27-S0, WS27-S1. Wave 2 is not started as a wave: these came in with Wave 1 batches because they were Wave 1 prerequisites.
@@ -565,3 +589,5 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 
 | D1-041 | WS10-S2, WS06-S7 | follow-up | P1 | The Control Plane compose now requires `INFERENCE_ORG_CORE_SERVICE_TOKEN` and `AUDIT_ORG_CORE_SERVICE_TOKEN` (`:?required`): the Control Plane secret generation must mint them before org-core is recreated, and org-core's image must be rebuilt first (an image that predates the new scopes refuses the whole credential registry). D1-040 is resolved: the package aborted because the compose registry lacked the new principals; with them `go test ./internal/http/` passes. | open |
 | WS06-S7 | auth, policy, audit | W1-03 | no |
+| WS12-S9 | authority | W1-05 | no |
+| WS01-S7.code | zdr, authority | W1-05 | no |
