@@ -338,6 +338,21 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D2-107 | WS19-S2 | live-proof | P1 | Live proof, lead-run: rebuild execution-core and model-gateway with CODE_INTERPRETER_OFFICE_VERIFY=structural, then an Ask turn writing a corrupt .docx, expecting failed, a repair call, a second passed result, and no verevon-code-office-verify-* directory left. | open |
 | D2-108 | WS19-S2 | follow-up | P3 | 22 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-03.json | open |
 
+
+### Wave-mode batch W2-03 (2026-10-23)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D2-109 | WS26-S2.code | decision | P1 | CONTENT_SAFETY_NORMALIZE defaults ON (the slice row and batch summary both specify default on, tighten-only, falsey opt-out), which conflicts with the verifier rule that switches default off; the lead must confirm the default-on decision (it is tighten-only: flags add a NOTE and an audit event, nothing is withheld in frame mode) before this is treated as a pass. | open |
+| D2-110 | WS26-S2.code | test-gap | P1 | Emoji subdivision flags (for example England and Scotland flag sequences containing tag-block characters) are flagged as obfuscation.tag_block under default-on mode: a benign false positive, verified by a scratch probe; add an exemption for a valid subdivision tag sequence and a benign corpus row before default-on, as the implementer's own risk note says. | open |
+| D2-111 | WS26-S2.code | follow-up | P1 | Shared worktree is not in a compiling state for this slice's other crates, from uncommitted work in other slices: execution-core lib fails with AcquireLeaseRequest missing field zdr (sandboxes.proto zdr = 8 is uncommitted WS22-S1 work, sandbox_manager_client.rs:201), and the model-gateway test target fails with E0046 missing record_scheduled_run_result in src/grpc.rs test mock; HEAD itself does not compile execution-core tests standalone. The plan's execution-core and model-gateway test commands therefore cannot be run in-tree until those owners land; this verifier used a scratch copy with two scratch-only patches (zdr: false literal, and a stub for the missing trait method). | open |
+| D2-112 | WS26-S2.code | live-proof | P1 | Do-run and chat evidence on the dev stack (rebuild model-gateway and execution-core, fixture page with an obfuscated override phrase, NATS subscription capture, counter snapshot, NATS and compose wiring for CONTENT_SAFETY_NORMALIZE) needs docker and the live stack; this verifier did not run docker and cannot close it. | open |
+| D2-113 | WS26-S2.code | live-proof | P1 | Shared compose and docs edits (docker-compose.yml CONTENT_SAFETY_NORMALIZE for model-gateway and execution-core, ZDR.md row, decisions ledger DEC-31 entry) are not applied; the lead applies them from lead_todo. | open |
+| D2-114 | WS26-S2.code | live-proof | P1 | Model-gateway and execution-core test commands cannot be run in the live worktree until the other slices' uncommitted proto and test-mock work is resolved; the lead needs the owner of WS22-S1 and the record_scheduled_run_result work to make the tree compile before the plan's test commands can be rerun in place. | open |
+| D2-115 | WS26-S2.code | live-proof | P1 | After applying the two test-literal edits: cd 'apps/Model Plane/rust' && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib moderation and ... --lib security_events. Those two are not yet run. | open |
+| D2-116 | WS26-S2.code | risk | P2 | Release 4 MiB benign scan is about 156 ms here, against a 250 ms budget (margin about 1.6x). fold() is now the largest stage at about 60 ms (strip, NFKC quick check, lowercase, whitespace collapse). Watch the budget on CI hardware. | open |
+| D2-117 | WS26-S2.code | follow-up | P3 | 10 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-03.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
@@ -371,3 +386,6 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 
 | D1-040 | WS10-S2 | test-gap | P2 | `go test ./internal/http/` in org-core aborts partway with `ORG_CORE_SERVICE_CREDENTIALS is required` (a test that builds the server without the credential block calls log.Fatal); each ZDR-seed test passes alone. Check whether the full-package run fails at HEAD without the slice (likely a CI-environment dependency), and fix the test setup. The fake service tokens in `model_entitlement_handlers_test.go` were replaced by low-entropy repeated letters because the gitleaks `generic-api-key` rule blocked the commit. | open |
 | WS19-S2 | authority, zdr | W2-03 | no |
+
+| D2-020 | WS26-S2.code | decision | P1 | The scanner rule `injection.override_the_system_prompt` is a plain phrase, so a benign business sentence such as "The team will override the system prompt in the staging config." is flagged while the normaliser is on by default; attacks atk-231 to atk-240 depend on that rule. Owner decision: narrow or drop the marker, or accept the hit. A single hyphen- or dot-joined token (`new-system-prompt`) still joins. | open |
+| WS26-S2.code | policy, zdr | W2-03 | no |
