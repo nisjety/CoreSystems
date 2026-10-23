@@ -15,11 +15,13 @@
 //!     connections (from GET /api/v1/connections) crossed with the static
 //!     operations catalog below. Not in `permission::is_risky_tool`, so it
 //!     runs under `ask` posture without a gate.
-//!   * `execute_provider_action` — runs one operation. Listed in
-//!     `permission::is_risky_tool`, so under `ask` posture the run pauses for
-//!     explicit human approval first (same spine as `book_shipment`); the
-//!     approval reference is then forwarded as `approvalId` in the body to
-//!     satisfy integration-corev2's own write-approval check.
+//!   * `execute_provider_action` — runs one operation. Under `ask` posture
+//!     `permission::is_risky_call` classifies it by its `operation`: a
+//!     catalogued read runs without a gate, while a write or an uncatalogued
+//!     operation pauses for explicit human approval first (same spine as
+//!     `book_shipment`). The approval reference is then forwarded as
+//!     `approvalId` in the body to satisfy integration-corev2's own
+//!     write-approval check.
 //!
 //! Transport (Auth Core `ingestion` audience service token):
 //!   GET  {INTEGRATION_COREV2_URL}/api/v1/connections?organizationId=<org>
@@ -192,11 +194,11 @@ struct ConnectionSummary {
 
 impl IntegrationActionsClient {
     /// Build from the environment: `INTEGRATION_COREV2_URL` overrides the
-    /// host-published compose default; `INTEGRATION_COREV2_INTERNAL_KEY`
-    /// supplies the `x-internal-api-key` header (integration-corev2 gates
-    /// /api/v1/* on it). Returns `None` only when the reqwest client cannot be
-    /// built — a missing key still yields a client (the gateway will answer
-    /// 401, which surfaces as an honest tool error rather than a silent skip).
+    /// host-published compose default; `INGESTION_SERVICE_API_KEY` is sent as
+    /// the `x-service-api-key` header with `INGESTION_SERVICE_ID` (default
+    /// `model-execution`) as `x-service-id`. Returns `None` when the key is
+    /// unset or the reqwest client cannot be built, so the caller has no
+    /// provider-action client at all.
     #[must_use]
     pub fn from_env() -> Option<Self> {
         let base_url = std::env::var("INTEGRATION_COREV2_URL")
@@ -1054,6 +1056,60 @@ mod tests {
         assert_eq!(operation_is_write("totally.made.up"), None);
         assert_eq!(operation_is_write(""), None);
         assert_eq!(operation_is_write("   "), None);
+    }
+
+    /// Pins today's gating table end to end (classification here, the ask-mode
+    /// decision in `permission::is_risky_call`), so a catalogue edit is a
+    /// deliberate change and not a silent widening. Catalogued reads run
+    /// ungated; uncatalogued operations are `None` and therefore gated, because
+    /// integration-corev2 leaves them ungated and exec-core must not guess they
+    /// are reads.
+    #[test]
+    fn current_gating_table_is_pinned() {
+        use crate::permission::is_risky_call;
+
+        let input = |operation: &str| serde_json::json!({ "operation": operation }).to_string();
+
+        for read in [
+            "pages.list",
+            "ads.insights",
+            "mail.messages",
+            "microsoft.mail.messages",
+            "gmail.messages",
+            "google.gmail.messages",
+            "drive.files",
+            "calendar.events",
+        ] {
+            assert_eq!(operation_is_write(read), Some(false), "{read} must stay a read");
+            assert!(
+                !is_risky_call("execute_provider_action", &input(read)),
+                "{read} must stay ungated under ask"
+            );
+        }
+
+        for uncatalogued in [
+            "mail.messages.get",
+            "gmail.messages.get",
+            "drive.file.content",
+            "sharepoint.sites",
+            "sharepoint.drives",
+            "profile",
+            "microsoft.profile",
+            "google.profile",
+        ] {
+            assert_eq!(
+                operation_is_write(uncatalogued),
+                None,
+                "{uncatalogued} is not catalogued yet"
+            );
+            assert!(
+                is_risky_call("execute_provider_action", &input(uncatalogued)),
+                "{uncatalogued} must stay gated under ask until it is catalogued"
+            );
+        }
+
+        assert_eq!(operation_is_write("mail.send"), Some(true));
+        assert!(is_risky_call("execute_provider_action", &input("mail.send")));
     }
 
     // -------------------------------------------------------------------
