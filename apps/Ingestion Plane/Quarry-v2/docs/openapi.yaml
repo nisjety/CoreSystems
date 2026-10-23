@@ -327,6 +327,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Envelope_HandoffAck'
+        '429':
+          description: "Backlog full (QUARRY_JOB_ADMISSION on): the organization already has its bound of waiting jobs. Body is RATE_LIMITED with details reason org_backlog_full, limit, queued and retry_after_seconds, and a Retry-After header. Nothing is stored."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
         '502':
           description: Orchestrator unreachable
           content:
@@ -357,6 +363,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Envelope_HandoffAck'
+        '429':
+          description: "Backlog full (QUARRY_JOB_ADMISSION on): the organization already has its bound of waiting jobs. Body is RATE_LIMITED with details reason org_backlog_full, limit, queued and retry_after_seconds, and a Retry-After header. Nothing is stored."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
         '502':
           description: Orchestrator unreachable
           content:
