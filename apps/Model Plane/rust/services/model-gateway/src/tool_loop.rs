@@ -18,6 +18,7 @@ use mp_contracts::model_plane::v1::{
     ChatMessage, FinalizeToolActionRequest, InferRequest, ReserveToolActionRequest,
     SearchMemoryRequest, ToolCall, ToolDefinition,
 };
+use mp_contracts::office_verification::{OfficeKind, OfficeVerification, VerificationLevel};
 use mp_events::publisher::EventPublisher;
 use serde_json::Value;
 
@@ -611,12 +612,87 @@ fn code_interpreter_events(outcome: &ToolOutcome) -> (Vec<ChatEvent>, Option<Str
         "stderr": truncate_chars(stderr, MAX_TOOL_OUTPUT_CHARS),
         "exit_code": exit_code,
         "files_delivered": listed,
-    })
-    .to_string();
-    summary.push_str(
+    });
+    let repair = add_office_checks(&payload, &mut summary);
+    let mut text = summary.to_string();
+    text.push_str(
         "\nThese files were delivered to the user as downloadable artifacts, which already appear as download cards below your message — the user can click them right now. Confirm what you produced in plain text (e.g. \"Fil lagret: name.xlsx (N bytes), tilgjengelig for nedlasting nedenfor.\"); NEVER write a markdown link, a bare URL, or a \"sandbox:/\" path for one of these files — no such link exists and it will not work.",
     );
-    (events, Some(summary))
+    if repair {
+        text.push_str(OFFICE_REPAIR_SENTENCE);
+    }
+    (events, Some(text))
+}
+
+/// Appended when a delivered file failed the structural check. The model must
+/// repair and re-run before calling the file ready, and must not overstate what
+/// the check proves.
+const OFFICE_REPAIR_SENTENCE: &str = " One or more files failed the structural Office check, so they will probably not open correctly in Office. Regenerate each failed file with code_interpreter, fix the reported problem, and run it again before you tell the user it is ready. The check only reads the file's structure: never describe a checked file as verified in Office.";
+
+/// Adds the Office check results to the summary the model reads, as text: a
+/// verdict and its messages per file, and a count of files not checked. The
+/// report's bytes never reach the prompt. Returns true when a file failed. The
+/// key is absent when the verifier did not run, so the summary is unchanged by
+/// default.
+fn add_office_checks(payload: &Value, summary: &mut Value) -> bool {
+    let reports = payload
+        .get("verification")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let unchecked = payload
+        .get("verification_unchecked")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let mut lines = Vec::new();
+    let mut failed = false;
+    for element in &reports {
+        let name = element
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("output")
+            .to_owned();
+        let Some(kind) = OfficeKind::from_file_name(&name) else {
+            continue;
+        };
+        let report = OfficeVerification::from_untrusted_json(&element.to_string(), &name, kind)
+            .unwrap_or_else(|_| {
+                OfficeVerification::skipped(&name, kind, "the verifier's report could not be read")
+            });
+        failed |= report.level == VerificationLevel::Failed;
+        lines.push(office_check_line(&report));
+    }
+    if unchecked > 0 {
+        lines.push(format!(
+            "{unchecked} Office file(s) were not structurally checked: too large to return, or past the check limit."
+        ));
+    }
+    if !lines.is_empty() {
+        summary["office_checks"] = serde_json::json!(lines);
+    }
+    failed
+}
+
+fn office_check_line(report: &OfficeVerification) -> String {
+    let verdict = match report.level {
+        VerificationLevel::Passed => {
+            "structure looks intact (advisory: this does not prove Office opens it)"
+        }
+        VerificationLevel::Warnings => "passed with warnings",
+        VerificationLevel::Failed => "FAILED the structural check",
+        VerificationLevel::Skipped => "not checked",
+    };
+    let findings: Vec<&str> = report
+        .checks
+        .iter()
+        .take(3)
+        .map(|check| check.message.as_str())
+        .collect();
+    if findings.is_empty() {
+        format!("{}: {verdict}", report.name)
+    } else {
+        format!("{}: {verdict} ({})", report.name, findings.join("; "))
+    }
 }
 
 fn inline_tool_action_id(run_id: &str, call_id: &str) -> String {
@@ -4355,7 +4431,7 @@ pub fn builtin_tool_defs() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "code_interpreter".to_owned(),
-            description: "Run Python 3 (or POSIX sh) in an isolated sandbox and return stdout/stderr plus any FILES the code wrote. This is the tool for exact computation and for producing real documents: use it for arithmetic and large-number math, date arithmetic, statistics, parsing and data transformation, and for GENERATING files the user can download — .xlsx via openpyxl or xlsxwriter (write formulas as strings such as \"=SUM(B2:B9)\" so the sheet keeps live formulas, and make a native Excel chart with openpyxl.chart or xlsxwriter's add_chart; neither library calculates a formula, so compute any figure you quote in Python as well), .docx via python-docx, .pptx via python-pptx (to put a chart on a slide, draw it with matplotlib and add the PNG with add_picture), .pdf via reportlab (pypdf reads and merges existing PDFs), charts and images as PNG via matplotlib (headless: plt.savefig, never plt.show) and Pillow, plus csv/json/html/md. Write files to the current working directory and they are returned to the user automatically as downloadable artifacts, appearing as download cards BELOW your message the moment this call returns (a PNG also shows inline in the message); do not base64 them yourself, and NEVER write a markdown link, a bare URL, or a \"sandbox:/\" path to reference one — none of those resolve to anything and the user cannot open them. Just confirm in plain text what you produced. Available libraries: numpy, pandas, matplotlib, openpyxl, xlsxwriter, python-docx, reportlab, pypdf, Pillow, python-pptx, lxml. The sandbox has NO network access and a hard ~30s timeout, so never attempt downloads or long jobs here (use web_search/fetch_url for the web). Prefer this over doing arithmetic in your head whenever the exact value matters.".to_owned(),
+            description: "Run Python 3 (or POSIX sh) in an isolated sandbox and return stdout/stderr plus any FILES the code wrote. This is the tool for exact computation and for producing real documents: use it for arithmetic and large-number math, date arithmetic, statistics, parsing and data transformation, and for GENERATING files the user can download — .xlsx via openpyxl or xlsxwriter (write formulas as strings such as \"=SUM(B2:B9)\" so the sheet keeps live formulas, and make a native Excel chart with openpyxl.chart or xlsxwriter's add_chart; neither library calculates a formula, so compute any figure you quote in Python as well), .docx via python-docx, .pptx via python-pptx (to put a chart on a slide, draw it with matplotlib and add the PNG with add_picture), .pdf via reportlab (pypdf reads and merges existing PDFs), charts and images as PNG via matplotlib (headless: plt.savefig, never plt.show) and Pillow, plus csv/json/html/md. Write files to the current working directory and they are returned to the user automatically as downloadable artifacts, appearing as download cards BELOW your message the moment this call returns (a PNG also shows inline in the message); do not base64 them yourself, and NEVER write a markdown link, a bare URL, or a \"sandbox:/\" path to reference one — none of those resolve to anything and the user cannot open them. Just confirm in plain text what you produced. Available libraries: numpy, pandas, matplotlib, openpyxl, xlsxwriter, python-docx, reportlab, pypdf, Pillow, python-pptx, lxml. The sandbox has NO network access and a hard time limit of about two minutes, so never attempt downloads or long jobs here (use web_search/fetch_url for the web). Prefer this over doing arithmetic in your head whenever the exact value matters.".to_owned(),
             parameters_json: r#"{"type":"object","properties":{"language":{"type":"string","enum":["python","sh"],"description":"Runtime; defaults to python"},"code":{"type":"string","description":"Source to execute. print() what you want to read back; write files to the working directory to hand them to the user."},"files_in":{"type":"array","description":"Optional input files to place in the working directory before running.","items":{"type":"object","properties":{"name":{"type":"string","description":"Flat filename, no directories"},"content_b64":{"type":"string","description":"Base64 file contents"}},"required":["name","content_b64"]}}},"required":["code"]}"#.to_owned(),
         },
         ToolDefinition {
@@ -10428,6 +10504,7 @@ mod tests {
             screening: crate::moderation::ScreeningOutcome {
                 posture: crate::moderation::ScreeningPosture::Flagged,
                 content_hash: crate::moderation::content_hash(b"whatever was scanned"),
+                rule_ids: Vec::new(),
             },
         };
         let outcomes = vec![outcome_with("fetch_url", "page text", provenance)];
@@ -10448,6 +10525,7 @@ mod tests {
             screening: crate::moderation::ScreeningOutcome {
                 posture: crate::moderation::ScreeningPosture::Degraded,
                 content_hash: crate::moderation::content_hash(b"oversized or contended payload"),
+                rule_ids: Vec::new(),
             },
         };
         let outcomes = vec![outcome_with("browser_agent", "scraped text", provenance)];
@@ -10470,6 +10548,7 @@ mod tests {
             screening: crate::moderation::ScreeningOutcome {
                 posture: crate::moderation::ScreeningPosture::Flagged,
                 content_hash: crate::moderation::content_hash(hostile_output.as_bytes()),
+                rule_ids: Vec::new(),
             },
         };
         let outcomes = vec![outcome_with("fetch_url", hostile_output, provenance)];
@@ -11467,6 +11546,72 @@ mod tests {
 
     /// A prefix with no JSON object at all (a plain error string, say) must
     /// still fall through to "untouched" rather than panicking on the `find`.
+    /// The Office check reaches the model as text: a verdict and its messages per
+    /// file, the count of files not checked, and a repair instruction when a file
+    /// failed. The report's bytes and the file's base64 never enter the summary,
+    /// and a result without a report is unchanged.
+    #[test]
+    fn code_interpreter_summary_carries_verification_and_no_base64() {
+        let base64_body = "QUFBQUFBQUFBQQ".repeat(400);
+        let with_report = serde_json::json!({
+            "stdout": "",
+            "stderr": "",
+            "exit_code": 0,
+            "files": [{
+                "name": "deck.docx",
+                "mime": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "bytes": 4096,
+                "content_b64": base64_body,
+            }],
+            "verification": [{
+                "name": "deck.docx",
+                "kind": "docx",
+                "level": "failed",
+                "checks": [{
+                    "id": "container",
+                    "level": "failed",
+                    "message": "the file is not a readable zip package",
+                }],
+                "stats": {},
+            }],
+            "verification_unchecked": 2,
+        })
+        .to_string();
+        let (_events, summary) =
+            tool_artifact_events(&outcome_for("code_interpreter", with_report), None);
+        let summary = summary.expect("a summary for delivered files");
+        assert!(
+            summary.contains(
+                "deck.docx: FAILED the structural check (the file is not a readable zip package)"
+            ),
+            "{summary}"
+        );
+        assert!(summary.contains("2 Office file(s) were not structurally checked"));
+        assert!(summary.contains("Regenerate each failed file"));
+        assert!(
+            !summary.contains("QUFBQUFBQUFBQQ"),
+            "file bytes must never reach the model"
+        );
+
+        let without_report = serde_json::json!({
+            "stdout": "",
+            "stderr": "",
+            "exit_code": 0,
+            "files": [{
+                "name": "deck.docx",
+                "mime": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "bytes": 4096,
+                "content_b64": "QUFB",
+            }],
+        })
+        .to_string();
+        let (_events, summary) =
+            tool_artifact_events(&outcome_for("code_interpreter", without_report), None);
+        let summary = summary.expect("a summary for delivered files");
+        assert!(!summary.contains("office_checks"), "{summary}");
+        assert!(!summary.contains("Regenerate each failed file"));
+    }
+
     #[test]
     fn code_interpreter_output_with_no_json_object_is_untouched() {
         let outcome = outcome_for(

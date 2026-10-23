@@ -47,6 +47,11 @@ use sha2::{Digest, Sha256};
 use crate::executor;
 use crate::policy::{MpNetworkPolicy, MpSandboxPolicy};
 
+/// Structural checks of the Office files this module returns. Its own file so the
+/// verifier's sandboxed second workspace stays separate from the program's.
+#[path = "office_verify.rs"]
+mod office_verify;
+
 /// Directory-name prefix for per-call workspaces. Also the marker cleanup and
 /// tests match on.
 const WORKSPACE_PREFIX: &str = "verevon-code";
@@ -166,6 +171,17 @@ struct CodeResult {
     stderr: String,
     exit_code: i32,
     files: Vec<OutputFile>,
+    /// Advisory structural checks of the returned Office files. Absent unless
+    /// `CODE_INTERPRETER_OFFICE_VERIFY` is on, so the result is unchanged by default.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    verification: Vec<mp_contracts::office_verification::OfficeVerification>,
+    /// Office files the verifier did not check, so the model can say so.
+    #[serde(skip_serializing_if = "is_zero")]
+    verification_unchecked: usize,
+}
+
+fn is_zero(count: &usize) -> bool {
+    *count == 0
 }
 
 /// Parse and validate a `code_interpreter` tool input.
@@ -595,12 +611,15 @@ async fn run_in_root(
     staged.push(program_file);
     staged.extend(request.files_in.iter().map(|file| file.name.as_str()));
     let files = collect_output_files(root, &staged, &pre_call_baseline);
+    let office = office_verify::verify_outputs(&files).await;
 
     serde_json::to_string(&CodeResult {
         stdout: outcome.stdout,
         stderr: outcome.stderr,
         exit_code: outcome.exit_code,
         files,
+        verification: office.reports,
+        verification_unchecked: office.unchecked,
     })
     .map_err(|error| format!("code_interpreter could not encode its result: {error}"))
 }
@@ -782,6 +801,8 @@ mod tests {
                     truncated: Some(true),
                 },
             ],
+            verification: Vec::new(),
+            verification_unchecked: 0,
         };
         assert_eq!(
             serde_json::to_string(&result).expect("serializes"),
