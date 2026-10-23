@@ -109,6 +109,7 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
 
   // Knowledge base / crawl / documents
   crawl_backlog_full: { no: 'Det venter for mange gjennomganger på organisasjonen din. Prøv igjen om litt.', en: 'Too many crawls are waiting for your organization. Try again shortly.' },
+  crawl_allowance_exhausted: { no: 'Organisasjonen din har brukt opp kvoten for gjennomgang av nettsteder. Kontakt en administrator eller prøv igjen når kvoten fornyes.', en: 'Your organization has used up its crawl allowance. Contact an administrator, or try again when the allowance renews.' },
   scrape_failed: { no: 'Kunne ikke hente innhold fra siden. Prøv igjen.', en: 'Could not fetch content from the page. Try again.' },
   unsupported_media: { no: 'Dette innholdet kan ikke vises som forhåndsvisning. Prøv en lenke til en nettside eller et dokument.', en: 'This content cannot be previewed. Try a link to a web page or a document.' },
   extraction_failed: { no: 'Kunne ikke hente ut innhold fra dette dokumentet.', en: 'Could not extract content from this document.' },

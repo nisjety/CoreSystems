@@ -382,6 +382,37 @@ fn crawl_backlog_full_response(resp: &Value) -> Option<Response> {
     )
 }
 
+/// The organization's crawl or batch allowance is spent: Quarry's
+/// `BUDGET_EXHAUSTED` 402 with `details.dimension = org_allowance` as a gateway
+/// `crawl_allowance_exhausted` 402. Only the metric (one of two known names) and a
+/// sane retry hint survive; nothing else from the upstream body is echoed.
+/// `None` for any other 402.
+fn crawl_allowance_exhausted_response(resp: &Value) -> Option<Response> {
+    let details = resp.pointer("/error/details")?;
+    if details.get("dimension")?.as_str()? != "org_allowance" {
+        return None;
+    }
+    let mut body = error(
+        "crawl_allowance_exhausted",
+        "This organization has used up its crawl allowance.",
+    );
+    if let Some(metric) = details
+        .get("metric")
+        .and_then(Value::as_str)
+        .filter(|metric| matches!(*metric, "quarry.crawl.page" | "quarry.batch.url"))
+    {
+        body["error"]["metric"] = json!(metric);
+    }
+    if let Some(seconds) = details
+        .get("retry_after_seconds")
+        .and_then(Value::as_u64)
+        .filter(|seconds| (1..=2_592_000).contains(seconds))
+    {
+        body["error"]["retryAfterSeconds"] = json!(seconds);
+    }
+    Some((StatusCode::PAYMENT_REQUIRED, Json(body)).into_response())
+}
+
 pub(super) async fn start_crawl(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -428,6 +459,13 @@ pub(super) async fn start_crawl(
         // upstream envelope through.
         if status == StatusCode::TOO_MANY_REQUESTS {
             if let Some(response) = crawl_backlog_full_response(&resp) {
+                return response;
+            }
+        }
+        // The organization's configured allowance is spent (WS6.D): the same, with the
+        // metric that ran out and no other upstream detail.
+        if status == StatusCode::PAYMENT_REQUIRED {
+            if let Some(response) = crawl_allowance_exhausted_response(&resp) {
                 return response;
             }
         }
@@ -918,6 +956,83 @@ mod tests {
             !rendered.contains("internal text") && !rendered.contains("postgres://leak"),
             "{rendered}"
         );
+    }
+
+    #[tokio::test]
+    async fn start_crawl_maps_org_allowance_402() {
+        use wiremock::matchers::{method as wm_method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/crawl"))
+            .respond_with(ResponseTemplate::new(402).set_body_json(json!({
+                "request_id": "req_edge",
+                "success": false,
+                "error": {
+                    "code": "BUDGET_EXHAUSTED",
+                    "message": "internal text that must not be echoed",
+                    "details": {
+                        "dimension": "org_allowance", "metric": "quarry.crawl.page",
+                        "limit_source": "entitlement", "retry_after_seconds": 3600,
+                        "internal": "postgres://leak"
+                    }
+                }
+            })))
+            .mount(&quarry)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+        let user = AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.invalid".to_owned(),
+            user_name: "User".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: None,
+        };
+
+        let response = start_crawl(
+            State(state),
+            Extension(user),
+            HeaderMap::new(),
+            Json(json!({ "url": "https://example.com/" })),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], "crawl_allowance_exhausted");
+        assert_eq!(body["error"]["metric"], "quarry.crawl.page");
+        assert_eq!(body["error"]["retryAfterSeconds"], 3600);
+        let rendered = body.to_string();
+        assert!(
+            !rendered.contains("internal text") && !rendered.contains("postgres://leak"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn only_the_org_allowance_402_is_remapped() {
+        // Another budget dimension, a missing detail or a non-envelope body stays as it came.
+        assert!(crawl_allowance_exhausted_response(
+            &json!({ "error": { "details": { "dimension": "runtime" } } })
+        )
+        .is_none());
+        assert!(crawl_allowance_exhausted_response(&json!({ "error": "pay up" })).is_none());
+        assert!(crawl_allowance_exhausted_response(&json!({})).is_none());
+        // An unknown metric and an absurd retry hint are dropped, not echoed.
+        let response = crawl_allowance_exhausted_response(&json!({
+            "error": { "details": {
+                "dimension": "org_allowance", "metric": "postgres://leak", "retry_after_seconds": 99999999999u64
+            } }
+        }))
+        .expect("typed");
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
     }
 
     #[test]

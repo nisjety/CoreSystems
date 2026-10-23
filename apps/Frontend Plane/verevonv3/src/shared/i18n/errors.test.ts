@@ -47,6 +47,17 @@ describe('translateApiError', () => {
   })
 })
 
+describe('crawl allowance', () => {
+  it('explains a spent crawl allowance in both languages', () => {
+    const no = (norwegian: string) => norwegian
+    const en = (_norwegian: string, english: string) => english
+
+    expect(translateApiError({ code: 'crawl_allowance_exhausted' }, no)).toMatch(/brukt opp kvoten/i)
+    expect(translateApiError({ code: 'crawl_allowance_exhausted' }, en)).toMatch(/used up its crawl allowance/i)
+    expect(translateApiError({ code: 'crawl_allowance_exhausted' }, no)).not.toMatch(/Noe gikk galt/)
+  })
+})
+
 describe('LocalizedError', () => {
   const refusal = new LocalizedError({
     no: 'Du har allerede et prosjekt med dette navnet.',
