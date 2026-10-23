@@ -528,7 +528,7 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS10-S2 | authority, auth, audit, policy | W1-02 | no |
 | WS10-S2 | authority, auth, audit, policy | W1-02 | no |
 
-| D1-040 | WS10-S2 | test-gap | P2 | `go test ./internal/http/` in org-core aborts partway with `ORG_CORE_SERVICE_CREDENTIALS is required` (a test that builds the server without the credential block calls log.Fatal); each ZDR-seed test passes alone. Check whether the full-package run fails at HEAD without the slice (likely a CI-environment dependency), and fix the test setup. The fake service tokens in `model_entitlement_handlers_test.go` were replaced by low-entropy repeated letters because the gitleaks `generic-api-key` rule blocked the commit. | open |
+| D1-040 | WS10-S2 | test-gap | P2 (resolved) | `go test ./internal/http/` in org-core aborts partway with `ORG_CORE_SERVICE_CREDENTIALS is required` (a test that builds the server without the credential block calls log.Fatal); each ZDR-seed test passes alone. Check whether the full-package run fails at HEAD without the slice (likely a CI-environment dependency), and fix the test setup. The fake service tokens in `model_entitlement_handlers_test.go` were replaced by low-entropy repeated letters because the gitleaks `generic-api-key` rule blocked the commit. | open |
 | WS19-S2 | authority, zdr | W2-03 | no |
 
 | D2-020 | WS26-S2.code | decision | P1 | The scanner rule `injection.override_the_system_prompt` is a plain phrase, so a benign business sentence such as "The team will override the system prompt in the staging config." is flagged while the normaliser is on by default; attacks atk-231 to atk-240 depend on that rule. Owner decision: narrow or drop the marker, or accept the hit. A single hyphen- or dot-joined token (`new-system-prompt`) still joins. | open |
@@ -547,3 +547,5 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS05-S5 | policy, auth, audit, zdr | W1-03 | no |
 | WS06-S7 | auth, policy, audit | W1-03 | no |
 | WS06-S7 | auth, policy, audit | W1-03 | no |
+
+| D1-041 | WS10-S2, WS06-S7 | follow-up | P1 | The Control Plane compose now requires `INFERENCE_ORG_CORE_SERVICE_TOKEN` and `AUDIT_ORG_CORE_SERVICE_TOKEN` (`:?required`): the Control Plane secret generation must mint them before org-core is recreated, and org-core's image must be rebuilt first (an image that predates the new scopes refuses the whole credential registry). D1-040 is resolved: the package aborted because the compose registry lacked the new principals; with them `go test ./internal/http/` passes. | open |

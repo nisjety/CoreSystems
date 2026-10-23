@@ -118,6 +118,7 @@ func main() {
 	if natsClient != nil {
 		orgService.SetAuditPublisher(natsClient)
 		go runGDPRAuditOutbox(ctx, orgService, 5*time.Second)
+		go runSIEMAuditOutbox(ctx, orgService, 5*time.Second)
 	}
 
 	// Wire shared cross-plane publisher (verevon-nats)
@@ -269,6 +270,34 @@ func runGDPRAuditOutbox(ctx context.Context, service *orgcore.Service, interval 
 		if result.Published > 0 || result.DeadLettered > 0 {
 			log.Printf(
 				"org-core GDPR audit outbox published=%d dead_lettered=%d",
+				result.Published, result.DeadLettered,
+			)
+		}
+	}
+	flush()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			flush()
+		}
+	}
+}
+
+// runSIEMAuditOutbox publishes the audit rows of SIEM destination changes. It runs whatever
+// ORG_SIEM_DESTINATIONS_ENABLED says, so rows still pending when the switch is turned off drain.
+func runSIEMAuditOutbox(ctx context.Context, service *orgcore.Service, interval time.Duration) {
+	flush := func() {
+		result, err := service.FlushSIEMAuditOutbox(ctx, 100)
+		if err != nil {
+			log.Printf("org-core SIEM audit outbox retry failed: %v", err)
+		}
+		if result.Published > 0 || result.DeadLettered > 0 {
+			log.Printf(
+				"org-core SIEM audit outbox published=%d dead_lettered=%d",
 				result.Published, result.DeadLettered,
 			)
 		}
