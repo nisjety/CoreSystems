@@ -1,0 +1,275 @@
+//! WS7.D: the agent path's web policy.
+//!
+//! `start_run` resolves the run's decision once: the caller's principal, the ZDR posture,
+//! the operator baseline and the request's `policy` ask (`web_policy_edge::decide`). The
+//! decision is kept on the lock-free `RunLive`, so every later surface reads the same one.
+//!
+//! The per-action gate is gate 8 of the admission chain (`admission::admit_action`, R-7):
+//! after the cheap local checks and before the budget and the one-shot sensitive approval,
+//! so a refusal consumes no step, no attempt, no receipt and no approval. REST `step`,
+//! `interact`, the browser WebSocket and the tab routes all reach it through the same chain.
+//!
+//! A refusal is the typed 403 of `web_policy_edge::quarry_error`. Nothing here echoes a URL
+//! or a script, and the counters and log lines carry the closed labels only.
+//!
+//! Organisation layer: absent until WS7.H and WS7.J. The baseline and the request layer
+//! are the only operator and caller inputs here.
+
+use quarry_browser::BrowserEgressPolicy;
+use quarry_core::contracts::AgentAction;
+use quarry_core::web_policy::{
+    CapKey, EgressNarrowing, PolicyDenial, Principal, RequestAsk, ResolvedPolicy,
+};
+use quarry_core::QuarryResult;
+
+use crate::agent_routes::RunLive;
+use crate::policy_baseline::{Decision, PolicyBaseline};
+use crate::state::AppState;
+use crate::web_policy_edge::{self, quarry_error, record_denial};
+
+/// Resolve the run's decision at start, before the browser is acquired.
+///
+/// `persist_profile` is the run's effective posture (a resumed run carries its checkpoint's
+/// value), and the two artifact flags are the caller's driver requirements. A refusal here
+/// is typed and consumes nothing: no lease, no slot, no checkpoint.
+pub fn resolve_for_start(
+    baseline: &PolicyBaseline,
+    principal: Principal,
+    zdr: bool,
+    ask: Option<&RequestAsk>,
+    persist_profile: bool,
+    artifact_uploads: bool,
+    artifact_downloads: bool,
+) -> QuarryResult<Decision> {
+    let decision = web_policy_edge::decide(baseline, principal, zdr, ask)?;
+    gate_decision(&decision, |policy| {
+        if persist_profile {
+            policy.require(CapKey::ProfilePersistent, "persist_profile")?;
+        }
+        if artifact_uploads {
+            policy.require(CapKey::ActUpload, "upload_ref")?;
+        }
+        if artifact_downloads {
+            policy.require(CapKey::ActDownload, "download_ref")?;
+        }
+        Ok(())
+    })?;
+    Ok(decision)
+}
+
+/// The egress boundary the run's browser is configured with: the run's own allow list,
+/// narrowed by the policy. `constraints.allowed_domains` is never changed here, so the
+/// broker grant equality checked by `validate_run_grant` still holds. An intersection that
+/// is empty denies everything; it never falls back to "allow all".
+pub fn egress_policy(decision: &Decision, allowed_domains: &[String]) -> BrowserEgressPolicy {
+    match decision.policy().narrow_egress(allowed_domains) {
+        EgressNarrowing::Unchanged => BrowserEgressPolicy::from_allowed_domains(allowed_domains),
+        EgressNarrowing::Narrowed(hosts) => BrowserEgressPolicy::from_allowed_domains(&hosts),
+        EgressNarrowing::DenyAll => BrowserEgressPolicy::deny_all(),
+    }
+}
+
+/// Gate a URL the run is about to use, before it is used (the recovery navigation of a
+/// resumed run). Host rules only.
+pub fn gate_url(decision: &Decision, url: &str) -> QuarryResult<()> {
+    gate_decision(decision, |policy| policy.check_url(url))
+}
+
+/// Gate 8 of the admission chain: the action's capability and, for a navigation, its host.
+/// Read, observe and navigate classes are never refused by a capability.
+pub fn gate_policy(
+    state: &AppState,
+    live: &RunLive,
+    zdr: bool,
+    action: &AgentAction,
+) -> QuarryResult<()> {
+    gate_live(state, live, zdr, |policy| check_action(policy, action))
+}
+
+/// The host rules for a URL a run has reached or is about to reach: a page the browser
+/// landed on after an action, or the URL of a tab a call opens. The caller returns the
+/// error; nothing is persisted for a refused page here.
+pub fn gate_visit(state: &AppState, live: &RunLive, zdr: bool, url: &str) -> QuarryResult<()> {
+    gate_live(state, live, zdr, |policy| policy.check_url(url))
+}
+
+/// The per-action check against one resolved policy.
+pub fn check_action(policy: &ResolvedPolicy, action: &AgentAction) -> Result<(), PolicyDenial> {
+    policy.gate_action(action)?;
+    if let AgentAction::Navigate { url } = action {
+        policy.check_url(url)?;
+    }
+    Ok(())
+}
+
+fn gate_live(
+    state: &AppState,
+    live: &RunLive,
+    zdr: bool,
+    check: impl Fn(&ResolvedPolicy) -> Result<(), PolicyDenial>,
+) -> QuarryResult<()> {
+    match live.policy() {
+        Some(decision) => gate_decision(decision, check),
+        None => {
+            // A run with no stored decision (one built outside `start_run`) is held to the
+            // autonomous principal, which is never less restrictive than the human one,
+            // under the operator baseline.
+            let decision = state
+                .policy
+                .decide(Principal::Autonomous, zdr, None)
+                .map_err(|denial| quarry_error(&denial))?;
+            gate_decision(&decision, check)
+        }
+    }
+}
+
+/// Run one check against the decision. Under `observe` the shadow (what `enforce` would
+/// do) is checked first and counted; the run's own decision decides.
+fn gate_decision(
+    decision: &Decision,
+    check: impl Fn(&ResolvedPolicy) -> Result<(), PolicyDenial>,
+) -> QuarryResult<()> {
+    if let Some(shadow) = decision.shadow() {
+        if let Err(denial) = check(shadow) {
+            record_denial(&denial, false);
+        }
+    }
+    check(decision.policy()).map_err(|denial| {
+        record_denial(&denial, true);
+        quarry_error(&denial)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use quarry_core::web_policy::{resolve, OrgInput, PolicyInputs, PolicyLayer};
+
+    fn resolved(principal: Principal, zdr: bool, ask: RequestAsk) -> ResolvedPolicy {
+        resolve(&PolicyInputs {
+            principal,
+            zdr,
+            baseline: PolicyLayer::default(),
+            org: OrgInput::Absent,
+            grant: None,
+            request: Some(ask.into_layer().expect("a valid ask")),
+        })
+        .expect("the policy resolves")
+    }
+
+    fn disable(keys: &[&str]) -> RequestAsk {
+        RequestAsk {
+            disable: keys.iter().map(|key| (*key).to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn read_and_navigate_classes_are_never_denied_by_capabilities() {
+        let everything_off = disable(&[
+            "browser.act.input",
+            "browser.act.interact",
+            "browser.act.upload",
+            "browser.act.download",
+            "browser.profile.persistent",
+        ]);
+        let policy = resolved(Principal::Autonomous, false, everything_off);
+
+        for action in [
+            AgentAction::Navigate {
+                url: "https://example.com/".into(),
+            },
+            AgentAction::Back,
+            AgentAction::Forward,
+            AgentAction::Wait { ms: 0 },
+            AgentAction::GetContent,
+            AgentAction::Pdf,
+        ] {
+            assert!(
+                check_action(&policy, &action).is_ok(),
+                "a read or navigate action is not gated by a capability"
+            );
+        }
+        // The same policy does refuse an interaction, so the test above is not vacuous.
+        assert!(check_action(
+            &policy,
+            &AgentAction::Click {
+                selector: "#go".into()
+            }
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn human_principal_skips_autonomous_only_keys() {
+        // `browser.act.input` applies to autonomous principals only: a person typing is
+        // not an agent typing, so the same ask does not refuse a human.
+        let typed = AgentAction::Type {
+            selector: "#q".into(),
+            text: "x".into(),
+        };
+        let human = resolved(Principal::Human, false, disable(&["browser.act.input"]));
+        assert!(check_action(&human, &typed).is_ok());
+
+        let autonomous = resolved(Principal::Autonomous, false, disable(&["browser.act.input"]));
+        assert!(check_action(&autonomous, &typed).is_err());
+    }
+
+    #[test]
+    fn service_principal_input_denied_when_the_layer_disables_input() {
+        // The organisation layer is absent in this slice (WS7.H, WS7.J), so the disabling
+        // layer here is the request's own ask. The refusal names the layer that decided it.
+        let policy = resolved(Principal::Autonomous, false, disable(&["browser.act.input"]));
+        let denial = check_action(
+            &policy,
+            &AgentAction::TypeRef {
+                snapshot_id: "snap".into(),
+                generation: 1,
+                ref_id: "e1".into(),
+                text: "x".into(),
+            },
+        )
+        .expect_err("input is disabled for an autonomous principal");
+        match denial {
+            PolicyDenial::PolicyDenied {
+                capability,
+                decision_source,
+                ..
+            } => {
+                assert_eq!(capability, CapKey::ActInput);
+                assert_eq!(decision_source.as_str(), "request");
+            }
+            other => panic!("expected a typed policy denial, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_empty_intersection_denies_all_instead_of_allowing_all() {
+        // The run may use example.com; the policy denies example.com: nothing is left.
+        let decision = PolicyBaseline::default()
+            .decide(
+                Principal::Autonomous,
+                false,
+                Some(
+                    RequestAsk {
+                        deny_domains: vec!["example.com".into()],
+                        ..Default::default()
+                    }
+                    .into_layer()
+                    .expect("a valid ask"),
+                ),
+            )
+            .expect("the policy resolves");
+        let egress = egress_policy(&decision, &["example.com".to_string()]);
+        assert!(!egress.allows_url("https://example.com/"));
+
+        // A partial intersection keeps the host that is still allowed.
+        let narrowed = egress_policy(
+            &decision,
+            &["example.com".to_string(), "other.test".to_string()],
+        );
+        assert!(narrowed.allows_url("https://other.test/"));
+        assert!(!narrowed.allows_url("https://example.com/"));
+    }
+}
