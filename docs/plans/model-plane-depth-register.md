@@ -541,6 +541,21 @@ Built so far (batches B01 to B07): WS01-S0, WS01-S1 (partial), WS01-S6; WS02-S1,
 | D1-406 | WS06-S8 | live-proof | P1 | DB tests (TestPGCursorsAdvanceOnlyForwardAndResetTheFailureStreak, TestExportStatusReadsTheCursorsOfOneOrgOnly) skipped without TEST_DATABASE_URL; they need postgres:16 through docker, lead only. | open |
 | D1-407 | WS06-S8 | follow-up | P3 | 17 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-10.json | open |
 
+
+### Wave-mode batch W1-10 (2026-10-24)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D1-408 | WS06-S8 | follow-up | P1 | Before AUDIT_SIEM_EXPORT_ENABLED is switched on for any org, the S2 details guard must move from observe to enforce (or the golden content-free check run on live rows): the exporter ships `details` exactly as stored, so a producer that puts content in details would leave the database for a customer SIEM. | open |
+| D1-409 | WS06-S8 | live-proof | P1 | Egress guard, signature, ordering, lag alert and dedup are proven only against in-process fakes and httptest TLS servers; the plan's live evidence (real receiver, real org-core destination via gateway, audit-verify over received NDJSON plus head record, lag alert firing and clearing) has not been run. | open |
+| D1-410 | WS06-S8 | follow-up | P1 | Before AUDIT_SIEM_EXPORT_ENABLED is turned on for any org, the S2 details guard must be enforcing or the export-content-free golden check must run on live rows, because the exporter ships `details` exactly as stored. | open |
+| D1-411 | WS06-S8 | live-proof | P1 | The egress guard, HMAC, ordering, dedup and lag alert are proven only against in-process fakes and httptest TLS servers; the plan's live evidence is outstanding. | open |
+| D1-412 | WS06-S8 | live-proof | P1 | Migration 010 is not in the store.Migrate list (migrate.go: add the //go:embed, the var and the list entry). Until the lead applies it, GET /export-status returns 500 query_failed on a real store; before this slice it returned an empty 200. The lead must apply it with this slice, ahead of or with the image roll. | open |
+| D1-413 | WS06-S8 | live-proof | P1 | The base compose service audit-siem-exporter is not in docker-compose.yml (lead_todo shared edit). docker-compose.production.yml now carries an override for a service that does not yet exist, so a compose config with the production override would be invalid until the base service lands. Apply both together. | open |
+| D1-414 | WS06-S8 | live-proof | P1 | promtool was unavailable: check rules and test rules for audit-core.rules.yml and audit-core.rules.test.yml have not run. I read the new rule expressions and their six unit tests by eye and they look consistent. | open |
+| D1-415 | WS06-S8 | live-proof | P1 | DB tests (TestPGCursorsAdvanceOnlyForwardAndResetTheFailureStreak, TestExportStatusReadsTheCursorsOfOneOrgOnly) skipped without TEST_DATABASE_URL; they need postgres:16 through docker, lead only. | open |
+| D1-416 | WS06-S8 | follow-up | P3 | 17 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-10.json | open |
+
 ## Wave 2 (WS13 to WS27)
 
 Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS27-S0, WS27-S1. Wave 2 is not started as a wave: these came in with Wave 1 batches because they were Wave 1 prerequisites.
@@ -854,4 +869,5 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS02-S11 | audit | W1-08 | no |
 | WS06-S5 | auth, audit, policy | W1-09 | no |
 | WS06-S6 | auth, audit | W1-10 | no |
+| WS06-S8 | audit, zdr, auth | W1-10 | no |
 | WS06-S8 | audit, zdr, auth | W1-10 | no |
