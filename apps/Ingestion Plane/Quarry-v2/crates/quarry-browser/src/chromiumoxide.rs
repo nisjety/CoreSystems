@@ -6728,6 +6728,52 @@ mod tests {
         driver.release(session).await.expect("release");
     }
 
+    /// WS7.G: a host on the policy's deny list is refused for a sub-resource of a page
+    /// that is otherwise unrestricted, and the refusal is an egress receipt.
+    #[tokio::test]
+    #[ignore = "WS7.G live lane: needs Chromium (CHROMIUMOXIDE_TEST=1)"]
+    async fn egress_deny_blocks_a_subresource_on_an_allowed_page() {
+        if !live_enabled() {
+            return;
+        }
+        let driver = live_driver();
+        let session = live_session(&driver, "ws7g-egress-deny").await;
+        driver
+            .configure_egress_policy(
+                &session,
+                BrowserEgressPolicy::from_allowed_domains(&[])
+                    .with_denied_domains(&["denied.example.test".to_owned()]),
+            )
+            .await
+            .expect("session policy with a deny list");
+        driver
+            .current_page(&session)
+            .await
+            .expect("page")
+            .set_content(
+                "<html><body><img src=\"https://denied.example.test/pixel.png\"></body></html>",
+            )
+            .await
+            .expect("inject a denied sub-resource");
+        let mut blocked = false;
+        for _ in 0..150 {
+            let receipts = driver
+                .egress_receipts(&session, 0, 512)
+                .await
+                .expect("receipts");
+            if receipts
+                .iter()
+                .any(|receipt| receipt.policy == "domain_grant_blocked")
+            {
+                blocked = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(blocked, "the denied host must be refused at the browser boundary");
+        driver.release(session).await.expect("release");
+    }
+
     /// The human tab keeps the open session policy while the agent tab is
     /// narrow: its third-host request reaches the DNS guard, not the grant.
     #[tokio::test]

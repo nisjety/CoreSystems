@@ -77,6 +77,11 @@ pub struct ObservationContext {
     /// Per-host challenge bookkeeping for the one-recovery rule. In memory,
     /// run-local, empty after a resume.
     pub block_episodes: BlockEpisodes,
+    /// Hosts the run's web policy denies (WS7.G). Set once when the run starts. Every action
+    /// installs the run's egress policy again, so the deny list rides along: a sub-resource,
+    /// frame or redirect to one of these hosts is refused at the browser boundary. Empty
+    /// means the policy installed is exactly the one built from the run's allowed domains.
+    pub egress_denied: Vec<String>,
 }
 
 /// Page identity captured at observation time. Deliberately tiny so carrying
@@ -333,7 +338,8 @@ impl ObservationRunner {
         self.browser
             .configure_egress_policy(
                 session,
-                BrowserEgressPolicy::from_allowed_domains(&request.constraints.allowed_domains),
+                BrowserEgressPolicy::from_allowed_domains(&request.constraints.allowed_domains)
+                    .with_denied_domains(&ctx.egress_denied),
             )
             .await?;
         if action_requires_atomic_target(&request.action)
