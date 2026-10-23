@@ -419,8 +419,22 @@ pub mod browserbase;
 pub mod browserless;
 #[cfg(feature = "chromiumoxide")]
 pub mod chromiumoxide;
-#[cfg(feature = "chromiumoxide")]
 pub mod capture_plan;
+/// WS13.6: tile-and-stitch planning and encoders (pure; no CDP call).
+pub mod stitch;
+
+/// WS13.6: a heavy-lane permit that lets one screenshot stitch tiles. The
+/// runtime takes it from the heavy semaphore only when the page needs stitching,
+/// and holds it for the one capture.
+pub struct StitchPermit {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl StitchPermit {
+    pub fn new(permit: tokio::sync::OwnedSemaphorePermit) -> Self {
+        Self { _permit: permit }
+    }
+}
 mod deadlines;
 #[cfg(feature = "chromiumoxide")]
 pub mod live_gate;
@@ -956,6 +970,31 @@ pub trait BrowserDriver: Send + Sync {
     /// WS13.3: the URL the page is on now, or `None` when the driver cannot say.
     async fn current_url(&self, _session: &BrowserSession) -> QuarryResult<Option<String>> {
         Ok(None)
+    }
+
+    /// WS13.6: whether a full-page screenshot of this page is taller than one
+    /// capture holds at its device scale, so it would need tile-and-stitch. Default:
+    /// no. The runtime asks this before it takes a heavy-lane permit.
+    async fn screenshot_needs_stitch(
+        &self,
+        _session: &BrowserSession,
+        _options: &quarry_core::capture::ScreenshotOptions,
+    ) -> QuarryResult<bool> {
+        Ok(false)
+    }
+
+    /// WS13.6: a screenshot that may stitch tiles when `stitch` holds a heavy-lane
+    /// permit. Without a permit, and on a driver that does not stitch, this is
+    /// `capture_screenshot`: the image stops at the single-capture limit.
+    async fn capture_screenshot_stitched(
+        &self,
+        session: &BrowserSession,
+        options: &quarry_core::capture::ScreenshotOptions,
+        limits: &quarry_core::capture::CaptureLimits,
+        stitch: Option<&StitchPermit>,
+    ) -> QuarryResult<quarry_core::capture::CapturedImage> {
+        let _ = stitch;
+        self.capture_screenshot(session, options, limits).await
     }
 
     /// List live tabs bound to this browser session. Default: Unsupported.

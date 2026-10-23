@@ -26,6 +26,9 @@ tempfile = "3"
 # ships Chromium). Core CDP driver only → no fetcher, no zip backend needed.
 chromiumoxide = { version = "0.9", default-features = false, optional = true }
 futures = { version = "0.3", optional = true }
+# WS13.6: the stitched PNG is streamed (png) and the stitched JPEG is encoded at the end (jpeg-encoder).
+png = "0.18"
+jpeg-encoder = "0.6"
 
 [dev-dependencies]
 wiremock = "0.6"
