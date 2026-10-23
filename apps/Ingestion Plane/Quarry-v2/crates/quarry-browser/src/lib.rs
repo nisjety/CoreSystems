@@ -36,6 +36,83 @@ pub struct BrowserEgressPolicy {
     /// non-empty grant list. Normalizing `[" "]` to `[]` must never turn a
     /// deny-all grant into allow-all authority.
     restricted: bool,
+    /// `Allowlist` (the established grant-scoped mode) or `OpenWeb` (a
+    /// human-browse grant: any public http(s) host not on `denied_domains`).
+    mode: EgressMode,
+    /// Only consulted in `OpenWeb` mode. Canonical, lower-case, dot-suffix
+    /// matched; a host equal to or under an entry is refused.
+    denied_domains: Vec<String>,
+}
+
+/// How a browser egress policy admits hosts. Default is `Allowlist`, so every
+/// existing constructor keeps its meaning.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum EgressMode {
+    #[default]
+    Allowlist,
+    /// Any public http(s) host that is not denied. Private, loopback, link-local,
+    /// single-label and cloud-metadata hosts are refused regardless of the
+    /// denied list; see `open_web_host_is_local`.
+    OpenWeb,
+}
+
+/// Upper bound on a broker grant's denied list (plan WS8.B, R-16 family).
+pub const MAX_DENIED_DOMAINS: usize = 64;
+
+/// The navigation authority a broker validation grants a run. Built only from
+/// the broker's own answer, never from the caller's requested domains.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BrokerNavPolicy {
+    /// Exact canonical host list (`policy_mode` empty or `allowlist`).
+    Allowlist { domains: Vec<String> },
+    /// Open web minus `denied` (`policy_mode` `open_web`).
+    OpenWeb { denied: Vec<String> },
+}
+
+impl BrokerNavPolicy {
+    /// Fail closed: an unknown mode, an allow-list carrying a deny list, or an
+    /// open-web grant naming allowed hosts is an error, never a fallback.
+    pub fn from_validation(
+        policy_mode: &str,
+        allowed_domains: &[String],
+        denied_domains: &[String],
+    ) -> Result<Self, String> {
+        match policy_mode {
+            "" | "allowlist" => {
+                if !denied_domains.is_empty() {
+                    return Err("allow-list browser grant carries a denied list".to_owned());
+                }
+                Ok(Self::Allowlist {
+                    domains: BrowserEgressPolicy::canonical_broker_domains(allowed_domains)?,
+                })
+            }
+            "open_web" => {
+                if !allowed_domains.is_empty() {
+                    return Err("open-web browser grant must not name allowed domains".to_owned());
+                }
+                Ok(Self::OpenWeb {
+                    denied: BrowserEgressPolicy::canonical_denied_domains(denied_domains)?,
+                })
+            }
+            _ => Err("unknown browser grant policy mode".to_owned()),
+        }
+    }
+
+    /// The egress policy the browser boundary enforces for this grant.
+    pub fn egress_policy(&self) -> BrowserEgressPolicy {
+        match self {
+            Self::Allowlist { domains } => BrowserEgressPolicy::from_allowed_domains(domains),
+            Self::OpenWeb { denied } => BrowserEgressPolicy::open_web(denied),
+        }
+    }
+
+    /// The wire name of the mode, as stored in a run checkpoint.
+    pub fn mode_name(&self) -> &'static str {
+        match self {
+            Self::Allowlist { .. } => "allowlist",
+            Self::OpenWeb { .. } => "open_web",
+        }
+    }
 }
 
 impl BrowserEgressPolicy {
@@ -49,6 +126,8 @@ impl BrowserEgressPolicy {
         Self {
             allowed_domains: Vec::new(),
             restricted: true,
+            mode: EgressMode::Allowlist,
+            denied_domains: Vec::new(),
         }
     }
 
@@ -93,7 +172,50 @@ impl BrowserEgressPolicy {
         Self {
             allowed_domains,
             restricted,
+            mode: EgressMode::Allowlist,
+            denied_domains: Vec::new(),
         }
+    }
+
+    /// An open-web egress policy: any public http(s) host except `denied`
+    /// (and except private or metadata hosts, which are always refused). The
+    /// caller validates `denied` with `canonical_denied_domains` first; this
+    /// constructor only normalises case and trims.
+    pub fn open_web(denied: &[String]) -> Self {
+        let denied_domains = denied
+            .iter()
+            .map(|domain| domain.trim().to_ascii_lowercase())
+            .filter(|domain| !domain.is_empty())
+            .collect();
+        Self {
+            allowed_domains: Vec::new(),
+            restricted: true,
+            mode: EgressMode::OpenWeb,
+            denied_domains,
+        }
+    }
+
+    /// Validate a broker's denied list for an open-web grant: empty is allowed,
+    /// at most `MAX_DENIED_DOMAINS` entries, each canonical (no wildcard, no IP
+    /// literal, at least one dot), sorted and unique. A non-canonical list is an
+    /// error, never repaired, the same rule as `canonical_broker_domains`.
+    pub fn canonical_denied_domains(domains: &[String]) -> Result<Vec<String>, String> {
+        if domains.len() > MAX_DENIED_DOMAINS {
+            return Err("browser grant denied list exceeds its bound".to_owned());
+        }
+        let mut canonical = BTreeSet::new();
+        for raw in domains {
+            let domain = raw.trim().to_ascii_lowercase();
+            if !is_canonical_broker_domain(&domain) {
+                return Err("browser grant denied list contains an invalid canonical domain".to_owned());
+            }
+            canonical.insert(domain);
+        }
+        let canonical: Vec<_> = canonical.into_iter().collect();
+        if canonical.as_slice() != domains {
+            return Err("browser grant denied list is not canonical".to_owned());
+        }
+        Ok(canonical)
     }
 
     pub fn allows_url(&self, raw: &str) -> bool {
@@ -102,6 +224,9 @@ impl BrowserEgressPolicy {
         // an inline image or use an object URL it created itself.
         if raw.starts_with("data:") || raw.starts_with("blob:") {
             return true;
+        }
+        if self.mode == EgressMode::OpenWeb {
+            return open_web_url_allowed(raw, &self.denied_domains);
         }
         if !self.restricted {
             return true;
@@ -126,6 +251,80 @@ impl BrowserEgressPolicy {
                     .strip_suffix(domain)
                     .is_some_and(|prefix| prefix.ends_with('.'))
         })
+    }
+}
+
+/// Whether an open-web policy may reach `raw`: http(s) only, a host that is
+/// not local (see `open_web_host_is_local`) and not equal to or under a denied
+/// entry.
+fn open_web_url_allowed(raw: &str, denied: &[String]) -> bool {
+    let Ok(url) = url::Url::parse(raw) else {
+        return false;
+    };
+    if !matches!(url.scheme(), "http" | "https") {
+        return false;
+    }
+    let Some(host) = url.host_str().map(|host| host.trim_end_matches('.').to_ascii_lowercase()) else {
+        return false;
+    };
+    if open_web_host_is_local(&host) {
+        return false;
+    }
+    !denied.iter().any(|domain| {
+        host == *domain
+            || host
+                .strip_suffix(domain.as_str())
+                .is_some_and(|prefix| prefix.ends_with('.'))
+    })
+}
+
+/// Hosts an open-web policy never reaches, whatever the broker's deny list says:
+/// loopback, private, link-local, unique-local, CGNAT, unspecified, multicast
+/// addresses; single-label names; local-only suffixes; and the cloud metadata
+/// names. A check on the name only: the DNS guard still resolves and checks.
+fn open_web_host_is_local(host: &str) -> bool {
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = bare.parse::<IpAddr>() {
+        return ip_is_local(ip);
+    }
+    if !bare.contains('.') {
+        return true;
+    }
+    const LOCAL_SUFFIXES: [&str; 6] = [
+        ".internal",
+        ".local",
+        ".localhost",
+        ".localdomain",
+        ".lan",
+        ".home.arpa",
+    ];
+    bare == "metadata.goog" || LOCAL_SUFFIXES.iter().any(|suffix| bare.ends_with(suffix))
+}
+
+fn ip_is_local(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let [a, b, _, _] = v4.octets();
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_multicast()
+                || a == 0
+                || (a == 100 && (64..=127).contains(&b))
+        }
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return ip_is_local(IpAddr::V4(v4));
+            }
+            let first = v6.segments()[0];
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (first & 0xfe00) == 0xfc00
+                || (first & 0xffc0) == 0xfe80
+        }
     }
 }
 
