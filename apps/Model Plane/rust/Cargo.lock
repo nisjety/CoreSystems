@@ -2348,6 +2348,7 @@ dependencies = [
  "dashmap",
  "futures",
  "hmac 0.12.1",
+ "hyper-util",
  "jsonwebtoken",
  "metrics",
  "metrics-exporter-prometheus",

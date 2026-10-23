@@ -57,6 +57,9 @@ use wiremock::{
     Mock, MockServer, ResponseTemplate,
 };
 
+#[path = "support/offline_downstreams.rs"]
+mod offline_downstreams;
+
 type MockEventStream =
     Pin<Box<dyn futures::Stream<Item = Result<OrchestrationEvent, Status>> + Send>>;
 
@@ -862,7 +865,7 @@ async fn spawn_orchestration_mock(
 fn make_state(
     orchestration_client: OrchestrationCoreServiceClient<tonic::transport::Channel>,
 ) -> AppState {
-    let mut state = AppState::new();
+    let mut state = offline_downstreams::offline_state();
     state.orchestration_client = orchestration_client;
     state
 }
@@ -1025,7 +1028,7 @@ async fn run_owner_state(
 ) -> (AppState, Arc<DynPublisher>, Arc<AtomicUsize>) {
     let publisher = Arc::new(DynPublisher::InMemory(InMemoryPublisher::new()));
     let cancel_calls = Arc::new(AtomicUsize::new(0));
-    let mut state = AppState::new();
+    let mut state = offline_downstreams::offline_state();
     state.publisher = publisher.clone();
     state.run_client = spawn_run_owner_mock(MockRunOwner {
         cancel_bearer: format!("Bearer {owner_session_token}"),
@@ -1847,13 +1850,10 @@ async fn plan_gate_harness() -> PlanGateHarness {
     let (mock, capture) = MockOrchestration::new();
     let (mut state, _publisher, _cancel_calls) = run_owner_state(&owner.session).await;
     state.orchestration_client = spawn_orchestration_mock(mock).await;
-    // The grant's durable half (`set_run_mode`) goes to session-core. Point it
-    // at a port nothing listens on, so the test never reaches a real service
-    // that happens to be running on the default local port; the route reports
-    // `persisted: false` and still answers.
-    state.session_client = mp_contracts::model_plane::v1::session_core_client::SessionCoreClient::new(
-        tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy(),
-    );
+    // The grant's durable half (`set_run_mode`) goes to session-core, which this
+    // harness does not serve: `offline_state` leaves it an offline double, so the
+    // test never reaches a real service that happens to be running on the default
+    // local port; the route reports `persisted: false` and still answers.
     let plan_mode = state.plan_mode.clone();
     PlanGateHarness {
         app: build_router(state, None),

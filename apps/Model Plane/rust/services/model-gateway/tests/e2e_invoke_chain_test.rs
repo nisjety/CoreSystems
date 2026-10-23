@@ -68,6 +68,9 @@ use wiremock::{
     Mock, MockServer, ResponseTemplate,
 };
 
+#[path = "support/offline_downstreams.rs"]
+mod offline_downstreams;
+
 type MockStream = Pin<Box<dyn futures::Stream<Item = Result<InferChunk, Status>> + Send>>;
 type MockVideoContentStream = Pin<
     Box<dyn futures::Stream<Item = Result<StreamVideoGenerationContentResponse, Status>> + Send>,
@@ -1933,6 +1936,11 @@ impl ExecutionCore for RejectingExecutionCore {
 /// deterministic refusal (`agent_dispatch_rejected`) instead of an unreachable
 /// transport error. Proven 2026-08-26 by stopping the container: the test went
 /// from failing to passing with no code change.
+///
+/// `make_state` no longer has that dependency: `offline_state` makes its default
+/// execution client an in-process double that fails the same way (`Unavailable`
+/// with a refused connect underneath) without opening a socket. This helper stays
+/// for the tests that pin that failure with a real closed port.
 async fn unreachable_execution_client() -> ExecutionCoreClient<tonic::transport::Channel> {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -2826,7 +2834,7 @@ async fn make_state(
     session_clients: SessionMockClients,
 ) -> (AppState, Arc<DynPublisher>) {
     let publisher = Arc::new(DynPublisher::InMemory(InMemoryPublisher::new()));
-    let mut state = AppState::new();
+    let mut state = offline_downstreams::offline_state();
     state.publisher = publisher.clone();
     state.inference_client = client;
     state.managed_run_client = session_clients.lifecycle;
