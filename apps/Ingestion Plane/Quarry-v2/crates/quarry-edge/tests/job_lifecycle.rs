@@ -13,7 +13,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::Response,
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use serde_json::{json, Value};
@@ -105,6 +105,7 @@ async fn spawn_control(captured: Captured) -> String {
         .route("/v1/jobs/ongoing", get(|| async { Json(json!({ "data": [] })) }))
         .route("/v1/jobs/:id/summary", get(control_summary))
         .route("/v1/jobs/:id/errors", get(control_errors))
+        .route("/v1/jobs/:id/control", post(control_job_verb))
         .route(
             "/v1/crawl/jobs",
             get(|| async { Json(json!({ "data": { "items": [], "next_cursor": null, "total_estimated": 0 } })) }),
@@ -327,4 +328,191 @@ fn job_summary_accepts_the_origin_and_phase_control_sends() {
     assert_eq!(origin.origin_type, "agent");
     assert_eq!(origin.origin_ref.as_deref(), Some("run_1"));
     assert_eq!(job.phase.as_deref(), Some("running"));
+}
+
+// ---- Job control (WS15.L2) -----------------------------------------------------
+
+/// Control's answer to a control verb: 409 for a terminal job, otherwise the job
+/// record with the request recorded (desired_seq ahead of applied_seq).
+async fn control_job_verb(
+    State(captured): State<Captured>,
+    Path(id): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> (StatusCode, Json<Value>) {
+    captured.0.lock().unwrap().push((headers, body.clone()));
+    if query.get("org_id").map(String::as_str) != Some(TEST_ORG) || id == "job_01J9FFFFFFFFFFFFFFFFFFFFFF" {
+        return (StatusCode::NOT_FOUND, Json(json!({ "data": null })));
+    }
+    if id == "job_01J9TTTTTTTTTTTTTTTTTTTTTT" {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({ "data": null, "error": { "code": "CONFLICT", "message": "the job has already ended" } })),
+        );
+    }
+    let action = body["action"].as_str().unwrap_or_default();
+    let cancelled = action == "cancel";
+    (
+        StatusCode::OK,
+        Json(json!({ "data": {
+            "id": id,
+            "org_id": TEST_ORG,
+            "kind": "crawl",
+            "status": if cancelled { "cancelled" } else { "running" },
+            "created_at": "2026-10-23T10:00:00Z",
+            "desired_state": action,
+            "desired_seq": 1,
+            "applied_seq": if cancelled { 1 } else { 0 },
+        } })),
+    )
+}
+
+/// The control verbs are on for these tests. The flag is process-wide, so every
+/// control test sets it.
+fn enable_job_control() {
+    std::env::set_var("QUARRY_EDGE__JOB_CONTROL", "1");
+}
+
+async fn send_control(addr: SocketAddr, method: reqwest::Method, path: &str) -> (u16, Value) {
+    let response = reqwest::Client::new()
+        .request(method, format!("http://{addr}{path}"))
+        .bearer_auth(TEST_BEARER)
+        .send()
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    (status, response.json().await.unwrap_or(Value::Null))
+}
+
+#[tokio::test]
+async fn cancel_is_org_checked_and_409_on_terminal() {
+    enable_job_control();
+    let addr = spawn_edge(spawn_control(Captured::default()).await, None).await;
+
+    let (status, body) = send_control(addr, reqwest::Method::DELETE, "/v1/crawl/job_01J9MMMMMMMMMMMMMMMMMMMMMM").await;
+    assert_eq!(status, 202, "{body}");
+    assert_eq!(body["data"]["job_id"], "job_01J9MMMMMMMMMMMMMMMMMMMMMM");
+    assert_eq!(body["data"]["phase"], "cancelling");
+    assert_eq!(body["data"]["control"]["desired"], "cancel");
+    assert_eq!(body["data"]["control"]["pending"], true);
+
+    let (status, body) = send_control(addr, reqwest::Method::DELETE, "/v1/crawl/job_01J9FFFFFFFFFFFFFFFFFFFFFF").await;
+    assert_eq!(status, 404, "a foreign or missing id is a 404: {body}");
+
+    let (status, body) = send_control(addr, reqwest::Method::DELETE, "/v1/crawl/job_01J9TTTTTTTTTTTTTTTTTTTTTT").await;
+    assert_eq!(status, 409, "a second cancel of an ended job is a 409: {body}");
+
+    let (status, body) = send_control(addr, reqwest::Method::POST, "/v1/batch/job_01J9MMMMMMMMMMMMMMMMMMMMMM/pause").await;
+    assert_eq!(status, 404, "a crawl id on the batch path is a 404: {body}");
+}
+
+#[tokio::test]
+async fn verbs_forward_actor_from_claims() {
+    enable_job_control();
+    let captured = Captured::default();
+    let addr = spawn_edge(spawn_control(captured.clone()).await, None).await;
+
+    let (status, body) = send_control(addr, reqwest::Method::POST, "/v1/crawl/job_01J9MMMMMMMMMMMMMMMMMMMMMM/pause").await;
+    assert_eq!(status, 202, "{body}");
+    assert_eq!(body["data"]["phase"], "pausing");
+
+    let posted = captured.0.lock().unwrap();
+    assert_eq!(posted.len(), 1, "one control request must reach control");
+    let (_, body) = &posted[0];
+    assert_eq!(body["action"], "pause");
+    assert_eq!(body["actor"], "user_placeholder", "the actor comes from the verified claims");
+    assert_eq!(body["actor_type"], "user");
+}
+
+#[tokio::test]
+async fn service_token_cannot_control() {
+    async fn ok() -> &'static str {
+        "ok"
+    }
+    async fn as_model_gateway(mut req: Request, next: Next) -> Response {
+        req.extensions_mut().insert(Claims {
+            sub: "service:model-gateway".into(),
+            iss: "auth-core".into(),
+            exp: i64::MAX,
+            org_id: TEST_ORG.into(),
+            user_id: "service:model-gateway".into(),
+            principal_type: Some("service".into()),
+            service_id: Some("service:model-gateway".into()),
+            nbf: None,
+            aud: None,
+            scopes: vec!["scrape:read".into(), "browser:execute".into()],
+            zdr: Some(true),
+        });
+        next.run(req).await
+    }
+    let app = Router::new()
+        .route("/v1/crawl/:id", delete(ok))
+        .route("/v1/crawl/:id/pause", post(ok))
+        .route("/v1/crawl/:id/resume", post(ok))
+        .route("/v1/batch/:id", delete(ok))
+        .layer(middleware::from_fn(require_service_route_scope))
+        .layer(middleware::from_fn(as_model_gateway));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    for (method, path) in [
+        (reqwest::Method::DELETE, "/v1/crawl/job_01J9AAAAAAAAAAAAAAAAAAAAAA"),
+        (reqwest::Method::POST, "/v1/crawl/job_01J9AAAAAAAAAAAAAAAAAAAAAA/pause"),
+        (reqwest::Method::POST, "/v1/crawl/job_01J9AAAAAAAAAAAAAAAAAAAAAA/resume"),
+        (reqwest::Method::DELETE, "/v1/batch/job_01J9AAAAAAAAAAAAAAAAAAAAAA"),
+    ] {
+        let status = reqwest::Client::new()
+            .request(method, format!("http://{addr}{path}"))
+            .send()
+            .await
+            .unwrap()
+            .status();
+        assert_eq!(status.as_u16(), 403, "{path} must be default-deny for a service principal");
+    }
+}
+
+/// A ZDR user may cancel a job (the verb keeps no content), but the error URLs of
+/// the same job stay behind the ZDR floor.
+#[tokio::test]
+async fn zdr_caller_can_cancel_but_not_read_errors() {
+    enable_job_control();
+    async fn as_zdr_user(mut req: Request, next: Next) -> Response {
+        req.extensions_mut().insert(Claims {
+            sub: "user_placeholder".into(),
+            iss: "auth-core".into(),
+            exp: i64::MAX,
+            org_id: TEST_ORG.into(),
+            user_id: "user_placeholder".into(),
+            principal_type: Some("user".into()),
+            service_id: None,
+            nbf: None,
+            aud: None,
+            scopes: Vec::new(),
+            zdr: Some(true),
+        });
+        next.run(req).await
+    }
+    let (tx, mut rx) = mpsc::channel(64);
+    tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    let driver = Arc::new(StaticDriver::new(Duration::from_secs(5), "quarry-test").unwrap());
+    let state = AppState {
+        control_base_url: spawn_control(Captured::default()).await,
+        ..support::base_state(driver, EventSink::new(tx))
+    };
+    let app = Router::new()
+        .route("/v1/crawl/:id", delete(quarry_edge::job_lifecycle_routes::cancel_crawl))
+        .route("/v1/crawl/:id/errors", get(quarry_edge::job_lifecycle_routes::crawl_errors))
+        .layer(middleware::from_fn(as_zdr_user))
+        .with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let (status, body) = send_control(addr, reqwest::Method::DELETE, "/v1/crawl/job_01J9MMMMMMMMMMMMMMMMMMMMMM").await;
+    assert_eq!(status, 202, "a ZDR caller can cancel: {body}");
+
+    let (status, body) = send_control(addr, reqwest::Method::GET, "/v1/crawl/job_01J9MMMMMMMMMMMMMMMMMMMMMM/errors").await;
+    assert_eq!(status, 403, "error URLs stay behind the ZDR floor: {body}");
 }
