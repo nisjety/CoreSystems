@@ -128,6 +128,8 @@ impl TestSite {
             .route("/dashboard", get(dashboard))
             .route("/search", get(search))
             .route("/secrets-lab", get(secrets_lab))
+            .route("/secrets-lab/frame", get(secrets_lab_frame))
+            .route("/secrets-lab/scrolled", get(secrets_lab_scrolled))
             .with_state(state)
     }
 }
@@ -240,6 +242,36 @@ async fn secrets_lab(State(state): State<SiteState>) -> Html<String> {
 <label for="tel">Phone</label><input id="tel" type="tel" value="+4799999999">
 <label for="otp">Verification code</label><input id="otp" autocomplete="one-time-code">
 <label for="plain">Visible</label><input id="plain" value="visible-text">
+<iframe id="lab-frame" src="/secrets-lab/frame" width="320" height="80" style="border:1px solid #888"></iframe>
+</body></html>"#
+    ))
+}
+
+/// WS12.S5: the same-origin iframe of `/secrets-lab`: one password field with a
+/// value, so the screenshot scan has to add the frame offset to find it.
+async fn secrets_lab_frame(State(state): State<SiteState>) -> Html<String> {
+    record(&state, "GET /secrets-lab/frame").await;
+    let canary = concat!("Fr4me", "P@ss-0451");
+    Html(format!(
+        r#"<!doctype html><html lang="en"><head><title>Secrets lab frame</title></head>
+<body style="margin:8px"><label for="fpw">Frame password</label>
+<input id="fpw" type="password" value="{canary}" style="font-size:28px;width:240px">
+</body></html>"#
+    ))
+}
+
+/// WS12.S5: a page whose password field sits far below the first screen, so a
+/// viewport screenshot taken after scrolling to it needs the scroll offset to find
+/// the field in the image. The field also has a large font so a leak is readable.
+async fn secrets_lab_scrolled(State(state): State<SiteState>) -> Html<String> {
+    record(&state, "GET /secrets-lab/scrolled").await;
+    let canary = concat!("Scr0ll", "P@ss-0451");
+    Html(format!(
+        r#"<!doctype html><html lang="en"><head><title>Secrets lab scrolled</title></head>
+<body style="margin:0"><div style="height:1800px;background:#eef">spacer</div>
+<label for="spw">Password</label>
+<input id="spw" type="password" value="{canary}" style="font-size:32px;width:360px">
+<div style="height:600px"></div>
 </body></html>"#
     ))
 }

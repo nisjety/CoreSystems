@@ -28,7 +28,7 @@ use quarry_core::redaction::action::{redacted_for_record, RecordBranch, RecordPo
 use quarry_core::redaction::field::{mask_with, Classification};
 use quarry_core::redaction::{
     self, redact_json_with, redact_text_with, redact_url_with, FieldKind, Mode, ProbeState,
-    Profile, RedactionStamp, Tally,
+    Profile, RedactionStamp, ScreenshotState, Tally,
 };
 use serde_json::Value;
 
@@ -54,6 +54,29 @@ fn classification(kind: FieldKind) -> Classification {
     }
 }
 
+/// WS12.S5: what happened to the screenshot of one observation. Counts only: no
+/// rectangle, no offset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScreenshotReport {
+    pub state: ScreenshotState,
+    pub rects: u32,
+    pub oopif_frames: u32,
+    pub mask_ms: u32,
+}
+
+impl ScreenshotReport {
+    /// The report of one masked (or withheld) screenshot.
+    #[must_use]
+    pub fn of(masked: &quarry_browser::MaskedScreenshot) -> Self {
+        Self {
+            state: masked.state,
+            rects: u32::try_from(masked.rects.len()).unwrap_or(u32::MAX),
+            oopif_frames: masked.oopif_frames,
+            mask_ms: masked.mask_ms,
+        }
+    }
+}
+
 /// Masks the parts of one observation and counts what it masked.
 #[derive(Debug)]
 pub struct Redactor {
@@ -61,6 +84,8 @@ pub struct Redactor {
     tally: Tally,
     /// What the driver's own masking pass reported for the native projection.
     projection: Option<ProjectionRedaction>,
+    /// What the screenshot mask reported (WS12.S5); `None` when no screenshot was taken.
+    screenshot: Option<ScreenshotReport>,
 }
 
 impl Default for Redactor {
@@ -83,7 +108,13 @@ impl Redactor {
             mode,
             tally: Tally::new(),
             projection: None,
+            screenshot: None,
         }
+    }
+
+    /// Record what happened to this observation's screenshot.
+    pub fn screenshot(&mut self, report: ScreenshotReport) {
+        self.screenshot = Some(report);
     }
 
     /// Free text returned to a caller: the high-confidence shapes only.
@@ -249,6 +280,12 @@ impl Redactor {
             stamp.probe_ms = projection.probe_ms;
         } else {
             stamp.probe = ProbeState::Skipped;
+        }
+        if let Some(report) = &self.screenshot {
+            stamp.screenshot = report.state;
+            stamp.rects = report.rects;
+            stamp.oopif_frames = report.oopif_frames;
+            stamp.mask_ms = report.mask_ms;
         }
         stamp
     }

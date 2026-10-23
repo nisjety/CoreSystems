@@ -32,7 +32,7 @@ use serde_json::{json, Value};
 use crate::artifact_store::ArtifactStore;
 use crate::challenge::{self, BlockEpisodes, ChallengeConfig, ChallengeInput, ClassifierMode, EnforceMode};
 use crate::events::EventSink;
-use crate::observation_redaction::{self, Redactor};
+use crate::observation_redaction::{self, Redactor, ScreenshotReport};
 use crate::vision::{VisualChangeArtifact, VisualObservationInput, VisualObservationProcessor};
 
 pub struct ObservationRunner {
@@ -408,6 +408,8 @@ impl ObservationRunner {
         }
 
         let mut screenshot_artifact_id: Option<ArtifactKind> = None;
+        // WS12.S5: what the screenshot mask did (counts only), for the stamp.
+        let mut screenshot_report: Option<ScreenshotReport> = None;
         let mut visual_observation_artifact_id: Option<ArtifactKind> = None;
         let mut download_artifact_id: Option<ArtifactKind> = None;
         let policy_denials: Vec<String> = Vec::new();
@@ -526,7 +528,15 @@ impl ObservationRunner {
                     );
                 }
                 AgentAction::Screenshot { full_page } => {
-                    let bytes = self.browser.screenshot(session, *full_page).await?;
+                    // WS12.S5: a withheld screenshot is a `SecurityBlocked` error
+                    // (403) with the same reason the observation note carries.
+                    let masked = self.browser.screenshot_masked(session, *full_page).await?;
+                    screenshot_report = Some(ScreenshotReport::of(&masked));
+                    let bytes = masked.bytes.ok_or_else(|| {
+                        quarry_browser::MaskedScreenshot::withheld_error(
+                            masked.note.unwrap_or("screenshot_withheld:sensitive_field_unresolved"),
+                        )
+                    })?;
                     let payload = bytes.to_vec();
                     screenshot_artifact_id = self
                         .put_artifact_if_allowed(
@@ -682,21 +692,34 @@ impl ObservationRunner {
         }
 
         if screenshot_artifact_id.is_none() {
-            if let Ok(bytes) = self.browser.screenshot(session, false).await {
-                let payload = bytes.to_vec();
-                if let Ok(id) = self
-                    .put_artifact_if_allowed(
-                        request.zdr,
-                        run_id,
-                        &ctx.page_hash,
-                        "screenshot",
-                        payload.clone(),
-                    )
-                    .await
-                {
-                    screenshot_artifact_id = id;
+            if let Ok(masked) = self.browser.screenshot_masked(session, false).await {
+                screenshot_report = Some(ScreenshotReport::of(&masked));
+                if let Some(bytes) = masked.bytes {
+                    let payload = bytes.to_vec();
+                    if let Ok(id) = self
+                        .put_artifact_if_allowed(
+                            request.zdr,
+                            run_id,
+                            &ctx.page_hash,
+                            "screenshot",
+                            payload.clone(),
+                        )
+                        .await
+                    {
+                        screenshot_artifact_id = id;
+                    }
+                    current_screenshot = Some(payload);
+                } else {
+                    // WS12.S5: withheld (`screenshot_withheld:sensitive_field_unresolved`
+                    // and the other closed causes). No artifact, no sidecar input, and
+                    // no stale previous frame for the next step to diff against.
+                    ctx.previous_screenshot = None;
+                    // zdr-log-ok: a closed note string, no page-derived value
+                    tracing::info!(
+                        note = masked.note.unwrap_or("screenshot_withheld"),
+                        "quarry.screenshot.withheld"
+                    );
                 }
-                current_screenshot = Some(payload);
             }
         }
 
@@ -1023,6 +1046,9 @@ impl ObservationRunner {
         let observation_url = redactor.live_url(&ctx.current_url);
         let mut console_summary = console_summary_from_devtools(&devtools_events);
         redactor.console(&mut console_summary);
+        if let Some(report) = screenshot_report {
+            redactor.screenshot(report);
+        }
         let redaction_stamp = redactor.stamp();
         if redaction_stamp.values_masked > 0 {
             // zdr-log-ok: counts and the process mode only, no page-derived value
@@ -3387,6 +3413,8 @@ mod tests {
         /// When set, `back` succeeds and the page then reports this URL.
         back_lands_on: Option<&'static str>,
         landed: std::sync::atomic::AtomicBool,
+        /// WS12.S5: what `screenshot_masked` reports; unset means an unscanned image.
+        masked_screenshot: Option<quarry_browser::MaskedScreenshot>,
     }
 
     impl ContentDriver {
@@ -3489,6 +3517,16 @@ mod tests {
             _full_page: bool,
         ) -> QuarryResult<Bytes> {
             Ok(Bytes::new())
+        }
+        async fn screenshot_masked(
+            &self,
+            _session: &quarry_browser::BrowserSession,
+            _full_page: bool,
+        ) -> QuarryResult<quarry_browser::MaskedScreenshot> {
+            Ok(match &self.masked_screenshot {
+                Some(masked) => masked.clone(),
+                None => quarry_browser::MaskedScreenshot::unmasked(Bytes::new()),
+            })
         }
         async fn pdf(&self, _session: &quarry_browser::BrowserSession) -> QuarryResult<Bytes> {
             Ok(Bytes::new())
@@ -3947,5 +3985,174 @@ mod tests {
         assert!(artifact.change_artifact_id.is_some());
         assert!(artifact.related_artifacts.contains_key("visual_change"));
         assert!(artifact.related_artifacts.contains_key("rendered_palette"));
+    }
+
+    fn mask_test_lease() -> BrowserLease {
+        BrowserLease {
+            lease_id: Id::new(),
+            profile_id: Id::new(),
+            session_affinity_key: "test".into(),
+            proxy_affinity: ProxyAffinity {
+                pool: "default".into(),
+                sticky_key: None,
+            },
+            ttl_s: 60,
+            capabilities: vec![],
+            artifact_bucket: "test".into(),
+            persist_profile: false,
+            viewport: None,
+            org_id: "org_a".into(),
+        }
+    }
+
+    fn mask_test_request(lease: &BrowserLease, action: AgentAction) -> AgentActionRequest {
+        AgentActionRequest {
+            run_id: Id::new(),
+            lease_id: lease.lease_id.clone(),
+            action,
+            instruction: None,
+            constraints: AgentConstraints {
+                max_steps: 3,
+                allowed_domains: vec![],
+                max_runtime_s: None,
+                max_cost_usd: None,
+            },
+            zdr: ZdrMode::Off,
+            extraction_profile: None,
+        }
+    }
+
+    fn mask_test_ctx() -> ObservationContext {
+        ObservationContext {
+            step: 1,
+            current_url: "https://example.com".into(),
+            page_hash: "blake3:page".into(),
+            previous_screenshot: Some(b"previous".to_vec()),
+            previous_observation: None,
+            previous_network_keys: vec![],
+            last_egress_sequence: 0,
+            active_snapshot: None,
+            observed_action_count: 0,
+            challenge_observation_count: 0,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn withheld_screenshot_writes_no_artifact_and_skips_the_sidecar() {
+        let store = Arc::new(InMemoryStore::new());
+        let browser = Arc::new(ContentDriver {
+            html: b"<html><body><p>hello</p></body></html>",
+            masked_screenshot: Some(quarry_browser::MaskedScreenshot::withheld(
+                quarry_browser::screenshot_mask::Withheld::SensitiveFieldUnresolved,
+                1,
+                7,
+            )),
+            ..Default::default()
+        });
+        let runner = ObservationRunner {
+            browser: browser.clone(),
+            artifacts: Some(store.clone()),
+            events: None,
+            visual_processor: Some(Arc::new(MockVisualProcessor)),
+            org_id: "org_a".into(),
+        };
+        let lease = mask_test_lease();
+        let session = browser.acquire(&lease).await.unwrap();
+        let request = mask_test_request(&lease, AgentAction::Wait { ms: 0 });
+        let mut ctx = mask_test_ctx();
+
+        let observation = runner.execute(&request, &session, &mut ctx).await.unwrap();
+
+        assert!(observation.screenshot_artifact_id.is_none());
+        assert!(observation.visual_observation_artifact_id.is_none());
+        let stamp = observation.redaction.expect("a redaction stamp");
+        assert_eq!(stamp.screenshot, quarry_core::redaction::ScreenshotState::Withheld);
+        assert_eq!((stamp.rects, stamp.oopif_frames, stamp.mask_ms), (0, 1, 7));
+        assert!(
+            ctx.previous_screenshot.is_none(),
+            "a withheld frame leaves no stale previous frame"
+        );
+        let listed = store
+            .list("org_a", &quarry_core::pagination::ListFilter::default())
+            .await
+            .unwrap();
+        for item in &listed.items {
+            assert!(
+                !item.kind.as_str().starts_with("screenshot")
+                    && item.kind.as_str() != "visual_observation"
+                    && item.kind.as_str() != "page_image_clean",
+                "a withheld screenshot left an artifact of kind {}",
+                item.kind.as_str()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_masked_screenshot_is_stored_and_stamped() {
+        let store = Arc::new(InMemoryStore::new());
+        let mut masked = quarry_browser::MaskedScreenshot::unmasked(Bytes::from_static(b"png"));
+        masked.state = quarry_core::redaction::ScreenshotState::Masked;
+        masked.rects = vec![
+            quarry_browser::screenshot_mask::PixelRect { x: 1, y: 2, w: 3, h: 4 },
+            quarry_browser::screenshot_mask::PixelRect { x: 5, y: 6, w: 7, h: 8 },
+        ];
+        masked.mask_ms = 9;
+        let browser = Arc::new(ContentDriver {
+            html: b"<html><body><p>hello</p></body></html>",
+            masked_screenshot: Some(masked),
+            ..Default::default()
+        });
+        let runner = ObservationRunner {
+            browser: browser.clone(),
+            artifacts: Some(store.clone()),
+            events: None,
+            visual_processor: None,
+            org_id: "org_a".into(),
+        };
+        let lease = mask_test_lease();
+        let session = browser.acquire(&lease).await.unwrap();
+        let request = mask_test_request(&lease, AgentAction::Wait { ms: 0 });
+        let mut ctx = mask_test_ctx();
+
+        let observation = runner.execute(&request, &session, &mut ctx).await.unwrap();
+
+        assert!(observation.screenshot_artifact_id.is_some());
+        let stamp = observation.redaction.expect("a redaction stamp");
+        assert_eq!(stamp.screenshot, quarry_core::redaction::ScreenshotState::Masked);
+        assert_eq!((stamp.rects, stamp.mask_ms), (2, 9));
+    }
+
+    #[tokio::test]
+    async fn an_explicit_screenshot_action_is_refused_when_the_image_is_withheld() {
+        let browser = Arc::new(ContentDriver {
+            html: b"<html><body><p>hello</p></body></html>",
+            masked_screenshot: Some(quarry_browser::MaskedScreenshot::withheld(
+                quarry_browser::screenshot_mask::Withheld::SensitiveFieldUnresolved,
+                0,
+                1,
+            )),
+            ..Default::default()
+        });
+        let runner = ObservationRunner {
+            browser: browser.clone(),
+            artifacts: None,
+            events: None,
+            visual_processor: None,
+            org_id: "org_a".into(),
+        };
+        let lease = mask_test_lease();
+        let session = browser.acquire(&lease).await.unwrap();
+        let request = mask_test_request(&lease, AgentAction::Screenshot { full_page: false });
+        let mut ctx = mask_test_ctx();
+
+        let error = runner
+            .execute(&request, &session, &mut ctx)
+            .await
+            .expect_err("a withheld screenshot is an error");
+
+        assert_eq!(error.code, ErrorCode::SecurityBlocked);
+        let reason = error.details.as_ref().and_then(|d| d["reason"].as_str());
+        assert_eq!(reason, Some("screenshot_withheld:sensitive_field_unresolved"));
     }
 }
