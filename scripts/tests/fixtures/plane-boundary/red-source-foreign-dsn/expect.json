@@ -1,0 +1,9 @@
+{
+  "exit": 1,
+  "contains": [
+    "controlplane-postgres",
+    "belongs to Control Plane",
+    "legacy-monolith-db",
+    "shared host"
+  ]
+}

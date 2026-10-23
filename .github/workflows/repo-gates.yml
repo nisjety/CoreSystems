@@ -73,3 +73,17 @@ jobs:
             echo "::notice::no previous commit to compare with (new branch); checking growth only"
             python3 scripts/gates/size-ratchet.py --check
           fi
+  plane-boundary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: plane boundary gate unit tests
+        run: python3 -m unittest scripts/tests/test_plane_boundary.py
+      # Advisory for the first three runs (rollout convention): record the failing
+      # set, then drop continue-on-error so the gate blocks.
+      - name: plane boundary gate
+        continue-on-error: true
+        run: python3 scripts/gates/plane-boundary.py --check

@@ -1,0 +1,2 @@
+[dependencies]
+mp-ids = { path = "../../crates/mp-ids" }
