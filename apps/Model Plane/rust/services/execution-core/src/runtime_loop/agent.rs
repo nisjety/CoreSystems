@@ -911,6 +911,9 @@ async fn offered_tools(
     // A waived route keeps nothing and runs no MCP call, exactly like a ZDR run: the same
     // flag, so no listing, no token and no lookup is made for either.
     let retention_bound = req.zdr || waived;
+    // No verified browser bearer reaches this loop yet: the gateway forwards one only from
+    // WS21-S2. Until then no run is offered a browser tool, whatever the switch says.
+    let browser_bearer = false;
     let (defs, derivable) = merged_tool_defs_governed(
         &req.run_id,
         &req.org_id,
@@ -919,6 +922,7 @@ async fn offered_tools(
         capability_policy,
         space_scoped,
         retention_bound,
+        browser_bearer,
         governance,
     )
     .await;
@@ -1034,6 +1038,7 @@ async fn merged_tool_defs_with_sources(
         capability_policy,
         space_scoped,
         zdr,
+        false,
         governance_from_env(),
     )
     .await
@@ -1057,17 +1062,21 @@ fn governance_from_env() -> Governance<'static> {
         mode,
         cap: crate::mcp_gateway::tool_cap_from_env(),
         source: source.map(|governed| governed as &dyn crate::mcp_gateway::GovernedSource),
+        browser_do: do_browser_enabled(),
     }
 }
 
 /// What a run's offer is governed by: the tool class gate, how far MCP reaches, the
 /// most MCP tools offered, and where the gateway's listing and the registry's
-/// bindings come from. Separate from the environment so a test can name all four.
+/// bindings come from, and whether the browser tools are switched on. Separate from the
+/// environment so a test can name all five.
 struct Governance<'a> {
     gate: crate::capability_policy::ToolClassGate,
     mode: crate::mcp_gateway::McpDoTools,
     cap: usize,
     source: Option<&'a dyn crate::mcp_gateway::GovernedSource>,
+    /// Whether the Do loop's browser tools are switched on (`EXECUTION_DO_BROWSER_ENABLED`).
+    browser_do: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1084,6 +1093,9 @@ async fn merged_tool_defs_governed(
     // (which can itself trigger an observation write), no MCP name resolved or prefetched.
     // The built-in names are still resolved when the gate reads classes (see below).
     zdr: bool,
+    // The run's verified browser bearer, the only thing that names a broker grant. No run
+    // carries one before WS21-S2, so every caller passes false until then.
+    browser_bearer: bool,
     governance: Governance<'_>,
 ) -> (Vec<pb::ToolDefinition>, bool) {
     use crate::capability_policy::ToolClassGate;
@@ -1096,7 +1108,13 @@ async fn merged_tool_defs_governed(
         mode,
         cap,
         source,
+        browser_do,
     } = governance;
+    // The browser tools are appended after `base_len`, so the length check below already
+    // reads the run as not derivable: a park resume rebuilds the base set alone.
+    if browser_tools_offered(browser_bearer, zdr, browser_do) {
+        tools.extend(browser_tool_defs());
+    }
     // The ungoverned listing, exactly as it was. A zero-retention run is not asked:
     // nothing it could be offered may run.
     if mode == McpDoTools::Off && !zdr {
@@ -1131,11 +1149,20 @@ async fn merged_tool_defs_governed(
     if governed_mode != McpDoTools::Off || gate != ToolClassGate::Off {
         match source {
             Some(source) => {
-                // Built-in classes are learned only for a gate that reads them.
+                // Built-in classes are learned only for a gate that reads them. The browser
+                // family is learned whether or not this run is offered it, as it always was:
+                // a switched-off deployment asks the registry for the same built-in names.
                 let builtin: Vec<String> = if gate == ToolClassGate::Off {
                     Vec::new()
                 } else {
-                    tools.iter().map(|tool| tool.name.clone()).collect()
+                    let mut names: Vec<String> =
+                        tools.iter().map(|tool| tool.name.clone()).collect();
+                    for def in browser_tool_defs() {
+                        if !names.contains(&def.name) {
+                            names.push(def.name);
+                        }
+                    }
+                    names
                 };
                 let resolved = crate::mcp_gateway::resolve_run_offer(
                     source,
@@ -1237,7 +1264,10 @@ fn append_untrusted_tool_defs(
     untrusted_tools: &[pb::ToolDefinition],
 ) {
     for tool in untrusted_tools {
-        if tool.name.trim().is_empty() || is_server_resolved_tool_name(&tool.name) {
+        if tool.name.trim().is_empty()
+            || is_server_resolved_tool_name(&tool.name)
+            || is_browser_tool_name(&tool.name)
+        {
             continue;
         }
         if !tools.iter().any(|existing| existing.name == tool.name) {
@@ -5717,7 +5747,7 @@ mod system_prompt_composition {
 
 #[cfg(test)]
 mod capability_binding_contract {
-    use super::{offered_tool_defs, pb, process_tool_defs};
+    use super::{browser_tool_defs, offered_tool_defs, pb, process_tool_defs};
     use crate::capability_policy::trusted_capability_id;
     use std::path::Path;
 
@@ -5726,12 +5756,13 @@ mod capability_binding_contract {
     /// use through this mapping.
     const EXPECTED_UNBOUND: &[&str] = &[];
 
-    /// Both sets, because the conditional one is exactly where an unbound
+    /// Every set, because the conditional ones are exactly where an unbound
     /// tool would hide: the process family is offered only for a Space-scoped
     /// run on a host with the flag set, so a missing binding would surface in
     /// production for a subset of deployments and never in a default one.
     fn every_offerable_tool_def() -> Vec<pb::ToolDefinition> {
         let mut all = offered_tool_defs();
+        all.extend(browser_tool_defs());
         all.extend(process_tool_defs());
         all
     }
@@ -6128,16 +6159,6 @@ fn offered_tool_defs() -> Vec<pb::ToolDefinition> {
             description: "ALIAS for web_fetch — same Quarry extract boundary, same cleaned text. Kept so existing plans that name it keep working. Prefer web_fetch; there is no case where this returns anything different.".to_owned(),
             parameters_json: r#"{"type":"object","properties":{"url":{"type":"string","description":"Absolute http(s) URL to read"}},"required":["url"]}"#.to_owned(),
         },
-        pb::ToolDefinition {
-            name: "browser.observe".to_owned(),
-            description: "Observe an EXISTING Quarry browser run using a BrowserBroker-issued grant, returning its current Quarry evidence, opaque accessibility snapshot refs, dialogs, redacted network/egress receipts, and telemetry. This cannot open a browser or navigate; use only run and lease ids provided by the approved browser workflow.".to_owned(),
-            parameters_json: r#"{"type":"object","additionalProperties":false,"properties":{"grant_id":{"type":"string","description":"Opaque active BrowserBroker grant id"},"quarry_run_id":{"type":"string","description":"Existing Quarry browser run id"},"lease_id":{"type":"string","description":"Existing Quarry browser lease id"}},"required":["grant_id","quarry_run_id","lease_id"]}"#.to_owned(),
-        },
-        pb::ToolDefinition {
-            name: "browser.act".to_owned(),
-            description: "Execute ONE governed action against an EXISTING Quarry browser run. Use only an exact snapshot_id, generation, and @e-style ref returned by browser.observe; never invent refs. A target with child frame_id requires the matching frame_*_ref action and exact frame id. No URLs, CSS selectors, JavaScript, raw CDP, coordinates, or filesystem paths are accepted. Dialog replies and artifact transfers require their fresh scope-specific approval grant and Quarry remains the final enforcer. This can have real external effects and requires human approval under ask posture.".to_owned(),
-            parameters_json: browser_act_parameters_json(),
-        },
         // Sandboxed code execution. Offered for the same reason as delegation
         // below — the purpose-lock rejects any tool absent from this list, so
         // without a definition here a `code_interpreter` call could never be
@@ -6246,12 +6267,59 @@ fn offered_tool_defs() -> Vec<pb::ToolDefinition> {
     tools
 }
 
+/// The browser tools a Do run may be offered. They act on an EXISTING Quarry browser run
+/// through a broker grant, so [`merged_tool_defs_governed`] offers them only to a run that
+/// [`browser_tools_offered`] admits. Kept out of [`offered_tool_defs`] so no other run is
+/// shown a tool it cannot use.
+fn browser_tool_defs() -> Vec<pb::ToolDefinition> {
+    vec![
+        pb::ToolDefinition {
+            name: "browser.observe".to_owned(),
+            description: "Observe an EXISTING Quarry browser run using a BrowserBroker-issued grant, returning its current Quarry evidence, opaque accessibility snapshot refs, dialogs, redacted network/egress receipts, and telemetry. This cannot open a browser or navigate; use only run and lease ids provided by the approved browser workflow.".to_owned(),
+            parameters_json: r#"{"type":"object","additionalProperties":false,"properties":{"grant_id":{"type":"string","description":"Opaque active BrowserBroker grant id"},"quarry_run_id":{"type":"string","description":"Existing Quarry browser run id"},"lease_id":{"type":"string","description":"Existing Quarry browser lease id"}},"required":["grant_id","quarry_run_id","lease_id"]}"#.to_owned(),
+        },
+        pb::ToolDefinition {
+            name: "browser.act".to_owned(),
+            description: "Execute ONE governed action against an EXISTING Quarry browser run. Use only an exact snapshot_id, generation, and @e-style ref returned by browser.observe; never invent refs. A target with child frame_id requires the matching frame_*_ref action and exact frame id. No URLs, CSS selectors, JavaScript, raw CDP, coordinates, or filesystem paths are accepted. Dialog replies and artifact transfers require their fresh scope-specific approval grant and Quarry remains the final enforcer. This can have real external effects and requires human approval under ask posture.".to_owned(),
+            parameters_json: browser_act_parameters_json(),
+        },
+    ]
+}
+
+/// The deployment switch for the Do loop's browser tools, read on every offer.
+const DO_BROWSER_ENABLED_ENV: &str = "EXECUTION_DO_BROWSER_ENABLED";
+
+/// Whether the deployment has switched the Do loop's browser tools on. Only the value `1`
+/// enables it: an unset, empty or other value leaves every run without them.
+fn do_browser_enabled() -> bool {
+    parse_do_browser_enabled(std::env::var(DO_BROWSER_ENABLED_ENV).ok().as_deref())
+}
+
+fn parse_do_browser_enabled(raw: Option<&str>) -> bool {
+    raw == Some("1")
+}
+
+/// Whether a run is offered the browser tools. It must carry a verified browser bearer, the
+/// only thing that names a broker grant; it must not be zero-retention; and the deployment
+/// must have switched the family on.
+fn browser_tools_offered(browser_bearer: bool, zdr: bool, switched_on: bool) -> bool {
+    browser_bearer && !zdr && switched_on
+}
+
+/// The browser tool names belong to the built-in family. A caller or an MCP server that
+/// declares one is refused at the offer, so it never reaches the purpose-lock allowlist or a
+/// dispatch the browser gate did not offer.
+fn is_browser_tool_name(name: &str) -> bool {
+    name.trim().starts_with("browser.")
+}
+
 /// Every tool name the loop can offer, for the name-based classification golden
 /// in `permission`. The offer lists stay private; only their names leave here.
 #[cfg(test)]
 pub(crate) fn offerable_tool_names() -> Vec<String> {
     offered_tool_defs()
         .into_iter()
+        .chain(browser_tool_defs())
         .chain(process_tool_defs())
         .map(|def| def.name)
         .collect()
@@ -7894,6 +7962,7 @@ mod tests {
             mode,
             cap,
             source: Some(source as &dyn crate::mcp_gateway::GovernedSource),
+            browser_do: false,
         }
     }
 
@@ -7911,6 +7980,7 @@ mod tests {
             policy,
             false,
             zdr,
+            false,
             governance,
         )
         .await;
@@ -9209,6 +9279,13 @@ mod tests {
             Err(Status::unimplemented(
                 "record_scheduled_step_receipt not used",
             ))
+        }
+
+        async fn record_scheduled_run_result(
+            &self,
+            _: Request<pb::RecordScheduledRunResultRequest>,
+        ) -> Result<Response<pb::RecordScheduledRunResultResponse>, Status> {
+            Err(Status::unimplemented("record_scheduled_run_result not used"))
         }
 
         async fn append_message(
@@ -18117,7 +18194,8 @@ mod tests {
     /// entry wins (or panics on construction).
     #[test]
     fn offered_tool_defs_has_no_duplicate_tool_names() {
-        let defs = offered_tool_defs();
+        let mut defs = offered_tool_defs();
+        defs.extend(browser_tool_defs());
         let mut names: Vec<&str> = defs.iter().map(|def| def.name.as_str()).collect();
         let before_dedup = names.len();
         names.sort_unstable();
@@ -18128,6 +18206,133 @@ mod tests {
             "offered_tool_defs() advertises a duplicate tool name — the model is handed \
              the same name twice, possibly with conflicting docs"
         );
+    }
+
+    /// The browser tools are not in the always-offered catalogue, so a run that is not
+    /// browser-scoped is never shown one. The two are the family, in this order.
+    #[test]
+    fn the_always_offered_catalogue_carries_no_browser_tool() {
+        assert!(offered_tool_defs()
+            .iter()
+            .all(|def| !def.name.starts_with("browser.")));
+        let names: Vec<String> = browser_tool_defs().into_iter().map(|def| def.name).collect();
+        assert_eq!(names, ["browser.observe", "browser.act"]);
+    }
+
+    /// Only the literal `1` switches the browser tools on. The compose default is `0`, and
+    /// any other spelling, `true` included, must leave every run without them.
+    #[test]
+    fn only_the_value_one_switches_the_browser_tools_on() {
+        assert!(parse_do_browser_enabled(Some("1")));
+        for raw in [None, Some(""), Some("0"), Some("true"), Some(" 1")] {
+            assert!(
+                !parse_do_browser_enabled(raw),
+                "{raw:?} must not switch the browser tools on"
+            );
+        }
+    }
+
+    /// Each of the three conditions is needed on its own.
+    #[test]
+    fn browser_tools_need_a_bearer_outside_zdr_and_the_switch() {
+        assert!(browser_tools_offered(true, false, true));
+        for (bearer, zdr, switched_on) in [
+            (false, false, true),
+            (true, true, true),
+            (true, false, false),
+        ] {
+            assert!(
+                !browser_tools_offered(bearer, zdr, switched_on),
+                "bearer={bearer} zdr={zdr} switched_on={switched_on} must not offer them"
+            );
+        }
+    }
+
+    /// The offer for one run: the browser tool names it carries, and whether its set is
+    /// derivable. Governance is named directly, so the switch does not read the environment.
+    async fn browser_offer(
+        bearer: bool,
+        zdr: bool,
+        switched_on: bool,
+        declared: &[pb::ToolDefinition],
+    ) -> (Vec<String>, bool) {
+        use crate::capability_policy::ToolClassGate;
+        use crate::mcp_gateway::McpDoTools;
+        let (tools, derivable) = merged_tool_defs_governed(
+            "run-browser-offer",
+            "org-browser",
+            "user-browser",
+            declared,
+            &ALLOW_CAPABILITY_POLICY,
+            false,
+            zdr,
+            bearer,
+            Governance {
+                gate: ToolClassGate::Off,
+                mode: McpDoTools::Off,
+                cap: 0,
+                source: None,
+                browser_do: switched_on,
+            },
+        )
+        .await;
+        let names = tools
+            .into_iter()
+            .map(|tool| tool.name)
+            .filter(|name| name.starts_with("browser."))
+            .collect();
+        (names, derivable)
+    }
+
+    /// Without a verified browser bearer no run is offered a browser tool, switch on or off.
+    #[tokio::test]
+    async fn browser_tools_absent_without_bearer() {
+        for switched_on in [false, true] {
+            let (names, _) = browser_offer(false, false, switched_on, &[]).await;
+            assert!(
+                names.is_empty(),
+                "switched_on={switched_on} offered {names:?} without a bearer"
+            );
+        }
+    }
+
+    /// Under zero retention no run is offered a browser tool, even with a bearer and the switch on.
+    #[tokio::test]
+    async fn browser_tools_absent_under_zdr() {
+        let (names, _) = browser_offer(true, true, true, &[]).await;
+        assert!(names.is_empty(), "a ZDR run was offered {names:?}");
+    }
+
+    /// A run with a bearer, outside ZDR and behind the switch is offered both browser tools,
+    /// and is not derivable: a park resume rebuilds only the base set. The switch keeps them out.
+    #[tokio::test]
+    async fn browser_tools_are_offered_to_a_bearer_run_only() {
+        let (names, derivable) = browser_offer(true, false, true, &[]).await;
+        assert_eq!(names, ["browser.observe", "browser.act"]);
+        assert!(
+            !derivable,
+            "a browser-scoped run must not park on a rebuilt base set"
+        );
+        let (names, _) = browser_offer(true, false, false, &[]).await;
+        assert!(names.is_empty(), "the switch off still offered {names:?}");
+    }
+
+    /// A caller cannot claim a browser tool name. Without a bearer the declared tool is
+    /// refused at the offer, so no stray `browser.*` call reaches the purpose-lock allowlist.
+    #[tokio::test]
+    async fn a_caller_declared_browser_tool_is_never_admitted() {
+        let declared = vec![pb::ToolDefinition {
+            name: "browser.act".to_owned(),
+            description: "declared by the caller".to_owned(),
+            parameters_json: r#"{"type":"object"}"#.to_owned(),
+        }];
+        let (names, _) = browser_offer(false, false, true, &declared).await;
+        assert!(
+            names.is_empty(),
+            "a caller-declared browser tool was admitted: {names:?}"
+        );
+        let (names, _) = browser_offer(true, false, true, &declared).await;
+        assert_eq!(names, ["browser.observe", "browser.act"]);
     }
 
     /// The kill switch (`WIDE_RESEARCH_FAN_OUT_ENABLED`, spec §4) has two
