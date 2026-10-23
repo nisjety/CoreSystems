@@ -3,15 +3,12 @@
 //! apps/Frontend Plane/verevonv3/docs/S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md
 //! §3 and §8 item 3.5.C.
 //!
-//! **Deliberately standalone, still not wired into a real caller as of this
-//! module's own code.** `code_interpreter.rs`'s existing workspace is fully
-//! ephemeral — created and `Drop`-cleaned up within one tool call, with no
-//! lease or Space association whatsoever; 3.5.C's own sub-slice C.5 is where
-//! that gets rewritten to call `hydrate`/`diff_and_upload`. Everything this
-//! module needs from sandbox-manager now exists (the `GetWorkspaceManifest`
-//! RPC feeding `hydrate`, `SnapshotSandbox`'s `changed_files` field consuming
-//! `diff_and_upload`'s output) — this module itself just hasn't been called
-//! from that rewrite yet.
+//! Called from `sandbox_lease.rs` for Space-scoped `code_interpreter` runs:
+//! `ensure_hydrated_workspace` hydrates on the first call, and
+//! `release_sandbox_lease_if_any` diffs and uploads when the run ends. The
+//! inline `ExecuteStep` path has no run-end signal, so its edits are not
+//! uploaded (see the module doc of `sandbox_lease.rs`). Thread-scoped
+//! workspaces do not call this module yet.
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};

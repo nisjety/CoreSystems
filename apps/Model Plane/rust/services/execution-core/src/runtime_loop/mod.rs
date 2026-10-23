@@ -2992,6 +2992,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn direct_execute_step_still_passes_empty_thread_id_to_memory_tools() {
+        // grpc.rs hands the direct ExecuteStep RPC's step to this loop with
+        // thread_id "" (there is no thread on that RPC). Memory is
+        // thread-scoped, so a thread-less step must keep failing closed here:
+        // the thread workspace work must never give this path a thread to read
+        // or write memory under.
+        let policy = allow_policy();
+        let save = step_through_the_gate(
+            SAVE_MEMORY_TOOL,
+            r#"{"content":"user prefers NOK"}"#,
+            "auto",
+            "",
+            &policy,
+        )
+        .await;
+        assert!(
+            save.error.contains("outside an agent-loop thread context"),
+            "{}",
+            save.error
+        );
+        let recall = step_through_the_gate(
+            RECALL_MEMORY_TOOL,
+            r#"{"query":"carrier"}"#,
+            "auto",
+            "",
+            &policy,
+        )
+        .await;
+        assert!(
+            recall.error.contains("outside an agent-loop thread context"),
+            "{}",
+            recall.error
+        );
+    }
+
+    #[tokio::test]
     async fn ticket_owner_action_never_reaches_its_adapter_from_auto_or_malformed_modes() {
         let policy = allow_policy();
         for mode in ["auto", "", "malformed"] {
