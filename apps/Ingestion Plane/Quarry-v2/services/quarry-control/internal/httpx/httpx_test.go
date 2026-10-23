@@ -152,3 +152,67 @@ func TestWriteJSONAndWriteErr_SetJSONEnvelope(t *testing.T) {
 		t.Fatalf("unmarshal error payload: %v", err)
 	}
 }
+
+// TestRequestIDRejectsOverlongAndForeignCharset (WS10.S1): an inbound id that
+// is too long, empty, or carries a character outside [A-Za-z0-9._:-] is
+// replaced by a minted req_ id, never forwarded and never a 400.
+func TestRequestIDRejectsOverlongAndForeignCharset(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]string{
+		"overlong":  strings.Repeat("a", 129),
+		"space":     "has space",
+		"control":   "tab\there",
+		"slash":     "../../etc",
+		"non-ascii": "café",
+		"semicolon": "x;drop",
+	}
+	for name, incoming := range cases {
+		incoming := incoming
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			var seen string
+			h := RequestID(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				seen = RequestIDOf(r.Context())
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.Header.Set("X-Request-Id", incoming)
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, req)
+			if rr.Code != http.StatusNoContent {
+				t.Fatalf("status = %d, want 204 (a bad id must not fail the request)", rr.Code)
+			}
+			if seen == incoming || !strings.HasPrefix(seen, "req_") {
+				t.Fatalf("seen = %q, want a minted req_ id instead of %q", seen, incoming)
+			}
+			if got := rr.Header().Get("X-Request-Id"); got != seen {
+				t.Fatalf("echoed header = %q, want %q", got, seen)
+			}
+		})
+	}
+}
+
+// TestRequestIDAdoptsValid (WS10.S1): a valid inbound id of 1 to 128 bytes is
+// adopted unchanged and echoed.
+func TestRequestIDAdoptsValid(t *testing.T) {
+	t.Parallel()
+
+	for _, incoming := range []string{"e2e-d10-0a1b", "a", "svc.v1:req_42-x", strings.Repeat("b", 128)} {
+		var seen string
+		h := RequestID(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			seen = RequestIDOf(r.Context())
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Set("X-Request-Id", incoming)
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if seen != incoming {
+			t.Fatalf("seen = %q, want adopted %q", seen, incoming)
+		}
+		if got := rr.Header().Get("X-Request-Id"); got != incoming {
+			t.Fatalf("echoed header = %q, want %q", got, incoming)
+		}
+	}
+}

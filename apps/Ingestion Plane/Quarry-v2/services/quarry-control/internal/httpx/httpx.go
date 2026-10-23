@@ -21,16 +21,37 @@ const (
 	ctxRequestID ctxKey = "request_id"
 )
 
+// RequestID adopts a valid inbound X-Request-Id and mints req_<uuid> otherwise
+// (WS10.S1). A bad id is replaced, never rejected. The rule matches quarry-edge
+// request_id.rs, and the id is a support-lookup key, never an auth key.
 func RequestID(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := r.Header.Get("X-Request-Id")
-		if id == "" {
+		if !validInboundID(id) {
 			id = "req_" + uuid.NewString()
 		}
 		w.Header().Set("X-Request-Id", id)
 		ctx := context.WithValue(r.Context(), ctxRequestID, id)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// validInboundID reports whether an inbound X-Request-Id may be adopted: 1 to
+// 128 bytes from [A-Za-z0-9._:-].
+func validInboundID(id string) bool {
+	if len(id) == 0 || len(id) > 128 {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case c == '.', c == '_', c == ':', c == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func RequestIDOf(ctx context.Context) string {
