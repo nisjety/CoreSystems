@@ -125,6 +125,14 @@ func main() {
 		},
 		workflow.RegisterOptions{Name: "ChangeMonitorWF"},
 	)
+	// ScheduledJobWF is the schedule action of a scrape, crawl or batch
+	// schedule (WS15.S2). Dark until QUARRY_SCHEDULED_JOBS_ENABLED is 1 in control.
+	w.RegisterWorkflowWithOptions(
+		func(ctx workflow.Context, in workflows.ScheduledJobInput) error {
+			return workflows.ScheduledJobWF(ctx, in, acts)
+		},
+		workflow.RegisterOptions{Name: "ScheduledJobWF"},
+	)
 	w.RegisterActivity(acts)
 
 	// Root context cancelled on SIGINT / SIGTERM. All long-running
@@ -138,15 +146,6 @@ func main() {
 		syscall.SIGINT, syscall.SIGTERM,
 	)
 	defer rootCancel()
-
-	schedMgr := schedules.New(c, schedules.Config{
-		ControlBaseURL:    controlURL,
-		ControlAuthToken:  controlToken,
-		ControlHMACSecret: edgeRunSecret,
-		TaskQueue:         TaskQueue,
-		Interval:          30 * time.Second,
-	})
-	go schedMgr.Run(rootCtx)
 
 	// Ad-hoc jobs dispatcher: polls control for newly POSTed jobs (the
 	// REST entrypoint verevon's onboarding crawl-preview uses) and
@@ -162,6 +161,19 @@ func main() {
 	if err != nil {
 		log.Fatal().Err(err).Msg("job claim batch")
 	}
+
+	// The schedule reconciler resolves a crawl schedule's bounds with the same
+	// limits the dispatcher uses (WS15.S2), so it starts after they are loaded.
+	schedMgr := schedules.New(c, schedules.Config{
+		ControlBaseURL:    controlURL,
+		ControlAuthToken:  controlToken,
+		ControlHMACSecret: edgeRunSecret,
+		TaskQueue:         TaskQueue,
+		Interval:          30 * time.Second,
+		CrawlLimits:       crawlLimits,
+	})
+	go schedMgr.Run(rootCtx)
+
 	jobsMgr := jobs.New(c, jobs.Config{
 		ControlBaseURL:    controlURL,
 		ControlAuthToken:  controlToken,

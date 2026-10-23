@@ -54,8 +54,8 @@ func TestFetchDesired(t *testing.T) {
 			if r.Method != http.MethodGet {
 				t.Fatalf("method=%s want=%s", r.Method, http.MethodGet)
 			}
-			if r.URL.Path != "/v1/schedules" {
-				t.Fatalf("path=%s want=/v1/schedules", r.URL.Path)
+			if r.URL.Path != "/v1/internal/schedules/desired" {
+				t.Fatalf("path=%s want=/v1/internal/schedules/desired", r.URL.Path)
 			}
 			if got := r.Header.Get("Authorization"); got != "Bearer token" {
 				t.Fatalf("authorization=%q want=%q", got, "Bearer token")

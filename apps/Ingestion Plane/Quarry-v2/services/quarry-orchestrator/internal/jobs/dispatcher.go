@@ -533,136 +533,21 @@ func isExecutableKind(k string) bool {
 }
 
 func scrapeInputFromJob(j job, runID string) (workflows.ScrapeJobInput, error) {
-	url, _ := j.Params["url"].(string)
-	if url == "" {
-		return workflows.ScrapeJobInput{}, errors.New("scrape job missing params.url")
-	}
-	return workflows.ScrapeJobInput{
-		UserID: userFromParams(j.Params),
-		Ingest: ingestFromParams(j.Params),
-		RunID:  runID,
-		JobID:  string(j.ID),
-		OrgID:  orgFromParams(j.Params),
-		URL:    url,
-	}, nil
+	return workflows.ScrapeInputFromParams(j.Params, runID, string(j.ID))
 }
 
+// crawlInputFromJob resolves the crawl bounds here, as well as at the edge: a
+// job row written before the edge resolved limits (or one created straight in
+// control) can carry a zero or a huge value, and zero used to mean "unlimited".
+// The shared builder (workflows.CrawlInputFromParams, also used by the
+// scheduled-job wrapper) receives the resolved values.
 func crawlInputFromJob(j job, runID string, limits CrawlLimits) (workflows.CrawlJobInput, error) {
-	// Accept either a single `url` (verevon onboarding) or an array of
-	// `seeds` (richer callers).
-	seeds := stringsFrom(j.Params["seeds"])
-	if len(seeds) == 0 {
-		if single, ok := j.Params["url"].(string); ok && single != "" {
-			seeds = []string{single}
-		}
-	}
-	if len(seeds) == 0 {
-		return workflows.CrawlJobInput{}, errors.New("crawl job missing params.url or params.seeds")
-	}
-	// Bound the crawl here as well as at the edge: a job row written before the
-	// edge resolved limits (or one created straight in control) can carry a zero
-	// or a huge value, and zero used to mean "unlimited".
-	resolved := limits.Resolve(uintFrom(j.Params["max_pages"]), uintFrom(j.Params["max_depth"]))
-	return workflows.CrawlJobInput{
-		UserID:   userFromParams(j.Params),
-		Ingest:   ingestFromParams(j.Params),
-		RunID:    runID,
-		JobID:    string(j.ID),
-		OrgID:    orgFromParams(j.Params),
-		Seeds:    seeds,
-		MaxDepth: resolved.Depth,
-		MaxPages: resolved.Pages,
-	}, nil
+	resolved := limits.Resolve(workflows.UintFromParam(j.Params["max_pages"]), workflows.UintFromParam(j.Params["max_depth"]))
+	return workflows.CrawlInputFromParams(j.Params, runID, string(j.ID), resolved.Depth, resolved.Pages)
 }
 
 func batchInputFromJob(j job, runID string) (workflows.BatchJobInput, error) {
-	urls := stringsFrom(j.Params["urls"])
-	if len(urls) == 0 {
-		return workflows.BatchJobInput{}, errors.New("batch job missing params.urls")
-	}
-	return workflows.BatchJobInput{
-		UserID: userFromParams(j.Params),
-		Ingest: ingestFromParams(j.Params),
-		RunID:  runID,
-		JobID:  string(j.ID),
-		OrgID:  orgFromParams(j.Params),
-		URLs:   urls,
-	}, nil
-}
-
-// ingestFromParams reads the selective-ingest flag (Phase 2) from a job's
-// params. The edge handoff stamps `ingest` (set by the gateway from the user's
-// crawl_ingest_mode). false/absent = working-set only (default NEVER); true =
-// persist+embed each crawled page into the Data Plane.
-func ingestFromParams(params map[string]any) bool {
-	if b, ok := params["ingest"].(bool); ok {
-		return b
-	}
-	return false
-}
-
-// userFromParams extracts the initiating user id from a job's params. The
-// edge handoff stamps `user_id` (verified from the JWT claim) alongside
-// `org_id`; the orchestrator forwards it into the workflow → run_page body,
-// and the edge forwards it as x-user-id on ingest so crawled docs are
-// owner-stamped private (private-by-default). "" when absent → system/legacy
-// job → org-visible.
-func userFromParams(params map[string]any) string {
-	if s, ok := params["user_id"].(string); ok {
-		return s
-	}
-	return ""
-}
-
-// orgFromParams extracts the originating tenant id from a job's params.
-// The edge handoff stamps `org_id` (verified from the JWT claim) into the
-// job params, so the orchestrator forwards it into the workflow → the
-// run_page HMAC org-binding. Returns "" when absent (legacy jobs); the
-// edge enforces a non-empty org_id itself.
-func orgFromParams(params map[string]any) string {
-	if s, ok := params["org_id"].(string); ok {
-		return s
-	}
-	return ""
-}
-
-func stringsFrom(v any) []string {
-	arr, ok := v.([]any)
-	if !ok {
-		return nil
-	}
-	out := make([]string, 0, len(arr))
-	for _, x := range arr {
-		if s, ok := x.(string); ok && s != "" {
-			out = append(out, s)
-		}
-	}
-	return out
-}
-
-func uintFrom(v any) uint32 {
-	switch n := v.(type) {
-	case float64:
-		if n < 0 {
-			return 0
-		}
-		return uint32(n)
-	case int:
-		if n < 0 {
-			return 0
-		}
-		return uint32(n)
-	case int64:
-		if n < 0 {
-			return 0
-		}
-		return uint32(n)
-	case uint32:
-		return n
-	case uint64:
-		return uint32(n)
-	}
-	return 0
+	return workflows.BatchInputFromParams(j.Params, runID, string(j.ID))
 }
 
 func truncate(s string, n int) string {
