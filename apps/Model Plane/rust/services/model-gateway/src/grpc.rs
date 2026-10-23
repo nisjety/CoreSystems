@@ -267,6 +267,33 @@ fn forwarded_authorization<T>(request: &Request<T>) -> String {
         .to_owned()
 }
 
+/// The capability-core bearer a governed caller forwards beside its own
+/// credential (`x-capability-authorization`), without the scheme prefix.
+///
+/// This interceptor does not verify it. It is accepted only from a service identity,
+/// which the interceptor did verify (and `authorize_rpc` scoped), so a user-facing
+/// caller can never hand this RPC a credential of its own choosing. Its only use is
+/// to be presented to capability-core, which verifies it, so a replica that has not
+/// yet seen an org's MCP servers can hydrate its cache from the registry; hydration
+/// replaces the cache from a successful answer, a bearer that capability-core refuses
+/// (401, 403) changes nothing, and a registry that cannot answer clears the org's cache
+/// (fail closed). A value that is not a plain bearer is no bearer at all.
+fn forwarded_capability_bearer<T>(
+    identity: &VerifiedIdentity,
+    request: &Request<T>,
+) -> Option<String> {
+    if !identity.is_service() {
+        return None;
+    }
+    request
+        .metadata()
+        .get("x-capability-authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .filter(|token| !token.is_empty() && !token.chars().any(char::is_whitespace))
+        .map(str::to_owned)
+}
+
 #[allow(clippy::result_large_err)]
 fn authorize_rpc<T: TenantScopedRequest>(
     request: &Request<T>,
@@ -1932,6 +1959,7 @@ impl ModelGateway for GatewayService {
                 .zdr_for(&crate::zdr_posture::Route::plain(false))
                 .ok(),
         );
+        let capability_bearer = forwarded_capability_bearer(&identity, &request);
         let req = request.into_inner();
         let (tools, meta) = runtime_registries::mcp_tool_listing(
             &self.state.mcp,
@@ -1941,7 +1969,7 @@ impl ModelGateway for GatewayService {
             &self.state.http_client,
             &self.state.capability_core_base_url,
             &self.state.mcp_oauth_service_token,
-            None,
+            capability_bearer.as_deref(),
             runtime_registries::McpListingOptions {
                 unstaged: req.unstaged,
                 observe,
@@ -2884,7 +2912,66 @@ pub async fn serve_with_readiness(
 #[cfg(test)]
 mod tests {
     use super::unowned_policy_fields;
-    use super::{command_args, command_from_catalog, json_str, task_from_catalog};
+    use super::{
+        command_args, command_from_catalog, forwarded_capability_bearer, json_str,
+        task_from_catalog,
+    };
+
+    #[test]
+    fn only_a_plain_bearer_is_forwarded_to_the_registry() {
+        let with = |value: &'static str| {
+            let mut request = tonic::Request::new(());
+            request
+                .metadata_mut()
+                .insert("x-capability-authorization", value.parse().unwrap());
+            request
+        };
+        let service = crate::grpc_auth::VerifiedIdentity::service_for_test(
+            "org-1",
+            "service:execution-core",
+            &["gateway:read"],
+            false,
+        );
+        assert_eq!(
+            forwarded_capability_bearer(&service, &with("Bearer abc.def.ghi")).as_deref(),
+            Some("abc.def.ghi")
+        );
+        for value in ["abc.def.ghi", "Bearer ", "Bearer a b", "bearer abc", "Basic abc"] {
+            assert_eq!(
+                forwarded_capability_bearer(&service, &with(value)),
+                None,
+                "{value:?}"
+            );
+        }
+        // The caller's own credential is never mistaken for the forwarded one.
+        let mut own = tonic::Request::new(());
+        own.metadata_mut()
+            .insert("authorization", "Bearer own".parse().unwrap());
+        assert_eq!(forwarded_capability_bearer(&service, &own), None);
+    }
+
+    /// The gateway reads this header unverified, so a user-facing identity must not
+    /// be able to choose the credential the registry sees: only a service identity's
+    /// forwarded bearer is used.
+    #[test]
+    fn a_user_identity_cannot_hand_the_registry_a_bearer_of_its_own_choosing() {
+        let mut request = tonic::Request::new(());
+        request
+            .metadata_mut()
+            .insert("x-capability-authorization", "Bearer junk".parse().unwrap());
+        let user = crate::grpc_auth::VerifiedIdentity::user_for_test("org-1", "user-1", false);
+        assert_eq!(forwarded_capability_bearer(&user, &request), None);
+        let service = crate::grpc_auth::VerifiedIdentity::service_for_test(
+            "org-1",
+            "service:execution-core",
+            &["gateway:read"],
+            false,
+        );
+        assert_eq!(
+            forwarded_capability_bearer(&service, &request).as_deref(),
+            Some("junk")
+        );
+    }
 
     #[test]
     fn policy_fields_with_no_owning_service_are_named_not_silently_banked() {

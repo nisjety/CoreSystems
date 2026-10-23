@@ -5189,20 +5189,24 @@ fn the_park_writer_guard_goes_red_when_the_code_it_guards_regresses() {
             "run_parkable no longer requires",
         );
     }
-    // A parked run is finalized, or releases its lease, or is matched too late.
+    // A parked run is finalized, or releases its lease, or is matched too late. (The arm no longer
+    // spells `return Ok(super::park::parked_response(` since the WS02-S3 change: it builds its
+    // response with `..super::park::parked_response(`. The two mutations below therefore hook into
+    // the head of the arm, which is what the guard reads, and add no brace the guard would have to
+    // balance.)
     must_flag(
         broken_agent(mutate(
             &agent,
-            "return Ok(super::park::parked_response(",
-            "let _ = finalize(); return Ok(super::park::parked_response(",
+            "RoundsOutcome::Parked(parked) => {",
+            "RoundsOutcome::Parked(parked) => { let _ = finalize();",
         )),
         "the parked outcome's arm names `finalize`",
     );
     must_flag(
         broken_agent(mutate(
             &agent,
-            "return Ok(super::park::parked_response(",
-            "crate::sandbox_lease::release_sandbox_lease_if_any(); return Ok(super::park::parked_response(",
+            "RoundsOutcome::Parked(parked) => {",
+            "RoundsOutcome::Parked(parked) => { crate::sandbox_lease::release_sandbox_lease_if_any();",
         )),
         "releases no lease",
     );

@@ -17,10 +17,13 @@
 //! So retry is gated on TWO independent conditions, both of which must hold:
 //!
 //! 1. the failure looks transient ([`is_transient_tool_failure`]), and
-//! 2. the call is not side-effecting ([`crate::permission::is_risky_call`] —
-//!    the SAME classifier the `ask`-posture approval gate, the leaf/orchestrator
+//! 2. the call is not side-effecting ([`crate::permission::RunGate::is_risky_call`]
+//!    — the SAME classifier the `ask`-posture approval gate, the leaf/orchestrator
 //!    subagent blocklist, and plan-mode enforcement all use, so a tool can never
 //!    be "risky enough to gate" and "safe enough to silently retry" at once).
+//!    Under `TOOL_CLASS_GATE=enforce` that classifier reads the registry's declared
+//!    class, so an MCP tool declared `read` is retried and every other MCP class
+//!    never is; with the gate off every `mcp__` name is risky and never retried.
 //!
 //! Everything here is pure so the policy is unit-testable without a network,
 //! matching `model-gateway`'s `compaction::is_context_length_error` — including
@@ -142,12 +145,17 @@ pub fn is_transient_tool_failure(error: &str) -> bool {
 
 /// Whether this specific failed call may be dispatched again.
 ///
-/// Both gates must pass — see the module doc. `is_risky_call` is checked first
+/// Both gates must pass — see the module doc. The risk classifier is checked first
 /// because it is the one that protects against a *duplicated real-world
 /// effect*, which is strictly worse than failing to retry.
 #[must_use]
-pub fn tool_call_is_retryable(tool_name: &str, tool_input: &str, error: &str) -> bool {
-    if crate::permission::is_risky_call(tool_name, tool_input) {
+pub fn tool_call_is_retryable(
+    gate: &crate::permission::RunGate<'_>,
+    tool_name: &str,
+    tool_input: &str,
+    error: &str,
+) -> bool {
+    if gate.is_risky_call(tool_name, tool_input) {
         return false;
     }
     // A delegation is not replayable either, for a reason the risk classifier
@@ -221,6 +229,84 @@ pub fn truncated_tool_call_index(stop_reason: &str, tool_call_count: usize) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capability_policy::ToolClassGate;
+    use crate::permission::{record_run_views, RunGate, ToolClassView};
+
+    /// The retry decision with the tool class gate off: the name heuristic.
+    fn legacy_retryable(tool_name: &str, tool_input: &str, error: &str) -> bool {
+        tool_call_is_retryable(
+            &RunGate::with_gate(ToolClassGate::Off, "org", "run"),
+            tool_name,
+            tool_input,
+            error,
+        )
+    }
+
+    #[test]
+    fn under_enforce_an_mcp_read_retries_and_every_other_mcp_class_never_does() {
+        let transient = "mcp proxy transport: connection reset by peer";
+        let (org, run) = ("org-retry", "run-retry");
+        record_run_views(
+            org,
+            run,
+            [
+                (
+                    "mcp__srv__echo_read".to_owned(),
+                    ToolClassView::from_registry("mcp__srv__echo_read", "read", "none", "d"),
+                ),
+                (
+                    "mcp__srv__create".to_owned(),
+                    ToolClassView::from_registry("mcp__srv__create", "external_write", "none", "d"),
+                ),
+                (
+                    "mcp__srv__unknown".to_owned(),
+                    ToolClassView::from_registry("mcp__srv__unknown", "bogus", "none", "d"),
+                ),
+            ],
+        );
+        let enforce = RunGate::with_gate(ToolClassGate::Enforce, org, run);
+        assert!(tool_call_is_retryable(
+            &enforce,
+            "mcp__srv__echo_read",
+            "{}",
+            transient
+        ));
+        assert!(!tool_call_is_retryable(
+            &enforce,
+            "mcp__srv__create",
+            "{}",
+            transient
+        ));
+        assert!(!tool_call_is_retryable(
+            &enforce,
+            "mcp__srv__unknown",
+            "{}",
+            transient
+        ));
+        // A name the run was never told about keeps the strict legacy answer.
+        assert!(!tool_call_is_retryable(
+            &enforce,
+            "mcp__srv__elsewhere",
+            "{}",
+            transient
+        ));
+
+        // With the gate off, or only watching, every `mcp__` name is risky.
+        for gate in [ToolClassGate::Off, ToolClassGate::Shadow] {
+            let legacy = RunGate::with_gate(gate, org, run);
+            assert!(
+                !tool_call_is_retryable(&legacy, "mcp__srv__echo_read", "{}", transient),
+                "{gate:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_changed_definition_is_not_a_transient_failure() {
+        assert!(!is_transient_tool_failure(
+            "tool_definition_changed: the tool's definition changed since it was approved"
+        ));
+    }
 
     #[test]
     fn recognizes_real_transient_transport_and_throttle_failures() {
@@ -323,7 +409,7 @@ mod tests {
             "browser_agent",
         ] {
             assert!(
-                !tool_call_is_retryable(tool, "{}", "operation timed out"),
+                !legacy_retryable(tool, "{}", "operation timed out"),
                 "{tool} is side-effecting and must never auto-retry"
             );
         }
@@ -331,12 +417,12 @@ mod tests {
 
     #[test]
     fn a_read_only_tool_retries_only_on_a_transient_failure() {
-        assert!(tool_call_is_retryable(
+        assert!(legacy_retryable(
             "knowledge_search",
             r#"{"query":"q"}"#,
             "transport error: connection reset"
         ));
-        assert!(!tool_call_is_retryable(
+        assert!(!legacy_retryable(
             "knowledge_search",
             r#"{"query":"q"}"#,
             "invalid json: expected value"
@@ -352,7 +438,7 @@ mod tests {
         // explicitly so a future relaxation of that classifier is a visible,
         // deliberate change here rather than a silent new replay path.
         let read = r#"{"operation":"crm.contacts.list"}"#;
-        assert!(!tool_call_is_retryable(
+        assert!(!legacy_retryable(
             "execute_provider_action",
             read,
             "operation timed out"
@@ -408,23 +494,23 @@ mod tests {
             "the premise: this error IS the kind the classifier retries"
         );
         assert!(
-            !tool_call_is_retryable("subagent.task", r#"{"goal":"look it up"}"#, transient),
+            !legacy_retryable("subagent.task", r#"{"goal":"look it up"}"#, transient),
             "replaying a delegation forks the answer from the receipt its child run already carries"
         );
         assert!(
-            !tool_call_is_retryable("subagent.research", "{}", transient),
+            !legacy_retryable("subagent.research", "{}", transient),
             "every subagent.* label, not just the one the tool table happens to offer"
         );
         // And the exclusion is specific: an ordinary read with the same
         // transient error is still retried, or this change would have quietly
         // disabled retry for everything.
         assert!(
-            tool_call_is_retryable("knowledge_search", r#"{"query":"x"}"#, transient),
+            legacy_retryable("knowledge_search", r#"{"query":"x"}"#, transient),
             "a plain read stays retryable"
         );
         // The bare prefix is not a subagent tool, and must not be caught by a
         // sloppy `starts_with` — it would be an ordinary unknown tool name.
-        assert!(tool_call_is_retryable("subagent.", "{}", transient));
+        assert!(legacy_retryable("subagent.", "{}", transient));
     }
 
     #[test]

@@ -753,7 +753,8 @@ pub(crate) async fn run_agent(
         )
         .await;
     }
-    let tools = offered_tools(&req, capability_policy).await;
+    let waived = offer_is_waived(&req, caller);
+    let tools = offered_tools(&req, waived, capability_policy, governance_from_env()).await;
     run_agent_with_offered(
         state,
         session_channel,
@@ -896,36 +897,52 @@ struct OfferedTools {
 ///   offered set is replaced by the snapshot the pause retained, so it never parks, whatever
 ///   the request's own tools say. (A park resume's own set is derived by S8-6, never listed
 ///   here.)
+///
+/// `waived` is whether the run's route is the one the caller's waiver binds. Such a run is
+/// zero-retention and is refused every MCP call at dispatch, so, like a ZDR run, it is not
+/// offered an MCP tool and nothing is asked on its behalf to be.
 async fn offered_tools(
     req: &pb::RunAgentRequest,
+    waived: bool,
     capability_policy: &dyn crate::capability_policy::CapabilityPolicy,
+    governance: Governance<'_>,
 ) -> OfferedTools {
     let space_scoped = !req.space_id.trim().is_empty();
-    if req.resume.is_some() {
-        let defs = merged_tool_defs(
-            &req.run_id,
-            &req.org_id,
-            &req.user_id,
-            &req.tools,
-            capability_policy,
-            space_scoped,
-        )
-        .await;
-        return OfferedTools {
-            defs,
-            derivable: false,
-        };
-    }
-    let (defs, derivable) = merged_tool_defs_with_sources(
+    // A waived route keeps nothing and runs no MCP call, exactly like a ZDR run: the same
+    // flag, so no listing, no token and no lookup is made for either.
+    let retention_bound = req.zdr || waived;
+    let (defs, derivable) = merged_tool_defs_governed(
         &req.run_id,
         &req.org_id,
         &req.user_id,
         &req.tools,
         capability_policy,
         space_scoped,
+        retention_bound,
+        governance,
     )
     .await;
+    if req.resume.is_some() {
+        return OfferedTools {
+            defs,
+            derivable: false,
+        };
+    }
     OfferedTools { defs, derivable }
+}
+
+/// Whether the run's route is waived, for the offer made before the route is resolved.
+/// The route is a function of the request and the caller alone, so it is resolved here the
+/// way [`run_agent_with_offered`] resolves it. A route that does not resolve refuses the run
+/// there, so nothing is offered for it: it counts as waived.
+fn offer_is_waived(req: &pb::RunAgentRequest, caller: &crate::auth::AuthenticatedUser) -> bool {
+    crate::agent_route::ModelRoute::resolve(
+        req,
+        subscription_switches(),
+        std::env::var("EXECUTION_AGENT_MODEL").ok().as_deref(),
+        caller,
+    )
+    .map_or(true, |route| route.is_waived())
 }
 
 /// The tools every run is offered before any caller, MCP server or resolver adds to them:
@@ -965,6 +982,14 @@ pub(super) fn base_tool_defs(space_scoped: bool) -> Vec<pb::ToolDefinition> {
 /// the model AND admits them into the purpose-lock allowlist (derived from this
 /// Vec at ~line 154), so the `runtime_loop` dispatch arm can route them. A
 /// built-in name always wins a (vanishingly unlikely) collision.
+///
+/// `zdr` is the run's zero-retention flag: a ZDR run is never offered an MCP tool
+/// and the gateway is not asked (the call would carry the run's content to a
+/// third-party server, and is refused at dispatch anyway). A waived route is the same
+/// (see [`offered_tools`]).
+///
+/// The test entry: production reads the same governance through [`offered_tools`].
+#[cfg(test)]
 async fn merged_tool_defs(
     run_id: &str,
     org_id: &str,
@@ -972,6 +997,7 @@ async fn merged_tool_defs(
     client_tools: &[pb::ToolDefinition],
     capability_policy: &dyn crate::capability_policy::CapabilityPolicy,
     space_scoped: bool,
+    zdr: bool,
 ) -> Vec<pb::ToolDefinition> {
     merged_tool_defs_with_sources(
         run_id,
@@ -980,6 +1006,7 @@ async fn merged_tool_defs(
         client_tools,
         capability_policy,
         space_scoped,
+        zdr,
     )
     .await
     .0
@@ -989,6 +1016,7 @@ async fn merged_tool_defs(
 /// server-resolved view was read (`Ok`) and no MCP tool and no client tool was appended. A
 /// run whose set is derivable can be parked, because a park resume rebuilds the same set from
 /// the deployment and the resolver alone and requires it to equal the fold's.
+#[cfg(test)]
 async fn merged_tool_defs_with_sources(
     run_id: &str,
     org_id: &str,
@@ -996,11 +1024,167 @@ async fn merged_tool_defs_with_sources(
     client_tools: &[pb::ToolDefinition],
     capability_policy: &dyn crate::capability_policy::CapabilityPolicy,
     space_scoped: bool,
+    zdr: bool,
 ) -> (Vec<pb::ToolDefinition>, bool) {
+    merged_tool_defs_governed(
+        run_id,
+        org_id,
+        user_id,
+        client_tools,
+        capability_policy,
+        space_scoped,
+        zdr,
+        governance_from_env(),
+    )
+    .await
+}
+
+/// The governance the process's environment names.
+fn governance_from_env() -> Governance<'static> {
+    let mode = crate::mcp_gateway::McpDoTools::from_env();
+    let gate = crate::permission::tool_class_gate();
+    // The governed client exists only when something governed is switched on, so a
+    // deployment with every switch off never builds a credential provider.
+    let source = if mode != crate::mcp_gateway::McpDoTools::Off
+        || gate != crate::capability_policy::ToolClassGate::Off
+    {
+        crate::mcp_gateway::GovernedMcp::shared()
+    } else {
+        None
+    };
+    Governance {
+        gate,
+        mode,
+        cap: crate::mcp_gateway::tool_cap_from_env(),
+        source: source.map(|governed| governed as &dyn crate::mcp_gateway::GovernedSource),
+    }
+}
+
+/// What a run's offer is governed by: the tool class gate, how far MCP reaches, the
+/// most MCP tools offered, and where the gateway's listing and the registry's
+/// bindings come from. Separate from the environment so a test can name all four.
+struct Governance<'a> {
+    gate: crate::capability_policy::ToolClassGate,
+    mode: crate::mcp_gateway::McpDoTools,
+    cap: usize,
+    source: Option<&'a dyn crate::mcp_gateway::GovernedSource>,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn merged_tool_defs_governed(
+    run_id: &str,
+    org_id: &str,
+    user_id: &str,
+    client_tools: &[pb::ToolDefinition],
+    capability_policy: &dyn crate::capability_policy::CapabilityPolicy,
+    space_scoped: bool,
+    // The run keeps nothing and is refused every MCP call: a ZDR run, or one on a waived
+    // route (`offered_tools`). Neither is offered an MCP tool, and nothing MCP is asked of the
+    // gateway or the registry on its behalf: no gateway token is minted, no listing made
+    // (which can itself trigger an observation write), no MCP name resolved or prefetched.
+    // The built-in names are still resolved when the gate reads classes (see below).
+    zdr: bool,
+    governance: Governance<'_>,
+) -> (Vec<pb::ToolDefinition>, bool) {
+    use crate::capability_policy::ToolClassGate;
+    use crate::mcp_gateway::{count_withheld, withheld, McpDoTools};
+
     let mut tools = base_tool_defs(space_scoped);
     let base_len = tools.len();
-    if let Some(client) = crate::mcp_gateway::McpGatewayClient::from_env() {
-        append_untrusted_tool_defs_sorted(&mut tools, &client.list_tools(org_id, user_id).await);
+    let Governance {
+        gate,
+        mode,
+        cap,
+        source,
+    } = governance;
+    // The ungoverned listing, exactly as it was. A zero-retention run is not asked:
+    // nothing it could be offered may run.
+    if mode == McpDoTools::Off && !zdr {
+        if let Some(client) = crate::mcp_gateway::McpGatewayClient::from_env() {
+            append_untrusted_tool_defs_sorted(
+                &mut tools,
+                &client.list_tools(org_id, user_id).await,
+            );
+        }
+    }
+    // MCP in a Do run needs the tool class gate to bind `mcp__` names (only
+    // `enforce` lets one through), and never reaches a zero-retention run. Either
+    // way the model is not shown a tool that every call would refuse.
+    let governed_mode = if mode == McpDoTools::Off {
+        McpDoTools::Off
+    } else if zdr {
+        count_withheld(&[(withheld::ZDR, 1)].into());
+        McpDoTools::Off
+    } else if gate != ToolClassGate::Enforce {
+        count_withheld(&[(withheld::GATE_NOT_ENFORCING, 1)].into());
+        McpDoTools::Off
+    } else {
+        mode
+    };
+    // A retention-bound run has `governed_mode == Off` (above), so for it this block asks for
+    // nothing MCP: no listing, no MCP name in the binding lookup, no prefetch. It still
+    // learns the BUILT-IN classes when the gate reads them (only built-in names reach the
+    // registry; they are tool names, not content), so the gate classifies such a run by the
+    // same declared classes as a non-retention run of the same org instead of falling back
+    // to the legacy name heuristic, which can be looser than a registry that tightened a
+    // built-in tool.
+    if governed_mode != McpDoTools::Off || gate != ToolClassGate::Off {
+        match source {
+            Some(source) => {
+                // Built-in classes are learned only for a gate that reads them.
+                let builtin: Vec<String> = if gate == ToolClassGate::Off {
+                    Vec::new()
+                } else {
+                    tools.iter().map(|tool| tool.name.clone()).collect()
+                };
+                let resolved = crate::mcp_gateway::resolve_run_offer(
+                    source,
+                    governed_mode,
+                    cap,
+                    run_id,
+                    org_id,
+                    user_id,
+                    &builtin,
+                )
+                .await;
+                count_withheld(&resolved.offer.withheld);
+                let offered_mcp: Vec<String> = resolved
+                    .offer
+                    .tools
+                    .iter()
+                    .map(|tool| tool.name.clone())
+                    .collect();
+                append_untrusted_tool_defs_sorted(&mut tools, &resolved.offer.tools);
+                if resolved.answered {
+                    crate::permission::record_run_views(
+                        org_id,
+                        run_id,
+                        resolved
+                            .builtin_views
+                            .into_iter()
+                            .chain(resolved.offer.views),
+                    );
+                }
+                // The gate keeps its own table of what the registry bound each MCP
+                // tool to; fill it once now rather than on the first call.
+                if !offered_mcp.is_empty() {
+                    if let Err(error) = capability_policy
+                        .prefetch_tool_bindings(run_id, org_id, user_id, &offered_mcp)
+                        .await
+                    {
+                        tracing::warn!(
+                            code = ?error.code(),
+                            run_id,
+                            "MCP tool bindings were not prefetched; each is looked up on its first call"
+                        );
+                    }
+                }
+            }
+            None if governed_mode != McpDoTools::Off => {
+                count_withheld(&[(withheld::GATEWAY_UNAVAILABLE, 1)].into());
+            }
+            None => {}
+        }
     }
     // chat-parity: fold in the caller's declared tools (RunAgentRequest.tools),
     // so a client can widen the agentic run's scope with its own or MCP tools.
@@ -2121,6 +2305,10 @@ async fn run_rounds(
     // gateway populates from the chat request's `zdr` flag — a nested loop
     // inherits it rather than deciding retention for itself.
     let zdr = req.zdr;
+    // How this run classifies a tool: by the registry's declared class where
+    // `TOOL_CLASS_GATE` says so and this process resolved one for the run, by name
+    // otherwise (`permission::RunGate`).
+    let run_gate = crate::permission::RunGate::for_run(&req.org_id, &req.run_id);
 
     let mut messages = match (restored.as_mut(), parked.as_mut()) {
         // The paused conversation: its own history, the system prompt it was paused under
@@ -2868,8 +3056,8 @@ async fn run_rounds(
             // to carve an exception for; the depth-0 run IS the orchestrator.
             if ctx.depth > 0
                 && !crate::subagent::is_subagent_tool(&call.name)
-                && (crate::permission::is_risky_call(&call.name, &call.arguments_json)
-                    || crate::permission::is_restricted_context_write(&call.name))
+                && (run_gate.is_risky_call(&call.name, &call.arguments_json)
+                    || run_gate.is_restricted_context_write(&call.name))
             {
                 warn!(
                     run_id = %req.run_id,
@@ -2915,11 +3103,9 @@ async fn run_rounds(
             if !crate::subagent::is_subagent_tool(&call.name) {
                 let granted = pb::AutonomyRung::try_from(req.autonomy_rung)
                     .unwrap_or(pb::AutonomyRung::Unspecified);
-                if let Err(refusal) = crate::permission::check_autonomy_rung(
-                    granted,
-                    &call.name,
-                    &call.arguments_json,
-                ) {
+                if let Err(refusal) =
+                    run_gate.check_autonomy_rung(granted, &call.name, &call.arguments_json)
+                {
                     warn!(
                         run_id = %req.run_id,
                         tool = %call.name,
@@ -3029,8 +3215,8 @@ async fn run_rounds(
             // to every subagent automatically with no extra wiring.
             if req.plan_mode
                 && !crate::subagent::is_subagent_tool(&call.name)
-                && (crate::permission::is_risky_call(&call.name, &call.arguments_json)
-                    || crate::permission::is_restricted_context_write(&call.name))
+                && (run_gate.is_risky_call(&call.name, &call.arguments_json)
+                    || run_gate.is_restricted_context_write(&call.name))
             {
                 warn!(
                     run_id = %req.run_id,
@@ -3111,7 +3297,8 @@ async fn run_rounds(
                 .iter()
                 .filter(|slot| {
                     matches!(slot, CallSlot::ToDispatch { call, .. }
-                        if runtime_loop::effect::effect_class_of(
+                        if runtime_loop::effect::effect_class_for_run(
+                            &run_gate,
                             &call.name,
                             &call.arguments_json,
                         )
@@ -3365,12 +3552,13 @@ async fn run_rounds(
                     // The continuation's released call is reserved whatever its class (its
                     // action is what fences a second attempt of the approval), so it keeps an
                     // entry here to be finalized. Every entry is built by the one builder
-                    // (`effect::entry_for_call`), which the release's pre-reserve shares.
+                    // (`effect::entry_for_run_call`), which the release's pre-reserve shares.
                     let is_release = ctx.release.as_ref().is_some_and(|release| {
                         release.covers(step_id, &call.name, &call.arguments_json)
                     });
                     let ledger_entry = if ctx.effect_ledger {
-                        let entry = runtime_loop::effect::entry_for_call(
+                        let entry = runtime_loop::effect::entry_for_run_call(
+                            &run_gate,
                             &req.run_id,
                             step_id,
                             &call.name,
@@ -3523,8 +3711,17 @@ async fn run_rounds(
                             ctx.release.as_ref(),
                         )
                         .await;
+                        // The ledger's word first: a call that holds an effectful reservation
+                        // (or the release's pre-reserve) is never dispatched again, whatever
+                        // the retry classifier says. The ledger classifies through the same
+                        // gate, so the two agree; this holds if they ever stop.
                         let retryable = attempt < runtime_loop::retry::MAX_TOOL_ATTEMPTS
+                            && !runtime_loop::effect::ledger_fences_retry(
+                                ledger_entry.as_ref(),
+                                is_release,
+                            )
                             && runtime_loop::retry::tool_call_is_retryable(
+                                &run_gate,
                                 &call.name,
                                 &call.arguments_json,
                                 &result.error,
@@ -7469,7 +7666,7 @@ mod tests {
 
     #[tokio::test]
     async fn merged_tool_defs_accepts_ticket_only_from_the_run_bound_policy_view() {
-        let tools = merged_tool_defs("run-1", "org-1", "user-1", &[], &TicketViewPolicy, false).await;
+        let tools = merged_tool_defs("run-1", "org-1", "user-1", &[], &TicketViewPolicy, false, false).await;
         assert!(tools
             .iter()
             .any(|tool| tool.name == crate::ticket_tools::TOOL_NAME));
@@ -7518,6 +7715,694 @@ mod tests {
     }
 
     static ALLOW_CAPABILITY_POLICY: AllowCapabilityPolicy = AllowCapabilityPolicy;
+
+    // -----------------------------------------------------------------------
+    // MCP in Do runs (WS05-S4): what a governed run is offered
+    // -----------------------------------------------------------------------
+
+    /// One MCP tool the gateway lists, and what the registry says about it.
+    struct McpFixture {
+        name: &'static str,
+        class: &'static str,
+        review_state: &'static str,
+        policy: &'static str,
+    }
+
+    const fn mcp(name: &'static str, class: &'static str) -> McpFixture {
+        McpFixture {
+            name,
+            class,
+            review_state: "approved",
+            policy: "allow",
+        }
+    }
+
+    /// A gateway and a registry that answer from a fixture, and count what they
+    /// were asked.
+    #[derive(Default)]
+    struct FakeGoverned {
+        tools: Vec<McpFixture>,
+        /// `(name, class)` of built-in tools the registry also declares.
+        builtins: Vec<(&'static str, &'static str)>,
+        registry_down: bool,
+        listing_calls: std::sync::atomic::AtomicUsize,
+        binding_calls: std::sync::atomic::AtomicUsize,
+        /// Every tool name any registry lookup carried, in order.
+        asked_names: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl FakeGoverned {
+        /// The MCP names any registry lookup carried: for a retention-bound run, none.
+        fn mcp_names_asked(&self) -> Vec<String> {
+            self.asked_names
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|name| name.starts_with("mcp__"))
+                .cloned()
+                .collect()
+        }
+    }
+
+    fn fixture_digest(name: &str) -> String {
+        format!("digest-of-{name}")
+    }
+
+    #[tonic::async_trait]
+    impl crate::mcp_gateway::GovernedSource for FakeGoverned {
+        async fn listing(
+            &self,
+            _org_id: &str,
+            _user_id: &str,
+        ) -> Result<crate::mcp_gateway::McpListing, Status> {
+            self.listing_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(crate::mcp_gateway::McpListing {
+                tools: self
+                    .tools
+                    .iter()
+                    .map(|tool| pb::ToolDefinition {
+                        name: tool.name.to_owned(),
+                        description: format!("{} description", tool.name),
+                        parameters_json: "{}".to_owned(),
+                    })
+                    .collect(),
+                meta: self
+                    .tools
+                    .iter()
+                    .map(|tool| pb::McpToolMeta {
+                        qualified_name: tool.name.to_owned(),
+                        server_id: "s".to_owned(),
+                        tool_name: tool.name.to_owned(),
+                        digest: fixture_digest(tool.name),
+                        declared_side_effect: String::new(),
+                    })
+                    .collect(),
+            })
+        }
+
+        async fn bindings(
+            &self,
+            _run_id: &str,
+            _org_id: &str,
+            _user_id: &str,
+            names: &[String],
+        ) -> Result<Vec<pb::ToolBinding>, Status> {
+            self.binding_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.asked_names
+                .lock()
+                .unwrap()
+                .extend(names.iter().cloned());
+            if self.registry_down {
+                return Err(Status::unavailable("registry down"));
+            }
+            let mut bindings: Vec<pb::ToolBinding> = self
+                .tools
+                .iter()
+                .filter(|tool| names.iter().any(|name| name == tool.name))
+                .map(|tool| pb::ToolBinding {
+                    tool_name: tool.name.to_owned(),
+                    capability_id: "cap.mcp_tool.fixture".to_owned(),
+                    capability_version: "1.0.0".to_owned(),
+                    side_effect_class: tool.class.to_owned(),
+                    approval_floor: "none".to_owned(),
+                    tool_digest: fixture_digest(tool.name),
+                    review_state: tool.review_state.to_owned(),
+                    effective_policy: tool.policy.to_owned(),
+                })
+                .collect();
+            bindings.extend(
+                self.builtins
+                    .iter()
+                    .filter(|(name, _)| names.iter().any(|asked| asked == name))
+                    .map(|(name, class)| pb::ToolBinding {
+                        tool_name: (*name).to_owned(),
+                        capability_id: "cap.builtin.fixture".to_owned(),
+                        capability_version: "1.0.0".to_owned(),
+                        side_effect_class: (*class).to_owned(),
+                        approval_floor: "none".to_owned(),
+                        tool_digest: String::new(),
+                        review_state: String::new(),
+                        effective_policy: String::new(),
+                    }),
+            );
+            Ok(bindings)
+        }
+    }
+
+    /// A policy that remembers which dynamic tool names the run asked it to bind.
+    #[derive(Default)]
+    struct PrefetchRecorder {
+        prefetched: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[tonic::async_trait]
+    impl crate::capability_policy::CapabilityPolicy for PrefetchRecorder {
+        async fn evaluate(
+            &self,
+            _tool_name: &str,
+            _run_id: &str,
+            _org_id: &str,
+        ) -> Result<crate::capability_policy::CapabilityDecision, Status> {
+            Ok(crate::capability_policy::CapabilityDecision::Allow)
+        }
+
+        async fn prefetch_tool_bindings(
+            &self,
+            _run_id: &str,
+            _org_id: &str,
+            _user_id: &str,
+            tool_names: &[String],
+        ) -> Result<(), Status> {
+            self.prefetched
+                .lock()
+                .unwrap()
+                .extend(tool_names.iter().cloned());
+            Ok(())
+        }
+    }
+
+    fn governance<'a>(
+        gate: crate::capability_policy::ToolClassGate,
+        mode: crate::mcp_gateway::McpDoTools,
+        cap: usize,
+        source: &'a FakeGoverned,
+    ) -> Governance<'a> {
+        Governance {
+            gate,
+            mode,
+            cap,
+            source: Some(source as &dyn crate::mcp_gateway::GovernedSource),
+        }
+    }
+
+    async fn governed_offer(
+        run: &str,
+        zdr: bool,
+        policy: &dyn crate::capability_policy::CapabilityPolicy,
+        governance: Governance<'_>,
+    ) -> (Vec<String>, bool) {
+        let (tools, derivable) = merged_tool_defs_governed(
+            run,
+            "org-governed",
+            "user-1",
+            &[],
+            policy,
+            false,
+            zdr,
+            governance,
+        )
+        .await;
+        let base = base_tool_defs(false).len();
+        (
+            tools[base..].iter().map(|tool| tool.name.clone()).collect(),
+            derivable,
+        )
+    }
+
+    #[tokio::test]
+    async fn a_read_mode_run_is_offered_only_approved_digest_matched_read_tools_in_name_order() {
+        use crate::capability_policy::ToolClassGate;
+        use crate::mcp_gateway::McpDoTools;
+        let source = FakeGoverned {
+            tools: vec![
+                mcp("mcp__s__zeta", "read"),
+                mcp("mcp__s__alpha", "read"),
+                mcp("mcp__s__create_item", "external_write"),
+                McpFixture {
+                    review_state: "pending",
+                    ..mcp("mcp__s__unreviewed", "read")
+                },
+                McpFixture {
+                    review_state: "drifted",
+                    ..mcp("mcp__s__changed", "read")
+                },
+                McpFixture {
+                    policy: "deny",
+                    ..mcp("mcp__s__denied", "read")
+                },
+            ],
+            ..Default::default()
+        };
+        let policy = PrefetchRecorder::default();
+        let (offered, derivable) = governed_offer(
+            "run-read-offer",
+            false,
+            &policy,
+            governance(ToolClassGate::Enforce, McpDoTools::Read, 40, &source),
+        )
+        .await;
+        assert_eq!(offered, ["mcp__s__alpha", "mcp__s__zeta"]);
+        assert!(
+            !derivable,
+            "an MCP tool in the set means a park resume cannot rebuild it by name"
+        );
+
+        // The gate's own class lookups come from the same answer the offer used.
+        let class = |name: &str| {
+            crate::permission::run_view("org-governed", "run-read-offer", name)
+                .map(|view| view.class())
+        };
+        assert_eq!(
+            class("mcp__s__alpha"),
+            Some(mp_contracts::tool_class::SideEffectClass::Read)
+        );
+        assert_eq!(class("mcp__s__create_item"), None, "withheld, so not bound");
+
+        // Every MCP tool the model was offered was handed to the gate's binder, and
+        // nothing else was.
+        assert_eq!(
+            *policy.prefetched.lock().unwrap(),
+            ["mcp__s__alpha", "mcp__s__zeta"]
+        );
+        assert_eq!(
+            source.listing_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            source.binding_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "one registry lookup for the whole offer"
+        );
+    }
+
+    #[tokio::test]
+    async fn all_mode_offers_every_approved_class_and_the_cap_cuts_the_sorted_tail() {
+        use crate::capability_policy::ToolClassGate;
+        use crate::mcp_gateway::McpDoTools;
+        let source = FakeGoverned {
+            tools: vec![
+                mcp("mcp__s__d", "destructive"),
+                mcp("mcp__s__a", "read"),
+                mcp("mcp__s__c", "external_write"),
+                mcp("mcp__s__b", "context_write"),
+            ],
+            ..Default::default()
+        };
+        let policy = PrefetchRecorder::default();
+        let (all, _) = governed_offer(
+            "run-all-offer",
+            false,
+            &policy,
+            governance(ToolClassGate::Enforce, McpDoTools::All, 40, &source),
+        )
+        .await;
+        assert_eq!(all, ["mcp__s__a", "mcp__s__b", "mcp__s__c", "mcp__s__d"]);
+        let (capped, _) = governed_offer(
+            "run-capped-offer",
+            false,
+            &policy,
+            governance(ToolClassGate::Enforce, McpDoTools::All, 2, &source),
+        )
+        .await;
+        assert_eq!(capped, ["mcp__s__a", "mcp__s__b"]);
+    }
+
+    #[tokio::test]
+    async fn a_zero_retention_run_is_offered_no_mcp_tool_and_neither_service_is_asked() {
+        use crate::capability_policy::ToolClassGate;
+        use crate::mcp_gateway::McpDoTools;
+        let source = FakeGoverned {
+            tools: vec![mcp("mcp__s__echo_read", "read")],
+            ..Default::default()
+        };
+        let policy = PrefetchRecorder::default();
+        for mode in [McpDoTools::Off, McpDoTools::Read, McpDoTools::All] {
+            let (offered, derivable) = governed_offer(
+                "run-zdr-offer",
+                true,
+                &policy,
+                governance(ToolClassGate::Enforce, mode, 40, &source),
+            )
+            .await;
+            assert!(offered.is_empty(), "{mode:?}: {offered:?}");
+            assert!(derivable, "{mode:?}: a ZDR run's set is the base set");
+        }
+        assert_eq!(
+            source.listing_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the gateway is not asked on behalf of a zero-retention run"
+        );
+        assert!(
+            source.mcp_names_asked().is_empty(),
+            "nor is the registry asked about an MCP tool: {:?}",
+            source.mcp_names_asked()
+        );
+        assert!(policy.prefetched.lock().unwrap().is_empty());
+    }
+
+    /// A built-in tool the org's registry tightened (a `code_interpreter` that the registry
+    /// declares an external write, where the legacy name heuristic says read).
+    fn tightened_builtin_source() -> FakeGoverned {
+        FakeGoverned {
+            tools: vec![mcp("mcp__s__echo_read", "read")],
+            builtins: vec![("code_interpreter", "external_write")],
+            ..Default::default()
+        }
+    }
+
+    /// Whether `tool` is refused at the read-only rung for this run, as the gate decides it.
+    fn refused_at_read_only(run: &str, tool: &str) -> bool {
+        crate::permission::RunGate::with_gate(
+            crate::capability_policy::ToolClassGate::Enforce,
+            "org-governed",
+            run,
+        )
+        .check_autonomy_rung(pb::AutonomyRung::ReadOnly, tool, "{}")
+        .is_err()
+    }
+
+    /// The offer of a retention-bound run learns the BUILT-IN classes, so the run's gate is
+    /// the same one the org's non-retention run has. Without it the gate falls back to the
+    /// legacy name heuristic, which calls `code_interpreter` a read.
+    #[tokio::test]
+    async fn a_retention_bound_run_learns_a_tightened_built_in_class_like_any_other_run() {
+        use crate::capability_policy::ToolClassGate;
+        use crate::mcp_gateway::McpDoTools;
+        let policy = PrefetchRecorder::default();
+
+        // The control: an ordinary run of the org is refused the tightened tool at the
+        // read-only rung. (Its own recorder: it is offered, and prefetches, an MCP tool.)
+        let control_source = tightened_builtin_source();
+        let control = offer_request("run-tightened-control");
+        let control_policy = PrefetchRecorder::default();
+        offered_tools(
+            &control,
+            false,
+            &control_policy,
+            governance(ToolClassGate::Enforce, McpDoTools::Read, 40, &control_source),
+        )
+        .await;
+        assert!(refused_at_read_only("run-tightened-control", "code_interpreter"));
+
+        // A ZDR request and a waived route are refused it exactly the same.
+        for (run, zdr, waived) in [
+            ("run-tightened-zdr", true, false),
+            ("run-tightened-waived", false, true),
+            ("run-tightened-both", true, true),
+        ] {
+            for mode in [McpDoTools::Off, McpDoTools::Read, McpDoTools::All] {
+                let source = tightened_builtin_source();
+                let mut request = offer_request(run);
+                request.zdr = zdr;
+                let offered = offered_tools(
+                    &request,
+                    waived,
+                    &policy,
+                    governance(ToolClassGate::Enforce, mode, 40, &source),
+                )
+                .await;
+                assert!(
+                    refused_at_read_only(run, "code_interpreter"),
+                    "{run} {mode:?}: the run did not learn the registry's class for the built-in tool"
+                );
+                assert_eq!(
+                    crate::permission::run_view("org-governed", run, "code_interpreter")
+                        .map(|view| view.class()),
+                    Some(mp_contracts::tool_class::SideEffectClass::ExternalWrite)
+                );
+                // Still nothing MCP: no listing, no MCP name in the lookup, no prefetch, no
+                // MCP tool shown, and the built-in lookup is the only one made.
+                let asked = |counter: &std::sync::atomic::AtomicUsize| {
+                    counter.load(std::sync::atomic::Ordering::SeqCst)
+                };
+                assert_eq!(asked(&source.listing_calls), 0, "{run} {mode:?}: listing");
+                assert_eq!(asked(&source.binding_calls), 1, "{run} {mode:?}: one lookup");
+                assert!(
+                    source.mcp_names_asked().is_empty(),
+                    "{run} {mode:?}: {:?}",
+                    source.mcp_names_asked()
+                );
+                assert!(offered.defs.iter().all(|tool| !tool.name.starts_with("mcp__")));
+                assert!(offered.derivable);
+            }
+        }
+        assert!(
+            policy.prefetched.lock().unwrap().is_empty(),
+            "no MCP tool was offered, so none was prefetched"
+        );
+    }
+
+    /// Without a gate that reads classes a retention-bound run asks the registry nothing.
+    #[tokio::test]
+    async fn a_retention_bound_run_under_a_gate_that_reads_no_class_asks_nothing() {
+        use crate::capability_policy::ToolClassGate;
+        use crate::mcp_gateway::McpDoTools;
+        let policy = PrefetchRecorder::default();
+        let source = tightened_builtin_source();
+        let mut request = offer_request("run-tightened-gate-off");
+        request.zdr = true;
+        offered_tools(
+            &request,
+            false,
+            &policy,
+            governance(ToolClassGate::Off, McpDoTools::Read, 40, &source),
+        )
+        .await;
+        assert_eq!(
+            source.binding_calls.load(std::sync::atomic::Ordering::SeqCst)
+                + source.listing_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    }
+
+    fn offer_request(run: &str) -> pb::RunAgentRequest {
+        pb::RunAgentRequest {
+            run_id: run.to_owned(),
+            org_id: "org-governed".to_owned(),
+            user_id: "user-1".to_owned(),
+            model: "gpt-4o-mini".to_owned(),
+            ..Default::default()
+        }
+    }
+
+    /// A waived route keeps nothing and is refused every MCP call at dispatch, so its
+    /// offer is the ZDR one: no token, no listing (which can trigger the gateway's
+    /// observation write), no binding lookup, and no MCP tool shown to the model.
+    #[tokio::test]
+    async fn a_waived_route_run_is_offered_no_mcp_tool_and_nothing_is_asked_on_its_behalf() {
+        use crate::capability_policy::ToolClassGate;
+        use crate::mcp_gateway::McpDoTools;
+        let source = FakeGoverned {
+            tools: vec![mcp("mcp__s__echo_read", "read")],
+            builtins: vec![("browser.act", "external_write")],
+            ..Default::default()
+        };
+        let policy = PrefetchRecorder::default();
+        let request = offer_request("run-waived-offer");
+        for mode in [McpDoTools::Off, McpDoTools::Read, McpDoTools::All] {
+            let offered = offered_tools(
+                &request,
+                true,
+                &policy,
+                governance(ToolClassGate::Enforce, mode, 40, &source),
+            )
+            .await;
+            assert!(
+                offered.defs.iter().all(|tool| !tool.name.starts_with("mcp__")),
+                "{mode:?}: a waived run was offered an MCP tool"
+            );
+            assert!(offered.derivable, "{mode:?}: the set is the base set");
+        }
+        let asked = |counter: &std::sync::atomic::AtomicUsize| {
+            counter.load(std::sync::atomic::Ordering::SeqCst)
+        };
+        assert_eq!(asked(&source.listing_calls), 0, "no listing");
+        assert!(
+            source.mcp_names_asked().is_empty(),
+            "no MCP name in a binding lookup: {:?}",
+            source.mcp_names_asked()
+        );
+        assert!(policy.prefetched.lock().unwrap().is_empty());
+
+        // The same run on a route that is not waived is offered the tool, so the test
+        // above is about the waiver and not about a source that offers nothing.
+        let control = offered_tools(
+            &request,
+            false,
+            &policy,
+            governance(ToolClassGate::Enforce, McpDoTools::Read, 40, &source),
+        )
+        .await;
+        assert!(control.defs.iter().any(|tool| tool.name == "mcp__s__echo_read"));
+        assert_eq!(asked(&source.listing_calls), 1);
+    }
+
+    /// A ZDR request reaches the same flag through the request itself.
+    #[tokio::test]
+    async fn a_zdr_request_and_a_waived_route_are_the_same_retention_bound_offer() {
+        use crate::capability_policy::ToolClassGate;
+        use crate::mcp_gateway::McpDoTools;
+        let source = FakeGoverned {
+            tools: vec![mcp("mcp__s__echo_read", "read")],
+            ..Default::default()
+        };
+        let policy = PrefetchRecorder::default();
+        let mut request = offer_request("run-zdr-request-offer");
+        request.zdr = true;
+        let offered = offered_tools(
+            &request,
+            false,
+            &policy,
+            governance(ToolClassGate::Enforce, McpDoTools::Read, 40, &source),
+        )
+        .await;
+        assert!(offered.defs.iter().all(|tool| !tool.name.starts_with("mcp__")));
+        assert_eq!(
+            source.listing_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert!(source.mcp_names_asked().is_empty());
+    }
+
+    #[test]
+    fn the_route_an_offer_is_made_for_is_waived_when_it_will_be_or_cannot_be_resolved() {
+        let caller = crate::auth::AuthenticatedUser::for_test("org-governed", "user-1");
+        // An ordinary run on the default route is not waived.
+        assert!(!offer_is_waived(&offer_request("run-plain"), &caller));
+        // A route that does not resolve refuses the run before it starts: it is offered
+        // nothing rather than a tool list nobody will use.
+        let mut broken = offer_request("run-broken-route");
+        broken.provider_hint = "no-such-provider".to_owned();
+        broken.subscription_connection_id = "conn_1".to_owned();
+        assert!(offer_is_waived(&broken, &caller));
+    }
+
+    #[tokio::test]
+    async fn without_an_enforcing_gate_no_mcp_tool_is_offered_because_every_call_would_be_refused() {
+        use crate::capability_policy::ToolClassGate;
+        use crate::mcp_gateway::McpDoTools;
+        let source = FakeGoverned {
+            tools: vec![mcp("mcp__s__echo_read", "read")],
+            ..Default::default()
+        };
+        let policy = PrefetchRecorder::default();
+        for gate in [ToolClassGate::Off, ToolClassGate::Shadow] {
+            let (offered, _) = governed_offer(
+                "run-gate-offer",
+                false,
+                &policy,
+                governance(gate, McpDoTools::Read, 40, &source),
+            )
+            .await;
+            assert!(offered.is_empty(), "{gate:?}: {offered:?}");
+        }
+        assert_eq!(
+            source.listing_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn with_every_switch_off_nothing_governed_is_asked_or_recorded() {
+        use crate::capability_policy::ToolClassGate;
+        use crate::mcp_gateway::McpDoTools;
+        let source = FakeGoverned {
+            tools: vec![mcp("mcp__s__echo_read", "read")],
+            builtins: vec![("browser.act", "external_write")],
+            ..Default::default()
+        };
+        let policy = PrefetchRecorder::default();
+        let (offered, derivable) = governed_offer(
+            "run-off-offer",
+            false,
+            &policy,
+            governance(ToolClassGate::Off, McpDoTools::Off, 40, &source),
+        )
+        .await;
+        // The plain listing is the only MCP path left; there is no gateway here.
+        assert!(offered.is_empty());
+        assert!(derivable);
+        assert_eq!(
+            source.listing_calls.load(std::sync::atomic::Ordering::SeqCst)
+                + source.binding_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert!(crate::permission::run_view("org-governed", "run-off-offer", "browser.act").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_shadow_gate_learns_the_built_in_classes_without_offering_mcp() {
+        use crate::capability_policy::ToolClassGate;
+        use crate::mcp_gateway::McpDoTools;
+        let source = FakeGoverned {
+            builtins: vec![("browser.act", "external_write"), ("knowledge_search", "read")],
+            ..Default::default()
+        };
+        let policy = PrefetchRecorder::default();
+        let (offered, _) = governed_offer(
+            "run-shadow-offer",
+            false,
+            &policy,
+            governance(ToolClassGate::Shadow, McpDoTools::Off, 40, &source),
+        )
+        .await;
+        assert!(offered.is_empty());
+        let view = crate::permission::run_view("org-governed", "run-shadow-offer", "browser.act")
+            .expect("the registry answered for the built-in tool");
+        assert_eq!(
+            view.class(),
+            mp_contracts::tool_class::SideEffectClass::ExternalWrite
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unavailable_registry_offers_no_mcp_tool_and_keeps_what_the_run_already_knew() {
+        use crate::capability_policy::ToolClassGate;
+        use crate::mcp_gateway::McpDoTools;
+        let policy = PrefetchRecorder::default();
+        let answering = FakeGoverned {
+            tools: vec![mcp("mcp__s__echo_read", "read")],
+            ..Default::default()
+        };
+        let (first, _) = governed_offer(
+            "run-outage-offer",
+            false,
+            &policy,
+            governance(ToolClassGate::Enforce, McpDoTools::Read, 40, &answering),
+        )
+        .await;
+        assert_eq!(first, ["mcp__s__echo_read"]);
+
+        let down = FakeGoverned {
+            tools: vec![mcp("mcp__s__echo_read", "read")],
+            registry_down: true,
+            ..Default::default()
+        };
+        let (second, _) = governed_offer(
+            "run-outage-offer",
+            false,
+            &policy,
+            governance(ToolClassGate::Enforce, McpDoTools::Read, 40, &down),
+        )
+        .await;
+        assert!(
+            second.is_empty(),
+            "a cold registry fails to offer, it does not fail to authorise"
+        );
+        assert!(
+            crate::permission::run_view("org-governed", "run-outage-offer", "mcp__s__echo_read")
+                .is_some(),
+            "an outage is not 'nothing is classified'"
+        );
+    }
+
+    #[test]
+    fn tool_loop_never_reads_a_declared_class() {
+        // The plain chat loop refuses side effects by construction; it must not
+        // grow a registry lookup that could turn a refusal into a permission.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../model-gateway/src/tool_loop.rs");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {} ({error}); re-point this test", path.display()));
+        for forbidden in ["tool_class", "ResolveToolBindings", "resolve_tool_bindings"] {
+            assert!(
+                !text.contains(forbidden),
+                "tool_loop.rs references `{forbidden}`: the two loops stay separate"
+            );
+        }
+    }
 
     /// Records the calls the driver made into Session Core / orchestration, so
     /// tests can distinguish non-terminal legacy tool audit steps from the
@@ -15378,10 +16263,10 @@ mod tests {
         let forward = [tool_named("client_a"), tool_named("client_m"), tool_named("client_z")];
         let reversed = [tool_named("client_z"), tool_named("client_a"), tool_named("client_m")];
         let from_forward =
-            merged_tool_defs("run-1", "org-1", "user-1", &forward, &ALLOW_CAPABILITY_POLICY, false)
+            merged_tool_defs("run-1", "org-1", "user-1", &forward, &ALLOW_CAPABILITY_POLICY, false, false)
                 .await;
         let from_reversed =
-            merged_tool_defs("run-1", "org-1", "user-1", &reversed, &ALLOW_CAPABILITY_POLICY, false)
+            merged_tool_defs("run-1", "org-1", "user-1", &reversed, &ALLOW_CAPABILITY_POLICY, false, false)
                 .await;
         assert_eq!(tool_names(&from_forward), tool_names(&from_reversed));
         let base = base_tool_defs(false);
@@ -17256,7 +18141,7 @@ mod tests {
         };
 
         let off = EnabledOverride::set(false);
-        let tools = merged_tool_defs("run_x", "org_x", "user_x", &[], &ALLOW_CAPABILITY_POLICY, false)
+        let tools = merged_tool_defs("run_x", "org_x", "user_x", &[], &ALLOW_CAPABILITY_POLICY, false, false)
             .await;
         assert!(!offered(&tools, RESEARCH_TOOL_NAME), "switched off, yet offered");
         assert!(
@@ -17266,7 +18151,7 @@ mod tests {
         drop(off);
 
         let _on = EnabledOverride::set(true);
-        let tools = merged_tool_defs("run_x", "org_x", "user_x", &[], &ALLOW_CAPABILITY_POLICY, false)
+        let tools = merged_tool_defs("run_x", "org_x", "user_x", &[], &ALLOW_CAPABILITY_POLICY, false, false)
             .await;
         assert!(offered(&tools, RESEARCH_TOOL_NAME), "switched on, yet not offered");
     }
@@ -22749,6 +23634,7 @@ mod tests {
                 &client,
                 &ALLOW_CAPABILITY_POLICY,
                 false,
+                false,
             )
             .await
         };
@@ -22765,7 +23651,7 @@ mod tests {
         assert_eq!(tools, base, "the derived set is the base set and the resolver's additions");
         assert_eq!(
             tools,
-            merged_tool_defs("run-1", "org-1", "user-1", &[], &ALLOW_CAPABILITY_POLICY, false)
+            merged_tool_defs("run-1", "org-1", "user-1", &[], &ALLOW_CAPABILITY_POLICY, false, false)
                 .await,
             "merged_tool_defs is the same set"
         );
@@ -22786,7 +23672,7 @@ mod tests {
 
         // The server-resolved view, when it is readable, is part of the derived set.
         let (tools, derivable) =
-            merged_tool_defs_with_sources("run-1", "org-1", "user-1", &[], &TicketViewPolicy, false)
+            merged_tool_defs_with_sources("run-1", "org-1", "user-1", &[], &TicketViewPolicy, false, false)
                 .await;
         assert!(derivable);
         assert!(tools.iter().any(|tool| tool.name == crate::ticket_tools::TOOL_NAME));
@@ -22799,6 +23685,7 @@ mod tests {
             &[],
             &BrokenViewPolicy,
             false,
+            false,
         )
         .await;
         assert!(!derivable, "a resume could not rebuild what it cannot read");
@@ -22810,7 +23697,7 @@ mod tests {
     #[tokio::test]
     async fn the_offer_is_derivable_only_for_a_fresh_request_with_no_added_tools() {
         let fresh = subscription_request();
-        let offered = offered_tools(&fresh, &ALLOW_CAPABILITY_POLICY).await;
+        let offered = offered_tools(&fresh, false, &ALLOW_CAPABILITY_POLICY, governance_from_env()).await;
         assert!(offered.derivable);
         assert_eq!(offered.defs, base_tool_defs(false));
 
@@ -22822,7 +23709,7 @@ mod tests {
             }],
             ..fresh.clone()
         };
-        assert!(!offered_tools(&with_client_tool, &ALLOW_CAPABILITY_POLICY).await.derivable);
+        assert!(!offered_tools(&with_client_tool, false, &ALLOW_CAPABILITY_POLICY, governance_from_env()).await.derivable);
 
         // An approval continuation (a stage-1 segment or the in-place resume): its offered set
         // is replaced by the snapshot's, so it is never derivable, and its defs are the ones
@@ -22837,7 +23724,7 @@ mod tests {
                 }),
                 ..fresh.clone()
             };
-            let offered = offered_tools(&continuation, &ALLOW_CAPABILITY_POLICY).await;
+            let offered = offered_tools(&continuation, false, &ALLOW_CAPABILITY_POLICY, governance_from_env()).await;
             assert!(!offered.derivable, "{mode}");
             assert_eq!(
                 offered.defs,
@@ -22847,6 +23734,7 @@ mod tests {
                     "user_test",
                     &[],
                     &ALLOW_CAPABILITY_POLICY,
+                    false,
                     false
                 )
                 .await,
@@ -23496,7 +24384,7 @@ mod tests {
             ..subscription_request()
         };
         // What the offer reports for this request is what the loop is driven with.
-        let offered = offered_tools(&with_client_tool, &ALLOW_CAPABILITY_POLICY).await;
+        let offered = offered_tools(&with_client_tool, false, &ALLOW_CAPABILITY_POLICY, governance_from_env()).await;
         assert!(!offered.derivable);
         let run = drive_park_with(
             ParkKnobs::ON,

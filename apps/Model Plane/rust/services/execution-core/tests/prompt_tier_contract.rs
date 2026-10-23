@@ -293,11 +293,11 @@ fn the_loop_seeds_its_run_context_in_tier_order() {
 #[test]
 fn the_appended_tool_segments_are_sorted_by_name() {
     let source = loop_source();
-    let body = function_body(&source, "fn merged_tool_defs_with_sources(");
+    let body = function_body(&source, "async fn merged_tool_defs_governed(");
     assert_eq!(
         body.matches("append_untrusted_tool_defs_sorted(").count(),
-        2,
-        "the MCP segment and the client segment are both appended sorted"
+        3,
+        "the plain MCP segment, the governed MCP segment and the client segment are all appended sorted"
     );
     assert!(
         !body.contains("append_untrusted_tool_defs(&"),

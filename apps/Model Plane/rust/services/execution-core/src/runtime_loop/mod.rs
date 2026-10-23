@@ -554,13 +554,22 @@ async fn execute_step_inner(
             &mp_contracts::zdr_refusal::Refusal::feature_not_supported("mcp_execution").message(),
         );
     }
+    // The class and floor this call's policy decision carried. A governed MCP call is
+    // compared with them at dispatch (`execute_governed_mcp`).
+    let signed_class: crate::mcp_gateway::SignedToolClass;
     match capability_policy
         .evaluate_tool_call(tool_name, run_id, org_id, user_id)
         .await
     {
         Ok(evaluation)
             if evaluation.decision == crate::capability_policy::CapabilityDecision::Allow
-                && evaluation.evidence_verified => {}
+                && evaluation.evidence_verified =>
+        {
+            signed_class = crate::mcp_gateway::SignedToolClass::new(
+                &evaluation.side_effect_class,
+                &evaluation.approval_floor,
+            );
+        }
         Ok(evaluation)
             if evaluation.decision == crate::capability_policy::CapabilityDecision::Allow =>
         {
@@ -574,6 +583,10 @@ async fn execute_step_inner(
         Ok(evaluation)
             if evaluation.decision == crate::capability_policy::CapabilityDecision::Ask =>
         {
+            signed_class = crate::mcp_gateway::SignedToolClass::new(
+                &evaluation.side_effect_class,
+                &evaluation.approval_floor,
+            );
             if !released {
                 // capability-core answers `ask` for a high-risk capability, and,
                 // once the tool class gate names the tool, for a tool whose class
@@ -638,7 +651,11 @@ async fn execute_step_inner(
     // `operation` embedded in `tool_input` (a read proceeds, a write pauses)
     // rather than by tool name alone; `browser_agent` and other write-capable
     // tools are gated by name.
-    match permission::evaluate_call(mode, tool_name, tool_input) {
+    //
+    // Under `TOOL_CLASS_GATE` the run's declared class and approval floor decide
+    // instead of the name (`permission::RunGate`); with the gate off this is
+    // `evaluate_call` exactly.
+    match permission::RunGate::for_run(org_id, run_id).evaluate_call(mode, tool_name, tool_input) {
         PermissionDecision::Deny => return StepOutcome::permission_denied(),
         PermissionDecision::AwaitApproval if !released => {
             return StepOutcome::awaiting_approval(permission_pause_cause(tool_name));
@@ -832,7 +849,16 @@ async fn execute_step_inner(
         // not a fallback to a generic HTTP executor.
         crate::ticket_tools::execute_if_configured(tool_input, run_id, org_id, step_id).await
     } else if tool_name.starts_with(MCP_TOOL_PREFIX) {
-        execute_mcp(tool_name, tool_input, org_id, user_id).await
+        execute_mcp(
+            tool_name,
+            tool_input,
+            org_id,
+            user_id,
+            run_id,
+            zdr || waived,
+            &signed_class,
+        )
+        .await
     } else if subagent::is_subagent_tool(tool_name) {
         execute_subagent(tool_name, tool_input, subagent_dispatch).await
     } else {
@@ -1153,22 +1179,131 @@ async fn execute_web_search(
 /// (never model input); the server is selected by the namespaced name, and the
 /// gateway enforces the server's enabled flag + tool allowlist. Best-effort: a
 /// missing gateway or remote error returns a clear tool error to the model.
+///
+/// `retention_waived` is true under ZDR and on a waived route: a call carries its
+/// content to a third-party server, so it is refused here, before any credential is
+/// minted or any network call made, even though the step gate refuses it first.
+///
+/// With `MCP_DO_TOOLS` off the call is the plain, unbound proxy it always was. With
+/// it on the call needs the run's registry binding: the tool's class must be one the
+/// mode allows and must still be the class the call's signed policy decision carries
+/// (`signed`), and the digest the registry pinned goes to the gateway, which refuses the
+/// call if the definition it would run has changed since.
 async fn execute_mcp(
     tool_name: &str,
     tool_input: &str,
     org_id: &str,
     user_id: &str,
+    run_id: &str,
+    retention_waived: bool,
+    signed: &crate::mcp_gateway::SignedToolClass,
 ) -> tool_bridge::ToolExecution {
+    if retention_waived {
+        return tool_error(
+            mp_contracts::zdr_refusal::Refusal::feature_not_supported("mcp_execution").message(),
+        );
+    }
     let Some((server_id, remote_tool)) = crate::mcp_gateway::parse_mcp_tool_name(tool_name) else {
         return tool_error(format!(
             "malformed MCP tool '{tool_name}' (expected mcp__<server>__<tool>)"
         ));
     };
+    let mode = crate::mcp_gateway::McpDoTools::from_env();
+    if mode != crate::mcp_gateway::McpDoTools::Off {
+        return execute_governed_mcp(
+            mode,
+            tool_name,
+            tool_input,
+            org_id,
+            user_id,
+            run_id,
+            (server_id, remote_tool),
+            signed,
+        )
+        .await;
+    }
     let Some(client) = crate::mcp_gateway::McpGatewayClient::from_env() else {
         return tool_error("MCP gateway not configured (MODEL_GATEWAY_ADDR)".to_owned());
     };
     match client
         .proxy_tool(org_id, user_id, server_id, remote_tool, tool_input)
+        .await
+    {
+        Ok(output) => tool_bridge::ToolExecution {
+            output,
+            error: None,
+        },
+        Err(e) => tool_error(e),
+    }
+}
+
+/// The governed half of [`execute_mcp`]: the call runs only if the run holds the
+/// registry's binding for the tool, the class and floor that binding gave the offer
+/// are still the ones the signed policy decision for this call carries, the mode
+/// allows that class, and the gateway can be reached as the execution service. Each
+/// refusal says which, so the model does not retry what retrying cannot fix.
+///
+/// The view is a snapshot from when the segment's tools were listed, and the plan-mode,
+/// leaf and autonomy checks read it too. A registry row tightened since (its digest
+/// unchanged, its review state still approved) would otherwise run under the looser
+/// snapshot, so a difference refuses the call as `class_changed`: counted, and no
+/// credential is minted and no network call made.
+#[allow(clippy::too_many_arguments)]
+async fn execute_governed_mcp(
+    mode: crate::mcp_gateway::McpDoTools,
+    tool_name: &str,
+    tool_input: &str,
+    org_id: &str,
+    user_id: &str,
+    run_id: &str,
+    (server_id, remote_tool): (&str, &str),
+    signed: &crate::mcp_gateway::SignedToolClass,
+) -> tool_bridge::ToolExecution {
+    let Some(view) = permission::run_view(org_id, run_id, tool_name)
+        .filter(|view| !view.digest().is_empty())
+    else {
+        return tool_error(format!(
+            "MCP tool '{tool_name}' is not bound for this run; it was not run"
+        ));
+    };
+    if signed.differs_from(tool_name, &view) {
+        metrics::counter!("mcp_tool_class_changed_total").increment(1);
+        tracing::warn!(
+            tool = %tool_name,
+            offered_class = view.class().as_str(),
+            decided_class = %signed.class,
+            "MCP tool class changed since the offer; the call was refused"
+        );
+        return tool_error(format!(
+            "{}: MCP tool '{tool_name}' is no longer the class this run was offered it as \
+             (offered '{}', now '{}'); it was not run",
+            crate::mcp_gateway::CLASS_CHANGED,
+            view.class().as_str(),
+            if signed.class.trim().is_empty() {
+                "unstated"
+            } else {
+                signed.class.as_str()
+            },
+        ));
+    }
+    if !mode.allows(view.class()) {
+        return tool_error(format!(
+            "MCP tool '{tool_name}' is a '{}' tool, which this deployment does not run in Do runs",
+            view.class().as_str()
+        ));
+    }
+    let Some(governed) = crate::mcp_gateway::GovernedMcp::shared() else {
+        return tool_error("MCP gateway credential is not configured; the tool was not run".to_owned());
+    };
+    match governed
+        .proxy(
+            org_id,
+            user_id,
+            server_id,
+            remote_tool,
+            tool_input,
+            view.digest(),
+        )
         .await
     {
         Ok(output) => tool_bridge::ToolExecution {
@@ -2597,6 +2732,8 @@ mod tests {
                 capability_version: String::new(),
                 evidence_verified: true,
                 policy_source: String::new(),
+                side_effect_class: String::new(),
+                approval_floor: String::new(),
             })
         }
     }
@@ -2628,6 +2765,8 @@ mod tests {
                 capability_version: String::new(),
                 evidence_verified: true,
                 policy_source: self.0.to_owned(),
+                side_effect_class: String::new(),
+                approval_floor: String::new(),
             })
         }
     }
@@ -3202,5 +3341,154 @@ mod tests {
             "a write with no run/step context must be blocked"
         );
         assert!(r.unwrap_err().contains("run/step"));
+    }
+
+    // -----------------------------------------------------------------------
+    // MCP in Do runs (WS05-S4): the governed call
+    // -----------------------------------------------------------------------
+
+    fn run_view_for(org: &str, run: &str, tool: &str, class: &str, digest: &str) {
+        permission::record_run_views(
+            org,
+            run,
+            [(
+                tool.to_owned(),
+                permission::ToolClassView::from_registry(tool, class, "none", digest),
+            )],
+        );
+    }
+
+    #[tokio::test]
+    async fn a_retention_waived_mcp_call_is_refused_before_any_credential_or_network_call() {
+        let signed = crate::mcp_gateway::SignedToolClass::new("read", "none");
+        let out = execute_mcp("mcp__srv__echo", "{}", "org_x", "user_x", "run_x", true, &signed).await;
+        assert!(out.output.is_empty());
+        assert_eq!(
+            out.error.as_deref(),
+            Some(
+                mp_contracts::zdr_refusal::Refusal::feature_not_supported("mcp_execution")
+                    .message()
+                    .as_str()
+            )
+        );
+        // Even a name that is not an MCP tool's shape gets the retention refusal first.
+        let malformed =
+            execute_mcp("mcp__nonsense", "{}", "org_x", "user_x", "run_x", true, &signed).await;
+        assert_eq!(malformed.error, out.error);
+    }
+
+    #[tokio::test]
+    async fn a_governed_call_needs_the_runs_binding_and_a_class_the_mode_allows() {
+        use crate::mcp_gateway::McpDoTools;
+        use crate::mcp_gateway::SignedToolClass;
+        let parts = ("srv", "echo");
+        // The class the call's signed policy decision carries: the view's own, unless a
+        // test says the registry moved on.
+        let call_decided = |mode, run: &'static str, decided: &'static str| async move {
+            execute_governed_mcp(
+                mode,
+                "mcp__srv__echo",
+                "{}",
+                "org-call",
+                "user",
+                run,
+                parts,
+                &SignedToolClass::new(decided, "none"),
+            )
+            .await
+            .error
+            .unwrap_or_default()
+        };
+        let call = |mode, run: &'static str| async move {
+            let decided = match run {
+                "run-write" => "external_write",
+                "run-changed" => "destructive",
+                _ => "read",
+            };
+            call_decided(mode, run, decided).await
+        };
+
+        // Nothing resolved for the run, or a view with no pinned digest: not bound.
+        assert!(call(McpDoTools::Read, "run-unbound").await.contains("not bound"));
+        run_view_for("org-call", "run-undigested", "mcp__srv__echo", "read", "");
+        assert!(call(McpDoTools::Read, "run-undigested").await.contains("not bound"));
+
+        // Read mode runs a read; every other class is refused and named.
+        run_view_for("org-call", "run-write", "mcp__srv__echo", "external_write", "d1");
+        let refused = call(McpDoTools::Read, "run-write").await;
+        assert!(refused.contains("external_write"), "{refused}");
+        assert!(refused.contains("does not run in Do runs"), "{refused}");
+
+        // A class that changed under the run is read at the call, not at the offer.
+        run_view_for("org-call", "run-changed", "mcp__srv__echo", "read", "d1");
+        run_view_for("org-call", "run-changed", "mcp__srv__echo", "destructive", "d1");
+        assert!(call(McpDoTools::Read, "run-changed").await.contains("destructive"));
+
+        // A read in read mode gets as far as the credential, which a unit test lacks.
+        run_view_for("org-call", "run-read", "mcp__srv__echo", "read", "d1");
+        let reached = call(McpDoTools::Read, "run-read").await;
+        assert!(reached.contains("credential"), "{reached}");
+
+        // The same call in another tenant's run finds no binding.
+        assert!(call(McpDoTools::All, "run-write").await.contains("credential"));
+        let other = execute_governed_mcp(
+            McpDoTools::All,
+            "mcp__srv__echo",
+            "{}",
+            "org-other",
+            "user",
+            "run-write",
+            parts,
+            &SignedToolClass::new("external_write", "none"),
+        )
+        .await;
+        assert!(other.error.unwrap_or_default().contains("not bound"));
+    }
+
+    /// The offer saw the tool as `read` and the registry has since tightened the row (its
+    /// digest and review state unchanged, so the gate still allows it). The signed decision
+    /// for the call says `external_write`: the view is stale, and the call is refused, not
+    /// run as a read. The test has no credential, so a call that was NOT refused would say
+    /// so ("credential"): the refusal comes before any credential or network call.
+    #[tokio::test]
+    async fn a_call_whose_signed_class_differs_from_the_offered_view_is_refused_before_any_network_call() {
+        use crate::mcp_gateway::{McpDoTools, SignedToolClass};
+        let call = |signed: SignedToolClass, run: &'static str| async move {
+            execute_governed_mcp(
+                McpDoTools::Read,
+                "mcp__srv__echo",
+                "{}",
+                "org-call",
+                "user",
+                run,
+                ("srv", "echo"),
+                &signed,
+            )
+            .await
+            .error
+            .unwrap_or_default()
+        };
+        run_view_for("org-call", "run-stale-view", "mcp__srv__echo", "read", "d1");
+
+        let refused = call(SignedToolClass::new("external_write", "none"), "run-stale-view").await;
+        assert!(refused.starts_with(crate::mcp_gateway::CLASS_CHANGED), "{refused}");
+        assert!(refused.contains("external_write"), "{refused}");
+        assert!(
+            !refused.contains("credential"),
+            "the refusal comes before the gateway is reached: {refused}"
+        );
+
+        // A floor that rose is a change too, though the class did not move.
+        let floor = call(SignedToolClass::new("read", "ask"), "run-stale-view").await;
+        assert!(floor.starts_with(crate::mcp_gateway::CLASS_CHANGED), "{floor}");
+
+        // A decision that names no class cannot confirm the view: fail closed.
+        let unstated = call(SignedToolClass::default(), "run-stale-view").await;
+        assert!(unstated.starts_with(crate::mcp_gateway::CLASS_CHANGED), "{unstated}");
+        assert!(unstated.contains("unstated"), "{unstated}");
+
+        // The decision that agrees with the view goes on as far as the credential.
+        let agreed = call(SignedToolClass::new("read", "none"), "run-stale-view").await;
+        assert!(agreed.contains("credential"), "{agreed}");
     }
 }

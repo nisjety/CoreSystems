@@ -141,6 +141,17 @@ impl PendingMcpOAuth {
 /// can't be replayed much later.
 const MCP_OAUTH_SESSION_TTL: Duration = Duration::from_secs(10 * 60);
 
+/// Whether two rows of one server would discover the same tools: what a cached
+/// `tools/list` depends on (where it was fetched from, how, with what credential, and
+/// what the allowlist and the enabled flag let through). The display name is not.
+fn same_discovery_config(left: &McpServer, right: &McpServer) -> bool {
+    left.url == right.url
+        && left.transport == right.transport
+        && left.tool_allowlist == right.tool_allowlist
+        && left.enabled == right.enabled
+        && left.token == right.token
+}
+
 #[derive(Clone, Default)]
 pub struct McpRegistry {
     inner: Arc<DashMap<(String, String), McpServer>>, // (org, server_id)
@@ -198,13 +209,45 @@ impl McpRegistry {
     /// projection. This is deliberately a whole-tenant replacement: a missing
     /// row must revoke a cached server after restart, not leave an orphan that
     /// can still be advertised to the model.
-    pub fn replace_org(&self, org_id: &str, servers: impl IntoIterator<Item = McpServer>) {
-        self.inner.retain(|key, _| key.0 != org_id);
-        self.catalog.retain(|key, _| key.0 != org_id);
-        for server in servers {
-            self.inner
-                .insert((org_id.to_owned(), server.server_id.clone()), server);
+    ///
+    /// The swap is done as a merge, never as clear-then-fill: the new rows are upserted
+    /// first and only then are the rows absent from the answer removed, so a server that
+    /// is in both the old and the new answer is present at every instant (a concurrent
+    /// proxy call never finds it missing). A discovered catalog is kept for a server whose
+    /// discovery-relevant config (url, transport, allowlist, enabled, token) is unchanged,
+    /// so a refresh does not force a `tools/list` against every server; it is dropped for
+    /// a server whose config changed, is new, or is gone. Returns the ids that were removed.
+    pub fn replace_org(
+        &self,
+        org_id: &str,
+        servers: impl IntoIterator<Item = McpServer>,
+    ) -> Vec<String> {
+        let incoming: std::collections::HashMap<String, McpServer> = servers
+            .into_iter()
+            .map(|server| (server.server_id.clone(), server))
+            .collect();
+        for (server_id, server) in &incoming {
+            let key = (org_id.to_owned(), server_id.clone());
+            let previous = self.inner.insert(key.clone(), server.clone());
+            // Dropped after the new row is in place: a reader that finds the old catalog in
+            // between sees it for an instant, never a missing server.
+            if previous.is_none_or(|previous| !same_discovery_config(&previous, server)) {
+                self.catalog.remove(&key);
+            }
         }
+        let gone: Vec<String> = self
+            .inner
+            .iter()
+            .filter(|entry| entry.key().0 == org_id && !incoming.contains_key(&entry.key().1))
+            .map(|entry| entry.key().1.clone())
+            .collect();
+        for server_id in &gone {
+            self.inner.remove(&(org_id.to_owned(), server_id.clone()));
+        }
+        // A catalog with no server behind it is never kept, whatever removed the server.
+        self.catalog
+            .retain(|key, _| key.0 != org_id || incoming.contains_key(&key.1));
+        gone
     }
 
     /// Whether a server is cached for (org, `server_id`). Test/observability helper.
@@ -354,10 +397,37 @@ fn catalog_mcp_parts(
     Ok((server, ownership))
 }
 
-/// Refresh one tenant's MCP cache from capability-core using a verified,
-/// user-bound capability bearer. A failed refresh clears the tenant cache and
-/// ownership projection so a registry outage cannot leave revoked tools
-/// callable from stale process memory.
+/// Drop everything the replica holds for one tenant's MCP servers: the registry, the
+/// ownership projection and the discovery catalog. The fail-closed answer to a registry
+/// that cannot say what is still registered.
+fn clear_org_mcp_cache(
+    reg: &McpRegistry,
+    ownership: &crate::ownership::OwnershipStore,
+    org_id: &str,
+) {
+    reg.replace_org(org_id, std::iter::empty());
+    ownership.replace_org_kind(org_id, crate::ownership::KIND_MCP, std::iter::empty());
+}
+
+/// Refresh one tenant's MCP cache from capability-core using a verified
+/// capability bearer.
+///
+/// * A successful, parsed answer replaces the tenant's registry, ownership projection
+///   and discovery catalog, as a merge ([`McpRegistry::replace_org`]): a server in both
+///   the old and the new answer is never missing, and keeps its discovered catalog while
+///   its config is unchanged.
+/// * A registry that cannot answer fails CLOSED: an unreachable registry, a 5xx or other
+///   unexpected status, a body that is not the projection, or no registry address clears
+///   the tenant's cache, so an admin's revocation is not undone by an outage that leaves a
+///   revoked server callable from stale process memory.
+/// * The one exception is a bearer capability-core refuses (401, 403). That says the
+///   CALLER's credential is bad, not that the registry is down, and it must not let a bad
+///   caller wipe an org's MCP servers for everyone else on the replica: the cache is left
+///   exactly as it was. (A missing bearer is the same caller defect and is handled the
+///   same way; nothing was asked of the registry.)
+///
+/// The caller decides what a failure means for its own turn (the HTTP routes answer 503,
+/// a governed listing offers no MCP tool).
 pub async fn hydrate_mcp_registry(
     reg: &McpRegistry,
     ownership: &crate::ownership::OwnershipStore,
@@ -366,37 +436,53 @@ pub async fn hydrate_mcp_registry(
     org_id: &str,
     capability_bearer: &str,
 ) -> Result<usize, String> {
-    if capability_core_base_url.trim().is_empty() || capability_bearer.trim().is_empty() {
-        reg.replace_org(org_id, std::iter::empty());
-        ownership.replace_org_kind(org_id, crate::ownership::KIND_MCP, std::iter::empty());
-        return Err("capability registry or bearer is unavailable".to_owned());
+    if capability_bearer.trim().is_empty() {
+        return Err("capability bearer is unavailable".to_owned());
     }
-    let mut url = reqwest::Url::parse(capability_core_base_url.trim())
-        .map_err(|_| "capability registry URL is invalid".to_owned())?;
+    if capability_core_base_url.trim().is_empty() {
+        clear_org_mcp_cache(reg, ownership, org_id);
+        return Err("capability registry is unavailable".to_owned());
+    }
+    let mut url = match reqwest::Url::parse(capability_core_base_url.trim()) {
+        Ok(url) => url,
+        Err(_) => {
+            clear_org_mcp_cache(reg, ownership, org_id);
+            return Err("capability registry URL is invalid".to_owned());
+        }
+    };
     url.set_path("/api/v1/mcp");
     url.query_pairs_mut().append_pair("org_id", org_id);
 
-    // Clear before the request: if capability-core is unreachable, the safe
-    // result is no advertised/callable MCP capability for this tenant.
-    reg.replace_org(org_id, std::iter::empty());
-    ownership.replace_org_kind(org_id, crate::ownership::KIND_MCP, std::iter::empty());
-
-    let response = http_client
+    let response = match http_client
         .get(url)
         .bearer_auth(capability_bearer.trim())
         .send()
         .await
-        .map_err(|error| format!("capability registry request failed: {error}"))?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "capability registry returned HTTP {}",
-            response.status()
-        ));
+    {
+        Ok(response) => response,
+        Err(error) => {
+            clear_org_mcp_cache(reg, ownership, org_id);
+            return Err(format!("capability registry request failed: {error}"));
+        }
+    };
+    let status = response.status();
+    if !status.is_success() {
+        // A refused bearer is the caller's fault and changes nothing; anything else the
+        // registry says is an outage or a registry that cannot be trusted to have said
+        // "still registered".
+        if status != reqwest::StatusCode::UNAUTHORIZED && status != reqwest::StatusCode::FORBIDDEN
+        {
+            clear_org_mcp_cache(reg, ownership, org_id);
+        }
+        return Err(format!("capability registry returned HTTP {status}"));
     }
-    let payload = response
-        .json::<CatalogMcpResponse>()
-        .await
-        .map_err(|error| format!("capability registry response was invalid: {error}"))?;
+    let payload = match response.json::<CatalogMcpResponse>().await {
+        Ok(payload) => payload,
+        Err(error) => {
+            clear_org_mcp_cache(reg, ownership, org_id);
+            return Err(format!("capability registry response was invalid: {error}"));
+        }
+    };
 
     let mut servers = Vec::with_capacity(payload.servers.len());
     let mut ownership_entries = Vec::with_capacity(payload.servers.len());
@@ -417,9 +503,33 @@ pub async fn hydrate_mcp_registry(
         }
     }
     let count = servers.len();
-    reg.replace_org(org_id, servers);
-    ownership.replace_org_kind(org_id, crate::ownership::KIND_MCP, ownership_entries);
+    apply_mcp_projection(reg, ownership, org_id, servers, ownership_entries);
     Ok(count)
+}
+
+/// Make one tenant's MCP cache the registry's answer, as a merge and never as
+/// clear-then-fill: a record is upserted before the row it describes appears, and a record
+/// is removed only after its row is gone, so a server in both the old and the new answer
+/// never lacks its row or its ownership at any instant. (The sidecar offers no way to list
+/// its keys, so what it drops is the ownership of the rows the registry dropped.)
+fn apply_mcp_projection(
+    reg: &McpRegistry,
+    ownership: &crate::ownership::OwnershipStore,
+    org_id: &str,
+    servers: Vec<McpServer>,
+    ownership_entries: Vec<(String, crate::ownership::Ownership)>,
+) {
+    for (server_id, resource_ownership) in ownership_entries {
+        ownership.set(
+            org_id,
+            crate::ownership::KIND_MCP,
+            &server_id,
+            resource_ownership,
+        );
+    }
+    for gone in reg.replace_org(org_id, servers) {
+        ownership.remove(org_id, crate::ownership::KIND_MCP, &gone);
+    }
 }
 
 /// Discover an MCP server's tools over the real **Streamable HTTP** transport
@@ -2049,6 +2159,499 @@ mod mcp_exposure_tests {
         .await;
         tokio::time::sleep(Duration::from_millis(150)).await;
         assert!(observation_posts(&capability_core).await.is_empty());
+    }
+
+    /// Everything a hydration refresh may replace is still there: the server row, its
+    /// ownership record and the discovered catalog.
+    fn assert_org_cache_intact(reg: &McpRegistry, ownership: &crate::ownership::OwnershipStore) {
+        assert!(reg.contains("org-1", "srv"), "the registry row was dropped");
+        assert!(
+            ownership
+                .get("org-1", crate::ownership::KIND_MCP, "srv")
+                .is_some(),
+            "the ownership record was dropped"
+        );
+        assert!(
+            reg.catalog
+                .contains_key(&("org-1".to_owned(), "srv".to_owned())),
+            "the discovery catalog was dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bearer_capability_core_refuses_leaves_the_orgs_registry_intact() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        for refused in [401_u16, 403] {
+            let capability_core = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/api/v1/mcp"))
+                .respond_with(ResponseTemplate::new(refused))
+                .mount(&capability_core)
+                .await;
+            let reg = McpRegistry::new();
+            let ownership = annotated_server(&reg, fixture_tools());
+            let client = reqwest::Client::new();
+
+            let hydrated = hydrate_mcp_registry(
+                &reg,
+                &ownership,
+                &client,
+                &capability_core.uri(),
+                "org-1",
+                "junk",
+            )
+            .await;
+            assert!(hydrated.is_err(), "{refused}: a refused bearer must not hydrate");
+            assert_org_cache_intact(&reg, &ownership);
+
+            // The governed listing a junk bearer rides on: no tool for this turn, and the
+            // cache is still whole for every other caller of the org.
+            let (tools, meta) = mcp_tool_listing(
+                &reg,
+                &ownership,
+                "org-1",
+                "u1",
+                &client,
+                &capability_core.uri(),
+                "",
+                Some("junk"),
+                McpListingOptions::default(),
+            )
+            .await;
+            assert!(tools.is_empty() && meta.is_empty());
+            assert_org_cache_intact(&reg, &ownership);
+        }
+
+        // A caller with no bearer at all asks nothing and changes nothing.
+        let reg = McpRegistry::new();
+        let ownership = annotated_server(&reg, fixture_tools());
+        assert!(hydrate_mcp_registry(
+            &reg,
+            &ownership,
+            &reqwest::Client::new(),
+            "http://127.0.0.1:9",
+            "org-1",
+            " "
+        )
+        .await
+        .is_err());
+        assert_org_cache_intact(&reg, &ownership);
+    }
+
+    /// Everything a hydration refresh may replace is gone.
+    fn assert_org_cache_cleared(reg: &McpRegistry, ownership: &crate::ownership::OwnershipStore) {
+        assert!(!reg.contains("org-1", "srv"), "a revoked server stayed callable");
+        assert!(
+            ownership
+                .get("org-1", crate::ownership::KIND_MCP, "srv")
+                .is_none(),
+            "the ownership record stayed"
+        );
+        assert!(
+            !reg.catalog
+                .contains_key(&("org-1".to_owned(), "srv".to_owned())),
+            "the discovery catalog stayed"
+        );
+    }
+
+    /// A registry that cannot say what is still registered is not a licence to keep serving
+    /// what an admin may just have revoked: each failure class clears the org's cache.
+    #[tokio::test]
+    async fn a_registry_that_cannot_answer_clears_the_orgs_cache() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let client = reqwest::Client::new();
+        for status in [500_u16, 502, 503, 404, 429] {
+            let capability_core = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/api/v1/mcp"))
+                .respond_with(ResponseTemplate::new(status))
+                .mount(&capability_core)
+                .await;
+            let reg = McpRegistry::new();
+            let ownership = annotated_server(&reg, fixture_tools());
+            assert!(hydrate_mcp_registry(
+                &reg,
+                &ownership,
+                &client,
+                &capability_core.uri(),
+                "org-1",
+                "bearer"
+            )
+            .await
+            .is_err());
+            assert_org_cache_cleared(&reg, &ownership);
+        }
+
+        let garbled = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/mcp"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+            .mount(&garbled)
+            .await;
+        let reg = McpRegistry::new();
+        let ownership = annotated_server(&reg, fixture_tools());
+        assert!(hydrate_mcp_registry(
+            &reg,
+            &ownership,
+            &client,
+            &garbled.uri(),
+            "org-1",
+            "bearer"
+        )
+        .await
+        .is_err());
+        assert_org_cache_cleared(&reg, &ownership);
+
+        let unreachable = {
+            let gone = MockServer::start().await;
+            gone.uri()
+        };
+        let reg = McpRegistry::new();
+        let ownership = annotated_server(&reg, fixture_tools());
+        assert!(
+            hydrate_mcp_registry(&reg, &ownership, &client, &unreachable, "org-1", "bearer")
+                .await
+                .is_err()
+        );
+        assert_org_cache_cleared(&reg, &ownership);
+
+        for base in ["", "not a url"] {
+            let reg = McpRegistry::new();
+            let ownership = annotated_server(&reg, fixture_tools());
+            assert!(hydrate_mcp_registry(&reg, &ownership, &client, base, "org-1", "bearer")
+                .await
+                .is_err());
+            assert_org_cache_cleared(&reg, &ownership);
+        }
+    }
+
+    /// Another org's cache is never touched by one org's failed or refreshed hydration.
+    #[tokio::test]
+    async fn a_failed_hydration_clears_only_its_own_org() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let capability_core = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/mcp"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&capability_core)
+            .await;
+        let reg = McpRegistry::new();
+        let ownership = annotated_server(&reg, fixture_tools());
+        register(&reg, "org-2", live_server("other"));
+        ownership.set(
+            "org-2",
+            crate::ownership::KIND_MCP,
+            "other",
+            crate::ownership::Ownership::org(),
+        );
+        assert!(hydrate_mcp_registry(
+            &reg,
+            &ownership,
+            &reqwest::Client::new(),
+            &capability_core.uri(),
+            "org-1",
+            "bearer"
+        )
+        .await
+        .is_err());
+        assert_org_cache_cleared(&reg, &ownership);
+        assert!(reg.contains("org-2", "other"));
+        assert!(ownership
+            .get("org-2", crate::ownership::KIND_MCP, "other")
+            .is_some());
+    }
+
+    fn live_server(id: &str) -> McpServer {
+        McpServer {
+            server_id: id.into(),
+            name: id.into(),
+            url: "https://mcp.example.test".into(),
+            transport: "http".into(),
+            token: String::new(),
+            tool_allowlist: vec!["echo_read".into()],
+            enabled: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_successful_fetch_still_replaces_the_orgs_registry_with_the_registrys_answer() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let capability_core = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/mcp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "servers": [{
+                    "id": "fresh",
+                    "org_id": "org-1",
+                    "name": "Fresh",
+                    "endpoint_url": "https://fresh.example.test",
+                    "transport": "http",
+                    "tool_allowlist": ["echo_read"],
+                    "enabled": true,
+                    "scope": "org"
+                }]
+            })))
+            .mount(&capability_core)
+            .await;
+        let reg = McpRegistry::new();
+        let ownership = annotated_server(&reg, fixture_tools());
+
+        let count = hydrate_mcp_registry(
+            &reg,
+            &ownership,
+            &reqwest::Client::new(),
+            &capability_core.uri(),
+            "org-1",
+            "bearer",
+        )
+        .await
+        .expect("hydrates");
+        assert_eq!(count, 1);
+        assert!(reg.contains("org-1", "fresh"));
+        assert!(!reg.contains("org-1", "srv"), "a revoked server must go");
+        assert!(ownership
+            .get("org-1", crate::ownership::KIND_MCP, "srv")
+            .is_none());
+        assert!(ownership
+            .get("org-1", crate::ownership::KIND_MCP, "fresh")
+            .is_some());
+    }
+
+    /// The catalog key of one server of `org-1`.
+    fn catalog_key(server_id: &str) -> (String, String) {
+        ("org-1".to_owned(), server_id.to_owned())
+    }
+
+    fn answer_server(id: &str, allowlist: &[&str]) -> Value {
+        json!({
+            "id": id,
+            "org_id": "org-1",
+            "name": id,
+            "endpoint_url": "https://mcp.example.test",
+            "transport": "http",
+            "tool_allowlist": allowlist,
+            "enabled": true,
+            "scope": "org"
+        })
+    }
+
+    /// A refresh replaces the org's servers, but does not throw away what discovery already
+    /// learned about a server the answer still lists unchanged (that would force a
+    /// `tools/list` against every server at each segment start).
+    #[tokio::test]
+    async fn a_refresh_keeps_the_catalog_of_an_unchanged_server_and_drops_a_changed_or_removed_ones() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let reg = McpRegistry::new();
+        let ownership = annotated_server(&reg, fixture_tools());
+        for id in ["changed", "removed"] {
+            register(&reg, "org-1", live_server(id));
+            reg.seed_catalog_for_test("org-1", id, fixture_tools());
+            ownership.set(
+                "org-1",
+                crate::ownership::KIND_MCP,
+                id,
+                crate::ownership::Ownership::org(),
+            );
+        }
+        let capability_core = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/mcp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "servers": [
+                    // `srv` exactly as `annotated_server` registered it.
+                    answer_server("srv", &["echo_read", "create_item", "drop_all"]),
+                    // `changed` now allows other tools.
+                    answer_server("changed", &["echo_read", "create_item"]),
+                    answer_server("added", &["echo_read"]),
+                ]
+            })))
+            .mount(&capability_core)
+            .await;
+
+        let count = hydrate_mcp_registry(
+            &reg,
+            &ownership,
+            &reqwest::Client::new(),
+            &capability_core.uri(),
+            "org-1",
+            "bearer",
+        )
+        .await
+        .expect("hydrates");
+        assert_eq!(count, 3);
+
+        assert!(
+            reg.catalog.contains_key(&catalog_key("srv")),
+            "an unchanged server lost its discovered catalog"
+        );
+        assert!(reg.contains("org-1", "changed"));
+        assert!(
+            !reg.catalog.contains_key(&catalog_key("changed")),
+            "a server whose allowlist changed kept a catalog discovered under the old one"
+        );
+        assert!(!reg.contains("org-1", "removed"));
+        assert!(
+            !reg.catalog.contains_key(&catalog_key("removed")),
+            "a removed server's catalog stayed"
+        );
+        assert!(reg.contains("org-1", "added"));
+        for (id, present) in [
+            ("srv", true),
+            ("changed", true),
+            ("added", true),
+            ("removed", false),
+        ] {
+            assert_eq!(
+                ownership
+                    .get("org-1", crate::ownership::KIND_MCP, id)
+                    .is_some(),
+                present,
+                "ownership of {id}"
+            );
+        }
+    }
+
+    /// The same, one level down: a changed url, allowlist, enabled flag or token each
+    /// invalidate the catalog; a changed display name does not.
+    #[test]
+    fn only_a_change_to_what_discovery_depends_on_drops_a_servers_catalog() {
+        let reg = McpRegistry::new();
+        let base = live_server("srv");
+        let cases: Vec<(&str, McpServer, bool)> = vec![
+            ("same", base.clone(), true),
+            (
+                "renamed",
+                McpServer {
+                    name: "another name".into(),
+                    ..base.clone()
+                },
+                true,
+            ),
+            (
+                "url",
+                McpServer {
+                    url: "https://elsewhere.example.test".into(),
+                    ..base.clone()
+                },
+                false,
+            ),
+            (
+                "allowlist",
+                McpServer {
+                    tool_allowlist: vec!["other".into()],
+                    ..base.clone()
+                },
+                false,
+            ),
+            (
+                "enabled",
+                McpServer {
+                    enabled: false,
+                    ..base.clone()
+                },
+                false,
+            ),
+            (
+                "token",
+                McpServer {
+                    token: "t".into(),
+                    ..base.clone()
+                },
+                false,
+            ),
+        ];
+        for (what, next, kept) in cases {
+            reg.replace_org("org-1", vec![base.clone()]);
+            reg.seed_catalog_for_test("org-1", "srv", fixture_tools());
+            reg.replace_org("org-1", vec![next]);
+            assert_eq!(
+                reg.catalog.contains_key(&catalog_key("srv")),
+                kept,
+                "{what}"
+            );
+            assert!(reg.contains("org-1", "srv"), "{what}: the server is present");
+        }
+        // A catalog with no server behind it does not survive a replacement either.
+        reg.seed_catalog_for_test("org-1", "orphan", fixture_tools());
+        reg.replace_org("org-1", vec![base]);
+        assert!(!reg.catalog.contains_key(&catalog_key("orphan")));
+        // Another org's catalog is not touched.
+        reg.seed_catalog_for_test("org-2", "srv", fixture_tools());
+        reg.replace_org("org-1", std::iter::empty());
+        assert!(reg
+            .catalog
+            .contains_key(&("org-2".to_owned(), "srv".to_owned())));
+    }
+
+    /// A server that is in both the old and the new answer is never missing, from the
+    /// registry or from the ownership sidecar, while another request refreshes the org.
+    #[test]
+    fn a_reader_never_finds_a_server_missing_that_is_in_both_the_old_and_the_new_answer() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let reg = McpRegistry::new();
+        let ownership = crate::ownership::OwnershipStore::new();
+        // The merge `hydrate_mcp_registry` applies, over answers that alternate.
+        let refresh = |reg: &McpRegistry,
+                       ownership: &crate::ownership::OwnershipStore,
+                       ids: &[&str]| {
+            apply_mcp_projection(
+                reg,
+                ownership,
+                "org-1",
+                ids.iter().map(|id| live_server(id)).collect(),
+                ids.iter()
+                    .map(|id| ((*id).to_owned(), crate::ownership::Ownership::org()))
+                    .collect(),
+            );
+        };
+        // `keep` is there before any reader starts, so every miss is a real one.
+        refresh(&reg, &ownership, &["keep", "a"]);
+
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let readers: Vec<_> = (0..3)
+            .map(|_| {
+                let (reg, ownership, stop) = (reg.clone(), ownership.clone(), stop.clone());
+                std::thread::spawn(move || {
+                    let mut missing = 0_u32;
+                    while !stop.load(Ordering::Relaxed) {
+                        if !reg.contains("org-1", "keep")
+                            || ownership
+                                .get("org-1", crate::ownership::KIND_MCP, "keep")
+                                .is_none()
+                        {
+                            missing += 1;
+                        }
+                    }
+                    missing
+                })
+            })
+            .collect();
+        for round in 0..20_000 {
+            if round % 2 == 0 {
+                refresh(&reg, &ownership, &["keep", "b"]);
+            } else {
+                refresh(&reg, &ownership, &["keep", "a"]);
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        for reader in readers {
+            assert_eq!(
+                reader.join().expect("reader"),
+                0,
+                "a present server was seen missing"
+            );
+        }
     }
 
     /// The observation posts a mock capability-core received. Discovery also asks

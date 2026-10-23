@@ -1,6 +1,12 @@
 //! Permission policy evaluation for tool execution.
 
+use std::collections::HashMap;
+use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
+
 use mp_contracts::model_plane::v1::AutonomyRung;
+use mp_contracts::tool_class::{effective_floor, ApprovalFloor, SideEffectClass};
+
+use crate::capability_policy::ToolClassGate;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionMode {
@@ -126,10 +132,27 @@ pub fn check_autonomy_rung(
     tool_name: &str,
     tool_input: &str,
 ) -> Result<(), String> {
+    check_autonomy_rung_with(ToolClassGate::Off, None, granted, tool_name, tool_input)
+}
+
+/// [`check_autonomy_rung`] under the tool class gate: the rung the call needs is
+/// the declared class's where the gate says so, and an unstated rung is still no
+/// constraint at all.
+///
+/// # Errors
+///
+/// The same refusal sentence as [`check_autonomy_rung`].
+pub fn check_autonomy_rung_with(
+    gate: ToolClassGate,
+    view: Option<&ToolClassView>,
+    granted: AutonomyRung,
+    tool_name: &str,
+    tool_input: &str,
+) -> Result<(), String> {
     if granted == AutonomyRung::Unspecified {
         return Ok(());
     }
-    let needed = rung_required_for(tool_name, tool_input);
+    let needed = rung_required_for_with(gate, view, tool_name, tool_input);
     if mp_contracts::autonomy::permits(granted, needed) {
         return Ok(());
     }
@@ -282,6 +305,439 @@ pub fn is_risky_tool(tool_name: &str) -> bool {
     }
     let lowered = tool_name.to_ascii_lowercase();
     RISKY.iter().any(|kw| lowered.contains(kw))
+}
+
+// --- Declared tool classes (WS05-S4) ----------------------------------------
+//
+// Everything above guesses a tool's risk from its name. The registry declares it
+// (`mp_contracts::tool_class`), and the functions below read the declaration
+// instead. They are reached only through `TOOL_CLASS_GATE`:
+//
+// * `off`: the legacy answer, byte for byte, and nothing is resolved.
+// * `shadow`: both are computed, a disagreement is counted
+//   (`tool_class_divergence_total{point,tool}`), and the legacy answer decides.
+// * `enforce`: the declared class decides wherever the run has a view of the tool;
+//   a tool the registry did not answer for keeps the legacy answer, which is the
+//   strict one for every name this module does not know.
+//
+// Nothing here loosens by itself: a class can only be as permissive as the
+// registry declared it, a floor only ever adds an approval, and the one place a
+// call may lower its own class is the provider-operation refinement below.
+
+/// What the registry declared about one tool, as one run saw it.
+///
+/// The floor is already the effective one (raised to what the class implies). An
+/// MCP tool also carries the digest of the definition the registry approved, which
+/// is what the gateway re-checks before it runs the call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolClassView {
+    class: SideEffectClass,
+    floor: ApprovalFloor,
+    /// The call may lower itself to a read when its operation is catalogued as one.
+    /// The registry row says so (`call_refinement = provider_operation`), but the
+    /// wire does not carry the column: the one seeded row that has it is the
+    /// external write `execute_provider_action`, so that is what grants it.
+    provider_operation: bool,
+    digest: String,
+}
+
+impl ToolClassView {
+    /// A view from a registry binding's wire values. Anything outside the
+    /// vocabulary is the strictest value, never a guess at the nearest one.
+    #[must_use]
+    pub fn from_registry(tool_name: &str, class: &str, floor: &str, digest: &str) -> Self {
+        let class = SideEffectClass::from_wire(class);
+        Self {
+            class,
+            floor: effective_floor(class, ApprovalFloor::from_wire(floor)),
+            provider_operation: tool_name == EXECUTE_PROVIDER_ACTION_TOOL
+                && class == SideEffectClass::ExternalWrite,
+            digest: digest.to_owned(),
+        }
+    }
+
+    #[must_use]
+    pub fn class(&self) -> SideEffectClass {
+        self.class
+    }
+
+    #[must_use]
+    pub fn floor(&self) -> ApprovalFloor {
+        self.floor
+    }
+
+    /// The pinned digest of an MCP tool's approved definition; empty for a built-in.
+    #[must_use]
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    /// The class of this call. A provider action whose operation is catalogued as
+    /// a read is a read; an unknown operation, malformed input and every write stay
+    /// the declared write class, and no other tool may lower.
+    fn class_for_call(&self, tool_input: &str) -> SideEffectClass {
+        if self.provider_operation && !provider_action_is_risky(tool_input) {
+            SideEffectClass::Read
+        } else {
+            self.class
+        }
+    }
+}
+
+/// `plan.propose` is the one durable write plan mode exists to make, so it is
+/// declared `context_write` and must still be callable in plan mode and at the
+/// `read_only` rung. This is the explicit rule that keeps it so; without it the
+/// declared class alone would refuse the tool plan mode is for.
+fn is_plan_proposal(tool_name: &str) -> bool {
+    tool_name.trim() == crate::plan::PROPOSE_TOOL
+}
+
+/// Whether a call needs the human gate under `ask`, by declared class.
+#[must_use]
+pub fn is_risky_class(view: &ToolClassView, tool_input: &str) -> bool {
+    view.class_for_call(tool_input).is_risky()
+}
+
+/// Whether plan mode and delegated leaves must refuse a call that is not risky,
+/// by declared class: a durable write confined to the run's own context, other
+/// than the plan proposal itself.
+#[must_use]
+pub fn is_restricted_context_write_class(view: &ToolClassView, tool_name: &str) -> bool {
+    view.class.is_restricted_context_write() && !is_plan_proposal(tool_name)
+}
+
+/// The autonomy rung a call needs, by declared class and with the call's own
+/// arguments (a schema is registry-global, the refinement is per call).
+#[must_use]
+pub fn rung_required_for_class(
+    view: &ToolClassView,
+    tool_name: &str,
+    tool_input: &str,
+) -> AutonomyRung {
+    let class = view.class_for_call(tool_input);
+    if class == SideEffectClass::ContextWrite && is_plan_proposal(tool_name) {
+        return AutonomyRung::ReadOnly;
+    }
+    class.required_rung()
+}
+
+/// [`evaluate_call`] from the declared class and floor: a floor above `none` asks
+/// on every posture except the stricter `deny`, and under `ask` a risky class asks.
+#[must_use]
+pub fn evaluate_call_with_class(
+    mode: PermissionMode,
+    view: &ToolClassView,
+    tool_input: &str,
+) -> PermissionDecision {
+    if view.floor != ApprovalFloor::None {
+        return if mode == PermissionMode::Deny {
+            PermissionDecision::Deny
+        } else {
+            PermissionDecision::AwaitApproval
+        };
+    }
+    match mode {
+        PermissionMode::Deny => PermissionDecision::Deny,
+        PermissionMode::Ask if is_risky_class(view, tool_input) => {
+            PermissionDecision::AwaitApproval
+        }
+        PermissionMode::Auto | PermissionMode::Ask => PermissionDecision::Allow,
+    }
+}
+
+/// One answer under the gate: the legacy one for `off`, for a tool the run has no
+/// view of, and for `shadow` (which counts a disagreement); the declared one for
+/// `enforce`.
+fn by_gate<T: PartialEq>(
+    gate: ToolClassGate,
+    view: Option<&ToolClassView>,
+    tool_name: &str,
+    point: &'static str,
+    legacy: T,
+    declared: impl FnOnce(&ToolClassView) -> T,
+) -> T {
+    match (gate, view) {
+        (ToolClassGate::Off, _) | (_, None) => legacy,
+        (ToolClassGate::Shadow, Some(view)) => {
+            if declared(view) != legacy {
+                record_divergence(point, tool_name);
+            }
+            legacy
+        }
+        (ToolClassGate::Enforce, Some(view)) => declared(view),
+    }
+}
+
+/// Counted, never silent. An MCP name is bucketed so the label set stays bounded
+/// by the number of call sites and built-in tools, not by the servers an org
+/// connects.
+fn record_divergence(point: &'static str, tool_name: &str) {
+    let tool = if tool_name.starts_with("mcp__") {
+        "mcp__".to_owned()
+    } else {
+        tool_name.trim().to_owned()
+    };
+    tracing::warn!(point, tool = %tool, "tool class divergence (shadow: legacy decides)");
+    metrics::counter!("tool_class_divergence_total", "point" => point, "tool" => tool).increment(1);
+}
+
+/// [`evaluate_call`] under the gate.
+#[must_use]
+pub fn evaluate_call_with(
+    gate: ToolClassGate,
+    view: Option<&ToolClassView>,
+    mode: PermissionMode,
+    tool_name: &str,
+    tool_input: &str,
+) -> PermissionDecision {
+    by_gate(
+        gate,
+        view,
+        tool_name,
+        "posture",
+        evaluate_call(mode, tool_name, tool_input),
+        |view| evaluate_call_with_class(mode, view, tool_input),
+    )
+}
+
+/// [`is_risky_call`] under the gate.
+#[must_use]
+pub fn is_risky_call_with(
+    gate: ToolClassGate,
+    view: Option<&ToolClassView>,
+    tool_name: &str,
+    tool_input: &str,
+) -> bool {
+    by_gate(
+        gate,
+        view,
+        tool_name,
+        "risky",
+        is_risky_call(tool_name, tool_input),
+        |view| is_risky_class(view, tool_input),
+    )
+}
+
+/// [`is_restricted_context_write`] under the gate.
+#[must_use]
+pub fn is_restricted_context_write_with(
+    gate: ToolClassGate,
+    view: Option<&ToolClassView>,
+    tool_name: &str,
+) -> bool {
+    by_gate(
+        gate,
+        view,
+        tool_name,
+        "restricted_write",
+        is_restricted_context_write(tool_name),
+        |view| is_restricted_context_write_class(view, tool_name),
+    )
+}
+
+/// [`rung_required_for`] under the gate. The arguments still decide: the legacy
+/// answer reads them through `is_risky_call`, the declared one through the
+/// provider-operation refinement.
+#[must_use]
+pub fn rung_required_for_with(
+    gate: ToolClassGate,
+    view: Option<&ToolClassView>,
+    tool_name: &str,
+    tool_input: &str,
+) -> AutonomyRung {
+    by_gate(
+        gate,
+        view,
+        tool_name,
+        "rung",
+        rung_required_for(tool_name, tool_input),
+        |view| rung_required_for_class(view, tool_name, tool_input),
+    )
+}
+
+/// The process's tool class gate, read once. A unit test never sees the
+/// environment: the gate is off there unless the test names it.
+#[must_use]
+pub fn tool_class_gate() -> ToolClassGate {
+    #[cfg(test)]
+    {
+        ToolClassGate::Off
+    }
+    #[cfg(not(test))]
+    {
+        static GATE: OnceLock<ToolClassGate> = OnceLock::new();
+        *GATE.get_or_init(ToolClassGate::from_env)
+    }
+}
+
+/// A run's classifier: the gate and the run whose snapshot of declared classes it
+/// reads. Every call site that used a name heuristic asks this instead.
+#[derive(Debug, Clone, Copy)]
+pub struct RunGate<'a> {
+    gate: ToolClassGate,
+    org_id: &'a str,
+    run_id: &'a str,
+}
+
+impl<'a> RunGate<'a> {
+    #[must_use]
+    pub fn for_run(org_id: &'a str, run_id: &'a str) -> Self {
+        Self::with_gate(tool_class_gate(), org_id, run_id)
+    }
+
+    #[must_use]
+    pub fn with_gate(gate: ToolClassGate, org_id: &'a str, run_id: &'a str) -> Self {
+        Self {
+            gate,
+            org_id,
+            run_id,
+        }
+    }
+
+    fn view(&self, tool_name: &str) -> Option<ToolClassView> {
+        if self.gate == ToolClassGate::Off {
+            return None;
+        }
+        run_view(self.org_id, self.run_id, tool_name)
+    }
+
+    #[must_use]
+    pub fn evaluate_call(
+        &self,
+        mode: PermissionMode,
+        tool_name: &str,
+        tool_input: &str,
+    ) -> PermissionDecision {
+        evaluate_call_with(
+            self.gate,
+            self.view(tool_name).as_ref(),
+            mode,
+            tool_name,
+            tool_input,
+        )
+    }
+
+    #[must_use]
+    pub fn is_risky_call(&self, tool_name: &str, tool_input: &str) -> bool {
+        is_risky_call_with(
+            self.gate,
+            self.view(tool_name).as_ref(),
+            tool_name,
+            tool_input,
+        )
+    }
+
+    #[must_use]
+    pub fn is_restricted_context_write(&self, tool_name: &str) -> bool {
+        is_restricted_context_write_with(self.gate, self.view(tool_name).as_ref(), tool_name)
+    }
+
+    /// The autonomy rung this call needs, by the run's declared class where the gate
+    /// says so. The effect ledger classifies a call through this, so it cannot call a
+    /// call an external effect while the retry policy calls it a read.
+    #[must_use]
+    pub fn rung_required_for(&self, tool_name: &str, tool_input: &str) -> AutonomyRung {
+        rung_required_for_with(
+            self.gate,
+            self.view(tool_name).as_ref(),
+            tool_name,
+            tool_input,
+        )
+    }
+
+    /// # Errors
+    ///
+    /// The refusal the model reads, as [`check_autonomy_rung`].
+    pub fn check_autonomy_rung(
+        &self,
+        granted: AutonomyRung,
+        tool_name: &str,
+        tool_input: &str,
+    ) -> Result<(), String> {
+        check_autonomy_rung_with(
+            self.gate,
+            self.view(tool_name).as_ref(),
+            granted,
+            tool_name,
+            tool_input,
+        )
+    }
+}
+
+/// Most runs the snapshot tracks, and most tools it keeps per run. Both are memory
+/// bounds: a run offers a few dozen tools, and the least recently used run is
+/// forgotten first. A forgotten run is classified by the legacy names, which is
+/// the strict answer.
+const MAX_TRACKED_RUNS: usize = 1024;
+/// Also what bounds an offer: the built-in views and the offered MCP views of one run
+/// share it, so an offer that did not leave room for its built-in tools would lose the
+/// views of its last MCP tools (`mcp_gateway::resolve_run_offer` clamps to it).
+pub(crate) const MAX_VIEWS_PER_RUN: usize = 256;
+
+#[derive(Default)]
+struct RunViewStore {
+    clock: u64,
+    runs: HashMap<(String, String), RunViews>,
+}
+
+struct RunViews {
+    touched: u64,
+    views: HashMap<String, ToolClassView>,
+}
+
+impl RunViewStore {
+    /// Replace one run's views, forgetting the least recently used run when the
+    /// store is full.
+    fn record(&mut self, key: (String, String), views: HashMap<String, ToolClassView>) {
+        self.clock += 1;
+        let touched = self.clock;
+        if !self.runs.contains_key(&key) && self.runs.len() >= MAX_TRACKED_RUNS {
+            let oldest = self
+                .runs
+                .iter()
+                .min_by_key(|(_, run)| run.touched)
+                .map(|(key, _)| key.clone());
+            if let Some(oldest) = oldest {
+                self.runs.remove(&oldest);
+            }
+        }
+        self.runs.insert(key, RunViews { touched, views });
+    }
+
+    fn view(&mut self, key: &(String, String), tool_name: &str) -> Option<ToolClassView> {
+        self.clock += 1;
+        let touched = self.clock;
+        let run = self.runs.get_mut(key)?;
+        run.touched = touched;
+        run.views.get(tool_name).cloned()
+    }
+}
+
+fn run_view_store() -> MutexGuard<'static, RunViewStore> {
+    static STORE: OnceLock<Mutex<RunViewStore>> = OnceLock::new();
+    STORE
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Replace the declared classes this run knows about. Called once per offer, after
+/// the registry answered; an offer the registry could not answer leaves the
+/// previous snapshot standing instead of clearing it.
+pub fn record_run_views(
+    org_id: &str,
+    run_id: &str,
+    views: impl IntoIterator<Item = (String, ToolClassView)>,
+) {
+    let key = (org_id.to_owned(), run_id.to_owned());
+    let views: HashMap<String, ToolClassView> = views.into_iter().take(MAX_VIEWS_PER_RUN).collect();
+    run_view_store().record(key, views);
+}
+
+/// The declared class of `tool_name` in this run, if the registry answered for it.
+#[must_use]
+pub fn run_view(org_id: &str, run_id: &str, tool_name: &str) -> Option<ToolClassView> {
+    run_view_store().view(&(org_id.to_owned(), run_id.to_owned()), tool_name)
 }
 
 #[cfg(test)]
@@ -819,5 +1275,481 @@ yr_weather                 risky=no/no restricted=no rung=read_only/read_only ow
                 );
             }
         }
+    }
+}
+
+/// The declared-class half of the engine (WS05-S4): what a registry view decides,
+/// and how `TOOL_CLASS_GATE` lets it.
+#[cfg(test)]
+mod class_tests {
+    use super::*;
+    use metrics::{
+        Counter, CounterFn, Gauge, Histogram, Key, KeyName, Metadata, Recorder, SharedString, Unit,
+    };
+    use std::sync::{Arc, Mutex};
+
+    const READ_CALL: &str = r#"{"connection_id":"c1","operation":"pages.list"}"#;
+    const WRITE_CALL: &str = r#"{"connection_id":"c1","operation":"pages.post"}"#;
+
+    /// Counter increments, keyed `name{label=value,...}`.
+    #[derive(Default)]
+    struct Counted(Arc<Mutex<Vec<String>>>);
+
+    struct Tap(String, Arc<Mutex<Vec<String>>>);
+
+    impl CounterFn for Tap {
+        fn increment(&self, _value: u64) {
+            self.1.lock().unwrap().push(self.0.clone());
+        }
+        fn absolute(&self, _value: u64) {}
+    }
+
+    impl Recorder for Counted {
+        fn describe_counter(&self, _: KeyName, _: Option<Unit>, _: SharedString) {}
+        fn describe_gauge(&self, _: KeyName, _: Option<Unit>, _: SharedString) {}
+        fn describe_histogram(&self, _: KeyName, _: Option<Unit>, _: SharedString) {}
+        fn register_counter(&self, key: &Key, _: &Metadata<'_>) -> Counter {
+            let mut labels: Vec<String> = key
+                .labels()
+                .map(|label| format!("{}={}", label.key(), label.value()))
+                .collect();
+            labels.sort();
+            Counter::from_arc(Arc::new(Tap(
+                format!("{}{{{}}}", key.name(), labels.join(",")),
+                Arc::clone(&self.0),
+            )))
+        }
+        fn register_gauge(&self, _: &Key, _: &Metadata<'_>) -> Gauge {
+            Gauge::noop()
+        }
+        fn register_histogram(&self, _: &Key, _: &Metadata<'_>) -> Histogram {
+            Histogram::noop()
+        }
+    }
+
+    fn view(name: &str, class: &str) -> ToolClassView {
+        ToolClassView::from_registry(name, class, "none", "digest")
+    }
+
+    /// The seed rows migration 0016 gives the built-in tools, as
+    /// `(tool, class, floor, refinement)`.
+    fn seeded_built_ins() -> Vec<(String, String, String)> {
+        let sql = include_str!(
+            "../../../../../go/services/capability-core/migrations/0016_capability_tool_classes.up.sql"
+        );
+        let row = regex::Regex::new(
+            r"\('global', '[^']+', '([^']+)', '([a-z_]+)', '([a-z_]+)', (?:NULL|'[a-z_]+'), 'seed'\)",
+        )
+        .expect("seed row pattern");
+        let rows: Vec<(String, String, String)> = row
+            .captures_iter(sql)
+            .map(|c| (c[1].to_owned(), c[2].to_owned(), c[3].to_owned()))
+            .collect();
+        assert!(
+            rows.len() >= 30,
+            "the seed row format changed: {} rows",
+            rows.len()
+        );
+        rows
+    }
+
+    /// The class-driven engine says what the name heuristics say, for every built-in
+    /// tool the registry seeds and for a read and a write form of its arguments.
+    /// `plan.propose` is the one declared stricter than its name, and the explicit
+    /// rule that keeps it callable in plan mode makes it agree here too.
+    #[test]
+    fn the_declared_class_reproduces_the_legacy_answers_for_every_seeded_built_in() {
+        for (tool, class, floor) in seeded_built_ins() {
+            let view = ToolClassView::from_registry(&tool, &class, &floor, "");
+            for args in [READ_CALL, WRITE_CALL] {
+                let what = format!("`{tool}` ({class}/{floor}) with {args}");
+                assert_eq!(
+                    is_risky_class(&view, args),
+                    is_risky_call(&tool, args),
+                    "risky: {what}"
+                );
+                assert_eq!(
+                    is_restricted_context_write_class(&view, &tool),
+                    is_restricted_context_write(&tool),
+                    "restricted: {what}"
+                );
+                assert_eq!(
+                    mp_contracts::autonomy::label(rung_required_for_class(&view, &tool, args)),
+                    mp_contracts::autonomy::label(rung_required_for(&tool, args)),
+                    "rung: {what}"
+                );
+                for mode in [
+                    PermissionMode::Ask,
+                    PermissionMode::Auto,
+                    PermissionMode::Deny,
+                ] {
+                    assert_eq!(
+                        evaluate_call_with_class(mode, &view, args),
+                        evaluate_call(mode, &tool, args),
+                        "{mode:?}: {what}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn off_and_shadow_decide_by_name_and_enforce_by_class_only_where_a_view_exists() {
+        // A view that disagrees with the name on every point: `browser.act` declared a read.
+        let read = view("browser.act", "read");
+        for gate in [ToolClassGate::Off, ToolClassGate::Shadow] {
+            assert!(
+                is_risky_call_with(gate, Some(&read), "browser.act", "{}"),
+                "{gate:?}"
+            );
+            assert_eq!(
+                evaluate_call_with(gate, Some(&read), PermissionMode::Ask, "browser.act", "{}"),
+                PermissionDecision::AwaitApproval,
+                "{gate:?}"
+            );
+            assert_eq!(
+                rung_required_for_with(gate, Some(&read), "browser.act", "{}"),
+                AutonomyRung::DangerFullAccess,
+                "{gate:?}"
+            );
+        }
+        assert!(!is_risky_call_with(
+            ToolClassGate::Enforce,
+            Some(&read),
+            "browser.act",
+            "{}"
+        ));
+        assert_eq!(
+            evaluate_call_with(
+                ToolClassGate::Enforce,
+                Some(&read),
+                PermissionMode::Ask,
+                "browser.act",
+                "{}"
+            ),
+            PermissionDecision::Allow
+        );
+        // No view of the tool: the legacy answer, whatever the gate.
+        for gate in [
+            ToolClassGate::Off,
+            ToolClassGate::Shadow,
+            ToolClassGate::Enforce,
+        ] {
+            assert!(
+                is_risky_call_with(gate, None, "browser.act", "{}"),
+                "{gate:?}"
+            );
+            assert!(
+                is_risky_call_with(gate, None, "mcp__s__t", "{}"),
+                "{gate:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn shadow_counts_a_divergence_by_point_and_tool_and_stays_silent_when_they_agree() {
+        let counted = Counted::default();
+        let guard = metrics::set_default_local_recorder(&counted);
+        let declared_read = view("browser.act", "read");
+        let agreeing = view("browser.act", "external_write");
+        assert!(is_risky_call_with(
+            ToolClassGate::Shadow,
+            Some(&declared_read),
+            "browser.act",
+            "{}"
+        ));
+        assert!(is_risky_call_with(
+            ToolClassGate::Shadow,
+            Some(&agreeing),
+            "browser.act",
+            "{}"
+        ));
+        // An MCP name is bucketed so a connected server cannot grow the label set.
+        let mcp_read = view("mcp__srv__echo", "read");
+        assert!(is_risky_call_with(
+            ToolClassGate::Shadow,
+            Some(&mcp_read),
+            "mcp__srv__echo",
+            "{}"
+        ));
+        // Enforce and off do not count: enforce has no legacy to compare, off no view.
+        assert!(!is_risky_call_with(
+            ToolClassGate::Enforce,
+            Some(&declared_read),
+            "browser.act",
+            "{}"
+        ));
+        assert!(is_risky_call_with(
+            ToolClassGate::Off,
+            Some(&declared_read),
+            "browser.act",
+            "{}"
+        ));
+        drop(guard);
+        let mut seen = counted.0.lock().unwrap().clone();
+        seen.sort();
+        assert_eq!(
+            seen,
+            [
+                "tool_class_divergence_total{point=risky,tool=browser.act}",
+                "tool_class_divergence_total{point=risky,tool=mcp__}",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_approval_floor_asks_on_every_posture_except_the_stricter_deny() {
+        for floor in ["ask", "durable_owner"] {
+            let view = ToolClassView::from_registry("mcp__srv__x", "read", floor, "d");
+            assert_eq!(
+                evaluate_call_with_class(PermissionMode::Auto, &view, "{}"),
+                PermissionDecision::AwaitApproval,
+                "{floor}"
+            );
+            assert_eq!(
+                evaluate_call_with_class(PermissionMode::Ask, &view, "{}"),
+                PermissionDecision::AwaitApproval,
+                "{floor}"
+            );
+            assert_eq!(
+                evaluate_call_with_class(PermissionMode::Deny, &view, "{}"),
+                PermissionDecision::Deny,
+                "{floor}"
+            );
+        }
+        // An owner effect carries its floor whatever the registry row said.
+        let owner = ToolClassView::from_registry("mcp__srv__x", "owner_effect", "none", "d");
+        assert_eq!(owner.floor(), ApprovalFloor::DurableOwner);
+        assert_eq!(
+            evaluate_call_with_class(PermissionMode::Auto, &owner, "{}"),
+            PermissionDecision::AwaitApproval
+        );
+    }
+
+    #[test]
+    fn an_mcp_read_runs_under_ask_and_every_other_class_pauses() {
+        for (class, expected) in [
+            ("read", PermissionDecision::Allow),
+            ("sandbox_compute", PermissionDecision::Allow),
+            ("context_write", PermissionDecision::Allow),
+            ("external_write", PermissionDecision::AwaitApproval),
+            ("destructive", PermissionDecision::AwaitApproval),
+            ("owner_effect", PermissionDecision::AwaitApproval),
+            ("unclassified", PermissionDecision::AwaitApproval),
+            ("a_class_from_the_future", PermissionDecision::AwaitApproval),
+        ] {
+            assert_eq!(
+                evaluate_call_with_class(PermissionMode::Ask, &view("mcp__srv__t", class), "{}"),
+                expected,
+                "{class}"
+            );
+        }
+        // Under auto only the floor pauses a call, as for a built-in.
+        assert_eq!(
+            evaluate_call_with_class(
+                PermissionMode::Auto,
+                &view("mcp__srv__t", "external_write"),
+                "{}"
+            ),
+            PermissionDecision::Allow
+        );
+    }
+
+    #[test]
+    fn plan_mode_and_leaf_roles_allow_an_mcp_read_and_refuse_the_rest() {
+        // The predicate plan mode and the leaf role both use.
+        let refused = |class: &str| {
+            let view = view("mcp__srv__t", class);
+            is_risky_class(&view, "{}") || is_restricted_context_write_class(&view, "mcp__srv__t")
+        };
+        assert!(!refused("read"));
+        assert!(!refused("sandbox_compute"));
+        for class in [
+            "context_write",
+            "external_write",
+            "destructive",
+            "owner_effect",
+            "unclassified",
+            "bogus",
+        ] {
+            assert!(refused(class), "{class}");
+        }
+        // And the one durable write plan mode exists for stays callable.
+        let proposal = view("plan.propose", "context_write");
+        assert!(!is_restricted_context_write_class(
+            &proposal,
+            "plan.propose"
+        ));
+        assert!(is_restricted_context_write_class(&proposal, "save_memory"));
+        assert_eq!(
+            rung_required_for_class(&proposal, "plan.propose", "{}"),
+            AutonomyRung::ReadOnly
+        );
+        assert_eq!(
+            rung_required_for_class(&proposal, "save_memory", "{}"),
+            AutonomyRung::WorkspaceWrite
+        );
+    }
+
+    #[test]
+    fn only_the_provider_operation_refinement_may_lower_a_call_and_only_to_a_read() {
+        let action = view(EXECUTE_PROVIDER_ACTION_TOOL, "external_write");
+        assert!(
+            !is_risky_class(&action, READ_CALL),
+            "a catalogued read operation"
+        );
+        assert_eq!(
+            rung_required_for_class(&action, EXECUTE_PROVIDER_ACTION_TOOL, READ_CALL),
+            AutonomyRung::ReadOnly
+        );
+        for args in [
+            WRITE_CALL,
+            "{}",
+            "not json",
+            r#"{"operation":"nobody.knows"}"#,
+        ] {
+            assert!(is_risky_class(&action, args), "{args}");
+            assert_eq!(
+                rung_required_for_class(&action, EXECUTE_PROVIDER_ACTION_TOOL, args),
+                AutonomyRung::DangerFullAccess,
+                "{args}"
+            );
+        }
+        // No other tool lowers itself, whatever its arguments say.
+        let other = view("mcp__srv__create", "external_write");
+        assert!(is_risky_class(&other, READ_CALL));
+        // And the refinement does not follow a class the registry did not declare for it.
+        let lowered_by_name = view(EXECUTE_PROVIDER_ACTION_TOOL, "destructive");
+        assert!(is_risky_class(&lowered_by_name, READ_CALL));
+    }
+
+    #[test]
+    fn a_run_gate_reads_the_runs_own_snapshot_and_no_other() {
+        let (org, run) = ("org-run-gate", "run-run-gate");
+        record_run_views(
+            org,
+            run,
+            [("mcp__s__echo".to_owned(), view("mcp__s__echo", "read"))],
+        );
+        let enforce = RunGate::with_gate(ToolClassGate::Enforce, org, run);
+        assert!(!enforce.is_risky_call("mcp__s__echo", "{}"));
+        assert_eq!(
+            enforce.evaluate_call(PermissionMode::Ask, "mcp__s__echo", "{}"),
+            PermissionDecision::Allow
+        );
+        assert!(enforce
+            .check_autonomy_rung(AutonomyRung::ReadOnly, "mcp__s__echo", "{}")
+            .is_ok());
+        // Another run, another tenant, and a name the snapshot lacks: the strict legacy answer.
+        for other in [
+            RunGate::with_gate(ToolClassGate::Enforce, org, "another-run"),
+            RunGate::with_gate(ToolClassGate::Enforce, "another-org", run),
+        ] {
+            assert!(other.is_risky_call("mcp__s__echo", "{}"));
+            assert!(other
+                .check_autonomy_rung(AutonomyRung::ReadOnly, "mcp__s__echo", "{}")
+                .is_err());
+        }
+        assert!(enforce.is_risky_call("mcp__s__elsewhere", "{}"));
+        // The gate off never reads the snapshot.
+        let off = RunGate::with_gate(ToolClassGate::Off, org, run);
+        assert!(off.is_risky_call("mcp__s__echo", "{}"));
+        // An unstated rung stays no constraint, class or not.
+        assert!(enforce
+            .check_autonomy_rung(AutonomyRung::Unspecified, "browser.act", "{}")
+            .is_ok());
+    }
+
+    #[test]
+    fn a_run_gate_names_the_rung_a_call_needs_from_the_runs_declared_class() {
+        let (org, run) = ("org-run-gate-rung", "run-run-gate-rung");
+        record_run_views(
+            org,
+            run,
+            [
+                ("mcp__s__echo".to_owned(), view("mcp__s__echo", "read")),
+                ("mcp__s__post".to_owned(), view("mcp__s__post", "external_write")),
+            ],
+        );
+        let enforce = RunGate::with_gate(ToolClassGate::Enforce, org, run);
+        assert_eq!(
+            enforce.rung_required_for("mcp__s__echo", "{}"),
+            AutonomyRung::ReadOnly
+        );
+        assert_eq!(
+            enforce.rung_required_for("mcp__s__post", "{}"),
+            AutonomyRung::DangerFullAccess
+        );
+        // No view for the name, and the gate off: the legacy name-based rung.
+        assert_eq!(
+            enforce.rung_required_for("mcp__s__elsewhere", "{}"),
+            AutonomyRung::DangerFullAccess
+        );
+        let off = RunGate::with_gate(ToolClassGate::Off, org, run);
+        assert_eq!(
+            off.rung_required_for("mcp__s__echo", "{}"),
+            rung_required_for("mcp__s__echo", "{}")
+        );
+    }
+
+    #[test]
+    fn a_recorded_snapshot_replaces_the_runs_views_and_the_oldest_run_is_forgotten_first() {
+        let mut store = RunViewStore::default();
+        let key = |n: usize| ("org".to_owned(), format!("run-{n}"));
+        let one = |name: &str, class: &str| HashMap::from([(name.to_owned(), view(name, class))]);
+        store.record(key(0), one("a", "read"));
+        store.record(key(0), one("b", "read"));
+        assert!(
+            store.view(&key(0), "a").is_none(),
+            "a snapshot replaces, it does not merge"
+        );
+        assert!(store.view(&key(0), "b").is_some());
+
+        for n in 1..MAX_TRACKED_RUNS {
+            store.record(key(n), one("a", "read"));
+        }
+        assert_eq!(store.runs.len(), MAX_TRACKED_RUNS);
+        // Reading run 0 makes it the most recently used, so run 1 goes next.
+        assert!(store.view(&key(0), "b").is_some());
+        store.record(key(MAX_TRACKED_RUNS), one("a", "read"));
+        assert_eq!(store.runs.len(), MAX_TRACKED_RUNS);
+        assert!(
+            store.view(&key(1), "a").is_none(),
+            "the least recently used run is forgotten"
+        );
+        assert!(store.view(&key(0), "b").is_some());
+        assert!(store.view(&key(MAX_TRACKED_RUNS), "a").is_some());
+    }
+
+    #[test]
+    fn the_legacy_mcp_blanket_is_what_off_and_a_missing_view_still_answer() {
+        // The test the class-driven engine replaced: an `mcp__` name is gated under
+        // `ask` and not under `auto` when nothing declared otherwise.
+        assert!(is_risky_call_with(
+            ToolClassGate::Enforce,
+            None,
+            "mcp__fakemcp__echo",
+            "{}"
+        ));
+        assert_eq!(
+            evaluate_call_with(
+                ToolClassGate::Enforce,
+                None,
+                PermissionMode::Ask,
+                "mcp__fakemcp__echo",
+                "{}"
+            ),
+            PermissionDecision::AwaitApproval
+        );
+        assert_eq!(
+            evaluate_call_with(
+                ToolClassGate::Enforce,
+                None,
+                PermissionMode::Auto,
+                "mcp__fakemcp__echo",
+                "{}"
+            ),
+            PermissionDecision::Allow
+        );
     }
 }

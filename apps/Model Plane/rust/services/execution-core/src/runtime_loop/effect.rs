@@ -61,12 +61,45 @@ pub(crate) fn ledger_enabled() -> bool {
 /// middle rung is a durable write inside the run's own context (`Write`); anything
 /// else is a read. A call the classifier cannot place is already treated as the
 /// widest rung, so an unrecognised tool is never mistaken for a read.
+///
+/// This is the NAME-based answer, with no run to ask: it classifies every `mcp__` name as
+/// the widest rung. Where the run is known, [`effect_class_for_run`] is the one to use, so
+/// that the ledger and the retry policy read one classifier. The name-based answer is only
+/// ever the stricter of the two, which is the safe side for a reconciliation that takes the
+/// more effectful of the classes it has.
 pub(crate) fn effect_class_of(tool_name: &str, tool_input: &str) -> EffectClass {
-    match crate::permission::rung_required_for(tool_name, tool_input) {
+    class_of_rung(crate::permission::rung_required_for(tool_name, tool_input))
+}
+
+/// [`effect_class_of`] through the run's gate: the class the registry declared for the
+/// tool where the gate says so, the name-based answer otherwise. The retry policy asks the
+/// same gate, so a call the ledger fences as an effect is never one the loop replays, and a
+/// call the loop replays never holds a reservation that calls it an effect.
+pub(crate) fn effect_class_for_run(
+    gate: &crate::permission::RunGate<'_>,
+    tool_name: &str,
+    tool_input: &str,
+) -> EffectClass {
+    class_of_rung(gate.rung_required_for(tool_name, tool_input))
+}
+
+fn class_of_rung(rung: AutonomyRung) -> EffectClass {
+    match rung {
         AutonomyRung::DangerFullAccess => EffectClass::External,
         AutonomyRung::WorkspaceWrite => EffectClass::Write,
         _ => EffectClass::Read,
     }
+}
+
+/// Whether the ledger forbids dispatching a call a second time in this turn.
+///
+/// A call that holds an effectful reservation, or the release's pre-reservation (whose
+/// class is the name-based one, whatever the run's gate says), is never retried: a
+/// timeout is ambiguous, and the ledger already records that the effect may have happened.
+/// This is the safety net under the retry policy's own classifier; it holds even if the two
+/// classifiers ever disagree again.
+pub(crate) fn ledger_fences_retry(entry: Option<&LedgerEntry<'_>>, released: bool) -> bool {
+    released || entry.is_some_and(|entry| entry.class.is_effectful())
 }
 
 /// The digest the ledger stores for a call's arguments, or `None` when they are not
@@ -150,6 +183,31 @@ impl<'a> LedgerEntry<'a> {
 /// The entry for a call about to be dispatched: its class and digest come from the tool
 /// and its actual arguments. The loop's phase 2 builds the entry of every call it reserves
 /// this way, and so does the release's pre-reserve: one identity per action.
+///
+/// The class is the run's: the declared one where the run's gate reads declared classes
+/// ([`effect_class_for_run`]).
+pub(crate) fn entry_for_run_call<'a>(
+    gate: &crate::permission::RunGate<'_>,
+    run_id: &'a str,
+    step_id: &str,
+    tool: &'a str,
+    tool_input: &str,
+    data_category: &'a str,
+    zdr: bool,
+) -> LedgerEntry<'a> {
+    LedgerEntry::new(
+        run_id,
+        step_id,
+        tool,
+        data_category,
+        zdr,
+        effect_class_for_run(gate, tool, tool_input),
+        args_digest_of(tool_input),
+    )
+}
+
+/// [`entry_for_run_call`] with the name-based class, for a caller with no run.
+#[cfg(test)]
 pub(crate) fn entry_for_call<'a>(
     run_id: &'a str,
     step_id: &str,
@@ -516,6 +574,76 @@ mod tests {
             effect_class_of("mcp__crm__lookup_contact", "{}"),
             EffectClass::External
         );
+    }
+
+    /// The ledger and the retry policy ask the run's gate the same question, so the class
+    /// that fences a call as an effect is the class that stops its replay.
+    #[test]
+    fn the_ledger_classifies_an_mcp_call_through_the_runs_gate_as_retry_does() {
+        use crate::capability_policy::ToolClassGate;
+        use crate::permission::{record_run_views, RunGate, ToolClassView};
+        let (org, run) = ("org-effect", "run-effect");
+        record_run_views(
+            org,
+            run,
+            [
+                (
+                    "mcp__srv__lookup".to_owned(),
+                    ToolClassView::from_registry("mcp__srv__lookup", "read", "none", "d"),
+                ),
+                (
+                    "mcp__srv__create".to_owned(),
+                    ToolClassView::from_registry("mcp__srv__create", "external_write", "none", "d"),
+                ),
+            ],
+        );
+        let enforce = RunGate::with_gate(ToolClassGate::Enforce, org, run);
+        assert_eq!(
+            effect_class_for_run(&enforce, "mcp__srv__lookup", "{}"),
+            EffectClass::Read,
+            "a declared read is not fenced as an external effect"
+        );
+        assert_eq!(
+            effect_class_for_run(&enforce, "mcp__srv__create", "{}"),
+            EffectClass::External
+        );
+        // A name the run has no view for keeps the strict name-based answer.
+        assert_eq!(
+            effect_class_for_run(&enforce, "mcp__srv__unlisted", "{}"),
+            EffectClass::External
+        );
+        // With the gate off the answer is the name-based one, byte for byte.
+        let off = RunGate::with_gate(ToolClassGate::Off, org, run);
+        assert_eq!(
+            effect_class_for_run(&off, "mcp__srv__lookup", "{}"),
+            effect_class_of("mcp__srv__lookup", "{}")
+        );
+
+        // The two classifiers never disagree about whether a call is an effect: an effect is
+        // never replayed and a replayed call is never an effect.
+        let transient = "mcp proxy transport: connection reset by peer";
+        for tool in ["mcp__srv__lookup", "mcp__srv__create", "mcp__srv__unlisted"] {
+            let effect = effect_class_for_run(&enforce, tool, "{}").is_effectful();
+            let replayed =
+                crate::runtime_loop::retry::tool_call_is_retryable(&enforce, tool, "{}", transient);
+            assert_eq!(effect, !replayed, "{tool}");
+        }
+    }
+
+    #[test]
+    fn a_reservation_that_is_an_effect_or_a_release_fences_a_retry() {
+        let entry = |class| {
+            LedgerEntry::new("run-1", "tool_1_c1", "mcp__srv__x", "public_non_personal", false, class, None)
+        };
+        let read = entry(EffectClass::Read);
+        for class in [EffectClass::Write, EffectClass::External] {
+            assert!(ledger_fences_retry(Some(&entry(class)), false), "{class:?}");
+        }
+        assert!(!ledger_fences_retry(Some(&read), false));
+        assert!(!ledger_fences_retry(None, false));
+        // The release's pre-reservation was classified by name, whatever the gate says now.
+        assert!(ledger_fences_retry(Some(&read), true));
+        assert!(ledger_fences_retry(None, true));
     }
 
     #[test]

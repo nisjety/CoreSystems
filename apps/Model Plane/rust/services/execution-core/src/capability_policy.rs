@@ -41,6 +41,12 @@ pub struct CapabilityEvaluation {
     /// from a policy that does not say. It only picks which pause cause an `ask`
     /// is shown under.
     pub policy_source: String,
+    /// The class and approval floor the decision carried for the tool, as the policy
+    /// worded them; empty from a policy that does not say. A governed MCP call is
+    /// compared with them at dispatch (WS05-S4): the offer's snapshot of the class must
+    /// still be the one capability-core just decided on.
+    pub side_effect_class: String,
+    pub approval_floor: String,
 }
 
 impl CapabilityEvaluation {
@@ -55,6 +61,8 @@ impl CapabilityEvaluation {
             capability_version: String::new(),
             evidence_verified: true,
             policy_source: String::new(),
+            side_effect_class: String::new(),
+            approval_floor: String::new(),
         }
     }
 }
@@ -1002,6 +1010,8 @@ fn map_capability_response(
         capability_version: response.capability_version.clone(),
         evidence_verified: false,
         policy_source: response.policy_source.clone(),
+        side_effect_class: response.side_effect_class.clone(),
+        approval_floor: response.approval_floor.clone(),
     })
 }
 
@@ -1702,6 +1712,20 @@ mod tests {
             capability_version: "cap-v3".to_owned(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn an_evaluation_carries_the_class_and_floor_the_decision_named() {
+        let mut response = allow_response();
+        response.side_effect_class = "external_write".to_owned();
+        response.approval_floor = "ask".to_owned();
+        let evaluation = map_capability_response(&response).expect("a decision");
+        assert_eq!(evaluation.side_effect_class, "external_write");
+        assert_eq!(evaluation.approval_floor, "ask");
+        // A policy that does not say leaves both empty, which a governed MCP call treats
+        // as unable to confirm its offered class.
+        let silent = map_capability_response(&allow_response()).expect("a decision");
+        assert!(silent.side_effect_class.is_empty() && silent.approval_floor.is_empty());
     }
 
     #[test]
