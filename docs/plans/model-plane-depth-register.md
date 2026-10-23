@@ -460,6 +460,48 @@ Built so far (batches B01 to B07): WS01-S0, WS01-S1 (partial), WS01-S6; WS02-S1,
 | D1-343 | WS06-S3 | risk | P1 | Attestation rows are never pruned and one is written per head change per org per interval, so the table grows without bound. S4 or S9 should set a retention rule, for example the newest per day. | open |
 | D1-344 | WS06-S3 | follow-up | P3 | 15 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-07.json | open |
 
+
+### Wave-mode batch W1-08 (2026-10-24)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D1-345 | WS06-S4 | live-proof | P1 | None of the new SQL has run against Postgres: the repeatable-read snapshot, the LEFT JOIN of attestations onto rows, the state upsert and the SQL attack table. | open |
+| D1-346 | WS06-S4 | follow-up | P1 | S5 must emit the export format audit-verify defines (field names in the cmd/audit-verify doc comment) and define a signed manifest payload; the CLI treats the manifest head as an unsigned claim. | open |
+| D1-347 | WS06-S4 | risk | P1 | After a restore of audit tables from a copy, the saved verifier cursor can exceed the restored head and the next incremental pass reports a false head_behind_chain break. The runbook (S9) must say to delete the org's audit_chain_verifications row, or the loop should treat a cursor above the head as a reset. | open |
+| D1-348 | WS06-S4 | live-proof | P1 | Repeatable-read read-only snapshot, the LEFT JOIN of attestations onto rows, the state upsert and the SQL attack table are compile-checked only. They need the DB harness before the loop is switched on. | open |
+| D1-349 | WS06-S4 | live-proof | P1 | Lead shared-edit apps/Control Plane/audit-core/internal/store/migrate.go: register migration 009_audit_chain_verification_state using the existing auditChainVerificationStateSQL embed in verify.go. Without it the audit_chain_verifications table never exists in a running service. | open |
+| D1-350 | WS06-S4 | live-proof | P1 | Lead shared-edit apps/Control Plane/audit-core/cmd/server/main.go: start verifier.Run when verifier.Enabled(os.Getenv("AUDIT_CHAIN_VERIFY_ENABLED"), cfg.ChainEnabled) is true, with verifier.ParseInterval(os.Getenv("AUDIT_CHAIN_VERIFY_INTERVAL")). Until then Enabled, ParseInterval and Run have no caller and the loop never runs. | open |
+| D1-351 | WS06-S4 | live-proof | P1 | Lead shared-edit apps/Control Plane/docker-compose.yml and apps/Control Plane/audit-core/.env.example: add AUDIT_CHAIN_VERIFY_ENABLED and AUDIT_CHAIN_VERIFY_INTERVAL, then re-run the cmd/server compose-contract tests. | open |
+| D1-352 | WS06-S4 | live-proof | P1 | DB harness (lead only): run the Postgres-backed tests TestVerifyOrg*, TestVerifierStateRoundTrips and TestVerifierPassRecordsStateAndCountsABrokenChain with TEST_DATABASE_URL set, and re-run the S2/S3 store tests. None of the new SQL has run against Postgres. | open |
+| D1-353 | WS06-S4 | follow-up | P3 | 15 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-08.json | open |
+| D1-354 | WS02-S11 | live-proof | P1 | `cargo test -p model-gateway --lib` still does not compile in the worktree, for reasons outside this slice. The test literals at grpc.rs:3973 (ListThreadsResponse lacks next_cursor) and sse_events.rs:2478 (ProviderSummary lacks failed_attempts_ms and retry_wait_ms) belong to other slices. The lead must fix them, then re-run `cargo test -p model-gateway --lib compaction` in the worktree. | open |
+| D1-355 | WS02-S11 | live-proof | P1 | `cargo test -p execution-core --test compaction_parity_contract` has 1 failing test of 11: both_loops_classify_through_one_trust_table_and_one_scanner. It wants `read_provider_action` in the trust table as ConnectorContent, and the in-progress execution-core/src/integration_tools.rs from another slice does not have it. This slice touches neither file. It must be green before the batch closes. | open |
+| D1-356 | WS02-S11 | live-proof | P1 | Live evidence is not captured: `mp_gateway_compaction_total{phase,outcome}` on /metrics, and a forced summariser timeout showing `abort`/`timeout` plus the DROPPED_HISTORY_NOTICE marker. This needs a rebuilt model-gateway and docker, so only the lead can do it. | open |
+| D1-357 | WS02-S11 | live-proof | P1 | Fix the two test literals that keep `cargo test -p model-gateway --lib` from compiling (they belong to other slices): grpc.rs:3973 ListThreadsResponse needs next_cursor, and sse_events.rs:2478 ProviderSummary needs failed_attempts_ms and retry_wait_ms. | open |
+| D1-358 | WS02-S11 | live-proof | P1 | Then run `cd "apps/Model Plane/rust" && cargo test -q -p model-gateway --lib compaction`. Expect my 5 new tests plus the existing budget tests to pass; I have not seen them run. | open |
+| D1-359 | WS02-S11 | live-proof | P1 | Look at the compaction_parity_contract failure in execution-core (read_provider_action must be ConnectorContent). It comes from an integration_tools.rs change by another slice and is not caused by this slice. | open |
+| D1-360 | WS02-S11 | live-proof | P1 | Evidence for the slice DoD (needs a rebuilt model-gateway): force a summariser timeout and capture `mp_gateway_compaction_total{phase="abort",outcome="timeout"}` on /metrics, plus the dropped-history marker in the prompt. | open |
+| D1-361 | WS02-S11 | test-gap | P2 | The new tests cover the bracket, the ledger and the generation stamping only; there is no test that summarize_head emits abort or commit on a timeout or a provider error, because it needs a live AppState (source-read or mock-state test needed). | open |
+| D1-362 | WS02-S11 | follow-up | P3 | 10 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-08.json | open |
+| D1-363 | WS02-S8.code | live-proof | P1 | Run the staging A/B per the runbook; nothing live was run here, so hit rate, write share and eval pass rate are unmeasured. | open |
+| D1-364 | WS02-S8.code | live-proof | P1 | Verify the cost token: cost-core accepts audiences cost-core and inference-core (COST_CORE_AUTH_AUDIENCE), so the model-gateway token that drive mints is probably refused by capture; a cost-core token with cost:org:read for the driver's organisation is needed. | open |
+| D1-365 | WS02-S8.code | risk | P1 | Write share will read 0.0% on OpenAI-API routes if the provider reports no cache-creation count, so it is not evidence of writes until a pinned route reports one. | open |
+| D1-366 | WS02-S8.code | decision | P1 | The owner picks the staging provider (openai or azure-openai) and the model alias the pinned route serves before the run; drive records both in turns.json. | open |
+| D1-367 | WS02-S8.code | live-proof | P1 | Nothing live was run, so hit rate, write share and eval pass rate on the openai or azure-openai pinned route are unmeasured; the switch must stay off until the A/B table and the owner decision exist. | open |
+| D1-368 | WS02-S8.code | risk | P1 | The capture token needs cost:org:read for the eval organisation, and cost-core's accepted audience may differ from the model-gateway token that drive mints; verify before the live run. | open |
+| D1-369 | WS02-S8.code | live-proof | P1 | Staging A/B (drive, capture, three eval reruns per arm, compare) is live-only and unrun; the written A/B table and owner decision are still open. | open |
+| D1-370 | WS02-S8.code | live-proof | P1 | Lead applies the shared edits: Makefile selftest line adding tests/test_stable_prefix_ab.py, and the ledger entry for WS02-S8. | open |
+| D1-371 | WS02-S8.code | follow-up | P3 | 19 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-08.json | open |
+| D1-372 | WS01-S14.code | live-proof | P1 | Trust-claims section 6 steps 1 to 5 and the postmortem final read are not run on a live stack, so no sentence, status or ledger entry may move to delivered yet (already open as D1-041 and D1-047). | open |
+| D1-373 | WS01-S14.code | live-proof | P1 | The running session-core may already carry the publisher fix and migration 0043, because the 2026-10-22 dev-stack rebuild (ledger row 4bf17b08) was made from the worktree; the lead must read the running image revision and _sqlx_migrations before the S2 deploy step. | open |
+| D1-374 | WS01-S14.code | decision | P1 | PendingItem d adoption and the counsel wording for trust rows 36 to 41 are external (DEC-33 D14, Q-7a2-11); trust-claims.ts was left unchanged and the trust-data drift test passes on it. | open |
+| D1-375 | WS01-S14.code | follow-up | P1 | The ZDR lapse alerts ZdrAttestationReviewDue and ZdrAttestationLapsed and the inference-core :8082 scrape job are not written (D1-139, D1-143), so a lapse is visible only in logs and the gauge. | open |
+| D1-376 | WS01-S14.code | live-proof | P1 | Audit delivery is not proven end to end: the final read (postmortem replay gates plus trust-claims section 6 steps 1 to 5) has not run on a live stack, so no wording may move to 'delivered'. | open |
+| D1-377 | WS01-S14.code | live-proof | P1 | Trust-claims section 6 steps 1 to 5 and the postmortem final read need docker and a live stack, so the lead must run them. The lead must also check the running session-core image revision and _sqlx_migrations 43 before any S2 deploy step. | open |
+| D1-378 | WS01-S14.code | live-proof | P1 | The four shared files (MODEL_PLANE_STATUS.md, decisions/ledger.md, evidence README.md, trust-claims-pending-reverification.md) still need the lead's shared-edit lines from the implementer's lead_todo; the row's 'rows updated, evidence indexed' is incomplete until then. | open |
+| D1-379 | WS01-S14.code | live-proof | P1 | Promtool check and test of audit-delivery.rules.yml need the Docker image, so they are lead-only. | open |
+| D1-380 | WS01-S14.code | follow-up | P3 | 14 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-08.json | open |
+
 ## Wave 2 (WS13 to WS27)
 
 Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS27-S0, WS27-S1. Wave 2 is not started as a wave: these came in with Wave 1 batches because they were Wave 1 prerequisites.
@@ -769,3 +811,5 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS02-S2 | money, zdr | W1-07 | no |
 | WS01-S13.code | zdr, policy | W1-07 | no |
 | WS06-S3 | data-loss, audit | W1-07 | no |
+| WS06-S4 | audit | W1-08 | no |
+| WS02-S11 | audit | W1-08 | no |
