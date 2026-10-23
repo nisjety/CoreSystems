@@ -39,6 +39,7 @@ mod change_routes;
 #[cfg(feature = "postgres-queue")]
 mod change_webhook;
 mod config;
+mod control_client;
 mod drain;
 mod experiments;
 mod extract_routes;
@@ -46,6 +47,7 @@ mod graphql;
 mod grant_boot;
 mod handoff;
 mod internal_auth;
+mod job_lifecycle_routes;
 mod limits;
 mod map_routes;
 mod metrics;

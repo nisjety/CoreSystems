@@ -9,6 +9,7 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use quarry_core::error::{ErrorCode, QuarryError};
+use quarry_core::resources::RunOrigin;
 
 use crate::routes::HandoffAck;
 
@@ -56,6 +57,103 @@ pub async fn forward_to_orchestrator(
     }
 
     let body = serde_json::json!({ "kind": kind, "params": payload });
+    post_job(control_base_url, org_id, body, None, signer).await
+}
+
+/// Posts a durable job with its origin (WS15.L1): the body is `{kind, params,
+/// origin}`, and the caller's `Idempotency-Key` rides along when one was sent.
+/// `forward_to_orchestrator` stays for callers that carry no origin.
+pub async fn forward_job_signed(
+    control_base_url: &str,
+    org_id: &str,
+    kind: &str,
+    params: serde_json::Value,
+    origin: &RunOrigin,
+    idempotency_key: Option<&str>,
+    signer: Option<&crate::internal_auth::InternalSigner>,
+) -> Result<HandoffAck, QuarryError> {
+    let body = serde_json::json!({ "kind": kind, "params": params, "origin": origin });
+    post_job(control_base_url, org_id, body, idempotency_key, signer).await
+}
+
+/// Service principals that run Model Plane work for a user. A job one of them
+/// submits has an agent origin; any other service principal is an API client.
+const MODEL_PLANE_PRINCIPALS: &[&str] = &["service:model-gateway", "service:execution-core"];
+
+/// The origin of a job, from the verified claims and never from the body: a user
+/// token is `user`; a Model Plane service is `agent`, carrying the run id it sent;
+/// any other service is `api`.
+pub fn run_origin_from_request(
+    claims: &crate::auth::Claims,
+    headers: &axum::http::HeaderMap,
+) -> RunOrigin {
+    let run_ref = if claims.is_service() {
+        headers
+            .get("x-verevon-run-id")
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|v| !v.is_empty() && v.len() <= 128)
+            .map(str::to_string)
+    } else {
+        None
+    };
+    if claims.is_service() {
+        let actor = claims.actor_id().to_string();
+        if MODEL_PLANE_PRINCIPALS.contains(&actor.as_str()) {
+            return RunOrigin {
+                origin_type: "agent".to_string(),
+                actor: Some(actor),
+                origin_ref: run_ref,
+            };
+        }
+        return RunOrigin {
+            origin_type: "api".to_string(),
+            actor: Some(actor),
+            origin_ref: None,
+        };
+    }
+    let actor = claims.user_id.trim();
+    RunOrigin {
+        origin_type: "user".to_string(),
+        actor: (!actor.is_empty()).then(|| actor.to_string()),
+        origin_ref: None,
+    }
+}
+
+/// The caller's `Idempotency-Key` header, when it is a usable key (1 to 128
+/// characters). Control answers a repeated key with the job it already created.
+pub fn idempotency_key_from_request(headers: &axum::http::HeaderMap) -> Option<String> {
+    headers
+        .get("idempotency-key")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty() && v.len() <= 128)
+        .map(str::to_string)
+}
+
+/// Posts a job body to control's `POST /v1/jobs?org_id=` and reads the created
+/// job back. The body is signed over the bytes and the query that are sent when
+/// a signer is configured. `idempotency_key`, when present, is sent as the
+/// `Idempotency-Key` header.
+pub(crate) async fn post_job(
+    control_base_url: &str,
+    org_id: &str,
+    body: serde_json::Value,
+    idempotency_key: Option<&str>,
+    signer: Option<&crate::internal_auth::InternalSigner>,
+) -> Result<HandoffAck, QuarryError> {
+    if control_base_url.is_empty() {
+        return Err(QuarryError::new(
+            ErrorCode::Internal,
+            "control base url empty",
+        ));
+    }
+    if org_id.is_empty() {
+        return Err(QuarryError::new(
+            ErrorCode::BadRequest,
+            "handoff missing org_id",
+        ));
+    }
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
@@ -77,6 +175,9 @@ pub async fn forward_to_orchestrator(
         .post(url.clone())
         .header("content-type", "application/json")
         .body(body_bytes.clone());
+    if let Some(key) = idempotency_key {
+        request = request.header("idempotency-key", key);
+    }
     if let Some(signer) = signer {
         let path_q = match url.query() {
             Some(query) => format!("{}?{}", url.path(), query),
@@ -134,6 +235,7 @@ pub async fn forward_to_orchestrator(
     })
 }
 
+/// The `org_backlog_full` refusal from control's error envelope
 /// The `org_backlog_full` refusal from control's error envelope
 /// (`{"error": {"code": "RATE_LIMITED", "details": {"reason": ..}}}`), as a
 /// typed `RATE_LIMITED` carrying `reason`, `limit`, `queued` and

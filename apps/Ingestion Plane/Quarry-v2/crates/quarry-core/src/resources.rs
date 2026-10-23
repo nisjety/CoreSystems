@@ -180,6 +180,133 @@ pub struct JobSummary {
     /// Page count, query, URL — whatever's natural for the kind.
     #[serde(default)]
     pub stats: serde_json::Value,
+    /// Who started the job (control's origin record). Absent on rows written
+    /// before the origin existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<RunOrigin>,
+    /// What a person reads: "queued" while waiting, otherwise the status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+}
+
+/// Who started a job and from which run. `origin_type` is one of `user`,
+/// `agent`, `schedule`, `webhook`, `api`, or `unknown` for rows written before
+/// the origin existed. `origin_ref` carries the Model Plane run id for agent
+/// origins only.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunOrigin {
+    #[serde(rename = "type")]
+    pub origin_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+    #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
+    pub origin_ref: Option<String>,
+}
+
+/// Page counters of a job, read from its event log.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JobCounts {
+    #[serde(default)]
+    pub completed: u64,
+    #[serde(default)]
+    pub failed: u64,
+    #[serde(default)]
+    pub blocked: u64,
+    #[serde(default)]
+    pub retried: u64,
+}
+
+/// A non-fatal note about a job. `code` is from a closed vocabulary.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JobWarning {
+    pub code: String,
+    pub message: String,
+}
+
+/// What the caller asked the job to do next, and whether the orchestrator has
+/// not yet carried it out (`pending`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JobControlState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desired: Option<String>,
+    #[serde(default)]
+    pub pending: bool,
+}
+
+/// The status document of one crawl, batch or other job: `GET /v1/crawl/:id`,
+/// `GET /v1/batch/:id`, `GET /v1/jobs/:id`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct JobStatusView {
+    pub job_id: String,
+    pub kind: String,
+    pub status: String,
+    pub phase: String,
+    /// True once the status is final (completed, failed, cancelled, timed_out
+    /// or skipped); the job takes no further transition.
+    pub terminal: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<RunOrigin>,
+    pub created_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_at: Option<DateTime<Utc>>,
+    pub counts: JobCounts,
+    /// The page total: the exact URL count of a batch, or the effective page
+    /// ceiling of a crawl (see `total_kind`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+    /// `exact` for a batch, `budget` for a crawl whose total is a ceiling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_kind: Option<String>,
+    #[serde(default)]
+    pub warnings: Vec<JobWarning>,
+    pub control: JobControlState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule_id: Option<String>,
+    /// The Temporal run id, once the orchestrator has dispatched the job. Event
+    /// reads by run id (`/v1/runs/:id/events`) use this, never `job_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+}
+
+/// One failed page of a job (a final attempt only).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct JobErrorView {
+    pub id: String,
+    pub ts: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    #[serde(default)]
+    pub retryable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+}
+
+/// One page the job did not visit because a rule blocked it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct JobBlockedView {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    pub ts: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// `GET /v1/crawl/:id/errors`. `next_seq` is set when the page was full: pass it
+/// back as `after_seq` to read the rest.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct JobErrorsView {
+    pub errors: Vec<JobErrorView>,
+    pub blocked: Vec<JobBlockedView>,
+    #[serde(default)]
+    pub robots_blocked: Vec<JobBlockedView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_seq: Option<u64>,
 }
 
 // =============================================================================

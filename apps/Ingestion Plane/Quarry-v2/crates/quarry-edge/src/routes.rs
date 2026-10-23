@@ -134,6 +134,16 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/scrape/:id", get(crate::scrape_routes::get_scrape))
         .route("/v1/crawl", post(crawl_handoff))
         .route("/v1/batch", post(batch_handoff))
+        // WS15.L1 — job lifecycle reads. `ongoing` is static, so it is matched
+        // before the `:id` routes of the same kind.
+        .route("/v1/crawl/ongoing", get(crate::job_lifecycle_routes::ongoing_crawl))
+        .route("/v1/crawl/:id", get(crate::job_lifecycle_routes::get_crawl))
+        .route("/v1/crawl/:id/errors", get(crate::job_lifecycle_routes::crawl_errors))
+        .route("/v1/batch/ongoing", get(crate::job_lifecycle_routes::ongoing_batch))
+        .route("/v1/batch/:id", get(crate::job_lifecycle_routes::get_batch))
+        .route("/v1/batch/:id/errors", get(crate::job_lifecycle_routes::batch_errors))
+        .route("/v1/jobs/:id", get(crate::job_lifecycle_routes::get_job))
+        .route("/v1/jobs/:id/errors", get(crate::job_lifecycle_routes::job_errors))
         .route("/v1/profiles", post(crate::profile_routes::save_profile))
         .route("/v1/profiles", get(crate::profile_routes::list_profiles))
         // Browser Workspace Phase 3 continuation — explicit named/scoped
@@ -852,6 +862,7 @@ fn refuse_while_draining(request_id: &str) -> Result<(), (StatusCode, Json<Envel
 async fn crawl_handoff(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
+    headers: HeaderMap,
     Json(req): Json<CrawlRequest>,
 ) -> Result<Json<Envelope<HandoffAck>>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = crate::request_id::current();
@@ -891,11 +902,14 @@ async fn crawl_handoff(
         }
     }
 
-    // Phase 3+: POST to orchestrator with verified tenant identity.
-    let ack = crate::handoff::forward_to_orchestrator(
+    // Phase 3+: POST to orchestrator with verified tenant identity. The job
+    // carries its origin (WS15.L1) and the caller's Idempotency-Key, if sent.
+    let origin = crate::handoff::run_origin_from_request(&claims, &headers);
+    let idempotency_key = crate::handoff::idempotency_key_from_request(&headers);
+    let ack = crate::handoff::forward_job_signed(
         &state.control_base_url,
-        &request_id,
         &org_id,
+        "crawl",
         serde_json::json!({
             "kind": "crawl",
             "url": req.url,
@@ -907,6 +921,8 @@ async fn crawl_handoff(
             "user_id": claims.user_id,
             "ingest": req.ingest,
         }),
+        &origin,
+        idempotency_key.as_deref(),
         state.internal_signer.as_deref(),
     )
     .await;
@@ -961,15 +977,18 @@ pub struct BatchRequest {
 async fn batch_handoff(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
+    headers: HeaderMap,
     Json(req): Json<BatchRequest>,
 ) -> Result<Json<Envelope<HandoffAck>>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = crate::request_id::current();
     refuse_durable_job_under_zdr(&claims, req.zdr, &request_id, "batch")?;
     refuse_while_draining(&request_id)?;
-    let ack = crate::handoff::forward_to_orchestrator(
+    let origin = crate::handoff::run_origin_from_request(&claims, &headers);
+    let idempotency_key = crate::handoff::idempotency_key_from_request(&headers);
+    let ack = crate::handoff::forward_job_signed(
         &state.control_base_url,
-        &request_id,
         &claims.org_id,
+        "batch",
         serde_json::json!({
             "kind": "batch",
             "urls": req.urls,
@@ -977,6 +996,8 @@ async fn batch_handoff(
             "user_id": claims.user_id,
             "ingest": req.ingest,
         }),
+        &origin,
+        idempotency_key.as_deref(),
         state.internal_signer.as_deref(),
     )
     .await;
