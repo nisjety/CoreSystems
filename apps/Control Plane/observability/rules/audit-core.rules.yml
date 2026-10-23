@@ -72,3 +72,30 @@ groups:
         labels: { severity: warning, plane: control }
         annotations:
           summary: "audit-core's chain verifier has not completed a pass in over 36 hours"
+
+      # SIEM export (build plan WS06 S8). The series come from the siem-exporter
+      # process, which only runs under the compose profile `siem`; without it
+      # none exist and neither rule can fire. Labels are destination kind and
+      # result only: no org, destination id or URL, so nothing tenant-specific
+      # or secret is in a series.
+      - alert: ControlAuditSIEMExportLag
+        # The oldest audit row a destination has not acknowledged is over 15
+        # minutes old. The exporter backs off to 15 minutes between attempts, so
+        # this fires for a destination that is down, not for one that is slow.
+        expr: audit_siem_export_lag_seconds > 15 * 60
+        for: 5m
+        labels: { severity: warning, plane: control }
+        annotations:
+          summary: "a SIEM destination is more than 15 minutes behind the audit chain"
+
+      - alert: ControlAuditSIEMExportFailing
+        # More than half of the batches in the last 15 minutes were refused or
+        # could not be delivered. Division by zero (no batches) is NaN and does
+        # not fire.
+        expr: |
+          sum(increase(audit_siem_export_batches_total{result!="ok"}[15m]))
+            / sum(increase(audit_siem_export_batches_total[15m])) > 0.5
+        for: 10m
+        labels: { severity: warning, plane: control }
+        annotations:
+          summary: "most SIEM export batches are failing (a destination is refusing or unreachable)"

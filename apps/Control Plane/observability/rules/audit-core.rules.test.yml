@@ -170,3 +170,73 @@ tests:
       - eval_time: 30h
         alertname: ControlAuditChainVerifyStale
         exp_alerts: []
+
+  - interval: 1m
+    name: a destination more than fifteen minutes behind fires after five more
+    input_series:
+      - series: 'audit_siem_export_lag_seconds{destination_kind="ndjson_webhook"}'
+        values: '1000x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: ControlAuditSIEMExportLag
+        exp_alerts:
+          - exp_labels: { severity: warning, plane: control, destination_kind: ndjson_webhook }
+            exp_annotations:
+              summary: "a SIEM destination is more than 15 minutes behind the audit chain"
+
+  - interval: 1m
+    name: a destination inside fifteen minutes of the chain stays quiet
+    input_series:
+      - series: 'audit_siem_export_lag_seconds{destination_kind="splunk_hec"}'
+        values: '800x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ControlAuditSIEMExportLag
+        exp_alerts: []
+
+  - interval: 1m
+    name: a lag that clears before five minutes never fires
+    input_series:
+      - series: 'audit_siem_export_lag_seconds{destination_kind="ndjson_webhook"}'
+        values: '1000x3 0x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ControlAuditSIEMExportLag
+        exp_alerts: []
+
+  - interval: 1m
+    name: batches that keep failing fire after ten minutes
+    input_series:
+      - series: 'audit_siem_export_batches_total{result="failed"}'
+        values: '0+1x40'
+      - series: 'audit_siem_export_batches_total{result="ok"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: ControlAuditSIEMExportFailing
+        exp_alerts:
+          - exp_labels: { severity: warning, plane: control }
+            exp_annotations:
+              summary: "most SIEM export batches are failing (a destination is refusing or unreachable)"
+
+  - interval: 1m
+    name: a healthy export with the odd failure stays quiet
+    input_series:
+      - series: 'audit_siem_export_batches_total{result="failed"}'
+        values: '0x10 1x30'
+      - series: 'audit_siem_export_batches_total{result="ok"}'
+        values: '0+4x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: ControlAuditSIEMExportFailing
+        exp_alerts: []
+
+  - interval: 1m
+    name: no batches at all is not a failure
+    input_series:
+      - series: 'audit_siem_export_batches_total{result="ok"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: ControlAuditSIEMExportFailing
+        exp_alerts: []

@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
@@ -342,8 +343,16 @@ func (a *API) complianceKeys(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"data": keys, "meta": map[string]any{"count": len(keys)}, "error": nil})
 }
 
-// complianceExportStatus is empty until the SIEM exporter (S8) exists: there
-// are no destinations to report on and nothing has been exported.
+// exportStatusReader is what the export status route needs beyond eventStore.
+// The production store implements it; a store that does not reports no
+// exporter, which is also the truth of a deployment without the siem profile.
+type exportStatusReader interface {
+	ExportStatus(context.Context, string) (store.ExportStatus, error)
+}
+
+// complianceExportStatus reports the SIEM exporter's cursors for the org: per
+// destination how far it has delivered and how it last failed, against the
+// chain head. It never carries a destination URL or secret.
 func (a *API) complianceExportStatus(w http.ResponseWriter, r *http.Request) {
 	authorization, ok := requireComplianceRole(w, r)
 	if !ok {
@@ -352,12 +361,24 @@ func (a *API) complianceExportStatus(w http.ResponseWriter, r *http.Request) {
 	if _, ok := complianceQuery(w, r, "org_id"); !ok {
 		return
 	}
-	if !a.recordComplianceRead(w, r, authorization, eventComplianceRead, map[string]any{"route": "export_status"}) {
+	status := store.ExportStatus{Destinations: []store.ExportDestinationStatus{}}
+	if reader, ok := a.store.(exportStatusReader); ok {
+		var err error
+		if status, err = reader.ExportStatus(r.Context(), authorization.OrgID); err != nil {
+			log.Error().Err(err).Str("org_id", authorization.OrgID).Msg("complianceExportStatus failed")
+			writeComplianceError(w, http.StatusInternalServerError, "query_failed", "query failed")
+			return
+		}
+	}
+	if !a.recordComplianceRead(w, r, authorization, eventComplianceRead, map[string]any{
+		"route": "export_status", "count": len(status.Destinations),
+	}) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{
-		"exporter_enabled": false,
-		"destinations":     []any{},
+		"exporter_enabled": status.Active,
+		"head_seq":         status.HeadSeq,
+		"destinations":     status.Destinations,
 	}, "error": nil})
 }
 

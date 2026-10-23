@@ -46,6 +46,13 @@ scrape_configs:
       - targets: ['audit-core-service:9091']
         labels: { service: audit-core }
 
+  # SIEM exporter (WS06-S8). Only runs under the compose profile `siem`; the
+  # target reads as down on a stack without it, and no rule alerts on `up`.
+  - job_name: audit-siem-exporter
+    static_configs:
+      - targets: ['audit-siem-exporter:9091']
+        labels: { service: audit-siem-exporter }
+
   # Model Plane services, reached on inter-plane-bus by their plane-unique
   # aliases (the bare name `session-core` is also a Control Plane service).
   # model-session-core serves /metrics on its health port 8081 (audit outbox
