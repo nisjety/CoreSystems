@@ -407,6 +407,21 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D2-152 | WS22-S1 | live-proof | P1 | Shared-edit to apps/Model Plane/deploy/docker-compose.yml: add the three SANDBOX_MANAGER_THREAD_WORKSPACE, _THREAD_MAX_FILES (256) and _THREAD_MAX_BYTES (67108864) lines beside SANDBOX_MANAGER_BACKEND_ID. Until then the env is unset, so the switch stays off. | open |
 | D2-153 | WS22-S1 | follow-up | P3 | 25 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-04.json | open |
 
+
+### Wave-mode batch W2-03 (2026-10-23)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D2-154 | WS18-S1 | live-proof | P1 | The cargo verification commands could not be confirmed in this pass: the shared target lock at C:/dev/mp-target-w2 was held by other slices' cargo runs, and the queued runs had not completed when this verdict was written. Re-run `cargo test -p model-gateway --test e2e_invoke_chain_test` and the BFF `cargo test --manifest-path apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml --all-targets space_` after the lock clears; the implementer's reported results (1 passed, 142 passed, 53 passed) are unverified here. | open |
+| D2-155 | WS18-S1 | live-proof | P1 | Eval-lab suite re-run in this pass: `PYTHONPATH=src pytest -q tests/` gives 19 passed, 17 skipped (the 17 are the live-eval gate). Case 17 is loaded and counted by the baseline test, and it skips by design until the harness passthrough exists. | open |
+| D2-156 | WS18-S1 | live-proof | P1 | Live proof is open: a flagged Do run in a project with a real Space, with the rebuilt model-gateway and BFF images, plus the SPA evidence the row's DoD asks for. This is a lead live proof and needs docker, which this verifier may not run. | open |
+| D2-157 | WS18-S1 | live-proof | P1 | Remember the plan asks for the posture-table Space row and the eval passthrough; both are outside this slice's ownership set. | open |
+| D2-158 | WS18-S1 | live-proof | P1 | No shared-edit lines required for this slice. | open |
+| D2-159 | WS18-S1 | live-proof | P1 | Eval case 17 still skips until eval_lab/client.py gains a space_instructions passthrough (not owned by this slice). | open |
+| D2-160 | WS18-S1 | test-gap | P2 | The ZDR golden a_zdr_turn_never_reaches_run_context_composition named in the plan row does not exist in the repo; nearest coverage is the zdr RunFacts unit case in run_context.rs. | open |
+| D2-161 | WS18-S1 | test-gap | P2 | crates/mp-contracts/tests/run_context_posture.rs has no Space row, which the row requires; that file is not owned by this slice. | open |
+| D2-162 | WS18-S1 | follow-up | P3 | 9 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-03.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
@@ -450,3 +465,4 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | D0-006 | cross | cleanup | P3 | Wave-mode slices handed back lines for shared files they may not edit (compose switches, `ZDR.md` rows, ownership-matrix rows, extra ledger text). They wait in `.plan-work/execution/shared-edits-<batch>.md` (W1-01, W1-02, W2-01 to W2-04 so far). The compose switches default off in code and need no line to be safe; the docs lines are bookkeeping. Apply in a depth pass. | open |
 
 | D0-007 | WS26-S9 | risk | P0 (fixed) | A fix agent's mutation check on `sse.rs` overlapped my commit of WS26-S9, so commit `1e2f5743d` carried a mutated ZDR guard (`if effective_zdr && !features...agentic`) that let an agentic ZDR turn skip the refusal. Restored in the next commit; the guard test `a_zdr_turn_never_reaches_run_context_composition` catches the mutation. Lesson: no agent runs mutation checks on shared files while the lead is committing; the wave rules now forbid mutation campaigns altogether. | done |
+| WS18-S1 | authority, zdr | W2-03 | no |
