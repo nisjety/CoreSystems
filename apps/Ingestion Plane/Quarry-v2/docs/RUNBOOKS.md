@@ -1655,3 +1655,24 @@ Every screenshot the Chromium driver takes is scanned for sensitive form fields 
 **Rollback.** Revert the commit or deploy the previous image; on a dev stack `QUARRY_BROWSER_SCREENSHOT_MASK=off` turns it off. No migration. The stamp gains `mask_ms`, `oopif_frames` and `rects` (all default 0, so an older reader is unaffected).
 
 **Not done.** The `png` dependency is the one WS13.6 added (version 0.18; the plan said 0.17). Cross-origin iframes are counted, not scanned (`allow`) or blanked whole (`mask`). The Browserless, Browserbase and Kernel drivers report `none`. The live view is not masked. The p95 measurement and the stack evidence are owed.
+
+## Stopping the edge: what a drained run leaves behind (WS6.J usage segment)
+
+This extends "Stopping the edge (drain)" above and replaces its "Not done" line for the `agent.expired` event and the usage segment. No flag: the drain was already on, `QUARRY_EDGE__DRAIN_DEADLINE_S` (default 30) is unchanged.
+
+The order on SIGTERM is now:
+
+1. `drain::begin()` as before: `/ready` 503 `draining`, new runs, crawls and batches get the typed 503.
+2. **Runs end first, at once.** Every live run goes through `finish_run` with the reason `Drain` (8 at a time; 5 s each for the wait on a running action, for the usage step and for the release). Each run: writes a timeline item `expired` (initiated by `system`) when it is not ZDR, leaves a non-ZDR checkpoint `active` (so `resume_run_id` works after the restart), hands its **last usage segment** to the meter (`quarry.browser.second.agent` or `.interactive`, `quarry.agent.run`, `quarry.agent.step`, outcome `expired`, id `quarry:<run_id>:s<segment>:<metric>`, so a resumed run's next segment never collides), releases the browser session once, and emits `agent.expired` with `{"reason": "shutdown", "idle_s", "age_s"}`. A ZDR run writes no checkpoint, timeline item or receipt; its usage event carries the ZDR allowlist only. The usage events are still subject to `QUARRY_EDGE__USAGE_BROWSER_METRICS` (`off` drops them, `shadow` counts them, `on` publishes them).
+3. **Then the open streams are closed** (`drain::close_streams()`): an event stream (SSE), a frame stream and a browser WebSocket send a final `done` frame with `shutdown` and end, so graceful shutdown completes with a viewer connected instead of waiting for the deadline. The event stream of a drained run has already received `agent.expired` and then ends with `done: run_closed`.
+4. `serve` returns (or the deadline passes and the rest is closed), a second `drain_runs_for_shutdown` pass catches a run the first missed, the browser is shut down, the usage meter is flushed (at most 5 s, so the NATS publishes in flight leave the process), the local index commits, exit 0.
+
+Log lines: `drain: runs ended released=N failed=N in_use=N` (the early pass), `drain: browser sessions released ...` (the second pass; normally all zero), `drain: an action still holds this run` (a run whose action did not finish in 5 s is left to the exit and is not billed for that segment), `drain: the usage segment was not accepted in time`, `drain: the timeline record failed; releasing anyway`.
+
+Metrics: `quarry_agent_run_expired_total{reason="shutdown"}` counts the runs this drain ended.
+
+**Checks (written, not run).** `cargo test -p quarry-edge --test drain` (serial; the file sets and resets the process-global flags): `drain_refuses_new_runs_with_503_and_retry_after`, `drain_closes_streams_so_graceful_shutdown_completes`, `drain_releases_every_session_exactly_once`, `drain_keeps_non_zdr_checkpoints_active_and_writes_none_for_zdr`, `drain_emits_the_usage_segment_before_exit`, `a_busy_run_does_not_block_the_drain`. Deployment evidence owed: with an SSE `events/stream`, a frame stream and one manual session open, `time docker stop quarry-edge` ends under the deadline with exit 0, the SSE received `agent.expired` with `reason: shutdown` and then `done`, and with `QUARRY_EDGE__USAGE_BROWSER_METRICS=on` `billing_usage_events` has the segment row.
+
+**Rollback.** Revert the commit; the earlier drain (release without events or usage) is the previous behaviour. No migration, no schema or wire change beyond one more `done` reason (`shutdown`) on the live streams.
+
+**Not done.** A boot-time settlement of orphaned non-ZDR `Active` checkpoints after a crash (plan S9b, design level; a crashed ZDR run is unbilled by design, ADR-4); `job_stream` and `scrape_stream` do not yet end on `close_streams` (the deadline still bounds them).
