@@ -93,6 +93,13 @@ services:
       # failure). Redis (QUARRY_EDGE__REDIS_URL below) still layers a
       # read-through cache in front of either backend.
       QUARRY_EDGE__PROFILE_STORE_KIND: ${QUARRY_EDGE_PROFILE_STORE_KIND:-postgres}
+      # WS17.E1: profile envelope encryption (default off; see RUNBOOKS WS17.E1). Master keys
+      # come from the secrets ledger, never from this file.
+      QUARRY_EDGE__PROFILE_ENCRYPTION: ${QUARRY_EDGE__PROFILE_ENCRYPTION:-off}
+      QUARRY_EDGE__PROFILE_ENCRYPTION_REQUIRED: ${QUARRY_EDGE__PROFILE_ENCRYPTION_REQUIRED:-false}
+      QUARRY_EDGE__PROFILE_KEY_PROVIDER: ${QUARRY_EDGE__PROFILE_KEY_PROVIDER:-env}
+      QUARRY_PROFILE_MASTER_KEYS: ${QUARRY_PROFILE_MASTER_KEYS:-}
+      QUARRY_PROFILE_MASTER_KEY_ACTIVE: ${QUARRY_PROFILE_MASTER_KEY_ACTIVE:-}
       QUARRY_EDGE__RUNTIME_AUTH_TOKEN: ${QUARRY_RUNTIME_AUTH_TOKEN:?QUARRY_RUNTIME_AUTH_TOKEN is required}
       QUARRY_EDGE__INTERNAL_SECRET: ${QUARRY_INTERNAL_SECRET:?QUARRY_INTERNAL_SECRET must be set (no insecure default)}
       QUARRY_EDGE__NATS_URL: nats://nats:4222

@@ -261,6 +261,17 @@ pub struct EdgeConfig {
     /// 404 to a non-owner; `off` skips the check. Env: `QUARRY_EDGE__PROFILE_OWNER_ENFORCE`.
     #[serde(default)]
     pub profile_owner_enforce: crate::profile_guard::OwnerEnforce,
+    /// WS17.E1: envelope encryption of profile snapshots: `off` (default), `compat` or `on`.
+    /// Validated at boot (`profile_encryption.rs`). Env: `QUARRY_EDGE__PROFILE_ENCRYPTION`.
+    #[serde(default)]
+    pub profile_encryption: String,
+    /// WS17.E1: boot refuses any mode below `on` (set in the production overlay after the
+    /// backfill). Env: `QUARRY_EDGE__PROFILE_ENCRYPTION_REQUIRED`.
+    #[serde(default)]
+    pub profile_encryption_required: bool,
+    /// WS17.E1: key provider. Only `env` is built; `org_core` is WS17.E2. Env: `QUARRY_EDGE__PROFILE_KEY_PROVIDER`.
+    #[serde(default)]
+    pub profile_key_provider: String,
 }
 
 fn default_port() -> u16 {
@@ -380,6 +391,9 @@ impl EdgeConfig {
             zdr_refuse_durable_resources: false,
             zdr_tombstone: false,
             profile_owner_enforce: crate::profile_guard::OwnerEnforce::Observe,
+            profile_encryption: String::new(),
+            profile_encryption_required: false,
+            profile_key_provider: String::new(),
         }
     }
 }

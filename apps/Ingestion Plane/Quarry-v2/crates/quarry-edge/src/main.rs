@@ -53,6 +53,7 @@ mod limits;
 mod map_routes;
 mod metrics;
 mod policy_baseline;
+mod profile_encryption;
 mod profile_guard;
 mod profile_routes;
 mod queue_routes;
@@ -752,6 +753,17 @@ async fn run() -> anyhow::Result<()> {
     // Otherwise the dev-default `InMemoryProfileStore` runs. Either
     // backend can be wrapped with Redis hot-cache via
     // `cached_profile_store::maybe_cache`.
+    // WS17.E1: profile envelope encryption. Validated before any profile store is built.
+    let profile_plan = profile_encryption::plan_from_settings(
+        &cfg.profile_encryption,
+        cfg.profile_encryption_required,
+        &cfg.profile_key_provider,
+        std::env::var(profile_encryption::MASTER_KEYS_ENV).ok().as_deref(),
+        std::env::var(profile_encryption::MASTER_KEY_ACTIVE_ENV).ok().as_deref(),
+    )?;
+    #[allow(unused_mut)]
+    let mut profile_blobs: Option<Arc<dyn quarry_runtime::profile_blob_store::ProfileBlobStore>> =
+        None;
     #[allow(unused_mut)]
     let mut profiles_durable = false;
     let inner_profiles: Arc<dyn quarry_browser::session::ProfileStore> = {
@@ -772,6 +784,12 @@ async fn run() -> anyhow::Result<()> {
                             quarry_runtime::postgres_profile_store::spawn_tombstone_sweeper(
                                 store.clone(),
                             );
+                        // WS17.E1: the same table, as a blob store for the envelope layer.
+                        profile_blobs = Some(Arc::new(
+                            quarry_runtime::postgres_profile_store::PostgresProfileBlobStore::new(
+                                store.clone(),
+                            ),
+                        ));
                         Arc::new(store)
                     }
                     Err(e) => {
@@ -797,9 +815,27 @@ async fn run() -> anyhow::Result<()> {
         }
     };
     // Optional Redis read-through cache (1h TTL by default).
-    let profiles =
-        quarry_runtime::cached_profile_store::maybe_cache(inner_profiles, cfg.redis_url.as_deref())
-            .await;
+    let profiles = match (profile_plan.mode, profile_plan.keys.clone()) {
+        (quarry_runtime::envelope_profile_store::EncryptionMode::Off, _) | (_, None) => {
+            quarry_runtime::cached_profile_store::maybe_cache(inner_profiles, cfg.redis_url.as_deref())
+                .await
+        }
+        (mode, Some(keys)) => match profile_blobs {
+            Some(blobs) => {
+                quarry_runtime::envelope_profile_store::wire(
+                    mode,
+                    blobs,
+                    keys,
+                    cfg.redis_url.as_deref(),
+                )
+                .await
+            }
+            None => anyhow::bail!(
+                "profile_encryption={} requires profile_store_kind=postgres and a database_url",
+                mode.as_str()
+            ),
+        },
+    };
 
     // P0 action proof. A production agent must not report readiness while
     // receipts would disappear with the edge process. The durable store uses
