@@ -3,6 +3,7 @@ package workflows
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"strconv"
 	"strings"
 	"time"
 
@@ -380,9 +381,22 @@ func ChangeMonitorWF(ctx workflow.Context, in ChangeMonitorInput, a *activities.
 
 // BatchJobWF fans out page activities for each URL sequentially (bounded
 // concurrency is enforced by the runtime) and aggregates the result.
+//
+// From batch-control-v1 the batch takes the same control requests as a crawl:
+// pause holds it before the next URL (run_paused, then run_resumed), cancel ends
+// it before the next URL with run_cancelled. Executions recorded before that
+// version run to the end as they did.
 func BatchJobWF(ctx workflow.Context, in BatchJobInput, a *activities.Activities) error {
 	ctx = workflow.WithActivityOptions(ctx, defaultActivityOpts())
 	ids := runIDs{RunID: in.RunID, JobID: in.JobID}
+
+	var ctrl *crawlControl
+	if workflow.GetVersion(ctx, "batch-control-v1", workflow.DefaultVersion, 1) >= 1 {
+		var err error
+		if ctrl, err = installControlHandlers(ctx); err != nil {
+			return err
+		}
+	}
 
 	if err := emitEvent(ctx, a, ids, quarrycontracts.EvtRunStarted, map[string]any{
 		"kind":  "batch",
@@ -393,7 +407,16 @@ func BatchJobWF(ctx workflow.Context, in BatchJobInput, a *activities.Activities
 
 	var visited, failed uint32
 	stats := newJobStatistics(workflow.Now(ctx))
-	for _, url := range in.URLs {
+	cancelled := false
+	for i, url := range in.URLs {
+		if ctrl != nil {
+			remaining := uint32(len(in.URLs) - i)
+			counts := map[string]any{"pages_visited": visited, "pages_failed": failed, "pending": remaining}
+			if !controlGate(ctx, a, ids, ctrl, in.RunID, counts) {
+				cancelled = true
+				break
+			}
+		}
 		res, err := runPage(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, url)
 		if err != nil {
 			failed++
@@ -404,11 +427,48 @@ func BatchJobWF(ctx workflow.Context, in BatchJobInput, a *activities.Activities
 		stats.recordPage(res)
 	}
 
+	if cancelled {
+		return emitEvent(ctx, a, ids, quarrycontracts.EvtRunCancelled, map[string]any{
+			"pages_visited": visited,
+			"pages_failed":  failed,
+			"pending":       uint32(len(in.URLs)) - visited - failed,
+			"statistics":    stats.payload(visited, failed, workflow.Now(ctx)),
+		}, in.RunID, string(quarrycontracts.EvtRunCancelled))
+	}
+
 	return emitEvent(ctx, a, ids, quarrycontracts.EvtRunCompleted, map[string]any{
 		"pages_visited": visited,
 		"pages_failed":  failed,
 		"statistics":    stats.payload(visited, failed, workflow.Now(ctx)),
 	}, in.RunID, string(quarrycontracts.EvtRunCompleted))
+}
+
+// controlGate holds the workflow at a safe boundary while it is paused. It emits
+// run_paused once for each pause (the pause count is part of the event id) and
+// run_resumed when it goes on. It reports false when the run was cancelled, and
+// the caller then stops before the next unit of work. The per-unit gate of the
+// batch and the single hook between the waves of later slices (F-t2-040).
+func controlGate(
+	ctx workflow.Context,
+	a *activities.Activities,
+	ids runIDs,
+	ctrl *crawlControl,
+	runID string,
+	counts map[string]any,
+) bool {
+	if ctrl.state != statePaused {
+		return ctrl.state != stateCancelled
+	}
+	seq := strconv.Itoa(ctrl.pauseSeq)
+	_ = emitEvent(ctx, a, ids, quarrycontracts.EvtRunPaused, counts,
+		runID, string(quarrycontracts.EvtRunPaused), seq)
+	_ = workflow.Await(ctx, func() bool { return ctrl.state != statePaused })
+	if ctrl.state == stateCancelled {
+		return false
+	}
+	_ = emitEvent(ctx, a, ids, quarrycontracts.EvtRunResumed, map[string]any{"pages_visited": counts["pages_visited"]},
+		runID, string(quarrycontracts.EvtRunResumed), seq)
+	return true
 }
 
 // CrawlJobWF runs a BFS crawl bounded by MaxDepth and MaxPages. Checkpoints
@@ -486,7 +546,7 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 					"pages_visited": pagesVisited,
 					"pages_failed":  pagesFailed,
 					"pending":       uint32(len(frontier)),
-				}, in.RunID, string(quarrycontracts.EvtRunPaused))
+				}, in.RunID, string(quarrycontracts.EvtRunPaused), strconv.Itoa(ctrl.pauseSeq))
 				emitPaused = true
 			}
 			if !ctrl.waitWhilePaused(ctx) {
@@ -494,7 +554,7 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 			}
 			_ = emitEvent(ctx, a, ids, quarrycontracts.EvtRunResumed, map[string]any{
 				"pages_visited": pagesVisited,
-			}, in.RunID, string(quarrycontracts.EvtRunResumed))
+			}, in.RunID, string(quarrycontracts.EvtRunResumed), strconv.Itoa(ctrl.pauseSeq))
 			emitPaused = false
 		}
 		if ctrl.state == stateCancelled {
@@ -619,7 +679,7 @@ func crawlJobDurableFrontier(
 			if !emitPaused {
 				_ = emitEvent(ctx, a, ids, quarrycontracts.EvtRunPaused, map[string]any{
 					"pages_visited": pagesVisited, "pages_failed": pagesFailed, "pending": 0,
-				}, in.RunID, string(quarrycontracts.EvtRunPaused))
+				}, in.RunID, string(quarrycontracts.EvtRunPaused), strconv.Itoa(ctrl.pauseSeq))
 				emitPaused = true
 			}
 			if !ctrl.waitWhilePaused(ctx) {
@@ -627,7 +687,7 @@ func crawlJobDurableFrontier(
 			}
 			_ = emitEvent(ctx, a, ids, quarrycontracts.EvtRunResumed, map[string]any{
 				"pages_visited": pagesVisited,
-			}, in.RunID, string(quarrycontracts.EvtRunResumed))
+			}, in.RunID, string(quarrycontracts.EvtRunResumed), strconv.Itoa(ctrl.pauseSeq))
 			emitPaused = false
 		}
 		if ctrl.state == stateCancelled || (in.MaxPages > 0 && pagesVisited >= in.MaxPages) {

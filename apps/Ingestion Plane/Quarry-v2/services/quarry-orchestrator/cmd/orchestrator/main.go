@@ -170,8 +170,14 @@ func main() {
 		Interval:          2 * time.Second,
 		CrawlLimits:       crawlLimits,
 		ClaimBatch:        claimBatch,
+		ControlLoop:       jobs.ControlLoopEnabled(),
 	})
 	go jobsMgr.Run(rootCtx)
+	// Job control loop (WS15.L2): applies the pause, resume and cancel requests
+	// control records, and finalizes jobs whose workflow ended unreported. Off by default.
+	if jobs.ControlLoopEnabled() {
+		go jobsMgr.RunControl(rootCtx)
+	}
 
 	// Use rootCtx.Done() instead of worker.InterruptCh() so signal
 	// handling has a single owner. Previously worker.InterruptCh() and

@@ -70,6 +70,9 @@ func (s controlState) String() string {
 type crawlControl struct {
 	state    controlState
 	progress crawlProgress
+	// pauseSeq counts the pauses this execution has entered. It goes into the
+	// run_paused and run_resumed event ids, so two pauses of one run are two events.
+	pauseSeq int
 }
 
 type crawlProgress struct {
@@ -98,8 +101,9 @@ func installControlHandlers(ctx workflow.Context) (*crawlControl, error) {
 			selector.AddReceive(pauseCh, func(c workflow.ReceiveChannel, _ bool) {
 				var v any
 				c.Receive(gctx, &v)
-				if ctrl.state != stateCancelled {
+				if ctrl.state == stateRunning {
 					ctrl.state = statePaused
+					ctrl.pauseSeq++
 				}
 			})
 			selector.AddReceive(resumeCh, func(c workflow.ReceiveChannel, _ bool) {
@@ -135,12 +139,18 @@ func installControlHandlers(ctx workflow.Context) (*crawlControl, error) {
 	return ctrl, nil
 }
 
-// waitWhilePaused blocks the workflow when state == Paused. Returns true
-// when the workflow should continue, false when cancelled.
+// waitWhilePaused blocks the workflow while it is paused and reports whether it
+// may continue (false when cancelled). From lifecycle-v1 the wait is a workflow
+// Await, woken by the resume signal, and not a timer poll; executions recorded
+// before that version keep the timer loop they were started with.
 func (c *crawlControl) waitWhilePaused(ctx workflow.Context) bool {
-	for c.state == statePaused {
-		// Sleep is cancellable and survives worker restarts.
-		_ = workflow.Sleep(ctx, sleepDuringPause)
+	if workflow.GetVersion(ctx, "lifecycle-v1", workflow.DefaultVersion, 1) >= 1 {
+		_ = workflow.Await(ctx, func() bool { return c.state != statePaused })
+	} else {
+		for c.state == statePaused {
+			// Sleep is cancellable and survives worker restarts.
+			_ = workflow.Sleep(ctx, sleepDuringPause)
+		}
 	}
 	return c.state != stateCancelled
 }

@@ -66,6 +66,9 @@ type Config struct {
 	// job admission on, control hands out leased jobs under per-organization
 	// caps; otherwise it answers 404 and the dispatcher lists as it always did.
 	ClaimBatch int
+	// ControlLoop is on when the job control loop runs (WS15.L2). It turns on the
+	// per-kind execution timeouts and the deadline written with the running mark.
+	ControlLoop bool
 }
 
 // dispatchEntry tracks state for one job ID inside the dispatcher's
@@ -181,7 +184,7 @@ func (m *Manager) tick(ctx context.Context) {
 			// lost: repeat it, or the job would never count against its
 			// organization's cap.
 			if claimed && entry.runID != "" && j.Status == "accepted" {
-				if err := m.markRunning(ctx, j.ID, entry.runID); err != nil {
+				if err := m.markRunning(ctx, j, entry.runID, "", time.Time{}); err != nil {
 					log.Warn().Err(err).Str("job_id", id).Msg("mark running (retry) failed")
 				}
 			}
@@ -197,6 +200,11 @@ func (m *Manager) tick(ctx context.Context) {
 			continue
 		}
 		runID, err := m.dispatch(ctx, j)
+		if errors.Is(err, errJobChanged) {
+			// Control ended the job before it started: nothing to retry.
+			entry.done = true
+			continue
+		}
 		if err != nil {
 			entry.attempts++
 			log.Warn().
@@ -278,7 +286,7 @@ func (m *Manager) dispatch(ctx context.Context, j job) (string, error) {
 	startOpts := client.StartWorkflowOptions{
 		ID:                       workflowID,
 		TaskQueue:                m.cfg.TaskQueue,
-		WorkflowExecutionTimeout: 30 * time.Minute,
+		WorkflowExecutionTimeout: m.executionTimeout(j),
 	}
 
 	var (
@@ -326,10 +334,18 @@ func (m *Manager) dispatch(ctx context.Context, j job) (string, error) {
 		Str("kind", j.Kind).
 		Msg("workflow started")
 
-	// Best-effort: mark the job as running. If this fails we still
-	// dispatched the workflow — the job record just won't reflect the
-	// status change. Events will still flow via run_id/job_id fan-out.
-	if err := m.markRunning(ctx, j.ID, runID); err != nil {
+	// The mark is a compare-and-set on accepted (WS15.L2). When control already
+	// has the job as ended (a cancel got there first), the workflow just started is
+	// terminated. Any other failure is logged, as before: the workflow is running.
+	var deadline time.Time
+	if m.cfg.ControlLoop {
+		deadline = time.Now().Add(m.executionTimeout(j))
+	}
+	if err := m.markRunning(ctx, j, runID, workflowID, deadline); err != nil {
+		if errors.Is(err, errJobChanged) {
+			m.stopStarted(ctx, workflowID)
+			return "", errJobChanged
+		}
 		log.Warn().Err(err).Str("job_id", string(j.ID)).Msg("mark running failed")
 	}
 	return runID, nil
@@ -337,14 +353,20 @@ func (m *Manager) dispatch(ctx context.Context, j job) (string, error) {
 
 // markRunning PUTs to control. Idempotent — control's updateJob handler
 // only overwrites the supplied fields.
-func (m *Manager) markRunning(ctx context.Context, jobID quarrycontracts.ID, runID string) error {
+func (m *Manager) markRunning(ctx context.Context, j job, runID, workflowID string, deadline time.Time) error {
 	patch := struct {
-		Status string `json:"status"`
-		RunID  string `json:"run_id"`
-	}{Status: "running", RunID: runID}
+		Status     string `json:"status"`
+		RunID      string `json:"run_id"`
+		IfStatus   string `json:"if_status"`
+		WorkflowID string `json:"workflow_id,omitempty"`
+		DeadlineAt string `json:"deadline_at,omitempty"`
+	}{Status: "running", RunID: runID, IfStatus: "accepted", WorkflowID: workflowID}
+	if !deadline.IsZero() {
+		patch.DeadlineAt = deadline.UTC().Format(time.RFC3339Nano)
+	}
 	body, _ := json.Marshal(patch)
 	url := fmt.Sprintf("%s/v1/jobs/%s",
-		strings.TrimRight(m.cfg.ControlBaseURL, "/"), string(jobID))
+		strings.TrimRight(m.cfg.ControlBaseURL, "/"), string(j.ID))
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -363,6 +385,9 @@ func (m *Manager) markRunning(ctx context.Context, jobID quarrycontracts.ID, run
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		bodyBytes, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode == http.StatusConflict {
+			return errJobChanged
+		}
 		return fmt.Errorf("control %d: %s", resp.StatusCode, truncate(string(bodyBytes), 200))
 	}
 	return nil
