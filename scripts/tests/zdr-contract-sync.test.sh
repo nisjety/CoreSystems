@@ -144,7 +144,7 @@ GOLDENS=(
   #   MP_UPDATE_GOLDEN=1 cargo test -p model-gateway --lib sse_event_payload_golden
   # in "apps/Model Plane/rust". Then refresh the .sha256 pin beside it, re-vendor the SPA's copy and its
   # pin, and update the digest here. Any ChatEvent change regenerates it in the same change.
-  "apps/Model Plane/api/contracts/sse-event-payloads.json|213d7304af12091c83baa95fcee372f66ab5ce5e6da22723ecf34a2970c6da47"
+  "apps/Model Plane/api/contracts/sse-event-payloads.json|08fcd874bed872da83dc676ebcf8c8998c89cb3944c1965effb0c569a532ef2a"
 )
 
 # "<repo-relative copy>|<repo-relative golden>"

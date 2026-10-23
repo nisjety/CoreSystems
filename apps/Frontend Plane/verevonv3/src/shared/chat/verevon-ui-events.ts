@@ -34,6 +34,9 @@ export type VerevonUiEvent =
   | { type: 'input.queued'; at: string; messages: string[] }
   | { type: 'thread.titled'; at: string; title: string }
   | { type: 'followups.suggested'; at: string; suggestions: string[] }
+  | { type: 'lifecycle.retry'; at: string; scope?: string; tool?: string; attempt?: number; maxAttempts?: number; waitMs?: number; reason?: string }
+  | { type: 'lifecycle.compaction'; at: string; scope?: string; outcome?: string; messagesCompacted?: number; messagesKept?: number; pinnedKept?: number }
+  | { type: 'lifecycle.context'; at: string; change?: string; messagesDropped?: number; skillsTruncated?: number; skillsDropped?: number; layer?: string; state?: string }
   | { type: 'unknown'; at: string; name: string; payload: Record<string, unknown> }
 
 const stringValue = (value: unknown): string | undefined => typeof value === 'string' ? value : undefined
@@ -103,6 +106,9 @@ const PROJECTABLE_CUSTOM_NAMES = new Set([
   'thread.titled',
   'followups.suggested',
   'trace.replayed',
+  'retry_scheduled',
+  'compaction',
+  'context_change',
   'artifact',
   'attachment',
   'reasoning_delta',
@@ -359,6 +365,9 @@ export function toVerevonUiEvent(name: string, payload: Record<string, unknown>,
     case 'queued_input': return { type: 'input.queued', at, messages: stringArray(payload.messages) }
     case 'title': return { type: 'thread.titled', at, title: stringValue(payload.title) ?? '' }
     case 'follow_ups': return { type: 'followups.suggested', at, suggestions: stringArray(payload.suggestions) }
+    case 'retry_scheduled': return { type: 'lifecycle.retry', at, scope: stringValue(payload.scope), tool: stringValue(payload.tool), attempt: numberValue(payload.attempt), maxAttempts: numberValue(payload.max_attempts), waitMs: numberValue(payload.wait_ms), reason: stringValue(payload.reason) }
+    case 'compaction': return { type: 'lifecycle.compaction', at, scope: stringValue(payload.scope), outcome: stringValue(payload.outcome), messagesCompacted: numberValue(payload.messages_compacted), messagesKept: numberValue(payload.messages_kept), pinnedKept: numberValue(payload.pinned_kept) }
+    case 'context_change': return { type: 'lifecycle.context', at, change: stringValue(payload.change), messagesDropped: numberValue(payload.messages_dropped), skillsTruncated: numberValue(payload.skills_truncated), skillsDropped: numberValue(payload.skills_dropped), layer: stringValue(payload.layer), state: stringValue(payload.state) }
     case 'CUSTOM': {
       const customName = stringValue(payload.name)
       const customValue = recordValue(payload.value)

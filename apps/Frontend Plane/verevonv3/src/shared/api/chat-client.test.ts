@@ -2021,3 +2021,79 @@ describe('run_parked (WS03 S8-A, display only)', () => {
     ])
   })
 })
+
+describe('lifecycle notices (WS15 S1)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const frame = (event: string, data: unknown) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
+
+  it('routes a retry notice with its counts and token to onRetryScheduled', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        sseResponse([
+          frame('retry_scheduled', {
+            scope: 'tool',
+            tool: 'knowledge_search',
+            attempt: 2,
+            max_attempts: 3,
+            wait_ms: 250,
+            reason: 'rate_limited',
+            request_id: 'req-1',
+          }),
+        ]),
+      ),
+    )
+    const onRetryScheduled = vi.fn()
+    const onUnknownEvent = vi.fn()
+    await streamChat({ content: 'hi' }, { onRetryScheduled, onUnknownEvent })
+
+    expect(onRetryScheduled).toHaveBeenCalledWith({
+      scope: 'tool',
+      tool: 'knowledge_search',
+      attempt: 2,
+      maxAttempts: 3,
+      waitMs: 250,
+      reason: 'rate_limited',
+      requestId: 'req-1',
+    })
+    expect(onUnknownEvent).not.toHaveBeenCalled()
+  })
+
+  it('drops a retry notice with no reason or counts, and passes an unknown reason through as a string', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        sseResponse([
+          frame('retry_scheduled', { scope: 'tool', attempt: 2, max_attempts: 3 }),
+          frame('retry_scheduled', { scope: 'tool', attempt: 2, max_attempts: 3, reason: 'a_new_token' }),
+        ]),
+      ),
+    )
+    const onRetryScheduled = vi.fn()
+    await streamChat({ content: 'hi' }, { onRetryScheduled })
+
+    expect(onRetryScheduled).toHaveBeenCalledTimes(1)
+    expect(onRetryScheduled.mock.calls[0]?.[0]).toMatchObject({ reason: 'a_new_token', waitMs: undefined })
+  })
+
+  it('reports compaction and context_change ungated, with unmeasured counts left out', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        sseResponse([
+          frame('compaction', { scope: 'history', outcome: 'truncated', request_id: 'req-1' }),
+          frame('context_change', { change: 'history_shed', messages_dropped: 4, request_id: 'req-1' }),
+        ]),
+      ),
+    )
+    const onCompaction = vi.fn()
+    const onContextChange = vi.fn()
+    await streamChat({ content: 'hi' }, { onCompaction, onContextChange })
+
+    expect(onCompaction).toHaveBeenCalledWith({ scope: 'history', outcome: 'truncated', requestId: 'req-1' })
+    expect(onContextChange).toHaveBeenCalledWith({ change: 'history_shed', messagesDropped: 4, requestId: 'req-1' })
+  })
+})

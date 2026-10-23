@@ -21,6 +21,8 @@ asserted, not just reported.
 | `artifact` | `artifacts` | `ChatEvent::Artifact` | ✅ |
 | `attachment` | `artifacts` | `ChatEvent::Attachment` | ✅ |
 | `citation` | `citations` | `ChatEvent::Citation` | ✅ |
+| `compaction` | — (control) | `ChatEvent::Compaction` | ✅ |
+| `context_change` | — (control) | `ChatEvent::ContextChange` | ✅ |
 | `error` | — (control) | `ChatEvent::Error` | ✅ |
 | `error` | — (control) | `ChatEvent::SubscriptionError` | ✅ |
 | `error` | — (control) | `ChatEvent::ZdrError` | ✅ |
@@ -32,6 +34,7 @@ asserted, not just reported.
 | `reasoning_delta` | `reasoning` | `ChatEvent::ReasoningDelta` | ✅ |
 | `result_receipt` | `usage` | `ChatEvent::ResultReceipt` | ✅ |
 | `retrieval_notice` | — (control) | `ChatEvent::RetrievalNotice` | ✅ |
+| `retry_scheduled` | `steps` | `ChatEvent::RetryScheduled` | ✅ |
 | `source_scope_applied` | `citations` | `ChatEvent::SourceScopeApplied` | ✅ |
 | `step_update` | `steps` | `ChatEvent::StepUpdate` | ✅ |
 | `stopped` | — (control) | `ChatEvent::Stopped` | ✅ |

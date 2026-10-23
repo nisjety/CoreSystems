@@ -374,6 +374,38 @@ pub enum ChatEvent {
     RetrievalNotice {
         notice: crate::retrieval_metadata::RetrievalNotice,
     },
+    // ---- lifecycle (WS15) ----
+    /// A tool call is being retried after a transient failure, before the next attempt. Counts and
+    /// closed tokens only (see `mp_contracts::lifecycle_notice`): the error text never reaches here.
+    /// `steps` family, so only a client that asked for step detail sees it.
+    RetryScheduled {
+        scope: &'static str,
+        tool: String,
+        attempt: u32,
+        max_attempts: u32,
+        wait_ms: u64,
+        reason: &'static str,
+    },
+    /// The history or the tool results were compacted to fit the model. A control event, ungated:
+    /// a client that never opted in still has to be told that its answer was built from less.
+    Compaction {
+        scope: &'static str,
+        outcome: &'static str,
+        messages_compacted: Option<u32>,
+        messages_kept: Option<u32>,
+        pinned_kept: Option<u32>,
+    },
+    /// The context the model was given changed: history shed, skill guidance cut short, or a run
+    /// context part skipped. A control event, ungated, for the same reason as `Compaction`.
+    ContextChange {
+        change: &'static str,
+        messages_dropped: Option<u32>,
+        skills_truncated: Option<u32>,
+        skills_dropped: Option<u32>,
+        layer: Option<&'static str>,
+        state: Option<&'static str>,
+    },
+    // ---- end lifecycle (WS15) ----
     /// Terminal control: generation stopped/cancelled by the user.
     Stopped { reason: String },
     /// Terminal control: a structured error (chat-parity §20). `code` is a
@@ -427,6 +459,8 @@ impl ChatEvent {
             | ChatEvent::ResultReceipt { .. }
             | ChatEvent::TurnTiming { .. } => Some("usage"),
             ChatEvent::MemoryRecall { .. } => Some("memory"),
+            // ---- lifecycle (WS15) ----
+            ChatEvent::RetryScheduled { .. } => Some("steps"),
             // control events — always allowed (Title/FollowUps only exist when
             // the gateway actually generated them; gating on a feature family
             // would silently drop them for the plain `chat` profile, which is
@@ -445,7 +479,10 @@ impl ChatEvent {
             | ChatEvent::Stopped { .. }
             | ChatEvent::Error { .. }
             | ChatEvent::ZdrError { .. }
-            | ChatEvent::SubscriptionError { .. } => None,
+            | ChatEvent::SubscriptionError { .. }
+            // ---- lifecycle (WS15) ----
+            | ChatEvent::Compaction { .. }
+            | ChatEvent::ContextChange { .. } => None,
         }
     }
 
@@ -479,6 +516,10 @@ impl ChatEvent {
             ChatEvent::TurnTiming { .. } => "turn_timing",
             ChatEvent::Verification { .. } => "verification",
             ChatEvent::MemoryRecall { .. } => "memory_recall",
+            // ---- lifecycle (WS15) ----
+            ChatEvent::RetryScheduled { .. } => "retry_scheduled",
+            ChatEvent::Compaction { .. } => "compaction",
+            ChatEvent::ContextChange { .. } => "context_change",
             ChatEvent::Title { .. } => "title",
             ChatEvent::FollowUps { .. } => "follow_ups",
             ChatEvent::PlanProposed { .. } => "plan_proposed",
@@ -687,6 +728,68 @@ impl ChatEvent {
                 "wording_key": notice.wording_key,
                 "request_id": request_id,
             }),
+            // ---- lifecycle (WS15) ----
+            ChatEvent::RetryScheduled {
+                scope,
+                tool,
+                attempt,
+                max_attempts,
+                wait_ms,
+                reason,
+            } => json!({
+                "scope": scope,
+                "tool": tool,
+                "attempt": attempt,
+                "max_attempts": max_attempts,
+                "wait_ms": wait_ms,
+                "reason": reason,
+                "request_id": request_id,
+            }),
+            ChatEvent::Compaction {
+                scope,
+                outcome,
+                messages_compacted,
+                messages_kept,
+                pinned_kept,
+            } => {
+                let mut payload = json!({ "scope": scope, "outcome": outcome, "request_id": request_id });
+                // Each count is omitted, not null, when the gateway did not measure it.
+                for (key, count) in [
+                    ("messages_compacted", messages_compacted),
+                    ("messages_kept", messages_kept),
+                    ("pinned_kept", pinned_kept),
+                ] {
+                    if let Some(count) = count {
+                        payload[key] = json!(count);
+                    }
+                }
+                payload
+            }
+            ChatEvent::ContextChange {
+                change,
+                messages_dropped,
+                skills_truncated,
+                skills_dropped,
+                layer,
+                state,
+            } => {
+                let mut payload = json!({ "change": change, "request_id": request_id });
+                for (key, count) in [
+                    ("messages_dropped", messages_dropped),
+                    ("skills_truncated", skills_truncated),
+                    ("skills_dropped", skills_dropped),
+                ] {
+                    if let Some(count) = count {
+                        payload[key] = json!(count);
+                    }
+                }
+                for (key, token) in [("layer", layer), ("state", state)] {
+                    if let Some(token) = token {
+                        payload[key] = json!(token);
+                    }
+                }
+                payload
+            }
             ChatEvent::Stopped { reason } => json!({ "reason": reason, "request_id": request_id }),
             ChatEvent::Error {
                 code,
@@ -2211,6 +2314,9 @@ mod payload_contract {
         "Error",
         "ZdrError",
         "SubscriptionError",
+        "RetryScheduled",
+        "Compaction",
+        "ContextChange",
     ];
 
     /// The variant's name. No wildcard arm, so a new `ChatEvent` variant is a compile error here.
@@ -2239,6 +2345,9 @@ mod payload_contract {
             ChatEvent::Error { .. } => "Error",
             ChatEvent::ZdrError { .. } => "ZdrError",
             ChatEvent::SubscriptionError { .. } => "SubscriptionError",
+            ChatEvent::RetryScheduled { .. } => "RetryScheduled",
+            ChatEvent::Compaction { .. } => "Compaction",
+            ChatEvent::ContextChange { .. } => "ContextChange",
         }
     }
 
@@ -2466,6 +2575,52 @@ mod payload_contract {
             ChatEvent::Error { code: s("upstream_unavailable"), message: s("Try again"), retryable: true },
             ChatEvent::ZdrError { refusal: refusal(None) },
             ChatEvent::ZdrError { refusal: refusal(Some("attachments")) },
+            ChatEvent::RetryScheduled {
+                scope: "tool",
+                tool: s("knowledge_search"),
+                attempt: 2,
+                max_attempts: 3,
+                wait_ms: 0,
+                reason: "other",
+            },
+            ChatEvent::RetryScheduled {
+                scope: "tool",
+                tool: s("knowledge_search"),
+                attempt: 2,
+                max_attempts: 3,
+                wait_ms: 250,
+                reason: "rate_limited",
+            },
+            ChatEvent::Compaction {
+                scope: "history",
+                outcome: "truncated",
+                messages_compacted: None,
+                messages_kept: None,
+                pinned_kept: None,
+            },
+            ChatEvent::Compaction {
+                scope: "tool_results",
+                outcome: "summarized",
+                messages_compacted: Some(12),
+                messages_kept: Some(6),
+                pinned_kept: Some(2),
+            },
+            ChatEvent::ContextChange {
+                change: "history_shed",
+                messages_dropped: None,
+                skills_truncated: None,
+                skills_dropped: None,
+                layer: None,
+                state: None,
+            },
+            ChatEvent::ContextChange {
+                change: "run_context_skipped",
+                messages_dropped: Some(4),
+                skills_truncated: Some(1),
+                skills_dropped: Some(0),
+                layer: Some("memory"),
+                state: Some("skipped_by_policy"),
+            },
             ChatEvent::SubscriptionError {
                 code: s("rate_limited"),
                 message: s(""),

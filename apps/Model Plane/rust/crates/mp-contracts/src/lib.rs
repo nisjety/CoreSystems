@@ -4,6 +4,7 @@ pub mod autonomy;
 pub mod dataplane_posture;
 pub mod durable_gate;
 pub mod effect_ledger;
+pub mod lifecycle_notice;
 pub mod loop_fold;
 pub mod office_verification;
 pub mod park_reason;

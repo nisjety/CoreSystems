@@ -902,7 +902,11 @@ fn map_upstream_frame(run: &mut AgUiRunState, frame: SseFrame) -> Vec<Event> {
         // continue resumes it. Display only, like the rest of this family; the park
         // reason is the closed token the gateway chose to say, never free text.
         | "run_parked"
-        | "run_resumed" => {
+        | "run_resumed"
+        // WS15 lifecycle notices: counts and closed tokens only, shown as they arrive.
+        | "retry_scheduled"
+        | "compaction"
+        | "context_change" => {
             vec![ag_ui_event(json!({
                 "type": "CUSTOM",
                 "name": event,
@@ -1322,6 +1326,46 @@ mod tests {
             assert!(rendered.contains(name), "{name}: {rendered}");
             assert!(rendered.contains(marker), "{name}: {rendered}");
             assert!(rendered.contains("id: 17"), "{name} keeps its cursor: {rendered}");
+            assert!(!rendered.contains("RAW"), "{name} is not opaque: {rendered}");
+        }
+    }
+
+    /// WS15 S1: the three lifecycle notices ride the same CUSTOM envelope as the other display-only
+    /// events, with their upstream fields and SSE cursor intact.
+    #[test]
+    fn lifecycle_notices_are_carried_as_custom_events_with_their_cursor() {
+        for (name, data, marker) in [
+            (
+                "retry_scheduled",
+                r#"{"scope":"tool","tool":"knowledge_search","attempt":2,"max_attempts":3,"wait_ms":250,"reason":"rate_limited","request_id":"req_1"}"#,
+                "rate_limited",
+            ),
+            (
+                "compaction",
+                r#"{"scope":"history","outcome":"truncated","request_id":"req_1"}"#,
+                "truncated",
+            ),
+            (
+                "context_change",
+                r#"{"change":"history_shed","messages_dropped":4,"request_id":"req_1"}"#,
+                "history_shed",
+            ),
+        ] {
+            let mut run = AgUiRunState::default();
+            let events = map_upstream_frame(
+                &mut run,
+                SseFrame {
+                    event: Some(name.into()),
+                    id: Some("9".into()),
+                    data: data.into(),
+                },
+            );
+            assert_eq!(events.len(), 1, "{name}");
+            let rendered = format!("{:?}", events[0]);
+            assert!(rendered.contains("CUSTOM"), "{name}: {rendered}");
+            assert!(rendered.contains(name), "{name}: {rendered}");
+            assert!(rendered.contains(marker), "{name}: {rendered}");
+            assert!(rendered.contains("id: 9"), "{name} keeps its cursor: {rendered}");
             assert!(!rendered.contains("RAW"), "{name} is not opaque: {rendered}");
         }
     }

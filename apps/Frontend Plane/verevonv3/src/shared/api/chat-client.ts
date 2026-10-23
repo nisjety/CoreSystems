@@ -266,6 +266,44 @@ export type ChatQueuedInputEvent = { messages: string[] }
  * key the client's wording is filed under: the gateway sends no sentence, so the text is the client's to write.
  */
 export type ChatRetrievalNoticeEvent = { code: string; wordingKey: string; requestId?: string }
+/**
+ * A tool call is being retried after a transient failure (`retry_scheduled`, `steps` family). Counts and
+ * closed tokens only: the error text never reaches the client. An unknown `reason` is passed through as-is.
+ */
+export type ChatRetryScheduledEvent = {
+  scope: string
+  tool?: string
+  attempt: number
+  maxAttempts: number
+  waitMs?: number
+  reason: string
+  requestId?: string
+}
+/**
+ * The history or tool results were compacted to fit the model (`compaction`, control). `outcome` says what
+ * happened, so a summary that failed arrives as `truncated`, never as `summarized`.
+ */
+export type ChatCompactionEvent = {
+  scope: string
+  outcome: string
+  messagesCompacted?: number
+  messagesKept?: number
+  pinnedKept?: number
+  requestId?: string
+}
+/**
+ * The context the model was given changed (`context_change`, control): history was shed, skill guidance was
+ * cut short, or a run-context part was skipped. Counts and the gateway's own tokens only.
+ */
+export type ChatContextChangeEvent = {
+  change: string
+  messagesDropped?: number
+  skillsTruncated?: number
+  skillsDropped?: number
+  layer?: string
+  state?: string
+  requestId?: string
+}
 export type ChatErrorEvent = {
   code: string
   message: string
@@ -691,6 +729,12 @@ export type ChatStreamHandlers = {
    * only. Ungated: sent whatever features the client opted into. See `ChatRetrievalNoticeEvent`.
    */
   onRetrievalNotice?: (event: ChatRetrievalNoticeEvent) => void
+  /** A tool call is being retried (`retry_scheduled`, `steps` family). See `ChatRetryScheduledEvent`. */
+  onRetryScheduled?: (event: ChatRetryScheduledEvent) => void
+  /** The history or tool results were compacted (`compaction`). Ungated. See `ChatCompactionEvent`. */
+  onCompaction?: (event: ChatCompactionEvent) => void
+  /** The context the model was given changed (`context_change`). Ungated. See `ChatContextChangeEvent`. */
+  onContextChange?: (event: ChatContextChangeEvent) => void
   /**
    * The run was PARKED (WS03 S8-A): it stopped on a typed, recoverable failure and stays open, so
    * it can be resumed later. Display only: read with `runParkedFrameOf`, and a frame whose reason
@@ -1831,6 +1875,55 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
       const wordingKey = str(payload.wording_key)
       if (code && wordingKey) {
         handlers.onRetrievalNotice?.({ code, wordingKey, requestId: str(payload.request_id) })
+      }
+      break
+    }
+    case 'retry_scheduled': {
+      // A retry with no scope, reason or counts cannot say what was retried, so it is not reported.
+      const scope = str(payload.scope)
+      const reason = str(payload.reason)
+      const attempt = num(payload.attempt)
+      const maxAttempts = num(payload.max_attempts)
+      if (scope && reason && attempt !== undefined && maxAttempts !== undefined) {
+        handlers.onRetryScheduled?.({
+          scope,
+          tool: str(payload.tool),
+          attempt,
+          maxAttempts,
+          waitMs: num(payload.wait_ms),
+          reason,
+          requestId: str(payload.request_id),
+        })
+      }
+      break
+    }
+    case 'compaction': {
+      const scope = str(payload.scope)
+      const outcome = str(payload.outcome)
+      if (scope && outcome) {
+        handlers.onCompaction?.({
+          scope,
+          outcome,
+          messagesCompacted: num(payload.messages_compacted),
+          messagesKept: num(payload.messages_kept),
+          pinnedKept: num(payload.pinned_kept),
+          requestId: str(payload.request_id),
+        })
+      }
+      break
+    }
+    case 'context_change': {
+      const change = str(payload.change)
+      if (change) {
+        handlers.onContextChange?.({
+          change,
+          messagesDropped: num(payload.messages_dropped),
+          skillsTruncated: num(payload.skills_truncated),
+          skillsDropped: num(payload.skills_dropped),
+          layer: str(payload.layer),
+          state: str(payload.state),
+          requestId: str(payload.request_id),
+        })
       }
       break
     }
