@@ -502,6 +502,21 @@ Built so far (batches B01 to B07): WS01-S0, WS01-S1 (partial), WS01-S6; WS02-S1,
 | D1-379 | WS01-S14.code | live-proof | P1 | Promtool check and test of audit-delivery.rules.yml need the Docker image, so they are lead-only. | open |
 | D1-380 | WS01-S14.code | follow-up | P3 | 14 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-08.json | open |
 
+
+### Wave-mode batch W1-09 (2026-10-24)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D1-381 | WS06-S5 | decision | P1 | Manifest signing needs chain.KeyRing.SignPayload/VerifyPayload (chain/sign.go, not owned here); until the lead adds them the production manifest is unsigned, so the plan's 'manifest signature verifies with /keys' only holds in tests with a fake signer. | open |
+| D1-382 | WS06-S5 | follow-up | P1 | Deploy ordering and grant: nothing grants audit:compliance:read:self yet (compose and run-control-plane.sh are shared files), so the API is unreachable until the lead edits the credential block, and the audit-core image must be live before that block ships. | open |
+| D1-383 | WS06-S5 | risk | P1 | cmd/audit-verify cannot verify a sub-range export: it treats manifest last_seq as the head and reports truncated_below_attestation when the range stops before the newest attestation; it needs a range mode and it does not check the manifest signature yet. | open |
+| D1-384 | WS06-S5 | follow-up | P1 | Needed before switching on: add KeyRing.SignPayload(payload) and VerifyPayload(keyID, payload, sig) in internal/chain/sign.go (nil-safe through CanSign, so a typed-nil ring yields ErrNoSigningKey and an unsigned manifest) and add the compliance scope to the gateway credential block; otherwise the API is unreachable and unsigned. | open |
+| D1-385 | WS06-S5 | risk | P1 | cmd/audit-verify treats manifest last_seq as the head and does not verify the manifest signature or support a sub-range export, so only a full-range export currently verifies offline; add a range mode before relying on sub-range exports as evidence. | open |
+| D1-386 | WS06-S5 | test-gap | P1 | The SQL in internal/store/compliance.go (MIN/MAX(chain_seq) by ingested_at range resolution, keyset paging with chain_seq > $2, thinning filters with ($n = '' OR col = $n), manifest ends, key listing) is unexecuted; it mirrors the verify.go query pattern (chainRowColumns + scanChainRow) and reads correctly, but must be proven on the DB harness before enabling. | open |
+| D1-387 | WS06-S5 | live-proof | P1 | The 6 new Postgres tests (contiguous pages recompute to their hashes, cursor stable under concurrent inserts, window resolves to one seq range, filters never cross orgs, manifest ends and signature, keys active/retired/unavailable) have never executed. Run the S2 harness: docker run ac-pg postgres:16, then TEST_DATABASE_URL=... go vet ./... && go test ./internal/store/ -run TestCompliance -v. | open |
+| D1-388 | WS06-S5 | live-proof | P1 | Nothing grants audit:compliance:read:self yet: docker-compose.yml, run-control-plane.sh, validate-release-credentials.sh and any compose-contract text tests need the scope on the verevon-gateway principal only. Deploy order is audit-core image first, then compose (an old image rejects the unknown scope and will not boot); use scripts/run-control-plane.sh. | open |
+| D1-389 | WS06-S5 | follow-up | P3 | 15 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-09.json | open |
+
 ## Wave 2 (WS13 to WS27)
 
 Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS27-S0, WS27-S1. Wave 2 is not started as a wave: these came in with Wave 1 batches because they were Wave 1 prerequisites.
@@ -813,3 +828,4 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS06-S3 | data-loss, audit | W1-07 | no |
 | WS06-S4 | audit | W1-08 | no |
 | WS02-S11 | audit | W1-08 | no |
+| WS06-S5 | auth, audit, policy | W1-09 | no |
