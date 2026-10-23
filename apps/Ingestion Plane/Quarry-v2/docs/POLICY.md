@@ -20,7 +20,7 @@ pub enum Determinism { Strict, BestEffort, Off }
 
 | Sub-policy          | Pins                                                    |
 | ------------------- | -------------------------------------------------------- |
-| `DiscoveryPolicy`   | `respect_robots`, `respect_meta_robots`, `include_subdomains`, `use_sitemap` |
+| `DiscoveryPolicy`   | `respect_robots`, `respect_meta_robots`, `include_subdomains`, `use_sitemap`. These are stamps: nothing enforces `respect_robots` on the crawl path, and no sitemap or subdomain rule reads the other three (corrected 2026-10-23, WS14.S0) |
 | `FetchPolicy`       | `user_agent`, `driver_kind` (static\|tls\|browserless\|kernel), `timeout_s`, headers |
 | `RetryPolicy`       | `max_attempts`, `base_delay_ms`, `transient_codes`        |
 | `BlockPolicy`       | `block_codes`, `block_body_markers`                       |

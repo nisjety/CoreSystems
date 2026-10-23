@@ -24,12 +24,14 @@ publish date, language, citations, and a content fingerprint.
   `quarry-transform` readability + metadata + language detection.
 
 ### 2. Web crawl — whole site → corpus
-Pass a domain or seed URL, get a bounded crawl with robots.txt respect,
-sitemap discovery, depth/page caps, and per-URL artifacts.
+Pass a domain or seed URL, get a bounded crawl with depth and page caps and
+per-URL artifacts. Scope and robots.txt are not enforced yet: the crawl follows
+cross-host links, has no sitemap discovery and does not read robots.txt
+(status 2026-10-23; WS14 in `docs/CRAWL_SCOPE_ROBOTS.md`).
 - **Parity with:** Firecrawl `/crawl`, Apify Website Content Crawler.
-- **Powered by:** `quarry-runtime/crawl_frontier`, `robots_cache`, sitemap
-  parser, plus Temporal-driven long-running orchestration in
-  `quarry-orchestrator`.
+- **Powered by:** Temporal-driven long-running orchestration in
+  `quarry-orchestrator`. The `quarry-runtime/crawl_frontier` and `robots_cache`
+  modules exist but have no production caller yet.
 
 ### 3. Web search — query → ranked results
 Ask a natural-language question, get back URLs + snippets + relevance,

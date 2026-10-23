@@ -170,9 +170,9 @@ V2 frontier components:
 
 - `RequestQueue`: per-run queue with priority, depth, source URL, canonical URL, retry count, and reason fields.
 - `SeenSet`: canonical URL dedupe with configurable query stripping and section-anchor policy.
-- `HostSlot`: per-host delay/concurrency state, robots crawl-delay floor, and adaptive backoff.
+- `HostSlot` (planned): per-host delay/concurrency state, robots crawl-delay floor, and adaptive backoff. No robots crawl-delay floor is applied today (WS14.S4).
 - `SessionPool`: session/proxy health scores (`good`, `bad`, `retired`) inspired by Crawlee.
-- `DenialReason`: structured reason for skipped links, using Firecrawl-style operator-readable explanations.
+- `DenialReason` (planned): structured reason for skipped links, using Firecrawl-style operator-readable explanations. The enum exists in `quarry-core/src/crawl_denial.rs` with no production producer (WS14.S2 and S3).
 - `Checkpoint`: serializable frontier + seen-set + host-slot state for Temporal replay.
 
 Temporal remains the durable outer workflow. Rust owns page execution, frontier mutation, link extraction, denial classification, and per-page events.
