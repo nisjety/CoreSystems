@@ -1119,3 +1119,13 @@ What changed on top of the 77374adc gate: a step response of an agent run carrie
 - Check after a deploy with the flag on: an agent step response has `meta.budget` with `cost_source`; `GET /v1/agent/runs/{id}/receipts` shows `cost_source: flat_table` and a non-zero `cost_micro_usd` on a failed attempt; `DELETE` returns `data.usage`; one `agent_budget_exhausted` event per refused segment; a resumed run refuses its first step at once.
 - Rollback: `QUARRY_EDGE__BUDGET_ENFORCEMENT=off` restores the request-cap behaviour for everyone (no ledger, no `meta.budget`). Nothing persisted needs reverting: the column and checkpoint fields are defaulted or nullable.
 - Known gaps (see the unit depth notes): the WebSocket reply has no `meta.budget`; the Model Plane does not map the 402 yet (execution-core reports the step failed); the WS10 trace row for `agent_budget_exhausted` is not built; no concurrent-run cap; no per-organization allowance.
+
+## Page captures on the fetch response: WS13.4a (U26, built, NOT run, 2026-10-23)
+
+- What changed: `FetchResponse` carries `captures: Option<Box<PageCaptures>>` (quarry-runtime `src/capture.rs`). Every driver sets it to `None`, and no request path fills it yet, so responses are unchanged. `FetchResponse::new(status, final_url, headers, body, duration_ms, served_by)` builds a response with `captures: None`.
+- Flags and wire: none. No contract, openapi or golden change. Nothing is persisted and nothing is logged from the new field.
+- Build note: a struct literal of `FetchResponse` must now name `captures` (or use `FetchResponse::new`). A literal without the field fails to compile.
+- Check: `cargo check --tests -p quarry-runtime -p quarry-edge` (built, compile check only). Test `fetch_response_new_defaults_captures_to_none` is written in `quarry-runtime/src/fetch.rs` and not run.
+- Evidence owed (test phase, not run): `POST /v1/scrape` of `https://example.com` returns a body identical (ignoring `run_id`, timestamps and `duration_ms`) before and after the rebuild of `quarry-edge`.
+- Rollback: revert the commit. Nothing persisted needs reverting.
+
