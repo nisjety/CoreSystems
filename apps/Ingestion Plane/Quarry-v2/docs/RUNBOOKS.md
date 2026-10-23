@@ -793,12 +793,13 @@ The spike answers the three `[UNVERIFIED]` CDP statements (D16-12) before WS17.C
 - Before C1 starts: paste the table into C1's design notes and answer the three statements from it (P1 cookies, P2 DOMStorage, P3 IndexedDB). P4 answers seeding and the `pagehide` flush.
 - Without `CHROMIUMOXIDE_TEST=1` the test returns at once, so the ordinary workspace job is unaffected.
 
-## Log hygiene lint and the log_message helper (WS12.S6, unit W2-U06, 2026-10-23)
+## Request id intake: `x-request-id` (WS10.S1, U01, built, NOT run, 2026-10-23)
 
-- `crates/quarry-runtime/tests/log_hygiene.rs` is a ratchet over every crate's production source (`crates/*/src`, `#[cfg(test)]` items skipped). Inside a `tracing` call it fails on `?action`, `?request`, `?observation`, `.text`, `.value`, `dom_summary`, `accessibility` and `url = %x` unless `x` is `redact_url(..)` or `log_url(..)`.
-- Exemptions: a `// zdr-log-ok: <reason>` comment on the macro's first line or the line above it (the WS4.F convention; an empty reason does not exempt), or one line in `crates/quarry-runtime/tests/log_hygiene.allow` (tab separated: path relative to `crates/`, the trimmed source line, the reason). An allow entry that matches nothing fails the test. The allow-list is empty.
-- Run it: `cargo test -p quarry-runtime --test log_hygiene`. A failure names the file, line, rule and text. Fix the call (log a count, a class or `error_class`, or wrap the URL in `redact_url`), or add a reasoned exemption.
-- `QuarryError::log_message()` (quarry-core `error.rs`) returns the error message through the WS12 Durable rules, with no `details`. `Display` is unchanged. Use it at a call site that must log error text; the call sites the plan named already log `error_class` only.
-- The browser hydration settle log (`quarry-runtime/src/browser_driver.rs`) logs the page URL through the Durable URL rules (userinfo and secret query or fragment values masked).
-- No flag and no change to any response. Rollback: revert the commit. The lint does not see a raw error text (`error = %e`); WS4.F covers quarry-edge and the `zdr-log-ok` comments cover the runtime sites reviewed so far.
+- What it is: `quarry_edge::request_id` (layer, `current()`, span), `quarry_runtime::request_context` (task-local). Handlers take `meta.request_id` from `request_id::current()`. A codemod replaced every `RequestKind::new()` call site in `quarry-edge/src`.
+- Behaviour: a valid inbound id is adopted, anything else is minted, the header is echoed on every response (including the 408 timeout and 413 body-limit answers, because the layer is the outermost one). Never a 400.
+- Flag: `QUARRY_EDGE__REQUEST_ID_ADOPT`. Unset, `1`, or any value other than `0`/`false`/`off` adopts (default on). `0` always mints. It is read once per process, so a restart is needed.
+- Support lookup: `docker logs quarry-edge` lines carry `request_id` on the request span. Filter by `(org_id, request_id)` in any store, never by the id alone.
+- Gateway: `apps/Frontend Plane/verevonv3/apps/gateway/src/request_id.rs` applies the same rule and forwards the adopted id to upstream builders (`request_id::apply`). It exposes `x-request-id` to browsers through CORS.
+- Rollback: set `QUARRY_EDGE__REQUEST_ID_ADOPT=0` (mints only; the header still exists), or revert the codemod commit alone (it is mechanical).
+- Known limit: the id does not follow `tokio::spawn`. Code in a spawned task that calls `request_id::current()` mints a new id; the gateway `apply` adds no header outside a request scope.
 

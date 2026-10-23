@@ -52,6 +52,12 @@ Error path:
 }
 ```
 
+### Request id (`x-request-id`, WS10.S1)
+
+Every Quarry response and every gateway response carries an `x-request-id` header. A valid inbound id is adopted: 1 to 128 bytes from `[A-Za-z0-9._:-]`. Anything else (overlong, empty, spaces, control characters, non-ASCII) is replaced by a server-minted `req_<ULID>` (`req_<uuid>` in quarry-control). A bad id is never a 400. The envelope `meta.request_id` equals the header on every envelope response, success and error alike.
+
+The id is a support-lookup key only. It is not unique across tenants, so it is never an authorization, tenancy or idempotency key; support lookups filter by `(org_id, request_id)`. Operator switch: `QUARRY_EDGE__REQUEST_ID_ADOPT=0` mints every id.
+
 ## 3. Event envelope (SSE + webhook + durable history)
 
 ```json
