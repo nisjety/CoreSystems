@@ -4611,3 +4611,36 @@ mismatch. capability-core and user-core build, vet and test green apart from
 capability-core's one known pre-existing CRLF failure in `internal/registry`.
 
 Full detail: design doc §8 and §9 step 3.
+
+## Browser broker restart semantics (WS1.C): what a broker restart does to a grant (2026-10-23)
+
+The broker keeps grants in two places. A non-ZDR grant is a row in `browser_grants` on the
+dedicated `browser_broker` database of Quarry's Postgres. A Zero Data Retention grant lives
+only in the broker's memory under a `z_` id (X-2): the table has no zdr column and a CHECK
+(`browser_grants_no_zdr_id_check`) refuses a `z_` id, and `grant.Routed` routes by that
+prefix, so a routing bug fails an insert instead of persisting a ZDR grant. The L1 test
+`the grants migration has no zdr column and keeps the z_ id CHECK` pins both.
+
+| Situation | What a caller sees | Why |
+|---|---|---|
+| Broker restarts, grant is non-ZDR and unexpired | The next `/step` is 200; the row is unchanged | The row is durable; the expiry is the row's `expires_at`, not the process |
+| Broker restarts, grant is ZDR | The next `/step` is 403 (grant inactive: the broker answers NotFound, Quarry maps it to `active:false`); the user opens a new session | Memory only; by design nothing survives, and nothing was ever written |
+| Quarry validates while the broker is still starting | 5xx after Quarry's three attempts (50 ms, 200 ms backoff) on `Unavailable`; never a fail-open | Quarry retries only `Unavailable`, `Internal` and `DeadlineExceeded`, then reports a driver failure |
+| Broker up, Postgres down | Non-ZDR calls answer `Unavailable`; `/readyz` is 503 `grant store unavailable`; ZDR grants still validate | `ErrStoreUnavailable` maps to `Unavailable`; `/readyz` pings the store with a 2 s deadline |
+| Broker cannot reach Postgres at boot | No `DATABASE_URL`: the process exits 1 unless `BROWSER_BROKER_ALLOW_EPHEMERAL_DEVELOPMENT=true` (development only). `DATABASE_URL` set but the database not answering yet: the broker starts and `/readyz` reports 503 until it answers | Production never silently falls back to memory |
+| Grant expired while the broker was down | 403 `inactive` on the first call after the restart | Expiry is checked on read; a purge loop deletes rows expired more than 24 h |
+
+Recipe to see it on a side-by-side stack (written down here, NOT run for this entry; record
+counts and statuses only, never print a grant id into a shared log):
+
+1. Open a non-ZDR UI session and note the HTTP status of one `/step` (200).
+2. `psql` on the `browser_broker` database: `SELECT count(*) FROM browser_grants WHERE revoked_at IS NULL;` (call it n).
+3. Restart the broker container only, wait for `/readyz` 200 (`ok`).
+4. Same session, next `/step`: 200. The count query still returns n.
+5. Repeat with a ZDR session: after the restart `/step` is 403, and the count is unchanged
+   (a ZDR grant never had a row).
+6. Stop Postgres on the same stack: `/readyz` 503, a non-ZDR `/step` is 5xx. Start it again.
+
+Not decided here: the production rollout of the durable store (X-2) is not in the approved
+list of open questions. The code already implements its recommended default, and the
+rollout waits.
