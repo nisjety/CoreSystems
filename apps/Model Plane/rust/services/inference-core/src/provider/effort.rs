@@ -21,6 +21,7 @@
 //! `verified_on` is `None` is a statement of intent, not of fact.
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use tracing::warn;
 
@@ -364,6 +365,33 @@ pub fn raised_ceiling(ceiling: i32, level: Level) -> i32 {
     ceiling.max(ceiling.saturating_add(allowance(level)).min(TOTAL_TOKEN_CAP))
 }
 
+/// Switch for clamping effort to Low when the org's budget is exhausted. Off
+/// unless the literal `true`, read once at startup.
+pub const BUDGET_CLAMP_ENV: &str = "INFERENCE_CORE_EFFORT_BUDGET_CLAMP";
+
+/// Whether an explicit env value turns the switch on. Pure so the policy is
+/// unit-testable without touching the process environment; a stray `1` or `on`
+/// must not start overriding what the user asked for.
+fn parse_enabled(raw: Option<&str>) -> bool {
+    raw.map(str::trim) == Some("true")
+}
+
+/// Whether the budget clamp is on for this process.
+#[must_use]
+pub fn budget_clamp_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| parse_enabled(std::env::var(BUDGET_CLAMP_ENV).ok().as_deref()))
+}
+
+/// Bound a level by a cap: clamps down, never up. `None` is no cap, which is
+/// every caller's answer until the per-role cap (owned by Control, delivered by
+/// WS10) exists; the seam is here so that source plugs in without touching the
+/// callers.
+#[must_use]
+pub fn clamp_to_cap(level: Level, cap: Option<Level>) -> Level {
+    cap.map_or(level, |cap| level.min(cap))
+}
+
 /// Deployment-name to base-model aliases, from [`MODEL_ALIASES_ENV`].
 #[derive(Debug, Clone, Default)]
 pub struct ModelAliases(HashMap<String, String>);
@@ -494,6 +522,29 @@ mod tests {
         assert_eq!(from_legacy_budget(2049), Some(Level::High));
         assert_eq!(from_legacy_budget(4096), Some(Level::High));
         assert_eq!(from_legacy_budget(i32::MAX), Some(Level::High));
+    }
+
+    #[test]
+    fn cap_clamps_down_never_up() {
+        assert_eq!(clamp_to_cap(Level::Max, Some(Level::Low)), Level::Low);
+        assert_eq!(clamp_to_cap(Level::High, Some(Level::High)), Level::High);
+        // A cap above the request must not raise it.
+        assert_eq!(clamp_to_cap(Level::Minimal, Some(Level::Max)), Level::Minimal);
+        assert_eq!(clamp_to_cap(Level::Low, Some(Level::Medium)), Level::Low);
+        // No cap leaves every level alone.
+        for level in Level::ALL {
+            assert_eq!(clamp_to_cap(level, None), level);
+        }
+    }
+
+    #[test]
+    fn only_the_literal_true_enables_the_budget_clamp() {
+        assert!(parse_enabled(Some("true")));
+        assert!(parse_enabled(Some(" true ")));
+        for off in ["1", "on", "TRUE", "yes", "false", ""] {
+            assert!(!parse_enabled(Some(off)), "{off:?} must leave it off");
+        }
+        assert!(!parse_enabled(None));
     }
 
     #[test]

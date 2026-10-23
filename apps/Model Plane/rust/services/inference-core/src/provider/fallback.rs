@@ -12,7 +12,7 @@ use super::routing_policy::RoutingPolicy;
 use super::timing::{CallClock, StreamClock};
 use super::{
     anthropic::AnthropicProvider, codex_subscription::CodexSubscriptionProvider,
-    endpoint_region_is_non_eu, intent, is_eu_region, normalize_region_token,
+    effort, endpoint_region_is_non_eu, intent, is_eu_region, normalize_region_token,
     openai::OpenAiProvider, EmbedRequest, EmbedResponse, InferChunk, InferRequest, InferResponse,
     ModelFamily, ModelInfo, PrivacyTier, ProviderCapabilities, ProviderError, ProviderRouter,
     Residency,
@@ -1037,6 +1037,24 @@ impl FallbackChain {
         );
         let mut rewritten = req.clone();
         rewritten.model = decision.model;
+        if effort::budget_clamp_enabled() {
+            if let Some(requested) = rewritten.reasoning_effort {
+                let applied = effort::clamp_to_cap(requested, decision.effort_cap);
+                if applied != requested {
+                    // Visible on purpose: the user asked for more than they got.
+                    info!(
+                        request_id = %req.request_id,
+                        resolved_model = %rewritten.model,
+                        posture = ?decision.posture,
+                        requested = requested.as_str(),
+                        applied = applied.as_str(),
+                        clamped = true,
+                        "effort clamped by budget posture"
+                    );
+                    rewritten.reasoning_effort = Some(applied);
+                }
+            }
+        }
         Some(rewritten)
     }
 
