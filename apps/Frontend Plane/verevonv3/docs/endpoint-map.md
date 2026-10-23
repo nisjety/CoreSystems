@@ -337,7 +337,7 @@ The only Ingestion service designed for end-user JWTs: verifies `Authorization: 
 
 ### 3.2 quarry-control (Go/chi) — HTTP :8081 — **inter-plane only**
 
-HMAC-signed cross-plane requests (`X-Quarry-Sig*`). **Never expose via gateway**; frontend-relevant reads are proxied through quarry-edge. (The gateway's existing onboarding crawl-preview/website-ingest handlers call it server-side — acceptable because the HMAC secret stays in the gateway.) All rows: v3 = none. Families: `/v1/jobs` CRUD+events+history, `/v1/stores`, `/v1/snapshots`, `/v1/artifacts`, `/v1/profiles`, `/v1/schedules` (+lifecycle, trigger/backfill stubs), `/v1/webhooks` (+delivery retry), `/v1/blocklists`, `/v1/presets`, `/v1/restore`, `/v1/runs/{id}/events` (GET paginated, POST bearer-key), `/v1/sources|benchmarks|request-queues`, `/v1/team/*`, `/v1/{kind}/jobs`.
+HMAC-signed cross-plane requests (`X-Quarry-Sig*`). **Never expose via gateway**; frontend-relevant reads are proxied through quarry-edge. (The gateway's existing onboarding crawl-preview/website-ingest handlers call it server-side — acceptable because the HMAC secret stays in the gateway.) All rows: v3 = none. Families: `/v1/jobs` CRUD+events+history, `/v1/stores`, `/v1/snapshots`, `/v1/artifacts`, `/v1/profiles`, `/v1/schedules` (+lifecycle, trigger/backfill stubs), `/v1/webhooks` (+delivery retry), `/v1/blocklists` (410 Gone since WS7.F), `/v1/presets`, `/v1/restore`, `/v1/runs/{id}/events` (GET paginated, POST bearer-key), `/v1/sources|benchmarks|request-queues`, `/v1/team/*`, `/v1/{kind}/jobs`.
 
 ### 3.3 imports-core (Python FastAPI) — HTTP :3025
 

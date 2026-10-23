@@ -14,6 +14,19 @@ pub enum Determinism { Strict, BestEffort, Off }
 | `BestEffort` | Yes (warn on drift)     | Yes                | Default for everyday scrapes                   |
 | `Off`        | No                      | No                 | Exploratory one-shot; no durable ingest        |
 
+## Three policy names (WS7.F)
+
+- `JobPolicy` (`quarry_core::policy`, Go `quarrycontracts.RunPolicy`): the job-level
+  policy a preset or a job stamps. Its serde shape is the one in CONTRACTS section 7.
+  The Rust type was called `RunPolicy` until WS7.F; the Go name is not renamed yet.
+- `ResolvedPolicy` (`quarry_core::web_policy`): the web-policy decision made from the
+  layers (invariant, ZDR floor, org, grant, operator baseline, request). Meet only tightens.
+- `RunPolicy` (`quarry_runtime::policy`): the bag the pipeline enforces for one run
+  (determinism plus sub-policies, below).
+
+`/v1/blocklists` answers 410 Gone (error code `GONE`) since WS7.F; the org web
+policy API replaces it (WS7.H, not built yet).
+
 ## RunPolicy sub-policies
 
 `crates/quarry-runtime/src/policy.rs`:
