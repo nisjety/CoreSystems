@@ -857,6 +857,14 @@ func (h *CronHandler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/cron", h.listOrCreate)
 	mux.HandleFunc("/api/v1/cron/", func(w http.ResponseWriter, r *http.Request) {
 		id := r.URL.Path[len("/api/v1/cron/"):]
+		if scheduleID, ok := strings.CutSuffix(id, "/fires"); ok {
+			if r.Method != http.MethodGet {
+				http.NotFound(w, r)
+				return
+			}
+			h.listFires(w, r, scheduleID)
+			return
+		}
 		switch r.Method {
 		case http.MethodGet:
 			h.get(w, r, id)
@@ -990,6 +998,79 @@ func (h *CronHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// cronFireRow is one fire of a schedule as its owner reads it. It carries
+// identifiers, closed tokens and counts only. The answer itself is read from the
+// scheduled thread named by thread_id.
+type cronFireRow struct {
+	ID              string     `json:"id"`
+	FiredAt         time.Time  `json:"fired_at"`
+	Status          string     `json:"status"`
+	Outcome         string     `json:"outcome"`
+	CompletedAt     *time.Time `json:"completed_at,omitempty"`
+	RunID           string     `json:"run_id"`
+	ThreadID        string     `json:"thread_id"`
+	WithheldEffects int        `json:"withheld_effects"`
+}
+
+const (
+	defaultCronFiresLimit = 20
+	maxCronFiresLimit     = 100
+)
+
+// listFires returns the most recent fires of one schedule in the verified
+// organization, newest first. A schedule outside the organization is not found,
+// never listed empty.
+func (h *CronHandler) listFires(w http.ResponseWriter, r *http.Request, scheduleID string) {
+	limit := defaultCronFiresLimit
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > maxCronFiresLimit {
+			jsonErr(w, "limit must be between 1 and 100", http.StatusBadRequest)
+			return
+		}
+		limit = parsed
+	}
+	orgID := verifiedOrganizationID(r)
+	var exists bool
+	if err := h.pool.QueryRow(r.Context(), `
+		SELECT EXISTS(SELECT 1 FROM cron_schedules WHERE id=$1 AND org_id=$2 AND deleted_at IS NULL)
+	`, scheduleID, orgID).Scan(&exists); err != nil {
+		jsonErr(w, "database unavailable", http.StatusInternalServerError)
+		return
+	}
+	if !exists {
+		jsonErr(w, "not found", http.StatusNotFound)
+		return
+	}
+	rows, err := h.pool.Query(r.Context(), `
+		SELECT id, fired_at, status, outcome, completed_at, run_id, thread_id, withheld_effects
+		FROM cron_fires
+		WHERE schedule_id=$1
+		ORDER BY fired_at DESC, id DESC
+		LIMIT $2
+	`, scheduleID, limit)
+	if err != nil {
+		jsonErr(w, "database unavailable", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+	fires := []cronFireRow{}
+	for rows.Next() {
+		var f cronFireRow
+		if err := rows.Scan(&f.ID, &f.FiredAt, &f.Status, &f.Outcome, &f.CompletedAt,
+			&f.RunID, &f.ThreadID, &f.WithheldEffects); err != nil {
+			jsonErr(w, "database unavailable", http.StatusInternalServerError)
+			return
+		}
+		fires = append(fires, f)
+	}
+	if err := rows.Err(); err != nil {
+		jsonErr(w, "database unavailable", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"data": fires})
 }
 
 func (h *CronHandler) get(w http.ResponseWriter, r *http.Request, id string) {

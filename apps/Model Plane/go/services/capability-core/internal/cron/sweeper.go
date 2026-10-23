@@ -240,6 +240,9 @@ func (s *Sweeper) fireOne(ctx context.Context, tx pgx.Tx, d dueSchedule, now tim
 	}
 	taskID := "task_" + uuid.New().String()
 	fireID := "cronfire_" + uuid.New().String()
+	// The fire key is the schedule's slot. Session Core matches a scheduled run
+	// back to this fire through it (build plan WS20 S1).
+	fireKey := d.nextFire.UTC().Format(time.RFC3339Nano)
 	_, terr := tx.Exec(ctx, `
 		INSERT INTO tasks (id, org_id, kind, title, description, assignee, status,
 		    priority, config_json, scheduled_at, created_at, updated_at)
@@ -253,11 +256,11 @@ func (s *Sweeper) fireOne(ctx context.Context, tx pgx.Tx, d dueSchedule, now tim
 	if terr != nil {
 		slog.Warn("cron task creation failed", "schedule", d.id, "error", terr)
 		_, _ = tx.Exec(ctx,
-			`INSERT INTO cron_fires (id, schedule_id, fired_at, status, error) VALUES ($1,$2,$3,'failed',$4)`,
-			fireID, d.id, now, terr.Error())
+			`INSERT INTO cron_fires (id, schedule_id, fired_at, status, error, fire_key) VALUES ($1,$2,$3,'failed',$4,$5)`,
+			fireID, d.id, now, terr.Error(), fireKey)
 		return
 	}
 	_, _ = tx.Exec(ctx,
-		`INSERT INTO cron_fires (id, schedule_id, task_id, fired_at, status) VALUES ($1,$2,$3,$4,'pending')`,
-		fireID, d.id, taskID, now)
+		`INSERT INTO cron_fires (id, schedule_id, task_id, fired_at, status, fire_key) VALUES ($1,$2,$3,$4,'pending',$5)`,
+		fireID, d.id, taskID, now, fireKey)
 }

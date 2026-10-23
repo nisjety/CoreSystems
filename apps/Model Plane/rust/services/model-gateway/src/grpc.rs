@@ -3749,6 +3749,13 @@ mod tests {
     impl SessionCore for MockSessionCore {
         type ReplayThreadStream = MockReplayStream;
 
+        async fn record_scheduled_run_result(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::RecordScheduledRunResultRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::RecordScheduledRunResultResponse>, Status> {
+            Err(Status::unimplemented("record_scheduled_run_result not used"))
+        }
+
         async fn create_thread(
             &self,
             request: Request<CreateThreadRequest>,

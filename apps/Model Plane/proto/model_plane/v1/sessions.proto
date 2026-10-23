@@ -184,6 +184,13 @@ service SessionCore {
   // (`runs.metadata.run_context`). Counts and closed tokens only; refused for
   // zero-retention and waived credentials like every durable run mutation.
   rpc RecordRunContext(RecordRunContextRequest) returns (RecordRunContextResponse);
+
+  // Persist the answer of a claimed scheduled step into the scheduled thread
+  // and complete its receipt in one transaction. Idempotent on (run_id,
+  // step_id). Refused for zero-retention and waived runs. Off unless
+  // SESSION_CORE_SCHEDULED_RESULT_PERSIST is `true`; off keeps the receipt-only
+  // path. `output` is content and is accepted only on this direct hop.
+  rpc RecordScheduledRunResult(RecordScheduledRunResultRequest) returns (RecordScheduledRunResultResponse);
 }
 
 // ManagedRunLifecycle owns the additive, durable terminalization protocol for
@@ -1295,6 +1302,35 @@ message RecordScheduledStepReceiptResponse {
   string receipt_id = 1;
   string status = 2;
   bool recorded = 3;
+}
+
+// RecordScheduledRunResultRequest completes a claimed scheduled step with its
+// result. Only `output` is content; every other field is an identifier, a
+// closed token or a count. The counts after `withheld_effects` are carried for
+// the scheduled Do lane and are not persisted by the receipt-only path.
+message RecordScheduledRunResultRequest {
+  string run_id = 1;
+  string step_id = 2;
+  string org_id = 3;
+  string idempotency_key = 4;
+  string receipt_id = 5;
+  string status = 6;
+  string output = 7;
+  string error_code = 8;
+  bool unknown_outcome = 9;
+  uint32 rounds_executed = 10;
+  uint32 withheld_effects = 11;
+  uint32 tool_calls = 12;
+  uint32 input_tokens = 13;
+  uint32 output_tokens = 14;
+}
+
+// message_id is empty when no answer was appended (a failed or unknown step,
+// or an empty answer). A replay returns the message the first call appended.
+message RecordScheduledRunResultResponse {
+  string receipt_id = 1;
+  string status = 2;
+  string message_id = 3;
 }
 
 // --- SessionRetentionService.CountWaivedRuns (Z-21a) ---

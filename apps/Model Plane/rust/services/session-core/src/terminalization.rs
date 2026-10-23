@@ -39,6 +39,9 @@ const APPROVAL_EXPIRY_ENV: &str = "SESSION_CORE_RECOVERY_APPROVAL_EXPIRY_ENABLED
 /// Build plan WS03 S8-4. Off by default; only the literal `true` turns it on. See
 /// [`park_recovery_enabled`] and [`park_recovery_active`].
 const PARK_RECOVERY_ENV: &str = "SESSION_CORE_PARK_RECOVERY_ENABLED";
+/// Build plan WS20 S1. Off by default; off keeps the receipt-only scheduled path. See
+/// [`scheduled_result_persist_enabled`].
+const SCHEDULED_RESULT_PERSIST_ENV: &str = "SESSION_CORE_SCHEDULED_RESULT_PERSIST";
 
 /// The only run-start values that may cross the durable boundary. For a ZDR
 /// caller every requester-controlled content field is replaced before SQL or
@@ -1111,7 +1114,52 @@ async fn transition_managed_run_terminal(
     .execute(&mut **transaction)
     .await
     .map_err(database_error)?;
+    // A scheduled run's fire learns its truthful terminal status in the same
+    // transaction that ends the run (build plan WS20 S1). Off: fires keep the
+    // status the sweeper wrote.
+    if scheduled_result_persist_enabled() {
+        settle_scheduled_fire(transaction, run_id, plan_status, now).await?;
+    }
     Ok(())
+}
+
+/// Link a scheduled run's fire row to the run and set its terminal status. The
+/// key is the run's own immutable schedule metadata, so only the fire that
+/// started this run is touched, and only while it has not settled yet.
+async fn settle_scheduled_fire(
+    transaction: &mut Transaction<'_, Postgres>,
+    run_id: &str,
+    status: &str,
+    now: DateTime<Utc>,
+) -> Result<(), Status> {
+    sqlx::query(
+        "UPDATE cron_fires AS cf
+            SET status = $2, completed_at = $3, run_id = r.id, thread_id = r.thread_id
+           FROM runs r
+          WHERE r.id = $1
+            AND r.metadata->>'source' = 'scheduled_run'
+            AND cf.schedule_id = r.metadata->>'schedule_id'
+            AND cf.fire_key = r.metadata->>'fire_key'
+            AND cf.status IN ('pending', 'running')",
+    )
+    .bind(run_id)
+    .bind(status)
+    .bind(now)
+    .execute(&mut **transaction)
+    .await
+    .map_err(database_error)?;
+    Ok(())
+}
+
+/// Whether a scheduled run's answer is persisted into its thread and its fire
+/// records the run (build plan WS20 S1). Off by default; only the literal `true`
+/// turns it on, parsed by the strict switch the other durable-loop switches share.
+/// Session Core reads it here and in the scheduled-result RPC. Execution Core reads
+/// the same name, so both sides of one deploy agree.
+pub(crate) fn scheduled_result_persist_enabled() -> bool {
+    mp_contracts::loop_fold::switch_from(
+        std::env::var(SCHEDULED_RESULT_PERSIST_ENV).ok().as_deref(),
+    )
 }
 
 async fn apply_managed_terminal_outcome(
@@ -2400,6 +2448,17 @@ mod tests {
                 "{what}: the guard did not flag it"
             );
         }
+    }
+
+    #[test]
+    fn scheduled_result_persist_is_off_by_default_and_only_literal_true_enables() {
+        use super::{scheduled_result_persist_enabled, SCHEDULED_RESULT_PERSIST_ENV};
+        if std::env::var_os(SCHEDULED_RESULT_PERSIST_ENV).is_none() {
+            assert!(!scheduled_result_persist_enabled(), "off by default");
+        }
+        assert!(mp_contracts::loop_fold::switch_from(Some("true")));
+        assert!(!mp_contracts::loop_fold::switch_from(Some("1")));
+        assert!(!mp_contracts::loop_fold::switch_from(Some("yes")));
     }
 
     #[test]

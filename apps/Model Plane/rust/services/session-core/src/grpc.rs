@@ -1287,10 +1287,14 @@ async fn claim_scheduled_step_inner(
     }))
 }
 
+/// Complete a claimed scheduled step's receipt. With `settle_fire` (the result switch
+/// is on) the fire learns the same terminal status in this transaction, so a failed
+/// or unknown step no longer leaves its fire pending (build plan WS20 S1).
 #[allow(clippy::result_large_err)]
 async fn record_scheduled_step_receipt_inner(
     pool: &PgPool,
     req: pb::RecordScheduledStepReceiptRequest,
+    settle_fire: bool,
 ) -> Result<Response<pb::RecordScheduledStepReceiptResponse>, Status> {
     if !valid_scheduled_run_identifier(&req.run_id)
         || !valid_scheduled_run_identifier(&req.step_id)
@@ -1371,6 +1375,25 @@ async fn record_scheduled_step_receipt_inner(
     .execute(&mut *tx)
     .await
     .map_err(|error| Status::internal(error.to_string()))?;
+    if settle_fire {
+        sqlx::query(
+            "UPDATE cron_fires AS cf
+             SET status = $4, completed_at = now(), run_id = sr.run_id,
+                 thread_id = sr.thread_id, outcome = $5
+             FROM scheduled_step_receipts AS sr
+             WHERE sr.run_id = $1 AND sr.step_id = $2 AND sr.org_id = $3
+               AND cf.schedule_id = sr.schedule_id AND cf.fire_key = sr.fire_key
+               AND cf.status IN ('pending', 'running')",
+        )
+        .bind(&req.run_id)
+        .bind(&req.step_id)
+        .bind(&req.org_id)
+        .bind(scheduled_fire_status(&req.status))
+        .bind(&req.status)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| Status::internal(error.to_string()))?;
+    }
     tx.commit()
         .await
         .map_err(|error| Status::internal(error.to_string()))?;
@@ -1379,6 +1402,306 @@ async fn record_scheduled_step_receipt_inner(
         status: req.status,
         recorded: true,
     }))
+}
+
+/// The fire status a terminal step outcome settles to. An unknown outcome is not
+/// a failure: the step may have run, so the fire says so, the same word the sweeper
+/// uses for fires it cannot match (build plan WS20 S8).
+fn scheduled_fire_status(step_status: &str) -> &'static str {
+    match step_status {
+        "completed" => "completed",
+        "unknown_outcome" => "unknown",
+        _ => "failed",
+    }
+}
+
+/// The shape of a scheduled-step result: identifiers, a closed status that agrees
+/// with the unknown-outcome flag, an answer only on a completed step, and a
+/// representable withheld-effect count. Returns the count for persistence.
+#[allow(clippy::result_large_err)]
+fn validate_scheduled_run_result_request(
+    req: &pb::RecordScheduledRunResultRequest,
+) -> Result<i32, Status> {
+    if !valid_scheduled_run_identifier(&req.run_id)
+        || !valid_scheduled_run_identifier(&req.step_id)
+        || !valid_scheduled_run_identifier(&req.org_id)
+        || !valid_scheduled_run_identifier(&req.idempotency_key)
+        || !valid_scheduled_run_identifier(&req.receipt_id)
+    {
+        return Err(Status::invalid_argument(
+            "scheduled-step result bindings are invalid",
+        ));
+    }
+    let allowed = matches!(
+        req.status.as_str(),
+        "completed" | "failed" | "unknown_outcome"
+    );
+    if !allowed || (req.unknown_outcome != (req.status == "unknown_outcome")) {
+        return Err(Status::invalid_argument(
+            "invalid scheduled-step result status",
+        ));
+    }
+    if !req.output.trim().is_empty() && req.status != "completed" {
+        return Err(Status::invalid_argument(
+            "only a completed scheduled step carries an answer",
+        ));
+    }
+    i32::try_from(req.withheld_effects)
+        .map_err(|_| Status::invalid_argument("withheld effect count is out of range"))
+}
+
+/// Complete a claimed scheduled step with its answer (build plan WS20 S1). The
+/// answer is appended to the scheduled thread, the receipt completes and the fire
+/// row learns its outcome, in one transaction. Locks run and thread, then the
+/// receipt, the order the other run writes use. A replay of the same terminal
+/// outcome returns the message the first call appended.
+#[allow(clippy::result_large_err, clippy::too_many_lines)]
+async fn record_scheduled_run_result_inner(
+    pool: &PgPool,
+    req: pb::RecordScheduledRunResultRequest,
+) -> Result<Response<pb::RecordScheduledRunResultResponse>, Status> {
+    let withheld_effects = validate_scheduled_run_result_request(&req)?;
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| Status::internal(error.to_string()))?;
+    let run: Option<(String, String, String, String, serde_json::Value)> = sqlx::query_as(
+        "SELECT r.thread_id, r.user_id, r.status, r.retention_class, r.metadata
+         FROM runs r JOIN threads t ON t.id = r.thread_id
+         WHERE r.id = $1 AND r.org_id = $2
+         FOR UPDATE OF r, t",
+    )
+    .bind(&req.run_id)
+    .bind(&req.org_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|error| Status::internal(error.to_string()))?;
+    let Some((run_thread_id, owner, run_status, retention_class, metadata)) = run else {
+        return Err(Status::not_found("scheduled run not found"));
+    };
+    if owner != crate::auth::system_run_owners()[0]
+        || metadata.get("source").and_then(serde_json::Value::as_str) != Some("scheduled_run")
+    {
+        return Err(Status::permission_denied(
+            "scheduled step does not match the prepared run",
+        ));
+    }
+    // A zero-retention or waived run keeps no answer (build plan WS20 S1).
+    if !matches!(
+        crate::retention_receipt::RetentionClass::from_storage(&retention_class),
+        Some(crate::retention_receipt::RetentionClass::Persistent)
+    ) {
+        return Err(Status::failed_precondition(
+            "a zero-retention or waived run has no durable scheduled result",
+        ));
+    }
+
+    let receipt: Option<(String, String, String, String, String, String)> = sqlx::query_as(
+        "SELECT receipt_id, status, idempotency_key, thread_id, schedule_id, fire_key
+         FROM scheduled_step_receipts
+         WHERE run_id = $1 AND step_id = $2 AND org_id = $3
+         FOR UPDATE",
+    )
+    .bind(&req.run_id)
+    .bind(&req.step_id)
+    .bind(&req.org_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|error| Status::internal(error.to_string()))?;
+    let Some((receipt_id, current_status, idempotency_key, thread_id, schedule_id, fire_key)) =
+        receipt
+    else {
+        return Err(Status::not_found("scheduled-step receipt not found"));
+    };
+    if receipt_id != req.receipt_id
+        || idempotency_key != req.idempotency_key
+        || thread_id != run_thread_id
+    {
+        return Err(Status::permission_denied(
+            "scheduled-step receipt binding mismatch",
+        ));
+    }
+    if current_status != "claimed" {
+        if current_status != req.status {
+            return Err(Status::already_exists(
+                "scheduled-step receipt already has a different terminal outcome",
+            ));
+        }
+        let message: Option<(String,)> = sqlx::query_as(
+            "SELECT id FROM messages
+             WHERE thread_id = $1 AND role = 'assistant'
+               AND metadata->>'run_id' = $2 AND metadata->>'step_id' = $3
+             ORDER BY sequence LIMIT 1",
+        )
+        .bind(&thread_id)
+        .bind(&req.run_id)
+        .bind(&req.step_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| Status::internal(error.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
+        return Ok(Response::new(pb::RecordScheduledRunResultResponse {
+            receipt_id,
+            status: current_status,
+            message_id: message.map(|(id,)| id).unwrap_or_default(),
+        }));
+    }
+    if is_terminal_run_status(&run_status) {
+        return Err(Status::failed_precondition(
+            "scheduled run is already terminal",
+        ));
+    }
+
+    let message_id = if req.status == "completed" && !req.output.trim().is_empty() {
+        Some(
+            append_scheduled_result_in_tx(
+                &mut tx,
+                &thread_id,
+                &req.run_id,
+                &req.step_id,
+                &req.output,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let output_digest = if req.output.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "sha256:{:x}",
+            <sha2::Sha256 as sha2::Digest>::digest(req.output.as_bytes())
+        )
+    };
+    sqlx::query(
+        "UPDATE scheduled_step_receipts
+         SET status = $4, output_digest = $5, error_code = $6,
+             unknown_outcome = $7, updated_at = now()
+         WHERE run_id = $1 AND step_id = $2 AND org_id = $3",
+    )
+    .bind(&req.run_id)
+    .bind(&req.step_id)
+    .bind(&req.org_id)
+    .bind(&req.status)
+    .bind(&output_digest)
+    .bind(&req.error_code)
+    .bind(req.unknown_outcome)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| Status::internal(error.to_string()))?;
+    sqlx::query(
+        "UPDATE cron_fires
+         SET status = $3, completed_at = now(), run_id = $4, thread_id = $5,
+             outcome = $6, withheld_effects = $7
+         WHERE schedule_id = $1 AND fire_key = $2 AND status IN ('pending', 'running')",
+    )
+    .bind(&schedule_id)
+    .bind(&fire_key)
+    .bind(scheduled_fire_status(&req.status))
+    .bind(&req.run_id)
+    .bind(&thread_id)
+    .bind(&req.status)
+    .bind(withheld_effects)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| Status::internal(error.to_string()))?;
+    tx.commit()
+        .await
+        .map_err(|error| Status::internal(error.to_string()))?;
+    Ok(Response::new(pb::RecordScheduledRunResultResponse {
+        receipt_id,
+        status: req.status,
+        message_id: message_id.unwrap_or_default(),
+    }))
+}
+
+/// Append a scheduled run's answer to its thread inside the caller's transaction
+/// (build plan WS20 S1). Unlike a chat append it runs no memory extraction: the
+/// answer came from an unattended run and the thread is not a conversation. It
+/// carries the thread's Space bindings as an assistant reply does, and writes the
+/// same MESSAGE_APPENDED event so the thread's feed stays complete.
+#[allow(clippy::result_large_err)]
+async fn append_scheduled_result_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    thread_id: &str,
+    run_id: &str,
+    step_id: &str,
+    content: &str,
+) -> Result<String, Status> {
+    let msg_id = new_ulid();
+    let now = Utc::now();
+    let (sequence, space_id, audience_ref, audience_revision, audience_hash, authority_revision, resource_ref): (
+        i64,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+        Option<String>,
+        Option<i64>,
+        Option<String>,
+    ) = sqlx::query_as(
+        "INSERT INTO messages
+         (id, thread_id, role, content, created_at, metadata, space_id, recipient_audience_ref,
+          recipient_audience_revision, recipient_audience_hash, authority_revision, resource_authorization_ref)
+         SELECT $1, t.id, 'assistant', $2, $3, $4, t.space_id, t.recipient_audience_ref,
+                t.recipient_audience_revision, t.recipient_audience_hash, t.authority_revision, t.resource_authorization_ref
+         FROM threads t WHERE t.id = $5
+         RETURNING sequence, space_id, recipient_audience_ref, recipient_audience_revision,
+                   recipient_audience_hash, authority_revision, resource_authorization_ref",
+    )
+    .bind(&msg_id)
+    .bind(content)
+    .bind(now)
+    .bind(serde_json::json!({
+        "source_scope": "scheduled_run",
+        "run_id": run_id,
+        "step_id": step_id,
+    }))
+    .bind(thread_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|e| Status::internal(e.to_string()))?;
+
+    let sequence_u64 =
+        u64::try_from(sequence).map_err(|_| Status::internal("message sequence out of range"))?;
+    let msg_resource = format!("message:{}", &msg_id);
+    let msg_idem = derive_idempotency_hash(
+        "session-core",
+        "MESSAGE_APPENDED",
+        &msg_resource,
+        &format!("{}:{}", thread_id, sequence_u64),
+    );
+    sqlx::query(
+        "INSERT INTO events (id, event_type, run_id, payload, ts, org_id, user_id, correlation_id, causation_id, idempotency_key, resource_ref, type_url, producer, schema_version)
+         SELECT $1, 'MESSAGE_APPENDED', $2, $3, $4, t.org_id, t.user_id, $5, '', $6, $7, $8, 'session-core', 1
+         FROM threads t WHERE t.id = $2",
+    )
+    .bind(new_ulid())
+    .bind(thread_id)
+    .bind(serde_json::json!({
+        "thread_id": thread_id,
+        "message_id": &msg_id,
+        "sequence": sequence_u64,
+        "role": "assistant",
+        "space_id": space_id,
+        "recipient_audience_ref": audience_ref,
+        "recipient_audience_revision": audience_revision,
+        "recipient_audience_hash": audience_hash,
+        "authority_revision": authority_revision,
+        "resource_authorization_ref": resource_ref,
+    }))
+    .bind(now)
+    .bind(thread_id)
+    .bind(&msg_idem)
+    .bind(&msg_resource)
+    .bind(MESSAGE_APPENDED_TYPE_URL)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| Status::internal(e.to_string()))?;
+    Ok(msg_id)
 }
 
 /// Bind the non-secret schedule identity to the deterministic run row. This
@@ -5864,10 +6187,36 @@ impl SessionCore for SessionService {
             let caller = identity(&request)?;
             authorize_operation(&caller, crate::auth::SCHEDULED_STEP_SCOPE)?;
             authorize_scheduled_step_service(&caller)?;
-            record_scheduled_step_receipt_inner(&self.pool, request.into_inner()).await
+            record_scheduled_step_receipt_inner(
+                &self.pool,
+                request.into_inner(),
+                crate::terminalization::scheduled_result_persist_enabled(),
+            )
+            .await
         }
         .await;
         record_metrics("record_scheduled_step_receipt", started, result.is_ok());
+        result
+    }
+
+    async fn record_scheduled_run_result(
+        &self,
+        request: Request<pb::RecordScheduledRunResultRequest>,
+    ) -> Result<Response<pb::RecordScheduledRunResultResponse>, Status> {
+        let started = Instant::now();
+        let result = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, crate::auth::SCHEDULED_STEP_SCOPE)?;
+            authorize_scheduled_step_service(&caller)?;
+            if !crate::terminalization::scheduled_result_persist_enabled() {
+                return Err(Status::failed_precondition(
+                    "scheduled result persistence is disabled",
+                ));
+            }
+            record_scheduled_run_result_inner(&self.pool, request.into_inner()).await
+        }
+        .await;
+        record_metrics("record_scheduled_run_result", started, result.is_ok());
         result
     }
 
@@ -8337,12 +8686,13 @@ mod tests {
         agent_run_thread_key, append_letta_memory_rows, assemble_segments,
         assistant_reply_slot_is_open, authorize_dataplane, claim_scheduled_step_inner,
         complete_step_inner, derive_idempotency_hash, finalize_tool_action_inner,
-        normalize_thread_presentation_text, pb, record_scheduled_step_receipt_inner,
-        reserve_tool_action_inner, resolve_dataplane_addr, resolve_residency,
-        resolve_thread_origin, scheduled_run_execution_payload_digest,
+        normalize_thread_presentation_text, pb, record_scheduled_run_result_inner,
+        record_scheduled_step_receipt_inner, reserve_tool_action_inner, resolve_dataplane_addr,
+        resolve_residency, resolve_thread_origin, scheduled_run_execution_payload_digest,
         semantic_context_search_status, support_thread_id, thread_append_payload_digest,
         thread_create_payload_digest, valid_scheduled_run_identifier,
-        validate_append_space_context_shape, validate_scheduled_step_request,
+        valid_scheduled_step_digest, validate_append_space_context_shape,
+        validate_scheduled_run_result_request, validate_scheduled_step_request,
         thread_read_payload_digest, validate_thread_space_context_shape, validate_user_checkpoint,
         CONTROL_THREAD_READ_ACTION, CONTROL_THREAD_READ_SCHEMA,
         verify_thread_read_space_decision, verify_thread_read_space_decision_with_key,
@@ -8422,6 +8772,372 @@ mod tests {
         let mut missing_policy = request;
         missing_policy.policy_digest.clear();
         assert!(validate_scheduled_step_request(&missing_policy).is_err());
+    }
+
+    #[test]
+    fn scheduled_run_result_shape_is_strict_and_counts_withheld_effects() {
+        let mut request = pb::RecordScheduledRunResultRequest {
+            run_id: "run-1".to_owned(),
+            step_id: "step-1".to_owned(),
+            org_id: "org-1".to_owned(),
+            idempotency_key: "fire-1:step:0".to_owned(),
+            receipt_id: "scheduled_step_1".to_owned(),
+            status: "completed".to_owned(),
+            output: "answer".to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_scheduled_run_result_request(&request).expect("valid result"),
+            0
+        );
+        request.withheld_effects = 2;
+        assert_eq!(
+            validate_scheduled_run_result_request(&request).expect("counted"),
+            2
+        );
+        request.withheld_effects = u32::MAX;
+        assert!(validate_scheduled_run_result_request(&request).is_err());
+        request.withheld_effects = 0;
+        request.status = "failed".to_owned();
+        assert!(
+            validate_scheduled_run_result_request(&request).is_err(),
+            "an answer is only persisted for a completed step"
+        );
+        request.output.clear();
+        assert!(validate_scheduled_run_result_request(&request).is_ok());
+        request.status = "unknown_outcome".to_owned();
+        assert!(
+            validate_scheduled_run_result_request(&request).is_err(),
+            "the unknown flag must agree with the status"
+        );
+        request.unknown_outcome = true;
+        assert!(validate_scheduled_run_result_request(&request).is_ok());
+        request.run_id = "*".to_owned();
+        assert!(validate_scheduled_run_result_request(&request).is_err());
+    }
+
+    /// Seed a service-owned scheduled thread and run, then claim its one step.
+    /// Returns (run_id, thread_id, org_id, step_id, idempotency_key, receipt_id).
+    async fn seeded_claimed_scheduled_step(
+        pool: &sqlx::PgPool,
+        suffix: &str,
+    ) -> (String, String, String, String, String, String) {
+        let run_id = format!("scheduled-run-{suffix}");
+        let thread_id = format!("scheduled-thread-{suffix}");
+        let org_id = format!("scheduled-org-{suffix}");
+        let space_id = format!("scheduled-space-{suffix}");
+        let schedule_id = format!("schedule-{suffix}");
+        let fire_key = format!("fire-{suffix}");
+        let step_id = format!("{run_id}:step:0");
+        let idempotency_key = format!("{fire_key}:step:0");
+        let template_digest = format!("sha256:{}", "a".repeat(64));
+        let policy_digest = format!("sha256:{}", "b".repeat(64));
+        let audience_hash = format!("sha256:{}", "c".repeat(64));
+        let metadata = serde_json::json!({
+            "source": "scheduled_run",
+            "schedule_id": schedule_id,
+            "fire_key": fire_key,
+            "template_digest": template_digest,
+            "space_id": space_id,
+        });
+        sqlx::query(
+            "INSERT INTO threads
+             (id, session_key, org_id, user_id, space_id, space_decision_ref,
+              recipient_audience_ref, recipient_audience_revision,
+              recipient_audience_hash, privacy_policy_ref,
+              resource_authorization_ref, authority_revision, origin)
+             VALUES ($1,$2,$3,'service:orchestrator-core',$4,$5,$6,1,$7,$8,$9,1,'space')",
+        )
+        .bind(&thread_id)
+        .bind(&thread_id)
+        .bind(&org_id)
+        .bind(&space_id)
+        .bind(format!("decision-{suffix}"))
+        .bind(format!("audience-{suffix}"))
+        .bind(&audience_hash)
+        .bind(format!("privacy-{suffix}"))
+        .bind(format!("resource-{suffix}"))
+        .execute(pool)
+        .await
+        .expect("seed scheduled thread");
+        sqlx::query(
+            "INSERT INTO runs
+             (id, thread_id, goal, org_id, user_id, status, metadata,
+              space_id, space_decision_ref, recipient_audience_ref,
+              recipient_audience_revision, recipient_audience_hash,
+              privacy_policy_ref, resource_authorization_ref, authority_revision)
+             VALUES ($1,$2,'scheduled proof goal',$3,'service:orchestrator-core',
+                     'queued',$4,$5,$6,$7,1,$8,$9,$10,1)",
+        )
+        .bind(&run_id)
+        .bind(&thread_id)
+        .bind(&org_id)
+        .bind(metadata)
+        .bind(&space_id)
+        .bind(format!("decision-{suffix}"))
+        .bind(format!("audience-{suffix}"))
+        .bind(&audience_hash)
+        .bind(format!("privacy-{suffix}"))
+        .bind(format!("resource-{suffix}"))
+        .execute(pool)
+        .await
+        .expect("seed scheduled run");
+        let claimed = claim_scheduled_step_inner(
+            pool,
+            pb::ClaimScheduledStepRequest {
+                run_id: run_id.clone(),
+                thread_id: thread_id.clone(),
+                org_id: org_id.clone(),
+                space_id,
+                schedule_id,
+                fire_key,
+                template_digest,
+                step_id: step_id.clone(),
+                step_index: 0,
+                policy_digest,
+                idempotency_key: idempotency_key.clone(),
+            },
+        )
+        .await
+        .expect("claim scheduled step")
+        .into_inner();
+        (
+            run_id,
+            thread_id,
+            org_id,
+            step_id,
+            idempotency_key,
+            claimed.receipt_id,
+        )
+    }
+
+    /// The schedule and fire row a claimed step belongs to, so the fire settles.
+    async fn seed_scheduled_fire(pool: &sqlx::PgPool, suffix: &str) {
+        let schedule_id = format!("schedule-{suffix}");
+        sqlx::query(
+            "INSERT INTO cron_schedules (id, name, schedule_expr, created_by)
+             VALUES ($1, $1, '0 9 * * *', 'test')",
+        )
+        .bind(&schedule_id)
+        .execute(pool)
+        .await
+        .expect("seed schedule");
+        sqlx::query(
+            "INSERT INTO cron_fires (id, schedule_id, status, fire_key)
+             VALUES ($1, $2, 'pending', $3)",
+        )
+        .bind(format!("fire-row-{suffix}"))
+        .bind(&schedule_id)
+        .bind(format!("fire-{suffix}"))
+        .execute(pool)
+        .await
+        .expect("seed fire");
+    }
+
+    /// Real-Postgres proof for WS20 S1: a scheduled answer is appended to its thread
+    /// once, the receipt completes with a digest, a replay returns the same message,
+    /// and a different terminal outcome cannot overwrite the first one.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn record_scheduled_run_result_appends_once_and_completes_receipt() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+        let suffix = mp_ids::new_ulid();
+        let (run_id, thread_id, org_id, step_id, idempotency_key, receipt_id) =
+            seeded_claimed_scheduled_step(&pool, &suffix).await;
+        seed_scheduled_fire(&pool, &suffix).await;
+        let request = pb::RecordScheduledRunResultRequest {
+            run_id: run_id.clone(),
+            step_id: step_id.clone(),
+            org_id: org_id.clone(),
+            idempotency_key: idempotency_key.clone(),
+            receipt_id: receipt_id.clone(),
+            status: "completed".to_owned(),
+            output: "the scheduled answer".to_owned(),
+            ..Default::default()
+        };
+
+        let first = record_scheduled_run_result_inner(&pool, request.clone())
+            .await
+            .expect("first result")
+            .into_inner();
+        assert_eq!(first.receipt_id, receipt_id);
+        assert_eq!(first.status, "completed");
+        assert!(!first.message_id.is_empty());
+        let replay = record_scheduled_run_result_inner(&pool, request)
+            .await
+            .expect("replayed result")
+            .into_inner();
+        assert_eq!(replay.message_id, first.message_id);
+
+        let (answers,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM messages
+             WHERE thread_id = $1 AND role = 'assistant' AND metadata->>'run_id' = $2",
+        )
+        .bind(&thread_id)
+        .bind(&run_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count answers");
+        assert_eq!(answers, 1);
+        let (content, scope): (String, String) = sqlx::query_as(
+            "SELECT content, metadata->>'source_scope' FROM messages WHERE id = $1",
+        )
+        .bind(&first.message_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read answer");
+        assert_eq!(content, "the scheduled answer");
+        assert_eq!(scope, "scheduled_run");
+        let (digest,): (String,) =
+            sqlx::query_as("SELECT output_digest FROM scheduled_step_receipts WHERE receipt_id = $1")
+                .bind(&receipt_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read receipt");
+        assert!(valid_scheduled_step_digest(&digest));
+        let (fire_status, fire_run): (String, String) = sqlx::query_as(
+            "SELECT status, run_id FROM cron_fires WHERE schedule_id = $1 AND fire_key = $2",
+        )
+        .bind(format!("schedule-{suffix}"))
+        .bind(format!("fire-{suffix}"))
+        .fetch_one(&pool)
+        .await
+        .expect("read fire");
+        assert_eq!(fire_status, "completed");
+        assert_eq!(fire_run, run_id);
+
+        let conflict = record_scheduled_run_result_inner(
+            &pool,
+            pb::RecordScheduledRunResultRequest {
+                run_id,
+                step_id,
+                org_id,
+                idempotency_key,
+                receipt_id,
+                status: "failed".to_owned(),
+                error_code: "provider_error".to_owned(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("a different terminal outcome is refused");
+        assert_eq!(conflict.code(), tonic::Code::AlreadyExists);
+    }
+
+    /// Real-Postgres proof for WS20 S1: a failed or unknown scheduled step settles its
+    /// fire through the receipt when the result switch is on. An unknown outcome
+    /// settles to `unknown`, never to `failed`.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn record_scheduled_step_receipt_settles_failed_and_unknown_fires() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+        for (status, fire_status, unknown) in [
+            ("failed", "failed", false),
+            ("unknown_outcome", "unknown", true),
+        ] {
+            let suffix = mp_ids::new_ulid();
+            let (run_id, thread_id, org_id, step_id, idempotency_key, receipt_id) =
+                seeded_claimed_scheduled_step(&pool, &suffix).await;
+            seed_scheduled_fire(&pool, &suffix).await;
+            record_scheduled_step_receipt_inner(
+                &pool,
+                pb::RecordScheduledStepReceiptRequest {
+                    run_id: run_id.clone(),
+                    step_id,
+                    org_id,
+                    idempotency_key,
+                    receipt_id,
+                    status: status.to_owned(),
+                    output_digest: String::new(),
+                    error_code: "inference_failed".to_owned(),
+                    unknown_outcome: unknown,
+                },
+                true,
+            )
+            .await
+            .expect("record terminal outcome");
+
+            let (settled, outcome, fire_run, fire_thread): (String, String, String, String) =
+                sqlx::query_as(
+                    "SELECT status, outcome, run_id, thread_id FROM cron_fires
+                     WHERE schedule_id = $1 AND fire_key = $2",
+                )
+                .bind(format!("schedule-{suffix}"))
+                .bind(format!("fire-{suffix}"))
+                .fetch_one(&pool)
+                .await
+                .expect("read fire");
+            assert_eq!(settled, fire_status);
+            assert_eq!(outcome, status);
+            assert_eq!(fire_run, run_id);
+            assert_eq!(fire_thread, thread_id);
+        }
+    }
+
+    /// Real-Postgres proof for WS20 S1: a zero-retention run never gets a durable
+    /// scheduled answer, and the refusal writes nothing.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn record_scheduled_run_result_refuses_zdr_run() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+        let suffix = mp_ids::new_ulid();
+        let (run_id, thread_id, org_id, step_id, idempotency_key, receipt_id) =
+            seeded_claimed_scheduled_step(&pool, &suffix).await;
+        sqlx::query("UPDATE runs SET retention_class = 'zdr' WHERE id = $1")
+            .bind(&run_id)
+            .execute(&pool)
+            .await
+            .expect("mark run zero-retention");
+
+        let refused = record_scheduled_run_result_inner(
+            &pool,
+            pb::RecordScheduledRunResultRequest {
+                run_id: run_id.clone(),
+                step_id,
+                org_id,
+                idempotency_key,
+                receipt_id,
+                status: "completed".to_owned(),
+                output: "must not be stored".to_owned(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("zero-retention run is refused");
+        assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+        let (answers,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM messages WHERE thread_id = $1 AND metadata->>'run_id' = $2",
+        )
+        .bind(&thread_id)
+        .bind(&run_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count answers");
+        assert_eq!(answers, 0);
     }
 
     /// Real-Postgres proof for the scheduled-step receipt contract. This keeps
@@ -8546,6 +9262,7 @@ mod tests {
                 error_code: "transport_ambiguous".to_owned(),
                 unknown_outcome: true,
             },
+            false,
         )
         .await
         .expect("record unknown outcome")
@@ -8566,6 +9283,7 @@ mod tests {
                 error_code: "transport_ambiguous".to_owned(),
                 unknown_outcome: true,
             },
+            false,
         )
         .await
         .expect("duplicate unknown outcome")
@@ -8585,6 +9303,7 @@ mod tests {
                 error_code: String::new(),
                 unknown_outcome: false,
             },
+            false,
         )
         .await
         .expect_err("terminal receipt must not be overwritten");

@@ -256,6 +256,13 @@ struct ScriptedSession;
 impl SessionCore for ScriptedSession {
     type ReplayThreadStream = MockReplayStream;
 
+    async fn record_scheduled_run_result(
+        &self,
+        _: tonic::Request<mp_contracts::model_plane::v1::RecordScheduledRunResultRequest>,
+    ) -> Result<Response<mp_contracts::model_plane::v1::RecordScheduledRunResultResponse>, Status> {
+        unimplemented_rpc("record_scheduled_run_result")
+    }
+
     async fn create_thread(
         &self,
         _: TReq<mpv1::CreateThreadRequest>,

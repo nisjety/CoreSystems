@@ -416,22 +416,33 @@ impl ExecutionService {
         match inference_result {
             Ok(response) => {
                 let output = response.into_inner().content;
-                let output_digest = format!("sha256:{:x}", Sha256::digest(output.as_bytes()));
-                let receipt = self
-                    .record_scheduled_step_receipt(
-                        &req,
-                        &session_bearer,
-                        &claim.receipt_id,
-                        "completed",
-                        &output_digest,
-                        "",
-                        false,
-                    )
-                    .await?;
+                // With the result switch on, the answer is persisted into the thread
+                // and the fire records the run (build plan WS20 S1). Off keeps the
+                // receipt-only path byte-for-byte.
+                let (receipt_id, status) = if scheduled_result_persist_enabled() {
+                    let receipt = self
+                        .record_scheduled_run_result(&req, &session_bearer, &claim.receipt_id, &output)
+                        .await?;
+                    (receipt.receipt_id, receipt.status)
+                } else {
+                    let output_digest = format!("sha256:{:x}", Sha256::digest(output.as_bytes()));
+                    let receipt = self
+                        .record_scheduled_step_receipt(
+                            &req,
+                            &session_bearer,
+                            &claim.receipt_id,
+                            "completed",
+                            &output_digest,
+                            "",
+                            false,
+                        )
+                        .await?;
+                    (receipt.receipt_id, receipt.status)
+                };
                 Ok(Response::new(pb::ExecuteScheduledStepResponse {
                     step_id: req.step_id,
-                    status: receipt.status,
-                    receipt_id: receipt.receipt_id,
+                    status,
+                    receipt_id,
                     output,
                     error: String::new(),
                     unknown_outcome: false,
@@ -460,6 +471,29 @@ impl ExecutionService {
                 }))
             }
         }
+    }
+
+    /// Complete a claimed step with its answer through Session Core's result RPC
+    /// (build plan WS20 S1). The answer is content, and it travels only on this
+    /// direct hop.
+    async fn record_scheduled_run_result(
+        &self,
+        req: &pb::ExecuteScheduledStepRequest,
+        bearer: &str,
+        receipt_id: &str,
+        output: &str,
+    ) -> Result<pb::RecordScheduledRunResultResponse, Status> {
+        self.session_client()
+            .record_scheduled_run_result(authenticated_session_request(
+                scheduled_run_result_request(req, receipt_id, output),
+                bearer,
+            )?)
+            .await
+            .map(|response| response.into_inner())
+            .map_err(|error| {
+                warn!(code = ?error.code(), "scheduled-step result persistence failed");
+                Status::unavailable("scheduled-step result persistence unavailable")
+            })
     }
 
     async fn record_scheduled_step_receipt(
@@ -493,6 +527,37 @@ impl ExecutionService {
                 warn!(code = ?error.code(), "scheduled-step receipt persistence failed");
                 Status::unavailable("scheduled-step receipt persistence unavailable")
             })
+    }
+}
+
+/// Whether a completed scheduled step's answer is persisted through
+/// `RecordScheduledRunResult` (build plan WS20 S1). It reads the name Session Core
+/// reads, so one deploy setting drives both sides. Only the literal `true` enables.
+fn scheduled_result_persist_enabled() -> bool {
+    mp_contracts::loop_fold::switch_from(
+        std::env::var(SCHEDULED_RESULT_PERSIST_ENV).ok().as_deref(),
+    )
+}
+
+const SCHEDULED_RESULT_PERSIST_ENV: &str = "SESSION_CORE_SCHEDULED_RESULT_PERSIST";
+
+/// The one completed-step result this lane sends. It carries the run's identity,
+/// the receipt it completes and the answer, and no counts: the scheduled Do lane
+/// that reports them is a later slice.
+fn scheduled_run_result_request(
+    req: &pb::ExecuteScheduledStepRequest,
+    receipt_id: &str,
+    output: &str,
+) -> pb::RecordScheduledRunResultRequest {
+    pb::RecordScheduledRunResultRequest {
+        run_id: req.run_id.clone(),
+        step_id: req.step_id.clone(),
+        org_id: req.org_id.clone(),
+        idempotency_key: req.idempotency_key.clone(),
+        receipt_id: receipt_id.to_owned(),
+        status: "completed".to_owned(),
+        output: output.to_owned(),
+        ..Default::default()
     }
 }
 
@@ -1782,6 +1847,37 @@ mod auth_tests {
         for mode in ["auto", "ask", "deny"] {
             validate_direct_permission_mode(mode).expect("recognized permission mode");
         }
+    }
+
+    #[test]
+    fn scheduled_result_request_carries_identity_and_answer_only() {
+        let req = pb::ExecuteScheduledStepRequest {
+            run_id: "run_01".to_owned(),
+            org_id: "org_01".to_owned(),
+            step_id: "step_01".to_owned(),
+            idempotency_key: "fire_01:step:0".to_owned(),
+            ..Default::default()
+        };
+        let result = scheduled_run_result_request(&req, "scheduled_step_01", "the answer");
+        assert_eq!(result.run_id, "run_01");
+        assert_eq!(result.org_id, "org_01");
+        assert_eq!(result.step_id, "step_01");
+        assert_eq!(result.idempotency_key, "fire_01:step:0");
+        assert_eq!(result.receipt_id, "scheduled_step_01");
+        assert_eq!(result.status, "completed");
+        assert_eq!(result.output, "the answer");
+        assert!(!result.unknown_outcome);
+        assert!(result.error_code.is_empty());
+        assert_eq!(result.withheld_effects, 0);
+    }
+
+    #[test]
+    fn scheduled_result_persist_is_off_unless_the_literal_switch_is_true() {
+        if std::env::var_os(SCHEDULED_RESULT_PERSIST_ENV).is_none() {
+            assert!(!scheduled_result_persist_enabled(), "off by default");
+        }
+        assert!(mp_contracts::loop_fold::switch_from(Some("true")));
+        assert!(!mp_contracts::loop_fold::switch_from(Some("on")));
     }
 
     #[test]
