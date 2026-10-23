@@ -72,10 +72,13 @@ const DIGEST_SUFFIX: &str = "_ZDR_DIGEST";
 
 /// Why an operator-supplied ZDR attestation was refused.
 ///
-/// Every variant is a boot-time failure rather than a downgrade. A downgrade
-/// would leave an operator who explicitly asserted ZDR running without it, and
-/// the only signal would be `ZdrUnavailable` errors surfacing later under load
-/// — long after the change that caused them.
+/// Every variant is a boot-time failure rather than a downgrade, except that
+/// [`ZdrAttestation::resolve_lenient`] downgrades the two window errors
+/// (`Expired`, `NotYetEffective`) with a loud log: those say a verified approval
+/// ran out, not that the claim was made wrongly. A silent downgrade of anything
+/// else would leave an operator who explicitly asserted ZDR running without it,
+/// and the only signal would be `ZdrUnavailable` errors surfacing later under
+/// load — long after the change that caused them.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ZdrAttestationError {
     /// Some but not all attestation fields were supplied.
@@ -234,6 +237,19 @@ impl ZdrAttestation {
         raw: &RawAttestation,
         today: NaiveDate,
     ) -> Result<Self, ZdrAttestationError> {
+        let attestation = Self::validate_evidence(prefix, raw)?;
+        match attestation.window_error(prefix, today) {
+            Some(not_in_force) => Err(not_in_force),
+            None => Ok(attestation),
+        }
+    }
+
+    /// Everything [`Self::validate`] checks except the in-force window: the
+    /// fields are present, well-formed and digest-bound, but `today` is not
+    /// consulted. Shared with [`Self::resolve_lenient`], which must tell a lapsed
+    /// attestation (an expired approval) from a forged or mistyped one (a boot
+    /// failure) and so needs the evidence verified before the window is judged.
+    fn validate_evidence(prefix: &str, raw: &RawAttestation) -> Result<Self, ZdrAttestationError> {
         let present = [
             &raw.resource_id,
             &raw.approval_ref,
@@ -302,25 +318,6 @@ impl ZdrAttestation {
             });
         }
 
-        if effective_date > today {
-            return Err(ZdrAttestationError::NotYetEffective {
-                prefix: prefix.to_owned(),
-                effective: effective_date,
-                today,
-            });
-        }
-
-        // Upper bound. An approval that lapsed months ago is not evidence of
-        // anything, and the operator who set it is not going to be reminded by
-        // anything else.
-        if review_by < today {
-            return Err(ZdrAttestationError::Expired {
-                prefix: prefix.to_owned(),
-                review_by,
-                today,
-            });
-        }
-
         Ok(Self {
             resource_id: raw.resource_id.trim().to_owned(),
             approval_ref: raw.approval_ref.trim().to_owned(),
@@ -328,6 +325,49 @@ impl ZdrAttestation {
             review_by,
             reviewer: raw.reviewer.trim().to_owned(),
             digest: expected,
+        })
+    }
+
+    /// Whether the approval covers `today`: effective on or before it and not
+    /// past its review-by date.
+    ///
+    /// Boot validation answers this once. A process keeps running long after the
+    /// date it booted on, so anything that advertises ZDR from a held attestation
+    /// asks again with the current date; otherwise a retention approval would
+    /// keep granting ZDR until the next restart.
+    #[must_use]
+    pub fn in_force(&self, today: NaiveDate) -> bool {
+        self.effective_date <= today && today <= self.review_by
+    }
+
+    /// [`Self::in_force`] on the current UTC date. What a provider asks each time
+    /// it advertises capabilities, so a held attestation stops granting ZDR on
+    /// the day after its review-by date without a restart.
+    #[must_use]
+    pub fn in_force_now(&self) -> bool {
+        self.in_force(chrono::Utc::now().date_naive())
+    }
+
+    /// Why this attestation does not cover `today`, or `None` when it does.
+    ///
+    /// An approval that lapsed months ago is not evidence of anything, and the
+    /// operator who set it is not going to be reminded by anything else.
+    fn window_error(&self, prefix: &str, today: NaiveDate) -> Option<ZdrAttestationError> {
+        if self.in_force(today) {
+            return None;
+        }
+        Some(if self.effective_date > today {
+            ZdrAttestationError::NotYetEffective {
+                prefix: prefix.to_owned(),
+                effective: self.effective_date,
+                today,
+            }
+        } else {
+            ZdrAttestationError::Expired {
+                prefix: prefix.to_owned(),
+                review_by: self.review_by,
+                today,
+            }
         })
     }
 
@@ -342,6 +382,13 @@ impl ZdrAttestation {
     ///
     /// Propagates [`Self::validate`].
     pub fn from_env(prefix: &str, today: NaiveDate) -> Result<Option<Self>, ZdrAttestationError> {
+        Self::read_raw(prefix)
+            .map(|raw| Self::validate(prefix, &raw, today))
+            .transpose()
+    }
+
+    /// The `{prefix}_ZDR_*` variables as read, or `None` when none is present.
+    fn read_raw(prefix: &str) -> Option<RawAttestation> {
         let read = |suffix: &str| -> String {
             std::env::var(format!("{prefix}{suffix}"))
                 .map(|value| value.trim().to_owned())
@@ -364,10 +411,10 @@ impl ZdrAttestation {
             && raw.reviewer.is_empty()
             && raw.digest.is_empty()
         {
-            return Ok(None);
+            return None;
         }
 
-        Self::validate(prefix, &raw, today).map(Some)
+        Some(raw)
     }
 
     /// Resolve the attestation for one provider surface, rejecting a legacy
@@ -397,6 +444,65 @@ impl ZdrAttestation {
             });
         }
         Ok(attestation)
+    }
+
+    /// Like [`Self::resolve`], except that an approval outside its in-force
+    /// window is not a boot failure.
+    ///
+    /// A lapsed `_ZDR_REVIEW_BY` used to abort inference-core, taking every
+    /// provider route down for a retention approval only ZDR traffic depends on.
+    /// The window is now a ZDR-only condition: [`ZdrResolution::NotInForce`]
+    /// leaves the surface without ZDR (so ZDR turns refuse with the usual typed
+    /// `zdr_unavailable`) and the caller logs why. Anything that says the
+    /// *evidence* is wrong, not merely old — an incomplete or malformed set of
+    /// fields, a digest mismatch, a legacy boolean with nothing behind it — stays
+    /// fatal, because that is a claim somebody made incorrectly rather than a
+    /// claim that ran out.
+    ///
+    /// # Errors
+    ///
+    /// Every [`Self::resolve`] error except [`ZdrAttestationError::Expired`] and
+    /// [`ZdrAttestationError::NotYetEffective`].
+    pub fn resolve_lenient(
+        prefix: &str,
+        legacy_var: &'static str,
+        legacy_confirmed: bool,
+        today: NaiveDate,
+    ) -> Result<ZdrResolution, ZdrAttestationError> {
+        Self::classify(
+            prefix,
+            legacy_var,
+            legacy_confirmed,
+            Self::read_raw(prefix),
+            today,
+        )
+    }
+
+    /// The pure core of [`Self::resolve_lenient`], over already-read fields.
+    fn classify(
+        prefix: &str,
+        legacy_var: &'static str,
+        legacy_confirmed: bool,
+        raw: Option<RawAttestation>,
+        today: NaiveDate,
+    ) -> Result<ZdrResolution, ZdrAttestationError> {
+        let Some(raw) = raw else {
+            if legacy_confirmed {
+                return Err(ZdrAttestationError::LegacyBooleanWithoutEvidence {
+                    legacy_var,
+                    prefix: prefix.to_owned(),
+                });
+            }
+            return Ok(ZdrResolution::Absent);
+        };
+        let attestation = Self::validate_evidence(prefix, &raw)?;
+        Ok(match attestation.window_error(prefix, today) {
+            None => ZdrResolution::InForce(attestation),
+            Some(reason) => ZdrResolution::NotInForce(NotInForce {
+                reason,
+                attestation,
+            }),
+        })
     }
 
     /// Warn when the attested resource id does not appear to describe `endpoint`.
@@ -482,7 +588,6 @@ impl ZdrAttestation {
 
     /// The date the retention approval must be re-verified by. Past this the
     /// attestation stops validating.
-    #[allow(dead_code)] // surfaced by the provenance receipt (strategy doc Phase 4)
     #[must_use]
     pub const fn review_by(&self) -> NaiveDate {
         self.review_by
@@ -500,6 +605,66 @@ impl ZdrAttestation {
     #[must_use]
     pub fn digest(&self) -> &str {
         &self.digest
+    }
+}
+
+/// A well-formed, digest-verified attestation whose window does not cover today:
+/// the approval lapsed, or has not started. It grants nothing, but it is kept so
+/// the operator is told exactly which date to act on and the review-by gauge
+/// still reports it.
+#[derive(Debug, PartialEq, Eq)]
+pub struct NotInForce {
+    /// Always [`ZdrAttestationError::Expired`] or
+    /// [`ZdrAttestationError::NotYetEffective`].
+    reason: ZdrAttestationError,
+    attestation: ZdrAttestation,
+}
+
+impl NotInForce {
+    /// Why the attestation does not cover today.
+    #[must_use]
+    pub const fn reason(&self) -> &ZdrAttestationError {
+        &self.reason
+    }
+
+    /// The evidence-verified attestation that is out of its window.
+    #[must_use]
+    pub const fn attestation(&self) -> &ZdrAttestation {
+        &self.attestation
+    }
+}
+
+/// What [`ZdrAttestation::resolve_lenient`] found for one provider surface.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ZdrResolution {
+    /// No attestation and no legacy claim: the surface makes no ZDR claim.
+    Absent,
+    /// A valid attestation covering today.
+    InForce(ZdrAttestation),
+    /// A valid attestation that does not cover today; the surface is not
+    /// ZDR-capable.
+    NotInForce(NotInForce),
+}
+
+impl ZdrResolution {
+    /// The attestation that may grant ZDR, if any. A [`Self::NotInForce`] one
+    /// never does.
+    #[must_use]
+    pub fn into_in_force(self) -> Option<ZdrAttestation> {
+        match self {
+            Self::InForce(attestation) => Some(attestation),
+            Self::Absent | Self::NotInForce(_) => None,
+        }
+    }
+
+    /// The evidence-verified attestation behind this resolution, in force or not.
+    #[must_use]
+    pub const fn attestation(&self) -> Option<&ZdrAttestation> {
+        match self {
+            Self::InForce(attestation) => Some(attestation),
+            Self::NotInForce(not_in_force) => Some(&not_in_force.attestation),
+            Self::Absent => None,
+        }
     }
 }
 
@@ -533,7 +698,9 @@ fn to_lower_hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{canonical_digest, RawAttestation, ZdrAttestation, ZdrAttestationError};
+    use super::{
+        canonical_digest, RawAttestation, ZdrAttestation, ZdrAttestationError, ZdrResolution,
+    };
     use chrono::NaiveDate;
 
     const PREFIX: &str = "AZURE_OPENAI";
@@ -863,6 +1030,115 @@ mod tests {
         // today() is 2026-08-17, two months past review-by.
         let error = ZdrAttestation::validate(PREFIX, &raw, today()).expect_err("lapsed must fail");
         assert!(matches!(error, ZdrAttestationError::Expired { .. }));
+    }
+
+    fn lapsed() -> RawAttestation {
+        let mut raw = RawAttestation {
+            effective_date: "2025-06-01".to_owned(),
+            review_by: "2026-06-01".to_owned(),
+            ..valid()
+        };
+        raw.digest = canonical_digest(&raw);
+        raw
+    }
+
+    fn classify(
+        raw: Option<RawAttestation>,
+        legacy_confirmed: bool,
+    ) -> Result<ZdrResolution, ZdrAttestationError> {
+        ZdrAttestation::classify(
+            PREFIX,
+            "LEGACY_ZDR_CONFIRMED",
+            legacy_confirmed,
+            raw,
+            today(),
+        )
+    }
+
+    /// DEC-33 D6: a lapsed approval must not take the whole service down (it
+    /// aborted boot before, so a forgotten review date was an inference outage),
+    /// and it must not grant ZDR either.
+    #[test]
+    fn lapsed_attestation_refuses_zdr_but_boots() {
+        let resolution = classify(Some(lapsed()), false).expect("a lapse is not a boot failure");
+        let ZdrResolution::NotInForce(not_in_force) = &resolution else {
+            panic!("expected NotInForce, got {resolution:?}");
+        };
+        assert!(matches!(
+            not_in_force.reason(),
+            ZdrAttestationError::Expired { .. }
+        ));
+        assert_eq!(
+            not_in_force.attestation().review_by(),
+            NaiveDate::from_ymd_opt(2026, 6, 1).expect("static date"),
+            "the lapsed review-by date stays available for the gauge and the log"
+        );
+        assert_eq!(resolution.into_in_force(), None, "a lapse never grants ZDR");
+    }
+
+    #[test]
+    fn a_not_yet_effective_attestation_boots_without_zdr() {
+        let mut raw = RawAttestation {
+            effective_date: "2027-01-01".to_owned(),
+            review_by: "2028-01-01".to_owned(),
+            ..valid()
+        };
+        raw.digest = canonical_digest(&raw);
+        let resolution = classify(Some(raw), false).expect("not yet effective is not fatal");
+        assert!(matches!(
+            &resolution,
+            ZdrResolution::NotInForce(n)
+                if matches!(n.reason(), ZdrAttestationError::NotYetEffective { .. })
+        ));
+        assert_eq!(resolution.into_in_force(), None);
+    }
+
+    #[test]
+    fn an_in_force_attestation_resolves_leniently_and_an_absent_one_is_absent() {
+        let resolution = classify(Some(valid()), false).expect("valid");
+        assert!(matches!(resolution, ZdrResolution::InForce(_)));
+        assert!(resolution.into_in_force().is_some());
+        assert_eq!(classify(None, false), Ok(ZdrResolution::Absent));
+    }
+
+    /// Only the window is lenient. A lapsed date does not excuse evidence that is
+    /// wrong: a digest that does not match, missing fields, or a legacy boolean
+    /// with nothing behind it all still abort boot.
+    #[test]
+    fn evidence_errors_stay_fatal_even_when_the_window_has_lapsed() {
+        let forged = RawAttestation {
+            digest: "CHANGEME".to_owned(),
+            ..lapsed()
+        };
+        assert!(matches!(
+            classify(Some(forged), false),
+            Err(ZdrAttestationError::DigestMismatch { .. })
+        ));
+
+        let partial = RawAttestation {
+            resource_id: String::new(),
+            ..lapsed()
+        };
+        assert!(matches!(
+            classify(Some(partial), false),
+            Err(ZdrAttestationError::Incomplete { .. })
+        ));
+
+        assert!(matches!(
+            classify(None, true),
+            Err(ZdrAttestationError::LegacyBooleanWithoutEvidence { .. })
+        ));
+    }
+
+    /// `in_force` is what callers that outlive boot ask with the current date.
+    #[test]
+    fn in_force_is_inclusive_at_both_ends_of_the_window() {
+        let attestation = ZdrAttestation::validate(PREFIX, &valid(), today()).expect("valid");
+        let date = |y, m, d| NaiveDate::from_ymd_opt(y, m, d).expect("static date");
+        assert!(!attestation.in_force(date(2026, 5, 31)));
+        assert!(attestation.in_force(date(2026, 6, 1)));
+        assert!(attestation.in_force(date(2027, 6, 1)));
+        assert!(!attestation.in_force(date(2027, 6, 2)));
     }
 
     /// The boundary: still in force on the review-by date itself.

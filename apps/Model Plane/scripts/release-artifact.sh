@@ -121,6 +121,7 @@ Usage:
   scripts/release-artifact.sh validate-deployability <artifact-directory>
   scripts/release-artifact.sh validate-lock <images.lock.env>
   scripts/release-artifact.sh validate-runtime-config <runtime.env> <config-policy.tsv> <runtime-public-policy.env> <compatibility-gates.env>
+  scripts/release-artifact.sh check-zdr-attestation <runtime-public-policy.env> [--today YYYY-MM-DD]
   scripts/release-artifact.sh snapshot-runtime-config <runtime.env> <config-policy.tsv> <runtime-public-policy.env> <compatibility-gates.env> <destination>
 
 `build` creates one Docker archive per application and infrastructure image
@@ -151,6 +152,12 @@ ZDR_RETENTION_PATH must be either
 `zdr-provider-route-attested` or `authoritative-non-zdr-policy-attested`, with
 a non-secret SHA-256 evidence digest. It is an operator evidence gate, not a
 substitute for live tests.
+
+A ZDR claim in the runtime public policy (AZURE_OPENAI_ZDR_CONFIRMED=true or
+any AZURE_OPENAI_/AZURE_ANTHROPIC_ ZDR_* attestation field) is accepted only
+with a complete, in-force attestation whose digest is recomputed here, passed
+gates and the provider-route retention path. check-zdr-attestation runs just the
+attestation check and reports the days left before each review-by date.
 
 The runtime-public-policy file contains every non-secret override and is part
 of the signed artifact. The external runtime file may contain only the audited
@@ -804,6 +811,104 @@ validate_https_public_url() {
     die "$name has an invalid HTTPS authority"
 }
 
+# Days since 1970-01-01 for an ISO date. Fails when the text is not a real
+# calendar date, which is the same rule inference-core applies to the
+# attestation dates (provider/zdr.rs).
+iso_date_to_days() {
+  [[ "$1" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || return 1
+  awk -v date="$1" 'BEGIN {
+    split(date, part, "-")
+    y = part[1] + 0; m = part[2] + 0; d = part[3] + 0
+    leap = (y % 4 == 0 && (y % 100 != 0 || y % 400 == 0))
+    dim = (m == 2) ? 28 + leap : ((m == 4 || m == 6 || m == 9 || m == 11) ? 30 : 31)
+    if (m < 1 || m > 12 || d < 1 || d > dim) exit 1
+    if (m <= 2) y--
+    era = int(y / 400)
+    yoe = y - era * 400
+    doy = int((153 * ((m + 9) % 12) + 2) / 5) + d - 1
+    print era * 146097 + yoe * 365 + int(yoe / 4) - int(yoe / 100) + doy - 719468
+  }'
+}
+
+# Whether a public policy makes a ZDR claim for one provider surface: the legacy
+# boolean set to true, or any attestation field with a value. Matches
+# inference-core, which treats a present field as a claim and an empty one as none.
+zdr_surface_claimed() {
+  local file="$1" prefix="$2"
+  grep -Eq "^${prefix}_ZDR_(RESOURCE_ID|APPROVAL_REF|EFFECTIVE_DATE|REVIEW_BY|REVIEWER|DIGEST)=." "$file" ||
+    grep -q "^${prefix}_ZDR_CONFIRMED=true$" "$file"
+}
+
+# Check one surface's evidence-bound ZDR attestation the way inference-core does
+# at boot (provider/zdr.rs): every field present, dates real, review-by after
+# the effective date, the digest recomputed from the five fields, and today
+# inside the window. A lapsed attestation is refused here even though the
+# running service would only stop granting ZDR: a candidate must not ship a
+# claim that is already out of date.
+validate_zdr_attestation() {
+  local file="$1" prefix="$2" today="$3" field count supplied expected
+  local resource approval effective review_by reviewer
+  local effective_days review_days today_days
+  local missing=()
+  for field in RESOURCE_ID APPROVAL_REF EFFECTIVE_DATE REVIEW_BY REVIEWER DIGEST; do
+    count="$(grep -Ec "^${prefix}_ZDR_${field}=." "$file" || true)"
+    [[ "$count" == "1" ]] || missing+=("${prefix}_ZDR_${field}")
+  done
+  [[ "${#missing[@]}" == "0" ]] ||
+    die "ZDR attestation for $prefix is incomplete: missing or empty ${missing[*]}"
+  resource="$(assignment_value "$file" "${prefix}_ZDR_RESOURCE_ID")"
+  approval="$(assignment_value "$file" "${prefix}_ZDR_APPROVAL_REF")"
+  effective="$(assignment_value "$file" "${prefix}_ZDR_EFFECTIVE_DATE")"
+  review_by="$(assignment_value "$file" "${prefix}_ZDR_REVIEW_BY")"
+  reviewer="$(assignment_value "$file" "${prefix}_ZDR_REVIEWER")"
+  supplied="$(assignment_value "$file" "${prefix}_ZDR_DIGEST" | tr 'A-F' 'a-f')"
+  effective_days="$(iso_date_to_days "$effective")" ||
+    die "${prefix}_ZDR_EFFECTIVE_DATE is not a YYYY-MM-DD date"
+  review_days="$(iso_date_to_days "$review_by")" ||
+    die "${prefix}_ZDR_REVIEW_BY is not a YYYY-MM-DD date"
+  today_days="$(iso_date_to_days "$today")" ||
+    die "today is not a YYYY-MM-DD date"
+  [[ "$review_days" -gt "$effective_days" ]] ||
+    die "ZDR attestation for $prefix: review-by $review_by is not after the effective date $effective"
+  expected="$(printf '%s\n%s\n%s\n%s\n%s\n' "$resource" "$approval" "$effective" "$review_by" "$reviewer" | sha256_stdin)"
+  [[ "$supplied" == "$expected" ]] ||
+    die "ZDR attestation for $prefix: ${prefix}_ZDR_DIGEST does not match the digest of the supplied fields (expected $expected)"
+  [[ "$today_days" -ge "$effective_days" ]] ||
+    die "ZDR attestation for $prefix is not yet in force (effective $effective)"
+  [[ "$today_days" -le "$review_days" ]] ||
+    die "ZDR attestation for $prefix lapsed on $review_by; re-verify the retention approval and recompute ${prefix}_ZDR_REVIEW_BY and ${prefix}_ZDR_DIGEST"
+}
+
+# A ZDR claim is only releasable on a candidate whose compatibility gates passed
+# and whose retention path says the provider route itself is attested.
+require_zdr_provider_route_gates() {
+  local gates_file="$1"
+  [[ "$(compatibility_gate_status "$gates_file" "$(assignment_value "$gates_file" SOURCE_REVISION)")" == "passed" ]] ||
+    die "ZDR provider confirmation requires passed compatibility gates"
+  [[ "$(assignment_value "$gates_file" ZDR_RETENTION_PATH)" == "zdr-provider-route-attested" ]] ||
+    die "ZDR provider confirmation requires provider-route attestation"
+}
+
+# Operator entry point (scripts/zdr-attestation-check.sh): validate every ZDR
+# claim in a runtime public policy and report how long each has left.
+check_zdr_attestations() {
+  local policy="$1" today="${2:-}" prefix review_by remaining
+  require_regular_file "$policy"
+  validate_restricted_dotenv "$policy" "ZDR attestation policy"
+  [[ -n "$today" ]] || today="$(date -u +%Y-%m-%d)"
+  iso_date_to_days "$today" >/dev/null || die "--today must be a YYYY-MM-DD date"
+  for prefix in AZURE_OPENAI AZURE_ANTHROPIC; do
+    if zdr_surface_claimed "$policy" "$prefix"; then
+      validate_zdr_attestation "$policy" "$prefix" "$today"
+      review_by="$(assignment_value "$policy" "${prefix}_ZDR_REVIEW_BY")"
+      remaining=$(($(iso_date_to_days "$review_by") - $(iso_date_to_days "$today")))
+      printf '%s: attestation valid, review by %s (%s days left)\n' "$prefix" "$review_by" "$remaining"
+    else
+      printf '%s: no ZDR claim\n' "$prefix"
+    fi
+  done
+}
+
 validate_runtime_public_policy() {
   local policy_source="$1" gates_source="$2" config_source="$3"
   local policy_file gates_file config_file
@@ -815,7 +920,7 @@ validate_runtime_public_policy() {
 
 validate_runtime_public_policy_files() {
   local policy_file="$1" gates_file="$2" config_file="$3"
-  local issuer jwks zdr line key value partition
+  local issuer jwks zdr line key value partition openai_claimed today
   validate_config_policy "$config_file"
   validate_restricted_dotenv "$policy_file" "runtime public policy"
   while IFS= read -r line || [[ -n "$line" ]]; do
@@ -849,13 +954,16 @@ validate_runtime_public_policy_files() {
   fi
   [[ "$zdr" == "false" || "$zdr" == "true" ]] ||
     die "AZURE_OPENAI_ZDR_CONFIRMED must be true or false"
-  if [[ "$zdr" == "true" ]]; then
+  today="$(date -u +%Y-%m-%d)"
+  # A claim is the boolean or any attestation field: inference-core grants ZDR
+  # from the attestation alone, so a policy carrying one with the boolean false
+  # still serves ZDR and must meet the same gates as one that says true.
+  openai_claimed=false
+  zdr_surface_claimed "$policy_file" AZURE_OPENAI && openai_claimed=true
+  if [[ "$openai_claimed" == "true" ]]; then
     local required route_value endpoint api_version region chat_deployments
     local embedding_deployments provider_order residency legacy
-    [[ "$(compatibility_gate_status "$gates_file" "$(assignment_value "$gates_file" SOURCE_REVISION)")" == "passed" ]] ||
-      die "ZDR provider confirmation requires passed compatibility gates"
-    [[ "$(assignment_value "$gates_file" ZDR_RETENTION_PATH)" == "zdr-provider-route-attested" ]] ||
-      die "ZDR provider confirmation requires provider-route attestation"
+    require_zdr_provider_route_gates "$gates_file"
     for required in AZURE_OPENAI_ENDPOINT AZURE_OPENAI_API_VERSION AZURE_OPENAI_REGION \
       AZURE_OPENAI_CHAT_DEPLOYMENTS AZURE_OPENAI_EMBEDDING_DEPLOYMENTS \
       INFERENCE_PROVIDER_ORDER MODEL_PLANE_RESIDENCY; do
@@ -888,12 +996,34 @@ validate_runtime_public_policy_files() {
         die "ZDR provider route forbids legacy deployment aliases"
       fi
     done
+    validate_zdr_attestation "$policy_file" AZURE_OPENAI "$today"
+  fi
+  if grep -q '^AZURE_ANTHROPIC_ZDR_CONFIRMED=' "$policy_file"; then
+    [[ "$(assignment_value "$policy_file" AZURE_ANTHROPIC_ZDR_CONFIRMED)" == "false" ||
+      "$(assignment_value "$policy_file" AZURE_ANTHROPIC_ZDR_CONFIRMED)" == "true" ]] ||
+      die "AZURE_ANTHROPIC_ZDR_CONFIRMED must be true or false"
+  fi
+  if zdr_surface_claimed "$policy_file" AZURE_ANTHROPIC; then
+    local anthropic_required anthropic_value
+    require_zdr_provider_route_gates "$gates_file"
+    for anthropic_required in AZURE_ANTHROPIC_ENDPOINT AZURE_ANTHROPIC_REGION AZURE_ANTHROPIC_DEPLOYMENTS; do
+      [[ "$(grep -c "^${anthropic_required}=." "$policy_file" || true)" == "1" ]] ||
+        die "ZDR provider confirmation requires signed $anthropic_required"
+    done
+    validate_https_public_url AZURE_ANTHROPIC_ENDPOINT "$(assignment_value "$policy_file" AZURE_ANTHROPIC_ENDPOINT)"
+    anthropic_value="$(assignment_value "$policy_file" AZURE_ANTHROPIC_REGION)"
+    [[ "$anthropic_value" =~ ^[a-z0-9-]+$ ]] ||
+      die "ZDR provider route has an invalid Anthropic region"
+    anthropic_value="$(assignment_value "$policy_file" AZURE_ANTHROPIC_DEPLOYMENTS)"
+    [[ "$anthropic_value" =~ ^[A-Za-z0-9._-]+(,[A-Za-z0-9._-]+)*$ ]] ||
+      die "ZDR provider route has an invalid Anthropic deployment catalog"
+    validate_zdr_attestation "$policy_file" AZURE_ANTHROPIC "$today"
   fi
 }
 
 validate_runtime_config() {
   local runtime_source policy_source public_policy_source gates_source
-  local runtime_file policy_file public_policy gates_file line key partition assignments
+  local runtime_file policy_file public_policy gates_file line key partition surface_key
   runtime_source="$(absolute_path "$1")"
   policy_source="$(absolute_path "$2")"
   public_policy_source="$(absolute_path "$3")"
@@ -915,13 +1045,14 @@ validate_runtime_config() {
     [[ "$partition" == "secret" ]] ||
       die "external runtime config permits secret keys only"
   done <"$runtime_file"
-  assignments="$(assignment_value "$public_policy" AZURE_OPENAI_ZDR_CONFIRMED)"
-  if [[ "$assignments" == "true" ]]; then
-    [[ "$(grep -c '^AZURE_OPENAI_API_KEY=' "$runtime_file" || true)" == "1" ]] ||
-      die "ZDR provider route requires AZURE_OPENAI_API_KEY in the secret runtime file"
-    [[ "$(assignment_value "$runtime_file" AZURE_OPENAI_API_KEY)" != "" ]] ||
-      die "ZDR provider route requires AZURE_OPENAI_API_KEY in the secret runtime file"
-  fi
+  for surface_key in AZURE_OPENAI AZURE_ANTHROPIC; do
+    if zdr_surface_claimed "$public_policy" "$surface_key"; then
+      [[ "$(grep -c "^${surface_key}_API_KEY=" "$runtime_file" || true)" == "1" ]] ||
+        die "ZDR provider route requires ${surface_key}_API_KEY in the secret runtime file"
+      [[ "$(assignment_value "$runtime_file" "${surface_key}_API_KEY")" != "" ]] ||
+        die "ZDR provider route requires ${surface_key}_API_KEY in the secret runtime file"
+    fi
+  done
 }
 
 snapshot_runtime_config() {
@@ -1907,6 +2038,10 @@ case "$command" in
   validate-runtime-config)
     [[ $# == 5 ]] || { usage >&2; exit 2; }
     validate_runtime_config "$2" "$3" "$4" "$5"
+    ;;
+  check-zdr-attestation)
+    [[ $# == 2 || ( $# == 4 && "$3" == "--today" ) ]] || { usage >&2; exit 2; }
+    check_zdr_attestations "$2" "${4:-}"
     ;;
   snapshot-runtime-config)
     [[ $# == 6 ]] || { usage >&2; exit 2; }

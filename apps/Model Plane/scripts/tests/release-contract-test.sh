@@ -71,6 +71,7 @@ make_artifact_fixture() {
   done
   printf 'key\tpartition\nAUTH_CORE_ISSUER\tpublic\nAUTH_CORE_JWKS_URL\tpublic\n' >"$artifact/config-policy.tsv"
   printf 'AZURE_OPENAI_ZDR_CONFIRMED\tpublic\nMODEL_POSTGRES_PASSWORD\tsecret\n' >>"$artifact/config-policy.tsv"
+  printf 'AZURE_OPENAI_ZDR_RESOURCE_ID\tpublic\nAZURE_OPENAI_ZDR_DIGEST\tpublic\n' >>"$artifact/config-policy.tsv"
   printf 'SOURCE_REVISION\tartifact\nBUILD_DATE\tartifact\n' >>"$artifact/config-policy.tsv"
   printf 'AUTH_CORE_ISSUER=https://auth.release.example/api/convex-auth\nAUTH_CORE_JWKS_URL=https://jwks.release.example/keys/model-plane\nAZURE_OPENAI_ZDR_CONFIRMED=false\n' \
     >"$artifact/runtime-public-policy.env"
@@ -418,6 +419,25 @@ if "$ROOT_DIR/scripts/release-artifact.sh" validate-runtime-config \
   echo "release runtime policy accepted ZDR confirmation without provider attestation" >&2
   exit 1
 fi
+# Attestation fields alone are a ZDR claim: inference-core grants ZDR from them
+# without the legacy boolean, so the release gate must apply to them too.
+{
+  cat "$artifact/runtime-public-policy.env"
+  printf 'AZURE_OPENAI_ZDR_RESOURCE_ID=/subscriptions/a/openai-x\n'
+} >"$TMP_DIR/runtime-attestation-only-policy.env"
+if "$ROOT_DIR/scripts/release-artifact.sh" validate-runtime-config \
+  "$runtime_env" "$artifact/config-policy.tsv" \
+  "$TMP_DIR/runtime-attestation-only-policy.env" "$artifact/compatibility-gates.env" \
+  >"$TMP_DIR/runtime-attestation-only.out" 2>&1; then
+  echo "release runtime policy accepted a ZDR attestation field without passed gates" >&2
+  exit 1
+fi
+grep -F 'ZDR provider confirmation requires passed compatibility gates' \
+  "$TMP_DIR/runtime-attestation-only.out" >/dev/null || {
+  echo "release runtime policy rejected an attestation-only ZDR claim for the wrong reason" >&2
+  cat "$TMP_DIR/runtime-attestation-only.out" >&2
+  exit 1
+}
 printf 'UNAPPROVED_OVERRIDE=value\n' >>"$runtime_env"
 if "$ROOT_DIR/scripts/release-artifact.sh" validate-runtime-config "$runtime_env" \
   "$artifact/config-policy.tsv" "$artifact/runtime-public-policy.env" \

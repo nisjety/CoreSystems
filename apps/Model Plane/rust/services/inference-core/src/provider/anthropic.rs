@@ -1023,7 +1023,7 @@ impl ProviderRouter for AnthropicProvider {
             supports_thinking: true,
             supports_streaming: true,
             supports_embeddings: false,
-            supports_zdr: self.zdr.is_some(),
+            supports_zdr: self.zdr.as_deref().is_some_and(ZdrAttestation::in_force_now),
             modalities: vec!["chat".to_owned(), "vision".to_owned()],
             max_context_tokens: 200_000,
             max_output_tokens: 8_192,
@@ -1910,6 +1910,40 @@ mod zdr_capability_tests {
         assert!(
             provider.capabilities().supports_zdr,
             "an attested Foundry Claude resource must be eligible for ZDR traffic"
+        );
+    }
+
+    /// A running process re-checks the date: an attestation that was valid at
+    /// boot stops granting ZDR once its review-by date has passed, without a
+    /// restart.
+    #[test]
+    fn review_by_passes_while_running_stops_granting() {
+        use crate::provider::zdr::canonical_digest;
+        let mut raw = RawAttestation {
+            resource_id: "/subscriptions/abc/rg/eu/foundry-claude".to_owned(),
+            approval_ref: "MAM-2020-0002".to_owned(),
+            effective_date: "2020-01-01".to_owned(),
+            review_by: "2020-06-01".to_owned(),
+            reviewer: "ima@aquatiq.com".to_owned(),
+            digest: String::new(),
+        };
+        raw.digest = canonical_digest(&raw);
+        let lapsed = ZdrAttestation::validate(
+            "AZURE_ANTHROPIC",
+            &raw,
+            chrono::NaiveDate::from_ymd_opt(2020, 3, 1).expect("static date"),
+        )
+        .expect("in force on the boot date");
+        let provider = AnthropicProvider::new_azure(
+            "k",
+            "https://res.services.ai.azure.com",
+            vec!["claude-sonnet-4-6".to_owned()],
+        )
+        .expect("azure provider")
+        .with_zdr_attestation(Some(Arc::new(lapsed)));
+        assert!(
+            !provider.capabilities().supports_zdr,
+            "an attestation past its review-by date must not advertise ZDR"
         );
     }
 

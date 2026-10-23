@@ -810,7 +810,7 @@ impl ProviderRouter for OpenAiProvider {
             supports_thinking: true,
             supports_streaming: true,
             supports_embeddings,
-            supports_zdr: self.zdr.is_some(),
+            supports_zdr: self.zdr.as_deref().is_some_and(ZdrAttestation::in_force_now),
             modalities,
             max_context_tokens,
             max_output_tokens,
@@ -1305,6 +1305,46 @@ mod tests {
     fn parse_tool_calls_empty_for_plain_answer() {
         let json = serde_json::json!({ "choices": [{ "message": { "content": "hi" } }] });
         assert!(parse_tool_calls(&json).is_empty());
+    }
+
+    /// An attestation that was valid when the process booted (validated against
+    /// a date inside its window) but whose review-by date has since passed.
+    fn attestation_that_lapsed_after_boot() -> Arc<ZdrAttestation> {
+        use crate::provider::zdr::{canonical_digest, RawAttestation};
+        let mut raw = RawAttestation {
+            resource_id: "/subscriptions/abc/rg/eu/example".to_owned(),
+            approval_ref: "MAM-2020-0001".to_owned(),
+            effective_date: "2020-01-01".to_owned(),
+            review_by: "2020-06-01".to_owned(),
+            reviewer: "ima@aquatiq.com".to_owned(),
+            digest: String::new(),
+        };
+        raw.digest = canonical_digest(&raw);
+        Arc::new(
+            ZdrAttestation::validate(
+                "AZURE_OPENAI",
+                &raw,
+                chrono::NaiveDate::from_ymd_opt(2020, 3, 1).expect("static date"),
+            )
+            .expect("in force on the boot date"),
+        )
+    }
+
+    /// A running process re-checks the date: once review-by has passed, the
+    /// provider stops advertising ZDR without a restart.
+    #[test]
+    fn review_by_passes_while_running_stops_granting() {
+        let provider = OpenAiProvider::new_azure(
+            "key",
+            "https://example.openai.azure.com/",
+            "2025-01-01-preview",
+        )
+        .expect("azure provider")
+        .with_zdr_attestation(Some(attestation_that_lapsed_after_boot()));
+        assert!(
+            !provider.capabilities().supports_zdr,
+            "an attestation past its review-by date must not advertise ZDR"
+        );
     }
 
     #[test]

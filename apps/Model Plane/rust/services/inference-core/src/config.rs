@@ -2,7 +2,8 @@
 
 use anyhow::{Context, Result};
 
-use crate::provider::zdr::ZdrAttestation;
+use crate::metrics;
+use crate::provider::zdr::{ZdrAttestation, ZdrResolution};
 
 /// Top-level configuration for inference-core.
 // The flags are independent deny-by-default residency/retention opt-ins, not a
@@ -264,11 +265,20 @@ impl InferenceConfig {
         // One `today` for the whole boot so every provider surface evaluates its
         // in-force window against the same date.
         let today = chrono::Utc::now().date_naive();
-        let azure_openai_zdr = resolve_zdr("AZURE_OPENAI", "AZURE_OPENAI_ZDR_CONFIRMED", today)
-            .context("Azure OpenAI ZDR attestation")?;
-        let azure_anthropic_zdr =
-            resolve_zdr("AZURE_ANTHROPIC", "AZURE_ANTHROPIC_ZDR_CONFIRMED", today)
-                .context("Azure Anthropic (Foundry Claude) ZDR attestation")?;
+        let azure_openai_zdr = resolve_zdr(
+            "azure_openai",
+            "AZURE_OPENAI",
+            "AZURE_OPENAI_ZDR_CONFIRMED",
+            today,
+        )
+        .context("Azure OpenAI ZDR attestation")?;
+        let azure_anthropic_zdr = resolve_zdr(
+            "azure_anthropic",
+            "AZURE_ANTHROPIC",
+            "AZURE_ANTHROPIC_ZDR_CONFIRMED",
+            today,
+        )
+        .context("Azure Anthropic (Foundry Claude) ZDR attestation")?;
 
         let azure_openai_deployment_type = trimmed_env("AZURE_OPENAI_DEPLOYMENT_TYPE");
 
@@ -352,7 +362,14 @@ impl InferenceConfig {
 /// ZDR without supplying the attestation fails boot: silently dropping the claim
 /// would leave them believing ZDR is on while requests fail later with
 /// `ZdrUnavailable`, far from the change that caused it.
+///
+/// An approval outside its in-force window is the one thing that does not fail
+/// boot (DEC-33 D6): the surface boots without ZDR, so ZDR turns refuse with the
+/// typed `zdr_unavailable`, an ERROR is logged and the review-by gauge keeps
+/// reporting the date. Failing boot there made a forgotten review date a whole
+/// inference outage, though only ZDR traffic depends on the approval.
 fn resolve_zdr(
+    surface: &'static str,
     prefix: &str,
     legacy_var: &'static str,
     today: chrono::NaiveDate,
@@ -360,12 +377,20 @@ fn resolve_zdr(
     let legacy_confirmed = std::env::var(legacy_var)
         .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true"))
         .unwrap_or(false);
-    Ok(ZdrAttestation::resolve(
-        prefix,
-        legacy_var,
-        legacy_confirmed,
-        today,
-    )?)
+    let resolution = ZdrAttestation::resolve_lenient(prefix, legacy_var, legacy_confirmed, today)?;
+    if let Some(attestation) = resolution.attestation() {
+        metrics::record_zdr_attestation_review_by(surface, attestation.review_by());
+    }
+    if let ZdrResolution::NotInForce(not_in_force) = &resolution {
+        tracing::error!(
+            surface,
+            review_by = %not_in_force.attestation().review_by(),
+            "ZDR attestation is not in force; this surface will refuse ZDR requests until it is \
+             re-verified and its date and digest are updated: {}",
+            not_in_force.reason()
+        );
+    }
+    Ok(resolution.into_in_force())
 }
 
 /// Whether a declared Azure deployment type processes requests outside a single
