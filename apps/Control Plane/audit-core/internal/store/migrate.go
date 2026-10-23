@@ -48,6 +48,7 @@ var migrations = []migration{
 	{version: "006_v2_producer_authority", name: "v2 producer authority identity", sql: v2ProducerAuthoritySQL},
 	{version: "007_audit_chain", name: "per-org audit hash chain", sql: auditChainSQL},
 	{version: "008_audit_chain_checkpoints", name: "signed audit chain checkpoints and attestations", sql: auditChainCheckpointsSQL},
+	{version: "009_audit_chain_verification_state", name: "audit chain verifier state", sql: auditChainVerificationStateSQL},
 }
 
 // Migrate applies the bundled SQL schema exactly once, tracking it in a

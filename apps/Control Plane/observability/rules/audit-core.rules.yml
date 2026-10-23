@@ -47,3 +47,28 @@ groups:
         labels: { severity: critical, plane: control }
         annotations:
           summary: "audit-core has been disconnected from a NATS bus for over 5 minutes"
+
+      # Chain tamper evidence (build plan WS06 S4). Both series are unlabelled
+      # counters (no org label: the per-org picture is audit_chain_verifications
+      # and audit_chain_heads), and neither carries row content.
+      - alert: ControlAuditChainVerifyFailed
+        expr: increase(audit_core_chain_verify_failures_total[1h]) > 0
+        labels: { severity: critical, plane: control }
+        annotations:
+          summary: "audit-core's chain verifier found an org's audit chain broken"
+
+      - alert: ControlAuditChainBroken
+        expr: increase(audit_core_chain_broken_total[1h]) > 0
+        labels: { severity: critical, plane: control }
+        annotations:
+          summary: "audit-core found an org's chain head disagreeing with its stored tip row at insert time"
+
+      - alert: ControlAuditChainVerifyStale
+        # The verifier runs once a day by default (AUDIT_CHAIN_VERIFY_INTERVAL);
+        # 36 hours leaves one missed pass. Raise this with a longer interval.
+        # The gauge starts at the loop's start time, so a verifier that never
+        # completes a pass goes stale instead of staying silent.
+        expr: time() - audit_core_chain_last_verify_timestamp_seconds > 36 * 3600
+        labels: { severity: warning, plane: control }
+        annotations:
+          summary: "audit-core's chain verifier has not completed a pass in over 36 hours"

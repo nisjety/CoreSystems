@@ -27,6 +27,7 @@ import (
 	metricsserver "github.com/triodelab/controlplane/audit-core/internal/metrics"
 	"github.com/triodelab/controlplane/audit-core/internal/store"
 	"github.com/triodelab/controlplane/audit-core/internal/subscriber"
+	"github.com/triodelab/controlplane/audit-core/internal/verifier"
 )
 
 func main() {
@@ -117,6 +118,11 @@ func main() {
 	go runRetention(ctx, st, cfg.RetentionDays)
 	if cfg.ChainEnabled && cfg.KeyRing.CanSign() {
 		go runAttestor(ctx, st, cfg.AttestInterval)
+	}
+
+	// The verifier follows the chain switch unless AUDIT_CHAIN_VERIFY_ENABLED says 0.
+	if verifier.Enabled(os.Getenv("AUDIT_CHAIN_VERIFY_ENABLED"), cfg.ChainEnabled) {
+		go verifier.Run(ctx, st, verifier.Config{Interval: verifier.ParseInterval(os.Getenv("AUDIT_CHAIN_VERIFY_INTERVAL"))})
 	}
 
 	r := chi.NewRouter()

@@ -829,6 +829,16 @@ services:
             AUDIT_EXTRA_NATS_BUSES: >-
                 [{"name":"model","plane":"model","url":"nats://model-nats:4222","user":"audit-core-model","password":"${AUDIT_MODEL_NATS_PASSWORD:?AUDIT_MODEL_NATS_PASSWORD is required}"},{"name":"application","plane":"application","url":"nats://application-nats:4222","user":"audit-core-application","password":"${AUDIT_APPLICATION_NATS_PASSWORD:?AUDIT_APPLICATION_NATS_PASSWORD is required}"}]
             HTTP_PORT: "8187"
+            AUDIT_CHAIN_KEY_ID: ${AUDIT_CHAIN_KEY_ID:-}
+            AUDIT_CHAIN_PRIVATE_KEY_BASE64: ${AUDIT_CHAIN_PRIVATE_KEY_BASE64:-}
+            AUDIT_CHAIN_PUBLIC_KEY_BASE64: ${AUDIT_CHAIN_PUBLIC_KEY_BASE64:-}
+            AUDIT_CHAIN_VERIFY_KEYS: ${AUDIT_CHAIN_VERIFY_KEYS:-}
+            AUDIT_CHAIN_ATTEST_INTERVAL: ${AUDIT_CHAIN_ATTEST_INTERVAL:-60s}
+            AUDIT_CHAIN_PRUNE_ENABLED: ${AUDIT_CHAIN_PRUNE_ENABLED:-0}
+            AUDIT_CHAIN_PRUNE_DRYRUN: ${AUDIT_CHAIN_PRUNE_DRYRUN:-0}
+            AUDIT_CHAIN_VERIFY_ENABLED: ${AUDIT_CHAIN_VERIFY_ENABLED:-}
+            AUDIT_CHAIN_VERIFY_INTERVAL: ${AUDIT_CHAIN_VERIFY_INTERVAL:-24h}
+            ENVIRONMENT: ${ENVIRONMENT:-development}
             AUDIT_CORE_SERVICE_CREDENTIALS: >-
                 [{"principal":"verevon-gateway","audience":"audit-core","token":"${GATEWAY_AUDIT_CORE_SERVICE_TOKEN:?GATEWAY_AUDIT_CORE_SERVICE_TOKEN is required}","scopes":["audit:read:self"]},{"principal":"integration-corev2","audience":"audit-core","token":"${INTEGRATION_AUDIT_CORE_SERVICE_TOKEN:?INTEGRATION_AUDIT_CORE_SERVICE_TOKEN is required}","scopes":["audit:write"],"planes":["ingestion"]}]
         ports:

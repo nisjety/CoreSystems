@@ -101,3 +101,72 @@ tests:
       - eval_time: 20m
         alertname: ControlAuditCoreNATSDisconnected
         exp_alerts: []
+
+  - interval: 1m
+    name: a failed chain verification fires while the counter rises
+    input_series:
+      - series: 'audit_core_chain_verify_failures_total'
+        values: '0x5 1x20'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: ControlAuditChainVerifyFailed
+        exp_alerts:
+          - exp_labels: { severity: critical, plane: control }
+            exp_annotations:
+              summary: "audit-core's chain verifier found an org's audit chain broken"
+
+  - interval: 1m
+    name: clean chain verifications stay quiet
+    input_series:
+      - series: 'audit_core_chain_verify_failures_total'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ControlAuditChainVerifyFailed
+        exp_alerts: []
+
+  - interval: 1m
+    name: a chain marked broken at insert time fires
+    input_series:
+      - series: 'audit_core_chain_broken_total'
+        values: '0x5 1x20'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: ControlAuditChainBroken
+        exp_alerts:
+          - exp_labels: { severity: critical, plane: control }
+            exp_annotations:
+              summary: "audit-core found an org's chain head disagreeing with its stored tip row at insert time"
+
+  - interval: 1m
+    name: an unchanged broken counter stays quiet after the window
+    input_series:
+      - series: 'audit_core_chain_broken_total'
+        values: '1x300'
+    alert_rule_test:
+      - eval_time: 200m
+        alertname: ControlAuditChainBroken
+        exp_alerts: []
+
+  - interval: 1m
+    name: a verifier that stopped finishing passes goes stale after 36 hours
+    input_series:
+      - series: 'audit_core_chain_last_verify_timestamp_seconds'
+        values: '0x2400'
+    alert_rule_test:
+      - eval_time: 37h
+        alertname: ControlAuditChainVerifyStale
+        exp_alerts:
+          - exp_labels: { severity: warning, plane: control }
+            exp_annotations:
+              summary: "audit-core's chain verifier has not completed a pass in over 36 hours"
+
+  - interval: 1m
+    name: a verifier that finished a pass within a day stays quiet
+    input_series:
+      - series: 'audit_core_chain_last_verify_timestamp_seconds'
+        values: '86400x2400'
+    alert_rule_test:
+      - eval_time: 30h
+        alertname: ControlAuditChainVerifyStale
+        exp_alerts: []
