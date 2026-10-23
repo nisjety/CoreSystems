@@ -14,6 +14,7 @@ import (
 	"github.com/triodelab/controlplane/audit-core/internal/api"
 	"github.com/triodelab/controlplane/audit-core/internal/events"
 	"github.com/triodelab/controlplane/audit-core/internal/store"
+	"github.com/triodelab/controlplane/audit-core/internal/verifier"
 )
 
 // stubStore satisfies store.Store's InsertAudit method without a real DB.
@@ -60,6 +61,18 @@ func (s *usageIngestStore) ListUsage(context.Context, store.UsageFilter) ([]stor
 }
 func (s *usageIngestStore) SummariseUsage(context.Context, string, time.Time, time.Time) ([]store.UsageSummary, error) {
 	return nil, nil
+}
+func (s *usageIngestStore) ComplianceEvents(context.Context, store.ComplianceFilter) (store.CompliancePage, error) {
+	return store.CompliancePage{}, nil
+}
+func (s *usageIngestStore) ComplianceManifest(context.Context, string, time.Time, time.Time) (store.ComplianceManifest, error) {
+	return store.ComplianceManifest{}, nil
+}
+func (s *usageIngestStore) ComplianceKeys(context.Context, string) ([]store.ComplianceKey, error) {
+	return nil, nil
+}
+func (s *usageIngestStore) VerifyOrg(context.Context, string, verifier.Options) (verifier.Report, error) {
+	return verifier.Report{}, nil
 }
 func (s *usageIngestStore) InsertAuditFromSource(_ context.Context, event *events.AuditEvent, source string) (bool, error) {
 	s.audit = event

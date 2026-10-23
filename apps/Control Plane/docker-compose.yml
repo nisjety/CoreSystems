@@ -840,7 +840,7 @@ services:
             AUDIT_CHAIN_VERIFY_INTERVAL: ${AUDIT_CHAIN_VERIFY_INTERVAL:-24h}
             ENVIRONMENT: ${ENVIRONMENT:-development}
             AUDIT_CORE_SERVICE_CREDENTIALS: >-
-                [{"principal":"verevon-gateway","audience":"audit-core","token":"${GATEWAY_AUDIT_CORE_SERVICE_TOKEN:?GATEWAY_AUDIT_CORE_SERVICE_TOKEN is required}","scopes":["audit:read:self"]},{"principal":"integration-corev2","audience":"audit-core","token":"${INTEGRATION_AUDIT_CORE_SERVICE_TOKEN:?INTEGRATION_AUDIT_CORE_SERVICE_TOKEN is required}","scopes":["audit:write"],"planes":["ingestion"]}]
+                [{"principal":"verevon-gateway","audience":"audit-core","token":"${GATEWAY_AUDIT_CORE_SERVICE_TOKEN:?GATEWAY_AUDIT_CORE_SERVICE_TOKEN is required}","scopes":["audit:read:self","audit:compliance:read:self"]},{"principal":"integration-corev2","audience":"audit-core","token":"${INTEGRATION_AUDIT_CORE_SERVICE_TOKEN:?INTEGRATION_AUDIT_CORE_SERVICE_TOKEN is required}","scopes":["audit:write"],"planes":["ingestion"]}]
         ports:
             # Native HTTP port 8187 (host and container). Kept clear of Model
             # Plane's browser-broker so the two never collide on the host.

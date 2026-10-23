@@ -204,3 +204,13 @@ func (k *KeyRing) VerifyCheckpoint(orgID string, throughSeq int64, throughHash [
 	}
 	return k.verify(keyID, payload, signature)
 }
+
+// SignPayload signs an arbitrary payload with the active key, for the compliance export manifest.
+func (k *KeyRing) SignPayload(payload []byte) (string, []byte, error) {
+	return k.sign(payload)
+}
+
+// VerifyPayload verifies a payload signature against the key with the given id.
+func (k *KeyRing) VerifyPayload(keyID string, payload, signature []byte) error {
+	return k.verify(keyID, payload, signature)
+}

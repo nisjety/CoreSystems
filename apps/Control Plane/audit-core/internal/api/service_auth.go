@@ -107,6 +107,12 @@ func parseServiceCredentialRegistry(raw string) ([]serviceCredential, error) {
 		for _, scope := range credential.Scopes {
 			switch scope {
 			case "audit:read:self":
+			case scopeComplianceRead:
+				// The compliance read API is the gateway's alone: it is the one
+				// caller that gates the route on the signed owner/admin role.
+				if credential.Principal != complianceGatewayPrincipal {
+					return nil, fmt.Errorf("audit-core compliance scope is reserved for the gateway principal")
+				}
 			case "audit:write":
 				writer = true
 			default:
@@ -208,6 +214,8 @@ func requiredAuditScope(request *http.Request) string {
 	case request.Method == http.MethodPost &&
 		(request.URL.Path == "/v1/audit" || request.URL.Path == "/v1/usage"):
 		return "audit:write"
+	case isComplianceRoute(request.Method, request.URL.Path):
+		return scopeComplianceRead
 	default:
 		return ""
 	}

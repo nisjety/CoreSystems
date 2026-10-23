@@ -35,6 +35,8 @@ type Store struct {
 	keys               *chain.KeyRing
 	prune              PruneMode
 	pruneBatchOverride int // tests only; zero means defaultPruneBatchSize
+	// manifestSigner signs compliance manifests; nil means the key ring if it can.
+	manifestSigner PayloadSigner
 }
 
 // Option configures a Store at construction.
