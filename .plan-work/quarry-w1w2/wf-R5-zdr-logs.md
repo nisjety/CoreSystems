@@ -1,0 +1,11 @@
+# R5-zdr-logs hand-over
+Commits: b275569d (gateway, WS4.F), 9a2bc002 (quarry-edge telemetry, WS4.E), e50046a9 (lint scanner + 44 sites, WS4.F), 4c4dd4d2 (matrix tests, WS4.G).
+Baselines: quarry 44 -> 1 (runtime/browser_driver.rs R1, file holds R1-browser's HeldSession diff); gateway 23 -> 1 (domains/browser.rs R2, file held by another unit).
+Traps: the lint used to cut at the first #[cfg(test)] of any kind (main.rs line 64); zdr-log-ok-begin/end regions are a new lint form (reason mandatory).
+Closed-catalogue lists in tests/zdr_feature_matrix.rs are COPIES of Model Plane zdr-refusals.json (uncommitted sibling work); WS4.I should vendor it.
+cargo check --workspace --all-targets: only failure is quarry-core `contracts` test E0382 (another unit's WIP in error.rs / tests/contracts.rs).
+
+## Round 3 corrections and follow-ups (review findings)
+- CORRECTION (reviewer HIGH, verified against scratchpad/R5-zdr-logs/stage1.log): commit 9a2bc002's message says four new RUST_LOG tests were red on the legacy registry-level EnvFilter wiring and names the level-filter test among them. That is wrong. On the legacy wiring SEVEN zdr_log tests failed (20 passed, 7 failed); THREE of the four named tests were red; `the_level_filter_still_applies_and_a_non_zdr_request_keeps_its_events` is a CONTROL: it passed on both wirings (no span means no zdr field, and the level filter behaved as before), so it cannot be red there by design. Commit messages are not amended; this note is the correction, use it in any PR text.
+- Reviewer MEDIUM 1 (OTLP branch untested): the OTLP stack moved into zdr_log::otel_subscriber(writer, log_env, export_env, exporter) which init_telemetry now calls; tests the_otlp_stack_drops_sensitive_events_for_a_zdr_request_at_every_level and the_otlp_stack_passes_the_request_span_even_at_rust_log_off drive it with a recording layer. The rule that the request span passes at RUST_LOG=off (declares-mark rule) is now pinned explicitly.
+- Reviewer MEDIUM 2 (lint cut at first inline test mod): production_part now blanks each inline cfg(test) mod block (newlines kept) and scans on; budget.rs, crawl_frontier.rs, local_index.rs have production code below a test module and are pinned by a test.
