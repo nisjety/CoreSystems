@@ -142,6 +142,13 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/batch/ongoing", get(crate::job_lifecycle_routes::ongoing_batch))
         .route("/v1/batch/:id", get(crate::job_lifecycle_routes::get_batch))
         .route("/v1/batch/:id/errors", get(crate::job_lifecycle_routes::batch_errors))
+        // Job control (WS15.L2): cancel, pause and resume. Off unless QUARRY_EDGE__JOB_CONTROL is on.
+        .route("/v1/crawl/:id", axum::routing::delete(crate::job_lifecycle_routes::cancel_crawl))
+        .route("/v1/crawl/:id/pause", post(crate::job_lifecycle_routes::pause_crawl))
+        .route("/v1/crawl/:id/resume", post(crate::job_lifecycle_routes::resume_crawl))
+        .route("/v1/batch/:id", axum::routing::delete(crate::job_lifecycle_routes::cancel_batch))
+        .route("/v1/batch/:id/pause", post(crate::job_lifecycle_routes::pause_batch))
+        .route("/v1/batch/:id/resume", post(crate::job_lifecycle_routes::resume_batch))
         .route("/v1/jobs/:id", get(crate::job_lifecycle_routes::get_job))
         .route("/v1/jobs/:id/errors", get(crate::job_lifecycle_routes::job_errors))
         .route("/v1/profiles", post(crate::profile_routes::save_profile))
