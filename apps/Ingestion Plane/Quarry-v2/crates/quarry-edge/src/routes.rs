@@ -1095,6 +1095,11 @@ pub struct InternalRunPage {
     pub render: Option<RenderHintsRequest>,
     #[serde(default)]
     pub prefer_http3: bool,
+    /// WS14.S2: the crawl scope for this page's links. Absent (or null) leaves the
+    /// response unchanged. Kept as a raw JSON value so a malformed object is a 400
+    /// that names its fields, not a rejection of the whole body.
+    #[serde(default)]
+    pub crawl: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1136,6 +1141,9 @@ pub struct InternalRunPageResult {
     /// Driver that served the fetch: `static` | `tls` | `browser`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub driver: Option<String>,
+    /// WS14.S2: set only when the request carried `crawl`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crawl: Option<quarry_core::crawl_scope::CrawlReport>,
 }
 
 impl InternalRunPageResult {
@@ -1165,8 +1173,59 @@ impl InternalRunPageResult {
                     .and_then(|v| v.as_str().map(str::to_owned))
                     .unwrap_or_default()
             }),
+            crawl: None,
         }
     }
+}
+
+/// WS14.S2: the `crawl` object, checked and compiled before anything is fetched.
+/// A malformed one is a 400 whose `details.fields` names each rejected path, the
+/// same shape as `contract_error`. Absent or null means no scope.
+fn compile_crawl(
+    raw: Option<serde_json::Value>,
+    request_id: &str,
+) -> Result<Option<quarry_runtime::crawl_filter::CompiledScope>, (StatusCode, Json<Envelope<()>>)>
+{
+    let Some(raw) = raw.filter(|v| !v.is_null()) else {
+        return Ok(None);
+    };
+    let compiled = quarry_core::crawl_scope::CrawlContext::from_json(raw).and_then(|ctx| {
+        quarry_runtime::crawl_filter::CompiledScope::compile(&ctx)
+    });
+    match compiled {
+        Ok(scope) => Ok(Some(scope)),
+        Err(errs) => {
+            let fields: Vec<serde_json::Value> = errs
+                .iter()
+                .map(|e| {
+                    serde_json::json!({ "path": e.field, "code": "invalid", "message": e.message })
+                })
+                .collect();
+            let err = QuarryError::new(ErrorCode::BadRequest, "the crawl scope is invalid")
+                .with_details(serde_json::json!({ "fields": fields }));
+            Err((
+                StatusCode::BAD_REQUEST,
+                Json(Envelope::<()>::err(request_id, err)),
+            ))
+        }
+    }
+}
+
+/// WS14.S2: when the request carried `crawl`, replace the page's links with the
+/// scope's allowed links and attach the report. Without a scope the result is
+/// returned exactly as built, so the response is unchanged for existing callers.
+fn with_crawl(
+    mut result: InternalRunPageResult,
+    final_url: &str,
+    scope: Option<&quarry_runtime::crawl_filter::CompiledScope>,
+) -> InternalRunPageResult {
+    let (Some(scope), Ok(page)) = (scope, Url::parse(final_url)) else {
+        return result;
+    };
+    let outcome = scope.evaluate(&page, &result.links, None);
+    result.links = outcome.links;
+    result.crawl = Some(outcome.report);
+    result
 }
 
 /// The shared runtime service token, latched once at startup (mirrors
@@ -1306,6 +1365,9 @@ async fn internal_run_page(
         )
     })?;
 
+    // WS14.S2: a malformed `crawl` is refused before anything is fetched.
+    let crawl_scope = compile_crawl(req.crawl.clone(), &request_id)?;
+
     // WS7.C: no JWT on this route. The caller is the orchestrator, an autonomous
     // principal, so the decision is the baseline and the invariants (no ask).
     let decision = crate::web_policy_edge::decide(
@@ -1371,9 +1433,10 @@ async fn internal_run_page(
     if !zdr.is_active() && should_read(&req.cache) {
         if let (Some(prev), Some(cache)) = (req.prev_fingerprint.as_ref(), state.cache.as_ref()) {
             if let Some(cached) = cache.get(&org_id, prev).await {
-                return Ok(Json(InternalRunPageResult::from_output(
-                    run_id.to_string(),
-                    &cached,
+                return Ok(Json(with_crawl(
+                    InternalRunPageResult::from_output(run_id.to_string(), &cached),
+                    &cached.url.final_url,
+                    crawl_scope.as_ref(),
                 )));
             }
         }
@@ -1391,9 +1454,10 @@ async fn internal_run_page(
                     }
                 }
             }
-            Ok(Json(InternalRunPageResult::from_output(
-                run_id.to_string(),
-                &out,
+            Ok(Json(with_crawl(
+                InternalRunPageResult::from_output(run_id.to_string(), &out),
+                &out.url.final_url,
+                crawl_scope.as_ref(),
             )))
         }
         Err(err) => Err((
