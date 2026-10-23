@@ -175,6 +175,22 @@ self_test() {
   failed_before="$FAILED"; FAILED=0
   unset -f docker
   check "scan_hops passes five clean hops" 0 "$failed_before"
+  # A HIT (a refusal line in a hop's log) fails the run when <fatal> is 1 and only reports when it is 0.
+  docker() { case "$1" in inspect) return 0;; logs) printf 'GET /health 200\nstatus 403 returned\n';; esac; }
+  FAILED=0; scan_hops "2026-01-01T00:00:00Z" 1 >/dev/null 2>&1 || true
+  failed_before="$FAILED"; FAILED=0
+  check "scan_hops fails on a refusal hit when fatal is 1" 1 "$failed_before"
+  FAILED=0; scan_hops "2026-01-01T00:00:00Z" 0 >/dev/null 2>&1 || true
+  failed_before="$FAILED"; FAILED=0
+  check "scan_hops only reports a refusal hit when fatal is 0" 0 "$failed_before"
+  docker() { case "$1" in inspect) return 0;; logs) printf 'navigating to example.com\n';; esac; }
+  FAILED=0; scan_hops "2026-01-01T00:00:00Z" 1 >/dev/null 2>&1 || true
+  failed_before="$FAILED"; FAILED=0
+  check "scan_hops fails on a host name in a log when fatal is 1" 1 "$failed_before"
+  FAILED=0; scan_hops "2026-01-01T00:00:00Z" 0 >/dev/null 2>&1 || true
+  failed_before="$FAILED"; FAILED=0
+  unset -f docker
+  check "scan_hops only reports a host name when fatal is 0" 0 "$failed_before"
   [ "$bad" -eq 0 ] && log "self-test passed" || { log "self-test FAILED"; return 1; }
 }
 

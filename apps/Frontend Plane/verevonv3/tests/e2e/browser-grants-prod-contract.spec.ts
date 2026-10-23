@@ -1,4 +1,12 @@
 import { test, expect, request as playwrightRequest, type APIRequestContext, type APIResponse, type TestInfo } from '@playwright/test'
+import {
+  GRANT_INACTIVE_MESSAGE,
+  GRANT_OTHER_USER_MESSAGE,
+  OUTSIDE_DOMAINS_MESSAGE,
+  classifyKnownRefusal,
+  knownRefusalFromEnv,
+  type SeenRefusal,
+} from './browser-grants-prod-contract-refusal'
 
 /**
  * SC1 L2 — the production-mode browser grant contract (plan 6.4 A, WS1.A2).
@@ -30,8 +38,10 @@ import { test, expect, request as playwrightRequest, type APIRequestContext, typ
  *   B and C (gateway session, AI run through the gateway): they go green with
  *     WS1.B on the production stack. Until then they are inverted by `untilWs1b`
  *     (not `test.fail()`, which would accept a transport error or a 500 as "the
- *     expected failure"): only an HTTP refusal with a status in KNOWN_BC_STATUSES
- *     passes, every answer is recorded as an annotation (`observed`) before
+ *     expected failure"): only the KNOWN refusal passes (the session start answered
+ *     403 "browser grant_id is required", see browser-grants-prod-contract-refusal.ts;
+ *     a 401 or any authentication message never counts, and the sign-in is
+ *     verified before the leg runs), every answer is recorded as an annotation (`observed`) before
  *     anything is asserted so the wrapper's transcript carries it, and an
  *     UNEXPECTED PASS fails the suite on purpose. After WS1.B run with
  *     CONTRACT_BC_GREEN=1.
@@ -57,36 +67,40 @@ const FORGED_GRANT_ID = '00000000000000000000000000000000'
 const SECOND_EMAIL = process.env.E2E_EMAIL || 'e2e@verevon.dev'
 const SECOND_PASSWORD = process.env.E2E_PASSWORD || 'e2e-Verevon-Pass-123'
 
+// A response body of a service under test: its shape is what the assertions check.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Json = Record<string, any>
 
-/** The statuses of the refusal legs B and C show until WS1.B runs on the stack. */
-const KNOWN_BC_STATUSES = (process.env.CONTRACT_BC_EXPECTED_STATUSES || '400,401,403,409,502,503')
-  .split(',')
-  .map((s) => Number(s.trim()))
-  .filter((n) => Number.isInteger(n))
+/** The one refusal legs B and C show until WS1.B runs on the stack (status and message, pinned). */
+const KNOWN_BC_REFUSAL = knownRefusalFromEnv(process.env)
 /** Legs B and C are expected to pass (after WS1.B): the inversion below is off. */
 const BC_GREEN = process.env.CONTRACT_BC_GREEN === '1'
 
 /**
  * Runs a leg that is expected to fail with a known refusal until WS1.B lands.
  * `seen` records each HTTP answer (status and message only, never a body) as an
- * `observed` annotation before anything is asserted. The leg passes only when it
- * throws AFTER an HTTP answer whose status is in KNOWN_BC_STATUSES; a throw with no
- * HTTP answer (transport error), or after an answer outside that set (a 200 that
- * went on to fail, a 404, a 500), is a real failure and is rethrown; a leg that
- * completes is an unexpected pass and fails on purpose. With CONTRACT_BC_GREEN=1
- * the body runs as an ordinary test.
+ * `observed` annotation before anything is asserted. The sign-in is verified FIRST
+ * (`precondition`, outside the inversion), so a signed-out cookie jar is a failure
+ * of its own and never reads as the known refusal. The leg then passes only when it
+ * throws AFTER the known refusal (classifyKnownRefusal: the session start, the listed
+ * status, the missing-grant message word for word, nothing authentication-shaped); a
+ * throw with no HTTP answer (transport error), or after any other answer (a 401, a
+ * 403 with another message, a 200 that went on to fail, a 404, a 500), is a real
+ * failure and is rethrown; a leg that completes is an unexpected pass and fails on
+ * purpose. With CONTRACT_BC_GREEN=1 the body runs as an ordinary test.
  */
 async function untilWs1b(
   info: TestInfo,
   leg: string,
+  precondition: () => Promise<void>,
   body: (seen: (step: string, status: number, message: string) => void) => Promise<void>,
 ): Promise<void> {
-  let last: { step: string; status: number } | undefined
+  let last: SeenRefusal | undefined
   const seen = (step: string, status: number, message: string): void => {
-    last = { step, status }
+    last = { step, status, message }
     info.annotations.push({ type: 'observed', description: `${leg} ${step} status=${status} message=${message}` })
   }
+  await precondition()
   if (BC_GREEN) {
     await body(seen)
     return
@@ -101,7 +115,11 @@ async function untilWs1b(
       })
       throw error
     }
-    if (!KNOWN_BC_STATUSES.includes(last.status)) throw error
+    const verdict = classifyKnownRefusal(last, KNOWN_BC_REFUSAL)
+    if (!verdict.known) {
+      info.annotations.push({ type: 'observed', description: `${leg} NOT the known failure: ${verdict.reason}` })
+      throw error
+    }
     info.annotations.push({
       type: 'expected-failure',
       description: `${leg} refused at ${last.step} with ${last.status}, the known failure until WS1.B`,
@@ -126,6 +144,11 @@ async function userToken(api: APIRequestContext, audience: string): Promise<stri
   const body = (await response.json()) as Json
   expect(typeof body.token, `${audience} token`).toBe('string')
   return body.token as string
+}
+
+/** The signed-in session is real: Auth Core mints a quarry token for it (a 401 here is the test's own failure). */
+async function signedIn(api: APIRequestContext): Promise<void> {
+  await userToken(api, 'quarry')
 }
 
 async function tokensFor(api: APIRequestContext): Promise<Tokens> {
@@ -242,8 +265,10 @@ test.describe('SC1 production-mode browser grants (L2)', () => {
       // The client asked for evil.example and example.org in A3; the broker's hosts won.
       const foreign = await quarry(request, tokens, `/v1/agent/runs/${happy.runId}/step`, navigate(FOREIGN_URL))
       expect(foreign.status, JSON.stringify(foreign.body)).toBe(403)
+      expect(errorMessage(foreign.body), 'refused for the host, not for another reason').toBe(OUTSIDE_DOMAINS_MESSAGE)
       const sibling = await quarry(request, tokens, `/v1/agent/runs/${happy.runId}/step`, navigate('https://example.org'))
       expect(sibling.status, JSON.stringify(sibling.body)).toBe(403)
+      expect(errorMessage(sibling.body), 'refused for the host, not for another reason').toBe(OUTSIDE_DOMAINS_MESSAGE)
     })
   })
 
@@ -251,13 +276,14 @@ test.describe('SC1 production-mode browser grants (L2)', () => {
   //
   // Not `test.fail()`: that accepts ANY throw, so a transport error or a 500 from a
   // broken stack would pass as "the expected failure". `untilWs1b` accepts exactly one
-  // shape: the gateway answered with an HTTP refusal whose status is in
-  // KNOWN_BC_STATUSES. The status and message of every answer are recorded as an
+  // shape: the session start answered 403 "browser grant_id is required" (pinned in
+  // browser-grants-prod-contract-refusal.ts; a 401 or an authentication message is
+  // never the known failure, and the sign-in is verified before each leg). The status and message of every answer are recorded as an
   // `observed` annotation BEFORE anything is asserted, and a transport error records
   // its class and is rethrown, so the transcript always carries what happened.
 
   test('B a gateway browser session starts with a grant and takes its first step @legBC', async ({ request }, info) => {
-    await untilWs1b(info, 'B', async (seen) => {
+    await untilWs1b(info, 'B', () => signedIn(request), async (seen) => {
       const created = await request.post('/api/v1/browser/sessions', {
         headers: { 'content-type': 'application/json', origin: LOCAL_ORIGIN },
         data: { url: ALLOWED_URL },
@@ -276,7 +302,7 @@ test.describe('SC1 production-mode browser grants (L2)', () => {
 
   test('C an AI run through the gateway acts and observes with no 401 or 403 @legBC', async ({ request }, info) => {
     test.setTimeout(150_000)
-    await untilWs1b(info, 'C', async (seen) => {
+    await untilWs1b(info, 'C', () => signedIn(request), async (seen) => {
       const created = await request.post('/api/v1/browser/sessions', {
         headers: { 'content-type': 'application/json', origin: LOCAL_ORIGIN },
         data: { url: ALLOWED_URL },
@@ -326,7 +352,9 @@ test.describe('SC1 production-mode browser grants (L2)', () => {
   test('A5b a forged grant id is 403 @negative', async ({ request }) => {
     const started = await quarry(request, await tokensFor(request), '/v1/agent/runs', startBody(FORGED_GRANT_ID))
     expect(started.status, JSON.stringify(started.body)).toBe(403)
-    expect(started.status).toBeLessThan(500)
+    expect(errorMessage(started.body), 'a forged id is a grant the broker does not know, not an authentication failure').toBe(
+      GRANT_INACTIVE_MESSAGE,
+    )
   })
 
   test('A5c a revoked grant ends the next step with 403, not a 5xx (G6) @negative', async ({ request }) => {
@@ -343,10 +371,11 @@ test.describe('SC1 production-mode browser grants (L2)', () => {
 
     const step = await quarry(request, tokens, `/v1/agent/runs/${runId}/step`, navigate(ALLOWED_URL))
     expect(step.status, JSON.stringify(step.body)).toBe(403)
-    expect(errorMessage(step.body)).toBe('browser grant is inactive or expired')
+    expect(errorMessage(step.body)).toBe(GRANT_INACTIVE_MESSAGE)
     // A new run on the revoked grant is refused at the start as well.
     const again = await quarry(request, tokens, '/v1/agent/runs', startBody(grantId))
     expect(again.status, JSON.stringify(again.body)).toBe(403)
+    expect(errorMessage(again.body)).toBe(GRANT_INACTIVE_MESSAGE)
   })
 
   test('A5d a grant past its TTL is 403, not a 5xx @negative', async ({ request }) => {
@@ -365,10 +394,10 @@ test.describe('SC1 production-mode browser grants (L2)', () => {
     const fresh = await tokensFor(request)
     const step = await quarry(request, fresh, `/v1/agent/runs/${runId}/step`, navigate(ALLOWED_URL))
     expect(step.status, JSON.stringify(step.body)).toBe(403)
-    expect(errorMessage(step.body)).toBe('browser grant is inactive or expired')
+    expect(errorMessage(step.body)).toBe(GRANT_INACTIVE_MESSAGE)
   })
 
-  test("A6 another user's grant is refused (403 or 404) @negative", async ({ request }) => {
+  test("A6 another user's grant is refused with 403 @negative", async ({ request }) => {
     const owner = await tokensFor(request)
     const issued = await issueGrant(request, owner)
     expect(issued.status, JSON.stringify(issued.body)).toBe(201)
@@ -378,7 +407,10 @@ test.describe('SC1 production-mode browser grants (L2)', () => {
     try {
       const strangerTokens = await tokensFor(stranger)
       const started = await quarry(stranger, strangerTokens, '/v1/agent/runs', startBody(grantId))
-      expect([403, 404], JSON.stringify(started.body)).toContain(started.status)
+      // 403, and for the grant's own reason: the broker does not know it for the stranger's
+      // organization (inactive) or the owner differs (another user). A 401/404/5xx is a failure.
+      expect(started.status, JSON.stringify(started.body)).toBe(403)
+      expect([GRANT_INACTIVE_MESSAGE, GRANT_OTHER_USER_MESSAGE], JSON.stringify(started.body)).toContain(errorMessage(started.body))
     } finally {
       await stranger.dispose()
       await revokeGrant(request, owner, grantId).catch(() => undefined)

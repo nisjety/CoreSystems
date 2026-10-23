@@ -628,6 +628,25 @@ test('main builds the production grant validator with the service tokens, throug
   assert.match(read(edge + 'tests/browser_grants_prod.rs'), /grant_boot::build_grpc_validator\(/);
 });
 
+test('cross_plane_tokens in main is bound once, from QUARRY_EDGE__QUARRY_SERVICE_API_KEY, and never rebound or shadowed', () => {
+  const main = productionPart(read('apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs'));
+  const bindings = main.match(/\blet\s+(?:mut\s+)?cross_plane_tokens\b/g) ?? [];
+  assert.equal(bindings.length, 1, 'cross_plane_tokens must be bound exactly once (found ' + bindings.length + '): a second let would shadow the production credential');
+  assert.doesNotMatch(main, /\bcross_plane_tokens\s*=[^=]/, 'cross_plane_tokens must never be reassigned');
+  const at = main.search(/\blet\s+(?:mut\s+)?cross_plane_tokens\b/);
+  // The binding is the match over the configured service credential that builds the Auth Core provider.
+  const binding = main.slice(at, main.indexOf(';', main.indexOf('None => None', at)) + 1);
+  assert.match(binding, /match\s+cfg\s*\.\s*quarry_service_api_key\s*\.\s*as_deref\s*\(\s*\)/, 'the credential is read from cfg.quarry_service_api_key');
+  assert.match(
+    binding,
+    /Some\(\s*credential\s*\)\s*=>\s*Some\(\s*Arc::new\(\s*quarry_runtime::service_tokens::AuthCoreServiceTokenProvider::new\(\s*&cfg\s*\.\s*auth_core_url\s*,\s*credential\s*,?\s*\)\?\s*,?\s*\)\s*,?\s*\)/,
+    'a configured credential builds the Auth Core provider from cfg.auth_core_url',
+  );
+  assert.match(binding, /None\s*=>\s*None/, 'only an unset credential leaves the provider empty');
+  // the config field is read from the documented variable
+  assert.match(read('apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/config.rs'), /quarry_service_api_key/);
+});
+
 test('the production overlay requires the broker address and the contract overlay pins it', () => {
   const production = read('apps/Ingestion Plane/docker-compose.production.yml');
   assert.match(
