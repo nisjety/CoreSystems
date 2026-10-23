@@ -2886,6 +2886,17 @@ components:
       - status
       - created_at
       properties:
+        timezone:
+          type: string
+          default: UTC
+          description: IANA zone the cron is read in (WS15.S1).
+        jitter_s:
+          type: integer
+          minimum: 0
+          description: Spread of each fire in seconds (WS15.S1).
+        needs_activation:
+          type: boolean
+          description: True for a non-monitor schedule created disabled and never toggled (WS15.S1).
         schedule_id:
           type: string
         org_id:
@@ -2942,6 +2953,22 @@ components:
       properties:
         name:
           type: string
+        activate:
+          type: boolean
+          default: false
+          description: Start the schedule when created (WS15.S1). Honoured only for a user token; a service token value is ignored. Without it the schedule is created disabled and needs_activation is true.
+        timezone:
+          type: string
+          default: UTC
+          description: IANA zone the cron is read in (WS15.S1).
+        catchup_window_s:
+          type: integer
+          minimum: 0
+          maximum: 86400
+          description: Catch-up window for missed fires (WS15.S1).
+        pause_on_failure:
+          type: boolean
+          default: false
         kind:
           type: string
           enum:
