@@ -392,6 +392,21 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D2-143 | WS27-S8 | live-proof | P1 | Deploy order: cost-core before model-gateway; an old cost-core rejects since with 400 under DisallowUnknownFields and the gateway fails closed with 503. | open |
 | D2-144 | WS27-S8 | follow-up | P3 | 13 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-02.json | open |
 
+
+### Wave-mode batch W2-04 (2026-10-23)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D2-145 | WS22-S1 | risk | P1 | DeleteThreadWorkspace takes thread_id and org_id from the request body and authz grants write to any user principal, so S5 must derive the owner from the principal or a lease before erasing; it is Unimplemented now, so there is no exposure yet. | open |
+| D2-146 | WS22-S1 | test-gap | P1 | threadworkspace Store.Apply and Get SQL (row lock, upsert, delete, revision) run only in the integration test, which has not been executed against Postgres. | open |
+| D2-147 | WS22-S1 | risk | P1 | A thread-scoped AcquireLease that names a space_id is still accepted while the switch is off (pre-WS22 path), and the row it creates sits in the leases_thread_live_uq index; after the switch is turned on, AcquireThread upserts onto that row and every thread RPC for that thread returns FailedPrecondition until it expires. Refuse thread scope with a non-empty space_id before the switch branch, or exclude space_id<>'' rows from the index predicate. | open |
+| D2-148 | WS22-S1 | test-gap | P1 | threadworkspace.checkPath accepts "." (path.Clean(".") == "." and it is not rejected), so a thread file named "." is stored; S2 hydration would then target the workspace root. Reject "." and add it to TestPlanChangesRefusesPathsThatEscapeOrRepeat before the switch can be on. | open |
+| D2-149 | WS22-S1 | risk | P1 | The ZDR refusal exists only at acquire. threadLease, GetThreadWorkspace and ApplyThreadWorkspaceChanges take no zdr input, so a holder of a non-ZDR thread lease id can still read and write thread rows. S2 must refuse ZDR at workspace open and commit as well as at acquire, and a test should pin it. | open |
+| D2-150 | WS22-S1 | live-proof | P1 | Postgres integration tests are not run (Docker is out of scope for me): `go test -tags integration -run TestLeaseStore_AcquireThreadIsIdempotentInPostgres ./internal/lease/` and `go test -tags integration -run TestThreadStore_ApplyIsCompareAndSwapAndCapped ./internal/threadworkspace/` in apps/Model Plane/go/services/sandbox-manager. I only confirmed with `go vet -tags integration` that they compile. | open |
+| D2-151 | WS22-S1 | live-proof | P1 | Before applying migration 0006 to any live database, run the duplicate check from the implementer's lead_todo: SELECT org_id, owner_id, scope_id, count(*) FROM leases WHERE scope_type='thread' AND state<>4 GROUP BY 1,2,3 HAVING count(*)>1; it must return zero rows. | open |
+| D2-152 | WS22-S1 | live-proof | P1 | Shared-edit to apps/Model Plane/deploy/docker-compose.yml: add the three SANDBOX_MANAGER_THREAD_WORKSPACE, _THREAD_MAX_FILES (256) and _THREAD_MAX_BYTES (67108864) lines beside SANDBOX_MANAGER_BACKEND_ID. Until then the env is unset, so the switch stays off. | open |
+| D2-153 | WS22-S1 | follow-up | P3 | 25 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-04.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
@@ -430,3 +445,4 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS26-S2.code | policy, zdr | W2-03 | no |
 | WS20-S1 | zdr, audit | W2-03 | no |
 | WS27-S8 | money, authority | W2-02 | no |
+| WS22-S1 | authority, auth, zdr, data-loss | W2-04 | no |
