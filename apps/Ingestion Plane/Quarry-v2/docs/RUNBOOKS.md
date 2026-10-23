@@ -849,3 +849,46 @@ The spike answers the three `[UNVERIFIED]` CDP statements (D16-12) before WS17.C
 - Not wired. No caller exists in this unit. The enqueue path (`enqueue_batch` and the crawl seed through the scope filter) waits for W2 U60 (WS14.S3). The older `normalize_url` in `quarry-runtime/src/crawl_frontier.rs` (fragment and empty path only) is unchanged.
 - Flag: none, nothing runs. Rollback: revert the commit; the module has no consumer.
 - Tests written, not run: `cargo test -p quarry-transform --test canonical_url` (spellings, refusals, idempotence, request-id shape, and redirect reconciliation: no redirect, scheme upgrade, cross-host, `www.`, trailing slash, tracking-only redirect under each option set, refused sides).
+
+## Job lifecycle reads: status, errors, origin (WS15.L1, unit W2-U11)
+
+Built, NOT run. The contract is in `docs/CONTRACTS.md` ("Job lifecycle reads and origin").
+
+**Deploy order.** Control first (migration `016_jobs_lifecycle.sql` and the new routes),
+then the edge, then the orchestrator. The migration is additive and idempotent; the old
+edge keeps working against the new control, since its paths are unchanged. An edge
+that is ahead of control answers the new reads with 404 (the old control has no such
+route), and the handoff still works because control accepts a body with or without
+`origin`.
+
+**Rollback.** Previous edge, then previous control. The columns stay: they are defaulted
+and nothing reads them back except the new routes. No flag is involved.
+
+**Check a job by hand.** With a user token for the org, `GET /v1/crawl/<job_id>` answers
+the status document; `GET /v1/crawl/<job_id>/errors` the final failures and blocked
+pages; `GET /v1/crawl/ongoing` the org's crawls still in flight. A foreign id is 404
+(not 403: the org is not revealed). A batch id on the crawl path is 404.
+
+**"Status says running but the crawl has finished".** Look at `control.pending` and the
+terminal event. A terminal event moves the job to its terminal status once; a status that
+is still `running` after `run_completed` is a missing event (check the job's events with
+`GET /v1/jobs/<job_id>/events`) or a late write that the terminal rule refused. The
+terminal rule never moves a job back, so a stale `running` write from the dispatcher
+cannot undo `completed`.
+
+**"Errors list is empty but pages failed".** Only the last attempt of a page is listed,
+and only when it failed (the orchestrator marks it `final: true`). A page that failed and
+then succeeded on a retry is not an error. Blocked pages are under `blocked`, never under
+`errors`.
+
+**"403 on the errors route".** The token carries the organization's ZDR floor, and error
+URLs are not returned under it. This is the intended answer; the status counts still come
+back on the status route.
+
+**Filter a list by status.** `GET /v1/crawl/jobs?status=running,paused` (control accepts
+the vocabulary `accepted`, `running`, `paused`, `completed`, `failed`, `cancelled`,
+`timed_out`, `skipped`; any other value is 400).
+
+**Origin on a job.** `origin.type` tells who started it: `user` (an interactive token),
+`agent` (a Model Plane service; `origin.ref` is the run id), `api` (any other service or
+API client). `unknown` is a row written before migration 016 and is not a fault.
