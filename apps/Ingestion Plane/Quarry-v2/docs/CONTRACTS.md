@@ -660,3 +660,58 @@ Read this with `docs/CRAWL_SCOPE_ROBOTS.md`, which is the contract for WS14. The
 - **Denial codes.** The schema above lists codes from an earlier design (`exclude_pattern`, `include_pattern`, `depth_limit`, `robots_txt`, `file_type`, `url_parse_error`, `backward_crawling`, `social_media`, `external_link`, `section_link`, `non_web_protocol`, `security_blocked`, `duplicate`). The vocabulary in `crates/quarry-core/src/crawl_denial.rs` is the one to build against. It uses `out_of_scope`, `robots_disallowed`, `depth_exceeded`, `max_pages_reached`, `duplicate`, `external_host_disabled`, `security_rejected`, `include_pattern_miss`, `exclude_pattern_hit`, `content_type_rejected` and `not_crawlable`. Mapping from the old names: `robots_txt` to `robots_disallowed`; `external_link` to `external_host_disabled`; `exclude_pattern` to `exclude_pattern_hit`; `depth_limit` to `depth_exceeded`; `file_type` to `content_type_rejected`; `url_parse_error` and `non_web_protocol` to `not_crawlable`; `section_link` to `out_of_scope`. `backward_crawling` and `social_media` have no code in the enum today and are not planned. `security_blocked` at fetch time stays the `SECURITY_BLOCKED` (403) error code with `details.denial` (no new `ErrorCode`).
 - **`page.blocked` and terminal payloads** are planned as in `docs/CRAWL_SCOPE_ROBOTS.md`, section 6. No new event type is added.
 - **Crawl and batch under ZDR** are still refused, with the status and text of the refusal unchanged (WS14 keeps the refusal; ADR-4).
+
+## Job lifecycle reads and origin (WS15.L1, unit W2-U11, built, NOT run, 2026-10-23)
+
+Migration `016_jobs_lifecycle.sql` (control) adds the job record fields below. Every
+column is additive and defaulted; rows written before it read as origin `unknown`.
+
+**Job statuses (closed).** `accepted` (waiting; the phase reads `queued`), `running`,
+`paused`, and the terminal statuses `completed`, `failed`, `cancelled`, `timed_out`,
+`skipped`. A terminal job takes no further transition: a late `run_resumed` or
+`run_failed` leaves it as it is, and `PUT /v1/jobs/{id}` refuses to leave a terminal
+status with 409.
+
+**Origin (closed).** `origin.type` is `user`, `agent`, `schedule`, `webhook` or `api`
+(`unknown` only for rows written before migration 016). `origin.actor` is the verified
+user or service principal; `origin.ref` is the Model Plane run id for `agent` origins
+only, taken from `x-verevon-run-id` on service tokens. The origin is stamped from the
+verified claims at the edge and never read from a request body. Control refuses any
+other type with 400; an empty type is `api`.
+
+**Handoff.** `POST /v1/crawl` and `POST /v1/batch` post `{kind, params, origin}` to
+control's `POST /v1/jobs`, signed when the internal HMAC is configured, and forward the
+caller's `Idempotency-Key` (1 to 128 characters) when one was sent.
+
+**Job record (wire).** `origin`, `desired_state` and `desired_seq`/`applied_seq` (set by
+WS15.L2; empty and zero until then), `workflow_id`, `deadline_at`, `terminal_reason`
+(the event type that ended the job), `finished_at`. List rows (`GET /v1/{kind}/jobs`)
+also carry `phase` and `stats` (`completed`, `failed`, `total`).
+
+**Status document (edge).** `GET /v1/crawl/{id}`, `/v1/batch/{id}`, `/v1/jobs/{id}`:
+`job_id`, `kind`, `status`, `phase`, `terminal`, `origin`, `created_at`, `finished_at`,
+`deadline_at`, `counts` (`completed`, `failed`, `blocked`, `retried`), `total` and
+`total_kind` (`exact` for a batch, the URL count; `budget` for a crawl, the effective
+page ceiling, not a prediction), `warnings` (closed codes; `max_pages_clamped` when the
+requested page limit was lowered), `control` (`desired`, `pending`), `schedule_id`,
+`run_id`. A foreign id and a kind mismatch are both 404.
+
+**Errors (edge).** `GET .../errors`: `errors` lists failed or retried pages whose final
+attempt the orchestrator marked (`final: true`), with `code` and `category`, `status` and
+`retryable` where known. `blocked` lists pages a rule blocked, with `reason`.
+`robots_blocked` is empty until robots enforcement (WS14.S4). The raw error text a worker
+recorded is not returned. `next_seq` is set when the page was full; pass it as
+`after_seq`. Under the token's ZDR floor the whole route answers 403, because it returns
+URLs.
+
+**Ongoing.** `GET /v1/crawl/ongoing` and `/v1/batch/ongoing` list the org's jobs in
+`accepted`, `running` or `paused`, oldest first.
+
+**Service principals** have no route to these paths: `require_service_route_scope`
+answers 403 by default, and these paths are not in its list.
+
+**Error reasons.** No new `ErrorCode`: 404 `NOT_FOUND`, 400 `BAD_REQUEST` (unknown origin
+type or status filter), 409 `CONFLICT` (a terminal job, or a failed `if_status`), 403
+`FORBIDDEN` (ZDR floor on errors).
+
+Goldens: none changed. The OpenAPI paths are in `docs/openapi.yaml`.

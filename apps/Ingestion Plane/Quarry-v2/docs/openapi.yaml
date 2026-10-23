@@ -1237,6 +1237,200 @@ paths:
                     $ref: '#/components/schemas/ResponseMeta'
                   error:
                     $ref: '#/components/schemas/ErrorDetail'
+  /v1/jobs/{job_id}:
+    get:
+      operationId: get_job_status
+      summary: Status document of a durable job (WS15.L1)
+      description: >-
+        Org-scoped by the verified token. A job id of another organization, or an id
+        that is not a job, answers 404. The document carries status, phase, origin,
+        counts, total and total_kind, warnings and the control state.
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^job_'
+      responses:
+        '200':
+          description: The job status document.
+          content:
+            application/json:
+              schema:
+                type: object
+        '404':
+          description: Not found for this organization, or not a job id.
+  /v1/crawl/ongoing:
+    get:
+      operationId: list_ongoing_crawls
+      summary: Crawls still in flight for the organization, oldest first (WS15.L1)
+      responses:
+        '200':
+          description: Job list items (status, origin, phase, stats) of the non-terminal crawls.
+          content:
+            application/json:
+              schema:
+                type: object
+  /v1/crawl/{job_id}:
+    get:
+      operationId: get_crawl_status
+      summary: Status document of a crawl (WS15.L1)
+      description: A batch id on this path answers 404 (kind mismatch).
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^job_'
+      responses:
+        '200':
+          description: The crawl status document.
+          content:
+            application/json:
+              schema:
+                type: object
+        '404':
+          description: Not found, a foreign id, or a job of another kind.
+  /v1/crawl/{job_id}/errors:
+    get:
+      operationId: get_crawl_errors
+      summary: Final page failures and blocked pages of a crawl, paged by event seq (WS15.L1)
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^job_'
+        - name: after_seq
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+      responses:
+        '200':
+          description: >-
+            errors (final failed or retried pages), blocked (pages a rule blocked),
+            robots_blocked (empty until robots enforcement), next_seq when the page was full.
+          content:
+            application/json:
+              schema:
+                type: object
+        '403':
+          description: The token's ZDR floor is set; error URLs are not returned.
+        '404':
+          description: Not found, a foreign id, or a job of another kind.
+  /v1/batch/ongoing:
+    get:
+      operationId: list_ongoing_batches
+      summary: Batches still in flight for the organization, oldest first (WS15.L1)
+      responses:
+        '200':
+          description: Job list items of the non-terminal batches.
+          content:
+            application/json:
+              schema:
+                type: object
+  /v1/batch/{job_id}:
+    get:
+      operationId: get_batch_status
+      summary: Status document of a batch (WS15.L1)
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^job_'
+      responses:
+        '200':
+          description: The batch status document.
+          content:
+            application/json:
+              schema:
+                type: object
+        '404':
+          description: Not found, a foreign id, or a job of another kind.
+  /v1/batch/{job_id}/errors:
+    get:
+      operationId: get_batch_errors
+      summary: Final page failures and blocked pages of a batch, paged by event seq (WS15.L1)
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^job_'
+        - name: after_seq
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+      responses:
+        '200':
+          description: errors, blocked, robots_blocked and next_seq, as for crawls.
+          content:
+            application/json:
+              schema:
+                type: object
+        '403':
+          description: The token's ZDR floor is set; error URLs are not returned.
+        '404':
+          description: Not found, a foreign id, or a job of another kind.
+  /v1/jobs/{job_id}/errors:
+    get:
+      operationId: get_job_errors
+      summary: Final page failures and blocked pages of any durable job (WS15.L1)
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^job_'
+        - name: after_seq
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+      responses:
+        '200':
+          description: errors, blocked, robots_blocked and next_seq, as for crawls.
+          content:
+            application/json:
+              schema:
+                type: object
+        '403':
+          description: The token's ZDR floor is set; error URLs are not returned.
+        '404':
+          description: Not found for this organization.
   /v1/{kind}/jobs:
     get:
       operationId: list_jobs_by_kind
