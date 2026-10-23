@@ -149,6 +149,9 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/batch/:id", axum::routing::delete(crate::job_lifecycle_routes::cancel_batch))
         .route("/v1/batch/:id/pause", post(crate::job_lifecycle_routes::pause_batch))
         .route("/v1/batch/:id/resume", post(crate::job_lifecycle_routes::resume_batch))
+        // WS15.L3: the job event tail by kind (`follow=true` on a flagged edge), same handler as /v1/jobs/:id/events.
+        .route("/v1/crawl/:id/events", get(crate::resource_routes::list_crawl_events))
+        .route("/v1/batch/:id/events", get(crate::resource_routes::list_batch_events))
         .route("/v1/jobs/:id", get(crate::job_lifecycle_routes::get_job))
         .route("/v1/jobs/:id/errors", get(crate::job_lifecycle_routes::job_errors))
         .route("/v1/profiles", post(crate::profile_routes::save_profile))

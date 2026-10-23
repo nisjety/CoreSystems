@@ -48,6 +48,7 @@ mod grant_boot;
 mod handoff;
 mod internal_auth;
 mod job_lifecycle_routes;
+mod job_stream;
 mod limits;
 mod map_routes;
 mod metrics;

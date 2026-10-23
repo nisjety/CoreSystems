@@ -17,9 +17,9 @@
 use axum::{
     body::Body,
     extract::{Path, Query, State},
-    http::{header, HeaderValue, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{
-        sse::{Event, Sse},
+        sse::{Event, KeepAlive, Sse},
         IntoResponse, Response,
     },
     Extension, Json,
@@ -28,6 +28,8 @@ use serde::Deserialize;
 
 use quarry_core::envelope::Envelope;
 use quarry_core::error::{ErrorCode, QuarryError};
+
+use crate::job_stream;
 use quarry_core::ids::kinds::{ArtifactKind, RequestKind};
 use quarry_core::pagination::{ListFilter, Page};
 use quarry_core::resources::{
@@ -998,6 +1000,9 @@ pub struct RunEventsQuery {
     /// Only return events with `seq` strictly greater than this watermark
     /// (control filters server-side). Lets incremental pollers such as the
     /// onboarding crawl preview avoid re-downloading the whole event log.
+    /// Not read by `list_run_events` (it was read only by the job route, which now has
+    /// `JobEventsQuery`); kept so the query shape does not change for callers.
+    #[allow(dead_code)]
     #[serde(default)]
     pub after_seq: Option<u64>,
 }
@@ -1083,11 +1088,68 @@ pub async fn list_run_events(
 // gateway forward the bytes verbatim via `proxy_sse_stream`, unlike the
 // JSON-returning `/v1/runs/:id/events` which the SSE reader can't parse.
 // =============================================================================
+/// Query of the job event routes. `follow` and `replay` are read only when the
+/// job-stream flag is on; with the flag off the route is the legacy drain.
+#[derive(Debug, Default, Deserialize)]
+pub struct JobEventsQuery {
+    /// Page size of the legacy drain (default 500, clamped to [1, 1000]).
+    #[serde(default)]
+    pub limit: Option<u32>,
+    /// Events after this seq. A `Last-Event-ID` header wins over it.
+    #[serde(default)]
+    pub after_seq: Option<u64>,
+    /// `true` or `1` keeps the stream open (WS15.L3).
+    #[serde(default)]
+    pub follow: Option<String>,
+    /// `all` (default) or `none`. With no cursor, `none` starts at the snapshot.
+    #[serde(default)]
+    pub replay: Option<String>,
+}
+
+/// Pages of the legacy drain read before it stops (500 events a page).
+const LEGACY_MAX_PAGES: usize = 200;
+
+/// `GET /v1/jobs/:id/events`. Legacy drain: every event the job has, then
+/// `done`. With `follow=true` on a flagged edge, a live tail (`job_stream`).
 pub async fn list_job_events(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
+    headers: HeaderMap,
     Path(job_id): Path<String>,
-    Query(q): Query<RunEventsQuery>,
+    Query(q): Query<JobEventsQuery>,
+) -> Response {
+    job_events(state, claims, headers, job_id, q, None).await
+}
+
+/// `GET /v1/crawl/:id/events`: as `list_job_events`, for crawl jobs only.
+pub async fn list_crawl_events(
+    State(state): State<AppState>,
+    Extension(claims): Extension<crate::auth::Claims>,
+    headers: HeaderMap,
+    Path(job_id): Path<String>,
+    Query(q): Query<JobEventsQuery>,
+) -> Response {
+    job_events(state, claims, headers, job_id, q, Some("crawl")).await
+}
+
+/// `GET /v1/batch/:id/events`: as `list_job_events`, for batch jobs only.
+pub async fn list_batch_events(
+    State(state): State<AppState>,
+    Extension(claims): Extension<crate::auth::Claims>,
+    headers: HeaderMap,
+    Path(job_id): Path<String>,
+    Query(q): Query<JobEventsQuery>,
+) -> Response {
+    job_events(state, claims, headers, job_id, q, Some("batch")).await
+}
+
+async fn job_events(
+    state: AppState,
+    claims: crate::auth::Claims,
+    headers: HeaderMap,
+    job_id: String,
+    q: JobEventsQuery,
+    kind: Option<&'static str>,
 ) -> Response {
     let request_id = crate::request_id::current();
     // Validate the id is a job id (job_*) so we never proxy garbage / a
@@ -1099,40 +1161,38 @@ pub async fn list_job_events(
         )
         .into_response();
     }
-    let limit = q.limit.unwrap_or(500).clamp(1, 1000).to_string();
-    let after_seq = q.after_seq.unwrap_or(0).to_string();
+    let last_event_id = headers
+        .get("last-event-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok());
 
-    let events: Vec<serde_json::Value> = if state.control_base_url.is_empty() {
-        tracing::debug!(%job_id, "control_base_url unset; emitting empty job-events stream");
-        Vec::new()
-    } else {
-        let path = format!("/v1/jobs/{job_id}/events");
-        match forward_one::<serde_json::Value>(
-            &state,
-            &request_id,
-            &claims.org_id,
-            &path,
-            &[("limit", limit), ("after_seq", after_seq)],
-        )
-        .await
-        {
-            // Control serves these events through `httpx.WriteJSON`, which
-            // wraps the `[]Event` slice in an envelope: `{"data": [ ... ]}`
-            // (and `{"data": null}` when there are none). It is NOT a bare
-            // top-level array. Unwrap `data` first — same tolerance as
-            // `forward_list` — then accept the inner array; otherwise we'd
-            // fall through to `Vec::new()` on every real response and emit
-            // only the terminal `done`, which is the 0-pages bug.
-            Ok(Some(raw)) => {
-                let inner = raw.get("data").cloned().unwrap_or(raw);
-                match inner {
-                    serde_json::Value::Array(items) => items,
-                    _ => Vec::new(),
-                }
-            }
-            Ok(None) => Vec::new(),
-            Err(e) => return err_response(&request_id, e).into_response(),
+    let follow_requested = q
+        .follow
+        .as_deref()
+        .is_some_and(|v| matches!(v.trim(), "1" | "true"));
+    if follow_requested && job_stream::follow_enabled() {
+        return follow_job(state, claims, request_id, job_id, q, last_event_id, kind).await;
+    }
+
+    if kind.is_some() {
+        if let Err(e) = ensure_job(&state, &claims, &job_id, kind).await {
+            return err_response(&request_id, e).into_response();
         }
+    }
+    let limit = q.limit.unwrap_or(500).clamp(1, 1000);
+    let first_after = last_event_id.or(q.after_seq).unwrap_or(0);
+    let events = match legacy_events(
+        &state,
+        &request_id,
+        &claims.org_id,
+        &job_id,
+        limit,
+        first_after,
+    )
+    .await
+    {
+        Ok(events) => events,
+        Err(e) => return err_response(&request_id, e).into_response(),
     };
 
     let stream = async_stream::stream! {
@@ -1157,6 +1217,132 @@ pub async fn list_job_events(
     };
 
     Sse::new(stream).into_response()
+}
+
+/// Reads control's summary of the job, org-scoped. A foreign id is a 404, and so
+/// is a job of another kind than the path names, both before any frame is sent.
+async fn ensure_job(
+    state: &AppState,
+    claims: &crate::auth::Claims,
+    job_id: &str,
+    kind: Option<&str>,
+) -> Result<serde_json::Value, QuarryError> {
+    let summary = crate::control_client::get_json(
+        state,
+        &format!("/v1/jobs/{job_id}/summary"),
+        &claims.org_id,
+        &[],
+    )
+    .await?;
+    if let Some(kind) = kind {
+        let actual = summary
+            .get("job")
+            .and_then(|job| job.get("kind"))
+            .and_then(serde_json::Value::as_str);
+        if actual != Some(kind) {
+            return Err(QuarryError::new(ErrorCode::NotFound, "not found"));
+        }
+    }
+    Ok(summary)
+}
+
+/// Every event of the job after `first_after`, read page by page until the log
+/// is caught up (a page shorter than `limit` ends it). The legacy drain used to
+/// stop at one page, which truncated any job with more events than a page.
+async fn legacy_events(
+    state: &AppState,
+    request_id: &str,
+    org_id: &str,
+    job_id: &str,
+    limit: u32,
+    first_after: u64,
+) -> Result<Vec<serde_json::Value>, QuarryError> {
+    let path = format!("/v1/jobs/{job_id}/events");
+    let mut after = first_after;
+    let mut events: Vec<serde_json::Value> = Vec::new();
+    for _ in 0..LEGACY_MAX_PAGES {
+        let page = forward_one::<serde_json::Value>(
+            state,
+            request_id,
+            org_id,
+            &path,
+            &[("limit", limit.to_string()), ("after_seq", after.to_string())],
+        )
+        .await?;
+        // Control serves these events through `httpx.WriteJSON`, which
+        // wraps the `[]Event` slice in an envelope: `{"data": [ ... ]}`
+        // (and `{"data": null}` when there are none). Unwrap `data` first.
+        let items: Vec<serde_json::Value> = match page {
+            Some(raw) => match raw.get("data").cloned().unwrap_or(raw) {
+                serde_json::Value::Array(items) => items,
+                _ => Vec::new(),
+            },
+            None => Vec::new(),
+        };
+        let full = items.len() >= limit as usize;
+        let last = items
+            .last()
+            .and_then(|event| event.get("seq"))
+            .and_then(serde_json::Value::as_u64);
+        events.extend(items);
+        match (full, last) {
+            (true, Some(seq)) if seq > after => after = seq,
+            _ => break,
+        }
+    }
+    Ok(events)
+}
+
+/// The follow path: checks the job, takes a stream permit, and returns the live
+/// tail with its snapshot first. Refusals (foreign id, bad replay, over the cap)
+/// are answered before any frame.
+async fn follow_job(
+    state: AppState,
+    claims: crate::auth::Claims,
+    request_id: String,
+    job_id: String,
+    q: JobEventsQuery,
+    last_event_id: Option<u64>,
+    kind: Option<&'static str>,
+) -> Response {
+    let summary = match ensure_job(&state, &claims, &job_id, kind).await {
+        Ok(summary) => summary,
+        Err(e) => return err_response(&request_id, e).into_response(),
+    };
+    let Some(replay) = job_stream::parse_replay(q.replay.as_deref()) else {
+        return err_response(
+            &request_id,
+            QuarryError::new(ErrorCode::BadRequest, "replay must be none or all"),
+        )
+        .into_response();
+    };
+    let Some(permit) = job_stream::acquire(&claims.org_id) else {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(crate::api_error::ApiError::rate_limited(
+                "too many open job event streams for this organization",
+                30,
+            )),
+        )
+            .into_response();
+    };
+    let last_seq = summary
+        .get("last_seq")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let cursor = job_stream::start_cursor(last_event_id, q.after_seq, replay, last_seq);
+    let snapshot = job_stream::snapshot(&job_id, &summary, cursor);
+    let stream = job_stream::follow(
+        state,
+        claims.org_id.clone(),
+        job_id,
+        cursor,
+        snapshot,
+        permit,
+    );
+    Sse::new(stream)
+        .keep_alive(KeepAlive::new().interval(job_stream::KEEP_ALIVE))
+        .into_response()
 }
 
 #[cfg(test)]
