@@ -778,6 +778,31 @@ impl PageRunner {
         drop(_slot);
         drop(_global_slot);
 
+        // WS7.G: a redirect can land the fetch on a host the requested URL's preflight never
+        // saw. When the engine asks for it, the final URL is preflighted too (host rules,
+        // blocklists, URL reputation). A block ends the run here: nothing is parsed, stored,
+        // cached or ingested. A final URL equal to the requested one is not asked twice.
+        if self.security.recheck_final_url() && resp.final_url != *requested_url {
+            let verdict = self.security.preflight(&resp.final_url).await;
+            if verdict.decision == quarry_security::Decision::Block {
+                self.emit_page_event(
+                    run_id.clone(),
+                    EventType::PageBlocked,
+                    json!({
+                        "url": resp.final_url.to_string(),
+                        "reason": "redirect_target_blocked",
+                        "reasons": verdict.reasons.clone(),
+                    }),
+                    format!("{}:{}:redirect_blocked", run_id, resp.final_url),
+                )
+                .await;
+                return Err(quarry_core::error::QuarryError::new(
+                    quarry_core::error::ErrorCode::SecurityBlocked,
+                    verdict.reasons.join("; "),
+                ));
+            }
+        }
+
         // Defensive body-size cap. `scraper::Html::parse_document`
         // (used by readability, branding, metadata) builds a full
         // in-memory DOM — fine on normal pages, can blow up on a
@@ -3322,5 +3347,213 @@ mod capture_pipeline_tests {
             .warnings
             .iter()
             .any(|w| w.code == "capture_exceeds_inline_cap"));
+    }
+}
+
+#[cfg(test)]
+mod final_url_recheck_tests {
+    //! WS7.G: a redirect to a host the policy denies ends the run before anything is
+    //! stored, and a final URL equal to the requested one is asked about once.
+    use super::*;
+    use crate::artifact_store::{ArtifactStore, InMemoryStore};
+    use crate::driver::Driver;
+    use crate::fetch::FetchResponse;
+    use crate::policy_gate::{PolicySecurityEngine, BLOCK_PREFIX};
+    use async_trait::async_trait;
+    use quarry_core::output::DriverKind;
+    use quarry_core::web_policy::{resolve, OrgInput, PolicyInputs, PolicyLayer, Principal};
+    use quarry_security::{SecurityEngine, Verdict};
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::mpsc;
+
+    const PAGE: &str = "<html><head><title>Landing</title></head><body><main><h1>Landing page</h1><p>Some body text that is long enough to be a page worth keeping in a store.</p></main></body></html>";
+
+    /// Answers every fetch with `PAGE` served from `final_host` (a redirect when it
+    /// differs from the requested host).
+    struct RedirectDriver {
+        final_host: &'static str,
+    }
+
+    #[async_trait]
+    impl Driver for RedirectDriver {
+        fn kind(&self) -> DriverKind {
+            DriverKind::Static
+        }
+        async fn fetch(&self, url: &Url) -> QuarryResult<FetchResponse> {
+            let mut final_url = url.clone();
+            final_url.set_host(Some(self.final_host)).unwrap();
+            Ok(FetchResponse {
+                status: 200,
+                final_url,
+                headers: vec![("content-type".into(), "text/html; charset=utf-8".into())],
+                body: PAGE.as_bytes().to_vec(),
+                duration_ms: 1,
+                served_by: DriverKind::Static,
+                captures: None,
+            })
+        }
+    }
+
+    /// Counts the preflights it is asked and allows them all.
+    #[derive(Default)]
+    struct CountingEngine {
+        preflights: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl SecurityEngine for CountingEngine {
+        async fn preflight(&self, _url: &Url) -> Verdict {
+            self.preflights.fetch_add(1, Ordering::SeqCst);
+            Verdict::allow()
+        }
+        async fn check_discovered(&self, _parent: &Url, _child: &Url) -> Verdict {
+            Verdict::allow()
+        }
+        fn allow_private_hosts(&self) -> bool {
+            true
+        }
+    }
+
+    fn deny_policy(host: &str) -> quarry_core::web_policy::ResolvedPolicy {
+        let layer = PolicyLayer::new(BTreeMap::new(), None, None, None, vec![host.to_string()])
+            .expect("a valid layer");
+        resolve(&PolicyInputs {
+            principal: Principal::Human,
+            zdr: false,
+            baseline: PolicyLayer::default(),
+            org: OrgInput::Absent,
+            grant: None,
+            request: Some(layer),
+        })
+        .expect("the policy resolves")
+    }
+
+    fn runner(
+        tx: mpsc::Sender<quarry_core::event::Event>,
+        driver: RedirectDriver,
+        security: Arc<dyn SecurityEngine>,
+        artifacts: Arc<InMemoryStore>,
+    ) -> PageRunner {
+        PageRunner {
+            driver: Arc::new(driver),
+            security,
+            artifacts,
+            event_sink: EventSink::new(tx),
+            zdr: ZdrMode::Off,
+            ingest: None,
+            org_id: Some("org_test".into()),
+            user_id: None,
+            privacy: PrivacyPolicy::default(),
+            cancel_token: None,
+            local_index: None,
+            policy: RunPolicy::default(),
+            scheduler: None,
+            autoscale: None,
+            render: RenderHints::default(),
+            page_renderer: None,
+            source_registrar: None,
+            title_enricher: None,
+            doc_routing: DocRouting::Off,
+        }
+    }
+
+    #[tokio::test]
+    async fn redirect_to_a_denied_host_returns_security_blocked_and_persists_nothing() {
+        let (tx, mut rx) = mpsc::channel(64);
+        let artifacts = Arc::new(InMemoryStore::new());
+        let engine = PolicySecurityEngine::new(
+            Arc::new(CountingEngine::default()),
+            deny_policy("denied.example"),
+        )
+        .with_final_url_check(true);
+        let runner = runner(
+            tx,
+            RedirectDriver {
+                final_host: "denied.example",
+            },
+            Arc::new(engine),
+            artifacts.clone(),
+        );
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://start.example/page".parse().unwrap();
+
+        let error = runner.run(&run_id, &url, None).await.expect_err("the redirect is refused");
+        assert_eq!(error.code, quarry_core::error::ErrorCode::SecurityBlocked);
+        assert!(error.message.starts_with(BLOCK_PREFIX), "{}", error.message);
+
+        assert_eq!(
+            artifacts.count("org_test").await.unwrap(),
+            Some(0),
+            "nothing is written to the artifact store"
+        );
+        let mut types = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            types.push(event.event_type);
+        }
+        assert!(types.contains(&EventType::PageBlocked), "{types:?}");
+        assert!(
+            !types.contains(&EventType::PageFetched) && !types.contains(&EventType::ArtifactWritten),
+            "no fetched page and no artifact event: {types:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn final_url_equal_to_requested_is_not_preflighted_twice() {
+        let (tx, _rx) = mpsc::channel(64);
+        let inner = Arc::new(CountingEngine::default());
+        let engine = PolicySecurityEngine::new(inner.clone(), deny_policy("denied.example"))
+            .with_final_url_check(true);
+        let runner = runner(
+            tx,
+            RedirectDriver {
+                final_host: "start.example",
+            },
+            Arc::new(engine),
+            Arc::new(InMemoryStore::new()),
+        );
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://start.example/page".parse().unwrap();
+        runner.run(&run_id, &url, None).await.expect("an allowed page runs");
+        assert_eq!(inner.preflights.load(Ordering::SeqCst), 1, "one preflight, for the requested URL");
+    }
+
+    #[tokio::test]
+    async fn a_redirect_to_an_allowed_host_is_preflighted_once_more() {
+        let (tx, _rx) = mpsc::channel(64);
+        let inner = Arc::new(CountingEngine::default());
+        let engine = PolicySecurityEngine::new(inner.clone(), deny_policy("denied.example"))
+            .with_final_url_check(true);
+        let runner = runner(
+            tx,
+            RedirectDriver {
+                final_host: "www.start.example",
+            },
+            Arc::new(engine),
+            Arc::new(InMemoryStore::new()),
+        );
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://start.example/page".parse().unwrap();
+        runner.run(&run_id, &url, None).await.expect("a redirect within the allowed hosts runs");
+        assert_eq!(inner.preflights.load(Ordering::SeqCst), 2, "requested URL, then the final URL");
+    }
+
+    #[tokio::test]
+    async fn with_the_flag_off_the_final_url_is_not_rechecked() {
+        let (tx, _rx) = mpsc::channel(64);
+        let inner = Arc::new(CountingEngine::default());
+        let engine = PolicySecurityEngine::new(inner.clone(), deny_policy("denied.example"));
+        let runner = runner(
+            tx,
+            RedirectDriver {
+                final_host: "www.start.example",
+            },
+            Arc::new(engine),
+            Arc::new(InMemoryStore::new()),
+        );
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://start.example/page".parse().unwrap();
+        runner.run(&run_id, &url, None).await.expect("runs as before");
+        assert_eq!(inner.preflights.load(Ordering::SeqCst), 1);
     }
 }

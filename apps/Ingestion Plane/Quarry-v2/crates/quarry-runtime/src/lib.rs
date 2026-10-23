@@ -71,6 +71,7 @@ pub mod mp_client;
 pub mod observation;
 pub mod observation_redaction;
 pub mod pipeline;
+pub mod policy_gate;
 pub mod planner;
 pub mod policy;
 pub mod proxy_affinity;
@@ -163,6 +164,7 @@ pub use mp_client::{
 pub use nats_event_bus::{NatsConfig, NatsEventBus};
 pub use observation::build_dom_summary;
 pub use pipeline::{DocRouting, InlineParts, InlineRequest, PageRunner};
+pub use policy_gate::PolicySecurityEngine;
 pub use planner::{MockPlanner, Planner, PlannerDecision};
 pub use policy::{
     policy_fingerprint, record_determinism_inputs, BlockPolicy, CheckpointPolicy, Determinism,
