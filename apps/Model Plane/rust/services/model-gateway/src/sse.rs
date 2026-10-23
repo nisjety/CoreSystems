@@ -1048,7 +1048,7 @@ pub async fn invoke_stream_sse(
     // ZDR takes a deliberately narrow, persistence-free path: no session/run,
     // event, stream-buffer, idempotency, memory, cache, artifact, or tool write.
     // Plain inference and optional read-only Data grounding remain usable.
-    if effective_zdr && !features.iter().any(|f| f == "agentic") {
+    if effective_zdr {
         // What the persistence-free path can do for this request is decided field
         // by field in `zdr_features`. A request for something it cannot do is
         // refused with its catalogue code and feature, before any model call, and
