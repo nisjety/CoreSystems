@@ -1077,10 +1077,17 @@ const audioDictateInput = z.object({
   zdr: z.boolean().optional(),
 })
 
-const orchestrationDecideApprovalInput = z.object({
+/**
+ * Upper bound on the decision `reason`. On a reject it can carry redirect text
+ * (the person telling the agent what to do instead). The owner does not read
+ * the text yet on every path; see the description on `orchestration.decide_approval`.
+ */
+export const ORCHESTRATION_APPROVAL_REASON_MAX = 1000
+
+export const orchestrationDecideApprovalInput = z.object({
   approvalId: z.string().min(1),
   decision: z.enum(['approve', 'reject']),
-  reason: z.string().trim().optional(),
+  reason: z.string().trim().max(ORCHESTRATION_APPROVAL_REASON_MAX).optional(),
 })
 
 const orchestrationResumeRunInput = z.object({
@@ -2960,7 +2967,7 @@ export const actionRegistry = [
   {
     id: 'orchestration.decide_approval',
     label: 'Decide orchestration approval',
-    description: 'Approve or reject a pending orchestration-run approval. This is the human checkpoint the run is waiting on.',
+    description: 'Approve or reject a pending orchestration-run approval. This is the human checkpoint the run is waiting on. On a reject, reason may carry redirect text (what the person wants the agent to do instead); it is capped at 1000 characters. A reject with reason aborts the run today unless the owner accepts the redirect.',
     ownerPlane: 'model',
     risk: 'high',
     requiresApproval: false,

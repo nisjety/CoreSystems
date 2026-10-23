@@ -1,4 +1,5 @@
-import { requestJson } from './http'
+import { orchestrationDecideApprovalInput } from '@/shared/actions/action-registry'
+import { ApiError, requestJson } from './http'
 
 // Human-in-the-loop run control for agentic chat runs. These call the gateway
 // `/api/v1/orchestration/*` proxy (→ model-gateway → session-core/execution-core).
@@ -83,18 +84,29 @@ export async function listApprovals(runId: string, signal?: AbortSignal): Promis
   return list.map(normalizeApproval).filter((a): a is Approval => a !== null)
 }
 
-/** Approve or reject a pending approval (unblocks/blocks the gated tool step). */
+/**
+ * Approve or reject a pending approval (unblocks/blocks the gated tool step).
+ *
+ * `reason` is checked against the `orchestration.decide_approval` action
+ * contract before anything is sent, so a caller cannot post an input the
+ * contract does not describe (for example redirect text over the length cap).
+ * A reject's `reason` is the redirect text channel (see the contract).
+ */
 export async function decideApproval(
   approvalId: string,
   decision: ApprovalDecision,
   reason?: string,
   signal?: AbortSignal,
 ): Promise<Approval | null> {
+  const checked = orchestrationDecideApprovalInput.safeParse({ approvalId, decision, reason: reason ?? '' })
+  if (!checked.success) {
+    throw new ApiError('Ugyldig godkjenningsavgjørelse.', 400, 'invalid_approval_decision')
+  }
   const payload = await requestJson<{ approval?: RawApproval }>(
     `/api/v1/orchestration/approvals/${encodeURIComponent(approvalId)}/decide`,
     {
       method: 'POST',
-      body: JSON.stringify({ decision, reason: reason ?? '' }),
+      body: JSON.stringify({ decision, reason: checked.data.reason ?? '' }),
       signal,
     },
   )

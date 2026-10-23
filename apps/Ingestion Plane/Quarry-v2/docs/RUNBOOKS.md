@@ -912,13 +912,24 @@ API client). `unknown` is a row written before migration 016 and is not a fault.
 - Verify (test phase, not yet run): `cd services/quarry-control && go test ./internal/egress/ ./internal/dispatcher/ ./internal/catalogwatch/`. Native `go vet ./...` in the module exited 0; the tests were not run.
 - Rollback: revert the anchor lines in `dispatcher.go` and `catalogwatch.go` to `&http.Client{Timeout: 30 * time.Second}`. The `egress` package has no other caller and can stay.
 
-## Webhook egress guard in quarry-control (E3.5-2, unit W3-B1-05, built, NOT run, 2026-10-23)
+## Shared browser driver foundation: background tabs, tab pins, per-tab egress (WS8.E, U07, built, NOT run, 2026-10-23)
 
-- What it is: `services/quarry-control/internal/egress` is a copy of integration-corev2's `internal/egress` (`guard.go`, `client.go` and their tests, all unchanged except the package comment in `guard.go`), plus `conformance_test.go` for the webhook and catalog-watch cases. It is the single-resolution SSRF and DNS-rebinding guard: `ResolveAndVet` resolves a host once and refuses the whole lookup if any address is loopback, private (RFC1918, RFC4193), CGNAT, link-local, multicast, reserved, this-network, or NAT64-embedded, or if the host is a cloud metadata name.
-- Where it is live: `internal/dispatcher/dispatcher.go` (the `hc == nil` fallback in `Run`, which `cmd/control/main.go` always uses) and `internal/catalogwatch/catalogwatch.go` (the `httpClient == nil` fallback in `NewClient`) now build their client with `egress.SafeClient`, keeping the old 30 s request timeout. This is a live change, not a dark one: webhook delivery in production goes through the guard from the commit that carries it.
-- What a tenant sees: a webhook target that resolves to a blocked address fails the delivery with a transport error that wraps `egress: destination blocked by policy`. It takes the normal retry and dead-letter path (five attempts, then DLQ). A target that answers with a 3xx is no longer followed; the 3xx response is recorded as the result.
-- Allowlist: `EGRESS_ALLOWLIST_HOSTS` and `EGRESS_ALLOWLIST_CIDRS` (comma-separated) are read once per process by `egress.Default()`. Leave both unset in production; the package doc says an entry should name one confirmed legitimate destination.
-- Keeping the copy in step: the copy must match integration-corev2 except the header comment of `guard.go`. Check with a diff of the two `guard.go` files and ignore the header lines; a behaviour change in one copy needs the same change in the other.
-- Not in this section: org scoping of webhook registrations and the fail-closed migration `021_webhook_org_scope` (E3.5-1), the text-fingerprint switch (E3.5-4), and per-job webhook fields.
-- Verify (test phase, not yet run): `cd services/quarry-control && go test ./internal/egress/ ./internal/dispatcher/ ./internal/catalogwatch/`. Native `go vet ./...` in the module exited 0; the tests were not run.
-- Rollback: revert the anchor lines in `dispatcher.go` and `catalogwatch.go` to `&http.Client{Timeout: 30 * time.Second}`. The `egress` package has no other caller and can stay.
+Dark and without a caller. Nothing in the edge, the runtime or the SPA opens a background tab, pins a handle or installs a tab policy yet, so behaviour is unchanged for every existing run. The surface is the capability bits, the `BrowserDriver` defaults and the chromiumoxide implementation.
+
+- What is new: `BrowserSession::pinned_to(tab_id)` and `tab_pin()`. A pinned handle addresses its tab and never the active tab; a closed pin is NOT_FOUND with `details.reason = "pinned_tab_closed"` and no fallback. `BrowserDriver::open_tab(OpenTabOptions { url, activate, egress_policy })` opens a background tab with `activate: false`, which leaves the active tab where it was (a session with no active tab still activates the new one). `configure_tab_egress_policy(session, tab_id, policy)` installs a per-tab egress policy: the tab's policy wins, then the session policy, then deny-all. `active_tab_id(session)` reads the active tab. `new_tab` now calls `open_tab` with `activate: true` and behaves as before.
+- Observations through a pinned handle: devtools events, egress receipts and dialogs of other tabs are not returned; `respond_dialog` refuses a dialog that belongs to another tab.
+- Capability bits (serde defaults `false` on the wire): `background_tabs` and `tab_pinning` are true for the chromiumoxide driver; `per_tab_egress` is true only with the pinned egress proxy, the same condition as `isolated_egress`.
+- Code: `crates/quarry-browser/src/tab_control.rs` (new, pure helpers and unit tests), `lib.rs` (trait defaults, `BrowserSession.tab_pin`), `chromiumoxide.rs` (the implementation and seven live tests). Every `BrowserSession` literal carries `tab_pin: None`.
+- Rollback: revert the commit. No flag, no schema, no wire change for existing callers.
+
+Tests (written and compile-checked; NOT run in the build):
+
+- Unit, no Chromium: `cargo test -p quarry-browser tab_control` (key lookup order, pin resolution, observation filters).
+- Live lane: `CHROMIUMOXIDE_TEST=1 QUARRY_BROWSER_NO_SANDBOX=1 CHROME=/usr/bin/chromium cargo test -p quarry-browser --features chromiumoxide --lib chromiumoxide::tests -- --ignored` runs `background_tab_leaves_active_tab_unchanged`, `pinned_session_clicks_pinned_tab_not_active_tab`, `per_tab_policy_blocks_third_host_in_agent_tab_only`, `human_tab_keeps_open_web_while_agent_tab_is_narrow`, `closing_pinned_tab_does_not_fall_back_to_active`, `pinned_observation_never_contains_other_tab_events` and `background_tab_is_not_throttled`. The last one asserts at least 10 ticks in 2 s, a floor chosen before the first run; record the real count and adjust the floor there. The per-tab tests use `https://third.example.test/` as a page subresource; the assertions read the policy decision recorded in the receipt, not whether the request succeeds, so an offline runner still proves the boundary.
+- Without `CHROMIUMOXIDE_TEST=1` every live test returns at once.
+
+Traps for the next reader:
+
+- A background open still runs `require_configured_egress`: a session needs its own policy before a tab can open, even when the tab carries its own.
+- `goto` on a pinned handle with a closed pin returns `pinned_tab_closed`; it never opens a stand-in tab.
+- Tab policies are removed with the tab (`close_tab`) and with the session (`teardown_locked`, `ensure_browser`). A tab whose attach fails keeps its entry until the session ends; tab ids are not reused within a session.
