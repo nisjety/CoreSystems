@@ -600,6 +600,98 @@ export async function getBrowserDevtoolsEvents(
   )
 }
 
+/** One event of a run's trace as the events stream sends it (WS10.S3). `seq` is per run. */
+export type BrowserTraceEvent = {
+  event_id: string
+  run_id?: string | null
+  job_id?: string | null
+  /** The envelope's snake_case type (`action_started`); the SSE name is in `onEvent`. */
+  type: string
+  ts: string
+  seq: number
+  payload: Record<string, unknown>
+  idempotency_key: string
+}
+
+/** The resume point is older than the ring: read the durable timeline for the missed part. */
+export type BrowserReplayGap = {
+  requested: number
+  oldest_retained: number
+  fallback: string
+}
+
+export type BrowserEventsStreamOptions = {
+  /** Replay the retained events after this seq before the live tail. */
+  fromSeq?: number
+  /** Stop after this many user-facing events. */
+  maxEvents?: number
+}
+
+export type BrowserEventsStreamHandlers = {
+  /** One user-facing event in seq order; `name` is the SSE event name (e.g. `action.started`). */
+  onEvent: (name: string, event: BrowserTraceEvent) => void
+  onReplayGap?: (gap: BrowserReplayGap) => void
+  /** The stream is finished: `run_closed` or `max_events`. */
+  onDone?: (reason: string) => void
+  /** A connection problem. EventSource reconnects on its own with `Last-Event-ID`. */
+  onError?: () => void
+}
+
+const BROWSER_EVENT_NAMES = [
+  'agent.started',
+  'action.started',
+  'action.completed',
+  'action.failed',
+  'observation.ready',
+  'agent.completed',
+  'agent.expired',
+  'agent.failed',
+] as const
+
+function parseSseJson<T>(raw: string): T | null {
+  try {
+    return JSON.parse(raw) as T
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Open the typed event stream of a browser session's run (WS10.S3). Cookie-authenticated
+ * like the live-frame stream, since EventSource cannot send the org header. The browser
+ * reconnects with `Last-Event-ID`, which the gateway forwards, so a reconnect continues
+ * after the last seq it saw. Returns a handle that closes the stream.
+ */
+export function streamBrowserEvents(
+  sessionId: string,
+  options: BrowserEventsStreamOptions,
+  handlers: BrowserEventsStreamHandlers,
+): { close: () => void } {
+  const params = new URLSearchParams()
+  if (typeof options.fromSeq === 'number') params.set('from_seq', String(options.fromSeq))
+  if (typeof options.maxEvents === 'number') params.set('max_events', String(options.maxEvents))
+  const query = params.toString()
+  const source = new EventSource(
+    `/api/v1/browser/sessions/${encodeURIComponent(sessionId)}/events/stream${query ? `?${query}` : ''}`,
+  )
+  for (const name of BROWSER_EVENT_NAMES) {
+    source.addEventListener(name, (message) => {
+      const event = parseSseJson<BrowserTraceEvent>((message as MessageEvent<string>).data)
+      if (event) handlers.onEvent(name, event)
+    })
+  }
+  source.addEventListener('replay_gap', (message) => {
+    const gap = parseSseJson<BrowserReplayGap>((message as MessageEvent<string>).data)
+    if (gap) handlers.onReplayGap?.(gap)
+  })
+  source.addEventListener('done', (message) => {
+    handlers.onDone?.((message as MessageEvent<string>).data)
+    source.close()
+  })
+  source.onerror = () => handlers.onError?.()
+  return { close: () => source.close() }
+}
+
 /** The receipts of a session, newest `limit` only (WS9.C). Refused for ZDR sessions. */
 export async function listBrowserReceipts(
   orgId: string,

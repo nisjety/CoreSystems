@@ -451,6 +451,11 @@ fn classed_routes(limiter: &crate::rate_limit::RateLimiter) -> Router<AppState> 
             "/api/v1/browser/sessions/{session_id}/frames/stream",
             get(stream_live_frames),
         )
+        // WS10.S3: the run's typed events as SSE, resumable with Last-Event-ID.
+        .route(
+            "/api/v1/browser/sessions/{session_id}/events/stream",
+            get(stream_agent_events),
+        )
         .route(
             "/api/v1/browser/sessions/{session_id}/frames/ws",
             get(proxy_live_frames_ws),
@@ -2046,6 +2051,65 @@ async fn stream_live_frames(
     };
     let url = format!(
         "{}/v1/agent/runs/{}/frames/stream{}",
+        state.quarry_edge_url,
+        urlencoding::encode(&session_id),
+        query_suffix(&uri)
+    );
+
+    proxy_sse_stream(
+        &state,
+        Method::GET,
+        &url,
+        None,
+        token.as_deref(),
+        headers.get("last-event-id").and_then(|v| v.to_str().ok()),
+        None,
+        projection
+            .get("zdr")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    )
+    .await
+}
+
+/// `GET /api/v1/browser/sessions/{session_id}/events/stream` (WS10.S3): the run's typed
+/// events as SSE, proxied from Quarry without buffering. The owner check is Quarry's
+/// (the projection call answers 404 to anyone else, and the stream is not opened). The
+/// `Last-Event-ID` header and the query (`from_seq`, `max_events`) pass through; Quarry
+/// owns the replay ring. The live-frame stream is the model.
+async fn stream_agent_events(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    uri: Uri,
+) -> Response {
+    if !is_valid_path_segment(&session_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_browser_session",
+                "The requested browser session id is invalid.",
+            )),
+        )
+            .into_response();
+    }
+
+    let cookie = cookie_header(&headers);
+    let token = quarry_token(&state, &user, &cookie).await;
+    let projection = match owner_browser_session_projection(
+        &state,
+        &user,
+        token.as_deref(),
+        &session_id,
+    )
+    .await
+    {
+        Ok(projection) => projection,
+        Err(response) => return response,
+    };
+    let url = format!(
+        "{}/v1/agent/runs/{}/events/stream{}",
         state.quarry_edge_url,
         urlencoding::encode(&session_id),
         query_suffix(&uri)
@@ -6352,6 +6416,93 @@ pub(crate) mod tests {
                 }
             ),
             Err(BrowserRunStoreError::Unavailable)
+        );
+    }
+
+    /// WS10.S3: the events stream forwards `Last-Event-ID` and the query to Quarry.
+    #[tokio::test]
+    async fn browser_events_stream_proxies_last_event_id_and_query_to_quarry() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let quarry = MockServer::start().await;
+        let mut state = test_app_state();
+        state.quarry_edge_url = quarry.uri();
+        Mock::given(method("GET"))
+            .and(path("/v1/agent/runs/run-owned/browser-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"zdr": false}})))
+            .mount(&quarry)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/agent/runs/run-owned/events/stream"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string("id: 4\nevent: action.started\ndata: {}\n\n"),
+            )
+            .mount(&quarry)
+            .await;
+
+        let mut headers = HeaderMap::new();
+        headers.insert("last-event-id", "3".parse().unwrap());
+        let response = stream_agent_events(
+            State(state.clone()),
+            Extension(test_user("user-owner", "org-owner")),
+            headers,
+            Path("run-owned".to_owned()),
+            Uri::from_static("/api/v1/browser/sessions/run-owned/events/stream?max_events=5"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let requests = quarry.received_requests().await.unwrap_or_default();
+        let forwarded = requests
+            .iter()
+            .find(|request| request.url.path() == "/v1/agent/runs/run-owned/events/stream")
+            .expect("the events stream reaches Quarry");
+        assert_eq!(forwarded.url.query(), Some("max_events=5"));
+        assert_eq!(
+            forwarded
+                .headers
+                .get("last-event-id")
+                .and_then(|value| value.to_str().ok()),
+            Some("3")
+        );
+    }
+
+    /// WS10.S3: a caller Quarry does not admit to the run never opens the stream.
+    #[tokio::test]
+    async fn browser_events_stream_refuses_a_non_owner() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let quarry = MockServer::start().await;
+        let mut state = test_app_state();
+        state.quarry_edge_url = quarry.uri();
+        Mock::given(method("GET"))
+            .and(path("/v1/agent/runs/run-owned/browser-session"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+                "error": { "code": "NOT_FOUND", "message": "agent run not found" }
+            })))
+            .mount(&quarry)
+            .await;
+
+        let response = stream_agent_events(
+            State(state.clone()),
+            Extension(test_user("user-attacker", "org-owner")),
+            HeaderMap::new(),
+            Path("run-owned".to_owned()),
+            Uri::from_static("/api/v1/browser/sessions/run-owned/events/stream"),
+        )
+        .await;
+        assert!(response.status().is_client_error(), "got {}", response.status());
+
+        let requests = quarry.received_requests().await.unwrap_or_default();
+        assert!(
+            requests
+                .iter()
+                .all(|request| !request.url.path().ends_with("/events/stream")),
+            "a non-owner must not reach the events stream"
         );
     }
 
