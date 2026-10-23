@@ -94,6 +94,9 @@ fn normalize_schedule(schedule: &Value) -> Value {
         "createdAt": str_at(schedule, "created_at"),
         "lastRunAt": str_or_null(schedule, "last_run_at"),
         "nextRunAt": str_or_null(schedule, "next_run_at"),
+        "needsActivation": schedule.get("needs_activation").and_then(Value::as_bool).unwrap_or(false),
+        "timezone": str_at(schedule, "timezone"),
+        "overlapPolicy": str_at(schedule, "overlap_policy"),
         "target": target,
         "config": config,
     })
@@ -144,6 +147,9 @@ pub(crate) async fn create_schedule(
                     .unwrap_or_else(|| "skip".to_owned()),
             ),
         );
+    }
+    if let Some(timezone) = first_str(&body, &["timezone"]) {
+        request.insert("timezone".into(), Value::String(timezone));
     }
     request.insert("config".into(), config);
 
@@ -496,6 +502,27 @@ mod capability_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_schedule_carries_activation_timezone_and_overlap() {
+        let item = normalize_schedule(&json!({
+            "schedule_id": "sch_1",
+            "name": "Nightly crawl",
+            "kind": "crawl",
+            "status": "paused",
+            "cron": "0 7 * * *",
+            "created_at": "2026-10-23T07:00:00Z",
+            "timezone": "Europe/Oslo",
+            "overlap_policy": "cancel",
+            "needs_activation": true,
+            "config": { "url": "https://example.com/docs" }
+        }));
+        assert_eq!(item["needsActivation"], true);
+        assert_eq!(item["timezone"], "Europe/Oslo");
+        assert_eq!(item["overlapPolicy"], "cancel");
+        assert_eq!(item["status"], "paused");
+        assert_eq!(item["target"], "https://example.com/docs");
+    }
 
     #[test]
     fn normalize_schedule_targets_url_then_urls_then_query() {
