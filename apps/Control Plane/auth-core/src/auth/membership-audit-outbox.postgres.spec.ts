@@ -4,15 +4,64 @@ import { join } from 'node:path';
 
 import postgres from 'postgres';
 
+jest.mock('better-auth/api', () => ({
+  createAuthMiddleware: <T>(handler: T): T => handler,
+}));
+
 import { verifyLifecycleFixtureMarker } from './lifecycle-test-fixture';
+import {
+  auditTimestampIso,
+  flushOrganizationMembershipAuditOutbox,
+  setOrganizationEventPublisher,
+} from './organization-events.plugin';
+
+type SqlCall = (...args: unknown[]) => unknown;
+type AuditEvent = {
+  org_id: string;
+  details: { actor_resolution_dead_lettered_at?: string };
+};
+type PublishAudit = jest.Mock<Promise<void>, [AuditEvent]>;
+
+// The flush runs on the module-level client; point it at the fixture schema
+// once the schema exists.
+const mockFlushDb: { client?: SqlCall & { begin: SqlCall } } = {};
+jest.mock('../db', () => ({
+  db: {},
+  sqlClient: Object.assign(
+    (...args: unknown[]) => mockFlushDb.client!(...args),
+    { begin: (...args: unknown[]) => mockFlushDb.client!.begin(...args) },
+  ),
+}));
 
 const testDatabaseUrl = process.env.TEST_DATABASE_URL?.trim();
 const postgresDescribe = testDatabaseUrl ? describe : describe.skip;
+
+describe('membership audit timestamp normalisation', () => {
+  it('reproduces the failure of a bare toISOString on a non-Date value', () => {
+    const fromDriver = '2026-10-23 10:00:00.123456+00' as unknown as Date;
+    expect(() => fromDriver.toISOString()).toThrow(TypeError);
+  });
+
+  it('accepts a Date, a driver string or number, and no value', () => {
+    expect(auditTimestampIso(new Date('2026-10-23T10:00:00.000Z'))).toBe(
+      '2026-10-23T10:00:00.000Z',
+    );
+    expect(auditTimestampIso('2026-10-23 10:00:00.5+00')).toBe(
+      '2026-10-23T10:00:00.500Z',
+    );
+    expect(auditTimestampIso(Date.UTC(2026, 9, 23, 10))).toBe(
+      '2026-10-23T10:00:00.000Z',
+    );
+    expect(auditTimestampIso(null)).toBeUndefined();
+    expect(auditTimestampIso(undefined)).toBeUndefined();
+  });
+});
 
 postgresDescribe('membership audit outbox with Postgres', () => {
   const schema = `membership_audit_${randomUUID().replaceAll('-', '')}`;
   let admin: ReturnType<typeof postgres>;
   let fixture: ReturnType<typeof postgres>;
+  let rawTimestamps: ReturnType<typeof postgres>;
 
   beforeAll(async () => {
     admin = postgres(testDatabaseUrl!, { max: 1, prepare: false });
@@ -28,6 +77,23 @@ postgresDescribe('membership audit outbox with Postgres', () => {
       prepare: false,
       connection: { search_path: `${schema},public` },
     });
+    // Hands timestamps back as the text Postgres sent, the non-Date input the
+    // flush must tolerate.
+    rawTimestamps = postgres(testDatabaseUrl!, {
+      max: 2,
+      prepare: false,
+      connection: { search_path: `${schema},public` },
+      types: {
+        date: {
+          to: 1184,
+          from: [1082, 1114, 1184],
+          serialize: (value: unknown) =>
+            value instanceof Date ? value.toISOString() : String(value),
+          parse: (value: string) => value,
+        },
+      },
+    });
+    mockFlushDb.client = rawTimestamps as unknown as typeof mockFlushDb.client;
     await fixture.unsafe(`
       CREATE TABLE "user" (id TEXT PRIMARY KEY, email TEXT NOT NULL);
       CREATE TABLE account (
@@ -288,6 +354,7 @@ postgresDescribe('membership audit outbox with Postgres', () => {
 
   afterAll(async () => {
     if (fixture) await fixture.end({ timeout: 5 });
+    if (rawTimestamps) await rawTimestamps.end({ timeout: 5 });
     if (admin) {
       await admin`DROP SCHEMA IF EXISTS ${admin(schema)} CASCADE`;
       await admin.end({ timeout: 5 });
@@ -725,5 +792,115 @@ postgresDescribe('membership audit outbox with Postgres', () => {
       { revision: '2', published: true, attempts: 1 },
       { revision: '3', published: false, attempts: 0 },
     ]);
+  });
+
+  // Dead-letters a pending-actor row exactly as the recovery job does, then
+  // ages the dead-letter past the claim query's five minute quarantine.
+  const deadLetterMembership = async (org: string, user: string) => {
+    await fixture.unsafe(`
+      INSERT INTO "user" (id, email)
+      VALUES ('${user}', '${user}@example.invalid');
+      INSERT INTO organization (id, name) VALUES ('${org}', '${org}');
+      INSERT INTO member (id, organization_id, user_id, role)
+      VALUES ('member-${user}', '${org}', '${user}', 'member');
+      UPDATE organization_membership_audit_outbox
+      SET actor_resolution_not_before = NOW()
+      WHERE organization_id = '${org}' AND user_id = '${user}';
+    `);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await fixture`SELECT * FROM recover_pending_membership_audit_actors(10, 3)`;
+      await fixture`
+        UPDATE organization_membership_audit_outbox
+        SET actor_resolution_not_before = NOW()
+        WHERE organization_id = ${org} AND user_id = ${user}
+          AND actor_classification = 'pending'
+      `;
+    }
+    await fixture`
+      UPDATE organization_membership_audit_outbox
+      SET actor_resolution_dead_lettered_at = NOW() - INTERVAL '10 minutes'
+      WHERE organization_id = ${org} AND user_id = ${user}
+    `;
+  };
+
+  const auditState = async (org: string, user: string) => {
+    const rows = await fixture<
+      Array<{ published: boolean; attempts: number; last_error: string | null }>
+    >`
+      SELECT published_at IS NOT NULL AS published, attempts, last_error
+      FROM organization_membership_audit_outbox
+      WHERE organization_id = ${org} AND user_id = ${user}
+    `;
+    return rows[0];
+  };
+
+  const publishedFor = (publish: PublishAudit, org: string) =>
+    publish.mock.calls.filter(([event]) => event.org_id === org);
+
+  it('flushes a dead-lettered row whose timestamps arrive as strings', async () => {
+    await deadLetterMembership('org-dl', 'user-dl');
+    const publishVerevonAudit: PublishAudit = jest
+      .fn<Promise<void>, [AuditEvent]>()
+      .mockResolvedValue(undefined);
+    setOrganizationEventPublisher({ publishVerevonAudit } as never);
+
+    await flushOrganizationMembershipAuditOutbox();
+
+    const events = publishedFor(publishVerevonAudit, 'org-dl');
+    expect(events).toHaveLength(1);
+    expect(events[0][0].details.actor_resolution_dead_lettered_at).toMatch(
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+    );
+    expect(await auditState('org-dl', 'user-dl')).toMatchObject({
+      published: true,
+      last_error: null,
+    });
+  });
+
+  it('retries a failing row no sooner than its exponential backoff', async () => {
+    await deadLetterMembership('org-bo', 'user-bo');
+    const failing: PublishAudit = jest
+      .fn<Promise<void>, [AuditEvent]>()
+      .mockRejectedValue(new Error('bus down'));
+    setOrganizationEventPublisher({ publishVerevonAudit: failing } as never);
+
+    await flushOrganizationMembershipAuditOutbox();
+    expect(publishedFor(failing, 'org-bo')).toHaveLength(1);
+    expect(await auditState('org-bo', 'user-bo')).toMatchObject({
+      published: false,
+      attempts: 1,
+    });
+
+    // Ten attempts back off 1024 s from the last failure: a flush now skips it.
+    await fixture`
+      UPDATE organization_membership_audit_outbox
+      SET attempts = 10, updated_at = NOW()
+      WHERE organization_id = 'org-bo' AND user_id = 'user-bo'
+    `;
+    await flushOrganizationMembershipAuditOutbox();
+    expect(publishedFor(failing, 'org-bo')).toHaveLength(1);
+    expect((await auditState('org-bo', 'user-bo')).attempts).toBe(10);
+
+    // The wait is capped at an hour however large the attempt count grew.
+    await fixture`
+      UPDATE organization_membership_audit_outbox
+      SET attempts = 100000, updated_at = NOW() - INTERVAL '30 minutes'
+      WHERE organization_id = 'org-bo' AND user_id = 'user-bo'
+    `;
+    await flushOrganizationMembershipAuditOutbox();
+    expect(publishedFor(failing, 'org-bo')).toHaveLength(1);
+
+    await fixture`
+      UPDATE organization_membership_audit_outbox
+      SET updated_at = NOW() - INTERVAL '61 minutes'
+      WHERE organization_id = 'org-bo' AND user_id = 'user-bo'
+    `;
+    const recovered: PublishAudit = jest
+      .fn<Promise<void>, [AuditEvent]>()
+      .mockResolvedValue(undefined);
+    setOrganizationEventPublisher({ publishVerevonAudit: recovered } as never);
+    await flushOrganizationMembershipAuditOutbox();
+    expect(publishedFor(recovered, 'org-bo')).toHaveLength(1);
+    expect((await auditState('org-bo', 'user-bo')).published).toBe(true);
   });
 });
