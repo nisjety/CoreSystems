@@ -1412,7 +1412,10 @@ impl SessionCore for MockSessionCore {
         &self,
         _: TReq<ListThreadsRequest>,
     ) -> Result<Response<ListThreadsResponse>, Status> {
-        Ok(Response::new(ListThreadsResponse { threads: vec![] }))
+        Ok(Response::new(ListThreadsResponse {
+            threads: vec![],
+            next_cursor: String::new(),
+        }))
     }
 
     async fn update_thread_presentation(

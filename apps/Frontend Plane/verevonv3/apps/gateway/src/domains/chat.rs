@@ -22,7 +22,9 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         )
         .route(
             "/api/v1/chat/threads/{thread_id}",
-            put(history::save_thread).delete(history::delete_thread),
+            put(history::save_thread)
+                .get(history::get_thread)
+                .delete(history::delete_thread),
         )
         .route(
             "/api/v1/chat/threads/{thread_id}/transcript",

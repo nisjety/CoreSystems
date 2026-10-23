@@ -2480,6 +2480,8 @@ mod payload_contract {
                         provider_ms: 7,
                         first_token_ms: Some(2),
                         attempts: 1,
+                        failed_attempts_ms: 0,
+                        retry_wait_ms: 0,
                         response_cache_hit: false,
                         upstream_ms: BTreeMap::from([(s("connect"), 1)]),
                     }),

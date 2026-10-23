@@ -3970,7 +3970,10 @@ mod tests {
             _: Request<mp_contracts::model_plane::v1::ListThreadsRequest>,
         ) -> Result<Response<mp_contracts::model_plane::v1::ListThreadsResponse>, Status> {
             Ok(Response::new(
-                mp_contracts::model_plane::v1::ListThreadsResponse { threads: vec![] },
+                mp_contracts::model_plane::v1::ListThreadsResponse {
+                    threads: vec![],
+                    next_cursor: String::new(),
+                },
             ))
         }
 

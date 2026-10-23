@@ -9656,7 +9656,10 @@ mod tests {
             &self,
             _: Request<pb::ListThreadsRequest>,
         ) -> Result<Response<pb::ListThreadsResponse>, Status> {
-            Ok(Response::new(pb::ListThreadsResponse { threads: vec![] }))
+            Ok(Response::new(pb::ListThreadsResponse {
+                threads: vec![],
+                next_cursor: String::new(),
+            }))
         }
 
         async fn update_thread_presentation(
