@@ -5345,6 +5345,15 @@ components:
           description: The control epoch the step was admitted under. Absent on older receipts.
         agent:
           $ref: '#/components/schemas/AgentIdentity'
+        redaction_rule_version:
+          type: string
+          nullable: true
+          description: |
+            The secret-redaction rule version (for example `qr-redact/3`) the stored
+            action, observation and failure text were masked under. Absent on a receipt
+            written before it existed or while masking was not enforcing; the receipts
+            route masks such a receipt on every read, so what it returns never holds the
+            raw text. Stored evidence is not rewritten.
     CompileProcedureRequest:
       type: object
       properties:
@@ -5387,6 +5396,13 @@ components:
                 - verified
                 - failed
                 - unknown
+              redacted_input:
+                type: boolean
+                default: false
+                description: |
+                  True when the action carries a redaction marker: what was typed or selected
+                  was masked when the receipt was written, so a replay must supply it. The
+                  replay check answers repair_required for such a step, never exact.
     Envelope_BrowserProcedure:
       type: object
       required:
