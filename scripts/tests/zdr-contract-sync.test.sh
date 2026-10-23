@@ -157,6 +157,13 @@ GOLDENS=(
   #   UPDATE_CONTRACT_GOLDEN=1 cargo test -p quarry-core --test web_policy catalogue_json_matches
   # in "apps/Ingestion Plane/Quarry-v2". The .sha256 pin beside it carries the same digest.
   "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/contracts/web-policy-catalogue.v1.json|998c80342543f3ce149c4680147d44bde2dc1ebf03223899bdbae7ebf9f281b0"
+
+  # WS10.S8: the telemetry field vocabulary (safe, zdr_sensitive, never) that the Rust exporter
+  # (crates/quarry-edge/src/otel_zdr.rs, tests/fixtures/telemetry-field-contract.json) and the Go
+  # quarryotel package (pkg/quarryotel, testdata/) are tested against. AUTHORED data owned by Quarry.
+  # Regenerate nothing: edit it, refresh the .sha256 pin beside it, update the digest here, then
+  # re-vendor the Go copy in VENDORED and its constants in fieldcontract.go and otel_zdr.rs.
+  "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/telemetry-field-contract.json|db13054403f7780a2a9ef32394c293801d926e1b173cc0a090e74c6f68527610"
 )
 
 # "<repo-relative copy>|<repo-relative golden>"
@@ -231,6 +238,10 @@ VENDORED=(
   # code from it, and zdr-refusals.test.ts reads the copy inside the Frontend tree.
   "apps/Frontend Plane/verevonv3/src/shared/api/contracts/zdr-refusals.json|apps/Model Plane/api/contracts/zdr-refusals.json"
   "apps/Frontend Plane/verevonv3/src/shared/api/contracts/zdr-refusals.json.sha256|apps/Model Plane/api/contracts/zdr-refusals.json.sha256"
+
+  # WS10.S8: the Go quarryotel package copy of the telemetry field contract, checked for
+  # byte identity (pkg/quarryotel/quarryotel_test.go, TestFieldConstantsEqualGolden).
+  "apps/Ingestion Plane/Quarry-v2/pkg/quarryotel/testdata/telemetry-field-contract.json|apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/telemetry-field-contract.json"
 )
 
 # "<repo-relative golden>|<consumer>|<tree its copy must live in>|<owning task>"
@@ -270,6 +281,8 @@ CONSUMERS=(
   # The secret-redaction shapes: the Model Plane scrub crate vendors the golden and runs the
   # cases that name it (applies_to "mp"). Pending until WS12.S4 creates the crate.
   "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/tests/fixtures/redaction/secret-shapes.v1.json|mp-scrub|apps/Model Plane/rust/crates/mp-scrub/|WS12.S4 (Model Plane scrub crate, vendored golden)"
+  # WS10.S8: the Go quarryotel package tests its constants against the vendored copy.
+  "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/telemetry-field-contract.json|quarryotel|apps/Ingestion Plane/Quarry-v2/pkg/quarryotel/|WS10.S8 (span field vocabulary, Go constants)"
 )
 
 passes=0

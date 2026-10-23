@@ -672,3 +672,26 @@ jobs:
       - name: quarry-orchestrator (activities, workflows, schedule reconciler)
         working-directory: 'apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator'
         run: go test -count=1 ./internal/activities/... ./internal/workflows/... ./internal/schedules/...
+
+  # WS10.S8 (F-t2-004 phase 2): the ZDR span sampler, trace registry, span processor and
+  # exporter redaction in pkg/quarryotel, plus the contract golden pins. REQUIRED (no
+  # continue-on-error): a regression here would export ZDR trace content. The Rust side
+  # (quarry-edge otel_zdr and tests/zdr_span_export.rs) runs in the cargo test job above.
+  quarryotel-test:
+    name: quarryotel (ZDR span export)
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache-dependency-path: 'apps/Ingestion Plane/Quarry-v2/pkg/quarryotel/go.sum'
+
+      - name: quarryotel go test (blocking)
+        working-directory: 'apps/Ingestion Plane/Quarry-v2/pkg/quarryotel'
+        run: go test ./... -count=1
+
+      - name: ZDR contract goldens and vendored copies (blocking)
+        run: bash scripts/tests/zdr-contract-sync.test.sh

@@ -1,0 +1,39 @@
+# THROWAWAY evidence override for WS10.S8 (F-t2-004 phase 2). Not a deployment file.
+#
+# Adds an OpenTelemetry Collector that writes every received span to its own log (debug
+# exporter), and points quarry-edge and quarry-control at it. Use it only to check that
+# ZDR scrapes and ZDR agent steps export zero spans while their non-ZDR twins export spans,
+# and that QUARRY_TELEMETRY_EXPORT=off makes the collector receive nothing. Never merge it
+# into a real environment: OTEL_EXPORTER_OTLP_ENDPOINT set anywhere real starts span export.
+#
+# Usage (after the standard stack is up, with the same env files):
+#   docker compose -f docker-compose.yml -f docker-compose.otel-test.yml up -d --build quarry-edge quarry-control otel-collector
+#   docker compose -f docker-compose.yml -f docker-compose.otel-test.yml logs otel-collector
+#
+# Not run in the W2 build phase: the image pins below are unverified until the evidence run.
+
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.116.1
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./otel-test/collector.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "127.0.0.1:4317:4317"
+
+  quarry-edge:
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_EXPORTER_OTLP_INSECURE: "true"
+      QUARRY_TELEMETRY_EXPORT: "on"
+      QUARRY_TELEMETRY_ZDR_REGISTRY_CAP: "100000"
+    depends_on:
+      - otel-collector
+
+  quarry-control:
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_EXPORTER_OTLP_INSECURE: "true"
+      QUARRY_TELEMETRY_EXPORT: "on"
+    depends_on:
+      - otel-collector
