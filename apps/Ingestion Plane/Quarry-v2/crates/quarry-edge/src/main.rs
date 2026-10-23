@@ -1649,6 +1649,9 @@ async fn run() -> anyhow::Result<()> {
             in_use = report.in_use,
             "drain: browser sessions released"
         );
+        // Stop the browser itself and remove its profile directories while this task can
+        // wait for it, instead of leaving that to the driver's Drop at process exit.
+        driver.shutdown().await;
     }
 
     // Serve returned, so no new requests can add to the corpus. Signal the

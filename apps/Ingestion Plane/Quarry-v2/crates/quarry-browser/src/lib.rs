@@ -501,6 +501,11 @@ pub trait BrowserDriver: Send + Sync {
     /// one) is not an error and changes nothing the second time.
     async fn release(&self, session: BrowserSession) -> QuarryResult<()>;
 
+    /// Stop whatever browser process this driver owns and wait for it, for the process's
+    /// graceful exit (after the sessions have been released). Idempotent. Default: nothing to
+    /// stop (remote providers, test doubles).
+    async fn shutdown(&self) {}
+
     /// How this driver's own browser processes are doing, for `/ready`.
     /// Default: not applicable (remote providers, test doubles).
     async fn health(&self) -> BrowserHealth {

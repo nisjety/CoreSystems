@@ -89,6 +89,14 @@ const MAX_GOVERNED_DOWNLOAD_BYTES: u64 = 25 * 1024 * 1024;
 const SLOT: SlotId = 0;
 /// How long a retired browser gets to exit before its directories go.
 const BROWSER_EXIT_WAIT: Duration = Duration::from_secs(5);
+/// How long `shutdown` waits for the CDP calls that are still running (they hold the
+/// browser lock, and each is bounded by its own deadline) before it gives the teardown to
+/// `Drop`.
+const SHUTDOWN_LOCK_WAIT: Duration = Duration::from_secs(10);
+/// Removal attempts for the launch directories after a kill: the browser's renderer,
+/// zygote and crash handler can write into them for a moment after the main process exits.
+const LAUNCH_DIR_REMOVE_ATTEMPTS: u32 = 25;
+const LAUNCH_DIR_REMOVE_PAUSE: Duration = Duration::from_millis(200);
 
 #[derive(Debug, Clone)]
 struct CachedLiveFrame {
@@ -272,6 +280,8 @@ pub struct ChromiumoxideDriver {
     /// Where the running browser keeps its profile and crash dumps; removed
     /// when that browser is retired.
     launch_dirs: Arc<Mutex<Option<ChromiumLaunchDirs>>>,
+    /// Where launch directories go instead of `QUARRY_BROWSER_PROFILE_ROOT` (tests).
+    profile_root: Option<PathBuf>,
     /// One tab attach at a time per session, so two attaches cannot each
     /// create a browser context; attaches of different sessions run in
     /// parallel (the browser lock is held only while creating).
@@ -347,6 +357,7 @@ impl ChromiumoxideDriver {
             book: Arc::new(std::sync::Mutex::new(SlotBook::new(pool.slot_config()))),
             pool,
             launch_dirs: Arc::new(Mutex::new(None)),
+            profile_root: None,
             attach_locks: Arc::new(Mutex::new(HashMap::new())),
             background: Arc::new(std::sync::Mutex::new(Vec::new())),
             background_started: Arc::new(AtomicBool::new(false)),
@@ -433,6 +444,13 @@ impl ChromiumoxideDriver {
         self
     }
 
+    /// Keep the launch directories under `root` instead of `QUARRY_BROWSER_PROFILE_ROOT`.
+    /// Call before the first `acquire`.
+    pub fn with_profile_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.profile_root = Some(root.into());
+        self
+    }
+
     /// A non-owning view over the same state, for the background tasks. Its
     /// drop tears nothing down.
     fn share(&self) -> Self {
@@ -444,6 +462,7 @@ impl ChromiumoxideDriver {
             book: self.book.clone(),
             pool: self.pool,
             launch_dirs: self.launch_dirs.clone(),
+            profile_root: self.profile_root.clone(),
             attach_locks: self.attach_locks.clone(),
             background: self.background.clone(),
             background_started: self.background_started.clone(),
@@ -730,14 +749,22 @@ impl ChromiumoxideDriver {
     }
 
     /// Take the browser out of service: kill it if it still runs, wait for it
-    /// (bounded), then delete its profile and crash-dump directories.
-    async fn retire_browser(mut browser: Browser, dirs: Option<ChromiumLaunchDirs>) {
+    /// (bounded), then delete its profile and crash-dump directories. A browser that died
+    /// by itself can have children (renderer, crash handler) still writing into them, so
+    /// the first removal can fail; what is left is removed from a background thread, and the
+    /// relaunch does not wait for it.
+    async fn retire_browser(browser: Browser, dirs: Option<ChromiumLaunchDirs>) {
+        Self::stop_browser(browser).await;
+        if let Some(dirs) = dirs {
+            dirs.remove_after_kill();
+        }
+    }
+
+    /// Kill the browser if it still runs and wait for it to exit (bounded).
+    async fn stop_browser(mut browser: Browser) {
         let _ = tokio::time::timeout(BROWSER_EXIT_WAIT, browser.kill()).await;
         let _ = tokio::time::timeout(BROWSER_EXIT_WAIT, browser.wait()).await;
         drop(browser);
-        if let Some(dirs) = dirs {
-            dirs.remove();
-        }
     }
 
     /// Launch the browser if there is none, or if the one there is dead. A
@@ -765,6 +792,10 @@ impl ChromiumoxideDriver {
         if guard.is_some() && !dead {
             return Ok(());
         }
+        let profile_root = self
+            .profile_root
+            .clone()
+            .unwrap_or_else(chromium_profile_root);
         // A fresh launch: whatever was kept for a previous browser is stale.
         if let Some(handle) = self.handler.lock().await.take() {
             handle.abort();
@@ -773,7 +804,7 @@ impl ChromiumoxideDriver {
             let dirs = self.launch_dirs.lock().await.take();
             Self::retire_browser(old, dirs).await;
         } else if self.launches.load(Ordering::SeqCst) == 0 {
-            sweep_stale_launch_dirs();
+            sweep_stale_launch_dirs_in(&profile_root);
         }
         self.pages.lock().await.clear();
         self.devtools_events.lock().await.clear();
@@ -786,7 +817,7 @@ impl ChromiumoxideDriver {
         self.dialog_pages.lock().await.clear();
         self.live_frames.lock().await.clear();
 
-        let launch_dirs = chromium_launch_dirs().map_err(|e| {
+        let launch_dirs = chromium_launch_dirs_in(&profile_root).map_err(|e| {
             QuarryError::new(
                 ErrorCode::DriverFailed,
                 "chromiumoxide launch directory setup failed",
@@ -1413,7 +1444,7 @@ impl ChromiumoxideDriver {
     }
 
     async fn update_tab_metadata(&self, session_key: &str, tab_id: &str, page: &Page) {
-        let url = page.url().await.ok().flatten();
+        let url = page_url(page).await;
         let title = page_title(page).await;
         let mut pages = self.pages.lock().await;
         if let Some(session_pages) = pages.get_mut(session_key) {
@@ -1588,19 +1619,22 @@ async fn install_network_guard(
     // pauses every request by default; without this command the listener
     // below is inert and redirects, frames, XHR, and subresources can leave
     // the browser without the policy having a chance to decide them.
-    page.execute(
-        FetchEnableParams::builder()
-            .handle_auth_requests(true)
-            .build(),
-    )
-    .await
-    .map_err(|error| {
-        QuarryError::new(
-            ErrorCode::DriverFailed,
-            "chromiumoxide enable browser network guard failed",
+    with_deadline(Op::TabAttach, async {
+        page.execute(
+            FetchEnableParams::builder()
+                .handle_auth_requests(true)
+                .build(),
         )
-        .with_details(json!({ "error": error.to_string() }))
-    })?;
+        .await
+        .map_err(|error| {
+            QuarryError::new(
+                ErrorCode::DriverFailed,
+                "chromiumoxide enable browser network guard failed",
+            )
+            .with_details(json!({ "error": error.to_string() }))
+        })
+    })
+    .await?;
     let guarded_page = page.clone();
     tokio::spawn(async move {
         while let Some(event) = events.next().await {
@@ -1621,22 +1655,24 @@ async fn install_network_guard(
                 (
                     BrowserEgressDecision::Block,
                     "domain_grant_blocked".to_owned(),
-                    guarded_page
-                        .execute(FailRequestParams::new(request_id, ErrorReason::Aborted))
-                        .await
-                        .map(|_| ())
-                        .map_err(|failure| failure.to_string()),
+                    best_effort(
+                        Op::GuardResolve,
+                        guarded_page.execute(FailRequestParams::new(request_id, ErrorReason::Aborted)),
+                    )
+                    .await
+                    .map(|_| ()),
                 )
             } else {
                 match guard_page_request_target(&request_url).await {
                     Ok(()) => (
                         BrowserEgressDecision::Allow,
                         "url_dns_public".to_owned(),
-                        guarded_page
-                            .execute(ContinueRequestParams::new(request_id))
-                            .await
-                            .map(|_| ())
-                            .map_err(|error| error.to_string()),
+                        best_effort(
+                            Op::GuardResolve,
+                            guarded_page.execute(ContinueRequestParams::new(request_id)),
+                        )
+                        .await
+                        .map(|_| ()),
                     ),
                     Err(error) => {
                         tracing::warn!(
@@ -1646,11 +1682,13 @@ async fn install_network_guard(
                         (
                             BrowserEgressDecision::Block,
                             "url_or_dns_blocked".to_owned(),
-                            guarded_page
-                                .execute(FailRequestParams::new(request_id, ErrorReason::Aborted))
-                                .await
-                                .map(|_| ())
-                                .map_err(|failure| failure.to_string()),
+                            best_effort(
+                                Op::GuardResolve,
+                                guarded_page
+                                    .execute(FailRequestParams::new(request_id, ErrorReason::Aborted)),
+                            )
+                            .await
+                            .map(|_| ()),
                         )
                     }
                 }
@@ -1785,6 +1823,61 @@ impl ChromiumLaunchDirs {
         let _ = std::fs::remove_dir_all(&self.user_data);
         let _ = std::fs::remove_dir_all(&self.crash_dumps);
     }
+
+    /// Remove both directories on the caller's task and wait for them to be gone: for a
+    /// browser whose main process has exited but whose children may still be writing. The
+    /// last thing `shutdown` does, so when it returns nothing of the launch is left.
+    async fn remove_retrying(&self) {
+        for attempt in 0..LAUNCH_DIR_REMOVE_ATTEMPTS {
+            self.remove();
+            if !self.user_data.exists() && !self.crash_dumps.exists() {
+                return;
+            }
+            if attempt + 1 < LAUNCH_DIR_REMOVE_ATTEMPTS {
+                tokio::time::sleep(LAUNCH_DIR_REMOVE_PAUSE).await;
+            }
+        }
+    }
+
+    /// The backstop for a driver that is dropped without `shutdown`. For a browser that has
+    /// only just been sent the kill and may still be exiting: its
+    /// renderer, zygote and crash handler can write into these directories for a moment,
+    /// so the first removal can fail with "not empty". Remove once now, and when something
+    /// is left behind, keep trying from a background thread (every 200 ms, for five
+    /// seconds, the same time a retired browser gets to exit).
+    fn remove_after_kill(self) {
+        self.remove();
+        if self.user_data.exists() || self.crash_dumps.exists() {
+            // A named, bounded thread (at most 25 x 200 ms); if it cannot start, the
+            // next process's sweep removes what is left.
+            let _ = std::thread::Builder::new()
+                .name("quarry-launch-dir-cleanup".to_owned())
+                .spawn(move || {
+                    remove_paths_retrying(
+                        &[self.user_data.as_path(), self.crash_dumps.as_path()],
+                        LAUNCH_DIR_REMOVE_ATTEMPTS,
+                        LAUNCH_DIR_REMOVE_PAUSE,
+                    );
+                });
+        }
+    }
+}
+
+/// Remove each directory, trying again after `pause` up to `attempts` times in all, until
+/// none of them exists. True when they are all gone.
+fn remove_paths_retrying(paths: &[&Path], attempts: u32, pause: Duration) -> bool {
+    for attempt in 0..attempts {
+        for path in paths {
+            let _ = std::fs::remove_dir_all(path);
+        }
+        if paths.iter().all(|path| !path.exists()) {
+            return true;
+        }
+        if attempt + 1 < attempts {
+            std::thread::sleep(pause);
+        }
+    }
+    false
 }
 
 fn chromium_profile_root() -> PathBuf {
@@ -1793,8 +1886,10 @@ fn chromium_profile_root() -> PathBuf {
         .unwrap_or_else(|| std::env::temp_dir().join("quarry-chromium"))
 }
 
-fn chromium_launch_dirs() -> std::io::Result<ChromiumLaunchDirs> {
-    let root = chromium_profile_root();
+/// One pair of directories (the browser's profile and its crash dumps) under `root`, new
+/// for every launch and named for this process, so [`sweep_stale_launch_dirs_in`] can tell
+/// whose they were.
+fn chromium_launch_dirs_in(root: &Path) -> std::io::Result<ChromiumLaunchDirs> {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -1837,13 +1932,16 @@ async fn hydrate_cookies(page: &Page, snapshot: &SessionSnapshot) -> QuarryResul
         .iter()
         .map(cookie_param)
         .collect::<QuarryResult<Vec<_>>>()?;
-    page.set_cookies(cookies).await.map_err(|e| {
-        QuarryError::new(
-            ErrorCode::DriverFailed,
-            "chromiumoxide cookie hydrate failed",
-        )
-        .with_details(json!({ "error": e.to_string() }))
-    })?;
+    with_deadline(Op::TabAttach, async {
+        page.set_cookies(cookies).await.map_err(|e| {
+            QuarryError::new(
+                ErrorCode::DriverFailed,
+                "chromiumoxide cookie hydrate failed",
+            )
+            .with_details(json!({ "error": e.to_string() }))
+        })
+    })
+    .await?;
     Ok(())
 }
 
@@ -1862,17 +1960,21 @@ async fn hydrate_storage(page: &Page, snapshot: &SessionSnapshot) -> QuarryResul
         local = serde_json::to_string(&snapshot.local_storage).unwrap_or_else(|_| "[]".into()),
         session = serde_json::to_string(&snapshot.session_storage).unwrap_or_else(|_| "[]".into()),
     );
-    page.evaluate(script).await.map_err(|e| {
-        QuarryError::new(
-            ErrorCode::DriverFailed,
-            "chromiumoxide storage hydrate failed",
-        )
-        .with_details(json!({ "error": e.to_string() }))
-    })?;
+    with_deadline(Op::Evaluate, async {
+        page.evaluate(script).await.map_err(|e| {
+            QuarryError::new(
+                ErrorCode::DriverFailed,
+                "chromiumoxide storage hydrate failed",
+            )
+            .with_details(json!({ "error": e.to_string() }))
+        })
+    })
+    .await?;
     Ok(true)
 }
 
 async fn install_popup_bridge(page: &Page) -> QuarryResult<()> {
+    with_deadline(Op::Evaluate, async {
     page.evaluate(
         r#"(() => {
             if (window.__quarryPopupBridgeInstalled) return true;
@@ -1908,7 +2010,9 @@ async fn install_popup_bridge(page: &Page) -> QuarryResult<()> {
             "chromiumoxide popup bridge install failed",
         )
         .with_details(json!({ "error": e.to_string() }))
-    })?;
+    })
+    })
+    .await?;
     Ok(())
 }
 
@@ -2601,6 +2705,17 @@ fn finite_metric_u64(value: f64, scale: f64) -> Option<u64> {
         .then_some(scaled.round() as u64)
 }
 
+/// The page's current URL, or `None` when it cannot be read within the table's bound
+/// (`Op::TabMetadata`); the caller keeps its last known value.
+async fn page_url(page: &Page) -> Option<String> {
+    with_deadline(Op::TabMetadata, async {
+        Ok(page.url().await.ok().flatten())
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 async fn page_title(page: &Page) -> Option<String> {
     tokio::time::timeout(deadline(Op::Content), page.evaluate("document.title"))
         .await
@@ -2619,6 +2734,25 @@ fn normalize_live_frame_options(options: LiveFrameOptions) -> LiveFrameOptions {
         max_height: options.max_height.clamp(240, 2160),
         every_nth_frame: options.every_nth_frame.clamp(1, 10),
         timeout_ms: options.timeout_ms.clamp(100, 5_000),
+    }
+}
+
+/// The next frame of a screencast, waiting at most `timeout`: the caller's
+/// `timeout_ms` (clamped to 100 ms to 5 s by `normalize_live_frame_options`), the one
+/// duration that is not read from the table (see the exceptions in `deadlines.rs`). A
+/// screencast that sends nothing in time is a typed `Timeout` naming `live_frame`, not
+/// a driver failure; one that ends first is a driver failure.
+async fn next_live_frame<S>(events: &mut S, timeout: Duration) -> QuarryResult<S::Item>
+where
+    S: futures::Stream + Unpin,
+{
+    match tokio::time::timeout(timeout, events.next()).await {
+        Ok(Some(frame)) => Ok(frame),
+        Ok(None) => Err(QuarryError::new(
+            ErrorCode::DriverFailed,
+            "chromiumoxide screencast ended before a frame arrived",
+        )),
+        Err(_) => Err(timeout_error(Op::LiveFrame, timeout)),
     }
 }
 
@@ -2645,43 +2779,39 @@ async fn capture_live_frame(page: &Page, options: LiveFrameOptions) -> QuarryRes
         .every_nth_frame(options.every_nth_frame as i64)
         .build();
 
-    page.execute(params).await.map_err(|e| {
-        QuarryError::new(
-            ErrorCode::DriverFailed,
-            "chromiumoxide screencast start failed",
-        )
-        .with_details(json!({ "error": e.to_string() }))
-    })?;
+    with_deadline(Op::LiveFrame, async {
+        page.execute(params).await.map_err(|e| {
+            QuarryError::new(
+                ErrorCode::DriverFailed,
+                "chromiumoxide screencast start failed",
+            )
+            .with_details(json!({ "error": e.to_string() }))
+        })
+    })
+    .await?;
 
     let timeout = Duration::from_millis(options.timeout_ms);
-    let frame = match tokio::time::timeout(timeout, events.next()).await {
-        Ok(Some(frame)) => frame,
-        Ok(None) => {
-            let _ = page.execute(StopScreencastParams::default()).await;
-            return Err(QuarryError::new(
-                ErrorCode::DriverFailed,
-                "chromiumoxide screencast ended before a frame arrived",
-            ));
-        }
-        Err(_) => {
-            let _ = page.execute(StopScreencastParams::default()).await;
-            return Err(QuarryError::new(
-                ErrorCode::DriverFailed,
-                "chromiumoxide screencast frame timed out",
-            ));
+    let frame = match next_live_frame(&mut events, timeout).await {
+        Ok(frame) => frame,
+        Err(error) => {
+            let _ = best_effort(Op::LiveFrame, page.execute(StopScreencastParams::default())).await;
+            return Err(error);
         }
     };
 
-    page.execute(ScreencastFrameAckParams::new(frame.session_id))
-        .await
-        .map_err(|e| {
-            QuarryError::new(
-                ErrorCode::DriverFailed,
-                "chromiumoxide screencast ack failed",
-            )
-            .with_details(json!({ "error": e.to_string() }))
-        })?;
-    if let Err(err) = page.execute(StopScreencastParams::default()).await {
+    with_deadline(Op::LiveFrame, async {
+        page.execute(ScreencastFrameAckParams::new(frame.session_id))
+            .await
+            .map_err(|e| {
+                QuarryError::new(
+                    ErrorCode::DriverFailed,
+                    "chromiumoxide screencast ack failed",
+                )
+                .with_details(json!({ "error": e.to_string() }))
+            })
+    })
+    .await?;
+    if let Err(err) = best_effort(Op::LiveFrame, page.execute(StopScreencastParams::default())).await {
         tracing::warn!(error_class = crate::deadlines::cdp_class(&err), "chromiumoxide screencast stop failed");
     }
 
@@ -3023,6 +3153,34 @@ impl BrowserDriver for ChromiumoxideDriver {
         );
         rollback.finish();
         Ok(session)
+    }
+
+    /// Stop the browser on the caller's task and wait for it: kill it, wait (bounded) for it
+    /// to exit, and remove its profile and crash-dump directories until they are gone. This is
+    /// the teardown production relies on (the edge calls it after the run drain); `Drop` is
+    /// only the backstop for a driver that is dropped without it, because `Drop` cannot wait
+    /// for a lock or for the exit and skips what it cannot take at that instant. Idempotent,
+    /// and a driver that is used afterwards launches a fresh browser.
+    async fn shutdown(&self) {
+        if let Some(handle) = self.handler.lock().await.take() {
+            handle.abort();
+        }
+        // CDP calls in flight hold the read side and each ends at its own deadline, so this
+        // wait is short; if it is not, leave the rest to `Drop`.
+        let Ok(mut guard) = tokio::time::timeout(SHUTDOWN_LOCK_WAIT, self.browser.write()).await
+        else {
+            tracing::warn!("chromiumoxide shutdown: the browser lock stayed busy; leaving the teardown to drop");
+            return;
+        };
+        let browser = guard.take();
+        let dirs = self.launch_dirs.lock().await.take();
+        if let Some(browser) = browser {
+            Self::stop_browser(browser).await;
+        }
+        drop(guard);
+        if let Some(dirs) = dirs {
+            dirs.remove_retrying().await;
+        }
     }
 
     async fn release(&self, session: BrowserSession) -> QuarryResult<()> {
@@ -3599,7 +3757,7 @@ impl BrowserDriver for ChromiumoxideDriver {
         let mut result = Vec::with_capacity(tabs.len());
         let mut fresh = Vec::with_capacity(tabs.len());
         for tab in tabs {
-            let url = tab.page.url().await.ok().flatten().or(tab.url_hint);
+            let url = page_url(&tab.page).await.or(tab.url_hint);
             let title = page_title(&tab.page).await.or(tab.title_hint);
             let active = active_tab_id.as_deref() == Some(tab.tab_id.as_str());
             fresh.push((tab.tab_id.clone(), title.clone(), url.clone()));
@@ -4237,16 +4395,19 @@ impl BrowserDriver for ChromiumoxideDriver {
 /// the driver and is used only to correlate an otherwise frame-less native AX
 /// target to the download event that its click causes.
 async fn root_frame_id(page: &Page) -> QuarryResult<String> {
-    let frame_tree = page
-        .execute(GetFrameTreeParams::default())
-        .await
-        .map_err(|error| {
-            QuarryError::new(
-                ErrorCode::DriverFailed,
-                "chromiumoxide root frame lookup failed for governed download",
-            )
-            .with_details(json!({ "error": error.to_string() }))
-        })?;
+    // The same read as the accessibility snapshot's frame tree, so the same bound.
+    let frame_tree = with_deadline(Op::AxSnapshot, async {
+        page.execute(GetFrameTreeParams::default())
+            .await
+            .map_err(|error| {
+                QuarryError::new(
+                    ErrorCode::DriverFailed,
+                    "chromiumoxide root frame lookup failed for governed download",
+                )
+                .with_details(json!({ "error": error.to_string() }))
+            })
+    })
+    .await?;
     serde_json::to_value(&frame_tree.result)
         .ok()
         .and_then(|tree| {
@@ -4296,7 +4457,7 @@ impl Drop for ChromiumoxideDriver {
         }
         if let Ok(mut dirs) = self.launch_dirs.try_lock() {
             if let Some(dirs) = dirs.take() {
-                dirs.remove();
+                dirs.remove_after_kill();
             }
         }
     }
@@ -4547,11 +4708,10 @@ fn not_open_error() -> QuarryError {
 /// gone (Linux: no `/proc/<pid>`). Our own pid's directories may belong to
 /// another driver in this process, and elsewhere liveness is unknown: both are
 /// left alone.
-fn sweep_stale_launch_dirs() {
+fn sweep_stale_launch_dirs_in(root: &Path) {
     if !cfg!(target_os = "linux") {
         return;
     }
-    let root = chromium_profile_root();
     let ours = std::process::id();
     let mut removed = 0usize;
     for sub in ["profiles", "crashpad"] {
@@ -6422,6 +6582,508 @@ mod tests {
         }
     }
 
+    /// A live browser has exactly one profile directory and one crash-dump directory, however
+    /// many sessions and tabs it serves; a crash and the relaunch after it leave one pair, not
+    /// two; and dropping the driver leaves none. This is the "no accumulation" half of the
+    /// WS3.F check `ls profiles | wc -l`.
+    #[tokio::test]
+    async fn one_profile_directory_per_browser_launch_and_none_left_behind() {
+        if !live_enabled() {
+            return;
+        }
+        let root = tempfile::tempdir().expect("a temp root");
+        let driver = live_driver()
+            .with_pool_config(quiet_pool())
+            .with_profile_root(root.path());
+        let count = |sub: &str| {
+            std::fs::read_dir(root.path().join(sub)).map_or(0, |entries| entries.flatten().count())
+        };
+
+        let first = live_session_sized(&driver, "profdir-1", None, "one").await;
+        assert_eq!((count("profiles"), count("crashpad")), (1, 1), "after the launch");
+        let second = live_session_sized(&driver, "profdir-2", None, "two").await;
+        driver.new_tab(&second, None).await.expect("another tab");
+        assert_eq!(
+            (count("profiles"), count("crashpad")),
+            (1, 1),
+            "more sessions and tabs share the browser's directories"
+        );
+
+        {
+            let mut guard = driver.browser.write().await;
+            let browser = guard.as_mut().expect("a running browser");
+            let _ = browser.kill().await;
+        }
+        assert!(
+            eventually(Duration::from_secs(20), || async {
+                driver
+                    .book()
+                    .slot(SLOT)
+                    .is_some_and(|slot| slot.status == SlotStatus::Dead)
+            })
+            .await,
+            "the handler marks the slot dead"
+        );
+        driver.release(first).await.expect("release the lost session");
+        driver.release(second).await.expect("release the lost session");
+
+        let third = live_session_sized(&driver, "profdir-3", None, "three").await;
+        assert_eq!(driver.launch_count(), 2);
+        // The lost browser's children can still be writing into its directories when the
+        // relaunch removes them, so what is left goes shortly after (the retry thread).
+        assert!(
+            eventually(Duration::from_secs(10), || async {
+                (count("profiles"), count("crashpad")) == (1, 1)
+            })
+            .await,
+            "the relaunch retired the lost browser's directories: now {} profile and {} crash-dump",
+            count("profiles"),
+            count("crashpad")
+        );
+        driver.release(third).await.expect("release");
+        // The production teardown waits: when shutdown returns, nothing of the launch is left,
+        // on the same instant and not "shortly after".
+        driver.shutdown().await;
+        assert_eq!(
+            (count("profiles"), count("crashpad")),
+            (0, 0),
+            "shutdown removes the running browser's directories before it returns"
+        );
+        driver.shutdown().await;
+        assert_eq!((count("profiles"), count("crashpad")), (0, 0), "a second shutdown changes nothing");
+    }
+
+    /// A driver that is dropped without `shutdown` still takes its browser's directories with
+    /// it: the backstop. Drop sends the kill and removes the directories without waiting for
+    /// the exit (the renderer, zygote and crashpad handler can outlive the browser pid for a
+    /// moment and still write into them), so the check is that they are gone shortly after.
+    #[tokio::test]
+    async fn a_dropped_driver_still_takes_its_browsers_directories_with_it() {
+        if !live_enabled() {
+            return;
+        }
+        let root = tempfile::tempdir().expect("a temp root");
+        let driver = live_driver()
+            .with_pool_config(quiet_pool())
+            .with_profile_root(root.path());
+        let count = |sub: &str| {
+            std::fs::read_dir(root.path().join(sub)).map_or(0, |entries| entries.flatten().count())
+        };
+        let session = live_session_sized(&driver, "profdir-drop", None, "drop").await;
+        assert_eq!((count("profiles"), count("crashpad")), (1, 1), "after the launch");
+        driver.release(session).await.expect("release");
+        drop(driver);
+        assert!(
+            eventually(Duration::from_secs(10), || async {
+                (count("profiles"), count("crashpad")) == (0, 0)
+            })
+            .await,
+            "dropping the driver removes the running browser's directories: now {} profile and {} crash-dump",
+            count("profiles"),
+            count("crashpad")
+        );
+    }
+
     // WS3.K: live fixtures for trusted input and the actionability pipeline.
     include!("trusted_input_live.rs");
+}
+
+/// WS3.D and WS3.F, the parts that need no browser: every CDP call is bounded, the
+/// screencast frame wait is a typed timeout, and the launch directories are one pair per
+/// launch and are swept when their process is gone.
+#[cfg(test)]
+mod bounded_calls_and_launch_dirs {
+    use super::*;
+    use futures::stream;
+
+    /// What a call on a page or browser looks like once whitespace is removed.
+    const CDP_CALLS: [&str; 12] = [
+        ".execute(",
+        ".evaluate(",
+        ".set_cookies(",
+        ".get_cookies(",
+        ".url()",
+        ".goto(",
+        ".reload(",
+        ".content()",
+        ".screenshot(",
+        ".pdf(",
+        ".find_element(",
+        ".new_page(",
+    ];
+
+    /// The wrappers of `deadlines.rs`, and the one direct use of the table
+    /// (`tokio::time::timeout(deadline(Op::X), call)`). A call is bounded when it sits
+    /// inside the argument list of one of these.
+    const BOUNDS: [&str; 4] = [
+        "with_deadline(",
+        "read_with_retry(",
+        "best_effort(",
+        "timeout(deadline(Op::",
+    ];
+
+    /// Functions that make CDP calls without a bound of their own because every caller
+    /// sets one: each is named with the operation its callers wrap it in.
+    const BOUNDED_BY_THE_CALLER: [(&str, &str); 3] = [
+        ("apply_page_hygiene", "Op::TabAttach, at its one call site in open_tab_page"),
+        ("capture_snapshot", "Op::ProfileCapture, at its one call site in persist_current_page"),
+        (
+            "execute_native_target_action",
+            "Op::NativeAction, at its two call sites (the action and the download)",
+        ),
+    ];
+
+    /// Production functions as (name, source with whitespace removed): everything
+    /// before the test module, minus comments and items that exist only under `cfg(test)`.
+    fn production_functions() -> Vec<(String, String)> {
+        functions_of(include_str!("chromiumoxide.rs"))
+    }
+
+    fn functions_of(source: &str) -> Vec<(String, String)> {
+        let source = source.replace("\r\n", "\n");
+        let end = source.find("#[cfg(test)]\nmod tests {").unwrap_or(source.len());
+        let lines: Vec<&str> = source[..end].lines().collect();
+        let mut functions: Vec<(String, String)> = Vec::new();
+        let mut skip_next_item = false;
+        for (index, line) in lines.iter().enumerate() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            if trimmed.starts_with("#[cfg(test)]") {
+                skip_next_item = true;
+                continue;
+            }
+            let after_visibility = {
+                let mut rest = trimmed;
+                if let Some(stripped) = rest.strip_prefix("pub") {
+                    rest = stripped.trim_start();
+                    if rest.starts_with('(') {
+                        rest = rest.split_once(')').map_or(rest, |(_, tail)| tail.trim_start());
+                    }
+                }
+                rest.strip_prefix("async ").unwrap_or(rest)
+            };
+            if let Some(signature) = after_visibility.strip_prefix("fn ") {
+                let name: String = signature
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                functions.push((name, String::new()));
+                if skip_next_item {
+                    functions.last_mut().unwrap().0 = format!("cfg(test):{index}");
+                }
+                skip_next_item = false;
+            } else if !trimmed.starts_with('#') && !trimmed.is_empty() {
+                skip_next_item = false;
+            }
+            if let Some((_, body)) = functions.last_mut() {
+                body.extend(trimmed.chars().filter(|c| !c.is_whitespace()));
+            }
+        }
+        functions
+            .into_iter()
+            .filter(|(name, _)| !name.starts_with("cfg(test):"))
+            .collect()
+    }
+
+    /// The index of the `)` that closes the `(` at `open`, skipping string, raw-string and
+    /// char literals so a bracket inside one does not count. An unbalanced body yields its
+    /// end, which can only make a call look bounded, never the reverse.
+    fn matching_paren(body: &str, open: usize) -> usize {
+        let bytes = body.as_bytes();
+        let is_word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+        let mut depth = 0usize;
+        let mut index = open;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return index;
+                    }
+                }
+                b'r' if (index == 0 || !is_word(bytes[index - 1]))
+                    && matches!(bytes.get(index + 1), Some(b'"' | b'#')) =>
+                {
+                    let hashes = bytes[index + 1..].iter().take_while(|b| **b == b'#').count();
+                    if bytes.get(index + 1 + hashes) == Some(&b'"') {
+                        let closing = format!("\"{}", "#".repeat(hashes));
+                        let from = index + 2 + hashes;
+                        index = body[from..].find(&closing).map_or(bytes.len(), |at| from + at + closing.len() - 1);
+                    }
+                }
+                b'"' => {
+                    index += 1;
+                    while index < bytes.len() && bytes[index] != b'"' {
+                        index += if bytes[index] == b'\\' { 2 } else { 1 };
+                    }
+                }
+                b'\'' if bytes.get(index + 2) == Some(&b'\'') => index += 2,
+                b'\'' if bytes.get(index + 1) == Some(&b'\\') => {
+                    index += 2;
+                    while index < bytes.len() && bytes[index] != b'\'' {
+                        index += 1;
+                    }
+                }
+                _ => {}
+            }
+            index += 1;
+        }
+        bytes.len()
+    }
+
+    /// The CDP-shaped calls in `body` that do not sit inside the argument list of a bound.
+    /// One bare call is reported even when the same function has wrapped ones.
+    fn bare_cdp_calls(body: &str) -> Vec<&'static str> {
+        let mut covered: Vec<(usize, usize)> = Vec::new();
+        for bound in BOUNDS {
+            let paren = bound.find('(').expect("every bound opens a call");
+            for (at, _) in body.match_indices(bound) {
+                let open = at + paren;
+                covered.push((open, matching_paren(body, open)));
+            }
+        }
+        CDP_CALLS
+            .iter()
+            .copied()
+            .filter(|call| {
+                body.match_indices(call)
+                    .any(|(at, _)| !covered.iter().any(|(open, close)| at > *open && at < *close))
+            })
+            .collect()
+    }
+
+    /// WS3.D's definition of done: every `page.execute` / `evaluate` / ... call in the
+    /// driver sits inside a deadline wrapper (or `timeout(deadline(Op::X), ..)`), except
+    /// in the few functions named above with the bound their callers set. The scan is
+    /// per call, not per function, so a bare call next to a wrapped one is reported, and
+    /// it also catches the next function someone adds. It cannot see a call made through
+    /// a helper (that helper's own body is scanned instead) or one whose future is built
+    /// first and wrapped later; the fixture below pins what it does see.
+    #[test]
+    fn cdp_calls_are_bounded() {
+        let functions = production_functions();
+        assert!(functions.len() > 100, "the scan found {} functions", functions.len());
+        let unbounded: Vec<(&str, Vec<&str>)> = functions
+            .iter()
+            .map(|(name, body)| (name.as_str(), bare_cdp_calls(body)))
+            .filter(|(name, bare)| {
+                !bare.is_empty() && !BOUNDED_BY_THE_CALLER.iter().any(|(known, _)| known == name)
+            })
+            .collect();
+        assert!(
+            unbounded.is_empty(),
+            "CDP calls outside a deadline wrapper (wrap them, or name the caller's bound in \
+             BOUNDED_BY_THE_CALLER): {unbounded:?}"
+        );
+        // The list cannot go stale: each named function still exists and is still unwrapped.
+        for (known, _) in BOUNDED_BY_THE_CALLER {
+            let found = functions.iter().find(|(name, _)| name == known);
+            let (_, body) = found.unwrap_or_else(|| panic!("{known} no longer exists"));
+            assert!(!bare_cdp_calls(body).is_empty(), "{known} is bounded now: take it off the list");
+        }
+    }
+
+    /// The scan itself: a bare call is reported (also next to a wrapped one), a wrapped one
+    /// is not, and an item that exists only under `cfg(test)` is skipped.
+    #[test]
+    fn the_scan_reports_a_bare_call_and_only_a_bare_call() {
+        let source = "\
+async fn bare(page: &Page) -> QuarryResult<()> {
+    page.execute(Params::default()).await?;
+    Ok(())
+}
+
+async fn wrapped(page: &Page) -> QuarryResult<()> {
+    with_deadline(Op::Input, async {
+        page.execute(Params::default())
+            .await
+    })
+    .await
+}
+
+async fn logged_only(page: &Page) {
+    let _ = best_effort(Op::PageClose, page
+        .execute(Params::default())).await;
+}
+
+async fn half_wrapped(page: &Page) -> QuarryResult<()> {
+    with_deadline(Op::Input, async {
+        page.evaluate(\"1\").await
+    })
+    .await?;
+    page.evaluate(\"2\").await?;
+    Ok(())
+}
+
+async fn paren_in_a_string(page: &Page) -> QuarryResult<()> {
+    with_deadline(Op::Input, async {
+        let _ = \"a ) b\";
+        Ok(())
+    })
+    .await?;
+    page.goto(\"x\").await?;
+    Ok(())
+}
+
+async fn timeout_form(page: &Page) {
+    let _ = tokio::time::timeout(deadline(Op::Content), page.evaluate(\"document.title\")).await;
+}
+
+// page.execute(commented_out)
+fn no_calls() {}
+
+#[cfg(test)]
+async fn test_only(page: &Page) {
+    page.evaluate(\"1\").await.ok();
+}
+";
+        let functions = functions_of(source);
+        let names: Vec<&str> = functions.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "bare",
+                "wrapped",
+                "logged_only",
+                "half_wrapped",
+                "paren_in_a_string",
+                "timeout_form",
+                "no_calls"
+            ]
+        );
+        let unbounded: Vec<&str> = functions
+            .iter()
+            .filter(|(_, body)| !bare_cdp_calls(body).is_empty())
+            .map(|(name, _)| name.as_str())
+            .collect();
+        // A bare call next to a wrapped one of the same kind, and one after a string that
+        // holds a bracket, are both reported; the `timeout(deadline(..), call)` form is not.
+        assert_eq!(unbounded, ["bare", "half_wrapped", "paren_in_a_string"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_screencast_that_sends_nothing_is_a_typed_live_frame_timeout() {
+        let mut events = stream::pending::<u8>();
+        let started = tokio::time::Instant::now();
+        let error = next_live_frame(&mut events, Duration::from_millis(250))
+            .await
+            .expect_err("nothing arrives");
+        assert_eq!(error.code, ErrorCode::Timeout, "{error:?}");
+        let details = error.details.clone().expect("details");
+        assert_eq!(details["op"], "live_frame");
+        assert_eq!(details["deadline_ms"], 250, "the caller's bound is the one named");
+        assert_eq!(details["effect"], "none");
+        assert!(error.retryable, "nothing was changed, so asking again is safe");
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn a_screencast_frame_that_arrives_is_returned_and_one_that_ends_is_a_driver_failure() {
+        let mut one = stream::iter([7u8]);
+        let frame = next_live_frame(&mut one, Duration::from_secs(5)).await;
+        assert_eq!(frame.expect("a frame arrived"), 7);
+
+        let mut none = stream::empty::<u8>();
+        let error = next_live_frame(&mut none, Duration::from_secs(5))
+            .await
+            .expect_err("the stream ended first");
+        assert_eq!(error.code, ErrorCode::DriverFailed);
+        assert!(error.message.contains("ended before a frame"), "{}", error.message);
+    }
+
+    fn entries(root: &Path, sub: &str) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(root.join(sub))
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn each_launch_gets_its_own_pair_of_directories_and_remove_takes_both() {
+        let root = tempfile::tempdir().expect("a temp root");
+        let first = chromium_launch_dirs_in(root.path()).expect("first launch dirs");
+        let second = chromium_launch_dirs_in(root.path()).expect("second launch dirs");
+        assert_ne!(first.user_data, second.user_data);
+
+        let profiles = entries(root.path(), "profiles");
+        let crashpad = entries(root.path(), "crashpad");
+        assert_eq!(profiles.len(), 2, "{profiles:?}");
+        assert_eq!(profiles, crashpad, "one crash-dump directory for each profile directory");
+        let prefix = format!("edge-{}-", std::process::id());
+        assert!(profiles.iter().all(|name| name.starts_with(&prefix)), "{profiles:?}");
+
+        first.remove();
+        assert_eq!(entries(root.path(), "profiles").len(), 1);
+        assert_eq!(entries(root.path(), "crashpad").len(), 1);
+        second.remove();
+        assert!(entries(root.path(), "profiles").is_empty());
+        assert!(entries(root.path(), "crashpad").is_empty());
+    }
+
+    /// A directory that cannot be removed on the first try (a file in the way here; a browser
+    /// process still writing into it on a real drop) is removed by a later attempt, and the
+    /// function says so; one that never goes reports false after its last attempt.
+    #[test]
+    fn removal_after_a_kill_is_retried_until_the_directories_are_gone() {
+        let root = tempfile::tempdir().expect("a temp root");
+        let in_the_way = root.path().join("not-a-directory-yet");
+        std::fs::write(&in_the_way, b"x").expect("a file where the directory will be");
+        let path = in_the_way.clone();
+        let helper = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(250));
+            std::fs::remove_file(&path).expect("the obstacle goes away");
+        });
+        let started = std::time::Instant::now();
+        let first_try_alone = remove_paths_retrying(&[in_the_way.as_path()], 1, Duration::ZERO);
+        assert!(!first_try_alone, "one attempt cannot remove a file with remove_dir_all");
+        assert!(
+            remove_paths_retrying(&[in_the_way.as_path()], 40, Duration::from_millis(50)),
+            "a later attempt finds the obstacle gone"
+        );
+        helper.join().expect("helper");
+        assert!(started.elapsed() >= Duration::from_millis(200), "it did wait for the later attempt");
+
+        let stuck = root.path().join("stays");
+        std::fs::write(&stuck, b"x").expect("a file that stays");
+        assert!(!remove_paths_retrying(&[stuck.as_path()], 3, Duration::from_millis(5)));
+    }
+
+    /// A process that died without retiring its browser leaves a pair behind; the next
+    /// process sweeps it, and only it: not its own, not a live process's, not a stranger's.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_sweep_removes_only_the_directories_of_processes_that_are_gone() {
+        let root = tempfile::tempdir().expect("a temp root");
+        let dead = "edge-4000000000-1";
+        let ours = format!("edge-{}-9", std::process::id());
+        // Pid 1 is alive in every Linux container.
+        let alive = "edge-1-5";
+        for sub in ["profiles", "crashpad"] {
+            for name in [dead, ours.as_str(), alive, "not-ours", "edge-x-1"] {
+                std::fs::create_dir_all(root.path().join(sub).join(name)).unwrap();
+            }
+        }
+
+        sweep_stale_launch_dirs_in(root.path());
+
+        for sub in ["profiles", "crashpad"] {
+            let mut expected = vec![
+                alive.to_owned(),
+                "edge-x-1".to_owned(),
+                ours.clone(),
+                "not-ours".to_owned(),
+            ];
+            expected.sort();
+            assert_eq!(entries(root.path(), sub), expected, "{sub}");
+        }
+    }
 }

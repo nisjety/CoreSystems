@@ -22,6 +22,29 @@
 //!
 //! `QUARRY_BROWSER_DEADLINE_SCALE` (a number in (0, 2], default 1) multiplies the
 //! whole table, for tests and for a host that is slower than the numbers assume.
+//!
+//! # What is not in the table (the named exceptions)
+//!
+//! Every CDP call in `chromiumoxide.rs` runs inside one of the wrappers above (the
+//! `cdp_calls_are_bounded` test scans the source call by call, so a bare call next to a
+//! wrapped one is reported too, and names the three functions whose bound comes from
+//! their caller). It cannot see a call whose future is built first and wrapped later;
+//! that is what the review of a diff is for. These durations are written elsewhere on purpose:
+//!
+//! - `BROWSER_EXIT_WAIT` (5 s): how long a retired browser process gets to exit before
+//!   its directories are deleted. It waits on a child process, not on a CDP call.
+//! - The launch builder's `request_timeout` (40 s) and `launch_timeout` (20 s): the
+//!   library's own backstop, above every entry here so a typed `Timeout` always wins;
+//!   it bounds only what has no entry (the event listeners).
+//! - The wait for a screencast frame: the caller's `timeout_ms`, clamped to 100 ms to
+//!   5 s (`normalize_live_frame_options`). It is the caller's answer to "how long may I
+//!   wait for a picture", and it expires as the typed `live_frame` `Timeout`.
+//! - `wait_for`'s caller timeout (capped by `Op::WaitFor`): a selector that does not
+//!   appear in the time the caller allowed is the caller's answer, so it stays a
+//!   `DriverFailed` "wait_for selector timed out" and is not a stalled CDP call.
+//! - The 500 ms the trusted-input path gives `Runtime.releaseObject` after a click
+//!   (`Op::StablePoll` is the same length but a different thing): the release queues
+//!   behind a blocked `alert`, and the click's own result is returned either way.
 
 use std::future::Future;
 use std::sync::OnceLock;
@@ -60,11 +83,23 @@ pub(crate) enum Op {
     /// The window in which a target's box has to hold still, sampled every
     /// 25 ms (WS3.K). Effect-less.
     StablePoll,
+    /// A tab's URL read for the tab list and its hints (`page.url()`). Effect-less; a read
+    /// that does not answer leaves the last known value in place.
+    TabMetadata,
+    /// The CDP calls around one live screencast frame (start, ack, stop). The wait for
+    /// the frame itself takes the caller's `timeout_ms` instead (see the exceptions in the
+    /// module docs). Effect-less.
+    LiveFrame,
+    /// Answering one paused request in the network guard (`Fetch.failRequest`,
+    /// `Fetch.continueRequest`). It runs on the guard's own task, so the error is only
+    /// logged; a stuck answer must not hold every later request of the page behind it for
+    /// the library's 40 s.
+    GuardResolve,
 }
 
 impl Op {
     #[cfg(test)]
-    pub(crate) const ALL: [Op; 20] = [
+    pub(crate) const ALL: [Op; 23] = [
         Op::Launch,
         Op::TabAttach,
         Op::Navigate,
@@ -85,6 +120,9 @@ impl Op {
         Op::DownloadComplete,
         Op::Actionability,
         Op::StablePoll,
+        Op::TabMetadata,
+        Op::LiveFrame,
+        Op::GuardResolve,
     ];
 
     pub(crate) const fn name(self) -> &'static str {
@@ -109,6 +147,9 @@ impl Op {
             Op::DownloadComplete => "download_complete",
             Op::Actionability => "actionability",
             Op::StablePoll => "stable_poll",
+            Op::TabMetadata => "tab_metadata",
+            Op::LiveFrame => "live_frame",
+            Op::GuardResolve => "guard_resolve",
         }
     }
 
@@ -145,6 +186,9 @@ impl Op {
             Op::DownloadComplete => 30_000,
             Op::Actionability => 2_000,
             Op::StablePoll => 500,
+            Op::TabMetadata => 3_000,
+            Op::LiveFrame => 5_000,
+            Op::GuardResolve => 5_000,
         }
     }
 }
