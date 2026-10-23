@@ -190,6 +190,21 @@ Built so far (batches B01 to B07): WS01-S0, WS01-S1 (partial), WS01-S6; WS02-S1,
 | D1-127 | WS10-S2 | live-proof | P1 | Add the README row and .sha256 pin for model-entitlement-matrix.json in apps/Model Plane/api/contracts, and the path in .github/workflows/contract-goldens.yml. S1 owns the sync script. | open |
 | D1-128 | WS10-S2 | follow-up | P3 | 13 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-02.json | open |
 
+
+### Wave-mode batch W1-02 (2026-10-23)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D1-129 | WS10-S2 | live-proof | P1 | Migration 021 and the Postgres repository test have never run against a real database; run the disposable-Postgres harness before S3, and check that gdpr_hard_delete_organization still reports success with the new cascading tables. | open |
+| D1-130 | WS10-S2 | decision | P1 | Owner to confirm: a named user who is not an active member resolves to nothing only when the organisation has a policy; with no policy the answer is state none. The plan row says non-member = nothing, which with enforce would also block members whose auth-core projection lags in organisations nobody restricted. S3 must read both cases from the golden rows r_non_member_gets_nothing and r_non_member_without_any_policy_is_unrestricted. | open |
+| D1-131 | WS10-S2 | decision | P1 | A non-member resolves to nothing only when the org has a policy; with no policy the state is none (unrestricted). The plan says non-member = nothing, so the owner should confirm this before enforce is switched on. S3 must read both golden rows (r_non_member_gets_nothing and r_non_member_without_any_policy_is_unrestricted). | open |
+| D1-132 | WS10-S2 | live-proof | P1 | The Postgres repository test is skipped here, so migration 021 and the FOR UPDATE and ON CONFLICT race logic are verified by reading only; run it through the lifecycle harness before S3 relies on the store. | open |
+| D1-133 | WS10-S2 | live-proof | P1 | shared-edit apps/Control Plane/docker-compose.yml: add the org:model-entitlement:read:any scope to the model-gateway principal and append the inference-core principal, exactly as in the implementer's lead_todo. I verified these lines make all 5 compose-reading tests pass. Ship with the new org-core image, because an old image refuses a registry that holds the new scope. Rerun go test -p 1 ./... with no override afterwards. | open |
+| D1-134 | WS10-S2 | live-proof | P1 | Run TestControlLifecycleModelEntitlementRepositoryUnderRLS through the disposable-Postgres harness. Migration 021, the RLS policies, the FOR UPDATE compare-and-set, the append-only history and the gdpr_hard_delete cascade have never met a real database. I read the SQL and Go paths and found no defect, but it is unproven. Add a step to apps/Control Plane/scripts/run-isolated-control-lifecycle-e2e.sh (shared edit). | open |
+| D1-135 | WS10-S2 | live-proof | P1 | Evidence run required by the plan: rebuild org-core with run-control-plane.sh up -d --no-deps --build org-core. Curl the internal route for a no-policy org (state none, revision 0, no-store), PUT with a signed delegation, GET per role, and capture the org_model_policy_history row. | open |
+| D1-136 | WS10-S2 | live-proof | P1 | Add the README row and .sha256 pin for model-entitlement-matrix.json in apps/Model Plane/api/contracts, and the path in .github/workflows/contract-goldens.yml. S1 owns the sync script. | open |
+| D1-137 | WS10-S2 | follow-up | P3 | 13 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-02.json | open |
+
 ## Wave 2 (WS13 to WS27)
 
 Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS27-S0, WS27-S1. Wave 2 is not started as a wave: these came in with Wave 1 batches because they were Wave 1 prerequisites.
@@ -336,4 +351,5 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS21-S1 | authority, zdr | W2-02 | no |
 | WS12-S10 | zdr | W1-02 | no |
 | WS01-S4 | audit | W1-02 | no |
+| WS10-S2 | authority, auth, audit, policy | W1-02 | no |
 | WS10-S2 | authority, auth, audit, policy | W1-02 | no |
