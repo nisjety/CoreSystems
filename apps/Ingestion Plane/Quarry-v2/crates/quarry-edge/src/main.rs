@@ -668,6 +668,19 @@ async fn run() -> anyhow::Result<()> {
         browser_metrics,
     ));
 
+    // WS6.D-s: the organization limits resolver. Only the static source is built; a misspelt
+    // source or fail mode, or the unbuilt `billing_core`, stops the edge here, naming the variable.
+    let limits_config =
+        limits::LimitsConfig::from_env().map_err(|e| anyhow::anyhow!("limits: {e}"))?;
+    let org_limits = limits_config
+        .build()
+        .map_err(|e| anyhow::anyhow!("limits: {e}"))?;
+    tracing::info!(
+        source = limits_config.source.label(),
+        fail_mode = limits_config.fail_mode.label(),
+        "limits resolver"
+    );
+
     let cache = redis
         .as_ref()
         .map(|conn| cache::PageCache::new(conn.clone(), Duration::from_secs(cfg.cache_ttl_secs)));
@@ -1685,6 +1698,7 @@ async fn run() -> anyhow::Result<()> {
         answer_pipeline,
         local_index,
         usage,
+        limits: org_limits,
         #[cfg(feature = "postgres-queue")]
         event_history,
         #[cfg(feature = "postgres-queue")]

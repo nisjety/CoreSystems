@@ -106,6 +106,10 @@ pub struct AppState {
     /// that Control Plane's billing-core consumes. Tests / dev wire
     /// `NoopUsageMeter`. Always populated; never `Option`.
     pub usage: Arc<dyn UsageMeter>,
+    /// WS6.D-s — what each organization has left of its metered allowances and
+    /// how much capacity its plan allows. `StaticFloor` (the default) knows no
+    /// organization and changes nothing; see `crate::limits`.
+    pub limits: Arc<dyn crate::limits::LimitsResolver>,
     /// WS7.C — the web-policy baseline and enforcement mode. Each request's
     /// resolved policy (and the RunPolicy it implies) is decided per request
     /// from this; see `crate::policy_baseline`.

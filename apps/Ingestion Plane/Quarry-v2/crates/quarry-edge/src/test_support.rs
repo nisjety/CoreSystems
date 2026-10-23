@@ -129,6 +129,7 @@ pub fn test_state(static_driver: Arc<dyn Driver>) -> AppState {
         answer_pipeline: None,
         local_index: None,
         usage: Arc::new(NoopUsageMeter),
+        limits: Arc::new(crate::limits::StaticFloor),
         policy: crate::policy_baseline::PolicyBaseline::default(),
         scheduler: None,
         internal_signer: None,

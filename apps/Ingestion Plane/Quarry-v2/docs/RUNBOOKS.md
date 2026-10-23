@@ -1409,3 +1409,26 @@ Rollback. Set `QUARRY_TELEMETRY_EXPORT=off` (no redeploy of the logic). Unset `O
 Evidence owed (not run in this batch). `deploy/compose/docker-compose.otel-test.yml` (throwaway) with `deploy/compose/otel-test/collector.yaml`: a non-ZDR and a ZDR scrape plus step; the collector shows spans for the non-ZDR trace only; the ZDR container log has no probe URL; with the flag off the collector receives nothing. Do not set `OTEL_EXPORTER_OTLP_ENDPOINT` in any real environment before that run.
 
 Not done in this unit (see the depth file): event-level stripping on OTel span events; the Model Plane `mp-telemetry` adoption (sibling b); the span-vocabulary attributes of WS6 L2; the exact OTel 0.29 builder signatures are compile-checked only.
+
+## Organization limits resolver: WS6.D-s (unit W2-U43, built, NOT run, 2026-10-23)
+
+What it does. `AppState.limits` answers, per organization, what is left of `quarry.crawl.page`,
+`quarry.batch.url` and `quarry.browser.second.agent`, and the plan capacity values. The crawl and batch handoffs
+and `start_run` read it. The default and only built source, `static`, reports nothing for anyone, so a
+default deployment behaves as before; the acknowledgement of a batch now carries `limits.urls` (counts).
+
+Flags. `QUARRY_EDGE__LIMITS_SOURCE` (`static` default; `billing_core` is refused at boot: not built).
+`QUARRY_EDGE__LIMITS_FAIL_MODE` (`floor` default, `open`, `closed`; the production overlay pins `floor` and a
+change needs ADR-1). The boot log line is `limits resolver` with `source` and `fail_mode`.
+
+Reading it. A 402 `BUDGET_EXHAUSTED` with `details.dimension = "org_allowance"` is a spent configured allowance;
+`details.metric` says which. The gateway shows `crawl_allowance_exhausted`. An agent start refused for the
+allowance counts in `quarry_agent_budget_exhausted_total{dimension="org_allowance"}`; in `shadow` the same line
+is counted with `mode="shadow"` and the run starts. With `closed` and an unreadable source the answer is 503
+`RUNTIME_NOT_READY`, `details.reason = "limits_unreadable"`.
+
+Rollback. Unset `QUARRY_EDGE__LIMITS_SOURCE` (static). Nothing is stored; no migration.
+
+Not built here (see the depth file): the `billing_core` source (per-org quota read, 30 s cache, stale window), the
+billing-core and Control Plane credential and plan keys, the per-organization capacity wiring (WS6.G, WS6.H), the
+compose rows, and the stack evidence of the plan's deployment steps.

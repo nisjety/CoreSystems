@@ -421,6 +421,51 @@ pub async fn start_run(
             body.initiated_by.as_deref(),
         ),
     );
+    // WS6.D-s: what the organization has left of its agent browser seconds. A spent
+    // allowance refuses the start (402 `org_allowance`, once enforcement is `on`; `shadow`
+    // records it and serves); what is left becomes a runtime ceiling below. A person's
+    // session is never limited here (human seconds are metered, never capped). The static
+    // source configures no allowance, so nothing changes until a source reports one.
+    let agent_seconds = if run_class == crate::budget::RunClass::Agent {
+        let org_limits = state
+            .limits
+            .org_limits(&org_id)
+            .await
+            .map_err(|error| driver_err(&request_id, error))?;
+        if org_limits.browser_seconds_agent.is_exhausted() {
+            match crate::budget::current_mode() {
+                crate::budget::BudgetMode::On => {
+                    crate::metrics::record_budget_exhausted(
+                        crate::limits::DIMENSION_ORG_ALLOWANCE,
+                        run_class.label(),
+                        "on",
+                    );
+                    return Err(driver_err(
+                        &request_id,
+                        crate::limits::AllowanceExhausted {
+                            metric: quarry_runtime::usage_metrics::BROWSER_SECOND_AGENT,
+                        }
+                        .into_error(),
+                    ));
+                }
+                crate::budget::BudgetMode::Shadow => {
+                    crate::metrics::record_budget_exhausted(
+                        crate::limits::DIMENSION_ORG_ALLOWANCE,
+                        run_class.label(),
+                        "shadow",
+                    );
+                    tracing::warn!(
+                        class = run_class.label(),
+                        "agent run allowance would be exhausted (shadow: not enforced)"
+                    );
+                }
+                crate::budget::BudgetMode::Off => {}
+            }
+        }
+        org_limits.browser_seconds_agent
+    } else {
+        crate::limits::Allowance::Unconfigured
+    };
     let slot = state
         .agent_runs
         .try_reserve(&org_id, run_class)
@@ -500,6 +545,7 @@ pub async fn start_run(
                 .and_then(|checkpoint| checkpoint.budget.as_ref()),
             std::time::Instant::now(),
         )
+        .with_entitlement(agent_seconds)
         .with_surface(surface)
     });
     let budget_view = budget

@@ -327,6 +327,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Envelope_HandoffAck'
+        '402':
+          description: "The organization's configured crawl page (quarry.crawl.page) allowance is spent (WS6.D-s; only a source that reports an allowance produces this, the default static source never does). Body is BUDGET_EXHAUSTED with details dimension org_allowance, metric, limit_source entitlement and resumable false. No job is created."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
         '429':
           description: "Backlog full (QUARRY_JOB_ADMISSION on): the organization already has its bound of waiting jobs. Body is RATE_LIMITED with details reason org_backlog_full, limit, queued and retry_after_seconds, and a Retry-After header. Nothing is stored."
           content:
@@ -363,6 +369,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Envelope_HandoffAck'
+        '402':
+          description: "The organization's configured batch URL (quarry.batch.url) allowance is spent (WS6.D-s; only a source that reports an allowance produces this, the default static source never does). Body is BUDGET_EXHAUSTED with details dimension org_allowance, metric, limit_source entitlement and resumable false. No job is created."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
         '429':
           description: "Backlog full (QUARRY_JOB_ADMISSION on): the organization already has its bound of waiting jobs. Body is RATE_LIMITED with details reason org_backlog_full, limit, queued and retry_after_seconds, and a Retry-After header. Nothing is stored."
           content:
@@ -6218,15 +6230,21 @@ components:
         limits:
           type: object
           description: >-
-            Set by /v1/crawl. The page and depth bounds the crawl will run with and
-            why they differ from the request (`clamped_by` is `default` when the
-            request was absent or zero, `hard` when it was above the ceiling, and
-            empty when it was used as asked).
+            Set by /v1/crawl and /v1/batch. A crawl carries the page and depth bounds it
+            will run with and why they differ from the request (`clamped_by` is
+            `default` when the request was absent or zero, `hard` when it was above the
+            ceiling, `entitlement` when the organization's remaining allowance was
+            smaller, and empty when it was used as asked). A batch carries `urls`: how
+            many URLs were asked for, accepted (the first ones, in order) and dropped.
+            Counts only; never a URL. `remaining` is present only for a configured
+            allowance (WS6.D-s).
           properties:
             max_pages:
               $ref: '#/components/schemas/CrawlBound'
             max_depth:
               $ref: '#/components/schemas/CrawlBound'
+            urls:
+              $ref: '#/components/schemas/BatchUrlsBound'
     CrawlBound:
       type: object
       required:
@@ -6239,6 +6257,13 @@ components:
         effective:
           type: integer
           minimum: 1
+        remaining:
+          type: integer
+          minimum: 1
+          description: >-
+            What the organization has left of its configured allowance for this bound
+            (WS6.D-s). Absent when no allowance is configured; never 0 (a spent
+            allowance is a 402).
         clamped_by:
           type: array
           items:
@@ -6246,6 +6271,34 @@ components:
             enum:
             - default
             - hard
+            - entitlement
+    BatchUrlsBound:
+      type: object
+      required:
+      - requested
+      - accepted
+      - dropped
+      - clamped_by
+      properties:
+        requested:
+          type: integer
+          minimum: 0
+        accepted:
+          type: integer
+          minimum: 0
+        dropped:
+          type: integer
+          minimum: 0
+        remaining:
+          type: integer
+          minimum: 1
+          description: Present only for a configured quarry.batch.url allowance (WS6.D-s).
+        clamped_by:
+          type: array
+          items:
+            type: string
+            enum:
+            - entitlement
     CrawlContext:
       description: >-
         WS14.S2. The crawl scope for one run_page call. Absent or null leaves the

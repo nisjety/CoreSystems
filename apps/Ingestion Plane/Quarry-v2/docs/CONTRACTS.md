@@ -760,3 +760,37 @@ The usage event shape is unchanged (`UsageEvent`, `event_id`, `metadata`). New h
   documented request property yet (depth item).
 - The `x-verevon-surface` header is read on the agent start route and honoured only on a service
   token, from the closed set in `BILLING.md`.
+
+## Organization limits: allowance clamps and the 402 `org_allowance` (WS6.D-s, built, NOT run)
+
+The edge holds a limits resolver (`AppState.limits`). Only the `static` source is built: it reports no
+allowance for any organization, so every response below is what it was before, plus the additive fields.
+
+- **Crawl.** `POST /v1/crawl` clamps the page bound to the organization's remaining
+  `quarry.crawl.page` when an allowance is configured: `effective = min(request-or-default, hard,
+  remaining)`. `limits.max_pages` gains `remaining` (absent when no allowance is configured; never 0)
+  and `clamped_by` may now contain `entitlement` next to `default` or `hard`. A configured allowance
+  with nothing left is refused before any job exists.
+- **Batch.** `POST /v1/batch` keeps the first N URLs that fit the remaining `quarry.batch.url`
+  allowance and answers `limits.urls = {requested, accepted, dropped, remaining?, clamped_by[]}`
+  (counts only, never a URL). The block is always present on a batch acknowledgement; `accepted` equals
+  `requested` and `clamped_by` is empty when no allowance is configured. Only the accepted URLs reach
+  the orchestrator and the usage meter.
+- **Agent run.** `POST /v1/agent/runs` for an agent-class run: a configured, spent
+  `quarry.browser.second.agent` allowance refuses the start like the other budget bounds (402 when
+  `QUARRY_EDGE__BUDGET_ENFORCEMENT=on`; `shadow` records it and serves). What is left becomes the
+  runtime bound: `clamped[]` gains `{field: "max_runtime_s", by: "entitlement"}` and a later runtime
+  refusal says `limit_source: "entitlement"`. An entitlement only lowers a bound; a person's session is
+  never limited (ADR-3).
+- **402.** `BUDGET_EXHAUSTED` (402, not retryable) with `details = {dimension: "org_allowance",
+  metric, limit_source: "entitlement", resumable: false}`. `metric` is the allowance that ran out:
+  `quarry.crawl.page`, `quarry.batch.url` or `quarry.browser.second.agent`. No count and no
+  organization id is in the body.
+- **Unreadable limits.** Never from the static source. Under a source that can fail, fail mode `floor`
+  serves the floor, `open` drops the entitlement ceiling, and `closed` answers `RUNTIME_NOT_READY`
+  (503, `details.reason = "limits_unreadable"`).
+- **Gateway.** The 402 reaches the app as `crawl_allowance_exhausted` (HTTP 402; `error.metric` for the two
+  crawl metrics and `error.retryAfterSeconds` when sent), with Norwegian and English copy.
+
+Goldens: none changed. The OpenAPI changes are `CrawlBound.remaining`, `entitlement` in `clamped_by`,
+`BatchUrlsBound` (new) and the 402 on `/v1/crawl` and `/v1/batch` (all additive).

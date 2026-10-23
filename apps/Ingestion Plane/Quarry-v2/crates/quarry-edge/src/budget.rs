@@ -342,6 +342,9 @@ pub struct BudgetCaps {
     pub browser_second_micro_usd: u64,
     /// Which bounds a grant's claim set (so a refusal can name its source).
     pub grant_bound: GrantBound,
+    /// WS6.D-s: the runtime bound is the organization's remaining agent browser
+    /// seconds, not the request, default, ceiling or a grant's claim.
+    pub entitlement_runtime: bool,
 }
 
 /// The bounds that a grant's claim, not the request or the default, set.
@@ -515,6 +518,7 @@ pub fn resolve_caps_with_claim(
             max_cost_usd,
             browser_second_micro_usd: usd_to_micro(limits.browser_second_usd),
             grant_bound,
+            entitlement_runtime: false,
         },
         clamps,
     ))
@@ -719,8 +723,9 @@ pub struct Exhausted {
     pub limit: f64,
     pub spent: f64,
     pub unit: &'static str,
-    /// `run_budget` (the request, default or ceiling set the bound) or
-    /// `grant` (the broker grant's claim did).
+    /// `run_budget` (the request, default or ceiling set the bound),
+    /// `grant` (the broker grant's claim did) or `entitlement` (the
+    /// organization's remaining agent browser seconds did, WS6.D-s).
     pub limit_source: &'static str,
 }
 
@@ -795,7 +800,13 @@ pub fn check(
         limit,
         spent,
         unit: dimension.unit(),
-        limit_source: if grant_bound { "grant" } else { "run_budget" },
+        limit_source: if dimension == Dimension::Runtime && caps.entitlement_runtime {
+            "entitlement"
+        } else if grant_bound {
+            "grant"
+        } else {
+            "run_budget"
+        },
     })
 }
 
@@ -1028,6 +1039,47 @@ impl RunBudget {
         })
     }
 
+    /// WS6.D-s: lower the runtime bound to what the organization has left of its
+    /// `quarry.browser.second.agent` allowance. It only lowers: an unconfigured
+    /// allowance, or one above the bound the run already has, changes nothing, and
+    /// an interactive run (no bounds) is never touched. The ledger counts the active
+    /// time of earlier segments, which the allowance has already paid for, so that
+    /// time is added back to the ceiling. Reported as a clamp `by: "entitlement"`.
+    #[must_use]
+    pub fn with_entitlement(mut self, remaining_agent_seconds: crate::limits::Allowance) -> Self {
+        let carried_s = self.base_active_ms / 1000;
+        let Some(caps) = self.caps.as_mut() else {
+            return self;
+        };
+        let allowance = match remaining_agent_seconds {
+            crate::limits::Allowance::Remaining(left) => {
+                crate::limits::Allowance::Remaining(left.saturating_add(carried_s))
+            }
+            unconfigured => unconfigured,
+        };
+        let current = u64::from(caps.max_runtime_s);
+        let (ceiling, lowered) = crate::limits::tighten_ceiling(current, allowance);
+        if !lowered {
+            return self;
+        }
+        let requested = match self.clamps.iter().find(|clamp| clamp.field == "max_runtime_s") {
+            Some(clamp) => clamp.requested,
+            None => Some(current as f64),
+        };
+        self.clamps.retain(|clamp| clamp.field != "max_runtime_s");
+        self.clamps.push(Clamp {
+            field: "max_runtime_s",
+            requested,
+            effective: ceiling as f64,
+            by: "entitlement",
+        });
+        // `ceiling` is below `current`, which is a u32.
+        caps.max_runtime_s = ceiling as u32;
+        caps.entitlement_runtime = true;
+        caps.grant_bound.runtime = false;
+        self
+    }
+
     /// WS6.C-e: the surface that started this segment, set by the start or resume route.
     #[must_use]
     pub fn with_surface(mut self, surface: crate::usage_attrs::Surface) -> Self {
@@ -1116,6 +1168,7 @@ mod tests {
             max_cost_usd: cost_usd,
             browser_second_micro_usd: 0,
             grant_bound: GrantBound::default(),
+            entitlement_runtime: false,
         }
     }
 
@@ -1884,6 +1937,65 @@ mod tests {
         let error = ClaimMode::parse("on").unwrap_err();
         assert!(error.contains(ENV_CLAIM_MODE), "{error}");
         assert_eq!(ClaimMode::Enforce.label(), "enforce");
+    }
+
+    #[test]
+    fn entitlement_lowers_the_runtime_bound_and_names_itself() {
+        use crate::limits::Allowance;
+        let limits = BudgetLimits::default();
+        let now = Instant::now();
+        let mut run = RunBudget::start(&limits, RunClass::Agent, &constraints(5, Some(600), Some(5.0)), None, now)
+            .with_entitlement(Allowance::Remaining(120));
+        assert_eq!(run.caps.as_ref().unwrap().max_runtime_s, 120);
+        let clamp = run.clamps.iter().find(|clamp| clamp.field == "max_runtime_s").unwrap();
+        assert_eq!((clamp.by, clamp.effective, clamp.requested), ("entitlement", 120.0, Some(600.0)));
+        let error = run.gate(BudgetMode::On, 0, now + Duration::from_secs(121)).unwrap_err();
+        assert_eq!(error.details.as_ref().unwrap()["dimension"], "runtime");
+        assert_eq!(error.details.as_ref().unwrap()["limit_source"], "entitlement");
+    }
+
+    #[test]
+    fn entitlement_never_raises_the_runtime_bound() {
+        use crate::limits::Allowance;
+        let limits = BudgetLimits::default();
+        let now = Instant::now();
+        let base = RunBudget::start(&limits, RunClass::Agent, &constraints(5, Some(600), Some(5.0)), None, now);
+        for remaining in [Allowance::Unconfigured, Allowance::Remaining(600), Allowance::Remaining(86_400)] {
+            let run = base.clone().with_entitlement(remaining);
+            assert_eq!(run.caps.as_ref().unwrap().max_runtime_s, 600);
+            assert!(!run.caps.as_ref().unwrap().entitlement_runtime);
+            assert_eq!(run.clamps, base.clamps);
+        }
+    }
+
+    #[test]
+    fn entitlement_never_touches_an_interactive_run() {
+        use crate::limits::Allowance;
+        let now = Instant::now();
+        let person = RunBudget::start(&BudgetLimits::default(), RunClass::Interactive, &constraints(12, Some(120), None), None, now)
+            .with_entitlement(Allowance::Remaining(0));
+        assert!(person.caps.is_none());
+        assert!(person.clamps.is_empty());
+    }
+
+    #[test]
+    fn entitlement_ceiling_adds_back_the_runtime_a_resume_carries() {
+        use crate::limits::Allowance;
+        let t0 = Instant::now();
+        let checkpoint = BudgetCheckpoint {
+            class: "agent".into(),
+            steps: 1,
+            attempts: 1,
+            spent_micro_usd: 0,
+            active_ms: 100_000,
+            exhausted: None,
+            claim: None,
+            segment: 0,
+        };
+        let run = RunBudget::start(&BudgetLimits::default(), RunClass::Agent, &constraints(5, Some(900), Some(5.0)), Some(&checkpoint), t0)
+            .with_entitlement(Allowance::Remaining(50));
+        // 100 s were spent by the earlier segment (already paid for); 50 s are left.
+        assert_eq!(run.caps.as_ref().unwrap().max_runtime_s, 150);
     }
 }
 

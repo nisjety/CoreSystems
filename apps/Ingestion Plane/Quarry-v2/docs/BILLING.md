@@ -175,3 +175,26 @@ billing owner (WAITING-OTHER). Rollback is `off`.
 **Not in this change.** Usage is emitted at segment close only, so a segment that ends with a crash is
 not billed (ZDR runs are unbilled by design, ADR-4). The shutdown drain flush is WS6.J. Segment usage
 needs budget enforcement not `off`, because the budget ledger is the clock.
+
+## Organization limits (WS6.D-s)
+
+What an organization has left of a metered allowance is read through a resolver, not computed from the
+events this file describes. Precedence when sources exist: a grant's claim (tighten only), then the
+billing pull, then the static floor. Only the floor is built.
+
+| Metric | Used by | What the remainder does |
+|---|---|---|
+| `quarry.crawl.page` | `POST /v1/crawl` | lowers `max_pages` (`clamped_by: entitlement`); 0 refuses (402) |
+| `quarry.batch.url` | `POST /v1/batch` | keeps the first N URLs (`limits.urls`); 0 refuses (402) |
+| `quarry.browser.second.agent` | `POST /v1/agent/runs` (agent class) | lowers the runtime bound (`by: entitlement`); 0 refuses (402) |
+
+Rules. An organization with no allowance policy for a metric is *unconfigured*, which keeps the floor and is
+never zero. An entitlement can lower a budget bound and can raise a capacity cap only up to the process-wide
+cap (`effective_capacity`); the plan capacity keys (`quarry.cap.*`) are carried in `OrgLimits.caps` and read by
+WS6.G and WS6.H later. Human browser seconds are metered and never capped.
+
+Configuration. `QUARRY_EDGE__LIMITS_SOURCE=static` (default; `billing_core` stops boot, it is not built) and
+`QUARRY_EDGE__LIMITS_FAIL_MODE=floor|open|closed` (default `floor`; read by every source, no effect on
+`static`). A misspelt value stops boot naming the variable. The `billing_core` source also needs the
+billing-core read credential (`billing:quota:read:any`, `billing:entitlement:read:any`), which this branch
+does not provision.
