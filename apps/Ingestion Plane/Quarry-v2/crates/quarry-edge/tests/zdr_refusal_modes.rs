@@ -489,6 +489,7 @@ async fn enforced_zdr_org_is_refused_every_durable_write_and_control_plane_sees_
             &ProfileMetadata {
                 name: Some(SEEDED_NAME.to_owned()),
                 scope: ProfileScope::UserPrivate,
+                owner: None,
             },
         )
         .await
@@ -553,6 +554,7 @@ async fn enforced_zdr_org_is_refused_every_durable_write_and_control_plane_sees_
         ProfileMetadata {
             name: Some(SEEDED_NAME.to_owned()),
             scope: ProfileScope::UserPrivate,
+            owner: None,
         },
         "a refused update left the stored profile as it was"
     );

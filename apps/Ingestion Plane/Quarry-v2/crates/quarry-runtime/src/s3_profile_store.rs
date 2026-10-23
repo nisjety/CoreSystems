@@ -229,6 +229,7 @@ impl ProfileStore for S3ProfileStore {
                 profile_id,
                 name: metadata.name,
                 scope: metadata.scope,
+                owner: metadata.owner,
             });
         }
         Ok(out)

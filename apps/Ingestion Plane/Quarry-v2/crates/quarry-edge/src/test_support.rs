@@ -102,6 +102,7 @@ pub fn test_state(static_driver: Arc<dyn Driver>) -> AppState {
         grant_validator: Arc::new(quarry_runtime::NoopGrantValidator),
         require_browser_grants: false,
         zdr_refuse_durable_resources: false,
+        profile_owner_enforce: crate::profile_guard::OwnerEnforce::Observe,
         driver: static_driver,
         drivers,
         http3: None,

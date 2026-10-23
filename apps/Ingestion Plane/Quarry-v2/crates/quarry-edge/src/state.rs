@@ -41,6 +41,9 @@ pub struct AppState {
     /// `zdr_durable_mutation_forbidden`; when false they are served and only a
     /// `zdr.would_refuse` event is logged. See `crate::zdr_refusal`.
     pub zdr_refuse_durable_resources: bool,
+    /// WS17.P2 owner and ACL check on `/v1/profiles*`: `off`, `observe` (logs, serves)
+    /// or `enforce` (404 for a non-owner). See `crate::profile_guard`.
+    pub profile_owner_enforce: crate::profile_guard::OwnerEnforce,
     pub driver: Arc<dyn Driver>,
     pub drivers: DriverRegistry,
     /// Wave 7 — optional HTTP/3 driver. `Some` when the runtime was

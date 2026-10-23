@@ -18,6 +18,7 @@ use quarry_core::envelope::Envelope;
 use quarry_core::error::{ErrorCode, QuarryError};
 use quarry_core::ids::kinds::ProfileKind;
 
+use crate::profile_guard::{self, ProfileOp};
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -41,11 +42,15 @@ pub struct ProfileSummaryResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     pub scope: String,
+    /// True when the caller owns the profile (WS17.P2; additive).
+    pub owner_is_caller: bool,
 }
 
-impl From<ProfileSummary> for ProfileSummaryResponse {
-    fn from(summary: ProfileSummary) -> Self {
+impl ProfileSummaryResponse {
+    /// The wire row as seen by `actor`: `owner_is_caller` comes from the stored owner.
+    fn for_caller(summary: ProfileSummary, actor: &str) -> Self {
         Self {
+            owner_is_caller: summary.owner.as_deref() == Some(actor),
             profile_id: summary.profile_id.to_string(),
             name: summary.name,
             scope: summary.scope.as_str().to_owned(),
@@ -87,6 +92,8 @@ pub struct UpdateProfileRequest {
 pub struct LoadProfileResponse {
     pub profile_id: String,
     pub snapshot: SessionSnapshot,
+    /// True when the caller owns the profile (WS17.P2; additive).
+    pub owner_is_caller: bool,
 }
 
 fn parse_id(s: &str) -> Result<ProfileKind, QuarryError> {
@@ -120,6 +127,14 @@ pub async fn save_profile(
         Some(s) => parse_id(s).map_err(|e| err_response(&request_id, e))?,
         None => quarry_core::ids::Id::new(),
     };
+
+    // WS17.P2: a body that names a profile needs write access to it. A body without an id
+    // creates a new profile, owned by the caller.
+    if req.profile_id.is_some() {
+        profile_guard::authorize(&state, &claims, &profile_id, ProfileOp::Import)
+            .await
+            .map_err(|e| err_response(&request_id, e))?;
+    }
 
     // Ordering stamp = request arrival (WS17.P1). An ignored save means a newer
     // capture or delete already holds the profile; the caller still gets the id,
@@ -181,6 +196,7 @@ pub async fn create_profile(
     let metadata = ProfileMetadata {
         name: name.clone(),
         scope: req.scope,
+        owner: Some(claims.actor_id().to_owned()),
     };
 
     state
@@ -195,6 +211,7 @@ pub async fn create_profile(
             profile_id: profile_id.to_string(),
             name,
             scope: req.scope.as_str().to_owned(),
+            owner_is_caller: true,
         },
     )))
 }
@@ -232,6 +249,11 @@ pub async fn update_profile(
         ));
     }
 
+    // WS17.P2: rename and rescope are owner-only, on an org-shared row too.
+    profile_guard::authorize(&state, &claims, &parsed, ProfileOp::Update)
+        .await
+        .map_err(|e| err_response(&request_id, e))?;
+
     // A profile that predates this metadata (or was never explicitly
     // named) still exists via its snapshot — `exists` confirms it's real
     // before we allow a rename, rather than silently creating a
@@ -258,6 +280,10 @@ pub async fn update_profile(
         .map_err(|e| err_response(&request_id, e))?
         .unwrap_or_default();
 
+    // The owner is carried through the rewrite unchanged: the store stamps it on INSERT only,
+    // but a file-backed store rewrites the whole metadata object.
+    let owner = current.owner.clone();
+    let owner_is_caller = owner.as_deref() == Some(claims.actor_id());
     let name = match req.name.as_deref().map(str::trim) {
         // An explicit empty string clears the name.
         Some("") => None,
@@ -283,6 +309,7 @@ pub async fn update_profile(
     let metadata = ProfileMetadata {
         name: name.clone(),
         scope,
+        owner,
     };
 
     state
@@ -297,6 +324,7 @@ pub async fn update_profile(
             profile_id: parsed.to_string(),
             name,
             scope: scope.as_str().to_owned(),
+            owner_is_caller,
         },
     )))
 }
@@ -309,6 +337,10 @@ pub async fn load_profile(
     let request_id = crate::request_id::current();
 
     let parsed = parse_id(&profile_id).map_err(|e| err_response(&request_id, e))?;
+
+    let facts = profile_guard::authorize(&state, &claims, &parsed, ProfileOp::Read)
+        .await
+        .map_err(|e| err_response(&request_id, e))?;
 
     let snapshot = state
         .profiles
@@ -330,6 +362,7 @@ pub async fn load_profile(
         LoadProfileResponse {
             profile_id: parsed.to_string(),
             snapshot,
+            owner_is_caller: facts.owned_by(claims.actor_id()),
         },
     )))
 }
@@ -342,6 +375,10 @@ pub async fn delete_profile(
     let request_id = crate::request_id::current();
 
     let parsed = parse_id(&profile_id).map_err(|e| err_response(&request_id, e))?;
+
+    profile_guard::authorize(&state, &claims, &parsed, ProfileOp::Delete)
+        .await
+        .map_err(|e| err_response(&request_id, e))?;
 
     state
         .profiles
@@ -392,6 +429,8 @@ pub struct RestoreProbeResponse {
     pub has_viewport: bool,
     pub locale: Option<String>,
     pub timezone: Option<String>,
+    /// True when the caller owns the profile (WS17.P2; additive).
+    pub owner_is_caller: bool,
 }
 
 pub async fn restore_probe(
@@ -416,6 +455,9 @@ pub async fn restore_probe(
             QuarryError::new(ErrorCode::BadRequest, format!("invalid url: {e}")),
         )
     })?;
+    let facts = profile_guard::authorize(&state, &claims, &parsed, ProfileOp::Probe)
+        .await
+        .map_err(|e| err_response(&request_id, e))?;
     let snapshot = state
         .profiles
         .load(&claims.org_id, &parsed)
@@ -461,6 +503,7 @@ pub async fn restore_probe(
             has_viewport: snapshot.viewport.is_some(),
             locale: snapshot.locale,
             timezone: snapshot.timezone,
+            owner_is_caller: facts.owned_by(claims.actor_id()),
         },
     )))
 }
@@ -476,13 +519,15 @@ pub async fn list_profiles(
         .list(&claims.org_id)
         .await
         .map_err(|e| err_response(&request_id, e))?;
+    let actor = claims.actor_id();
+    let visible = profile_guard::filter_listing(state.profile_owner_enforce, actor, summaries);
 
     Ok(Json(Envelope::ok(
         request_id,
         ListProfilesResponse {
-            profiles: summaries
+            profiles: visible
                 .into_iter()
-                .map(ProfileSummaryResponse::from)
+                .map(|summary| ProfileSummaryResponse::for_caller(summary, actor))
                 .collect(),
         },
     )))

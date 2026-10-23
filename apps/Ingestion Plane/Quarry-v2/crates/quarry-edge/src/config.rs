@@ -256,6 +256,11 @@ pub struct EdgeConfig {
     /// Env: `QUARRY_EDGE__ZDR_TOMBSTONE`.
     #[serde(default)]
     pub zdr_tombstone: bool,
+    /// WS17.P2: owner and ACL check on the `/v1/profiles*` routes. `observe` (the
+    /// default) logs `profile.owner.would_deny` and serves as before; `enforce` answers
+    /// 404 to a non-owner; `off` skips the check. Env: `QUARRY_EDGE__PROFILE_OWNER_ENFORCE`.
+    #[serde(default)]
+    pub profile_owner_enforce: crate::profile_guard::OwnerEnforce,
 }
 
 fn default_port() -> u16 {
@@ -374,6 +379,7 @@ impl EdgeConfig {
             visual_max_regions: None,
             zdr_refuse_durable_resources: false,
             zdr_tombstone: false,
+            profile_owner_enforce: crate::profile_guard::OwnerEnforce::Observe,
         }
     }
 }

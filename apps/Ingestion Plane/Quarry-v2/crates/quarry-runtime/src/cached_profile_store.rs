@@ -454,6 +454,7 @@ mod tests {
         let metadata = ProfileMetadata {
             name: Some("Shared support inbox".into()),
             scope: quarry_browser::session::ProfileScope::OrgShared,
+            owner: None,
         };
         store.save_metadata("org_a", &id, &metadata).await.unwrap();
 

@@ -125,6 +125,10 @@ pub struct ProfileMetadata {
     pub name: Option<String>,
     #[serde(default)]
     pub scope: ProfileScope,
+    /// The owner actor id (`Claims::actor_id()`), stamped on INSERT only (WS17.P2).
+    /// `None` on a legacy row. Read by the edge owner check; not a display field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
 }
 
 /// One row of `ProfileStore::list` — enough to render a profile picker
@@ -136,6 +140,9 @@ pub struct ProfileSummary {
     pub name: Option<String>,
     #[serde(default)]
     pub scope: ProfileScope,
+    /// The owner actor id, read from the same row as `scope` (WS17.P2). `None` on a legacy row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
 }
 
 /// Ordering metadata for one `ProfileStore::save`. `saved_at` is the START
@@ -379,11 +386,11 @@ impl ProfileStore for InMemoryProfileStore {
 
     async fn list(&self, org_id: &str) -> QuarryResult<Vec<ProfileSummary>> {
         let prefix = format!("{org_id}\0");
+        // Lock order: order book, store, metadata (as in `save`, `delete`, `save_metadata`).
+        let book = self.order.read().await;
+        let stored = self.store.read().await;
         let metadata = self.metadata.read().await;
-        Ok(self
-            .store
-            .read()
-            .await
+        Ok(stored
             .keys()
             .filter_map(|k| {
                 let suffix = k.strip_prefix(&prefix)?;
@@ -393,6 +400,7 @@ impl ProfileStore for InMemoryProfileStore {
                     profile_id,
                     name: found.name,
                     scope: found.scope,
+                    owner: book.rows.get(k).and_then(|row| row.owner.clone()),
                 })
             })
             .collect())
@@ -411,12 +419,23 @@ impl ProfileStore for InMemoryProfileStore {
         // placeholder snapshot only if one doesn't already exist so a
         // rename/rescope of a profile with real captured cookies never
         // clobbers them.
-        self.store
-            .write()
-            .await
+        // Lock order: order book, store, metadata. The owner is stamped on INSERT only,
+        // like the SQL upsert: a rename of an existing row never changes it (WS17.P2).
+        let mut book = self.order.write().await;
+        let mut stored = self.store.write().await;
+        if !stored.contains_key(&key) {
+            book.rows.entry(key.clone()).or_default().owner = metadata.owner.clone();
+        }
+        stored
             .entry(key.clone())
             .or_insert_with(SessionSnapshot::default);
-        self.metadata.write().await.insert(key, metadata.clone());
+        self.metadata.write().await.insert(
+            key,
+            ProfileMetadata {
+                owner: None,
+                ..metadata.clone()
+            },
+        );
         Ok(())
     }
 
@@ -425,12 +444,15 @@ impl ProfileStore for InMemoryProfileStore {
         org_id: &str,
         profile_id: &ProfileKind,
     ) -> QuarryResult<Option<ProfileMetadata>> {
-        Ok(self
-            .metadata
-            .read()
-            .await
-            .get(&Self::key(org_id, profile_id))
-            .cloned())
+        let key = Self::key(org_id, profile_id);
+        let book = self.order.read().await;
+        let metadata = self.metadata.read().await;
+        if !metadata.contains_key(&key) && !book.rows.contains_key(&key) {
+            return Ok(None);
+        }
+        let mut out = metadata.get(&key).cloned().unwrap_or_default();
+        out.owner = book.rows.get(&key).and_then(|row| row.owner.clone());
+        Ok(Some(out))
     }
 }
 
@@ -612,6 +634,7 @@ mod tests {
         let metadata = ProfileMetadata {
             name: Some("Work Gmail".into()),
             scope: ProfileScope::UserPrivate,
+            owner: None,
         };
         store
             .save_metadata("org_a", &profile_id, &metadata)
@@ -657,6 +680,7 @@ mod tests {
                 &ProfileMetadata {
                     name: Some("Norwegian bank".into()),
                     scope: ProfileScope::OrgShared,
+                    owner: None,
                 },
             )
             .await
@@ -699,6 +723,7 @@ mod tests {
                 &ProfileMetadata {
                     name: Some("secret".into()),
                     scope: ProfileScope::UserPrivate,
+                    owner: None,
                 },
             )
             .await
@@ -727,6 +752,7 @@ mod tests {
                 &ProfileMetadata {
                     name: Some("temp".into()),
                     scope: ProfileScope::RunScoped,
+                    owner: None,
                 },
             )
             .await

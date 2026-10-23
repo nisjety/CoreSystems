@@ -49,6 +49,7 @@ pub fn base_state(driver: Arc<dyn Driver>, event_sink: EventSink) -> AppState {
         grant_validator: Arc::new(quarry_runtime::NoopGrantValidator),
         require_browser_grants: false,
         zdr_refuse_durable_resources: false,
+        profile_owner_enforce: quarry_edge::profile_guard::OwnerEnforce::Observe,
         driver,
         drivers,
         http3: None,

@@ -52,6 +52,7 @@ mod limits;
 mod map_routes;
 mod metrics;
 mod policy_baseline;
+mod profile_guard;
 mod profile_routes;
 mod queue_routes;
 mod request_id;
@@ -1578,6 +1579,7 @@ async fn run() -> anyhow::Result<()> {
         grant_validator,
         require_browser_grants,
         zdr_refuse_durable_resources: cfg.zdr_refuse_durable_resources,
+        profile_owner_enforce: cfg.profile_owner_enforce,
         driver: default_driver,
         drivers,
         http3: http3_driver,

@@ -248,7 +248,7 @@ impl ProfileStore for PostgresProfileStore {
         // 0002_profiles.sql — single index seek + range scan, no full
         // table walk even on a multi-tenant DB.
         let rows = sqlx::query(
-            "SELECT profile_id, name, scope FROM quarry_profiles \
+            "SELECT profile_id, name, scope, owner_user_id FROM quarry_profiles \
              WHERE org_id = $1 \
              ORDER BY updated_at DESC",
         )
@@ -262,11 +262,13 @@ impl ProfileStore for PostgresProfileStore {
             let id_str: String = row.try_get(0).map_err(|e| db_err("list:row", e))?;
             let name: Option<String> = row.try_get(1).map_err(|e| db_err("list:row", e))?;
             let scope_str: String = row.try_get(2).map_err(|e| db_err("list:row", e))?;
+            let owner: Option<String> = row.try_get(3).map_err(|e| db_err("list:row", e))?;
             if let Ok(profile_id) = id_str.parse::<ProfileKind>() {
                 out.push(ProfileSummary {
                     profile_id,
                     name,
                     scope: scope_str.parse::<ProfileScope>().unwrap_or_default(),
+                    owner,
                 });
             }
         }
@@ -285,8 +287,8 @@ impl ProfileStore for PostgresProfileStore {
         // for a brand-new, snapshot-less "created" profile, so its
         // placeholder snapshot is safe.
         sqlx::query(
-            "INSERT INTO quarry_profiles (org_id, profile_id, snapshot, name, scope, created_at, updated_at) \
-             VALUES ($1, $2, $3, $4, $5, NOW(), NOW()) \
+            "INSERT INTO quarry_profiles (org_id, profile_id, snapshot, name, scope, owner_user_id, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW()) \
              ON CONFLICT (org_id, profile_id) DO UPDATE SET \
                  name       = EXCLUDED.name, \
                  scope      = EXCLUDED.scope, \
@@ -297,6 +299,7 @@ impl ProfileStore for PostgresProfileStore {
         .bind(empty_snapshot_json())
         .bind(&metadata.name)
         .bind(metadata.scope.as_str())
+        .bind(&metadata.owner)
         .execute(&self.pool)
         .await
         .map_err(|e| db_err("save_metadata", e))?;
@@ -308,8 +311,8 @@ impl ProfileStore for PostgresProfileStore {
         org_id: &str,
         profile_id: &ProfileKind,
     ) -> QuarryResult<Option<ProfileMetadata>> {
-        let row: Option<(Option<String>, String)> = sqlx::query_as(
-            "SELECT name, scope FROM quarry_profiles \
+        let row: Option<(Option<String>, String, Option<String>)> = sqlx::query_as(
+            "SELECT name, scope, owner_user_id FROM quarry_profiles \
              WHERE org_id = $1 AND profile_id = $2",
         )
         .bind(org_id)
@@ -318,9 +321,10 @@ impl ProfileStore for PostgresProfileStore {
         .await
         .map_err(|e| db_err("load_metadata", e))?;
 
-        Ok(row.map(|(name, scope)| ProfileMetadata {
+        Ok(row.map(|(name, scope, owner)| ProfileMetadata {
             name,
             scope: scope.parse::<ProfileScope>().unwrap_or_default(),
+            owner,
         }))
     }
 }
