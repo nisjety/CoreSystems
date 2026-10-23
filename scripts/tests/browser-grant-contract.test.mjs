@@ -630,10 +630,17 @@ test('main builds the production grant validator with the service tokens, throug
 
 test('cross_plane_tokens in main is bound once, from QUARRY_EDGE__QUARRY_SERVICE_API_KEY, and never rebound or shadowed', () => {
   const main = productionPart(read('apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs'));
-  const bindings = main.match(/\blet\s+(?:mut\s+)?cross_plane_tokens\b/g) ?? [];
-  assert.equal(bindings.length, 1, 'cross_plane_tokens must be bound exactly once (found ' + bindings.length + '): a second let would shadow the production credential');
+  // Every way Rust can introduce the name: a let pattern (plain, mut, typed, tuple or struct destructuring,
+  // let-else, if/while let), a match or closure pattern, a for pattern, a function parameter.
+  const LET = /\blet\b[^=;]*?\bcross_plane_tokens\b/g;
+  const PATTERN = /(?:\bSome|\bOk|\bErr)\s*\(\s*(?:mut\s+)?cross_plane_tokens\s*\)|\|[^|;]*\bcross_plane_tokens\b[^|;]*\||\bfor\b[^;{]*?\bcross_plane_tokens\b[^;{]*?\bin\b|\bfn\s+\w+[^)]*\bcross_plane_tokens\s*:/g;
+  const bindings = [...(main.match(LET) ?? []), ...(main.match(PATTERN) ?? [])];
+  assert.equal(bindings.length, 1, 'cross_plane_tokens must be bound exactly once (found ' + bindings.length + ': ' + JSON.stringify(bindings) + '): a second binding would shadow the production credential');
   assert.doesNotMatch(main, /\bcross_plane_tokens\s*=[^=]/, 'cross_plane_tokens must never be reassigned');
+  // destructuring assignment: (cross_plane_tokens, _) = ...
+  assert.doesNotMatch(main, /\(\s*(?:[\w.&]+\s*,\s*)*cross_plane_tokens\s*(?:,\s*[\w.&]+\s*)*\)\s*=(?![=>])/, 'cross_plane_tokens must never be reassigned by destructuring');
   const at = main.search(/\blet\s+(?:mut\s+)?cross_plane_tokens\b/);
+  assert.ok(at >= 0, 'the single binding must be a plain let cross_plane_tokens');
   // The binding is the match over the configured service credential that builds the Auth Core provider.
   const binding = main.slice(at, main.indexOf(';', main.indexOf('None => None', at)) + 1);
   assert.match(binding, /match\s+cfg\s*\.\s*quarry_service_api_key\s*\.\s*as_deref\s*\(\s*\)/, 'the credential is read from cfg.quarry_service_api_key');
@@ -643,8 +650,25 @@ test('cross_plane_tokens in main is bound once, from QUARRY_EDGE__QUARRY_SERVICE
     'a configured credential builds the Auth Core provider from cfg.auth_core_url',
   );
   assert.match(binding, /None\s*=>\s*None/, 'only an unset credential leaves the provider empty');
-  // the config field is read from the documented variable
-  assert.match(read('apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/config.rs'), /quarry_service_api_key/);
+  // QUARRY_EDGE__QUARRY_SERVICE_API_KEY reaches cfg.quarry_service_api_key: the config crate reads the QUARRY_EDGE
+  // prefix with a double-underscore separator, the field name is the lower-cased remainder, and no serde rename
+  // moves it to another key. The compose files set exactly that variable.
+  const config = read('apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/config.rs');
+  assert.match(
+    config,
+    /config::Environment::with_prefix\(\s*"QUARRY_EDGE"\s*\)\s*\.separator\(\s*"__"\s*\)/,
+    'EdgeConfig::from_env must read the QUARRY_EDGE prefix with the __ separator',
+  );
+  const field = config.match(/((?:[ \t]*(?:#\[[^\]]*\]|\/\/[^\n]*)\n)*)[ \t]*pub\s+quarry_service_api_key\s*:\s*Option<String>\s*,/);
+  assert.ok(field, 'EdgeConfig must declare pub quarry_service_api_key: Option<String>');
+  assert.doesNotMatch(field[1], /rename|alias/, 'quarry_service_api_key must not be renamed or aliased away from QUARRY_EDGE__QUARRY_SERVICE_API_KEY');
+  for (const file of ['docker-compose.yml', 'docker-compose.production.yml']) {
+    assert.match(
+      read('apps/Ingestion Plane/' + file),
+      /^\s+QUARRY_EDGE__QUARRY_SERVICE_API_KEY:\s*\$\{QUARRY_SERVICE_API_KEY:\?/m,
+      file + ' must set QUARRY_EDGE__QUARRY_SERVICE_API_KEY from the required QUARRY_SERVICE_API_KEY',
+    );
+  }
 });
 
 test('the production overlay requires the broker address and the contract overlay pins it', () => {
