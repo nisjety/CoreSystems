@@ -483,7 +483,7 @@ pub(crate) fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-fn verify_internal_token(headers: &HeaderMap) -> Result<(), QuarryError> {
+pub(crate) fn verify_internal_token(headers: &HeaderMap) -> Result<(), QuarryError> {
     let expected = std::env::var("QUARRY_EDGE_INTERNAL_TOKEN").unwrap_or_default();
     let provided = headers.get("authorization").and_then(|v| v.to_str().ok());
     check_internal_token(&expected, provided, internal_dev_bypass())

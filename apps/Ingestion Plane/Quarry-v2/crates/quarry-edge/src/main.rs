@@ -47,6 +47,7 @@ mod graphql;
 mod grant_boot;
 mod handoff;
 mod internal_auth;
+mod internal_routes;
 mod job_lifecycle_routes;
 mod job_stream;
 mod limits;
@@ -814,6 +815,8 @@ async fn run() -> anyhow::Result<()> {
             Arc::new(quarry_browser::session::InMemoryProfileStore::new())
         }
     };
+    // WS17.E3: keep the Postgres blob store for the erasure families (any mode).
+    let erasure_blobs = profile_blobs.clone();
     // Optional Redis read-through cache (1h TTL by default).
     let profiles = match (profile_plan.mode, profile_plan.keys.clone()) {
         (quarry_runtime::envelope_profile_store::EncryptionMode::Off, _) | (_, None) => {
@@ -837,6 +840,19 @@ async fn run() -> anyhow::Result<()> {
         },
     };
 
+    // WS17.E3: the erasure families the internal purge route walks. Profiles first;
+    // the rows live in the durable table, so this needs the Postgres blob store.
+    let org_erasables: Vec<Arc<dyn quarry_runtime::org_erasure::OrgErasable>> = match erasure_blobs {
+        Some(blobs) => vec![Arc::new(
+            quarry_runtime::org_erasure::ProfileErasure::connect(
+                blobs,
+                profile_plan.keys.clone(),
+                cfg.redis_url.as_deref(),
+            )
+            .await,
+        )],
+        None => Vec::new(),
+    };
     // P0 action proof. A production agent must not report readiness while
     // receipts would disappear with the edge process. The durable store uses
     // the same migration set as the queue/history stores and enforces org_id
@@ -1628,6 +1644,7 @@ async fn run() -> anyhow::Result<()> {
         require_browser_grants,
         zdr_refuse_durable_resources: cfg.zdr_refuse_durable_resources,
         profile_owner_enforce: cfg.profile_owner_enforce,
+        org_erasables,
         driver: default_driver,
         drivers,
         http3: http3_driver,

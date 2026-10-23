@@ -120,6 +120,11 @@ pub fn router(state: AppState) -> Router {
         // (stamped by the orchestrator from the schedule memo, verified at
         // schedule-creation). The handler enforces the token itself.
         .route("/v1/internal/run_page", post(internal_run_page))
+        // WS17.E3: org erasure of the profile families. Shared internal token, counts only.
+        .route(
+            "/v1/internal/orgs/:org/profiles",
+            delete(crate::internal_routes::purge_org_profiles),
+        )
         .merge(crate::queue_routes::internal_router());
 
     // Protected surface — every /v1/* route. The auth middleware
@@ -1826,6 +1831,7 @@ mod tests {
             require_browser_grants: false,
             zdr_refuse_durable_resources: false,
             profile_owner_enforce: crate::profile_guard::OwnerEnforce::Observe,
+            org_erasables: Vec::new(),
             driver: static_driver,
             drivers,
             http3,

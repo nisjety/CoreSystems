@@ -58,6 +58,10 @@ pub struct AppState {
     pub event_sink: quarry_runtime::EventSink,
     pub ingest: Option<Arc<dyn DataPlaneIngest>>,
     pub profiles: Arc<dyn ProfileStore>,
+    /// WS17.E3: the data families an org erasure reaches, profiles first. Empty when
+    /// no durable profile store is wired (nothing durable to purge). Read by
+    /// `internal_routes::purge_org_profiles`.
+    pub org_erasables: Vec<Arc<dyn quarry_runtime::org_erasure::OrgErasable>>,
     pub search: Option<Arc<dyn SearchProvider>>,
     /// Semantic retrieval backend (Data Plane v2 `retrieval_v2` → Qdrant).
     /// Powers `POST /v1/search/similar` (find-similar) directly, and is the

@@ -18,6 +18,7 @@ pub mod graphql;
 pub mod grant_boot;
 pub mod handoff;
 pub mod internal_auth;
+pub mod internal_routes;
 pub mod job_lifecycle_routes;
 pub mod job_stream;
 pub mod limits;
