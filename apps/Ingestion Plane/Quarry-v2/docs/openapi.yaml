@@ -4121,6 +4121,19 @@ components:
           - none
           - masked
           - withheld
+          description: What happened to the screenshot of this record. masked means sensitive field rectangles were painted over; withheld means the screenshot was not stored or returned because a sensitive field could not be masked (no screenshot_artifact_id). Cross-origin iframes are not scanned (see oopif_frames).
+        mask_ms:
+          type: integer
+          minimum: 0
+          description: Milliseconds the screenshot scan and mask took, outside the capture itself. 0 when none ran.
+        oopif_frames:
+          type: integer
+          minimum: 0
+          description: Cross-origin iframes the screenshot scan could not look into. A count only; their content is not masked unless QUARRY_BROWSER_SCREENSHOT_OOPIF=mask.
+        rects:
+          type: integer
+          minimum: 0
+          description: How many rectangles were painted over in the screenshot. Counts only, no geometry.
     BrowserEgressReceipt:
       type: object
       required:
