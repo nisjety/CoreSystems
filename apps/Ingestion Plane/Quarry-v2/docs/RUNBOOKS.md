@@ -820,3 +820,11 @@ The spike answers the three `[UNVERIFIED]` CDP statements (D16-12) before WS17.C
 - Check the object: `GET /v1/jobs/{id}` on a finished 5-page crawl shows `statistics.pages_visited` = 5; `psql` shows the same JSON in `jobs.statistics`.
 - Tests written (not run in this unit): orchestrator `TestCrawlJobWF_TerminalEventCarriesStatistics`, `TestBatchJobWF_TerminalEventCarriesStatistics`, `TestStatisticsContainNoUrlOrErrorText` (`go test ./internal/workflows/ -run Statistic`); control `TestTerminalEventPersistsStatistics` (`go test ./internal/resources/ -run Statistics` in quarry-control); quarry-edge `run_duration_tests` (`cargo test -p quarry-edge run_duration_tests`).
 - Known gap: the orchestrator has no Prometheus recorder, so the histogram lives only in quarry-edge. The histogram is not yet listed in WS6.I's `describe_all`.
+
+## Crawl scope and robots: the crawl characterization tests and the go-test job (WS14.S0, WS14.S0b, unit W2-U12, built, NOT run, 2026-10-23)
+
+- Contract: `docs/CRAWL_SCOPE_ROBOTS.md`. This change switches nothing on; the crawl behaves as before, and the two tests pin today's behaviour.
+- Local run (orchestrator): `cd "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator" && go test ./internal/workflows/ -run CrawlJob -count=1`. Expected: `TestCrawlJobWF_CharacterizesExternalLinkFollowing_Legacy` (a cross-host link is fetched) and `TestCrawlJobDurable_EnqueuesEveryLinkWithOneActivityEach` (one enqueue per link, each page fetched once) pass on the unmodified code. They were written in W2-U12 and compile-checked with `go vet ./...`; they were not run in the build.
+- CI: the `go-test` job in `.github/workflows/quarry-v2-ci.yml` runs `go test ./... -count=1` for `services/quarry-control`, `services/quarry-orchestrator` and `pkg/quarrycontracts`, with no `continue-on-error`. `go-coverage` stays report-only. Branch protection must list the three `go-test (...)` checks as required; a workflow file cannot set that.
+- A failure in a module you did not touch: name the failing tests in the PR. Do not quarantine a test without a named list in the PR (plan WS14.S0b).
+- Rollback: revert the commit that added the job; the two tests go with it.
