@@ -256,6 +256,32 @@ async fn extract_run(
     // Body flag raised (never lowered) by the token's ZDR floor: see
     // `Claims::zdr_floor`.
     let zdr = claims.effective_zdr_mode(req.zdr);
+    // WS7.E: every target is gated before the first fetch. One denied URL refuses the whole
+    // request with a 403 that names the capability and never a URL.
+    let decision = match crate::web_policy_edge::decide(
+        &state.policy,
+        &claims,
+        zdr.is_active(),
+        None,
+    ) {
+        Ok(decision) => decision,
+        Err(error) => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(ApiError::new("FORBIDDEN", error.message)),
+            )
+                .into_response();
+        }
+    };
+    if let Err(error) =
+        crate::web_policy_edge::gate_urls(&decision, targets.iter().map(String::as_str))
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ApiError::new("FORBIDDEN", error.message)),
+        )
+            .into_response();
+    }
     let privacy = req.privacy.unwrap_or_default().with_zdr(zdr);
     let signals = req.signals.unwrap_or_default();
     let mut results = Vec::with_capacity(targets.len());

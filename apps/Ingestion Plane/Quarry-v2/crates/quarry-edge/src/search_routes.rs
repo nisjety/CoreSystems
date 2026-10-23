@@ -161,6 +161,11 @@ pub struct SearchResponse {
     /// Present when `facets=true` — result aggregations by host (desc count).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub facets: Option<Vec<FacetCount>>,
+    /// WS7.E: the permissions the web policy took away from this request, by capability
+    /// name. Present only when the request asked for one the policy refused; the search
+    /// ran without it. A downgrade is never a 403.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub policy_downgrades: Vec<String>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -683,7 +688,36 @@ async fn search_run(
     let intent_hint_effect_label =
         intent_hint_effect(intent_hint_raw.is_some(), intent_hint, intent_rule);
 
-    let opts = build_search_options(&req, &claims.org_id, zdr, intent_hint);
+    // WS7.E: the web policy decides whether paid providers may run. A policy refusal is a
+    // downgrade (the search runs without them and the response names it), never a 403;
+    // ZDR stays the floor it always was.
+    let decision = match crate::web_policy_edge::decide(
+        &state.policy,
+        &claims,
+        zdr,
+        None,
+    ) {
+        Ok(decision) => decision,
+        Err(error) => {
+            return (
+                StatusCode::from_u16(error.code.http_status()).unwrap_or(StatusCode::FORBIDDEN),
+                Json(ErrorBody {
+                    error: error.message,
+                    code: format!("{:?}", error.code).to_uppercase(),
+                    hint: None,
+                }),
+            )
+                .into_response()
+        }
+    };
+    let paid = crate::web_policy_edge::paid_provider(&decision, req.allow_paid_providers, zdr);
+    let policy_downgrades: Vec<String> = paid
+        .downgraded_by
+        .map(|_| "search.paid_provider".to_string())
+        .into_iter()
+        .collect();
+    let mut opts = build_search_options(&req, &claims.org_id, zdr, intent_hint);
+    opts.allow_paid_providers = paid.allowed;
 
     // ── Cache lookup (org-scoped, intent-driven TTL) ─────────────────────────
     // Key encodes only result-affecting params; highlight/facets/format are
@@ -960,6 +994,7 @@ async fn search_run(
             citations,
             context,
             facets,
+            policy_downgrades,
         }),
     )
         .into_response()
@@ -1275,6 +1310,41 @@ pub async fn similar(
             .into_response();
     };
 
+    // WS7.E: a seed URL is fetched, so the web policy gates it before any fetch. The refusal
+    // names the capability and the deciding layer, never the URL.
+    if let Some(seed_url) = url {
+        let decision = match crate::web_policy_edge::decide(
+            &state.policy,
+            &claims,
+            claims.effective_zdr(false),
+            None,
+        ) {
+            Ok(decision) => decision,
+            Err(error) => {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(ErrorBody {
+                        error: error.message,
+                        code: "FORBIDDEN".into(),
+                        hint: None,
+                    }),
+                )
+                    .into_response();
+            }
+        };
+        if let Err(error) = crate::web_policy_edge::gate_url(&decision, seed_url) {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(ErrorBody {
+                    error: error.message,
+                    code: "FORBIDDEN".into(),
+                    hint: None,
+                }),
+            )
+                .into_response();
+        }
+    }
+
     // Resolve the seed: explicit text wins; otherwise fetch the URL's content
     // (best-effort — fall back to the URL string itself so the call still runs).
     let (seed, label) = match (text, url) {
@@ -1360,6 +1430,7 @@ pub async fn similar(
             citations: None,
             context: None,
             facets: None,
+            policy_downgrades: Vec::new(),
         }),
     )
         .into_response()
@@ -2273,6 +2344,7 @@ mod tests {
             }]),
             context: None,
             facets: None,
+            policy_downgrades: Vec::new(),
         };
         let wire = serde_json::to_string(&response).unwrap();
         assert!(

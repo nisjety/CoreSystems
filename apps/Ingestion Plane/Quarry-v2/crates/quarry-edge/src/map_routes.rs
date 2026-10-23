@@ -161,6 +161,23 @@ pub async fn map(
             .into_response();
     }
 
+    // WS7.E: the seed is gated by the web policy before any fetch. The refusal names the
+    // capability and the layer that decided, never the URL.
+    let decision = match crate::web_policy_edge::decide(
+        &state.policy,
+        &claims,
+        claims.effective_zdr(false),
+        None,
+    ) {
+        Ok(decision) => decision,
+        Err(error) => {
+            return (StatusCode::FORBIDDEN, Json(forbidden(error.message))).into_response();
+        }
+    };
+    if let Err(error) = crate::web_policy_edge::gate_url(&decision, req.url.trim()) {
+        return (StatusCode::FORBIDDEN, Json(forbidden(error.message))).into_response();
+    }
+
     let origin = format!(
         "{}://{}",
         base.scheme(),

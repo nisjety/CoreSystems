@@ -895,6 +895,18 @@ async fn crawl_handoff(
     let request_id = crate::request_id::current();
     refuse_durable_job_under_zdr(&claims, req.zdr, &request_id, "crawl")?;
     refuse_while_draining(&request_id)?;
+    // WS7.E: the seed is gated by the web policy before the handoff. A denial is a 403 and
+    // the orchestrator is never called. The durable refusal above already decided ZDR, so
+    // the decision is taken for a non-ZDR run.
+    let decision = crate::web_policy_edge::decide(
+        &state.policy,
+        &claims,
+        false,
+        None,
+    )
+    .map_err(|error| crate::web_policy_edge::envelope_error(&request_id, error))?;
+    crate::web_policy_edge::gate_url(&decision, &req.url)
+        .map_err(|error| crate::web_policy_edge::envelope_error(&request_id, error))?;
     let org_id = claims.org_id.clone();
 
     // Every crawl is bounded: an absent or zero page limit takes the default
@@ -1010,6 +1022,17 @@ async fn batch_handoff(
     let request_id = crate::request_id::current();
     refuse_durable_job_under_zdr(&claims, req.zdr, &request_id, "batch")?;
     refuse_while_draining(&request_id)?;
+    // WS7.E: every URL of the batch is gated before the handoff. One denied URL refuses
+    // the whole batch; the details carry a count, never a URL or a host.
+    let decision = crate::web_policy_edge::decide(
+        &state.policy,
+        &claims,
+        false,
+        None,
+    )
+    .map_err(|error| crate::web_policy_edge::envelope_error(&request_id, error))?;
+    crate::web_policy_edge::gate_urls(&decision, req.urls.iter().map(String::as_str))
+        .map_err(|error| crate::web_policy_edge::envelope_error(&request_id, error))?;
     let origin = crate::handoff::run_origin_from_request(&claims, &headers);
     let idempotency_key = crate::handoff::idempotency_key_from_request(&headers);
     let ack = crate::handoff::forward_job_signed(

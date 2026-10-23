@@ -186,6 +186,23 @@ pub async fn create_profile(
         ));
     }
 
+    // WS7.E: a created profile persists, so the operator and org layers decide whether it
+    // may. The ZDR refusal of creation stays with profile_guard, so the decision is taken
+    // for a non-ZDR run here.
+    let decision = crate::web_policy_edge::decide(
+        &state.policy,
+        &claims,
+        false,
+        None,
+    )
+    .map_err(|error| err_response(&request_id, error))?;
+    decision
+        .policy()
+        .require(quarry_core::web_policy::CapKey::ProfilePersistent, "profile.create")
+        .map_err(|denial| {
+            err_response(&request_id, crate::web_policy_edge::quarry_error(&denial))
+        })?;
+
     let name = req
         .name
         .as_deref()
