@@ -637,3 +637,43 @@ func TestCrawlJobWF_OldVersionHistoryKeepsLegacyBehaviour(t *testing.T) {
 	require.NoError(t, env.GetWorkflowError())
 	require.Len(t, seen, 8, "the legacy path never counted failures toward the bound")
 }
+
+// TestCrawlJobWF_CharacterizesExternalLinkFollowing_Legacy pins today's
+// behaviour (WS14.S0). The in-workflow loop has no host scope, so a link from
+// the seed to another host is handed to RunPage like any other link. WS14.S3
+// changes this under crawl-scope-v1; that change must show up as a deliberate
+// diff to this test, not as a surprise.
+func TestCrawlJobWF_CharacterizesExternalLinkFollowing_Legacy(t *testing.T) {
+	env, a := newEnv(t)
+
+	var fetched []string
+	env.OnActivity(a.RunPage, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, in activities.RunPageInput) (activities.RunPageResult, error) {
+			fetched = append(fetched, in.URL)
+			if in.URL == "https://seed.example/start" {
+				return activities.RunPageResult{
+					Status:      200,
+					Fingerprint: "blake3:seed",
+					Links:       []string{"https://other.example/"},
+				}, nil
+			}
+			return activities.RunPageResult{Status: 200, Fingerprint: "blake3:other"}, nil
+		},
+	)
+	env.OnActivity(a.EmitEvent, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.Checkpoint, mock.Anything, mock.Anything).Return(nil)
+
+	env.ExecuteWorkflow(CrawlJobWF, CrawlJobInput{
+		RunID:    "run_s0_external_legacy",
+		Seeds:    []string{"https://seed.example/start"},
+		MaxDepth: 2,
+		MaxPages: 10,
+	}, a)
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+	require.Equal(t,
+		[]string{"https://seed.example/start", "https://other.example/"},
+		fetched,
+		"the legacy loop fetches a cross-host link today; WS14.S3 changes this on purpose")
+}
