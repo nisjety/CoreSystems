@@ -125,8 +125,10 @@ fn fixture() -> &'static TokenFixture {
         std::env::set_var("AUTH_CORE_ISSUER", DEPLOYED_ISSUER);
         // The document route reads QUARRY_EDGE__DOC_ROUTING once per process
         // (DocRouting::cached). Every harness starts with this initializer, so
-        // no request can run before it: the whole binary runs with the route
-        // on. An HTML page takes the same path as before; the PDF test needs it.
+        // no request can run before it, and the whole binary runs with the
+        // route on. The two PDF tests below need that: with the route off the
+        // same bytes take the HTML path, and their document-route checks fail.
+        // An HTML page takes the same path either way.
         std::env::set_var(quarry_runtime::DocRouting::ENV, "on");
 
         TokenFixture { private_pem }
@@ -767,6 +769,13 @@ async fn a_zdr_scrape_of_a_pdf_returns_inline_text_and_persists_nothing() {
         markdown.contains("Hemmelig dokument"),
         "the PDF's text is inline under ZDR: {body}"
     );
+    // The markdown is the parser's text: none of the file's own syntax is in it.
+    for syntax in ["%PDF", "/Type", "Tj"] {
+        assert!(
+            !markdown.contains(syntax),
+            "the markdown is the parsed text, not the PDF source ({syntax}): {body}"
+        );
+    }
     assert!(
         data["scrape_id"].is_null(),
         "a ZDR scrape stores no record, so it has no scrape_id: {body}"
@@ -787,6 +796,59 @@ async fn a_zdr_scrape_of_a_pdf_returns_inline_text_and_persists_nothing() {
     assert!(
         !is_page_fetched(&harness.settled_events().await),
         "a ZDR document keeps its page events off the durable channel"
+    );
+}
+
+/// The control for the test above: the same bytes from a standard organisation.
+/// The document route keeps the original bytes as `formats.raw` and stores the
+/// parsed text as markdown. A binary that runs with the route off returns the
+/// HTML path's output instead, and fails here.
+#[tokio::test]
+async fn a_standard_org_scrape_of_the_same_pdf_keeps_its_bytes_as_raw() {
+    let store = Arc::new(InMemoryStore::new());
+    let for_state = store.clone();
+    let harness = Harness::start_with(move |state| AppState {
+        artifacts: for_state,
+        ..state
+    })
+    .await;
+    let pdf = minimal_pdf("Hemmelig dokument");
+    *harness.driver.document.lock().unwrap() = Some(pdf.clone());
+
+    let response = harness
+        .post(
+            &user_in_standard_org(),
+            "/v1/scrape",
+            json!({ "url": "https://page.test/rapport.pdf", "zdr": false }),
+        )
+        .await;
+    assert_eq!(response.status().as_u16(), 200);
+    let body: Value = response.json().await.expect("a JSON envelope");
+    let data = &body["data"];
+    assert_eq!(
+        data["formats"]["raw"]["bytes"].as_u64(),
+        Some(pdf.len() as u64),
+        "the document's original bytes are kept as formats.raw: {body}"
+    );
+    assert!(
+        data["formats"]["html"].is_null(),
+        "a document is never stored as html: {body}"
+    );
+    assert!(
+        data["formats"]["markdown"]["artifact_id"].is_string(),
+        "the parsed text is stored as markdown: {body}"
+    );
+    assert_eq!(harness.fetch_zdr(), vec![false]);
+    let stored = store
+        .list(
+            &golden_org("user_in_standard_org"),
+            &quarry_core::pagination::ListFilter::default(),
+        )
+        .await
+        .expect("list artifacts");
+    assert!(
+        !stored.items.is_empty(),
+        "a standard org's document is stored"
     );
 }
 
