@@ -1035,3 +1035,13 @@ Dark by default. With the two variables unset, quarry-edge behaves as before: th
 Operator check after enabling: run the feed sync, then confirm the gauge moves and a host from the new feed gets a host-blocklisted verdict within one watch interval. With the watch off, the running edge keeps the old lists until it restarts.
 
 Not in this slice: per-organization `off|warn|block` modes, the `Arc<dyn HostReputation>` hook in `BrowserEgressPolicy` (redirects, clicks and subresources), `decision_source` in receipts, the sync compose service, and suffix matching on the allowlist. See `.plan-work/quarry-w1w2/depth/W3-B3-01.md`.
+
+## Stopping the orchestrator: worker stop bound (WS6.J, unit W2-U22, built, NOT run, 2026-10-23)
+
+On SIGTERM or SIGINT the orchestrator cancels its root context. The jobs dispatcher and the schedules manager stop, and the Temporal worker stops. The SDK stops the workflow worker and then the activity worker, one after the other: each cancels the work in flight and waits at most `QUARRY_ORCH_WORKER_STOP_TIMEOUT_S` seconds (default 20, whole seconds from 1 to 25; any other value stops the process at boot and names the variable). `main` waits for the worker to return for twice that bound plus a 5 s exit slack, then exits. Before this change the worker's stop bound was zero and `main` exited at once, so an activity in flight was killed with the process.
+
+`apps/Ingestion Plane/docker-compose.yml` sets `stop_grace_period: 60s` for `quarry-orchestrator`. The largest total wait is 2 x 25 + 5 = 55 s, so the grace period stays above it. Keep the two in step if either value changes.
+
+Not in this section: the run drain and the usage flush belong to the edge (see "Stopping the edge (drain)"), and the orchestrator usage segment is a later unit (WS6.J, U54).
+
+Check after a deploy (not run in this unit): `docker stop quarry-orchestrator` ends with exit 0 inside the grace period, and the log shows `worker stopped` or `worker did not stop within its bound; exiting` before `shutdown`.
