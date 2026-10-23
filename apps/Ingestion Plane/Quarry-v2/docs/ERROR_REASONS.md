@@ -158,3 +158,25 @@ The check repeats every 100 ms for up to 2 s (`Op::Actionability`), so a button 
 Reasons the in-page script path has always put in `details.reason` stay as they were, for one release after trusted input is on by default: `native_target_not_connected` (an alias of `target_not_attached`: `canonical()` in `target_repair_reason` maps it), `target_not_unique_or_changed`, `target_not_typeable`, `value_setter_unavailable`, `target_not_select`, `select_value_unavailable`, `unsupported_native_operation`, `unsupported_verified_operation`. A client written against the old strings keeps working; a client may map a reason it does not know to "observe again".
 
 The two new driver deadlines (`op` in the 504 table above): `actionability` (2 s; each protocol call inside the check is bounded by it too, and it is the `op` of a 504 `TIMEOUT` only when one of those calls does not answer) and `stable_poll` (500 ms, a polling window that ends in `target_unstable`, never in a 504). Both are `effect: none` and retryable: nothing has been clicked while a target is still being checked.
+
+## Scrape captures and actions (WS13.4b, WS13.5, WS13.6; WS13.8)
+
+These reasons come from `POST /v1/scrape` (and the stream, where noted). The status is the HTTP status the edge answers. 501 and 400 are not in the header list above, which is why they are here.
+
+| reason | status and code | meaning | what a caller does |
+|---|---|---|---|
+| `browser_capability_unavailable` | 501 `UNSUPPORTED` | the browser the endpoint uses cannot capture or act (a provider adapter inherits the defaults), or no browser is wired | use the Local driver, or send no capture or actions |
+| `heavy_browser_busy` | 429 `RATE_LIMITED` | another action run holds the browser's heavy lane | retry shortly |
+| `scrape_interact_scope_required` | 403 `FORBIDDEN` | actions need a user request, or a service principal with `scrape:interact` in the `on` mode; a request labelled `initiated_by: "agent"` is always refused | send actions from the user's own request |
+| `unsupported_in_stream` | 400 `BAD_REQUEST` | a capture or actions on `POST /v1/scrape/stream` | use `POST /v1/scrape` |
+| `actions_deadline` | 504 `TIMEOUT` | the run with actions hit its 115 s bound (`details.op` scrape, `deadline_ms` 115000) | send fewer or shorter actions |
+| `actions_cancelled` | 504 `TIMEOUT` | the run was cancelled before an action finished | retry |
+| `wait_too_long` | 504 `TIMEOUT` inside an action; under `abort` the request answers 502 `action_failed` | one wait is over its limit (30 s by default) | shorten the wait |
+| `wait_budget_exhausted` | as `wait_too_long` | the run's total wait is over its budget (60 s by default) | fewer or shorter waits |
+| `wait_needs_a_target` | 400 inside an action | a `wait` with neither a time nor a selector | give one |
+| `scroll_needs_one_target` | 400 inside an action | a `scroll` with none, or with more than one, of `to`, `selector`, `direction` | give exactly one |
+| `attached_runtime` | 400 `BAD_REQUEST` | an internal guard: an attached action runtime never takes a session of its own; a caller should not see it | report it |
+| `no_browser_session` | 502 `DRIVER_FAILED` | the run holds no browser session for its actions | retry |
+| `action_failed` | 502 `DRIVER_FAILED` | an action failed under `abort`; `details.action_index` and `details.action_type` name it and `details.actions` lists every outcome in order | read `details.actions` (each entry's `error`); earlier clicks or writes may already have happened, so do not replay the list blindly |
+
+Field errors (400, in `errors[]`, not in `details.reason`): `feature_disabled`, `action_denied`, `unknown_action_type`, `invalid_action`, `too_many_actions`, `too_many_captures`, `too_many`, `unsupported_format`, `selector_too_long`, `text_too_long`. Each carries a path and never a value.

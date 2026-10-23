@@ -1,8 +1,6 @@
 # Scrape-time capture: single-capture limits (WS13.3)
 
-Status: the driver API is built (W2-U40, `quarry-browser`), NOT run. The spike table below
-is not measured yet. No request reaches these methods until WS13.4b wires `formats` and
-`captures` into `POST /v1/scrape`, so nothing here changes a response today.
+Status (2026-10-24): built, NOT run. The driver API (W2-U40, `quarry-browser`), the wire (`formats` captures, WS13.4b, W2-U45), the tile-and-stitch (WS13.6, W2-U50) and the scrape actions (WS13.5, W2-U53, partial) are in the tree, all behind `QUARRY_EDGE__SCRAPE_CAPTURE`, `QUARRY_EDGE__SCRAPE_STITCH` and `QUARRY_EDGE__SCRAPE_ACTIONS`, all off by default. The spike table below is not measured yet. Nothing here is evidenced on a stack.
 
 ## What the driver API does
 
@@ -77,3 +75,26 @@ Chrome.
   (WS13.4b).
 - Memory evidence for a tall `fullPage` capture. A capture is held as bytes until the response is
   built, so a 16,000 px PNG is held in full.
+
+## Flags, limits and the evidence owed (WS13.8, 2026-10-24)
+
+Switches (all off by default): `QUARRY_EDGE__SCRAPE_CAPTURE` (only `on`), `QUARRY_EDGE__SCRAPE_ACTIONS` (`user` for user tokens in dev; `on` also for service principals with `scrape:interact`), `QUARRY_EDGE__SCRAPE_STITCH` (`on`), `QUARRY_EDGE__SCRAPE_CAPTURE_INLINE_MAX_BYTES` (ZDR inline cap, 6 MiB default, 16 MiB ceiling).
+
+Limits as built (`quarry-core/src/capture.rs` and `scrape_actions.rs`; the environment can only lower them):
+
+| Limit | Value |
+|---|---|
+| captures per request, formats and actions together | 8 |
+| bytes per capture | 32 MiB |
+| viewport | 3840 by 2160 CSS px; device scale factor 1 to 2 |
+| single capture ceiling | 16000 device px (provisional, see the WS13.3 spike) |
+| stitch tile | 4096 CSS px; 16 tiles; 60000 CSS px of content |
+| stitched pixels | 40 Mpx PNG; 24 Mpx JPEG |
+| PDF pages | 100 by default; 200 at most; scale 0.1 to 2.0 |
+| actions per request | 50 |
+| total wait | 60 s; one wait 30 s; selector wait default 5 s |
+| selector | 512 bytes; text 4096 bytes per write, 16384 in all |
+| scroll | 20000 px at most |
+| handler bound with actions | 115 s; router 125 s with actions, 60 s otherwise |
+
+Evidence owed (none of it run): the named cargo tests in each slice's progress file; the live Chromium tests (`screenshot_mask_live`, `stitch_live`, `scrape_actions_live`); the measured spike table above; `make test-scrape-capture` on a clean stack; the ADR-6 ruling before `on`.
