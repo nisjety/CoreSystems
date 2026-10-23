@@ -26,6 +26,13 @@ type scheduleWire struct {
 	Workflow string `json:"workflow"`
 	Args     []any  `json:"args"`
 	Paused   bool   `json:"paused"`
+	// Executable-schedule fields (WS15.S2): the calendar and overlap options the
+	// reconciler gives Temporal. The defaults are the schedule row's defaults.
+	Overlap        string `json:"overlap"`
+	TimeZone       string `json:"timezone"`
+	JitterS        int64  `json:"jitter_s"`
+	CatchupWindowS int64  `json:"catchup_window_s"`
+	PauseOnFailure bool   `json:"pause_on_failure"`
 }
 
 // changeMonitorArgs is the [0] element of the Temporal workflow Args for a
@@ -54,6 +61,19 @@ func workflowFor(s store.Schedule) (string, []any) {
 	switch s.TargetKind {
 	case store.TargetKindChangeMonitor:
 		return "ChangeMonitorWF", []any{changeMonitorArgs{OrgID: s.OrgID, URL: s.TargetRef, CreatedBy: s.CreatedBy, Zdr: s.Zdr}}
+	case "scrape", "crawl", "batch":
+		// Dark until QUARRY_SCHEDULED_JOBS_ENABLED is 1 (WS15.S2): with the switch
+		// off these kinds stay unmapped and the reconciler creates nothing for them.
+		if !ScheduledJobsEnabled() {
+			return "", nil
+		}
+		return "ScheduledJobWF", []any{scheduledJobArgs{
+			ScheduleID: string(s.ID),
+			OrgID:      s.OrgID,
+			CreatedBy:  s.CreatedBy,
+			Kind:       s.TargetKind,
+			Params:     scheduledParams(s),
+		}}
 	default:
 		return "", nil
 	}
@@ -66,17 +86,22 @@ func toScheduleWire(s store.Schedule) scheduleWire {
 		args = []any{}
 	}
 	return scheduleWire{
-		ID:         string(s.ID),
-		Name:       string(s.ID),
-		OrgID:      s.OrgID,
-		Cron:       s.Cron,
-		TargetKind: s.TargetKind,
-		TargetRef:  s.TargetRef,
-		Enabled:    s.Enabled,
-		CreatedAt:  s.CreatedAt,
-		Workflow:   wf,
-		Args:       args,
-		Paused:     !s.Enabled,
+		ID:             string(s.ID),
+		Name:           string(s.ID),
+		OrgID:          s.OrgID,
+		Cron:           s.Cron,
+		TargetKind:     s.TargetKind,
+		TargetRef:      s.TargetRef,
+		Enabled:        s.Enabled,
+		CreatedAt:      s.CreatedAt,
+		Workflow:       wf,
+		Args:           args,
+		Paused:         !s.Enabled,
+		Overlap:        s.OverlapPolicy,
+		TimeZone:       s.Timezone,
+		JitterS:        s.JitterS,
+		CatchupWindowS: s.CatchupWindowS,
+		PauseOnFailure: s.PauseOnFailure,
 	}
 }
 

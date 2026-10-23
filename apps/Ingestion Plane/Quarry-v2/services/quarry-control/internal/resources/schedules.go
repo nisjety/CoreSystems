@@ -39,6 +39,9 @@ func MountSchedules(r chi.Router, db store.DB) {
 	r.Get("/v1/schedules/{id}/runs", scheduleRuns(db))
 	// The orchestrator's all-orgs read. Internal path, wire shape.
 	r.Get("/v1/internal/schedules/desired", desiredSchedulesHandler(s))
+	// The orchestrator's fire registration (WS15.S2). HMAC signed, like the rest
+	// of the internal surface.
+	r.Post("/v1/internal/schedules/{id}/runs", registerScheduledRun(db))
 }
 
 // listSchedulesHandler answers GET /v1/schedules. With org_id it is the tenant
