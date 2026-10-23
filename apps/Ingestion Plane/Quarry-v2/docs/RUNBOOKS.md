@@ -780,3 +780,15 @@ The Ingestions Schedules surface offers only what the gateway says this installa
 - `raw_script_denied` keeps its reason and message from WS2.A and is decided by the invariant layer, so no layer can unlock `evaluate`.
 - Changing the catalogue: edit `src/web_policy/catalogue.rs`, then regenerate with `UPDATE_CONTRACT_GOLDEN=1 cargo test -p quarry-core --test web_policy catalogue_json_matches_the_checked_in_file_and_its_pin` (in `apps/Ingestion Plane/Quarry-v2`). Then update the digest in the GOLDENS row of `scripts/tests/zdr-contract-sync.test.sh` and run that script. Key strings become public once the claim carries them, so review with Control before WS7.H.
 - Rollback: revert the commit. Nothing else depends on the module until WS7.C.
+
+## WS17.S0 CDP capability spike: run it and file the table (U05, built, NOT run, 2026-10-23)
+
+The spike answers the three `[UNVERIFIED]` CDP statements (D16-12) before WS17.C1 chooses between "frame-less CDP" and "journal/flush". It is a test only; no product code changes.
+
+- Test: `crates/quarry-browser/tests/profile_cdp_spike.rs`, test `cdp_capability_spike` (`#[ignore]`). It prints a `probe | outcome` table and does not assert the expected answers yet.
+- Run in the live Chromium lane, through the docker lock (`qtest.sh`, image `quarry-rust-env:2` has chromium):
+  `CHROMIUMOXIDE_TEST=1 QUARRY_BROWSER_NO_SANDBOX=1 CHROME=/usr/bin/chromium cargo test -p quarry-browser --features chromiumoxide --test profile_cdp_spike -- --ignored --nocapture`
+- P1, P2 and P3 navigate to `https://example.com` (outbound HTTPS needed). Offline, a probe stops at its first navigation and records `ERROR`; such rows are not evidence. P4 uses a loopback origin only.
+- Record the Chromium version next to the table (the plan pins 149.0.7827.102, WS3).
+- Before C1 starts: paste the table into C1's design notes and answer the three statements from it (P1 cookies, P2 DOMStorage, P3 IndexedDB). P4 answers seeding and the `pagehide` flush.
+- Without `CHROMIUMOXIDE_TEST=1` the test returns at once, so the ordinary workspace job is unaffected.
