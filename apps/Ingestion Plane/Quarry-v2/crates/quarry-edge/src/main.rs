@@ -66,7 +66,6 @@ mod scrape_routes;
 mod search_routes;
 mod source_registrar;
 mod state;
-mod trace_config;
 mod zdr_log;
 mod zdr_refusal;
 mod web_policy_edge;
@@ -200,10 +199,6 @@ async fn run() -> anyhow::Result<()> {
     // A crawl bound that cannot be read must stop the process here, naming the
     // variable, rather than silently become "no bound" later.
     limits::CrawlLimits::from_env().map_err(|e| anyhow::anyhow!("crawl limits: {e}"))?;
-    // WS10.S3: the agent event replay ring bounds (env-only; an unparsable value aborts boot).
-    let trace_ring = trace_config::TraceConfig::from_env()
-        .map_err(|e| anyhow::anyhow!("trace: {e}"))?
-        .ring;
     quarry_runtime::DocRouting::from_env().map_err(|e| anyhow::anyhow!("doc routing: {e}"))?;
     // Whether an agent action is refused while a person holds the browser. A typo
     // stops the edge here, naming the variable, rather than leaving it off.
@@ -604,7 +599,7 @@ async fn run() -> anyhow::Result<()> {
     // (autocomplete-core, model-plane, org-core) see them on a durable
     // subject. Connection failure is non-fatal: we log and fall back to
     // the mpsc-only sink so the service still boots.
-    let event_sink = quarry_runtime::EventSink::new(event_tx).with_ring_limits(trace_ring);
+    let event_sink = quarry_runtime::EventSink::new(event_tx);
     // The NatsEventBus also seeds the P3 billing meter. Keep it as an
     // `Option<NatsEventBus>` so we can derive a `NatsUsageMeter` from
     // the same connection below.
