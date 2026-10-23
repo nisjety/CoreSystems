@@ -1162,7 +1162,7 @@ mod tests {
     }
 
     #[test]
-    fn field_names_equal_the_keys_of_a_fully_populated_options_value() {
+    fn field_names_match_a_fully_populated_serialization() {
         // A fully populated value serializes every field; its keys are the snake_case
         // names, and field_names() must hold each of them plus its camelCase alias.
         let full = ScrapeOptions {
