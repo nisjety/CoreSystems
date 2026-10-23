@@ -54,6 +54,7 @@ use crate::{
     },
     gateway_metrics, normalize, rate_limit,
     readiness::GrpcReadiness,
+    run_control::{CancelRoute, RunControlStatus},
     session_flow, sse,
     state::AppState,
 };
@@ -585,13 +586,23 @@ async fn healthz() -> &'static str {
     "ok"
 }
 
-async fn readyz(Extension(grpc_readiness): Extension<GrpcReadiness>) -> Response {
+async fn readyz(
+    State(state): State<AppState>,
+    Extension(grpc_readiness): Extension<GrpcReadiness>,
+) -> Response {
     // A draining process is finishing the streams it has and must get no new
     // ones, so it reports not ready whatever its listeners are doing.
     if grpc_readiness.is_draining() {
         (StatusCode::SERVICE_UNAVAILABLE, "draining").into_response()
     } else if grpc_readiness.is_bound() {
-        (StatusCode::OK, "ok").into_response()
+        // A degraded run-control bus (the NATS ACL without its subjects, a broker that would
+        // not connect) behaves as off, so the gateway is still ready: the state is told, not
+        // enforced. With the bus off the answer is the one it always was.
+        match state.run_control.status() {
+            RunControlStatus::Off => (StatusCode::OK, "ok".to_owned()).into_response(),
+            status => (StatusCode::OK, format!("ok run_control={}", status.as_str()))
+                .into_response(),
+        }
     } else {
         (StatusCode::SERVICE_UNAVAILABLE, "grpc listener not bound").into_response()
     }
@@ -1881,15 +1892,30 @@ async fn cancel_run(
         }
     };
 
-    // A stream still producing this run in this process must stop as well.
-    // The durable cancel alone left it to save its answer onto the cancelled
-    // run and then fail to terminalize it, with a replay buffer that never
-    // finished. Owner-scoped like the stream's own cancel route; a stream on
-    // another replica is caught by its liveness check before the save.
-    let live_stream = cancellation.cancelled
-        && state
-            .cancels
-            .cancel_run_for(&run_id, &claims.org_id, &claims.user_id);
+    // A stream still producing this run must stop as well. The durable cancel
+    // alone left it to save its answer onto the cancelled run and then fail to
+    // terminalize it, with a replay buffer that never finished. Owner-scoped
+    // like the stream's own cancel route. A stream on another replica is asked
+    // over the run-control bus when it is on; the run is cancelled whatever the
+    // bus says, so an unreachable owner is logged and never an error here (its
+    // liveness check before the save is the backstop).
+    let route = if cancellation.cancelled {
+        Some(
+            state
+                .run_control
+                .cancel_run(&state.cancels, &run_id, &claims.org_id, &claims.user_id)
+                .await,
+        )
+    } else {
+        None
+    };
+    let live_stream = matches!(route, Some(CancelRoute::Local | CancelRoute::Peer));
+    let via = match route {
+        Some(CancelRoute::Local) => "local",
+        Some(CancelRoute::Peer) => "peer",
+        Some(CancelRoute::Unavailable) => "unavailable",
+        Some(CancelRoute::NoOwner) | None => "none",
+    };
 
     // Keep the legacy notification on the run subject (nothing acts on it
     // today, see above), but never turn a successful durable cancellation into
@@ -1929,7 +1955,7 @@ async fn cancel_run(
     } else {
         "already_terminal"
     };
-    info!(run_id = %run_id, receipt_id = %cancellation.receipt_id, outcome = status, live_stream, "run cancel");
+    info!(run_id = %run_id, receipt_id = %cancellation.receipt_id, outcome = status, live_stream, via, "run cancel");
     return Ok(Json(json!({
         "run_id": run_id,
         "status": status,
@@ -7521,7 +7547,9 @@ mod invoke_response_contract_tests {
 
 /// chat-parity §4 — cooperatively cancel an in-flight `/v1/invoke/stream`.
 /// Flips the registered cancel flag; the SSE loop emits a terminal `stopped`
-/// event and closes. 404 when no active stream matches the id.
+/// event and closes. With the run-control bus on, a stream another replica owns
+/// is asked to stop (202, `via: "peer"`). 404 when no active stream matches the
+/// id, 503 `run_control_unavailable` when the bus could not tell.
 async fn invoke_cancel(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -7530,17 +7558,41 @@ async fn invoke_cancel(
     // The stream registry binds request ids to the authenticated tenant/user at
     // registration time. A mismatched owner gets the same 404 as an inactive
     // stream, avoiding unauthorized cancellation and an existence oracle.
-    if state
+    // A ZDR turn never registers a stream, so its Stop stays here and puts
+    // nothing on the bus.
+    let zdr = matches!(
+        crate::zdr_posture::decide_for(&claims, &crate::zdr_posture::Route::plain(false)),
+        Ok(crate::zdr_posture::TurnPosture::Zdr { .. })
+    );
+    let route = if !zdr {
+        state
+            .run_control
+            .cancel_stream(&state.cancels, &request_id, &claims.org_id, &claims.user_id)
+            .await
+    } else if state
         .cancels
         .cancel_for(&request_id, &claims.org_id, &claims.user_id)
     {
-        (
+        CancelRoute::Local
+    } else {
+        CancelRoute::NoOwner
+    };
+    match route {
+        CancelRoute::Local => (
             StatusCode::ACCEPTED,
             Json(serde_json::json!({ "request_id": request_id, "cancelled": true })),
         )
-            .into_response()
-    } else {
-        (
+            .into_response(),
+        CancelRoute::Peer => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({
+                "request_id": request_id,
+                "cancelled": true,
+                "via": "peer",
+            })),
+        )
+            .into_response(),
+        CancelRoute::NoOwner => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({
                 "request_id": request_id,
@@ -7548,7 +7600,18 @@ async fn invoke_cancel(
                 "error": "no active stream",
             })),
         )
-            .into_response()
+            .into_response(),
+        // Neither a stop nor a missing stream is known: say so, so the client retries.
+        CancelRoute::Unavailable => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "request_id": request_id,
+                "cancelled": false,
+                "error": "run_control_unavailable",
+                "retryable": true,
+            })),
+        )
+            .into_response(),
     }
 }
 
@@ -11017,12 +11080,56 @@ mod grpc_readiness_tests {
     async fn readyz_fails_until_grpc_listener_is_bound() {
         let readiness = GrpcReadiness::new();
 
-        let before_bind = readyz(Extension(readiness.clone())).await.into_response();
+        let before_bind = readyz(State(AppState::new()), Extension(readiness.clone()))
+            .await
+            .into_response();
         assert_eq!(before_bind.status(), StatusCode::SERVICE_UNAVAILABLE);
 
         readiness.mark_bound();
-        let after_bind = readyz(Extension(readiness)).await.into_response();
+        let after_bind = readyz(State(AppState::new()), Extension(readiness))
+            .await
+            .into_response();
         assert_eq!(after_bind.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(after_bind.into_body(), 1024).await.unwrap();
+        assert_eq!(&body[..], b"ok", "the bus off leaves the answer as it always was");
+    }
+
+    /// The run-control bus state is told on `/readyz`, and a degraded bus (it behaves as off)
+    /// does not make the gateway unready.
+    #[tokio::test]
+    async fn readyz_reports_the_run_control_bus_and_stays_ready_while_it_is_degraded() {
+        use crate::run_control::{LoopbackHub, RunControl};
+
+        let readiness = GrpcReadiness::new();
+        readiness.mark_bound();
+        let answer = |state: AppState| {
+            let readiness = readiness.clone();
+            async move {
+                let response = readyz(State(state), Extension(readiness))
+                    .await
+                    .into_response();
+                let status = response.status();
+                let body = axum::body::to_bytes(response.into_body(), 1024)
+                    .await
+                    .unwrap();
+                (status, String::from_utf8(body.to_vec()).unwrap())
+            }
+        };
+
+        let mut on = AppState::new();
+        on.run_control =
+            RunControl::loopback(LoopbackHub::new(), std::time::Duration::from_millis(200));
+        assert_eq!(
+            answer(on).await,
+            (StatusCode::OK, "ok run_control=ok".to_owned())
+        );
+
+        let mut degraded = AppState::new();
+        degraded.run_control = RunControl::degraded();
+        assert_eq!(
+            answer(degraded).await,
+            (StatusCode::OK, "ok run_control=degraded".to_owned())
+        );
     }
 
     /// I3: a draining gateway is finishing its streams and must get no new
@@ -11032,11 +11139,15 @@ mod grpc_readiness_tests {
     async fn readyz_fails_while_draining_even_though_the_listeners_are_bound() {
         let readiness = GrpcReadiness::new();
         readiness.mark_bound();
-        let before = readyz(Extension(readiness.clone())).await.into_response();
+        let before = readyz(State(AppState::new()), Extension(readiness.clone()))
+            .await
+            .into_response();
         assert_eq!(before.status(), StatusCode::OK);
 
         readiness.begin_drain();
-        let draining = readyz(Extension(readiness.clone())).await.into_response();
+        let draining = readyz(State(AppState::new()), Extension(readiness.clone()))
+            .await
+            .into_response();
         assert_eq!(draining.status(), StatusCode::SERVICE_UNAVAILABLE);
         let body = axum::body::to_bytes(draining.into_body(), 1024).await.unwrap();
         assert_eq!(&body[..], b"draining", "the reason is told, not guessed");
@@ -11665,6 +11776,66 @@ mod run_owner_publish_tests {
         );
     }
 
+    /// A durable cancel on a replica that does not own the run's stream still stops it, over the
+    /// run-control bus, and says so in its log line (`via`). The run is cancelled whatever the
+    /// bus answers: an owner that does not answer is logged, never an error.
+    #[tokio::test]
+    #[serial_test::serial(run_cancel_log)]
+    async fn a_durable_cancel_reaches_a_stream_on_another_replica_over_the_bus() {
+        use crate::run_control::{LoopbackHub, RunControl};
+        use std::sync::atomic::Ordering;
+        let hub = LoopbackHub::new();
+        let (mut owner, _publisher) = test_state().await;
+        let (mut other, _publisher) = test_state().await;
+        for state in [&mut owner, &mut other] {
+            state.run_control = RunControl::loopback(hub.clone(), std::time::Duration::from_millis(200));
+            state.cancels = crate::cancel_registry::CancelRegistry::new();
+        }
+        let flag = owner
+            .cancels
+            .register_run("req-owned", "org-owner", "user-owner", "run-owned");
+        owner
+            .run_control
+            .attach(&owner.cancels, "req-owned", "run-owned")
+            .await;
+
+        let lines = CancelLines::default();
+        let _guard = tracing::subscriber::set_default(lines.clone());
+        let cancel = |state: AppState| async move {
+            cancel_run(
+                State(state),
+                Extension(claims("org-owner", "user-owner")),
+                VerifiedSessionBearer::for_test("test-session-bearer"),
+                Path("run-owned".to_owned()),
+            )
+            .await
+            .expect("the owner may cancel")
+        };
+
+        // The owner hangs: the durable cancel still answers, and the log says what happened.
+        hub.mute(true);
+        let _ = cancel(other.clone()).await;
+        assert!(!flag.load(Ordering::Relaxed));
+        hub.mute(false);
+        let _ = cancel(other.clone()).await;
+        assert!(flag.load(Ordering::Relaxed), "the stream on the other replica stops");
+        let _ = cancel(owner.clone()).await;
+
+        let via: Vec<String> = lines
+            .0
+            .lock()
+            .expect("log capture lock")
+            .iter()
+            .map(|line| {
+                line.iter()
+                    .find(|(key, _)| key == "via")
+                    .map(|(_, value)| value.clone())
+                    .unwrap_or_default()
+            })
+            .collect();
+        assert_eq!(via, ["unavailable", "peer", "local"]);
+    }
+
     /// One captured log line as `(field, value)` pairs.
     type LogLine = Vec<(String, String)>;
 
@@ -11748,11 +11919,11 @@ mod run_owner_publish_tests {
         }
 
         let lines = lines.0.lock().expect("log capture lock").clone();
-        // `[run_id, outcome, receipt_id, code]`, empty where the line has none.
-        let outcomes: Vec<[String; 4]> = lines
+        // `[run_id, outcome, receipt_id, code, via]`, empty where the line has none.
+        let outcomes: Vec<[String; 5]> = lines
             .iter()
             .map(|line| {
-                ["run_id", "outcome", "receipt_id", "code"].map(|name| {
+                ["run_id", "outcome", "receipt_id", "code", "via"].map(|name| {
                     line.iter()
                         .find(|(key, _)| key == name)
                         .map(|(_, value)| value.clone())
@@ -11763,11 +11934,11 @@ mod run_owner_publish_tests {
         assert_eq!(
             outcomes,
             [
-                ["run-owned", "cancelled", "receipt-cancel-1", ""],
-                ["run-finished", "already_terminal", "receipt-existing", ""],
-                ["run-vanished", "error", "", "NotFound"],
-                ["run-owned", "owner_rejected", "", ""],
-                ["run-owned", "zdr_rejected", "", ""],
+                ["run-owned", "cancelled", "receipt-cancel-1", "", "none"],
+                ["run-finished", "already_terminal", "receipt-existing", "", "none"],
+                ["run-vanished", "error", "", "NotFound", ""],
+                ["run-owned", "owner_rejected", "", "", ""],
+                ["run-owned", "zdr_rejected", "", "", ""],
             ]
         );
         assert!(

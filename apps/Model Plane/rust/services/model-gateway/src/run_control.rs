@@ -40,6 +40,7 @@ use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
+use crate::cancel_registry::CancelRegistry;
 use crate::gateway_metrics::{self, RunControlOutcome};
 
 /// The switch that turns the bus on. Default off; only `true` enables it.
@@ -344,6 +345,13 @@ impl LoopbackHub {
         self.lock().muted = muted;
     }
 
+    /// How many listeners are subscribed on the hub, for tests that prove a finished or
+    /// ZDR stream left none.
+    #[must_use]
+    pub fn listener_count(&self) -> usize {
+        self.lock().listeners.len()
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, HubState> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -440,16 +448,28 @@ enum ListenerKind {
         hub: LoopbackHub,
         id: u64,
     },
-    /// Aborting a serving task drops its subscription, which unsubscribes.
-    Nats(Vec<JoinHandle<()>>),
+    /// Held for its `Drop`: the tasks are aborted with the listener.
+    Nats {
+        _tasks: ServingTasks,
+    },
+}
+
+/// The tasks serving a NATS listener. Aborting one drops its subscription, which unsubscribes;
+/// holding them in a type of their own means a `listen` that is cancelled half way (the attach
+/// budget) cannot leave a subscribed task behind.
+#[derive(Default)]
+struct ServingTasks(Vec<JoinHandle<()>>);
+
+impl Drop for ServingTasks {
+    fn drop(&mut self) {
+        self.0.iter().for_each(JoinHandle::abort);
+    }
 }
 
 impl Drop for RemoteListener {
     fn drop(&mut self) {
-        match &self.kind {
-            ListenerKind::Inert => {}
-            ListenerKind::Loopback { hub, id } => hub.remove(*id),
-            ListenerKind::Nats(tasks) => tasks.iter().for_each(JoinHandle::abort),
+        if let ListenerKind::Loopback { hub, id } = &self.kind {
+            hub.remove(*id);
         }
     }
 }
@@ -480,7 +500,7 @@ impl RunControl {
         }
     }
 
-    fn degraded() -> Self {
+    pub(crate) fn degraded() -> Self {
         Self {
             status: RunControlStatus::Degraded,
             ..Self::off()
@@ -674,28 +694,183 @@ impl RunControl {
                 hub: hub.clone(),
             },
             Transport::Nats(client) => {
-                let mut tasks = Vec::with_capacity(subjects.len());
+                let mut tasks = ServingTasks::default();
                 for subject in subjects {
                     match client.subscribe(subject.subject.clone()).await {
-                        Ok(subscription) => tasks.push(tokio::spawn(serve(
+                        Ok(subscription) => tasks.0.push(tokio::spawn(serve(
                             client.clone(),
                             subscription,
                             handler.clone(),
                         ))),
-                        Err(error) => {
-                            tasks.iter().for_each(JoinHandle::abort);
-                            return Err(RunControlError::Unavailable(error.to_string()));
-                        }
+                        Err(error) => return Err(RunControlError::Unavailable(error.to_string())),
                     }
                 }
                 if let Err(error) = client.flush().await {
-                    tasks.iter().for_each(JoinHandle::abort);
                     return Err(RunControlError::Unavailable(error.to_string()));
                 }
-                ListenerKind::Nats(tasks)
+                ListenerKind::Nats { _tasks: tasks }
             }
         };
         Ok(RemoteListener { kind })
+    }
+}
+
+/// How long a stream waits for its run-control subscriptions before it goes on without them. A
+/// slow broker costs a Stop from the other replica, never the user's turn.
+const ATTACH_BUDGET: Duration = Duration::from_millis(250);
+
+/// Where a Stop found the stream it was aimed at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelRoute {
+    /// This replica owns the stream and stopped it.
+    Local,
+    /// Another replica owns it and said it stopped it.
+    Peer,
+    /// No stream of this caller is live anywhere: it ended, never ran, or is somebody else's.
+    /// The same answer for all three, so an id is no oracle.
+    NoOwner,
+    /// The bus could not tell: the owner did not answer in time or the bus failed. The caller
+    /// must say so (a retryable 503), never claim a stop or a missing stream.
+    Unavailable,
+}
+
+/// What the replica owning a stream does with a cancel: the stream's own flag by request id, or
+/// the flag of whichever of its streams produces the run. Every other op, and every id that is
+/// not this stream's, is "not here"; the registry itself checks the caller's org and user.
+fn cancel_owner(
+    cancels: CancelRegistry,
+    request_id: String,
+    run_id: String,
+) -> impl Fn(RunControlMsg) -> RunControlReply + Send + Sync + 'static {
+    move |msg| {
+        let stopped = match msg.op {
+            RunControlOp::Cancel if !msg.request_id.is_empty() => {
+                msg.request_id == request_id
+                    && cancels.cancel_for(&request_id, &msg.org_id, &msg.user_id)
+            }
+            RunControlOp::Cancel if !msg.run_id.is_empty() => {
+                msg.run_id == run_id && cancels.cancel_run_for(&run_id, &msg.org_id, &msg.user_id)
+            }
+            _ => false,
+        };
+        if stopped {
+            RunControlReply::found()
+        } else {
+            RunControlReply::not_found()
+        }
+    }
+}
+
+impl RunControl {
+    /// Make the stream `request_id` (producing `run_id`, when it has one) reachable from the other
+    /// replicas: subscribe to its request subjects and its run's cancel subject, and hand the
+    /// listener to its entry in `cancels`, so [`CancelRegistry::finish`] ends the subscription.
+    /// Call it right after the stream registers and before the client hears `connected`; a Stop
+    /// can then never arrive at a stream nobody is listening for.
+    ///
+    /// Bounded by 250 ms and best effort: on a failure the stream runs as it did before, local
+    /// only. Returns whether the stream is now reachable. With the bus off it does nothing, and
+    /// a ZDR turn never gets here (it leaves for its direct stream before it registers).
+    pub async fn attach(&self, cancels: &CancelRegistry, request_id: &str, run_id: &str) -> bool {
+        if !self.enabled() {
+            return false;
+        }
+        let mut subjects = Vec::with_capacity(2);
+        match RunControlSubject::request_any_op(request_id) {
+            Ok(subject) => subjects.push(subject),
+            Err(_) => return false,
+        }
+        if !run_id.is_empty() {
+            // A run id that is no subject token only costs the run-keyed Stop.
+            if let Ok(subject) = RunControlSubject::run_cancel(run_id) {
+                subjects.push(subject);
+            }
+        }
+        let handler = cancel_owner(cancels.clone(), request_id.to_owned(), run_id.to_owned());
+        match tokio::time::timeout(ATTACH_BUDGET, self.listen(&subjects, handler)).await {
+            Ok(Ok(listener)) => cancels.attach_remote(request_id, listener),
+            Ok(Err(error)) => {
+                warn!(%error, "run control: could not listen for a stream, a Stop from another replica will not reach it");
+                false
+            }
+            Err(_) => {
+                warn!("run control: listening for a stream timed out, a Stop from another replica will not reach it");
+                false
+            }
+        }
+    }
+
+    /// Stop this caller's stream `request_id`: here when this replica owns it, otherwise ask the
+    /// replica that does. The local registry wins, so a Stop on the owner never touches the bus.
+    pub async fn cancel_stream(
+        &self,
+        cancels: &CancelRegistry,
+        request_id: &str,
+        org_id: &str,
+        user_id: &str,
+    ) -> CancelRoute {
+        if cancels.cancel_for(request_id, org_id, user_id) {
+            self.count_local(RunControlOp::Cancel);
+            return CancelRoute::Local;
+        }
+        let Ok(subject) = RunControlSubject::request(request_id, RunControlOp::Cancel) else {
+            return CancelRoute::NoOwner;
+        };
+        let mut msg = RunControlMsg::new(RunControlOp::Cancel, org_id, user_id);
+        msg.request_id = request_id.to_owned();
+        self.ask_to_cancel(&subject, &msg).await
+    }
+
+    /// Stop this caller's live stream for the durable run `run_id`, after the run itself was
+    /// cancelled: here, or on whichever replica produces it. A run with no live stream anywhere
+    /// is the normal answer ([`CancelRoute::NoOwner`]).
+    pub async fn cancel_run(
+        &self,
+        cancels: &CancelRegistry,
+        run_id: &str,
+        org_id: &str,
+        user_id: &str,
+    ) -> CancelRoute {
+        if cancels.cancel_run_for(run_id, org_id, user_id) {
+            self.count_local(RunControlOp::Cancel);
+            return CancelRoute::Local;
+        }
+        let Ok(subject) = RunControlSubject::run_cancel(run_id) else {
+            return CancelRoute::NoOwner;
+        };
+        let mut msg = RunControlMsg::new(RunControlOp::Cancel, org_id, user_id);
+        msg.run_id = run_id.to_owned();
+        self.ask_to_cancel(&subject, &msg).await
+    }
+
+    async fn ask_to_cancel(
+        &self,
+        subject: &RunControlSubject,
+        msg: &RunControlMsg,
+    ) -> CancelRoute {
+        match self.request(subject, msg).await {
+            Ok(reply) if reply.found => CancelRoute::Peer,
+            Ok(_)
+            | Err(
+                RunControlError::NoOwner
+                | RunControlError::Disabled
+                | RunControlError::InvalidSubject,
+            ) => CancelRoute::NoOwner,
+            Err(
+                RunControlError::Timeout
+                | RunControlError::BadReply
+                | RunControlError::PayloadTooLarge
+                | RunControlError::Unavailable(_),
+            ) => CancelRoute::Unavailable,
+        }
+    }
+
+    /// Count a request this replica answered itself, so `run_control_requests_total` shows the
+    /// local share next to the peer one. Counted only with the bus on: off must leave no trace.
+    fn count_local(&self, op: RunControlOp) {
+        if self.enabled() {
+            gateway_metrics::run_control_request(op.as_str(), RunControlOutcome::Local);
+        }
     }
 }
 
@@ -1103,5 +1278,76 @@ mod tests {
         let bytes = serde_json::to_vec(&reply).expect("serialize");
         assert_eq!(decode_reply(&bytes), Err(RunControlError::BadReply));
         assert!(decode_msg(b"not json").is_none());
+    }
+
+    #[tokio::test]
+    async fn an_attached_stream_is_stoppable_from_a_peer_until_it_finishes() {
+        let hub = LoopbackHub::new();
+        let (owner, peer) = (rc(&hub), rc(&hub));
+        let (owner_cancels, peer_cancels) = (CancelRegistry::new(), CancelRegistry::new());
+        let flag = owner_cancels.register_run("req-1", "org-a", "user-a", "run-1");
+        assert!(owner.attach(&owner_cancels, "req-1", "run-1").await);
+        assert_eq!(hub.lock().listeners.len(), 1);
+
+        assert_eq!(
+            peer.cancel_stream(&peer_cancels, "req-1", "org-b", "user-a").await,
+            CancelRoute::NoOwner
+        );
+        assert!(!flag.load(std::sync::atomic::Ordering::Relaxed));
+        assert_eq!(
+            peer.cancel_stream(&peer_cancels, "req-1", "org-a", "user-a").await,
+            CancelRoute::Peer
+        );
+        assert!(flag.load(std::sync::atomic::Ordering::Relaxed));
+
+        owner_cancels.finish("req-1");
+        assert!(hub.lock().listeners.is_empty());
+        assert_eq!(
+            peer.cancel_stream(&peer_cancels, "req-1", "org-a", "user-a").await,
+            CancelRoute::NoOwner
+        );
+    }
+
+    #[tokio::test]
+    async fn attach_with_the_bus_off_or_an_unsafe_id_subscribes_nothing() {
+        let cancels = CancelRegistry::new();
+        let _flag = cancels.register_run("req-1", "org-a", "user-a", "run-1");
+        assert!(!RunControl::off().attach(&cancels, "req-1", "run-1").await);
+
+        let hub = LoopbackHub::new();
+        let control = rc(&hub);
+        let _flag = cancels.register("a.b", "org-a", "user-a");
+        assert!(!control.attach(&cancels, "a.b", "").await);
+        // A run id that is no subject token costs only the run-keyed Stop.
+        assert!(control.attach(&cancels, "req-1", "run.1").await);
+        assert_eq!(
+            control
+                .cancel_run(&CancelRegistry::new(), "run.1", "org-a", "user-a")
+                .await,
+            CancelRoute::NoOwner
+        );
+    }
+
+    #[tokio::test]
+    async fn the_owner_answers_only_cancel_ops_for_its_own_ids() {
+        let hub = LoopbackHub::new();
+        let control = rc(&hub);
+        let cancels = CancelRegistry::new();
+        let flag = cancels.register_run("req-1", "org-a", "user-a", "run-1");
+        assert!(control.attach(&cancels, "req-1", "run-1").await);
+
+        // Queue and probe belong to later slices: this owner says "not here" to them.
+        for op in [RunControlOp::Queue, RunControlOp::Probe] {
+            let mut msg = RunControlMsg::new(op, "org-a", "user-a");
+            msg.request_id = "req-1".into();
+            let subject = RunControlSubject::request("req-1", op).expect("subject");
+            assert!(!control.request(&subject, &msg).await.expect("answered").found);
+        }
+        // A message whose ids are not the stream's it was delivered for is not honoured.
+        let mut msg = cancel_msg("req-2");
+        msg.run_id = "run-2".into();
+        let subject = RunControlSubject::request("req-1", RunControlOp::Cancel).expect("subject");
+        assert!(!control.request(&subject, &msg).await.expect("answered").found);
+        assert!(!flag.load(std::sync::atomic::Ordering::Relaxed));
     }
 }

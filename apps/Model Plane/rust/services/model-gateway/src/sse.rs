@@ -2132,6 +2132,9 @@ pub async fn invoke_stream_sse(
     // /v1/orchestration/runs/{id}/cancel) stops it the same way.
     let cancels = state.cancels.clone();
     let cancel_flag = cancels.register_run(&request_id, &org_id, &user_id, &session_run.run_id);
+    // A Stop that lands on another replica reaches this stream over the run-control bus; the
+    // subscription is in place before `connected`. Nothing happens with the bus off.
+    state.run_control.attach(&cancels, &request_id, &session_run.run_id).await;
     // Accept mid-run input for this stream. The thread id is recorded HERE, from
     // the prepared run, so the enqueue endpoint never has to trust a
     // client-supplied thread — see `queued_input::enqueue_for`.

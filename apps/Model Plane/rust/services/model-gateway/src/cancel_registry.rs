@@ -5,13 +5,15 @@
 //! iteration and emits a terminal `stopped` event. Each flag is bound to the
 //! authenticated tenant/user so a request id cannot be used as a cross-tenant
 //! cancel oracle. Cheap (a `DashMap` of `AtomicBool`), no new deps. In-memory
-//! + single-replica today — promote to a NATS cancel subject for multi-replica
-//! later (matrix-style note).
+//! per process; with the run-control bus on, an entry also holds the listener
+//! that lets another replica's Stop reach it (`run_control::RunControl::attach`).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use dashmap::DashMap;
+
+use crate::run_control::RemoteListener;
 
 /// Tracks cancellable in-flight streams by `request_id`.
 #[derive(Clone, Default)]
@@ -25,6 +27,10 @@ struct CancelEntry {
     user_id: String,
     /// The durable run this stream produces; empty when it has none.
     run_id: String,
+    /// The bus subscription that carries another replica's Stop to this entry. Dropped with the
+    /// entry, so a stream that ends (any of its exit paths calls `finish`) leaves nothing
+    /// subscribed.
+    remote: Option<RemoteListener>,
 }
 
 impl CancelRegistry {
@@ -59,9 +65,20 @@ impl CancelRegistry {
                 org_id: org_id.to_owned(),
                 user_id: user_id.to_owned(),
                 run_id: run_id.to_owned(),
+                remote: None,
             },
         );
         flag
+    }
+
+    /// Hold `listener` for as long as `request_id` stays registered. Returns `false`, and drops
+    /// the listener, when the stream already finished.
+    pub fn attach_remote(&self, request_id: &str, listener: RemoteListener) -> bool {
+        let Some(mut entry) = self.inner.get_mut(request_id) else {
+            return false;
+        };
+        entry.remote = Some(listener);
+        true
     }
 
     /// Request cancellation of this caller's live stream for durable run
@@ -217,5 +234,30 @@ mod tests {
         // A late cancel (client raced the stream finishing) finds nothing.
         assert!(!reg.cancel("req-2"));
         assert!(!flag.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn finishing_a_stream_drops_its_remote_listener() {
+        use crate::run_control::{LoopbackHub, RunControl, RunControlReply, RunControlSubject};
+        let hub = LoopbackHub::new();
+        let control = RunControl::loopback(hub.clone(), std::time::Duration::from_millis(100));
+        let listen = || async {
+            control
+                .listen(
+                    &[RunControlSubject::request_any_op("req-1").expect("subject")],
+                    |_| RunControlReply::found(),
+                )
+                .await
+                .expect("listen")
+        };
+        let reg = CancelRegistry::new();
+        let _flag = reg.register("req-1", "org-a", "user-a");
+        assert!(reg.attach_remote("req-1", listen().await));
+        assert_eq!(hub.listener_count(), 1);
+        reg.finish("req-1");
+        assert_eq!(hub.listener_count(), 0, "the entry took its listener with it");
+        // A stream that already finished does not keep a listener it was handed late.
+        assert!(!reg.attach_remote("req-1", listen().await));
+        assert_eq!(hub.listener_count(), 0);
     }
 }
