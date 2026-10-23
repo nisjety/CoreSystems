@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/authz"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/lease"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/telemetry"
+	"github.com/triodelab/model-plane/services/sandbox-manager/internal/threadworkspace"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/workspace"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -49,6 +51,14 @@ type Server struct {
 	// instance has none (no durable database), in which case every process
 	// RPC is refused rather than served against state a restart discards.
 	processes ProcessStore
+	// threadWorkspaceEnabled is SANDBOX_MANAGER_THREAD_WORKSPACE. Off, a thread
+	// lease is acquired exactly as before and every thread-workspace RPC is
+	// refused.
+	threadWorkspaceEnabled bool
+	// threads is the durable per-thread workspace. Nil in ephemeral development,
+	// where the thread RPCs refuse rather than serve state a restart discards.
+	threads      ThreadWorkspaceStore
+	threadLimits threadworkspace.Limits
 }
 
 // NewServer constructs a Server with the given stores. Space capability
@@ -80,6 +90,15 @@ func (s *Server) WithProcessStore(processes ProcessStore) *Server {
 	return s
 }
 
+// WithThreadWorkspace wires the per-thread workspace (WS22-S1). enabled is the
+// SANDBOX_MANAGER_THREAD_WORKSPACE switch; a nil store means no durable database.
+func (s *Server) WithThreadWorkspace(enabled bool, store ThreadWorkspaceStore, limits threadworkspace.Limits) *Server {
+	s.threadWorkspaceEnabled = enabled
+	s.threads = store
+	s.threadLimits = limits
+	return s
+}
+
 // AcquireLease creates a new lease for the requested scope.
 func (s *Server) AcquireLease(ctx context.Context, req *AcquireLeaseRequest) (*AcquireLeaseResponse, error) {
 	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "AcquireLease")))
@@ -108,6 +127,16 @@ func (s *Server) AcquireLease(ctx context.Context, req *AcquireLeaseRequest) (*A
 	}
 	if ttl <= 0 {
 		return nil, status.Error(codes.InvalidArgument, "ttl must be greater than zero")
+	}
+
+	threadScope := req.GetScopeType() == "thread"
+	if threadScope && req.GetZdr() {
+		// Refused whatever the switch says: a ZDR turn keeps no thread files
+		// (DEC-23 D8), so nothing is written and nothing is hydrated.
+		return nil, status.Error(codes.FailedPrecondition, "thread workspace is refused under zero data retention")
+	}
+	if threadScope && s.threadWorkspaceEnabled {
+		return s.acquireThread(ctx, principal, req, ttl)
 	}
 
 	spaceID := strings.TrimSpace(req.GetSpaceId())
@@ -166,6 +195,51 @@ func (s *Server) AcquireLease(ctx context.Context, req *AcquireLeaseRequest) (*A
 		// preparing a spawn `RegisterProcess` would deny; that denial remains
 		// the authoritative one.
 		ProcessesPermitted: l.ProcessesPermitted,
+	}, nil
+}
+
+// threadWorkspaceErr maps an error from the thread lease or the thread store.
+// A quota or a malformed batch is the caller's fault and is reported as such,
+// and an unowned thread lease is refused as an authority answer.
+func threadWorkspaceErr(err error) error {
+	switch {
+	case errors.Is(err, lease.ErrThreadLeaseOwnerRequired):
+		return status.Error(codes.PermissionDenied, err.Error())
+	case errors.Is(err, threadworkspace.ErrQuotaExceeded):
+		return status.Error(codes.ResourceExhausted, err.Error())
+	case errors.Is(err, threadworkspace.ErrInvalidChange):
+		return status.Error(codes.InvalidArgument, err.Error())
+	default:
+		return mapErr(err)
+	}
+}
+
+// acquireThread is AcquireLease for a thread scope with the switch on. It is
+// the only way a thread lease is minted: idempotent per user and thread, never
+// Space-scoped, and refused for a service principal.
+func (s *Server) acquireThread(ctx context.Context, principal authctx.Principal, req *AcquireLeaseRequest, ttl time.Duration) (*AcquireLeaseResponse, error) {
+	if principal.PrincipalType != "user" {
+		telemetry.LeaseDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "policy_denied")))
+		return nil, status.Error(codes.PermissionDenied, "a thread lease belongs to a user, not a service principal")
+	}
+	if strings.TrimSpace(req.GetSpaceId()) != "" {
+		return nil, status.Error(codes.InvalidArgument, "a thread lease cannot name a Space")
+	}
+	if s.threads == nil {
+		return nil, status.Error(codes.FailedPrecondition, "thread workspace requires a durable database")
+	}
+	l, err := s.leases.AcquireThread(ctx, req.GetScopeId(), principal.OrganizationID, principal.ActorID, s.backendID, ttl)
+	if err != nil {
+		telemetry.LeaseDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", leaseOutcome(err))))
+		return nil, threadWorkspaceErr(err)
+	}
+	telemetry.LeaseDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "thread_acquired")))
+	return &AcquireLeaseResponse{
+		LeaseId:   l.ID,
+		Endpoint:  l.Endpoint,
+		ExpiresAt: timestamppb.New(l.ExpiresAt),
+		BackendId: l.BackendID,
+		State:     l.State,
 	}, nil
 }
 
@@ -334,6 +408,101 @@ func (s *Server) PromoteWorkspace(ctx context.Context, req *PromoteWorkspaceRequ
 		return nil, status.Errorf(codes.Internal, "promote workspace: %v", err)
 	}
 	return &PromoteWorkspaceResponse{ConflictingPaths: conflicts}, nil
+}
+
+// threadLease resolves the lease a thread-workspace RPC names. It refuses while
+// the switch is off or no durable store is wired, then requires a user caller
+// and a thread lease. A Space lease is refused here, so no thread RPC can reach
+// a Space's rows.
+func (s *Server) threadLease(ctx context.Context, principal authctx.Principal, leaseID, backendID string) (*lease.Lease, error) {
+	if !s.threadWorkspaceEnabled || s.threads == nil {
+		return nil, status.Error(codes.FailedPrecondition, "thread workspace is not enabled")
+	}
+	if leaseID == "" {
+		return nil, status.Error(codes.InvalidArgument, "lease_id is required")
+	}
+	if principal.PrincipalType != "user" {
+		return nil, status.Error(codes.PermissionDenied, "a thread workspace belongs to a user, not a service principal")
+	}
+	l, err := s.leases.GetScoped(ctx, leaseID, principal.OrganizationID, authz.OwnerFilter(principal), backendID)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	if l.ScopeType != "thread" || l.SpaceID != "" {
+		return nil, status.Error(codes.FailedPrecondition, "lease is not a thread lease")
+	}
+	return l, nil
+}
+
+// GetThreadWorkspace reads the files the thread behind a thread lease holds.
+func (s *Server) GetThreadWorkspace(ctx context.Context, req *GetThreadWorkspaceRequest) (*GetThreadWorkspaceResponse, error) {
+	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "GetThreadWorkspace")))
+	principal, err := s.principal(ctx)
+	if err != nil {
+		return nil, err
+	}
+	l, err := s.threadLease(ctx, principal, req.GetLeaseId(), req.GetBackendId())
+	if err != nil {
+		return nil, err
+	}
+	snap, err := s.threads.Get(ctx, principal.OrganizationID, l.OwnerID, l.ScopeID)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "get thread workspace: %v", err)
+	}
+	entries := make([]*ThreadWorkspaceEntry, 0, len(snap.Files))
+	for _, f := range snap.Files {
+		entries = append(entries, &ThreadWorkspaceEntry{Path: f.Path, ContentHash: f.ContentHash, SizeBytes: f.SizeBytes})
+	}
+	return &GetThreadWorkspaceResponse{Entries: entries, Revision: snap.Revision}, nil
+}
+
+// ApplyThreadWorkspaceChanges applies a batch through a thread lease. Each path
+// is compare-and-swapped on its base_hash: a conflicting path is reported and
+// never overwritten, and every other path in the batch still applies.
+func (s *Server) ApplyThreadWorkspaceChanges(ctx context.Context, req *ApplyThreadWorkspaceChangesRequest) (*ApplyThreadWorkspaceChangesResponse, error) {
+	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "ApplyThreadWorkspaceChanges")))
+	principal, err := s.principal(ctx)
+	if err != nil {
+		return nil, err
+	}
+	l, err := s.threadLease(ctx, principal, req.GetLeaseId(), req.GetBackendId())
+	if err != nil {
+		return nil, err
+	}
+	changes := make([]threadworkspace.Change, 0, len(req.GetChanges()))
+	for _, c := range req.GetChanges() {
+		changes = append(changes, threadworkspace.Change{
+			Path: c.GetPath(), ContentHash: c.GetContentHash(), SizeBytes: c.GetSizeBytes(), BaseHash: c.GetBaseHash(),
+		})
+	}
+	deletions := make([]threadworkspace.Deletion, 0, len(req.GetDeleted()))
+	for _, d := range req.GetDeleted() {
+		deletions = append(deletions, threadworkspace.Deletion{Path: d.GetPath(), BaseHash: d.GetBaseHash()})
+	}
+	res, err := s.threads.Apply(ctx, principal.OrganizationID, l.OwnerID, l.ScopeID, changes, deletions, s.threadLimits)
+	if err != nil {
+		return nil, threadWorkspaceErr(err)
+	}
+	return &ApplyThreadWorkspaceChangesResponse{
+		ConflictingPaths: res.Conflicts,
+		Revision:         res.Revision,
+		FileCount:        res.FileCount,
+		TotalBytes:       res.TotalBytes,
+	}, nil
+}
+
+// DeleteThreadWorkspace erases a thread's workspace. Its implementation arrives
+// with the retention sweeper (WS22-S5), which also owns the object-store
+// prefix delete, so until then it only reports whether the switch is on.
+func (s *Server) DeleteThreadWorkspace(ctx context.Context, _ *DeleteThreadWorkspaceRequest) (*DeleteThreadWorkspaceResponse, error) {
+	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "DeleteThreadWorkspace")))
+	if _, err := s.principal(ctx); err != nil {
+		return nil, err
+	}
+	if !s.threadWorkspaceEnabled || s.threads == nil {
+		return nil, status.Error(codes.FailedPrecondition, "thread workspace is not enabled")
+	}
+	return nil, status.Error(codes.Unimplemented, "thread workspace erasure arrives with the retention sweeper (WS22-S5)")
 }
 
 // Health reports serving status.

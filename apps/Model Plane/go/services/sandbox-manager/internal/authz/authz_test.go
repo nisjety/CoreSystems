@@ -200,3 +200,24 @@ func TestStartupAuthenticationConfigurationFailsClosed(t *testing.T) {
 		t.Fatal("wrong configured audience unexpectedly succeeded")
 	}
 }
+
+func TestThreadWorkspaceMethodsAreKnownAndScoped(t *testing.T) {
+	writeOnly := authctx.Principal{OrganizationID: "org-a", ActorID: "service:execution-core", PrincipalType: "service", Scopes: []string{ScopeWrite}}
+	readOnly := authctx.Principal{OrganizationID: "org-a", ActorID: "service:execution-core", PrincipalType: "service", Scopes: []string{ScopeRead}}
+	for _, method := range []string{"ApplyThreadWorkspaceChanges", "DeleteThreadWorkspace"} {
+		full := "/model_plane.v1.SandboxManager/" + method
+		if err := Authorize(writeOnly, full, nil); err != nil {
+			t.Fatalf("%s with sandbox:write unexpectedly refused: %v", method, err)
+		}
+		if err := Authorize(readOnly, full, nil); err == nil {
+			t.Fatalf("%s with only sandbox:read unexpectedly authorized", method)
+		}
+	}
+	if err := Authorize(readOnly, "/model_plane.v1.SandboxManager/GetThreadWorkspace", nil); err != nil {
+		t.Fatalf("GetThreadWorkspace with sandbox:read unexpectedly refused: %v", err)
+	}
+	noScope := authctx.Principal{OrganizationID: "org-a", ActorID: "service:execution-core", PrincipalType: "service"}
+	if err := Authorize(noScope, "/model_plane.v1.SandboxManager/GetThreadWorkspace", nil); err == nil {
+		t.Fatal("GetThreadWorkspace with no scope unexpectedly authorized")
+	}
+}

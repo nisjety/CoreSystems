@@ -37,3 +37,13 @@ type ReadProcessOutputResponse = mpv1.ReadProcessOutputResponse
 type Process = mpv1.Process
 type ProcessOutputChunk = mpv1.ProcessOutputChunk
 type RedactedCommand = mpv1.RedactedCommand
+
+// WS22-S1 per-thread workspace.
+type ThreadWorkspaceEntry = mpv1.ThreadWorkspaceEntry
+type GetThreadWorkspaceRequest = mpv1.GetThreadWorkspaceRequest
+type GetThreadWorkspaceResponse = mpv1.GetThreadWorkspaceResponse
+type ApplyThreadWorkspaceChangesRequest = mpv1.ApplyThreadWorkspaceChangesRequest
+type ApplyThreadWorkspaceChangesResponse = mpv1.ApplyThreadWorkspaceChangesResponse
+type DeleteThreadWorkspaceRequest = mpv1.DeleteThreadWorkspaceRequest
+type DeleteThreadWorkspaceResponse = mpv1.DeleteThreadWorkspaceResponse
+type ThreadDeletedPath = mpv1.ThreadDeletedPath
