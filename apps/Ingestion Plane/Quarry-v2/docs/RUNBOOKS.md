@@ -1393,3 +1393,19 @@ Order of rollout:
 
 Rollback: set `off` and restart the edge. The existing metrics go back to their legacy rules at the same
 time; events already published are not withdrawn.
+
+## Span export and ZDR traces: WS10.S8 (F-t2-004 phase 2, unit W2-U42, built, NOT run, 2026-10-23)
+
+What it does. Adds the trace side of ZDR: a ZDR trace (a span with `zdr=true`, or a trace flagged after a span recorded it) exports nothing. The sampler, the span processor and the Go exporter wrapper all judge against one bounded trace registry (FIFO). Span attributes named in the `zdr_sensitive` or `never` classes are stripped from every span that is kept. Contract: `docs/TELEMETRY_FIELD_CONTRACT.md`; golden `crates/quarry-runtime/contracts/telemetry-field-contract.json`.
+
+Flags. `QUARRY_TELEMETRY_EXPORT` (default on; `off`, `0` or `false` builds no exporter and no provider, and the process logs `telemetry export disabled by flag`). `QUARRY_TELEMETRY_ZDR_REGISTRY_CAP` (default 100000). Export also needs `OTEL_EXPORTER_OTLP_ENDPOINT`; without it nothing changes.
+
+Go side. `pkg/quarryotel` `Init` honours the same flag. quarry-control calls `quarryotel.MarkZDR(ctx)` where a ZDR posture is parsed after the request span started (change webhook body, source register with `zdr`).
+
+Limits. A span that ended before its trace was flagged is already in the batch and is not recalled (the same limit as logs). `QUARRY_TELEMETRY_EXPORT=off` is not a privacy control on its own: it stops export, it does not change what the logs say.
+
+Rollback. Set `QUARRY_TELEMETRY_EXPORT=off` (no redeploy of the logic). Unset `OTEL_EXPORTER_OTLP_ENDPOINT` to stop export altogether.
+
+Evidence owed (not run in this batch). `deploy/compose/docker-compose.otel-test.yml` (throwaway) with `deploy/compose/otel-test/collector.yaml`: a non-ZDR and a ZDR scrape plus step; the collector shows spans for the non-ZDR trace only; the ZDR container log has no probe URL; with the flag off the collector receives nothing. Do not set `OTEL_EXPORTER_OTLP_ENDPOINT` in any real environment before that run.
+
+Not done in this unit (see the depth file): event-level stripping on OTel span events; the Model Plane `mp-telemetry` adoption (sibling b); the span-vocabulary attributes of WS6 L2; the exact OTel 0.29 builder signatures are compile-checked only.
