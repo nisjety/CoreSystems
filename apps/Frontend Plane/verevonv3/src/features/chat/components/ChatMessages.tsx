@@ -435,6 +435,12 @@ export function AnswerRegion(props: {
   )
 }
 
+/**
+ * A provider's own retry-after wait is only worth a line when a person would
+ * have noticed it. Shorter waits are part of an ordinary answer.
+ */
+const PROVIDER_WAIT_NOTE_MS = 2_000
+
 export function AssistantMessage(props: {
   copied: boolean
   message: ChatTurn
@@ -480,6 +486,14 @@ export function AssistantMessage(props: {
   // Undefined (nothing rendered) unless the server asserted a residency or a
   // retention claim; never worked out from the model name.
   const processingNote = createMemo(() => answerProcessingNote(i18n, props.message.servedBy))
+  // The longest single provider call's retry-after wait. Calls can run in
+  // parallel, so summing them would overstate the time the person sat through.
+  const providerWaitNote = createMemo(() => {
+    const waitMs = Math.max(0, ...(props.message.timing?.phases ?? []).map((phase) => phase.provider?.retryWaitMs ?? 0))
+    if (waitMs <= PROVIDER_WAIT_NOTE_MS) return undefined
+    const seconds = Math.round(waitMs / 1000)
+    return i18n.tr(`ventet ${seconds} s på leverandøren`, `waited ${seconds} s for the provider`)
+  })
 
   // "Les høyt" reads the reply through governed text-to-speech (Azure Speech
   // via Verevon's speech route) in the UI language's voice. The browser's own
@@ -893,6 +907,13 @@ export function AssistantMessage(props: {
             {(note) => (
               <p class="verevon-chat-processing-line" role="note" title={note().title}>
                 {note().text}
+              </p>
+            )}
+          </Show>
+          <Show when={providerWaitNote()}>
+            {(text) => (
+              <p class="verevon-chat-processing-line" role="note">
+                {text()}
               </p>
             )}
           </Show>
