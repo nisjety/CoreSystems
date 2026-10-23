@@ -473,6 +473,10 @@ pub enum OverlapPolicy {
 /// detail. Maps 1:1 onto Temporal's `Schedule` proto but uses
 /// Quarry-native field names so the wire shape doesn't leak the
 /// orchestrator vendor.
+fn schedule_default_timezone() -> String {
+    "UTC".to_owned()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScheduleSummary {
     pub schedule_id: kinds::ScheduleKind,
@@ -497,6 +501,15 @@ pub struct ScheduleSummary {
     /// Whether the schedule pauses itself after a failure.
     #[serde(default)]
     pub pause_on_failure: bool,
+    /// IANA zone the cron is read in (WS15.S1). Older payloads carry none: UTC.
+    #[serde(default = "schedule_default_timezone")]
+    pub timezone: String,
+    /// Spread of each fire, in seconds (WS15.S1). Zero when absent.
+    #[serde(default)]
+    pub jitter_s: u64,
+    /// True for a schedule created disabled that nobody has started yet (WS15.S1).
+    #[serde(default)]
+    pub needs_activation: bool,
     /// `"active" | "paused" | "deleted"`.
     pub status: String,
     pub created_at: DateTime<Utc>,
@@ -584,6 +597,9 @@ mod tests {
             overlap_policy: OverlapPolicy::Skip,
             catchup_window_s: 3600,
             pause_on_failure: true,
+            timezone: "Europe/Oslo".into(),
+            jitter_s: 0,
+            needs_activation: false,
             status: "active".into(),
             created_at: Utc::now(),
             last_run_at: None,
@@ -596,6 +612,8 @@ mod tests {
         assert!(s.contains("\"overlap_policy\":\"skip\""));
         assert!(s.contains("\"catchup_window_s\":3600"));
         assert!(s.contains("\"pause_on_failure\":true"));
+        assert!(s.contains("\"timezone\":\"Europe/Oslo\""));
+        assert!(s.contains("\"needs_activation\":false"));
         // schedule_at absent (None + skip_serializing_if).
         assert!(!s.contains("\"schedule_at\""));
     }

@@ -344,7 +344,7 @@ async fn a_legacy_cron_create_never_forwards_a_declared_zdr() {
     for enforce in [false, true] {
         let control = control_plane().await;
         let harness = edge(control.uri(), enforce).await;
-        let body = json!({ "name": "legacy", "kind": "scrape", "cron": "*/5 * * * *", "zdr": true });
+        let body = json!({ "name": "legacy", "kind": "scrape", "cron": "*/5 * * * *", "config": { "url": "https://page.test/legacy" }, "zdr": true });
         let resp = harness.post(&user_in_standard_org(), "/v1/schedules", body).await;
         // Enforced, the declaration makes it a ZDR create and the edge refuses it; observing,
         // it is created. Either way the forwarded body (if any) has no zdr key.
