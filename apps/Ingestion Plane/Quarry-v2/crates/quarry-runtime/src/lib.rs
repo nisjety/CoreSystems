@@ -39,6 +39,7 @@ pub mod autoprompt;
 pub mod autoscale;
 pub mod cached_profile_store;
 pub mod content_route;
+pub mod crawl_filter;
 pub mod crawl_frontier;
 pub mod crawl_ranker;
 pub mod crawl_signals;

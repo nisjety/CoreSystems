@@ -92,10 +92,10 @@ impl FrontierConfig {
             return self
                 .seed_hosts
                 .iter()
-                .any(|root| host == root || host.ends_with(&format!(".{root}")));
+                .any(|root| crate::crawl_filter::host_matches(root, host, true));
         }
         match &self.seed_host {
-            Some(root) => host == root || host.ends_with(&format!(".{root}")),
+            Some(root) => crate::crawl_filter::host_matches(root, host, true),
             None => true, // no scope set yet — first seed will set it
         }
     }
@@ -117,7 +117,7 @@ pub(crate) fn pattern_matches(pattern: &str, url: &str) -> bool {
 
 /// Classic linear-time wildcard matcher (`*` = any run, `?` = one char),
 /// anchored to the full string. No regex/glob crate needed.
-fn glob_match(pattern: &str, text: &str) -> bool {
+pub(crate) fn glob_match(pattern: &str, text: &str) -> bool {
     let p: Vec<char> = pattern.chars().collect();
     let t: Vec<char> = text.chars().collect();
     let (mut pi, mut ti) = (0usize, 0usize);
@@ -397,7 +397,7 @@ impl CrawlFrontier {
     }
 }
 
-fn normalize_url(input: &str) -> Option<String> {
+pub(crate) fn normalize_url(input: &str) -> Option<String> {
     let mut parsed = Url::parse(input).ok()?;
     parsed.set_fragment(None); // drop #anchor
     if parsed.path().is_empty() {
