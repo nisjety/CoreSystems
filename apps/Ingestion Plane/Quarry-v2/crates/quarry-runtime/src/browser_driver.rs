@@ -9,7 +9,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 use url::Url;
 
-use quarry_browser::{BrowserDriver as BrowserDriverTrait, BrowserEgressPolicy, BrowserSession};
+use quarry_browser::{
+    BrowserDriver as BrowserDriverTrait, BrowserEgressPolicy, BrowserSession, StitchPermit,
+};
 use quarry_core::capture::{CaptureLimits, CapturePlan};
 use quarry_core::output::DriverKind;
 use quarry_core::{
@@ -115,10 +117,14 @@ async fn take_captures(
     plan: &CapturePlan,
     limits: &CaptureLimits,
     url: &Url,
+    stitch: Option<&StitchPermit>,
 ) -> PageCaptures {
     let mut out = PageCaptures::default();
     if let Some(options) = plan.screenshot.as_ref() {
-        match inner.capture_screenshot(session, options, limits).await {
+        match inner
+            .capture_screenshot_stitched(session, options, limits, stitch)
+            .await
+        {
             Ok(image) => {
                 if image.truncated {
                     out.warnings.push(CaptureWarning {
@@ -203,6 +209,25 @@ pub fn heavy_permits_from_env(pool_size: usize) -> usize {
     heavy_permits_from(std::env::var(ENV_HEAVY_PERMITS).ok().as_deref(), pool_size)
 }
 
+/// WS13.6: whether a full-page screenshot may stitch tiles, from the raw value of
+/// `QUARRY_EDGE__SCRAPE_STITCH`. Only `on`, `1` and `true` (ignoring case and
+/// surrounding space) turn it on; unset is off, and the image is then cropped at the
+/// single-capture limit with a warning.
+pub fn scrape_stitch_from(value: Option<&str>) -> bool {
+    matches!(
+        value.map(|raw| raw.trim().to_ascii_lowercase()).as_deref(),
+        Some("on" | "1" | "true")
+    )
+}
+
+/// Whether stitching is on in this process (reads the environment).
+pub fn scrape_stitch_enabled() -> bool {
+    scrape_stitch_from(std::env::var(ENV_SCRAPE_STITCH).ok().as_deref())
+}
+
+/// Environment variable for tile-and-stitch of full-page screenshots (WS13.6).
+pub const ENV_SCRAPE_STITCH: &str = "QUARRY_EDGE__SCRAPE_STITCH";
+
 fn heavy_lane(pool: &RuntimeLeasePool) -> Arc<Semaphore> {
     Arc::new(Semaphore::new(heavy_permits_from_env(pool.max_concurrent())))
 }
@@ -254,6 +279,9 @@ pub struct BrowserDriverAdapter {
     /// Whether every fetch gets its own session key (WS13.1), read from
     /// `QUARRY_SCRAPE_SESSION_ISOLATION` when the adapter is built.
     session_isolation: bool,
+    /// WS13.6: whether a full-page screenshot may stitch tiles, read from
+    /// `QUARRY_EDGE__SCRAPE_STITCH` when the adapter is built. Off by default.
+    scrape_stitch: bool,
 }
 
 /// The browser session and pool slot of one fetch, held until the fetch
@@ -356,6 +384,7 @@ impl BrowserDriverAdapter {
         Self {
             heavy: heavy_lane(&pool),
             session_isolation: session_isolation_enabled(),
+            scrape_stitch: scrape_stitch_enabled(),
             inner,
             pool,
             managed_processor_id: None,
@@ -370,6 +399,7 @@ impl BrowserDriverAdapter {
         Self {
             heavy: heavy_lane(&pool),
             session_isolation: session_isolation_enabled(),
+            scrape_stitch: scrape_stitch_enabled(),
             inner,
             pool,
             managed_processor_id: Some(processor_id.into()),
@@ -388,6 +418,18 @@ impl BrowserDriverAdapter {
         self
     }
 
+    /// Whether a full-page screenshot may stitch tiles (WS13.6).
+    pub fn scrape_stitch(&self) -> bool {
+        self.scrape_stitch
+    }
+
+    /// Set tile-and-stitch explicitly, overriding the environment read when the
+    /// adapter was built (WS13.6).
+    pub fn with_scrape_stitch(mut self, enabled: bool) -> Self {
+        self.scrape_stitch = enabled;
+        self
+    }
+
     /// Rebuild the heavy lane with `permits` (WS13.1), clamped to the pool size.
     pub fn with_heavy_permits(mut self, permits: usize) -> Self {
         let permits = permits.clamp(1, self.pool.max_concurrent().max(1));
@@ -399,6 +441,34 @@ impl BrowserDriverAdapter {
     /// slices (WS13.4, WS13.4a) take them; nothing takes them in this slice.
     pub fn heavy_permits_available(&self) -> usize {
         self.heavy.available_permits()
+    }
+
+    /// WS13.6: a heavy-lane permit for one stitched screenshot. Taken only when
+    /// stitching is on, the screenshot is full-page, and the page is taller than
+    /// one capture. A busy lane gives none, and the capture is then cropped at the
+    /// limit (the opposite of an action, which waits).
+    async fn stitch_permit_for(
+        &self,
+        session: &BrowserSession,
+        plan: &CapturePlan,
+    ) -> Option<StitchPermit> {
+        if !self.scrape_stitch {
+            return None;
+        }
+        let options = plan.screenshot.as_ref()?;
+        if !self
+            .inner
+            .screenshot_needs_stitch(session, options)
+            .await
+            .unwrap_or(false)
+        {
+            return None;
+        }
+        self.heavy
+            .clone()
+            .try_acquire_owned()
+            .ok()
+            .map(StitchPermit::new)
     }
 }
 
@@ -602,16 +672,21 @@ impl BrowserDriverAdapter {
         // WS13.4b: capture what the request asked for while the page is still
         // open, before the session is released.
         let captures = match hints.render.capture.as_ref() {
-            Some(plan) => Some(Box::new(
-                take_captures(
-                    self.inner.as_ref(),
-                    session,
-                    plan,
-                    &hints.render.capture_limits,
-                    url,
-                )
-                .await,
-            )),
+            Some(plan) => {
+                // WS13.6: a stitch permit only when the page needs one and the heavy lane is free.
+                let stitch = self.stitch_permit_for(session, plan).await;
+                Some(Box::new(
+                    take_captures(
+                        self.inner.as_ref(),
+                        session,
+                        plan,
+                        &hints.render.capture_limits,
+                        url,
+                        stitch.as_ref(),
+                    )
+                    .await,
+                ))
+            }
             None => None,
         };
 
