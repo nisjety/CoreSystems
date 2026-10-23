@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
 use mp_contracts::model_plane::v1::{
-    AppendMessageRequest, CancelRunRequest, CompleteDirectRunWithMessageRequest,
-    CompleteDirectRunWithMessageResponse, CreateThreadRequest, HeartbeatManagedRunRequest,
-    ManagedRunSource, RecordTerminalOutcomeRequest, ResolveRunOwnerRequest, StartManagedRunRequest,
-    StartRunRequest, TerminalOutcome,
+    AppendMessageRequest, AutonomyRung, CancelRunRequest, CompleteDirectRunWithMessageRequest,
+    CompleteDirectRunWithMessageResponse, CreateThreadRequest, GetThreadGrantRequest,
+    GetThreadGrantResponse, HeartbeatManagedRunRequest, ManagedRunSource,
+    RecordTerminalOutcomeRequest, ResolveRunOwnerRequest, StartManagedRunRequest, StartRunRequest,
+    TerminalOutcome,
 };
 use mp_ids::new_ulid;
 use std::time::Duration;
@@ -1635,6 +1636,96 @@ pub async fn append_queued_user_message(
     })
 }
 
+/// Bound on the read of a thread's plan grant at run start. The read sits on the path of
+/// every Do-run start while the durable grant switch is on, so a Session Core that does not
+/// answer must cost a bounded delay and no more: the caller treats the timeout as an
+/// unreadable grant ([`ThreadGrant::unreadable`]), which is not the same as "no grant".
+const THREAD_GRANT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// A thread's plan grant as Session Core holds it (build plan WS04 S4). The default is "no
+/// grant": nothing recorded, lapsed, or a rung this build does not know. A read that failed is
+/// NOT the default: it is [`ThreadGrant::unreadable`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ThreadGrant {
+    /// The rung the thread's approved plan granted. `None` is "no live grant", which is not
+    /// the same as READ_ONLY: nothing was stated.
+    pub rung: Option<AutonomyRung>,
+    /// The plan approved with the grant, when it named one. Reading it does not consume it:
+    /// the plan's own `APPROVED -> EXECUTING` compare-and-swap is the single-use guard.
+    pub approved_plan_id: Option<String>,
+    /// When the grant lapses, unix seconds.
+    pub expires_at_unix: Option<i64>,
+    /// The READ itself failed (a timeout, `Unavailable`, `Unimplemented` from an older Session
+    /// Core, a refusal), so nothing is known about the grant. This is NOT "no grant": a caller
+    /// must not read it as the thread having none, because a grant may well exist that this
+    /// call could not see. It is only ever set by [`ThreadGrant::unreadable`].
+    pub read_failed: bool,
+}
+
+impl ThreadGrant {
+    /// The answer for a grant that could not be read (see [`ThreadGrant::read_failed`]).
+    #[must_use]
+    pub fn unreadable() -> Self {
+        Self {
+            read_failed: true,
+            ..Self::default()
+        }
+    }
+}
+
+impl From<GetThreadGrantResponse> for ThreadGrant {
+    fn from(response: GetThreadGrantResponse) -> Self {
+        let rung = AutonomyRung::try_from(response.granted_rung)
+            .ok()
+            .filter(|rung| *rung != AutonomyRung::Unspecified);
+        if rung.is_none() {
+            return Self::default();
+        }
+        Self {
+            rung,
+            approved_plan_id: Some(response.approved_plan_id).filter(|id| !id.is_empty()),
+            expires_at_unix: response.expires_at.map(|at| at.seconds),
+            read_failed: false,
+        }
+    }
+}
+
+/// Read the live plan grant of `thread_id` from Session Core (`ThreadAutonomy`), with the
+/// caller's own credential: Session Core checks that the caller owns the thread and answers
+/// nothing for another org's. One primary-key read, uncached on purpose: a cache would be a
+/// second place a revoked or replaced grant could still be believed.
+///
+/// # Errors
+/// Returns an error when the reader is not configured, the credential cannot be forwarded,
+/// Session Core refuses or does not answer within [`THREAD_GRANT_TIMEOUT`]. An absent grant
+/// is not an error: it is `Ok(ThreadGrant::default())`.
+pub async fn thread_grant(
+    state: &AppState,
+    org_id: &str,
+    thread_id: &str,
+    bearer: &str,
+) -> Result<ThreadGrant, tonic::Status> {
+    let Some(mut client) = state.plan_mode.durable_grant_client() else {
+        return Err(tonic::Status::unavailable(
+            "the durable plan grant reader is not configured",
+        ));
+    };
+    let mut request = tonic::Request::new(GetThreadGrantRequest {
+        thread_id: thread_id.to_owned(),
+        org_id: org_id.to_owned(),
+    });
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {bearer}")
+            .parse()
+            .map_err(|_| tonic::Status::internal("verified session credential is not forwardable"))?,
+    );
+    let response = tokio::time::timeout(THREAD_GRANT_TIMEOUT, client.get_thread_grant(request))
+        .await
+        .map_err(|_| tonic::Status::deadline_exceeded("reading the thread's plan grant timed out"))??;
+    Ok(response.into_inner().into())
+}
+
 trait StringExt {
     fn if_empty_then(self, fallback: String) -> String;
 }
@@ -1661,6 +1752,74 @@ mod tests {
         assert!(super::with_compaction_summary(None, "private source", true).is_none());
         assert!(super::with_compaction_summary(None, &"x".repeat(128_001), false).is_none());
         assert!(super::persisted_compaction_summary(None).is_empty());
+    }
+
+    /// What Session Core answers for a thread's grant becomes the gateway's view of it: a live
+    /// grant in full, and every other answer (none, a rung this build cannot name) as no grant,
+    /// which is never READ_ONLY and never a rung nobody approved.
+    #[test]
+    fn a_thread_grant_answer_becomes_a_grant_or_no_grant() {
+        use super::{AutonomyRung, GetThreadGrantResponse, ThreadGrant};
+        let live = ThreadGrant::from(GetThreadGrantResponse {
+            granted_rung: AutonomyRung::WorkspaceWrite as i32,
+            justification: "writes the report".to_owned(),
+            approved_plan_id: "plan-7".to_owned(),
+            expires_at: Some(prost_types::Timestamp {
+                seconds: 1_800_000_000,
+                nanos: 0,
+            }),
+        });
+        assert_eq!(live.rung, Some(AutonomyRung::WorkspaceWrite));
+        assert_eq!(live.approved_plan_id.as_deref(), Some("plan-7"));
+        assert_eq!(live.expires_at_unix, Some(1_800_000_000));
+
+        let without_plan = ThreadGrant::from(GetThreadGrantResponse {
+            granted_rung: AutonomyRung::DangerFullAccess as i32,
+            ..Default::default()
+        });
+        assert_eq!(without_plan.rung, Some(AutonomyRung::DangerFullAccess));
+        assert_eq!(without_plan.approved_plan_id, None, "an empty plan id is no plan");
+
+        for granted_rung in [AutonomyRung::Unspecified as i32, 99, -1] {
+            assert_eq!(
+                ThreadGrant::from(GetThreadGrantResponse {
+                    granted_rung,
+                    approved_plan_id: "plan-7".to_owned(),
+                    ..Default::default()
+                }),
+                ThreadGrant::default(),
+                "rung {granted_rung} is no grant, and carries no plan with it"
+            );
+        }
+    }
+
+    /// A grant that could not be read is its own answer, never the "no grant" one: only the
+    /// reader's own failure sets it, and no answer from Session Core can.
+    #[test]
+    fn an_unreadable_grant_is_not_the_no_grant_answer() {
+        use super::{AutonomyRung, GetThreadGrantResponse, ThreadGrant};
+        let unreadable = ThreadGrant::unreadable();
+        assert!(unreadable.read_failed);
+        assert_ne!(unreadable, ThreadGrant::default(), "unreadable is not 'no grant'");
+        assert_eq!(unreadable.rung, None, "an unreadable grant states no rung of its own");
+        for granted_rung in [AutonomyRung::Unspecified as i32, AutonomyRung::ReadOnly as i32, 99] {
+            let answered = ThreadGrant::from(GetThreadGrantResponse {
+                granted_rung,
+                ..Default::default()
+            });
+            assert!(!answered.read_failed, "an answer is never a failed read (rung {granted_rung})");
+        }
+    }
+
+    /// A gateway whose reader is not configured answers a typed refusal, not a guess: the caller
+    /// then treats the grant as unreadable, never as the thread holding none.
+    #[tokio::test]
+    async fn reading_a_grant_without_a_configured_reader_is_unavailable() {
+        let state = crate::state::AppState::new();
+        let error = super::thread_grant(&state, "org-1", "thread-1", "token")
+            .await
+            .expect_err("the durable grant switch is off, so there is no reader");
+        assert_eq!(error.code(), tonic::Code::Unavailable);
     }
 
     /// A reload shows a failed run by its recorded code, so a draft the

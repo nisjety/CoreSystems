@@ -1956,3 +1956,127 @@ var SessionRetentionService_ServiceDesc = grpc.ServiceDesc{
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "model_plane/v1/sessions.proto",
 }
+
+const (
+	ThreadAutonomy_GetThreadGrant_FullMethodName = "/model_plane.v1.ThreadAutonomy/GetThreadGrant"
+)
+
+// ThreadAutonomyClient is the client API for ThreadAutonomy service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// ThreadAutonomy: the autonomy grant a plan approval made, read back by the
+// run that is about to start. A separate service, as SessionRetentionService
+// is, so that SessionCore and every mock of it stay source-compatible. The
+// grant is WRITTEN by SessionCore.SetRunMode (with `approved_plan_id` set), in
+// the same transaction as the run update.
+type ThreadAutonomyClient interface {
+	// The live grant of one thread: the rung, the reason it was granted, the plan
+	// it was approved with and when it lapses. A thread with no grant, or one
+	// that has lapsed, answers a response whose `granted_rung` is UNSPECIFIED:
+	// "no grant" is an answer, not an error. Read-only; it spends nothing. Refused
+	// for a caller that does not own the thread, and never answers for another org.
+	GetThreadGrant(ctx context.Context, in *GetThreadGrantRequest, opts ...grpc.CallOption) (*GetThreadGrantResponse, error)
+}
+
+type threadAutonomyClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewThreadAutonomyClient(cc grpc.ClientConnInterface) ThreadAutonomyClient {
+	return &threadAutonomyClient{cc}
+}
+
+func (c *threadAutonomyClient) GetThreadGrant(ctx context.Context, in *GetThreadGrantRequest, opts ...grpc.CallOption) (*GetThreadGrantResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetThreadGrantResponse)
+	err := c.cc.Invoke(ctx, ThreadAutonomy_GetThreadGrant_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ThreadAutonomyServer is the server API for ThreadAutonomy service.
+// All implementations must embed UnimplementedThreadAutonomyServer
+// for forward compatibility.
+//
+// ThreadAutonomy: the autonomy grant a plan approval made, read back by the
+// run that is about to start. A separate service, as SessionRetentionService
+// is, so that SessionCore and every mock of it stay source-compatible. The
+// grant is WRITTEN by SessionCore.SetRunMode (with `approved_plan_id` set), in
+// the same transaction as the run update.
+type ThreadAutonomyServer interface {
+	// The live grant of one thread: the rung, the reason it was granted, the plan
+	// it was approved with and when it lapses. A thread with no grant, or one
+	// that has lapsed, answers a response whose `granted_rung` is UNSPECIFIED:
+	// "no grant" is an answer, not an error. Read-only; it spends nothing. Refused
+	// for a caller that does not own the thread, and never answers for another org.
+	GetThreadGrant(context.Context, *GetThreadGrantRequest) (*GetThreadGrantResponse, error)
+	mustEmbedUnimplementedThreadAutonomyServer()
+}
+
+// UnimplementedThreadAutonomyServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedThreadAutonomyServer struct{}
+
+func (UnimplementedThreadAutonomyServer) GetThreadGrant(context.Context, *GetThreadGrantRequest) (*GetThreadGrantResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetThreadGrant not implemented")
+}
+func (UnimplementedThreadAutonomyServer) mustEmbedUnimplementedThreadAutonomyServer() {}
+func (UnimplementedThreadAutonomyServer) testEmbeddedByValue()                        {}
+
+// UnsafeThreadAutonomyServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to ThreadAutonomyServer will
+// result in compilation errors.
+type UnsafeThreadAutonomyServer interface {
+	mustEmbedUnimplementedThreadAutonomyServer()
+}
+
+func RegisterThreadAutonomyServer(s grpc.ServiceRegistrar, srv ThreadAutonomyServer) {
+	// If the following call panics, it indicates UnimplementedThreadAutonomyServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&ThreadAutonomy_ServiceDesc, srv)
+}
+
+func _ThreadAutonomy_GetThreadGrant_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetThreadGrantRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ThreadAutonomyServer).GetThreadGrant(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ThreadAutonomy_GetThreadGrant_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ThreadAutonomyServer).GetThreadGrant(ctx, req.(*GetThreadGrantRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// ThreadAutonomy_ServiceDesc is the grpc.ServiceDesc for ThreadAutonomy service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var ThreadAutonomy_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "model_plane.v1.ThreadAutonomy",
+	HandlerType: (*ThreadAutonomyServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "GetThreadGrant",
+			Handler:    _ThreadAutonomy_GetThreadGrant_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "model_plane/v1/sessions.proto",
+}

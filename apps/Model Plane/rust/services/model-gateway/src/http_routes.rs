@@ -7552,7 +7552,7 @@ async fn plan_approval(
     use mp_contracts::autonomy::{label, rung_from_keyword, AutonomyEscalation};
     // Owner decision 17: a plan approval advances the run. See approve_plan.
     crate::zdr_posture::continuation_gate(&claims)?;
-    use mp_contracts::model_plane::v1::{AutonomyRung, ExitPlanModeRequest, SetRunModeRequest};
+    use mp_contracts::model_plane::v1::{AutonomyRung, ExitPlanModeRequest};
 
     let bad_request = |message: String| -> HttpJsonError {
         (StatusCode::BAD_REQUEST, Json(json!({ "error": message })))
@@ -7600,7 +7600,7 @@ async fn plan_approval(
     //   AFTER the plan had already been moved to APPROVED, so a transient
     //   error at that point left an approved plan with no grant, and — an
     //   approval being single-use — no way to retry it.
-    let thread_id = state
+    let run_detail = state
         .run_client
         .clone()
         .get_run(authenticated_session_request(
@@ -7611,8 +7611,11 @@ async fn plan_approval(
         )?)
         .await
         .map_err(|error| grpc_status_to_http(&error))?
-        .into_inner()
-        .thread_id;
+        .into_inner();
+    // Whether the run is in plan mode is read from the durable row here, not from the memory
+    // of this replica: the flag was set by whichever replica started the run (WS04 S4).
+    let run_was_in_plan_mode = run_detail.mode == "plan";
+    let thread_id = run_detail.thread_id;
 
     // The plan being decided must be a plan OF THIS run's conversation. The
     // route is keyed by run and the body names the plan, and session-core
@@ -7728,57 +7731,250 @@ async fn plan_approval(
     // validation. `thread_id` was resolved above, before the plan moved. (An
     // earlier revision of this call sent an empty `session_id`, which the
     // store correctly refused, making the whole grant path a no-op.)
-    let exited = crate::coordinator::handle_exit_plan_mode(
-        &state.plan_mode,
-        &*state.publisher,
-        ExitPlanModeRequest {
-            request_id: format!("plan-approval-{run_id}"),
-            org_id: claims.org_id.clone(),
-            run_id: run_id.clone(),
-            session_id: thread_id.clone(),
-            granted_rung: escalation.to() as i32,
-            justification: escalation.justification().to_owned(),
-        },
-        &body.plan_id,
-    )
-    .await
+    //
+    // With the durable grant switch on (WS04 S4) the grant is Session Core's to record, in the
+    // same transaction as the run update below, and this replica's memory holds no copy of it;
+    // the lifecycle event follows the run's durable mode rather than this replica's flag.
+    let durable_grant = state.plan_mode.durable_grant_enabled();
+    let exit_request = ExitPlanModeRequest {
+        request_id: format!("plan-approval-{run_id}"),
+        org_id: claims.org_id.clone(),
+        run_id: run_id.clone(),
+        session_id: thread_id.clone(),
+        granted_rung: escalation.to() as i32,
+        justification: escalation.justification().to_owned(),
+    };
+    let exited = if durable_grant {
+        crate::coordinator::handle_exit_plan_mode_durable(
+            &state.plan_mode,
+            &*state.publisher,
+            exit_request,
+            &body.plan_id,
+            run_was_in_plan_mode,
+        )
+        .await
+    } else {
+        crate::coordinator::handle_exit_plan_mode(
+            &state.plan_mode,
+            &*state.publisher,
+            exit_request,
+            &body.plan_id,
+        )
+        .await
+    }
     .map_err(|error| grpc_status_to_http(&error))?;
 
     // The durable half. Reported rather than swallowed: a grant the run does not
     // carry is a grant the next request will not honour, and the caller should
     // learn that here instead of by watching the agent refuse work it was just
     // authorized to do.
-    let persisted = state
-        .session_client
-        .clone()
-        .set_run_mode(authenticated_session_request(
-            SetRunModeRequest {
-                run_id: run_id.clone(),
-                mode: "execute".to_owned(),
-                org_id: claims.org_id.clone(),
-                granted_rung: escalation.to() as i32,
-                justification: escalation.justification().to_owned(),
-            },
+    //
+    // With the durable switch on, the plan above is already APPROVED and an approval is
+    // single-use, so this write is the only place the grant can still be made durable: it is
+    // retried with a bounded backoff on a transient failure, and if it still fails the grant is
+    // kept in THIS replica's memory so the approving replica keeps honouring what the human
+    // approved (`durable_thread_grant` reads it back when Session Core holds none). The answer
+    // stays honest (`persisted: false`); the plan is not rolled back.
+    //
+    // A WAIVED credential (zero retention waived for one connection) may not write a durable
+    // grant: Session Core refuses a `SetRunMode` that states one. The run's mode change is not
+    // a grant and is not refused, so the request carries the mode alone (no rung, no
+    // justification, no plan id: everything that only feeds the thread's durable copy is
+    // stripped) and the run leaves plan mode exactly as it did before durable grants existed.
+    // The answer then says `persisted: false`, and this replica keeps the grant in memory.
+    // Read through the resolver's own adapter, as every retention claim is. This is not the
+    // posture decision (the gateway has refused a ZDR credential above and Session Core decides
+    // the waiver's receipt): it only chooses what the request states.
+    let waived = crate::zdr_posture::claims_view(&claims).waiver.is_some();
+    let set_run_mode_request = || {
+        authenticated_session_request(
+            set_run_mode_request_for(
+                &run_id,
+                &claims.org_id,
+                &escalation,
+                if durable_grant { &body.plan_id } else { "" },
+                waived,
+            ),
             &bearer,
-        )?)
-        .await;
+        )
+        .map_err(|_| {
+            tonic::Status::invalid_argument("verified session credential is not forwardable")
+        })
+    };
+    let persisted = if durable_grant {
+        retry_set_run_mode(&SET_RUN_MODE_RETRY_BACKOFF, || async {
+            state
+                .session_client
+                .clone()
+                .set_run_mode(set_run_mode_request()?)
+                .await
+        })
+        .await
+    } else {
+        state
+            .session_client
+            .clone()
+            .set_run_mode(set_run_mode_request().map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "verified session credential is not forwardable"})),
+                )
+            })?)
+            .await
+    };
+    // The grant is on the thread in Session Core only when the write succeeded AND it stated the
+    // grant (a waived credential's did not).
+    let durably_recorded = persisted.is_ok() && !waived;
     if let Err(error) = &persisted {
-        tracing::warn!(%error, %run_id, "plan approval granted but not durably recorded");
+        if durable_grant {
+            // The status code only: the message can carry upstream text.
+            tracing::warn!(
+                code = ?error.code(),
+                %run_id,
+                "plan approval granted but the run's mode change was not recorded"
+            );
+        } else {
+            tracing::warn!(%error, %run_id, "plan approval granted but not durably recorded");
+        }
     }
+    // This replica keeps the grant in memory (keyed on the run's OWN thread, `thread_id` from
+    // GetRun above, never on a caller-supplied one) when nothing durable holds it and the
+    // reason is not a refusal: a waived credential, whose grant is never durable, or a
+    // transient failure of the write. A refusal (the caller may not, the request is invalid,
+    // the run is gone) leaves no copy: a grant Session Core refused must not be honoured here.
+    if durable_grant && !durably_recorded {
+        let keep = waived
+            || persisted
+                .as_ref()
+                .err()
+                .is_some_and(|error| crate::coordinator::set_run_mode_failure_is_transient(error.code()));
+        if keep {
+            tracing::warn!(%run_id, "plan approval not durably recorded; this replica keeps the grant in memory");
+            state.plan_mode.record_grant(
+                &claims.org_id,
+                &thread_id,
+                escalation.to(),
+                &body.plan_id,
+            );
+        }
+    }
+    // When the grant lapses. Durable: as Session Core recorded it, read back after the write
+    // (an approval is rare, so one read is cheap and the answer is the stored one, not a
+    // guess). Otherwise the in-memory store's.
+    let grant_expires_at_unix = if durable_grant {
+        if durably_recorded {
+            crate::session_flow::thread_grant(
+                &state,
+                &claims.org_id,
+                &thread_id,
+                bearer.as_str(),
+            )
+            .await
+            .ok()
+            .and_then(|grant| grant.expires_at_unix)
+        } else {
+            // Not recorded in Session Core: the expiry of the copy this replica kept.
+            state.plan_mode.grant_expires_at(&claims.org_id, &thread_id)
+        }
+    } else {
+        state.plan_mode.grant_expires_at(&claims.org_id, &thread_id)
+    };
 
     Ok(Json(json!({
         "run_id": run_id,
         "was_in_plan_mode": exited.was_active,
         "granted_rung": label(escalation.to()),
         "justification": escalation.justification(),
-        "persisted": persisted.is_ok(),
+        "persisted": durably_recorded,
         "plan": approved_plan.map(|plan| plan_value(&plan)),
         // WS14 S2a, additive: when the grant just recorded lapses (unix seconds; the
         // gateway keeps it in memory for this long and no longer), so the client can say
         // so and refuse to offer a rung that has run out. `null` when no grant is held
         // (a rung the store does not record).
-        "grant_expires_at_unix": state.plan_mode.grant_expires_at(&claims.org_id, &thread_id),
+        "grant_expires_at_unix": grant_expires_at_unix,
     })))
+}
+
+/// The `SetRunMode` an approval sends. For an ordinary credential it states the grant (rung,
+/// justification and, when grants are durable, the plan id). For a WAIVED credential it is the
+/// mode change alone: Session Core refuses a waived caller that states a grant, and that refusal
+/// would otherwise take the run's mode update down with it, so every field that only feeds the
+/// durable grant is left out here and the update proceeds as it did before durable grants.
+fn set_run_mode_request_for(
+    run_id: &str,
+    org_id: &str,
+    escalation: &mp_contracts::autonomy::AutonomyEscalation,
+    approved_plan_id: &str,
+    waived: bool,
+) -> mp_contracts::model_plane::v1::SetRunModeRequest {
+    if waived {
+        return mp_contracts::model_plane::v1::SetRunModeRequest {
+            run_id: run_id.to_owned(),
+            mode: "execute".to_owned(),
+            org_id: org_id.to_owned(),
+            granted_rung: mp_contracts::model_plane::v1::AutonomyRung::Unspecified as i32,
+            justification: String::new(),
+            approved_plan_id: String::new(),
+        };
+    }
+    mp_contracts::model_plane::v1::SetRunModeRequest {
+        run_id: run_id.to_owned(),
+        mode: "execute".to_owned(),
+        org_id: org_id.to_owned(),
+        granted_rung: escalation.to() as i32,
+        justification: escalation.justification().to_owned(),
+        // Named only when the grant is durable: off, the request is the one it always was.
+        approved_plan_id: approved_plan_id.to_owned(),
+    }
+}
+
+/// The wait before each retry of the approval's durable write (WS04 S4): the first attempt is
+/// made at once, then up to three retries after about 100, 300 and 900 ms, so a Session Core
+/// that restarts or sheds load for a moment does not strand a plan that is already APPROVED.
+/// Bounded at 1.3 s of waiting in all.
+const SET_RUN_MODE_RETRY_BACKOFF: [std::time::Duration; 3] = [
+    std::time::Duration::from_millis(100),
+    std::time::Duration::from_millis(300),
+    std::time::Duration::from_millis(900),
+];
+
+/// Whether a failed `SetRunMode` is worth another attempt: a transient condition of Session
+/// Core, never a refusal. A refusal (the caller may not, the request is invalid, the run is
+/// gone) would only be refused again, and repeating it is noise.
+fn set_run_mode_retryable(code: tonic::Code) -> bool {
+    matches!(
+        code,
+        tonic::Code::Unavailable
+            | tonic::Code::DeadlineExceeded
+            | tonic::Code::ResourceExhausted
+            | tonic::Code::Aborted
+            | tonic::Code::Internal
+            | tonic::Code::Unknown
+    )
+}
+
+/// Run `attempt`, and on a transient failure run it again after each wait in `backoff`
+/// (one retry per entry). Returns the first success, or the last failure.
+async fn retry_set_run_mode<T, F, Fut>(
+    backoff: &[std::time::Duration],
+    mut attempt: F,
+) -> Result<T, tonic::Status>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, tonic::Status>>,
+{
+    let mut waits = backoff.iter();
+    loop {
+        match attempt().await {
+            Ok(value) => return Ok(value),
+            Err(status) => match waits.next() {
+                Some(wait) if set_run_mode_retryable(status.code()) => {
+                    tokio::time::sleep(*wait).await;
+                }
+                _ => return Err(status),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -12193,5 +12389,143 @@ mod speech_route_tests {
         )
         .await;
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    }
+}
+
+/// WS04 S4 review defect 1: the retry of the approval's durable write.
+#[cfg(test)]
+mod set_run_mode_request_tests {
+    use super::set_run_mode_request_for;
+    use mp_contracts::autonomy::AutonomyEscalation;
+    use mp_contracts::model_plane::v1::AutonomyRung;
+
+    fn escalation() -> AutonomyEscalation {
+        AutonomyEscalation::request(
+            AutonomyRung::ReadOnly,
+            AutonomyRung::WorkspaceWrite,
+            "the plan writes its report into the workspace",
+        )
+        .expect("a justified escalation")
+    }
+
+    /// WS04 S4 second review, defect 1: a waived credential's approval carries the mode change
+    /// alone. Session Core refuses a waived caller that states a grant, and would refuse the
+    /// whole call, mode update included.
+    #[test]
+    fn a_waived_approval_states_the_mode_and_nothing_that_feeds_a_durable_grant() {
+        let request = set_run_mode_request_for("run-1", "org-1", &escalation(), "plan-7", true);
+        assert_eq!(request.run_id, "run-1");
+        assert_eq!(request.org_id, "org-1");
+        assert_eq!(request.mode, "execute");
+        assert_eq!(request.granted_rung, AutonomyRung::Unspecified as i32);
+        assert_eq!(request.justification, "");
+        assert_eq!(request.approved_plan_id, "");
+    }
+
+    #[test]
+    fn an_ordinary_approval_states_its_grant_and_plan() {
+        let request = set_run_mode_request_for("run-1", "org-1", &escalation(), "plan-7", false);
+        assert_eq!(request.mode, "execute");
+        assert_eq!(request.granted_rung, AutonomyRung::WorkspaceWrite as i32);
+        assert_eq!(request.justification, "the plan writes its report into the workspace");
+        assert_eq!(request.approved_plan_id, "plan-7");
+        let no_plan = set_run_mode_request_for("run-1", "org-1", &escalation(), "", false);
+        assert_eq!(no_plan.approved_plan_id, "");
+    }
+}
+
+#[cfg(test)]
+mod set_run_mode_retry_tests {
+    use super::{retry_set_run_mode, set_run_mode_retryable, SET_RUN_MODE_RETRY_BACKOFF};
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Duration,
+    };
+
+    #[test]
+    fn the_backoff_is_about_100_300_and_900_ms() {
+        assert_eq!(
+            SET_RUN_MODE_RETRY_BACKOFF,
+            [
+                Duration::from_millis(100),
+                Duration::from_millis(300),
+                Duration::from_millis(900)
+            ]
+        );
+    }
+
+    #[test]
+    fn only_a_transient_failure_is_retried() {
+        for code in [
+            tonic::Code::Unavailable,
+            tonic::Code::DeadlineExceeded,
+            tonic::Code::ResourceExhausted,
+            tonic::Code::Aborted,
+            tonic::Code::Internal,
+            tonic::Code::Unknown,
+        ] {
+            assert!(set_run_mode_retryable(code), "{code:?}");
+        }
+        for code in [
+            tonic::Code::PermissionDenied,
+            tonic::Code::Unauthenticated,
+            tonic::Code::InvalidArgument,
+            tonic::Code::NotFound,
+            tonic::Code::FailedPrecondition,
+            tonic::Code::Unimplemented,
+        ] {
+            assert!(!set_run_mode_retryable(code), "{code:?}");
+        }
+    }
+
+    /// Two transient failures then a success: three attempts, and the waits are 100 then 300 ms.
+    #[tokio::test(start_paused = true)]
+    async fn a_write_that_fails_twice_then_succeeds_is_retried_with_the_backoff() {
+        let attempts = AtomicUsize::new(0);
+        let started = tokio::time::Instant::now();
+        let result = retry_set_run_mode(&SET_RUN_MODE_RETRY_BACKOFF, || async {
+            if attempts.fetch_add(1, Ordering::SeqCst) < 2 {
+                Err(tonic::Status::unavailable("restarting"))
+            } else {
+                Ok("recorded")
+            }
+        })
+        .await;
+        assert_eq!(result.expect("the third attempt succeeds"), "recorded");
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        assert_eq!(started.elapsed(), Duration::from_millis(400));
+    }
+
+    /// A write that never succeeds is attempted four times (the first and three retries), waits
+    /// 1.3 s in all, and returns the last failure.
+    #[tokio::test(start_paused = true)]
+    async fn a_write_that_always_fails_is_bounded() {
+        let attempts = AtomicUsize::new(0);
+        let started = tokio::time::Instant::now();
+        let result: Result<(), tonic::Status> =
+            retry_set_run_mode(&SET_RUN_MODE_RETRY_BACKOFF, || async {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                Err(tonic::Status::deadline_exceeded("slow"))
+            })
+            .await;
+        assert_eq!(result.expect_err("it gives up").code(), tonic::Code::DeadlineExceeded);
+        assert_eq!(attempts.load(Ordering::SeqCst), 4);
+        assert_eq!(started.elapsed(), Duration::from_millis(1_300));
+    }
+
+    /// A refusal is attempted once and returned at once.
+    #[tokio::test(start_paused = true)]
+    async fn a_refusal_is_not_retried() {
+        let attempts = AtomicUsize::new(0);
+        let started = tokio::time::Instant::now();
+        let result: Result<(), tonic::Status> =
+            retry_set_run_mode(&SET_RUN_MODE_RETRY_BACKOFF, || async {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                Err(tonic::Status::permission_denied("not yours"))
+            })
+            .await;
+        assert_eq!(result.expect_err("refused").code(), tonic::Code::PermissionDenied);
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(started.elapsed(), Duration::ZERO);
     }
 }

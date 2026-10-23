@@ -22,6 +22,7 @@ use mp_contracts::model_plane::v1::{
     run_service_server::RunServiceServer,
     session_core_server::{SessionCore, SessionCoreServer},
     session_retention_service_server::{SessionRetentionService, SessionRetentionServiceServer},
+    thread_autonomy_server::{ThreadAutonomy, ThreadAutonomyServer},
 };
 use mp_contracts::zdr_refusal::Refusal;
 use mp_events::idempotency::derive_idempotency_hash;
@@ -48,7 +49,7 @@ use crate::terminalization;
 
 /// Standard gRPC health names registered on the unauthenticated health-only
 /// surface. Business RPCs remain independently intercepted.
-pub const HEALTH_SERVICE_NAMES: [&str; 8] = [
+pub const HEALTH_SERVICE_NAMES: [&str; 9] = [
     "model_plane.v1.SessionCore",
     "model_plane.v1.ManagedRunLifecycle",
     "model_plane.v1.OrchestrationCoreService",
@@ -57,6 +58,7 @@ pub const HEALTH_SERVICE_NAMES: [&str; 8] = [
     "model_plane.v1.RoutingPolicy",
     "model_plane.v1.RunService",
     "model_plane.v1.SessionRetentionService",
+    "model_plane.v1.ThreadAutonomy",
 ];
 
 const RUN_STARTED_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.RunStarted";
@@ -253,6 +255,9 @@ pub struct SessionService {
     /// arriving without a verifier fails closed rather than being forwarded
     /// unverified.
     auth: Option<JwtVerifier>,
+    /// Whether the thread grant columns of migration 0050 exist, checked once at boot
+    /// ([`ThreadGrantColumns::detect`]). Gates the grant write of `SetRunMode`.
+    grant_columns: ThreadGrantColumns,
 }
 
 /// Additive managed-run protocol. Keeping this service separate preserves the
@@ -2914,6 +2919,7 @@ mod list_tool_actions_wiring_tests {
             letta_memory: None,
             audit_publisher: None,
             auth: None,
+            grant_columns: crate::grpc::ThreadGrantColumns::present(),
         }
     }
 
@@ -3072,6 +3078,7 @@ mod persona_db_tests {
             letta_memory: None,
             audit_publisher: None,
             auth: None,
+            grant_columns: crate::grpc::ThreadGrantColumns::present(),
         }
     }
 
@@ -5663,6 +5670,7 @@ impl SessionCore for SessionService {
                 return Err(Status::invalid_argument("run_id and org_id are required"));
             }
             caller.authorize_org(&req.org_id)?;
+            refuse_waived_grant(&caller, req.granted_rung)?;
             authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Mutate).await?;
             let mode = match req.mode.as_str() {
                 "execute" | "plan" | "reactive" | "research" => req.mode.as_str(),
@@ -5710,29 +5718,61 @@ impl SessionCore for SessionService {
                     })
                 },
             );
+            validate_grant_plan_id(&req.approved_plan_id, grant.is_some())?;
+            // The run update and the thread's grant are ONE transaction: a grant
+            // that reached the thread without the run recording it, or the other
+            // way round, is an approval a later run reads differently depending
+            // on which replica asks.
+            let mut tx = self.pool.begin().await.map_err(|e| {
+                warn!(error = %e, "set_run_mode failed");
+                Status::internal(e.to_string())
+            })?;
             // Org-scoped UPDATE: a run is only mutable by its owning org, so a
             // caller can never flip the mode of another org's run (per-org
             // isolation invariant). A missing row ⟺ wrong org OR unknown run;
             // both surface as not_found without leaking which.
-            let row: Option<(String, String)> = sqlx::query_as(
+            let row: Option<(String, String, String)> = sqlx::query_as(
                 "UPDATE runs
                     SET mode = $2,
                         metadata = COALESCE(metadata, '{}'::jsonb) || $4::jsonb,
                         updated_at = now()
-                  WHERE id = $1 AND org_id = $3 RETURNING id, mode",
+                  WHERE id = $1 AND org_id = $3 RETURNING id, mode, thread_id",
             )
             .bind(&req.run_id)
             .bind(mode)
             .bind(&req.org_id)
             .bind(&grant_patch)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *tx)
             .await
             .map_err(|e| {
                 warn!(error = %e, "set_run_mode failed");
                 Status::internal(e.to_string())
             })?;
-            let (run_id, mode) =
+            let (run_id, mode, thread_id) =
                 row.ok_or_else(|| Status::not_found(format!("run {} not found", req.run_id)))?;
+            if let Some(grant) = grant.as_ref() {
+                if self.grant_columns.records_grants() {
+                    record_thread_grant(
+                        &mut tx,
+                        &req.org_id,
+                        &thread_id,
+                        grant,
+                        &req.approved_plan_id,
+                    )
+                    .await?;
+                } else {
+                    // The 0050 columns are not there (the revert dropped them): the run keeps
+                    // its own audit copy of the grant, and the thread keeps none. Failing the
+                    // statement would roll the run update back with it.
+                    warn!(
+                        "set_run_mode stated a grant but the thread grant columns are absent;                          the thread's copy was skipped"
+                    );
+                }
+            }
+            tx.commit().await.map_err(|e| {
+                warn!(error = %e, "set_run_mode failed");
+                Status::internal(e.to_string())
+            })?;
             Ok(Response::new(pb::SetRunModeResponse {
                 run_id,
                 mode,
@@ -7875,6 +7915,13 @@ pub async fn serve(
         letta_memory: letta_memory.clone(),
     };
     let retention = SessionRetentionGrpc { pool: pool.clone() };
+    // Checked once, here, after the migrations ran: a database whose 0050 columns were dropped
+    // (the revert) must not make every grant-bearing SetRunMode fail with a missing column.
+    let grant_columns = ThreadGrantColumns::detect(&pool).await;
+    let thread_autonomy = ThreadAutonomyGrpc {
+        pool: pool.clone(),
+        grant_columns,
+    };
 
     let session = SessionService {
         pool,
@@ -7884,6 +7931,7 @@ pub async fn serve(
         letta_memory,
         audit_publisher,
         auth: Some(auth.clone()),
+        grant_columns,
     };
 
     let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
@@ -7909,6 +7957,10 @@ pub async fn serve(
         .add_service(RoutingPolicyServer::with_interceptor(routing, auth.clone()))
         .add_service(SessionRetentionServiceServer::with_interceptor(
             retention,
+            auth.clone(),
+        ))
+        .add_service(ThreadAutonomyServer::with_interceptor(
+            thread_autonomy,
             auth.clone(),
         ))
         .add_service(RunServiceServer::with_interceptor(runs, auth))
@@ -7963,6 +8015,294 @@ impl SessionRetentionService for SessionRetentionGrpc {
         }
         .await;
         record_metrics("count_waived_runs", started, result.is_ok());
+        result
+    }
+}
+
+/// The columns migration 0050 adds to `threads`.
+const THREAD_GRANT_COLUMN_NAMES: [&str; 5] = [
+    "granted_rung",
+    "granted_justification",
+    "granted_plan_id",
+    "granted_at",
+    "granted_expires_at",
+];
+
+/// The thread read with the grant columns, and the same read without them.
+const THREAD_GRANT_SELECT: &str = "SELECT org_id, user_id, COALESCE(space_id, ''),
+                        granted_rung, granted_justification, granted_plan_id, granted_expires_at
+                   FROM threads WHERE id = $1";
+const THREAD_GRANT_SELECT_WITHOUT_COLUMNS: &str = "SELECT org_id, user_id, COALESCE(space_id, ''),
+                        NULL::text, NULL::text, NULL::text, NULL::timestamptz
+                   FROM threads WHERE id = $1";
+
+/// Whether the thread grant columns of migration 0050 exist in this database.
+///
+/// Decided once when session-core starts ([`ThreadGrantColumns::detect`]), because the
+/// documented revert of 0050 drops them while this service may be running a build that
+/// writes them. Without the gate every grant-bearing `SetRunMode` would fail with "column
+/// granted_rung does not exist", and the run update that shares its transaction would roll
+/// back with it; `GetThreadGrant` would fail too. With it, a stated grant is skipped with a
+/// warning (the run update proceeds) and the read answers "no grant" without naming the
+/// columns. The check runs at boot, so the revert is: turn the gateway flag off, drop the
+/// columns, restart session-core.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ThreadGrantColumns {
+    present: bool,
+}
+
+impl ThreadGrantColumns {
+    /// The columns exist (a database migrated through 0050, the normal case).
+    #[must_use]
+    pub const fn present() -> Self {
+        Self { present: true }
+    }
+
+    /// The columns do not exist (0050 reverted).
+    #[must_use]
+    pub const fn absent() -> Self {
+        Self { present: false }
+    }
+
+    /// The answer for `found` of the five columns being in the table. All five or none of the
+    /// gate: a partly reverted table is not one this build can write a grant to.
+    #[must_use]
+    pub const fn from_found(found: i64) -> Self {
+        if found == THREAD_GRANT_COLUMN_NAMES.len() as i64 {
+            Self::present()
+        } else {
+            Self::absent()
+        }
+    }
+
+    /// Whether a stated grant is written to the thread.
+    #[must_use]
+    pub const fn records_grants(self) -> bool {
+        self.present
+    }
+
+    /// The thread read for `GetThreadGrant`: it never names a column that is not there.
+    #[must_use]
+    pub const fn thread_grant_select(self) -> &'static str {
+        if self.present {
+            THREAD_GRANT_SELECT
+        } else {
+            THREAD_GRANT_SELECT_WITHOUT_COLUMNS
+        }
+    }
+
+    /// Look the columns up in `information_schema`, in `schema` or, with `None`, in the
+    /// connection's current schema. A lookup that fails answers "present": the behaviour of
+    /// every earlier build, which fails loudly where a guess of "absent" would drop grants
+    /// silently.
+    pub async fn detect_in(pool: &PgPool, schema: Option<&str>) -> Self {
+        let names: Vec<String> = THREAD_GRANT_COLUMN_NAMES
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect();
+        let found: Result<i64, sqlx::Error> = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM information_schema.columns
+              WHERE table_schema = COALESCE($2::text, current_schema())
+                AND table_name = 'threads'
+                AND column_name::text = ANY($1::text[])",
+        )
+        .bind(&names)
+        .bind(schema)
+        .fetch_one(pool)
+        .await;
+        match found {
+            Ok(found) => {
+                let columns = Self::from_found(found);
+                if !columns.present {
+                    warn!(
+                        found,
+                        "the thread grant columns of migration 0050 are absent: plan grants are \
+                         not recorded on threads and GetThreadGrant answers no grant"
+                    );
+                }
+                columns
+            }
+            Err(error) => {
+                warn!(%error, "could not look up the thread grant columns; assuming they exist");
+                Self::present()
+            }
+        }
+    }
+
+    /// [`detect_in`](Self::detect_in) for the connection's current schema: the boot check.
+    pub async fn detect(pool: &PgPool) -> Self {
+        Self::detect_in(pool, None).await
+    }
+}
+
+/// A grant is a durable record on the thread (rung, free-text justification, plan id): it is
+/// refused for a zero-retention credential by the `session:write` gate before this runs, and
+/// refused here for a WAIVED credential, which passes that gate (a persistent token of a ZDR
+/// org with `zdr` false and a waiver). A mode change that states no grant is not refused here.
+/// The same refusal and status as `record_run_context`.
+#[allow(clippy::result_large_err)]
+fn refuse_waived_grant(caller: &VerifiedIdentity, granted_rung: i32) -> Result<(), Status> {
+    let stated = pb::AutonomyRung::try_from(granted_rung)
+        .map_or(false, |rung| rung != pb::AutonomyRung::Unspecified);
+    if stated && caller.zdr_waiver().is_some() {
+        return Err(Refusal::DURABLE_MUTATION_FORBIDDEN.grpc_status(tonic::Code::FailedPrecondition));
+    }
+    Ok(())
+}
+
+/// How long a plan grant is good for on its thread. The gateway's in-memory grants
+/// last the same (`MAX_PLAN_TTL_SECS` in model-gateway's coordinator), so reading the
+/// durable grant does not change how long an approval authorizes.
+const THREAD_GRANT_TTL_SECS: i64 = 86_400;
+
+/// Longest plan id a grant records. Plan ids are short generated ids; the bound is
+/// the same one every id column of this service is held to.
+const MAX_GRANT_PLAN_ID_BYTES: usize = 256;
+
+/// The plan a grant names, checked before anything is written. An id with no grant is
+/// refused: a plan alone authorizes nothing, and recording one would make a later reader
+/// believe an approval happened.
+#[allow(clippy::result_large_err)]
+fn validate_grant_plan_id(plan_id: &str, grant_stated: bool) -> Result<(), Status> {
+    if plan_id.is_empty() {
+        return Ok(());
+    }
+    if !grant_stated {
+        return Err(Status::invalid_argument(
+            "approved_plan_id needs granted_rung: a plan alone grants nothing",
+        ));
+    }
+    if plan_id.len() > MAX_GRANT_PLAN_ID_BYTES || plan_id.chars().any(char::is_control) {
+        return Err(Status::invalid_argument("approved_plan_id is not a valid plan id"));
+    }
+    Ok(())
+}
+
+/// Record an approved grant on its thread, inside the caller's transaction. The newest
+/// approval replaces the previous one, exactly as the gateway's in-memory grant did, and
+/// the expiry is counted from now by the database clock. Org-scoped: a thread of another
+/// org matches nothing.
+#[allow(clippy::result_large_err)]
+async fn record_thread_grant(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    org_id: &str,
+    thread_id: &str,
+    grant: &mp_contracts::autonomy::AutonomyEscalation,
+    plan_id: &str,
+) -> Result<(), Status> {
+    let updated = sqlx::query(
+        "UPDATE threads
+            SET granted_rung = $3,
+                granted_justification = $4,
+                granted_plan_id = $5,
+                granted_at = now(),
+                granted_expires_at = now() + ($6::bigint * interval '1 second')
+          WHERE id = $1 AND org_id = $2",
+    )
+    .bind(thread_id)
+    .bind(org_id)
+    .bind(mp_contracts::autonomy::label(grant.to()))
+    .bind(grant.justification())
+    .bind(plan_id)
+    .bind(THREAD_GRANT_TTL_SECS)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| {
+        warn!(error = %e, "record_thread_grant failed");
+        Status::internal(e.to_string())
+    })?;
+    if updated.rows_affected() == 0 {
+        return Err(Status::not_found("thread not found"));
+    }
+    Ok(())
+}
+
+/// The grant columns of a thread row, as stored.
+struct StoredThreadGrant {
+    rung: Option<String>,
+    justification: Option<String>,
+    plan_id: Option<String>,
+    expires_at: Option<DateTime<Utc>>,
+}
+
+/// What a thread's stored grant answers at `now`: the live grant, or UNSPECIFIED with
+/// nothing else set. A lapsed grant, a thread that never had one and a label this build
+/// does not know all answer "no grant": the last fails closed, it never invents a rung.
+fn live_thread_grant(stored: StoredThreadGrant, now: DateTime<Utc>) -> pb::GetThreadGrantResponse {
+    let rung = stored
+        .rung
+        .as_deref()
+        .and_then(mp_contracts::autonomy::rung_from_keyword)
+        .filter(|rung| *rung != pb::AutonomyRung::Unspecified);
+    match (rung, stored.expires_at) {
+        (Some(rung), Some(expires_at)) if expires_at > now => pb::GetThreadGrantResponse {
+            granted_rung: rung as i32,
+            justification: stored.justification.unwrap_or_default(),
+            approved_plan_id: stored.plan_id.unwrap_or_default(),
+            expires_at: Some(to_proto_timestamp(expires_at)),
+        },
+        _ => pb::GetThreadGrantResponse::default(),
+    }
+}
+
+/// `ThreadAutonomy`: the read half of the durable plan grant. Served behind the verifying
+/// interceptor like every service here, and beside `SessionCore` so that trait and its
+/// mocks are unchanged. The write half is `SetRunMode`.
+pub struct ThreadAutonomyGrpc {
+    pool: PgPool,
+    /// Checked once at boot ([`ThreadGrantColumns::detect`]): without the columns the read
+    /// answers "no grant" and never names them.
+    grant_columns: ThreadGrantColumns,
+}
+
+#[tonic::async_trait]
+impl ThreadAutonomy for ThreadAutonomyGrpc {
+    async fn get_thread_grant(
+        &self,
+        request: Request<pb::GetThreadGrantRequest>,
+    ) -> Result<Response<pb::GetThreadGrantResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<pb::GetThreadGrantResponse>, Status> = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "session:read")?;
+            let req = request.into_inner();
+            if req.thread_id.is_empty() || req.org_id.is_empty() {
+                return Err(Status::invalid_argument("thread_id and org_id are required"));
+            }
+            caller.authorize_org(&req.org_id)?;
+            // One read serves both the ownership check and the answer. A thread of
+            // another org is refused by the org check below before any grant is shown.
+            let row: Option<(
+                String,
+                String,
+                String,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<DateTime<Utc>>,
+            )> = sqlx::query_as(self.grant_columns.thread_grant_select())
+            .bind(&req.thread_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "get_thread_grant failed");
+                Status::internal(e.to_string())
+            })?;
+            let (org_id, user_id, space_id, rung, justification, plan_id, expires_at) =
+                row.ok_or_else(|| Status::not_found("thread not found"))?;
+            authorize_thread_owner_row(&caller, &org_id, &user_id, &space_id, OwnerIntent::Read)?;
+            Ok(Response::new(live_thread_grant(
+                StoredThreadGrant {
+                    rung,
+                    justification,
+                    plan_id,
+                    expires_at,
+                },
+                Utc::now(),
+            )))
+        }
+        .await;
+        record_metrics("get_thread_grant", started, result.is_ok());
         result
     }
 }
@@ -9572,6 +9912,7 @@ mod tests {
                 "model_plane.v1.RoutingPolicy",
                 "model_plane.v1.RunService",
                 "model_plane.v1.SessionRetentionService",
+                "model_plane.v1.ThreadAutonomy",
             ]
         );
     }
@@ -10050,6 +10391,7 @@ mod tests {
             letta_memory: None,
             audit_publisher: None,
             auth: None,
+            grant_columns: crate::grpc::ThreadGrantColumns::present(),
         };
         let status = pb::RunContextStatus {
             instructions: Some(pb::RunContextPart { state: pb::RunContextState::Included as i32, included: 1, omitted: 0, reason: String::new() }),
@@ -10121,6 +10463,7 @@ mod tests {
                     org_id: org.to_owned(),
                     granted_rung: 0,
                     justification: String::new(),
+                    approved_plan_id: String::new(),
                 },
             ))
             .await
@@ -10137,6 +10480,7 @@ mod tests {
                     org_id: org.to_owned(),
                     granted_rung: 0,
                     justification: String::new(),
+                    approved_plan_id: String::new(),
                 },
             ))
             .await
@@ -10153,6 +10497,7 @@ mod tests {
                     org_id: attacker.clone(),
                     granted_rung: 0,
                     justification: String::new(),
+                    approved_plan_id: String::new(),
                 },
             ))
             .await;
@@ -10170,6 +10515,537 @@ mod tests {
             persisted.0, "plan",
             "cross-org attempt must not mutate the run"
         );
+    }
+
+    // ---- build plan WS04 S4: the durable plan grant ----
+
+    /// A plan id is only ever recorded WITH a grant, and only a sane one.
+    #[test]
+    fn a_plan_id_needs_a_stated_grant_and_a_sane_shape() {
+        use super::validate_grant_plan_id;
+        assert!(validate_grant_plan_id("", false).is_ok(), "no plan, no grant: an ordinary mode change");
+        assert!(validate_grant_plan_id("", true).is_ok(), "a grant without a plan is a plain approval");
+        assert!(validate_grant_plan_id("plan-1", true).is_ok());
+        assert_eq!(
+            validate_grant_plan_id("plan-1", false)
+                .expect_err("a plan alone grants nothing")
+                .code(),
+            tonic::Code::InvalidArgument
+        );
+        assert!(validate_grant_plan_id(&"p".repeat(257), true).is_err(), "too long");
+        assert!(validate_grant_plan_id("plan\n1", true).is_err(), "control characters");
+    }
+
+    fn stored_grant(
+        rung: Option<&str>,
+        expires_in_secs: Option<i64>,
+        now: DateTime<Utc>,
+    ) -> super::StoredThreadGrant {
+        super::StoredThreadGrant {
+            rung: rung.map(str::to_owned),
+            justification: Some("writes the report".to_owned()),
+            plan_id: Some("plan-7".to_owned()),
+            expires_at: expires_in_secs.map(|secs| now + chrono::Duration::seconds(secs)),
+        }
+    }
+
+    /// What a thread answers: the live grant in full, and "no grant" (UNSPECIFIED, nothing
+    /// else set) for a grant that has lapsed, one never made, and a label this build does not
+    /// know. The last never invents a rung.
+    #[test]
+    fn a_live_grant_reads_back_and_a_lapsed_or_absent_one_is_no_grant() {
+        use super::live_thread_grant;
+        let now = Utc::now();
+        let live = live_thread_grant(stored_grant(Some("workspace_write"), Some(60), now), now);
+        assert_eq!(live.granted_rung, pb::AutonomyRung::WorkspaceWrite as i32);
+        assert_eq!(live.justification, "writes the report");
+        assert_eq!(live.approved_plan_id, "plan-7");
+        assert!(live.expires_at.is_some());
+
+        let none = pb::GetThreadGrantResponse::default();
+        for stored in [
+            stored_grant(Some("workspace_write"), Some(-1), now),
+            stored_grant(Some("workspace_write"), Some(0), now),
+            stored_grant(Some("workspace_write"), None, now),
+            stored_grant(None, Some(60), now),
+            stored_grant(Some("unspecified"), Some(60), now),
+            stored_grant(Some("root"), Some(60), now),
+        ] {
+            assert_eq!(live_thread_grant(stored, now), none);
+        }
+        assert_eq!(
+            live_thread_grant(stored_grant(Some("danger_full_access"), Some(60), now), now)
+                .granted_rung,
+            pb::AutonomyRung::DangerFullAccess as i32
+        );
+    }
+
+    /// `set_run_mode` passes this check before it writes anything, so a zero-retention
+    /// turn records neither the run's grant nor the thread's.
+    #[test]
+    fn a_zdr_credential_cannot_record_a_grant() {
+        let zdr = VerifiedIdentity::user_for_test_with_zdr("org-1", "user-1", true);
+        assert_eq!(
+            crate::auth::authorize_operation(&zdr, "session:write")
+                .expect_err("set_run_mode is gated by this check before it writes anything")
+                .code(),
+            tonic::Code::FailedPrecondition
+        );
+    }
+
+    /// WS04 S4 review defect 4: a WAIVED credential (a persistent token of a ZDR org with `zdr`
+    /// false and a waiver) passes `session:write`, so the grant refusal has to be its own: a
+    /// grant is a durable record (rung, free-text justification, plan id) on the thread.
+    #[test]
+    fn a_waived_credential_is_refused_a_stated_grant_and_only_a_stated_grant() {
+        use super::refuse_waived_grant;
+        let waived = VerifiedIdentity::user_for_test_with_waiver("org-1", "user-1", "conn-1", "ack-1");
+        assert!(
+            crate::auth::authorize_operation(&waived, "session:write").is_ok(),
+            "the session:write gate does not stop a waived credential: this check has to"
+        );
+        for rung in [
+            pb::AutonomyRung::ReadOnly,
+            pb::AutonomyRung::WorkspaceWrite,
+            pb::AutonomyRung::DangerFullAccess,
+        ] {
+            let error = refuse_waived_grant(&waived, rung as i32)
+                .expect_err("a waived credential records no grant");
+            assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+            assert_eq!(
+                mp_contracts::zdr_refusal::Refusal::from_status(&error).map(|refusal| refusal.code()),
+                Some(mp_contracts::zdr_refusal::code::DURABLE_MUTATION_FORBIDDEN)
+            );
+        }
+        // No grant stated (an ordinary mode change, or a rung this build cannot name) is not a
+        // grant: not refused here.
+        for rung in [pb::AutonomyRung::Unspecified as i32, 99, -1] {
+            assert!(refuse_waived_grant(&waived, rung).is_ok(), "rung {rung}");
+        }
+        // An ordinary credential is never refused by this check.
+        let ordinary = VerifiedIdentity::user_for_test("org-1", "user-1");
+        assert!(refuse_waived_grant(&ordinary, pb::AutonomyRung::WorkspaceWrite as i32).is_ok());
+    }
+
+    /// The same refusal through the handler: it comes before the run lookup, so a waived
+    /// credential that states a grant is refused without touching the database.
+    #[tokio::test]
+    async fn set_run_mode_refuses_a_waived_credential_that_states_a_grant() {
+        use mp_contracts::model_plane::v1::session_core_server::SessionCore;
+        let svc = lazy_test_service();
+        let mut request = Request::new(pb::SetRunModeRequest {
+            run_id: "run-1".into(),
+            mode: "execute".into(),
+            org_id: "org-1".into(),
+            granted_rung: pb::AutonomyRung::WorkspaceWrite as i32,
+            justification: "writes the report into the workspace".into(),
+            approved_plan_id: "plan-1".into(),
+        });
+        request.extensions_mut().insert(VerifiedIdentity::user_for_test_with_waiver(
+            "org-1", "user-1", "conn-1", "ack-1",
+        ));
+        let error = svc.set_run_mode(request).await.expect_err("a waived credential records no grant");
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(
+            mp_contracts::zdr_refusal::Refusal::from_status(&error).map(|refusal| refusal.code()),
+            Some(mp_contracts::zdr_refusal::code::DURABLE_MUTATION_FORBIDDEN)
+        );
+    }
+
+    /// WS04 S4 review defect 2: the gate on the thread grant columns. Present, a stated grant
+    /// is written and the read names the columns; absent (0050 reverted), the write is skipped
+    /// and the read never names a column that is not there, so it answers "no grant" instead of
+    /// failing the statement (and, for the write, rolling the run update back with it).
+    #[test]
+    fn the_grant_columns_gate_decides_the_write_and_the_read() {
+        use super::{ThreadGrantColumns, THREAD_GRANT_COLUMN_NAMES};
+        let present = ThreadGrantColumns::present();
+        let absent = ThreadGrantColumns::absent();
+        assert!(present.records_grants());
+        assert!(!absent.records_grants());
+
+        // All five columns, or the gate is shut: a partly reverted table is not writable.
+        assert_eq!(ThreadGrantColumns::from_found(5), present);
+        for found in [0, 1, 4, 6] {
+            assert_eq!(ThreadGrantColumns::from_found(found), absent, "{found} columns found");
+        }
+
+        for column in THREAD_GRANT_COLUMN_NAMES {
+            assert!(
+                present.thread_grant_select().contains(column) || column == "granted_at",
+                "{column}"
+            );
+            assert!(
+                !absent.thread_grant_select().contains(column),
+                "the read without the columns never names {column}"
+            );
+        }
+        // The two reads answer the same shape, so the handler maps either one.
+        assert_eq!(
+            present.thread_grant_select().matches(',').count(),
+            absent.thread_grant_select().matches(',').count()
+        );
+        // Without the columns the stored row is "never had a grant": the read answers no grant.
+        let none = super::live_thread_grant(
+            super::StoredThreadGrant {
+                rung: None,
+                justification: None,
+                plan_id: None,
+                expires_at: None,
+            },
+            Utc::now(),
+        );
+        assert_eq!(none, pb::GetThreadGrantResponse::default());
+    }
+
+    /// DB-gated: the gate against a database that really has no `granted_*` columns. A scratch
+    /// schema holds a `threads` table without them, so nothing in the real tables is dropped.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn the_column_check_finds_the_columns_where_they_are_and_not_where_they_are_not() {
+        use super::ThreadGrantColumns;
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations").run(&pool).await.expect("migrate");
+        assert_eq!(
+            ThreadGrantColumns::detect(&pool).await,
+            ThreadGrantColumns::present(),
+            "a database migrated through 0050 has the columns"
+        );
+        let scratch = format!("grant_cols_{}", std::process::id());
+        sqlx::query(&format!("CREATE SCHEMA {scratch}")).execute(&pool).await.expect("schema");
+        sqlx::query(&format!("CREATE TABLE {scratch}.threads (id TEXT PRIMARY KEY)"))
+            .execute(&pool)
+            .await
+            .expect("table");
+        let without = ThreadGrantColumns::detect_in(&pool, Some(&scratch)).await;
+        sqlx::query(&format!("DROP SCHEMA {scratch} CASCADE")).execute(&pool).await.expect("drop");
+        assert_eq!(without, ThreadGrantColumns::absent(), "a threads table without the columns");
+    }
+
+    /// DB-gated: SetRunMode and GetThreadGrant with the gate shut, against a database that has
+    /// the columns (the gate is what is under test, so the columns stay and are checked). The
+    /// run update proceeds (mode and the run's own audit copy), the thread keeps no grant, and
+    /// the read answers "no grant" even for a grant row written directly. A waived credential
+    /// that states a grant changes nothing either.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    #[allow(clippy::too_many_lines)]
+    async fn set_run_mode_without_the_grant_columns_still_updates_the_run_against_real_pg() {
+        use super::{SessionService, ThreadAutonomyGrpc, ThreadGrantColumns};
+        use mp_contracts::model_plane::v1::session_core_server::SessionCore;
+        use mp_contracts::model_plane::v1::thread_autonomy_server::ThreadAutonomy;
+
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations").run(&pool).await.expect("migrate");
+        let sfx = format!("nocol-{}", std::process::id());
+        let (thread_id, run_id, org) = (format!("t-{sfx}"), format!("r-{sfx}"), format!("org-{sfx}"));
+        sqlx::query("INSERT INTO threads (id,session_key,org_id,user_id) VALUES ($1,$1,$2,'u1')")
+            .bind(&thread_id).bind(&org).execute(&pool).await.expect("seed thread");
+        sqlx::query("INSERT INTO runs (id,thread_id,goal,org_id,user_id) VALUES ($1,$2,'g',$3,'u1')")
+            .bind(&run_id).bind(&thread_id).bind(&org).execute(&pool).await.expect("seed run");
+        let svc = SessionService {
+            pool: pool.clone(),
+            retrieval_client: None,
+            graph_client: None,
+            knowledge_client: None,
+            letta_memory: None,
+            audit_publisher: None,
+            auth: None,
+            grant_columns: ThreadGrantColumns::absent(),
+        };
+        let approve = |user: &str| {
+            as_user(
+                &org,
+                user,
+                pb::SetRunModeRequest {
+                    run_id: run_id.clone(),
+                    mode: "execute".into(),
+                    org_id: org.clone(),
+                    granted_rung: pb::AutonomyRung::WorkspaceWrite as i32,
+                    justification: "writes the report into the workspace".into(),
+                    approved_plan_id: "plan-1".into(),
+                },
+            )
+        };
+        let response = svc.set_run_mode(approve("u1")).await.expect("the run update proceeds").into_inner();
+        assert_eq!(response.mode, "execute");
+        let (mode, rung): (String, Option<String>) = sqlx::query_as(
+            "SELECT r.mode, t.granted_rung FROM runs r JOIN threads t ON t.id = r.thread_id WHERE r.id = $1",
+        )
+        .bind(&run_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read back");
+        assert_eq!(mode, "execute", "the run update was not rolled back");
+        assert_eq!(rung, None, "the thread recorded no grant while the gate was shut");
+        let (audit,): (Option<String>,) =
+            sqlx::query_as("SELECT metadata->>'autonomy_rung' FROM runs WHERE id = $1")
+                .bind(&run_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read metadata");
+        assert_eq!(audit.as_deref(), Some("workspace_write"), "the run keeps its own audit copy");
+
+        // A grant row that exists is not read while the gate is shut.
+        sqlx::query(
+            "UPDATE threads SET granted_rung='danger_full_access', granted_justification='x',
+                    granted_plan_id='p', granted_at=now(), granted_expires_at=now()+interval '1 hour'
+              WHERE id=$1",
+        )
+        .bind(&thread_id)
+        .execute(&pool)
+        .await
+        .expect("plant a grant row");
+        let reader = ThreadAutonomyGrpc { pool: pool.clone(), grant_columns: ThreadGrantColumns::absent() };
+        let read = reader
+            .get_thread_grant(as_user(
+                &org,
+                "u1",
+                pb::GetThreadGrantRequest { thread_id: thread_id.clone(), org_id: org.clone() },
+            ))
+            .await
+            .expect("the read answers without naming the columns")
+            .into_inner();
+        assert_eq!(read.granted_rung, pb::AutonomyRung::Unspecified as i32);
+        // The ownership check still applies with the gate shut.
+        let stranger = reader
+            .get_thread_grant(as_user(
+                &org,
+                "u2",
+                pb::GetThreadGrantRequest { thread_id: thread_id.clone(), org_id: org.clone() },
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(stranger.code(), tonic::Code::PermissionDenied);
+
+        // Defect 4: a waived credential that states a grant is refused, with the gate open too.
+        let open = SessionService { grant_columns: ThreadGrantColumns::present(), ..svc };
+        let mut waived = approve("u1");
+        waived
+            .extensions_mut()
+            .insert(VerifiedIdentity::user_for_test_with_waiver(&org, "u1", "conn-1", "ack-1"));
+        assert_eq!(
+            open.set_run_mode(waived).await.unwrap_err().code(),
+            tonic::Code::FailedPrecondition,
+            "a waived credential records no grant"
+        );
+        let (justification,): (Option<String>,) =
+            sqlx::query_as("SELECT granted_justification FROM threads WHERE id = $1")
+                .bind(&thread_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read thread");
+        assert_eq!(justification.as_deref(), Some("x"), "the refused waived call wrote nothing");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    #[allow(clippy::too_many_lines)]
+    async fn the_plan_grant_is_written_with_the_approval_and_read_back_against_real_pg() {
+        use super::{SessionService, ThreadAutonomyGrpc};
+        use mp_contracts::model_plane::v1::session_core_server::SessionCore;
+        use mp_contracts::model_plane::v1::thread_autonomy_server::ThreadAutonomy;
+
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+
+        let sfx = format!("grant-{}", std::process::id());
+        let (thread_id, other_thread, run_id, org) = (
+            format!("t-{sfx}"),
+            format!("t2-{sfx}"),
+            format!("r-{sfx}"),
+            format!("org-{sfx}"),
+        );
+        for id in [&thread_id, &other_thread] {
+            sqlx::query(
+                "INSERT INTO threads (id,session_key,org_id,user_id) VALUES ($1,$1,$2,'u1')",
+            )
+            .bind(id)
+            .bind(&org)
+            .execute(&pool)
+            .await
+            .expect("seed thread");
+        }
+        sqlx::query(
+            "INSERT INTO runs (id,thread_id,goal,org_id,user_id,mode) VALUES ($1,$2,'g',$3,'u1','plan')",
+        )
+        .bind(&run_id)
+        .bind(&thread_id)
+        .bind(&org)
+        .execute(&pool)
+        .await
+        .expect("seed run");
+
+        let svc = SessionService {
+            pool: pool.clone(),
+            retrieval_client: None,
+            graph_client: None,
+            knowledge_client: None,
+            letta_memory: None,
+            audit_publisher: None,
+            auth: None,
+            grant_columns: crate::grpc::ThreadGrantColumns::present(),
+        };
+        let reader = ThreadAutonomyGrpc {
+            pool: pool.clone(),
+            grant_columns: super::ThreadGrantColumns::present(),
+        };
+        let read = |org_id: &str, user: &str, request_org: &str, thread: &str| {
+            reader.get_thread_grant(as_user(
+                org_id,
+                user,
+                pb::GetThreadGrantRequest {
+                    thread_id: thread.to_owned(),
+                    org_id: request_org.to_owned(),
+                },
+            ))
+        };
+        let approve = |plan_id: &str, rung: pb::AutonomyRung| {
+            svc.set_run_mode(as_user(
+                &org,
+                "u1",
+                pb::SetRunModeRequest {
+                    run_id: run_id.clone(),
+                    mode: "execute".into(),
+                    org_id: org.clone(),
+                    granted_rung: rung as i32,
+                    justification: "writes the report into the workspace".into(),
+                    approved_plan_id: plan_id.to_owned(),
+                },
+            ))
+        };
+
+        // Nothing granted yet: "no grant" is an answer, not an error.
+        let before = read(&org, "u1", &org, &thread_id).await.expect("read").into_inner();
+        assert_eq!(before.granted_rung, pb::AutonomyRung::Unspecified as i32);
+
+        // A plan id without a grant is a malformed ask and writes nothing.
+        let malformed = approve("plan-1", pb::AutonomyRung::Unspecified).await;
+        assert_eq!(malformed.unwrap_err().code(), tonic::Code::InvalidArgument);
+        let still = read(&org, "u1", &org, &thread_id).await.expect("read").into_inner();
+        assert_eq!(still.granted_rung, pb::AutonomyRung::Unspecified as i32);
+
+        // The approval writes the run and the thread together.
+        let resp = approve("plan-1", pb::AutonomyRung::WorkspaceWrite)
+            .await
+            .expect("approve")
+            .into_inner();
+        assert_eq!(resp.mode, "execute");
+        let grant = read(&org, "u1", &org, &thread_id).await.expect("read").into_inner();
+        assert_eq!(grant.granted_rung, pb::AutonomyRung::WorkspaceWrite as i32);
+        assert_eq!(grant.justification, "writes the report into the workspace");
+        assert_eq!(grant.approved_plan_id, "plan-1");
+        let expires = grant.expires_at.expect("a live grant says when it lapses").seconds;
+        let now = Utc::now().timestamp();
+        assert!(
+            expires > now && expires <= now + 86_400 + 5,
+            "the expiry is the 24 hour ceiling from now: {expires} vs {now}"
+        );
+        let (run_rung,): (Option<String>,) =
+            sqlx::query_as("SELECT metadata->>'autonomy_rung' FROM runs WHERE id = $1")
+                .bind(&run_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read run");
+        assert_eq!(run_rung.as_deref(), Some("workspace_write"), "the run keeps its own copy");
+
+        // Another thread of the same owner holds nothing: the grant is the thread's.
+        let elsewhere = read(&org, "u1", &org, &other_thread).await.expect("read").into_inner();
+        assert_eq!(elsewhere.granted_rung, pb::AutonomyRung::Unspecified as i32);
+
+        // A newer approval replaces the older one, plan and rung.
+        approve("", pb::AutonomyRung::DangerFullAccess).await.expect("re-approve");
+        let newer = read(&org, "u1", &org, &thread_id).await.expect("read").into_inner();
+        assert_eq!(newer.granted_rung, pb::AutonomyRung::DangerFullAccess as i32);
+        assert_eq!(newer.approved_plan_id, "", "a plain approval carries no plan");
+
+        // Reads are refused for another org (named or forged) and for another user.
+        let attacker = format!("attacker-{sfx}");
+        assert_eq!(
+            read(&attacker, "u1", &attacker, &thread_id).await.unwrap_err().code(),
+            tonic::Code::PermissionDenied,
+            "another org's caller cannot read this thread's grant"
+        );
+        assert_eq!(
+            read(&attacker, "u1", &org, &thread_id).await.unwrap_err().code(),
+            tonic::Code::PermissionDenied,
+            "a request that names this org with another org's credential is refused"
+        );
+        assert_eq!(
+            read(&org, "u2", &org, &thread_id).await.unwrap_err().code(),
+            tonic::Code::PermissionDenied,
+            "another user of the same org does not own the thread"
+        );
+        assert_eq!(
+            read(&org, "u1", &org, "no-such-thread").await.unwrap_err().code(),
+            tonic::Code::NotFound
+        );
+
+        // A grant past its expiry is no grant.
+        sqlx::query("UPDATE threads SET granted_expires_at = now() - interval '1 second' WHERE id = $1")
+            .bind(&thread_id)
+            .execute(&pool)
+            .await
+            .expect("lapse the grant");
+        let lapsed = read(&org, "u1", &org, &thread_id).await.expect("read").into_inner();
+        assert_eq!(lapsed.granted_rung, pb::AutonomyRung::Unspecified as i32);
+        assert!(lapsed.expires_at.is_none());
+
+        // A grant for a run of another org changes nothing, and neither does a ZDR credential.
+        let foreign = svc
+            .set_run_mode(as_user(
+                &attacker,
+                "u1",
+                pb::SetRunModeRequest {
+                    run_id: run_id.clone(),
+                    mode: "execute".into(),
+                    org_id: attacker.clone(),
+                    granted_rung: pb::AutonomyRung::DangerFullAccess as i32,
+                    justification: "forged".into(),
+                    approved_plan_id: "plan-forged".into(),
+                },
+            ))
+            .await;
+        assert_eq!(foreign.unwrap_err().code(), tonic::Code::PermissionDenied);
+        let mut zdr_request = Request::new(pb::SetRunModeRequest {
+            run_id: run_id.clone(),
+            mode: "execute".into(),
+            org_id: org.clone(),
+            granted_rung: pb::AutonomyRung::DangerFullAccess as i32,
+            justification: "from a zdr turn".into(),
+            approved_plan_id: "plan-zdr".into(),
+        });
+        zdr_request
+            .extensions_mut()
+            .insert(VerifiedIdentity::user_for_test_with_zdr(&org, "u1", true));
+        assert_eq!(
+            svc.set_run_mode(zdr_request).await.unwrap_err().code(),
+            tonic::Code::FailedPrecondition,
+            "a zero-retention credential records no grant"
+        );
+        let (rung, plan): (Option<String>, Option<String>) =
+            sqlx::query_as("SELECT granted_rung, granted_plan_id FROM threads WHERE id = $1")
+                .bind(&thread_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read thread");
+        assert_eq!(rung.as_deref(), Some("danger_full_access"), "only the owner's approval was recorded");
+        assert_eq!(plan.as_deref(), Some(""), "and the refused ones left no plan id behind");
     }
 
     // G7 — fresh background_review insert succeeds; a background_review overwrite
@@ -10264,6 +11140,7 @@ mod tests {
             letta_memory: None,
             audit_publisher: None,
             auth: None,
+            grant_columns: crate::grpc::ThreadGrantColumns::present(),
         };
 
         assert_set_run_mode_isolation(&svc, &pool, &run_id, &org, sfx).await;
@@ -10824,6 +11701,7 @@ mod tests {
             letta_memory: None,
             audit_publisher: None,
             auth: None,
+            grant_columns: crate::grpc::ThreadGrantColumns::present(),
         };
 
         let mut cross_request = Request::new(pb::DeleteThreadRequest {
@@ -10977,6 +11855,7 @@ mod tests {
             letta_memory: None,
             audit_publisher: None,
             auth: None,
+            grant_columns: crate::grpc::ThreadGrantColumns::present(),
         };
         let mut request = Request::new(pb::DeleteSpaceThreadsRequest {
             org_id: org_id.clone(),
@@ -11034,6 +11913,7 @@ mod tests {
             letta_memory: None,
             audit_publisher: None,
             auth: None,
+            grant_columns: crate::grpc::ThreadGrantColumns::present(),
         };
         let mut request = Request::new(pb::DeleteSpaceThreadsRequest {
             org_id: "org-b".to_owned(),
@@ -11087,6 +11967,7 @@ mod tests {
             letta_memory: None,
             audit_publisher: None,
             auth: None,
+            grant_columns: crate::grpc::ThreadGrantColumns::present(),
         };
 
         // The fixture decision is minted for org-1 / user-1 / space-room, the
@@ -11256,6 +12137,7 @@ mod tests {
             letta_memory: None,
             audit_publisher: None,
             auth: None,
+            grant_columns: crate::grpc::ThreadGrantColumns::present(),
         }
     }
 
@@ -11795,6 +12677,7 @@ mod tests {
             letta_memory: None,
             audit_publisher: None,
             auth: None,
+            grant_columns: crate::grpc::ThreadGrantColumns::present(),
         };
         let session_key = format!("chat/{}", super::new_ulid());
         let build_request = || {
@@ -11876,6 +12759,7 @@ mod tests {
             letta_memory: None,
             audit_publisher: None,
             auth: None,
+            grant_columns: crate::grpc::ThreadGrantColumns::present(),
         };
 
         let signing_key = SigningKey::from_bytes(&[41_u8; 32]);
@@ -12622,6 +13506,7 @@ mod tests {
             letta_memory: None,
             audit_publisher: None,
             auth: None,
+            grant_columns: crate::grpc::ThreadGrantColumns::present(),
         };
         let addr: std::net::SocketAddr = std::net::TcpListener::bind("127.0.0.1:0")
             .unwrap()
@@ -12663,6 +13548,7 @@ mod tests {
                 org_id: org.clone(),
                 granted_rung: 0,
                 justification: String::new(),
+                approved_plan_id: String::new(),
             })
             .await
             .expect("set_run_mode rpc over wire")
@@ -12801,6 +13687,7 @@ mod tests {
             letta_memory: None,
             audit_publisher: None,
             auth: None,
+            grant_columns: crate::grpc::ThreadGrantColumns::present(),
         };
 
         let list_as = |user_id: String| {

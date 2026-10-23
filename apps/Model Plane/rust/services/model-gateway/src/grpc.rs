@@ -313,6 +313,35 @@ async fn require_durable_run_owner(
     .await
 }
 
+/// The run's DURABLE row (WS04 S4, the durable grant switch): its mode, and the thread it belongs
+/// to. The mode says whether the run is in plan mode whatever this replica's flag holds; the
+/// thread is the only key an in-memory grant may ever use, because the request's own
+/// `session_id` is the caller's word and the ownership check above covers the run, not it.
+/// `None` when the row cannot be read; the ownership check that precedes it has already
+/// authorized the call.
+async fn read_run_detail(
+    state: &AppState,
+    identity: &VerifiedIdentity,
+    run_id: &str,
+) -> Option<mp_contracts::model_plane::v1::RunDetail> {
+    let request = match identity.session_request(mp_contracts::model_plane::v1::GetRunRequest {
+        run_id: run_id.to_owned(),
+    }) {
+        Ok(request) => request,
+        Err(error) => {
+            tracing::warn!(code = ?error.code(), "run not readable: no session credential");
+            return None;
+        }
+    };
+    match state.run_client.clone().get_run(request).await {
+        Ok(detail) => Some(detail.into_inner()),
+        Err(error) => {
+            tracing::warn!(code = ?error.code(), "run not readable from session-core");
+            None
+        }
+    }
+}
+
 /// Maximum page content (markdown chars) forwarded to inference-core
 /// for `ExtractStructured`. Tuned to stay well below the 128k context
 /// floor every in-use model shares, leaving headroom for the schema +
@@ -1322,6 +1351,7 @@ impl ModelGateway for GatewayService {
                         // holds the run to investigation meanwhile.
                         granted_rung: 0,
                         justification: String::new(),
+                        approved_plan_id: String::new(),
                     },
                 )?)
                 .await
@@ -1347,17 +1377,68 @@ impl ModelGateway for GatewayService {
         // this pair exists to remove.
         let granted_rung = req.granted_rung;
         let justification = req.justification.clone();
+        let session_id = req.session_id.clone();
+        let grant_org_id = org_id.clone();
+        // With the durable grant switch on (WS04 S4) the grant is Session Core's to record
+        // (the `SetRunMode` below states it) and this replica's memory holds no copy; whether
+        // the run was in plan mode is then the run's durable mode OR this replica's own flag,
+        // not this replica's flag alone, because the run may have entered plan mode on another
+        // replica. Left to the in-memory exit, a grant that is durable and cluster-wide would
+        // be published with no RUN_PLAN_MODE_EXITED to say who granted what.
+        let durable_grant = self.state.plan_mode.durable_grant_enabled();
+        // The run's own row, read once, before anything is written, published or recorded. The
+        // ownership check above covers the RUN, not the `session_id` the request names, so a
+        // caller who owns run R could otherwise name another user's conversation and have a
+        // grant kept in memory against it. The conversation is the run's `thread_id` and
+        // nothing else: a `session_id` that names another one is refused, and the only key the
+        // in-memory fallback below uses is the run's own thread.
+        let run_detail = if durable_grant {
+            read_run_detail(&self.state, &identity, &run_id).await
+        } else {
+            None
+        };
+        let run_thread: Option<String> = match &run_detail {
+            Some(detail) => {
+                if !session_id.is_empty() && session_id != detail.thread_id {
+                    return Err(Status::permission_denied(
+                        "session_id is not the conversation of this run",
+                    ));
+                }
+                Some(detail.thread_id.clone())
+            }
+            None if durable_grant && !session_id.is_empty() => {
+                // The run's conversation cannot be read, so the one named cannot be checked.
+                return Err(Status::unavailable(
+                    "the run could not be read to check its conversation",
+                ));
+            }
+            None => None,
+        };
         // No plan-gate plan on this raw gRPC path — it predates plan-gate and
         // carries no `plan_id` (sessions.proto's `ExitPlanModeRequest` stays
         // untouched); `handle_exit_plan_mode` omits the field entirely rather
         // than recording an empty one.
-        let resp = coordinator::handle_exit_plan_mode(
-            &self.state.plan_mode,
-            &*self.state.publisher,
-            req,
-            "",
-        )
-        .await?;
+        let resp = if durable_grant {
+            let was_in_plan_mode = run_detail
+                .as_ref()
+                .is_some_and(|detail| detail.mode == "plan");
+            coordinator::handle_exit_plan_mode_durable(
+                &self.state.plan_mode,
+                &*self.state.publisher,
+                req,
+                "",
+                was_in_plan_mode,
+            )
+            .await?
+        } else {
+            coordinator::handle_exit_plan_mode(
+                &self.state.plan_mode,
+                &*self.state.publisher,
+                req,
+                "",
+            )
+            .await?
+        };
         // Exiting plan mode returns the run to 'execute' durably. Best-effort.
         // org_id is forwarded so session-core can org-scope the UPDATE.
         if !run_id.is_empty() && !org_id.is_empty() {
@@ -1377,11 +1458,27 @@ impl ModelGateway for GatewayService {
                         // nothing anywhere read it back.
                         granted_rung,
                         justification,
+                        approved_plan_id: String::new(),
                     },
                 )?)
                 .await
             {
                 tracing::warn!(error = %e, "durable run-mode persist (execute) failed (best-effort)");
+                if durable_grant && coordinator::set_run_mode_failure_is_transient(e.code()) {
+                    // A transient failure: nothing recorded the grant, so this replica keeps it
+                    // in memory and keeps honouring it (`sse::durable_thread_grant`), as
+                    // `plan_approval` does. Keyed on the run's OWN thread (never the request's
+                    // `session_id`), and never after a refusal: a grant Session Core said no to
+                    // is not one this replica may keep.
+                    if let (Some(thread_id), Ok(rung)) = (
+                        run_thread.as_deref(),
+                        mp_contracts::model_plane::v1::AutonomyRung::try_from(granted_rung),
+                    ) {
+                        self.state
+                            .plan_mode
+                            .record_grant(&grant_org_id, thread_id, rung, "");
+                    }
+                }
             }
         }
         Ok(Response::new(resp))
@@ -3705,9 +3802,17 @@ mod tests {
 
         async fn set_run_mode(
             &self,
-            _: Request<mp_contracts::model_plane::v1::SetRunModeRequest>,
+            request: Request<mp_contracts::model_plane::v1::SetRunModeRequest>,
         ) -> Result<Response<mp_contracts::model_plane::v1::SetRunModeResponse>, Status> {
-            Err(Status::unimplemented("set_run_mode not needed in test"))
+            // Every durable-write failure a test needs, chosen by the run id: a transient one
+            // (Session Core restarting) and a refusal (it says no).
+            match request.into_inner().run_id.as_str() {
+                "run-durable-plan" | "run-victim-attempt" => {
+                    Err(Status::unavailable("session-core restarting"))
+                }
+                "run-refused-mode" => Err(Status::failed_precondition("durable_mutation_forbidden")),
+                _ => Err(Status::unimplemented("set_run_mode not needed in test")),
+            }
         }
 
         async fn record_run_context(
@@ -3987,8 +4092,24 @@ mod tests {
     impl RunService for MockRunService {
         async fn get_run(
             &self,
-            _: Request<mp_contracts::model_plane::v1::GetRunRequest>,
+            request: Request<mp_contracts::model_plane::v1::GetRunRequest>,
         ) -> Result<Response<RunDetail>, Status> {
+            // The one run whose durable row says it is in plan mode (entered on another
+            // replica, so this replica holds no flag): the durable grant switch reads it.
+            let run_id = request.into_inner().run_id;
+            // They all belong to the conversation `session-test`, which is what
+            // `exit_plan_request` names.
+            if matches!(
+                run_id.as_str(),
+                "run-durable-plan" | "run-victim-attempt" | "run-refused-mode"
+            ) {
+                return Ok(Response::new(RunDetail {
+                    run_id,
+                    mode: "plan".to_owned(),
+                    thread_id: "session-test".to_owned(),
+                    ..Default::default()
+                }));
+            }
             Err(Status::unimplemented("get_run not needed in test"))
         }
 
@@ -4028,7 +4149,10 @@ mod tests {
             }
             let request = request.into_inner();
             Ok(Response::new(ResolveRunOwnerResponse {
-                authorized: request.run_id == "run-owned"
+                authorized: matches!(
+                    request.run_id.as_str(),
+                    "run-owned" | "run-durable-plan" | "run-victim-attempt" | "run-refused-mode"
+                )
                     && request.org_id == "org_test"
                     && request.user_id == "user_test",
             }))
@@ -4462,6 +4586,123 @@ mod tests {
         assert!(events
             .iter()
             .all(|(subject, _)| subject == "mp.v1.run.run-owned.event"));
+    }
+
+    /// WS04 S4 review defect 3b: with the durable grant switch on, the raw gRPC `ExitPlanMode`
+    /// follows the run's DURABLE mode, not only this replica's flag. The run entered plan mode
+    /// on another replica (this one holds no flag), so the old flag-keyed path published no
+    /// RUN_PLAN_MODE_EXITED although the `SetRunMode` it makes writes a cluster-wide grant. The
+    /// durable write fails in this double (`set_run_mode` is unimplemented), so the approving
+    /// replica also keeps the grant in memory rather than leaving none anywhere.
+    #[tokio::test]
+    async fn a_durable_exit_publishes_the_grant_event_for_a_run_that_entered_plan_mode_elsewhere() {
+        let (mut service, publisher) = test_run_ownership_service().await;
+        service.state.plan_mode = service.state.plan_mode.clone().with_durable_grant_enabled(true);
+        assert!(
+            !service.state.plan_mode.is_plan_mode("org_test", "run-durable-plan").0,
+            "this replica never saw the run enter plan mode"
+        );
+
+        let exited = service
+            .exit_plan_mode(authenticated(exit_plan_request("run-durable-plan")))
+            .await
+            .expect("the durable owner may exit plan mode")
+            .into_inner();
+        assert!(exited.was_active, "the durable run row says the run was in plan mode");
+        let events = publisher.drain();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].1.event_type, "RUN_PLAN_MODE_EXITED");
+        assert_eq!(events[0].1.payload["granted_rung"], "workspace_write");
+        // Session Core did not record the grant (the double refuses), so this replica holds it.
+        assert_eq!(
+            service.state.plan_mode.granted_rung("org_test", "session-test"),
+            Some(mp_contracts::model_plane::v1::AutonomyRung::WorkspaceWrite)
+        );
+    }
+
+    /// With the switch off the exit is the in-memory one it always was: a run this replica
+    /// never saw enter plan mode publishes no event, whatever the durable row says.
+    #[tokio::test]
+    async fn without_the_durable_switch_the_exit_follows_this_replicas_flag_alone() {
+        let (service, publisher) = test_run_ownership_service().await;
+        let exited = service
+            .exit_plan_mode(authenticated(exit_plan_request("run-durable-plan")))
+            .await
+            .expect("the durable owner may exit plan mode")
+            .into_inner();
+        assert!(!exited.was_active);
+        assert!(publisher.drain().is_empty());
+        assert_eq!(
+            service.state.plan_mode.granted_rung("org_test", "session-test"),
+            Some(mp_contracts::model_plane::v1::AutonomyRung::WorkspaceWrite),
+            "the in-memory grant, as ever"
+        );
+    }
+
+    /// WS04 S4 second review, defect 0 (an authority hole): with the durable grant switch on, a
+    /// caller who owns run R names ANOTHER conversation as `session_id`. The ownership check
+    /// covers the run, not that id, and a durable write that fails (here, transiently) used to
+    /// leave an in-memory grant keyed on the id the caller typed, which the victim's next run
+    /// would then be handed. The call is refused before anything is published or recorded.
+    #[tokio::test]
+    async fn an_exit_naming_another_conversation_is_refused_and_plants_no_grant() {
+        let (mut service, publisher) = test_run_ownership_service().await;
+        service.state.plan_mode = service.state.plan_mode.clone().with_durable_grant_enabled(true);
+        let mut request = exit_plan_request("run-victim-attempt");
+        request.session_id = "victim-thread".to_owned();
+        request.granted_rung = mp_contracts::model_plane::v1::AutonomyRung::DangerFullAccess as i32;
+
+        let error = service
+            .exit_plan_mode(authenticated(request))
+            .await
+            .expect_err("a session_id that is not the run's conversation is refused");
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+        for thread in ["victim-thread", "session-test"] {
+            assert_eq!(
+                service.state.plan_mode.granted_rung("org_test", thread),
+                None,
+                "no grant exists for {thread}"
+            );
+        }
+        assert!(publisher.drain().is_empty(), "nothing was published");
+    }
+
+    /// The fallback is keyed on the run's OWN thread, whatever the request typed: an empty
+    /// `session_id` still leaves the grant on the run's conversation, after a transient failure.
+    #[tokio::test]
+    async fn a_transient_durable_failure_keeps_the_grant_on_the_runs_own_thread() {
+        let (mut service, _publisher) = test_run_ownership_service().await;
+        service.state.plan_mode = service.state.plan_mode.clone().with_durable_grant_enabled(true);
+        let mut request = exit_plan_request("run-durable-plan");
+        request.session_id = String::new();
+
+        service
+            .exit_plan_mode(authenticated(request))
+            .await
+            .expect("the exit itself succeeds");
+        assert_eq!(
+            service.state.plan_mode.granted_rung("org_test", "session-test"),
+            Some(mp_contracts::model_plane::v1::AutonomyRung::WorkspaceWrite),
+            "the run's own thread, from its durable row"
+        );
+    }
+
+    /// A REFUSAL by Session Core (FAILED_PRECONDITION here) is not a reason to keep the grant:
+    /// the exit answers as before, and no copy of the grant exists on this replica.
+    #[tokio::test]
+    async fn a_refused_durable_write_keeps_no_grant_in_memory() {
+        let (mut service, _publisher) = test_run_ownership_service().await;
+        service.state.plan_mode = service.state.plan_mode.clone().with_durable_grant_enabled(true);
+
+        service
+            .exit_plan_mode(authenticated(exit_plan_request("run-refused-mode")))
+            .await
+            .expect("the best-effort durable write does not fail the exit");
+        assert_eq!(
+            service.state.plan_mode.granted_rung("org_test", "session-test"),
+            None,
+            "a grant Session Core refused is not honoured from memory"
+        );
     }
 
     #[tokio::test]

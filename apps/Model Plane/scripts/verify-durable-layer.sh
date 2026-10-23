@@ -80,6 +80,29 @@ SQL
 expect "$(q <<<"UPDATE runs SET mode='plan' WHERE id='r1' RETURNING mode;")" "plan" "SetRunMode -> plan"
 expect "$(q <<<"UPDATE runs SET mode='plan' WHERE id='nope' RETURNING id;")" "" "SetRunMode missing run => 0 rows"
 
+echo "==> WS04 S4 durable plan grant (0050_thread_autonomy_grant)"
+GRANT_SET="UPDATE threads SET granted_rung='workspace_write', granted_justification='writes the report', granted_plan_id='plan-1', granted_at=now(), granted_expires_at=now() + (86400::bigint * interval '1 second') WHERE id='t1' AND org_id='org1' RETURNING granted_rung || '/' || granted_plan_id;"
+expect "$(q <<<"SELECT granted_rung IS NULL AND granted_expires_at IS NULL FROM threads WHERE id='t1';")" "t" "a thread that never held a grant keeps every column NULL"
+expect "$(q <<<"$GRANT_SET")" "workspace_write/plan-1" "the approval writes the grant on its thread"
+expect "$(q <<<"UPDATE threads SET granted_rung='workspace_write' WHERE id='t1' AND org_id='other-org' RETURNING id;")" "" "a thread of another org is not touched"
+expect "$(q <<<"SELECT granted_expires_at > now() + interval '23 hours' AND granted_expires_at <= now() + interval '24 hours' FROM threads WHERE id='t1';")" "t" "the grant lapses 24 hours after it was made"
+if q >/dev/null 2>&1 <<<"UPDATE threads SET granted_rung='root' WHERE id='t1';"; then
+  echo "FAIL: a rung label outside the ladder was accepted"; exit 1
+fi
+echo "  ok: the CHECK refuses a rung label outside the ladder"
+q >/dev/null <<<"UPDATE threads SET granted_rung=NULL, granted_justification=NULL, granted_plan_id=NULL, granted_at=NULL, granted_expires_at=NULL WHERE id='t1';"
+echo "  -- reversal and re-application"
+docker exec -i "$CTR" psql -U postgres -d session_core -v ON_ERROR_STOP=1 -q < "$MIG/revert/0050_thread_autonomy_grant.down.sql"
+expect "$(q <<<"SELECT count(*) FROM information_schema.columns WHERE table_name='threads' AND column_name LIKE 'granted\_%';")" "0" "the reversal drops every grant column"
+# The boot check of session-core (ThreadGrantColumns::detect) counts these five columns and keeps
+# its gate open only when all five are there.
+GRANT_COLS="SELECT count(*) FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'threads' AND column_name::text = ANY(ARRAY['granted_rung','granted_justification','granted_plan_id','granted_at','granted_expires_at']::text[]);"
+expect "$(q <<<"$GRANT_COLS")" "0" "the boot check finds none of the five columns after the reversal"
+docker exec -i "$CTR" psql -U postgres -d session_core -v ON_ERROR_STOP=1 -q < "$MIG/0050_thread_autonomy_grant.sql"
+docker exec -i "$CTR" psql -U postgres -d session_core -v ON_ERROR_STOP=1 -q < "$MIG/0050_thread_autonomy_grant.sql"
+expect "$(q <<<"SELECT count(*) FROM information_schema.columns WHERE table_name='threads' AND column_name LIKE 'granted\_%';")" "5" "the migration re-applies, and twice is harmless"
+expect "$(q <<<"$GRANT_COLS")" "5" "the boot check finds all five columns once the migration is applied"
+
 echo "==> G8 approval id-alignment"
 q >/dev/null <<SQL
 INSERT INTO approvals (id,run_id,kind,status,requested_by,org_id,user_id,idempotency_key,metadata,requested_at)

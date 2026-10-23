@@ -6392,6 +6392,7 @@ async fn mark_run_plan_mode(state: &AppState, org_id: &str, run_id: &str, sessio
         org_id: org_id.to_owned(),
         granted_rung: 0,
         justification: String::new(),
+        approved_plan_id: String::new(),
     };
     let mut durable_request = tonic::Request::new(durable);
     let Ok(authorization) = format!("Bearer {session_bearer}").parse() else {
@@ -8815,11 +8816,21 @@ fn authenticated_run_agent_request(
 /// proceeds on ordinary conversation history alone, exactly as it did before
 /// plan-gate existed — this must never block or fail an otherwise-ready
 /// dispatch, and "no plan context" is always the safe outcome.
+///
+/// # Durable grants
+///
+/// With the durable grant switch on (`durable_grant` is `Some`, WS04 S4) the plan id comes
+/// from the grant the caller read from Session Core for this run start, and nothing is taken
+/// out of memory. The read does not spend the plan: the claim below is still the single-use
+/// guard, a compare-and-swap in Session Core, so of two runs that start together on two
+/// replicas exactly one wins it, and a later run that reads the same grant finds the plan no
+/// longer approved and proceeds without it.
 async fn approved_plan_context(
     state: &AppState,
     org_id: &str,
     thread_id: &str,
     bearer: &VerifiedModelBearer,
+    durable_grant: Option<&crate::session_flow::ThreadGrant>,
 ) -> Option<String> {
     let source = GrpcApprovedPlanSource {
         state,
@@ -8827,7 +8838,106 @@ async fn approved_plan_context(
         org_id,
         thread_id,
     };
-    approved_plan_block_for(&state.plan_mode, &source, org_id, thread_id).await
+    match durable_grant {
+        Some(grant) => {
+            let plan_id = grant.approved_plan_id.as_deref()?;
+            approved_plan_block_for_id(plan_id, true, &source, org_id, thread_id).await
+        }
+        None => approved_plan_block_for(&state.plan_mode, &source, org_id, thread_id).await,
+    }
+}
+
+/// The thread's grant from Session Core for one run start (WS04 S4, the durable grant
+/// switch on). Never fails, and never mistakes a failed read for "no grant": an `Ok` answer
+/// is the grant (or the absence of one) Session Core stated, and any error (a timeout, a
+/// transient `Unavailable`, `Unimplemented` from an older Session Core, a refusal) is
+/// [`ThreadGrant::unreadable`](crate::session_flow::ThreadGrant::unreadable). A grant may
+/// well exist that this read could not see, so [`resolve_autonomy_rung`] refuses an execute
+/// turn (`plan_grant_unavailable`) and states the NARROWEST rung to any other run, rather than
+/// the unstated one that would silently widen it past what the human granted.
+async fn durable_thread_grant(
+    state: &AppState,
+    org_id: &str,
+    thread_id: &str,
+    bearer: &VerifiedModelBearer,
+) -> crate::session_flow::ThreadGrant {
+    let read = crate::session_flow::thread_grant(state, org_id, thread_id, bearer.as_str()).await;
+    with_local_fallback(
+        grant_from_read(read, org_id, thread_id),
+        &state.plan_mode,
+        org_id,
+        thread_id,
+    )
+}
+
+/// The one grant a durable-switch replica may hold in memory: the one an approval taken HERE
+/// could not record in Session Core (`plan_approval` keeps it when `SetRunMode` fails after
+/// its retries, so the approving replica keeps honouring what the human approved). It is
+/// consulted only when Session Core answered and said there is NO grant: a grant Session Core
+/// does hold always wins, and a read that failed is not an answer (the run then fails closed,
+/// see [`resolve_autonomy_rung`]). The durable path records nothing else in memory, so
+/// anything found here is exactly such a fallback.
+fn with_local_fallback(
+    grant: crate::session_flow::ThreadGrant,
+    store: &crate::coordinator::PlanModeStore,
+    org_id: &str,
+    thread_id: &str,
+) -> crate::session_flow::ThreadGrant {
+    if grant.read_failed || grant.rung.is_some() {
+        return grant;
+    }
+    match store.granted_rung(org_id, thread_id) {
+        Some(rung) => {
+            tracing::info!(
+                org_id,
+                thread_id,
+                rung = mp_contracts::autonomy::label(rung),
+                "plan grant taken from this replica's memory: session-core holds none and the approval's write failed here"
+            );
+            crate::session_flow::ThreadGrant {
+                rung: Some(rung),
+                approved_plan_id: store.peek_approved_plan(org_id, thread_id),
+                expires_at_unix: store.grant_expires_at(org_id, thread_id),
+                read_failed: false,
+            }
+        }
+        None => grant,
+    }
+}
+
+/// What one read of the thread's grant means for the run start. Pure apart from the log line
+/// and the counter: an `Ok` is passed through, an error is an unreadable grant, said once in
+/// the log by status code only (the message can carry upstream text) and counted in
+/// `plan_grant_read_failed_total`.
+fn grant_from_read(
+    read: Result<crate::session_flow::ThreadGrant, tonic::Status>,
+    org_id: &str,
+    thread_id: &str,
+) -> crate::session_flow::ThreadGrant {
+    match read {
+        Ok(grant) => {
+            if let Some(rung) = grant.rung {
+                tracing::info!(
+                    org_id,
+                    thread_id,
+                    rung = mp_contracts::autonomy::label(rung),
+                    has_plan = grant.approved_plan_id.is_some(),
+                    "plan grant read from session-core for the run start"
+                );
+            }
+            grant
+        }
+        Err(status) => {
+            tracing::warn!(
+                code = ?status.code(),
+                org_id,
+                thread_id,
+                "plan grant could not be read from session-core; the run starts at the narrowest rung and an execute turn is refused"
+            );
+            metrics::counter!("plan_grant_read_failed_total").increment(1);
+            crate::session_flow::ThreadGrant::unreadable()
+        }
+    }
 }
 
 /// Whether a run asks for the plan approved with its thread's grant
@@ -8934,16 +9044,41 @@ async fn approved_plan_block_for(
     thread_id: &str,
 ) -> Option<String> {
     let plan_id = store.take_approved_plan(org_id, thread_id)?;
-    let plan = source.plan(&plan_id).await?;
+    approved_plan_block_for_id(&plan_id, false, source, org_id, thread_id).await
+}
+
+/// [`approved_plan_block_for`] for a plan id that is already known. `durable` says the id
+/// came from the thread's durable grant, which keeps naming the plan after a run has claimed
+/// it: a plan that is no longer approved is then the ordinary state of every later run of
+/// the thread for the day the grant lasts, not a warning.
+async fn approved_plan_block_for_id(
+    plan_id: &str,
+    durable: bool,
+    source: &impl ApprovedPlanSource,
+    org_id: &str,
+    thread_id: &str,
+) -> Option<String> {
+    let plan = source.plan(plan_id).await?;
     if !approved_plan_is_for(&plan, thread_id) {
-        tracing::warn!(
-            plan_id = %plan_id,
-            state = plan.state,
-            org_id,
-            thread_id,
-            "plan-gate: the plan approved with this grant is no longer an approved plan of this \
-             conversation; the run proceeds without it"
-        );
+        if durable {
+            tracing::debug!(
+                plan_id,
+                state = plan.state,
+                org_id,
+                thread_id,
+                "plan-gate: the plan named by the durable grant is not approved any more; the run \
+                 proceeds without it"
+            );
+        } else {
+            tracing::warn!(
+                plan_id,
+                state = plan.state,
+                org_id,
+                thread_id,
+                "plan-gate: the plan approved with this grant is no longer an approved plan of this \
+                 conversation; the run proceeds without it"
+            );
+        }
         return None;
     }
     if !source.claim(&plan).await {
@@ -9079,6 +9214,14 @@ const PLAN_EXECUTE_DISABLED: &str = "plan_execute_disabled";
 /// The key is `(verified org, run.thread_id)`: the thread session-core resolved and
 /// owner-verified for this run, never the request's own thread id, so a request cannot ask
 /// whether a grant exists for a thread it does not own.
+///
+/// `durable_grant` is where the thread's grant comes from (WS04 S4). `None` is the in-memory
+/// store, as ever. `Some` is the grant the caller read from Session Core for this run start
+/// (the durable grant switch is on): the store is then not asked at all. A grant Session Core
+/// said is absent behaves as above, but a read that FAILED (`ThreadGrant::read_failed`) is not
+/// "absent": an execute turn is refused the same way, and any other run states READ_ONLY, the
+/// narrowest rung the ladder has (`mp_contracts::autonomy::rank`), never the unstated one that
+/// would silently widen it past what the human granted.
 #[allow(clippy::result_large_err)]
 fn resolve_autonomy_rung(
     store: &crate::coordinator::PlanModeStore,
@@ -9086,12 +9229,25 @@ fn resolve_autonomy_rung(
     thread_id: &str,
     plan_mode: bool,
     execute_granted: bool,
+    durable_grant: Option<&crate::session_flow::ThreadGrant>,
 ) -> Result<i32, tonic::Status> {
     use mp_contracts::model_plane::v1::AutonomyRung;
     if plan_mode {
         return Ok(AutonomyRung::ReadOnly as i32);
     }
-    let granted = store.granted_rung(org_id, thread_id);
+    let granted = match durable_grant {
+        Some(grant) if grant.read_failed => {
+            // The read failed, so a grant may exist that was not seen: fail closed, never
+            // "no grant". An execute turn is refused; any other run is held to the narrowest rung.
+            return if execute_granted {
+                Err(tonic::Status::failed_precondition(PLAN_GRANT_UNAVAILABLE))
+            } else {
+                Ok(AutonomyRung::ReadOnly as i32)
+            };
+        }
+        Some(grant) => grant.rung,
+        None => store.granted_rung(org_id, thread_id),
+    };
     if execute_granted {
         return granted
             .map(|rung| rung as i32)
@@ -9231,6 +9387,9 @@ fn spawn_run_dispatch(
     // What the run's rounds cost, published by the task itself the moment the executor
     // answers (build plan WS02 S3), so a follower that has given up cannot lose it.
     usage_ledger: AgentUsageLedger,
+    // The thread's grant as Session Core holds it (build plan WS04 S4), read once for this
+    // run start; `None` with the durable grant switch off, and the in-memory store decides.
+    durable_grant: Option<&crate::session_flow::ThreadGrant>,
 ) -> Result<tokio::task::JoinHandle<Result<RunAgentResponse, tonic::Status>>, tonic::Status> {
     let mut execution_client = state.execution_client.clone();
     // The graded authority execution-core enforces PER CALL.
@@ -9264,6 +9423,7 @@ fn spawn_run_dispatch(
         &run.thread_id,
         plan_mode,
         execute_granted,
+        durable_grant,
     )?;
     // The granted rung as `resolved_run_agent_request` takes it: the rung the store held
     // (UNSPECIFIED is "none"). Plan mode and a resume still decide the rung that is sent
@@ -10001,8 +10161,27 @@ fn agentic_run_stream(
         // for the next ordinary run (`plan_context_wanted`). Any other run asks
         // the store whether an approval with a plan is waiting for this thread —
         // an in-memory lookup that answers "no" without an RPC in the common case.
+        //
+        // With the durable grant switch on (WS04 S4) the grant is read from Session Core
+        // instead, once, for the rung and the plan together, so a run started on a replica
+        // that never saw the approval carries it. The read is wanted exactly when the plan
+        // context is: a plan-mode run states READ_ONLY and a continuation states no rung.
+        let durable_grant = if state.plan_mode.durable_grant_enabled()
+            && plan_context_wanted(plan_mode, resume.is_some())
+        {
+            Some(durable_thread_grant(&state, &org_id, &thread_id, &model_bearer).await)
+        } else {
+            None
+        };
         let plan_context = if plan_context_wanted(plan_mode, resume.is_some()) {
-            approved_plan_context(&state, &org_id, &thread_id, &model_bearer).await
+            approved_plan_context(
+                &state,
+                &org_id,
+                &thread_id,
+                &model_bearer,
+                durable_grant.as_ref(),
+            )
+            .await
         } else {
             None
         };
@@ -10048,6 +10227,7 @@ fn agentic_run_stream(
                 min_privacy_tier: min_privacy_tier_wire,
                 start,
             },
+            durable_grant.as_ref(),
         ) {
             Ok(dispatch) => dispatch,
             Err(error) => {
@@ -11830,6 +12010,91 @@ mod tests {
             store.granted_rung("org-1", "thread-1"),
             Some(mp_contracts::model_plane::v1::AutonomyRung::WorkspaceWrite)
         );
+    }
+
+    /// Session Core's plan as two replicas see it: readable by all, claimable once. Before the
+    /// claim it is `APPROVED`; after it, `EXECUTING`, as the compare-and-swap leaves it.
+    struct SharedPlanSource {
+        claimed: std::sync::atomic::AtomicBool,
+        claims_attempted: std::sync::atomic::AtomicUsize,
+    }
+
+    impl SharedPlanSource {
+        fn new() -> Self {
+            Self {
+                claimed: std::sync::atomic::AtomicBool::new(false),
+                claims_attempted: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl ApprovedPlanSource for SharedPlanSource {
+        async fn plan(&self, _plan_id: &str) -> Option<mp_contracts::model_plane::v1::Plan> {
+            let mut plan = approved_plan_with_a_step();
+            if self.claimed.load(std::sync::atomic::Ordering::SeqCst) {
+                plan.state = PlanState::Executing as i32;
+            }
+            Some(plan)
+        }
+
+        async fn claim(&self, _plan: &mp_contracts::model_plane::v1::Plan) -> bool {
+            self.claims_attempted
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.claimed
+                .compare_exchange(
+                    false,
+                    true,
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                )
+                .is_ok()
+        }
+    }
+
+    /// The durable grant names the plan and never spends it (WS04 S4): two runs starting on two
+    /// replicas read the same grant, exactly one wins the claim and is handed the plan, and a
+    /// run that starts afterwards reads the same grant, finds the plan already claimed and is
+    /// handed nothing without trying to claim it again.
+    #[tokio::test]
+    async fn a_durable_grant_names_the_plan_and_the_claim_alone_decides_which_run_gets_it() {
+        use super::approved_plan_block_for_id;
+        let source = SharedPlanSource::new();
+        let (first, second) = tokio::join!(
+            approved_plan_block_for_id("plan_a", true, &source, "org-1", "thread-1"),
+            approved_plan_block_for_id("plan_a", true, &source, "org-1", "thread-1"),
+        );
+        assert_eq!(
+            usize::from(first.is_some()) + usize::from(second.is_some()),
+            1,
+            "exactly one of two concurrent starts is handed the plan"
+        );
+        assert!(
+            first.or(second).expect("the winner").contains("1. Draft the email"),
+        );
+        assert!(
+            approved_plan_block_for_id("plan_a", true, &source, "org-1", "thread-1")
+                .await
+                .is_none(),
+            "a later run reads the same grant and finds the plan spent"
+        );
+        assert!(
+            source.claims_attempted.load(std::sync::atomic::Ordering::SeqCst) <= 2,
+            "the later run did not try to claim a plan that is no longer approved"
+        );
+    }
+
+    /// A plan that is not an approved plan of the run's thread is never claimed, durable or not.
+    #[tokio::test]
+    async fn a_durable_grant_never_claims_a_plan_of_another_thread() {
+        use super::approved_plan_block_for_id;
+        let source = FakePlanSource::new(
+            Some(plan_of("plan_a", PlanState::Approved, "another-thread")),
+            true,
+        );
+        assert!(approved_plan_block_for_id("plan_a", true, &source, "org-1", "thread-1")
+            .await
+            .is_none());
+        assert_eq!(source.calls(), vec!["plan:plan_a"], "it must not be claimed");
     }
 
     #[tokio::test]
@@ -16079,7 +16344,10 @@ mod continue_run_tests {
         }
         let gate = plan_context_gate();
         assert!(
-            gate.contains("approved_plan_context(&state, &org_id, &thread_id, &model_bearer).await"),
+            gate.contains("&model_bearer,
+                durable_grant.as_ref(),
+            )
+            .await"),
             "the ordinary request is unchanged: {gate}"
         );
     }
@@ -18850,7 +19118,7 @@ mod execute_turn_tests {
         plan_mode: bool,
         execute: bool,
     ) -> i32 {
-        resolve_autonomy_rung(store, org, thread, plan_mode, execute).expect("the rung resolves")
+        resolve_autonomy_rung(store, org, thread, plan_mode, execute, None).expect("the rung resolves")
     }
 
     fn request(extra: serde_json::Value) -> InvokeRequest {
@@ -18910,7 +19178,7 @@ mod execute_turn_tests {
             ("org-2", "thread-1"),
             ("org-1", ""),
         ] {
-            let error = resolve_autonomy_rung(&store, org, thread, false, true)
+            let error = resolve_autonomy_rung(&store, org, thread, false, true, None)
                 .expect_err("no live grant for this org and thread");
             assert_eq!(error.code(), tonic::Code::FailedPrecondition, "({org}, {thread})");
             assert_eq!(error.message(), PLAN_GRANT_UNAVAILABLE);
@@ -18921,6 +19189,7 @@ mod execute_turn_tests {
             "thread-1",
             false,
             true,
+            None,
         )
         .expect_err("a gateway that restarted holds no grant");
         assert_eq!(none.message(), PLAN_GRANT_UNAVAILABLE);
@@ -18948,7 +19217,189 @@ mod execute_turn_tests {
             Rung::Unspecified as i32,
             "the legacy path sees an expired grant as none"
         );
-        assert!(resolve_autonomy_rung(&lapsed, "org-1", "thread-1", false, true).is_err());
+        assert!(resolve_autonomy_rung(&lapsed, "org-1", "thread-1", false, true, None).is_err());
+    }
+
+    /// WS04 S4: with the durable grant switch on the rung is the one Session Core answered for
+    /// this run start, whatever this replica's memory holds (it may hold a different grant, or
+    /// none, because the approval was taken on another replica).
+    #[test]
+    fn a_durable_grant_decides_the_rung_and_this_replicas_memory_is_not_asked() {
+        use crate::session_flow::ThreadGrant;
+        let live = ThreadGrant {
+            rung: Some(Rung::WorkspaceWrite),
+            approved_plan_id: Some("plan-1".to_owned()),
+            expires_at_unix: Some(i64::MAX),
+            read_failed: false,
+        };
+        let empty = crate::coordinator::PlanModeStore::new();
+        for execute in [false, true] {
+            assert_eq!(
+                resolve_autonomy_rung(&empty, "org-1", "thread-1", false, execute, Some(&live))
+                    .expect("the durable rung resolves on a replica that never saw the approval"),
+                Rung::WorkspaceWrite as i32,
+                "execute_granted {execute}"
+            );
+        }
+        // A stale in-memory grant is not consulted once the durable one is the source.
+        let stale = store_with("org-1", "thread-1", Rung::DangerFullAccess);
+        let none = ThreadGrant::default();
+        assert_eq!(
+            resolve_autonomy_rung(&stale, "org-1", "thread-1", false, false, Some(&none))
+                .expect("legacy path"),
+            Rung::Unspecified as i32,
+            "no durable grant: the legacy fail-open for a non-execute run, memory ignored"
+        );
+        let refused = resolve_autonomy_rung(&stale, "org-1", "thread-1", false, true, Some(&none))
+            .expect_err("an execute turn with no durable grant fails closed");
+        assert_eq!(refused.message(), PLAN_GRANT_UNAVAILABLE);
+        // Plan mode is still READ_ONLY, whatever the durable grant says.
+        assert_eq!(
+            resolve_autonomy_rung(&empty, "org-1", "thread-1", true, true, Some(&live))
+                .expect("plan mode"),
+            Rung::ReadOnly as i32
+        );
+    }
+
+    /// WS04 S4 review defect 0: with the durable grant switch on, a grant read that FAILED is not
+    /// "no grant". An execute turn is refused (`plan_grant_unavailable`); any other run is held
+    /// to READ_ONLY, the narrowest rung, never the unstated one (which is the least constrained a
+    /// chat run can have and would silently widen the run past what the human granted). Only an
+    /// answer that says there is no grant keeps the legacy unstated rung.
+    #[test]
+    fn a_failed_grant_read_fails_closed_and_only_a_stated_absence_is_no_grant() {
+        let unreadable = crate::session_flow::ThreadGrant::unreadable();
+        let none = crate::session_flow::ThreadGrant::default();
+        // The in-memory store holds a wide grant: a failed durable read must not consult it
+        // either (the durable source decides), and must not widen to it.
+        let store = store_with("org-1", "thread-1", Rung::DangerFullAccess);
+
+        assert_eq!(
+            resolve_autonomy_rung(&store, "org-1", "thread-1", false, false, Some(&unreadable))
+                .expect("a non-execute run still starts"),
+            Rung::ReadOnly as i32,
+            "an unreadable grant holds a non-execute run to the narrowest rung"
+        );
+        assert_ne!(
+            resolve_autonomy_rung(&store, "org-1", "thread-1", false, false, Some(&unreadable))
+                .expect("a non-execute run still starts"),
+            Rung::Unspecified as i32,
+            "never the unstated rung, which is the least constrained"
+        );
+        let refused =
+            resolve_autonomy_rung(&store, "org-1", "thread-1", false, true, Some(&unreadable))
+                .expect_err("an execute turn with an unreadable grant fails closed");
+        assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(refused.message(), PLAN_GRANT_UNAVAILABLE);
+        // Plan mode is READ_ONLY whatever the read said.
+        assert_eq!(
+            resolve_autonomy_rung(&store, "org-1", "thread-1", true, false, Some(&unreadable))
+                .expect("plan mode"),
+            Rung::ReadOnly as i32
+        );
+        // "No grant", stated by an Ok answer, is unchanged: the legacy unstated rung.
+        assert_eq!(
+            resolve_autonomy_rung(&store, "org-1", "thread-1", false, false, Some(&none))
+                .expect("legacy path"),
+            Rung::Unspecified as i32
+        );
+    }
+
+    /// Every way the read can fail is an unreadable grant, and an `Ok` is passed through
+    /// untouched (including the absence of a grant): a timeout, a transient `Unavailable`,
+    /// `Unimplemented` from a Session Core with no ThreadAutonomy service, a refusal.
+    #[test]
+    fn every_failed_grant_read_is_unreadable_and_an_ok_answer_is_not() {
+        for code in [
+            tonic::Code::DeadlineExceeded,
+            tonic::Code::Unavailable,
+            tonic::Code::Unimplemented,
+            tonic::Code::PermissionDenied,
+            tonic::Code::Internal,
+        ] {
+            let grant = grant_from_read(Err(tonic::Status::new(code, "secret upstream text")), "org-1", "thread-1");
+            assert!(grant.read_failed, "{code:?}");
+            assert_eq!(grant.rung, None, "{code:?}");
+        }
+        let none = grant_from_read(Ok(crate::session_flow::ThreadGrant::default()), "org-1", "thread-1");
+        assert_eq!(none, crate::session_flow::ThreadGrant::default());
+        assert!(!none.read_failed);
+        let live = crate::session_flow::ThreadGrant {
+            rung: Some(Rung::WorkspaceWrite),
+            approved_plan_id: None,
+            expires_at_unix: Some(1),
+            read_failed: false,
+        };
+        assert_eq!(grant_from_read(Ok(live.clone()), "org-1", "thread-1"), live);
+    }
+
+    /// The real read, through `durable_thread_grant`: a Session Core that cannot be reached
+    /// (the grant client points at a closed port) is an unreadable grant, and the rung the run
+    /// would state is READ_ONLY (execute: refused), not the unstated one.
+    #[tokio::test]
+    async fn an_unreachable_session_core_leaves_the_run_at_the_narrowest_rung() {
+        let mut state = AppState::new();
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
+        state.plan_mode = crate::coordinator::PlanModeStore::new()
+            .with_durable_grant_enabled(true)
+            .with_durable_grant_client(
+                mp_contracts::model_plane::v1::thread_autonomy_client::ThreadAutonomyClient::new(channel),
+            );
+        let bearer = crate::auth::VerifiedSessionBearer::for_test("session-token");
+        let grant = durable_thread_grant(&state, "org-1", "thread-1", &bearer).await;
+        assert!(grant.read_failed, "{grant:?}");
+        let store = crate::coordinator::PlanModeStore::new();
+        assert_eq!(
+            resolve_autonomy_rung(&store, "org-1", "thread-1", false, false, Some(&grant))
+                .expect("a non-execute run starts"),
+            Rung::ReadOnly as i32
+        );
+        assert_eq!(
+            resolve_autonomy_rung(&store, "org-1", "thread-1", false, true, Some(&grant))
+                .expect_err("an execute turn is refused")
+                .message(),
+            PLAN_GRANT_UNAVAILABLE
+        );
+    }
+
+    /// WS04 S4 review defect 1: the one grant a durable-switch replica holds in memory is the
+    /// one its own approval could not record in Session Core. It is honoured only when Session
+    /// Core answered "no grant"; a grant Session Core holds always wins, and a read that failed
+    /// is not an answer (the run fails closed, never on the strength of a copy in memory).
+    #[test]
+    fn this_replicas_unrecorded_grant_is_honoured_only_when_session_core_holds_none() {
+        let store = crate::coordinator::PlanModeStore::new();
+        store.record_grant("org-1", "thread-1", Rung::WorkspaceWrite, "plan-7");
+        let none = crate::session_flow::ThreadGrant::default();
+        let unreadable = crate::session_flow::ThreadGrant::unreadable();
+        let held = crate::session_flow::ThreadGrant {
+            rung: Some(Rung::ReadOnly),
+            approved_plan_id: None,
+            expires_at_unix: Some(1),
+            read_failed: false,
+        };
+
+        let fallback = with_local_fallback(none.clone(), &store, "org-1", "thread-1");
+        assert_eq!(fallback.rung, Some(Rung::WorkspaceWrite));
+        assert_eq!(fallback.approved_plan_id.as_deref(), Some("plan-7"));
+        assert!(fallback.expires_at_unix.is_some());
+        assert!(!fallback.read_failed);
+        assert_eq!(
+            store.peek_approved_plan("org-1", "thread-1").as_deref(),
+            Some("plan-7"),
+            "reading it does not spend it: the plan's own claim is the single-use guard"
+        );
+
+        // Another thread or org has no such grant.
+        assert_eq!(with_local_fallback(none.clone(), &store, "org-1", "thread-2"), none);
+        assert_eq!(with_local_fallback(none.clone(), &store, "org-2", "thread-1"), none);
+        // Session Core's own grant wins, even a narrower one.
+        assert_eq!(with_local_fallback(held.clone(), &store, "org-1", "thread-1"), held);
+        // A failed read is not "no grant": the copy in memory is not consulted.
+        assert_eq!(with_local_fallback(unreadable.clone(), &store, "org-1", "thread-1"), unreadable);
+        // A store that never recorded one changes nothing.
+        let empty = crate::coordinator::PlanModeStore::new();
+        assert_eq!(with_local_fallback(none.clone(), &empty, "org-1", "thread-1"), none);
     }
 
     /// The ratchet: only an execute turn, only at the widest rung, and only ever stricter.
