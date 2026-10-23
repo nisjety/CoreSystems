@@ -7,6 +7,7 @@ import {
 } from './orchestration-client'
 
 import { readSseStream, type SseEvent } from './sse'
+import type { ChatEventPayloads } from './chat-event-payloads.generated'
 import { isZdrCode } from './zdr-refusals'
 import {
   isSelectablePrivacyTier,
@@ -995,7 +996,8 @@ function failureFeature(
 }
 
 function emitCitation(value: unknown, handlers: ChatStreamHandlers): void {
-  const payload = objectValue(value)
+  // The golden's keys are typed; the legacy spellings read below stay `unknown` until they are retired.
+  const payload = objectValue(value) as (Partial<ChatEventPayloads['citation']> & Record<string, unknown>) | undefined
   if (!payload) return
   handlers.onCitation?.({
     id: str(payload.id),
@@ -1712,19 +1714,21 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
         ...(event.id ? { frameId: event.id } : {}),
       })
       break
-    case 'usage':
+    case 'usage': {
+      const usage = payload as Partial<ChatEventPayloads['usage']> & Record<string, unknown>
       handlers.onUsage?.({
-        inputTokens: num(payload.input_tokens),
-        outputTokens: num(payload.output_tokens),
-        costUsd: num(payload.cost_usd),
-        costBasis: costBasisValue(payload.cost_basis),
-        latencyMs: num(payload.latency_ms),
-        confidence: num(payload.confidence),
-        cacheReadTokens: num(payload.cache_read_tokens) ?? num(payload.cacheReadTokens),
-        cacheWriteTokens: num(payload.cache_write_tokens) ?? num(payload.cacheWriteTokens),
+        inputTokens: num(usage.input_tokens),
+        outputTokens: num(usage.output_tokens),
+        costUsd: num(usage.cost_usd),
+        costBasis: costBasisValue(usage.cost_basis),
+        latencyMs: num(usage.latency_ms),
+        confidence: num(usage.confidence),
+        cacheReadTokens: num(usage.cache_read_tokens) ?? num(usage.cacheReadTokens),
+        cacheWriteTokens: num(usage.cache_write_tokens) ?? num(usage.cacheWriteTokens),
         ...servedByField(payload),
       })
       break
+    }
     case 'turn_timing': {
       // Optional by contract: an older gateway never sends it, and a payload
       // without its totals is dropped rather than shown as a zero.
