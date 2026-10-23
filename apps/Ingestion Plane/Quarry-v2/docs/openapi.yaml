@@ -4010,6 +4010,7 @@ components:
         proof_bundle:
           type: object
           nullable: true
+          description: Evidence manifest for this observation. redaction_rule_version names the secret-redaction rule set the observation was masked under.
           additionalProperties: true
         target_resolution:
           type: object
@@ -4017,6 +4018,11 @@ components:
           additionalProperties: true
         telemetry:
           $ref: '#/components/schemas/BrowserTelemetry'
+        redaction:
+          allOf:
+          - $ref: '#/components/schemas/RedactionStamp'
+          nullable: true
+          description: What the secret-redaction pass did to this observation. Counts per rule id only; no content and no lengths.
         observed_at:
           type: string
           format: date-time
@@ -4070,6 +4076,51 @@ components:
           type: integer
           minimum: 0
           nullable: true
+    RedactionStamp:
+      type: object
+      description: What the secret-redaction pass did to a record. It carries counts per static rule id and no content and no lengths. Every field has a default, so a stamp written by an older build still reads.
+      properties:
+        rule_version:
+          type: string
+          description: The rule set that ran, for example qr-redact/3.
+        profile:
+          type: string
+          enum:
+          - live
+          - durable
+        mode:
+          type: string
+          enum:
+          - enforce
+          - shadow
+          - 'off'
+          description: shadow counts and returns the input unchanged; off does nothing. Both are refused at boot in production.
+        values_masked:
+          type: integer
+          minimum: 0
+        by_rule:
+          type: object
+          description: Masked values per rule id (field.password, shape.jwt, ...).
+          additionalProperties:
+            type: integer
+            minimum: 0
+        probe:
+          type: string
+          enum:
+          - ok
+          - partial
+          - failed
+          - skipped
+          description: How the field-facts probe ended. partial or failed means some editable values were masked without facts.
+        probe_ms:
+          type: integer
+          minimum: 0
+        screenshot:
+          type: string
+          enum:
+          - none
+          - masked
+          - withheld
     BrowserEgressReceipt:
       type: object
       required:

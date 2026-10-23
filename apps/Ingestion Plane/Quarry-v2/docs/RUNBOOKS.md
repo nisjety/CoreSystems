@@ -1432,3 +1432,39 @@ Rollback. Unset `QUARRY_EDGE__LIMITS_SOURCE` (static). Nothing is stored; no mig
 Not built here (see the depth file): the `billing_core` source (per-org quota read, 30 s cache, stale window), the
 billing-core and Control Plane credential and plan keys, the per-organization capacity wiring (WS6.G, WS6.H), the
 compose rows, and the stack evidence of the plan's deployment steps.
+
+## Secret redaction of observations, events and errors: WS12.S2 (unit W2-U44, built, NOT run, 2026-10-24)
+
+What it does. Every observation Quarry returns carries a `redaction` stamp, and what an observation, an event, a JSON
+artifact or an error body shows has passed the rules in `docs/SECRET_REDACTION.md` (`qr-redact/3`). Nothing is stored
+in a new place and there is no migration.
+
+Flag. `QUARRY_EDGE__REDACTION_MODE`, set in compose from `QUARRY_REDACTION_MODE` (default `enforce`).
+`shadow` counts and returns the input unchanged, `off` does nothing; production (`ENVIRONMENT=prod|production`) accepts
+only `enforce` and the edge refuses to boot with the others or with a value it cannot read. The boot log line is
+`secret redaction active` (or the warning `secret redaction is not enforcing`) with `rule_version` and `mode`.
+
+Reading it. `redaction.rule_version` is the rule set that ran. `redaction.values_masked` and `redaction.by_rule` count
+what was masked per rule id (`field.password`, `shape.jwt`, ...) and never hold content. `redaction.probe` is how the
+field-facts probe ended (`ok`, `partial`, `failed`, `skipped`) and `probe_ms` what it cost. `partial` or `failed` means
+some editable values were masked without facts (fail closed). `ProofBundle.redaction_rule_version` is the same rule
+version on the stored proof. The edge logs one `quarry.redaction.observation` line (counts only) per observation that
+masked anything.
+
+Staging, 3 to 5 days in `shadow` (not yet done). Set `QUARRY_REDACTION_MODE=shadow`, exercise the planner on real
+pages, read `by_rule` on the observations and the log lines for rules that fire on ordinary page text, then set
+`enforce`. A shadow stamp has `mode: "shadow"` and the page content is unchanged.
+
+Rollback. In production there is no setting that turns masking off: redeploy the previous image. On staging or in
+development set `QUARRY_REDACTION_MODE=off`. `QUARRY_BROWSER_FIELD_PROBE=off` is more masking, not less (every editable
+value is masked).
+
+Evidence owed (not run). A rebuilt `quarry-edge` (record the image id and `SOURCE_REVISION`), then: Flow A (non-ZDR):
+start a run, navigate to a page with a password field, `type_ref` into it, `get_content`: no `S3cretP@ss` anywhere in the
+response, `redaction.values_masked >= 1`, the `ActionStarted` event over `GET /v1/agent/runs/{id}/events/stream` shows
+`"text":"[redacted:password]"`, and `nats sub 'quarry.>'` shows no message with the secret. Flow B (`"zdr": true`): the
+same masked body, `GET .../receipts` empty. Flow C: `type_ref` with a stale ref and the secret as text: the 409 body has
+no secret.
+
+Not built here: the receipt, checkpoint and procedure masking (WS12.S3), the Model Plane scrub (WS12.S4), the screenshot
+masking (WS12.S5).

@@ -28,6 +28,7 @@ Name | Type
 `proofBundle` | { [key: string]: any; }
 `targetResolution` | { [key: string]: any; }
 `telemetry` | [BrowserTelemetry](BrowserTelemetry.md)
+`redaction` | [RedactionStamp](RedactionStamp.md)
 `observedAt` | Date
 
 ## Example
@@ -59,6 +60,7 @@ const example = {
   "proofBundle": null,
   "targetResolution": null,
   "telemetry": null,
+  "redaction": null,
   "observedAt": null,
 } satisfies BrowserObservation
 
