@@ -1560,3 +1560,29 @@ Checks to run in the wave's test phase (not run here):
 - Deployment evidence (owed): a Postgres-backed edge with `zdr:false`, the secrets-lab flow, then `psql -c "SELECT action::text, observation::text, redaction_rule_version FROM quarry_step_receipts WHERE run_id='<run>'"`: the typed step's action text is `[redacted:password]`, `observation::text` holds no typed secret and no card-number fixture, the version column is `qr-redact/3`; insert a legacy-shaped row by hand (raw text, NULL version) and read `GET /v1/agent/runs/{id}/receipts`: it comes back masked; `POST .../procedure` shows `redacted_input: true` for the typed step.
 
 Not done in this slice: SDK regeneration (the generated `StepReceipt` models lack the new field; `sdks/generate.sh` needs a container), the Model Plane side of X-19 (confirm the default with the product owner), per-key masking for a `press` that types a password one key at a time, and a typed-kind probe on the admission-refusal receipt (it records an unknown kind, so a refused typing action reads as `[redacted:secret]`).
+
+## Tall full-page screenshots: tile-and-stitch (WS13.6, unit W2-U50, built, NOT run, 2026-10-24)
+
+What it does. A `fullPage` screenshot of a page taller than one Chromium capture (`SINGLE_CAPTURE_MAX_DEVICE_PX`, still the provisional 16,000 device px) is stitched from clip tiles, but only when the stitch flag is on and the heavy lane has a free permit. Otherwise the image is cropped at the limit as before (WS13.3/WS13.4b). Method A only: each tile is a clip of the page with `captureBeyondViewport`, no scrolling and no overlap. Method B (scroll and trim) is not built; it waits for the spike in `docs/SCRAPE_CAPTURE.md`.
+
+**Flag.** `QUARRY_EDGE__SCRAPE_STITCH`, read when the browser driver adapter is built (`quarry-runtime`, `browser_driver.rs`). `on`, `1` or `true` (any case, surrounding space ignored) turn it on; unset or any other value is off. The committed compose files do not set it, so the default is off. `QUARRY_SCRAPE_STITCH_METHOD` is not read by the code yet: there is one method.
+
+**Off (the default).** The image stops at the single-capture limit. The response says so: `captures.screenshot.truncated` is `true` and the warning is `screenshot_truncated`. Nothing else changes.
+
+**On, heavy lane free.** One permit from the heavy lane (`QUARRY_SCRAPE_HEAVY_PERMITS`, default 1) is held for that one capture. The response says `captures.screenshot.stitched: true` with `tiles` (the tile count) and `truncated` (the page was cut at a limit). The permit is taken only for a full-page capture whose page is taller than one capture; a viewport capture or a short page takes none.
+
+**On, heavy lane busy.** No wait. The capture falls back to the crop, with `screenshot_truncated`. (An action waits for the lane; a capture does not, because a stitch is the slow path and the page is still usable without it.)
+
+**Limits** (`quarry-core/src/capture.rs` and `quarry-browser/src/stitch.rs`). A tile is at most 4,096 CSS px tall and never more device px than one capture holds. At most 16 tiles. The stitched content is at most 60,000 CSS px. At most 40 Mpx for a PNG and 24 Mpx for a JPEG (the pixel cap is taken at the stitched width). A page past any limit is cut at the lowest of them and `truncated` is `true`. The deadline is the lower of 10 s times the tile count and 60 s; each tile also has the 10 s screenshot deadline. A stitch that runs out of time is `timeout` with `details.reason` `stitch_deadline` and no image.
+
+**Formats.** PNG is the default. A capture with `quality` set (JPEG) is stitched in JPEG: the PNG tiles are read in full and the JPEG is encoded at the end over a white background (the JPEG has no alpha). The wire shape does not change: the response is the same `captures.screenshot` object.
+
+**Memory.** PNG output is streamed: one decoded tile (RGBA) is held at a time, plus the compressed output. JPEG output holds the whole RGB image. A tile at scale 2 and 1,280 CSS px wide is about 84 MB of RGBA; the tile decoder allows 256 MiB for one tile.
+
+**Errors (details.reason).** `no_content_area`, `capture_too_large` (the page is too wide to stitch at all), `screenshot_unreadable` (a tile is not a PNG Chromium should have sent), `stitch_tile_mismatch` (a tile is smaller than its rows), `stitch_encode_failed`, `stitch_deadline`. The tile captures keep their own reasons (`driver_error`, `viewport_emulation_failed`).
+
+**Checks.** Not yet run. The tests are written and compile-checked: `cargo test -p quarry-browser stitch` (the pure planning and PNG streaming tests in `stitch.rs`) and, with Chromium, `CHROMIUMOXIDE_TEST=1 QUARRY_BROWSER_NO_SANDBOX=1 CHROME=/usr/bin/chromium cargo test -p quarry-browser --features chromiumoxide stitch_live -- --test-threads=1 --ignored` (the banded 25,000 px page with the band order sampled, and the permit-busy crop). The plan's sticky-header and lazy-image live tests are not written (they need the spike).
+
+**Rollback.** Leave `QUARRY_EDGE__SCRAPE_STITCH` unset (the default), or revert the commits. No migration, no schema or wire change.
+
+**Owed before the flag goes on anywhere.** The spike (`docs/SCRAPE_CAPTURE.md`): the single-capture limit and the method choice on the pinned Chromium, a banded 25,000 px page, a sticky-header page and a lazy-image page. Then the edge evidence from the plan: a stitched 30,000 px banded fixture through `POST /v1/scrape` returns `stitched: true` with `tiles >= 2`, the PNG height is 30,000 times the device scale, the band colours at the middle of bands 1, 15 and 30 are in order, a second concurrent stitch gets the cropped image with `screenshot_truncated`, and a 90,000 px fixture is `truncated: true` at the 60,000 px cap.
