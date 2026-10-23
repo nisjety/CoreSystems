@@ -424,6 +424,8 @@ export type TurnTimingProvider = {
   providerMs: number
   firstTokenMs?: number
   attempts: number
+  failedAttemptsMs?: number
+  retryWaitMs?: number
   responseCacheHit: boolean
   upstreamMs?: Record<string, number>
 }
@@ -514,6 +516,8 @@ function turnTimingProvider(value: unknown): TurnTimingProvider | undefined {
     providerMs,
     ...(millis(raw.first_token_ms) !== undefined ? { firstTokenMs: millis(raw.first_token_ms) } : {}),
     attempts: countValue(raw.attempts),
+    ...(millis(raw.failed_attempts_ms) !== undefined ? { failedAttemptsMs: millis(raw.failed_attempts_ms) } : {}),
+    ...(millis(raw.retry_wait_ms) !== undefined ? { retryWaitMs: millis(raw.retry_wait_ms) } : {}),
     responseCacheHit: raw.response_cache_hit === true,
     ...(upstreamMs && Object.keys(upstreamMs).length > 0 ? { upstreamMs } : {}),
   }
@@ -826,6 +830,8 @@ export type ChatThreadSession = {
    * "chat" in practice (see history.rs's backfill note). Read today only to
    * show the "Fra e-post / From email" badge on a mail-task thread. */
   origin?: string
+  /** Set when the owner archived the thread. Absent for an active thread. */
+  archivedAt?: string
 }
 
 export type ChatThreadTranscriptSnapshot = {
@@ -2378,18 +2384,81 @@ function applyRetentionFrom(raw: unknown): void {
   applyServerRetention(typeof zdr === 'boolean' ? zdr : undefined)
 }
 
-export async function listChatThreads(): Promise<ChatThreadSession[]> {
-  const raw = await requestJson<unknown>('/api/v1/chat/threads')
+export type ChatThreadPage = {
+  sessions: ChatThreadSession[]
+  /** Keyset cursor for the next page; null on the last page. */
+  nextCursor: string | null
+}
+
+export type ChatThreadArchiveFilter = 'active' | 'archived' | 'all'
+
+/**
+ * One page of the owner's threads, in the order Session Core sorts them. Does
+ * not reconcile local copies: a single page is never the whole listing.
+ */
+export async function listChatThreadsPage(
+  options: { cursor?: string; archived?: ChatThreadArchiveFilter } = {},
+): Promise<ChatThreadPage> {
+  const params = new URLSearchParams()
+  if (options.cursor) params.set('cursor', options.cursor)
+  if (options.archived) params.set('archived', options.archived)
+  const query = params.toString()
+  const raw = await requestJson<unknown>(`/api/v1/chat/threads${query ? `?${query}` : ''}`)
   applyRetentionFrom(raw)
-  const sessions = normalizeChatThreadSessions(raw)
+  // requestJson hands back `data` only, so the BFF repeats the cursor there.
+  return {
+    sessions: normalizeChatThreadSessions(raw),
+    nextCursor: str(objectValue(raw)?.nextCursor) ?? null,
+  }
+}
+
+export async function listChatThreads(): Promise<ChatThreadSession[]> {
+  // Walk every page before reconciling: a thread on page two is still listed,
+  // and reconciling against page one alone would erase its local copy. A cursor
+  // the walk has already requested ends it, so a server that stops advancing
+  // cannot loop the client; that walk is incomplete and reconciles nothing.
+  const sessions: ChatThreadSession[] = []
+  const requested = new Set<string>()
+  let cursor: string | undefined
+  let complete = false
+  for (;;) {
+    const page = await listChatThreadsPage(cursor ? { cursor } : {})
+    sessions.push(...page.sessions)
+    if (page.nextCursor === null) {
+      complete = true
+      break
+    }
+    if (requested.has(page.nextCursor)) break
+    requested.add(page.nextCursor)
+    cursor = page.nextCursor
+  }
   // Reached only on a SUCCESSFUL listing — `requestJson` throws otherwise — so
   // an empty array here really means "the server has no threads for you", not
   // "the request failed". That distinction is what makes this safe to act on:
   // a thread the server no longer lists has been erased upstream, and its local
   // copy must go with it. This is the only way a GDPR erasure reaches the
-  // device at all.
-  reconcileLocalThreads(sessions.map((session) => session.threadId))
+  // device at all. Only a walk that reached the last page is the whole listing,
+  // so only that walk may reconcile.
+  if (complete) {
+    reconcileLocalThreads(sessions.map((session) => session.threadId))
+  }
   return sessions
+}
+
+/**
+ * One thread's session by id, so a thread past the first page resolves like
+ * any other. Null when the server no longer has it as a chat thread.
+ */
+export async function getChatThread(threadId: string): Promise<ChatThreadSession | null> {
+  let raw: unknown
+  try {
+    raw = await requestJson<unknown>(`/api/v1/chat/threads/${encodeURIComponent(threadId)}`)
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) return null
+    throw error
+  }
+  applyRetentionFrom(raw)
+  return normalizeChatThreadSession(objectValue(raw)?.session)
 }
 
 export async function saveChatThreadSnapshot(
@@ -2541,6 +2610,9 @@ function normalizeChatThreadSession(raw: unknown): ChatThreadSession | null {
   const latestRunUpdatedAt = normalizeOptionalIsoTimestamp(
     str(item.latestRunUpdatedAt) ?? str(item.latest_run_updated_at),
   )
+  const archivedAt = normalizeOptionalIsoTimestamp(
+    str(item.archivedAt) ?? str(item.archived_at),
+  )
   return {
     threadId,
     title,
@@ -2556,6 +2628,7 @@ function normalizeChatThreadSession(raw: unknown): ChatThreadSession | null {
     ...(latestRunUpdatedAt ? { latestRunUpdatedAt } : {}),
     spaceRef: str(item.spaceRef) ?? str(item.space_ref),
     origin: str(item.origin),
+    ...(archivedAt ? { archivedAt } : {}),
   }
 }
 

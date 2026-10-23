@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Extension, Path, State},
+    extract::{Extension, Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -11,14 +11,17 @@ use serde_json::{json, Value};
 
 use crate::{
     config::AppState,
-    envelope::{error, ok},
+    envelope::{error, ok, ok_with_cursor},
     middleware::AuthenticatedUser,
     upstream::authorized_org_id,
 };
 
 use super::shared;
 
-const MAX_THREADS: usize = 80;
+/// One page of the chat list. Session Core pages on a keyset cursor, so the
+/// list has no cap that also decides which threads can be opened: a thread past
+/// the first page is read by id.
+const THREAD_PAGE_SIZE: usize = 50;
 
 /// Persona spec: absence of `persona_enabled` on the wire (a legacy thread
 /// row from before the column existed, or a durable-thread response a caller
@@ -64,6 +67,10 @@ struct ChatThreadSummary {
     latest_run_status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     latest_run_updated_at: Option<String>,
+    /// Set when the owner archived the thread. The chat list hides archived
+    /// threads by default; the archive surface reads this to label them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    archived_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,6 +110,36 @@ struct ThreadsResponse {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct DeleteThreadResponse {
+    deleted: String,
+    sessions: Vec<ChatThreadSummary>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadPageResponse {
+    sessions: Vec<ChatThreadSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ThreadListQuery {
+    cursor: Option<String>,
+    limit: Option<usize>,
+    archived: Option<String>,
+}
+
+/// What one ListThreads call asks Model Gateway for. `limit` is the page size.
+struct ThreadListRequest<'a> {
+    cursor: Option<&'a str>,
+    limit: usize,
+    archived: Option<&'a str>,
+    thread_id: Option<&'a str>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ThreadResponse {
     session: ChatThreadSummary,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -119,6 +156,8 @@ struct TranscriptResponse {
 struct DurableThreadsResponse {
     #[serde(default)]
     threads: Vec<DurableThreadSummary>,
+    #[serde(default)]
+    next_cursor: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -147,24 +186,74 @@ struct DurableThreadSummary {
     latest_run_status: String,
     #[serde(default, alias = "latestRunUpdatedAt")]
     latest_run_updated_at: Option<String>,
+    #[serde(default, alias = "archivedAt")]
+    archived_at: String,
 }
 
 pub(super) async fn list_threads(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
+    Query(query): Query<ThreadListQuery>,
 ) -> Response {
     if let Err(response) = scope_for(&state, &user).await {
         return response;
     }
-    let sessions = match read_durable_threads(&state, &user, &headers).await {
-        Ok(sessions) => sessions,
-        Err(response) => return response,
+    let cursor = query
+        .cursor
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let archived = query
+        .archived
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let request = ThreadListRequest {
+        cursor,
+        limit: query
+            .limit
+            .unwrap_or(THREAD_PAGE_SIZE)
+            .clamp(1, THREAD_PAGE_SIZE),
+        archived,
+        thread_id: None,
     };
-    Json(ok(ThreadsResponse {
+    let (sessions, next_cursor) =
+        match fetch_durable_threads(&state, &user, &headers, request).await {
+            Ok(page) => page,
+            Err(response) => return response,
+        };
+    let page = ThreadPageResponse {
         sessions: chat_history_sessions(sessions),
-    }))
-    .into_response()
+        next_cursor: (!next_cursor.is_empty()).then(|| next_cursor.clone()),
+    };
+    Json(ok_with_cursor(page, &next_cursor)).into_response()
+}
+
+/// One chat thread's session without its transcript. The list is paged, so
+/// the SPA resolves a thread it was not shown through this route.
+pub(super) async fn get_thread(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(thread_id): Path<String>,
+) -> Response {
+    if let Err(response) = scope_for(&state, &user).await {
+        return response;
+    }
+    let thread_id = normalize_id(&thread_id);
+    if thread_id.is_empty() {
+        return bad_request("thread_id is required.");
+    }
+    match read_durable_thread(&state, &user, &headers, &thread_id).await {
+        Ok(Some(session)) => Json(ok(ThreadResponse {
+            session,
+            transcript: None,
+        }))
+        .into_response(),
+        Ok(None) => thread_not_found(),
+        Err(response) => response,
+    }
 }
 
 /// Space-scoped conversations are the room's shared record and render in the
@@ -206,12 +295,10 @@ pub(super) async fn get_thread_transcript(
     if thread_id.is_empty() {
         return bad_request("thread_id is required.");
     }
-    let threads = match read_durable_threads(&state, &user, &headers).await {
-        Ok(threads) => threads,
+    let session = match read_durable_thread(&state, &user, &headers, &thread_id).await {
+        Ok(Some(session)) => session,
+        Ok(None) => return thread_not_found(),
         Err(response) => return response,
-    };
-    let Some(session) = threads.iter().find(|thread| thread.thread_id == thread_id) else {
-        return thread_not_found();
     };
     let transcript = match read_canonical_transcript(&state, &user, &headers, &thread_id).await {
         Ok(transcript) => transcript.map(|mut transcript| {
@@ -258,16 +345,10 @@ pub(crate) async fn save_thread(
             return response;
         }
     }
-    let sessions = match read_durable_threads(&state, &user, &headers).await {
-        Ok(sessions) => sessions,
+    let session = match read_durable_thread(&state, &user, &headers, &thread_id).await {
+        Ok(Some(session)) => session,
+        Ok(None) => return thread_not_found(),
         Err(response) => return response,
-    };
-    let Some(session) = sessions
-        .iter()
-        .find(|item| item.thread_id == thread_id)
-        .cloned()
-    else {
-        return thread_not_found();
     };
 
     Json(ok(ThreadResponse {
@@ -296,11 +377,22 @@ pub(crate) async fn delete_thread(
     if let Err(response) = delete_durable_thread(&state, &user, &headers, &thread_id).await {
         return response;
     }
-    let sessions = match read_durable_threads(&state, &user, &headers).await {
-        Ok(sessions) => sessions,
+    // The first page comes back so the sidebar can redraw without a second call.
+    let request = ThreadListRequest {
+        cursor: None,
+        limit: THREAD_PAGE_SIZE,
+        archived: None,
+        thread_id: None,
+    };
+    let (sessions, _) = match fetch_durable_threads(&state, &user, &headers, request).await {
+        Ok(page) => page,
         Err(response) => return response,
     };
-    Json(ok(ThreadsResponse { sessions })).into_response()
+    Json(ok(DeleteThreadResponse {
+        deleted: thread_id,
+        sessions: chat_history_sessions(sessions),
+    }))
+    .into_response()
 }
 
 pub(crate) async fn clear_threads(
@@ -332,11 +424,15 @@ async fn scope_for(state: &AppState, user: &AuthenticatedUser) -> Result<(), Res
     Ok(())
 }
 
-async fn read_durable_threads(
+/// One page of the caller's threads as Session Core orders them, plus the
+/// cursor for the next page. Session Core owns the sort and the cursor; the BFF
+/// relays both without re-sorting, so the order is the one the cursor expects.
+async fn fetch_durable_threads(
     state: &AppState,
     user: &AuthenticatedUser,
     headers: &HeaderMap,
-) -> Result<Vec<ChatThreadSummary>, Response> {
+    request: ThreadListRequest<'_>,
+) -> Result<(Vec<ChatThreadSummary>, String), Response> {
     let token = shared::model_token(state, user, headers).await;
     let session_token = match shared::required_session_token(state, user, headers).await {
         Ok(token) => token,
@@ -347,10 +443,7 @@ async fn read_durable_threads(
     // check is what actually enforces the invariant if session-core or
     // model-gateway ever ignores the query parameter -- the same
     // belt-and-braces shape this codebase already uses for ZDR.
-    let url = format!(
-        "{}/v1/threads?limit={MAX_THREADS}&origin=chat",
-        state.model_gateway_url
-    );
+    let url = durable_thread_list_url(&state.model_gateway_url, &request);
     let (status, Json(payload)) = shared::proxy_model_json_with_session(
         state,
         Method::GET,
@@ -375,11 +468,47 @@ async fn read_durable_threads(
             .into_response()
     })?;
     let now = now_iso();
-    Ok(payload
+    let sessions = payload
         .threads
         .into_iter()
         .filter_map(|item| durable_to_summary(item, &now))
-        .collect())
+        .collect();
+    Ok((sessions, payload.next_cursor))
+}
+
+/// The chat thread with this id, archived or not. Read by id rather than
+/// searched for in a page, so a thread past the first page opens like any
+/// other. `None` when the thread is not a chat thread the caller owns.
+async fn read_durable_thread(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    thread_id: &str,
+) -> Result<Option<ChatThreadSummary>, Response> {
+    let request = ThreadListRequest {
+        cursor: None,
+        limit: 1,
+        archived: Some("all"),
+        thread_id: Some(thread_id),
+    };
+    let (sessions, _) = fetch_durable_threads(state, user, headers, request).await?;
+    Ok(chat_history_sessions(sessions)
+        .into_iter()
+        .find(|session| session.thread_id == thread_id))
+}
+
+fn durable_thread_list_url(base: &str, request: &ThreadListRequest<'_>) -> String {
+    let mut params = vec![format!("limit={}", request.limit), "origin=chat".to_owned()];
+    if let Some(thread_id) = request.thread_id {
+        params.push(format!("thread_id={}", urlencoding::encode(thread_id)));
+    }
+    if let Some(cursor) = request.cursor {
+        params.push(format!("cursor={}", urlencoding::encode(cursor)));
+    }
+    if let Some(archived) = request.archived {
+        params.push(format!("archived={}", urlencoding::encode(archived)));
+    }
+    format!("{base}/v1/threads?{}", params.join("&"))
 }
 
 fn durable_to_summary(item: DurableThreadSummary, now: &str) -> Option<ChatThreadSummary> {
@@ -406,6 +535,7 @@ fn durable_to_summary(item: DurableThreadSummary, now: &str) -> Option<ChatThrea
         latest_run_id: item.latest_run_id,
         latest_run_status: item.latest_run_status,
         latest_run_updated_at: item.latest_run_updated_at,
+        archived_at: Some(item.archived_at.trim().to_owned()).filter(|value| !value.is_empty()),
     })
 }
 
@@ -820,6 +950,7 @@ mod tests {
                 latest_run_id: String::new(),
                 latest_run_status: String::new(),
                 latest_run_updated_at: None,
+                archived_at: String::new(),
             },
             now,
         )
@@ -838,6 +969,7 @@ mod tests {
                 latest_run_id: String::new(),
                 latest_run_status: String::new(),
                 latest_run_updated_at: None,
+                archived_at: String::new(),
             },
             now,
         )
@@ -875,6 +1007,7 @@ mod tests {
                     latest_run_id: String::new(),
                     latest_run_status: String::new(),
                     latest_run_updated_at: None,
+                    archived_at: String::new(),
                 },
                 now,
             )
@@ -917,6 +1050,7 @@ mod tests {
                 latest_run_id: String::new(),
                 latest_run_status: String::new(),
                 latest_run_updated_at: None,
+                archived_at: String::new(),
             },
             now,
         )
@@ -941,6 +1075,7 @@ mod tests {
                 latest_run_id: "run_1".to_owned(),
                 latest_run_status: "awaiting_approval".to_owned(),
                 latest_run_updated_at: Some("2026-08-11T11:00:00Z".to_owned()),
+                archived_at: String::new(),
             },
             "2026-08-11T12:00:00Z",
         )
@@ -1349,5 +1484,61 @@ mod tests {
         );
         assert!(transcript.turns[0].get("grounding").is_none());
         assert!(transcript.turns[1].get("citations").is_none());
+    }
+}
+
+#[cfg(test)]
+mod thread_paging_tests {
+    use super::*;
+
+    #[test]
+    fn read_durable_thread_url_addresses_one_thread_by_id_beyond_the_page() {
+        let url = durable_thread_list_url(
+            "http://model-gateway",
+            &ThreadListRequest {
+                cursor: None,
+                limit: 1,
+                archived: Some("all"),
+                thread_id: Some("thread-81"),
+            },
+        );
+        assert_eq!(
+            url,
+            "http://model-gateway/v1/threads?limit=1&origin=chat&thread_id=thread-81&archived=all"
+        );
+    }
+
+    #[test]
+    fn thread_81_transcript_is_reachable() {
+        // The transcript route resolves its thread by id, so the lookup never
+        // depends on the thread being inside the first page.
+        let url = durable_thread_list_url(
+            "http://model-gateway",
+            &ThreadListRequest {
+                cursor: None,
+                limit: 1,
+                archived: Some("all"),
+                thread_id: Some("thread-81"),
+            },
+        );
+        assert!(url.contains("thread_id=thread-81"));
+        assert!(!url.contains("limit=50"));
+    }
+
+    #[test]
+    fn thread_list_url_forwards_the_cursor_and_page_size() {
+        let url = durable_thread_list_url(
+            "http://model-gateway",
+            &ThreadListRequest {
+                cursor: Some("abc-_123"),
+                limit: 50,
+                archived: None,
+                thread_id: None,
+            },
+        );
+        assert_eq!(
+            url,
+            "http://model-gateway/v1/threads?limit=50&origin=chat&cursor=abc-_123"
+        );
     }
 }

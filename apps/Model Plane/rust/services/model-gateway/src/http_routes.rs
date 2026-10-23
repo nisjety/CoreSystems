@@ -8605,6 +8605,13 @@ struct ListThreadsQuery {
     /// who may read a room.
     space_read_decision_ref: Option<String>,
     space_read_decision_token: Option<String>,
+    /// Keyset cursor from a previous page's `next_cursor`. Opaque here:
+    /// session-core decodes it and refuses one it did not issue.
+    cursor: Option<String>,
+    /// Lists one thread by id, owner-bound like the rest of the listing.
+    thread_id: Option<String>,
+    /// `active` (the default), `archived` or `all`.
+    archived: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -8635,11 +8642,18 @@ struct ThreadSummaryResponse {
     /// `true` here for a pre-persona session-core replica during a rolling
     /// deploy — fail open, never silently disable persona fleet-wide.
     persona_enabled: bool,
+    /// Set when the owner archived the thread; omitted for an active thread.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    archived_at: String,
 }
 
 #[derive(Debug, Serialize)]
 struct ListThreadsResponse {
     threads: Vec<ThreadSummaryResponse>,
+    /// Omitted on the last page, so a caller that never pages sees the shape it
+    /// always did.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    next_cursor: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -8815,7 +8829,19 @@ async fn list_threads(
     bearer: VerifiedModelBearer,
     Query(query): Query<ListThreadsQuery>,
 ) -> Result<Json<ListThreadsResponse>, (StatusCode, Json<serde_json::Value>)> {
-    use mp_contracts::model_plane::v1::ListThreadsRequest;
+    use mp_contracts::model_plane::v1::{ArchiveFilter, ListThreadsRequest};
+
+    let archived = match query.archived.as_deref().unwrap_or("active") {
+        "active" => ArchiveFilter::Unspecified,
+        "archived" => ArchiveFilter::Archived,
+        "all" => ArchiveFilter::All,
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "archived must be active, archived or all" })),
+            ))
+        }
+    };
 
     let response = state
         .session_client
@@ -8829,6 +8855,9 @@ async fn list_threads(
                 origin: query.origin.unwrap_or_default(),
                 space_read_decision_ref: query.space_read_decision_ref.unwrap_or_default(),
                 space_read_decision_token: query.space_read_decision_token.unwrap_or_default(),
+                cursor: query.cursor.unwrap_or_default(),
+                thread_id: query.thread_id.unwrap_or_default(),
+                archived: archived as i32,
             },
             &bearer,
         )?)
@@ -8836,6 +8865,7 @@ async fn list_threads(
         .map_err(|e| session_thread_error("session-core list_threads failed", &e))?
         .into_inner();
 
+    let next_cursor = response.next_cursor;
     let threads = response
         .threads
         .into_iter()
@@ -8856,10 +8886,14 @@ async fn list_threads(
             origin: thread.origin,
             owner_subject_id: thread.owner_subject_id,
             persona_enabled: thread.persona_enabled,
+            archived_at: timestamp_to_rfc3339(thread.archived_at),
         })
         .collect();
 
-    Ok(Json(ListThreadsResponse { threads }))
+    Ok(Json(ListThreadsResponse {
+        threads,
+        next_cursor,
+    }))
 }
 
 /// Persist user-facing title, preview, and pin state through Session Core.

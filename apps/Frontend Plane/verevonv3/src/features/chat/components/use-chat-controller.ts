@@ -74,7 +74,7 @@ import {
   getChatThreadTranscript,
   listChatThreadEvents,
   getThreadMessages,
-  listChatThreads,
+  getChatThread,
   approvePlan,
   rejectPlan,
   listModels,
@@ -1196,8 +1196,10 @@ export function useChatController() {
     // Recover the non-secret routing hint from the server-owned listing so a
     // scoped thread remains appendable after a page reload. No authority is
     // cached: the BFF obtains a new Control decision for the actual content.
-    const listed = await listChatThreads().catch(() => [])
-    const scoped = listed.find((thread) => thread.threadId === threadId)?.spaceRef?.trim()
+    // By id, not a search of the listing: a thread past the first page keeps its
+    // routing hint too.
+    const session = await getChatThread(threadId).catch(() => null)
+    const scoped = session?.spaceRef?.trim()
     if (scoped) scopedThreadRefs.set(threadId, scoped)
     const localCached = readChatThreadTranscript(threadId)
     const serverCached = await getChatThreadTranscript(threadId).catch(() => null)
@@ -1236,7 +1238,7 @@ export function useChatController() {
       // never from browser draft content (the BFF intentionally does not
       // persist presentation snapshots). A still-active run is followed below
       // until its saved answer lands.
-      const latest = listed.find((thread) => thread.threadId === threadId)
+      const latest = session
       const lastMessage = history.at(-1)
       let activeRunTail: ChatTurn | null = null
       if (turns.at(-1)?.role === 'user' && lastMessage?.role === 'user'
@@ -1992,7 +1994,13 @@ export function useChatController() {
             // itself was unavailable — a transient outage must not blank the
             // chat. Deep links fail closed to read-only until origin can be
             // proven; an existing Chat pointer can still load from cache.
-            const listed = await listChatThreads().catch(() => null)
+            // By id, so a thread past the first page is found. A null session is
+            // the server saying it is not a chat thread; a failed lookup is an
+            // outage, which cannot prove origin.
+            const lookup = await getChatThread(storedThread).then(
+              (session) => ({ session }),
+              () => null,
+            )
             // The user may have selected a different thread or pressed New
             // chat while the listing request was outstanding. The event
             // listener owns that newer selection; never resurrect the
@@ -2000,14 +2008,14 @@ export function useChatController() {
             if (bootstrapSelectionRevision !== threadSelectionRevision) {
               // Keep initializing models and a pending routed launch below;
               // only this stale transcript restoration is cancelled.
-            } else if (!listed && linkedThread) {
+            } else if (!lookup && linkedThread) {
               // An outage means origin cannot be proven. Keep the deep-linked
               // transcript viewable, but fail closed to read-only so a
               // transient listing failure can never turn a foreign thread
               // into a Chat-owned write.
               markThreadForeignOrigin(storedThread)
               await loadThread(storedThread)
-            } else if (!listed || listed.some((thread) => thread.threadId === storedThread)) {
+            } else if (!lookup || lookup.session) {
               await loadThread(storedThread)
             } else if (linkedThread) {
               // A cross-surface "open in chat" link may DISPLAY a thread whose

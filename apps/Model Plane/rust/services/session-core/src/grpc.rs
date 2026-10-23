@@ -159,6 +159,81 @@ fn clamp_thread_limit(limit: u32) -> i64 {
     i64::from(limit).clamp(1, MAX_THREAD_LIST_LIMIT)
 }
 
+/// The sort position a ListThreads page ended on. The list sorts pinned threads
+/// first, then by last activity, then by id, so these three values identify the
+/// row and the next page starts strictly after them.
+#[derive(Debug, PartialEq)]
+struct ThreadCursor {
+    pinned: bool,
+    last_activity_at: DateTime<Utc>,
+    thread_id: String,
+}
+
+fn encode_thread_cursor(cursor: &ThreadCursor) -> String {
+    // One-letter keys keep the cursor short when it travels in a query string.
+    let json = serde_json::json!({
+        "p": cursor.pinned,
+        "a": cursor.last_activity_at.to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
+        "i": cursor.thread_id,
+    });
+    URL_SAFE_NO_PAD.encode(json.to_string())
+}
+
+fn decode_thread_cursor(raw: &str) -> Result<ThreadCursor, Status> {
+    let invalid = || Status::invalid_argument("cursor is not a thread list cursor");
+    let bytes = URL_SAFE_NO_PAD.decode(raw).map_err(|_| invalid())?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+    let pinned = value["p"].as_bool().ok_or_else(invalid)?;
+    let last_activity_at = value["a"]
+        .as_str()
+        .and_then(|text| DateTime::parse_from_rfc3339(text).ok())
+        .map(|parsed| parsed.with_timezone(&Utc))
+        .ok_or_else(invalid)?;
+    let thread_id = value["i"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .ok_or_else(invalid)?
+        .to_owned();
+    Ok(ThreadCursor {
+        pinned,
+        last_activity_at,
+        thread_id,
+    })
+}
+
+#[cfg(test)]
+mod thread_cursor_tests {
+    use super::*;
+    use chrono::{Duration, TimeZone};
+
+    #[test]
+    fn cursor_round_trips_the_sort_position_to_the_microsecond() {
+        let cursor = ThreadCursor {
+            pinned: true,
+            last_activity_at: Utc.with_ymd_and_hms(2026, 10, 1, 12, 30, 15).unwrap()
+                + Duration::microseconds(123_456),
+            thread_id: "01HZTHREAD".to_owned(),
+        };
+        let raw = encode_thread_cursor(&cursor);
+        assert_eq!(decode_thread_cursor(&raw).unwrap(), cursor);
+    }
+
+    #[test]
+    fn cursor_rejects_anything_that_is_not_a_thread_position() {
+        let cases = vec![
+            "!!!".to_owned(),
+            URL_SAFE_NO_PAD.encode("[]"),
+            URL_SAFE_NO_PAD.encode(r#"{"p":true,"a":"not-a-time","i":"t"}"#),
+            URL_SAFE_NO_PAD.encode(r#"{"p":"yes","a":"2026-10-01T00:00:00Z","i":"t"}"#),
+            URL_SAFE_NO_PAD.encode(r#"{"p":true,"a":"2026-10-01T00:00:00Z","i":""}"#),
+        ];
+        for raw in cases {
+            let error = decode_thread_cursor(&raw).expect_err(&raw);
+            assert_eq!(error.code(), tonic::Code::InvalidArgument, "{raw}");
+        }
+    }
+}
+
 fn compact_thread_text(value: Option<String>, fallback: &str, max_chars: usize) -> String {
     let text = value
         .map(|value| value.split_whitespace().collect::<Vec<_>>().join(" "))
@@ -1665,6 +1740,17 @@ async fn append_scheduled_result_in_tx(
     .await
     .map_err(|e| Status::internal(e.to_string()))?;
 
+    // The list's paging key moves with the result, as it does for a chat append,
+    // so a scheduled answer lifts its thread to the top of the list.
+    sqlx::query(
+        "UPDATE threads SET last_activity_at = GREATEST(last_activity_at, $2) WHERE id = $1",
+    )
+    .bind(thread_id)
+    .bind(now)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| Status::internal(e.to_string()))?;
+
     let sequence_u64 =
         u64::try_from(sequence).map_err(|_| Status::internal("message sequence out of range"))?;
     let msg_resource = format!("message:{}", &msg_id);
@@ -2920,6 +3006,18 @@ pub(crate) async fn append_message_in_tx(
     .bind(&metadata_json)
     .bind(author_subject_id)
     .fetch_one(&mut **tx)
+    .await
+    .map_err(|e| Status::internal(e.to_string()))?;
+
+    // The list's paging key, written in the same transaction as the message so
+    // the cursor moves exactly when the message does. Non-owner Space appends
+    // come through here too.
+    sqlx::query(
+        "UPDATE threads SET last_activity_at = GREATEST(last_activity_at, $2) WHERE id = $1",
+    )
+    .bind(&req.thread_id)
+    .bind(now)
+    .execute(&mut **tx)
     .await
     .map_err(|e| Status::internal(e.to_string()))?;
 
@@ -6469,7 +6567,30 @@ impl SessionCore for SessionService {
             )?;
             let audience_ceiling = space_read.map(|read| read.recipient_audience_revision);
             let limit = clamp_thread_limit(req.limit);
-            let rows: Vec<(
+            let page_size = usize::try_from(limit).unwrap_or(usize::MAX);
+            let archive_state = match pb::ArchiveFilter::try_from(req.archived) {
+                Ok(pb::ArchiveFilter::Unspecified) => "active",
+                Ok(pb::ArchiveFilter::Archived) => "archived",
+                Ok(pb::ArchiveFilter::All) => "all",
+                Err(_) => {
+                    return Err(Status::invalid_argument(
+                        "archived must be ARCHIVE_FILTER_ACTIVE, ARCHIVE_FILTER_ARCHIVED or ARCHIVE_FILTER_ALL",
+                    ))
+                }
+            };
+            let (cursor_pinned, cursor_activity, cursor_thread_id) = if req.cursor.is_empty() {
+                (None, None, None)
+            } else {
+                let cursor = decode_thread_cursor(&req.cursor)?;
+                (
+                    Some(cursor.pinned),
+                    Some(cursor.last_activity_at),
+                    Some(cursor.thread_id),
+                )
+            };
+            // One extra row tells the caller whether another page exists without
+            // a second count query.
+            let mut rows: Vec<(
                 String,
                 String,
                 DateTime<Utc>,
@@ -6484,60 +6605,79 @@ impl SessionCore for SessionService {
                 String,
                 String,
                 bool,
+                Option<DateTime<Utc>>,
             )> = sqlx::query_as(
-                "SELECT
-                    t.id,
-                    t.session_key,
-                    t.created_at,
-                    COALESCE(t.presentation_title, first_user.content) AS title,
-                    COALESCE(t.presentation_preview, last_message.content) AS preview,
-                    t.pinned_at,
-                    COALESCE(last_message.created_at, t.created_at) AS updated_at,
-                    t.space_id,
+                "WITH page AS (
+                    SELECT t.id, t.session_key, t.created_at, t.presentation_title,
+                           t.presentation_preview, t.pinned_at, t.last_activity_at, t.space_id,
+                           t.origin, t.user_id, t.persona_enabled, t.archived_at
+                    FROM threads t
+                    WHERE t.org_id = $1
+                      AND ($6::BIGINT IS NULL
+                           OR (t.recipient_audience_revision IS NULL
+                               OR t.recipient_audience_revision <= $6))
+                      AND ($6::BIGINT IS NOT NULL OR t.user_id = $2)
+                      AND (NULLIF($4, '') IS NULL OR t.space_id = $4)
+                      AND (NULLIF($5, '') IS NULL OR t.origin = $5)
+                      AND (NULLIF($7, '') IS NULL OR t.id = $7)
+                      AND ($11 = 'all' OR (($11 = 'archived') = (t.archived_at IS NOT NULL)))
+                      AND ($8::BOOLEAN IS NULL
+                           OR ((t.pinned_at IS NOT NULL), t.last_activity_at, t.id)
+                              < ($8::BOOLEAN, $9::TIMESTAMPTZ, $10::TEXT))
+                    ORDER BY (t.pinned_at IS NOT NULL) DESC, t.last_activity_at DESC, t.id DESC
+                    LIMIT $3
+                 )
+                 SELECT
+                    page.id,
+                    page.session_key,
+                    page.created_at,
+                    COALESCE(page.presentation_title, first_user.content) AS title,
+                    COALESCE(page.presentation_preview, last_message.content) AS preview,
+                    page.pinned_at,
+                    page.last_activity_at,
+                    page.space_id,
                     latest_run.id AS latest_run_id,
                     latest_run.status AS latest_run_status,
                     latest_run.updated_at AS latest_run_updated_at,
-                    t.origin,
-                    t.user_id,
-                    t.persona_enabled
-                 FROM threads t
+                    page.origin,
+                    page.user_id,
+                    page.persona_enabled,
+                    page.archived_at
+                 FROM page
                  LEFT JOIN LATERAL (
                     SELECT content
                     FROM messages
-                    WHERE thread_id = t.id AND role = 'user'
+                    WHERE thread_id = page.id AND role = 'user'
                     ORDER BY sequence ASC
                     LIMIT 1
                  ) first_user ON TRUE
                  LEFT JOIN LATERAL (
-                    SELECT content, created_at
+                    SELECT content
                     FROM messages
-                    WHERE thread_id = t.id
+                    WHERE thread_id = page.id
                     ORDER BY sequence DESC
                     LIMIT 1
                  ) last_message ON TRUE
                  LEFT JOIN LATERAL (
                     SELECT id, status, updated_at
                     FROM runs
-                    WHERE thread_id = t.id
+                    WHERE thread_id = page.id
                     ORDER BY updated_at DESC, created_at DESC, id DESC
                     LIMIT 1
                  ) latest_run ON TRUE
-                 WHERE t.org_id = $1 AND t.archived_at IS NULL
-                   AND ($6::BIGINT IS NULL
-                        OR (t.recipient_audience_revision IS NULL
-                            OR t.recipient_audience_revision <= $6))
-                   AND ($6::BIGINT IS NOT NULL OR t.user_id = $2)
-                   AND (NULLIF($4, '') IS NULL OR t.space_id = $4)
-                   AND (NULLIF($5, '') IS NULL OR t.origin = $5)
-                 ORDER BY (t.pinned_at IS NOT NULL) DESC, COALESCE(last_message.created_at, t.created_at) DESC, t.created_at DESC, t.id DESC
-                 LIMIT $3",
+                 ORDER BY (page.pinned_at IS NOT NULL) DESC, page.last_activity_at DESC, page.id DESC",
             )
             .bind(&req.org_id)
             .bind(&req.user_id)
-            .bind(limit)
+            .bind(limit + 1)
             .bind(&req.space_id)
             .bind(&req.origin)
             .bind(audience_ceiling)
+            .bind(&req.thread_id)
+            .bind(cursor_pinned)
+            .bind(cursor_activity)
+            .bind(cursor_thread_id)
+            .bind(archive_state)
             .fetch_all(&self.pool)
             .await
             .map_err(|e| {
@@ -6545,10 +6685,21 @@ impl SessionCore for SessionService {
                 Status::internal(e.to_string())
             })?;
 
+            let has_more = rows.len() > page_size;
+            let next_cursor = match rows.get(page_size - 1) {
+                Some(last) if has_more => encode_thread_cursor(&ThreadCursor {
+                    pinned: last.5.is_some(),
+                    last_activity_at: last.6,
+                    thread_id: last.0.clone(),
+                }),
+                _ => String::new(),
+            };
+            rows.truncate(page_size);
+
             let threads = rows
                 .into_iter()
                 .map(
-                    |(thread_id, session_key, created_at, title, preview, pinned_at, updated_at, space_id, latest_run_id, latest_run_status, latest_run_updated_at, origin, owner_subject_id, persona_enabled)| {
+                    |(thread_id, session_key, created_at, title, preview, pinned_at, last_activity_at, space_id, latest_run_id, latest_run_status, latest_run_updated_at, origin, owner_subject_id, persona_enabled, archived_at)| {
                         let fallback_title = if session_key.trim().is_empty() {
                             "Verevon Chat"
                         } else {
@@ -6564,7 +6715,7 @@ impl SessionCore for SessionService {
                             title,
                             preview,
                             created_at: Some(to_proto_timestamp(created_at)),
-                            updated_at: Some(to_proto_timestamp(updated_at)),
+                            updated_at: Some(to_proto_timestamp(last_activity_at)),
                             pinned: pinned_at.is_some(),
                             space_id: space_id.unwrap_or_default(),
                             latest_run_id: latest_run_id.unwrap_or_default(),
@@ -6573,12 +6724,16 @@ impl SessionCore for SessionService {
                             origin,
                             owner_subject_id,
                             persona_enabled,
+                            archived_at: archived_at.map(to_proto_timestamp),
                         }
                     },
                 )
                 .collect();
 
-            Ok(Response::new(pb::ListThreadsResponse { threads }))
+            Ok(Response::new(pb::ListThreadsResponse {
+                threads,
+                next_cursor,
+            }))
         }
         .await;
         record_metrics("list_threads", started, result.is_ok());
@@ -15781,5 +15936,243 @@ mod direct_completion_db_tests {
         assert!(response.receipt.is_some());
         assert!(assistant_messages(&pool, &run.thread_id).await.is_empty());
         assert_eq!(run_status(&pool, &run.run_id).await, "completed");
+    }
+}
+
+#[cfg(test)]
+mod thread_list_db_tests {
+    use super::*;
+    use chrono::{Duration, TimeZone};
+    use mp_contracts::model_plane::v1::session_core_server::SessionCore;
+
+    fn service(pool: PgPool) -> SessionService {
+        SessionService {
+            pool,
+            retrieval_client: None,
+            graph_client: None,
+            knowledge_client: None,
+            letta_memory: None,
+            audit_publisher: None,
+            auth: None,
+            grant_columns: crate::grpc::ThreadGrantColumns::present(),
+        }
+    }
+
+    async fn connect() -> PgPool {
+        let pool =
+            PgPool::connect(&std::env::var("DATABASE_URL").expect("disposable database required"))
+                .await
+                .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        pool
+    }
+
+    /// A thread whose activity is `activity` seconds after a fixed base, so the
+    /// list order is known without reading the clock.
+    async fn seed_thread(
+        pool: &PgPool,
+        org: &str,
+        user: &str,
+        id: &str,
+        activity: i64,
+        pinned: bool,
+        archived: bool,
+    ) {
+        let base = Utc.with_ymd_and_hms(2026, 10, 1, 0, 0, 0).unwrap();
+        sqlx::query(
+            "INSERT INTO threads (id, session_key, org_id, user_id, last_activity_at, pinned_at, archived_at)
+             VALUES ($1, $1, $2, $3, $4, $5, $6)",
+        )
+        .bind(id)
+        .bind(org)
+        .bind(user)
+        .bind(base + Duration::seconds(activity))
+        .bind(pinned.then_some(base))
+        .bind(archived.then_some(base))
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn list(
+        svc: &SessionService,
+        org: &str,
+        user: &str,
+        request: pb::ListThreadsRequest,
+    ) -> pb::ListThreadsResponse {
+        let mut request = Request::new(pb::ListThreadsRequest {
+            org_id: org.to_owned(),
+            user_id: user.to_owned(),
+            ..request
+        });
+        request
+            .extensions_mut()
+            .insert(VerifiedIdentity::user_for_test(org, user));
+        svc.list_threads(request)
+            .await
+            .expect("list_threads")
+            .into_inner()
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn list_threads_pages_without_gaps_or_repeats() {
+        let pool = connect().await;
+        let suffix = new_ulid();
+        let org = format!("paging-test-{suffix}");
+        let user = "paging-user";
+        for n in 0..150 {
+            seed_thread(
+                &pool,
+                &org,
+                user,
+                &format!("{suffix}-{n:03}"),
+                n,
+                n == 7,
+                false,
+            )
+            .await;
+        }
+        let mut expected: Vec<(bool, i64, String)> = (0..150)
+            .map(|n| (n == 7, n, format!("{suffix}-{n:03}")))
+            .collect();
+        expected.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+        let expected_ids: Vec<String> = expected.into_iter().map(|(_, _, id)| id).collect();
+
+        let svc = service(pool.clone());
+        let mut seen = Vec::new();
+        let mut pages = 0;
+        let mut cursor = String::new();
+        loop {
+            let page = list(
+                &svc,
+                &org,
+                user,
+                pb::ListThreadsRequest {
+                    limit: 50,
+                    cursor: cursor.clone(),
+                    ..Default::default()
+                },
+            )
+            .await;
+            pages += 1;
+            seen.extend(page.threads.into_iter().map(|thread| thread.thread_id));
+            if page.next_cursor.is_empty() {
+                break;
+            }
+            cursor = page.next_cursor;
+        }
+        assert_eq!(pages, 3, "150 threads at 50 a page");
+        assert_eq!(
+            seen, expected_ids,
+            "no gaps, no repeats, pinned first then newest activity"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn list_threads_by_id_finds_thread_beyond_80() {
+        let pool = connect().await;
+        let suffix = new_ulid();
+        let org = format!("by-id-test-{suffix}");
+        let user = "by-id-user";
+        for n in 0..120 {
+            seed_thread(
+                &pool,
+                &org,
+                user,
+                &format!("{suffix}-{n:03}"),
+                n,
+                false,
+                false,
+            )
+            .await;
+        }
+        // Activity 0 is the oldest of the 120, so it sits past the 80-thread cap.
+        let oldest = format!("{suffix}-000");
+        let svc = service(pool.clone());
+        let found = list(
+            &svc,
+            &org,
+            user,
+            pb::ListThreadsRequest {
+                thread_id: oldest.clone(),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(found.threads.len(), 1);
+        assert_eq!(found.threads[0].thread_id, oldest);
+        assert!(found.next_cursor.is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn archived_filter_separates_active_archived_and_all() {
+        let pool = connect().await;
+        let suffix = new_ulid();
+        let org = format!("archive-filter-test-{suffix}");
+        let user = "archive-user";
+        seed_thread(&pool, &org, user, &format!("{suffix}-a1"), 1, false, false).await;
+        seed_thread(&pool, &org, user, &format!("{suffix}-a2"), 2, false, false).await;
+        seed_thread(&pool, &org, user, &format!("{suffix}-x1"), 3, false, true).await;
+        let svc = service(pool.clone());
+
+        let active = list(&svc, &org, user, pb::ListThreadsRequest::default()).await;
+        assert_eq!(active.threads.len(), 2, "ACTIVE is the default");
+        assert!(active
+            .threads
+            .iter()
+            .all(|thread| thread.archived_at.is_none()));
+
+        let archived = list(
+            &svc,
+            &org,
+            user,
+            pb::ListThreadsRequest {
+                archived: pb::ArchiveFilter::Archived as i32,
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(archived.threads.len(), 1);
+        assert!(archived.threads[0].archived_at.is_some());
+
+        let all = list(
+            &svc,
+            &org,
+            user,
+            pb::ListThreadsRequest {
+                archived: pb::ArchiveFilter::All as i32,
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(all.threads.len(), 3);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn foreign_thread_id_is_not_found() {
+        let pool = connect().await;
+        let suffix = new_ulid();
+        let org = format!("foreign-id-test-{suffix}");
+        let foreign_thread = format!("{suffix}-foreign");
+        seed_thread(&pool, &org, "owner-user", &foreign_thread, 1, false, false).await;
+        let svc = service(pool.clone());
+
+        // The by-id read is owner-bound: another member of the org gets an empty
+        // listing, which the BFF reports as thread_not_found.
+        let other = list(
+            &svc,
+            &org,
+            "other-user",
+            pb::ListThreadsRequest {
+                thread_id: foreign_thread,
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(other.threads.is_empty());
     }
 }

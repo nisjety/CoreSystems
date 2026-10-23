@@ -1049,6 +1049,28 @@ message ListThreadsRequest {
   // in that Space are visible.
   string space_read_decision_ref = 6;
   string space_read_decision_token = 7;
+
+  // Keyset cursor from the previous page's ListThreadsResponse.next_cursor.
+  // Empty starts at the first page. Opaque to callers; a malformed cursor is
+  // invalid_argument.
+  string cursor = 8;
+  // Optional by-id read: returns at most this thread, and only when the caller
+  // could list it. Empty means no id filter.
+  string thread_id = 9;
+  // Which archive state to list. Unspecified lists the active threads, the
+  // listing as it was before archiving existed.
+  ArchiveFilter archived = 10;
+}
+
+// Which archive state a ListThreads call returns. Values are prefixed because
+// proto enum values share the package scope with sandboxes.proto's ACTIVE.
+enum ArchiveFilter {
+  // Active threads only. The zero value, so an older caller lists as before.
+  ARCHIVE_FILTER_UNSPECIFIED = 0;
+  // Archived threads only.
+  ARCHIVE_FILTER_ARCHIVED = 1;
+  // Active and archived threads together.
+  ARCHIVE_FILTER_ALL = 2;
 }
 
 message ThreadSummary {
@@ -1091,10 +1113,15 @@ message ThreadSummary {
   // no "caller said nothing" state to distinguish here the way the
   // read/write RPCs above must.
   bool persona_enabled = 14;
+
+  // Set when the owner archived the thread; absent for an active thread.
+  google.protobuf.Timestamp archived_at = 15;
 }
 
 message ListThreadsResponse {
   repeated ThreadSummary threads = 1;
+  // Keyset cursor for the next page; empty when this page is the last.
+  string next_cursor = 2;
 }
 
 // User-facing presentation state for a thread, written only by Session Core.

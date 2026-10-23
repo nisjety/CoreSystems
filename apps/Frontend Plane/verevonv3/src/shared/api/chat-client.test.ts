@@ -7,9 +7,11 @@ import {
   rejectPlan,
   shouldRequestSupportContext,
   describeFeedbackFailure,
+  getChatThread,
   getChatThreadTranscript,
   getThreadContext,
   listChatThreads,
+  listChatThreadsPage,
   modelEffortLevels,
   modelSupportsAgentic,
   parseTurnTiming,
@@ -2095,5 +2097,115 @@ describe('lifecycle notices (WS15 S1)', () => {
 
     expect(onCompaction).toHaveBeenCalledWith({ scope: 'history', outcome: 'truncated', requestId: 'req-1' })
     expect(onContextChange).toHaveBeenCalledWith({ change: 'history_shed', messagesDropped: 4, requestId: 'req-1' })
+  })
+})
+
+describe('paged thread listing', () => {
+  const json = { headers: { 'Content-Type': 'application/json' }, status: 200 }
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    __resetRetentionForTests()
+  })
+
+  it('sends the cursor and reads the next cursor the BFF repeats in data', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: {
+        sessions: [{ threadId: 't51', title: 'Fifty-first', updatedAt: '2026-06-17T10:00:00.000Z' }],
+        nextCursor: 'cursor_2',
+      },
+      meta: { next_cursor: 'cursor_2' },
+    }), json))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const page = await listChatThreadsPage({ cursor: 'cursor_1' })
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain('/api/v1/chat/threads?cursor=cursor_1')
+    expect(page.nextCursor).toBe('cursor_2')
+    expect(page.sessions.map((session) => session.threadId)).toEqual(['t51'])
+  })
+
+  it('reads a null next cursor as the last page', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: { sessions: [], nextCursor: null },
+    }), json)))
+
+    await expect(listChatThreadsPage()).resolves.toEqual({ sessions: [], nextCursor: null })
+  })
+
+  it('reads one thread by id and reports a thread the server no longer has as null', async () => {
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        data: { session: { threadId: 'thread_81', title: 'Beyond the first page', updatedAt: '2026-06-17T10:00:00.000Z' } },
+      }), json))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: { code: 'thread_not_found', message: 'The chat thread no longer exists.' },
+      }), { headers: { 'Content-Type': 'application/json' }, status: 404 })))
+
+    await expect(getChatThread('thread_81')).resolves.toMatchObject({
+      threadId: 'thread_81',
+      title: 'Beyond the first page',
+    })
+    await expect(getChatThread('thread_gone')).resolves.toBeNull()
+  })
+
+  it('walks every page before reconciling, so a thread on a later page keeps its local copy', async () => {
+    upsertChatThreadHistory({
+      threadId: 'thread_page_two',
+      title: 'Second page',
+      preview: '',
+      updatedAt: '2020-01-01T00:00:00.000Z',
+    })
+    upsertChatThreadHistory({
+      threadId: 'thread_erased',
+      title: 'Erased upstream',
+      preview: '',
+      updatedAt: '2020-01-01T00:00:00.000Z',
+    })
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        data: {
+          sessions: [{ threadId: 'thread_page_one', title: 'First page', updatedAt: '2026-06-17T10:00:00.000Z' }],
+          nextCursor: 'cursor_2',
+        },
+      }), json))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        data: {
+          sessions: [{ threadId: 'thread_page_two', title: 'Second page', updatedAt: '2026-06-16T10:00:00.000Z' }],
+          nextCursor: null,
+        },
+      }), json))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const sessions = await listChatThreads()
+
+    expect(sessions.map((session) => session.threadId)).toEqual(['thread_page_one', 'thread_page_two'])
+    expect(String(fetchMock.mock.calls[1]?.[0])).toContain('/api/v1/chat/threads?cursor=cursor_2')
+    const local = readChatThreadHistory().map((item) => item.threadId)
+    expect(local).toContain('thread_page_two')
+    expect(local).not.toContain('thread_erased')
+  })
+
+  it('keeps a local copy a partial listing does not show, and reconciles a complete one', async () => {
+    upsertChatThreadHistory({
+      threadId: 'thread_beyond_page',
+      title: 'Older chat',
+      preview: '',
+      updatedAt: '2020-01-01T00:00:00.000Z',
+    })
+    // A cursor that repeats ends the walk without reaching the last page.
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => new Response(JSON.stringify({
+      data: { sessions: [], nextCursor: 'cursor_2' },
+    }), json)))
+
+    await listChatThreads()
+    expect(readChatThreadHistory().map((item) => item.threadId)).toContain('thread_beyond_page')
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: { sessions: [], nextCursor: null },
+    }), json)))
+
+    await listChatThreads()
+    expect(readChatThreadHistory().map((item) => item.threadId)).not.toContain('thread_beyond_page')
   })
 })

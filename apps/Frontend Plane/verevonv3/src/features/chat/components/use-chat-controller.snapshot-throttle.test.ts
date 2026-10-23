@@ -60,6 +60,9 @@ const mocks = vi.hoisted(() => ({
   cancelRun: vi.fn(async (runId: string) => ({ runId, cancelled: true, status: 'cancelled', receiptId: 'receipt-1' })),
   getChatThreadTranscript: vi.fn(async () => null as unknown),
   listChatThreads: vi.fn(async () => [] as unknown[]),
+  getChatThread: vi.fn((threadId: string) =>
+    mocks.listChatThreads().then((listed) =>
+      (listed as Array<{ threadId: string }>).find((item) => item.threadId === threadId) ?? null)),
   getThreadMessages: vi.fn(async () => [] as unknown[]),
   getRun: vi.fn(async () => null as RunDetail | null),
   listRuns: vi.fn(async () => ({ runs: [] as RunDetail[], hasMore: false })),
@@ -74,6 +77,7 @@ vi.mock('@/shared/api/chat-client', async (importOriginal) => {
     getChatThreadTranscript: mocks.getChatThreadTranscript,
     listModels: vi.fn().mockResolvedValue([]),
     listChatThreads: mocks.listChatThreads,
+    getChatThread: mocks.getChatThread,
     saveChatThreadSnapshot: mocks.saveChatThreadSnapshot,
     getThreadMessages: mocks.getThreadMessages,
   }
