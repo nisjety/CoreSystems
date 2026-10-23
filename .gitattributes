@@ -50,3 +50,10 @@ Dockerfile text eol=lf
 # already LF by the *.json rule; this pins the rest, so that a Windows checkout with
 # core.autocrlf=true cannot change a hash (the CR-T11 keyword-index parity contract).
 **/testdata/index-parity-v1/* text eol=lf
+
+# The SSE payload golden (WS12 S7) and its vendored SPA copy are hashed byte for byte like every
+# other contract golden, and so are the pins beside them (the sync script compares copies byte for
+# byte). The *.json rule above already pins LF; naming the contracts directories keeps that true if
+# the general rule is ever narrowed.
+apps/**/contracts/*.json text eol=lf
+apps/**/contracts/*.sha256 text eol=lf

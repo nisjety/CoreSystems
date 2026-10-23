@@ -2159,3 +2159,485 @@ mod memory_recall_payload_tests {
         assert!(body["latency_ms"].is_number());
     }
 }
+
+/// The key, type and presence golden of every `ChatEvent` payload (WS12-S7): what the SPA's
+/// `chat-client.ts` may rely on, generated from the real `payload()` rather than written by hand.
+/// Each variant is sampled twice, minimal (every optional empty) and full (every optional set), so a
+/// conditionally written key reads as `optional` and a renamed or retyped key changes the file.
+/// Names, types and presence only: no sample text is recorded, so the golden carries no content.
+#[cfg(test)]
+mod payload_contract {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use serde::Serialize;
+    use serde_json::{json, Value};
+
+    use super::{ChatEvent, RetentionClass, ServedBy};
+
+    const REQUEST_ID: &str = "req-sample";
+
+    /// The committed golden. Regenerate with `MP_UPDATE_GOLDEN=1`; the repo-level
+    /// `scripts/tests/zdr-contract-sync.test.sh` then needs its pinned digest, the `.sha256` pin and the
+    /// SPA's vendored copy refreshed, which is the deliberate second step of changing the contract.
+    const GOLDEN_PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../api/contracts/sse-event-payloads.json"
+    );
+
+    /// Every variant name `covered` can return. A variant added to `ChatEvent` does not compile until
+    /// `covered` names it, and `every_variant_has_a_minimal_and_a_full_sample` then fails until it is
+    /// listed here with its samples.
+    const VARIANTS: &[&str] = &[
+        "ResultReceipt",
+        "ReasoningDelta",
+        "StepUpdate",
+        "ToolCall",
+        "ToolResult",
+        "Citation",
+        "SourceScopeApplied",
+        "Grounding",
+        "Artifact",
+        "Attachment",
+        "Usage",
+        "TurnTiming",
+        "Title",
+        "FollowUps",
+        "PlanProposed",
+        "Verification",
+        "MemoryRecall",
+        "QueuedInput",
+        "RetrievalNotice",
+        "Stopped",
+        "Error",
+        "ZdrError",
+        "SubscriptionError",
+    ];
+
+    /// The variant's name. No wildcard arm, so a new `ChatEvent` variant is a compile error here.
+    fn covered(event: &ChatEvent) -> &'static str {
+        match event {
+            ChatEvent::ResultReceipt { .. } => "ResultReceipt",
+            ChatEvent::ReasoningDelta { .. } => "ReasoningDelta",
+            ChatEvent::StepUpdate { .. } => "StepUpdate",
+            ChatEvent::ToolCall { .. } => "ToolCall",
+            ChatEvent::ToolResult { .. } => "ToolResult",
+            ChatEvent::Citation { .. } => "Citation",
+            ChatEvent::SourceScopeApplied { .. } => "SourceScopeApplied",
+            ChatEvent::Grounding { .. } => "Grounding",
+            ChatEvent::Artifact { .. } => "Artifact",
+            ChatEvent::Attachment { .. } => "Attachment",
+            ChatEvent::Usage { .. } => "Usage",
+            ChatEvent::TurnTiming { .. } => "TurnTiming",
+            ChatEvent::Title { .. } => "Title",
+            ChatEvent::FollowUps { .. } => "FollowUps",
+            ChatEvent::PlanProposed { .. } => "PlanProposed",
+            ChatEvent::Verification { .. } => "Verification",
+            ChatEvent::MemoryRecall { .. } => "MemoryRecall",
+            ChatEvent::QueuedInput { .. } => "QueuedInput",
+            ChatEvent::RetrievalNotice { .. } => "RetrievalNotice",
+            ChatEvent::Stopped { .. } => "Stopped",
+            ChatEvent::Error { .. } => "Error",
+            ChatEvent::ZdrError { .. } => "ZdrError",
+            ChatEvent::SubscriptionError { .. } => "SubscriptionError",
+        }
+    }
+
+    fn s(text: &str) -> String {
+        text.to_owned()
+    }
+
+    fn citation(full: bool) -> ChatEvent {
+        ChatEvent::Citation {
+            id: s("c1"),
+            title: s("Doc"),
+            url: s("https://example.test/doc"),
+            snippet: s("snippet"),
+            source_group_id: s("kb:sharepoint"),
+            source_group_label: full.then(|| s("Microsoft 365")),
+            number: full.then_some(1),
+            claim_id: full.then(|| s("turn-1:claim-0")),
+            start: full.then_some(12),
+            end: full.then_some(15),
+            origin: s("knowledge"),
+        }
+    }
+
+    fn grounding(full: bool) -> ChatEvent {
+        let grounding = if full {
+            crate::retrieval::Grounding {
+                mode: s("hybrid"),
+                query: s("query"),
+                trace_id: Some(s("trace-1")),
+                low_confidence: true,
+                fact_count: 1,
+                source_count: 1,
+                facts: vec![crate::retrieval::GroundingFact {
+                    knowledge_id: s("kid-1"),
+                    document_id: s("doc-1"),
+                    text: s("fact"),
+                    score: 0.9,
+                    source_title: s("Title"),
+                    source_type: s("policy"),
+                    provider: s("Notion"),
+                    chunk_index: 0,
+                }],
+                sources: vec![crate::retrieval::GroundingSource {
+                    id: s("doc-1"),
+                    kind: s("knowledge"),
+                    title: s("Title"),
+                    snippet: s("snippet"),
+                    provider: s("Notion"),
+                    source_type: s("policy"),
+                    document_id: s("doc-1"),
+                    href: s("/knowledge"),
+                    score: 0.9,
+                }],
+                graph: Some(crate::retrieval::GroundingGraph {
+                    trace_id: Some(s("graph-1")),
+                    community_summaries: vec![s("summary")],
+                    edge_count: 1,
+                    nodes: vec![crate::retrieval::GroundingGraphNode {
+                        id: s("node-1"),
+                        label: s("Label"),
+                        kind: s("policy"),
+                    }],
+                }),
+                suggested_next_tools: vec![s("knowledge_search")],
+                zdr_actions_applied: vec![s("ephemeral_no_trace_persist")],
+                ..Default::default()
+            }
+        } else {
+            crate::retrieval::Grounding::default()
+        };
+        ChatEvent::Grounding { grounding }
+    }
+
+    fn usage(full: bool) -> ChatEvent {
+        ChatEvent::Usage {
+            input_tokens: 12,
+            output_tokens: 34,
+            cost_usd: full.then_some(0.002),
+            cost_basis: full.then_some(crate::pricing::CostBasis::Metered),
+            latency_ms: 880,
+            confidence: full.then_some(0.77),
+            served_by: full.then(|| ServedBy {
+                provider_used: s("provider-a"),
+                residency: s("eu"),
+                privacy_tier: Some("eu_resident"),
+            }),
+            retention_class: full.then_some(RetentionClass::ZdrWaived {
+                reason: "connection_not_zdr_capable",
+            }),
+            cache_read_tokens: u32::from(full) * 5,
+            cache_write_tokens: u32::from(full) * 3,
+        }
+    }
+
+    fn turn_timing(full: bool) -> ChatEvent {
+        use crate::turn_timing::{Counts, Draft, Marks, Outcome, Phase, PhaseSpan, ProviderSummary};
+        let report = crate::turn_timing::TurnTimingReport {
+            request_id: s(REQUEST_ID),
+            outcome: Outcome::Completed,
+            server_ms: 900,
+            provider_ms: 700,
+            orchestration_ms: 200,
+            marks: if full {
+                Marks {
+                    connected_ms: Some(1),
+                    source_ready_ms: Some(2),
+                    first_token_ms: Some(3),
+                    first_draft_ms: Some(4),
+                    first_validated_ms: Some(5),
+                    durable_ms: Some(6),
+                }
+            } else {
+                Marks::default()
+            },
+            counts: Counts { model_rounds: u32::from(full), ..Default::default() },
+            tokens_reported: full,
+            phases: if full {
+                vec![PhaseSpan {
+                    phase: Phase::Generation,
+                    start_ms: 1,
+                    end_ms: 9,
+                    round: Some(1),
+                    pass: Some(1),
+                    batch: Some(1),
+                    attempt: Some(1),
+                    outcome: Some("ok"),
+                    tools: vec![s("create_artifact")],
+                    provider: Some(ProviderSummary {
+                        handler_ms: 8,
+                        provider_ms: 7,
+                        first_token_ms: Some(2),
+                        attempts: 1,
+                        response_cache_hit: false,
+                        upstream_ms: BTreeMap::from([(s("connect"), 1)]),
+                    }),
+                    budget_ms: Some(100),
+                }]
+            } else {
+                Vec::new()
+            },
+            phases_dropped: u32::from(full),
+            draft: if full {
+                Draft { model_writes: 1, model_write_chars: 10, stored_chars: 9, ..Default::default() }
+            } else {
+                Draft::default()
+            },
+        };
+        ChatEvent::TurnTiming { report }
+    }
+
+    fn memory_recall(full: bool) -> ChatEvent {
+        use crate::memory_provenance::{MemoryOrigin, MemoryRole, RecalledMemoryView};
+        let memories = if full {
+            vec![RecalledMemoryView {
+                memory_id: s("mem-1"),
+                role: MemoryRole::Recall,
+                origin: MemoryOrigin::Stated,
+                label: s("USER"),
+                preview: s("preview"),
+            }]
+        } else {
+            Vec::new()
+        };
+        ChatEvent::MemoryRecall { count: memories.len() as u32, latency_ms: 12, memories }
+    }
+
+    /// A minimal and a full sample of every variant, minimal first.
+    fn samples() -> Vec<ChatEvent> {
+        let refusal = |feature: Option<&'static str>| match feature {
+            Some(key) => mp_contracts::zdr_refusal::Refusal::feature_not_supported(key),
+            None => mp_contracts::zdr_refusal::Refusal::UNAVAILABLE,
+        };
+        vec![
+            ChatEvent::ResultReceipt { receipt: json!({}) },
+            ChatEvent::ResultReceipt { receipt: json!({ "checks": [] }) },
+            ChatEvent::ReasoningDelta { delta: s("") },
+            ChatEvent::ReasoningDelta { delta: s("thinking") },
+            ChatEvent::StepUpdate { id: s("1"), title: s(""), detail: s(""), status: s("running") },
+            ChatEvent::StepUpdate { id: s("1"), title: s("Title"), detail: s("Detail"), status: s("done") },
+            ChatEvent::ToolCall { id: s("1"), name: s("web_search"), args: json!({}) },
+            ChatEvent::ToolCall { id: s("1"), name: s("web_search"), args: json!({ "query": "q" }) },
+            ChatEvent::ToolResult { id: s("1"), status: s("ok"), output: s(""), error: None },
+            ChatEvent::ToolResult { id: s("1"), status: s("error"), output: s("out"), error: Some(s("boom")) },
+            citation(false),
+            citation(true),
+            ChatEvent::SourceScopeApplied { scope: s("web_only"), excluded_tools: Vec::new() },
+            ChatEvent::SourceScopeApplied { scope: s("knowledge_only"), excluded_tools: vec![s("web_search")] },
+            grounding(false),
+            grounding(true),
+            ChatEvent::Artifact { id: s("a1"), kind: s("document"), title: s(""), content: s(""), version: 1 },
+            ChatEvent::Artifact { id: s("a1"), kind: s("code"), title: s("T"), content: s("body"), version: 2 },
+            ChatEvent::Attachment { id: s("f1"), name: s("f.png"), mime: s("image/png"), url: s("blob:1"), size: 0 },
+            ChatEvent::Attachment { id: s("f1"), name: s("f.png"), mime: s("image/png"), url: s("blob:1"), size: 2048 },
+            usage(false),
+            usage(true),
+            turn_timing(false),
+            turn_timing(true),
+            ChatEvent::Title { title: s("") },
+            ChatEvent::Title { title: s("A title") },
+            ChatEvent::FollowUps { suggestions: Vec::new() },
+            ChatEvent::FollowUps { suggestions: vec![s("Why?")] },
+            ChatEvent::PlanProposed { plan_id: s("p1"), summary: s(""), steps: json!([]) },
+            ChatEvent::PlanProposed {
+                plan_id: s("p1"),
+                summary: s("Summary"),
+                steps: json!([{ "id": "s1", "title": "T", "operation": "write" }]),
+            },
+            ChatEvent::Verification { verdict: "unrelated", kb_citations: 0, web_citations: 0, web_allowed: false },
+            ChatEvent::Verification { verdict: "supports", kb_citations: 2, web_citations: 1, web_allowed: true },
+            memory_recall(false),
+            memory_recall(true),
+            ChatEvent::QueuedInput { messages: Vec::new() },
+            ChatEvent::QueuedInput { messages: vec![s("one more thing")] },
+            ChatEvent::RetrievalNotice {
+                notice: crate::retrieval_metadata::notice_for_code("zdr_dense_unavailable")
+                    .expect("the ZDR notice is catalogued"),
+            },
+            ChatEvent::RetrievalNotice {
+                notice: crate::retrieval_metadata::notice_for_code("another_reduction")
+                    .expect("the generic notice is catalogued"),
+            },
+            ChatEvent::Stopped { reason: s("") },
+            ChatEvent::Stopped { reason: s("user") },
+            ChatEvent::Error { code: s("internal"), message: s(""), retryable: false },
+            ChatEvent::Error { code: s("upstream_unavailable"), message: s("Try again"), retryable: true },
+            ChatEvent::ZdrError { refusal: refusal(None) },
+            ChatEvent::ZdrError { refusal: refusal(Some("attachments")) },
+            ChatEvent::SubscriptionError {
+                code: s("rate_limited"),
+                message: s(""),
+                retryable: false,
+                retry_after_ms: None,
+                resets_at: None,
+                retry_at: None,
+            },
+            ChatEvent::SubscriptionError {
+                code: s("rate_limited"),
+                message: s("Wait"),
+                retryable: true,
+                retry_after_ms: Some(1000),
+                resets_at: Some(s("2026-01-01T00:00:00Z")),
+                retry_at: Some(s("2026-01-01T00:00:01Z")),
+            },
+        ]
+    }
+
+    fn json_type(value: &Value) -> &'static str {
+        match value {
+            Value::Null => "null",
+            Value::Bool(_) => "boolean",
+            Value::Number(number) if number.is_f64() => "number",
+            Value::Number(_) => "integer",
+            Value::String(_) => "string",
+            Value::Array(_) => "array",
+            Value::Object(_) => "object",
+        }
+    }
+
+    #[derive(Serialize)]
+    struct KeyShape {
+        types: Vec<&'static str>,
+        presence: &'static str,
+    }
+
+    #[derive(Serialize)]
+    struct EventShape {
+        family: Option<&'static str>,
+        variants: Vec<&'static str>,
+        keys: BTreeMap<String, KeyShape>,
+    }
+
+    #[derive(Serialize)]
+    struct Contract {
+        contract: &'static str,
+        version: u32,
+        generated_by: &'static str,
+        events: BTreeMap<&'static str, EventShape>,
+    }
+
+    /// What the samples say about each SSE event name: the families and variants behind it and, per
+    /// payload key, the JSON types it took and whether every sample carried it. The three `error`
+    /// variants are one event name, so they merge into one entry.
+    fn render() -> String {
+        struct Seen {
+            family: Option<&'static str>,
+            variants: BTreeSet<&'static str>,
+            samples: usize,
+            keys: BTreeMap<String, (BTreeSet<&'static str>, usize)>,
+        }
+        let mut seen: BTreeMap<&'static str, Seen> = BTreeMap::new();
+        for event in samples() {
+            let entry = seen.entry(event.name()).or_insert_with(|| Seen {
+                family: event.family(),
+                variants: BTreeSet::new(),
+                samples: 0,
+                keys: BTreeMap::new(),
+            });
+            assert_eq!(entry.family, event.family(), "{} mixes feature families", event.name());
+            entry.variants.insert(covered(&event));
+            entry.samples += 1;
+            let payload = event.payload(REQUEST_ID);
+            let object = payload.as_object().expect("an SSE payload is a JSON object");
+            for (key, value) in object {
+                let slot = entry.keys.entry(key.clone()).or_default();
+                slot.0.insert(json_type(value));
+                slot.1 += 1;
+            }
+        }
+        let events = seen
+            .into_iter()
+            .map(|(name, seen)| {
+                let keys = seen
+                    .keys
+                    .into_iter()
+                    .map(|(key, (types, count))| {
+                        let presence = if count == seen.samples { "always" } else { "optional" };
+                        (key, KeyShape { types: types.into_iter().collect(), presence })
+                    })
+                    .collect();
+                (name, EventShape { family: seen.family, variants: seen.variants.into_iter().collect(), keys })
+            })
+            .collect();
+        let contract = Contract {
+            contract: "model-gateway.sse-event-payloads",
+            version: 1,
+            generated_by: "model-gateway sse_events payload_contract tests (MP_UPDATE_GOLDEN=1)",
+            events,
+        };
+        let mut text = serde_json::to_string_pretty(&contract).expect("the contract serializes");
+        text.push('\n');
+        text
+    }
+
+    #[test]
+    fn every_variant_has_a_minimal_and_a_full_sample() {
+        let mut count: BTreeMap<&str, usize> = BTreeMap::new();
+        for event in samples() {
+            *count.entry(covered(&event)).or_default() += 1;
+        }
+        for variant in VARIANTS {
+            assert!(
+                count.get(variant).copied().unwrap_or(0) >= 2,
+                "{variant} needs a minimal and a full sample in samples()"
+            );
+        }
+        assert_eq!(
+            count.keys().copied().collect::<BTreeSet<_>>(),
+            VARIANTS.iter().copied().collect::<BTreeSet<_>>(),
+            "samples() and VARIANTS name different variants"
+        );
+    }
+
+    #[test]
+    fn the_golden_carries_names_and_types_and_never_sample_content() {
+        let text = render();
+        for content in ["thinking", "Try again", "one more thing", "A title", "Wait"] {
+            assert!(!text.contains(content), "the golden records sample text: {content}");
+        }
+    }
+
+    /// The frames that carry retention and refusal facts keep the keys the SPA reads them by.
+    #[test]
+    fn the_zdr_bearing_frames_keep_their_keys() {
+        let contract: Value = serde_json::from_str(&render()).expect("the golden is JSON");
+        let key = |event: &str, key: &str| contract["events"][event]["keys"].get(key).cloned();
+        assert_eq!(key("usage", "retention_class").unwrap()["presence"], "optional");
+        assert_eq!(key("usage", "retention_reason").unwrap()["presence"], "optional");
+        assert_eq!(key("error", "code").unwrap()["presence"], "always");
+        assert_eq!(key("error", "action").unwrap()["presence"], "optional");
+        assert_eq!(key("error", "feature").unwrap()["presence"], "optional");
+        assert_eq!(key("retrieval_notice", "wording_key").unwrap()["presence"], "always");
+    }
+
+    #[test]
+    fn sse_event_payload_golden() {
+        let generated = render();
+        if std::env::var("MP_UPDATE_GOLDEN").is_ok_and(|value| value == "1") {
+            std::fs::create_dir_all(std::path::Path::new(GOLDEN_PATH).parent().unwrap())
+                .expect("the contracts directory");
+            std::fs::write(GOLDEN_PATH, &generated).expect("write the SSE payload golden");
+            return;
+        }
+        let committed = std::fs::read_to_string(GOLDEN_PATH).unwrap_or_else(|error| {
+            panic!(
+                "cannot read {GOLDEN_PATH} ({error}). Generate it with MP_UPDATE_GOLDEN=1 cargo test \
+                 -p model-gateway --lib sse_event_payload_golden, then pin its digest in \
+                 scripts/tests/zdr-contract-sync.test.sh."
+            )
+        });
+        assert!(
+            !committed.contains('\r'),
+            "the SSE payload golden must keep LF line endings (see .gitattributes)"
+        );
+        assert_eq!(
+            committed, generated,
+            "the committed SSE payload golden differs from what ChatEvent::payload produces. If the \
+             change is intended, regenerate it with MP_UPDATE_GOLDEN=1 cargo test -p model-gateway \
+             --lib sse_event_payload_golden, refresh its .sha256 pin and the SPA's vendored copy, and \
+             update the pinned digest in scripts/tests/zdr-contract-sync.test.sh."
+        );
+    }
+}

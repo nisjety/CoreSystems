@@ -137,6 +137,14 @@ GOLDENS=(
   # QB-M: the usage ledger's signed-envelope golden (CR-T10). usage-ledger-rs generates it with
   # UPDATE_USAGE_FIXTURE=1 cargo test -p usage-ledger-rs --test envelope_fixture; its pin is beside it.
   "apps/Data Plane v2/services/usage-ledger-rs/tests/fixtures/usage-envelopes.v2.json|cf50135121443b2dffa702297cffb77a311a66c204d0081e83623759532cc2d0"
+
+  # WS12 S7: the key, type and presence of every ChatEvent payload the gateway can put on an SSE frame.
+  # GENERATED from the real ChatEvent::payload by model-gateway's payload_contract tests, never written
+  # by hand:
+  #   MP_UPDATE_GOLDEN=1 cargo test -p model-gateway --lib sse_event_payload_golden
+  # in "apps/Model Plane/rust". Then refresh the .sha256 pin beside it, re-vendor the SPA's copy and its
+  # pin, and update the digest here. Any ChatEvent change regenerates it in the same change.
+  "apps/Model Plane/api/contracts/sse-event-payloads.json|213d7304af12091c83baa95fcee372f66ab5ce5e6da22723ecf34a2970c6da47"
 )
 
 # "<repo-relative copy>|<repo-relative golden>"
@@ -251,6 +259,11 @@ VENDORED=(
   # copy through the pin (tests/rerank_contract.rs), and scripts/check-usage-contract.sh section 1b checks it.
   "apps/Data Plane v2/services/retrieval-engine-rs/tests/fixtures/contracts/usage-ledger-v2/usage-envelopes.v2.json|apps/Data Plane v2/services/usage-ledger-rs/tests/fixtures/usage-envelopes.v2.json"
   "apps/Data Plane v2/services/retrieval-engine-rs/tests/fixtures/contracts/usage-ledger-v2/usage-envelopes.v2.json.sha256|apps/Data Plane v2/services/usage-ledger-rs/tests/fixtures/usage-envelopes.v2.json.sha256"
+
+  # WS12 S7: the SPA's copy of the SSE payload golden and its pin. scripts/verify-sse-frames.mjs checks a
+  # captured transcript against the copy inside the Frontend tree.
+  "apps/Frontend Plane/verevonv3/src/shared/api/contracts/sse-event-payloads.json|apps/Model Plane/api/contracts/sse-event-payloads.json"
+  "apps/Frontend Plane/verevonv3/src/shared/api/contracts/sse-event-payloads.json.sha256|apps/Model Plane/api/contracts/sse-event-payloads.json.sha256"
 )
 
 # "<repo-relative golden>|<consumer>|<tree its copy must live in>|<owning task>"
@@ -295,6 +308,8 @@ CONSUMERS=(
   "apps/Data Plane v2/services/retrieval-engine-rs/tests/fixtures/contracts/rerank-v1/ok.golden.json|quarry-runtime|apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/|QB-T09 (ok answer, scores by index)"
   "apps/Data Plane v2/services/retrieval-engine-rs/tests/fixtures/contracts/rerank-v1/skipped-zdr.golden.json|quarry-runtime|apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/|QB-T09 (skip reasons keep the order)"
   "apps/Data Plane v2/services/retrieval-engine-rs/tests/fixtures/contracts/rerank-v1/degraded-timeout.golden.json|quarry-runtime|apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/|QB-T09 (degraded reasons keep the order)"
+  # WS12 S7: the SPA checks every captured SSE frame against the Rust-generated payload golden.
+  "apps/Model Plane/api/contracts/sse-event-payloads.json|spa|apps/Frontend Plane/verevonv3/|WS12 S7 (key, type and presence of every ChatEvent payload)"
 )
 
 passes=0
