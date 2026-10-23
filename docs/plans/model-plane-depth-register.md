@@ -446,3 +446,5 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS20-S1 | zdr, audit | W2-03 | no |
 | WS27-S8 | money, authority | W2-02 | no |
 | WS22-S1 | authority, auth, zdr, data-loss | W2-04 | no |
+
+| D0-006 | cross | cleanup | P3 | Wave-mode slices handed back lines for shared files they may not edit (compose switches, `ZDR.md` rows, ownership-matrix rows, extra ledger text). They wait in `.plan-work/execution/shared-edits-<batch>.md` (W1-01, W1-02, W2-01 to W2-04 so far). The compose switches default off in code and need no line to be safe; the docs lines are bookkeeping. Apply in a depth pass. | open |
