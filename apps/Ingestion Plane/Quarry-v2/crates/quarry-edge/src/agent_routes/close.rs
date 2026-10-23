@@ -162,6 +162,9 @@ pub(super) async fn finish_run(
                 .await;
         }
     }
+    // WS10.S3: after the terminal event above, the run's trace (replay ring and live
+    // channel) is released, so a live subscriber sees the channel close.
+    state.event_sink.close_run(&rid);
     Ok(usage)
 }
 

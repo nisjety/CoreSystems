@@ -214,28 +214,32 @@ pub async fn live_view(
     Ok(Json(Envelope::ok(request_id, lv)))
 }
 
-/// `GET /v1/agent/runs/{run_id}/events/stream` — W3 — typed
-/// agent-event SSE. Sends the same `quarry_core::event::Event`
-/// envelope the `EventSink` already broadcasts, in the order the
-/// agent loop emitted them, until the run closes. The App Shell
-/// uses this to render the action timeline next to the frame
-/// stream.
+/// `GET /v1/agent/runs/{run_id}/events/stream` — typed agent-event SSE. Sends the
+/// `quarry_core::event::Event` envelope in the order the run emitted it (the `seq`
+/// of the run's trace), until the run closes. The App Shell uses this to render the
+/// action timeline next to the frame stream.
 ///
-/// Filtering: `internal.*` and `telemetry.*` event types are
-/// dropped. The agent loop only emits a small set of
-/// human-facing event types (`agent.*`, `action.*`,
-/// `observation.ready`) so the filter is currently a no-op,
-/// but it documents the wire contract for future telemetry
-/// events that the agent loop may add without surfacing.
+/// Filtering: only the user-facing types in `is_user_facing_event` are sent. Every
+/// other event still advances the connection's `seq`, so ids stay meaningful.
 ///
-/// Reconnect: `?from_seq=N` replays from the durable event
-/// history first (Postgres `quarry_event_history` when
-/// configured, no-op otherwise), then streams the live tail.
+/// Resume (WS10.S3): `?from_seq=N`, else the `Last-Event-ID` header a reconnecting
+/// EventSource sends (`from_seq` wins when both are present). The stream replays the
+/// run's in-memory trace ring after that seq, then tails the live channel with no
+/// gap and no duplicate. When the ring no longer holds the events the client missed,
+/// the stream first sends `replay_gap` with `{requested, oldest_retained,
+/// fallback}`; the client then reads the durable browser-session timeline for the
+/// older part. The ring is bounded per run (`QUARRY_EDGE__TRACE_RING_EVENTS`,
+/// `QUARRY_EDGE__TRACE_RING_MAX_BYTES`) and lives only as long as the run, so a
+/// reconnect after the run closed ends at once with `done` (`run_closed`).
+///
+/// A slow consumer that falls behind the broadcast buffer gets `lagged`, and the
+/// stream re-snapshots from the ring after the last seq it sent.
 pub async fn agent_events_stream(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
     Path(run_id): Path<String>,
     Query(query): Query<AgentEventsQuery>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, ApiErr> {
     let request_id = crate::request_id::current();
     let parsed_run: RunKind =
@@ -262,103 +266,124 @@ pub async fn agent_events_stream(
     }
     drop(entry);
 
-    // Replay the durable tail (best-effort: if the postgres
-    // history backend is not configured, the replay emits no
-    // events and the live tail still starts immediately).
-    // NOTE: postgres-queue JobHistoryEvent replay is wired
-    // separately via `GET /v1/runs/:id/events?after_seq=`; the
-    // agent live tail here is intentionally live-only so we
-    // don't conflate JobHistoryEvent<->Event types during the
-    // fleet promotion. `?from_seq=` remains accepted for
-    // forward-compat but is currently a no-op live tail.
-    let mut history_rx: Option<
-        std::pin::Pin<Box<dyn futures_util::Stream<Item = quarry_core::event::Event> + Send>>,
-    > = None;
-    let _ = &query.from_seq;
-
+    // The resume point: `?from_seq=` wins over the `Last-Event-ID` header.
+    let resume_from = query.from_seq.or_else(|| last_event_id(&headers));
     // A person watching the run keeps it from expiring idle (not from the backstop).
     let viewer = handle.live.viewer_guard();
-    let mut live_rx = state.event_sink.subscribe(&parsed_run);
+    let subscription = match resume_from {
+        Some(from_seq) => state.event_sink.subscribe_with_replay(&parsed_run, from_seq),
+        None => None,
+    };
+    // A run without a trace has no ring to replay; it gets the live tail only.
+    let (replay, gap, mut rx, start_seen) = match subscription {
+        Some(sub) => (sub.replay, sub.gap, sub.rx, resume_from),
+        None => (Vec::new(), None, state.event_sink.subscribe(&parsed_run), None),
+    };
     let max_events = query.max_events.unwrap_or(0);
-    let mut emitted: u64 = 0;
+    let sink = state.event_sink.clone();
 
     let stream = async_stream::stream! {
         let _viewer = viewer;
-        // Drain the replay tail first (if any). The replay
-        // stream yields events already in seq order.
-        if let Some(replay) = history_rx.as_mut() {
-            use futures_util::StreamExt;
-            while let Some(evt) = replay.next().await {
-                if is_user_facing_event(evt.event_type) {
-                    if max_events > 0 && emitted >= max_events {
-                        yield Ok(Event::default().event("done").data("max_events"));
-                        return;
-                    }
-                    emitted += 1;
-                    if let Ok(event) = Event::default()
-                        .event(event_name(evt.event_type))
-                        .id(evt.seq.to_string())
-                        .json_data(&evt)
-                    {
-                        yield Ok(event);
-                    }
-                }
-            }
+        let mut emitted: u64 = 0;
+        let mut last_seen: Option<u64> = start_seen;
+        let mut pending: std::collections::VecDeque<quarry_core::event::Event> = replay.into();
+        if let Some(gap) = gap {
+            yield Ok(replay_gap_event(gap));
         }
-        // Then stream the live tail.
         loop {
             if max_events > 0 && emitted >= max_events {
                 yield Ok(Event::default().event("done").data("max_events"));
                 break;
             }
-            match live_rx.recv().await {
-                Ok(evt) => {
-                    if !is_user_facing_event(evt.event_type) {
+            let evt = match pending.pop_front() {
+                Some(evt) => evt,
+                None => match rx.recv().await {
+                    Ok(evt) => evt,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        // Slow consumer: say so, then re-snapshot from the ring after the
+                        // last seq this connection sent, so the live tail resumes without a gap.
+                        yield Ok(Event::default()
+                            .event("lagged")
+                            .data(format!("{{\"skipped\":{skipped}}}")));
+                        match sink.subscribe_with_replay(&parsed_run, last_seen.unwrap_or(0)) {
+                            Some(resumed) => {
+                                rx = resumed.rx;
+                                pending = resumed.replay.into();
+                                if let Some(gap) = resumed.gap {
+                                    yield Ok(replay_gap_event(gap));
+                                }
+                            }
+                            None => {
+                                yield Ok(Event::default().event("done").data("run_closed"));
+                                break;
+                            }
+                        }
                         continue;
                     }
-                    emitted += 1;
-                    let name = event_name(evt.event_type);
-                    match Event::default()
-                        .event(name)
-                        .id(evt.seq.to_string())
-                        .json_data(&evt)
-                    {
-                        Ok(event) => yield Ok(event),
-                        Err(_) => {
-                            // The event's payload can hold the page's URL, title and text, so the
-                            // line names its type and sequence number, never the event itself.
-                            tracing::warn!(
-                                error_class = "serialize",
-                                event_type = ?evt.event_type,
-                                seq = evt.seq,
-                                "agent events stream: failed to serialize event; skipping"
-                            );
-                        }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        // Run closed. The terminal `agent.completed` / `agent.failed` event
+                        // is already sent; `done` tells the App Shell to close its EventSource.
+                        yield Ok(Event::default().event("done").data("run_closed"));
+                        break;
                     }
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                    // Slow consumer: tell the App Shell to
-                    // reconnect with `?from_seq=N` to backfill
-                    // the gap. We keep streaming from the next
-                    // available event so a real-time-only
-                    // consumer still sees fresh data.
-                    yield Ok(Event::default()
-                        .event("lagged")
-                        .data(format!("{{\"skipped\":{skipped}}}")));
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    // Run closed. The terminal `agent.completed` /
-                    // `agent.failed` event is already in the
-                    // history; emit `done` so the App Shell
-                    // closes its EventSource.
-                    yield Ok(Event::default().event("done").data("run_closed"));
-                    break;
+                },
+            };
+            // A replayed event the connection already sent (or a repeat from the live tail).
+            if last_seen.is_some_and(|seen| evt.seq <= seen) {
+                continue;
+            }
+            last_seen = Some(evt.seq);
+            if !is_user_facing_event(evt.event_type) {
+                continue;
+            }
+            emitted += 1;
+            let name = event_name(evt.event_type);
+            match Event::default()
+                .event(name)
+                .id(evt.seq.to_string())
+                .json_data(&evt)
+            {
+                Ok(event) => yield Ok(event),
+                Err(_) => {
+                    // The event's payload can hold the page's URL, title and text, so the
+                    // line names its type and sequence number, never the event itself.
+                    tracing::warn!(
+                        error_class = "serialize",
+                        event_type = ?evt.event_type,
+                        seq = evt.seq,
+                        "agent events stream: failed to serialize event; skipping"
+                    );
                 }
             }
         }
     };
 
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+/// The `Last-Event-ID` a reconnecting EventSource sends: this stream's SSE `id:` is the
+/// run's `seq`, so the header is the resume point.
+fn last_event_id(headers: &axum::http::HeaderMap) -> Option<u64> {
+    headers
+        .get("last-event-id")?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// The `replay_gap` event: the resume point is older than the ring. The fallback names
+/// the durable read that covers the missed part.
+fn replay_gap_event(gap: quarry_runtime::ReplayGap) -> Event {
+    Event::default().event("replay_gap").data(
+        serde_json::json!({
+            "requested": gap.requested,
+            "oldest_retained": gap.oldest_retained,
+            "fallback": "browser-session/timeline",
+        })
+        .to_string(),
+    )
 }
 
 /// `GET /v1/agent/runs/{run_id}/frames/stream` — stream transient live frames.

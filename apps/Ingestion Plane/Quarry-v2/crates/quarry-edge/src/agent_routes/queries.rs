@@ -33,9 +33,9 @@ pub struct FrameStreamQuery {
 }
 
 /// W3 — query for `GET /v1/agent/runs/{id}/events/stream`.
-/// `from_seq` triggers a durable-history replay before the live
-/// tail; `max_events` caps the total emission count for the
-/// connection.
+/// `from_seq` replays the run's in-memory trace ring after that seq before the
+/// live tail (WS10.S3; the `Last-Event-ID` header is the fallback); `max_events`
+/// caps the total emission count for the connection.
 #[derive(Debug, Deserialize)]
 pub struct AgentEventsQuery {
     #[serde(default, deserialize_with = "deserialize_optional_query_u64")]

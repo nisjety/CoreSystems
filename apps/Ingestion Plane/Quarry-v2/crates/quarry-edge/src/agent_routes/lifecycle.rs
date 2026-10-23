@@ -551,6 +551,10 @@ pub async fn start_run(
 
     slot.commit(run_id.to_string(), RunHandle::new(entry, live));
 
+    // WS10.S3: the run's event trace starts here, numbered from seq 1, so the
+    // AgentStarted below is the first event of the run's replay ring.
+    state.event_sink.open_run(&run_id, 1);
+
     state
         .event_sink
         .emit_for_zdr(
