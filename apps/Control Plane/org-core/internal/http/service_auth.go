@@ -48,6 +48,11 @@ var orgServiceScopeAllowlist = map[string]struct{}{
 	// GET /internal/orgs/:orgId/retention-posture and nothing else. Deliberately
 	// not org:read:any, which returns the whole organization record.
 	"org:retention:read:any": {},
+	// Read-only access to the resolved chat model policy of one org and user,
+	// through GET /internal/orgs/:orgId/model-entitlement and nothing else. Held
+	// by inference-core (the enforcement point, ADR-0005) and by model-gateway
+	// for explain; deliberately not org:read:any.
+	"org:model-entitlement:read:any": {},
 }
 
 type serviceCredential struct {
@@ -293,6 +298,14 @@ func organizationAPIScopes(method string, rest []string) []string {
 		return []string{"org:settings:write:self"}
 	case len(rest) == 3 && method == http.MethodGet && rest[1] == "members" && rest[2] == "search":
 		return []string{"org:read:self", "org:read:any"}
+	// The model policy is read and written only on behalf of a signed user
+	// (:self); org:read:any holders never see it.
+	case len(rest) == 2 && method == http.MethodGet && rest[1] == "model-entitlement":
+		return []string{"org:read:self"}
+	case len(rest) == 2 && method == http.MethodPut && rest[1] == "model-entitlement":
+		return []string{"org:settings:write:self"}
+	case len(rest) == 3 && method == http.MethodGet && rest[1] == "model-entitlement" && rest[2] == "explain":
+		return []string{"org:read:self"}
 	case len(rest) == 2 && method == http.MethodPost && rest[1] == "plan":
 		return []string{"org:settings:write:self"}
 	case len(rest) == 2 && method == http.MethodPatch && rest[1] == "settings":
@@ -322,6 +335,12 @@ func organizationProxyScopes(method string, rest []string) []string {
 		return []string{"org:read:self", "org:read:any"}
 	case len(rest) == 3 && method == http.MethodGet && rest[1] == "roles" && rest[2] == "catalog":
 		return []string{"org:read:self", "org:read:any"}
+	case len(rest) == 2 && method == http.MethodGet && rest[1] == "model-entitlement":
+		return []string{"org:read:self"}
+	case len(rest) == 2 && method == http.MethodPut && rest[1] == "model-entitlement":
+		return []string{"org:settings:write:self"}
+	case len(rest) == 3 && method == http.MethodGet && rest[1] == "model-entitlement" && rest[2] == "explain":
+		return []string{"org:read:self"}
 	case len(rest) == 2 && method == http.MethodPost && rest[1] == "plan":
 		return []string{"org:settings:write:self"}
 	case len(rest) == 2 && method == http.MethodPatch && (rest[1] == "capabilities" || rest[1] == "settings"):
@@ -359,6 +378,8 @@ func internalOrganizationScopes(method string, rest []string) []string {
 		return []string{"org:onboarding:write:self", "org:onboarding:write:any"}
 	case len(rest) == 2 && rest[1] == "retention-posture" && method == http.MethodGet:
 		return []string{"org:retention:read:any"}
+	case len(rest) == 2 && rest[1] == "model-entitlement" && method == http.MethodGet:
+		return []string{"org:model-entitlement:read:any"}
 	case len(rest) == 2 && rest[1] == "reconcile" && method == http.MethodPost:
 		return []string{"org:projection:write:any"}
 	case len(rest) == 3 && rest[1] == "members" && rest[2] == "reconcile" && method == http.MethodPost:

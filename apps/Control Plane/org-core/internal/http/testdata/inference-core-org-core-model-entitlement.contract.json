@@ -1,0 +1,73 @@
+{
+  "contract": "inference-core -> org-core model entitlement",
+  "version": 1,
+  "organizationId": "org-contract-fixture",
+  "userId": "user-contract-fixture",
+  "tokenPlaceholder": "<ORG_CORE_SERVICE_TOKEN>",
+  "exchanges": [
+    {
+      "name": "a user call",
+      "request": {
+        "method": "GET",
+        "path": "/internal/orgs/org-contract-fixture/model-entitlement?user_id=user-contract-fixture",
+        "headers": {
+          "accept": "application/json",
+          "x-service-id": "inference-core",
+          "x-service-token": "<ORG_CORE_SERVICE_TOKEN>"
+        }
+      },
+      "response": {
+        "status": 200,
+        "cacheControl": "no-store",
+        "body": {
+          "state": "role",
+          "revision": 4,
+          "role": "member",
+          "can_manage": false,
+          "policy": {
+            "allow_mode": "listed",
+            "allow": ["gpt-5-mini", "provider:anthropic"],
+            "deny": ["claude-opus-4-8"],
+            "max_effort": "high",
+            "defaults": {
+              "chat": {
+                "model": "gpt-5-mini",
+                "effort": "medium"
+              }
+            }
+          },
+          "sources": [
+            {
+              "layer": "role_override",
+              "role": "member"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "a service call with no user",
+      "request": {
+        "method": "GET",
+        "path": "/internal/orgs/org-contract-fixture/model-entitlement",
+        "headers": {
+          "accept": "application/json",
+          "x-service-id": "inference-core",
+          "x-service-token": "<ORG_CORE_SERVICE_TOKEN>"
+        }
+      },
+      "response": {
+        "status": 200,
+        "cacheControl": "no-store",
+        "body": {
+          "state": "none",
+          "revision": 0,
+          "role": "",
+          "can_manage": false,
+          "policy": null,
+          "sources": []
+        }
+      }
+    }
+  ]
+}

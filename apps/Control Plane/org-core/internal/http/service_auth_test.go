@@ -225,6 +225,22 @@ func TestOrgServiceScopeForRequest(t *testing.T) {
 		{method: http.MethodGet, path: "/internal/orgs/org-1/retention-posture/extra", want: nil},
 		{method: http.MethodGet, path: "/api/v1/organizations/org-1/retention-posture", want: nil},
 		{method: http.MethodGet, path: "/orgs/org-1/retention-posture", want: nil},
+		// The model policy is one narrow machine scope on the internal route, and
+		// signed-user scopes on the admin routes; org:read:any never reaches it.
+		{method: http.MethodGet, path: "/internal/orgs/org-1/model-entitlement", want: []string{"org:model-entitlement:read:any"}},
+		{method: http.MethodPost, path: "/internal/orgs/org-1/model-entitlement", want: nil},
+		{method: http.MethodPut, path: "/internal/orgs/org-1/model-entitlement", want: nil},
+		{method: http.MethodGet, path: "/internal/orgs/org-1/model-entitlement/explain", want: nil},
+		{method: http.MethodGet, path: "/api/v1/organizations/org-1/model-entitlement", want: []string{"org:read:self"}},
+		{method: http.MethodPut, path: "/api/v1/organizations/org-1/model-entitlement", want: []string{"org:settings:write:self"}},
+		{method: http.MethodGet, path: "/api/v1/organizations/org-1/model-entitlement/explain", want: []string{"org:read:self"}},
+		{method: http.MethodPost, path: "/api/v1/organizations/org-1/model-entitlement", want: nil},
+		{method: http.MethodDelete, path: "/api/v1/organizations/org-1/model-entitlement", want: nil},
+		{method: http.MethodPut, path: "/api/v1/organizations/org-1/model-entitlement/explain", want: nil},
+		{method: http.MethodGet, path: "/orgs/org-1/model-entitlement", want: []string{"org:read:self"}},
+		{method: http.MethodPut, path: "/orgs/org-1/model-entitlement", want: []string{"org:settings:write:self"}},
+		{method: http.MethodGet, path: "/orgs/org-1/model-entitlement/explain", want: []string{"org:read:self"}},
+		{method: http.MethodPatch, path: "/orgs/org-1/model-entitlement", want: nil},
 		{method: http.MethodGet, path: "/orgs//org-1", want: nil},
 		{method: http.MethodPost, path: "/orgs/org-1/members/invite", want: nil},
 	}

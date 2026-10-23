@@ -21,6 +21,7 @@ import (
 	grpcserver "github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/grpc"
 	httpserver "github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/http"
 	metricsserver "github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/metrics"
+	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/modelentitlement"
 	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/nats"
 	orgcore "github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/org"
 	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/rbac"
@@ -165,6 +166,9 @@ func main() {
 	go runOrgDeletionReminderSweep(ctx, orgService, orgDeletionReminderInterval)
 
 	server := httpserver.NewServer(cfg.HTTPPort, orgService, rbacRepo, cfg.AuthServiceURL, cfg.UserServiceURL)
+	// Chat model policy (WS10-S2, ADR-0005). Roles come from the membership
+	// table through orgService, never from a request header.
+	server.SetModelEntitlements(modelentitlement.NewService(modelentitlement.NewRepository(db), orgService))
 	grpcServer := grpcserver.NewServer(cfg.GRPCPort)
 	metricsServer := metricsserver.NewServer(cfg.MetricsPort)
 

@@ -26,6 +26,11 @@ type Server struct {
 	userServiceToken string
 	httpClient       *http.Client
 	brregClient      *brreg.Client
+
+	// modelEntitlements is set by SetModelEntitlements (WS10-S2); callerRoles is
+	// how its admin routes learn the caller's role from the membership table.
+	modelEntitlements modelEntitlementService
+	callerRoles       callerRoleReader
 }
 
 func NewServer(port int, orgService *orgcore.Service, rbacRepo *rbac.Repository, authServiceURL, userServiceURL string) *Server {
@@ -53,6 +58,7 @@ func NewServer(port int, orgService *orgcore.Service, rbacRepo *rbac.Repository,
 		// Assigned only when present: a typed-nil *Service in the interface
 		// would defeat the handler's nil check.
 		s.retentionPosture = orgService
+		s.callerRoles = orgService
 	}
 	s.setupRoutes()
 	s.httpServer = &http.Server{
@@ -96,6 +102,12 @@ func (s *Server) setupRoutes() {
 	v1.GET("/organizations/:id/quotas", s.getQuotas)
 	v1.PUT("/organizations/:id/quotas/:key", guard, s.putQuota)
 	v1.GET("/organizations/:id/members/search", s.searchMembers)
+	// Chat model policy (WS10-S2, ADR-0005). The handlers check the caller's
+	// role against the membership table themselves; the guard is the same
+	// second layer the other mutations use.
+	v1.GET("/organizations/:id/model-entitlement", s.getModelEntitlement)
+	v1.PUT("/organizations/:id/model-entitlement", guard, s.putModelEntitlement)
+	v1.GET("/organizations/:id/model-entitlement/explain", s.explainModelEntitlement)
 	// createOrganization is intentionally NOT guarded: there is no :id to check
 	// membership against yet (the org is being created and the caller becomes
 	// its first owner). It still requires x-user-id in the handler.
@@ -118,6 +130,9 @@ func (s *Server) setupRoutes() {
 	s.router.PATCH("/orgs/:id/capabilities", guard, s.updateCapabilities)
 	s.router.GET("/orgs/:id/members", s.listMembers)
 	s.router.GET("/orgs/:id/members/search", s.searchMembers)
+	s.router.GET("/orgs/:id/model-entitlement", s.getModelEntitlement)
+	s.router.PUT("/orgs/:id/model-entitlement", guard, s.putModelEntitlement)
+	s.router.GET("/orgs/:id/model-entitlement/explain", s.explainModelEntitlement)
 
 	// Read-only projection/RBAC catalog. Membership, role assignment, and custom
 	// policy mutations are intentionally not mounted for the secure MVP: Auth
@@ -166,6 +181,9 @@ func (s *Server) setupRoutes() {
 	// (not org:read:any, which returns the whole organization record). Computed
 	// from the database on every call; see getRetentionPostureInternal.
 	internal.GET("/orgs/:orgId/retention-posture", s.getRetentionPostureInternal)
+	// The resolved chat model policy for one org and user, for inference-core's
+	// pull (WS10-S2). Own scope org:model-entitlement:read:any; no-store.
+	internal.GET("/orgs/:orgId/model-entitlement", s.getModelEntitlementInternal)
 	internal.GET("/orgs/:orgId/roles/:roleName/capabilities", s.getEffectiveCapabilities)
 	internal.GET("/orgs/by-tenant", s.getOrganizationByTenant)
 	internal.POST("/orgs/ensure-from-tenant", s.ensureOrganizationFromTenant)
