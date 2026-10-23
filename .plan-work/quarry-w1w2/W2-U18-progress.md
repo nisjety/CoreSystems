@@ -35,4 +35,4 @@ Status: BUILT to scope, compile-checked (gateway cargo check --tests, SPA tsc), 
 - action-registry.ts (H13): two ids added after browser_run.control's neighbour (before browser_session.create). WS9.C (U19) adds its own ids elsewhere in the registry; the dispatch arms for the two omnibox ids sit in handlers.rs before browser_profile.create.
 - gateway search.rs: search_suggestions now takes a HeaderMap as its second argument. Any new caller must pass the headers.
 - The flag is read at build time (`import.meta.env.VITE_BROWSER_OMNIBOX_SEARCH === '1'`). Dev and staging builds must set it to 1; docker-compose.yml does not pass it yet (depth, medium).
-- Depth bullets are in .plan-work/quarry-w1w2/depth/W2-U18.md (13 items; the high ones are the test-run gap and the host-specific refusal row).
+- Depth bullets are in .plan-work/quarry-w1w2/depth/W2-U18.md (18 items; the high ones are the test-run gap and the host-specific refusal row).
