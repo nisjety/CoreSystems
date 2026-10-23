@@ -73,6 +73,7 @@ import { CrawlPagePicker } from './CrawlPagePicker'
 import { DashboardPlanBadge } from './DashboardPlanBadge'
 import { ProductPicker } from './ProductPicker'
 import { ScrapePreviewPanel } from './KnowledgeScrapePreview'
+import { navigationFailureFromError, type BrowserNavigationFailure } from '@/features/browser/session/browser-navigation-error'
 import { PROFILE_SCOPE_LABELS, type BrowserProfileManagerProps } from './BrowserChrome'
 import { createBrowserLoopController, type BrowserLoopState } from './browser-loop'
 import {
@@ -193,6 +194,8 @@ export function KnowledgeComposer(props: {
   const [submitting, setSubmitting] = createSignal(false)
   const [adding, setAdding] = createSignal(false)
   const [browserBusy, setBrowserBusy] = createSignal(false)
+  // A navigation that did not load, kept for the error card and its Retry (WS9.B).
+  const [browserNavigationError, setBrowserNavigationError] = createSignal<BrowserNavigationFailure | null>(null)
   const [browserProfiles, setBrowserProfiles] = createSignal<BrowserProfileSummary[]>([])
   const [browserProfilesLoading, setBrowserProfilesLoading] = createSignal(false)
   const [browserProfileChoice, setBrowserProfileChoice] = createSignal(isolatedProfileChoice)
@@ -911,9 +914,14 @@ export function KnowledgeComposer(props: {
     try {
       const nextSession = await runBrowserAction(id, sessionId, action, { actor: 'human' })
       setPreview(attachBrowserSession(current, nextSession))
+      setBrowserNavigationError(null)
       void refreshBrowserOwnerTimeline(sessionId)
     } catch (reason) {
-      setFormError(browserErrorMessage(reason, i18n.tr, { no: 'Nettleserhandlingen kunne ikke fullføres.', en: 'The browser action could not be completed.' }))
+      const failure = navigationFailureFromError(action, reason, i18n.tr)
+      setBrowserNavigationError(failure)
+      if (!failure) {
+        setFormError(browserErrorMessage(reason, i18n.tr, { no: 'Nettleserhandlingen kunne ikke fullføres.', en: 'The browser action could not be completed.' }))
+      }
     } finally {
       setBrowserBusy(false)
     }
@@ -1633,6 +1641,9 @@ export function KnowledgeComposer(props: {
             browserRationales={browserRationales()}
             decidingBrowserApprovalKeys={decidingApprovalKeys()}
             onBrowserAction={(action) => void performBrowserAction(action)}
+            browserNavigationError={browserNavigationError()}
+            onBrowserNavigationDismiss={() => setBrowserNavigationError(null)}
+            onBrowserNavigationRetry={(url) => void performBrowserAction({ type: 'navigate', url })}
             onBrowserAutoRun={beginBrowserAiRun}
             onBrowserControlMode={(mode) => void updateBrowserControlMode(mode)}
             onBrowserLoopPause={() => browserLoop.requestPause()}

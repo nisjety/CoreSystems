@@ -81,6 +81,8 @@ import {
 } from './browser-session'
 import { BrowserTimelineDetailPanel, compactBrowserUrl, consoleTone, networkTone } from './BrowserTimelineDetail'
 import { OmniboxField } from '@/features/browser/omnibox/OmniboxField'
+import { BrowserNavigationError } from '@/features/browser/omnibox/BrowserNavigationError'
+import type { BrowserNavigationFailure } from '@/features/browser/session/browser-navigation-error'
 import { BrowserSearchResults } from '@/features/browser/omnibox/BrowserSearchResults'
 import { currentOmniboxHistoryKey, recordOmniboxVisit } from '@/features/browser/omnibox/omnibox-history'
 import {
@@ -436,6 +438,10 @@ export function BrowserChrome(props: {
    * decide call — disables that card's Approve/Reject buttons. */
   decidingBrowserApprovalKeys?: string[]
   frameControls?: JSX.Element
+  /** A navigation that did not load (WS9.B): shown as an error card with Retry. */
+  browserNavigationError?: BrowserNavigationFailure | null
+  onBrowserNavigationDismiss?: () => void
+  onBrowserNavigationRetry?: (url: string) => void
   onBrowserAction?: (action: BrowserAction) => void
   onBrowserAutoRun?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
   onBrowserControlMode?: (mode: BrowserSessionViewModel['controlMode']) => void
@@ -646,6 +652,37 @@ export function BrowserChrome(props: {
     if (controlsDisabled()) return
     if (sendBrowserWsAction(action)) return
     props.onBrowserAction?.(action)
+  }
+  /**
+   * Reload from the chrome (WS9.B). A soft reload after a failed navigation retries
+   * that URL; a hard reload is the Quarry `reload` action and needs the capability.
+   */
+  const reloadFromChrome = (ignoreCache: boolean) => {
+    const failure = props.browserNavigationError
+    if (!ignoreCache && failure && props.onBrowserNavigationRetry) {
+      props.onBrowserNavigationRetry(failure.url)
+      return
+    }
+    if (ignoreCache) runAction({ type: 'reload', ignore_cache: true })
+    else runAction({ type: 'navigate', url: session().url })
+  }
+  /** F5 and Ctrl/Cmd+R reload inside the chrome; Ctrl/Cmd+Shift+R is a hard reload. */
+  const onChromeReloadKey = (event: KeyboardEvent) => {
+    const modifier = event.ctrlKey || event.metaKey
+    const isReload = event.key === 'F5' || (modifier && event.key.toLowerCase() === 'r')
+    if (!isReload) return
+    event.preventDefault()
+    reloadFromChrome(modifier && event.shiftKey && session().capabilities.includes('hard_reload'))
+  }
+  /** Mouse buttons 4 and 5 on the page frame go back and forward (WS9.B). */
+  const onChromePageAuxClick = (event: MouseEvent) => {
+    if (event.button === 3) {
+      event.preventDefault()
+      runAction({ type: 'back' })
+    } else if (event.button === 4) {
+      event.preventDefault()
+      runAction({ type: 'forward' })
+    }
   }
   const clearQueuedWheelTimer = () => {
     if (queuedWheelTimer === undefined) return
@@ -1096,6 +1133,7 @@ export function BrowserChrome(props: {
   return (
     <div
       class={['knowledge-browser-chrome', { 'knowledge-browser-chrome--compact': Boolean(props.compact) }]}
+      onKeyDown={onChromeReloadKey}
     >
       <div class="knowledge-browser-frame__topbar knowledge-browser-frame__topbar--minimal">
         <div class="knowledge-browser-frame__window">
@@ -1174,6 +1212,14 @@ export function BrowserChrome(props: {
         {props.frameControls}
       </div>
 
+      <Show when={props.browserNavigationError}>
+        <BrowserNavigationError
+          failure={props.browserNavigationError as BrowserNavigationFailure}
+          busy={props.browserBusy}
+          onRetry={(url) => props.onBrowserNavigationRetry?.(url)}
+          onDismiss={() => props.onBrowserNavigationDismiss?.()}
+        />
+      </Show>
       <div class="knowledge-browser-chrome__toolbar" aria-label="Nettleserkontroller">
         <div class="knowledge-browser-chrome__nav">
           <button
@@ -1199,10 +1245,21 @@ export function BrowserChrome(props: {
             aria-label="Last nettlesersiden på nytt"
             title="Last på nytt"
             disabled={controlsDisabled()}
-            onClick={() => runAction({ type: 'navigate', url: session().url })}
+            onClick={() => reloadFromChrome(false)}
           >
             <RefreshCw class="size-3.5" />
           </button>
+          <Show when={session().capabilities.includes('hard_reload')}>
+            <button
+              type="button"
+              aria-label="Last nettlesersiden på nytt uten hurtigbuffer"
+              title="Last på nytt uten hurtigbuffer"
+              disabled={controlsDisabled()}
+              onClick={() => reloadFromChrome(true)}
+            >
+              <RefreshCw class="size-3.5" />
+            </button>
+          </Show>
         </div>
 
         <div class="knowledge-browser-chrome__address">
@@ -1811,7 +1868,7 @@ export function BrowserChrome(props: {
         class={['knowledge-browser-chrome__body', { 'knowledge-browser-chrome__body--devtools': isLive() && chrome().devtoolsOpen }]}
       >
         <Show when={isLive()} fallback={props.children}>
-          <div class="knowledge-browser-chrome__page" aria-label="Gjengitt nettleserside">
+          <div class="knowledge-browser-chrome__page" aria-label="Gjengitt nettleserside" onAuxClick={onChromePageAuxClick}>
             <Show when={searchQuery()}>
               {(query) => (
                 <BrowserSearchResults

@@ -16,6 +16,8 @@ export type BrowserAction =
   | { type: 'back' }
   | { type: 'forward' }
   | { type: 'get_content' }
+  /** Human-only (WS9.B): the gateway refuses it for agent actors. */
+  | { type: 'reload'; ignore_cache?: boolean }
 
 export type BrowserInteractiveElement = {
   role?: string | null

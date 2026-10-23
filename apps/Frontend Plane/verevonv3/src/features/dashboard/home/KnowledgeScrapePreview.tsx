@@ -18,6 +18,7 @@ import type {
 import type { ApprovalDecision } from '@/shared/api/orchestration-client'
 import type { BrowserLoopState } from './browser-loop'
 import { BrowserChrome, type BrowserProfileManagerProps } from './BrowserChrome'
+import type { BrowserNavigationFailure } from '@/features/browser/session/browser-navigation-error'
 import { browserSessionFromPreview, type BrowserApprovalEntry, type BrowserStepRationale } from './browser-session'
 import { hostnameOf, type ScrapeBlock, type ScrapePreview } from './knowledge-preview'
 
@@ -210,8 +211,11 @@ function BrowserSessionSurface(props: {
   browserLoopRationale?: BrowserStepRationale | null
   browserRationales?: BrowserStepRationale[]
   decidingBrowserApprovalKeys?: string[]
+  browserNavigationError?: BrowserNavigationFailure | null
   hovered: number | null
   onBrowserAction?: (action: BrowserAction) => void
+  onBrowserNavigationDismiss?: () => void
+  onBrowserNavigationRetry?: (url: string) => void
   onBrowserAutoRun?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
   onBrowserControlMode?: (mode: BrowserControlMode) => void
   onBrowserLoopPause?: () => void
@@ -259,6 +263,9 @@ function BrowserSessionSurface(props: {
         browserLoopRationale={props.browserLoopRationale}
         browserRationales={props.browserRationales}
         decidingBrowserApprovalKeys={props.decidingBrowserApprovalKeys}
+        browserNavigationError={props.browserNavigationError}
+        onBrowserNavigationDismiss={props.onBrowserNavigationDismiss}
+        onBrowserNavigationRetry={props.onBrowserNavigationRetry}
         frameControls={
           <div class="knowledge-browser-frame__controls">
             <button
@@ -411,8 +418,11 @@ export function ScrapePreviewPanel(props: {
   browserLoop?: BrowserLoopState
   browserLoopRationale?: BrowserStepRationale | null
   browserRationales?: BrowserStepRationale[]
+  browserNavigationError?: BrowserNavigationFailure | null
   decidingBrowserApprovalKeys?: string[]
   onBrowserAction?: (action: BrowserAction) => void
+  onBrowserNavigationDismiss?: () => void
+  onBrowserNavigationRetry?: (url: string) => void
   onBrowserAutoRun?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
   onBrowserControlMode?: (mode: BrowserControlMode) => void
   onBrowserLoopPause?: () => void
@@ -469,9 +479,12 @@ export function ScrapePreviewPanel(props: {
         browserLoopRationale={props.browserLoopRationale}
         browserRationales={props.browserRationales}
         decidingBrowserApprovalKeys={props.decidingBrowserApprovalKeys}
+        browserNavigationError={props.browserNavigationError}
         expanded={browserExpanded()}
         hovered={hovered()}
         onBrowserAction={props.onBrowserAction}
+        onBrowserNavigationDismiss={props.onBrowserNavigationDismiss}
+        onBrowserNavigationRetry={props.onBrowserNavigationRetry}
         onBrowserAutoRun={props.onBrowserAutoRun}
         onBrowserControlMode={props.onBrowserControlMode}
         onBrowserLoopPause={props.onBrowserLoopPause}
