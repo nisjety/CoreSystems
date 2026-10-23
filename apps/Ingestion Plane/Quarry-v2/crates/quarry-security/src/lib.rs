@@ -52,4 +52,10 @@ pub trait SecurityEngine: Send + Sync {
     fn allow_private_hosts(&self) -> bool {
         false
     }
+    /// Whether the pipeline preflights the final URL of a fetch again when a redirect
+    /// moved it off the requested URL (WS7.G). Default false: an engine that does not
+    /// ask for it sees the requested URL only, as before.
+    fn recheck_final_url(&self) -> bool {
+        false
+    }
 }

@@ -771,6 +771,16 @@ impl ResolvedPolicy {
         Ok(())
     }
 
+    /// The hosts any layer denies, canonical, sorted and without duplicates. The browser
+    /// egress boundary takes this list as its own deny list (WS7.G), so a sub-resource,
+    /// frame or redirect to a denied host is refused where it happens.
+    pub fn denied_hosts(&self) -> Vec<String> {
+        let mut hosts: Vec<String> = self.deny.iter().map(|(_, host)| host.clone()).collect();
+        hosts.sort();
+        hosts.dedup();
+        hosts
+    }
+
     /// Keep only the egress hosts the policy still allows.
     pub fn narrow_egress(&self, hosts: &[String]) -> EgressNarrowing {
         let kept: Vec<String> = hosts

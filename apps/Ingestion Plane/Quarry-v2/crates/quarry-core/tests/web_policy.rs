@@ -757,3 +757,21 @@ fn reserved_keys_are_listed_so_a_new_option_must_call_require() {
         ]
     );
 }
+
+#[test]
+fn denied_hosts_lists_every_layers_deny_once_and_sorted() {
+    let mut input = inputs(Principal::Autonomous);
+    input.baseline = layer_domains(None, vec!["zz.example", "ads.example.com"]);
+    input.request = Some(layer_domains(None, vec!["ads.example.com", "bad.example"]));
+    let resolved = quarry_core::web_policy::resolve(&input).expect("resolves");
+    assert_eq!(
+        resolved.denied_hosts(),
+        vec![
+            "ads.example.com".to_string(),
+            "bad.example".to_string(),
+            "zz.example".to_string()
+        ]
+    );
+    let none = quarry_core::web_policy::resolve(&inputs(Principal::Human)).expect("resolves");
+    assert!(none.denied_hosts().is_empty(), "no deny rule means an empty list");
+}
