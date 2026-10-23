@@ -32,7 +32,7 @@
 #
 # Usage:
 #   ./scripts/ws6a-crawl-bound-evidence.sh               # the recipe (exit gate only)
-#   ./scripts/ws6a-crawl-bound-evidence.sh --self-test   # the checks on canned JSON; no network
+#   ./scripts/ws6a-crawl-bound-evidence.sh --self-test   # check() and json_get() on canned JSON; no network
 set -uo pipefail
 
 RESULTS=()
@@ -88,33 +88,39 @@ self_test() {
   printf '%s' '{"data":{"params":{"max_pages":7},"statistics":{"pages_visited":7}}}' > "$good_job"
   printf '%s' '{"data":{"params":{"max_pages":7},"statistics":{"pages_visited":6}}}' > "$short_job"
 
-  # The self-test expects the good fixtures to pass and the short job to be
-  # refused, so a broken json_get or check shows up here before any stack is
-  # involved. It reads the values itself and does not touch RESULTS.
-  local failures=0 got
-  expect_value() { # expect_value <name> <expected-json> <actual-json> <want: pass|refuse>
-    local verdict
-    if [ "$3" = "$2" ]; then verdict=pass; else verdict=refuse; fi
-    if [ "$verdict" = "$4" ]; then
-      echo "self-test $1: $verdict, as expected"
+  # The self-test calls the real check() and json_get(), with the same paths and
+  # expected values that run_recipe uses, and asserts the verdict that check()
+  # records and prints. A check() that passes everything, a check() that refuses
+  # the good values, or a json_get that reads the wrong path is reported here
+  # before any stack is involved. The comparison is not copied: check() decides,
+  # and self_check only compares that verdict with the wanted one. RESULTS is
+  # reset here because this process runs no recipe.
+  local failures=0 line printed verdict before after
+  RESULTS=()
+  self_check() { # self_check <want: PASS|FAIL> <name> <expected-json> <actual-json>
+    before=${#RESULTS[@]}
+    check "$2" "$3" "$4" > "$dir/check.out"
+    after=${#RESULTS[@]}
+    line=$(head -n 1 "$dir/check.out")
+    printed=${line%% *}
+    verdict=none
+    if [ $((after - before)) -eq 1 ]; then verdict="${RESULTS[$((after - 1))]}"; fi
+    if [ "$verdict" = "$1" ] && [ "$printed" = "$1" ]; then
+      echo "self-test ok: $line"
     else
-      echo "self-test $1: $verdict, but expected $4"
+      echo "self-test MISMATCH $2: recorded $verdict, printed $printed, expected $1"
       failures=$((failures + 1))
     fi
   }
-  got=$(json_get "$good_limits" data.limits.max_pages.effective)
-  expect_value limits_effective 7 "$got" pass
-  got=$(json_get "$good_limits" data.limits.max_pages.clamped_by)
-  expect_value limits_clamped_by '["default"]' "$got" pass
-  got=$(json_get "$good_job" data.params.max_pages)
-  expect_value job_params 7 "$got" pass
-  got=$(json_get "$good_job" data.statistics.pages_visited)
-  expect_value job_pages_visited 7 "$got" pass
-  got=$(json_get "$short_job" data.statistics.pages_visited)
-  expect_value short_job_pages_visited 7 "$got" refuse
+  self_check PASS limits_max_pages_effective 7 "$(json_get "$good_limits" data.limits.max_pages.effective)"
+  self_check PASS limits_max_pages_clamped_by '["default"]' "$(json_get "$good_limits" data.limits.max_pages.clamped_by)"
+  self_check PASS control_params_max_pages 7 "$(json_get "$good_job" data.params.max_pages)"
+  self_check PASS statistics_pages_visited 7 "$(json_get "$good_job" data.statistics.pages_visited)"
+  self_check FAIL statistics_pages_visited_short_job 7 "$(json_get "$short_job" data.statistics.pages_visited)"
+  self_check FAIL limits_max_pages_missing 7 "$(json_get "$good_limits" data.limits.max_pages.missing)"
   rm -rf "$dir"
   if [ "$failures" -eq 0 ]; then
-    echo "SELF-TEST OK: the four good values match and the short job is refused"
+    echo "SELF-TEST OK: check() passes the four good values, refuses the short job and a missing value"
     return 0
   fi
   echo "SELF-TEST FAILED: $failures unexpected verdicts"
