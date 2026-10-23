@@ -964,6 +964,17 @@ Not done: the Tier B corpus and the Chromium job (E3.9.2 onward), the scheduled 
 - Known gaps: `schedule_at`, `trigger` and `backfill` are unavailable. An invalid `overlap_policy` value is rejected by the edge's JSON decoder (422) before control sees it. Control answers 201 and the edge answers 200 (the WS4.H tests pin 200). Error reasons are carried in `error.details.reason`, not as new error codes.
 - Not done here: the executor and the orchestrator read of the new fields (WS15.S2), the frontend activation control, and the migration tests against a real database (they need `QUARRY_TEST_DSN`).
 
+## Field-facts probe and AX value masking (WS12.S1, U17, built, NOT run, 2026-10-23)
+
+The browser projection (`native_page_projection`) asks the page for the attributes of each editable control and masks the values of the ones that hold a secret. The probe is on by default and ships dark in the sense that nothing outside the browser reads its new fields yet.
+
+- Flag: `QUARRY_BROWSER_FIELD_PROBE`. Unset or `on` runs the probe. `off` (also `0`, `false`, `no`) runs no probe and masks every editable value as `[redacted:secret]`. Use `off` to rule the probe out when a page misbehaves; it never shows more than the default.
+- Read the masking: a masked editable value shows as `[redacted:<kind>]` in the projection. An editable value that shows as `[redacted:secret]` with the probe on means the probe did not read that control (timeout, CDP error, or more than 64 controls).
+- Q10 recipe (must run before S1 merges, not yet run): start the pinned Chromium with `--remote-debugging-port=9222`, then `node "apps/Ingestion Plane/Quarry-v2/scripts/q10/ax-password-probe.mjs" 9222` (Node 22+). Commit the printed JSON as `crates/quarry-browser/tests/fixtures/ax-password-probe.json`, and copy the result into `docs/SECRET_REDACTION.md`.
+- Live test (Chromium lane, through the docker lock): `CHROMIUMOXIDE_TEST=1 QUARRY_BROWSER_NO_SANDBOX=1 CHROME=/usr/bin/chromium cargo test -p quarry-browser --features chromiumoxide ax_field_probe_live -- --ignored --nocapture`. It prints `probe_ms`, which is the first real cost number for the probe.
+- Rollback: set `QUARRY_BROWSER_FIELD_PROBE=off`, or revert the commit. No migration, no wire change.
+- Fixture page for in-process tests: `GET /secrets-lab` on the runtime test site (`quarry-runtime/src/test_site.rs`).
+
 ## Tier B eval corpus and scorer (E3.9.2, W3-B2-05, built, NOT run, 2026-10-23)
 
 - What: `lab/evals/tier_b/corpus.json` (9 cases over the TestSite routes `/`, `/login`, `/dashboard`, `/search` and 4 static synthetic pages under `lab/evals/tier_b/site/`), and the `quarry-tier-b` binary (`lab/evals/src/tier_b.rs`, registered in `lab/evals/Cargo.toml`).

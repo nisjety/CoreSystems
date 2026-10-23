@@ -216,3 +216,17 @@ case, so give every verify rule and every threshold a positive and a negative ca
 - **Q10 (does Chromium mask password values in the accessibility tree) is
   answered in S1**, before it merges. Nothing here depends on the answer.
 - **Screenshots and OCR text** are S5 and the Model Plane (S4); this module is text.
+
+## WS12.S1: field-facts probe and AX and target masking (U17, built, NOT run, 2026-10-23)
+
+Built to scope and compile-checked. Nothing is deployed, the Q10 answer is not in, and no test has been run. The browser projection now masks values before they leave the driver (`native_page_projection`).
+
+- **Code.** `crates/quarry-browser/src/field_probe.rs` (pure masking plus a cfg-gated probe), `field_probe_live.rs` (live test, included in `chromiumoxide.rs` tests), `lib.rs` (`ProjectionRedaction`, `BrowserNativeProjection.redaction`, `BrowserNativeTarget.field_kind` with `serde(skip)`). `quarry-runtime/src/test_site.rs` serves `GET /secrets-lab`.
+- **What the probe reads.** Attributes only: `type`, `autocomplete`, `name`, `id`, `aria-label`, `placeholder`. Never a value. `DOM.describeNode` first; on failure, `DOM.resolveNode` plus `Runtime.callFunctionOn` (released after the read). Controls are probed concurrently and the whole run is bounded at 400 ms. At most 64 editable controls are probed.
+- **What gets masked.** Editable roles (`textbox`, `searchbox`, `combobox`, `spinbutton`) with a value. A value the classifier calls sensitive becomes its marker (`[redacted:password]`, `card`, `phone`, `otp`, `secret`). A value the probe read as not sensitive is kept, then passes the shape rules. An editable value with no facts (probe off, timeout, CDP error, over the cap) becomes `[redacted:secret]`: fail closed. Names and all other text pass the shape rules (Live) only; names are never masked by field kind.
+- **Flag.** `QUARRY_BROWSER_FIELD_PROBE`, default on. `off` (also `0`, `false`, `no`) skips the probe and masks every editable value. Any other value reads as on.
+- **Stamp.** `ProjectionRedaction { probe, probe_ms, values_masked, by_rule }` (counts and rule ids only). It is crate-internal and not on the wire. WS12.S2 builds the observation-level stamp from it.
+- **Q10 (not answered).** `scripts/q10/ax-password-probe.mjs` and its fixture page `scripts/q10/secrets-lab.html` are the recipe. Run the script against the pinned Chromium (Node 22+) before S1 merges, then commit its output as `crates/quarry-browser/tests/fixtures/ax-password-probe.json` (not produced yet). The answer decides between describe-first and the resolve path, and whether the AX value of a password field is `plain`, `bullets` or `absent`.
+- **Tests written, not run.** `cargo test -p quarry-browser projection field_probe` (pure, in `field_probe.rs`). Live, Chromium required: `CHROMIUMOXIDE_TEST=1 QUARRY_BROWSER_NO_SANDBOX=1 CHROME=/usr/bin/chromium cargo test -p quarry-browser --features chromiumoxide ax_field_probe_live -- --ignored --nocapture`.
+- **Rollback.** `QUARRY_BROWSER_FIELD_PROBE=off` masks every editable value (more masking, no probe). Otherwise revert the commit. Nothing outside the browser projection reads the new fields yet.
+- **Honest limits.** A text box with no label, no autocomplete and no Luhn-valid number is kept as text. A secret in static text is masked by shape only. The 400 ms budget and the probe cost are not measured. Child-frame nodes that the probe cannot reach are masked (fail closed).
