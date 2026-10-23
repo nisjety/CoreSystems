@@ -34,11 +34,32 @@
 //! client can send `run_id` directly — it is safe for the client to *name* a run
 //! because ownership is still verified server-side; it is not safe for the
 //! client to name *skills*, because nothing verifies those).
+//!
+//! ## Shared mirror (`MODEL_GATEWAY_SHARED_TURN_RECORD`, default off)
+//!
+//! With several gateway replicas, a rating can land on a replica that did not
+//! stream the turn. When the switch is on, the turn's ids are also written,
+//! best-effort, to the shared Redis the stream buffer already uses, and a rating
+//! that misses locally reads them from there. The local map stays the first
+//! lookup and the only record when the switch is off. The shared record is ids
+//! only (`run_id`, skill ids), keyed by the verified identity, never holds a
+//! bearer or any content, and is never written for a ZDR or waived turn. It
+//! shares the stream buffer's breaker, so a slow or dead store costs a rating
+//! its skill attribution (the behaviour above), never the turn or the rating.
 
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
+use serde::{Deserialize, Serialize};
+
+use crate::stream_buffer::{scoped_stream_key, StreamBufferStore};
+
+/// Switch for the shared mirror. Parsed by [`shared_turn_record_from`].
+pub const SHARED_TURN_RECORD_ENV: &str = "MODEL_GATEWAY_SHARED_TURN_RECORD";
+
+/// Namespace of the shared record, beside the stream buffer's `mp:gw:stream:`.
+const SHARED_TURN_PREFIX: &str = "mp:gw:turn:";
 
 /// How long a finished turn stays rateable. Generous on purpose: a user may
 /// scroll back and rate an answer well after it streamed.
@@ -164,6 +185,129 @@ impl ChatTurnRegistry {
         self.inner
             .retain(|_, entry| now.duration_since(entry.at) < TURN_TTL);
     }
+
+    /// When this replica does not know the turn, adopt the shared record of the
+    /// verified caller's own turn so the sync [`Self::lookup`] path resolves it.
+    /// The key is derived from the caller's identity, so a hit is the caller's by
+    /// construction and another user or tenant misses. A miss, an unusable
+    /// store, or an open breaker leaves the registry as it was.
+    pub(crate) async fn adopt_shared(
+        &self,
+        store: &impl SharedTurnStore,
+        org_id: &str,
+        user_id: &str,
+        request_id: &str,
+    ) {
+        if self.lookup(request_id).is_some() {
+            return;
+        }
+        if let Some(turn) = lookup_shared_turn(store, org_id, user_id, request_id).await {
+            self.record(
+                request_id,
+                &turn.org_id,
+                &turn.user_id,
+                &turn.run_id,
+                turn.skill_ids,
+            );
+        }
+    }
+}
+
+/// The shared mirror's switch: `true` in any case and nothing else, like the other
+/// Model Plane switches, so a typo never turns it on.
+#[must_use]
+pub fn shared_turn_record_from(value: Option<&str>) -> bool {
+    mp_contracts::loop_fold::switch_from(value)
+}
+
+#[must_use]
+pub fn shared_turn_record_enabled() -> bool {
+    shared_turn_record_from(std::env::var(SHARED_TURN_RECORD_ENV).ok().as_deref())
+}
+
+/// What the shared record holds: ids only. Identity lives in the key.
+#[derive(Serialize, Deserialize)]
+struct SharedTurn {
+    run_id: String,
+    #[serde(default)]
+    skill_ids: Vec<String>,
+}
+
+/// The shared key of one turn: `mp:gw:turn:{org}\x1f{user}\x1f{request_id}`.
+///
+/// Identity-scoped for the reason the stream buffer's key is: the request id is
+/// not a secret, so the verified caller's identity in the key is the access
+/// control. `None` for a part that is blank or oversized, or that carries the
+/// separator and could therefore be made to collide with another identity.
+#[must_use]
+pub fn shared_turn_key(org_id: &str, user_id: &str, request_id: &str) -> Option<String> {
+    let (org, user, request) = (org_id.trim(), user_id.trim(), request_id.trim());
+    let unusable = |part: &str| part.is_empty() || part.contains('\u{1f}');
+    if unusable(org) || unusable(user) || unusable(request) || request.len() > MAX_REQUEST_ID_BYTES
+    {
+        return None;
+    }
+    Some(format!(
+        "{SHARED_TURN_PREFIX}{}",
+        scoped_stream_key(org, user, request)
+    ))
+}
+
+/// Where the shared record lives. The gateway's stream-buffer store is the only
+/// implementation; the trait exists so the mirror is tested against a fake.
+pub(crate) trait SharedTurnStore {
+    async fn put(&self, key: &str, value: &str, ttl: Duration);
+    async fn get(&self, key: &str) -> Option<String>;
+}
+
+impl SharedTurnStore for StreamBufferStore {
+    async fn put(&self, key: &str, value: &str, ttl: Duration) {
+        self.kv_set(key, value, ttl.as_secs()).await;
+    }
+
+    async fn get(&self, key: &str) -> Option<String> {
+        self.kv_get(key).await
+    }
+}
+
+/// Write one turn's ids to the shared store. Best-effort and infallible: a write
+/// that does not happen costs a later rating on another replica its skill
+/// attribution, nothing more.
+pub(crate) async fn mirror_turn(
+    store: &impl SharedTurnStore,
+    request_id: &str,
+    turn: &ChatTurnRecord,
+) {
+    let Some(key) = shared_turn_key(&turn.org_id, &turn.user_id, request_id) else {
+        return;
+    };
+    let Ok(value) = serde_json::to_string(&SharedTurn {
+        run_id: turn.run_id.clone(),
+        skill_ids: turn.skill_ids.clone(),
+    }) else {
+        return;
+    };
+    store.put(&key, &value, TURN_TTL).await;
+}
+
+/// Read a turn back for the verified caller. Anything unreadable is a miss.
+pub(crate) async fn lookup_shared_turn(
+    store: &impl SharedTurnStore,
+    org_id: &str,
+    user_id: &str,
+    request_id: &str,
+) -> Option<ChatTurnRecord> {
+    let key = shared_turn_key(org_id, user_id, request_id)?;
+    let shared: SharedTurn = serde_json::from_str(&store.get(&key).await?).ok()?;
+    if shared.run_id.trim().is_empty() {
+        return None;
+    }
+    Some(ChatTurnRecord {
+        org_id: org_id.trim().to_owned(),
+        user_id: user_id.trim().to_owned(),
+        run_id: shared.run_id,
+        skill_ids: shared.skill_ids,
+    })
 }
 
 /// Process-global registry.
@@ -207,6 +351,30 @@ pub fn record_chat_turn(
             injected_limit,
         ),
     );
+}
+
+/// The hook `sse.rs` calls right after [`record_chat_turn`]: mirror what that call
+/// just recorded to the shared store, when the switch is on. Spawned, so the
+/// turn never waits on the store. The caller does not call it for a waived turn
+/// (a ZDR turn never gets here); an unrecorded turn mirrors nothing.
+pub fn mirror_chat_turn(
+    state: &crate::state::AppState,
+    request_id: &str,
+    org_id: &str,
+    user_id: &str,
+) {
+    if !shared_turn_record_enabled() {
+        return;
+    }
+    let Some(turn) = global()
+        .lookup(request_id)
+        .filter(|turn| turn.org_id == org_id && turn.user_id == user_id)
+    else {
+        return;
+    };
+    let store = state.stream_buffers.clone();
+    let request_id = request_id.to_owned();
+    tokio::spawn(async move { mirror_turn(&store, &request_id, &turn).await });
 }
 
 /// The previous turn in one conversation, for implicit-dissatisfaction detection.
@@ -409,8 +577,37 @@ fn injected_skill_ids(
     out
 }
 
+/// A stand-in for the shared store, for this file's tests and the feedback route's.
+#[cfg(test)]
+pub(crate) mod fake {
+    use super::*;
+
+    #[derive(Default)]
+    pub(crate) struct FakeSharedStore {
+        pub(crate) entries: std::sync::Mutex<std::collections::HashMap<String, (String, Duration)>>,
+    }
+
+    impl SharedTurnStore for FakeSharedStore {
+        async fn put(&self, key: &str, value: &str, ttl: Duration) {
+            self.entries
+                .lock()
+                .unwrap()
+                .insert(key.to_owned(), (value.to_owned(), ttl));
+        }
+
+        async fn get(&self, key: &str) -> Option<String> {
+            self.entries
+                .lock()
+                .unwrap()
+                .get(key)
+                .map(|(v, _)| v.clone())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::fake::FakeSharedStore;
     use super::*;
 
     fn record(reg: &ChatTurnRegistry, request_id: &str, skills: &[&str]) {
@@ -513,5 +710,137 @@ mod tests {
             .expect("the second turn is the previous one");
         assert_eq!(third.run_id, "run-2");
         assert!(!third.private_run, "the second answer was persistent");
+    }
+
+    fn turn(skills: &[&str]) -> ChatTurnRecord {
+        ChatTurnRecord {
+            org_id: "org-1".to_owned(),
+            user_id: "user-1".to_owned(),
+            run_id: "run-1".to_owned(),
+            skill_ids: skills.iter().map(|s| (*s).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn shared_turn_key_is_identity_scoped() {
+        let key = shared_turn_key("org-1", "user-1", "req-1").expect("usable");
+        assert_eq!(key, "mp:gw:turn:org-1\u{1f}user-1\u{1f}req-1");
+        assert_ne!(
+            Some(key.clone()),
+            shared_turn_key("org-2", "user-1", "req-1")
+        );
+        assert_ne!(Some(key), shared_turn_key("org-1", "user-2", "req-1"));
+        // A part carrying the separator could be shifted into another identity.
+        assert!(shared_turn_key("org-1\u{1f}user-1", "x", "req-1").is_none());
+        assert!(shared_turn_key("org-1", "user-1", "req\u{1f}1").is_none());
+        assert!(shared_turn_key("", "user-1", "req-1").is_none());
+        assert!(shared_turn_key("org-1", " ", "req-1").is_none());
+        assert!(
+            shared_turn_key("org-1", "user-1", &"x".repeat(MAX_REQUEST_ID_BYTES + 1)).is_none()
+        );
+    }
+
+    #[test]
+    fn the_shared_turn_record_switch_is_strict() {
+        assert!(!shared_turn_record_from(None));
+        for off in ["", "1", "on", "yes", "false", "enabled", "ture"] {
+            assert!(
+                !shared_turn_record_from(Some(off)),
+                "{off:?} must not enable it"
+            );
+        }
+        assert!(shared_turn_record_from(Some("true")));
+    }
+
+    #[tokio::test]
+    async fn a_turn_streamed_on_one_replica_resolves_on_another() {
+        let shared = FakeSharedStore::default();
+        mirror_turn(&shared, "req-1", &turn(&["skill.a", "skill.b"])).await;
+
+        // The other replica's own map has never seen the turn.
+        let other_replica = ChatTurnRegistry::new();
+        assert!(other_replica.lookup("req-1").is_none());
+        other_replica
+            .adopt_shared(&shared, "org-1", "user-1", "req-1")
+            .await;
+        let found = other_replica.lookup("req-1").expect("adopted");
+        assert_eq!(found, turn(&["skill.a", "skill.b"]));
+    }
+
+    #[tokio::test]
+    async fn another_user_or_tenant_cannot_adopt_the_turn() {
+        let shared = FakeSharedStore::default();
+        mirror_turn(&shared, "req-1", &turn(&["skill.a"])).await;
+        for (org, user) in [("org-1", "user-2"), ("org-2", "user-1")] {
+            let reg = ChatTurnRegistry::new();
+            reg.adopt_shared(&shared, org, user, "req-1").await;
+            assert!(reg.lookup("req-1").is_none(), "{org}/{user} must miss");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_shared_record_holds_ids_and_a_24_hour_ttl_and_nothing_else() {
+        let shared = FakeSharedStore::default();
+        mirror_turn(&shared, "req-1", &turn(&["skill.a"])).await;
+        let entries = shared.entries.lock().unwrap();
+        let (value, ttl) = entries.values().next().expect("one record");
+        assert_eq!(*ttl, TURN_TTL);
+        let json: serde_json::Value = serde_json::from_str(value).unwrap();
+        let mut keys: Vec<&String> = json.as_object().unwrap().keys().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            ["run_id", "skill_ids"],
+            "no identity, bearer or content"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_local_record_is_not_replaced_by_the_shared_one() {
+        let shared = FakeSharedStore::default();
+        mirror_turn(&shared, "req-1", &turn(&["skill.shared"])).await;
+        let reg = ChatTurnRegistry::new();
+        record(&reg, "req-1", &["skill.local"]);
+        reg.adopt_shared(&shared, "org-1", "user-1", "req-1").await;
+        assert_eq!(reg.lookup("req-1").unwrap().skill_ids, vec!["skill.local"]);
+    }
+
+    #[tokio::test]
+    async fn an_unusable_or_corrupt_shared_record_is_a_miss() {
+        let shared = FakeSharedStore::default();
+        let reg = ChatTurnRegistry::new();
+        // Nothing written, a blank id, a record that is not JSON, and one with no run.
+        reg.adopt_shared(&shared, "org-1", "user-1", "req-1").await;
+        reg.adopt_shared(&shared, "org-1", "user-1", " ").await;
+        let key = shared_turn_key("org-1", "user-1", "req-bad").unwrap();
+        shared.put(&key, "not json", TURN_TTL).await;
+        reg.adopt_shared(&shared, "org-1", "user-1", "req-bad")
+            .await;
+        let key = shared_turn_key("org-1", "user-1", "req-norun").unwrap();
+        shared
+            .put(&key, r#"{"run_id":" ","skill_ids":[]}"#, TURN_TTL)
+            .await;
+        reg.adopt_shared(&shared, "org-1", "user-1", "req-norun")
+            .await;
+        assert_eq!(reg.tracked(), 0);
+    }
+
+    #[tokio::test]
+    async fn an_unusable_turn_is_not_mirrored() {
+        let shared = FakeSharedStore::default();
+        let mut blank_org = turn(&[]);
+        blank_org.org_id.clear();
+        mirror_turn(&shared, "req-1", &blank_org).await;
+        mirror_turn(&shared, "", &turn(&[])).await;
+        assert!(shared.entries.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_in_memory_store_mirrors_nothing() {
+        let store = StreamBufferStore::new();
+        mirror_turn(&store, "req-1", &turn(&["skill.a"])).await;
+        assert!(lookup_shared_turn(&store, "org-1", "user-1", "req-1")
+            .await
+            .is_none());
     }
 }

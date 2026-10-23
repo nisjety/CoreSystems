@@ -1929,6 +1929,12 @@ pub async fn invoke_stream_sse(
         &requested_skill_ids,
         MAX_INJECTED_SKILLS,
     );
+    // Shared turn record (off by default): lets a rating on another replica
+    // resolve this turn. A waived turn stays in this process, as it does for
+    // every other shared store.
+    if !turn_posture.is_waived() {
+        crate::chat_turn_registry::mirror_chat_turn(&state, &req_id, &org_id, &user_id);
+    }
     // Implicit dissatisfaction: did this turn signal that the PREVIOUS answer
     // missed? Runs here because everything it needs is resolved — verified
     // org/user, the thread, and the skills recorded for this turn just above —

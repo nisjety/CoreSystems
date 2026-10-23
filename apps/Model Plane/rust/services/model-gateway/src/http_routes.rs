@@ -7156,6 +7156,22 @@ async fn ingest_feedback(
             "rating must be positive|negative or good|acceptable|poor.",
         )
     })?;
+    // A turn that streamed on another replica is not in this one's map. With the
+    // shared record on, adopt the caller's own record before resolving, so the
+    // turn is rateable here instead of `turn_not_rateable`. The guard above has
+    // already refused ZDR and waived callers.
+    if crate::chat_turn_registry::shared_turn_record_enabled() {
+        if let Some(request_id) = body.request_id.as_deref() {
+            crate::chat_turn_registry::global()
+                .adopt_shared(
+                    &state.stream_buffers,
+                    &claims.org_id,
+                    &claims.user_id,
+                    request_id,
+                )
+                .await;
+        }
+    }
     let target = resolve_feedback_target(crate::chat_turn_registry::global(), &claims, &body)?;
     require_durable_run_owner(&state, &claims, &target.run_id, &session_bearer).await?;
     // The rating is the label this turn's confidence inputs were missing.
@@ -11584,6 +11600,65 @@ mod run_owner_publish_tests {
             resolved.skill_ids.is_empty(),
             "no skill attribution survives the restart, and that is not an error"
         );
+    }
+
+    /// A turn that streamed on replica A is rateable on replica B once B adopts the
+    /// caller's shared record: it resolves to the run and the injected skills
+    /// instead of `turn_not_rateable`.
+    #[tokio::test]
+    async fn a_turn_from_another_replica_resolves_through_the_shared_record() {
+        let shared = crate::chat_turn_registry::fake::FakeSharedStore::default();
+        let streamed_on_a = crate::chat_turn_registry::ChatTurnRegistry::new();
+        streamed_on_a.record(
+            "req-1",
+            "org-owner",
+            "user-owner",
+            "run-owned",
+            vec!["skill.a".to_owned()],
+        );
+        let turn = streamed_on_a.lookup("req-1").expect("recorded on A");
+        crate::chat_turn_registry::mirror_turn(&shared, "req-1", &turn).await;
+
+        let replica_b = crate::chat_turn_registry::ChatTurnRegistry::new();
+        let body = chat_feedback("req-1", "negative");
+        let owner = claims("org-owner", "user-owner");
+        let before = resolve_feedback_target(&replica_b, &owner, &body)
+            .expect_err("B has never seen the turn");
+        assert_eq!(before.0, StatusCode::CONFLICT);
+
+        replica_b
+            .adopt_shared(&shared, &owner.org_id, &owner.user_id, "req-1")
+            .await;
+        let resolved = resolve_feedback_target(&replica_b, &owner, &body)
+            .expect("the shared record makes the turn rateable on B");
+        assert_eq!(resolved.run_id, "run-owned");
+        assert_eq!(resolved.skill_ids, vec!["skill.a"]);
+    }
+
+    /// The shared key is the access control: a rating from another user or tenant
+    /// finds nothing to adopt and is refused as an unknown turn.
+    #[tokio::test]
+    async fn another_callers_rating_cannot_resolve_the_shared_record() {
+        let shared = crate::chat_turn_registry::fake::FakeSharedStore::default();
+        let turn = crate::chat_turn_registry::ChatTurnRecord {
+            org_id: "org-owner".to_owned(),
+            user_id: "user-owner".to_owned(),
+            run_id: "run-owned".to_owned(),
+            skill_ids: Vec::new(),
+        };
+        crate::chat_turn_registry::mirror_turn(&shared, "req-1", &turn).await;
+        let intruder = claims("org-owner", "user-other");
+        let replica_b = crate::chat_turn_registry::ChatTurnRegistry::new();
+        replica_b
+            .adopt_shared(&shared, &intruder.org_id, &intruder.user_id, "req-1")
+            .await;
+        let refused = resolve_feedback_target(
+            &replica_b,
+            &intruder,
+            &chat_feedback("req-1", "positive"),
+        )
+        .expect_err("another user must not resolve the owner's turn");
+        assert_eq!(refused.0, StatusCode::CONFLICT);
     }
 
     #[tokio::test]
