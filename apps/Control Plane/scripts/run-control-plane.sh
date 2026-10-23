@@ -204,6 +204,33 @@ if ! lookup_value CONTROL_SPACE_DECISION_PRIVATE_KEY_BASE64 >/dev/null 2>&1 \
   fi
 fi
 
+# Audit-chain signing keypair (Ed25519), WS06-S3. audit-core SIGNS head
+# attestations and retention checkpoints with the private half; the public half
+# is served so a verifier outside the database can check them. The private key
+# lives only in this persisted store and the audit-core environment, never in
+# the database, which is what makes a rewritten chain detectable. Same
+# derivation as the Space-decision pair above: a 32-byte seed and its 32-byte
+# public key, base64url without padding (audit-core's loader also accepts
+# standard base64). Both halves are minted together and never hand-edited; a
+# mismatched pair would make every checkpoint fail verification, so audit-core
+# refuses to boot on one.
+if ! lookup_value AUDIT_CHAIN_PRIVATE_KEY_BASE64 >/dev/null 2>&1 \
+  || ! lookup_value AUDIT_CHAIN_PUBLIC_KEY_BASE64 >/dev/null 2>&1; then
+  audit_chain_der=$(mktemp)
+  openssl genpkey -algorithm ed25519 -outform DER -out "$audit_chain_der" >/dev/null 2>&1
+  audit_chain_private=$(tail -c 32 "$audit_chain_der" | base64url_no_pad)
+  audit_chain_public=$(openssl pkey -inform DER -in "$audit_chain_der" -pubout -outform DER 2>/dev/null \
+    | tail -c 32 | base64url_no_pad)
+  rm -f "$audit_chain_der"
+  if [[ -n "$audit_chain_private" && -n "$audit_chain_public" ]]; then
+    persist_if_missing AUDIT_CHAIN_KEY_ID "audit-chain-$(openssl rand -hex 8)"
+    persist_if_missing AUDIT_CHAIN_PRIVATE_KEY_BASE64 "$audit_chain_private"
+    persist_if_missing AUDIT_CHAIN_PUBLIC_KEY_BASE64 "$audit_chain_public"
+  else
+    printf 'WARNING: could not generate the audit-chain Ed25519 keypair; audit-core cannot sign chain heads or checkpoints.\n' >&2
+  fi
+fi
+
 # AES-256-GCM key for Model Plane session-core's approval-continuation
 # descriptors. NOT the base64url form used above: continuation_crypto.rs decodes
 # with base64::STANDARD and then hard-requires exactly 32 bytes, so this is

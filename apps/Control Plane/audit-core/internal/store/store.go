@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/triodelab/controlplane/audit-core/internal/chain"
 	"github.com/triodelab/controlplane/audit-core/internal/events"
 )
 
@@ -29,6 +30,11 @@ type Store struct {
 	// chain makes every new audit row join its org's hash chain (see chain.go).
 	// Off, insertAudit is the single unchained INSERT it always was.
 	chain bool
+	// keys signs attestations and checkpoints; prune decides whether Purge may
+	// delete chained rows (see attest.go). The zero values keep chained rows.
+	keys               *chain.KeyRing
+	prune              PruneMode
+	pruneBatchOverride int // tests only; zero means defaultPruneBatchSize
 }
 
 // Option configures a Store at construction.
@@ -249,8 +255,15 @@ func validateStreamIdentity(sourceBus string, streamSequence uint64) (int64, err
 // PurgeResult reports how many rows each append-only table shed during a
 // single retention sweep.
 type PurgeResult struct {
-	AuditDeleted int64
+	AuditDeleted int64 // unchained rows plus, with pruning on, chained rows
 	UsageDeleted int64
+	// CheckpointsWritten counts signed retention checkpoints (one per chained
+	// batch). OrgsBlocked counts orgs whose prefix failed verification, which
+	// lost nothing and have an incident row. ChainedPlanned is what a dry run
+	// would have deleted.
+	CheckpointsWritten int
+	OrgsBlocked        int
+	ChainedPlanned     int64
 }
 
 // Purge enforces data retention by deleting events older than retentionDays
@@ -269,9 +282,9 @@ func (s *Store) Purge(ctx context.Context, retentionDays int) (PurgeResult, erro
 	var res PurgeResult
 
 	// audit_events is guarded against DELETE (migration 007); audit.maintenance
-	// lifts the guard for this transaction only. Chained rows are skipped: until
-	// the chain-safe purge exists, deleting one would break its org's chain, so
-	// they are kept and only unchained rows age out.
+	// lifts the guard for this transaction only. Chained rows are skipped here:
+	// deleting one by age would break its org's chain, so they leave only
+	// through purgeChained below (verified, checkpointed, and off by default).
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return PurgeResult{}, fmt.Errorf("purge audit_events: %w", err)
@@ -301,6 +314,12 @@ func (s *Store) Purge(ctx context.Context, retentionDays int) (PurgeResult, erro
 		return PurgeResult{}, fmt.Errorf("purge usage_events: %w", err)
 	}
 	res.UsageDeleted = usageTag.RowsAffected()
+
+	// Last, so a chained-purge failure cannot skip the work above. The partial
+	// result is returned with the error: what was deleted is still true.
+	if err := s.purgeChained(ctx, retentionDays, &res); err != nil {
+		return res, fmt.Errorf("purge chained audit_events: %w", err)
+	}
 
 	return res, nil
 }

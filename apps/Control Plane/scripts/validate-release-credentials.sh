@@ -61,9 +61,24 @@ if [[ "${ORG_SIEM_DESTINATIONS_ENABLED:-0}" == "1" || "${ORG_SIEM_DESTINATIONS_E
   credential_names+=(ORG_CORE_SIEM_SEAL_KEY)
 fi
 
+# The audit-chain signing keypair is only needed once the chain, or pruning of
+# chained rows, is switched on (audit-core refuses to sign without it). Both
+# halves are base64 of 32 bytes, so they pass the length floor below. Only the
+# literal 1 enables, like audit-core's own switches.
+audit_chain_keys_required=0
+if [[ "${AUDIT_CHAIN_ENABLED:-0}" == "1" || "${AUDIT_CHAIN_PRUNE_ENABLED:-0}" == "1" ]]; then
+  audit_chain_keys_required=1
+  credential_names+=(AUDIT_CHAIN_PRIVATE_KEY_BASE64 AUDIT_CHAIN_PUBLIC_KEY_BASE64)
+fi
+
 fingerprints=()
 fingerprint_owners=()
 failed=0
+
+if [[ "$audit_chain_keys_required" == "1" && -z "${AUDIT_CHAIN_KEY_ID:-}" ]]; then
+  printf 'credential preflight: AUDIT_CHAIN_KEY_ID is missing\n' >&2
+  failed=1
+fi
 
 for name in "${credential_names[@]}"; do
   value="${!name-}"
