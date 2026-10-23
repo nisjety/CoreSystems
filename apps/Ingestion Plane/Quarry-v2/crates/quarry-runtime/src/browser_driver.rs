@@ -6,6 +6,7 @@
 use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::Semaphore;
 use url::Url;
 
 use quarry_browser::{BrowserDriver as BrowserDriverTrait, BrowserEgressPolicy, BrowserSession};
@@ -74,6 +75,78 @@ fn log_url(url: &str) -> String {
         .into_owned()
 }
 
+/// Environment variable for per-fetch session isolation (WS13.1). On by
+/// default; `0` or `false` restores the legacy host-keyed affinity key.
+pub const ENV_SESSION_ISOLATION: &str = "QUARRY_SCRAPE_SESSION_ISOLATION";
+
+/// Environment variable for the heavy lane (WS13.1): how many requests may hold
+/// the heavy permit at once. Default 1, clamped to the pool size.
+pub const ENV_HEAVY_PERMITS: &str = "QUARRY_SCRAPE_HEAVY_PERMITS";
+
+/// Whether a fetch gets its own session key (WS13.1), from the raw value of
+/// `QUARRY_SCRAPE_SESSION_ISOLATION`. Unset or empty is on; only `0` and
+/// `false` (ignoring case and surrounding space) turn it off.
+pub fn session_isolation_from(value: Option<&str>) -> bool {
+    match value.map(|raw| raw.trim().to_ascii_lowercase()) {
+        None => true,
+        Some(raw) => !(raw == "0" || raw == "false"),
+    }
+}
+
+/// Whether session isolation is on in this process (reads the environment).
+pub fn session_isolation_enabled() -> bool {
+    session_isolation_from(std::env::var(ENV_SESSION_ISOLATION).ok().as_deref())
+}
+
+/// Heavy-lane permits from the raw value of `QUARRY_SCRAPE_HEAVY_PERMITS`: a
+/// missing or unparsable value is 1, and the result is clamped to
+/// `1..=pool_size` (a pool of zero still leaves one permit).
+pub fn heavy_permits_from(value: Option<&str>, pool_size: usize) -> usize {
+    let requested = value
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .unwrap_or(1);
+    requested.clamp(1, pool_size.max(1))
+}
+
+/// Heavy-lane permits in this process (reads the environment).
+pub fn heavy_permits_from_env(pool_size: usize) -> usize {
+    heavy_permits_from(std::env::var(ENV_HEAVY_PERMITS).ok().as_deref(), pool_size)
+}
+
+fn heavy_lane(pool: &RuntimeLeasePool) -> Arc<Semaphore> {
+    Arc::new(Semaphore::new(heavy_permits_from_env(pool.max_concurrent())))
+}
+
+/// The session key of one isolated fetch (WS13.1): the host, a tilde, then the
+/// fresh lease id. The host keeps the key readable in logs; the lease id makes
+/// it unique, so no two fetches share a browser context.
+fn isolated_session_key(host: &str, lease_id: impl std::fmt::Display) -> String {
+    format!("{host}~{lease_id}")
+}
+
+/// A lease for one isolated fetch (WS13.1). Nothing is pooled under the host
+/// key and the lease is never returned to the pool, so the next fetch starts
+/// from a fresh browser context with no cookies or storage from this one.
+fn isolated_lease(host: &str, org_id: &str) -> BrowserLease {
+    let lease_id = kinds::LeaseKind::new();
+    let session_affinity_key = isolated_session_key(host, &lease_id);
+    BrowserLease {
+        lease_id,
+        profile_id: kinds::ProfileKind::new(),
+        session_affinity_key,
+        proxy_affinity: ProxyAffinity {
+            pool: "default".into(),
+            sticky_key: None,
+        },
+        ttl_s: 30,
+        capabilities: vec![],
+        artifact_bucket: "default".into(),
+        persist_profile: false,
+        viewport: None,
+        org_id: org_id.to_owned(),
+    }
+}
+
 /// Adapts a [`quarry_browser::BrowserDriver`] into the [`Driver`] trait.
 ///
 /// The adapter acquires a browser session, executes the fetch, then
@@ -85,6 +158,12 @@ pub struct BrowserDriverAdapter {
     inner: Arc<dyn BrowserDriverTrait + Send + Sync>,
     pool: Arc<RuntimeLeasePool>,
     managed_processor_id: Option<String>,
+    /// The heavy lane (WS13.1): permits for requests that hold the browser
+    /// longer than a plain fetch. Sized from `QUARRY_SCRAPE_HEAVY_PERMITS`.
+    heavy: Arc<Semaphore>,
+    /// Whether every fetch gets its own session key (WS13.1), read from
+    /// `QUARRY_SCRAPE_SESSION_ISOLATION` when the adapter is built.
+    session_isolation: bool,
 }
 
 /// The browser session and pool slot of one fetch, held until the fetch
@@ -185,6 +264,8 @@ impl BrowserDriverAdapter {
         pool: Arc<RuntimeLeasePool>,
     ) -> Self {
         Self {
+            heavy: heavy_lane(&pool),
+            session_isolation: session_isolation_enabled(),
             inner,
             pool,
             managed_processor_id: None,
@@ -197,10 +278,37 @@ impl BrowserDriverAdapter {
         processor_id: impl Into<String>,
     ) -> Self {
         Self {
+            heavy: heavy_lane(&pool),
+            session_isolation: session_isolation_enabled(),
             inner,
             pool,
             managed_processor_id: Some(processor_id.into()),
         }
+    }
+
+    /// Whether each fetch gets its own session key (WS13.1).
+    pub fn session_isolation(&self) -> bool {
+        self.session_isolation
+    }
+
+    /// Set session isolation explicitly, overriding the environment read when
+    /// the adapter was built.
+    pub fn with_session_isolation(mut self, enabled: bool) -> Self {
+        self.session_isolation = enabled;
+        self
+    }
+
+    /// Rebuild the heavy lane with `permits` (WS13.1), clamped to the pool size.
+    pub fn with_heavy_permits(mut self, permits: usize) -> Self {
+        let permits = permits.clamp(1, self.pool.max_concurrent().max(1));
+        self.heavy = Arc::new(Semaphore::new(permits));
+        self
+    }
+
+    /// Heavy-lane permits free right now (WS13.1). The actions and capture
+    /// slices (WS13.4, WS13.4a) take them; nothing takes them in this slice.
+    pub fn heavy_permits_available(&self) -> usize {
+        self.heavy.available_permits()
     }
 }
 
@@ -245,36 +353,42 @@ impl BrowserDriverAdapter {
             .acquire_timeout_for_org(&hints.org_id, &key, LEASE_ACQUIRE_TIMEOUT)
             .await?;
 
-        if guard.lease.is_none() {
-            let lease = BrowserLease {
-                lease_id: kinds::LeaseKind::new(),
-                profile_id: kinds::ProfileKind::new(),
-                session_affinity_key: key.clone(),
-                proxy_affinity: ProxyAffinity {
-                    pool: "default".into(),
-                    sticky_key: None,
-                },
-                ttl_s: 30,
-                capabilities: vec![],
-                artifact_bucket: "default".into(),
-                persist_profile: false,
-                viewport: None,
-                // Internal lease minted on the fetch path — the org_id
-                // travels with the request via the PageRunner that
-                // invoked us. This adapter doesn't yet have access to
-                // it, so we record empty and rely on the surrounding
-                // PageRunner code (which knows the verified org_id from
-                // the edge handler) to attach it before any persistence.
-                org_id: String::new(),
-            };
-            self.pool
-                .seed(lease.session_affinity_key.clone(), lease.clone());
-            guard.lease = Some(lease);
-        }
-
         // The pooled lease is shared by host across callers, so the tenant is
         // stamped on this call's copy rather than on the pooled one.
-        let mut call_lease = guard.lease.as_ref().expect("lease set above").clone();
+        let mut call_lease = if self.session_isolation {
+            // WS13.1: a fresh lease id per fetch, so every fetch gets its own
+            // browser context and cookie jar, even for the same host and across
+            // organizations. Nothing is seeded under the host key, and the guard
+            // gives back no lease when it drops.
+            let _ = guard.take_lease();
+            isolated_lease(&key, &hints.org_id)
+        } else {
+            if guard.lease.is_none() {
+                let lease = BrowserLease {
+                    lease_id: kinds::LeaseKind::new(),
+                    profile_id: kinds::ProfileKind::new(),
+                    session_affinity_key: key.clone(),
+                    proxy_affinity: ProxyAffinity {
+                        pool: "default".into(),
+                        sticky_key: None,
+                    },
+                    ttl_s: 30,
+                    capabilities: vec![],
+                    artifact_bucket: "default".into(),
+                    persist_profile: false,
+                    viewport: None,
+                    // Minted on the fetch path. The pooled copy is shared by
+                    // host, so the tenant is stamped on each call's copy below;
+                    // this value is the first caller's and is never read for
+                    // another call.
+                    org_id: hints.org_id.clone(),
+                };
+                self.pool
+                    .seed(lease.session_affinity_key.clone(), lease.clone());
+                guard.lease = Some(lease);
+            }
+            guard.lease.as_ref().expect("lease set above").clone()
+        };
         call_lease.org_id = hints.org_id.clone();
         let lease_ref = &call_lease;
         let start = Instant::now();
@@ -422,6 +536,8 @@ mod tests {
         release_count: AtomicUsize,
         wait_for_count: AtomicUsize,
         call_order: TokioMutex<Vec<&'static str>>,
+        lease_keys: TokioMutex<Vec<String>>,
+        lease_orgs: TokioMutex<Vec<String>>,
         last_url: TokioMutex<Option<String>>,
         last_wait_for: TokioMutex<Option<(String, u32)>>,
         body: Bytes,
@@ -436,6 +552,8 @@ mod tests {
                 release_count: AtomicUsize::new(0),
                 wait_for_count: AtomicUsize::new(0),
                 call_order: TokioMutex::new(Vec::new()),
+                lease_keys: TokioMutex::new(Vec::new()),
+                lease_orgs: TokioMutex::new(Vec::new()),
                 last_url: TokioMutex::new(None),
                 last_wait_for: TokioMutex::new(None),
                 body: Bytes::from_static(body),
@@ -455,6 +573,11 @@ mod tests {
         async fn acquire(&self, lease: &BrowserLease) -> QuarryResult<BrowserSession> {
             self.acquire_count.fetch_add(1, Ordering::SeqCst);
             self.call_order.lock().await.push("acquire");
+            self.lease_keys
+                .lock()
+                .await
+                .push(lease.session_affinity_key.clone());
+            self.lease_orgs.lock().await.push(lease.org_id.clone());
             Ok(BrowserSession {
                 lease: lease.clone(),
                 tab_pin: None,
@@ -987,5 +1110,118 @@ mod tests {
         adapter.fetch_conditional(&url, &hints).await.unwrap();
 
         assert_eq!(mock.acquire_count.load(Ordering::SeqCst), 1);
+    }
+
+    /// Serialises the tests that set `QUARRY_SCRAPE_SESSION_ISOLATION` (WS13.1).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn host_url(path: &str) -> Url {
+        Url::parse(&format!("https://example.com{path}")).unwrap()
+    }
+
+    #[tokio::test]
+    async fn concurrent_same_host_fetches_use_distinct_session_keys() {
+        let mock = Arc::new(MockBrowserDriver::new(b"x"));
+        let pool = Arc::new(RuntimeLeasePool::new(4));
+        let adapter = BrowserDriverAdapter::new(mock.clone(), pool).with_session_isolation(true);
+        let url_a = host_url("/a");
+        let url_b = host_url("/b");
+        let (first, second) = tokio::join!(adapter.fetch(&url_a), adapter.fetch(&url_b));
+        first.unwrap();
+        second.unwrap();
+
+        let keys = mock.lease_keys.lock().await.clone();
+        assert_eq!(keys.len(), 2);
+        assert_ne!(keys[0], keys[1], "same-host fetches shared a session key");
+        assert!(keys.iter().all(|key| key.starts_with("example.com~")));
+    }
+
+    #[test]
+    fn isolated_session_key_starts_with_the_host_and_ends_with_the_lease_id() {
+        let lease_id = kinds::LeaseKind::new();
+        let key = isolated_session_key("example.com", &lease_id);
+        assert!(key.starts_with("example.com~"));
+        assert!(key.ends_with(&lease_id.to_string()));
+    }
+
+    #[tokio::test]
+    async fn isolated_lease_carries_the_request_org() {
+        let mock = Arc::new(MockBrowserDriver::new(b"x"));
+        let pool = Arc::new(RuntimeLeasePool::new(4));
+        let adapter = BrowserDriverAdapter::new(mock.clone(), pool).with_session_isolation(true);
+        let hints = FetchHints {
+            org_id: "org_a".into(),
+            ..FetchHints::default()
+        };
+        adapter
+            .fetch_conditional(&host_url("/"), &hints)
+            .await
+            .unwrap();
+
+        let orgs = mock.lease_orgs.lock().await.clone();
+        assert_eq!(orgs, vec!["org_a".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn an_isolated_fetch_does_not_return_its_lease_to_the_pool() {
+        let mock = Arc::new(MockBrowserDriver::new(b"x"));
+        let pool = Arc::new(RuntimeLeasePool::new(4));
+        let adapter =
+            BrowserDriverAdapter::new(mock.clone(), pool.clone()).with_session_isolation(true);
+        adapter.fetch(&host_url("/")).await.unwrap();
+
+        let keys = mock.lease_keys.lock().await.clone();
+        assert_eq!(keys.len(), 1);
+        let by_session = pool.try_acquire(&keys[0]).unwrap();
+        assert!(
+            !by_session.has_lease(),
+            "the isolated lease was returned to the pool"
+        );
+        let by_host = pool.try_acquire("example.com").unwrap();
+        assert!(!by_host.has_lease(), "an isolated fetch seeded the host key");
+    }
+
+    #[tokio::test]
+    async fn kill_switch_restores_the_host_affinity_key() {
+        let mock = Arc::new(MockBrowserDriver::new(b"x"));
+        let pool = Arc::new(RuntimeLeasePool::new(4));
+        let adapter = {
+            let _env = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let previous = std::env::var(ENV_SESSION_ISOLATION).ok();
+            std::env::set_var(ENV_SESSION_ISOLATION, "0");
+            let adapter = BrowserDriverAdapter::new(mock.clone(), pool);
+            match previous {
+                Some(value) => std::env::set_var(ENV_SESSION_ISOLATION, value),
+                None => std::env::remove_var(ENV_SESSION_ISOLATION),
+            }
+            adapter
+        };
+        assert!(!adapter.session_isolation());
+
+        adapter.fetch(&host_url("/")).await.unwrap();
+        adapter.fetch(&host_url("/")).await.unwrap();
+        let keys = mock.lease_keys.lock().await.clone();
+        assert_eq!(
+            keys,
+            vec!["example.com".to_string(), "example.com".to_string()]
+        );
+    }
+
+    #[test]
+    fn isolation_flag_is_on_unless_zero_or_false() {
+        assert!(session_isolation_from(None));
+        assert!(session_isolation_from(Some("")));
+        assert!(session_isolation_from(Some("on")));
+        assert!(!session_isolation_from(Some("0")));
+        assert!(!session_isolation_from(Some(" False ")));
+    }
+
+    #[test]
+    fn heavy_lane_defaults_to_one_and_clamps_to_the_pool() {
+        assert_eq!(heavy_permits_from(None, 4), 1);
+        assert_eq!(heavy_permits_from(Some("nope"), 4), 1);
+        assert_eq!(heavy_permits_from(Some("3"), 4), 3);
+        assert_eq!(heavy_permits_from(Some("9"), 4), 4);
+        assert_eq!(heavy_permits_from(Some("0"), 4), 1);
     }
 }
