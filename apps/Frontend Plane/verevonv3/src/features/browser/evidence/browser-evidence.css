@@ -1,0 +1,183 @@
+/* Evidence panels of the browser chrome (WS9.D). Colours come from the app tokens; the
+   fallbacks keep the panels readable if a token is missing. */
+
+.browser-evidence-filter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.375rem 0.5rem;
+  margin: 0.375rem 0;
+  font-size: 0.75rem;
+}
+
+.browser-evidence-filter__levels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
+.browser-evidence-filter__input {
+  flex: 1 1 10rem;
+  min-width: 0;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--border-subtle, #d4d4d8);
+  border-radius: 0.375rem;
+  background: var(--surface-base, #ffffff);
+  color: var(--text-primary, #1f1f1f);
+  font: inherit;
+}
+
+.browser-evidence-filter__count {
+  margin: 0;
+  color: var(--text-muted, #6b6b72);
+  white-space: nowrap;
+}
+
+.browser-evidence-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.125rem 0.5rem;
+  border: 1px solid var(--border-subtle, #d4d4d8);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-secondary, #3f3f46);
+  font: inherit;
+  font-size: 0.6875rem;
+  cursor: pointer;
+}
+
+.browser-evidence-chip--active {
+  border-color: var(--border-accent, #2563eb);
+  background: var(--surface-accent, #eff6ff);
+  color: var(--text-accent, #1d4ed8);
+}
+
+.browser-evidence-chip--zdr {
+  cursor: default;
+  border-style: dashed;
+  color: var(--text-muted, #6b6b72);
+}
+
+.browser-evidence-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.5rem 0.25rem;
+  font-size: 0.8125rem;
+  color: var(--text-primary, #1f1f1f);
+}
+
+.browser-evidence-panel__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 600;
+}
+
+.browser-evidence-panel__counts {
+  display: inline-flex;
+  gap: 0.75rem;
+  font-weight: 500;
+}
+
+.browser-evidence-panel__counts [data-decision='allow'] {
+  color: var(--text-success, #15803d);
+}
+
+.browser-evidence-panel__counts [data-decision='block'] {
+  color: var(--text-danger, #b91c1c);
+}
+
+.browser-evidence-panel__hint {
+  margin: 0;
+  color: var(--text-muted, #6b6b72);
+}
+
+.browser-evidence-panel__action {
+  align-self: flex-start;
+  padding: 0.3125rem 0.75rem;
+  border: 1px solid var(--border-subtle, #d4d4d8);
+  border-radius: 0.375rem;
+  background: var(--surface-base, #ffffff);
+  color: var(--text-primary, #1f1f1f);
+  font: inherit;
+  cursor: pointer;
+}
+
+.browser-evidence-panel__action:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.browser-evidence-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.browser-evidence-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+  align-items: center;
+  gap: 0.375rem 0.5rem;
+  padding: 0.25rem 0.375rem;
+  border-bottom: 1px solid var(--border-subtle, #e4e4e7);
+}
+
+.browser-evidence-row__method {
+  font-weight: 600;
+  color: var(--text-secondary, #3f3f46);
+}
+
+.browser-evidence-row__url {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.75rem;
+}
+
+.browser-evidence-row__policy,
+.browser-evidence-row__time {
+  color: var(--text-muted, #6b6b72);
+  font-size: 0.6875rem;
+}
+
+.browser-evidence-row__decision--allow {
+  color: var(--text-success, #15803d);
+}
+
+.browser-evidence-row__decision--block {
+  color: var(--text-danger, #b91c1c);
+}
+
+.browser-evidence-procedure {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+}
+
+.browser-evidence-procedure__quality {
+  margin: 0;
+  font-weight: 600;
+}
+
+.browser-evidence-procedure__quality[data-promotion='blocked'] {
+  color: var(--text-warning, #b45309);
+}
+
+.browser-evidence-procedure__reasons {
+  margin: 0;
+  padding-left: 1.125rem;
+  color: var(--text-muted, #6b6b72);
+}
+
+.browser-evidence-procedure__sources {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}

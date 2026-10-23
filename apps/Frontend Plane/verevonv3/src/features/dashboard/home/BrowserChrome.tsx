@@ -91,6 +91,9 @@ import {
   type OmniboxIntent,
 } from '@/features/browser/omnibox/omnibox-resolver'
 import { hostnameOf } from './knowledge-preview'
+import { ConsoleFilterBar, emptyConsoleFilter, filterConsoleEntries, type ConsoleFilter } from '@/features/browser/evidence/ConsoleFilterBar'
+import { EgressReceiptsPanel } from '@/features/browser/evidence/EgressReceiptsPanel'
+import { ProcedurePanel } from '@/features/browser/evidence/ProcedurePanel'
 
 export const SESSION_STATUS_LABELS: Record<BrowserSessionViewModel['status'], string> = {
   closed: 'Lukket',
@@ -207,7 +210,7 @@ function browserKeyFromKeyboardEvent(event: KeyboardEvent): string | null {
   return event.key
 }
 
-type DevtoolsTab = 'console' | 'dom' | 'network' | 'vision'
+type DevtoolsTab = 'console' | 'dom' | 'network' | 'vision' | 'egress'
 type BrowserWheelAction = Extract<BrowserAction, { type: 'mouse_wheel' }>
 type LiveFrameStreamPayload = {
   dataBase64?: string
@@ -490,6 +493,7 @@ export function BrowserChrome(props: {
   const [copyState, setCopyState] = createSignal<'copied' | 'failed' | 'idle'>('idle')
   const [streamFrameSrc, setStreamFrameSrc] = createSignal<string | null>(null)
   const [devtoolsEvents, setDevtoolsEvents] = createSignal<BrowserDevtoolsEvent[]>([])
+  const [consoleFilter, setConsoleFilter] = createSignal<ConsoleFilter>(emptyConsoleFilter())
   const [liveFrameWsConnected, setLiveFrameWsConnected] = createSignal(false)
   const [liveFrameWsFailed, setLiveFrameWsFailed] = createSignal(false)
   const [liveFrameSseFailed, setLiveFrameSseFailed] = createSignal(false)
@@ -510,6 +514,10 @@ export function BrowserChrome(props: {
 
   const session = () => props.session
   const isLive = () => session().renderMode === 'chromium'
+  // Evidence panels (WS9.D) are shown only when the gateway advertises capability 'evidence'.
+  const hasEvidence = () => session().capabilities.includes('evidence')
+  const visibleConsoleEntries = () =>
+    hasEvidence() ? filterConsoleEntries(liveConsoleEntries(), consoleFilter()) : liveConsoleEntries()
   const controlsDisabled = () => !isLive() || props.browserBusy || wsActionPending() || !session().sessionId
   const loopStatus = () => props.browserLoop?.status ?? 'idle'
   const loopRunning = () => isBrowserLoopRunning(loopStatus())
@@ -1015,6 +1023,13 @@ export function BrowserChrome(props: {
       if (!timeline.some((entry) => entry.step === selected)) {
         setSelectedTimelineStep(null)
       }
+    },
+  )
+
+  createEffect(
+    () => ({ tab: devtoolsTab(), hasEvidence: hasEvidence() }),
+    ({ tab, hasEvidence: available }) => {
+      if (tab === 'egress' && !available) setDevtoolsTab('dom')
     },
   )
 
@@ -2040,6 +2055,17 @@ export function BrowserChrome(props: {
                 >
                   <Network class="size-3.5" /> Network <em>{liveNetworkEntries().length}</em>
                 </button>
+                <Show when={hasEvidence()}>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={devtoolsTab() === 'egress' ? 'true' : 'false'}
+                    class={['knowledge-browser-devtools__tab', { 'knowledge-browser-devtools__tab--active': devtoolsTab() === 'egress' }]}
+                    onClick={() => setDevtoolsTab('egress')}
+                  >
+                    <Send class="size-3.5" /> Egress
+                  </button>
+                </Show>
                 <Show when={session().visualObservationArtifactId}>
                   <button
                     type="button"
@@ -2061,9 +2087,17 @@ export function BrowserChrome(props: {
                     <DomNodeList nodes={session().domNodes} />
                   </Match>
                   <Match when={devtoolsTab() === 'console'}>
+                    <Show when={hasEvidence()}>
+                      <ConsoleFilterBar
+                        value={consoleFilter()}
+                        total={liveConsoleEntries().length}
+                        shown={visibleConsoleEntries().length}
+                        onChange={setConsoleFilter}
+                      />
+                    </Show>
                     <div class="knowledge-browser-console-list">
                       <For
-                        each={liveConsoleEntries()}
+                        each={visibleConsoleEntries()}
                         fallback={<p class="knowledge-browser-empty">Ingen console-hendelser.</p>}
                       >
                         {(entry) => (
@@ -2090,6 +2124,9 @@ export function BrowserChrome(props: {
                         )}
                       </For>
                     </div>
+                  </Match>
+                  <Match when={devtoolsTab() === 'egress'}>
+                    <EgressReceiptsPanel sessionId={session().sessionId ?? ''} zdr={session().zdr} />
                   </Match>
                   <Match when={devtoolsTab() === 'vision'}>
                     <Show when={session().visualObservationArtifactId}>
@@ -2163,6 +2200,9 @@ export function BrowserChrome(props: {
                 </For>
               </div>
             </div>
+          </Show>
+          <Show when={hasEvidence()}>
+            <ProcedurePanel sessionId={session().sessionId ?? ''} zdr={session().zdr} />
           </Show>
           <Show when={session().ownerTimelineError}>
             {(message) => (
