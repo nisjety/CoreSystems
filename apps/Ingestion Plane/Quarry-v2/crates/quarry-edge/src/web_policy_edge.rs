@@ -13,7 +13,7 @@ use axum::{
 };
 use quarry_core::envelope::Envelope;
 use quarry_core::error::{ErrorCode, QuarryError};
-use quarry_core::web_policy::{LayerError, OrgInput, PolicyDenial, Principal, RequestAsk};
+use quarry_core::web_policy::{LayerError, PolicyDenial, Principal, RequestAsk};
 use serde_json::json;
 
 use crate::auth::Claims;
@@ -31,35 +31,12 @@ pub fn principal(claims: &Claims) -> Principal {
     }
 }
 
-/// Decide the policy for one request of a caller with a token. The org layer is the token's
-/// `web_policy` claim (WS7.J). The ask's shape is checked first, in every enforcement mode (a
-/// malformed ask is a 400, not a policy decision); then the baseline's mode decides what the
-/// claim, the ask and the baseline do.
+/// Decide the policy for one request. The ask's shape is checked first, in every
+/// enforcement mode (a malformed ask is a 400, not a policy decision); then the
+/// baseline's mode decides what the ask and the baseline do.
 pub fn decide(
     baseline: &PolicyBaseline,
-    claims: &Claims,
-    zdr: bool,
-    ask: Option<&RequestAsk>,
-) -> Result<Decision, QuarryError> {
-    let org = baseline.org_input(claims.web_policy_claim());
-    decide_with(baseline, principal(claims), org, zdr, ask)
-}
-
-/// [`decide`] for a caller with no token: the orchestrator's internal route. The baseline and
-/// the invariants apply, with no org layer.
-pub fn decide_for_principal(
-    baseline: &PolicyBaseline,
     principal: Principal,
-    zdr: bool,
-    ask: Option<&RequestAsk>,
-) -> Result<Decision, QuarryError> {
-    decide_with(baseline, principal, OrgInput::Absent, zdr, ask)
-}
-
-fn decide_with(
-    baseline: &PolicyBaseline,
-    principal: Principal,
-    org: OrgInput,
     zdr: bool,
     ask: Option<&RequestAsk>,
 ) -> Result<Decision, QuarryError> {
@@ -67,17 +44,12 @@ fn decide_with(
         Some(ask) => Some(ask.into_layer().map_err(ask_error)?),
         None => None,
     };
-    let decision = baseline
-        .decide_with_org(principal, zdr, org, request)
+    baseline
+        .decide(principal, zdr, request)
         .map_err(|denial| {
             record_denial(&denial, true);
             quarry_error(&denial)
-        })?;
-    // Under `observe` a shadow that could not be resolved is a would-be denial: counted, never enforced.
-    if let Some(shadow) = decision.shadow_denial() {
-        record_denial(shadow, false);
-    }
-    Ok(decision)
+        })
 }
 
 /// Gate one URL of the request. Under `observe` the shadow decision is checked first
