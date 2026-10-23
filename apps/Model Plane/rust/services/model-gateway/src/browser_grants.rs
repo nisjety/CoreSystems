@@ -129,7 +129,8 @@ async fn issue_grant(
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     require_user(&claims)?;
     let mode = validate_request(&req)?;
-    let zdr = claims.effective_zdr(req.zdr);
+    // The same posture resolver the browser runs use: an ordinary ZDR credential is ZDR, a waived credential names no browser route and is refused.
+    let zdr = crate::zdr_posture::zdr_or_refuse(&claims, &crate::zdr_posture::Route::plain(req.zdr))?;
 
     let request = AcquireGrantRequest {
         session_key: format!("ui-{}", new_ulid()),
@@ -306,6 +307,8 @@ mod tests {
             aud: Some("model-gateway".to_owned()),
             scopes: Vec::new(),
             zdr,
+            org_zdr: None,
+            zdr_waiver: None,
             sovereign: None,
             principal_type: Some("user".to_owned()),
             service_id: None,
