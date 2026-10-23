@@ -270,10 +270,10 @@ Convention: parallel_groups are listed in phase order. Tasks inside one group ma
 | H11 | Post-write diagnostics for code artifacts instead of deploying an LSP bridge | S |  | yes |
 | I19 | Read-only share link for a chat (real project, after the model decision) | L |  | yes |
 | I20 | Copy a chat into a Space as a new Space thread (real project, after the decision) | L | I8 | yes |
-| I21 | Server-synced project folders with folder instructions (about 1 week, after the precedence decision) | M |  | yes |
+| I21 | **Superseded 2026-10-23 by DEC-28: chat projects are Spaces, so no server-synced folder store is built.** Was: server-synced project folders with folder instructions (about 1 week, after the precedence decision) | M |  | yes |
 | I23 | Skills and learning loop: prove one skill authored from a real run and used in a later turn | M | delegated-identity workstream (letter not given) | yes |
 
-**Exit criteria:** No work in this wave. Revisit triggers: - E12: after OD2 flips the Do default and the Do-on-Terra proof is accepted. - F12: only if A reports Do cannot run on Terra. - H7: after the H5 proof and verified sandbox CPU and memory limits. - H11: only on a concrete user need. - I19: after the share-link ruling and a security review. - I20: after I8 and a security review. - I21: after ADR-0003 precedence sign-off. - I23: step 1 (harness proof) can run any time after A0; step 2 waits for a user-bound reviewer route from D10.
+**Exit criteria:** No work in this wave. Revisit triggers: - E12: after OD2 flips the Do default and the Do-on-Terra proof is accepted. - F12: only if A reports Do cannot run on Terra. - H7: after the H5 proof and verified sandbox CPU and memory limits. - H11: only on a concrete user need. - I19: after the share-link ruling and a security review. - I20: after I8 and a security review. - I21: superseded 2026-10-23 by DEC-28; no trigger. - I23: step 1 (harness proof) can run any time after A0; step 2 waits for a user-bound reviewer route from D10.
 
 **Needs from the owner:** OD19
 
@@ -505,6 +505,7 @@ Hard ceiling: the 300 s delegated bearer. A runs about 270 s. B plan runs need 4
 - Blocks: H3, H9, H10, H1 limits, G6, H7, H11
 
 **OD19. Chat-core rulings (I): share-link model, presence, duplex voice, copying a chat to a Space, projects, rewind scope, reasoning default, usage-meter ceiling, selection-edit scope, and who may author slash templates.**
+- Superseded in part, 2026-10-23: the projects item is decided by DEC-28 (Spaces are the chat project container; ADR-0003 order unchanged; I21 superseded). The other items stay open.
 - Options: Public / named recipients / org-internal snapshot. Presence in /chat or Spaces only. Governed duplex voice or park. Copy / move / nothing. Per-browser folders / server-synced folders with instructions / private-room projects. Conversation only / plus artifact versions / plus workspace state. Hidden / collapsed summary / expanded reasoning. Show only / warn / stop mid-run. Phase 1 only or a server range patch. Users only or users and org admins.
 - Recommended: Org-internal sign-in snapshot link, 30-day expiry, revocable, redacted text view. Presence stays in Spaces. Park duplex voice, keep governed push-to-talk, and run one real-microphone check yourself on Chrome and Safari. Copy into a Space as a new Space thread, never move. Server-synced folders with a project-instruction layer under the persona (ADR-0003 sign-off needed). Rewind is conversation plus artifact versions, and effectful turns are non-rewindable. Reasoning shown as a collapsed summary only when text arrives, with effort unchanged. Usage meter shows and warns at 80% in v1. Selection edits stay at phase 1 (I18 is cut). Templates are user-authored first.
 - Blocks: I22, I19, I20, I21, I11, I13 phase 2, I15, I16, I17

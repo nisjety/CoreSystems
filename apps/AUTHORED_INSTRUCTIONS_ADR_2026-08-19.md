@@ -309,3 +309,37 @@ until a real versioning consumer is scoped.
   any deployment that leaves `PLATFORM_SYSTEM_INSTRUCTIONS` unset, produce
   identical behavior to today (silent, no instruction message) aside from
   the (already-existing) per-agent mention case.
+
+## Addendum 2026-10-23: Spaces are the chat project container (DEC-28)
+
+**Status: decided; build pending (WS18-S1 to S5).** The owner ruling DEC-28 in
+`docs/plans/model-plane-chat-build-plan-2026-10-14.md` (option (a)) makes Spaces
+the chat project container. The server-synced folders with a project-instruction
+layer (the I21 option in `apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md`)
+and per-browser folders are not built. This addendum does not change the decision
+above; it records what the decision means for order, composition and scope.
+
+- **Order unchanged.** Platform, org, Space, the user's personal instructions
+  when the per-thread toggle is on (persona.md §6.3), then a mentioned agent's
+  own character. This addendum records the order the existing composer
+  implements and makes no ADR-0003 change. A chat project has no layer of its
+  own: the Space's instructions are the project layer. Where another document
+  lists the order differently, this order is the one to implement.
+- **One composer.** `compose_authored_instructions` (model-gateway,
+  `run_context.rs`) is the only function that composes these layers. The callers
+  in the tree today are `run_context.rs` and `sse.rs`; scheduled runs (WS20 D8)
+  would be a future caller. No second composer and no folder or project
+  instruction store is added.
+- **Opt-in, no migration.** A project thread keeps `origin='space'`, and the
+  default `/chat` list stays `origin='chat'`. Projects appear in their own
+  section; the stored thread model does not change.
+- **Eligible containers.** Personal Spaces and non-organisation rooms only. A
+  project shared with more than one member needs a "Visible to N members"
+  confirmation before its first send.
+- **Scope.** Project retrieval is authorised by a Control decision, carried in
+  the `x-space-retrieval-authorization` header. A Space-scoped run that cannot
+  obtain a decision gets a typed "project knowledge unavailable" result, never an
+  org-wide search.
+- **Presence, not authority.** "Presence, not authority (mirrors ADR-0002)" still
+  holds: Control keeps membership and retrieval decisions, and a Space
+  instruction grants nothing.
