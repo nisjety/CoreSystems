@@ -13,6 +13,7 @@ import (
 
 	"github.com/rs/zerolog"
 
+	"github.com/triodelab/quarry-v2/services/quarry-control/internal/egress"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/store"
 )
 
@@ -38,7 +39,7 @@ func Run(ctx context.Context, db store.DB, hc *http.Client, opts Options, logger
 		opts.Workers = 4
 	}
 	if hc == nil {
-		hc = &http.Client{Timeout: 30 * time.Second}
+		hc = egress.SafeClient(egress.ClientConfig{RequestTimeout: 30 * time.Second}) // E3.5-2: webhook targets are tenant-registered; SSRF guard
 	}
 	jobs := make(chan store.WebhookDelivery, opts.Workers*4)
 	// Both the outer select and the inner send-loop need to close the
