@@ -524,6 +524,37 @@ jobs:
           echo "total coverage: ${total}%"
           awk -v t="$total" 'BEGIN { exit (t + 0 >= 80) ? 0 : 1 }'
 
+  # WS14.S0b (review K3-06). The Go unit tests of the three Go modules that carry the
+  # workflow code: quarry-control, quarry-orchestrator and pkg/quarrycontracts. Until this
+  # job existed, the only job that ran `go test` over them was go-coverage above, which is
+  # report-only (continue-on-error), so a failing replay test or GetVersion guard merged
+  # green. This job is REQUIRED: no continue-on-error, no coverage threshold (the 80 percent
+  # floor stays in go-coverage). The WS14.S3 replay test (workflows_replay_test.go) and the
+  # WS15 Go tests run here once they land. Branch protection must list "go-test (...)" as a
+  # required check; a workflow file cannot set that.
+  go-test:
+    name: go-test (${{ matrix.module }})
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module:
+          - services/quarry-control
+          - services/quarry-orchestrator
+          - pkg/quarrycontracts
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache-dependency-path: 'apps/Ingestion Plane/Quarry-v2/${{ matrix.module }}/go.sum'
+
+      - name: go test (blocking)
+        working-directory: 'apps/Ingestion Plane/Quarry-v2/${{ matrix.module }}'
+        run: go test ./... -count=1
+
   # quarry-control's Postgres store tests (the TestPostgres_* set, the schedule ZDR
   # stamp round trip and the migration 023 idempotence test) skip without
   # QUARRY_TEST_DSN, and go-coverage above is report-only and has no database, so a
