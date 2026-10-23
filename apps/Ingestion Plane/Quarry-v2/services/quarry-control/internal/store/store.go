@@ -207,6 +207,24 @@ type JobsStore interface {
 	// UpdateIfStatus replaces a job only while its stored status is expected.
 	// A job in another status is ErrConflict; a missing job is ErrNotFound.
 	UpdateIfStatus(j Job, expected string) error
+	// SetControl records one control request against a job (WS15.L2), as one
+	// write: a cancel of an accepted job ends it at once, any other allowed verb
+	// sets desired_state and raises desired_seq. A refused request is a
+	// *ControlError; a repeat of a request already pending returns the job.
+	SetControl(orgID string, id quarrycontracts.ID, action string) (Job, error)
+	// AckControl records that the orchestrator applied the desired state up to
+	// appliedSeq. It only raises applied_seq. Internal.
+	AckControl(id quarrycontracts.ID, appliedSeq int64) error
+	// PendingControl lists up to limit jobs whose desired state is ahead of what
+	// was applied, across organizations. Internal, for the orchestrator loop.
+	PendingControl(limit int) []Job
+	// ListRunning lists up to limit running or paused jobs that have a workflow,
+	// across organizations. Internal, for the orchestrator's sweep.
+	ListRunning(limit int) []Job
+	// Finalize ends a job the orchestrator found ended (a timeout, a forced
+	// cancel). Terminal only: a job that already ended is returned with
+	// changed=false. Internal.
+	Finalize(id quarrycontracts.ID, status, reason string, finishedAt int64) (Job, bool, error)
 }
 
 // AdmissionKind reports whether the dispatcher executes jobs of this kind, and

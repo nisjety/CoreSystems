@@ -48,6 +48,15 @@ const (
 	// page names and text. Additive: consumers that only know page_fetched
 	// keep working.
 	EvtPageExtracted EventType = "page_extracted"
+	// WS15.L2 (job control): a caller asked for a pause, resume or cancel. Recorded
+	// by control when the request is written; the workflow acts on it later.
+	EvtControlRequested EventType = "control_requested"
+	// EvtRunTimedOut ends a job whose workflow ran past its execution timeout. Written
+	// by the orchestrator's sweep with a deterministic event id.
+	EvtRunTimedOut EventType = "run_timed_out"
+	// EvtScheduleSkipped records a scheduled fire that did not start a job (overlap
+	// policy or posture). Mirrors quarry_core::event::EventType (WS15.S4).
+	EvtScheduleSkipped EventType = "schedule_skipped"
 )
 
 type Event struct {

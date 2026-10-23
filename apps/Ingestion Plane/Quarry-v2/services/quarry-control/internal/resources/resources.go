@@ -39,6 +39,12 @@ func MountJobs(r chi.Router, db store.DB, opts ...JobsOption) {
 	// under the same HMAC group as every other /v1 route; 404 while admission is
 	// off so a newer dispatcher falls back to listing.
 	r.Post("/v1/internal/jobs/claim", claimJobs(db, adm))
+	// Job control (WS15.L2): the orchestrator control loop reads the pending
+	// requests, acknowledges them, lists running jobs and finalizes ended ones.
+	r.Get("/v1/internal/jobs/pending-control", pendingControl(db))
+	r.Post("/v1/internal/jobs/{id}/control-ack", controlAck(db))
+	r.Get("/v1/internal/jobs/running", runningJobs(db))
+	r.Post("/v1/internal/jobs/{id}/finalize", finalizeJob(db))
 	r.Route("/v1/jobs", func(r chi.Router) {
 		r.Get("/", listJobs(db))
 		r.Post("/", createJob(db, adm))
@@ -49,6 +55,7 @@ func MountJobs(r chi.Router, db store.DB, opts ...JobsOption) {
 		r.Get("/ongoing", jobsOngoing(db))
 		r.Get("/{id}/summary", jobSummary(db))
 		r.Get("/{id}/errors", jobErrors(db))
+		r.Post("/{id}/control", controlJob(db))
 	})
 }
 
