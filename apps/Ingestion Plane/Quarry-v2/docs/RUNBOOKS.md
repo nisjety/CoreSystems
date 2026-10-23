@@ -1615,3 +1615,23 @@ Checks (written, run at the end of the wave): `cargo test -p quarry-edge --test 
 Deployment evidence (owed): with the flag on, from a container on `inter-plane-bus` read `/metrics` with the bearer; start and close an agent run and expect `quarry_agent_run_starts_total{class="agent",outcome="started"}` to move and `quarry_agent_runs_active` to rise and fall within 5 s; a step moves `quarry_agent_steps_total`; `curl ... | grep -c "<probe-host>"` is 0; `docker stop` shows `quarry_edge_draining 1` on a last scrape.
 
 Rollback: `QUARRY_EDGE__METRICS_ENABLED=0` and restart, or revert the commit.
+
+## Scrape-time actions: `actions[]` on `POST /v1/scrape` (WS13.5, unit W2-U53, built, NOT run, 2026-10-24)
+
+**What it does.** A scrape may carry `actions[]` (`wait`, `click`, `write`, `press`, `scroll`, `select`, `screenshot`, `pdf`). The browser runs them in order on the page the scrape opened, after the `waitForSelector` wait and before the page is read. Each action reports an ordered outcome. Off by default.
+
+**Flag.** `QUARRY_EDGE__SCRAPE_ACTIONS`: `off` (default; `actions` is refused with the field error `feature_disabled`), `user` (user tokens only; dev only), `on` (user tokens, and service principals that hold `scrape:interact`). Turn `on` only after the ADR-6 ruling, which is not in the approved set. Rollback: unset the variable or set `off`; the router deadline then returns to 60 s.
+
+**Who may send actions.** A user token, or a service principal with the `scrape:interact` scope (`SCOPE_SCRAPE_INTERACT` in `quarry-edge/src/auth.rs`). A request labelled `"initiated_by": "agent"` is refused with 403 `scrape_interact_scope_required` whatever the token is. The label can only tighten; it never widens a principal.
+
+**Limits.** The built-in caps in `quarry-core/src/scrape_actions.rs` apply and the environment can only lower them: 50 actions, 60 s of total wait, 30 s for one wait. Each action has a 30 s driver timeout inside the run deadline (115 s with actions on; the router allows 125 s for `POST /v1/scrape` only while the switch is on). No action is retried. `abort` (the default) stops at the first failure and marks later actions `skipped`; `continue` goes on. A request with actions holds one heavy-lane permit (`QUARRY_SCRAPE_HEAVY_PERMITS`); when the lane is busy the request gets 429 `heavy_browser_busy` at once and is never queued.
+
+**Errors.** 400 field errors (for example `actions[3].selector`); 403 `scrape_interact_scope_required`; 429 `heavy_browser_busy`; 501 `browser_capability_unavailable`; 502 `action_failed` with `details.actions` holding every outcome in order; 408 or the handler's `actions_deadline`. Messages carry reason classes only: never the text typed by `write`, never a driver message.
+
+**Not in this build (open).** The response does not yet carry `data.actions[]` (the `ScrapeResponse` view is not wired), action output bytes are held in memory only (the `pipeline.rs` persistence is not built), the safe-mode runner is replaced by `None` fields on the page runner (`local_index`, `page_renderer`, `title_enricher`; `source_registrar` was already `None`), and the gateway does not yet pass a 125 s timeout or stamp `initiated_by` for Model-proposed scrapes. The stream route refuses `actions` (400 `unsupported_in_stream`); the batch route is not checked. `scroll` by direction wheels at the viewport centre of the lease (640 by 400 when the lease names no viewport).
+
+**Checks.** Not run. Written and compile-checked only: `cargo test -p quarry-runtime action_runtime` (`attached_runtime_never_acquires_or_releases_the_session`, `run_scrape_runs_actions_in_order_and_records_ordered_outcomes`, `abort_marks_later_actions_skipped`, `continue_records_failure_and_keeps_going`, `no_retry_on_failure`, `scroll_direction_maps_to_mouse_wheel_at_viewport_centre`, `wait_budget_and_deadline_stop_the_run_with_timeout`, `cancel_token_stops_between_actions`, `error_messages_never_contain_write_text`, `missing_driver_or_session_is_an_error_not_dry_run`) and `cargo test -p quarry-edge actions_tests`.
+
+**Owed before the flag goes on anywhere.** The live Chromium test (`scrape_actions_live`: post-click DOM extraction and the off-host denial), the edge `scrape_capture` integration tests, `agent_labelled_user_token_cannot_send_actions` over the wire, the 502 and 429 body checks, and the evidence steps in the WS13.5 detail of the plan. Depth bullets are in `.plan-work/quarry-w1w2/depth/W2-U53.md`.
+
+**Rollback.** Set `QUARRY_EDGE__SCRAPE_ACTIONS` to `off` (or unset it). The default request path is unchanged: the router deadline is 60 s and no render hint carries actions.
