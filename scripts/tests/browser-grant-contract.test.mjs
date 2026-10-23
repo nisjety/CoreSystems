@@ -456,6 +456,38 @@ test('the broker defaults in compose match the Go defaults', () => {
   assert.match(config, /DefaultGrantTTL = 15 \* time\.Minute/);
   assert.match(config, /DefaultMaxActiveGrantsPerOwner = 20/);
   assert.match(read('apps/Model Plane/go/services/browser-broker/internal/grant/policy.go'), /DefaultMaxSessionDomains = 8/);
+  assert.match(config, /DefaultMaxRunDomains = grant\.DefaultMaxRunDomains/);
+  assert.match(read('apps/Model Plane/go/services/browser-broker/internal/grant/grant.go'), /DefaultMaxRunDomains = 8/);
+  const brokerCompose = read('apps/Model Plane/deploy/docker-compose.yml');
+  assert.match(brokerCompose, /BROWSER_BROKER_MAX_RUN_DOMAINS: \$\{BROWSER_BROKER_MAX_RUN_DOMAINS:-8\}/);
+  assert.match(brokerCompose, /BROWSER_BROKER_GRANT_TTL_SECONDS: \$\{BROWSER_BROKER_GRANT_TTL_SECONDS:-900\}/);
+});
+
+test('the gateway reads BROWSER_GRANT_ENFORCEMENT from compose with an empty default, so the code picks the mode per environment', () => {
+  const compose = read('apps/Frontend Plane/verevonv3/docker-compose.yml');
+  assert.match(compose, /^\s+BROWSER_GRANT_ENFORCEMENT: \$\{BROWSER_GRANT_ENFORCEMENT:-\}\s*$/m);
+  // The base file must not hard-code a mode: the production overlay would inherit it.
+  assert.doesNotMatch(compose, /BROWSER_GRANT_ENFORCEMENT: \$\{BROWSER_GRANT_ENFORCEMENT:-(off|permissive|strict)\}/);
+});
+
+// WS1.C: Zero Data Retention grants are never stored. The table has no zdr column and its
+// id CHECK refuses the "z_" prefix, so a routing bug fails the insert instead of persisting.
+test('the grants migration has no zdr column and keeps the z_ id CHECK', () => {
+  const sql = read('apps/Model Plane/go/services/browser-broker/migrations/0001_browser_grants.up.sql')
+    .replace(/--.*$/gm, '');
+  const table = sql.match(/CREATE TABLE IF NOT EXISTS browser_grants\s*\(([\s\S]*?)\n\);/);
+  assert.ok(table, 'browser_grants table definition not found');
+  const columns = [...table[1].matchAll(/^\s{4}([a-z_]+)\s+(?:TEXT|TIMESTAMPTZ)/gm)].map((m) => m[1]);
+  assert.ok(columns.length >= 10, `expected the grant columns, parsed ${columns.length}`);
+  assert.ok(!columns.some((name) => /zdr/i.test(name)), `a zdr column exists: ${columns.join(', ')}`);
+  assert.match(table[1], /CONSTRAINT browser_grants_no_zdr_id_check CHECK \(id NOT LIKE 'z\\_%'\)/);
+  // No later migration may add one either.
+  const dir = 'apps/Model Plane/go/services/browser-broker/migrations';
+  for (const name of readdirSync(join(ROOT, dir)).filter((n) => n.endsWith('.up.sql'))) {
+    const text = read(`${dir}/${name}`).replace(/--.*$/gm, '');
+    assert.ok(!/ADD COLUMN[^;]*\bzdr\b/i.test(text), `${name} adds a zdr column`);
+    assert.ok(!/DROP CONSTRAINT[^;]*browser_grants_no_zdr_id_check/i.test(text), `${name} drops the z_ id CHECK`);
+  }
 });
 
 /** The file's production code: every `#[cfg(test)]` item removed by brace matching. */

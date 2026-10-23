@@ -128,6 +128,12 @@ services:
       QUICKWIT_ADAPTER_URL: ${QUICKWIT_ADAPTER_URL:-http://dpv2-quickwit-adapter:9204}
       FINSPO_CORE_URL: ${FINSPO_CORE_URL:-http://finspo-api:3130}
       QUARRY_EDGE_URL: ${QUARRY_EDGE_URL:-http://quarry-edge:8082}
+      # In-app browser session grants (WS1.B, domains/browser.rs): off | permissive | strict.
+      # Unset = permissive outside production and strict when APP_ENV=production. An
+      # explicit `off` is refused in production (falls back to strict). An unknown value
+      # is the environment's default, never a looser mode. Keep the default empty here:
+      # a value in this base file would be inherited by the production overlay.
+      BROWSER_GRANT_ENFORCEMENT: ${BROWSER_GRANT_ENFORCEMENT:-}
       QUARRY_CONTROL_URL: ${QUARRY_CONTROL_URL:-http://quarry-control:8081}
       # Result caching/rate limiting degrades safely to in-process storage when
       # no frontend-owned cache contract is configured.

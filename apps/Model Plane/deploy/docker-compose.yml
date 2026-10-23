@@ -1627,6 +1627,11 @@ services:
       BROWSER_BROKER_GRANT_TTL_SECONDS: ${BROWSER_BROKER_GRANT_TTL_SECONDS:-900}
       BROWSER_BROKER_MAX_SESSION_DOMAINS: ${BROWSER_BROKER_MAX_SESSION_DOMAINS:-8}
       BROWSER_BROKER_MAX_ACTIVE_GRANTS_PER_OWNER: ${BROWSER_BROKER_MAX_ACTIVE_GRANTS_PER_OWNER:-20}
+      # Hosts one derived run grant may hold, and how many a run may inherit from
+      # its session grant without naming them (internal/server/config.go, WS1.B).
+      # Same rule as the other limits: not a positive integer stops the broker at
+      # boot; clamped to 32.
+      BROWSER_BROKER_MAX_RUN_DOMAINS: ${BROWSER_BROKER_MAX_RUN_DOMAINS:-8}
       # Durable grant store (WS1.C). Required: without it the broker exits 1 at
       # boot unless BROWSER_BROKER_ALLOW_EPHEMERAL_DEVELOPMENT=true (dev only).
       # Quarry's Postgres server (ingestion-postgres, reached over the
