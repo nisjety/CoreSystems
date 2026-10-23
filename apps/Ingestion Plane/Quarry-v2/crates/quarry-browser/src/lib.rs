@@ -195,6 +195,64 @@ impl BrowserEgressPolicy {
         }
     }
 
+    /// Add hosts the run may never reach, in any mode (WS7.G). A host equal to or under an
+    /// entry is refused for every http(s) request: navigation, redirect, frame and
+    /// sub-resource. Entries are trimmed and lower-cased; an empty list changes nothing, so
+    /// a policy built without this call is byte-identical to one built before it existed.
+    pub fn with_denied_domains(mut self, denied: &[String]) -> Self {
+        let mut added = false;
+        for domain in denied {
+            let domain = domain
+                .trim()
+                .trim_end_matches('.')
+                .to_ascii_lowercase();
+            if !domain.is_empty() && !self.denied_domains.contains(&domain) {
+                self.denied_domains.push(domain);
+                added = true;
+            }
+        }
+        if added {
+            self.denied_domains.sort();
+        }
+        self
+    }
+
+    /// The hosts this policy refuses whatever else it allows.
+    pub fn denied_domains(&self) -> &[String] {
+        &self.denied_domains
+    }
+
+    /// True for an allow-list policy that names no host: the "unchanged" resolution of an
+    /// unrestricted run. A deny list, if any, does not make it restricted to a host set.
+    pub fn is_unconstrained(&self) -> bool {
+        self.mode == EgressMode::Allowlist && !self.restricted && self.allowed_domains.is_empty()
+    }
+
+    /// Whether `raw` is an http(s) URL whose host is equal to or under a denied entry.
+    pub fn denies_url(&self, raw: &str) -> bool {
+        if self.denied_domains.is_empty() {
+            return false;
+        }
+        let Ok(url) = url::Url::parse(raw) else {
+            return false;
+        };
+        if !matches!(url.scheme(), "http" | "https") {
+            return false;
+        }
+        let Some(host) = url
+            .host_str()
+            .map(|host| host.trim_end_matches('.').to_ascii_lowercase())
+        else {
+            return false;
+        };
+        self.denied_domains.iter().any(|domain| {
+            host == *domain
+                || host
+                    .strip_suffix(domain.as_str())
+                    .is_some_and(|prefix| prefix.ends_with('.'))
+        })
+    }
+
     /// Validate a broker's denied list for an open-web grant: empty is allowed,
     /// at most `MAX_DENIED_DOMAINS` entries, each canonical (no wildcard, no IP
     /// literal, at least one dot), sorted and unique. A non-canonical list is an
@@ -227,6 +285,11 @@ impl BrowserEgressPolicy {
         }
         if self.mode == EgressMode::OpenWeb {
             return open_web_url_allowed(raw, &self.denied_domains);
+        }
+        // WS7.G: the policy's deny list wins over an allow-list entry and over an
+        // unrestricted run. Empty by default, so this line costs nothing for a run without one.
+        if self.denies_url(raw) {
+            return false;
         }
         if !self.restricted {
             return true;
