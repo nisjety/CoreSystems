@@ -1180,6 +1180,7 @@ dependencies = [
  "jsonwebtoken",
  "metrics",
  "metrics-exporter-prometheus",
+ "mp-content-safety",
  "mp-contracts",
  "mp-ids",
  "mp-slo",
@@ -2352,6 +2353,7 @@ dependencies = [
  "jsonwebtoken",
  "metrics",
  "metrics-exporter-prometheus",
+ "mp-content-safety",
  "mp-contracts",
  "mp-events",
  "mp-ids",
@@ -2396,6 +2398,14 @@ dependencies = [
  "tower 0.5.3",
  "tower-layer",
  "tracing",
+]
+
+[[package]]
+name = "mp-content-safety"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "unicode-normalization",
 ]
 
 [[package]]
@@ -3895,6 +3905,7 @@ dependencies = [
  "jsonwebtoken",
  "metrics",
  "metrics-exporter-prometheus",
+ "mp-content-safety",
  "mp-contracts",
  "mp-events",
  "mp-ids",

@@ -523,62 +523,55 @@ fn quoted_names(fragment: &str) -> Vec<String> {
     out
 }
 
-/// The two loops' trust classifiers must name the same tools.
+/// The two loops must classify tools and match markers through one shared
+/// table and one scanner, never through a copy each.
 ///
-/// `TrustClass::classify` exists in both crates, and both copies carry a comment
-/// saying to keep the rule in sync by hand. They had already drifted three ways:
-/// the gateway knew `fetch_url` and execution-core did not, execution-core knew
-/// `web_fetch` and the gateway's list differed, and **neither** knew `web.search`
-/// or `web.read` — the Quarry-backed public-web tools, which are dispatched
-/// (`runtime_loop/mod.rs`) and were therefore falling through to `OrgInternal`.
+/// Both services used to carry a `TrustClass::classify` and a marker list, kept
+/// in sync by a comment. They drifted: neither knew `web.search` or `web.read`,
+/// the Quarry-backed public-web tools, so those fell through to `OrgInternal`.
+/// `OrgInternal` means `framing()` is `None`, so a page fetched from the open
+/// internet reached the model with no "treat this as data" framing and was not
+/// audited. A misclassified tool is a silent hole in injection defense.
 ///
-/// That fall-through is the whole reason this test exists. `OrgInternal` means
-/// `is_external()` is false, which means `framing()` returns `None` — so a page
-/// fetched from the open internet reached the model with no "treat this as data,
-/// not instructions" framing, and a skipped injection scan was not even flagged
-/// for audit. A misclassified tool is not a cosmetic drift; it is a silent hole
-/// in injection defense.
+/// The fix is one table in `mp-content-safety`. This test keeps the copies from
+/// coming back and pins the names that must stay external.
 #[test]
-fn both_trust_classifiers_treat_the_same_tools_as_external_web() {
+fn both_loops_classify_through_one_trust_table_and_one_scanner() {
     let agent = read("execution-core/src/provenance.rs");
     let chat = read("model-gateway/src/moderation.rs");
+    let table = read("../crates/mp-content-safety/src/trust.rs");
 
-    let arm_of = |source: &str, which: &str| -> Vec<String> {
-        let arm = between(
-            source,
-            "if tool_name.starts_with(\"mcp__\")",
-            "Self::ExternalWeb",
-        );
-        let names = quoted_names(arm);
+    for (which, source) in [("execution-core", &agent), ("model-gateway", &chat)] {
         assert!(
-            !names.is_empty(),
-            "{which}: parsed no tool names before the ExternalWeb arm — the match \
-             shape changed, re-point this test rather than deleting it"
+            !source.contains("fn classify("),
+            "{which} defines its own `classify`; the trust table lives only in mp-content-safety"
         );
-        let mut sorted = names;
-        sorted.sort();
-        sorted
-    };
-
-    let agent_names = arm_of(&agent, "execution-core");
-    let chat_names = arm_of(&chat, "model-gateway");
-    assert_eq!(
-        agent_names, chat_names,
-        "the two loops disagree about which tools return untrusted external content, \
-         so the same page is framed as untrusted on one surface and as org-internal \
-         on the other"
-    );
-
-    // The dotted Quarry pair is the drift this test was written for. Pin it by
-    // name so a future edit cannot quietly drop it from both at once and stay
-    // green.
-    for required in ["web.search", "web.read"] {
         assert!(
-            agent_names.iter().any(|name| name == required),
+            !source.contains("INJECTION_MARKERS"),
+            "{which} keeps its own marker list; the markers live only in mp-content-safety"
+        );
+        assert!(
+            source.contains("mp_content_safety"),
+            "{which} must read the shared mp-content-safety crate"
+        );
+    }
+
+    let table_block = between(&table, "const TOOL_TRUST", "];");
+    for required in ["web_search", "web_fetch", "fetch_url", "web.search", "web.read"] {
+        assert!(
+            table_block.contains(&format!("(\"{required}\", TrustClass::ExternalWeb)")),
             "`{required}` fetches public web content and is dispatched, so it must be \
              ExternalWeb — as OrgInternal it gets no untrusted framing at all"
         );
     }
+    assert!(
+        table_block.contains("(\"browser_agent\", TrustClass::BrowserScraped)"),
+        "`browser_agent` must stay BrowserScraped"
+    );
+    assert!(
+        table.contains("pub const MCP_TOOL_PREFIX: &str = \"mcp__\";"),
+        "third-party MCP tools are classified by this prefix; keep it in the shared table"
+    );
 }
 
 /// Every ground-checked tool must actually be *offered* by at least one loop,

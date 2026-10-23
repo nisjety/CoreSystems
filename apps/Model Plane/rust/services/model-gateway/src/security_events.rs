@@ -84,6 +84,9 @@ pub fn envelope_for(
             // that were screened, without the bytes ever leaving the
             // process — see module docs on why this is ZDR-safe.
             "content_hash": provenance.screening.content_hash,
+            // Rule ids name what fired, never the matched text: they are
+            // published on the same ZDR-safe channel as the hash.
+            "flags": provenance.screening.rule_ids,
         }),
         zdr,
     })
@@ -157,8 +160,21 @@ mod tests {
             screening: ScreeningOutcome {
                 posture,
                 content_hash: crate::moderation::content_hash(b"some payload"),
+                rule_ids: Vec::new(),
             },
         }
+    }
+
+    #[test]
+    fn a_flagged_event_carries_rule_ids_and_no_text() {
+        let mut p = provenance(TrustClass::ExternalWeb, ScreeningPosture::Flagged);
+        p.screening.rule_ids = vec!["injection.ignore_previous_instructions", "obfuscation.tag_block"];
+        let envelope = envelope_for(&p, "org-1", "user-1", "run-1", "web_fetch", false)
+            .expect("flagged result must be audited");
+        assert_eq!(
+            envelope.payload["flags"],
+            serde_json::json!(["injection.ignore_previous_instructions", "obfuscation.tag_block"])
+        );
     }
 
     #[test]

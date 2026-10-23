@@ -507,6 +507,7 @@ mod tests {
         ScreeningOutcome {
             posture: ScreeningPosture::Clean,
             content_hash: crate::moderation::content_hash(b"x"),
+            rule_ids: Vec::new(),
         }
     }
 
@@ -514,6 +515,7 @@ mod tests {
         ScreeningOutcome {
             posture: ScreeningPosture::Flagged,
             content_hash: crate::moderation::content_hash(b"x"),
+            rule_ids: Vec::new(),
         }
     }
 
