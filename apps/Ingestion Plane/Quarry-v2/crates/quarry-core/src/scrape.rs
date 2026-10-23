@@ -83,6 +83,17 @@ pub struct ScrapeResponse {
     /// Absent under ZDR (nothing is stored) and when records are off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scrape_id: Option<String>,
+    /// WS13.4b: the screenshot, inline. Under ZDR only (nothing is stored to
+    /// point at); otherwise read it from `formats.screenshot`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screenshot: Option<InlineCapture>,
+    /// WS13.4b: the PDF, inline. Under ZDR only; otherwise `formats.pdf`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pdf: Option<InlineCapture>,
+    /// WS13.4b: what the captures measured, in both modes. Counts and sizes
+    /// only, never a URL. Absent when the request captured nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub captures: Option<CapturesReport>,
 }
 
 impl ScrapeResponse {
@@ -98,8 +109,55 @@ impl ScrapeResponse {
             warnings: Vec::new(),
             effective_options: None,
             scrape_id: None,
+            screenshot: None,
+            pdf: None,
+            captures: None,
         }
     }
+}
+
+/// WS13.4b: a capture returned inline (ZDR only). The bytes are base64 under
+/// the inline cap; nothing is stored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InlineCapture {
+    pub content_type: String,
+    /// Size of the decoded bytes.
+    pub bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    pub data_base64: String,
+}
+
+/// WS13.4b: what the captures of one request measured, returned in both modes.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct CapturesReport {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screenshot: Option<ScreenshotReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pdf: Option<PdfReport>,
+    /// Requests the egress policy blocked while the page loaded. A count only.
+    pub blocked_requests: u32,
+}
+
+/// The measured screenshot: its encoding, size in pixels and bytes, how many
+/// tiles it was made from, and whether the page was cut at the limit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScreenshotReport {
+    pub content_type: String,
+    pub width: u32,
+    pub height: u32,
+    pub bytes: u64,
+    pub tiles: u32,
+    pub stitched: bool,
+    pub truncated: bool,
+}
+
+/// The measured PDF.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PdfReport {
+    pub bytes: u64,
 }
 
 /// Cut `text` to at most `max_bytes` on a character boundary. Returns the text
