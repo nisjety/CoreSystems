@@ -3596,6 +3596,24 @@ mod tests {
     }
 
     #[test]
+    fn hook_context_json_carries_exactly_the_four_rule_keys_today() {
+        let reg = HookRegistry::new();
+        register(&reg, "org", hook("pre_tool", "shell", "deny", true));
+        let ctx: Value = serde_json::from_str(&hook_context_json(&reg, "org")).expect("valid json");
+        // The per-rule object is the wire contract execution-core parses. A new
+        // key is a wire change and has to change this golden on purpose.
+        assert_eq!(
+            ctx,
+            json!({"rules": [{
+                "event": "pre_tool_use",
+                "tools": "shell",
+                "decision": "deny",
+                "reason": "policy",
+            }]})
+        );
+    }
+
+    #[test]
     fn mcp_register_assigns_id() {
         let reg = McpRegistry::new();
         let resp = handle_register_mcp_server(
