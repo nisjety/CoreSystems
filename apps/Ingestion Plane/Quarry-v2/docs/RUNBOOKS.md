@@ -1045,3 +1045,25 @@ On SIGTERM or SIGINT the orchestrator cancels its root context. The jobs dispatc
 Not in this section: the run drain and the usage flush belong to the edge (see "Stopping the edge (drain)"), and the orchestrator usage segment is a later unit (WS6.J, U54).
 
 Check after a deploy (not run in this unit): `docker stop quarry-orchestrator` ends with exit 0 inside the grace period, and the log shows `worker stopped` or `worker did not stop within its bound; exiting` before `shutdown`.
+
+## Profile owner and ACL check (WS17.P2, unit W2-U24, built, NOT run, 2026-10-23)
+
+- What it does. Every `/v1/profiles*` route decides, per profile, whether the caller may use it. A `user_private` profile belongs to its owner (the actor id stamped on its row, `Claims::actor_id()`). An `org_shared` profile is usable by every member of the org: any member may list, read, probe, attach and save it, and only the owner may rename, rescope or delete it. A caller who may not use a profile gets 404 `profile not found`, never 403. Code: `crates/quarry-edge/src/profile_guard.rs`; routes in `crates/quarry-edge/src/profile_routes.rs`.
+- Flag: `QUARRY_EDGE__PROFILE_OWNER_ENFORCE`, one of `off`, `observe`, `enforce`. Default `observe`. Read once at boot; a change needs a quarry-edge restart.
+  - `observe` (the shipped default): the same decision is made and logged as `profile.owner.would_deny` with `op` and `reason` (`not_owner` or `legacy_ownerless`), and the request is served as before. A list call logs one count per reason.
+  - `enforce`: a denied caller gets the 404, and the log line is `profile.owner.denied`.
+  - `off`: no decision is made. Responses still carry `owner_is_caller`.
+- Responses: `owner_is_caller` (boolean, additive) on the list rows and on the load, create, update and restore-probe responses. True only when the caller is the stored owner.
+- Logs carry the op and the reason class only. No profile id, name or owner id is logged.
+- Legacy rows (owner NULL, written before WS17.P1, or by a capture that stamps no owner): an unowned `user_private` or unscoped row is hidden from everyone under `enforce` and is not deleted. An unowned `org_shared` row stays visible to the org, and its owner-only operations stay open to the org, as before WS17.P2.
+- Rescue of a legacy private row is an operator decision, never a guess. Find the candidates first:
+  `SELECT org_id, profile_id, name, scope, rev, updated_at FROM quarry_profiles WHERE owner_user_id IS NULL AND scope <> 'org_shared';`
+  Then set the owner only after the org confirms who owns the profile, using that user's actor id from the auth-core user record:
+  `UPDATE quarry_profiles SET owner_user_id = '<actor id>' WHERE org_id = '<org id>' AND profile_id = '<profile id>' AND owner_user_id IS NULL;`
+- Not wired yet: the attach path (the profile id block in the agent run route, `crates/quarry-edge/src/agent_routes/`). The queue defers it to WS8.F. Until then a run that names another user's profile id still attaches it. `ProfileOp::Attach` is decided like the other operations, ready for that call site.
+- Known gaps while the flag is `observe`: a profile first written by a browser capture has no owner (the browser lease carries no actor id), so under `enforce` it is hidden from everyone until it is rescued as above. The S3 profile backend stamps the owner on a metadata create but not on a snapshot save.
+- Rollout, not decided: move to `enforce` only after a week of `profile.owner.would_deny` counts shows only the expected denials. The legacy-owner policy (D16 Q2) is not among the approved 13, so `enforce` stays off until it is decided.
+- Tests (written, compile-checked, NOT run in this build):
+  - Unit: `cargo test -p quarry-edge --lib profile_guard`. Covers the decision table, the listing filter, the observe and enforce gates and the mode parse.
+  - Route: `cargo test -p quarry-edge --test profile_owner`. Calls the handlers with hand-built claims for two users in one org.
+- Evidence owed (test phase, not run): rebuild the quarry-edge image. With two users A and B in one org: A creates a `user_private` profile P; B's `GET /v1/profiles` does not list P; B's `GET /v1/profiles/P` returns 404 under `enforce` and is served under `observe`, and the edge log shows `profile.owner.would_deny` with `reason=not_owner`.
