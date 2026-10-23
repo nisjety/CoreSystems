@@ -14,6 +14,20 @@ pub fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// WS6.K: how long a run has been running, in seconds, on the run clock. A clock that
+/// reads earlier than the start gives 0, never a negative or wrapped value.
+pub fn run_duration_seconds(started_ms: u64, now_ms: u64) -> f64 {
+    now_ms.saturating_sub(started_ms) as f64 / 1000.0
+}
+
+/// WS6.K: records `quarry_agent_run_duration_seconds{class}` once, when a run ends.
+/// The only label is the closed `interactive|agent` set: no run id, org, actor or URL.
+/// The macro is a no-op until the recorder is installed (`metrics.rs`).
+pub fn record_run_duration(live: &RunLive, now_ms: u64) {
+    metrics::histogram!("quarry_agent_run_duration_seconds", "class" => live.class.label())
+        .record(run_duration_seconds(live.started_ms, now_ms));
+}
+
 /// Why a run is released by the sweeper (its `agent.expired` `reason`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExpireReason {
@@ -248,6 +262,11 @@ impl RunLive {
         self.class
     }
 
+    /// When the run started, in ms since the epoch (the clock `new` set).
+    pub fn started_ms(&self) -> u64 {
+        self.started_ms
+    }
+
     pub fn org_id(&self) -> &str {
         &self.org_id
     }
@@ -460,4 +479,20 @@ pub(super) fn lookup_run(state: &AppState, run_id: &str) -> Option<RunHandle> {
         .expect("agent_runs mutex poisoned")
         .get(run_id)
         .cloned()
+}
+
+#[cfg(test)]
+mod run_duration_tests {
+    use super::run_duration_seconds;
+
+    #[test]
+    fn duration_is_measured_on_the_run_clock_in_seconds() {
+        assert_eq!(run_duration_seconds(1_000, 3_500), 2.5);
+        assert_eq!(run_duration_seconds(1_000, 1_000), 0.0);
+    }
+
+    #[test]
+    fn a_clock_that_reads_earlier_than_the_start_gives_zero() {
+        assert_eq!(run_duration_seconds(5_000, 4_000), 0.0);
+    }
 }

@@ -117,6 +117,9 @@ pub(super) async fn finish_run(
         }
         crate::zdr_tombstone::emit_run_end(state.tombstones.as_ref(), zdr.is_active(), &run_end);
     }
+    // WS6.K: the run-duration histogram, recorded by the one path that won the removal
+    // above (a racing second caller returned at the `closed` check).
+    record_run_duration(&handle.live, now_ms());
     let session = entry.session.clone();
     drop(entry);
     if let Err(error) = state.agent_driver.release(session).await {
