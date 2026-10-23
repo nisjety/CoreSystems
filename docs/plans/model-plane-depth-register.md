@@ -280,6 +280,21 @@ Built so far (batches B01 to B07): WS01-S0, WS01-S1 (partial), WS01-S6; WS02-S1,
 | D1-199 | WS06-S7 | risk | P1 | gdpr_hard_delete_organization (003) does not purge organization_siem_audit_outbox, which has no FK. Rows carrying org_id, actor id and destination host survive erasure; decide purge versus keep and extend the erasure function in a later migration. | open |
 | D1-200 | WS06-S7 | follow-up | P3 | 22 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-03.json | open |
 
+
+### Wave-mode batch W1-03 (2026-10-23)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D1-201 | WS06-S7 | live-proof | P1 | Nothing has run against a real Postgres or the rebuilt org-core image: the seven TestControlLifecycleSIEM tests compile and vet clean but are skipped without CONTROL_LIFECYCLE_TEST_DATABASE_URL, and the migration (trigger, RLS, grants as org_core_app) is untested live. | open |
+| D1-202 | WS06-S7 | risk | P1 | The audit outbox relay is not wired until main.go gets runSIEMAuditOutbox; until then destination changes write their audit row but it is never published, so the 'durable audit row per change' is stored but not delivered. | open |
+| D1-203 | WS06-S7 | risk | P1 | With the flag on and an invalid or missing ORG_CORE_SIEM_SEAL_KEY the server boots and every SIEM route answers 503 instead of failing the start; boot validation needs the main.go edit. | open |
+| D1-204 | WS06-S7 | risk | P1 | gdpr_hard_delete_organization (003) does not know organization_siem_audit_outbox (no FK, rows carry org_id, actor id and destination host), so erasure leaves those content-free rows behind; siem_destinations itself cascades. Decide whether erasure must purge or keep them and extend the erasure function in a later migration. | open |
+| D1-205 | WS06-S7 | live-proof | P1 | Migration 022 (cap trigger, RLS policies, org_core_app grants, outbox constraints) and all seven TestControlLifecycleSIEM tests have never run against a real Postgres; needed before the flag is switched on. | open |
+| D1-206 | WS06-S7 | risk | P1 | Until the lead wires runSIEMAuditOutbox in cmd/server/main.go, destination changes commit their audit row but it is never delivered to audit-core, so the 'durable audit row per change' is incomplete. | open |
+| D1-207 | WS06-S7 | risk | P1 | With the flag on and a missing or invalid seal key, the server boots and every SIEM route answers 503 (it only logs). Boot validation in main.go should turn this into a startup failure. | open |
+| D1-208 | WS06-S7 | risk | P1 | gdpr_hard_delete_organization (003) does not purge organization_siem_audit_outbox, which has no FK. Rows carrying org_id, actor id and destination host survive erasure; decide purge versus keep and extend the erasure function in a later migration. | open |
+| D1-209 | WS06-S7 | follow-up | P3 | 22 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-03.json | open |
+
 ## Wave 2 (WS13 to WS27)
 
 Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS27-S0, WS27-S1. Wave 2 is not started as a wave: these came in with Wave 1 batches because they were Wave 1 prerequisites.
@@ -549,3 +564,4 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS06-S7 | auth, policy, audit | W1-03 | no |
 
 | D1-041 | WS10-S2, WS06-S7 | follow-up | P1 | The Control Plane compose now requires `INFERENCE_ORG_CORE_SERVICE_TOKEN` and `AUDIT_ORG_CORE_SERVICE_TOKEN` (`:?required`): the Control Plane secret generation must mint them before org-core is recreated, and org-core's image must be rebuilt first (an image that predates the new scopes refuses the whole credential registry). D1-040 is resolved: the package aborted because the compose registry lacked the new principals; with them `go test ./internal/http/` passes. | open |
+| WS06-S7 | auth, policy, audit | W1-03 | no |
