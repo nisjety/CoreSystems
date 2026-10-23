@@ -220,6 +220,11 @@ pub struct RunPolicy {
     pub block: BlockPolicy,
     pub extraction: ExtractionPolicy,
     pub checkpoint: CheckpointPolicy,
+    /// WS7.C: digest of the web policy a run ran under, set only when that policy
+    /// differs from the catalogue default for its principal and ZDR posture. Absent
+    /// for a default run, so default fingerprints and stored JSON are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_policy: Option<String>,
 }
 
 impl Default for RunPolicy {
@@ -254,6 +259,7 @@ impl RunPolicy {
             block: BlockPolicy::default(),
             extraction: ExtractionPolicy::default(),
             checkpoint: CheckpointPolicy::default(),
+            web_policy: None,
         }
     }
 
@@ -267,6 +273,7 @@ impl RunPolicy {
             block: BlockPolicy::default(),
             extraction: ExtractionPolicy::default(),
             checkpoint: CheckpointPolicy::default(),
+            web_policy: None,
         }
     }
 
@@ -294,7 +301,48 @@ impl RunPolicy {
                 every_n_pages: 0,
                 min_interval_s: 0,
             },
+            web_policy: None,
         }
+    }
+}
+
+// =============================================================================
+// Web policy (WS7.C)
+// =============================================================================
+
+/// The run policy a resolved web policy runs under. The base is `best_effort`.
+/// A resolution equal to the catalogue default for the same principal and ZDR
+/// posture leaves `web_policy` unset, so a default run keeps its fingerprint; any
+/// other resolution stamps its digest, which carries no URL.
+impl From<&quarry_core::web_policy::ResolvedPolicy> for RunPolicy {
+    fn from(resolved: &quarry_core::web_policy::ResolvedPolicy) -> Self {
+        let mut policy = RunPolicy::best_effort();
+        let digest = resolved.digest();
+        if digest != default_web_digest(resolved.principal(), resolved.zdr()) {
+            policy.web_policy = Some(digest);
+        }
+        policy
+    }
+}
+
+/// The digest of the catalogue default for a principal and ZDR posture: no operator
+/// baseline, no org layer, no grant, no ask.
+fn default_web_digest(principal: quarry_core::web_policy::Principal, zdr: bool) -> String {
+    use quarry_core::web_policy::{resolve, OrgInput, PolicyInputs, PolicyLayer};
+    let inputs = PolicyInputs {
+        principal,
+        zdr,
+        baseline: PolicyLayer::default(),
+        org: OrgInput::Absent,
+        grant: None,
+        request: None,
+    };
+    match resolve(&inputs) {
+        Ok(default) => default.digest(),
+        // Unreachable in practice: resolve fails only on an unreadable org layer,
+        // and none is passed. An empty digest never equals a real one, so a
+        // failure stamps the run rather than hiding a non-default policy.
+        Err(_) => String::new(),
     }
 }
 
@@ -410,6 +458,53 @@ mod tests {
         // Sanity: with a equal-mutation both differ from baseline.
         a.extraction.markdown_converter_version = "html2md-0.3".into();
         assert_eq!(policy_fingerprint(&a), policy_fingerprint(&b));
+    }
+
+    #[test]
+    fn default_resolved_policy_has_the_same_policy_fingerprint_as_best_effort() {
+        use quarry_core::web_policy::{resolve, OrgInput, PolicyInputs, PolicyLayer, Principal};
+        for zdr in [false, true] {
+            let resolved = resolve(&PolicyInputs {
+                principal: Principal::Human,
+                zdr,
+                baseline: PolicyLayer::default(),
+                org: OrgInput::Absent,
+                grant: None,
+                request: None,
+            })
+            .expect("a default resolution resolves");
+            let run = RunPolicy::from(&resolved);
+            assert!(run.web_policy.is_none(), "zdr={zdr}");
+            assert_eq!(
+                policy_fingerprint(&run),
+                policy_fingerprint(&RunPolicy::best_effort()),
+                "zdr={zdr}"
+            );
+        }
+    }
+
+    #[test]
+    fn strict_ask_changes_the_fingerprint() {
+        use quarry_core::web_policy::{resolve, OrgInput, PolicyInputs, Principal, RequestAsk};
+        let ask = RequestAsk {
+            deny_domains: vec!["example.org".into()],
+            ..Default::default()
+        };
+        let resolved = resolve(&PolicyInputs {
+            principal: Principal::Human,
+            zdr: false,
+            baseline: Default::default(),
+            org: OrgInput::Absent,
+            grant: None,
+            request: Some(ask.into_layer().expect("a valid ask")),
+        })
+        .expect("the ask resolves");
+        let run = RunPolicy::from(&resolved);
+        assert!(run.web_policy.is_some());
+        assert_ne!(
+            policy_fingerprint(&run),
+            policy_fingerprint(&RunPolicy::best_effort())
+        );
     }
 
     #[test]
