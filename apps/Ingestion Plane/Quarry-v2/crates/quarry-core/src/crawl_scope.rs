@@ -225,7 +225,9 @@ impl CrawlScope {
         if total_patterns > MAX_PATTERNS {
             errs.push(CrawlFieldError::new(
                 format!("{base}.include_paths"),
-                format!("include_paths and exclude_paths together hold at most {MAX_PATTERNS} patterns"),
+                format!(
+                    "include_paths and exclude_paths together hold at most {MAX_PATTERNS} patterns"
+                ),
             ));
         }
         let mut total_chars = 0usize;
@@ -561,7 +563,10 @@ mod tests {
             );
         }
         assert_eq!(counts.robots.len(), MAX_ROBOTS_DENIALS_PER_PAGE);
-        assert_eq!(counts.counts["robots_disallowed"], (MAX_ROBOTS_DENIALS_PER_PAGE + 5) as u32);
+        assert_eq!(
+            counts.counts["robots_disallowed"],
+            (MAX_ROBOTS_DENIALS_PER_PAGE + 5) as u32
+        );
     }
 
     #[test]
