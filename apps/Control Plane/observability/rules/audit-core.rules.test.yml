@@ -1,0 +1,103 @@
+# promtool unit tests for audit-core.rules.yml:
+#   promtool test rules audit-core.rules.test.yml
+# The primary subscriber reports its events and consumer as bus="control"
+# (subscriber.New defaults); its NATS connection gauge is set as bus="primary"
+# (cmd/server/main.go), so the series below carry those labels.
+rule_files:
+  - audit-core.rules.yml
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    name: an authority mismatch fires as soon as the counter rises
+    input_series:
+      - series: 'audit_core_events_total{bus="control",kind="audit",result="authority_mismatch"}'
+        values: '0x5 1x20'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: ControlAuditCoreAuthorityMismatch
+        exp_alerts:
+          - exp_labels: { severity: critical, plane: control, bus: control, kind: audit, result: authority_mismatch }
+            exp_annotations:
+              summary: "audit-core refused audit events whose subject does not match their payload or plane"
+
+  - interval: 1m
+    name: no authority mismatch stays quiet
+    input_series:
+      - series: 'audit_core_events_total{bus="control",kind="audit",result="authority_mismatch"}'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ControlAuditCoreAuthorityMismatch
+        exp_alerts: []
+
+  - interval: 1m
+    name: a store error fires while the counter rises
+    input_series:
+      - series: 'audit_core_events_total{bus="control",kind="usage",result="store_error"}'
+        values: '0+1x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ControlAuditCoreStoreError
+        exp_alerts:
+          - exp_labels: { severity: warning, plane: control, bus: control, kind: usage, result: store_error }
+            exp_annotations:
+              summary: "audit-core could not persist an audit event (it retries, then dead-letters)"
+
+  - interval: 1m
+    name: a malformed message fires while the counter rises
+    input_series:
+      - series: 'audit_core_events_total{bus="control",kind="audit",result="malformed"}'
+        values: '0+1x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ControlAuditCoreMalformed
+        exp_alerts:
+          - exp_labels: { severity: warning, plane: control, bus: control, kind: audit, result: malformed }
+            exp_annotations:
+              summary: "audit-core received a message it cannot decode"
+
+  - interval: 1m
+    name: messages pending on the consumer fire after fifteen minutes
+    input_series:
+      - series: 'audit_core_consumer_pending{bus="control",kind="audit"}'
+        values: '4x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ControlAuditCoreConsumerPending
+        exp_alerts:
+          - exp_labels: { severity: warning, plane: control, bus: control, kind: audit }
+            exp_annotations:
+              summary: "audit-core has audit messages pending on its durable consumer for over 15 minutes"
+
+  - interval: 1m
+    name: a drained consumer stays quiet
+    input_series:
+      - series: 'audit_core_consumer_pending{bus="control",kind="audit"}'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ControlAuditCoreConsumerPending
+        exp_alerts: []
+
+  - interval: 1m
+    name: a NATS disconnect fires after five minutes
+    input_series:
+      - series: 'audit_core_nats_connected{bus="primary"}'
+        values: '1x5 0x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ControlAuditCoreNATSDisconnected
+        exp_alerts:
+          - exp_labels: { severity: critical, plane: control, bus: primary }
+            exp_annotations:
+              summary: "audit-core has been disconnected from a NATS bus for over 5 minutes"
+
+  - interval: 1m
+    name: a connected bus stays quiet
+    input_series:
+      - series: 'audit_core_nats_connected{bus="primary"}'
+        values: '1x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ControlAuditCoreNATSDisconnected
+        exp_alerts: []

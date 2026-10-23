@@ -1,0 +1,49 @@
+# Alert rules for the Control Plane's audit-core (build plan WS06 S0).
+#
+# Why: audit-core persists the audit events every plane publishes. It already
+# counts the events it rejects or fails to store (authority mismatch, malformed,
+# store error) and reports whether its NATS buses are connected and how far its
+# durable consumer is behind, but nothing alerted on those series. These rules
+# make them visible.
+# There is no pager yet: alerts show in the Prometheus UI until a routing target
+# is chosen (build plan WS01 decision D1).
+#
+# All series are content-free: bus, kind and result labels only (audit-core
+# internal/metrics/server.go), so nothing here is a ZDR concern.
+groups:
+  - name: control-audit-core
+    rules:
+      - alert: ControlAuditCoreAuthorityMismatch
+        expr: increase(audit_core_events_total{result="authority_mismatch"}[10m]) > 0
+        labels: { severity: critical, plane: control }
+        annotations:
+          summary: "audit-core refused audit events whose subject does not match their payload or plane"
+
+      - alert: ControlAuditCoreStoreError
+        expr: increase(audit_core_events_total{result="store_error"}[10m]) > 0
+        labels: { severity: warning, plane: control }
+        annotations:
+          summary: "audit-core could not persist an audit event (it retries, then dead-letters)"
+
+      - alert: ControlAuditCoreMalformed
+        expr: increase(audit_core_events_total{result="malformed"}[10m]) > 0
+        labels: { severity: warning, plane: control }
+        annotations:
+          summary: "audit-core received a message it cannot decode"
+
+      - alert: ControlAuditCoreConsumerPending
+        # Proposed threshold: a durable consumer with messages still pending after
+        # fifteen minutes is not keeping up. Tune after the WS01 phase 0 replay,
+        # which publishes thousands of rows at once.
+        expr: audit_core_consumer_pending > 0
+        for: 15m
+        labels: { severity: warning, plane: control }
+        annotations:
+          summary: "audit-core has audit messages pending on its durable consumer for over 15 minutes"
+
+      - alert: ControlAuditCoreNATSDisconnected
+        expr: audit_core_nats_connected == 0
+        for: 5m
+        labels: { severity: critical, plane: control }
+        annotations:
+          summary: "audit-core has been disconnected from a NATS bus for over 5 minutes"
