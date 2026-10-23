@@ -23,6 +23,8 @@
 // compiles this module separately.
 #![allow(dead_code)]
 
+pub mod fixture_site;
+
 use std::sync::Arc;
 
 use quarry_core::output::DriverKind;
