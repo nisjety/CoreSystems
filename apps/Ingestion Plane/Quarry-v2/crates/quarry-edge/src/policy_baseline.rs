@@ -31,6 +31,14 @@ pub const ENFORCEMENT_ENV: &str = "QUARRY_EDGE__WEB_POLICY_ENFORCEMENT";
 /// (403 `policy_unreadable`) under `enforce`; under `observe` the refusal is only counted.
 pub const REQUIRE_CLAIM_ENV: &str = "QUARRY_EDGE__WEB_POLICY_REQUIRE_CLAIM";
 
+/// `1`/`true` or `0`/`false` (WS7.G). On: a page run preflights the final URL of a fetch
+/// again when a redirect moved it off the requested URL, so a redirect to a host the policy
+/// or the security engine refuses ends the run before anything is stored. Unset: on in a
+/// development environment (`ENVIRONMENT` = dev, development, local or test), off elsewhere,
+/// so a production deployment turns it on deliberately after the corpus of known-good
+/// redirects (http to https, www) has been checked.
+pub const FINAL_URL_CHECK_ENV: &str = "QUARRY_EDGE__WEB_POLICY_FINAL_URL_CHECK";
+
 /// What a decision does with the policy it resolves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Enforcement {
@@ -65,6 +73,7 @@ pub struct PolicyBaseline {
     layer: PolicyLayer,
     enforcement: Enforcement,
     require_claim: bool,
+    final_url_check: bool,
 }
 
 impl Default for PolicyBaseline {
@@ -74,6 +83,7 @@ impl Default for PolicyBaseline {
             layer: PolicyLayer::default(),
             enforcement: Enforcement::Enforce,
             require_claim: false,
+            final_url_check: false,
         }
     }
 }
@@ -95,10 +105,17 @@ impl PolicyBaseline {
             Some(raw) => parse_flag(&raw)?,
             None => false,
         };
+        let final_url_check = match lookup(FINAL_URL_CHECK_ENV) {
+            Some(raw) => {
+                parse_flag(&raw).map_err(|_| format!("{FINAL_URL_CHECK_ENV} must be 1 or 0"))?
+            }
+            None => lookup("ENVIRONMENT").is_some_and(|name| is_development(&name)),
+        };
         Ok(Self {
             layer,
             enforcement,
             require_claim,
+            final_url_check,
         })
     }
 
@@ -113,6 +130,11 @@ impl PolicyBaseline {
 
     pub fn baseline(&self) -> &PolicyLayer {
         &self.layer
+    }
+
+    /// Whether a page run rechecks the final URL of a redirected fetch (WS7.G).
+    pub fn final_url_check(&self) -> bool {
+        self.final_url_check
     }
 
     /// Whether a token without the `web_policy` claim is refused (WS7.J).
@@ -216,6 +238,13 @@ fn parse_flag(raw: &str) -> Result<bool, String> {
     }
 }
 
+/// A development environment name, in any case.
+fn is_development(name: &str) -> bool {
+    ["dev", "development", "local", "test"]
+        .iter()
+        .any(|dev| name.trim().eq_ignore_ascii_case(dev))
+}
+
 /// The decision for one request: the policy the run runs under, and under
 /// `observe` the policy `enforce` would have applied.
 #[derive(Debug, Clone)]
@@ -265,6 +294,26 @@ mod tests {
             .unwrap()
             .requires_claim());
         assert!(PolicyBaseline::from_lookup(|name| (name == REQUIRE_CLAIM_ENV).then(|| "yes".to_owned())).is_err());
+    }
+
+    #[test]
+    fn final_url_check_is_on_in_development_and_off_elsewhere_unless_set() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            PolicyBaseline::from_lookup(move |name| {
+                pairs.iter().find(|(key, _)| *key == name).map(|(_, value)| (*value).to_owned())
+            })
+        };
+        assert!(!env(&[]).unwrap().final_url_check(), "unlabelled means off");
+        assert!(!PolicyBaseline::default().final_url_check());
+        assert!(env(&[("ENVIRONMENT", "dev")]).unwrap().final_url_check());
+        assert!(!env(&[("ENVIRONMENT", "production")]).unwrap().final_url_check());
+        assert!(env(&[("ENVIRONMENT", "production"), (FINAL_URL_CHECK_ENV, "1")])
+            .unwrap()
+            .final_url_check());
+        assert!(!env(&[("ENVIRONMENT", "dev"), (FINAL_URL_CHECK_ENV, "0")])
+            .unwrap()
+            .final_url_check());
+        assert!(env(&[(FINAL_URL_CHECK_ENV, "maybe")]).is_err());
     }
 
     #[test]

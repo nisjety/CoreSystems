@@ -63,10 +63,49 @@ pub fn resolve_for_start(
 /// broker grant equality checked by `validate_run_grant` still holds. An intersection that
 /// is empty denies everything; it never falls back to "allow all".
 pub fn egress_policy(decision: &Decision, allowed_domains: &[String]) -> BrowserEgressPolicy {
+    // WS7.G: the hosts the policy denies are also the browser boundary's deny list, so a
+    // sub-resource, frame or redirect to one of them is refused where it happens, even on
+    // a run whose allow list is empty or names a parent domain. Empty when no rule denies.
+    let denied = decision.policy().denied_hosts();
     match decision.policy().narrow_egress(allowed_domains) {
-        EgressNarrowing::Unchanged => BrowserEgressPolicy::from_allowed_domains(allowed_domains),
-        EgressNarrowing::Narrowed(hosts) => BrowserEgressPolicy::from_allowed_domains(&hosts),
+        EgressNarrowing::Unchanged => {
+            BrowserEgressPolicy::from_allowed_domains(allowed_domains).with_denied_domains(&denied)
+        }
+        EgressNarrowing::Narrowed(hosts) => {
+            BrowserEgressPolicy::from_allowed_domains(&hosts).with_denied_domains(&denied)
+        }
         EgressNarrowing::DenyAll => BrowserEgressPolicy::deny_all(),
+    }
+}
+
+/// The hosts the run's policy denies, for the run's per-action egress (WS7.G). A run built
+/// outside `start_run` is held to the autonomous principal under the operator baseline, as
+/// the other gates hold it; a baseline that cannot resolve yields no list here, and the
+/// admission gates refuse that run anyway.
+pub fn egress_denied(state: &AppState, live: &RunLive, zdr: bool) -> Vec<String> {
+    match live.policy() {
+        Some(decision) => decision.policy().denied_hosts(),
+        None => state
+            .policy
+            .decide(Principal::Autonomous, zdr, None)
+            .map(|decision| decision.policy().denied_hosts())
+            .unwrap_or_default(),
+    }
+}
+
+/// The egress boundary for a run that already exists (a tab opened mid-run): the run's
+/// allow list narrowed and extended by its stored decision, as at start. Without a stored
+/// decision the run's allow list stands alone, as it did before WS7.G.
+pub fn live_egress_policy(
+    state: &AppState,
+    live: &RunLive,
+    zdr: bool,
+    allowed_domains: &[String],
+) -> BrowserEgressPolicy {
+    match live.policy() {
+        Some(decision) => egress_policy(decision, allowed_domains),
+        None => BrowserEgressPolicy::from_allowed_domains(allowed_domains)
+            .with_denied_domains(&egress_denied(state, live, zdr)),
     }
 }
 
@@ -243,6 +282,49 @@ mod tests {
             }
             other => panic!("expected a typed policy denial, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn denied_hosts_are_refused_even_with_no_allow_list_and_under_an_allowed_parent() {
+        let decision = PolicyBaseline::default()
+            .decide(
+                Principal::Autonomous,
+                false,
+                Some(
+                    RequestAsk {
+                        deny_domains: vec!["ads.example.com".into()],
+                        ..Default::default()
+                    }
+                    .into_layer()
+                    .expect("a valid ask"),
+                ),
+            )
+            .expect("the policy resolves");
+        // An unrestricted run (no allow list) still refuses the denied host.
+        let open = egress_policy(&decision, &[]);
+        assert!(open.allows_url("https://news.example.org/"));
+        assert!(!open.allows_url("https://ads.example.com/pixel.gif"));
+        assert!(!open.allows_url("https://cdn.ads.example.com/pixel.gif"));
+        // A denied subdomain of an allowed parent is refused.
+        let parent = egress_policy(&decision, &["example.com".to_string()]);
+        assert!(parent.allows_url("https://www.example.com/"));
+        assert!(!parent.allows_url("https://ads.example.com/"));
+    }
+
+    #[test]
+    fn a_policy_without_deny_rules_builds_the_egress_policy_it_always_did() {
+        let decision = PolicyBaseline::default()
+            .decide(Principal::Autonomous, false, None)
+            .expect("the policy resolves");
+        assert_eq!(
+            egress_policy(&decision, &["example.com".to_string()]),
+            BrowserEgressPolicy::from_allowed_domains(&["example.com".to_string()]),
+            "an empty deny list leaves the policy byte-identical"
+        );
+        assert_eq!(
+            egress_policy(&decision, &[]),
+            BrowserEgressPolicy::from_allowed_domains(&[])
+        );
     }
 
     #[test]

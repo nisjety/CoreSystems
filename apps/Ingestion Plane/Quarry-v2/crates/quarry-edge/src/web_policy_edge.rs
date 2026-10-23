@@ -106,6 +106,24 @@ pub fn is_default(decision: &Decision) -> bool {
         .is_none()
 }
 
+/// WS7.G: the security engine a page run of this request uses. It is the shared engine
+/// wrapped with the request's resolved host rules and, when the operator turned it on, the
+/// final-URL recheck. Same type as the runner's `security` field, so no `PageRunner`
+/// literal changes. A denial it raises is counted like any other enforced denial.
+pub fn security_engine(
+    shared: &std::sync::Arc<dyn quarry_security::SecurityEngine>,
+    baseline: &PolicyBaseline,
+    decision: &Decision,
+) -> std::sync::Arc<dyn quarry_security::SecurityEngine> {
+    std::sync::Arc::new(
+        quarry_runtime::PolicySecurityEngine::new(shared.clone(), decision.policy().clone())
+            .with_final_url_check(baseline.final_url_check())
+            .with_observer(std::sync::Arc::new(|denial: &PolicyDenial| {
+                record_denial(denial, true)
+            })),
+    )
+}
+
 /// The capability whose downgrade the counter and the response name (WS7.E).
 const PAID_PROVIDER: &str = "search.paid_provider";
 

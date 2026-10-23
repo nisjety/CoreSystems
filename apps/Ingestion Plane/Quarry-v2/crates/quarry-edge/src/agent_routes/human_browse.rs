@@ -126,10 +126,9 @@ pub(super) fn open_web_egress(
     web_egress: BrowserEgressPolicy,
 ) -> BrowserEgressPolicy {
     match run {
-        RunNavPolicy::OpenWeb { denied }
-            if web_egress == BrowserEgressPolicy::from_allowed_domains(&[]) =>
-        {
-            BrowserEgressPolicy::open_web(denied)
+        RunNavPolicy::OpenWeb { denied } if web_egress.is_unconstrained() => {
+            // The web policy's own deny list (WS7.G) rides along with the grant's.
+            BrowserEgressPolicy::open_web(denied).with_denied_domains(web_egress.denied_domains())
         }
         _ => web_egress,
     }
@@ -341,6 +340,13 @@ mod tests {
         let egress = open_web_egress(&open, unchanged);
         assert!(!egress.allows_url("https://bank.example/"));
         assert!(egress.allows_url("https://example.com/"));
+        // The web policy's deny list is added to the grant's (WS7.G).
+        let with_policy_deny = BrowserEgressPolicy::from_allowed_domains(&[])
+            .with_denied_domains(&["ads.example".to_owned()]);
+        let merged = open_web_egress(&open, with_policy_deny);
+        assert!(!merged.allows_url("https://ads.example/"));
+        assert!(!merged.allows_url("https://bank.example/"));
+        assert!(merged.allows_url("https://example.com/"));
         // A narrowing from the web policy is kept.
         let narrowed = BrowserEgressPolicy::from_allowed_domains(&["only.example".to_owned()]);
         let kept = open_web_egress(&open, narrowed);

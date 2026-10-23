@@ -585,6 +585,8 @@ pub async fn start_run(
             active_snapshot: None,
             observed_action_count: 0,
             challenge_observation_count: 0,
+            // WS7.G: the run's web-policy deny list, installed with every action's egress policy.
+            egress_denied: web_decision.policy().denied_hosts(),
             ..Default::default()
         },
         lease,

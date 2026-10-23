@@ -188,7 +188,13 @@ pub async fn new_tab(
         .agent_driver
         .configure_egress_policy(
             &entry.session,
-            BrowserEgressPolicy::from_allowed_domains(&entry.constraints.allowed_domains),
+            // WS7.G: the run's web-policy deny list is part of the boundary a new tab runs under.
+            crate::agent_policy_gate::live_egress_policy(
+                &state,
+                &handle.live,
+                entry.zdr.is_active(),
+                &entry.constraints.allowed_domains,
+            ),
         )
         .await
         .map_err(|error| driver_err(&request_id, error))?;
