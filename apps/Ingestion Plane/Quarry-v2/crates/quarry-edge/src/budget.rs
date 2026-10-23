@@ -599,6 +599,9 @@ pub struct BudgetLedger {
     exhausted: Option<Dimension>,
     /// Shadow mode records the first would-be refusal once, not on every call.
     shadow_reported: bool,
+    /// The refusal of this segment has been announced (`agent.budget_exhausted`).
+    /// Not persisted: a resumed run is a new segment and may announce again.
+    refusal_announced: bool,
 }
 
 impl BudgetLedger {
@@ -614,6 +617,7 @@ impl BudgetLedger {
             paused_ms: 0,
             exhausted: None,
             shadow_reported: false,
+            refusal_announced: false,
         }
     }
 
@@ -690,9 +694,19 @@ impl BudgetLedger {
     }
 
     fn cost_micro(&self, caps: &BudgetCaps, now: Instant) -> u64 {
-        let browser_time =
-            (self.active_ms(now) / 1000).saturating_mul(caps.browser_second_micro_usd);
+        self.cost_micro_at(caps.browser_second_micro_usd, now)
+    }
+
+    /// Spent so far, in micro-USD: the flat charges plus the browser-time term.
+    pub fn cost_micro_at(&self, browser_second_micro_usd: u64, now: Instant) -> u64 {
+        let browser_time = (self.active_ms(now) / 1000).saturating_mul(browser_second_micro_usd);
         self.spent_micro_usd.saturating_add(browser_time)
+    }
+
+    /// Whether this segment has not yet announced its refusal; the first call says
+    /// yes and records it.
+    pub fn take_refusal_announcement(&mut self) -> bool {
+        !std::mem::replace(&mut self.refusal_announced, true)
     }
 }
 
@@ -783,6 +797,21 @@ pub fn check(
     })
 }
 
+impl Exhausted {
+    /// The payload of `agent.budget_exhausted` (WS6.B): the same figures as the
+    /// refusal, without `resumable`.
+    pub fn event_payload(&self) -> serde_json::Value {
+        serde_json::json!({
+            "dimension": self.dimension.label(),
+            "limit": self.limit,
+            "spent": self.spent,
+            "unit": self.unit,
+            "estimated": self.dimension == Dimension::Cost,
+            "limit_source": self.limit_source,
+        })
+    }
+}
+
 /// The effective bounds returned to the caller of `POST /v1/agent/runs`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct EffectiveConstraints {
@@ -821,6 +850,8 @@ pub struct RunBudget {
     /// with the ledger so a resume cannot drop it. Always `None` for an
     /// interactive run.
     pub claim: Option<GrantBudget>,
+    /// The refusal the last `gate` made in `On` mode, until it is announced (WS6.B).
+    refusal: Option<Exhausted>,
 }
 
 impl RunBudget {
@@ -872,6 +903,7 @@ impl RunBudget {
             clamps,
             ledger,
             claim,
+            refusal: None,
         }
     }
 
@@ -906,7 +938,9 @@ impl RunBudget {
                 self.class.label(),
                 "on",
             );
-            return Err(exhausted.into_error());
+            let error = exhausted.into_error();
+            self.refusal = Some(exhausted);
+            return Err(error);
         }
         if self.ledger.take_shadow_report() {
             crate::metrics::record_budget_exhausted(
@@ -923,6 +957,48 @@ impl RunBudget {
             );
         }
         Ok(())
+    }
+
+    /// The `agent.budget_exhausted` payload for the refusal the last `gate` made, the
+    /// first time this segment refuses; `None` otherwise (WS6.B).
+    pub fn take_refusal_announcement(&mut self) -> Option<serde_json::Value> {
+        let exhausted = self.refusal.take()?;
+        self.ledger
+            .take_refusal_announcement()
+            .then(|| exhausted.event_payload())
+    }
+
+    /// `meta.budget` for a step response (WS6.B). `cost_source` labels the cost of the
+    /// step the response answers.
+    pub fn meta(&self, cost_source: &str, now: Instant) -> quarry_core::contracts::BudgetMeta {
+        let browser_second = self.caps.as_ref().map_or(0, |caps| caps.browser_second_micro_usd);
+        quarry_core::contracts::BudgetMeta {
+            class: self.class.label().to_owned(),
+            steps: self.ledger.steps,
+            attempts: self.ledger.attempts,
+            max_steps: self.caps.as_ref().map(|caps| caps.max_steps),
+            max_attempts: self.caps.as_ref().map(|caps| caps.max_attempts),
+            elapsed_s: self.ledger.active_ms(now) as f64 / 1000.0,
+            max_runtime_s: self.caps.as_ref().map(|caps| caps.max_runtime_s),
+            spent_usd: self.ledger.cost_micro_at(browser_second, now) as f64 / MICRO,
+            max_cost_usd: self.caps.as_ref().map(|caps| caps.max_cost_usd),
+            estimated: true,
+            cost_source: cost_source.to_owned(),
+            exhausted: self.ledger.exhausted().map(|dimension| dimension.label().to_owned()),
+        }
+    }
+
+    /// The `usage` block of `DELETE /v1/agent/runs/{run_id}` (WS6.B).
+    pub fn usage(&self, now: Instant) -> serde_json::Value {
+        let browser_second = self.caps.as_ref().map_or(0, |caps| caps.browser_second_micro_usd);
+        serde_json::json!({
+            "class": self.class.label(),
+            "spent_usd": self.ledger.cost_micro_at(browser_second, now) as f64 / MICRO,
+            "steps": self.ledger.steps,
+            "attempts": self.ledger.attempts,
+            "active_s": self.ledger.active_ms(now) as f64 / 1000.0,
+            "exhausted": self.ledger.exhausted().map(|dimension| dimension.label()),
+        })
     }
 
     /// Record an executed action: `completed` is false for a failed attempt.
@@ -951,6 +1027,19 @@ impl RunBudget {
                 by: clamp.by,
             })
             .collect()
+    }
+}
+
+/// Whether the request's own step cap (`constraints.max_steps`) still refuses
+/// with the legacy 429. It stops where the gate owns the bound: a person's
+/// session is never capped, and an agent run is refused with the typed 402 once
+/// enforcement is `on`. Otherwise it stays as it was: with enforcement `off`
+/// there is no gate, and in `shadow` an agent run keeps its request cap until
+/// the gate is enforced.
+pub fn legacy_step_cap_applies(budget: Option<&RunBudget>, mode: BudgetMode) -> bool {
+    match budget {
+        None => true,
+        Some(budget) => budget.class == RunClass::Agent && mode != BudgetMode::On,
     }
 }
 
@@ -1220,6 +1309,107 @@ mod tests {
             check(&mut resumed, &caps, 0, later).unwrap_err().dimension,
             Dimension::Steps
         );
+    }
+
+    #[test]
+    fn exhaustion_is_announced_once_per_segment() {
+        let limits = BudgetLimits::default();
+        let now = Instant::now();
+        let mut run = RunBudget::start(&limits, RunClass::Agent, &constraints(2, Some(600), Some(5.0)), None, now);
+        // Two completed steps: the third gate refuses.
+        for _ in 0..2 {
+            run.gate(BudgetMode::On, 0, now).unwrap();
+            run.charge(true, 0);
+        }
+        assert!(run.gate(BudgetMode::On, 0, now).is_err());
+        let payload = run.take_refusal_announcement().expect("first refusal is announced");
+        assert_eq!(payload["dimension"], "steps");
+        assert_eq!(payload["limit"], 2.0);
+        assert_eq!(payload["estimated"], false);
+        // The same segment refuses again, but says nothing new.
+        assert!(run.gate(BudgetMode::On, 0, now).is_err());
+        assert!(run.take_refusal_announcement().is_none());
+        // A shadow gate never announces a refusal it did not make.
+        let mut shadow = RunBudget::start(&limits, RunClass::Agent, &constraints(1, Some(600), Some(5.0)), None, now);
+        shadow.charge(true, 0);
+        assert!(shadow.gate(BudgetMode::Shadow, 0, now).is_ok());
+        assert!(shadow.take_refusal_announcement().is_none());
+        // A resume is a new segment: the restored latch refuses, and announces once more.
+        let saved = run.snapshot(now);
+        let mut resumed = RunBudget::start(&limits, RunClass::Agent, &constraints(2, Some(600), Some(5.0)), Some(&saved), now);
+        assert!(resumed.gate(BudgetMode::On, 0, now).is_err());
+        assert!(resumed.take_refusal_announcement().is_some());
+    }
+
+    #[test]
+    fn meta_and_usage_report_the_ledger_and_its_source() {
+        let limits = BudgetLimits::default();
+        let now = Instant::now();
+        let mut run = RunBudget::start(&limits, RunClass::Agent, &constraints(5, Some(60), Some(0.5)), None, now);
+        run.charge(true, 1_500);
+        run.charge(false, 100);
+        let meta = run.meta("flat_table", now);
+        assert_eq!((meta.class.as_str(), meta.steps, meta.attempts), ("agent", 1, 2));
+        assert_eq!((meta.max_steps, meta.max_attempts), (Some(5), Some(10)));
+        assert_eq!(meta.max_cost_usd, Some(0.5));
+        assert!((meta.spent_usd - 0.0016).abs() < 1e-9, "spent is the charged micro-USD");
+        assert!(meta.estimated);
+        assert_eq!(meta.cost_source, "flat_table");
+        assert!(meta.exhausted.is_none());
+        let usage = run.usage(now);
+        assert_eq!(usage["steps"], 1);
+        assert_eq!(usage["attempts"], 2);
+        assert!(usage["exhausted"].is_null());
+        // An interactive run has no bounds to report.
+        let person = RunBudget::start(&limits, RunClass::Interactive, &constraints(12, Some(120), None), None, now);
+        let meta = person.meta("flat_table", now);
+        assert_eq!(meta.class, "interactive");
+        assert!(meta.max_steps.is_none() && meta.max_cost_usd.is_none());
+    }
+
+    #[test]
+    fn resolve_caps_takes_min_of_request_grant_ceiling() {
+        // The request asks for 50 steps, the grant claims 7, the ceiling is 300: the
+        // smallest bound wins and is reported as a grant clamp. (The plan's per-org
+        // allowance term is not in the resolver yet; see the W2-U21 depth notes.)
+        let limits = BudgetLimits::default();
+        let (caps, clamps) = resolve_caps_with_claim(
+            &limits,
+            RunClass::Agent,
+            &constraints(50, None, None),
+            Some(&claim(0, 7, 0)),
+        )
+        .unwrap();
+        assert_eq!(caps.max_steps, 7);
+        assert!(caps.grant_bound.steps);
+        let clamp = clamps.iter().find(|clamp| clamp.field == "max_steps").unwrap();
+        assert_eq!((clamp.requested, clamp.effective, clamp.by), (Some(50.0), 7.0, "grant"));
+        // A claim above what the request gave changes nothing.
+        let (caps, _) = resolve_caps_with_claim(
+            &limits,
+            RunClass::Agent,
+            &constraints(5, None, None),
+            Some(&claim(0, 7, 0)),
+        )
+        .unwrap();
+        assert_eq!(caps.max_steps, 5);
+        assert!(!caps.grant_bound.steps);
+    }
+
+    #[test]
+    fn legacy_step_cap_applies_only_where_the_gate_does_not_own_the_bound() {
+        let limits = BudgetLimits::default();
+        let now = Instant::now();
+        let agent = RunBudget::start(&limits, RunClass::Agent, &constraints(5, None, None), None, now);
+        let person = RunBudget::start(&limits, RunClass::Interactive, &constraints(12, None, None), None, now);
+        // Off: no gate at all, so the request cap is what it always was, for everyone.
+        assert!(legacy_step_cap_applies(None, BudgetMode::Off));
+        // Shadow: an agent keeps its request cap; a person is never capped.
+        assert!(legacy_step_cap_applies(Some(&agent), BudgetMode::Shadow));
+        assert!(!legacy_step_cap_applies(Some(&person), BudgetMode::Shadow));
+        // On: the typed gate owns the agent bound; the person is still uncapped.
+        assert!(!legacy_step_cap_applies(Some(&agent), BudgetMode::On));
+        assert!(!legacy_step_cap_applies(Some(&person), BudgetMode::On));
     }
 
     #[test]

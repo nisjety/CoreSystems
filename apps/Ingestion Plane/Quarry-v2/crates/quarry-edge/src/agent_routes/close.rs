@@ -28,14 +28,15 @@ pub async fn close_run(
         ));
     }
 
-    finish_run(&state, &run_id, handle, CloseReason::Explicit)
+    let usage = finish_run(&state, &run_id, handle, CloseReason::Explicit)
         .await
         .map_err(|error| driver_err(&request_id, error))?;
-
-    Ok(Json(Envelope::ok(
-        request_id,
-        serde_json::json!({ "closed": true }),
-    )))
+    // WS6.B: an agent run reports what it spent; a person's session has no budget to report.
+    let mut body = serde_json::json!({ "closed": true });
+    if let Some(usage) = usage {
+        body["usage"] = usage;
+    }
+    Ok(Json(Envelope::ok(request_id, body)))
 }
 
 /// Why a run ended.
@@ -59,11 +60,11 @@ pub(super) async fn finish_run(
     run_id: &str,
     handle: RunHandle,
     reason: CloseReason,
-) -> QuarryResult<()> {
+) -> QuarryResult<Option<serde_json::Value>> {
     // Waits for an action that is still running.
     let mut entry = handle.entry.lock().await;
     if entry.closed {
-        return Ok(());
+        return Ok(None);
     }
     let zdr = entry.zdr;
     let rid = entry.run_id.clone();
@@ -120,6 +121,11 @@ pub(super) async fn finish_run(
     // WS6.K: the run-duration histogram, recorded by the one path that won the removal
     // above (a racing second caller returned at the `closed` check).
     record_run_duration(&handle.live, now_ms());
+    // WS6.B: the usage as it stood when the run ended (absent for a person's session).
+    let usage = entry
+        .budget
+        .as_ref()
+        .map(|budget| budget.usage(std::time::Instant::now()));
     let session = entry.session.clone();
     drop(entry);
     if let Err(error) = state.agent_driver.release(session).await {
@@ -156,7 +162,7 @@ pub(super) async fn finish_run(
                 .await;
         }
     }
-    Ok(())
+    Ok(usage)
 }
 
 /// Release every live browser session. Runs concurrently (8 at a time) with

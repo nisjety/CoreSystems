@@ -1,5 +1,7 @@
 use super::*;
 
+use quarry_runtime::action_cost::CostSource;
+
 /// `POST /v1/agent/runs/{run_id}/step` — execute one action, return the
 /// resulting observation. `ObservationRunner` advances `ctx.step` and emits
 /// `ActionStarted`/`ObservationReady` itself.
@@ -76,7 +78,7 @@ pub async fn step(
     // effect; the observation carries that distinction. Persist an
     // immutable receipt for both success and failure so a planner or
     // reviewer can replay the exact action sequence.
-    let obs = match runner
+    let (obs, cost_source) = match runner
         .execute(&req, &entry_mut.session, &mut entry_mut.ctx)
         .await
     {
@@ -85,12 +87,14 @@ pub async fn step(
             // back to the flat action-cost table so max_cost_usd
             // budgets are enforceable.
             let cost_usd = receipt_cost_usd(&obs.telemetry, &receipt_action);
+            let cost_source = receipt_cost_source(&obs.telemetry);
             budget_charge(&mut entry, true, cost_usd);
             let receipt = ReceiptBuilder::start(receipt_run_id.clone(), receipt_step)
                 .org_id(entry.org_id.clone())
                 .actor_id(entry.actor_id.clone())
                 .initiator(admitted.initiator, admitted.control_epoch)
                 .agent(admitted.agent.clone())
+                .cost_source(cost_source)
                 .complete(receipt_action, Some(obs.clone()), cost_usd);
             if !entry.zdr.is_active() {
                 state
@@ -99,19 +103,19 @@ pub async fn step(
                     .await
                     .map_err(|e| driver_err(&request_id, e))?;
             }
-            obs
+            (obs, cost_source)
         }
         Err(error) => {
-            budget_charge(
-                &mut entry,
-                false,
-                estimated_action_cost_usd(&receipt_action),
-            );
+            // A failed attempt is charged the flat cost, so its receipt carries it too (WS6.B).
+            let flat_usd = estimated_action_cost_usd(&receipt_action);
+            budget_charge(&mut entry, false, flat_usd);
             let receipt = ReceiptBuilder::start(receipt_run_id, receipt_step)
                 .org_id(entry.org_id.clone())
                 .actor_id(entry.actor_id.clone())
                 .initiator(admitted.initiator, admitted.control_epoch)
                 .agent(admitted.agent.clone())
+                .failed_cost(flat_usd)
+                .cost_source(CostSource::FlatTable)
                 .fail(receipt_action, &error);
             if !entry.zdr.is_active() {
                 state
@@ -147,7 +151,13 @@ pub async fn step(
         ));
     }
 
-    Ok(Json(Envelope::ok(request_id, obs)))
+    // `meta.budget` (WS6.B): the run's ledger after this step, labelled with the source of
+    // this step's cost. Absent when budgets are off.
+    let budget = entry
+        .budget
+        .as_ref()
+        .map(|budget| budget.meta(cost_source_label(cost_source), std::time::Instant::now()));
+    Ok(Json(Envelope::ok(request_id, obs).with_budget(budget)))
 }
 
 pub(super) async fn execute_ws_action(

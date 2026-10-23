@@ -72,7 +72,7 @@ pub async fn sweep_once(state: &AppState, now_ms: u64) -> SweepReport {
             "run expired"
         );
         match finish_run(state, &run_id, handle, CloseReason::Expired(verdict)).await {
-            Ok(()) => report.expired += 1,
+            Ok(_) => report.expired += 1,
             Err(error) => tracing::warn!(
                 %run_id,
                 error_class = crate::zdr_log::class(&error),

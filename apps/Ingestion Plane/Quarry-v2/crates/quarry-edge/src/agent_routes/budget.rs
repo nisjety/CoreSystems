@@ -1,5 +1,7 @@
 use super::*;
 
+use quarry_runtime::action_cost::CostSource;
+
 pub(super) fn enforce_step_budget(entry: &RunEntry) -> Result<(), &'static str> {
     if entry.constraints.max_steps > 0 && entry.ctx.step >= entry.constraints.max_steps {
         return Err("agent step budget exhausted");
@@ -97,6 +99,63 @@ pub(super) fn telemetry_receipt_cost_usd(telemetry: &BrowserTelemetry) -> f64 {
         .verified_action_cost_micro_usd
         .map(|micro_usd| micro_usd as f64 / 1_000_000.0)
         .unwrap_or(0.0)
+}
+
+/// Where the cost of a completed action came from, for its receipt and `meta.budget`:
+/// the driver's figure when it supplied one, otherwise the flat table (WS6.B). The
+/// same condition as [`receipt_cost_usd`].
+pub(super) fn receipt_cost_source(telemetry: &BrowserTelemetry) -> CostSource {
+    if telemetry_receipt_cost_usd(telemetry) == 0.0 {
+        CostSource::FlatTable
+    } else {
+        CostSource::ProviderBilled
+    }
+}
+
+pub(super) fn cost_source_label(source: CostSource) -> &'static str {
+    match source {
+        CostSource::FlatTable => "flat_table",
+        CostSource::Estimated => "estimated",
+        CostSource::ProviderBilled => "provider_billed",
+    }
+}
+
+/// Announce the refusal the last budget gate made, once per segment: the
+/// `agent.budget_exhausted` event, and a checkpoint that stores the latch so a
+/// resume restores it. Nothing is written for a ZDR run (the event goes through
+/// `emit_for_zdr`). Errors are logged, never returned: the caller returns the 402.
+pub(super) async fn announce_budget_refusal(state: &AppState, entry: &mut RunEntry) {
+    let zdr = entry.zdr;
+    let run_id = entry.run_id.clone();
+    let Some(payload) = entry
+        .budget
+        .as_mut()
+        .and_then(|budget| budget.take_refusal_announcement())
+    else {
+        return;
+    };
+    state
+        .event_sink
+        .emit_for_zdr(
+            zdr,
+            run_id.clone(),
+            EventType::AgentBudgetExhausted,
+            payload,
+            format!("{run_id}:agent_budget_exhausted:{}", uuid::Uuid::new_v4()),
+        )
+        .await;
+    if !zdr.is_active() {
+        if let Err(error) = state
+            .receipts
+            .save_run_checkpoint(checkpoint_for_entry(entry))
+            .await
+        {
+            tracing::warn!(
+                error_class = crate::zdr_log::class(&error),
+                "could not checkpoint a budget refusal"
+            );
+        }
+    }
 }
 
 /// W4: estimate a cost for an action when no provider-billed cost is

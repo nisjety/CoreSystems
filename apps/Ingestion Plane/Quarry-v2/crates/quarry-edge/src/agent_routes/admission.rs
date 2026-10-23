@@ -403,10 +403,16 @@ pub(super) async fn admit_action(
     deny_raw_script(action, &entry.run_id.to_string())?;
     // 8. web policy: WS7 plugs in here.
 
-    // 9. budget
-    enforce_step_budget(entry)
-        .map_err(|message| QuarryError::new(ErrorCode::RateLimited, message))?;
-    budget_gate(entry, action)?;
+    // 9. budget: the request's own step cap where the gate does not own it, then the
+    // gate, whose first refusal per segment is announced before the 402 is returned.
+    if crate::budget::legacy_step_cap_applies(entry.budget.as_ref(), crate::budget::current_mode()) {
+        enforce_step_budget(entry)
+            .map_err(|message| QuarryError::new(ErrorCode::RateLimited, message))?;
+    }
+    if let Err(error) = budget_gate(entry, action) {
+        announce_budget_refusal(state, entry).await;
+        return Err(error);
+    }
 
     // 10. sensitive approval (the only gate that consumes state)
     if let Some(approval) = sensitive_approval_for_action(entry, action)? {
