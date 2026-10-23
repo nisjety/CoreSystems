@@ -217,6 +217,11 @@ pub struct WebPolicyClaim {
 }
 
 /// The only claim version this build reads. Any other version fails closed.
+/// WS13.5: the scope a service principal needs to send scrape-time `actions[]`.
+/// The check lives in the scrape handler (`scrape_actions::check_principal`), like
+/// `scrape:write` for ingest; a user token does not need it.
+pub const SCOPE_SCRAPE_INTERACT: &str = "scrape:interact";
+
 pub const WEB_POLICY_CLAIM_VERSION: u64 = 1;
 
 /// The top-level fields of a version 1 claim. Anything else is an unknown key.

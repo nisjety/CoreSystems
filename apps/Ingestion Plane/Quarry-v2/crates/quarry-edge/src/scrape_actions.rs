@@ -16,12 +16,19 @@
 
 use std::sync::OnceLock;
 
+use axum::extract::Request;
+use axum::http::{Method, StatusCode};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
+
 use quarry_core::capture::CaptureLimits;
 use quarry_core::error::{ErrorCode, QuarryError};
 use quarry_core::scrape::ResolvedScrapeOptions;
 use quarry_runtime::driver::RenderHints;
 use quarry_runtime::driver_plan::{plan_from_signals, DriverSignals};
 use quarry_runtime::DriverPlan;
+
+use crate::auth::{Claims, SCOPE_SCRAPE_INTERACT};
 
 /// The switch for the capture formats. Only `on` enables them.
 pub const ENV_SCRAPE_CAPTURE: &str = "QUARRY_EDGE__SCRAPE_CAPTURE";
@@ -82,10 +89,11 @@ pub fn inline_max_bytes() -> usize {
 /// browser fetch with no fallback chain. Otherwise the request's signals decide,
 /// as they always have.
 pub fn plan_for(resolved: &ResolvedScrapeOptions, signals: DriverSignals) -> DriverPlan {
-    if resolved.capture.is_empty() {
+    // WS13.5: actions run in the browser too, so they take the same plan.
+    if resolved.capture.is_empty() && resolved.actions.is_none() {
         plan_from_signals(signals)
     } else {
-        DriverPlan::browser_fetch("screenshot or pdf requires the browser")
+        DriverPlan::browser_fetch("screenshot, pdf or actions require the browser")
     }
 }
 
@@ -133,6 +141,181 @@ pub fn browser_unavailable() -> QuarryError {
         "screenshot and pdf need a browser, and none is available on this endpoint",
     )
     .with_details(serde_json::json!({ "reason": "browser_capability_unavailable" }))
+}
+
+/// WS13.5: the switch for scrape-time `actions[]`, read once. `off` (the default)
+/// keeps `actions` refused with a field error (`feature_disabled`). `user` lets a
+/// user token send them and nothing else (dev only). `on` also lets a service
+/// principal that holds `scrape:interact` send them. Anything else is off.
+pub const ENV_SCRAPE_ACTIONS: &str = "QUARRY_EDGE__SCRAPE_ACTIONS";
+
+/// The handler's bound on a run that carries actions (WS13.5), in milliseconds.
+pub const ACTIONS_RUN_DEADLINE_MS: u64 = 115_000;
+
+/// The router's deadline for `POST /v1/scrape` while actions are on (WS13.5).
+pub const ACTIONS_ROUTE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(125);
+
+/// The router's deadline on every other route (unchanged since WS5).
+pub const DEFAULT_ROUTE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Who may send scrape-time actions, from the switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionsMode {
+    Off,
+    User,
+    On,
+}
+
+impl ActionsMode {
+    pub fn enabled(self) -> bool {
+        self != Self::Off
+    }
+}
+
+/// Only `on` and `user` (ignoring case and surrounding space) turn actions on.
+pub fn parse_actions_mode(value: Option<&str>) -> ActionsMode {
+    match value.map(|raw| raw.trim().to_ascii_lowercase()).as_deref() {
+        Some("on") => ActionsMode::On,
+        Some("user") => ActionsMode::User,
+        _ => ActionsMode::Off,
+    }
+}
+
+/// The process switch, read once.
+pub fn actions_mode() -> ActionsMode {
+    static MODE: OnceLock<ActionsMode> = OnceLock::new();
+    *MODE.get_or_init(|| parse_actions_mode(std::env::var(ENV_SCRAPE_ACTIONS).ok().as_deref()))
+}
+
+/// WS13.5: whether this principal may send `actions`. The check only tightens:
+/// a request labelled `initiated_by: "agent"` (a Model-proposed action relayed
+/// under the user's bearer) is refused whatever the token, a service principal
+/// needs `scrape:interact`, and the `user` mode admits user tokens only. Nothing
+/// here widens what a principal may already do.
+pub fn check_principal(
+    claims: &Claims,
+    initiated_by: Option<&str>,
+    mode: ActionsMode,
+) -> Result<(), QuarryError> {
+    let refused = initiated_by == Some("agent")
+        || (claims.is_service() && !claims.has_scope(SCOPE_SCRAPE_INTERACT))
+        || (mode == ActionsMode::User && claims.is_service());
+    if refused {
+        return Err(QuarryError::new(
+            ErrorCode::Forbidden,
+            "scrape actions need a user request, or a service principal with the scrape:interact scope",
+        )
+        .with_details(serde_json::json!({ "reason": "scrape_interact_scope_required" })));
+    }
+    Ok(())
+}
+
+/// WS13.5: put the request's actions on the render hints. Nothing is set when the
+/// request has none, so the default path is unchanged.
+pub fn apply_actions(render: &mut RenderHints, resolved: &ResolvedScrapeOptions) {
+    if let Some(actions) = resolved.actions.as_ref() {
+        render.actions = Some(std::sync::Arc::new(actions.clone()));
+        render.actions_deadline = Some(std::time::Duration::from_millis(ACTIONS_RUN_DEADLINE_MS));
+    }
+}
+
+/// WS13.5: the handler's bound on the run. With actions it is 115 s; otherwise the
+/// caller's `timeout_ms`, already capped by WS5.
+pub fn run_deadline_ms(has_actions: bool, timeout_ms: u64) -> u64 {
+    if has_actions {
+        ACTIONS_RUN_DEADLINE_MS
+    } else {
+        timeout_ms
+    }
+}
+
+/// WS13.5: the details of the handler's timeout. The `actions_deadline` reason
+/// is added only for a run that carried actions, so the default body is unchanged.
+pub fn run_timeout_details(has_actions: bool, deadline_ms: u64) -> serde_json::Value {
+    if has_actions {
+        serde_json::json!({
+            "op": "scrape",
+            "deadline_ms": deadline_ms,
+            "reason": "actions_deadline",
+        })
+    } else {
+        serde_json::json!({
+            "op": "scrape",
+            "deadline_ms": deadline_ms,
+        })
+    }
+}
+
+/// WS13.5: the router's deadline, path-aware. `POST /v1/scrape` gets 125 s while
+/// actions are on, so the handler's 115 s bound answers first; every other route
+/// keeps its 60 s. The refusal is the empty 408 that `TimeoutLayer` gives.
+pub async fn path_deadline(request: Request, next: Next) -> Response {
+    let actions_route = request.method() == Method::POST && request.uri().path() == "/v1/scrape";
+    let limit = if actions_route && actions_mode().enabled() {
+        ACTIONS_ROUTE_DEADLINE
+    } else {
+        DEFAULT_ROUTE_DEADLINE
+    };
+    match tokio::time::timeout(limit, next.run(request)).await {
+        Ok(response) => response,
+        Err(_) => StatusCode::REQUEST_TIMEOUT.into_response(),
+    }
+}
+
+#[cfg(test)]
+mod actions_tests {
+    use super::*;
+
+    fn claims(principal: &str, scopes: &[&str]) -> Claims {
+        serde_json::from_value(serde_json::json!({
+            "sub": "subject_test",
+            "iss": "issuer_test",
+            "exp": 4_102_444_800_i64,
+            "org_id": "org_test",
+            "principal_type": principal,
+            "scopes": scopes,
+        }))
+        .expect("claims")
+    }
+
+    #[test]
+    fn actions_are_off_unless_the_switch_names_a_mode() {
+        assert_eq!(parse_actions_mode(None), ActionsMode::Off);
+        assert_eq!(parse_actions_mode(Some("off")), ActionsMode::Off);
+        assert_eq!(parse_actions_mode(Some("1")), ActionsMode::Off);
+        assert_eq!(parse_actions_mode(Some(" USER ")), ActionsMode::User);
+        assert_eq!(parse_actions_mode(Some("on")), ActionsMode::On);
+        assert!(!ActionsMode::Off.enabled());
+    }
+
+    #[test]
+    fn agent_labelled_user_token_cannot_send_actions() {
+        let user = claims("user", &["scrape:read"]);
+        let error = check_principal(&user, Some("agent"), ActionsMode::On).expect_err("refused");
+        assert_eq!(error.code, ErrorCode::Forbidden);
+        assert_eq!(error.details.unwrap()["reason"], "scrape_interact_scope_required");
+        assert!(check_principal(&user, None, ActionsMode::On).is_ok());
+    }
+
+    #[test]
+    fn service_principal_needs_scrape_interact() {
+        let bare = claims("service", &["scrape:read"]);
+        assert!(check_principal(&bare, None, ActionsMode::On).is_err());
+        let granted = claims("service", &["scrape:read", SCOPE_SCRAPE_INTERACT]);
+        assert!(check_principal(&granted, None, ActionsMode::On).is_ok());
+        assert!(check_principal(&granted, None, ActionsMode::User).is_err());
+    }
+
+    #[test]
+    fn deadlines_are_125_for_the_route_and_115_for_the_run_with_actions() {
+        assert_eq!(run_deadline_ms(true, 55_000), 115_000);
+        assert_eq!(run_deadline_ms(false, 55_000), 55_000);
+        assert_eq!(ACTIONS_ROUTE_DEADLINE.as_secs(), 125);
+        assert_eq!(DEFAULT_ROUTE_DEADLINE.as_secs(), 60);
+        let details = run_timeout_details(true, 115_000);
+        assert_eq!(details["reason"], "actions_deadline");
+        assert!(run_timeout_details(false, 55_000).get("reason").is_none());
+    }
 }
 
 #[cfg(test)]

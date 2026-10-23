@@ -11,7 +11,6 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use tower_http::limit::RequestBodyLimitLayer;
-use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 use tracing::Instrument as _;
 use url::Url;
@@ -78,8 +77,6 @@ fn effective_ttl(p: &Option<CachePolicy>, default: u64) -> u64 {
 }
 
 pub fn router(state: AppState) -> Router {
-    #[allow(deprecated)]
-    let timeout = TimeoutLayer::new(Duration::from_secs(60));
 
     // Public surface — health/ready are intentionally unauthenticated so
     // load balancers and orchestrator probes can verify liveness without
@@ -345,7 +342,8 @@ pub fn router(state: AppState) -> Router {
             }),
         )
         .layer(body_limit)
-        .layer(timeout)
+        // WS13.5: path-aware deadline (60 s, or 125 s for POST /v1/scrape with actions on).
+        .layer(middleware::from_fn(crate::scrape_actions::path_deadline))
         // WS10.S1: outermost, so the span above sees the id and the
         // x-request-id header is echoed on every answer (timeout and body-limit
         // answers included).
@@ -475,6 +473,15 @@ pub struct ScrapeRequest {
     /// reads its formats through the contract parse, not through this field.
     #[serde(default)]
     pub formats: Option<serde_json::Value>,
+    /// WS13.5: the raw `actions`. The contract parse checks them on `/v1/scrape`;
+    /// the stream route refuses them.
+    #[serde(default)]
+    pub actions: Option<serde_json::Value>,
+    /// WS13.5: a tighten-only hint. Only `"agent"` changes anything: it refuses
+    /// `actions` whatever the token (`scrape_actions::check_principal`). Unknown
+    /// values are ignored.
+    #[serde(default)]
+    pub initiated_by: Option<String>,
 }
 
 /// Wire-level shape for [`RenderHints`]. Kept separate from the runtime
@@ -578,6 +585,20 @@ async fn scrape_with(
             "scrape request carried fields that are not part of the contract"
         );
     }
+    // WS13.5: a request with actions needs a user, or a service principal holding
+    // scrape:interact; a request labelled as a Model action is refused.
+    if resolved.actions.is_some() {
+        if let Err(error) = crate::scrape_actions::check_principal(
+            &claims,
+            req.initiated_by.as_deref(),
+            crate::scrape_actions::actions_mode(),
+        ) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(Envelope::<()>::err(&request_id, error)).into_response(),
+            ));
+        }
+    }
     let privacy = effective_privacy(req.privacy.clone(), zdr);
     // Tenant isolation: ignore any client-supplied org_id and use the
     // verified JWT claim. The `ScrapeRequest.org_id` field is preserved
@@ -670,6 +691,9 @@ async fn scrape_with(
         None
     };
 
+    // WS13.5: a page an action changed is not evidence of its URL, so nothing that
+    // indexes, titles or re-renders it runs for an actions request.
+    let actions_safe = resolved.actions.is_some();
     let runner = PageRunner {
         driver,
         security: crate::web_policy_edge::security_engine(&state.security, &state.policy, &decision),
@@ -681,7 +705,7 @@ async fn scrape_with(
         user_id: Some(claims.actor_id().to_owned()),
         privacy: privacy.clone(),
         cancel_token: None,
-        local_index: state.local_index.clone(),
+        local_index: if actions_safe { None } else { state.local_index.clone() },
         policy: quarry_runtime::RunPolicy::from(decision.policy()),
         scheduler: state.scheduler.clone(),
         autoscale: Some(quarry_runtime::global_autoscale()),
@@ -694,13 +718,14 @@ async fn scrape_with(
             // WS13.4b: captures ride the same render hints; a request without
             // them leaves the hints exactly as they were.
             crate::scrape_actions::apply_capture(&mut render, &resolved, settings.limits().captures);
+            crate::scrape_actions::apply_actions(&mut render, &resolved);
             render
         },
-        page_renderer: state.page_renderer.clone(),
+        page_renderer: if actions_safe { None } else { state.page_renderer.clone() },
         // Ad-hoc single-page scrape, not a crawl target — don't materialize
         // a "tracked website" row for it.
         source_registrar: None,
-        title_enricher: state.page_title_enricher.clone(),
+        title_enricher: if actions_safe { None } else { state.page_title_enricher.clone() },
         doc_routing,
     };
 
@@ -722,18 +747,20 @@ async fn scrape_with(
     let tombstone_started = chrono::Utc::now();
     // The caller's bound, never past the table's cap, so the typed Timeout
     // reaches the caller before the router's own limit drops the request.
+    let run_deadline_ms =
+        crate::scrape_actions::run_deadline_ms(resolved.actions.is_some(), resolved.timeout_ms);
     let run = tokio::time::timeout(
-        Duration::from_millis(resolved.timeout_ms),
+        Duration::from_millis(run_deadline_ms),
         runner.run_with_inline_request(&run_id, &url, prev_fp, &inline_request),
     )
     .await
     .unwrap_or_else(|_| {
         Err(
             QuarryError::new(ErrorCode::Timeout, "the scrape did not finish within timeout_ms")
-                .with_details(serde_json::json!({
-                    "op": "scrape",
-                    "deadline_ms": resolved.timeout_ms,
-                })),
+                .with_details(crate::scrape_actions::run_timeout_details(
+                    resolved.actions.is_some(),
+                    run_deadline_ms,
+                )),
         )
     });
     // WS4.J: a ZDR run's metadata-only tombstone (off unless the flag is on; fail open).
@@ -1693,6 +1720,16 @@ async fn scrape_stream(
                 return;
             }
         };
+        // WS13.5: the stream runs no actions and keeps no run. Refused, not dropped.
+        if req.actions.as_ref().is_some_and(|value| !value.is_null()) {
+            let error = QuarryError::new(
+                ErrorCode::BadRequest,
+                "scrape actions are not served on the stream route",
+            )
+            .with_details(serde_json::json!({ "reason": "unsupported_in_stream" }));
+            yield Ok(Event::default().event("error").data(serde_json::to_string(&error).unwrap_or_default()));
+            return;
+        }
         // WS13.4b: the stream serves no captures. Refused, not dropped.
         if crate::scrape_actions::requests_capture(req.formats.as_ref()) {
             let error = QuarryError::new(
