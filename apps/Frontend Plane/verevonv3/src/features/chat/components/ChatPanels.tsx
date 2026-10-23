@@ -13,6 +13,7 @@ import {
 } from '@/shared/icons'
 import type { ThreadContext } from '@/shared/api/chat-client'
 import { OPEN_FEEDBACK_EVENT } from '@/features/core/components/FeedbackWidget'
+import { isSafeLinkHref } from '../lib/safe-href'
 import {
   getRunProofBundle,
   type ProofApproval,
@@ -541,16 +542,26 @@ export function WebSourceCard(props: { source: Citation & { kind: 'web' }; index
   // the "Ikke lest" heading it says nothing the heading has not already said,
   // and an unread lead whose snippet was ONLY the marker must render no
   // paragraph at all rather than an empty one.
+  const i18n = useI18n()
   const snippet = createMemo(() => evidenceSourceSnippet(props.source))
-  return (
-    <a class="verevon-chat-source-card" href={props.source.url} target="_blank" rel="noopener noreferrer">
+  const body = () => (
+    <>
       <div class="verevon-chat-source-card__meta">
         <span>{props.index}</span>
         <em>{hostname(props.source.url)}</em>
       </div>
       <h2>{props.source.title || props.source.url}</h2>
       <Show when={snippet()}><p>{snippet()}</p></Show>
-    </a>
+    </>
+  )
+  // The URL comes from the model's search results: an unsafe one keeps the card's text but is not a link.
+  return (
+    <Show
+      when={isSafeLinkHref(props.source.url)}
+      fallback={<span class="verevon-chat-source-card verevon-chat-link-blocked" title={i18n.tr('Lenke blokkert: ukjent adresse', 'Link blocked: unsupported address')}>{body()}</span>}
+    >
+      <a class="verevon-chat-source-card" href={props.source.url} target="_blank" rel="noopener noreferrer">{body()}</a>
+    </Show>
   )
 }
 

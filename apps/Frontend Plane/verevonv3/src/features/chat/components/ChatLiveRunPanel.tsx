@@ -65,6 +65,7 @@ import {
   type ChatRunWatchState,
 } from '@/features/chat/lib/chat-run-watch'
 import { useI18n } from '@/shared/i18n'
+import { isSafeLinkHref } from '../lib/safe-href'
 import { RunNotifyButton } from './RunNotifyButton'
 
 // The run stores its error as this Norwegian text; the reader's language is chosen where it is shown.
@@ -175,7 +176,9 @@ function ChatRunEvidenceFallback(props: {
                   <div>
                     <dt>URL</dt>
                     <dd>
-                      <a href={url()} target="_blank" rel="noopener noreferrer">{url()}</a>
+                      {isSafeLinkHref(url())
+                        ? <a href={url()} target="_blank" rel="noopener noreferrer">{url()}</a>
+                        : <span class="verevon-chat-link-blocked" title={i18n.tr('Lenke blokkert: ukjent adresse', 'Link blocked: unsupported address')}>{url()}</span>}
                     </dd>
                   </div>
                 )}
@@ -679,7 +682,9 @@ export function ChatLiveRunPanel(props: {
                           <Show when={step().pageTitle}>{(title) => <span>{title()}</span>}</Show>
                           <Show when={step().url}>
                             {(url) => (
-                              <a href={url()} target="_blank" rel="noopener noreferrer">{url()}</a>
+                              isSafeLinkHref(url())
+                                ? <a href={url()} target="_blank" rel="noopener noreferrer">{url()}</a>
+                                : <span class="verevon-chat-link-blocked" title={i18n.tr('Lenke blokkert: ukjent adresse', 'Link blocked: unsupported address')}>{url()}</span>
                             )}
                           </Show>
                           <Show when={step().reason}>{(reason) => <p>{reason()}</p>}</Show>

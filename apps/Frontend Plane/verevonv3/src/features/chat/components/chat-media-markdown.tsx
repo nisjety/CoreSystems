@@ -38,6 +38,7 @@ import {
   type TaskStepStatus,
 } from './chat-types'
 import { useI18n } from '@/shared/i18n'
+import { isSafeLinkHref } from '../lib/safe-href'
 
 export function collectArtifactItems(turns: ChatTurn[]): ArtifactPanelItem[] {
   const byId = new Map<string, ArtifactPanelItem>()
@@ -1301,6 +1302,7 @@ export function renderBlockMath(source: string): string | null {
 
 export function parseInline(text: string, citations?: readonly Citation[]): Array<string | JSX.Element> {
   const nodes: Array<string | JSX.Element> = []
+  const i18n = useI18n()
   // Keep Markdown links before citation markers: `[3](url)` is a link, not
   // an evidence marker followed by literal `(url)` text. An escaped marker
   // (`\*`, `\[`) is not a token at all — the alternation is guarded so the
@@ -1362,7 +1364,13 @@ export function parseInline(text: string, citations?: readonly Citation[]): Arra
       if (trailing) nodes.push(trailing)
     } else {
       const link = /^\[([^\]]+)\]\(([^)]+)\)$/.exec(token)
-      nodes.push(link ? <a href={link[2]} target="_blank" rel="noopener noreferrer">{unescapeMarkdown(link[1] ?? '')}</a> : token)
+      const label = unescapeMarkdown(link?.[1] ?? '')
+      const target = link?.[2] ?? ''
+      if (!link) nodes.push(token)
+      else if (isSafeLinkHref(target)) nodes.push(<a href={target} target="_blank" rel="noopener noreferrer">{label}</a>)
+      // The model wrote this target, so an unsafe one keeps its visible label as
+      // inert text rather than becoming a link to javascript:, data: or file:.
+      else nodes.push(<span class="verevon-chat-link-blocked" title={i18n.tr('Lenke blokkert: ukjent adresse', 'Link blocked: unsupported address')}>{label}</span>)
     }
     cursor = match.index + token.length
   }

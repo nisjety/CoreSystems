@@ -61,6 +61,7 @@ import type { DockedNodes } from '@/shared/chat-nodes/types'
 // The barrel does not re-export it yet; one more line there when it next changes.
 import { nodeKey } from '@/shared/chat-nodes/derive'
 import type { AutonomyRung, ChatPlanStep, MemoryOrigin, RecalledMemory } from '@/shared/api/chat-client'
+import { isSafeLinkHref } from '../lib/safe-href'
 import { readChatThreadHistory } from '../lib/chat-thread-history'
 import { chatAppearanceActive } from '../lib/chat-appearance-preview'
 import { MIN_PLAN_JUSTIFICATION_CHARS } from '@/shared/api/chat-client'
@@ -1788,7 +1789,9 @@ export function ReasoningPopover(props: { message: ChatTurn }) {
                     {(source) => <span>{source.title}</span>}
                   </For>
                   <For each={props.message.citations ?? []}>
-                    {(citation) => <a href={citation.url} target="_blank" rel="noopener noreferrer">{citation.title || citation.url}</a>}
+                    {(citation) => isSafeLinkHref(citation.url)
+                      ? <a href={citation.url} target="_blank" rel="noopener noreferrer">{citation.title || citation.url}</a>
+                      : <span class="verevon-chat-link-blocked" title={i18n.tr('Lenke blokkert: ukjent adresse', 'Link blocked: unsupported address')}>{citation.title || citation.url}</span>}
                   </For>
                 </div>
               </Match>
@@ -3822,10 +3825,15 @@ export function TaskStep(props: { isLast: boolean; step: AgentTaskStep }) {
                       fallback={<span><strong>{item.label}</strong><em>{item.value}</em></span>}
                     >
                       {(href) => (
-                        <a href={href()} target="_blank" rel="noopener noreferrer">
-                          <strong>{item.label}</strong>
-                          <em>{item.value}</em>
-                        </a>
+                        isSafeLinkHref(href())
+                          ? <a href={href()} target="_blank" rel="noopener noreferrer">
+                            <strong>{item.label}</strong>
+                            <em>{item.value}</em>
+                          </a>
+                          : <span class="verevon-chat-link-blocked" title={i18n.tr('Lenke blokkert: ukjent adresse', 'Link blocked: unsupported address')}>
+                            <strong>{item.label}</strong>
+                            <em>{item.value}</em>
+                          </span>
                       )}
                     </Show>
                   )}
