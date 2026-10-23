@@ -36,16 +36,19 @@ import {
   createIngestionSource,
   deleteIngestionSource,
   getIngestionEvidence,
+  getScheduleCapabilities,
   listIngestionProfiles,
   listIngestionRuns,
   listIngestionSchedules,
   listIngestionSources,
+  NO_SCHEDULE_CAPABILITIES,
   runIngestionScheduleAction,
   type EvidenceTimeline,
   type ManualEvidence,
   type ProfilePayload,
   type RunCreateRequest,
   type RunItem,
+  type ScheduleCapabilities,
   type ScheduleItem,
   type SourceCreateInput,
   type SourcePayload,
@@ -122,6 +125,7 @@ export default function VerevonIngestionsPage() {
   const [error, setError] = createSignal<string | null>(null)
   const [runs, setRuns] = createSignal<RunItem[]>([])
   const [schedules, setSchedules] = createSignal<ScheduleItem[]>([])
+  const [scheduleCapabilities, setScheduleCapabilities] = createSignal<ScheduleCapabilities>(NO_SCHEDULE_CAPABILITIES)
   const [sources, setSources] = createSignal<SourcePayload | null>(null)
   const [profiles, setProfiles] = createSignal<ProfilePayload | null>(null)
   const [selectedRunId, setSelectedRunId] = createSignal<string | null>(null)
@@ -192,6 +196,26 @@ export default function VerevonIngestionsPage() {
     () => {
       const controller = new AbortController()
       void loadWorkspace(controller.signal)
+      return () => controller.abort()
+    },
+  )
+
+  // Read once on mount: what the Schedules surface may offer (WS15.S0). Never polled.
+  createEffect(
+    () => undefined,
+    () => {
+      const controller = new AbortController()
+      void getScheduleCapabilities(controller.signal).then((next) => {
+        if (controller.signal.aborted) return
+        setScheduleCapabilities(next)
+        // Keep the composer on a kind this installation can actually run.
+        const fallbackKind = next.kinds[0]
+        setScheduleForm((current) =>
+          fallbackKind === undefined || next.kinds.includes(current.kind)
+            ? current
+            : { ...current, kind: fallbackKind },
+        )
+      })
       return () => controller.abort()
     },
   )
@@ -301,6 +325,13 @@ export default function VerevonIngestionsPage() {
 
   async function createSchedule() {
     setError(null)
+    if (!scheduleCapabilities().kinds.includes(scheduleForm().kind)) {
+      setError(i18n.tr(
+        'Denne tidsplantypen er ikke aktivert på denne installasjonen.',
+        'This schedule type is not enabled on this installation.',
+      ))
+      return
+    }
     try {
       const form = scheduleForm()
       await createIngestionSchedule({
@@ -558,10 +589,15 @@ export default function VerevonIngestionsPage() {
           <section class="ingestions-two-column ingestions-two-column--runs">
             <ScheduleComposer
               form={scheduleForm()}
+              kinds={scheduleCapabilities().kinds}
               onFormChange={(patch) => setScheduleForm((current) => ({ ...current, ...patch }))}
               onSubmit={createSchedule}
             />
-            <SchedulesPanel schedules={schedules()} onAction={runScheduleAction} />
+            <SchedulesPanel
+              schedules={schedules()}
+              canTrigger={scheduleCapabilities().trigger}
+              onAction={runScheduleAction}
+            />
           </section>
         </Show>
 
@@ -783,8 +819,28 @@ function RunsPanel(props: {
   )
 }
 
+function scheduleKindLabel(kind: string, i18n: ReturnType<typeof useI18n>) {
+  switch (kind) {
+    case 'scrape':
+      return i18n.tr('Skraping', 'Scrape')
+    case 'crawl':
+      return 'Crawl'
+    case 'extract':
+      return i18n.tr('Uttrekk', 'Extract')
+    case 'search':
+      return i18n.tr('Søk', 'Search')
+    case 'batch':
+      return 'Batch'
+    case 'agent':
+      return 'Agent'
+    default:
+      return kind
+  }
+}
+
 function ScheduleComposer(props: {
   form: ScheduleFormState
+  kinds: string[]
   onFormChange: (patch: Partial<ScheduleFormState>) => void
   onSubmit: () => Promise<void>
 }) {
@@ -812,11 +868,9 @@ function ScheduleComposer(props: {
       <label class="ingestions-field">
         {i18n.tr('Type', 'Kind')}
         <VerevonSelect value={props.form.kind} onChange={(event) => props.onFormChange({ kind: event.currentTarget.value })}>
-          <option value="crawl">{i18n.tr('Crawl', 'Crawl')}</option>
-          <option value="extract">{i18n.tr('Uttrekk', 'Extract')}</option>
-          <option value="search">{i18n.tr('Søk', 'Search')}</option>
-          <option value="batch">{i18n.tr('Batch', 'Batch')}</option>
-          <option value="agent">{i18n.tr('Agent', 'Agent')}</option>
+          <For each={props.kinds}>
+            {(kind) => <option value={kind}>{scheduleKindLabel(kind, i18n)}</option>}
+          </For>
         </VerevonSelect>
       </label>
       <label class="ingestions-field">
@@ -835,7 +889,15 @@ function ScheduleComposer(props: {
           placeholder="0 7 * * *"
         />
       </label>
-      <Button variant="primary" fullWidth type="submit">
+      <Show when={props.kinds.length === 0}>
+        <div class="ingestions-empty-box" role="status">
+          {i18n.tr(
+            'Ingen tidsplantyper er aktivert på denne installasjonen ennå. Lagring er av til bakgrunnstjenesten kan kjøre dem.',
+            'No schedule types are enabled on this installation yet. Saving stays off until the backend can run them.',
+          )}
+        </div>
+      </Show>
+      <Button variant="primary" fullWidth type="submit" disabled={!props.kinds.includes(props.form.kind)}>
         <CalendarClock class="size-4" strokeWidth={1.9} />
         {i18n.tr('Lagre tidsplan', 'Save schedule')}
       </Button>
@@ -845,6 +907,7 @@ function ScheduleComposer(props: {
 
 function SchedulesPanel(props: {
   schedules: ScheduleItem[]
+  canTrigger: boolean
   onAction: (action: string, scheduleId: string) => Promise<void>
 }) {
   const i18n = useI18n()
@@ -892,10 +955,12 @@ function SchedulesPanel(props: {
                       {i18n.tr('Gjenoppta', 'Resume')}
                     </Button>
                   </Show>
-                  <Button size="xs" onClick={() => void props.onAction('trigger_schedule', schedule.id)}>
-                    <RefreshCw class="size-4" strokeWidth={1.9} />
-                    {i18n.tr('Utløs', 'Trigger')}
-                  </Button>
+                  <Show when={props.canTrigger}>
+                    <Button size="xs" onClick={() => void props.onAction('trigger_schedule', schedule.id)}>
+                      <RefreshCw class="size-4" strokeWidth={1.9} />
+                      {i18n.tr('Utløs', 'Trigger')}
+                    </Button>
+                  </Show>
                   <Button size="xs" onClick={() => void props.onAction('delete_schedule', schedule.id)}>
                     {i18n.tr('Legg ned', 'Retire')}
                   </Button>
