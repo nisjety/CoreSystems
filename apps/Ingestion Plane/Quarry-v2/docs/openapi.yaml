@@ -468,7 +468,11 @@ paths:
               schema:
                 $ref: '#/components/schemas/Envelope_Error'
         '403':
-          description: Missing or invalid BrowserBroker grant
+          description: >-
+            Missing or invalid BrowserBroker grant, or `policy_denied`: the request's
+            `policy` or the operator baseline refuses a capability the run asked for
+            (`error.details.reason` `policy_denied`, with `capability`,
+            `decision_source` and `retryable: false`). Nothing is acquired.
           content:
             application/json:
               schema:
@@ -3390,6 +3394,17 @@ components:
           default: chromium
           description: Experimental ephemeral_evidence forces a disposable no-profile, no-resume, no-durable-state run and remains gated by isolated egress/security proof. Its current explicit engine is
             Chromium fallback, not a claim of a production Lite renderer.
+        policy:
+          description: >-
+            WS7.D web policy ask. Tighten-only: `disable` names capabilities
+            (browser.act.input, browser.act.interact, browser.act.upload,
+            browser.act.download, browser.profile.persistent, search.paid_provider,
+            and the others of the catalogue), `deny_domains` and `allow_domains`
+            narrow the hosts, `robots_max` and `proxy_max` lower ceilings. It can
+            never loosen the operator baseline or the ZDR floor. Resolved once at
+            start; a resumed run does not carry it. Unknown keys are 400.
+          allOf:
+          - $ref: '#/components/schemas/RequestAsk'
         driver_requirements:
           $ref: '#/components/schemas/BrowserDriverCapabilities'
     BrowserDriverCapabilities:
