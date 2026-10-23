@@ -797,6 +797,48 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D2-179 | WS23-S1.code | follow-up | P2 | WS23-S5 must add the connector_read refusal to the model-gateway Ask loop, and the matrix rows and feature shape, before any MG loop offers a provider tool. | open |
 | D2-180 | WS23-S1.code | follow-up | P3 | 18 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-05.json | open |
 
+
+### Wave-mode batch W2-06 (2026-10-24)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D2-181 | WS17-S1 | risk | P1 | Until WS17-S2 adds Load more, the sidebar shows only the first 50 threads; threads 51 to 80 that were visible before this slice disappear from the list, though they still open by id. | open |
+| D2-182 | WS17-S1 | test-gap | P1 | model-gateway list_threads route has no unit test for the archived 400 path or the next_cursor pass-through; the lib test target cannot compile until shared edit 3 and the pre-existing sse_events.rs error are fixed. | open |
+| D2-183 | WS17-S1 | decision | P1 | The by-id read uses archived=all, so an archived chat thread can be opened by id though the list hides it; the owner should confirm. | open |
+| D2-184 | WS17-S1 | test-gap | P1 | The row names an MG test for the archived 400 path and the next_cursor pass-through ("MG clamp/legacy-identical"), and http_routes.rs has none; add a unit test for `archived=bogus` -> 400 and for next_cursor relayed and omitted when empty. | open |
+| D2-185 | WS17-S1 | test-gap | P1 | The row's ZDR golden row (list and by-id under a ZDR claim return durable rows only and write nothing) is absent from zdr_posture_matrix.rs and zdr_feature_table.rs, although the risk classes include zdr; the clause holds by construction (both RPCs are read-only), but nothing guards it. | open |
+| D2-186 | WS17-S1 | decision | P1 | The by-id read sends archived=all, so an archived chat thread opens by id while the list hides it; the access is owner-bound and origin=chat, so no authority leaks, but the owner should confirm this is intended before S2 builds on it. | open |
+| D2-187 | WS17-S1 | live-proof | P1 | The four DB tests written in grpc.rs (list_threads_pages_without_gaps_or_repeats, list_threads_by_id_finds_thread_beyond_80, archived_filter_separates_active_archived_and_all, foreign_thread_id_is_not_found) have never run: no DATABASE_URL is set and no local Postgres exists, so the SQL (row comparison on (pinned, last_activity_at, id), NULLIF($7), $11 archive predicate) and migration 0049 are unexecuted. Run them with `cargo test -p session-core --bin session-core <name> -- --ignored --test-threads=1` against a disposable Postgres, plus the scheduled-result test once written. | open |
+| D2-188 | WS17-S1 | live-proof | P1 | Live proof is absent: rebuild session-core, model-gateway and the BFF, run apps/Model Plane/scripts/tests/history-foundation-proof.sh with PROOF_* set, and capture EXPLAIN (ANALYZE) of the production query shape with bound parameters showing idx_threads_owner_activity; the row's DoD requires a 150-thread user to page 3 times and thread 120 to open and reload. | open |
+| D2-189 | WS17-S1 | follow-up | P3 | 25 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-06.json | open |
+| D2-190 | WS25-S4 | test-gap | P1 | tool_result_handles and the new tool_loop tests have not run to a pass. Run them after grpc.rs (ListThreadsResponse next_cursor, WS17-S1) and sse_events.rs (ProviderSummary failed_attempts_ms and retry_wait_ms, WS15-S4) compile again. | open |
+| D2-191 | WS25-S4 | risk | P1 | parse_extended accepts only the literal 'true', but the S12 flip in the plan sets RESULT_HANDLES_EXTENDED / EXECUTION_RESULT_HANDLES to 'on'; the flip would silently leave extended parking off. | open |
+| D2-192 | WS25-S4 | live-proof | P1 | Test outcomes for tool_result_handles (29) and the 8 new tool_loop tests are unverified; the worktree does not build. | open |
+| D2-193 | WS25-S4 | live-proof | P1 | No live proof: the row's evidence (proof-stack chat turn fetching a >20k-char page, both read-backs and flag log) needs docker and the lead. | open |
+| D2-194 | WS25-S4 | live-proof | P1 | The ZDR live matrix rows (external_tool_result_not_parked_under_zdr, do_run_result_not_parked_under_zdr) live in MG/tests/zdr_posture_matrix.rs and were not checked. | open |
+| D2-195 | WS25-S4 | live-proof | P1 | The grounding test the row asks for ('read-vs-not-read keys on the call, not handle bytes') is absent from the diff. | open |
+| D2-196 | WS25-S4 | live-proof | P1 | After both are fixed, run from apps/Model Plane/rust with CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0: cargo test -q -p model-gateway --lib tool_result_handles, then the same filter for the new tool_loop tests (names in depth_findings of the previous report). | open |
+| D2-197 | WS25-S4 | live-proof | P1 | Commit when the tests pass. No compose or env change is needed for the code; RESULT_HANDLES_EXTENDED stays unset (off) until the S12 flip. | open |
+| D2-198 | WS25-S4 | follow-up | P3 | 6 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-06.json | open |
+| D2-199 | WS15-S4 | decision | P1 | With every switch off, the turn_timing wire changes whenever a provider retry-after wait happened (failed_attempts_ms and retry_wait_ms are emitted). This breaks the byte-identical-when-off rule. The plan row wants the FE copy gated by MODEL_GATEWAY_LIFECYCLE_EVENTS, but the batch JSON gives an empty flag. The owner or lead must decide whether to gate the fields or accept the additive change. Not changed this round. | open |
+| D2-200 | WS15-S4 | live-proof | P1 | Live proof (docker, fake provider 429 with retry-after, captured turn_timing frame) is not done and must be run by the lead. | open |
+| D2-201 | WS15-S4 | live-proof | P1 | cargo test -p model-gateway --lib turn_timing has not passed; it needs the sse_events.rs literal fix and the grpc.rs:3973 ListThreadsResponse fix from another batch. | open |
+| D2-202 | WS15-S4 | live-proof | P1 | pnpm typecheck must be re-run after the chat-client.ts edit to confirm the three slice-file TS errors are gone. | open |
+| D2-203 | WS15-S4 | live-proof | P1 | pnpm lint has not been run for the slice files. | open |
+| D2-204 | WS15-S4 | live-proof | P1 | Resolve grpc.rs:3973 (ListThreadsResponse missing next_cursor, owned by another batch) before the model-gateway lib test target compiles. Then run: `cd apps/Model Plane/rust && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib turn_timing` and confirm provider_summary_reports_wait_only_when_nonzero passes. | open |
+| D2-205 | WS15-S4 | live-proof | P1 | Run `pnpm lint` in apps/Frontend Plane/verevonv3 (not run by this slice). Re-run `pnpm typecheck` and confirm the three slice-file errors are gone; the other 33 errors are in unrelated files. | open |
+| D2-206 | WS15-S4 | test-gap | P2 | The per-phase max is a lower bound. A sum over parallel review batches would overstate, and a turn-level retry-wait total computed in the gateway would be exact. Not built. | open |
+| D2-207 | WS15-S4 | follow-up | P3 | 7 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-06.json | open |
+| D2-208 | WS23-S2 | test-gap | P1 | The execution-core test target still fails to compile (E0063 at agent.rs:9659), so catalog_reads_match_contract_table and the updated current_gating_table_is_pinned are unexecuted. This is the only compile error in that target, so the one-line shared edit should be enough; the lead must run the test after applying it. | open |
+| D2-209 | WS23-S2 | risk | P1 | Catalogued reads run ungated under ask: mail.messages.get returns full message bodies and drive.file.content returns file bytes into model context without a gate. S1 framing is keyed by tool name and no live proof of the new reads exists, so do not switch them on before S1 and a live proof. | open |
+| D2-210 | WS23-S2 | test-gap | P1 | The Rust side does not check the golden's sha256 pin: mp-contracts has no sha2 dependency and its Cargo.toml is not in the owned list. Only the Go test pins the digest. Adding sha2 as a dev-dependency would close this, but it needs the Cargo.toml owner. | open |
+| D2-211 | WS23-S2 | risk | P1 | The catalogue flip makes mail.messages.get, gmail.messages.get and drive.file.content ungated under ask in execute_provider_action (current_gating_table_is_pinned asserts this), so full message bodies and file bytes can enter Do-run context with no approval and no flag; S1 framing and counts-only persistence are present at HEAD, the Ask loop in model-gateway does not offer provider tools, and Do runs are refused under ZDR (grpc.rs:1376), so the exposure is limited to Do runs and should be confirmed off by default before merge. | open |
+| D2-212 | WS23-S2 | test-gap | P1 | The same uncommitted ListThreadsResponse.next_cursor change also breaks two model-gateway test fakes (services/model-gateway/src/grpc.rs:3973 inside the cfg(test) module and tests/e2e_invoke_chain_test.rs:1415), which are outside this slice's test commands but will fail the model-gateway test targets in the same pass. | open |
+| D2-213 | WS23-S2 | live-proof | P1 | The Go CI workflow .github/workflows/integration-corev2-go.yml has not run on GitHub; a CI run URL is needed as evidence (N1 CI-only evidence rule). | open |
+| D2-214 | WS23-S2 | live-proof | P1 | Both suites must be green in CI logs per the row's DoD; only the local equivalents were run, and the execution-core target still fails to compile at this tree state. | open |
+| D2-215 | WS23-S2 | live-proof | P1 | Owner sign-off (K3-14) for the frozen-doc addendum is outstanding; docs/actions-surface-operations.md is correctly untouched. | open |
+| D2-216 | WS23-S2 | follow-up | P3 | 11 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-06.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
@@ -871,3 +913,6 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS06-S6 | auth, audit | W1-10 | no |
 | WS06-S8 | audit, zdr, auth | W1-10 | no |
 | WS06-S8 | audit, zdr, auth | W1-10 | no |
+| WS17-S1 | auth, zdr | W2-06 | no |
+| WS25-S4 | zdr, authority | W2-06 | no |
+| WS23-S2 | authority, policy | W2-06 | no |
