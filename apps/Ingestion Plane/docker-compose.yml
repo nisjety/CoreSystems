@@ -279,6 +279,10 @@ services:
       # external/LAN interface. Bind the host publish to loopback only so the
       # internal routes (/v1/internal/run_page etc.) cannot be hit off-host.
       - "${INGESTION_BIND_ADDRESS:-127.0.0.1}:8082:8082"
+    # WS6.I: the internal Prometheus listener (QUARRY_EDGE__METRICS_ENABLED=1).
+    # Exposed to the compose networks only, never published with `ports`.
+    expose:
+      - "9092"
     volumes:
       - ./config/security-feeds:/app/data/security-feeds:ro
       # Backs QUARRY_EDGE__LOCAL_INDEX_DIR above. Mounted on the image's XDG

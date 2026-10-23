@@ -90,10 +90,16 @@ pub async fn step(
     // effect; the observation carries that distinction. Persist an
     // immutable receipt for both success and failure so a planner or
     // reviewer can replay the exact action sequence.
-    let (obs, cost_source) = match runner
+    let step_started = std::time::Instant::now();
+    let step_result = runner
         .execute(&req, &entry_mut.session, &mut entry_mut.ctx)
-        .await
-    {
+        .await;
+    crate::metrics::record_agent_step(
+        browser_action_name(&receipt_action),
+        step_result.is_ok(),
+        step_started.elapsed(),
+    );
+    let (obs, cost_source) = match step_result {
         Ok(obs) => {
             // W4: when the driver omits a provider-billed cost, fall
             // back to the flat action-cost table so max_cost_usd
@@ -238,10 +244,16 @@ pub(super) async fn execute_ws_action(
         org_id: entry.org_id.clone(),
     };
     let entry_mut: &mut RunEntry = &mut entry;
-    let observation = match runner
+    let step_started = std::time::Instant::now();
+    let step_result = runner
         .execute(&req, &entry_mut.session, &mut entry_mut.ctx)
-        .await
-    {
+        .await;
+    crate::metrics::record_agent_step(
+        browser_action_name(&receipt_action),
+        step_result.is_ok(),
+        step_started.elapsed(),
+    );
+    let observation = match step_result {
         Ok(observation) => {
             let cost_usd = receipt_cost_usd(&observation.telemetry, &receipt_action);
             if counts_budget {

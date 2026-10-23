@@ -56,6 +56,8 @@ pub fn deadline_from_env(get: impl Fn(&str) -> Option<String>) -> Result<Duratio
 /// Start draining. Idempotent.
 pub fn begin() {
     if !DRAINING.swap(true, Ordering::SeqCst) {
+        // WS6.I: visible at once, not at the sampler's next tick.
+        metrics::gauge!("quarry_edge_draining").set(1.0);
         tracing::info!("drain: no longer accepting new runs, crawls or batches");
         STARTED.notify_waiters();
     }

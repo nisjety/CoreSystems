@@ -17,6 +17,15 @@ struct LeaseMetrics {
     released: AtomicU64,
     in_flight: AtomicU64,
     peak_in_flight: AtomicU64,
+    /// WS6.I: refusals because the whole pool was full.
+    refused_pool_full: AtomicU64,
+    /// WS6.I: refusals because the organization held its own share.
+    refused_org_cap: AtomicU64,
+    /// WS6.I: waits that ran out of time on the global pool.
+    wait_timeouts: AtomicU64,
+    /// WS6.I: waits for a permit that ended (granted or timed out), and their total time.
+    waits: AtomicU64,
+    wait_nanos: AtomicU64,
 }
 
 /// Point-in-time snapshot of lease pool metrics.
@@ -26,6 +35,11 @@ pub struct LeaseMetricsSnapshot {
     pub released: u64,
     pub in_flight: u64,
     pub peak_in_flight: u64,
+    pub refused_pool_full: u64,
+    pub refused_org_cap: u64,
+    pub wait_timeouts: u64,
+    pub waits: u64,
+    pub wait_nanos: u64,
 }
 
 /// Most distinct organizations whose idle semaphore is kept. Past this the idle
@@ -108,6 +122,7 @@ impl RuntimeLeasePool {
     }
 
     fn org_cap_error(&self, org_id: &str) -> QuarryError {
+        self.metrics.refused_org_cap.fetch_add(1, Ordering::Relaxed);
         let active = self.org_semaphores.get(org_id).map_or(0, |semaphore| {
             self.org_max - semaphore.available_permits().min(self.org_max)
         });
@@ -131,6 +146,11 @@ impl RuntimeLeasePool {
             released: self.metrics.released.load(Ordering::Relaxed),
             in_flight: self.metrics.in_flight.load(Ordering::Relaxed),
             peak_in_flight: self.metrics.peak_in_flight.load(Ordering::Relaxed),
+            refused_pool_full: self.metrics.refused_pool_full.load(Ordering::Relaxed),
+            refused_org_cap: self.metrics.refused_org_cap.load(Ordering::Relaxed),
+            wait_timeouts: self.metrics.wait_timeouts.load(Ordering::Relaxed),
+            waits: self.metrics.waits.load(Ordering::Relaxed),
+            wait_nanos: self.metrics.wait_nanos.load(Ordering::Relaxed),
         }
     }
 
@@ -175,6 +195,7 @@ impl RuntimeLeasePool {
             .try_acquire_owned()
             .map_err(|e| match e {
                 TryAcquireError::NoPermits => {
+                    self.metrics.refused_pool_full.fetch_add(1, Ordering::Relaxed);
                     QuarryError::new(ErrorCode::RateLimited, "lease pool capacity exhausted")
                 }
                 TryAcquireError::Closed => {
@@ -256,7 +277,14 @@ impl RuntimeLeasePool {
         deadline: Duration,
     ) -> QuarryResult<LeaseGuard> {
         let sem = self.semaphore.clone();
-        let permit = match timeout(deadline, sem.acquire_owned()).await {
+        let wait_started = std::time::Instant::now();
+        let waited = timeout(deadline, sem.acquire_owned()).await;
+        self.metrics.waits.fetch_add(1, Ordering::Relaxed);
+        self.metrics.wait_nanos.fetch_add(
+            u64::try_from(wait_started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        let permit = match waited {
             Ok(Ok(p)) => p,
             Ok(Err(_)) => {
                 return Err(QuarryError::new(
@@ -265,6 +293,7 @@ impl RuntimeLeasePool {
                 ))
             }
             Err(_) => {
+                self.metrics.wait_timeouts.fetch_add(1, Ordering::Relaxed);
                 return Err(QuarryError::new(
                     ErrorCode::Timeout,
                     "timed out waiting for lease pool capacity",
@@ -552,5 +581,22 @@ mod tests {
         assert_eq!(snap2.released, 2);
         assert_eq!(snap2.in_flight, 0);
         assert_eq!(snap2.peak_in_flight, 2);
+    }
+
+    #[tokio::test]
+    async fn refusals_and_waits_are_counted() {
+        let pool = RuntimeLeasePool::new(1);
+        let held = pool.try_acquire("a").expect("acquire");
+        assert!(pool.try_acquire("b").is_err());
+        assert!(pool
+            .acquire_timeout("c", Duration::from_millis(20))
+            .await
+            .is_err());
+        let snap = pool.metrics_snapshot();
+        assert_eq!(snap.refused_pool_full, 1);
+        assert_eq!(snap.wait_timeouts, 1);
+        assert_eq!(snap.waits, 1);
+        assert!(snap.wait_nanos > 0);
+        drop(held);
     }
 }

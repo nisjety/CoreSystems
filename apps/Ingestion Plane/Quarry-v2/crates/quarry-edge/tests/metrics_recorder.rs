@@ -91,7 +91,7 @@ async fn public_listener_does_not_serve_metrics() {
 }
 
 #[tokio::test]
-async fn http_requests_are_counted_by_route_class_not_by_path() {
+async fn route_label_is_the_matched_template_not_the_raw_path() {
     let public = spawn_public().await;
     let metrics_addr = spawn_metrics(Some(TOKEN)).await;
 
@@ -105,7 +105,7 @@ async fn http_requests_are_counted_by_route_class_not_by_path() {
     assert!(
         body.lines()
             .any(|line| line.starts_with("quarry_http_requests_total{")
-                && line.contains(r#"route="health""#)
+                && line.contains(r#"route="/health""#)
                 && line.contains(r#"status_class="2xx""#)),
         "{body}"
     );
@@ -114,11 +114,14 @@ async fn http_requests_are_counted_by_route_class_not_by_path() {
         "{body}"
     );
     assert!(
-        body.contains(r#"route="v1_other""#),
-        "an unknown /v1 path is one class: {body}"
+        body.contains(r#"route="unmatched""#),
+        "a path no route matches is one label: {body}"
     );
-    assert!(body.contains(r#"route="agent""#), "{body}");
-    assert!(body.contains(r#"route="other""#), "{body}");
+    // The id in the path never becomes a label; the route's own template does.
+    assert!(
+        body.contains(r#"route="/v1/agent/runs/:run_id/step""#),
+        "{body}"
+    );
     for secret in [
         "probe-host",
         "example.com",
@@ -155,6 +158,10 @@ async fn metrics_labels_are_closed_sets() {
         .filter(|line| line.starts_with("quarry_http_requests_total{"))
         .filter_map(|line| line.split(r#"route=""#).nth(1)?.split('"').next())
         .collect();
+    assert!(
+        routes.iter().all(|route| *route == "unmatched" || route.starts_with('/')),
+        "{routes:?}"
+    );
     assert!(
         routes.len() <= 10,
         "route label set grew with the traffic: {routes:?}"
@@ -200,4 +207,95 @@ async fn scrape_outcomes_are_counted_by_closed_outcome() {
         body.contains(r#"quarry_scrape_outcomes_total{outcome="unsupported_media"}"#),
         "{body}"
     );
+}
+
+#[tokio::test]
+async fn agent_run_and_cache_series_use_closed_label_sets() {
+    handle();
+    metrics::record_run_start("agent", "started");
+    metrics::record_run_start("interactive", "resumed");
+    // Values outside the closed sets collapse to `other`; they never become labels.
+    metrics::record_run_start("org_secret_class_77", "outcome-from-a-caller");
+    metrics::record_run_denied("org_run_cap");
+    metrics::record_run_denied("https://probe-denied.example/x");
+    metrics::record_run_expired("idle", 2);
+    metrics::record_run_expired("reason-from-a-caller", 1);
+    metrics::record_agent_step("click_ref", true, Duration::from_millis(12));
+    metrics::record_agent_step("https://probe-step.example/y", false, Duration::from_millis(3));
+    metrics::record_cache("page", "hit");
+    metrics::record_cache("search", "miss");
+    metrics::record_cache("probe-cache", "probe-outcome");
+
+    let addr = spawn_metrics(Some(TOKEN)).await;
+    let (_, body) = get(addr, "/metrics", Some(TOKEN)).await;
+    for want in [
+        r#"quarry_agent_run_starts_total{class="agent",outcome="started"}"#,
+        r#"quarry_agent_run_starts_total{class="interactive",outcome="resumed"}"#,
+        r#"quarry_agent_run_starts_total{class="other",outcome="other"}"#,
+        r#"quarry_agent_run_denied_total{reason="org_run_cap"}"#,
+        r#"quarry_agent_run_denied_total{reason="other"}"#,
+        r#"quarry_agent_run_expired_total{reason="idle"}"#,
+        r#"quarry_agent_run_expired_total{reason="other"}"#,
+        r#"quarry_agent_steps_total{action_class="click",outcome="ok"}"#,
+        r#"quarry_agent_steps_total{action_class="other",outcome="error"}"#,
+        r#"quarry_agent_step_duration_seconds_bucket{action_class="click",outcome="ok""#,
+        r#"quarry_cache_requests_total{cache="page",outcome="hit"}"#,
+        r#"quarry_cache_requests_total{cache="search",outcome="miss"}"#,
+        r#"quarry_cache_requests_total{cache="other",outcome="other"}"#,
+    ] {
+        assert!(body.contains(want), "{want} missing in {body}");
+    }
+    for secret in [
+        "org_secret_class_77",
+        "outcome-from-a-caller",
+        "probe-denied",
+        "reason-from-a-caller",
+        "probe-step",
+        "probe-cache",
+        "probe-outcome",
+    ] {
+        assert!(!body.contains(secret), "{secret} leaked into the exposition");
+    }
+}
+
+#[tokio::test]
+async fn sampler_exports_run_gauges_the_drain_flag_and_pool_refusals() {
+    handle();
+    metrics::register_run_stats(|| metrics::RunStats {
+        interactive: 2,
+        agent: 3,
+        pending: 1,
+    });
+    let pool = RuntimeLeasePool::new(1);
+    metrics::register_pool("refusal_test_pool", pool.clone());
+    let _held = pool.try_acquire("affinity-a").expect("lease");
+    assert!(pool.try_acquire("affinity-b").is_err());
+    assert!(pool
+        .acquire_timeout("affinity-c", Duration::from_millis(20))
+        .await
+        .is_err());
+    metrics::sample_all();
+
+    let addr = spawn_metrics(Some(TOKEN)).await;
+    let (_, body) = get(addr, "/metrics", Some(TOKEN)).await;
+    let line = |prefix: &str| {
+        body.lines()
+            .find(|line| line.starts_with(prefix))
+            .unwrap_or_else(|| panic!("{prefix} missing in {body}"))
+            .to_owned()
+    };
+    assert!(line(r#"quarry_agent_runs_active{class="interactive"}"#).ends_with(" 2"));
+    assert!(line(r#"quarry_agent_runs_active{class="agent"}"#).ends_with(" 3"));
+    assert!(line("quarry_agent_runs_pending").ends_with(" 1"));
+    // This test binary never begins a drain.
+    assert!(line("quarry_edge_draining").ends_with(" 0"));
+    assert!(
+        line(r#"quarry_lease_pool_refused_total{pool="refusal_test_pool",reason="pool_full"}"#)
+            .ends_with(" 1")
+    );
+    assert!(
+        line(r#"quarry_lease_pool_refused_total{pool="refusal_test_pool",reason="wait_timeout"}"#)
+            .ends_with(" 1")
+    );
+    assert!(line(r#"quarry_lease_pool_waits_total{pool="refusal_test_pool"}"#).ends_with(" 1"));
 }

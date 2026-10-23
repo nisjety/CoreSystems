@@ -254,7 +254,7 @@ Gap closure now follows the phase system in Section 14. The `Owner Phase` column
 |-----------|----|----|-----------|
 | Structured logging | ✅ (zap/slog) | ✅ (tracing crate, structured) | ✅ |
 | OpenTelemetry traces | 🟡 partial | 🟡 partial | ✅ |
-| Metrics endpoint | ✅ `/metrics` | ✅ `/health` + `/ready` | ✅ |
+| Metrics endpoint | ✅ `/metrics` | 🟡 `/health` + `/ready` on the public port; Prometheus `/metrics` on a separate bearer-authenticated internal listener, off unless `QUARRY_EDGE__METRICS_ENABLED=1` (WS6.I; usage series and the Control Plane scrape job not built) | ✅ |
 | Slow-request warnings | ✅ (middleware) | 🟡 (planned, not shipped) | ✅ |
 | SDK | ❌ | ❌ | ✅ 6 languages |
 | API docs / OpenAPI | ✅ | ❌ | ✅ |

@@ -250,5 +250,7 @@ pub async fn drain_runs(
             None => report.in_use += 1,
         }
     }
+    // WS6.I: the runs this drain released ended with the `agent.expired` reason `shutdown`.
+    crate::metrics::record_run_expired("shutdown", report.released as u64);
     report
 }

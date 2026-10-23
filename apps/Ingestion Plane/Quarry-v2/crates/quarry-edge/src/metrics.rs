@@ -15,8 +15,8 @@
 //!   time. In production an enabled listener without a token of at least
 //!   [`MIN_PRODUCTION_TOKEN_LEN`] characters refuses to start.
 //! - **Closed label sets.** Every label value comes from a fixed, small set
-//!   (a route class from an allowlist, a status class, a pool name, a driver
-//!   or error code from an enum). A URL, host, organization, user, run id or
+//!   (the router's matched route template or `unmatched`, a status class, a
+//!   pool name, an action class, a driver or error code from an enum). A URL, host, organization, user, run id or
 //!   message is never a label: those belong in traces, and a label built from
 //!   them grows the series count without bound and leaks what a tenant
 //!   browses.
@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use axum::{
-    extract::{Request, State},
+    extract::{MatchedPath, Request, State},
     http::{header, HeaderMap, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -109,55 +109,23 @@ impl MetricsConfig {
     }
 }
 
-/// The route label for a request path: a fixed set, never the raw path.
-///
-/// An allowlist of the first path segments (under `/v1/` where it applies) so
-/// an attacker probing random URLs, or a path that embeds an id, cannot mint a
-/// new series. Anything not listed is `other`.
-pub fn route_class(path: &str) -> &'static str {
-    const V1: &[&str] = &[
-        "agent",
-        "ai",
-        "answer",
-        "artifacts",
-        "audio",
-        "batch",
-        "benchmarks",
-        "change",
-        "crawl",
-        "extract",
-        "fleets",
-        "internal",
-        "jobs",
-        "map",
-        "profiles",
-        "request-queues",
-        "runs",
-        "schedules",
-        "scrape",
-        "search",
-        "snapshots",
-        "sources",
-        "team",
-        "webhooks",
-    ];
-    const ROOT: &[&str] = &["health", "ready", "version", "graphql", "jwks", "frames"];
+/// The route label of a request that matched no route.
+pub const UNMATCHED_ROUTE: &str = "unmatched";
 
-    let mut segments = path.trim_start_matches('/').split('/');
-    match segments.next() {
-        Some("v1") => {
-            let second = segments.next().unwrap_or("");
-            V1.iter()
-                .find(|name| **name == second)
-                .copied()
-                .unwrap_or("v1_other")
+/// The route label for a request: the router's matched template (for example
+/// `/v1/agent/runs/:run_id/step`), never the raw path.
+///
+/// A template can only be one the route table registered, so the label set is
+/// as large as the route table and no larger: an attacker probing random URLs,
+/// or a path that embeds an id, matches no route and becomes `unmatched`. A
+/// template that does not look like one (empty, not rooted, absurdly long) is
+/// also `unmatched`.
+pub fn route_label(matched: Option<&str>) -> String {
+    match matched {
+        Some(template) if template.starts_with('/') && template.len() <= 160 => {
+            template.to_owned()
         }
-        Some(first) => ROOT
-            .iter()
-            .find(|name| **name == first)
-            .copied()
-            .unwrap_or("other"),
-        None => "other",
+        _ => UNMATCHED_ROUTE.to_owned(),
     }
 }
 
@@ -177,7 +145,12 @@ pub fn status_class(code: u16) -> &'static str {
 /// Layered with `Router::layer` (outermost) so a request rejected by an
 /// authentication layer is counted too.
 pub async fn http_middleware(request: Request, next: Next) -> Response {
-    let route = route_class(request.uri().path());
+    let route = route_label(
+        request
+            .extensions()
+            .get::<MatchedPath>()
+            .map(MatchedPath::as_str),
+    );
     let method = match request.method().as_str() {
         "GET" => "GET",
         "POST" => "POST",
@@ -189,7 +162,7 @@ pub async fn http_middleware(request: Request, next: Next) -> Response {
     let started = Instant::now();
     let response = next.run(request).await;
     let status = status_class(response.status().as_u16());
-    metrics::counter!("quarry_http_requests_total", "route" => route, "method" => method, "status_class" => status)
+    metrics::counter!("quarry_http_requests_total", "route" => route.clone(), "method" => method, "status_class" => status)
         .increment(1);
     metrics::histogram!("quarry_http_request_duration_seconds", "route" => route, "status_class" => status)
         .record(started.elapsed().as_secs_f64());
@@ -207,6 +180,118 @@ pub fn record_budget_exhausted(dimension: &'static str, class: &'static str, mod
         "mode" => mode
     )
     .increment(1);
+}
+
+/// The run classes a series may carry; anything else is `other`.
+fn run_class_label(class: &str) -> &'static str {
+    match class {
+        "interactive" => "interactive",
+        "agent" => "agent",
+        _ => "other",
+    }
+}
+
+/// An agent run start. `outcome` is `started`, `resumed`, `denied` (a cap or an
+/// allowance refused it), `draining` (the edge is shutting down) or `aborted`
+/// (admitted, then failed before the run was registered). WS6.I.
+pub fn record_run_start(class: &str, outcome: &str) {
+    let outcome = match outcome {
+        "started" => "started",
+        "resumed" => "resumed",
+        "denied" => "denied",
+        "draining" => "draining",
+        "aborted" => "aborted",
+        _ => "other",
+    };
+    metrics::counter!(
+        "quarry_agent_run_starts_total",
+        "class" => run_class_label(class),
+        "outcome" => outcome
+    )
+    .increment(1);
+}
+
+/// An agent run start refused. `reason` is a `details.reason` of the typed 429/402
+/// (the closed list in `docs/ERROR_REASONS.md`); an unknown reason is `other`.
+pub fn record_run_denied(reason: &str) {
+    let reason = match reason {
+        "global_run_cap" => "global_run_cap",
+        "org_run_cap" => "org_run_cap",
+        "org_interactive_run_cap" => "org_interactive_run_cap",
+        "org_plan_cap" => "org_plan_cap",
+        "org_allowance" => "org_allowance",
+        "draining" => "draining",
+        _ => "other",
+    };
+    metrics::counter!("quarry_agent_run_denied_total", "reason" => reason).increment(1);
+}
+
+/// `count` runs ended without a client closing them. `reason` is the
+/// `agent.expired` reason: `idle`, `ttl`, `takeover_idle`, `max_age` or `shutdown`.
+pub fn record_run_expired(reason: &str, count: u64) {
+    let reason = match reason {
+        "idle" => "idle",
+        "ttl" => "ttl",
+        "takeover_idle" => "takeover_idle",
+        "max_age" => "max_age",
+        "shutdown" => "shutdown",
+        _ => "other",
+    };
+    metrics::counter!("quarry_agent_run_expired_total", "reason" => reason).increment(count);
+}
+
+/// The coarse class of an agent action, from its wire name
+/// (`browser_action_name`): a closed set of eleven, so no step metric grows
+/// with the action vocabulary.
+pub fn action_class(action: &str) -> &'static str {
+    match action {
+        "navigate" | "back" | "forward" | "reload" => "navigate",
+        "click" | "click_ref" | "frame_click_ref" | "click_semantic" | "click_point" => "click",
+        "type" | "type_ref" | "frame_type_ref" | "type_semantic" => "type",
+        "press" | "respond_dialog" => "press",
+        "scroll" | "mouse_wheel" => "scroll",
+        "select" | "select_ref" | "frame_select_ref" | "select_semantic" => "select",
+        "wait" | "wait_for" | "wait_for_ref" | "frame_wait_for_ref" | "wait_for_semantic" => {
+            "wait"
+        }
+        "screenshot" | "pdf" | "get_content" => "capture",
+        "evaluate" => "evaluate",
+        "upload_ref" | "frame_upload_ref" | "download_ref" | "frame_download_ref" => "file",
+        _ => "other",
+    }
+}
+
+/// One executed agent step: its count and duration by action class and outcome
+/// (`ok` when the driver completed it, `error` when it failed). WS6.I.
+pub fn record_agent_step(action: &str, ok: bool, elapsed: Duration) {
+    let class = action_class(action);
+    let outcome = if ok { "ok" } else { "error" };
+    metrics::counter!("quarry_agent_steps_total", "action_class" => class, "outcome" => outcome)
+        .increment(1);
+    metrics::histogram!(
+        "quarry_agent_step_duration_seconds",
+        "action_class" => class,
+        "outcome" => outcome
+    )
+    .record(elapsed.as_secs_f64());
+}
+
+/// A cache lookup. `cache` is `page` or `search`; `outcome` is `hit`, `miss` or
+/// `error` (backend or decode failure, served as a miss). WS6.I.
+pub fn record_cache(cache: &'static str, outcome: &'static str) {
+    let cache = match cache {
+        "page" => "page",
+        "search" => "search",
+        _ => "other",
+    };
+    let outcome = match outcome {
+        "hit" => "hit",
+        "miss" => "miss",
+        "error" => "error",
+        _ => "other",
+    };
+    metrics::counter!("quarry_cache_requests_total", "cache" => cache, "outcome" => outcome)
+        .increment(1);
 }
 
 /// Record the result of one `/v1/scrape`. `outcome` is `ok` or the error
@@ -258,6 +343,60 @@ fn describe_all() {
         "quarry_agent_budget_exhausted_total",
         "Agent runs that reached a budget bound, by dimension, class and mode (shadow = would have been refused)."
     );
+    describe_counter!(
+        "quarry_agent_run_starts_total",
+        "Agent run starts by class and outcome (started, resumed, denied, draining, aborted)."
+    );
+    describe_counter!(
+        "quarry_agent_run_denied_total",
+        "Agent run starts refused, by the typed reason (a cap or an allowance)."
+    );
+    describe_counter!(
+        "quarry_agent_run_expired_total",
+        "Agent runs ended without a client closing them, by reason (idle, ttl, takeover_idle, max_age, shutdown)."
+    );
+    describe_gauge!(
+        "quarry_agent_runs_active",
+        "Live agent runs now, by class (interactive or agent)."
+    );
+    describe_gauge!(
+        "quarry_agent_runs_pending",
+        "Agent run starts admitted and not yet registered."
+    );
+    describe_counter!(
+        "quarry_agent_steps_total",
+        "Agent steps executed, by action class and outcome."
+    );
+    describe_histogram!(
+        "quarry_agent_step_duration_seconds",
+        Unit::Seconds,
+        "Agent step duration by action class and outcome."
+    );
+    describe_histogram!(
+        "quarry_agent_run_duration_seconds",
+        Unit::Seconds,
+        "How long a run lived, by class."
+    );
+    describe_counter!(
+        "quarry_cache_requests_total",
+        "Cache lookups by cache (page, search) and outcome (hit, miss, error)."
+    );
+    describe_gauge!(
+        "quarry_edge_draining",
+        "1 once the edge has begun draining for shutdown, otherwise 0."
+    );
+    describe_counter!(
+        "quarry_lease_pool_refused_total",
+        "Lease requests refused, by pool and reason (pool_full, org_render_cap, wait_timeout)."
+    );
+    describe_counter!(
+        "quarry_lease_pool_waits_total",
+        "Waits for a lease permit that ended, by pool."
+    );
+    describe_gauge!(
+        "quarry_lease_pool_wait_seconds_sum",
+        "Cumulative seconds spent waiting for a lease permit, by pool (divide by the waits counter for the mean)."
+    );
     describe_gauge!(
         "quarry_lease_pool_in_flight",
         "Leases currently held, by pool."
@@ -305,7 +444,64 @@ pub fn sample_pools() {
             .set(pool.max_concurrent() as f64);
         metrics::counter!("quarry_lease_pool_acquired_total", "pool" => name)
             .absolute(counters.acquired);
+        metrics::counter!("quarry_lease_pool_refused_total", "pool" => name, "reason" => "pool_full")
+            .absolute(counters.refused_pool_full);
+        metrics::counter!("quarry_lease_pool_refused_total", "pool" => name, "reason" => "org_render_cap")
+            .absolute(counters.refused_org_cap);
+        metrics::counter!("quarry_lease_pool_refused_total", "pool" => name, "reason" => "wait_timeout")
+            .absolute(counters.wait_timeouts);
+        metrics::counter!("quarry_lease_pool_waits_total", "pool" => name)
+            .absolute(counters.waits);
+        metrics::gauge!("quarry_lease_pool_wait_seconds_sum", "pool" => name)
+            .set(counters.wait_nanos as f64 / 1_000_000_000.0);
     }
+}
+
+/// What the run registry reports, as the sampler needs it. The sampler takes a
+/// closure instead of the registry so this module does not depend on the
+/// `browser-agent` feature.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RunStats {
+    pub interactive: usize,
+    pub agent: usize,
+    pub pending: usize,
+}
+
+type RunStatsFn = Arc<dyn Fn() -> RunStats + Send + Sync>;
+
+fn run_stats_source() -> &'static Mutex<Option<RunStatsFn>> {
+    static SOURCE: OnceLock<Mutex<Option<RunStatsFn>>> = OnceLock::new();
+    SOURCE.get_or_init(|| Mutex::new(None))
+}
+
+/// Make the live-run counts visible to the sampler (`main` passes
+/// `RunRegistry::stats`). A later call replaces the earlier one.
+pub fn register_run_stats(source: impl Fn() -> RunStats + Send + Sync + 'static) {
+    if let Ok(mut registered) = run_stats_source().lock() {
+        *registered = Some(Arc::new(source));
+    }
+}
+
+/// Publish the live-run gauges once.
+pub fn sample_runs() {
+    let source = match run_stats_source().lock() {
+        Ok(registered) => registered.clone(),
+        Err(_) => return,
+    };
+    if let Some(source) = source {
+        let stats = source();
+        metrics::gauge!("quarry_agent_runs_active", "class" => "interactive")
+            .set(stats.interactive as f64);
+        metrics::gauge!("quarry_agent_runs_active", "class" => "agent").set(stats.agent as f64);
+        metrics::gauge!("quarry_agent_runs_pending").set(stats.pending as f64);
+    }
+}
+
+/// Publish every sampled series once: the pools, the live runs, the drain flag.
+pub fn sample_all() {
+    sample_pools();
+    sample_runs();
+    metrics::gauge!("quarry_edge_draining").set(if crate::drain::is_draining() { 1.0 } else { 0.0 });
 }
 
 /// Sample the pools every [`SAMPLE_INTERVAL`] until the process exits.
@@ -315,7 +511,7 @@ pub fn spawn_sampler() -> tokio::task::JoinHandle<()> {
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
-            sample_pools();
+            sample_all();
         }
     })
 }
@@ -433,23 +629,34 @@ mod tests {
     }
 
     #[test]
-    fn route_label_is_a_closed_set_never_the_raw_path() {
-        for (path, want) in [
-            ("/v1/scrape", "scrape"),
-            ("/v1/agent/runs/run_abc123/step", "agent"),
-            ("/v1/crawl", "crawl"),
-            ("/v1/artifacts/art_1/content", "artifacts"),
-            ("/health", "health"),
-            ("/ready", "ready"),
-            ("/graphql/playground", "graphql"),
-            ("/v1/some-host.example.com/secret", "v1_other"),
-            ("/v1", "v1_other"),
-            ("/wp-admin/../../etc/passwd", "other"),
-            ("/", "other"),
-            ("", "other"),
-        ] {
-            assert_eq!(route_class(path), want, "{path}");
+    fn route_label_is_the_matched_template_not_the_raw_path() {
+        assert_eq!(
+            route_label(Some("/v1/agent/runs/:run_id/step")),
+            "/v1/agent/runs/:run_id/step"
+        );
+        assert_eq!(route_label(Some("/health")), "/health");
+        // A request that matched no route, or a template that is not one.
+        for bad in [None, Some(""), Some("no-slash"), Some(&"/x".repeat(100)[..])] {
+            assert_eq!(route_label(bad), UNMATCHED_ROUTE, "{bad:?}");
         }
+    }
+
+    #[test]
+    fn action_classes_are_a_closed_set_of_eleven() {
+        let known = [
+            "navigate", "back", "forward", "reload", "click", "click_ref", "frame_click_ref",
+            "click_semantic", "click_point", "type", "type_ref", "frame_type_ref",
+            "type_semantic", "press", "respond_dialog", "scroll", "mouse_wheel", "select",
+            "select_ref", "frame_select_ref", "select_semantic", "wait", "wait_for",
+            "wait_for_ref", "frame_wait_for_ref", "wait_for_semantic", "screenshot", "pdf",
+            "get_content", "evaluate", "upload_ref", "frame_upload_ref", "download_ref",
+            "frame_download_ref",
+        ];
+        let classes: std::collections::BTreeSet<_> =
+            known.iter().map(|name| action_class(name)).collect();
+        assert!(!classes.contains("other"), "every known action has a class: {classes:?}");
+        assert!(classes.len() <= 10, "{classes:?}");
+        assert_eq!(action_class("https://probe.example/x"), "other");
     }
 
     #[test]

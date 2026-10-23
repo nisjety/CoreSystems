@@ -100,6 +100,9 @@ pub async fn start_run(
 ) -> Result<Json<Envelope<StartRunData>>, ApiErr> {
     let request_id = crate::request_id::current();
     if let Some(error) = crate::drain::refusal() {
+        // WS6.I: the class is not known yet, so the start counts under `other`.
+        crate::metrics::record_run_denied("draining");
+        crate::metrics::record_run_start("", "draining");
         return Err(driver_err(&request_id, error));
     }
     let org_id = claims.org_id.clone();
@@ -440,6 +443,8 @@ pub async fn start_run(
                         run_class.label(),
                         "on",
                     );
+                    crate::metrics::record_run_denied("org_allowance");
+                    crate::metrics::record_run_start(run_class.label(), "denied");
                     return Err(driver_err(
                         &request_id,
                         crate::limits::AllowanceExhausted {
@@ -469,7 +474,11 @@ pub async fn start_run(
     let slot = state
         .agent_runs
         .try_reserve(&org_id, run_class)
-        .map_err(|denied| driver_err(&request_id, denied.into_error()))?;
+        .map_err(|denied| {
+            crate::metrics::record_run_denied(denied.reason);
+            crate::metrics::record_run_start(run_class.label(), "denied");
+            driver_err(&request_id, denied.into_error())
+        })?;
 
     let session = state
         .agent_driver
@@ -644,6 +653,10 @@ pub async fn start_run(
     }
 
     slot.commit(run_id.to_string(), RunHandle::new(entry, live));
+    crate::metrics::record_run_start(
+        run_class.label(),
+        if resume_checkpoint.is_some() { "resumed" } else { "started" },
+    );
 
     // WS10.S3: the run's event trace starts here, numbered from seq 1, so the
     // AgentStarted below is the first event of the run's replay ring.

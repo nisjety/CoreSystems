@@ -51,11 +51,24 @@ impl PageCache {
     pub async fn get(&self, org_id: &str, fingerprint: &str) -> Option<NormalizedOutput> {
         let key = Self::key(org_id, fingerprint)?;
         let mut conn = self.conn.clone();
-        let raw: Option<String> = conn.get(key).await.ok()?;
-        let raw = raw?;
+        let raw: Option<String> = match conn.get(key).await {
+            Ok(raw) => raw,
+            Err(_) => {
+                crate::metrics::record_cache("page", "error");
+                return None;
+            }
+        };
+        let Some(raw) = raw else {
+            crate::metrics::record_cache("page", "miss");
+            return None;
+        };
         match serde_json::from_str::<NormalizedOutput>(&raw) {
-            Ok(out) => Some(out),
+            Ok(out) => {
+                crate::metrics::record_cache("page", "hit");
+                Some(out)
+            }
             Err(err) => {
+                crate::metrics::record_cache("page", "error");
                 // zdr-log-ok: the page cache is never read for a ZDR request (every caller gates on the ZDR guard), so only non-ZDR work reaches this line
                 tracing::warn!(error = %err, fingerprint, "page cache: deserialize failed");
                 None
@@ -154,10 +167,24 @@ impl SearchCache {
     /// `Some(value)` on hit; `None` on miss or any recoverable error.
     pub async fn get<T: DeserializeOwned>(&self, key: &str) -> Option<T> {
         let mut conn = self.conn.clone();
-        let raw: Option<String> = conn.get(key).await.ok()?;
-        match serde_json::from_str::<T>(&raw?) {
-            Ok(v) => Some(v),
+        let raw: Option<String> = match conn.get(key).await {
+            Ok(raw) => raw,
+            Err(_) => {
+                crate::metrics::record_cache("search", "error");
+                return None;
+            }
+        };
+        let Some(raw) = raw else {
+            crate::metrics::record_cache("search", "miss");
+            return None;
+        };
+        match serde_json::from_str::<T>(&raw) {
+            Ok(v) => {
+                crate::metrics::record_cache("search", "hit");
+                Some(v)
+            }
             Err(err) => {
+                crate::metrics::record_cache("search", "error");
                 // zdr-log-ok: the search cache is never read for a ZDR request (the caller skips the lookup when zdr is set), so only non-ZDR work reaches this line
                 tracing::warn!(error = %err, key, "search cache: deserialize failed");
                 None

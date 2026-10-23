@@ -177,8 +177,8 @@ Prometheus metrics are off unless `QUARRY_EDGE__METRICS_ENABLED=1` (rollback: `0
 
 - They are served on `QUARRY_EDGE__METRICS_ADDR` (default `0.0.0.0:9092`), a listener separate from the public port. The public port never serves `/metrics`: 404 for a caller with a valid bearer, 401 without one (the auth layer answers first). The compose files do not publish 9092; scrape it over the compose network.
 - `QUARRY_EDGE__METRICS_TOKEN` is a bearer token (constant-time compare). In production an enabled listener without a token of at least 16 characters stops the edge at boot (`metrics: QUARRY_EDGE__METRICS_TOKEN is required in production…`). Without a token (development only) the endpoint is open.
-- Series today: `quarry_http_requests_total{route,method,status_class}`, `quarry_http_request_duration_seconds{route,status_class}`, `quarry_scrape_outcomes_total{outcome}`, `quarry_lease_pool_{in_flight,peak_in_flight,capacity}{pool}`, `quarry_lease_pool_acquired_total{pool}`, `quarry_build_info{version}`. `route` is a class from a fixed list (`scrape`, `agent`, `crawl`, …, `v1_other`, `other`), never the path; no URL, host, organization, user or run id is ever a label.
-- Not yet: agent-run gauges and budget series (they need the run registry), usage and cache series, `quarry_edge_draining`.
+- Series today: `quarry_http_requests_total{route,method,status_class}`, `quarry_http_request_duration_seconds{route,status_class}`, `quarry_scrape_outcomes_total{outcome}`, `quarry_lease_pool_{in_flight,peak_in_flight,capacity}{pool}`, `quarry_lease_pool_acquired_total{pool}`, `quarry_build_info{version}`. `route` is the router's matched template or `unmatched`, never the raw path; no URL, host, organization, user or run id is ever a label.
+- The agent-run, step, budget, cache, pool-refusal and drain series are listed in "WS6.I series" at the end of this file. Not yet: the usage series.
 
 Check it from a container on the same network:
 
@@ -1586,3 +1586,32 @@ What it does. A `fullPage` screenshot of a page taller than one Chromium capture
 **Rollback.** Leave `QUARRY_EDGE__SCRAPE_STITCH` unset (the default), or revert the commits. No migration, no schema or wire change.
 
 **Owed before the flag goes on anywhere.** The spike (`docs/SCRAPE_CAPTURE.md`): the single-capture limit and the method choice on the pinned Chromium, a banded 25,000 px page, a sticky-header page and a lazy-image page. Then the edge evidence from the plan: a stitched 30,000 px banded fixture through `POST /v1/scrape` returns `stitched: true` with `tiles >= 2`, the PNG height is 30,000 times the device scale, the band colours at the middle of bands 1, 15 and 30 are in order, a second concurrent stitch gets the cropped image with `screenshot_truncated`, and a 90,000 px fixture is `truncated: true` at the 60,000 px cap.
+
+## WS6.I series: agent runs, steps, budgets, caches, pool refusals
+
+Slice WS6.I, second half (the HTTP, scrape and pool series are in "Metrics" above). Same listener, same flag, same token: nothing here is recorded unless `QUARRY_EDGE__METRICS_ENABLED=1`, and with it off every call below is a no-op. No new flag.
+
+Series (labels are closed sets; a value outside its set is recorded as `other`, never as the caller's text):
+
+| Series | Labels | Recorded by |
+|---|---|---|
+| `quarry_http_requests_total`, `quarry_http_request_duration_seconds` | `route` is the router's matched template (for example `/v1/agent/runs/:run_id/step`) or `unmatched`; `status_class` | the HTTP layer; a path that matches no route is `unmatched`, so a probe or an id in the path never becomes a label |
+| `quarry_agent_runs_active`, `quarry_agent_runs_pending` | `class` = `interactive`, `agent` | the 5 s sampler, from `RunRegistry::stats()` |
+| `quarry_agent_run_starts_total` | `class`, `outcome` = `started`, `resumed`, `denied`, `draining`, `aborted` | `start_run` (`aborted` = admitted, then failed before the run was registered; a start refused while draining has no class yet and counts under `other`) |
+| `quarry_agent_run_denied_total` | `reason` = `global_run_cap`, `org_run_cap`, `org_interactive_run_cap`, `org_plan_cap`, `org_allowance`, `draining` | `start_run` refusals |
+| `quarry_agent_run_expired_total` | `reason` = `idle`, `ttl`, `takeover_idle`, `max_age`, `shutdown` | the run sweeper; the drain at shutdown (`shutdown`) |
+| `quarry_agent_steps_total`, `quarry_agent_step_duration_seconds` | `action_class` (eleven values: `navigate`, `click`, `type`, `press`, `scroll`, `select`, `wait`, `capture`, `evaluate`, `file`, `other`), `outcome` = `ok`, `error` | `step` and the WebSocket action path, around the driver call |
+| `quarry_agent_run_duration_seconds` | `class` | `finish_run` (already built, WS6.K) |
+| `quarry_agent_budget_exhausted_total` | `dimension`, `class`, `mode` | the budget gate (already built, WS6.B) |
+| `quarry_lease_pool_refused_total` | `pool`, `reason` = `pool_full`, `org_render_cap`, `wait_timeout` | the pool counters, published by the sampler |
+| `quarry_lease_pool_waits_total`, `quarry_lease_pool_wait_seconds_sum` | `pool` | the pool counters; the mean wait is the sum over the count (it is not a histogram: the runtime crate has no recorder) |
+| `quarry_cache_requests_total` | `cache` = `page`, `search`; `outcome` = `hit`, `miss`, `error` | the two Redis caches (`error` = backend or decode failure, served as a miss) |
+| `quarry_edge_draining` | none | 1 from the moment SIGTERM starts the drain; 0 otherwise |
+
+Not built: `quarry_usage_events_total{metric,result}` (waits for the usage emission unit), the Control Plane Prometheus job `quarry-edge` and its token secret (Control Plane files; Prometheus refuses its whole configuration when a `credentials_file` is missing, so the job lands with the secret), alert rules.
+
+Checks (written, run at the end of the wave): `cargo test -p quarry-edge --test metrics_recorder` (the recorder is process-global, so these live in their own binary) and `cargo test -p quarry-edge --lib metrics`; `cargo test -p quarry-runtime lease_pool`.
+
+Deployment evidence (owed): with the flag on, from a container on `inter-plane-bus` read `/metrics` with the bearer; start and close an agent run and expect `quarry_agent_run_starts_total{class="agent",outcome="started"}` to move and `quarry_agent_runs_active` to rise and fall within 5 s; a step moves `quarry_agent_steps_total`; `curl ... | grep -c "<probe-host>"` is 0; `docker stop` shows `quarry_edge_draining 1` on a last scrape.
+
+Rollback: `QUARRY_EDGE__METRICS_ENABLED=0` and restart, or revert the commit.

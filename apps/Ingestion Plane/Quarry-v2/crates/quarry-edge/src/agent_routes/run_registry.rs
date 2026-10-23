@@ -250,6 +250,8 @@ impl RunSlot {
 impl Drop for RunSlot {
     fn drop(&mut self) {
         if !self.committed {
+            // WS6.I: admitted, then failed before the run was registered.
+            crate::metrics::record_run_start(self.class.label(), "aborted");
             let registry = self.registry.clone();
             let guard = registry.inner.lock();
             if let Ok(mut inner) = guard {

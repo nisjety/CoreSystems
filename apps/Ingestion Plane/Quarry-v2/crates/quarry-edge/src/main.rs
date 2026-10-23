@@ -1742,6 +1742,20 @@ async fn run() -> anyhow::Result<()> {
     #[cfg(feature = "browser-agent")]
     let run_sweeper = agent_routes::spawn_run_sweeper(app_state.clone());
 
+    // WS6.I: the live-run counts the metrics sampler publishes as gauges.
+    #[cfg(feature = "browser-agent")]
+    {
+        let runs = app_state.agent_runs.clone();
+        metrics::register_run_stats(move || {
+            let stats = runs.stats();
+            metrics::RunStats {
+                interactive: stats.interactive,
+                agent: stats.agent,
+                pending: stats.pending,
+            }
+        });
+    }
+
     let app = routes::router(app_state);
     // Outermost, so a request refused by an auth layer is still counted.
     let app = if metrics_handle.is_some() {
