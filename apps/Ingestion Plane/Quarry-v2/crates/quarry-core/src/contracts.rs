@@ -901,6 +901,13 @@ pub enum AgentAction {
     Back,
     Forward,
     GetContent,
+    /// Reload the current page (WS9.B). Human-only on the wire: the Model
+    /// Plane `browser.act` schema never exposes it. `ignore_cache` bypasses
+    /// the HTTP cache (CDP `Page.reload{ignoreCache}`).
+    Reload {
+        #[serde(default)]
+        ignore_cache: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1084,4 +1091,23 @@ pub struct ExtractionUsage {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub cost_usd: f64,
+}
+
+#[cfg(test)]
+mod reload_contract_tests {
+    use super::AgentAction;
+
+    #[test]
+    fn agent_action_reload_roundtrips() {
+        let soft: AgentAction = serde_json::from_str(r#"{"type":"reload"}"#).unwrap();
+        assert!(matches!(soft, AgentAction::Reload { ignore_cache: false }));
+        let hard: AgentAction =
+            serde_json::from_str(r#"{"type":"reload","ignore_cache":true}"#).unwrap();
+        assert!(matches!(hard, AgentAction::Reload { ignore_cache: true }));
+        let wire = serde_json::to_string(&hard).unwrap();
+        let back: AgentAction = serde_json::from_str(&wire).unwrap();
+        assert!(matches!(back, AgentAction::Reload { ignore_cache: true }));
+        // Unknown keys stay accepted by default; a URL field is not part of the variant.
+        assert!(serde_json::from_str::<AgentAction>(r#"{"type":"reload","url":"x"}"#).is_ok());
+    }
 }

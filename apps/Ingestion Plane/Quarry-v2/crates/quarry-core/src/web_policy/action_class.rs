@@ -98,6 +98,7 @@ fn classify(action: &AgentAction) -> (ActionClass, &'static str) {
         AgentAction::Evaluate { .. } => (C::Script, "evaluate"),
         AgentAction::Back => (C::Navigation, "back"),
         AgentAction::Forward => (C::Navigation, "forward"),
+        AgentAction::Reload { .. } => (C::Navigation, "reload"),
         AgentAction::GetContent => (C::Observation, "get_content"),
     }
 }

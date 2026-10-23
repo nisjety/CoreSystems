@@ -4642,6 +4642,26 @@ impl BrowserDriver for ChromiumoxideDriver {
         Ok(())
     }
 
+    async fn reload(&self, session: &BrowserSession, ignore_cache: bool) -> QuarryResult<()> {
+        let page = self.current_page(session).await?;
+        with_deadline(Op::Navigate, async {
+            page.execute(
+                ::chromiumoxide::cdp::browser_protocol::page::ReloadParams::builder()
+                    .ignore_cache(ignore_cache)
+                    .build(),
+            )
+            .await
+            .map_err(|e| {
+                QuarryError::new(ErrorCode::DriverFailed, "reload failed").with_details(
+                    json!({ "error": e.to_string(), "ignore_cache": ignore_cache }),
+                )
+            })
+        })
+        .await?;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        Ok(())
+    }
+
     async fn forward(&self, _session: &BrowserSession) -> QuarryResult<()> {
         let page = self.current_page(_session).await?;
         with_deadline(Op::Navigate, async {
@@ -6384,6 +6404,22 @@ mod tests {
         );
         assert_ne!(background.tab_id, first.tab_id);
         assert!(!background.active);
+        driver.release(session).await.expect("release");
+    }
+
+    /// WS9.B: a soft and a hard reload both succeed on a live page and leave the
+    /// session usable. Shallow on purpose: proving the cache is bypassed needs a
+    /// fixture server with cache headers (see the depth note for W2-U27).
+    #[tokio::test]
+    #[ignore = "WS9.B live lane: needs Chromium (CHROMIUMOXIDE_TEST=1)"]
+    async fn reload_ignores_cache() {
+        if !live_enabled() {
+            return;
+        }
+        let driver = live_driver();
+        let session = live_session(&driver, "ws9b-reload").await;
+        driver.reload(&session, false).await.expect("soft reload");
+        driver.reload(&session, true).await.expect("hard reload");
         driver.release(session).await.expect("release");
     }
 

@@ -1434,6 +1434,7 @@ impl BlockEpisodes {
             | AgentAction::Pdf
             | AgentAction::Back
             | AgentAction::Forward
+            | AgentAction::Reload { .. }
             | AgentAction::GetContent => None,
         };
         match blocked_host {
@@ -2298,6 +2299,7 @@ mod tests {
             | AgentAction::Pdf
             | AgentAction::Back
             | AgentAction::Forward
+            | AgentAction::Reload { .. }
             | AgentAction::GetContent => false,
         }
     }

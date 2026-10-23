@@ -821,6 +821,12 @@ pub trait BrowserDriver: Send + Sync {
     async fn forward(&self, _session: &BrowserSession) -> QuarryResult<()> {
         Err(QuarryError::unsupported_action("forward"))
     }
+
+    /// Reload the current page (WS9.B). `ignore_cache` bypasses the HTTP cache.
+    /// Default: Unsupported.
+    async fn reload(&self, _session: &BrowserSession, _ignore_cache: bool) -> QuarryResult<()> {
+        Err(QuarryError::unsupported_action("reload"))
+    }
 }
 
 #[derive(Debug, Clone)]

@@ -227,7 +227,8 @@ impl ObservationRunner {
             | AgentAction::SelectSemantic { .. }
             | AgentAction::Evaluate { .. }
             | AgentAction::Back
-            | AgentAction::Forward => ActionOutcome::unknown(
+            | AgentAction::Forward
+            | AgentAction::Reload { .. } => ActionOutcome::unknown(
                 "postcondition_required",
                 "the browser operation completed, but its business effect was not verified",
             ),
@@ -308,6 +309,9 @@ impl ObservationRunner {
             },
             AgentAction::Back => Action::Back,
             AgentAction::Forward => Action::Forward,
+            AgentAction::Reload { ignore_cache } => Action::Reload {
+                ignore_cache: *ignore_cache,
+            },
             AgentAction::GetContent => Action::Navigate { url: String::new() },
         })
     }
@@ -539,6 +543,9 @@ impl ObservationRunner {
                 }
                 AgentAction::Forward => {
                     self.browser.forward(session).await?;
+                }
+                AgentAction::Reload { ignore_cache } => {
+                    self.browser.reload(session, *ignore_cache).await?;
                 }
                 AgentAction::GetContent => {
                     let _content = self.browser.content(session).await?;
@@ -3627,6 +3634,15 @@ mod tests {
         let browser_action =
             ObservationRunner::agent_action_to_browser_action(&AgentAction::Forward).unwrap();
         assert!(matches!(browser_action, Action::Forward));
+    }
+
+    #[test]
+    fn reload_action_converts_to_browser_reload() {
+        let browser_action = ObservationRunner::agent_action_to_browser_action(&AgentAction::Reload {
+            ignore_cache: true,
+        })
+        .unwrap();
+        assert!(matches!(browser_action, Action::Reload { ignore_cache: true }));
     }
 
     #[tokio::test]

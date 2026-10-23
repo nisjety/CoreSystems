@@ -82,6 +82,7 @@ pub(super) fn browser_action_name(action: &AgentAction) -> &'static str {
         AgentAction::Evaluate { .. } => "evaluate",
         AgentAction::Back => "back",
         AgentAction::Forward => "forward",
+        AgentAction::Reload { .. } => "reload",
         AgentAction::GetContent => "get_content",
     }
 }
@@ -192,6 +193,7 @@ pub(super) fn estimated_action_cost_usd(action: &AgentAction) -> f64 {
         AgentAction::Evaluate { .. } => "evaluate",
         AgentAction::Back => "back",
         AgentAction::Forward => "forward",
+        AgentAction::Reload { .. } => "reload",
         AgentAction::GetContent => "get_content",
         AgentAction::MouseWheel { .. } => "mouse_wheel",
         AgentAction::SelectSemantic { .. } => "select",
@@ -200,4 +202,22 @@ pub(super) fn estimated_action_cost_usd(action: &AgentAction) -> f64 {
         | AgentAction::TypeSemantic { .. } => "click",
     };
     quarry_runtime::action_cost::estimate_action_cost(name, 0).total_usd
+}
+
+#[cfg(test)]
+mod reload_label_tests {
+    use super::*;
+
+    #[test]
+    fn action_label_reload() {
+        assert_eq!(
+            browser_action_name(&AgentAction::Reload { ignore_cache: true }),
+            "reload"
+        );
+        assert_eq!(
+            browser_action_name(&AgentAction::Reload { ignore_cache: false }),
+            "reload"
+        );
+        assert!(estimated_action_cost_usd(&AgentAction::Reload { ignore_cache: false }) > 0.0);
+    }
 }

@@ -414,6 +414,16 @@ impl ActionRuntime {
                 }
                 None
             }
+            Action::Reload { ignore_cache } => {
+                if let (Some(driver), Some(session)) =
+                    (self.browser.as_ref(), self.session.as_ref())
+                {
+                    driver.reload(session, *ignore_cache).await?;
+                } else {
+                    trace!(action_index = index, "reload (dry-run)");
+                }
+                None
+            }
         };
 
         let mut result = ActionResult::ok(index, output);
@@ -481,6 +491,21 @@ mod tests {
         );
         let results = runtime.run(&s).await.unwrap();
         assert_eq!(results.len(), 11);
+        assert!(results.iter().all(|r| r.success));
+    }
+
+    #[tokio::test]
+    async fn reload_action_runs_in_dry_run_mode() {
+        let runtime = ActionRuntime::new();
+        let s = script(
+            vec![
+                Action::Reload { ignore_cache: false },
+                Action::Reload { ignore_cache: true },
+            ],
+            OnError::Abort,
+        );
+        let results = runtime.run(&s).await.unwrap();
+        assert_eq!(results.len(), 2);
         assert!(results.iter().all(|r| r.success));
     }
 

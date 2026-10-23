@@ -4031,6 +4031,7 @@ components:
           navigate: '#/components/schemas/NavigateAction'
           pdf: '#/components/schemas/PdfAction'
           press: '#/components/schemas/PressAction'
+          reload: '#/components/schemas/ReloadAction'
           respond_dialog: '#/components/schemas/DialogResponseAction'
           screenshot: '#/components/schemas/ScreenshotAction'
           scroll: '#/components/schemas/ScrollAction'
@@ -4065,6 +4066,7 @@ components:
       - $ref: '#/components/schemas/NavigateAction'
       - $ref: '#/components/schemas/PdfAction'
       - $ref: '#/components/schemas/PressAction'
+      - $ref: '#/components/schemas/ReloadAction'
       - $ref: '#/components/schemas/DialogResponseAction'
       - $ref: '#/components/schemas/ScreenshotAction'
       - $ref: '#/components/schemas/ScrollAction'
@@ -4317,6 +4319,19 @@ components:
         type:
           type: string
           const: get_content
+    ReloadAction:
+      type: object
+      description: Reload the current page (WS9.B). Human-only; agent surfaces never send it.
+      required:
+      - type
+      properties:
+        type:
+          type: string
+          const: reload
+        ignore_cache:
+          type: boolean
+          default: false
+      additionalProperties: false
     SnapshotRefAction:
       type: object
       oneOf:
