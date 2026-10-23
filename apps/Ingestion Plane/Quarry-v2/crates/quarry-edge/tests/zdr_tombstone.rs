@@ -549,6 +549,154 @@ async fn a_full_in_flight_cap_drops_and_counts_without_waiting() {
     assert_eq!(emitter.counters().dropped, 3, "two in flight, three dropped");
 }
 
+/// The 2 s `SEND_TIMEOUT` is a field of the emitter, so a test can shorten it. A
+/// delivery that hangs is abandoned, counted as failed, and its permit comes back:
+/// with the timeout wrapper removed the first emit would hold the only permit for
+/// 60 s and the third emit below would be dropped.
+#[tokio::test]
+async fn a_hung_delivery_times_out_is_counted_failed_and_frees_its_permit() {
+    let emitter = Arc::new(TombstoneEmitter::with_limits(
+        Arc::new(HangingSink),
+        1,
+        Duration::from_millis(100),
+    ));
+    emit_run_end(Some(&emitter), true, &RunEnd::new("run_1", "org_1", Kind::Scrape).started(Utc::now()));
+    // The only permit is held while the delivery hangs.
+    emit_run_end(Some(&emitter), true, &RunEnd::new("run_2", "org_1", Kind::Scrape).started(Utc::now()));
+    assert_eq!(emitter.counters().dropped, 1, "the second emit found no permit");
+    for _ in 0..100 {
+        if emitter.counters().failed == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(emitter.counters().failed, 1, "the abandoned delivery is counted as failed");
+    assert_eq!(emitter.counters().sent, 0);
+    // The permit is back: a third emit is accepted, not dropped.
+    emit_run_end(Some(&emitter), true, &RunEnd::new("run_3", "org_1", Kind::Scrape).started(Utc::now()));
+    assert_eq!(emitter.counters().dropped, 1, "the permit was not released after the timeout");
+}
+
+// ── HttpSink on the wire ────────────────────────────────────────────────────
+
+#[derive(Clone, Default)]
+struct Seen {
+    requests: Arc<Mutex<Vec<(String, String, Vec<(String, String)>, Vec<u8>)>>>,
+}
+
+async fn stub_control(status: u16) -> (std::net::SocketAddr, Seen) {
+    use axum::extract::State;
+    use axum::http::{HeaderMap, Method, StatusCode, Uri};
+
+    async fn handle(
+        State((seen, status)): State<(Seen, u16)>,
+        method: Method,
+        uri: Uri,
+        headers: HeaderMap,
+        body: axum::body::Bytes,
+    ) -> StatusCode {
+        let headers = headers
+            .iter()
+            .map(|(name, value)| (name.as_str().to_ascii_lowercase(), value.to_str().unwrap_or("").to_owned()))
+            .collect();
+        seen.requests
+            .lock()
+            .unwrap()
+            .push((method.to_string(), uri.to_string(), headers, body.to_vec()));
+        StatusCode::from_u16(status).unwrap()
+    }
+
+    let seen = Seen::default();
+    let app = axum::Router::new().fallback(handle).with_state((seen.clone(), status));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (addr, seen)
+}
+
+fn signer() -> Arc<quarry_edge::internal_auth::InternalSigner> {
+    Arc::new(quarry_edge::internal_auth::InternalSigner::new("0123456789abcdef0123456789abcdef").unwrap())
+}
+
+/// The only path that sends data off the edge: a POST to quarry-control's receiver,
+/// the body exactly `to_body()`, and the three signature headers verifying over the
+/// same canonical string the Go verifier rebuilds.
+#[tokio::test]
+async fn the_http_sink_posts_the_signed_allowlisted_body_to_the_receiver_path() {
+    use quarry_edge::internal_auth::{InternalSigner, HEADER_NONCE, HEADER_SIG, HEADER_TS};
+    use quarry_edge::zdr_tombstone::{HttpSink, PATH};
+
+    let (addr, seen) = stub_control(204).await;
+    let signer = signer();
+    // A trailing slash on the base URL must not double the slash in the path.
+    let sink = HttpSink::new(&format!("http://{addr}/"), signer.clone()).expect("client builds");
+    let tombstone = full_tombstone();
+    sink.put(&tombstone).await.expect("a 204 is a delivery");
+
+    let requests = seen.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    let (method, uri, headers, body) = &requests[0];
+    assert_eq!(method, "POST");
+    assert_eq!(uri, PATH);
+    assert_eq!(PATH, "/v1/internal/zdr-tombstones");
+    assert_eq!(body, &tombstone.to_body(), "the wire body is exactly the allowlisted struct");
+    let header = |name: &str| {
+        headers
+            .iter()
+            .find(|(key, _)| key == &name.to_ascii_lowercase())
+            .map(|(_, value)| value.clone())
+            .unwrap_or_else(|| panic!("header {name} missing in {headers:?}"))
+    };
+    assert_eq!(header("content-type"), "application/json");
+    let timestamp: i64 = header(HEADER_TS).parse().expect("a unix timestamp");
+    let nonce = header(HEADER_NONCE);
+    assert_eq!(nonce.len(), 32);
+    let expected = InternalSigner::header_value(&signer.sign_raw(
+        "POST",
+        PATH,
+        &InternalSigner::body_digest(body),
+        timestamp,
+        &nonce,
+    ));
+    assert_eq!(header(HEADER_SIG), expected, "the signature does not verify over method, path, body digest, ts and nonce");
+    // The body carries no URL even though the stub saw the real wire bytes.
+    assert!(!String::from_utf8_lossy(body).contains("://"));
+}
+
+#[tokio::test]
+async fn the_http_sink_maps_a_refusal_to_a_status_and_a_dead_peer_to_a_class() {
+    use quarry_edge::zdr_tombstone::HttpSink;
+
+    let (addr, _seen) = stub_control(503).await;
+    let sink = HttpSink::new(&format!("http://{addr}"), signer()).unwrap();
+    assert_eq!(sink.put(&full_tombstone()).await, Err(SinkError::Status(503)));
+
+    // A port nothing listens on: a connect failure, reported as a class.
+    let dead = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap()
+    };
+    let sink = HttpSink::new(&format!("http://{dead}"), signer()).unwrap();
+    assert_eq!(sink.put(&full_tombstone()).await, Err(SinkError::Transport("connect")));
+
+    // And through an emitter a refusal is counted, not raised.
+    let (addr, _seen) = stub_control(500).await;
+    let emitter = Arc::new(TombstoneEmitter::new(Arc::new(
+        HttpSink::new(&format!("http://{addr}"), signer()).unwrap(),
+    )));
+    emit_run_end(Some(&emitter), true, &RunEnd::new("run_x", "org_1", Kind::Scrape).started(Utc::now()));
+    for _ in 0..100 {
+        if emitter.counters().failed == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(emitter.counters().failed, 1);
+    assert_eq!(emitter.counters().sent, 0);
+}
+
 #[tokio::test]
 async fn emit_run_end_sends_nothing_for_a_standard_run() {
     let (capture, emitter) = capturing();

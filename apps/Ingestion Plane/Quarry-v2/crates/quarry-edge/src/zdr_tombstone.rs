@@ -292,6 +292,7 @@ pub struct Counters {
 /// Owns the sink, the in-flight bound and the counters. One per edge process
 /// (`AppState::tombstones`), `None` while the flag is off.
 pub struct TombstoneEmitter {
+    timeout: Duration,
     sink: Arc<dyn TombstoneSink>,
     permits: Arc<Semaphore>,
     sent: Arc<AtomicU64>,
@@ -307,7 +308,15 @@ impl TombstoneEmitter {
 
     #[must_use]
     pub fn with_capacity(sink: Arc<dyn TombstoneSink>, in_flight: usize) -> Self {
+        Self::with_limits(sink, in_flight, SEND_TIMEOUT)
+    }
+
+    /// The in-flight bound and the per-delivery timeout, both explicit (tests shorten
+    /// the timeout; production uses [`MAX_IN_FLIGHT`] and [`SEND_TIMEOUT`]).
+    #[must_use]
+    pub fn with_limits(sink: Arc<dyn TombstoneSink>, in_flight: usize, timeout: Duration) -> Self {
         Self {
+            timeout,
             sink,
             permits: Arc::new(Semaphore::new(in_flight)),
             sent: Arc::new(AtomicU64::new(0)),
@@ -334,12 +343,13 @@ impl TombstoneEmitter {
             return;
         };
         let sink = Arc::clone(&self.sink);
+        let timeout = self.timeout;
         let sent = Arc::clone(&self.sent);
         let failed = Arc::clone(&self.failed);
         tokio::spawn(
             async move {
                 let _permit = permit;
-                match tokio::time::timeout(SEND_TIMEOUT, sink.put(&tombstone)).await {
+                match tokio::time::timeout(timeout, sink.put(&tombstone)).await {
                     Ok(Ok(())) => {
                         sent.fetch_add(1, Ordering::Relaxed);
                     }
@@ -347,6 +357,7 @@ impl TombstoneEmitter {
                         failed.fetch_add(1, Ordering::Relaxed);
                         match error {
                             SinkError::Transport(class) => {
+                                // zdr-log-ok: `class` is one of the five closed labels of zdr_log::class_reqwest (timeout, connect, status, decode, request), never the error text or a URL
                                 tracing::warn!(error_class = class, "zdr tombstone delivery failed");
                             }
                             SinkError::Status(status) => {
