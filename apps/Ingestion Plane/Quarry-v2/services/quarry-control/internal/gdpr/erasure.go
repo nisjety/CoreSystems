@@ -83,12 +83,23 @@ func (e *poisonEventError) Error() string { return e.reason }
 // `DELETE ... WHERE org_id = $1` statements match zero rows on a second
 // delivery of the same event.
 func HandleErasure(purger OrgPurger, payload []byte) (store.PurgeResult, error) {
+	result, _, err := HandleErasureWithEdge(purger, nil, payload)
+	return result, err
+}
+
+// HandleErasureWithEdge is HandleErasure plus the quarry-edge hop (WS17.E3). For
+// an "organization" event it purges the control store first, then calls the edge
+// (when edge is not nil). A failure in either step is returned as a plain error,
+// so the subscriber NAKs and JetStream redelivers; both steps are idempotent, so
+// a redelivery repeats them safely. Other events are the same deliberate no-ops
+// as HandleErasure.
+func HandleErasureWithEdge(purger OrgPurger, edge EdgePurger, payload []byte) (store.PurgeResult, EdgePurgeResult, error) {
 	evt, err := decodeErasureEvent(payload)
 	if err != nil {
-		return store.PurgeResult{}, err
+		return store.PurgeResult{}, EdgePurgeResult{}, err
 	}
 	if evt.SubjectType != "organization" {
-		return store.PurgeResult{}, nil
+		return store.PurgeResult{}, EdgePurgeResult{}, nil
 	}
 	// org_id and subject_id are always the same value in org-core's actual
 	// publisher (PublishGDPRErasureFanout stamps both from orgID), but fall
@@ -99,7 +110,18 @@ func HandleErasure(purger OrgPurger, payload []byte) (store.PurgeResult, error) 
 		orgID = evt.SubjectID
 	}
 	if orgID == "" {
-		return store.PurgeResult{}, nil
+		return store.PurgeResult{}, EdgePurgeResult{}, nil
 	}
-	return purger.PurgeOrg(orgID)
+	result, err := purger.PurgeOrg(orgID)
+	if err != nil {
+		return result, EdgePurgeResult{}, err
+	}
+	if edge == nil {
+		return result, EdgePurgeResult{}, nil
+	}
+	edgeResult, err := edge.PurgeEdgeOrg(orgID)
+	if err != nil {
+		return result, EdgePurgeResult{}, err
+	}
+	return result, edgeResult, nil
 }

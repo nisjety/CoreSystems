@@ -263,7 +263,7 @@ func main() {
 		)
 		if err != nil {
 			log.Warn().Err(err).Msg("control-shared NATS connect failed — GDPR org-erasure purge consumer disabled")
-		} else if _, err := gdpr.StartSubscriber(nc, db, log.Logger); err != nil {
+		} else if _, err := gdpr.StartSubscriber(nc, db, gdpr.EdgePurgerFromEnv(os.Getenv, log.Logger), log.Logger); err != nil {
 			log.Warn().Err(err).Msg("GDPR org-erasure subscriber failed to start")
 			nc.Close()
 		} else {
