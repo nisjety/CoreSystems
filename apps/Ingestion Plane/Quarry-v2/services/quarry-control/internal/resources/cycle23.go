@@ -33,6 +33,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/triodelab/quarry-v2/pkg/quarrycontracts"
+	"github.com/triodelab/quarry-v2/pkg/quarryotel"
 	temporalclient "github.com/triodelab/quarry-v2/services/quarry-control/internal/temporal"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/httpx"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/store"
@@ -193,6 +194,10 @@ func createSourceHandler(db store.DB) http.HandlerFunc {
 		// Only on the newly-inserted branch — an idempotent repeat
 		// registration (e.g. the crawl pipeline's per-page calls) must not
 		// spin up a duplicate schedule every time.
+		// WS10.S8: a ZDR posture parsed after the request span started drops that trace from export.
+		if body.Zdr != nil && *body.Zdr {
+			quarryotel.MarkZDR(r.Context())
+		}
 		if body.Monitor && created {
 			preset := strings.TrimSpace(body.Preset)
 			if preset == "" {

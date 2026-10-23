@@ -19,6 +19,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -38,7 +40,8 @@ type ShutdownFunc func(ctx context.Context) error
 // is unset, so callers don't need to special-case "OTEL disabled".
 func Init(ctx context.Context, serviceName, version string) (ShutdownFunc, error) {
 	endpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
-	if endpoint == "" {
+	if endpoint == "" || !ExportEnabled() {
+		// QUARRY_TELEMETRY_EXPORT=off builds no exporter, as an unset endpoint does.
 		// Use a no-op TracerProvider but still set the propagator so
 		// incoming traceparent headers are honored when present.
 		otel.SetTextMapPropagator(propagation.TraceContext{})
@@ -71,13 +74,17 @@ func Init(ctx context.Context, serviceName, version string) (ShutdownFunc, error
 		return nil, fmt.Errorf("quarryotel exporter: %w", err)
 	}
 
+	// WS10.S8: the sampler decides at span start, the processor at span end, and
+	// the exporter strips the contract keys. All three judge against one registry.
+	registry := SharedRegistry()
+	batcher := sdktrace.NewBatchSpanProcessor(redactingExporter{SpanExporter: exporter},
+		sdktrace.WithBatchTimeout(5*time.Second),
+		sdktrace.WithMaxQueueSize(2048),
+	)
 	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(exporter,
-			sdktrace.WithBatchTimeout(5*time.Second),
-			sdktrace.WithMaxQueueSize(2048),
-		),
+		sdktrace.WithSpanProcessor(newZdrProcessor(batcher, registry)),
 		sdktrace.WithResource(res),
-		sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.AlwaysSample())),
+		sdktrace.WithSampler(NewZdrSampler(registry, true)),
 	)
 	otel.SetTracerProvider(tp)
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
@@ -98,4 +105,23 @@ func envOr(key, fallback string) string {
 		return fallback
 	}
 	return v
+}
+
+// ExportEnabled reads QUARRY_TELEMETRY_EXPORT: on unless the value is `off`, `0`
+// or `false` (any case, surrounding whitespace ignored).
+func ExportEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(ExportEnv))) {
+	case "off", "0", "false":
+		return false
+	}
+	return true
+}
+
+// registryCapFromEnv reads RegistryCapEnv: a positive integer, else DefaultRegistryCap.
+func registryCapFromEnv() int {
+	n, err := strconv.Atoi(strings.TrimSpace(os.Getenv(RegistryCapEnv)))
+	if err != nil || n < 1 {
+		return DefaultRegistryCap
+	}
+	return n
 }
