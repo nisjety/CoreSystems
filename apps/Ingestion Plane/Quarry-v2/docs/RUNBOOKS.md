@@ -1021,3 +1021,17 @@ Checks to run in the wave's test phase (not run here):
 Rollback. Set `QUARRY_EDGE__WEB_POLICY_ENFORCEMENT=off` (the ask and the baseline stop applying; invariants stay), or unset the baseline variable, or revert the commit. Nothing else depends on the module until WS7.D and WS7.E.
 
 Not done in this slice: the organisation layer (`OrgInput::Absent`, WS7.H to WS7.J), the grant layer, the agent path (WS7.D), the remaining routes (WS7.E), the claim intake and its required-claim mode (WS7.J), the integration test file `tests/web_policy_scrape.rs` named by the plan (it needs the real-token harness of `zdr_claim_floor.rs`), and the regeneration of the TypeScript and Python SDKs (`sdks/generate.sh`).
+
+## Reputation snapshot hot reload and subdomain matching (E3.8.6, W3-B3-01, built, NOT run, 2026-10-23)
+
+Dark by default. With the two variables unset, quarry-edge behaves as before: the URL blocklist is read once at boot from `QUARRY_EDGE__SECURITY_SNAPSHOT_PATH` and never changes until restart.
+
+- `QUARRY_SECURITY_SNAPSHOT_WATCH_S` (compose) sets `QUARRY_EDGE__SECURITY_SNAPSHOT_WATCH_S`. A positive number of seconds makes quarry-edge check the snapshot file's modification time at that interval. A changed mtime reloads both host lists in one swap. A failed reload (missing or invalid JSON) keeps the previous lists and logs only the error class. Clamped to at least 1 second. Default `0` (off).
+- `QUARRY_SECURITY_SNAPSHOT_SUBDOMAINS` sets `QUARRY_EDGE__SECURITY_SNAPSHOT_SUBDOMAINS`. `1`, `true`, `yes` turn on dot-suffix matching for the blocklist only: a listed `evil.example` also blocks `a.b.evil.example`, but not `notevil.example`. Default off. Turn it on only after checking the feed for parent domains that host unrelated sites (shared hosting, for example). The allowlist stays exact-match.
+- The sync script still writes the file: `apps/Ingestion Plane/scripts/sync-security-feeds.py`, which keeps its 10-minute minimum interval. Nothing in this change runs the sync as a compose service. The feed volume is still read-only in the edge container.
+- Gauge `quarry_security_reputation_entries{list="blocklist"|"allowlist"}` is set at boot when the watch is on and after each successful reload. It counts entries only; no host names are exported.
+- Log lines: `reputation snapshot hot reload enabled` (boot), `reputation snapshot reloaded` (counts), `reputation snapshot reload failed` (error class). No host or URL is logged.
+
+Operator check after enabling: run the feed sync, then confirm the gauge moves and a host from the new feed gets a host-blocklisted verdict within one watch interval. With the watch off, the running edge keeps the old lists until it restarts.
+
+Not in this slice: per-organization `off|warn|block` modes, the `Arc<dyn HostReputation>` hook in `BrowserEgressPolicy` (redirects, clicks and subresources), `decision_source` in receipts, the sync compose service, and suffix matching on the allowlist. See `.plan-work/quarry-w1w2/depth/W3-B3-01.md`.
