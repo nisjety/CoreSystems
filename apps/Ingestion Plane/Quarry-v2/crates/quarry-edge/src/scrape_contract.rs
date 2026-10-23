@@ -148,6 +148,7 @@ impl ScrapeSettings {
     pub fn limits(&self) -> ScrapeLimits {
         ScrapeLimits {
             default_inline_bytes: self.inline_max_bytes,
+            captures_enabled: crate::scrape_actions::capture_mode().enabled(),
             ..ScrapeLimits::default()
         }
     }

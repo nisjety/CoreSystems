@@ -35,6 +35,8 @@ services:
       QUARRY_EDGE__SCRAPE_STRICT_AFTER: "${QUARRY_EDGE_SCRAPE_STRICT_AFTER:-}"
       QUARRY_EDGE__SCRAPE_INLINE_MAX_BYTES: "${QUARRY_EDGE_SCRAPE_INLINE_MAX_BYTES:-1048576}"
       QUARRY_EDGE__SCRAPE_OPTIONS_ENABLED: "${QUARRY_EDGE_SCRAPE_OPTIONS_ENABLED:-1}"
+      QUARRY_EDGE__SCRAPE_CAPTURE: "${QUARRY_EDGE_SCRAPE_CAPTURE:-off}"
+      QUARRY_EDGE__SCRAPE_CAPTURE_INLINE_MAX_BYTES: "${QUARRY_EDGE_SCRAPE_CAPTURE_INLINE_MAX_BYTES:-6291456}"
       # Caps on live runs and the sweeper that releases idle ones (docs/RUNBOOKS.md,
       # "Run caps and the run sweeper"). The caps are live from the first deploy; the
       # sweeper starts in dry run, so it only logs would_expire. Review the log for a
