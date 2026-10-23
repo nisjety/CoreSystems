@@ -4644,3 +4644,56 @@ counts and statuses only, never print a grant id into a shared log):
 Not decided here: the production rollout of the durable store (X-2) is not in the approved
 list of open questions. The code already implements its recommended default, and the
 rollout waits.
+
+## Browser broker grants for Quarry (WS1.A1): the decisions D1, D2, D5, D6 left in the broker, and the proto field allocation R-6 (2026-10-23)
+
+Written after the build, from the code on branch `quarryv2-next`, so a later reader
+can find why the broker looks the way it does. Plan: `docs/plans/quarry-browser-build-plan-2026-10-14.md`,
+WS1.A1, WS1.B, WS1.C and the allocation ledger (R-6).
+
+**D1, grants: the broker is the only place a browser grant is issued, and the grant carries the whole policy.**
+A grant has a kind (`session`, `run`, `sensitive_approval`), an owner, a ZDR flag and a
+bounded host list. Nothing outside the broker mints one: the model-gateway grant route is
+the single `AcquireGrant` caller and the model-gateway browser run route is the single
+`DeriveRunGrant` caller (both pinned by `scripts/tests/browser-grant-contract.test.mjs`).
+The TTL is `BROWSER_BROKER_GRANT_TTL_SECONDS` (900 by default, clamped to 30-3600); a run
+grant expires at `min(now + ttl, parent.ExpiresAt)`, so a run never outlives its session
+grant. Caps: 8 session hosts, 8 run hosts, 20 live session grants per owner, 8 live run
+grants per session grant. A derive that would widen its parent is refused
+(`ErrDeriveWidensParent`); a derive from any parent kind other than `session` needs an
+explicit non-empty host list of at most 8 (R-16, ships stricter from day one). Quarry holds
+`browser:read` on the broker and nothing else (X-1); no service principal holds
+`browser:write`. Production Quarry validates every action's grant through the broker with an
+org-scoped token.
+
+**D2, run control: grants do not widen what a run may do.** The broker has no script-hash
+scope and `/step` discards a script's return value, so `Evaluate` is rejected in Quarry
+rather than approved through a grant; the grant says where a run may go, not what code it
+may run. Grants carry no tab or takeover state: who controls a live run is Quarry's local
+gate (`USER_TOOK_OVER`), checked before the grant is revalidated (R-7 order).
+
+**D5, scrape: no broker contract.** Scrape is stateless fetch and takes no grant, so D5
+claims no `browser.proto` field. R-6 lists none for it.
+
+**D6, budgets: the claim rides on the grant, in the 40-44 block.** `budget_micro_usd=40`,
+`budget_max_steps=41`, `budget_max_runtime_s=42`, `budget_source=43`,
+`budget_minted_at_unix=44` on `AcquireGrantRequest`/`Response`, `ValidateGrantResponse` and
+`DeriveRunGrantRequest`/`Response` (45-49 reserved). The L1 test pins all five on every
+message that carries them.
+
+**R-6, `browser.proto` allocation (live messages used 1-9).** 10-19 WS1: `AcquireGrantRequest.zdr=10`;
+`AcquireGrantResponse.kind=10, zdr=11`; `ValidateGrantResponse.kind=10, owner_id=11, zdr=12`;
+the `DeriveRunGrant` messages (request `parent_grant_id=1, session_key=2, org_id=3,
+allowed_domains=4, purpose=5, ttl_seconds=6`; response `grant_id=1, endpoint=2, expires_at=3,
+allowed_domains=4, parent_grant_id=5, kind=6, zdr=7`). 20 WS7 `WebPolicy` (21-39 for its
+sub-fields); 40-44 WS6 (D6 above); 50-59 WS8 (`policy_mode`, `denied_domains`,
+`absolute_expires_at`, `resource_id`, `RenewGrant`). No `reserved` statements are added.
+Quarry vendors a subset of the file by hand (`crates/quarry-runtime/proto/browser.proto`);
+the L1 test fails when a vendored field differs in name, number or type. Go bindings are
+regenerated Go-only (`buf generate --template buf.gen.go-only.yaml`); the Python and
+TypeScript trees stay stale on purpose.
+
+**The broker's log lines.** The broker writes one line per grant issued and one per grant
+revoked (`grantlog.go`): kind, ZDR flag, host COUNT, and the grant id for a non-ZDR grant. A
+host, scope URL, organization or owner is never logged, and a ZDR grant's id is left out as
+well. `ValidateGrant` writes no line: it runs once per browser action.
