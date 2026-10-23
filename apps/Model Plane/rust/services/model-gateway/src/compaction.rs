@@ -17,6 +17,10 @@
 //! a tier-2 summary and the retry loop behind a too-long prompt live at the
 //! callers' IO edge (`sse.rs`, `tool_loop.rs`).
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::time::{Duration, Instant};
+
 use mp_contracts::model_plane::v1::ChatMessage;
 
 /// Prefix shared by every tool-result context block the tool loop injects
@@ -820,6 +824,276 @@ fn reusable_through(
         .iter()
         .all(|id| pinned_ids.contains(id))
         .then_some(through)
+}
+
+/// Ceiling on the tier-2 summarization call. It runs before the stream opens, so
+/// a slow summarizer must degrade to truncation rather than delay first byte.
+/// It is also how long a begun compaction may stay open before the
+/// [`CompactionLedger`] reports it unmatched.
+pub const COMPACTION_SUMMARY_TIMEOUT: Duration = Duration::from_secs(6);
+
+/// Counter of compaction brackets, labelled `phase` (`begin`, `commit`,
+/// `abort`) and `outcome` (a closed set: see [`CompactionTx`]).
+const COMPACTION_METRIC: &str = "mp_gateway_compaction_total";
+
+/// Why a compaction was abandoned. A closed set, so the `outcome` label of
+/// [`COMPACTION_METRIC`] cannot grow with request data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompactionAbort {
+    /// The summarizer did not answer within [`COMPACTION_SUMMARY_TIMEOUT`].
+    Timeout,
+    /// The summarizer's call failed.
+    ProviderError,
+    /// The summarizer answered with nothing to keep.
+    EmptySummary,
+}
+
+impl CompactionAbort {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Timeout => "timeout",
+            Self::ProviderError => "provider_error",
+            Self::EmptySummary => "empty_summary",
+        }
+    }
+}
+
+/// A bracket call the transaction refused because it had already closed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompactionRefusal {
+    /// The compaction was already committed.
+    AlreadyCommitted,
+    /// The compaction was already aborted: a summary that arrives after the
+    /// abort must not be taken for the one the prompt was built without.
+    AlreadyAborted,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TxState {
+    Open,
+    Committed,
+    Aborted,
+}
+
+/// Compactions begun in this process and not yet closed, keyed
+/// `(thread, generation)`. Advisory and per replica: it exists so a bracket
+/// that was begun and then dropped (a cancelled stream) shows up in the
+/// metric instead of vanishing.
+#[derive(Debug, Default)]
+pub struct CompactionLedger {
+    open: Mutex<HashMap<(String, u64), Instant>>,
+}
+
+impl CompactionLedger {
+    fn open_map(&self) -> std::sync::MutexGuard<'_, HashMap<(String, u64), Instant>> {
+        // A poisoned lock only means another thread panicked mid-insert; the
+        // map is still a valid set of timestamps.
+        self.open.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn begin(&self, thread_id: &str, generation: u64, now: Instant) {
+        self.open_map()
+            .insert((thread_id.to_owned(), generation), now);
+    }
+
+    fn close(&self, thread_id: &str, generation: u64) {
+        self.open_map().remove(&(thread_id.to_owned(), generation));
+    }
+
+    /// Remove and return every compaction begun more than `older_than` before
+    /// `now` that never closed.
+    pub fn take_unmatched(&self, now: Instant, older_than: Duration) -> Vec<(String, u64)> {
+        let mut open = self.open_map();
+        let stale: Vec<(String, u64)> = open
+            .iter()
+            .filter(|(_, begun)| now.saturating_duration_since(**begun) > older_than)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in &stale {
+            open.remove(key);
+        }
+        stale
+    }
+}
+
+fn shared_ledger() -> Arc<CompactionLedger> {
+    static LEDGER: OnceLock<Arc<CompactionLedger>> = OnceLock::new();
+    Arc::clone(LEDGER.get_or_init(Arc::default))
+}
+
+fn count(phase: &'static str, outcome: &'static str) {
+    metrics::counter!(COMPACTION_METRIC, "phase" => phase, "outcome" => outcome).increment(1);
+}
+
+/// One head-summary compaction as a bracket: begin, then exactly one of commit
+/// (with the digest of the summary that was kept) or abort (with the reason).
+///
+/// An abort leaves the prompt with [`DROPPED_HISTORY_NOTICE`] where the head
+/// was (see [`apply_head_summary`]); the bracket only records that this is what
+/// happened. Nothing here persists: the durable half is WS17.
+#[derive(Debug)]
+pub struct CompactionTx {
+    ledger: Arc<CompactionLedger>,
+    thread_id: String,
+    generation: u64,
+    state: TxState,
+}
+
+impl CompactionTx {
+    /// Begin a compaction of `thread_id` at `generation` on this process's ledger.
+    #[must_use]
+    pub fn begin(thread_id: &str, generation: u64) -> Self {
+        Self::begin_in(shared_ledger(), thread_id, generation)
+    }
+
+    fn begin_in(ledger: Arc<CompactionLedger>, thread_id: &str, generation: u64) -> Self {
+        let now = Instant::now();
+        for (thread, stale_generation) in ledger.take_unmatched(now, COMPACTION_SUMMARY_TIMEOUT) {
+            count("begin", "unmatched");
+            tracing::warn!(
+                thread_id = %thread,
+                generation = stale_generation,
+                "compaction begun and never closed; its stream was dropped or its task died"
+            );
+        }
+        ledger.begin(thread_id, generation, now);
+        count("begin", "started");
+        Self {
+            ledger,
+            thread_id: thread_id.to_owned(),
+            generation,
+            state: TxState::Open,
+        }
+    }
+
+    /// Close the compaction with the digest of the summary that was kept.
+    ///
+    /// # Errors
+    ///
+    /// Refused once the compaction has closed either way.
+    pub fn commit(&mut self, summary_digest: &str) -> Result<(), CompactionRefusal> {
+        self.close(TxState::Committed)?;
+        count("commit", "ok");
+        tracing::debug!(
+            thread_id = %self.thread_id,
+            generation = self.generation,
+            %summary_digest,
+            "compaction committed"
+        );
+        Ok(())
+    }
+
+    /// Close the compaction as abandoned.
+    ///
+    /// # Errors
+    ///
+    /// Refused once the compaction has closed either way.
+    pub fn abort(&mut self, reason: CompactionAbort) -> Result<(), CompactionRefusal> {
+        self.close(TxState::Aborted)?;
+        count("abort", reason.as_str());
+        tracing::debug!(
+            thread_id = %self.thread_id,
+            generation = self.generation,
+            reason = reason.as_str(),
+            "compaction aborted"
+        );
+        Ok(())
+    }
+
+    fn close(&mut self, to: TxState) -> Result<(), CompactionRefusal> {
+        let refusal = match self.state {
+            TxState::Open => None,
+            TxState::Committed => Some(CompactionRefusal::AlreadyCommitted),
+            TxState::Aborted => Some(CompactionRefusal::AlreadyAborted),
+        };
+        if let Some(refusal) = refusal {
+            let phase = match to {
+                TxState::Committed => "commit",
+                _ => "abort",
+            };
+            count(phase, "refused");
+            return Err(refusal);
+        }
+        self.state = to;
+        self.ledger.close(&self.thread_id, self.generation);
+        Ok(())
+    }
+}
+
+/// Stable, content-free name for a summary: the first 32 hex characters of its
+/// blake3 hash. What a commit records instead of the text.
+#[must_use]
+pub fn summary_digest(summary: &str) -> String {
+    let mut digest = blake3::hash(summary.trim().as_bytes()).to_hex().to_string();
+    digest.truncate(32);
+    digest
+}
+
+/// A summary written this turn, with the generation it carries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewHeadSummary {
+    pub record: StoredHeadSummary,
+    /// One more than the newest generation the thread had persisted: how many
+    /// times this thread's head has been summarised, counting this one.
+    pub generation: u64,
+}
+
+/// Same key `session_flow::with_head_summary` writes; the generation rides inside it.
+const HEAD_SUMMARY_KEY: &str = "head_summary";
+const GENERATION_KEY: &str = "compaction_generation";
+
+/// Record `new`'s generation inside the `head_summary` entry of `metadata`,
+/// beside what `session_flow::with_head_summary` wrote there. Nothing to stamp
+/// (no summary, or it was withheld under ZDR) leaves `metadata` as it was.
+#[must_use]
+pub fn stamp_generation(
+    metadata: Option<prost_types::Struct>,
+    new: Option<&NewHeadSummary>,
+) -> Option<prost_types::Struct> {
+    use prost_types::value::Kind;
+    let Some(new) = new else {
+        return metadata;
+    };
+    let mut metadata = metadata?;
+    if let Some(Kind::StructValue(record)) = metadata
+        .fields
+        .get_mut(HEAD_SUMMARY_KEY)
+        .and_then(|value| value.kind.as_mut())
+    {
+        // Counts stay far below f64's integer range.
+        #[allow(clippy::cast_precision_loss)]
+        let generation = new.generation as f64;
+        record.fields.insert(
+            GENERATION_KEY.to_owned(),
+            prost_types::Value {
+                kind: Some(Kind::NumberValue(generation)),
+            },
+        );
+    }
+    Some(metadata)
+}
+
+/// The generation a turn's persisted head summary carries; 0 for a record
+/// written before generations existed, or none.
+#[must_use]
+pub fn persisted_generation(metadata: Option<&prost_types::Struct>) -> u64 {
+    use prost_types::value::Kind;
+    let Some(Kind::StructValue(record)) = metadata
+        .and_then(|metadata| metadata.fields.get(HEAD_SUMMARY_KEY))
+        .and_then(|value| value.kind.as_ref())
+    else {
+        return 0;
+    };
+    match record
+        .fields
+        .get(GENERATION_KEY)
+        .and_then(|v| v.kind.as_ref())
+    {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        Some(Kind::NumberValue(value)) if value.is_finite() && *value >= 0.0 => *value as u64,
+        _ => 0,
+    }
 }
 
 /// Drop the oldest droppable group after a provider rejected the prompt for
@@ -2041,5 +2315,90 @@ mod tests {
         ];
         assert!(drop_oldest_group(&mut plain_drop, 6, 1));
         assert!(!plain_drop.iter().any(|m| m.content == "grounding"));
+    }
+
+    #[test]
+    fn a_begun_but_never_committed_compaction_is_reported_unmatched() {
+        let ledger = Arc::new(CompactionLedger::default());
+        let _never_closed = CompactionTx::begin_in(Arc::clone(&ledger), "thr_a", 3);
+        let mut closed = CompactionTx::begin_in(Arc::clone(&ledger), "thr_b", 1);
+        closed.commit("digest").expect("an open compaction commits");
+
+        let begun = Instant::now();
+        // Inside the summary timeout it is still in flight, not unmatched.
+        assert!(ledger
+            .take_unmatched(begun + Duration::from_secs(5), COMPACTION_SUMMARY_TIMEOUT)
+            .is_empty());
+        // Past it, only the one that never closed is reported, once.
+        let later = begun + COMPACTION_SUMMARY_TIMEOUT + Duration::from_secs(1);
+        assert_eq!(
+            ledger.take_unmatched(later, COMPACTION_SUMMARY_TIMEOUT),
+            vec![("thr_a".to_owned(), 3)]
+        );
+        assert!(ledger
+            .take_unmatched(later, COMPACTION_SUMMARY_TIMEOUT)
+            .is_empty());
+    }
+
+    #[test]
+    fn commit_after_abort_is_refused() {
+        let ledger = Arc::new(CompactionLedger::default());
+        let mut tx = CompactionTx::begin_in(Arc::clone(&ledger), "thr_a", 1);
+        tx.abort(CompactionAbort::Timeout)
+            .expect("an open compaction aborts");
+        assert_eq!(tx.commit("late"), Err(CompactionRefusal::AlreadyAborted));
+        assert_eq!(
+            tx.abort(CompactionAbort::ProviderError),
+            Err(CompactionRefusal::AlreadyAborted)
+        );
+        // The abort closed it: nothing is left to report.
+        assert!(ledger
+            .take_unmatched(Instant::now() + Duration::from_secs(60), Duration::ZERO)
+            .is_empty());
+    }
+
+    #[test]
+    fn abort_after_commit_is_refused() {
+        let mut tx = CompactionTx::begin_in(Arc::default(), "thr_a", 1);
+        tx.commit("digest").expect("an open compaction commits");
+        assert_eq!(
+            tx.abort(CompactionAbort::Timeout),
+            Err(CompactionRefusal::AlreadyCommitted)
+        );
+    }
+
+    #[test]
+    fn a_summary_digest_names_the_text_without_carrying_it() {
+        let digest = summary_digest("  user wants NOK  ");
+        assert_eq!(digest.len(), 32);
+        assert_eq!(digest, summary_digest("user wants NOK"));
+        assert_ne!(digest, summary_digest("user wants EUR"));
+        assert!(!digest.contains("NOK"));
+    }
+
+    #[test]
+    fn the_generation_rides_inside_the_head_summary_record() {
+        let new = NewHeadSummary {
+            record: StoredHeadSummary {
+                summary: "notes".to_owned(),
+                through_id: "m9".to_owned(),
+                pinned_ids: Vec::new(),
+            },
+            generation: 4,
+        };
+        let written = crate::session_flow::with_head_summary(None, Some(&new.record), false);
+        let stamped = stamp_generation(written.clone(), Some(&new));
+        assert_eq!(persisted_generation(stamped.as_ref()), 4);
+        // The record stays readable by the reader that predates generations.
+        assert_eq!(
+            crate::session_flow::persisted_head_summary(stamped.as_ref()),
+            Some(new.record.clone())
+        );
+        // A record without one, and a turn without a record, are generation 0.
+        assert_eq!(persisted_generation(written.as_ref()), 0);
+        assert_eq!(persisted_generation(None), 0);
+        // Withheld summary (ZDR) or none: nothing to stamp, metadata untouched.
+        assert_eq!(stamp_generation(None, Some(&new)), None);
+        assert_eq!(stamp_generation(written.clone(), None), written);
     }
 }

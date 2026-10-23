@@ -3929,43 +3929,46 @@ pub async fn invoke_stream_sse(
                             crate::session_flow::DirectAnswer {
                                 content: &assistant_output,
                                 agent_name: session_agent_name.as_deref(),
-                                metadata: crate::session_flow::with_head_summary(
-                                    crate::session_flow::with_compaction_summary(
-                                        crate::session_flow::with_result_receipt(
-                                            crate::session_flow::turn_evidence_metadata(
-                                                session_grounding.as_ref(),
-                                                &sink.recorded_citations(),
-                                                &sink.recorded_artifacts(),
-                                                // Scored, and where applicable verified, just
-                                                // above — so the durable turn carries the same
-                                                // number the stream reported, and a reader who
-                                                // opens this thread on another device sees why.
-                                                crate::session_flow::TurnQuality {
-                                                    confidence,
-                                                    verification: verification_decision
-                                                        .should_verify()
-                                                        .then(|| {
-                                                            crate::session_flow::TurnVerification {
-                                                                verdict: verdict.as_str(),
-                                                                kb_citations: evidence.kb_citations,
-                                                                web_citations: evidence
-                                                                    .web_citations,
-                                                                web_allowed: verify_web_allowed,
-                                                            }
-                                                        }),
-                                                },
+                                metadata: crate::compaction::stamp_generation(
+                                    crate::session_flow::with_head_summary(
+                                        crate::session_flow::with_compaction_summary(
+                                            crate::session_flow::with_result_receipt(
+                                                crate::session_flow::turn_evidence_metadata(
+                                                    session_grounding.as_ref(),
+                                                    &sink.recorded_citations(),
+                                                    &sink.recorded_artifacts(),
+                                                    // Scored, and where applicable verified, just
+                                                    // above — so the durable turn carries the same
+                                                    // number the stream reported, and a reader who
+                                                    // opens this thread on another device sees why.
+                                                    crate::session_flow::TurnQuality {
+                                                        confidence,
+                                                        verification: verification_decision
+                                                            .should_verify()
+                                                            .then(|| {
+                                                                crate::session_flow::TurnVerification {
+                                                                    verdict: verdict.as_str(),
+                                                                    kb_citations: evidence.kb_citations,
+                                                                    web_citations: evidence
+                                                                        .web_citations,
+                                                                    web_allowed: verify_web_allowed,
+                                                                }
+                                                            }),
+                                                    },
+                                                ),
+                                                result_receipt
+                                                    .lock()
+                                                    .ok()
+                                                    .and_then(|receipt| receipt.clone())
+                                                    .as_ref(),
                                             ),
-                                            result_receipt
-                                                .lock()
-                                                .ok()
-                                                .and_then(|receipt| receipt.clone())
-                                                .as_ref(),
+                                            &chunk.compaction_summary,
+                                            effective_zdr,
                                         ),
-                                        &chunk.compaction_summary,
+                                        head_summary.as_ref().map(|new| &new.record),
                                         effective_zdr,
                                     ),
                                     head_summary.as_ref(),
-                                    effective_zdr,
                                 ),
                             },
                             &req_id,
@@ -4649,9 +4652,6 @@ const MAX_THREAD_CONTEXT_MESSAGES: usize = 24;
 /// the retained summary takes the slot the dropped head used to occupy and the
 /// prompt still carries at most [`MAX_THREAD_CONTEXT_MESSAGES`] messages.
 const COMPACTED_TAIL_MESSAGES: usize = MAX_THREAD_CONTEXT_MESSAGES - 1;
-/// Ceiling on the tier-2 summarization call. It runs before the stream opens, so
-/// a slow summarizer must degrade to truncation rather than delay first byte.
-const COMPACTION_SUMMARY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6);
 /// Retries allowed after a provider rejects the prompt for length. Matches the
 /// reference implementation's allowance: enough to recover a turn that is merely
 /// over the line, few enough that a prompt which can never fit fails fast.
@@ -5184,7 +5184,7 @@ struct RecentThread {
     messages: Vec<ChatMessage>,
     /// Set only in token-budget mode, when this turn wrote a new summary; the
     /// answer's persisted metadata carries it so later turns can reuse it.
-    head_summary: Option<crate::compaction::StoredHeadSummary>,
+    head_summary: Option<crate::compaction::NewHeadSummary>,
 }
 
 /// How much of the about-to-be-discarded head is used as the memory query.
@@ -5501,6 +5501,9 @@ async fn load_recent_thread_messages(
     };
     // The newest summary an earlier turn persisted, read only in budget mode.
     let mut stored_summary: Option<crate::compaction::StoredHeadSummary> = None;
+    // How many times earlier turns summarised this thread's head, from the
+    // same record; a record without one counts as 0.
+    let mut stored_generation = 0u64;
     // `message_id` is carried alongside each turn only as far as the pin
     // resolution below; `ChatMessage` (what the provider sees) has no field for
     // our identifiers and must not gain one.
@@ -5529,6 +5532,8 @@ async fn load_recent_thread_messages(
                         crate::session_flow::persisted_head_summary(message.metadata.as_ref())
                     {
                         stored_summary = Some(stored);
+                        stored_generation =
+                            crate::compaction::persisted_generation(message.metadata.as_ref());
                     }
                 }
                 crate::compaction::IdentifiedMessage {
@@ -5577,6 +5582,7 @@ async fn load_recent_thread_messages(
             thread_id,
             loaded,
             stored_summary.as_ref(),
+            stored_generation,
             pinned_message_ids,
             bearer,
             summarizer,
@@ -5661,7 +5667,7 @@ async fn load_recent_thread_messages(
     {
         let transcript = crate::compaction::render_head_transcript(&messages, head);
         let summary =
-            summarize_head(state, org_id, thread_id, &transcript, bearer, summarizer).await;
+            summarize_head(state, org_id, thread_id, 0, &transcript, bearer, summarizer).await;
         messages = crate::compaction::apply_head_summary(messages, head, summary.as_deref());
     }
 
@@ -5677,6 +5683,9 @@ async fn summarize_head(
     state: &AppState,
     org_id: &str,
     thread_id: &str,
+    // The generation this compaction would persist as; 0 where nothing is
+    // persisted (the message-count path).
+    generation: u64,
     transcript: &str,
     bearer: &VerifiedModelBearer,
     summarizer: &SummarizerContext<'_>,
@@ -5689,12 +5698,15 @@ async fn summarize_head(
     } else {
         fetch_compaction_memory_directive(state, org_id, thread_id, transcript, bearer).await
     };
+    // The bracket opens after the memory read so that what it times is the
+    // bounded call below.
+    let mut tx = crate::compaction::CompactionTx::begin(thread_id, generation);
     // Bounded because this runs BEFORE the stream opens: an unbounded
     // summarization call would reintroduce the dead spinner that moving the
     // tool phase into the stream task just removed. On timeout we take the
     // truncation fallback, which is exactly the pre-compaction behaviour.
-    let summary = tokio::time::timeout(
-        COMPACTION_SUMMARY_TIMEOUT,
+    let answer = tokio::time::timeout(
+        crate::compaction::COMPACTION_SUMMARY_TIMEOUT,
         direct_infer(
             state,
             &format!("{}-compaction", summarizer.request_id),
@@ -5711,14 +5723,29 @@ async fn summarize_head(
             summarizer.inference_bearer,
         ),
     )
-    .await
-    // A timeout and a provider error are the same outcome here — no summary
-    // — and compaction is best-effort by contract, so both collapse to
-    // `None` and take the truncation fallback.
-    .map_err(|_| ())
-    .and_then(|result| result.map_err(|_| ()))
-    .ok()
-    .map(|answer| answer.content);
+    .await;
+    // A timeout and a provider error are the same outcome for the prompt — no
+    // summary — and compaction is best-effort by contract, so both take the
+    // truncation fallback; the bracket keeps them apart. A fresh bracket
+    // cannot refuse a close, so the results are not read.
+    let summary = match answer {
+        Err(_) => {
+            let _ = tx.abort(crate::compaction::CompactionAbort::Timeout);
+            None
+        }
+        Ok(Err(_)) => {
+            let _ = tx.abort(crate::compaction::CompactionAbort::ProviderError);
+            None
+        }
+        Ok(Ok(answer)) if answer.content.trim().is_empty() => {
+            let _ = tx.abort(crate::compaction::CompactionAbort::EmptySummary);
+            Some(answer.content)
+        }
+        Ok(Ok(answer)) => {
+            let _ = tx.commit(&crate::compaction::summary_digest(&answer.content));
+            Some(answer.content)
+        }
+    };
     if summary.is_none() {
         tracing::warn!(
             %thread_id,
@@ -5740,6 +5767,7 @@ async fn budget_compacted_thread(
     thread_id: &str,
     loaded: Vec<crate::compaction::IdentifiedMessage>,
     stored: Option<&crate::compaction::StoredHeadSummary>,
+    stored_generation: u64,
     pinned_message_ids: &[String],
     bearer: &VerifiedModelBearer,
     summarizer: &SummarizerContext<'_>,
@@ -5761,8 +5789,21 @@ async fn budget_compacted_thread(
         };
     };
     let transcript = crate::compaction::render_head_transcript(&plan.messages, head);
-    let summary = summarize_head(state, org_id, thread_id, &transcript, bearer, summarizer).await;
-    let head_summary = summary.as_deref().and_then(|summary| plan.record(summary));
+    let generation = stored_generation + 1;
+    let summary = summarize_head(
+        state,
+        org_id,
+        thread_id,
+        generation,
+        &transcript,
+        bearer,
+        summarizer,
+    )
+    .await;
+    let head_summary = summary
+        .as_deref()
+        .and_then(|summary| plan.record(summary))
+        .map(|record| crate::compaction::NewHeadSummary { record, generation });
     RecentThread {
         messages: crate::compaction::apply_head_summary(plan.messages, head, summary.as_deref()),
         head_summary,
@@ -6618,7 +6659,7 @@ async fn run_infer_fallback(
     // The turn's clock: the fallback call is the turn's answer call.
     timing: &crate::turn_timing::TurnTiming,
     // A compaction summary written this turn, persisted with the answer.
-    head_summary: Option<&crate::compaction::StoredHeadSummary>,
+    head_summary: Option<&crate::compaction::NewHeadSummary>,
     // How the answer's content is retained, stated on its usage frame.
     retention_class: Option<crate::sse_events::RetentionClass>,
 ) {
@@ -6837,22 +6878,25 @@ async fn run_infer_fallback(
                     // The fallback path runs no tool loop, so retrieval grounding
                     // is the only evidence it can have — and it runs no
                     // verification pass either, so there is no verdict to record.
-                    metadata: crate::session_flow::with_head_summary(
-                        crate::session_flow::with_compaction_summary(
-                            crate::session_flow::turn_evidence_metadata(
-                                grounding,
-                                &[],
-                                &[],
-                                crate::session_flow::TurnQuality {
-                                    confidence,
-                                    verification: None,
-                                },
+                    metadata: crate::compaction::stamp_generation(
+                        crate::session_flow::with_head_summary(
+                            crate::session_flow::with_compaction_summary(
+                                crate::session_flow::turn_evidence_metadata(
+                                    grounding,
+                                    &[],
+                                    &[],
+                                    crate::session_flow::TurnQuality {
+                                        confidence,
+                                        verification: None,
+                                    },
+                                ),
+                                &resp.compaction_summary,
+                                fallback_zdr,
                             ),
-                            &resp.compaction_summary,
+                            head_summary.map(|new| &new.record),
                             fallback_zdr,
-                        ),
+                            ),
                         head_summary,
-                        fallback_zdr,
                     ),
                 },
                 request_id,
