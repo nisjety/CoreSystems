@@ -4,7 +4,7 @@ What was done: the driver capture API (capture_screenshot, capture_pdf, current_
 
 Left (in order):
 1. Run the spike in the edge image's Chromium and fill the table in docs/SCRAPE_CAPTURE.md; set SINGLE_CAPTURE_MAX_DEVICE_PX (quarry-core capture.rs) from it.
-2. Run the tests named for WS13.3 (commands in the RUNBOOKS section). The quarry-runtime lib-test build needs W2-U39's step_receipts.rs fix first (policy_mode literal at lines 878 and 1241).
+2. Run the tests named for WS13.3 (commands in the RUNBOOKS section). The quarry-runtime lib-test build passed (rc 0) after W2-U39 fixed the policy_mode literals in step_receipts.rs.
 3. WS13.4b wires these into /v1/scrape behind QUARRY_EDGE__SCRAPE_CAPTURE (default off).
 
 Traps found:

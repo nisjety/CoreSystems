@@ -17,7 +17,7 @@ Status: BUILT to scope and compile-checked in part. NOT run: no test suite, no C
 - `cargo check -p quarry-browser --tests`: rc 0.
 - `cargo check -p quarry-browser --features chromiumoxide --tests` (includes the live test module, compiled not run): rc 0.
 - `rustfmt --edition 2021 --check` on capture_plan.rs and capture_live.rs: clean after one `rustfmt` run that formatted those two new files only.
-- `cargo check -p quarry-runtime --tests`: the lib builds with the artifact_store change; the lib-test build FAILS in `crates/quarry-runtime/src/step_receipts.rs` lines 878 and 1241 (`missing field policy_mode in AgentRunCheckpoint`). That file is W2-U39's in-progress work, not this unit's. Retried twice (after the first attempt the blocker was still there at the second). Not run: quarry-runtime tests.
+- `cargo check -p quarry-runtime --tests`: rc 0 on the third attempt. The first two attempts failed in `crates/quarry-runtime/src/step_receipts.rs` (`missing field policy_mode in AgentRunCheckpoint`, W2-U39's in-progress work); W2-U39 fixed it before the third attempt. Not run: quarry-runtime tests.
 - Gitleaks pre-commit hook: no leaks, both commits.
 
 ## Not run (build-first rule)
