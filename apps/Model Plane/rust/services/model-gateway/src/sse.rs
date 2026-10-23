@@ -25,6 +25,10 @@ use serde_json::{json, Value};
 use tokio_stream::{wrappers::ReceiverStream, StreamExt as _};
 use tracing::info;
 
+// Declared here, not in lib.rs, so this slice stays inside its owned files.
+#[path = "cache_telemetry.rs"]
+pub mod cache_telemetry;
+
 use crate::{
     auth::{
         Claims, VerifiedCapabilityBearer, VerifiedCostBearer,
@@ -2755,6 +2759,11 @@ pub async fn invoke_stream_sse(
             &grpc_req.provider_hint,
             &grpc_req.subscription_connection_id,
         );
+        // Advisory cache-miss classification (WS02-S2): digest the leading
+        // system messages now, before any retry rewrites the request. A ZDR
+        // turn is never observed, so no digest of its prompt is kept.
+        let cache_prefix = (!effective_zdr)
+            .then(|| cache_telemetry::PrefixDigest::of(&grpc_req.messages));
 
         // No response cache is consulted here, deliberately. A prompt-keyed
         // answer cache used to sit at exactly this point and was removed
@@ -4190,6 +4199,16 @@ pub async fn invoke_stream_sse(
                     );
                     // A summary as of now, beside the unchanged `latency_ms`.
                     usage_envelope.payload["timing"] = timing.summary();
+                    if let Some(reason) = cache_telemetry::miss_reason_for_turn(
+                        cache_prefix.filter(|_| cost_basis != crate::pricing::CostBasis::Subscription),
+                        &org_clone,
+                        &session_thread_id,
+                        &model_used,
+                        input_tokens,
+                        cache_read_tokens,
+                    ) {
+                        usage_envelope.payload["cache_miss_reason"] = reason.into();
+                    }
                     if let Err(e) = publisher
                         .publish(&subjects::usage_subject(&org_clone), &usage_envelope)
                         .await
@@ -6617,6 +6636,9 @@ async fn run_infer_fallback(
         &grpc_req.provider_hint,
         &grpc_req.subscription_connection_id,
     );
+    // Advisory cache-miss classification (WS02-S2); never for a ZDR turn.
+    let cache_prefix =
+        (!fallback_zdr).then(|| cache_telemetry::PrefixDigest::of(&grpc_req.messages));
     let answer_call = timing.call(crate::turn_timing::Phase::AnswerStream);
     let result = state
         .inference_client
@@ -7029,6 +7051,16 @@ async fn run_infer_fallback(
                 cost_basis,
             );
             usage.payload["timing"] = timing.summary();
+            if let Some(reason) = cache_telemetry::miss_reason_for_turn(
+                cache_prefix.filter(|_| cost_basis != crate::pricing::CostBasis::Subscription),
+                org_id,
+                &thread_id,
+                &model_used,
+                input_tokens,
+                cache_read_tokens,
+            ) {
+                usage.payload["cache_miss_reason"] = reason.into();
+            }
             let _ = publisher
                 .publish(&subjects::usage_subject(org_id), &usage)
                 .await;

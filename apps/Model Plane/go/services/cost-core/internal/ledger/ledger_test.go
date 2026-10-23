@@ -333,3 +333,14 @@ func TestStore_ListEntriesCarriesCostBasis(t *testing.T) {
 		t.Fatalf("cost bases = %v", bases)
 	}
 }
+
+// The cache miss reason is validated like the cost basis: a value outside the
+// closed set is a caller error at the storage boundary.
+func TestStore_RejectsACacheMissReasonOutsideTheClosedSet(t *testing.T) {
+	s := NewStore()
+	err := s.RecordEntry(context.Background(), Entry{OrgID: "org1", UserID: "u1", InputTokens: 10, CacheMissReason: "cold"})
+	if !errors.Is(err, ErrInvalidEntry) {
+		t.Fatalf("err = %v, want ErrInvalidEntry", err)
+	}
+	mustRecord(t, s, Entry{OrgID: "org1", UserID: "u1", InputTokens: 10, CacheMissReason: CacheMissNoBaseline})
+}
