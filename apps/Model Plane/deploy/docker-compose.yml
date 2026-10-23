@@ -304,6 +304,9 @@ services:
       # literal `true` turns it on. Roll out in this order: inference-core adapter flags on first, then this switch. With
       # this on and the adapter flags off, a deep request sends budget 0 and a level nothing renders (no thinking).
       MODEL_GATEWAY_EFFORT_LADDER: ${MODEL_GATEWAY_EFFORT_LADDER:-false}
+      # WS04-S4: read the plan grant from session-core so a Do run started on another replica carries the rung. Off by default; only
+      # the literal `true` turns it on. Deploy session-core first so migration 0050 has applied; off keeps the in-memory grants.
+      MODEL_GATEWAY_DURABLE_PLAN_GRANT: ${MODEL_GATEWAY_DURABLE_PLAN_GRANT:-false}
       # Kill-switches for the review-latency levers. Empty keeps a lever ON;
       # 0/off/false/no/disabled turns it off at the next restart, no rebuild.
       MODEL_GATEWAY_SOLE_NOTE_PREFETCH: ${MODEL_GATEWAY_SOLE_NOTE_PREFETCH:-}
@@ -1288,6 +1291,13 @@ services:
       EXECUTION_CORE_AUTH_AUDIENCE: ${EXECUTION_CORE_AUTH_AUDIENCE:-execution-core}
       EXECUTION_CORE_SERVICE_ID: ${EXECUTION_CORE_SERVICE_ID:-execution-core}
       EXECUTION_CORE_SERVICE_API_KEY: ${EXECUTION_CORE_SERVICE_API_KEY:?EXECUTION_CORE_SERVICE_API_KEY is required}
+      # WS05-S3/S4: how the permission engine reads a tool's declared class. TOOL_CLASS_GATE is off, shadow or enforce (an unknown value is
+      # off): shadow compares with the legacy name heuristics and counts divergence, enforce reads the signed v2 decision. MCP tools reach a
+      # Do run only with MCP_DO_TOOLS=read (read-class tools; `all` is blocked) AND TOOL_CLASS_GATE=enforce; MCP_DO_TOOL_CAP bounds the offer.
+      # Roll execution-core first, then capability-core, then shadow, then enforce.
+      TOOL_CLASS_GATE: ${TOOL_CLASS_GATE:-off}
+      MCP_DO_TOOLS: ${MCP_DO_TOOLS:-off}
+      MCP_DO_TOOL_CAP: ${MCP_DO_TOOL_CAP:-40}
       # Per-call capability decisions are signed by capability-core and
       # verified immediately before execution. Development may leave these
       # unset (allow decisions then carry no evidence); production overlays
