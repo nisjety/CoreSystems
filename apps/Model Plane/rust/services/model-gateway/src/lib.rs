@@ -94,6 +94,7 @@ pub mod tools;
 pub mod trajectory;
 pub mod turn_timing;
 pub mod url_domain;
+pub mod usage_meter;
 pub mod verbosity;
 pub mod verevon_actions;
 pub mod verification;

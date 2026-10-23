@@ -3,8 +3,9 @@
 //!
 //! - `tool_round_tokens_are_absent_from_the_final_usage_frame` flips in WS27-S2, when
 //!   the tool-decision calls are metered into the turn's usage.
-//! - `unknown_model_priced_from_default_row` flips in WS27-S1, when a model the
-//!   catalogue does not list stops taking the `default` row's price.
+//! - `unknown_model_priced_from_default_row` flipped in WS27-S1, when a model the
+//!   catalogue does not list stopped taking the `default` row's price; it is now
+//!   `unknown_model_is_unpriced_not_default_priced`.
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -830,11 +831,11 @@ async fn tool_round_tokens_are_absent_from_the_final_usage_frame() {
     clear_auth_env();
 }
 
-/// Today a model the catalogue does not list is priced at the `default` row, so a
-/// confident figure reaches the stream and the ledger for a model whose price is
-/// unknown. WS27-S1 makes that cost unknown instead.
+/// A model the catalogue does not list used to be priced at the `default` row, so a
+/// confident figure reached the stream and the ledger for a model whose price is
+/// unknown. Its cost is unknown instead, and a listed model is still priced.
 #[tokio::test]
-async fn unknown_model_priced_from_default_row() {
+async fn unknown_model_is_unpriced_not_default_priced() {
     let catalogue = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/api/v1/pricing"))
@@ -848,7 +849,7 @@ async fn unknown_model_priced_from_default_row() {
         .await;
     let pricing = PricingCache::new(Some(catalogue.uri()), reqwest::Client::new());
 
-    let cost = pricing
+    let unknown = pricing
         .cost_usd_for(
             CostBasis::Metered,
             "a-model-the-catalogue-does-not-list",
@@ -857,8 +858,13 @@ async fn unknown_model_priced_from_default_row() {
             0,
             0,
         )
+        .await;
+    assert_eq!(unknown, None, "the default row is not this model's price");
+
+    let listed = pricing
+        .cost_usd_for(CostBasis::Metered, "gpt-4o-mini", 1_000, 500, 0, 0)
         .await
-        .expect("priced from the default row");
-    let want = 1_000.0 / 1_000_000.0 * 3.0 + 500.0 / 1_000_000.0 * 15.0;
-    assert!((cost - want).abs() < 1e-12, "got {cost}, want {want}");
+        .expect("a listed model is priced");
+    let want = 1_000.0 / 1_000_000.0 * 0.15 + 500.0 / 1_000_000.0 * 0.6;
+    assert!((listed - want).abs() < 1e-12, "got {listed}, want {want}");
 }
