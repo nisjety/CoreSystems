@@ -403,6 +403,48 @@ jobs:
         if: always()
         run: cargo test -p quarry-browser --features chromiumoxide -- --ignored --list
 
+  # WS17.P1 (profile store): ordered saves, deletion tombstones and exists run against a real
+  # Postgres 16. Advisory for the first two weeks (continue-on-error), then promoted to required.
+  quarry-postgres-store:
+    name: Quarry Postgres profile store tests
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: 'apps/Ingestion Plane/Quarry-v2'
+    env:
+      DATABASE_URL: postgres://postgres:quarry@127.0.0.1:5434/quarry_test?sslmode=disable
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: quarry
+          POSTGRES_DB: quarry_test
+        ports:
+          - 5434:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d quarry_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: 'apps/Ingestion Plane/Quarry-v2 -> target'
+
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: '27.x'
+
+      - name: Profile store tests - quarry-runtime (Postgres)
+        run: cargo test -p quarry-runtime --features postgres-queue profile -- --test-threads=1
+
   cargo-audit:
     name: cargo-audit
     runs-on: ubuntu-latest
