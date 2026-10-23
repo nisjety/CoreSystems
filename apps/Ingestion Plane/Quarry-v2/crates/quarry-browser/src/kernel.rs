@@ -591,15 +591,26 @@ impl BrowserDriver for KernelDriver {
                 owner: None,
             };
             match store
-                .save(&session.lease.org_id, &session.lease.profile_id, &snapshot, &meta)
+                .save(
+                    &session.lease.org_id,
+                    &session.lease.profile_id,
+                    &snapshot,
+                    &meta,
+                )
                 .await
             {
                 Ok(outcome) if !outcome.is_stored() => {
-                    tracing::info!(reason = outcome.reason_class(), "kernel session capture ignored");
+                    tracing::info!(
+                        reason = outcome.reason_class(),
+                        "kernel session capture ignored"
+                    );
                 }
                 Ok(_) => {}
                 Err(e) => {
-                    tracing::warn!(error_class = e.code.wire_name(), "kernel session capture save failed");
+                    tracing::warn!(
+                        error_class = e.code.wire_name(),
+                        "kernel session capture save failed"
+                    );
                 }
             }
         }

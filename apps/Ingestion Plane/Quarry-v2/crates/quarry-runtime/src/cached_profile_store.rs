@@ -229,7 +229,10 @@ mod tests {
             redact_credentials("redis://user:s3cret@host/0"),
             "redis://***@host/0"
         );
-        assert_eq!(redact_credentials("redis://host:6379/0"), "redis://host:6379/0");
+        assert_eq!(
+            redact_credentials("redis://host:6379/0"),
+            "redis://host:6379/0"
+        );
     }
 
     use super::*;
@@ -338,7 +341,10 @@ mod tests {
         // guaranteed hit regardless of the read-through path under test.
         // Seeding `inner` directly leaves the cache genuinely cold so the
         // first `store.load()` below exercises a real cache miss.
-        inner.save("org_a", &id, &snap, &SaveMeta::now(None)).await.unwrap();
+        inner
+            .save("org_a", &id, &snap, &SaveMeta::now(None))
+            .await
+            .unwrap();
         let _ = store.load("org_a", &id).await.unwrap();
         let _ = store.load("org_a", &id).await.unwrap();
         let _ = store.load("org_a", &id).await.unwrap();
@@ -359,7 +365,12 @@ mod tests {
         // cold cache makes the first `store.load()` a real, countable
         // inner hit instead of an immediate write-through cache hit.
         inner
-            .save("org_a", &id, &SessionSnapshot::default(), &SaveMeta::now(None))
+            .save(
+                "org_a",
+                &id,
+                &SessionSnapshot::default(),
+                &SaveMeta::now(None),
+            )
             .await
             .unwrap();
         let _ = store.load("org_a", &id).await.unwrap();
@@ -387,7 +398,15 @@ mod tests {
             ..SessionSnapshot::default()
         };
         inner
-            .save("org_a", &id, &newer, &SaveMeta { saved_at: now, owner: None })
+            .save(
+                "org_a",
+                &id,
+                &newer,
+                &SaveMeta {
+                    saved_at: now,
+                    owner: None,
+                },
+            )
             .await
             .unwrap();
         // An older capture arrives through the cache wrapper and is ignored.
@@ -423,7 +442,12 @@ mod tests {
         let store = CachedProfileStore::new(inner.clone(), redis);
         let id: ProfileKind = quarry_core::ids::Id::new();
         store
-            .save("org_a", &id, &SessionSnapshot::default(), &SaveMeta::now(None))
+            .save(
+                "org_a",
+                &id,
+                &SessionSnapshot::default(),
+                &SaveMeta::now(None),
+            )
             .await
             .unwrap();
 

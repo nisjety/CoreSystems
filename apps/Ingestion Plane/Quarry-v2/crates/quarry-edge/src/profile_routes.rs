@@ -107,14 +107,7 @@ pub async fn save_profile(
     Json(req): Json<SaveProfileRequest>,
 ) -> Result<Json<Envelope<SaveProfileResponse>>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = crate::request_id::current();
-    crate::zdr_refusal::refuse_for_claims(
-        &state,
-        &claims,
-        None,
-        &request_id,
-        "profiles",
-        "save",
-    )?;
+    crate::zdr_refusal::refuse_for_claims(&state, &claims, None, &request_id, "profiles", "save")?;
 
     let profile_id = match req.profile_id.as_deref() {
         Some(s) => parse_id(s).map_err(|e| err_response(&request_id, e))?,

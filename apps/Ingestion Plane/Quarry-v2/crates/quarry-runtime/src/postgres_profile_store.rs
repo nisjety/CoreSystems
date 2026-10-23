@@ -88,9 +88,8 @@ impl PostgresProfileStore {
 /// to the store it builds (see `main.rs`). The first tick runs immediately.
 pub fn spawn_tombstone_sweeper(store: PostgresProfileStore) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(std::time::Duration::from_secs(
-            TOMBSTONE_SWEEP_INTERVAL_S,
-        ));
+        let mut tick =
+            tokio::time::interval(std::time::Duration::from_secs(TOMBSTONE_SWEEP_INTERVAL_S));
         loop {
             tick.tick().await;
             match store.purge_expired_tombstones().await {
@@ -365,7 +364,10 @@ mod tests {
         clean(&pool).await;
         let store = PostgresProfileStore::new(pool);
         let id: ProfileKind = quarry_core::ids::Id::new();
-        store.save("org_a", &id, &snap(), &SaveMeta::now(None)).await.unwrap();
+        store
+            .save("org_a", &id, &snap(), &SaveMeta::now(None))
+            .await
+            .unwrap();
 
         let loaded = store.load("org_a", &id).await.unwrap().unwrap();
         assert_eq!(loaded.user_agent.as_deref(), Some("test/1.0"));
@@ -381,11 +383,17 @@ mod tests {
         let store = PostgresProfileStore::new(pool);
         let id: ProfileKind = quarry_core::ids::Id::new();
 
-        store.save("org_a", &id, &snap(), &SaveMeta::now(None)).await.unwrap();
+        store
+            .save("org_a", &id, &snap(), &SaveMeta::now(None))
+            .await
+            .unwrap();
         // Second save with different content should overwrite, not insert.
         let mut other = snap();
         other.user_agent = Some("test/2.0".into());
-        store.save("org_a", &id, &other, &SaveMeta::now(None)).await.unwrap();
+        store
+            .save("org_a", &id, &other, &SaveMeta::now(None))
+            .await
+            .unwrap();
 
         let loaded = store.load("org_a", &id).await.unwrap().unwrap();
         assert_eq!(loaded.user_agent.as_deref(), Some("test/2.0"));
@@ -403,7 +411,10 @@ mod tests {
         let store = PostgresProfileStore::new(pool);
         let id: ProfileKind = quarry_core::ids::Id::new();
 
-        store.save("org_a", &id, &snap(), &SaveMeta::now(None)).await.unwrap();
+        store
+            .save("org_a", &id, &snap(), &SaveMeta::now(None))
+            .await
+            .unwrap();
 
         // The same profile_id under a DIFFERENT org MUST be invisible
         // (it's actually inaccessible because the PK is composite).
@@ -420,7 +431,10 @@ mod tests {
     }
 
     fn meta_at(saved_at: chrono::DateTime<chrono::Utc>) -> SaveMeta {
-        SaveMeta { saved_at, owner: None }
+        SaveMeta {
+            saved_at,
+            owner: None,
+        }
     }
 
     #[tokio::test]
@@ -432,11 +446,19 @@ mod tests {
         let store = PostgresProfileStore::new(pool);
         let id: ProfileKind = quarry_core::ids::Id::new();
         let now = chrono::Utc::now();
-        store.save("org_a", &id, &snap(), &meta_at(now)).await.unwrap();
+        store
+            .save("org_a", &id, &snap(), &meta_at(now))
+            .await
+            .unwrap();
         let mut older = snap();
         older.user_agent = Some("older".into());
         let outcome = store
-            .save("org_a", &id, &older, &meta_at(now - chrono::Duration::seconds(10)))
+            .save(
+                "org_a",
+                &id,
+                &older,
+                &meta_at(now - chrono::Duration::seconds(10)),
+            )
             .await
             .unwrap();
         assert_eq!(outcome, SaveOutcome::IgnoredStale);
@@ -474,7 +496,10 @@ mod tests {
         clean(&pool).await;
         let store = PostgresProfileStore::new(pool);
         let id: ProfileKind = quarry_core::ids::Id::new();
-        store.save("org_a", &id, &snap(), &SaveMeta::now(None)).await.unwrap();
+        store
+            .save("org_a", &id, &snap(), &SaveMeta::now(None))
+            .await
+            .unwrap();
         store.delete("org_a", &id).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         let outcome = store
@@ -518,17 +543,30 @@ mod tests {
         let id: ProfileKind = quarry_core::ids::Id::new();
         let now = chrono::Utc::now();
         assert_eq!(
-            store.save("org_a", &id, &snap(), &meta_at(now)).await.unwrap(),
+            store
+                .save("org_a", &id, &snap(), &meta_at(now))
+                .await
+                .unwrap(),
             SaveOutcome::Stored { rev: 1 }
         );
         let stale = store
-            .save("org_a", &id, &snap(), &meta_at(now - chrono::Duration::seconds(10)))
+            .save(
+                "org_a",
+                &id,
+                &snap(),
+                &meta_at(now - chrono::Duration::seconds(10)),
+            )
             .await
             .unwrap();
         assert_eq!(stale, SaveOutcome::IgnoredStale);
         assert_eq!(
             store
-                .save("org_a", &id, &snap(), &meta_at(now + chrono::Duration::seconds(1)))
+                .save(
+                    "org_a",
+                    &id,
+                    &snap(),
+                    &meta_at(now + chrono::Duration::seconds(1))
+                )
                 .await
                 .unwrap(),
             SaveOutcome::Stored { rev: 2 }
@@ -546,7 +584,10 @@ mod tests {
             .await;
         let store = PostgresProfileStore::new(pool.clone());
         let id: ProfileKind = quarry_core::ids::Id::new();
-        store.save("org_a", &id, &snap(), &SaveMeta::now(None)).await.unwrap();
+        store
+            .save("org_a", &id, &snap(), &SaveMeta::now(None))
+            .await
+            .unwrap();
         store.delete("org_a", &id).await.unwrap();
         let (rows,): (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM quarry_profiles WHERE org_id = $1 AND profile_id = $2",
@@ -608,7 +649,10 @@ mod tests {
         let store = PostgresProfileStore::new(pool);
         let id: ProfileKind = quarry_core::ids::Id::new();
         assert!(!store.exists("org_a", &id).await.unwrap());
-        store.save("org_a", &id, &snap(), &SaveMeta::now(None)).await.unwrap();
+        store
+            .save("org_a", &id, &snap(), &SaveMeta::now(None))
+            .await
+            .unwrap();
         assert!(store.exists("org_a", &id).await.unwrap());
         assert!(!store.exists("org_b", &id).await.unwrap());
     }
@@ -623,10 +667,16 @@ mod tests {
 
         let a: ProfileKind = quarry_core::ids::Id::new();
         let b: ProfileKind = quarry_core::ids::Id::new();
-        store.save("org_a", &a, &snap(), &SaveMeta::now(None)).await.unwrap();
+        store
+            .save("org_a", &a, &snap(), &SaveMeta::now(None))
+            .await
+            .unwrap();
         // Tick to ensure distinct updated_at values.
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        store.save("org_a", &b, &snap(), &SaveMeta::now(None)).await.unwrap();
+        store
+            .save("org_a", &b, &snap(), &SaveMeta::now(None))
+            .await
+            .unwrap();
 
         let ids = store.list("org_a").await.unwrap();
         assert_eq!(ids.len(), 2);

@@ -483,7 +483,10 @@ mod tests {
             timezone: Some("America/New_York".into()),
         };
 
-        store.save("org_a", &profile_id, &snapshot, &SaveMeta::now(None)).await.unwrap();
+        store
+            .save("org_a", &profile_id, &snapshot, &SaveMeta::now(None))
+            .await
+            .unwrap();
         let loaded = store.load("org_a", &profile_id).await.unwrap().unwrap();
 
         assert_eq!(loaded.cookies.len(), 1);
@@ -519,7 +522,10 @@ mod tests {
             locale: None,
             timezone: None,
         };
-        store.save("org_a", &pid, &snapshot, &SaveMeta::now(None)).await.unwrap();
+        store
+            .save("org_a", &pid, &snapshot, &SaveMeta::now(None))
+            .await
+            .unwrap();
 
         // Cross-tenant load: must miss.
         assert!(store.load("org_b", &pid).await.unwrap().is_none());
@@ -544,7 +550,10 @@ mod tests {
         let profile_id: ProfileKind = Id::new();
         let snapshot = SessionSnapshot::default();
 
-        store.save("org_a", &profile_id, &snapshot, &SaveMeta::now(None)).await.unwrap();
+        store
+            .save("org_a", &profile_id, &snapshot, &SaveMeta::now(None))
+            .await
+            .unwrap();
         assert!(store.load("org_a", &profile_id).await.unwrap().is_some());
 
         store.delete("org_a", &profile_id).await.unwrap();
@@ -558,11 +567,21 @@ mod tests {
         let p2: ProfileKind = Id::new();
 
         store
-            .save("org_a", &p1, &SessionSnapshot::default(), &SaveMeta::now(None))
+            .save(
+                "org_a",
+                &p1,
+                &SessionSnapshot::default(),
+                &SaveMeta::now(None),
+            )
             .await
             .unwrap();
         store
-            .save("org_a", &p2, &SessionSnapshot::default(), &SaveMeta::now(None))
+            .save(
+                "org_a",
+                &p2,
+                &SessionSnapshot::default(),
+                &SaveMeta::now(None),
+            )
             .await
             .unwrap();
 
@@ -575,7 +594,12 @@ mod tests {
         let store = InMemoryProfileStore::new();
         let profile_id: ProfileKind = Id::new();
         store
-            .save("org_a", &profile_id, &SessionSnapshot::default(), &SaveMeta::now(None))
+            .save(
+                "org_a",
+                &profile_id,
+                &SessionSnapshot::default(),
+                &SaveMeta::now(None),
+            )
             .await
             .unwrap();
 
@@ -609,11 +633,21 @@ mod tests {
         let named: ProfileKind = Id::new();
         let unnamed: ProfileKind = Id::new();
         store
-            .save("org_a", &named, &SessionSnapshot::default(), &SaveMeta::now(None))
+            .save(
+                "org_a",
+                &named,
+                &SessionSnapshot::default(),
+                &SaveMeta::now(None),
+            )
             .await
             .unwrap();
         store
-            .save("org_a", &unnamed, &SessionSnapshot::default(), &SaveMeta::now(None))
+            .save(
+                "org_a",
+                &unnamed,
+                &SessionSnapshot::default(),
+                &SaveMeta::now(None),
+            )
             .await
             .unwrap();
         store
@@ -650,7 +684,12 @@ mod tests {
         let store = InMemoryProfileStore::new();
         let pid: ProfileKind = Id::new();
         store
-            .save("org_a", &pid, &SessionSnapshot::default(), &SaveMeta::now(None))
+            .save(
+                "org_a",
+                &pid,
+                &SessionSnapshot::default(),
+                &SaveMeta::now(None),
+            )
             .await
             .unwrap();
         store
@@ -673,7 +712,12 @@ mod tests {
         let store = InMemoryProfileStore::new();
         let pid: ProfileKind = Id::new();
         store
-            .save("org_a", &pid, &SessionSnapshot::default(), &SaveMeta::now(None))
+            .save(
+                "org_a",
+                &pid,
+                &SessionSnapshot::default(),
+                &SaveMeta::now(None),
+            )
             .await
             .unwrap();
         store
@@ -744,7 +788,10 @@ mod tests {
     }
 
     fn meta_at(saved_at: chrono::DateTime<chrono::Utc>) -> SaveMeta {
-        SaveMeta { saved_at, owner: None }
+        SaveMeta {
+            saved_at,
+            owner: None,
+        }
     }
 
     #[tokio::test]
@@ -760,10 +807,18 @@ mod tests {
             user_agent: Some("older".into()),
             ..SessionSnapshot::default()
         };
-        let outcome = store.save("org_a", &pid, &newer, &meta_at(now)).await.unwrap();
+        let outcome = store
+            .save("org_a", &pid, &newer, &meta_at(now))
+            .await
+            .unwrap();
         assert!(outcome.is_stored());
         let stale = store
-            .save("org_a", &pid, &older, &meta_at(now - chrono::Duration::seconds(10)))
+            .save(
+                "org_a",
+                &pid,
+                &older,
+                &meta_at(now - chrono::Duration::seconds(10)),
+            )
             .await
             .unwrap();
         assert_eq!(stale, SaveOutcome::IgnoredStale);
@@ -777,12 +832,22 @@ mod tests {
         let pid: ProfileKind = Id::new();
         let capture_started = chrono::Utc::now();
         store
-            .save("org_a", &pid, &SessionSnapshot::default(), &meta_at(capture_started))
+            .save(
+                "org_a",
+                &pid,
+                &SessionSnapshot::default(),
+                &meta_at(capture_started),
+            )
             .await
             .unwrap();
         store.delete("org_a", &pid).await.unwrap();
         let outcome = store
-            .save("org_a", &pid, &SessionSnapshot::default(), &meta_at(capture_started))
+            .save(
+                "org_a",
+                &pid,
+                &SessionSnapshot::default(),
+                &meta_at(capture_started),
+            )
             .await
             .unwrap();
         assert_eq!(outcome, SaveOutcome::IgnoredByTombstone);
@@ -794,13 +859,23 @@ mod tests {
         let store = InMemoryProfileStore::new();
         let pid: ProfileKind = Id::new();
         store
-            .save("org_a", &pid, &SessionSnapshot::default(), &SaveMeta::now(None))
+            .save(
+                "org_a",
+                &pid,
+                &SessionSnapshot::default(),
+                &SaveMeta::now(None),
+            )
             .await
             .unwrap();
         store.delete("org_a", &pid).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         let outcome = store
-            .save("org_a", &pid, &SessionSnapshot::default(), &SaveMeta::now(None))
+            .save(
+                "org_a",
+                &pid,
+                &SessionSnapshot::default(),
+                &SaveMeta::now(None),
+            )
             .await
             .unwrap();
         assert!(outcome.is_stored());
@@ -813,14 +888,24 @@ mod tests {
         let pid: ProfileKind = Id::new();
         let far_future = chrono::Utc::now() + chrono::Duration::hours(1);
         let outcome = store
-            .save("org_a", &pid, &SessionSnapshot::default(), &meta_at(far_future))
+            .save(
+                "org_a",
+                &pid,
+                &SessionSnapshot::default(),
+                &meta_at(far_future),
+            )
             .await
             .unwrap();
         assert!(outcome.is_stored());
         // The stored stamp is now + 5 s, so a save stamped now + 1 s is older.
         let just_ahead = chrono::Utc::now() + chrono::Duration::seconds(1);
         let stale = store
-            .save("org_a", &pid, &SessionSnapshot::default(), &meta_at(just_ahead))
+            .save(
+                "org_a",
+                &pid,
+                &SessionSnapshot::default(),
+                &meta_at(just_ahead),
+            )
             .await
             .unwrap();
         assert_eq!(stale, SaveOutcome::IgnoredStale);
@@ -837,12 +922,22 @@ mod tests {
             .unwrap();
         assert_eq!(first, SaveOutcome::Stored { rev: 1 });
         let stale = store
-            .save("org_a", &pid, &SessionSnapshot::default(), &meta_at(now - chrono::Duration::seconds(10)))
+            .save(
+                "org_a",
+                &pid,
+                &SessionSnapshot::default(),
+                &meta_at(now - chrono::Duration::seconds(10)),
+            )
             .await
             .unwrap();
         assert_eq!(stale, SaveOutcome::IgnoredStale);
         let second = store
-            .save("org_a", &pid, &SessionSnapshot::default(), &meta_at(now + chrono::Duration::seconds(1)))
+            .save(
+                "org_a",
+                &pid,
+                &SessionSnapshot::default(),
+                &meta_at(now + chrono::Duration::seconds(1)),
+            )
             .await
             .unwrap();
         assert_eq!(second, SaveOutcome::Stored { rev: 2 });
@@ -854,15 +949,34 @@ mod tests {
         let pid: ProfileKind = Id::new();
         let now = chrono::Utc::now();
         store
-            .save("org_a", &pid, &SessionSnapshot::default(), &SaveMeta { saved_at: now, owner: Some("user_1".into()) })
+            .save(
+                "org_a",
+                &pid,
+                &SessionSnapshot::default(),
+                &SaveMeta {
+                    saved_at: now,
+                    owner: Some("user_1".into()),
+                },
+            )
             .await
             .unwrap();
         store
-            .save("org_a", &pid, &SessionSnapshot::default(), &SaveMeta { saved_at: now + chrono::Duration::seconds(1), owner: Some("user_2".into()) })
+            .save(
+                "org_a",
+                &pid,
+                &SessionSnapshot::default(),
+                &SaveMeta {
+                    saved_at: now + chrono::Duration::seconds(1),
+                    owner: Some("user_2".into()),
+                },
+            )
             .await
             .unwrap();
         let book = store.order.read().await;
-        let row = book.rows.get(&InMemoryProfileStore::key("org_a", &pid)).unwrap();
+        let row = book
+            .rows
+            .get(&InMemoryProfileStore::key("org_a", &pid))
+            .unwrap();
         assert_eq!(row.owner.as_deref(), Some("user_1"));
         assert_eq!(row.rev, 2);
     }
@@ -873,7 +987,12 @@ mod tests {
         let pid: ProfileKind = Id::new();
         assert!(!store.exists("org_a", &pid).await.unwrap());
         store
-            .save("org_a", &pid, &SessionSnapshot::default(), &SaveMeta::now(None))
+            .save(
+                "org_a",
+                &pid,
+                &SessionSnapshot::default(),
+                &SaveMeta::now(None),
+            )
             .await
             .unwrap();
         assert!(store.exists("org_a", &pid).await.unwrap());
