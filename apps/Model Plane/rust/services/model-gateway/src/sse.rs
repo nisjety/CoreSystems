@@ -1048,7 +1048,7 @@ pub async fn invoke_stream_sse(
     // ZDR takes a deliberately narrow, persistence-free path: no session/run,
     // event, stream-buffer, idempotency, memory, cache, artifact, or tool write.
     // Plain inference and optional read-only Data grounding remain usable.
-    if effective_zdr {
+    if effective_zdr && !features.iter().any(|f| f == "agentic") {
         // What the persistence-free path can do for this request is decided field
         // by field in `zdr_features`. A request for something it cannot do is
         // refused with its catalogue code and feature, before any model call, and
@@ -1515,7 +1515,13 @@ pub async fn invoke_stream_sse(
             org_id,
             user_id,
             model,
-            req.content.clone(),
+            // The goal the executor receives: redacted under the same policy the Ask turn's model
+            // input is, so a Do run opens no new egress of raw PII to the executor.
+            if pii_redaction_required {
+                crate::moderation::redact_pii(&req.content).0
+            } else {
+                req.content.clone()
+            },
             features,
             agentic_tools,
             effective_zdr,
@@ -13847,6 +13853,44 @@ mod tests {
             !is_confirmed_agent_dispatch_rejection(&status),
             "still not a code-based rejection — the two classifiers stay distinct"
         );
+    }
+
+    /// A Do turn hands its executor the goal the org's PII policy allows: the chat text redacted
+    /// exactly as an Ask turn's model input is, and the raw text when the policy is off. The
+    /// call's goal argument is checked by name, since that one argument is the whole redaction.
+    #[test]
+    fn agentic_goal_is_redacted_when_pii_policy_on() {
+        let source = include_str!("sse.rs").replace("\r\n", "\n");
+        let from = source
+            .find("pub async fn invoke_stream_sse(")
+            .expect("the invoke handler is in this file");
+        let invoke = &source[from..];
+        let call = invoke
+            .find("return agentic_run_stream(")
+            .expect("the agentic stream call");
+        let args_end = invoke[call..]
+            .find("agentic_tools,")
+            .expect("the call's tools argument follows the goal");
+        let args = invoke[call..call + args_end]
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let args = args
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            args.contains(
+                "model, if pii_redaction_required { crate::moderation::redact_pii(&req.content).0 } \
+                 else { req.content.clone() }, features,"
+            ),
+            "the goal is redacted under the org policy: {args}"
+        );
+
+        let (redacted, count) = crate::moderation::redact_pii("write to alice@example.com");
+        assert_eq!(count, 1);
+        assert!(!redacted.contains("alice@example.com"), "{redacted}");
     }
 }
 
