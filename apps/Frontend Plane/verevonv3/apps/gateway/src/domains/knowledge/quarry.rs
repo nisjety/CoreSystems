@@ -1135,6 +1135,17 @@ mod tests {
         );
         assert_eq!(code, "unsupported_media");
         assert!(!message.is_empty());
+        // A static sentence: no host, page text or upstream message in it.
+        assert_no_proxy_or_leak(&message);
+        // Even when the upstream body carries a message of its own, the
+        // classifier does not echo it.
+        let (_, with_body) = classify_scrape_failure(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            Duration::ZERO,
+            &json!({ "error": { "code": "UNSUPPORTED_MEDIA", "message": "image/png secret.example" } }),
+        );
+        assert_eq!(with_body, message);
+        assert!(!with_body.contains("image/png"));
         // The neighbours are unchanged.
         assert_eq!(
             classify_scrape_failure(StatusCode::FORBIDDEN, Duration::ZERO, &Value::Null).0,
@@ -1174,11 +1185,100 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
         let value = preview_body(response).await;
         assert_eq!(value["error"]["code"], "unsupported_media");
+        let message = value["error"]["message"].as_str().unwrap();
+        assert_no_proxy_or_leak(message);
+        assert!(
+            !message.contains("image/png"),
+            "the upstream message is not echoed: {message}"
+        );
         assert_eq!(
             quarry.received_requests().await.unwrap().len(),
             1,
             "a typed refusal is final: no static retry"
         );
+    }
+
+    /// The formats default is set before the variant digest, so the cache key
+    /// describes the request that is forwarded: a preview with no `formats`
+    /// and one that names `["markdown"]` share ONE entry (the second is a
+    /// hit, quarry is asked once), and `["html"]` is a different request with
+    /// its own entry. Moving the default below the digest makes the first two
+    /// differ, which fails the key and call counts below.
+    #[tokio::test]
+    async fn preview_cache_key_describes_the_forwarded_formats() {
+        use wiremock::matchers::{method as wm_method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let org_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/organizations/org-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "org-1",
+                "metadata": { "interactiveRetention": { "zdr": false } }
+            })))
+            .mount(&org_core)
+            .await;
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/scrape"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "status": 200, "markdown": "# Hi" }
+            })))
+            .mount(&quarry)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.org_core_url = org_core.uri();
+        state.quarry_edge_url = quarry.uri();
+        state.cache = crate::cache::ResultCache::in_memory();
+        let mut user = preview_user();
+        user.authorized_membership = Some(crate::middleware::AuthorizedMembership {
+            organization_id: "org-1".to_owned(),
+            role: "member".to_owned(),
+        });
+
+        let preview_keys = |state: &AppState| -> Vec<String> {
+            state
+                .cache
+                .mem_keys()
+                .into_iter()
+                .filter(|key| key.contains("scrape-preview"))
+                .collect()
+        };
+        let run = |body: Value| {
+            let state = state.clone();
+            let user = user.clone();
+            async move {
+                let response =
+                    scrape_preview(State(state), Extension(user), HeaderMap::new(), Json(body))
+                        .await;
+                assert_eq!(response.status(), StatusCode::OK);
+            }
+        };
+
+        run(json!({ "url": "https://example.com/a" })).await;
+        let first = preview_keys(&state);
+        assert_eq!(first.len(), 1, "the first preview is stored: {first:?}");
+        assert_eq!(quarry.received_requests().await.unwrap().len(), 1);
+
+        run(json!({ "url": "https://example.com/a", "formats": ["markdown"] })).await;
+        assert_eq!(
+            preview_keys(&state),
+            first,
+            "no formats and [markdown] are the same forwarded request: one key"
+        );
+        assert_eq!(
+            quarry.received_requests().await.unwrap().len(),
+            1,
+            "the second preview is a cache hit"
+        );
+
+        run(json!({ "url": "https://example.com/a", "formats": ["html"] })).await;
+        assert_eq!(
+            preview_keys(&state).len(),
+            2,
+            "[html] is a different request with its own entry"
+        );
+        assert_eq!(quarry.received_requests().await.unwrap().len(), 2);
     }
 
     #[test]
