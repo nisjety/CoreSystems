@@ -143,3 +143,181 @@ fn production_refuses_shadow_and_off() {
     assert!(decide(Some("off"), true).is_err());
     assert!(decide(Some("shadow"), false).is_ok());
 }
+
+// ── WS12.S3: receipts, typed text, checkpoints ──────────────────────────────
+
+/// The standard-org member (`user-golden` in `org-standard-golden`).
+const ORG: &str = "org-standard-golden";
+const ACTOR: &str = "user-golden";
+
+/// A receipt written the way a release before WS12.S3 wrote it: raw typed text and no
+/// rule version.
+fn legacy_receipt(run: &str, step: u32, text: &str) -> quarry_runtime::StepReceipt {
+    quarry_runtime::ReceiptBuilder::start(run.to_owned(), step)
+        .org_id(ORG)
+        .actor_id(ACTOR)
+        .redaction_mode(quarry_core::redaction::Mode::Off)
+        .complete(
+            quarry_core::contracts::AgentAction::TypeRef {
+                snapshot_id: "snap_old".to_owned(),
+                generation: 1,
+                ref_id: "@e1".to_owned(),
+                text: text.to_owned(),
+            },
+            None,
+            0.0,
+        )
+}
+
+/// `GET .../receipts` returns typed text masked: a password field's text by its kind, an
+/// ordinary field's text kept under the default policy, and a legacy row that holds raw
+/// text masked on read (the stored row is not rewritten).
+#[tokio::test]
+async fn receipts_endpoint_returns_masked_typed_text() {
+    let edge = Edge::start(RunLimits::default()).await;
+    let person = member_token();
+    let run = edge.start_run(&person, json!({})).await;
+    let secret = typed_secret();
+
+    let _ = edge
+        .step(
+            &person,
+            &run,
+            json!({ "type": "type", "selector": "input#password", "text": secret }),
+            None,
+        )
+        .await;
+    let _ = edge
+        .step(
+            &person,
+            &run,
+            json!({ "type": "type", "selector": "#q", "text": "wireless headphones" }),
+            None,
+        )
+        .await;
+    edge.state
+        .receipts
+        .append(legacy_receipt(&run, 90, &secret))
+        .await
+        .expect("the legacy row is stored");
+
+    let receipts = edge.receipts(&person, &run).await;
+    let rendered = serde_json::to_string(&receipts).unwrap();
+    assert!(!rendered.contains(&secret), "a receipt carries the typed text: {rendered}");
+
+    let password_step = receipts
+        .iter()
+        .find(|receipt| receipt["action"]["selector"] == "input#password")
+        .expect("the password step has a receipt");
+    assert_eq!(password_step["action"]["text"], "[redacted:password]");
+
+    let search_step = receipts
+        .iter()
+        .find(|receipt| receipt["action"]["selector"] == "#q")
+        .expect("the search step has a receipt");
+    assert_eq!(search_step["action"]["text"], "wireless headphones");
+
+    let legacy = receipts
+        .iter()
+        .find(|receipt| receipt["step"] == 90)
+        .expect("the legacy row is listed");
+    assert_eq!(legacy["action"]["text"], "[redacted:secret]");
+    for receipt in &receipts {
+        assert_eq!(
+            receipt["redaction_rule_version"],
+            quarry_core::redaction::RULE_VERSION,
+            "every returned receipt is stamped: {receipt}"
+        );
+    }
+
+    // The stored row still holds what was written: masking is a read-time act.
+    let stored = edge
+        .state
+        .receipts
+        .list_for_actor(ORG, ACTOR, &kind(&run))
+        .await
+        .unwrap();
+    let stored_legacy = stored.iter().find(|receipt| receipt.step == 90).unwrap();
+    assert_eq!(stored_legacy.redaction_rule_version, None);
+}
+
+/// The run checkpoint's URL carries no secret query value.
+#[tokio::test]
+async fn checkpoint_current_url_has_no_query_token() {
+    let edge = Edge::start(RunLimits::default()).await;
+    let person = member_token();
+    let run = edge.start_run(&person, json!({})).await;
+
+    let _ = edge
+        .step(
+            &person,
+            &run,
+            json!({
+                "type": "navigate",
+                "url": format!("https://example.test/cb?access_token={}&page=2", token_shape()),
+            }),
+            None,
+        )
+        .await;
+    let checkpoint = edge
+        .state
+        .receipts
+        .load_run_checkpoint(ORG, &kind(&run))
+        .await
+        .unwrap()
+        .expect("a step on a non-ZDR run saves a checkpoint");
+    assert!(
+        !checkpoint.current_url.contains(&token_shape()),
+        "the checkpoint keeps a token: {}",
+        checkpoint.current_url
+    );
+    assert!(checkpoint.current_url.contains("example.test/cb"));
+}
+
+/// An action sent over the browser socket is recorded as masked as one sent over REST.
+#[tokio::test]
+async fn ws_action_receipt_is_masked() {
+    let edge = Edge::start(RunLimits::default()).await;
+    let person = member_token();
+    let run = edge.start_run(&person, json!({})).await;
+    let secret = typed_secret();
+
+    let mut socket =
+        TestSocket::connect(&edge, &person, &format!("/v1/agent/runs/{run}/frames/ws")).await;
+    socket
+        .send_text(
+            &json!({
+                "type": "action",
+                "action": { "type": "type", "selector": "input#password", "text": secret },
+            })
+            .to_string(),
+        )
+        .await;
+    let _ = socket
+        .next_matching(|message| message["type"] == "observation" || message["type"] == "error")
+        .await;
+    drop(socket);
+
+    let receipts = edge.receipts(&person, &run).await;
+    assert!(!receipts.is_empty(), "the socket action has a receipt");
+    let rendered = serde_json::to_string(&receipts).unwrap();
+    assert!(!rendered.contains(&secret), "{rendered}");
+    assert_eq!(receipts[0]["action"]["text"], "[redacted:password]");
+}
+
+/// The receipt text policy boot values.
+#[test]
+fn the_receipt_text_policy_boot_values() {
+    use quarry_core::redaction::action::RecordPolicy;
+    use quarry_edge::redaction_boot::decide_record_policy;
+
+    assert_eq!(decide_record_policy(None), Ok(RecordPolicy::SensitiveOnly));
+    assert_eq!(
+        decide_record_policy(Some("all")),
+        Ok(RecordPolicy::AllTyped)
+    );
+    assert_eq!(
+        decide_record_policy(Some("everything")),
+        Err(RedactionBootError::ReceiptTextUnparsable)
+    );
+}
