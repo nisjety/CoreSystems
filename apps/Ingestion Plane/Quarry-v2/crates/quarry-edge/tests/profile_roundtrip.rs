@@ -49,6 +49,7 @@ fn rich_snapshot() -> SessionSnapshot {
                 secure: true,
                 http_only: true,
                 expires: None,
+                ..Default::default()
             },
             Cookie {
                 name: "csrf".into(),
@@ -58,6 +59,7 @@ fn rich_snapshot() -> SessionSnapshot {
                 secure: false,
                 http_only: false,
                 expires: None,
+                ..Default::default()
             },
         ],
         local_storage: vec![
@@ -75,6 +77,7 @@ fn rich_snapshot() -> SessionSnapshot {
         }),
         locale: Some("en-US".into()),
         timezone: Some("America/Los_Angeles".into()),
+        ..Default::default()
     }
 }
 
