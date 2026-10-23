@@ -11,9 +11,10 @@
 //! `save` and `delete` drop the Redis key after the inner store has
 //! answered, and never write a payload themselves. A write-through `set_ex`
 //! after an ignored (stale or tombstoned) save would cache a payload the
-//! inner store had just refused, for a full TTL. `list` is pass-through (we don't
-//! cache the org's id-set because it can grow unboundedly and is
-//! cheap to compute against Postgres anyway).
+//! inner store had just refused, for a full TTL.
+//!
+//! `list` is pass-through (we don't cache the org's id-set because it can grow
+//! unboundedly and is cheap to compute against Postgres anyway).
 //!
 //! Why this matters: the warm-path scrape that needs to restore a
 //! profile pays a Postgres round-trip on every restore unless we
