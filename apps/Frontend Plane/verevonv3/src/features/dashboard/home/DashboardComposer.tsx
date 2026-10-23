@@ -102,12 +102,15 @@ import {
 	isExpensiveModel,
 	listChatThreads,
 	listModels,
+	modelEffortLevels,
 	modelSupportsAgentic,
 	saveChatThreadSnapshot,
 	verevonModeById,
 	VEREVON_BALANCE_MODE_ID,
 	VEREVON_MODES,
 	type ChatThreadSession,
+	type EffortLevel,
+	type EffortProfile,
 	type ModelGroup,
 	type ModelInfo,
 } from "@/shared/api/chat-client";
@@ -149,7 +152,9 @@ import {
 	waitForCatalogue,
 } from "./submit-privacy-tier";
 
-type ResponseMode = "auto" | "quick" | "deep";
+// "max" is the Maksimal level: offered only while the selected model's catalogue
+// entry lists `xhigh`, and sent as that canonical level, never as a profile.
+type ResponseMode = "auto" | "quick" | "deep" | "max";
 
 type ResponseModeOption = {
 	announcement: {
@@ -352,14 +357,15 @@ export type DashboardComposerSubmitPayload = {
 	minPrivacyTier?: PrivacyTier;
 	/**
 	 * Reasoning effort from the response-mode selector: "Raskt svar" → 'quick',
-	 * "Dyp research" → 'deep'; Auto carries nothing. Maps to the wire's
+	 * "Dyp research" → 'deep', "Maksimal" → 'xhigh' (only for a model whose
+	 * catalogue entry lists it); Auto carries nothing. Maps to the wire's
 	 * `effort` field, which model-gateway turns into a real thinking budget
 	 * (quick=1024, deep=4096 tokens). This selector existed and rode the
 	 * payload as `responseMode` with ZERO downstream readers — the dial's read
 	 * path was fully built (gateway → provider → reasoning_delta → the Innsikt
 	 * popover) while no product surface ever wrote it.
 	 */
-	effort?: "quick" | "deep";
+	effort?: Exclude<EffortProfile, "standard"> | EffortLevel;
 };
 
 type PanelPosition = {
@@ -390,6 +396,12 @@ const responseModes: ResponseModeOption[] = [
 		id: "deep",
 		label: { no: "Dyp research", en: "Deep research" },
 		announcement: { no: "Dyp research-modus", en: "Deep research mode" },
+		icon: Lightbulb,
+	},
+	{
+		id: "max",
+		label: { no: "Maksimal", en: "Maximum" },
+		announcement: { no: "Maksimal innsats", en: "Maximum effort" },
 		icon: Lightbulb,
 	},
 ];
@@ -1134,6 +1146,17 @@ export function DashboardComposer(props: {
 				model.provider === selectedModelProvider(),
 		);
 	});
+	// Maksimal is a catalogue fact, not a UI constant: only a model whose
+	// `effort_levels` lists `xhigh` offers it. The pick is kept in
+	// `responseMode` (so switching back to such a model restores it) but never
+	// acted on for a model that lacks the level: the select, the payload and the
+	// receipt all read `effectiveResponseMode`, which falls back to Deep.
+	const maxEffortAvailable = createMemo(() =>
+		modelEffortLevels(selectedCatalogModel()).includes("xhigh"),
+	);
+	const effectiveResponseMode = createMemo<ResponseMode>(() =>
+		responseMode() === "max" && !maxEffortAvailable() ? "deep" : responseMode(),
+	);
 	// Do (plan mode on execution-core's agentic loop) on the ChatGPT subscription
 	// depends on the SERVER, not on the provider name: inference-core adds the
 	// `agentic` capability to the subscription models only while
@@ -2493,7 +2516,7 @@ export function DashboardComposer(props: {
 			imageMode: imageMode() || commandBuiltin === "image",
 			model: selectedModel(),
 			provider: subscriptionRoute?.provider,
-			responseMode: responseMode(),
+			responseMode: effectiveResponseMode(),
 			subscriptionConnectionId: subscriptionRoute?.connectionId,
 			text: initialSnapshot.submittedText,
 			tone: settings().tone,
@@ -2551,7 +2574,7 @@ export function DashboardComposer(props: {
 					files: initialSnapshot.files,
 					model: selectedModelLabel(),
 					now: initialSnapshot.now,
-					responseMode: responseMode(),
+					responseMode: effectiveResponseMode(),
 				}),
 				...current,
 			].slice(0, 6),
@@ -3593,7 +3616,7 @@ export function DashboardComposer(props: {
 								when={props.appearance === "chat"}
 								fallback={
 									<div class="dashboard-composer-response-group">
-										<For each={responseModes}>
+										<For each={responseModes.filter((mode) => mode.id !== "max")}>
 											{(mode) => (
 												<ComposerIconButton
 													active={responseMode() === mode.id}
@@ -3613,12 +3636,15 @@ export function DashboardComposer(props: {
 									<span class="sr-only">{i18n.tr("Svarinnsats", "Response effort")}</span>
 									<select
 										aria-label={i18n.tr("Svarinnsats", "Response effort")}
-										value={responseMode()}
+										value={effectiveResponseMode()}
 										onChange={(event) => handleResponseMode(event.currentTarget.value as ResponseMode)}
 									>
 										<option value="quick">{i18n.tr("Rask", "Quick")}</option>
 										<option value="auto">{i18n.tr("Standard", "Standard")}</option>
 										<option value="deep">{i18n.tr("Grundig", "Deep")}</option>
+										<Show when={maxEffortAvailable()}>
+											<option value="max">{i18n.tr("Maksimal", "Maximum")}</option>
+										</Show>
 									</select>
 								</label>
 							</Show>
@@ -3899,7 +3925,9 @@ function createComposerSubmitPayload(input: {
 			? { effort: "quick" as const }
 			: input.responseMode === "deep"
 				? { effort: "deep" as const }
-				: {}),
+				: input.responseMode === "max"
+					? { effort: "xhigh" as const }
+					: {}),
 		// Presence-only for the same reason as effort: "balanced" is the
 		// gateway's no-directive default, so sending it would be a no-op key on
 		// every ordinary turn.

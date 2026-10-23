@@ -10,6 +10,7 @@ import {
   getChatThreadTranscript,
   getThreadContext,
   listChatThreads,
+  modelEffortLevels,
   modelSupportsAgentic,
   parseTurnTiming,
   queueInvocationInput,
@@ -1479,6 +1480,31 @@ describe('extended-thinking effort', () => {
       })
       expect(body.effort).toBe(effort)
     }
+  })
+
+  it('sends a canonical level as given, and still omits an absent or standard one', () => {
+    expect(buildChatWireBody({ content: 'hei', threadId: 't1', effort: 'xhigh' }).effort).toBe('xhigh')
+    expect(buildChatWireBody({ content: 'hei', threadId: 't1', effort: 'standard' })).not.toHaveProperty('effort')
+  })
+
+  it('reads effort_levels from the catalogue and drops names it cannot place', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ models: [
+      { id: 'm-ladder', name: 'Ladder', effort_levels: ['low', 'medium', 'high', 'xhigh', 'ultra'] },
+      { id: 'm-camel', name: 'Camel', effortLevels: ['low', 'high'] },
+      { id: 'm-none', name: 'None' },
+      { id: 'm-empty', name: 'Empty', effort_levels: [] },
+      { id: 'm-bad', name: 'Bad', effort_levels: 'high' },
+    ] }), { status: 200, headers: { 'Content-Type': 'application/json' } })))
+
+    const models = await listModels()
+    const byId = (id: string) => models.find((model) => model.id === id)
+
+    expect(modelEffortLevels(byId('m-ladder'))).toEqual(['low', 'medium', 'high', 'xhigh'])
+    expect(modelEffortLevels(byId('m-camel'))).toEqual(['low', 'high'])
+    // No list, an empty list and a malformed list all mean "no effort control".
+    for (const id of ['m-none', 'm-empty', 'm-bad']) expect(modelEffortLevels(byId(id))).toEqual([])
+    expect(modelEffortLevels(undefined)).toEqual([])
+    vi.unstubAllGlobals()
   })
 
   it('keeps the reasoning family so the deltas can actually arrive', () => {

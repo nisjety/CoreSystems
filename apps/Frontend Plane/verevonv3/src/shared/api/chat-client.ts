@@ -113,8 +113,12 @@ export type ChatInvokeRequest = {
    * the ordinary turn is unchanged; only `deep`/`quick` cost the extra latency
    * and tokens. Reasoning arrives on `reasoning_delta`, which requires the
    * `reasoning` feature (already in `DEFAULT_FEATURES`).
+   *
+   * A canonical {@link EffortLevel} is accepted too: the gateway takes one
+   * `effort` string and reads either vocabulary. Only a level the selected
+   * model's catalogue entry lists (`modelEffortLevels`) is ever sent.
    */
-  effort?: 'quick' | 'standard' | 'deep'
+  effort?: EffortProfile | EffortLevel
   /**
    * Response-style dial, orthogonal to `effort`: how much prose the answer
    * spends, not how hard the model thinks.
@@ -882,6 +886,21 @@ export function verevonModeById(id: string): VerevonMode | undefined {
   return VEREVON_MODES.find((mode) => mode.id === id)
 }
 
+/** The composer's named effort profiles; `standard` asks for no reasoning. */
+export type EffortProfile = 'quick' | 'standard' | 'deep'
+
+/**
+ * The canonical reasoning ladder, weakest first. Mirrors the names the gateway
+ * accepts for `effort` and lists in `effort_levels` on `/v1/models`.
+ */
+export const EFFORT_LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
+export type EffortLevel = (typeof EFFORT_LEVELS)[number]
+
+/** Narrows an arbitrary wire value to a canonical level; anything else is no level. */
+export function isEffortLevel(value: unknown): value is EffortLevel {
+  return typeof value === 'string' && (EFFORT_LEVELS as readonly string[]).includes(value)
+}
+
 export type ModelInfo = {
   id: string
   name: string
@@ -902,6 +921,12 @@ export type ModelInfo = {
   privacyTier?: PrivacyTier
   /** Data-residency region the backend reports alongside the tier (`residency`). */
   residency?: string
+  /**
+   * Reasoning levels this model accepts (`effort_levels` on `/v1/models`).
+   * `undefined` when the server lists none: the model has no effort control,
+   * or the gateway's ladder is off.
+   */
+  effortLevels?: EffortLevel[]
 }
 
 // Opt-in rich SSE families the model-gateway understands (chat-parity §2).
@@ -2553,6 +2578,13 @@ function normalizeCostTier(value: unknown): ModelInfo['costTier'] {
   return undefined
 }
 
+/** Unknown names are dropped, not guessed at: a level the client cannot name is never offered. */
+function normalizeEffortLevels(value: unknown): ModelInfo['effortLevels'] {
+  if (!Array.isArray(value)) return undefined
+  const levels = value.filter(isEffortLevel)
+  return levels.length > 0 ? levels : undefined
+}
+
 function readBool(value: unknown): boolean | undefined {
   if (typeof value === 'boolean') return value
   if (typeof value === 'string') {
@@ -2602,6 +2634,7 @@ export async function listModels(): Promise<ModelInfo[]> {
         privacyTier,
         residency: str(item.residency),
         cheap: readBool(item.cheap) ?? readBool(item.is_cheap),
+        effortLevels: normalizeEffortLevels(item.effort_levels ?? item.effortLevels),
       }
     })
     .filter((model) => model.id.length > 0)
@@ -2693,6 +2726,15 @@ export const AGENTIC_CAPABILITY = 'agentic'
  */
 export function modelSupportsAgentic(model: Pick<ModelInfo, 'capabilities'> | undefined): boolean {
   return model?.capabilities?.includes(AGENTIC_CAPABILITY) ?? false
+}
+
+/**
+ * The reasoning levels the catalogue lists for a model, weakest first. Empty
+ * for a model that is not listed or lists none, so a catalogue that has not
+ * answered never offers a level by guess.
+ */
+export function modelEffortLevels(model: Pick<ModelInfo, 'effortLevels'> | undefined): readonly EffortLevel[] {
+  return model?.effortLevels ?? []
 }
 
 /** Patterns that mark a model as expensive enough to warrant a deliberate pick. */

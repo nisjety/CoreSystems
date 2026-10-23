@@ -1,4 +1,5 @@
 import { objectUrlToDataUrl } from '@/shared/lib/blob-data'
+import { isEffortLevel, type EffortLevel, type EffortProfile } from '@/shared/api/chat-client'
 import { normalizePrivacyTier, type PrivacyTier } from '@/shared/api/privacy-tier'
 import { removeClientValue } from '@/shared/session/client-storage'
 
@@ -46,7 +47,7 @@ export type PendingChatLaunch = {
   actions?: PendingChatAction[]
   attachments?: PendingChatAttachment[]
   createdAt?: string
-  effort?: 'quick' | 'deep'
+  effort?: EffortProfile | EffortLevel
   minPrivacyTier?: PrivacyTier
   model?: string
   /** Explicit route for a connected user-owned model subscription. */
@@ -157,8 +158,9 @@ function normalizeOptionalString(value: unknown): string | undefined {
   return value.trim() || undefined
 }
 
+// `standard` is the absence of an effort choice, so a launch never carries it.
 function normalizeEffort(value: unknown): PendingChatLaunch['effort'] {
-  return value === 'quick' || value === 'deep' ? value : undefined
+  return value === 'quick' || value === 'deep' || isEffortLevel(value) ? value : undefined
 }
 
 function normalizeTone(value: unknown): PendingChatLaunch['tone'] {

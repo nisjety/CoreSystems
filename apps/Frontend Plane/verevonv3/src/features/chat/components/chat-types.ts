@@ -7,6 +7,8 @@ import {
   type ChatCostBasis,
   type ChatTurnTiming,
   type ChatVerificationEvent,
+  type EffortLevel,
+  type EffortProfile,
   type RecalledMemory,
 } from '@/shared/api/chat-client'
 import {
@@ -555,7 +557,7 @@ export type SendOptions = {
   /** Opaque Integration Core connection id; never a ChatGPT token. */
   subscriptionConnectionId?: string
   /** Reasoning effort from the composer's response-mode selector. */
-  effort?: 'quick' | 'deep'
+  effort?: EffortProfile | EffortLevel
   /**
    * Response-style dial from composer settings — how much prose the answer
    * spends, independent of `effort`'s thinking budget.

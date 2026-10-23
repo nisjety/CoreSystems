@@ -40,6 +40,17 @@ describe('pending chat launch routing', () => {
     })
   })
 
+  it('carries a canonical effort level through the launch and drops an unknown one', async () => {
+    await writePendingChatLaunch({ text: 'think hard', effort: 'xhigh' })
+    expect(consumePendingChatLaunch()).toMatchObject({ effort: 'xhigh' })
+
+    window.sessionStorage.setItem(
+      'verevon.chat.pendingLaunch',
+      JSON.stringify({ text: 'stale client', effort: 'ultra' }),
+    )
+    expect(consumePendingChatLaunch()).toBeNull()
+  })
+
   // DashboardComposer revokes every attachment's blob: URL right after this
   // write resolves (resetComposerDraft -> clearFiles, called synchronously
   // before the navigate to /chat). A non-image attachment (.txt/.pdf/.docx/
