@@ -35,6 +35,7 @@ import {
   type ChatThreadTranscriptTurn,
 } from '@/features/chat/lib/chat-thread-history'
 import { hydratablePlan } from '@/features/chat/lib/chat-plan-hydration'
+import { registerReloadGuard } from '@/app/chunk-recovery'
 import { isLocalRetentionAllowed } from '@/features/chat/lib/chat-retention'
 import { openProjectionChannel } from '@/shared/projection/keyed-channel'
 import {
@@ -445,6 +446,9 @@ export function useChatController() {
 
   const hasMessages = () => state.turns.length > 0
   const isStreaming = () => state.status === 'streaming'
+  // A stale-build reload would drop unsent composer text and a running answer.
+  // Attachments not yet sent live in the composer component, which registers its own guard.
+  onCleanup(registerReloadGuard(() => isStreaming() || input().trim().length > 0))
   const evidenceSources = createMemo(() => collectEvidenceSources(state.turns))
   const latestGrounding = createMemo(() => collectLatestGrounding(state.turns))
   const artifactItems = createMemo(() => collectArtifactItems(state.turns))

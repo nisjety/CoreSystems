@@ -58,6 +58,13 @@ const BROWSER_WORKSPACE_SPECS = /browser-workspace-.*\.spec\.ts/
 const CHAT_WORKSPACE_SPECS = /chat-(?:workspace|voice-mode|transcript-performance)\.spec\.ts/
 const PRODUCT_READINESS_SPECS = /(?:product-(?:readiness|scenarios|memory|connected|experience|latency|durability|recovery|journeys-viewport|office-outputs|code-interpreter|chat-charts)|agentic-subscription)\.spec\.ts/
 const PRODUCT_RECORDING_SPEC = /product-recording\.spec\.ts/
+/**
+ * Stale-chunk recovery needs a PRODUCTION build (Vite fires `vite:preloadError`
+ * only there) and no backend or sign-in: `vite build` then
+ * `vite preview --port 5176 --strictPort`, and the spec makes one lazy chunk 404.
+ */
+const CHUNK_RECOVERY_SPEC = /chunk-recovery\.spec\.ts/
+const CHUNK_BASE_URL = process.env.CHUNK_E2E_BASE_URL || 'http://localhost:5176'
 if (process.env.PRODUCT_RECORDING_CAPTURE === '1' && process.env.PRODUCT_RECORDING_MODE === 'rehearsal') throw new Error('Do not combine release capture and rehearsal flags')
 const capture = productCaptureSettings(process.env.PRODUCT_RECORDING_MODE || (process.env.PRODUCT_RECORDING_CAPTURE === '1' ? 'release' : undefined),
   JSON.parse(readFileSync(new URL('./apps/verevon-web/plans/product-recordings/manifest.json', import.meta.url), 'utf8')),
@@ -89,7 +96,7 @@ export default defineConfig({
     {
       name: 'e2e',
       testMatch: /.*\.spec\.ts/,
-      testIgnore: [BROWSER_WORKSPACE_SPECS, CHAT_WORKSPACE_SPECS, PRODUCT_READINESS_SPECS, PRODUCT_RECORDING_SPEC],
+      testIgnore: [BROWSER_WORKSPACE_SPECS, CHAT_WORKSPACE_SPECS, PRODUCT_READINESS_SPECS, PRODUCT_RECORDING_SPEC, CHUNK_RECOVERY_SPEC],
       dependencies: ['setup'],
       use: { ...devices['Desktop Chrome'], storageState: STORAGE_STATE },
     },
@@ -109,6 +116,11 @@ export default defineConfig({
       testMatch: CHAT_WORKSPACE_SPECS,
       dependencies: ['local-setup'],
       use: { ...devices['Desktop Chrome'], baseURL: LOCAL_BASE_URL, storageState: LOCAL_STORAGE_STATE },
+    },
+    {
+      name: 'chunk-recovery',
+      testMatch: CHUNK_RECOVERY_SPEC,
+      use: { ...devices['Desktop Chrome'], baseURL: CHUNK_BASE_URL },
     },
     {
       name: 'product-recording',

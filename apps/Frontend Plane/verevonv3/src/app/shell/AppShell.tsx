@@ -2,6 +2,7 @@ import { useLocation } from '@solidjs/router'
 import { createEffect, Show } from 'solid-js'
 import type { JSX } from '@solidjs/web'
 import { QueryProvider } from '@/app/providers/QueryProvider'
+import { StaleBuildNotice } from '@/app/shell/StaleBuildNotice'
 import { CoreShell } from '@/features/core/components/CoreShell'
 import { SESSION_EXPIRED_EVENT } from '@/shared/api/http'
 import { I18nProvider } from '@/shared/i18n'
@@ -32,6 +33,7 @@ export function AppShell(props: { children?: JSX.Element }) {
         <Show when={!isStandaloneSurface()} fallback={<>{props.children}</>}>
           <CoreShell>{props.children}</CoreShell>
         </Show>
+        <StaleBuildNotice />
       </QueryProvider>
     </I18nProvider>
   )
