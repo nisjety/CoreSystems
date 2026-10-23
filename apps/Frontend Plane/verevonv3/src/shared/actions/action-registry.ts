@@ -563,6 +563,18 @@ const socialDecideApprovalInput = z.object({
 
 const scrapeUrlInput = z.object({
   url: z.string().min(1),
+  // WS13.7: screenshot and PDF captures. Actions are not exposed in v1.
+  capture: z
+    .object({
+      screenshot: z
+        .union([
+          z.boolean(),
+          z.object({ fullPage: z.boolean().optional(), quality: z.number().int().min(1).max(100).optional() }),
+        ])
+        .optional(),
+      pdf: z.boolean().optional(),
+    })
+    .optional(),
 })
 
 const crawlSiteInput = z.object({

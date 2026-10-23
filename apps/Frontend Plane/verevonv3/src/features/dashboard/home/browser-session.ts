@@ -596,7 +596,7 @@ export function describeTimelineDelta(detail: BrowserTimelineDetail): BrowserTim
 
 // --- Artifact descriptors ----------------------------------------------------
 
-export type BrowserArtifactMediaKind = 'image' | 'json'
+export type BrowserArtifactMediaKind = 'image' | 'json' | 'pdf'
 
 export type BrowserArtifactDescriptor = {
   artifactId: string

@@ -141,6 +141,11 @@ function ArtifactCard(props: { artifact: BrowserArtifactDescriptor; sessionId?: 
           <ExternalLink class="size-3.5" />
         </a>
       </header>
+      <Show when={props.artifact.mediaKind === 'pdf'}>
+        <a class="knowledge-browser-artifact__download" href={props.artifact.url} download aria-label={`Last ned ${props.artifact.label}`}>
+          Last ned PDF
+        </a>
+      </Show>
       <Show when={props.artifact.mediaKind === 'image'}>
         <Show
           when={!broken()}
