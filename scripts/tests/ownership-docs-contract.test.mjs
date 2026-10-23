@@ -42,6 +42,12 @@ const FILES = {
   gdpr: 'apps/GDPR_SUMMARY.md',
   ledger: 'apps/Model Plane/docs/decisions/ledger.md',
   audit: 'apps/Frontend Plane/verevonv3/docs/WEB_SOURCE_QUALITY_AUDIT_2026-09-15.md',
+  // WS10-S0: the model entitlement ADR and the owned documents that point at it.
+  adr: 'apps/MODEL_ENTITLEMENTS_ADR_2026-10-15.md',
+  cp: 'apps/Control Plane/CONTROL_PLANE_OWNERSHIP.md',
+  gdp: 'apps/Model Plane/docs/GATEWAY_DEDUPLICATION_PLAN.md',
+  capMatrix: 'apps/Model Plane/docs/capability-ownership-matrix.md',
+  convex: 'apps/Application Plane/convex-core/convex/schema.ts',
 };
 
 function load(key) {
@@ -697,4 +703,189 @@ test('audit: W-05 no longer claims a clean pass for a reranker that never ran', 
   const cells = cellsOf(row);
   assert.notEqual(cells[1], '✅', 'W-05 status must not be a bare pass');
   assert.match(row, /A3 status/);
+});
+
+// ------------------------------------------------- WS10-S0: model entitlement ADR
+//
+// The ADR, the Control Plane ownership doc, the GatewayDeduplication plan and the
+// Convex schema are owned by this slice and are read here. The four "ws10-s0
+// shared" tests read the matrix, the capability matrix and the ledger, which the
+// lead edits after the batch: they fail until those exact lines are applied.
+
+test('adr: is ADR-0005 in the Series A shape, with the sections the convention requires', () => {
+  const { text } = load('adr');
+  assert.match(text, /^# ADR-0005: Model entitlements: org-core stores, inference-core enforces, Model Plane fails closed$/m);
+  for (const field of [
+    /^\*\*Date\*\*: \d{4}-\d{2}-\d{2}/m,
+    /^\*\*Status\*\*: /m,
+    /^\*\*Deciders\*\*: /m,
+    /^\*\*Scope\*\*: /m,
+    /^\*\*Supersedes \/ extends\*\*: /m,
+  ]) {
+    assert.match(text, field);
+  }
+  const lines = text.split('\n').map((l) => l.trimEnd());
+  const order = [
+    '## Context',
+    '## Decision',
+    '## Alternatives considered',
+    '## Consequences',
+    '### Positive',
+    '### Negative',
+    '### Risks and release gates',
+  ];
+  let at = -1;
+  for (const heading of order) {
+    const i = lines.indexOf(heading);
+    assert.ok(i > at, `ADR heading "${heading}" is missing or out of order`);
+    at = i;
+  }
+  const options = lines
+    .slice(lines.indexOf('## Alternatives considered'), lines.indexOf('## Consequences'))
+    .filter((l) => l.startsWith('### '));
+  assert.ok(options.length >= 2, 'the ADR must name the alternatives it rejects, one ### each');
+});
+
+test('adr: records DEC-13 (a): the owner split, the pull, the staleness bounds and the modes', () => {
+  const body = flat(load('adr').text);
+  for (const needle of [
+    /org-core stores/,
+    /inference-core enforces/,
+    /`GetModelAccess`/,
+    /30 s \(TTL\)/,
+    /900 s/,
+    /120 s/,
+    /`model_entitlement_unavailable`/,
+    /`off`, `shadow` or `enforce`/,
+    /`service_exempt`/,
+    /`would_refuse`/,
+    /GATEWAY_DEDUPLICATION_PLAN\.md/,
+  ]) {
+    assert.match(body, needle);
+  }
+});
+
+test('adr: states the quota asymmetry and why an entitlement has no fail-open', () => {
+  const body = flat(load('adr').text);
+  assert.match(body, /Quota reads keep failing open on a Control outage/);
+  assert.match(body, /a deny list has none/i);
+  assert.match(body, /Entitlement therefore fails closed/);
+});
+
+test('adr: the entitlement holds model and actor ids only, and a ZDR-empty policy is refused on write', () => {
+  const body = flat(load('adr').text);
+  assert.match(body, /holds model ids and actor ids only, never content/);
+  assert.match(body, /409 `model_policy_leaves_no_zdr_model`/);
+  assert.match(body, /Hard-deleting an organisation removes its policy rows/);
+});
+
+test('adr: rejects capability-core routing_policies, a Convex mirror and gateway-only enforcement by name', () => {
+  const alternatives = section(load('adr').text, /^## Alternatives considered$/, /^## Consequences$/);
+  for (const needle of [/`routing_policies`/, /Convex/, /Enforce in model-gateway only/, /Fail open on an outage/]) {
+    assert.match(alternatives, needle);
+  }
+});
+
+test('adr: its status says the default is taken and the owner still ratifies it before S2 merges', () => {
+  const status = load('adr').text.split('\n').find((l) => l.startsWith('**Status**: '));
+  assert.ok(status, 'the ADR has no Status line');
+  assert.match(status, /DEC-13 \(a\)/);
+  assert.match(status, /ratifies/);
+});
+
+test('adr: changes no code, and its one switch is named and defaults off', () => {
+  const body = flat(load('adr').text);
+  assert.match(body, /This ADR changes no code/);
+  assert.match(body, /Unset means `off`/);
+});
+
+test('gdp: the CR-06 allowlist text stays as written and is marked superseded by ADR-0005', () => {
+  const lines = load('gdp').text.split('\n');
+  const i = lines.findIndex((l) => l.includes('allowed_models -> STILL homeless; refused by name.'));
+  assert.notEqual(i, -1, 'the original CR-06 allowlist line must stay as the record');
+  assert.match(lines.slice(i, i + 5).join(' '), /SUPERSEDED by ADR-0005/);
+  const fix = lines.find((l) => l.startsWith('**Fix direction:** Retire `OrgPolicy`/`PolicyStore`.'));
+  assert.ok(fix, 'the CR-06 fix-direction line must stay as the record');
+  assert.match(fix, /\*\*Superseded for the model allowlist by ADR-0005 \(2026-10-23\):\*\*/);
+});
+
+test('cp: one model-entitlement row sits beside the retention rows and is designed, not built', () => {
+  const { text } = load('cp');
+  const rows = text.split('\n').filter((l) => l.startsWith('| Model entitlements'));
+  assert.equal(rows.length, 1, 'exactly one model-entitlement row in the data boundary table');
+  assert.match(rows[0], /org-core/);
+  assert.match(rows[0], /ADR-0005/);
+  assert.match(rows[0], /designed, not built/);
+  assert.ok(text.includes('| Org zero-retention intent and plan entitlement |'), 'the retention rows must stay');
+});
+
+test('cp: model entitlement is listed under designed-not-built, never under built', () => {
+  const { text } = load('cp');
+  const designed = section(text, /^\*\*Designed, not built \(model entitlements, ADR-0005\)\.\*\*$/, /^---$/);
+  assert.match(designed, /^- org-core stores each organisation's chat model policy/m);
+  assert.match(designed, /`model_policy_leaves_no_zdr_model`/);
+  const built = section(text, /^\*\*Built \(read on 2026-10-06\)\.\*\*$/, /^\*\*Designed, not built\.\*\*/);
+  assert.doesNotMatch(built, /model entitlement|model_entitlement|ADR-0005/i);
+});
+
+test('schema: allowedModels is deprecated in a comment only, and its validator is unchanged', () => {
+  const lines = load('convex').text.split('\n');
+  const i = lines.findIndex((l) => l.trim() === 'allowedModels: v.optional(v.array(v.string())),');
+  assert.notEqual(i, -1, 'the allowedModels validator must stay as it is');
+  const above = lines.slice(Math.max(0, i - 5), i).join('\n');
+  assert.match(above, /Deprecated by ADR-0005/);
+  assert.match(above, /stored documents keep validating/);
+});
+
+test('convex: nothing outside schema.ts reads the allowedModels setting, so the deprecation changes no behaviour', () => {
+  const walk = (dir) =>
+    readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+      const path = resolve(dir, entry.name);
+      if (entry.isDirectory()) return entry.name === 'node_modules' ? [] : walk(path);
+      return /\.(ts|tsx|js|mjs|cjs)$/.test(entry.name) ? [path] : [];
+    });
+  const readers = walk(resolve(ROOT, 'apps/Application Plane/convex-core/convex'))
+    .filter((p) => !p.endsWith('schema.ts'))
+    .filter((p) => readFileSync(p, 'utf8').includes('allowedModels'))
+    .map((p) => p.slice(ROOT.length + 1));
+  assert.deepEqual(readers, [], 'a reader of settings.allowedModels would make the deprecation a behaviour change');
+});
+
+test('ws10-s0 shared: matrix rule 19 states the entitlement split, fail-closed, and links ADR-0005', () => {
+  const { text } = load('matrix');
+  const rule = section(text, /^## 3\. Non-negotiable Cross-Plane Contracts/, /^## 4\./)
+    .split('\n')
+    .find((l) => l.startsWith('19. **'));
+  assert.ok(rule, 'rule 19 (model entitlements) is not in the matrix yet: the lead applies it after the batch');
+  for (const needle of [/org-core/, /inference-core/, /fail(s)? closed/, /ADR-0005/]) {
+    assert.match(rule, needle);
+  }
+});
+
+test('ws10-s0 shared: the inference-core row in the Model Plane table notes the entitlement check', () => {
+  const row = load('matrix').text.split('\n').find((l) => l.startsWith('| `inference-core` | Rust |'));
+  assert.ok(row, 'the inference-core row is missing');
+  assert.match(row, /ADR-0005/);
+});
+
+test('ws10-s0 shared: the capability matrix lists model entitlement as an org-core policy, not a registry', () => {
+  const { text } = load('capMatrix');
+  const row = text.split('\n').find((l) => l.startsWith('| Model entitlement'));
+  assert.ok(row, 'the model entitlement row is not in the capability matrix yet: the lead applies it after the batch');
+  assert.match(row, /org-core/);
+  assert.match(row, /ADR-0005/);
+  const ruling = section(text, /^### 4\.6 Model entitlements/, /^---$/);
+  assert.match(ruling, /not a registry/);
+});
+
+test('ws10-s0 shared: the ledger opens with a proposed entry that names the quota asymmetry', () => {
+  const { text } = load('ledger');
+  const top = text.match(/^## .+$/m);
+  assert.ok(top, 'the ledger has no entries');
+  assert.match(top[0], /^## 2026-10-23 - Model entitlements/);
+  const entry = flat(text.slice(top.index, text.indexOf('\n---\n', top.index)));
+  assert.match(entry, /\*\*Status: proposed\.\*\*/);
+  assert.match(entry, /ADR-0005/);
+  assert.match(entry, /quota[^.]{0,200}fail[- ]open/i);
+  assert.match(entry, /fail[- ]closed/i);
 });
