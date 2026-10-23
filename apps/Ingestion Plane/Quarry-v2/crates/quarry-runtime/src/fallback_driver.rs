@@ -232,9 +232,9 @@ impl FallbackDriver {
                     // that would hand the page that just refused this identity
                     // to the browser, which is the status-driven change of
                     // identity the first branch above forbids. The gate below
-                    // then returns the shell (WS3.I). Under `legacy` a block status never reaches
-                    // here with a driver ahead (the first branch took it), so
-                    // this changes nothing there.
+                    // then returns the shell (WS3.I). Under `legacy` a block
+                    // status never reaches here with a driver ahead (the first
+                    // branch took it), so this changes nothing there.
                     if *kind != DriverKind::Browser && idx < order.len() - 1 {
                         let is_redirect = (300..400).contains(&resp.status);
                         let thinner = best_shell
