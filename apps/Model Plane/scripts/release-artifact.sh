@@ -8,11 +8,11 @@ ARTIFACT_FORMAT_VERSION="3"
 
 SERVICES=(
   model-gateway session-core inference-core execution-core orchestrator-core
-  capability-core sandbox-manager browser-broker letta-bridge cost-core bridge-core
+  capability-core sandbox-manager browser-broker letta-bridge cost-core bridge-core nats-provisioner
 )
 CONTEXTS=(
   "$ROOT_DIR" "$ROOT_DIR" "$ROOT_DIR" "$ROOT_DIR" "$ROOT_DIR/go"
-  "$ROOT_DIR/go" "$ROOT_DIR/go" "$ROOT_DIR/go" "$ROOT_DIR/go" "$ROOT_DIR/go" "$ROOT_DIR/go"
+  "$ROOT_DIR/go" "$ROOT_DIR/go" "$ROOT_DIR/go" "$ROOT_DIR/go" "$ROOT_DIR/go" "$ROOT_DIR/go" "$ROOT_DIR/go"
 )
 DOCKERFILES=(
   "$ROOT_DIR/rust/services/model-gateway/Dockerfile"
@@ -26,6 +26,7 @@ DOCKERFILES=(
   "$ROOT_DIR/go/services/letta-bridge/Dockerfile"
   "$ROOT_DIR/go/services/cost-core/Dockerfile"
   "$ROOT_DIR/go/services/bridge-core/Dockerfile"
+  "$ROOT_DIR/go/services/nats-provisioner/Dockerfile"
 )
 INFRASTRUCTURE_IMAGES=(
   postgres nats minio dragonfly temporal temporal-ui otel-collector

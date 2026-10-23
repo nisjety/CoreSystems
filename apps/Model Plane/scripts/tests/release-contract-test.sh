@@ -7,7 +7,7 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 
 APPLICATION_IMAGES=(
   model-gateway session-core inference-core execution-core orchestrator-core
-  capability-core sandbox-manager browser-broker letta-bridge cost-core bridge-core
+  capability-core sandbox-manager browser-broker letta-bridge cost-core bridge-core nats-provisioner
 )
 INFRASTRUCTURE_IMAGES=(
   postgres nats minio dragonfly temporal temporal-ui otel-collector
@@ -235,6 +235,39 @@ done
 reset_count="$(grep -Fc 'build: !reset null' "$ROOT_DIR/deploy/docker-compose.release.yml")"
 test "$reset_count" -eq "${#services[@]}"
 
+# A base-compose service that builds from source but has no `build: !reset null`
+# overlay entry would be rebuilt on the production host instead of running the
+# signed image, so the two sets must match by name, not only by count.
+compose_services_with() {
+  # $1 compose file, $2 awk regex for the service-level key to look for
+  awk -v key="$2" '
+    { sub(/\r$/, "") }
+    /^services:[[:space:]]*$/ { in_services = 1; next }
+    in_services && /^[^[:space:]#]/ { in_services = 0 }
+    in_services && /^  [[:alnum:]_-]+:[[:space:]]*$/ { name = $1; sub(/:$/, "", name); next }
+    in_services && name != "" && $0 ~ key { print name; name = "" }
+  ' "$1" | LC_ALL=C sort -u
+}
+overlay_build_omissions() {
+  local base_builds overlay_resets
+  base_builds="$(compose_services_with "$1" '^    build:')"
+  overlay_resets="$(compose_services_with "$2" '^    build: !reset null[[:space:]]*$')"
+  comm -23 <(printf '%s\n' "$base_builds") <(printf '%s\n' "$overlay_resets")
+}
+omitted="$(overlay_build_omissions "$ROOT_DIR/deploy/docker-compose.yml" "$ROOT_DIR/deploy/docker-compose.release.yml")"
+if [[ -n "$omitted" ]]; then
+  echo "release overlay has no build reset for: $omitted" >&2
+  exit 1
+fi
+grep -qx 'nats-provisioner' <(compose_services_with "$ROOT_DIR/deploy/docker-compose.release.yml" '^    build: !reset null[[:space:]]*$')
+seeded_overlay="$TMP_DIR/overlay-with-omission.yml"
+awk '
+  /^  nats-provisioner:/ { skip = 1; next }
+  skip && /^  [[:alnum:]_-]+:/ { skip = 0 }
+  !skip { print }
+' "$ROOT_DIR/deploy/docker-compose.release.yml" >"$seeded_overlay"
+test "$(overlay_build_omissions "$ROOT_DIR/deploy/docker-compose.yml" "$seeded_overlay")" = "nats-provisioner"
+
 for image in "${INFRASTRUCTURE_IMAGES[@]}"; do
   env_name="$(printf '%s_RELEASE_IMAGE' "$image" | tr '[:lower:]-' '[:upper:]_')"
   grep -F "image: \${${env_name}:?" "$ROOT_DIR/deploy/docker-compose.release.yml" >/dev/null
@@ -242,7 +275,7 @@ done
 grep -F 'image: ${POSTGRES_RELEASE_IMAGE:?' "$ROOT_DIR/deploy/docker-compose.release.yml" | \
   test "$(wc -l | tr -d '[:space:]')" -eq 2
 pull_never_count="$(grep -Ec '^[[:space:]]+pull_policy: never$' "$ROOT_DIR/deploy/docker-compose.release.yml")"
-test "$pull_never_count" -eq 21
+test "$pull_never_count" -eq 22
 
 revision="0123456789abcdef0123456789abcdef01234567"
 dry_run="$TMP_DIR/dry-run"
