@@ -37,7 +37,7 @@ use quarry_core::ids::kinds::ProfileKind;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 
-use crate::profile_blob_store::{BlobPayload, BlobRow, ProfileBlobStore};
+use crate::profile_blob_store::{BlobPayload, BlobPurge, BlobRow, PlaintextRow, ProfileBlobStore};
 
 /// Default TTL for cached snapshot blobs. 1 hour balances:
 ///   - too long → stale state after a `save` from a peer instance
@@ -341,6 +341,20 @@ impl ProfileBlobStore for CachedBlobStore {
         profile_id: &ProfileKind,
     ) -> QuarryResult<Option<ProfileMetadata>> {
         self.inner.load_metadata(org_id, profile_id).await
+    }
+
+    async fn plaintext_page(
+        &self,
+        after: Option<&(String, String)>,
+        limit: usize,
+    ) -> QuarryResult<Vec<PlaintextRow>> {
+        self.inner.plaintext_page(after, limit).await
+    }
+
+    // The database rows only. The Redis entries of the org are dropped by
+    // org_erasure::ProfileErasure, which holds the connection.
+    async fn purge_org(&self, org_id: &str) -> QuarryResult<BlobPurge> {
+        self.inner.purge_org(org_id).await
     }
 }
 

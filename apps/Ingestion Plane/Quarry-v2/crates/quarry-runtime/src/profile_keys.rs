@@ -95,6 +95,10 @@ pub trait ProfileKeyProvider: Send + Sync {
     /// The `key_id` that new wraps use.
     fn current_key_id(&self) -> String;
 
+    /// Drop any cached unwrapped DEKs of one org (WS17.E3 erasure). A provider
+    /// without a cache does nothing.
+    fn evict_org(&self, _org: &str) {}
+
     /// Unwrap, then wrap under the current key (used after a KEK rotation).
     fn rewrap(
         &self,
@@ -288,6 +292,10 @@ impl ProfileKeyProvider for EnvKeyProvider {
 
     fn current_key_id(&self) -> String {
         format!("{ENV_KEY_ID_PREFIX}{}", self.active)
+    }
+
+    fn evict_org(&self, org: &str) {
+        EnvKeyProvider::evict_org(self, org);
     }
 }
 

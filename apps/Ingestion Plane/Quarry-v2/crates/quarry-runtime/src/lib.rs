@@ -53,6 +53,8 @@ pub mod envelope_profile_store;
 pub mod profile_blob_store;
 pub mod profile_crypto;
 pub mod profile_keys;
+pub mod org_erasure;
+pub mod profile_backfill;
 #[cfg(feature = "grpc")]
 pub mod grpc;
 #[cfg(feature = "http3")]

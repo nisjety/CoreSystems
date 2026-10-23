@@ -32,7 +32,7 @@ use quarry_browser::session::{
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 use quarry_core::ids::kinds::ProfileKind;
 
-use crate::profile_blob_store::{BlobPayload, BlobRow, ProfileBlobStore};
+use crate::profile_blob_store::{BlobPayload, BlobPurge, BlobRow, PlaintextRow, ProfileBlobStore};
 
 fn db_err(label: &str, e: sqlx::Error) -> QuarryError {
     QuarryError::new(ErrorCode::Internal, format!("postgres {label}: {e}"))
@@ -232,6 +232,83 @@ impl PostgresProfileStore {
         .await
         .map_err(|e| db_err("blob_reseal", e))?;
         Ok(done.rows_affected() == 1)
+    }
+}
+
+impl PostgresProfileStore {
+    /// One page of plaintext rows for the WS17.E3 backfill: legacy JSON set and
+    /// no envelope, ordered by (org_id, profile_id), strictly after the cursor.
+    pub(crate) async fn plaintext_page_rows(
+        &self,
+        after: Option<&(String, String)>,
+        limit: usize,
+    ) -> QuarryResult<Vec<PlaintextRow>> {
+        let limit = limit.clamp(1, 1000) as i64;
+        let fetched = match after {
+            None => {
+                sqlx::query_as::<_, (String, String, i64, serde_json::Value)>(
+                    "SELECT org_id, profile_id, rev, snapshot FROM quarry_profiles \
+                     WHERE envelope IS NULL AND snapshot IS NOT NULL \
+                     ORDER BY org_id, profile_id LIMIT $1",
+                )
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await
+            }
+            Some((after_org, after_profile)) => {
+                sqlx::query_as::<_, (String, String, i64, serde_json::Value)>(
+                    "SELECT org_id, profile_id, rev, snapshot FROM quarry_profiles \
+                     WHERE envelope IS NULL AND snapshot IS NOT NULL \
+                       AND (org_id, profile_id) > ($1, $2) \
+                     ORDER BY org_id, profile_id LIMIT $3",
+                )
+                .bind(after_org.as_str())
+                .bind(after_profile.as_str())
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await
+            }
+        }
+        .map_err(|e| db_err("backfill_page", e))?;
+        fetched
+            .into_iter()
+            .map(|(org_id, profile, rev, json)| {
+                let profile_id = profile.parse::<ProfileKind>().map_err(|_| {
+                    QuarryError::new(ErrorCode::Internal, "profile id is not a valid kind")
+                })?;
+                Ok(PlaintextRow {
+                    org_id,
+                    profile_id,
+                    rev,
+                    json,
+                })
+            })
+            .collect()
+    }
+
+    /// Delete the org's rows and tombstones in one transaction (WS17.E3 erasure).
+    pub(crate) async fn purge_org_rows(&self, org_id: &str) -> QuarryResult<BlobPurge> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| db_err("purge_org:begin", e))?;
+        let rows = sqlx::query("DELETE FROM quarry_profiles WHERE org_id = $1")
+            .bind(org_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| db_err("purge_org:rows", e))?
+            .rows_affected();
+        let tombstones = sqlx::query("DELETE FROM quarry_profile_tombstones WHERE org_id = $1")
+            .bind(org_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| db_err("purge_org:tombstones", e))?
+            .rows_affected();
+        tx.commit()
+            .await
+            .map_err(|e| db_err("purge_org:commit", e))?;
+        Ok(BlobPurge { rows, tombstones })
     }
 }
 
@@ -500,6 +577,18 @@ impl ProfileBlobStore for PostgresProfileBlobStore {
         profile_id: &ProfileKind,
     ) -> QuarryResult<Option<ProfileMetadata>> {
         ProfileStore::load_metadata(&self.inner, org_id, profile_id).await
+    }
+
+    async fn plaintext_page(
+        &self,
+        after: Option<&(String, String)>,
+        limit: usize,
+    ) -> QuarryResult<Vec<PlaintextRow>> {
+        self.inner.plaintext_page_rows(after, limit).await
+    }
+
+    async fn purge_org(&self, org_id: &str) -> QuarryResult<BlobPurge> {
+        self.inner.purge_org_rows(org_id).await
     }
 }
 

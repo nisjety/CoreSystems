@@ -54,6 +54,23 @@ impl BlobRow {
     }
 }
 
+/// A plaintext (legacy) row as the WS17.E3 backfill reads it. Counts and ids only
+/// leave the backfill; the JSON is sealed and never logged.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlaintextRow {
+    pub org_id: String,
+    pub profile_id: ProfileKind,
+    pub rev: i64,
+    pub json: serde_json::Value,
+}
+
+/// Rows and tombstones removed by one org purge (WS17.E3 erasure).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct BlobPurge {
+    pub rows: u64,
+    pub tombstones: u64,
+}
+
 /// Row storage for profile payloads, metadata and tombstones.
 #[async_trait]
 pub trait ProfileBlobStore: Send + Sync {
@@ -106,6 +123,17 @@ pub trait ProfileBlobStore: Send + Sync {
         org_id: &str,
         profile_id: &ProfileKind,
     ) -> QuarryResult<Option<ProfileMetadata>>;
+
+    /// One page of plaintext rows (legacy JSON set, no envelope), ordered by
+    /// (org_id, profile_id) strictly after after. WS17.E3 backfill only.
+    async fn plaintext_page(
+        &self,
+        after: Option<&(String, String)>,
+        limit: usize,
+    ) -> QuarryResult<Vec<PlaintextRow>>;
+
+    /// Delete every row and tombstone of one org. Idempotent; counts only.
+    async fn purge_org(&self, org_id: &str) -> QuarryResult<BlobPurge>;
 }
 
 #[derive(Debug, Clone)]
@@ -324,6 +352,58 @@ impl ProfileBlobStore for InMemoryBlobStore {
             .rows
             .get(&Self::key(org_id, profile_id))
             .map(|r| r.metadata.clone()))
+    }
+
+    async fn plaintext_page(
+        &self,
+        after: Option<&(String, String)>,
+        limit: usize,
+    ) -> QuarryResult<Vec<PlaintextRow>> {
+        let st = self.state.read().await;
+        let mut found: Vec<(String, String, PlaintextRow)> = Vec::new();
+        for (key, row) in st.rows.iter() {
+            let BlobPayload::Legacy { json } = &row.payload else {
+                continue;
+            };
+            let Some((org, prof)) = key.split_once('\0') else {
+                continue;
+            };
+            let Ok(profile_id) = prof.parse::<ProfileKind>() else {
+                continue;
+            };
+            found.push((
+                org.to_string(),
+                prof.to_string(),
+                PlaintextRow {
+                    org_id: org.to_string(),
+                    profile_id,
+                    rev: row.rev,
+                    json: json.clone(),
+                },
+            ));
+        }
+        found.sort_by(|a, b| (a.0.as_str(), a.1.as_str()).cmp(&(b.0.as_str(), b.1.as_str())));
+        Ok(found
+            .into_iter()
+            .filter(|(o, p, _)| match after {
+                None => true,
+                Some((ao, ap)) => (o.as_str(), p.as_str()) > (ao.as_str(), ap.as_str()),
+            })
+            .take(limit)
+            .map(|(_, _, r)| r)
+            .collect())
+    }
+
+    async fn purge_org(&self, org_id: &str) -> QuarryResult<BlobPurge> {
+        let prefix = format!("{org_id}\0");
+        let mut st = self.state.write().await;
+        let rows_before = st.rows.len();
+        st.rows.retain(|k, _| !k.starts_with(&prefix));
+        let rows = (rows_before - st.rows.len()) as u64;
+        let tomb_before = st.tombstones.len();
+        st.tombstones.retain(|k, _| !k.starts_with(&prefix));
+        let tombstones = (tomb_before - st.tombstones.len()) as u64;
+        Ok(BlobPurge { rows, tombstones })
     }
 }
 
