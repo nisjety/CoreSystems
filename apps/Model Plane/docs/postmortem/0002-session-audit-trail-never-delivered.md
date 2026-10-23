@@ -144,7 +144,8 @@ Tests (all fail on the defect, all apply the real rules):
    docker exec model-plane-nats-1 wget -qO- 'http://127.0.0.1:8222/jsz?streams=true&consumers=true&config=true'
    ```
 
-2. **Build and deploy `session-core` only** (through the launcher, by the orchestrator). It
+2. **Build and deploy `session-core` only** (`scripts/rebuild-service.sh session-core`, which tags the
+   running image for rollback first; or through the launcher, by the orchestrator). It
    applies migration 43 on start. Do this before any replay: the old build publishes a
    reservation on the wrong subject and audit-core would dead-letter all 2,477 of them.
 3. **Verify the deploy** (read-only):
@@ -163,6 +164,11 @@ Tests (all fail on the defect, all apply the real rules):
 4. Replay (next section).
 
 ## Replay of the stuck rows
+
+The order of operations, the gates and the proof script (`scripts/tests/audit-delivery-proof.sh`) are in
+`docs/runbooks/audit-delivery-replay.md`. The 10-row canary needs no gate; the large replay waits for the Space role
+gate on `GET /api/v1/audit` or for the owner's recorded acceptance, because it makes every stored event readable by every
+org member until that gate exists. The SQL below is the same procedure, kept for the record.
 
 Read first (read-only), expect 2,515 and 2,477, all `no stream found for given subject`:
 
