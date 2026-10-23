@@ -40,6 +40,8 @@ pub mod state;
 pub mod zdr_log;
 pub mod zdr_refusal;
 pub mod web_policy_edge;
+#[cfg(feature = "browser-agent")]
+pub mod agent_policy_gate;
 pub mod zdr_tombstone;
 #[cfg(test)]
 pub mod test_support;

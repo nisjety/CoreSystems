@@ -166,6 +166,9 @@ pub async fn new_tab(
                 "browser tab navigation is outside the run's allowed domains",
             ));
         }
+        // WS7.D: the tab's URL is held to the run's web policy before it is opened.
+        crate::agent_policy_gate::gate_visit(&state, &handle.live, entry.zdr.is_active(), url)
+            .map_err(|error| driver_err(&request_id, error))?;
         validate_navigation(
             &AgentAction::Navigate {
                 url: url.to_owned(),

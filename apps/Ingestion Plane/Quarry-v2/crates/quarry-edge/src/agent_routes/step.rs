@@ -151,6 +151,10 @@ pub async fn step(
         ));
     }
 
+    // WS7.D: the page the step landed on is held to the run's host rules too. The action has
+    // already run; the refusal is the same typed 403 the pre-action gate gives.
+    crate::agent_policy_gate::gate_visit(&state, &handle.live, entry.zdr.is_active(), &obs.url)
+        .map_err(|error| driver_err(&request_id, error))?;
     // `meta.budget` (WS6.B): the run's ledger after this step, labelled with the source of
     // this step's cost. Absent when budgets are off.
     let budget = entry
@@ -253,5 +257,6 @@ pub(super) async fn execute_ws_action(
             "browser action reached a domain outside the run's allowed domains",
         ));
     }
+    crate::agent_policy_gate::gate_visit(state, &handle.live, entry.zdr.is_active(), &observation.url)?;
     Ok(observation)
 }

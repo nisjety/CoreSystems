@@ -321,6 +321,18 @@ pub async fn start_run(
             Some("zdr_persistent_profile_forbidden"),
         ));
     }
+    // WS7.D: the run's web policy, resolved once from the caller's principal, the ZDR posture,
+    // the operator baseline and the request's `policy` ask. A refusal here consumes nothing.
+    let web_decision = crate::agent_policy_gate::resolve_for_start(
+        &state.policy,
+        crate::web_policy_edge::principal(&claims),
+        zdr.is_active(),
+        body.policy.as_ref(),
+        persist_profile,
+        body.driver_requirements.uploads_from_artifacts,
+        body.driver_requirements.downloads_to_artifacts,
+    )
+    .map_err(|error| driver_err(&request_id, error))?;
     if persist_profile && !state.agent_driver.capabilities().persistent_profile {
         return Err(driver_err(
             &request_id,
@@ -387,7 +399,7 @@ pub async fn start_run(
         .agent_driver
         .configure_egress_policy(
             &session,
-            BrowserEgressPolicy::from_allowed_domains(&constraints.allowed_domains),
+            crate::agent_policy_gate::egress_policy(&web_decision, &constraints.allowed_domains),
         )
         .await
     {
@@ -410,6 +422,10 @@ pub async fn start_run(
                     &request_id,
                     "durable checkpoint URL is outside the persisted allowed domains",
                 ));
+            }
+            if let Err(error) = crate::agent_policy_gate::gate_url(&web_decision, &checkpoint.current_url) {
+                let _ = state.agent_driver.release(session).await;
+                return Err(driver_err(&request_id, error));
             }
             if let Err(error) =
                 validate_navigation(&recovery_action, state.security.as_ref()).await
@@ -509,7 +525,8 @@ pub async fn start_run(
     )
     // The lifetime is the run's effective one: a resumed run's stored constraints
     // are authoritative (see above), so the resume request cannot lengthen it.
-    .with_run(run_class, entry.constraints.max_runtime_s.map(u64::from));
+    .with_run(run_class, entry.constraints.max_runtime_s.map(u64::from))
+    .with_policy(web_decision);
 
     if !zdr.is_active() {
         let checkpoint = checkpoint_for_entry(&entry);

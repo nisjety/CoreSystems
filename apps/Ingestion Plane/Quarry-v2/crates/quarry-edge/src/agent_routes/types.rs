@@ -121,6 +121,11 @@ pub struct StartRunBody {
     /// authenticated browser run.
     #[serde(default)]
     pub execution_tier: BrowserExecutionTier,
+    /// WS7.D: the caller's web-policy ask. Tighten-only: it can disable a capability, lower a
+    /// ceiling or narrow the hosts, and never loosens the operator baseline or the ZDR floor.
+    /// Resolved once at start. A resumed run does not carry it (see the W2-U29 depth notes).
+    #[serde(default)]
+    pub policy: Option<quarry_core::web_policy::RequestAsk>,
 }
 
 /// Browser execution contract selected at run creation. The renderer

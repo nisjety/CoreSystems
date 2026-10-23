@@ -69,6 +69,8 @@ mod state;
 mod zdr_log;
 mod zdr_refusal;
 mod web_policy_edge;
+#[cfg(feature = "browser-agent")]
+mod agent_policy_gate;
 mod zdr_tombstone;
 #[cfg(test)]
 mod test_support;

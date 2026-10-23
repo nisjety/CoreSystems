@@ -221,6 +221,9 @@ pub struct RunLive {
     in_flight: AtomicU32,
     /// The lifetime the caller asked for (`constraints.max_runtime_s`), if it asked.
     explicit_runtime_s: Option<u64>,
+    /// WS7.D: the run's web-policy decision, resolved at start (see `agent_policy_gate`).
+    /// `None` only for a run built outside `start_run`.
+    policy: Option<crate::policy_baseline::Decision>,
 }
 
 impl RunLive {
@@ -241,6 +244,7 @@ impl RunLive {
             viewers: AtomicU32::new(0),
             in_flight: AtomicU32::new(0),
             explicit_runtime_s: None,
+            policy: None,
         }
     }
 
@@ -249,6 +253,17 @@ impl RunLive {
         self.class = class;
         self.explicit_runtime_s = explicit_runtime_s.filter(|seconds| *seconds > 0);
         self
+    }
+
+    /// WS7.D: attach the decision `start_run` resolved for this run.
+    pub fn with_policy(mut self, decision: crate::policy_baseline::Decision) -> Self {
+        self.policy = Some(decision);
+        self
+    }
+
+    /// WS7.D: the run's web-policy decision, or `None` for a run built outside `start_run`.
+    pub fn policy(&self) -> Option<&crate::policy_baseline::Decision> {
+        self.policy.as_ref()
     }
 
     /// Start the clocks at `now_ms` (tests).

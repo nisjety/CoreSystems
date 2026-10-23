@@ -401,7 +401,9 @@ pub(super) async fn admit_action(
     }
     // 7. raw script
     deny_raw_script(action, &entry.run_id.to_string())?;
-    // 8. web policy: WS7 plugs in here.
+    // 8. web policy (WS7.D): the run's resolved decision. Before the budget and the one-shot
+    // approval, so a refusal consumes neither.
+    crate::agent_policy_gate::gate_policy(state, &handle.live, entry.zdr.is_active(), action)?;
 
     // 9. budget: the request's own step cap where the gate does not own it, then the
     // gate, whose first refusal per segment is announced before the 402 is returned.
