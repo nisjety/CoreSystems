@@ -618,13 +618,13 @@ test('main builds the production grant validator with the service tokens, throug
   // main hands the shared provider (the production credential) to build_grpc_validator ...
   assert.match(
     main,
-    /grant_boot::build_grpc_validator\(\s*url,\s*cross_plane_tokens\.clone\(\),/,
+    /grant_boot\s*::\s*build_grpc_validator\s*\(\s*[\w.&]+\s*,\s*cross_plane_tokens(?:\s*\.\s*clone\s*\(\s*\))?\s*,/,
     'main must pass cross_plane_tokens to build_grpc_validator',
   );
   assert.doesNotMatch(main, /GrpcGrantValidator::connect/, 'main must not build the validator by hand');
   // ... which attaches them, and the production test builds its validator the same way.
   const boot = read(edge + 'src/grant_boot.rs');
-  assert.match(boot, /\(Some\(tokens\), _\) => validator\.with_service_tokens\(tokens\)/);
+  assert.match(boot, /\(\s*Some\(\s*tokens\s*\)\s*,\s*_\s*\)\s*=>\s*validator\s*\.\s*with_service_tokens\(\s*tokens\s*\)/);
   assert.match(read(edge + 'tests/browser_grants_prod.rs'), /grant_boot::build_grpc_validator\(/);
 });
 
