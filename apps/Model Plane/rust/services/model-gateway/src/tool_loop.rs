@@ -732,10 +732,11 @@ fn arg_bool(args_json: &str, key: &str) -> bool {
 ///
 /// Routing this surface through `ExecuteStep` is intentionally not attempted
 /// here: the inline loop has no established execution-run/permission-mode
-/// continuation contract, and execution-core's capability policy rejects
-/// dynamic MCP names until capability-core provides a durable binding. A
+/// continuation contract, and a registered MCP tool is bound only through
+/// execution-core's per-run registry lookup (`TOOL_CLASS_GATE`), which this loop
+/// never reads: it classifies by this list alone, not by a declared class. A
 /// direct gateway proxy would therefore be an authority bypass; fail closed
-/// until those two contracts exist.
+/// until the inline loop has a continuation contract of its own.
 #[must_use]
 pub(crate) fn inline_tool_allowed(name: &str) -> bool {
     !matches!(name, "save_memory" | "browser_agent")
@@ -13354,5 +13355,29 @@ mod tests {
             error.contains("was NOT called"),
             "validation must run before the arm's own credential check: {error}"
         );
+    }
+
+    /// The inline loop and execution-core's loop stay separate (postmortem 0001):
+    /// this one refuses side effects by `inline_tool_allowed`, and must never start
+    /// reading the registry's declared classes, or a mis-declared `read` would let
+    /// an MCP tool run here with no approval workflow around it. The needles are
+    /// built at run time so this test does not contain what it forbids.
+    #[test]
+    fn the_inline_loop_ignores_the_registry_classes() {
+        let source = include_str!("tool_loop.rs");
+        let code: String = source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for needle in [
+            ["tool", "_class"].concat(),
+            ["Resolve", "ToolBindings"].concat(),
+            ["Tool", "ClassGate"].concat(),
+        ] {
+            let mentions = code.matches(needle.as_str()).count();
+            // The test module names each needle once, in the array above, split.
+            assert_eq!(mentions, 0, "tool_loop.rs mentions `{needle}`");
+        }
     }
 }

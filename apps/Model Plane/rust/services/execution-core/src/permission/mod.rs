@@ -248,6 +248,12 @@ fn provider_action_is_risky(tool_input: &str) -> bool {
 /// from the name alone, so under the `ask` (`deployed_agent`) posture a human
 /// approves each external call by default. Under `auto` (chat) posture nothing
 /// is gated, so this does not change the default chat experience.
+///
+/// This list and the `mcp__` blanket are the legacy classifier (WS05-S6). Under
+/// `TOOL_CLASS_GATE=enforce` they answer only for a tool the registry gave the run
+/// no class for, which is the strict answer. They are deleted, and the `*_with`
+/// functions below lose their gate, once the `shadow` soak has shown zero built-in
+/// divergence; until then they are also what `off` and `shadow` decide by.
 #[must_use]
 pub fn is_risky_tool(tool_name: &str) -> bool {
     const RISKY: &[&str] = &[
@@ -555,6 +561,42 @@ pub fn rung_required_for_with(
     )
 }
 
+/// [`requires_durable_owner_approval`] under the gate: the registry's own
+/// never-auto marker is the `durable_owner` floor.
+#[must_use]
+pub fn requires_durable_owner_approval_with(
+    gate: ToolClassGate,
+    view: Option<&ToolClassView>,
+    tool_name: &str,
+) -> bool {
+    by_gate(
+        gate,
+        view,
+        tool_name,
+        "owner_approval",
+        requires_durable_owner_approval(tool_name),
+        |view| view.floor == ApprovalFloor::DurableOwner,
+    )
+}
+
+/// [`requires_consent_to_disclose`] under the gate: a disclosure is a read that
+/// carries the `ask` floor.
+#[must_use]
+pub fn requires_consent_to_disclose_with(
+    gate: ToolClassGate,
+    view: Option<&ToolClassView>,
+    tool_name: &str,
+) -> bool {
+    by_gate(
+        gate,
+        view,
+        tool_name,
+        "disclosure_consent",
+        requires_consent_to_disclose(tool_name),
+        |view| view.floor == ApprovalFloor::Ask,
+    )
+}
+
 /// The process's tool class gate, read once. A unit test never sees the
 /// environment: the gate is off there unless the test names it.
 #[must_use]
@@ -630,6 +672,16 @@ impl<'a> RunGate<'a> {
     #[must_use]
     pub fn is_restricted_context_write(&self, tool_name: &str) -> bool {
         is_restricted_context_write_with(self.gate, self.view(tool_name).as_ref(), tool_name)
+    }
+
+    #[must_use]
+    pub fn requires_durable_owner_approval(&self, tool_name: &str) -> bool {
+        requires_durable_owner_approval_with(self.gate, self.view(tool_name).as_ref(), tool_name)
+    }
+
+    #[must_use]
+    pub fn requires_consent_to_disclose(&self, tool_name: &str) -> bool {
+        requires_consent_to_disclose_with(self.gate, self.view(tool_name).as_ref(), tool_name)
     }
 
     /// The autonomy rung this call needs, by the run's declared class where the gate
@@ -1751,5 +1803,114 @@ mod class_tests {
             ),
             PermissionDecision::Allow
         );
+    }
+
+    /// The two never-auto predicates are floor lookups under `enforce`, and say what
+    /// the names say for every built-in the registry seeds, so replacing them moves
+    /// no built-in.
+    #[test]
+    fn the_never_auto_predicates_follow_the_declared_floor_and_reproduce_the_names() {
+        for (tool, class, floor) in seeded_built_ins() {
+            let view = ToolClassView::from_registry(&tool, &class, &floor, "");
+            assert_eq!(
+                requires_durable_owner_approval_with(ToolClassGate::Enforce, Some(&view), &tool),
+                requires_durable_owner_approval(&tool),
+                "owner approval: {tool} ({class}/{floor})"
+            );
+            assert_eq!(
+                requires_consent_to_disclose_with(ToolClassGate::Enforce, Some(&view), &tool),
+                requires_consent_to_disclose(&tool),
+                "disclosure consent: {tool} ({class}/{floor})"
+            );
+        }
+    }
+
+    #[test]
+    fn the_never_auto_predicates_are_decided_by_name_unless_enforced_and_counted_in_shadow() {
+        let counted = Counted::default();
+        let guard = metrics::set_default_local_recorder(&counted);
+        // A view that disagrees with the names: the owner effect declared with no floor
+        // cannot exist (the floor is raised to the class), so declare the floor itself.
+        let owner = ToolClassView::from_registry("mcp__srv__x", "read", "durable_owner", "d");
+        let consent = ToolClassView::from_registry("mcp__srv__y", "read", "ask", "d");
+        let open = view("tickets.create", "read");
+        for gate in [ToolClassGate::Off, ToolClassGate::Shadow] {
+            assert!(
+                requires_durable_owner_approval_with(gate, Some(&open), "tickets.create"),
+                "{gate:?}"
+            );
+            assert!(
+                !requires_durable_owner_approval_with(gate, Some(&owner), "mcp__srv__x"),
+                "{gate:?}"
+            );
+            assert!(
+                !requires_consent_to_disclose_with(gate, Some(&consent), "mcp__srv__y"),
+                "{gate:?}"
+            );
+        }
+        assert!(requires_durable_owner_approval_with(
+            ToolClassGate::Enforce,
+            Some(&owner),
+            "mcp__srv__x"
+        ));
+        assert!(requires_consent_to_disclose_with(
+            ToolClassGate::Enforce,
+            Some(&consent),
+            "mcp__srv__y"
+        ));
+        // Nothing declared for the tool: the legacy name answer, the strict one.
+        for gate in [
+            ToolClassGate::Off,
+            ToolClassGate::Shadow,
+            ToolClassGate::Enforce,
+        ] {
+            assert!(
+                requires_durable_owner_approval_with(gate, None, "tickets.create"),
+                "{gate:?}"
+            );
+            assert!(
+                requires_consent_to_disclose_with(
+                    gate,
+                    None,
+                    crate::runtime_loop::subagent_results::READ_TOOL
+                ),
+                "{gate:?}"
+            );
+        }
+        drop(guard);
+        let mut seen = counted.0.lock().unwrap().clone();
+        seen.sort();
+        assert_eq!(
+            seen,
+            [
+                "tool_class_divergence_total{point=disclosure_consent,tool=mcp__}",
+                "tool_class_divergence_total{point=owner_approval,tool=mcp__}",
+                "tool_class_divergence_total{point=owner_approval,tool=tickets.create}",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_run_gate_answers_the_never_auto_predicates_from_the_runs_snapshot() {
+        let (org, run) = ("org-run-gate-floor", "run-run-gate-floor");
+        record_run_views(
+            org,
+            run,
+            [(
+                "mcp__s__pay".to_owned(),
+                ToolClassView::from_registry("mcp__s__pay", "external_write", "durable_owner", "d"),
+            )],
+        );
+        let enforce = RunGate::with_gate(ToolClassGate::Enforce, org, run);
+        assert!(enforce.requires_durable_owner_approval("mcp__s__pay"));
+        assert!(!enforce.requires_consent_to_disclose("mcp__s__pay"));
+        // Another run has no snapshot, the gate off never reads one.
+        assert!(
+            !RunGate::with_gate(ToolClassGate::Enforce, org, "another-run")
+                .requires_durable_owner_approval("mcp__s__pay")
+        );
+        assert!(!RunGate::with_gate(ToolClassGate::Off, org, run)
+            .requires_durable_owner_approval("mcp__s__pay"));
+        assert!(enforce.requires_durable_owner_approval("tickets.create"));
     }
 }
