@@ -1,0 +1,115 @@
+name: Audit Core CI
+
+# CI gate for apps/Control Plane/audit-core (build plan WS06 S1). Before this
+# file nothing ran audit-core's Go tests: the Postgres-backed suites
+# (store, replay, the JetStream inbox contract) skip silently without
+# TEST_DATABASE_URL, and the compose-contract tests in cmd/server read three
+# planes' compose files, so a drift there was only ever caught by hand.
+#
+# Modelled on org-service.yml, with two deliberate differences:
+#   * pull_request has no `branches` filter, so a change opened against an
+#     integration branch is gated too, not only one aimed at main or develop.
+#   * Go comes from go.mod (`go-version-file`), so the toolchain this gate
+#     tests is the one the Dockerfile and go.mod already declare.
+#
+# The promtool job covers the Control Plane Prometheus rules (audit-core's
+# alerts live beside the Model Plane's delivery alerts in observability/rules).
+# It idles cleanly when a rules file or a test file is absent, so it never
+# blocks a change that adds neither.
+
+on:
+  push:
+    branches: [main, develop, model-plane]
+    paths:
+      - "apps/Control Plane/audit-core/**"
+      - "apps/Control Plane/observability/rules/**"
+      - "apps/Control Plane/docker-compose.yml"
+      - ".github/workflows/audit-core-ci.yml"
+  pull_request:
+    paths:
+      - "apps/Control Plane/audit-core/**"
+      - "apps/Control Plane/observability/rules/**"
+      - "apps/Control Plane/docker-compose.yml"
+      # cmd/server contract tests read the Application and Model Plane compose files.
+      - "apps/Application Plane/docker-compose.yml"
+      - "apps/Model Plane/deploy/docker-compose.yml"
+      - ".github/workflows/audit-core-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: "apps/Control Plane/audit-core"
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: audit_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: "apps/Control Plane/audit-core/go.mod"
+          cache-dependency-path: "apps/Control Plane/audit-core/go.sum"
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Vet
+        run: go vet ./...
+
+      # No -race: it needs cgo, and the local harness this mirrors has none.
+      # -p 1 because the store tests share one database and clean up by org id.
+      - name: Test
+        env:
+          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/audit_test?sslmode=disable
+        run: go test -count=1 -p 1 ./...
+
+      - name: Build every binary
+        run: |
+          set -euo pipefail
+          for d in ./cmd/*/; do
+            go build -o /dev/null "$d"
+          done
+
+  promtool:
+    runs-on: ubuntu-latest
+    env:
+      PROMETHEUS_IMAGE: prom/prometheus:v2.54.1
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check and test Control Plane rules
+        run: |
+          set -euo pipefail
+          rules_dir="$PWD/apps/Control Plane/observability/rules"
+          if [ ! -d "$rules_dir" ]; then
+            echo "no rules directory, nothing to check"
+            exit 0
+          fi
+          shopt -s nullglob
+          rules=("$rules_dir"/*.rules.yml)
+          tests=("$rules_dir"/*.rules.test.yml)
+          if [ "${#rules[@]}" -gt 0 ]; then
+            docker run --rm --entrypoint promtool -v "$rules_dir:/rules:ro" "$PROMETHEUS_IMAGE" \
+              check rules $(printf '/rules/%s ' "${rules[@]##*/}")
+          fi
+          if [ "${#tests[@]}" -gt 0 ]; then
+            docker run --rm --entrypoint promtool -v "$rules_dir:/rules:ro" "$PROMETHEUS_IMAGE" \
+              test rules $(printf '/rules/%s ' "${tests[@]##*/}")
+          fi
