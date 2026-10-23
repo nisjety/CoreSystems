@@ -406,13 +406,13 @@ func MountJobsByKind(r chi.Router, db store.DB) {
 			if limit <= 0 {
 				limit = 25
 			}
-			raw, next := db.Jobs().ListByKind(orgID, kind, limit, r.URL.Query().Get("cursor"))
-			items := make([]jobWire, 0, len(raw))
-			for _, j := range raw {
-				if wire, ok := toJobWire(j); ok {
-					items = append(items, wire)
-				}
+			statuses, ok := jobStatusFilter(r.URL.Query().Get("status"))
+			if !ok {
+				httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, "status must be a comma-separated list of job statuses", nil)
+				return
 			}
+			raw, next := db.Jobs().ListByKindStatus(orgID, kind, statuses, limit, r.URL.Query().Get("cursor"))
+			items := jobWires(db, raw)
 			var nextPtr *string
 			if next != "" {
 				nextPtr = &next

@@ -169,6 +169,16 @@ type JobsStore interface {
 	// the cutoff and returns them, with params.failure_reason set to
 	// "backlog_expired".
 	FailExpired(createdBefore, now time.Time) ([]Job, error)
+	// ListByKindStatus is ListByKind restricted to the given statuses (an empty
+	// list means any status). Backs GET /v1/{kind}/jobs?status=a,b.
+	ListByKindStatus(orgID, kind string, statuses []string, limit int, cursor string) ([]Job, string)
+	// ListActiveByOrg returns the organization's non-terminal jobs (accepted,
+	// running, paused), oldest first, for the ongoing list. Org-scoped by
+	// design: the ongoing list is a tenant-facing read.
+	ListActiveByOrg(orgID string, limit int) []Job
+	// UpdateIfStatus replaces a job only while its stored status is expected.
+	// A job in another status is ErrConflict; a missing job is ErrNotFound.
+	UpdateIfStatus(j Job, expected string) error
 }
 
 // AdmissionKind reports whether the dispatcher executes jobs of this kind, and
@@ -223,6 +233,42 @@ type EventLog interface {
 	// realistic threat, and the lookup only ever surfaces an event_id,
 	// never payload content, to the retrying caller.
 	FindByIdempotencyKey(key string) (quarrycontracts.Event, bool)
+	// SummaryForJob counts a job's events by type: the count, the highest seq
+	// and the first and last timestamp of each type.
+	SummaryForJob(jobID quarrycontracts.ID) map[quarrycontracts.EventType]EventTypeSummary
+	// CountsForJobs counts events by type for each of the jobs, in one query per
+	// page (the job list's stats). Jobs with no events are absent from the map.
+	CountsForJobs(jobIDs []quarrycontracts.ID) map[quarrycontracts.ID]map[quarrycontracts.EventType]int64
+	// ForJobTypes is ForJob restricted to the given event types, in seq order.
+	ForJobTypes(jobID quarrycontracts.ID, types []quarrycontracts.EventType, afterSeq uint64, limit int) []quarrycontracts.Event
+}
+
+// EventTypeSummary is what SummaryForJob reports for one event type.
+type EventTypeSummary struct {
+	Count  int64
+	MaxSeq uint64
+	First  time.Time
+	Last   time.Time
+}
+
+// IsTerminalJobStatus reports whether a job status is final: the job takes no
+// further transition, and a terminal event never moves it back.
+func IsTerminalJobStatus(status string) bool {
+	switch status {
+	case "completed", "failed", "cancelled", "timed_out", "skipped":
+		return true
+	}
+	return false
+}
+
+// IsActiveJobStatus reports whether a job is still in flight: waiting, running
+// or paused. These are the statuses the ongoing list shows.
+func IsActiveJobStatus(status string) bool {
+	switch status {
+	case "accepted", "running", "paused":
+		return true
+	}
+	return false
 }
 
 // ---- resource types -------------------------------------------------------
@@ -265,7 +311,39 @@ type Job struct {
 	// duration). Set from the terminal event; absent while the job runs and
 	// for job kinds that do not report it. Closed vocabularies only.
 	Statistics map[string]any `json:"statistics,omitempty"`
+	// Origin says who started the job and from which run. Stamped at create time
+	// from the verified caller; never read from the request body.
+	Origin JobOrigin `json:"origin"`
+	// DesiredState is the state the caller asked the job to reach next (for
+	// example "paused" or "cancelled"). DesiredSeq rises with each request and
+	// AppliedSeq is the last request the orchestrator carried out (WS15.L2).
+	DesiredState string `json:"desired_state,omitempty"`
+	DesiredSeq   int64  `json:"desired_seq"`
+	AppliedSeq   int64  `json:"applied_seq"`
+	// WorkflowID is the Temporal workflow id the orchestrator started. Empty
+	// until the job is dispatched.
+	WorkflowID string `json:"workflow_id,omitempty"`
+	// DeadlineAt is when the job times out, in unix millis. Nil when unbounded.
+	DeadlineAt *int64 `json:"deadline_at,omitempty"`
+	// TerminalReason is the event type that ended the job, for example
+	// "run_completed". Empty while the job is not terminal.
+	TerminalReason string `json:"terminal_reason,omitempty"`
+	// FinishedAt is when the job reached a terminal status, in unix millis.
+	FinishedAt *int64 `json:"finished_at,omitempty"`
 }
+
+// JobOrigin is who started a job and from which run. Type is one of the closed
+// set in OriginTypes; control refuses any other value at create time. Rows
+// written before migration 016 read back as "unknown".
+type JobOrigin struct {
+	Type      string `json:"type"`
+	Actor     string `json:"actor,omitempty"`
+	Ref       string `json:"ref,omitempty"`
+	CreatedBy string `json:"created_by,omitempty"`
+}
+
+// OriginTypes is the closed set of job origins a caller may declare.
+var OriginTypes = map[string]bool{"user": true, "agent": true, "schedule": true, "webhook": true, "api": true}
 
 // MarshalJSON renders Job.CreatedAt as an RFC3339 string on the wire
 // instead of the raw Unix-millis int64 it's stored as internally.
@@ -301,6 +379,14 @@ func (j Job) MarshalJSON() ([]byte, error) {
 		RunID          *quarrycontracts.ID       `json:"run_id,omitempty"`
 		IdempotencyKey *string                   `json:"idempotency_key,omitempty"`
 		Statistics     map[string]any            `json:"statistics,omitempty"`
+		Origin         JobOrigin                 `json:"origin"`
+		DesiredState   string                    `json:"desired_state,omitempty"`
+		DesiredSeq     int64                     `json:"desired_seq"`
+		AppliedSeq     int64                     `json:"applied_seq"`
+		WorkflowID     string                    `json:"workflow_id,omitempty"`
+		DeadlineAt     *string                   `json:"deadline_at,omitempty"`
+		TerminalReason string                    `json:"terminal_reason,omitempty"`
+		FinishedAt     *string                   `json:"finished_at,omitempty"`
 	}
 	return json.Marshal(wire{
 		ID:             j.ID,
@@ -314,7 +400,25 @@ func (j Job) MarshalJSON() ([]byte, error) {
 		RunID:          j.RunID,
 		IdempotencyKey: j.IdempotencyKey,
 		Statistics:     j.Statistics,
+		Origin:         j.Origin,
+		DesiredState:   j.DesiredState,
+		DesiredSeq:     j.DesiredSeq,
+		AppliedSeq:     j.AppliedSeq,
+		WorkflowID:     j.WorkflowID,
+		DeadlineAt:     unixMilliPtrRFC3339(j.DeadlineAt),
+		TerminalReason: j.TerminalReason,
+		FinishedAt:     unixMilliPtrRFC3339(j.FinishedAt),
 	})
+}
+
+// unixMilliPtrRFC3339 renders an optional unix-millis timestamp as RFC3339,
+// or nil when it is unset.
+func unixMilliPtrRFC3339(ms *int64) *string {
+	if ms == nil {
+		return nil
+	}
+	s := time.UnixMilli(*ms).UTC().Format(time.RFC3339Nano)
+	return &s
 }
 
 // UnmarshalJSON is MarshalJSON's symmetric counterpart: it accepts
@@ -338,6 +442,14 @@ func (j *Job) UnmarshalJSON(data []byte) error {
 		RunID          *quarrycontracts.ID       `json:"run_id,omitempty"`
 		IdempotencyKey *string                   `json:"idempotency_key,omitempty"`
 		Statistics     map[string]any            `json:"statistics,omitempty"`
+		Origin         JobOrigin                 `json:"origin"`
+		DesiredState   string                    `json:"desired_state,omitempty"`
+		DesiredSeq     int64                     `json:"desired_seq"`
+		AppliedSeq     int64                     `json:"applied_seq"`
+		WorkflowID     string                    `json:"workflow_id,omitempty"`
+		DeadlineAt     *string                   `json:"deadline_at,omitempty"`
+		TerminalReason string                    `json:"terminal_reason,omitempty"`
+		FinishedAt     *string                   `json:"finished_at,omitempty"`
 	}
 	var w wire
 	if err := json.Unmarshal(data, &w); err != nil {
@@ -354,6 +466,12 @@ func (j *Job) UnmarshalJSON(data []byte) error {
 		RunID:          w.RunID,
 		IdempotencyKey: w.IdempotencyKey,
 		Statistics:     w.Statistics,
+		Origin:         w.Origin,
+		DesiredState:   w.DesiredState,
+		DesiredSeq:     w.DesiredSeq,
+		AppliedSeq:     w.AppliedSeq,
+		WorkflowID:     w.WorkflowID,
+		TerminalReason: w.TerminalReason,
 	}
 	if w.CreatedAt != "" {
 		t, err := time.Parse(time.RFC3339Nano, w.CreatedAt)
@@ -361,6 +479,22 @@ func (j *Job) UnmarshalJSON(data []byte) error {
 			return fmt.Errorf("job.created_at: %w", err)
 		}
 		j.CreatedAt = t.UnixMilli()
+	}
+	if w.DeadlineAt != nil {
+		t, err := time.Parse(time.RFC3339Nano, *w.DeadlineAt)
+		if err != nil {
+			return fmt.Errorf("job.deadline_at: %w", err)
+		}
+		ms := t.UnixMilli()
+		j.DeadlineAt = &ms
+	}
+	if w.FinishedAt != nil {
+		t, err := time.Parse(time.RFC3339Nano, *w.FinishedAt)
+		if err != nil {
+			return fmt.Errorf("job.finished_at: %w", err)
+		}
+		ms := t.UnixMilli()
+		j.FinishedAt = &ms
 	}
 	return nil
 }
@@ -644,6 +778,96 @@ func (m *memSources) SoftDeleteByOrg(orgID string, id quarrycontracts.ID) error 
 	m.deleted[id] = true
 	s.Status = "deleted"
 	m.items[id] = s
+	return nil
+}
+
+// listWhere is the in-memory counterpart of the keyset-paged list queries: the
+// jobs keep returns true for, newest first, after the cursor.
+func (m *memJobs) listWhere(keep func(Job) bool, limit int, cur string) ([]Job, string) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var curTS int64
+	var curID string
+	haveCur := false
+	if cur != "" {
+		if raw, err := base64.RawURLEncoding.DecodeString(cur); err == nil {
+			parts := strings.SplitN(string(raw), "|", 2)
+			if len(parts) == 2 {
+				if _, err := fmt.Sscan(parts[0], &curTS); err == nil {
+					curID = parts[1]
+					haveCur = true
+				}
+			}
+		}
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	out := make([]Job, 0, limit)
+	for i := len(m.order) - 1; i >= 0; i-- {
+		it := m.items[m.order[i]]
+		if !keep(it) {
+			continue
+		}
+		if haveCur && !(it.CreatedAt < curTS || (it.CreatedAt == curTS && string(it.ID) < curID)) {
+			continue
+		}
+		if len(out) == limit {
+			last := out[len(out)-1]
+			return out, base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf("%d|%s", last.CreatedAt, string(last.ID))))
+		}
+		out = append(out, it)
+	}
+	return out, ""
+}
+
+// ListByKindStatus mirrors the Postgres query: kind and org, optionally
+// restricted to a set of statuses.
+func (m *memJobs) ListByKindStatus(orgID, kind string, statuses []string, limit int, cur string) ([]Job, string) {
+	want := map[string]bool{}
+	for _, s := range statuses {
+		want[s] = true
+	}
+	return m.listWhere(func(it Job) bool {
+		return it.Kind == kind && it.OrgID == orgID && (len(want) == 0 || want[it.Status])
+	}, limit, cur)
+}
+
+// ListActiveByOrg returns the organization's jobs that are still in flight,
+// oldest first. Mirrors the Postgres partial index idx_jobs_active.
+func (m *memJobs) ListActiveByOrg(orgID string, limit int) []Job {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if limit <= 0 {
+		limit = 50
+	}
+	out := []Job{}
+	for _, id := range m.order {
+		it := m.items[id]
+		if it.OrgID != orgID || !IsActiveJobStatus(it.Status) {
+			continue
+		}
+		out = append(out, it)
+		if len(out) == limit {
+			break
+		}
+	}
+	return out
+}
+
+// UpdateIfStatus is the compare-and-set form of Update: the write happens only
+// while the stored status is expected.
+func (m *memJobs) UpdateIfStatus(j Job, expected string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cur, ok := m.items[j.ID]
+	if !ok {
+		return ErrNotFound
+	}
+	if cur.Status != expected {
+		return ErrConflict
+	}
+	m.items[j.ID] = j
 	return nil
 }
 
@@ -1090,6 +1314,75 @@ func (l *memEventLog) ForJob(jobID quarrycontracts.ID, afterSeq uint64, limit in
 			continue
 		}
 		if e.Seq <= afterSeq {
+			continue
+		}
+		out = append(out, e)
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+// SummaryForJob counts a job's events by type.
+func (l *memEventLog) SummaryForJob(jobID quarrycontracts.ID) map[quarrycontracts.EventType]EventTypeSummary {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	out := map[quarrycontracts.EventType]EventTypeSummary{}
+	for _, e := range l.events {
+		if e.JobID == nil || *e.JobID != jobID {
+			continue
+		}
+		s := out[e.Type]
+		s.Count++
+		if e.Seq > s.MaxSeq {
+			s.MaxSeq = e.Seq
+		}
+		if s.First.IsZero() || e.Timestamp.Before(s.First) {
+			s.First = e.Timestamp
+		}
+		if e.Timestamp.After(s.Last) {
+			s.Last = e.Timestamp
+		}
+		out[e.Type] = s
+	}
+	return out
+}
+
+// CountsForJobs counts events by type for each listed job.
+func (l *memEventLog) CountsForJobs(jobIDs []quarrycontracts.ID) map[quarrycontracts.ID]map[quarrycontracts.EventType]int64 {
+	want := make(map[quarrycontracts.ID]bool, len(jobIDs))
+	for _, id := range jobIDs {
+		want[id] = true
+	}
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	out := map[quarrycontracts.ID]map[quarrycontracts.EventType]int64{}
+	for _, e := range l.events {
+		if e.JobID == nil || !want[*e.JobID] {
+			continue
+		}
+		counts := out[*e.JobID]
+		if counts == nil {
+			counts = map[quarrycontracts.EventType]int64{}
+			out[*e.JobID] = counts
+		}
+		counts[e.Type]++
+	}
+	return out
+}
+
+// ForJobTypes returns the job's events of the given types after afterSeq.
+func (l *memEventLog) ForJobTypes(jobID quarrycontracts.ID, types []quarrycontracts.EventType, afterSeq uint64, limit int) []quarrycontracts.Event {
+	want := make(map[quarrycontracts.EventType]bool, len(types))
+	for _, t := range types {
+		want[t] = true
+	}
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	out := []quarrycontracts.Event{}
+	for _, e := range l.events {
+		if e.JobID == nil || *e.JobID != jobID || e.Seq <= afterSeq || !want[e.Type] {
 			continue
 		}
 		out = append(out, e)

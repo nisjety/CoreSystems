@@ -3,6 +3,7 @@ package resources
 import (
 	"time"
 
+	"github.com/triodelab/quarry-v2/pkg/quarrycontracts"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/store"
 )
 
@@ -40,12 +41,24 @@ var validJobResourceKinds = map[string]bool{
 // Its previous omission meant verevon's Ingestions evidence panel always
 // fell back to the job id and 400'd against quarry-edge.
 type jobWire struct {
-	JobID     string  `json:"job_id"`
-	Kind      string  `json:"kind"`
-	OrgID     string  `json:"org_id"`
-	Status    string  `json:"status"`
-	CreatedAt string  `json:"created_at"`
-	RunID     *string `json:"run_id,omitempty"`
+	JobID        string         `json:"job_id"`
+	Kind         string         `json:"kind"`
+	OrgID        string         `json:"org_id"`
+	Status       string         `json:"status"`
+	CreatedAt    string         `json:"created_at"`
+	RunID        *string        `json:"run_id,omitempty"`
+	Origin       jobWireOrigin  `json:"origin"`
+	Phase        string         `json:"phase"`
+	DeadlineAt   *string        `json:"deadline_at,omitempty"`
+	DesiredState string         `json:"desired_state,omitempty"`
+	Stats        map[string]any `json:"stats"`
+}
+
+// jobWireOrigin is a job's origin as the list and status views show it.
+type jobWireOrigin struct {
+	Type  string `json:"type"`
+	Actor string `json:"actor,omitempty"`
+	Ref   string `json:"ref,omitempty"`
 }
 
 // toJobWire projects a store.Job into the JobSummary wire shape. ok is
@@ -62,11 +75,49 @@ func toJobWire(j store.Job) (jobWire, bool) {
 		runID = &s
 	}
 	return jobWire{
-		JobID:     string(j.ID),
-		Kind:      j.Kind,
-		OrgID:     j.OrgID,
-		Status:    j.Status,
-		CreatedAt: time.UnixMilli(j.CreatedAt).UTC().Format(time.RFC3339Nano),
-		RunID:     runID,
+		JobID:        string(j.ID),
+		Kind:         j.Kind,
+		OrgID:        j.OrgID,
+		Status:       j.Status,
+		CreatedAt:    time.UnixMilli(j.CreatedAt).UTC().Format(time.RFC3339Nano),
+		RunID:        runID,
+		Origin:       jobWireOrigin{Type: j.Origin.Type, Actor: j.Origin.Actor, Ref: j.Origin.Ref},
+		Phase:        jobPhase(j.Status),
+		DeadlineAt:   optRFC3339Millis(j.DeadlineAt),
+		DesiredState: j.DesiredState,
+		Stats:        jobStats(j, nil),
 	}, true
+}
+
+// jobStats are the counters a list row shows: pages completed and failed, and
+// the job's total (see jobTotal). counts is the job's event counts by type, nil
+// when none were read.
+func jobStats(j store.Job, counts map[quarrycontracts.EventType]int64) map[string]any {
+	total, _ := jobTotal(j)
+	return map[string]any{
+		"completed": counts[quarrycontracts.EvtPageFetched],
+		"failed":    counts[quarrycontracts.EvtPageFailed],
+		"total":     total,
+	}
+}
+
+// jobWires projects jobs into the list wire shape, with stats from one grouped
+// event count for the whole page. Jobs whose kind has no JobResourceKind are
+// skipped, as toJobWire does.
+func jobWires(db store.DB, jobs []store.Job) []jobWire {
+	ids := make([]quarrycontracts.ID, 0, len(jobs))
+	for _, j := range jobs {
+		ids = append(ids, j.ID)
+	}
+	counts := db.Events().CountsForJobs(ids)
+	out := make([]jobWire, 0, len(jobs))
+	for _, j := range jobs {
+		wire, ok := toJobWire(j)
+		if !ok {
+			continue
+		}
+		wire.Stats = jobStats(j, counts[j.ID])
+		out = append(out, wire)
+	}
+	return out
 }

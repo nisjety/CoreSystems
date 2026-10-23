@@ -199,9 +199,13 @@ func runPage(
 		if e, ok := errs.Classify(err); ok {
 			cat = e.Category
 		}
+		// final: the activity's retries are exhausted, so this attempt is the last
+		// one and the control errors view lists it. code is the closed category.
 		_ = emitEvent(ctx, a, ids, cat.Event(), map[string]any{
 			"url":      url,
 			"category": cat.String(),
+			"code":     cat.String(),
+			"final":    true,
 			"error":    err.Error(),
 		}, ids.RunID, url, string(cat.Event()))
 		return res, err

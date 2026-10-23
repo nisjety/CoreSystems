@@ -46,6 +46,9 @@ func MountJobs(r chi.Router, db store.DB, opts ...JobsOption) {
 		r.Put("/{id}", updateJob(db))
 		r.Get("/{id}/events", jobEvents(db))
 		r.Get("/{id}/history", jobHistory(db))
+		r.Get("/ongoing", jobsOngoing(db))
+		r.Get("/{id}/summary", jobSummary(db))
+		r.Get("/{id}/errors", jobErrors(db))
 	})
 }
 
@@ -328,7 +331,23 @@ func markJobTerminalIfNeeded(db store.DB, ev quarrycontracts.Event) {
 	if !exists {
 		return
 	}
+	// A job that ended stays ended: a late event (a resume after a cancel, a
+	// page after a timeout) must not move it back to a live status.
+	if store.IsTerminalJobStatus(job.Status) {
+		return
+	}
 	job.Status = status
+	if store.IsTerminalJobStatus(status) {
+		at := ev.Timestamp
+		if at.IsZero() {
+			at = time.Now()
+		}
+		if job.FinishedAt == nil {
+			ms := at.UnixMilli()
+			job.FinishedAt = &ms
+		}
+		job.TerminalReason = string(ev.Type)
+	}
 	if statistics := terminalStatistics(ev.Payload); statistics != nil {
 		job.Statistics = statistics
 	}
@@ -362,6 +381,14 @@ func jobStatusForEvent(eventType quarrycontracts.EventType) (string, bool) {
 		return "failed", true
 	case quarrycontracts.EvtRunCancelled:
 		return "cancelled", true
+	case quarrycontracts.EvtRunPaused:
+		return "paused", true
+	case quarrycontracts.EvtRunResumed:
+		return "running", true
+	case quarrycontracts.EventType("run_timed_out"):
+		return "timed_out", true
+	case quarrycontracts.EventType("schedule_skipped"):
+		return "skipped", true
 	default:
 		return "", false
 	}
@@ -449,6 +476,11 @@ func createJob(db store.DB, adm Admission) http.HandlerFunc {
 			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, err.Error(), nil)
 			return
 		}
+		origin, err := resolveJobOrigin(in.Origin)
+		if err != nil {
+			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, err.Error(), nil)
+			return
+		}
 		// Honor `Idempotency-Key` header: if a job with the same key
 		// already exists, return it (200 OK) rather than creating a
 		// duplicate (201). This lets verevon safely retry the POST on
@@ -482,6 +514,7 @@ func createJob(db store.DB, adm Admission) http.HandlerFunc {
 			Policy:    policy,
 			Params:    in.Params,
 			CreatedAt: time.Now().UnixMilli(),
+			Origin:    origin,
 		}
 		if idemKey != "" {
 			k := idemKey
@@ -509,6 +542,29 @@ type createJobInput struct {
 	Policy *quarrycontracts.RunPolicy `json:"policy"`
 	Preset string                     `json:"preset,omitempty"`
 	Params map[string]any             `json:"params,omitempty"`
+	// Origin says who asked for the job. Set by the edge from the verified
+	// caller; absent means an API client.
+	Origin *store.JobOrigin `json:"origin,omitempty"`
+}
+
+// resolveJobOrigin checks the origin a create request declares against the
+// closed set in store.OriginTypes. An absent origin is "api"; an empty type is
+// "api"; any other unknown type is refused, so a typo never lands as an origin.
+func resolveJobOrigin(in *store.JobOrigin) (store.JobOrigin, error) {
+	if in == nil {
+		return store.JobOrigin{Type: "api"}, nil
+	}
+	t := strings.TrimSpace(in.Type)
+	if t == "" {
+		t = "api"
+	}
+	if !store.OriginTypes[t] {
+		return store.JobOrigin{}, fmt.Errorf("origin.type must be one of user, agent, schedule, webhook, api")
+	}
+	if len(in.Actor) > 256 || len(in.Ref) > 256 || len(in.CreatedBy) > 256 {
+		return store.JobOrigin{}, fmt.Errorf("origin fields are limited to 256 characters")
+	}
+	return store.JobOrigin{Type: t, Actor: in.Actor, Ref: in.Ref, CreatedBy: in.CreatedBy}, nil
 }
 
 // resolveJobPolicy honors the precedence: explicit policy > preset > default.
@@ -566,16 +622,31 @@ func updateJob(db store.DB) http.HandlerFunc {
 			return
 		}
 		var patch struct {
-			Status *string                    `json:"status,omitempty"`
-			RunID  *quarrycontracts.ID        `json:"run_id,omitempty"`
-			Policy *quarrycontracts.RunPolicy `json:"policy,omitempty"`
+			Status     *string                    `json:"status,omitempty"`
+			RunID      *quarrycontracts.ID        `json:"run_id,omitempty"`
+			Policy     *quarrycontracts.RunPolicy `json:"policy,omitempty"`
+			WorkflowID *string                    `json:"workflow_id,omitempty"`
+			DeadlineAt *string                    `json:"deadline_at,omitempty"`
+			// IfStatus makes the write a compare-and-set: it applies only while the
+			// stored status is still IfStatus, and otherwise answers 409.
+			IfStatus *string `json:"if_status,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
 			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, err.Error(), nil)
 			return
 		}
 		if patch.Status != nil {
+			// A job that ended stays ended: no patch moves it to another status.
+			if store.IsTerminalJobStatus(existing.Status) && *patch.Status != existing.Status {
+				httpx.WriteErr(w, r, quarrycontracts.CodeConflict, "the job has already ended",
+					map[string]any{"id": id, "status": existing.Status})
+				return
+			}
 			existing.Status = *patch.Status
+			if store.IsTerminalJobStatus(existing.Status) && existing.FinishedAt == nil {
+				now := time.Now().UnixMilli()
+				existing.FinishedAt = &now
+			}
 		}
 		if patch.RunID != nil {
 			existing.RunID = patch.RunID
@@ -583,12 +654,34 @@ func updateJob(db store.DB) http.HandlerFunc {
 		if patch.Policy != nil {
 			existing.Policy = *patch.Policy
 		}
-		if err := db.Jobs().Update(existing); err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				httpx.WriteErr(w, r, quarrycontracts.CodeNotFound, "not found", map[string]any{"id": id})
+		if patch.WorkflowID != nil {
+			existing.WorkflowID = *patch.WorkflowID
+		}
+		if patch.DeadlineAt != nil {
+			t, err := time.Parse(time.RFC3339Nano, *patch.DeadlineAt)
+			if err != nil {
+				httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, "deadline_at must be RFC 3339", nil)
 				return
 			}
-			httpx.WriteErr(w, r, quarrycontracts.CodeInternal, err.Error(), nil)
+			ms := t.UnixMilli()
+			existing.DeadlineAt = &ms
+		}
+		var err error
+		if patch.IfStatus != nil {
+			err = db.Jobs().UpdateIfStatus(existing, *patch.IfStatus)
+		} else {
+			err = db.Jobs().Update(existing)
+		}
+		if err != nil {
+			switch {
+			case errors.Is(err, store.ErrNotFound):
+				httpx.WriteErr(w, r, quarrycontracts.CodeNotFound, "not found", map[string]any{"id": id})
+			case errors.Is(err, store.ErrConflict):
+				httpx.WriteErr(w, r, quarrycontracts.CodeConflict, "the job changed since it was read",
+					map[string]any{"id": id})
+			default:
+				httpx.WriteErr(w, r, quarrycontracts.CodeInternal, err.Error(), nil)
+			}
 			return
 		}
 		httpx.WriteJSON(w, r, http.StatusOK, existing)
