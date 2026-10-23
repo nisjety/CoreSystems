@@ -63,6 +63,12 @@ services:
       # crates/quarry-runtime/src/browser_driver.rs — surfaced here so a
       # slow-hydrating source can be granted more time without a rebuild.
       QUARRY_BROWSER_SETTLE_MS: "${QUARRY_BROWSER_SETTLE_MS:-3500}"
+      # WS13.1: each scrape fetch gets its own browser session key, so two orgs
+      # (or two fetches of one host) never share cookies or storage. `0` restores
+      # the legacy host-keyed session. The heavy lane (one permit by default)
+      # is taken by the actions and capture requests that come later.
+      QUARRY_SCRAPE_SESSION_ISOLATION: "${QUARRY_SCRAPE_SESSION_ISOLATION:-on}"
+      QUARRY_SCRAPE_HEAVY_PERMITS: "${QUARRY_SCRAPE_HEAVY_PERMITS:-1}"
       QUARRY_EDGE__CONTROL_BASE_URL: http://quarry-control:8081
       QUARRY_EDGE__CONTROL_API_KEY: ${QUARRY_CONTROL_API_KEY:?QUARRY_CONTROL_API_KEY is required}
       # Phase 1 Track C / cluster #9 — durable change-monitoring store.

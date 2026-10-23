@@ -106,6 +106,9 @@ services:
       # the edge refuses to launch Chromium with it when ENVIRONMENT is
       # production, and logs a warning otherwise.
       QUARRY_BROWSER_NO_SANDBOX: ${QUARRY_BROWSER_NO_SANDBOX:-0}
+      # WS13.1: per-fetch session isolation (on unless 0) and the heavy lane.
+      QUARRY_SCRAPE_SESSION_ISOLATION: ${QUARRY_SCRAPE_SESSION_ISOLATION:-on}
+      QUARRY_SCRAPE_HEAVY_PERMITS: ${QUARRY_SCRAPE_HEAVY_PERMITS:-1}
       QUARRY_EDGE__INTERNAL_SECRET: ${QUARRY_INTERNAL_SECRET:?QUARRY_INTERNAL_SECRET is required}
       QUARRY_EDGE__RUNTIME_AUTH_TOKEN: ${QUARRY_RUNTIME_AUTH_TOKEN:?QUARRY_RUNTIME_AUTH_TOKEN is required}
       # Isolated OpenCV sidecar for deterministic visual evidence artifacts.
