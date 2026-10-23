@@ -228,7 +228,7 @@ With `QUARRY_JOB_ADMISSION=on` (control; default `off`):
 
 Roll out: deploy control, then the orchestrator and edge, then set `QUARRY_JOB_ADMISSION=on`; roll back by setting it `off` (no data change; `claimed_until` is only read while admission is on). Migration 019 adds `jobs.claimed_until` and an index.
 
-Limits to know: the caps are per job row, taken from `params.admission` if present and otherwise the control defaults, so a plan-dependent cap needs the edge to stamp it at submit time (not built; no plan data is read yet). The claim statement is one query without row locking, so run a single dispatcher; two concurrent claimers can each lease up to a batch past a cap. A job whose workflow was started but whose "mark running" write was lost comes back after its lease and is marked running then.
+Limits to know: the caps are per job row, taken from `params.admission` if present and otherwise the control defaults, so a plan-dependent cap needs the edge to stamp it at submit time (not built; no plan data is read yet). The claim takes a transaction-scoped advisory lock, so two dispatchers cannot lease past a cap together (see the WS6.H claim section below). A job whose workflow was started but whose "mark running" write was lost comes back after its lease and is marked running then.
 
 ## Stopping the edge (drain)
 
@@ -781,6 +781,25 @@ The Ingestions Schedules surface offers only what the gateway says this installa
 - Changing the catalogue: edit `src/web_policy/catalogue.rs`, then regenerate with `UPDATE_CONTRACT_GOLDEN=1 cargo test -p quarry-core --test web_policy catalogue_json_matches_the_checked_in_file_and_its_pin` (in `apps/Ingestion Plane/Quarry-v2`). Then update the digest in the GOLDENS row of `scripts/tests/zdr-contract-sync.test.sh` and run that script. Key strings become public once the claim carries them, so review with Control before WS7.H.
 - Rollback: revert the commit. Nothing else depends on the module until WS7.C.
 
+## Request id intake: `x-request-id` (WS10.S1, U01, built, NOT run, 2026-10-23)
+
+- What it is: `quarry_edge::request_id` (layer, `current()`, span), `quarry_runtime::request_context` (task-local). Handlers take `meta.request_id` from `request_id::current()`. A codemod replaced every `RequestKind::new()` call site in `quarry-edge/src`.
+- Behaviour: a valid inbound id is adopted, anything else is minted, the header is echoed on every response (including the 408 timeout and 413 body-limit answers, because the layer is the outermost one). Never a 400.
+- Flag: `QUARRY_EDGE__REQUEST_ID_ADOPT`. Unset, `1`, or any value other than `0`/`false`/`off` adopts (default on). `0` always mints. It is read once per process, so a restart is needed.
+- Support lookup: `docker logs quarry-edge` lines carry `request_id` on the request span. Filter by `(org_id, request_id)` in any store, never by the id alone.
+- Gateway: `apps/Frontend Plane/verevonv3/apps/gateway/src/request_id.rs` applies the same rule and forwards the adopted id to upstream builders (`request_id::apply`). It exposes `x-request-id` to browsers through CORS.
+- Rollback: set `QUARRY_EDGE__REQUEST_ID_ADOPT=0` (mints only; the header still exists), or revert the codemod commit alone (it is mechanical).
+- Known limit: the id does not follow `tokio::spawn`. Code in a spawned task that calls `request_id::current()` mints a new id; the gateway `apply` adds no header outside a request scope.
+
+## Log hygiene lint and the log_message helper (WS12.S6, unit W2-U06, 2026-10-23)
+
+- `crates/quarry-runtime/tests/log_hygiene.rs` is a ratchet over every crate's production source (`crates/*/src`, `#[cfg(test)]` items skipped). Inside a `tracing` call it fails on `?action`, `?request`, `?observation`, `.text`, `.value`, `dom_summary`, `accessibility` and `url = %x` unless `x` is `redact_url(..)` or `log_url(..)`.
+- Exemptions: a `// zdr-log-ok: <reason>` comment on the macro's first line or the line above it (the WS4.F convention; an empty reason does not exempt), or one line in `crates/quarry-runtime/tests/log_hygiene.allow` (tab separated: path relative to `crates/`, the trimmed source line, the reason). An allow entry that matches nothing fails the test. The allow-list is empty.
+- Run it: `cargo test -p quarry-runtime --test log_hygiene`. A failure names the file, line, rule and text. Fix the call (log a count, a class or `error_class`, or wrap the URL in `redact_url`), or add a reasoned exemption.
+- `QuarryError::log_message()` (quarry-core `error.rs`) returns the error message through the WS12 Durable rules, with no `details`. `Display` is unchanged. Use it at a call site that must log error text; the call sites the plan named already log `error_class` only.
+- The browser hydration settle log (`quarry-runtime/src/browser_driver.rs`) logs the page URL through the Durable URL rules (userinfo and secret query or fragment values masked).
+- No flag and no change to any response. Rollback: revert the commit. The lint does not see a raw error text (`error = %e`); WS4.F covers quarry-edge and the `zdr-log-ok` comments cover the runtime sites reviewed so far.
+
 ## WS17.S0 CDP capability spike: run it and file the table (U05, built, NOT run, 2026-10-23)
 
 The spike answers the three `[UNVERIFIED]` CDP statements (D16-12) before WS17.C1 chooses between "frame-less CDP" and "journal/flush". It is a test only; no product code changes.
@@ -793,26 +812,6 @@ The spike answers the three `[UNVERIFIED]` CDP statements (D16-12) before WS17.C
 - Before C1 starts: paste the table into C1's design notes and answer the three statements from it (P1 cookies, P2 DOMStorage, P3 IndexedDB). P4 answers seeding and the `pagehide` flush.
 - Without `CHROMIUMOXIDE_TEST=1` the test returns at once, so the ordinary workspace job is unaffected.
 
-## Log hygiene lint and the log_message helper (WS12.S6, unit W2-U06, 2026-10-23)
-
-- `crates/quarry-runtime/tests/log_hygiene.rs` is a ratchet over every crate's production source (`crates/*/src`, `#[cfg(test)]` items skipped). Inside a `tracing` call it fails on `?action`, `?request`, `?observation`, `.text`, `.value`, `dom_summary`, `accessibility` and `url = %x` unless `x` is `redact_url(..)` or `log_url(..)`.
-- Exemptions: a `// zdr-log-ok: <reason>` comment on the macro's first line or the line above it (the WS4.F convention; an empty reason does not exempt), or one line in `crates/quarry-runtime/tests/log_hygiene.allow` (tab separated: path relative to `crates/`, the trimmed source line, the reason). An allow entry that matches nothing fails the test. The allow-list is empty.
-- Run it: `cargo test -p quarry-runtime --test log_hygiene`. A failure names the file, line, rule and text. Fix the call (log a count, a class or `error_class`, or wrap the URL in `redact_url`), or add a reasoned exemption.
-- `QuarryError::log_message()` (quarry-core `error.rs`) returns the error message through the WS12 Durable rules, with no `details`. `Display` is unchanged. Use it at a call site that must log error text; the call sites the plan named already log `error_class` only.
-- The browser hydration settle log (`quarry-runtime/src/browser_driver.rs`) logs the page URL through the Durable URL rules (userinfo and secret query or fragment values masked).
-- No flag and no change to any response. Rollback: revert the commit. The lint does not see a raw error text (`error = %e`); WS4.F covers quarry-edge and the `zdr-log-ok` comments cover the runtime sites reviewed so far.
-
-
-## Request id intake: `x-request-id` (WS10.S1, U01, built, NOT run, 2026-10-23)
-
-- What it is: `quarry_edge::request_id` (layer, `current()`, span), `quarry_runtime::request_context` (task-local). Handlers take `meta.request_id` from `request_id::current()`. A codemod replaced every `RequestKind::new()` call site in `quarry-edge/src`.
-- Behaviour: a valid inbound id is adopted, anything else is minted, the header is echoed on every response (including the 408 timeout and 413 body-limit answers, because the layer is the outermost one). Never a 400.
-- Flag: `QUARRY_EDGE__REQUEST_ID_ADOPT`. Unset, `1`, or any value other than `0`/`false`/`off` adopts (default on). `0` always mints. It is read once per process, so a restart is needed.
-- Support lookup: `docker logs quarry-edge` lines carry `request_id` on the request span. Filter by `(org_id, request_id)` in any store, never by the id alone.
-- Gateway: `apps/Frontend Plane/verevonv3/apps/gateway/src/request_id.rs` applies the same rule and forwards the adopted id to upstream builders (`request_id::apply`). It exposes `x-request-id` to browsers through CORS.
-- Rollback: set `QUARRY_EDGE__REQUEST_ID_ADOPT=0` (mints only; the header still exists), or revert the codemod commit alone (it is mechanical).
-- Known limit: the id does not follow `tokio::spawn`. Code in a spawned task that calls `request_id::current()` mints a new id; the gateway `apply` adds no header outside a request scope.
-
 ## Crawl job statistics and the agent run-duration histogram (WS6.K, unit W2-U08, built, NOT run, 2026-10-23)
 
 - Job statistics: a finished crawl or batch job carries `statistics` (`pages_visited`, `pages_failed`, `duration_ms`, `status_classes`, `drivers`, `error_classes`). The orchestrator builds it in `internal/workflows/statistics.go` and attaches it to the terminal event as `payload.statistics`; control migration 020 stores it on the job and `GET /v1/jobs/{id}` returns it. Every key is from a closed vocabulary, so no URL, title or error text can appear. Commit 369caa89 built this. No flag: the object is written for every non-ZDR crawl or batch job (crawls are refused under ZDR, so a ZDR job never has it).
@@ -820,6 +819,14 @@ The spike answers the three `[UNVERIFIED]` CDP statements (D16-12) before WS17.C
 - Check the object: `GET /v1/jobs/{id}` on a finished 5-page crawl shows `statistics.pages_visited` = 5; `psql` shows the same JSON in `jobs.statistics`.
 - Tests written (not run in this unit): orchestrator `TestCrawlJobWF_TerminalEventCarriesStatistics`, `TestBatchJobWF_TerminalEventCarriesStatistics`, `TestStatisticsContainNoUrlOrErrorText` (`go test ./internal/workflows/ -run Statistic`); control `TestTerminalEventPersistsStatistics` (`go test ./internal/resources/ -run Statistics` in quarry-control); quarry-edge `run_duration_tests` (`cargo test -p quarry-edge run_duration_tests`).
 - Known gap: the orchestrator has no Prometheus recorder, so the histogram lives only in quarry-edge. The histogram is not yet listed in WS6.I's `describe_all`.
+
+## Crawl fixture site and the crawl-scope harness (WS14.S1, unit W2-U10, built, NOT run, 2026-10-23)
+
+- Rust fixture: `crates/quarry-edge/tests/support/fixture_site.rs`, `FixtureSiteDriver`. It is an in-memory `Driver` that serves what a test configures, records every request (404s included) and follows redirects hop by hop. It opens no socket, so it does not exercise the connection-level SSRF guard. `FixtureSiteDriver::standard_site()` mirrors the live fixture content. Self-test: `cargo test -p quarry-edge --test fixture_site_selftest` (written, compile-checked, not run).
+- Live fixture: `apps/Ingestion Plane/docker-compose.crawl-fixture.yml`, an overlay on the root stack. It adds two nginx services (`crawl-fixture-a` with aliases `fixture-a.crawl.test` and `docs.fixture-a.crawl.test`; `crawl-fixture-b` with `fixture-b.crawl.test`), a `crawl-fixture` network (192.88.99.0/24) and that network on `quarry-edge`. Content: `Quarry-v2/deploy/compose/crawl-fixture/{a,b}`. The overlay is test-only. No production compose file may name it; `crawl-scope-robots.sh --guard` checks that.
+- Bring-up, last `-f` on the root stack's env-file chain: `cd "apps/Ingestion Plane" && docker compose --env-file ../../.env --env-file .env -f docker-compose.yml -f docker-compose.crawl-fixture.yml up -d --wait`. The overlay's merged config was checked in a scratch copy with placeholder env values (`docker compose ... config -q` exits 0). Not checked on a running stack: that the subnet is accepted by Docker Desktop on Windows, and that the edge reaches the fixture hosts.
+- Harness: `Quarry-v2/scripts/e2e/crawl-scope-robots.sh --expect legacy`. It needs `DEV_BEARER` and an edge started with `ENVIRONMENT=dev` (the dev bypass is refused in production). It posts `/v1/crawl` to the loopback edge (`127.0.0.1:8082`), polls `GET /v1/jobs/{id}` on control (`127.0.0.1:28081`) until the record carries statistics, then reads the two fixture containers' access logs. `legacy` expects `GET /ext` on fixture-b and no `GET /robots.txt` on fixture-a. `observe` and `enforce` are planned sets for WS14.S2 to S4; they are not expected to pass yet. `--self-test` and `--guard` run offline.
+- Rollback: nothing in a production path refers to the fixture. Stop the two containers, or remove the overlay file and the `crawl-fixture` network.
 
 ## Crawl scope and robots: the crawl characterization tests and the go-test job (WS14.S0, WS14.S0b, unit W2-U12, built, NOT run, 2026-10-23)
 
@@ -839,16 +846,6 @@ The spike answers the three `[UNVERIFIED]` CDP statements (D16-12) before WS17.C
 - Errors carry their entry path (`actions[3].selector`). Text and selectors never appear in an error message or in the effective-options echo, which carries counts, types, the wait budget and `on_error` only.
 - Caps: 50 actions, 60 s total wait (a selector wait counts its timeout in full, default 5 s), 30 s per wait, 512-byte selectors, 4 KiB per write and 16 KiB in total, 8 captures per request across `formats` and `actions`, viewports up to 3840x2160 at device scale factor 1 to 2, PDF `maxPages` 1 to 200. Environment settings can lower these, never raise them (`CaptureLimits::lowered`, `ActionLimits::lowered`).
 - Golden: `docs/schemas/scrape-options.schema.json` and `effective-scrape-options.schema.json` regenerated with `UPDATE_SCHEMAS=1 cargo test -p quarry-core --features jsonschema --test scrape_schema`. The Model Plane vendored copy is stale until its owner refreshes it.
-
-## Canonical URL helper and redirect reconciliation (WS14 / E3.7.6, unit W3-B1-04, built, NOT run, 2026-10-23)
-
-- What it is: `quarry_transform::canonical_url` (pure, no I/O, no tenant data). `canonicalize(input, CanonicalOptions)` gives one string per resource. `request_id_for_canonical` derives `cu1-` plus 32 lower-case hex digits (blake3 over `canonical-url-v1`, a newline, and the canonical string). `reconcile(requested, final_url, opts)` reports `redirected`, `same_host` and the request ids the frontier must mark as seen (`seen_request_ids`).
-- Default (conservative) folding: scheme and host case, default port, fragment, dot segments, empty path to `/`, one trailing dot on the host, and percent-escapes of unreserved bytes (decoded; reserved escapes such as `%2F` stay encoded, upper-cased). Kept distinct on purpose: trailing slash, `www.`, `index.html`, query order and tracking parameters.
-- Opt-in `CanonicalOptions { sort_query, strip_tracking_params }`: sorts query pairs, removes `utm_*`, `gclid`, `fbclid`, `msclkid`, `yclid`, `mc_cid`, `mc_eid`, `_ga`, `_gl` (keys matched case-insensitively). Nothing passes these yet.
-- Refused with a typed class: other schemes than http and https, userinfo in the URL (`url_credentials`, which blocks the `http://example.com@evil.test/` trick), no host, unparseable, and input over 8 KiB. `CanonicalError::code()` returns only `url_*` class names; the URL is never in an error.
-- Not wired. No caller exists in this unit. The enqueue path (`enqueue_batch` and the crawl seed through the scope filter) waits for W2 U60 (WS14.S3). The older `normalize_url` in `quarry-runtime/src/crawl_frontier.rs` (fragment and empty path only) is unchanged.
-- Flag: none, nothing runs. Rollback: revert the commit; the module has no consumer.
-- Tests written, not run: `cargo test -p quarry-transform --test canonical_url` (spellings, refusals, idempotence, request-id shape, and redirect reconciliation: no redirect, scheme upgrade, cross-host, `www.`, trailing slash, tracking-only redirect under each option set, refused sides).
 
 ## Job lifecycle reads: status, errors, origin (WS15.L1, unit W2-U11)
 
@@ -893,46 +890,15 @@ the vocabulary `accepted`, `running`, `paused`, `completed`, `failed`, `cancelle
 `agent` (a Model Plane service; `origin.ref` is the run id), `api` (any other service or
 API client). `unknown` is a row written before migration 016 and is not a fault.
 
-## Crawl fixture site and the crawl-scope harness (WS14.S1, unit W2-U10, built, NOT run, 2026-10-23)
+## Canonical URL helper and redirect reconciliation (WS14 / E3.7.6, unit W3-B1-04, built, NOT run, 2026-10-23)
 
-- Rust fixture: `crates/quarry-edge/tests/support/fixture_site.rs`, `FixtureSiteDriver`. It is an in-memory `Driver` that serves what a test configures, records every request (404s included) and follows redirects hop by hop. It opens no socket, so it does not exercise the connection-level SSRF guard. `FixtureSiteDriver::standard_site()` mirrors the live fixture content. Self-test: `cargo test -p quarry-edge --test fixture_site_selftest` (written, compile-checked, not run).
-- Live fixture: `apps/Ingestion Plane/docker-compose.crawl-fixture.yml`, an overlay on the root stack. It adds two nginx services (`crawl-fixture-a` with aliases `fixture-a.crawl.test` and `docs.fixture-a.crawl.test`; `crawl-fixture-b` with `fixture-b.crawl.test`), a `crawl-fixture` network (192.88.99.0/24) and that network on `quarry-edge`. Content: `Quarry-v2/deploy/compose/crawl-fixture/{a,b}`. The overlay is test-only. No production compose file may name it; `crawl-scope-robots.sh --guard` checks that.
-- Bring-up, last `-f` on the root stack's env-file chain: `cd "apps/Ingestion Plane" && docker compose --env-file ../../.env --env-file .env -f docker-compose.yml -f docker-compose.crawl-fixture.yml up -d --wait`. The overlay's merged config was checked in a scratch copy with placeholder env values (`docker compose ... config -q` exits 0). Not checked on a running stack: that the subnet is accepted by Docker Desktop on Windows, and that the edge reaches the fixture hosts.
-- Harness: `Quarry-v2/scripts/e2e/crawl-scope-robots.sh --expect legacy`. It needs `DEV_BEARER` and an edge started with `ENVIRONMENT=dev` (the dev bypass is refused in production). It posts `/v1/crawl` to the loopback edge (`127.0.0.1:8082`), polls `GET /v1/jobs/{id}` on control (`127.0.0.1:28081`) until the record carries statistics, then reads the two fixture containers' access logs. `legacy` expects `GET /ext` on fixture-b and no `GET /robots.txt` on fixture-a. `observe` and `enforce` are planned sets for WS14.S2 to S4; they are not expected to pass yet. `--self-test` and `--guard` run offline.
-- Rollback: nothing in a production path refers to the fixture. Stop the two containers, or remove the overlay file and the `crawl-fixture` network.
-
-## Webhook egress guard in quarry-control (E3.5-2, unit W3-B1-05, built, NOT run, 2026-10-23)
-
-- What it is: `services/quarry-control/internal/egress` is a copy of integration-corev2's `internal/egress` (`guard.go`, `client.go` and their tests, all unchanged except the package comment in `guard.go`), plus `conformance_test.go` for the webhook and catalog-watch cases. It is the single-resolution SSRF and DNS-rebinding guard: `ResolveAndVet` resolves a host once and refuses the whole lookup if any address is loopback, private (RFC1918, RFC4193), CGNAT, link-local, multicast, reserved, this-network, or NAT64-embedded, or if the host is a cloud metadata name.
-- Where it is live: `internal/dispatcher/dispatcher.go` (the `hc == nil` fallback in `Run`, which `cmd/control/main.go` always uses) and `internal/catalogwatch/catalogwatch.go` (the `httpClient == nil` fallback in `NewClient`) now build their client with `egress.SafeClient`, keeping the old 30 s request timeout. This is a live change, not a dark one: webhook delivery in production goes through the guard from the commit that carries it.
-- What a tenant sees: a webhook target that resolves to a blocked address fails the delivery with a transport error that wraps `egress: destination blocked by policy`. It takes the normal retry and dead-letter path (five attempts, then DLQ). A target that answers with a 3xx is no longer followed; the 3xx response is recorded as the result.
-- Allowlist: `EGRESS_ALLOWLIST_HOSTS` and `EGRESS_ALLOWLIST_CIDRS` (comma-separated) are read once per process by `egress.Default()`. Leave both unset in production; the package doc says an entry should name one confirmed legitimate destination.
-- Keeping the copy in step: the copy must match integration-corev2 except the header comment of `guard.go`. Check with a diff of the two `guard.go` files and ignore the header lines; a behaviour change in one copy needs the same change in the other.
-- Not in this section: org scoping of webhook registrations and the fail-closed migration `021_webhook_org_scope` (E3.5-1), the text-fingerprint switch (E3.5-4), and per-job webhook fields.
-- Verify (test phase, not yet run): `cd services/quarry-control && go test ./internal/egress/ ./internal/dispatcher/ ./internal/catalogwatch/`. Native `go vet ./...` in the module exited 0; the tests were not run.
-- Rollback: revert the anchor lines in `dispatcher.go` and `catalogwatch.go` to `&http.Client{Timeout: 30 * time.Second}`. The `egress` package has no other caller and can stay.
-
-## Shared browser driver foundation: background tabs, tab pins, per-tab egress (WS8.E, U07, built, NOT run, 2026-10-23)
-
-Dark and without a caller. Nothing in the edge, the runtime or the SPA opens a background tab, pins a handle or installs a tab policy yet, so behaviour is unchanged for every existing run. The surface is the capability bits, the `BrowserDriver` defaults and the chromiumoxide implementation.
-
-- What is new: `BrowserSession::pinned_to(tab_id)` and `tab_pin()`. A pinned handle addresses its tab and never the active tab; a closed pin is NOT_FOUND with `details.reason = "pinned_tab_closed"` and no fallback. `BrowserDriver::open_tab(OpenTabOptions { url, activate, egress_policy })` opens a background tab with `activate: false`, which leaves the active tab where it was (a session with no active tab still activates the new one). `configure_tab_egress_policy(session, tab_id, policy)` installs a per-tab egress policy: the tab's policy wins, then the session policy, then deny-all. `active_tab_id(session)` reads the active tab. `new_tab` now calls `open_tab` with `activate: true` and behaves as before.
-- Observations through a pinned handle: devtools events, egress receipts and dialogs of other tabs are not returned; `respond_dialog` refuses a dialog that belongs to another tab.
-- Capability bits (serde defaults `false` on the wire): `background_tabs` and `tab_pinning` are true for the chromiumoxide driver; `per_tab_egress` is true only with the pinned egress proxy, the same condition as `isolated_egress`.
-- Code: `crates/quarry-browser/src/tab_control.rs` (new, pure helpers and unit tests), `lib.rs` (trait defaults, `BrowserSession.tab_pin`), `chromiumoxide.rs` (the implementation and seven live tests). Every `BrowserSession` literal carries `tab_pin: None`.
-- Rollback: revert the commit. No flag, no schema, no wire change for existing callers.
-
-Tests (written and compile-checked; NOT run in the build):
-
-- Unit, no Chromium: `cargo test -p quarry-browser tab_control` (key lookup order, pin resolution, observation filters).
-- Live lane: `CHROMIUMOXIDE_TEST=1 QUARRY_BROWSER_NO_SANDBOX=1 CHROME=/usr/bin/chromium cargo test -p quarry-browser --features chromiumoxide --lib chromiumoxide::tests -- --ignored` runs `background_tab_leaves_active_tab_unchanged`, `pinned_session_clicks_pinned_tab_not_active_tab`, `per_tab_policy_blocks_third_host_in_agent_tab_only`, `human_tab_keeps_open_web_while_agent_tab_is_narrow`, `closing_pinned_tab_does_not_fall_back_to_active`, `pinned_observation_never_contains_other_tab_events` and `background_tab_is_not_throttled`. The last one asserts at least 10 ticks in 2 s, a floor chosen before the first run; record the real count and adjust the floor there. The per-tab tests use `https://third.example.test/` as a page subresource; the assertions read the policy decision recorded in the receipt, not whether the request succeeds, so an offline runner still proves the boundary.
-- Without `CHROMIUMOXIDE_TEST=1` every live test returns at once.
-
-Traps for the next reader:
-
-- A background open still runs `require_configured_egress`: a session needs its own policy before a tab can open, even when the tab carries its own.
-- `goto` on a pinned handle with a closed pin returns `pinned_tab_closed`; it never opens a stand-in tab.
-- Tab policies are removed with the tab (`close_tab`) and with the session (`teardown_locked`, `ensure_browser`). A tab whose attach fails keeps its entry until the session ends; tab ids are not reused within a session.
+- What it is: `quarry_transform::canonical_url` (pure, no I/O, no tenant data). `canonicalize(input, CanonicalOptions)` gives one string per resource. `request_id_for_canonical` derives `cu1-` plus 32 lower-case hex digits (blake3 over `canonical-url-v1`, a newline, and the canonical string). `reconcile(requested, final_url, opts)` reports `redirected`, `same_host` and the request ids the frontier must mark as seen (`seen_request_ids`).
+- Default (conservative) folding: scheme and host case, default port, fragment, dot segments, empty path to `/`, one trailing dot on the host, and percent-escapes of unreserved bytes (decoded; reserved escapes such as `%2F` stay encoded, upper-cased). Kept distinct on purpose: trailing slash, `www.`, `index.html`, query order and tracking parameters.
+- Opt-in `CanonicalOptions { sort_query, strip_tracking_params }`: sorts query pairs, removes `utm_*`, `gclid`, `fbclid`, `msclkid`, `yclid`, `mc_cid`, `mc_eid`, `_ga`, `_gl` (keys matched case-insensitively). Nothing passes these yet.
+- Refused with a typed class: other schemes than http and https, userinfo in the URL (`url_credentials`, which blocks the `http://example.com@evil.test/` trick), no host, unparseable, and input over 8 KiB. `CanonicalError::code()` returns only `url_*` class names; the URL is never in an error.
+- Not wired. No caller exists in this unit. The enqueue path (`enqueue_batch` and the crawl seed through the scope filter) waits for W2 U60 (WS14.S3). The older `normalize_url` in `quarry-runtime/src/crawl_frontier.rs` (fragment and empty path only) is unchanged.
+- Flag: none, nothing runs. Rollback: revert the commit; the module has no consumer.
+- Tests written, not run: `cargo test -p quarry-transform --test canonical_url` (spellings, refusals, idempotence, request-id shape, and redirect reconciliation: no redirect, scheme upgrade, cross-host, `www.`, trailing slash, tracking-only redirect under each option set, refused sides).
 
 ## Quarry-v2 eval CI gates (E3.9.1, W3-B1-01)
 
@@ -943,6 +909,27 @@ Run it locally: `cargo run -p quarry-evals --bin quarry-eval`, then `cargo run -
 Gotchas: the job deletes the committed `lab/evals/*.json` outputs before it runs, so the matrix can never pass on an old run. It builds only the three gate binaries, not `quarry-browser-benchmark`, because that bin constructs the `BrowserSession` struct of `quarry-browser` directly and breaks when that struct changes. The provider matrix and Chromium are not run here.
 
 Not done: the Tier B corpus and the Chromium job (E3.9.2 onward), the scheduled Tier C run, and the default-on gate thresholds, which are still `[placeholder, ratify]`.
+
+## Web policy on the scrape family: baseline, enforcement and the request ask (WS7.C, U13, built, NOT run, 2026-10-23)
+
+The scrape family (`POST /v1/scrape`, `POST /v1/scrape/stream`, and the internal `run_page` route) resolves a web policy per request with `quarry_core::web_policy::resolve` and gates every URL before the page cache is read. Code: `crates/quarry-edge/src/policy_baseline.rs` (the operator baseline and the mode), `crates/quarry-edge/src/web_policy_edge.rs` (decide, gate, error shapes, counters), and `RunPolicy::from(&ResolvedPolicy)` in `crates/quarry-runtime/src/policy.rs` (a run stamps `web_policy` only when its policy differs from the catalogue default).
+
+- Flags. `QUARRY_EDGE__WEB_POLICY_BASELINE_JSON`: a `PolicyLayer` wire document (`{"modes":{...},"robots_max":...,"domains":{"deny":[...]}}`); unset means no operator layer. `QUARRY_EDGE__WEB_POLICY_ENFORCEMENT`: `enforce` (default), `observe` or `off`. A value that does not parse fails the boot with a message that names the variable and not its value.
+- Modes. `enforce`: the baseline and the request ask both apply; a denied URL is a 403. `observe`: the run proceeds as under `off`; the decision `enforce` would take is counted as `web_policy_would_deny_total{capability,decision_source}`. `off`: the baseline and the ask are ignored; invariants (raw script) and the ZDR floor still apply.
+- Request ask. `policy` on the body of `/v1/scrape` and `/v1/scrape/stream` (`RequestAsk` in `docs/openapi.yaml`). It can only tighten. An unknown key or capability is a 400 in every mode (`details.reason` `unknown_capability`, the name capped at 64 characters). A denied host is a 403 with `details.reason` `policy_denied` or `domain_denied`, `capability` `domains.deny`, and `decision_source` naming the layer (`request` for an ask, `baseline` for the operator layer).
+- Stream. A refusal on `/v1/scrape/stream` is the first SSE event, `event: error`, carrying the same envelope.
+- Logs and metrics. `policy.denied` and `policy.would_deny` log the capability, the decision source and the reason only. No URL, host, path or query is logged. The host appears in the response only when ZDR is off.
+- Internal `run_page`. No JWT on this route, so it is decided as an autonomous principal with the baseline and the invariants and no ask.
+- Cache. A non-default policy neither reads nor writes the page cache (the cache holds default results).
+
+Checks to run in the wave's test phase (not run here):
+- `cargo test -p quarry-runtime policy` (includes `default_resolved_policy_has_the_same_policy_fingerprint_as_best_effort` and `strict_ask_changes_the_fingerprint`).
+- `cargo test -p quarry-edge --test policy_baseline`.
+- Dev deploy: with `QUARRY_EDGE__WEB_POLICY_BASELINE_JSON={"domains":{"deny":["example.net"]}}`, `POST /v1/scrape {"url":"https://example.net/"}` is 403 with `decision_source` `baseline`; `https://example.org/` is 200 with the same `determinism.policy_fp` as before the change.
+
+Rollback. Set `QUARRY_EDGE__WEB_POLICY_ENFORCEMENT=off` (the ask and the baseline stop applying; invariants stay), or unset the baseline variable, or revert the commit. Nothing else depends on the module until WS7.D and WS7.E.
+
+Not done in this slice: the organisation layer (`OrgInput::Absent`, WS7.H to WS7.J), the grant layer, the agent path (WS7.D), the remaining routes (WS7.E), the claim intake and its required-claim mode (WS7.J), the integration test file `tests/web_policy_scrape.rs` named by the plan (it needs the real-token harness of `zdr_claim_floor.rs`), and the regeneration of the TypeScript and Python SDKs (`sdks/generate.sh`).
 
 ## Job policy name, job preset `requires`, and `/v1/blocklists` 410 (WS7.F, unit W2-U14, built, NOT run, 2026-10-23)
 
@@ -1001,27 +988,6 @@ The browser projection (`native_page_projection`) asks the page for the attribut
 - Not done: the Tier B loop that writes observations (needs WS11 S0 `ScriptedPlanner` and `FakeQuarry`, a sibling, and a stub grant validator); the CI wiring into `quarry-v2-eval.yml`; the threshold ratification; the scheduled Tier C run. Nothing has been run against a stack. The tests are written and compile-checked only.
 - Trap: `cargo check -p quarry-evals --tests` stops on `lab/evals/src/browser_benchmark.rs:221` (the `BrowserSession` literal lacks `tab_pin`, from an uncommitted `quarry-browser` change in the shared tree). That file is not owned here and was not touched. `--keep-going` reaches the other targets. `quarry-browser-benchmark` stays out of the release gate, as in the E3.9.1 section above.
 
-## Web policy on the scrape family: baseline, enforcement and the request ask (WS7.C, U13, built, NOT run, 2026-10-23)
-
-The scrape family (`POST /v1/scrape`, `POST /v1/scrape/stream`, and the internal `run_page` route) resolves a web policy per request with `quarry_core::web_policy::resolve` and gates every URL before the page cache is read. Code: `crates/quarry-edge/src/policy_baseline.rs` (the operator baseline and the mode), `crates/quarry-edge/src/web_policy_edge.rs` (decide, gate, error shapes, counters), and `RunPolicy::from(&ResolvedPolicy)` in `crates/quarry-runtime/src/policy.rs` (a run stamps `web_policy` only when its policy differs from the catalogue default).
-
-- Flags. `QUARRY_EDGE__WEB_POLICY_BASELINE_JSON`: a `PolicyLayer` wire document (`{"modes":{...},"robots_max":...,"domains":{"deny":[...]}}`); unset means no operator layer. `QUARRY_EDGE__WEB_POLICY_ENFORCEMENT`: `enforce` (default), `observe` or `off`. A value that does not parse fails the boot with a message that names the variable and not its value.
-- Modes. `enforce`: the baseline and the request ask both apply; a denied URL is a 403. `observe`: the run proceeds as under `off`; the decision `enforce` would take is counted as `web_policy_would_deny_total{capability,decision_source}`. `off`: the baseline and the ask are ignored; invariants (raw script) and the ZDR floor still apply.
-- Request ask. `policy` on the body of `/v1/scrape` and `/v1/scrape/stream` (`RequestAsk` in `docs/openapi.yaml`). It can only tighten. An unknown key or capability is a 400 in every mode (`details.reason` `unknown_capability`, the name capped at 64 characters). A denied host is a 403 with `details.reason` `policy_denied` or `domain_denied`, `capability` `domains.deny`, and `decision_source` naming the layer (`request` for an ask, `baseline` for the operator layer).
-- Stream. A refusal on `/v1/scrape/stream` is the first SSE event, `event: error`, carrying the same envelope.
-- Logs and metrics. `policy.denied` and `policy.would_deny` log the capability, the decision source and the reason only. No URL, host, path or query is logged. The host appears in the response only when ZDR is off.
-- Internal `run_page`. No JWT on this route, so it is decided as an autonomous principal with the baseline and the invariants and no ask.
-- Cache. A non-default policy neither reads nor writes the page cache (the cache holds default results).
-
-Checks to run in the wave's test phase (not run here):
-- `cargo test -p quarry-runtime policy` (includes `default_resolved_policy_has_the_same_policy_fingerprint_as_best_effort` and `strict_ask_changes_the_fingerprint`).
-- `cargo test -p quarry-edge --test policy_baseline`.
-- Dev deploy: with `QUARRY_EDGE__WEB_POLICY_BASELINE_JSON={"domains":{"deny":["example.net"]}}`, `POST /v1/scrape {"url":"https://example.net/"}` is 403 with `decision_source` `baseline`; `https://example.org/` is 200 with the same `determinism.policy_fp` as before the change.
-
-Rollback. Set `QUARRY_EDGE__WEB_POLICY_ENFORCEMENT=off` (the ask and the baseline stop applying; invariants stay), or unset the baseline variable, or revert the commit. Nothing else depends on the module until WS7.D and WS7.E.
-
-Not done in this slice: the organisation layer (`OrgInput::Absent`, WS7.H to WS7.J), the grant layer, the agent path (WS7.D), the remaining routes (WS7.E), the claim intake and its required-claim mode (WS7.J), the integration test file `tests/web_policy_scrape.rs` named by the plan (it needs the real-token harness of `zdr_claim_floor.rs`), and the regeneration of the TypeScript and Python SDKs (`sdks/generate.sh`).
-
 ## Reputation snapshot hot reload and subdomain matching (E3.8.6, W3-B3-01, built, NOT run, 2026-10-23)
 
 Dark by default. With the two variables unset, quarry-edge behaves as before: the URL blocklist is read once at boot from `QUARRY_EDGE__SECURITY_SNAPSHOT_PATH` and never changes until restart.
@@ -1046,27 +1012,22 @@ Not in this section: the run drain and the usage flush belong to the edge (see "
 
 Check after a deploy (not run in this unit): `docker stop quarry-orchestrator` ends with exit 0 inside the grace period, and the log shows `worker stopped` or `worker did not stop within its bound; exiting` before `shutdown`.
 
-## Profile owner and ACL check (WS17.P2, unit W2-U24, built, NOT run, 2026-10-23)
+## Scrape session isolation and the heavy lane: WS13.1 (U23, built, NOT run, 2026-10-23)
 
-- What it does. Every `/v1/profiles*` route decides, per profile, whether the caller may use it. A `user_private` profile belongs to its owner (the actor id stamped on its row, `Claims::actor_id()`). An `org_shared` profile is usable by every member of the org: any member may list, read, probe, attach and save it, and only the owner may rename, rescope or delete it. A caller who may not use a profile gets 404 `profile not found`, never 403. Code: `crates/quarry-edge/src/profile_guard.rs`; routes in `crates/quarry-edge/src/profile_routes.rs`.
-- Flag: `QUARRY_EDGE__PROFILE_OWNER_ENFORCE`, one of `off`, `observe`, `enforce`. Default `observe`. Read once at boot; a change needs a quarry-edge restart.
-  - `observe` (the shipped default): the same decision is made and logged as `profile.owner.would_deny` with `op` and `reason` (`not_owner` or `legacy_ownerless`), and the request is served as before. A list call logs one count per reason.
-  - `enforce`: a denied caller gets the 404, and the log line is `profile.owner.denied`.
-  - `off`: no decision is made. Responses still carry `owner_is_caller`.
-- Responses: `owner_is_caller` (boolean, additive) on the list rows and on the load, create, update and restore-probe responses. True only when the caller is the stored owner.
-- Logs carry the op and the reason class only. No profile id, name or owner id is logged.
-- Legacy rows (owner NULL, written before WS17.P1, or by a capture that stamps no owner): an unowned `user_private` or unscoped row is hidden from everyone under `enforce` and is not deleted. An unowned `org_shared` row stays visible to the org, and its owner-only operations stay open to the org, as before WS17.P2.
-- Rescue of a legacy private row is an operator decision, never a guess. Find the candidates first:
-  `SELECT org_id, profile_id, name, scope, rev, updated_at FROM quarry_profiles WHERE owner_user_id IS NULL AND scope <> 'org_shared';`
-  Then set the owner only after the org confirms who owns the profile, using that user's actor id from the auth-core user record:
-  `UPDATE quarry_profiles SET owner_user_id = '<actor id>' WHERE org_id = '<org id>' AND profile_id = '<profile id>' AND owner_user_id IS NULL;`
-- Not wired yet: the attach path (the profile id block in the agent run route, `crates/quarry-edge/src/agent_routes/`). The queue defers it to WS8.F. Until then a run that names another user's profile id still attaches it. `ProfileOp::Attach` is decided like the other operations, ready for that call site.
-- Known gaps while the flag is `observe`: a profile first written by a browser capture has no owner (the browser lease carries no actor id), so under `enforce` it is hidden from everyone until it is rescued as above. The S3 profile backend stamps the owner on a metadata create but not on a snapshot save.
-- Rollout, not decided: move to `enforce` only after a week of `profile.owner.would_deny` counts shows only the expected denials. The legacy-owner policy (D16 Q2) is not among the approved 13, so `enforce` stays off until it is decided.
+Each scrape fetch through the local Chromium driver now gets its own browser session key, `{host}~{lease id}`, so two fetches of one host, for two organizations, never share a browser context, cookie jar or storage. Before this change the key was the bare host, so a later caller's page could inherit the earlier caller's cookies (finding A, `browser_driver.rs`).
+
+- Flags, both in the `quarry-edge` env blocks (`apps/Ingestion Plane/docker-compose.yml`, `apps/Ingestion Plane/Quarry-v2/deploy/compose/docker-compose.yml`):
+  - `QUARRY_SCRAPE_SESSION_ISOLATION`, default `on`. `0` or `false` restores the legacy host key, including the seeded host lease.
+  - `QUARRY_SCRAPE_HEAVY_PERMITS`, default `1`, clamped to the pool size (`1..=pool`). Nothing takes the heavy permit yet; the actions and capture slices (WS13.4, WS13.4a) do.
+- Both are read once, when the edge builds its browser adapter. A change needs a quarry-edge restart.
+- Rollback: set `QUARRY_SCRAPE_SESSION_ISOLATION=0` and restart quarry-edge. Nothing is migrated and no response shape changes.
+- Boot log: the line `browser driver registered (local chromiumoxide)` now carries `session_isolation` and `heavy_permits`.
+- Cost: an isolated fetch opens a fresh browser context and a fresh pinned proxy listener for its own key. Per-request setup cost is not measured yet (see the evidence owed below).
+- Managed providers (Browserbase) use the same adapter, so with isolation on each fetch asks the provider for its own session. This has not been measured.
 - Tests (written, compile-checked, NOT run in this build):
-  - Unit: `cargo test -p quarry-edge --lib profile_guard`. Covers the decision table, the listing filter, the observe and enforce gates and the mode parse.
-  - Route: `cargo test -p quarry-edge --test profile_owner`. Calls the handlers with hand-built claims for two users in one org.
-- Evidence owed (test phase, not run): rebuild the quarry-edge image. With two users A and B in one org: A creates a `user_private` profile P; B's `GET /v1/profiles` does not list P; B's `GET /v1/profiles/P` returns 404 under `enforce` and is served under `observe`, and the edge log shows `profile.owner.would_deny` with `reason=not_owner`.
+  - Unit: `cargo test -p quarry-runtime browser_driver`. Covers distinct session keys for concurrent same-host fetches, the key shape, the org carried on the isolated lease, no return to the pool, the kill switch, and the flag and heavy-lane parsing.
+  - Live: `CHROMIUMOXIDE_TEST=1 QUARRY_BROWSER_NO_SANDBOX=1 CHROME=/usr/bin/chromium cargo test -p quarry-runtime --features chromiumoxide --test browser_session_isolation_live -- --test-threads=1`. It needs outbound HTTPS to `httpbin.org`, or `QUARRY_TEST_COOKIE_PAGE` pointing at a page that sets a cookie and echoes the jar.
+- Evidence owed (not done; WS13.1 definition of done): the live test must fail with `QUARRY_SCRAPE_SESSION_ISOLATION=0` on the old code, recorded; p50 of 20 sequential plain scrapes within 10 percent of the pre-change p50; two concurrent `POST /v1/scrape` at a cookie-reflecting page with two org tokens, each markdown holding only its own probe, with no `lease guard poisoned` in `docker logs quarry-edge`.
 
 ## Devtools filters and browser evidence proxies (WS9.C, D9 S3a, unit W2-U19, built, NOT run, 2026-10-23)
 
@@ -1090,24 +1051,7 @@ Check after a deploy (not run in this unit): `docker stop quarry-orchestrator` e
 - Robots: the edge does not consult robots rules here yet (WS14.S4 adds the cached-rules lookup), so `robots_disallowed` and `robots_unreachable` do not appear from this route yet.
 - Tests (written, compile-checked, NOT run): `cargo test -p quarry-runtime crawl_filter` (host rule, patterns, caps, depth, redirects, observe, batch, and the proptest host differential) and `cargo test -p quarry-core crawl_` plus `cargo test -p quarry-edge --test crawl_scope_robots`.
 - Rollback: none needed for callers that omit `crawl`. A revert of the three U20 commits removes the field from the route.
-- Evidence owed (not done): the signed `run_page` call against the fixture site with and without `crawl`, and a golden of the no-crawl body recorded from the pre-U20 handler. See `.plan-work/quarry-w1w2/depth/W2-U20.md`.
-
-## Scrape session isolation and the heavy lane: WS13.1 (U23, built, NOT run, 2026-10-23)
-
-Each scrape fetch through the local Chromium driver now gets its own browser session key, `{host}~{lease id}`, so two fetches of one host, for two organizations, never share a browser context, cookie jar or storage. Before this change the key was the bare host, so a later caller's page could inherit the earlier caller's cookies (finding A, `browser_driver.rs`).
-
-- Flags, both in the `quarry-edge` env blocks (`apps/Ingestion Plane/docker-compose.yml`, `apps/Ingestion Plane/Quarry-v2/deploy/compose/docker-compose.yml`):
-  - `QUARRY_SCRAPE_SESSION_ISOLATION`, default `on`. `0` or `false` restores the legacy host key, including the seeded host lease.
-  - `QUARRY_SCRAPE_HEAVY_PERMITS`, default `1`, clamped to the pool size (`1..=pool`). Nothing takes the heavy permit yet; the actions and capture slices (WS13.4, WS13.4a) do.
-- Both are read once, when the edge builds its browser adapter. A change needs a quarry-edge restart.
-- Rollback: set `QUARRY_SCRAPE_SESSION_ISOLATION=0` and restart quarry-edge. Nothing is migrated and no response shape changes.
-- Boot log: the line `browser driver registered (local chromiumoxide)` now carries `session_isolation` and `heavy_permits`.
-- Cost: an isolated fetch opens a fresh browser context and a fresh pinned proxy listener for its own key. Per-request setup cost is not measured yet (see the evidence owed below).
-- Managed providers (Browserbase) use the same adapter, so with isolation on each fetch asks the provider for its own session. This has not been measured.
-- Tests (written, compile-checked, NOT run in this build):
-  - Unit: `cargo test -p quarry-runtime browser_driver`. Covers distinct session keys for concurrent same-host fetches, the key shape, the org carried on the isolated lease, no return to the pool, the kill switch, and the flag and heavy-lane parsing.
-  - Live: `CHROMIUMOXIDE_TEST=1 QUARRY_BROWSER_NO_SANDBOX=1 CHROME=/usr/bin/chromium cargo test -p quarry-runtime --features chromiumoxide --test browser_session_isolation_live -- --test-threads=1`. It needs outbound HTTPS to `httpbin.org`, or `QUARRY_TEST_COOKIE_PAGE` pointing at a page that sets a cookie and echoes the jar.
-- Evidence owed (not done; WS13.1 definition of done): the live test must fail with `QUARRY_SCRAPE_SESSION_ISOLATION=0` on the old code, recorded; p50 of 20 sequential plain scrapes within 10 percent of the pre-change p50; two concurrent `POST /v1/scrape` at a cookie-reflecting page with two org tokens, each markdown holding only its own probe, with no `lease guard poisoned` in `docker logs quarry-edge`.
+- Evidence owed (not done): the signed `run_page` call against the fixture site with and without `crawl`, and a golden of the no-crawl body recorded from the pre-U20 handler. See `.plan-work/quarry-w1w2/depth/W2-U20.md`.
 
 ## Agent run budgets: meta.budget, cost_source, usage and agent.budget_exhausted (WS6.B remainder, W2-U21, built, NOT run, 2026-10-23)
 
@@ -1129,24 +1073,18 @@ What changed on top of the 77374adc gate: a step response of an agent run carrie
 - Evidence owed (test phase, not run): `POST /v1/scrape` of `https://example.com` returns a body identical (ignoring `run_id`, timestamps and `duration_ms`) before and after the rebuild of `quarry-edge`.
 - Rollback: revert the commit. Nothing persisted needs reverting.
 
-## Agent event trace: per-run seq, replay ring and resume (WS10.S3, unit W2-U25, built, NOT run, 2026-10-23)
 
-What changed for an operator: the SSE `id:` of `GET /v1/agent/runs/{run_id}/events/stream` is now the run's `seq`, dense from 1 per run (the run's `agent.started` is 1). A reconnect with `Last-Event-ID` (or `?from_seq=`, which wins) replays the events after that seq from the run's in-memory ring and then tails the live channel, with no gap and no duplicate. When the ring no longer holds the events after the resume point, the stream first sends `replay_gap` `{requested, oldest_retained, fallback: "browser-session/timeline"}`: read the durable timeline for the missed part. The ring is memory only, lives as long as the run, and never reaches Postgres. A ZDR event is kept in the ring and never reaches the durable publisher or NATS.
+## Reload and the navigation error card: WS9.B (W2-U27, built, NOT run, 2026-10-23)
 
-Flags (read once at boot, env only, `crates/quarry-edge/src/trace_config.rs`):
-
-- `QUARRY_EDGE__TRACE_RING_EVENTS`, default `512`. `0` disables the ring: a resume that missed events then gets `replay_gap`, and the live tail is unchanged.
-- `QUARRY_EDGE__TRACE_RING_MAX_BYTES`, default `1048576` (1 MiB, estimated). Must be at least `1`. An unparsable value, or `0`, aborts boot and names the variable.
-
-Memory: each open run holds at most `QUARRY_EDGE__TRACE_RING_EVENTS` events and about `QUARRY_EDGE__TRACE_RING_MAX_BYTES` of estimated payload per run. The byte count is an estimate (payload text length plus key plus 192 bytes per event), not heap size. Runs are released at `close_run` (owner close and sweeper expiry).
-
-Rollback: set `QUARRY_EDGE__TRACE_RING_EVENTS=0` and restart quarry-edge (resumes then report a gap, the live stream is as before), or revert the commits. A resumed run (`resume_run_id` after a restart) starts its trace at seq 1 again: a client that kept an id from before the restart should start a fresh stream.
-
-Checks (compile only, this unit did not run the tests): `cargo check --tests -p quarry-runtime -p quarry-edge`; gateway `cargo check --tests` in `apps/Frontend Plane/verevonv3/apps/gateway`. Tests written, not run: `cargo test -p quarry-runtime events` (the plan's names, plus the dense, ring-bound, replay-filter, gap, lag, close and ZDR cases); `cargo test -p quarry-edge --lib trace_config`; `cargo test -p quarry-edge --test agent_events_replay` (reconnect, from_seq precedence, replay_gap first, non-owner 404, closed-run done, and the doc-comment source scan); gateway `cargo test browser_events_stream`; `pnpm typecheck` for `browser-client.ts`.
-
-Evidence owed (test phase, on a deployed stack, not run): rebuild quarry-edge and the gateway image; create a session; `curl -N` the events stream; drive five steps; kill the stream after `id: 3`; reconnect with `Last-Event-ID: 3` and check the first event is `id: 4`, consecutive, no repeats; `Last-Event-ID: 0` after about 600 steps gives `replay_gap` first; closing the run ends the stream with `event: done` / `data: run_closed`. With `RUST_LOG=quarry_runtime=debug`, the `open_runs` count returns to 0 after a batch closes.
-
-Known gaps: the SPA has the typed reader (`streamBrowserEvents` in `shared/api/browser-client.ts`) but no UI uses it yet; agent events still reach NATS raw for non-ZDR runs until WS10.S4 (see the unit depth notes); the gateway forwards the query string as it arrives (Quarry reads only `from_seq` and `max_events`). See `.plan-work/quarry-w1w2/depth/W2-U25.md`.
+- What changed: the wire action `reload { ignore_cache: bool }` (default false) is added to `AgentAction` (quarry-core `contracts.rs`, appended at the end of the enum), to the browser `Action` (quarry-browser `actions.rs`) and to the driver trait (`BrowserDriver::reload`, default Unsupported). The chromiumoxide driver runs CDP `Page.reload{ignoreCache}`. A soft reload from the SPA is still a GET navigate to the session URL; only the hard reload uses the new action.
+- Human-only: the Model Plane `browser.act` schema and `tool_bridge` do not list `reload`, so no agent tool can send it. The gateway also refuses `reload` when the actor is `agent` (`browser_action_denied`, 403) before any Quarry call.
+- Flags and wire: none in Quarry. The gateway advertises the capability strings `reload` and `hard_reload` in the two session projections; the SPA shows the hard reload button only when `hard_reload` is listed. Rollback: remove the two strings from `browser.rs` (gateway image swap). Advertise them only after the Quarry edge image with this commit is deployed (order: Quarry edge, gateway, frontend).
+- Budget and cost: `reload` has its own label in `browser_action_name` and the flat cost table (0.0001 USD, like `back`). Web policy classes it as `navigation`.
+- Contract: `docs/openapi.yaml` gains `ReloadAction` (additive, mapped under `AgentAction`). Unknown keys are rejected at the gateway; the Quarry body accepts only `type` and `ignore_cache`.
+- Check: `cargo check --tests -p quarry-core -p quarry-browser --features chromiumoxide -p quarry-runtime -p quarry-edge` (compile check only). Tests written, not run: `cargo test -p quarry-core agent_action_reload_roundtrips`, `cargo test -p quarry-runtime reload`, `cargo test -p quarry-edge action_label_reload`, and the ignored live test `cargo test -p quarry-browser --features chromiumoxide -- --ignored reload_ignores_cache` (needs `CHROMIUMOXIDE_TEST=1`; shallow, see the unit depth notes). Gateway: `sanitize_action_allows_reload_without_extra_keys`, `sanitize_action_rejects_reload_with_url`, `reload_is_refused_for_agent_actor_only`.
+- Evidence owed (test phase, not run): on a deployed stack, a reload after a navigation to an unresolvable host shows the error card with the failed URL; a hard reload from the chrome sends `{"action":{"type":"reload","ignore_cache":true}}` and returns 200 with an observation; the Quarry timeline records the action row; the same request with `actor=agent` returns 403.
+- Known gaps: the error card has no Playwright spec yet; the chrome offers the hard reload as a second button rather than a menu item; cache bypass is not proven by a fixture test; the SPA copy is Norwegian only, like the rest of the chrome. See the unit depth notes.
+- Rollback: revert the commit. The enum variant is additive; no persisted data uses it.
 
 ## Cancel, pause and resume a job: control loop and typed timeouts (WS15.L2, unit W2-U28, built, NOT run, 2026-10-23)
 
@@ -1161,55 +1099,6 @@ Known gaps: the SPA has the typed reader (`streamBrowserEvents` in `shared/api/b
   3. The job is `timed_out` with a `run_timed_out` event: the execution timeout for its kind ended the workflow. The timeout is in `deadline_at` on the job. Raise the matching `QUARRY_JOB_TIMEOUT_*` variable if the work legitimately needs longer.
   4. `temporal workflow describe -w quarry-job-<id>` shows the workflow state. A closed workflow that the job record still shows as running is corrected by the sweep (every 30 s), which finalizes it from the Temporal status.
 - Not done here: the Model Plane registry actions (`ingestions.cancel_run` and the others) and the SPA controls are WS15.L5. The job event tail is WS15.L3. Deployment evidence (the 5000-page crawl with pause, resume and cancel, and the timeout check) is owed in the wave's stack phase and is not claimed by this section.
-
-## Reload and the navigation error card: WS9.B (W2-U27, built, NOT run, 2026-10-23)
-
-- What changed: the wire action `reload { ignore_cache: bool }` (default false) is added to `AgentAction` (quarry-core `contracts.rs`, appended at the end of the enum), to the browser `Action` (quarry-browser `actions.rs`) and to the driver trait (`BrowserDriver::reload`, default Unsupported). The chromiumoxide driver runs CDP `Page.reload{ignoreCache}`. A soft reload from the SPA is still a GET navigate to the session URL; only the hard reload uses the new action.
-- Human-only: the Model Plane `browser.act` schema and `tool_bridge` do not list `reload`, so no agent tool can send it. The gateway also refuses `reload` when the actor is `agent` (`browser_action_denied`, 403) before any Quarry call.
-- Flags and wire: none in Quarry. The gateway advertises the capability strings `reload` and `hard_reload` in the two session projections; the SPA shows the hard reload button only when `hard_reload` is listed. Rollback: remove the two strings from `browser.rs` (gateway image swap). Advertise them only after the Quarry edge image with this commit is deployed (order: Quarry edge, gateway, frontend).
-- Budget and cost: `reload` has its own label in `browser_action_name` and the flat cost table (0.0001 USD, like `back`). Web policy classes it as `navigation`.
-- Contract: `docs/openapi.yaml` gains `ReloadAction` (additive, mapped under `AgentAction`). Unknown keys are rejected at the gateway; the Quarry body accepts only `type` and `ignore_cache`.
-- Check: `cargo check --tests -p quarry-core -p quarry-browser --features chromiumoxide -p quarry-runtime -p quarry-edge` (compile check only). Tests written, not run: `cargo test -p quarry-core agent_action_reload_roundtrips`, `cargo test -p quarry-runtime reload`, `cargo test -p quarry-edge action_label_reload`, and the ignored live test `cargo test -p quarry-browser --features chromiumoxide -- --ignored reload_ignores_cache` (needs `CHROMIUMOXIDE_TEST=1`; shallow, see the unit depth notes). Gateway: `sanitize_action_allows_reload_without_extra_keys`, `sanitize_action_rejects_reload_with_url`, `reload_is_refused_for_agent_actor_only`.
-- Evidence owed (test phase, not run): on a deployed stack, a reload after a navigation to an unresolvable host shows the error card with the failed URL; a hard reload from the chrome sends `{"action":{"type":"reload","ignore_cache":true}}` and returns 200 with an observation; the Quarry timeline records the action row; the same request with `actor=agent` returns 403.
-- Known gaps: the error card has no Playwright spec yet; the chrome offers the hard reload as a second button rather than a menu item; cache bypass is not proven by a fixture test; the SPA copy is Norwegian only, like the rest of the chrome. See the unit depth notes.
-- Rollback: revert the commit. The enum variant is additive; no persisted data uses it.
-
-## Web policy on the agent path: start decision, admission gate 8 and host rules (WS7.D, unit W2-U29, built, NOT run, 2026-10-23)
-
-`start_run` resolves the run's web policy once (`agent_policy_gate::resolve_for_start`): the caller's principal (a service token is autonomous, a user is human), the ZDR posture, the operator baseline (`QUARRY_EDGE__WEB_POLICY_BASELINE_JSON`, the WS7.C variable) and the request's `policy` ask (`StartAgentRunRequest.policy`, a `RequestAsk`, tighten-only, unknown keys 400). The decision is kept on `RunLive` (lock-free), not on `RunEntry`. Every browser surface then reads it: admission gate 8 (`admit_action`, R-7 order, after the raw-script gate and before the budget and the one-shot approval) for REST `step`, `interact`, the browser WebSocket action message and the tab routes; the landed page after a `step` or WebSocket action; and the URL of `new_tab`. The browser's egress boundary is the run's `allowed_domains` narrowed by the decision (`egress_policy`); an empty intersection is deny-all, never allow-all. `constraints.allowed_domains` itself is not changed, so the broker grant equality check is unchanged.
-
-Flag: none new. `QUARRY_EDGE__WEB_POLICY_ENFORCEMENT` (`off`, `observe`, `enforce`; default `enforce`, as in WS7.C) decides what the gate does. Under `observe` the enforced decision is only counted (`web_policy_would_deny_total`), never returned. With no baseline and no ask the decision is the catalogue default and changes nothing.
-
-A refusal is a typed 403 `FORBIDDEN` with `details.reason` `policy_denied` (with `capability`, `decision_source`, `denied_action`, `retryable: false`), or `domain_denied` / `domain_not_allowed` (with `capability` `domains.deny` or `domains.allow`). Nothing is acquired at start on a refused start, and nothing is consumed on a refused action: no step, no attempt, no receipt, no approval grant. A start refused for `persist_profile` or for the artifact flags (`driver_requirements.uploads_from_artifacts` / `downloads_to_artifacts`) is refused the same way (`upload_ref`, `download_ref`, `persist_profile` are the denied actions named).
-
-Known gaps (see `.plan-work/quarry-w1w2/depth/W2-U29.md`): a resumed run does not carry the original ask (high); no egress deny for an unconstrained run (WS7.G 6a); the landed-URL check runs after the action (WS7.G final-URL preflight); the organisation layer is absent (WS7.H, WS7.J).
-
-Tests written, not run: `cargo test -p quarry-edge --lib agent_policy_gate` (four unit tests) and `cargo test -p quarry-edge --test web_policy_agent` (seven tests through the real router). Upload, download, resume and grant-equality cases are not written (see the depth file).
-
-## Web policy claim intake: the org layer and the required-claim flag (WS7.J observe part, W2-U35, built, NOT run, 2026-10-23)
-
-The token's `web_policy` claim (minted by auth-core under WS7.I, which is not built yet) is the org layer of the web policy. Code: `crates/quarry-edge/src/auth.rs` (`Claims.web_policy`, untyped; `Claims::web_policy_claim` reads it), `crates/quarry-edge/src/policy_baseline.rs` (`PolicyBaseline::org_input`, `decide_with_org`, the require flag), `crates/quarry-edge/src/web_policy_edge.rs` (`decide` takes the caller's claims; `decide_for_principal` serves the no-token internal route). The agent run start (`resolve_for_start`) takes the claims the same way.
-
-- Claim shape (version 1 only). `{"v":1,"rev":"<1 to 12 hex digits>","caps":{"<capability>":"disabled|allowed|forced",...},"robots_max":"strict|respect|ignore","proxy_max":"none|pool","domains":{"allow":[...],"deny":[...]}}`. `caps` may also carry `robots.max_mode` or `proxy.max_tier`; they tighten the top-level ceilings. An empty `domains.allow` means no allow rule (the claim lists only non-baseline entries).
-- Unreadable claim. Malformed, a version other than 1, a `rev` that is not hex, or a rule a layer may not state (for example `forced` on an ability, a domain rule under `caps`). It is refused with 403 `policy_unreadable` under `enforce`. Under `observe` it is counted as `web_policy_would_deny_total{decision_source="org_policy"}` and the run proceeds.
-- Unknown keys. Unknown capability keys and unknown top-level fields are ignored and counted (`web_policy_claim_unknown_key_total`). Unreadable claims count in `web_policy_claim_unreadable_total`. The claim's content is never logged.
-- Absent claim. An old issuer's token has no claim: no org layer, as before. With `QUARRY_EDGE__WEB_POLICY_REQUIRE_CLAIM=1` the request is refused with 403 `policy_unreadable` under `enforce` (counted only under `observe`).
-- `QUARRY_EDGE__WEB_POLICY_REQUIRE_CLAIM`: `1` or `0` (also `true` or `false`, any case). Default `0`. Any other value fails the boot, and the message names the variable only. Order of rollout (WS7.J): auth-core ships the claim first, then the edge runs `observe`, then this flag. Setting it before auth-core mints the claim refuses every request.
-- The org layer is the claim's layer. Each decision still meets it with the invariants, the ZDR floor, the baseline and the ask, so the claim can only tighten.
-- Routes. Scrape (`POST /v1/scrape`, `/v1/scrape/stream`) and agent run start (`POST /v1/agent/runs`) read the claim. The internal `run_page` route has no token and is decided with no org layer.
-- Test phase (written, NOT run): `cargo test -p quarry-edge --test web_policy_claim` (twelve tests) and `cargo test -p quarry-edge --test zdr_claim_floor` (unchanged, must stay green).
-
-## Live job-event tail: follow=true (WS15.L3, unit W2-U31, built, NOT run, 2026-10-23)
-
-- What: `GET /v1/jobs/{id}/events`, and the aliases `GET /v1/crawl/{id}/events` and `GET /v1/batch/{id}/events` (a kind mismatch is 404), gain `follow=true`. The stream opens with `event: snapshot` (status, phase, counts, last_seq, deadline_at, origin, control; its `id` is the start cursor), then one frame per event with `id: <seq>` and `event: <type>`, and ends with `data: done` after a terminal event or once the job record is terminal and the log is caught up. Code: `crates/quarry-edge/src/job_stream.rs` (permits, poll, snapshot, the stream) and `resource_routes.rs` (`job_events`, `follow_job`, `legacy_events`).
-- Flag: `QUARRY_EDGE__JOB_STREAM_FOLLOW` (default off; `1` enables). Off means `follow` is ignored and the response is the legacy drain.
-- Other knobs: `QUARRY_EDGE__JOB_STREAM_MAX_PER_ORG` (default 20), `QUARRY_EDGE__JOB_STREAM_MAX` (default 500, per instance), `QUARRY_EDGE__JOB_STREAM_MAX_AGE_S` (default 1800; then `event: reconnect`).
-- Cursor: `Last-Event-ID` wins over `after_seq`. With neither, `replay=all` (default) starts at 0 and `replay=none` starts at the job's last seq. Any other `replay` value is 400.
-- Refusals before any frame: a foreign or wrong-kind id is 404; over a cap it is 429 with `code: RATE_LIMITED` and `retry_after_seconds: 30`.
-- Legacy drain change: without `follow` the route now reads every page (500 events each) until the log is caught up, instead of one page. Frames are unchanged. Gateway: `/api/v1/knowledge/jobs/{id}/events` forwards the query and `Last-Event-ID` as before; no gateway code changed.
-- Failure frames: a failed control read ends the stream with `event: error` and `{ "code": <wire name> }`; no internal text is sent.
-- Rollback: unset the flag (or set it to 0). Clients that send `follow=true` then get the legacy drain.
-- Not done here: the SPA controls and the `knowledge-client` follow use are WS15.L5. Under zero data retention the follow path does not apply the errors route's refusal (see depth). Deployment evidence (curl against a slow crawl with a `Last-Event-ID` resume and the 21st-stream 429; the browser network panel) is owed in the stack phase and is not claimed here.
 
 ## Web policy on the remaining routes: search, extract, map, crawl, batch, profile create (WS7.E, unit W2-U33, built, NOT run, 2026-10-23)
 
@@ -1235,6 +1124,38 @@ Rollback. Set `QUARRY_EDGE__WEB_POLICY_ENFORCEMENT=off` (the baseline and the or
 
 Not done in this slice: the route-level tests above; the ZDR consolidation PR; WS7.G's answer candidate filter; save and update of profiles; resumed runs; the deployment evidence of the plan.
 
+## Live job-event tail: follow=true (WS15.L3, unit W2-U31, built, NOT run, 2026-10-23)
+
+- What: `GET /v1/jobs/{id}/events`, and the aliases `GET /v1/crawl/{id}/events` and `GET /v1/batch/{id}/events` (a kind mismatch is 404), gain `follow=true`. The stream opens with `event: snapshot` (status, phase, counts, last_seq, deadline_at, origin, control; its `id` is the start cursor), then one frame per event with `id: <seq>` and `event: <type>`, and ends with `data: done` after a terminal event or once the job record is terminal and the log is caught up. Code: `crates/quarry-edge/src/job_stream.rs` (permits, poll, snapshot, the stream) and `resource_routes.rs` (`job_events`, `follow_job`, `legacy_events`).
+- Flag: `QUARRY_EDGE__JOB_STREAM_FOLLOW` (default off; `1` enables). Off means `follow` is ignored and the response is the legacy drain.
+- Other knobs: `QUARRY_EDGE__JOB_STREAM_MAX_PER_ORG` (default 20), `QUARRY_EDGE__JOB_STREAM_MAX` (default 500, per instance), `QUARRY_EDGE__JOB_STREAM_MAX_AGE_S` (default 1800; then `event: reconnect`).
+- Cursor: `Last-Event-ID` wins over `after_seq`. With neither, `replay=all` (default) starts at 0 and `replay=none` starts at the job's last seq. Any other `replay` value is 400.
+- Refusals before any frame: a foreign or wrong-kind id is 404; over a cap it is 429 with `code: RATE_LIMITED` and `retry_after_seconds: 30`.
+- Legacy drain change: without `follow` the route now reads every page (500 events each) until the log is caught up, instead of one page. Frames are unchanged. Gateway: `/api/v1/knowledge/jobs/{id}/events` forwards the query and `Last-Event-ID` as before; no gateway code changed.
+- Failure frames: a failed control read ends the stream with `event: error` and `{ "code": <wire name> }`; no internal text is sent.
+- Rollback: unset the flag (or set it to 0). Clients that send `follow=true` then get the legacy drain.
+- Not done here: the SPA controls and the `knowledge-client` follow use are WS15.L5. Under zero data retention the follow path does not apply the errors route's refusal (see depth). Deployment evidence (curl against a slow crawl with a `Last-Event-ID` resume and the 21st-stream 429; the browser network panel) is owed in the stack phase and is not claimed here.
+
+## Web policy claim intake: the org layer and the required-claim flag (WS7.J observe part, W2-U35, built, NOT run, 2026-10-23)
+
+The token's `web_policy` claim (minted by auth-core under WS7.I, which is not built yet) is the org layer of the web policy. Code: `crates/quarry-edge/src/auth.rs` (`Claims.web_policy`, untyped; `Claims::web_policy_claim` reads it), `crates/quarry-edge/src/policy_baseline.rs` (`PolicyBaseline::org_input`, `decide_with_org`, the require flag), `crates/quarry-edge/src/web_policy_edge.rs` (`decide` takes the caller's claims; `decide_for_principal` serves the no-token internal route). The agent run start (`resolve_for_start`) takes the claims the same way.
+
+- Claim shape (version 1 only). `{"v":1,"rev":"<1 to 12 hex digits>","caps":{"<capability>":"disabled|allowed|forced",...},"robots_max":"strict|respect|ignore","proxy_max":"none|pool","domains":{"allow":[...],"deny":[...]}}`. `caps` may also carry `robots.max_mode` or `proxy.max_tier`; they tighten the top-level ceilings. An empty `domains.allow` means no allow rule (the claim lists only non-baseline entries).
+- Unreadable claim. Malformed, a version other than 1, a `rev` that is not hex, or a rule a layer may not state (for example `forced` on an ability, a domain rule under `caps`). It is refused with 403 `policy_unreadable` under `enforce`. Under `observe` it is counted as `web_policy_would_deny_total{decision_source="org_policy"}` and the run proceeds.
+- Unknown keys. Unknown capability keys and unknown top-level fields are ignored and counted (`web_policy_claim_unknown_key_total`). Unreadable claims count in `web_policy_claim_unreadable_total`. The claim's content is never logged.
+- Absent claim. An old issuer's token has no claim: no org layer, as before. With `QUARRY_EDGE__WEB_POLICY_REQUIRE_CLAIM=1` the request is refused with 403 `policy_unreadable` under `enforce` (counted only under `observe`).
+- `QUARRY_EDGE__WEB_POLICY_REQUIRE_CLAIM`: `1` or `0` (also `true` or `false`, any case). Default `0`. Any other value fails the boot, and the message names the variable only. Order of rollout (WS7.J): auth-core ships the claim first, then the edge runs `observe`, then this flag. Setting it before auth-core mints the claim refuses every request.
+- The org layer is the claim's layer. Each decision still meets it with the invariants, the ZDR floor, the baseline and the ask, so the claim can only tighten.
+- Routes. Scrape (`POST /v1/scrape`, `/v1/scrape/stream`) and agent run start (`POST /v1/agent/runs`) read the claim. The internal `run_page` route has no token and is decided with no org layer.
+- Test phase (written, NOT run): `cargo test -p quarry-edge --test web_policy_claim` (twelve tests) and `cargo test -p quarry-edge --test zdr_claim_floor` (unchanged, must stay green).
+
+## Job claim serialisation and the team concurrency read (WS6.H, unit W2-U32, built, NOT run, 2026-10-23)
+
+- **Claims are serialised.** `ClaimAccepted` (control, `services/quarry-control/internal/store/pg/resources.go`) runs in one transaction that first takes `pg_advisory_xact_lock(7245110311)` (`jobClaimLockKey`), then the claim statement. Two dispatchers can no longer each read the same in-use count and each lease up to the cap. The lock is one lock for every organization, which is simple and fine at dispatcher tick rates; per-organization locks are the next step if claim latency ever shows.
+- **Team concurrency counts leased jobs.** `TeamUsage().Concurrency` (`resources_v2.go`) counts running jobs plus accepted jobs whose `claimed_until` is in the future, because a leased job takes a cap slot. With admission off no accepted job is leased, so the number is unchanged.
+- **Flags.** None new. `QUARRY_JOB_ADMISSION` still governs the claim endpoint (404 when off). Rollback: set it `off`; the dispatcher then lists as before and takes no lock.
+- **Tests written, not run.** `TestPostgres_ConcurrentClaimsNeverExceedTheCap` and `TestPostgres_ConcurrencyCountsLeasedAcceptedJobs` (`store/pg/job_claim_race_test.go`, need `QUARRY_TEST_DSN`); the edge test `zdr_crawl_is_still_refused_so_no_backlog_row_exists` (`crates/quarry-edge/tests/job_admission.rs`). The contract cases (round robin, per-org cap with leases, no starvation, lease expiry) run as subtests of `storetest.AdmissionConformance` against both stores.
+- **Still not done.** A plan-dependent cap stamped at submit time (needs the WS6.D plan values). Until then every job takes `QUARRY_JOB_CAP_DEFAULT` unless the submitter stamped `params.admission.cap`.
 ## WS17.E1: profile envelope encryption (W2-U36)
 
 Status: built, flag off by default. Tests written and compile-checked; the test suites and the deployment evidence are NOT run yet (test phase of wave 2).
@@ -1303,30 +1224,6 @@ Order of rollout:
 Rollback: set `off` and restart the edge. The existing metrics go back to their legacy rules at the same
 time; events already published are not withdrawn.
 
-## WS15.S2: executable scrape, crawl and batch schedules (W2-U38, built, NOT run, 2026-10-23)
-
-Scope: a scrape, crawl or batch schedule fires as a tracked control job with origin `schedule`. Built dark. Nothing fires until the flag is on and the S5 go-live gate (WS14 scope deployed and WS6.A live) is met.
-
-- **Flag.** `QUARRY_SCHEDULED_JOBS_ENABLED` (control, default `0`, read at serialize time). Off: scrape, crawl and batch schedules stay unmapped and no Temporal schedule is created for them. A Temporal schedule of such a kind that already exists is paused on the next reconcile pass (about 30 s). It is not deleted. Turning the flag on maps the kinds on the next pass.
-- **Deploy order.** Control, then the orchestrator, then the edge. The orchestrator and the edge do not read the flag.
-- **Per fire.** The orchestrator's `ScheduledJobWF` (the schedule action) runs these steps in order:
-  1. `POST /v1/internal/schedules/preflight` on the edge (runtime bearer token plus `X-Quarry-Run-Sig` over `org_id` and `schedule:<id>`). S2 answers `allow: true`, `posture: unchecked`, `entitlement: floor`. S4 adds the ZDR and entitlement checks here.
-  2. `POST /v1/internal/schedules/{id}/runs` on control, HMAC signed, with `Idempotency-Key: sched:<id>:<run_key>`. Body: `run_key`, `run_id`, `status` (`running` or `skipped`), `reason`, `workflow_id`. Org, kind and params come from the schedule row. A denied fire is a terminal `skipped` job with `terminal_reason: schedule_skipped` and a `schedule_skipped` event.
-  3. The matching job workflow (`ScrapeJobWF`, `CrawlJobWF` or `BatchJobWF`) runs as a child with workflow id `quarry-job-<jobID>` and `REQUEST_CANCEL` on parent close. The child's input comes from the shared builders in `workflows/inputs.go`, the same builders the dispatcher uses.
-- **Overlap.** Stored policy `skip`, `allow` or `cancel` maps to Temporal `SKIP`, `ALLOW_ALL` or `CANCEL_OTHER`. With `cancel`, the wrapper signals its child `cancel` on a disconnected context and waits at most 2 minutes.
-- **Failure.** A child error writes `run_failed`, or `run_timed_out` for a Temporal timeout. The payload carries `schedule_id`, `org_id`, `created_by` and a reason class, with no URL. The wrapper returns the error, so the schedule's pause-on-failure option can see it.
-- **Crawl bounds.** The reconciler resolves a crawl schedule's `max_pages` and `max_depth` with the orchestrator's `QUARRY_CRAWL_*` limits, and writes them into the fire's params. The execution timeout (`QUARRY_JOB_TIMEOUT_*`) is written into the fire's args the same way. A change in either is a spec change and is applied on the next pass.
-- **Reconcile.** The reconciler reads the desired set from `/v1/internal/schedules/desired`. It compares what Temporal holds (`Describe`) with the desired spec and calls `Update` only when they differ. It pauses or unpauses only when the state differs. It never deletes a schedule without an org memo, and never reaps across orgs.
-- **Check a fire.** `GET /v1/schedules/{id}/runs` lists the fire's jobs. `GET /v1/crawl/{job}` shows `origin.type: schedule` and `origin.actor: <schedule id>`.
-
-Not run in this wave. The deployment evidence (flag on, one minute cron, Oslo time zone, overlap skip, cancel through `DELETE /v1/crawl/<job>`, flag off pauses the schedule, one fire each for batch and scrape) is owed at the stack phase. The Temporal replay fixture `testdata/scheduled_job_history.json` is owed too.
-
-Test phase checks (not run):
-
-- `cd services/quarry-orchestrator && go test ./internal/workflows/ ./internal/schedules/ ./internal/jobs/ ./internal/activities/ -count=1`
-- `cd services/quarry-control && go test ./internal/resources/ -run "Schedule|WorkflowFor|RegisterRun" -count=1`
-- `cargo test -p quarry-edge --test schedule_preflight` and `cargo test -p quarry-edge --lib schedule_preflight`
-
 ## WS17.E3: profile backfill, erasure hop and plaintext removal (W2-U41, built, NOT run, 2026-10-23)
 
 Built to scope; the tests are written and compile-checked, not run. Deployment evidence (a live stack, a restore after backfill, a canary check in Postgres and Redis) is not run. Plan: `docs/plans/quarry-browser-build-plan-2026-10-14.md`, "Slice WS17.E3 detail". Migration `0017_profile_plaintext_null.sql`.
@@ -1362,3 +1259,17 @@ Test phase checks (not run):
 - `cargo test -p quarry-runtime --features postgres-queue profile_backfill org_erasure` (the Redis-gated cases need `REDIS_URL`; the Postgres-lane cases need `DATABASE_URL`).
 - `go test ./internal/gdpr/...` in `services/quarry-control` (the new tests are `edge_purger_test.go` and the `HandleErasureWithEdge` cases in `erasure_test.go`).
 - Stack evidence: backfill a canary profile, confirm no canary in `quarry_profiles` or in Redis, erase the org through the control event, confirm the rows, tombstones and `quarry:profile:v2:*` keys are gone and a second erasure reports zeros.
+
+## Human browsing on the open web: WS8.B (U39, built, NOT run, 2026-10-23)
+
+Flags. `QUARRY_EDGE__HUMAN_BROWSE` (off by default; 1 in the dev compose, 0 in the production overlay) accepts a broker grant of kind `human_browse`. `QUARRY_EDGE__HUMAN_RECEIPT_MODE`: `metadata` (default: the action redacted, no observation), `full` (today's storage, for dev and procedure recording) or `none` (no receipt for a person's step). A ZDR run writes no receipt in any mode. Both are read at boot; an unparseable value stops the edge and names the variable.
+
+What it does. Open web minus the broker's denied list (`EgressMode::OpenWeb`, quarry-browser). Private, loopback, link-local, CGNAT, single-label and cloud-metadata hosts are refused whatever the denied list says. A human-browse run takes no domains from the request and no max-steps, runtime or cost bound; a person's steps do not charge the step budget (plan R-8). The broker's answer must be `policy_mode = open_web` with a canonical denied list; an allow-list grant of kind `human_browse` is refused. A checkpoint keeps `policy_mode` and, for open web, the URL without its query, fragment or userinfo.
+
+Receipts. A person's step on a non-ZDR run under `metadata` has no observation; typed text, selected values, key presses, dialog prompts, upload ids and evaluated scripts are `[redacted]` (an upload id becomes the nil ULID); a navigation keeps scheme, host with port, and path. The timeline decode skips kinds it does not know (shipped one release before WS8.F writes new kinds).
+
+Refusals (403, the message is the reason): `human_browse_disabled`, `human_browse_service_refused`, `human_browse_owner_mismatch`, `human_browse_zdr_posture` (a ZDR grant backs only a ZDR run), `human_browse_policy_unknown`.
+
+Rollback. `QUARRY_EDGE__HUMAN_BROWSE=0`: new starts with a human grant are refused. The image rollback is safe (the tolerant decode and the policy column are additive).
+
+Not done in this unit (see the depth file): the broker side (WS8.C: `human_browse` issuance, `RenewGrant`, the policy column); idle 900 s and absolute 4 h lifetimes (a human run uses the default TTL); the integration test `tests/human_browse.rs`; deployment evidence.

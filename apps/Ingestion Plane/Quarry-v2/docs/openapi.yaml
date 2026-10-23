@@ -485,6 +485,11 @@ paths:
             `policy` or the operator baseline refuses a capability the run asked for
             (`error.details.reason` `policy_denied`, with `capability`,
             `decision_source` and `retryable: false`). Nothing is acquired.
+            A person's `human_browse` grant (WS8.B; refused unless `QUARRY_EDGE__HUMAN_BROWSE` is on) is
+            refused with 403 and the reason as the message: `human_browse_disabled`,
+            `human_browse_service_refused`, `human_browse_owner_mismatch`, `human_browse_zdr_posture`
+            or `human_browse_policy_unknown`. A resumed run whose stored policy mode differs is refused
+            with "resumed run policy no longer matches its broker grant".
           content:
             application/json:
               schema:
