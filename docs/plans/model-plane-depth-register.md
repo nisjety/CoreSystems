@@ -412,6 +412,39 @@ Built so far (batches B01 to B07): WS01-S0, WS01-S1 (partial), WS01-S6; WS02-S1,
 | D1-307 | WS01-S12.code | live-proof | P1 | Committed evidence files (rollback-rehearsal-<date>.txt, conformance JSON, manifest digests) and the key ceremony: operator work. | open |
 | D1-308 | WS01-S12.code | follow-up | P3 | 10 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-06.json | open |
 
+
+### Wave-mode batch W1-07 (2026-10-23)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D1-309 | WS06-S3 | risk | P1 | The purge verifies only the rows it is about to delete, linked to the newest signed checkpoint. It does not check that the head or the newest attested sequence still agree with the retained suffix, so a tampered retained row is caught only by S4's verifier, not by purge. | open |
+| D1-310 | WS06-S3 | risk | P1 | Attestations are never pruned and the attestor writes one per head change per org. On a hot org that is a row per interval at most. S4 or S9 should decide a retention rule (keep the newest per day) before the table grows. | open |
+| D1-311 | WS06-S3 | risk | P1 | The purge detects a tampered prefix but does not alert on it: there is no purge, incident or attestation metric (internal/metrics is not owned here), and S4 owns the rules. Add audit_core_chain_purge_blocked_total and an incident-count alert, or the incident table is only visible by querying it. | open |
+| D1-312 | WS06-S3 | risk | P1 | Replicas each run Attest and Purge. Attest is idempotent via ON CONFLICT DO NOTHING. A purge that loses the advisory lock skips that org until the next daily sweep, so a purger that stalls leaves expired rows for a day. | open |
+| D1-313 | WS06-S3 | risk | P1 | Checkpoint signatures cover created_at at microsecond precision, written by the Go side and stored verbatim. S4's verifier and the offline audit-verify CLI must format it with chain.SignedTimeLayout in UTC or every checkpoint will look invalid. | open |
+| D1-314 | WS06-S3 | live-proof | P1 | The purge, checkpoint and attest SQL has never run against Postgres. The plan's DoD (a purge leaves verification green, plus the live evidence) needs the DB tests and a dev-stack sweep before AUDIT_CHAIN_PRUNE_ENABLED is ever set to 1. | open |
+| D1-315 | WS06-S3 | risk | P1 | No purge, incident or attestation metrics or alerts exist (internal/metrics is not owned here). Blocked purges are visible only in logs and in audit_chain_incidents. S4 should add audit_core_chain_purge_blocked_total and an incident alert, and a blocked org writes a new incident row on every daily sweep. | open |
+| D1-316 | WS06-S3 | risk | P1 | Attestation rows are never pruned and one is written per head change per org per interval, so the table grows without bound. S4 or S9 should set a retention rule, for example the newest per day. | open |
+| D1-317 | WS06-S3 | follow-up | P3 | 15 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-07.json | open |
+| D1-318 | WS02-S2 | live-proof | P1 | Needed before this slice can be switched on or relied on: run the 6-turn Anthropic and pinned-openai threads on a rebuilt cost-core (applies 0011) and model-gateway. Then capture `GET /api/v1/cost/analytics?scope=organization` showing `cache_breakdown` and the SPA tile, and check that real `provider_used` strings and the Anthropic and OpenAI idle windows match the 300 s ttl guess. | open |
+| D1-319 | WS02-S2 | live-proof | P1 | Live proof: 6-turn Anthropic and pinned-openai threads on rebuilt cost-core (0011) and model-gateway, with the cost/analytics JSON (cache_* fields and cache_breakdown) and an Insights screenshot, plus baseline numbers for S8/S9. | open |
+| D1-320 | WS02-S2 | live-proof | P1 | Postgres integration test TestPostgresLedger_CacheMissReasonRoundTrip must be run with a database URL (needs docker or a database the lead controls). | open |
+| D1-321 | WS02-S2 | live-proof | P1 | Deploy order: cost-core first, then model-gateway, via compose.sh up -d --no-deps --build cost-core model-gateway. | open |
+| D1-322 | WS02-S2 | live-proof | P1 | The action-surface-contract node test is red on the tree for reasons outside this slice and needs its owner. | open |
+| D1-323 | WS02-S2 | live-proof | P1 | The lead should add the ledger entry for WS02-S2 and mark 0011 consumed in plan section 4.4. | open |
+| D1-324 | WS02-S2 | live-proof | P1 | Rebuild and deploy: `bash "apps/Model Plane/scripts/compose.sh" up -d --no-deps --build cost-core model-gateway`. cost-core applies migration 0011 on boot. Deploy cost-core first, since an older cost-core ignores the new payload key. | open |
+| D1-325 | WS02-S2 | live-proof | P1 | Run the Postgres test with `COST_CORE_TEST_DATABASE_URL` set: `cd "apps/Model Plane/go/services/cost-core" && go test -tags integration -run TestPostgresLedger_CacheMissReasonRoundTrip ./internal/postgres/`. | open |
+| D1-326 | WS02-S2 | follow-up | P3 | 16 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-07.json | open |
+| D1-327 | WS01-S13.code | decision | P1 | Z-40 cannot be attested without a real written Microsoft or Anthropic ZDR contract and an owner-named reviewer; no fixture or script may stand in for it, and the check cannot tell a fixture from a real attestation (the policy grammar forbids comments), so a fixture-marked resource id must never be copied into a signed policy. | open |
+| D1-328 | WS01-S13.code | follow-up | P1 | Pass 2 proof is not yet scripted end to end: zdr-live-turn.spec.ts only expects the typed refusal, and zdr-live-proof.sh has no phase asserting zdr appears in /api/v1/models; both are needed before pass 2 can run. | open |
+| D1-329 | WS01-S13.code | live-proof | P1 | Real written ZDR contract (ZDR.md Step 0) and owner-named reviewer do not exist; the six *_ZDR_* fields cannot be filled in the signed policy | open |
+| D1-330 | WS01-S13.code | live-proof | P1 | Candidate with ZDR_RETENTION_PATH=zdr-provider-route-attested, deploy, /api/v1/models lists zdr, and pass 2 live proof with zero deltas on the ZDR-TEST org need docker/live (lead) | open |
+| D1-331 | WS01-S13.code | live-proof | P1 | shared-edit apps/Model Plane/docs/ZDR.md (Z-40 and Z-60 pass 2 rows) and docs/compliance/evidence/live-reads-zdr-<date>.txt only after the real attestation and live run | open |
+| D1-332 | WS01-S13.code | live-proof | P1 | zdr-live-turn.spec.ts expectation for an answer and any pass 2 preflight in zdr-live-proof.sh are outside this slice's ownership and still unwritten | open |
+| D1-333 | WS01-S13.code | live-proof | P1 | release-runtime-partition-test.sh and the signed-policy gate path were not run (Windows lacks O_NOFOLLOW); run on Linux/macOS | open |
+| D1-334 | WS01-S13.code | live-proof | P1 | New test file is untracked with a non-executable mode here; sibling tests are 100755, so set the executable bit when committing | open |
+| D1-335 | WS01-S13.code | follow-up | P3 | 8 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-07.json | open |
+
 ## Wave 2 (WS13 to WS27)
 
 Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS27-S0, WS27-S1. Wave 2 is not started as a wave: these came in with Wave 1 batches because they were Wave 1 prerequisites.
@@ -717,3 +750,6 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS01-S12.code | authority, policy | W1-06 | no |
 | WS15-S1 | zdr | W2-05 | no |
 | WS23-S1.code | zdr, audit, policy | W2-05 | no |
+| WS06-S3 | data-loss, audit | W1-07 | no |
+| WS02-S2 | money, zdr | W1-07 | no |
+| WS01-S13.code | zdr, policy | W1-07 | no |
