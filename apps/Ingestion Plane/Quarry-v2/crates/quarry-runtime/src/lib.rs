@@ -54,6 +54,7 @@ pub mod grpc;
 pub mod http3;
 pub mod hybrid;
 pub mod ingest_client;
+pub mod job_pricing;
 pub mod lease_pool;
 pub mod local_index;
 #[cfg(feature = "postgres-queue")]
