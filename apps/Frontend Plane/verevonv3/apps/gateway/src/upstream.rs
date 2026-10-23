@@ -1577,6 +1577,7 @@ pub(crate) async fn proxy_bearer_json_with_headers(
         .client
         .request(method, url)
         .header("x-user-id", user_id);
+    req = crate::request_id::apply(req);
 
     for (name, value) in extra_headers {
         req = req.header(name, value);
@@ -1773,6 +1774,7 @@ pub(crate) async fn proxy_sse_stream_with_data_plane(
         req = req.header("x-sandbox-authorization", format!("Bearer {token}"));
     }
 
+    req = crate::request_id::apply(req);
     if let Some((user_id, org_id)) = actor {
         req = req.header("x-user-id", user_id);
         if !org_id.trim().is_empty() {
@@ -2880,7 +2882,7 @@ pub(crate) async fn proxy_artifact_bytes(
     bearer_token: Option<&str>,
     user_id: &str,
 ) -> Response {
-    let mut req = state.client.get(url).header("x-user-id", user_id);
+    let mut req = crate::request_id::apply(state.client.get(url)).header("x-user-id", user_id);
     if let Some(token) = bearer_token {
         req = req.bearer_auth(token);
     }

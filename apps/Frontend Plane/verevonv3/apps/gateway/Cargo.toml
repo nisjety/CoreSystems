@@ -30,6 +30,8 @@ tokio = { version = "1.39", features = ["full"] }
 tokio-tungstenite = "0.30"
 tower-http = { version = "0.5", features = ["cors", "set-header", "trace"] }
 tracing = "0.1"
+# WS10.S1 x-request-id minting (already in Cargo.lock via other crates; no new package).
+rand = "0.8"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 url = "2.5"
 urlencoding = "2.1"

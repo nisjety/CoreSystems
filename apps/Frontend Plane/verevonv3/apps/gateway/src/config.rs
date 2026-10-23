@@ -384,6 +384,8 @@ pub(crate) fn build_cors_layer() -> CorsLayer {
             CONTENT_TYPE,
             HeaderName::from_static("x-verevon-org-id"),
         ])
+        // WS10.S1: browsers may read the id from a response (support reports).
+        .expose_headers([HeaderName::from_static("x-request-id")])
         .allow_credentials(true)
 }
 

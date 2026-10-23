@@ -1792,7 +1792,7 @@ async fn get_artifact(
         state.quarry_edge_url,
         urlencoding::encode(&artifact_id)
     );
-    let mut req = state.client.get(&url).header("x-user-id", &user.user_id);
+    let mut req = crate::request_id::apply(state.client.get(&url)).header("x-user-id", &user.user_id);
     if let Some(token) = token {
         req = req.bearer_auth(token);
     }
@@ -3918,7 +3918,7 @@ async fn fetch_quarry_artifact_bytes(
         state.quarry_edge_url,
         urlencoding::encode(artifact_id)
     );
-    let mut req = state.client.get(&url).header("x-user-id", &user.user_id);
+    let mut req = crate::request_id::apply(state.client.get(&url)).header("x-user-id", &user.user_id);
     if let Some(token) = token {
         req = req.bearer_auth(token);
     }
@@ -4176,6 +4176,7 @@ async fn proxy_model_json_with_delegated_headers(
         .request(method, url)
         .header("x-user-id", &user.user_id)
         .header("x-user-role", user_role);
+    req = crate::request_id::apply(req);
     if !org_id.trim().is_empty() {
         req = req.header("x-org-id", org_id);
     }
@@ -5821,6 +5822,39 @@ mod tests {
         .await
         .expect_err("an unknown run id must be denied");
         assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// WS10.S1: the adopted x-request-id rides on the browser proxy's upstream
+    /// read (the model-gateway run probe), so a support lookup can join the
+    /// gateway log to the upstream log.
+    #[tokio::test]
+    async fn browser_proxy_forwards_request_id_to_quarry() {
+        let upstream = model_plane_run_read_model().await;
+        let auth = plane_token_issuer().await;
+        let state = state_for(&auth, &upstream);
+        let headers = HeaderMap::new();
+        let owner = owner_of("user-owner", "org-owner");
+        let _ = crate::request_id::scope_for_test(
+            "gw-forward-1",
+            owned_orchestration_run(
+                &state,
+                &test_user("user-owner", "org-owner"),
+                &headers,
+                &owner,
+                "run-owned",
+            ),
+        )
+        .await;
+        let received = upstream
+            .received_requests()
+            .await
+            .expect("recorded requests");
+        let last = received.last().expect("the probe must reach the upstream");
+        assert_eq!(
+            last.headers.get("x-request-id").map(|v| v.to_str().unwrap()),
+            Some("gw-forward-1"),
+            "the adopted request id must be forwarded upstream"
+        );
     }
 
     /// Tenant isolation depends on the probe running under the caller's own

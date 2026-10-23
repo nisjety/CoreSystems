@@ -35,6 +35,7 @@ mod observability;
 mod onboarding;
 mod public_url;
 mod rate_limit;
+mod request_id;
 mod upstream;
 mod utils;
 mod zdr;
@@ -163,6 +164,9 @@ fn build_router(state: config::AppState) -> Router {
         ))
         .layer(build_cors_layer())
         .layer(TraceLayer::new_for_http().make_span_with(make_http_trace_span))
+        // WS10.S1: outside the trace layer, so the span sees the id and every
+        // response (including the CORS and rate-limit answers) echoes it.
+        .layer(axum::middleware::from_fn(request_id::layer))
         .with_state(state)
 }
 
@@ -200,12 +204,18 @@ fn request_target_for_log(uri: &axum::http::Uri) -> String {
 /// span that carry a sensitive field name.
 fn make_http_trace_span(request: &axum::http::Request<Body>) -> tracing::Span {
     let request_target = request_target_for_log(request.uri());
+    let request_id_value = request
+        .extensions()
+        .get::<request_id::RequestId>()
+        .map(|id| id.0.clone())
+        .unwrap_or_default();
     // zdr-log-ok: `uri` is the path only, query stripped and single-use secrets templated out
     let span = tracing::info_span!(
         "http_request",
         method = %request.method(),
         uri = %request_target,
         version = ?request.version(),
+        request_id = %request_id_value,
         zdr = tracing::field::Empty,
     );
     // The header is the earliest posture signal there is: mark the span before

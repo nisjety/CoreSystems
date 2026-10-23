@@ -674,6 +674,7 @@ async fn proxy_model_json_with_delegations(
         .request(method, url)
         .header("x-user-id", &user.user_id)
         .header("x-user-role", user_role);
+    req = crate::request_id::apply(req);
     if let Some(timeout) = request_timeout {
         req = req.timeout(timeout);
     }
