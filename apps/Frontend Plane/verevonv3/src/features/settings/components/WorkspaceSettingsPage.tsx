@@ -2,6 +2,7 @@ import { createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Sw
 import RouterPolicyPage from '@/features/router-policy/components/RouterPolicyPage'
 import FinetuneJobsPage from '@/features/finetune/components/FinetuneJobsPage'
 import { OrgDeletionDangerZone } from '@/features/settings/components/OrgDeletionDangerZone'
+import { AuditComplianceSection } from '@/features/settings/components/AuditComplianceSection'
 import { TrustCenterSection } from '@/features/settings/components/TrustCenterSection'
 import { McpServersSection } from '@/features/settings/components/McpServersSection'
 import { SkillsSection } from '@/features/settings/components/SkillsSection'
@@ -470,6 +471,7 @@ function WorkspaceSettingsSection(props: {
       </Match>
       <Match when={props.section === 'trust'}>
         <TrustCenterSection />
+        <AuditComplianceSection />
       </Match>
       <Match when={props.section === 'mcp'}>
         <McpServersSection />

@@ -33,6 +33,9 @@ var auditChainSQL string
 //go:embed migrations/008_audit_chain_checkpoints.sql
 var auditChainCheckpointsSQL string
 
+//go:embed migrations/010_audit_export_cursors.sql
+var auditExportCursorsSQL string
+
 type migration struct {
 	version string
 	name    string
@@ -49,6 +52,7 @@ var migrations = []migration{
 	{version: "007_audit_chain", name: "per-org audit hash chain", sql: auditChainSQL},
 	{version: "008_audit_chain_checkpoints", name: "signed audit chain checkpoints and attestations", sql: auditChainCheckpointsSQL},
 	{version: "009_audit_chain_verification_state", name: "audit chain verifier state", sql: auditChainVerificationStateSQL},
+	{version: "010_audit_export_cursors", name: "SIEM export cursors", sql: auditExportCursorsSQL},
 }
 
 // Migrate applies the bundled SQL schema exactly once, tracking it in a
