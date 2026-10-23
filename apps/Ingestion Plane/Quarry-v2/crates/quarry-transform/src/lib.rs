@@ -5,6 +5,7 @@
 pub mod attributes;
 pub mod branding;
 pub mod branding_rendered;
+pub mod canonical_url;
 pub mod charset;
 pub mod chunk;
 pub mod clean_html;
