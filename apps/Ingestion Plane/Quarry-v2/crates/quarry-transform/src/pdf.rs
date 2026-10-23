@@ -29,7 +29,7 @@
 use std::collections::HashMap;
 
 use lopdf::content::Operation;
-use lopdf::{Document, Object};
+use lopdf::{Dictionary, Document, Object, ObjectId};
 use serde::{Deserialize, Serialize};
 
 use quarry_core::{
@@ -228,6 +228,151 @@ pub const INFLATE_BUDGET_BYTES: u64 = 256 * 1024 * 1024;
 /// can wear it too, so it is capped (lower than the 768 MiB address-space limit
 /// of the parser child, which stays behind it).
 pub const IMAGE_INFLATE_BUDGET_BYTES: u64 = 384 * 1024 * 1024;
+
+// ---- per-page classification: text layer or scan (E3.6-3) -------------------
+
+/// Non-white-space characters a page must show before its text layer counts
+/// as real text. Below this, a page that also paints an image is treated as a
+/// scan: a page number or a running header laid over a scanned image is not a
+/// text layer, and reading such a page natively would drop the scan's content.
+pub const MIN_TEXT_CHARS: usize = 20;
+
+/// Most parent links [`resources_of`] follows. A page tree is a few levels deep;
+/// the bound only stops a cyclic `/Parent` chain from looping.
+const PAGE_TREE_DEPTH_LIMIT: usize = 32;
+
+/// What a page holds, decided from its text layer and its image resources.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PageKind {
+    /// Real text: the native extractor reads this page.
+    Text,
+    /// An image and no real text: a scan. Only scanned pages are candidates for
+    /// a layout or OCR route; nothing routes them yet.
+    Scanned,
+    /// Neither text nor an image (blank, or vector art alone).
+    Empty,
+}
+
+/// One page's classification. `page` is 1-based, as lopdf numbers pages.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PageClassification {
+    pub page: u32,
+    pub kind: PageKind,
+    /// Non-white-space characters the page's text produced.
+    pub text_chars: usize,
+    /// Whether the page's resources name an image XObject.
+    pub has_image: bool,
+}
+
+/// The decision for one page from the two facts the page gives. Biased towards
+/// `Scanned` when an image is present and the text is short: a scanned page
+/// sent to OCR costs a call, while a scan read as text loses its content.
+pub fn classify_page(text_chars: usize, has_image: bool) -> PageKind {
+    if text_chars >= MIN_TEXT_CHARS {
+        PageKind::Text
+    } else if has_image {
+        PageKind::Scanned
+    } else if text_chars > 0 {
+        PageKind::Text
+    } else {
+        PageKind::Empty
+    }
+}
+
+/// Classifies every page of the PDF, in page order. It parses through the same
+/// guarded loader as [`extract_text`]: a document over the inflate budget or
+/// one lopdf cannot parse is an error, never a classification.
+pub fn classify_pages(body: &[u8]) -> QuarryResult<Vec<PageClassification>> {
+    let doc = load_doc(body)?;
+    let mut pages = Vec::new();
+    for (page_no, page_id) in doc.get_pages() {
+        let text_chars = page_text_chars(&doc, page_no, page_id);
+        let has_image = page_has_image(&doc, page_id);
+        pages.push(PageClassification {
+            page: page_no,
+            kind: classify_page(text_chars, has_image),
+            text_chars,
+            has_image,
+        });
+    }
+    Ok(pages)
+}
+
+/// Non-white-space characters of the page's text. The font-aware read first (the
+/// one [`extract_text`] uses); when that finds nothing, the raw operands of the
+/// page's text-showing operators, so a page whose font the reader cannot map
+/// still counts as having a text layer.
+fn page_text_chars(doc: &Document, page_no: u32, page_id: ObjectId) -> usize {
+    let font_aware = doc.extract_text(&[page_no]).map(|text| non_white(&text)).unwrap_or(0);
+    if font_aware > 0 {
+        return font_aware;
+    }
+    doc.get_and_decode_page_content(page_id)
+        .map(|content| {
+            content
+                .operations
+                .iter()
+                .filter_map(extract_text_op)
+                .map(|text| non_white(&text))
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
+fn non_white(text: &str) -> usize {
+    text.chars().filter(|c| !c.is_whitespace()).count()
+}
+
+/// The resource dictionary that applies to a page: its own `/Resources`, or the
+/// nearest ancestor's (Resources are inheritable through `/Parent`). `None` when
+/// there is none, or the chain does not reach one within the depth limit.
+fn resources_of(doc: &Document, page_id: ObjectId) -> Option<&Dictionary> {
+    let mut node = page_id;
+    for _ in 0..PAGE_TREE_DEPTH_LIMIT {
+        let dict = doc.get_dictionary(node).ok()?;
+        if let Ok(resources) = dict.get(b"Resources") {
+            return match resources {
+                Object::Dictionary(direct) => Some(direct),
+                Object::Reference(id) => doc.get_dictionary(*id).ok(),
+                _ => None,
+            };
+        }
+        node = dict.get(b"Parent").ok()?.as_reference().ok()?;
+    }
+    None
+}
+
+/// True when the page's resources name an image XObject. An image painted by a
+/// content stream that does not name it in the resources is not seen, and an
+/// image inside a form XObject is not followed; both are noted in the depth list.
+fn page_has_image(doc: &Document, page_id: ObjectId) -> bool {
+    let Some(resources) = resources_of(doc, page_id) else {
+        return false;
+    };
+    let xobjects = match resources.get(b"XObject") {
+        Ok(Object::Dictionary(direct)) => direct,
+        Ok(Object::Reference(id)) => match doc.get_dictionary(*id) {
+            Ok(dict) => dict,
+            Err(_) => return false,
+        },
+        _ => return false,
+    };
+    xobjects.iter().any(|(_, entry)| {
+        let stream = match entry {
+            Object::Reference(id) => doc.get_object(*id).ok(),
+            direct => Some(direct),
+        };
+        match stream {
+            Some(Object::Stream(stream)) => stream
+                .dict
+                .get(b"Subtype")
+                .and_then(Object::as_name)
+                .is_ok_and(|name| name == &b"Image"[..]),
+            _ => false,
+        }
+    })
+}
 
 fn is_pdf_space(byte: u8) -> bool {
     matches!(byte, b' ' | b'\t' | b'\r' | b'\n' | 0x0c | 0)
@@ -966,6 +1111,178 @@ mod tests {
         out.extend_from_slice(&deflated_zeros(300 * 1024 * 1024));
         out.extend_from_slice(b"\nendstream\nendobj\n");
         check_inflate_budget(&out).expect_err("a bomb with an indirect length");
+    }
+
+    // ---- per-page classification (E3.6-3) -----------------------------------
+
+    /// One page of a [`build_pdf`] document: `text` is shown in Helvetica when
+    /// present, and `image` paints the one-pixel image XObject `Im1` over the page.
+    struct PageSpec {
+        text: Option<&'static str>,
+        image: bool,
+    }
+
+    fn text_page(text: &'static str) -> PageSpec {
+        PageSpec { text: Some(text), image: false }
+    }
+
+    fn scan_page() -> PageSpec {
+        PageSpec { text: None, image: true }
+    }
+
+    /// A PDF with one page per spec, built with lopdf so the objects are well formed.
+    /// `resources_on_root` puts the font and image resources on the page tree root
+    /// instead of each page, so the pages inherit them.
+    fn build_pdf(pages: &[PageSpec], resources_on_root: bool) -> Vec<u8> {
+        use lopdf::content::{Content, Operation};
+        use lopdf::{dictionary, Stream};
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let font = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+        });
+        let image = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Image",
+                "Width" => 1,
+                "Height" => 1,
+                "ColorSpace" => "DeviceGray",
+                "BitsPerComponent" => 8,
+            },
+            vec![0x80],
+        ));
+        let resources = dictionary! {
+            "Font" => dictionary! { "F1" => font },
+            "XObject" => dictionary! { "Im1" => image },
+        };
+        let mut kids: Vec<Object> = Vec::new();
+        for spec in pages {
+            let mut operations = Vec::new();
+            if let Some(text) = spec.text {
+                operations.push(Operation::new("BT", vec![]));
+                operations.push(Operation::new("Tf", vec!["F1".into(), 12.into()]));
+                operations.push(Operation::new("Td", vec![72.into(), 700.into()]));
+                operations.push(Operation::new("Tj", vec![Object::string_literal(text.as_bytes().to_vec())]));
+                operations.push(Operation::new("ET", vec![]));
+            }
+            if spec.image {
+                operations.push(Operation::new("q", vec![]));
+                operations.push(Operation::new(
+                    "cm",
+                    vec![595.into(), 0.into(), 0.into(), 842.into(), 0.into(), 0.into()],
+                ));
+                operations.push(Operation::new("Do", vec!["Im1".into()]));
+                operations.push(Operation::new("Q", vec![]));
+            }
+            let content = doc.add_object(Stream::new(dictionary! {}, Content { operations }.encode().unwrap()));
+            let mut page = dictionary! {
+                "Type" => "Page",
+                "Parent" => pages_id,
+                "Contents" => content,
+                "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+            };
+            if !resources_on_root {
+                page.set("Resources", resources.clone());
+            }
+            kids.push(doc.add_object(page).into());
+        }
+        let mut pages_dict = dictionary! {
+            "Type" => "Pages",
+            "Kids" => kids,
+            "Count" => pages.len() as i64,
+        };
+        if resources_on_root {
+            pages_dict.set("Resources", resources);
+        }
+        doc.objects.insert(pages_id, Object::Dictionary(pages_dict));
+        let catalog = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        doc.trailer.set("Root", catalog);
+        let mut out = Vec::new();
+        doc.save_to(&mut out).unwrap();
+        out
+    }
+
+    #[test]
+    fn the_decision_table_reads_text_then_image_then_nothing() {
+        assert_eq!(classify_page(0, false), PageKind::Empty);
+        assert_eq!(classify_page(0, true), PageKind::Scanned);
+        assert_eq!(classify_page(1, false), PageKind::Text, "short text with no image is still text");
+        assert_eq!(classify_page(MIN_TEXT_CHARS - 1, true), PageKind::Scanned);
+        assert_eq!(classify_page(MIN_TEXT_CHARS, true), PageKind::Text);
+        assert_eq!(classify_page(MIN_TEXT_CHARS, false), PageKind::Text);
+    }
+
+    #[test]
+    fn a_text_page_and_a_scanned_page_are_told_apart_in_page_order() {
+        let pdf = build_pdf(&[text_page("This is a text page with enough characters."), scan_page()], false);
+        let pages = classify_pages(&pdf).expect("classify");
+        assert_eq!(pages.iter().map(|p| p.page).collect::<Vec<_>>(), vec![1, 2]);
+        assert_eq!(pages[0].kind, PageKind::Text);
+        assert!(pages[0].text_chars >= MIN_TEXT_CHARS, "{:?}", pages[0]);
+        assert!(!pages[0].has_image);
+        assert_eq!(pages[1].kind, PageKind::Scanned);
+        assert_eq!(pages[1].text_chars, 0);
+        assert!(pages[1].has_image);
+    }
+
+    #[test]
+    fn a_page_number_over_a_scan_is_still_a_scan() {
+        // The footer is one character: below the text threshold, and the page paints an image.
+        let footer = PageSpec { text: Some("1"), image: true };
+        let pages = classify_pages(&build_pdf(&[footer], false)).expect("classify");
+        assert_eq!(pages[0].kind, PageKind::Scanned, "{:?}", pages[0]);
+        assert_eq!(pages[0].text_chars, 1);
+    }
+
+    #[test]
+    fn a_blank_page_is_empty_and_a_short_text_page_is_text() {
+        let blank = PageSpec { text: None, image: false };
+        let pages = classify_pages(&build_pdf(&[blank, text_page("Hi")], false)).expect("classify");
+        assert_eq!(pages[0].kind, PageKind::Empty);
+        assert_eq!(pages[1].kind, PageKind::Text);
+        assert!(!pages[1].has_image);
+    }
+
+    #[test]
+    fn resources_inherited_from_the_page_tree_root_are_seen() {
+        // The image is named only on the root: the scan page must still see it.
+        let pages = classify_pages(&build_pdf(&[scan_page(), text_page("Inherited resources page text.")], true))
+            .expect("classify");
+        assert!(pages[0].has_image, "{:?}", pages[0]);
+        assert_eq!(pages[0].kind, PageKind::Scanned);
+        assert_eq!(pages[1].kind, PageKind::Text);
+    }
+
+    #[test]
+    fn a_cyclic_page_tree_is_bounded_not_followed_forever() {
+        // A page whose /Parent is itself and that has no resources anywhere.
+        let mut doc = Document::with_version("1.5");
+        let page_id = doc.new_object_id();
+        doc.objects.insert(
+            page_id,
+            Object::Dictionary(lopdf::dictionary! { "Type" => "Page", "Parent" => page_id }),
+        );
+        assert!(resources_of(&doc, page_id).is_none());
+        assert!(!page_has_image(&doc, page_id));
+    }
+
+    #[test]
+    fn the_page_kind_serialises_as_a_snake_case_word() {
+        assert_eq!(serde_json::to_string(&PageKind::Scanned).unwrap(), "\"scanned\"");
+        assert_eq!(serde_json::to_string(&PageKind::Empty).unwrap(), "\"empty\"");
+    }
+
+    #[test]
+    fn classification_sits_behind_the_inflate_budget() {
+        // A flate bomb is refused before any page is read, so it gets no classification.
+        let bomb = pdf_with_stream(&deflated_zeros(300 * 1024 * 1024), "/Filter /FlateDecode");
+        let error = classify_pages(&bomb).expect_err("the bomb must not be classified");
+        assert_eq!(error.code, ErrorCode::BadRequest);
+        assert!(error.message.contains("exceeds"), "{}", error.message);
     }
 
     #[test]
