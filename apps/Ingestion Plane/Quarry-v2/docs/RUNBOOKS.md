@@ -1092,13 +1092,19 @@ Check after a deploy (not run in this unit): `docker stop quarry-orchestrator` e
 - Rollback: none needed for callers that omit `crawl`. A revert of the three U20 commits removes the field from the route.
 - Evidence owed (not done): the signed `run_page` call against the fixture site with and without `crawl`, and a golden of the no-crawl body recorded from the pre-U20 handler. See `.plan-work/quarry-w1w2/depth/W2-U20.md`.
 
-## Agent run budgets: meta.budget, cost_source, usage and agent.budget_exhausted (WS6.B remainder, W2-U21, built, NOT run, 2026-10-23)
+## Scrape session isolation and the heavy lane: WS13.1 (U23, built, NOT run, 2026-10-23)
 
-What changed on top of the 77374adc gate: a step response of an agent run carries `meta.budget`; every receipt carries `cost_source` (migration `0012_step_receipt_cost_source.sql`, nullable, no backfill); a failed attempt's receipt carries the flat cost it was charged; `DELETE /v1/agent/runs/{id}` returns `usage`; the first refusal per segment emits `agent_budget_exhausted` (durable history; not in the App Shell SSE) and checkpoints the latch. Contract: CONTRACTS.md, "Agent run budgets" (end of file).
+Each scrape fetch through the local Chromium driver now gets its own browser session key, `{host}~{lease id}`, so two fetches of one host, for two organizations, never share a browser context, cookie jar or storage. Before this change the key was the bare host, so a later caller's page could inherit the earlier caller's cookies (finding A, `browser_driver.rs`).
 
-- Flag: `QUARRY_EDGE__BUDGET_ENFORCEMENT` = `off` | `shadow` (default) | `on`. Limits are unchanged (`QUARRY_EDGE__AGENT_DEFAULT_*`, `QUARRY_EDGE__AGENT_CEILING_*`, `QUARRY_EDGE__BUDGET_ATTEMPT_FACTOR`, `QUARRY_EDGE__BUDGET_BROWSER_SECOND_USD`); the numbers are placeholders until X-12.
-- Migration: `0012_step_receipt_cost_source.sql` is applied by `run_migrations` on boot (the runner embeds the whole directory). It is additive and idempotent (`ADD COLUMN IF NOT EXISTS`). Old binaries ignore the column.
-- Before `on`: read the shadow record for at least 24 h (`quarry_agent_budget_exhausted_total{mode="shadow"}`). No series may carry `class="interactive"`. Note that `on` also stops the request's own `max_steps` from refusing a person's session (the 429 at the 13th step); agent runs get the typed 402 instead.
-- Check after a deploy with the flag on: an agent step response has `meta.budget` with `cost_source`; `GET /v1/agent/runs/{id}/receipts` shows `cost_source: flat_table` and a non-zero `cost_micro_usd` on a failed attempt; `DELETE` returns `data.usage`; one `agent_budget_exhausted` event per refused segment; a resumed run refuses its first step at once.
-- Rollback: `QUARRY_EDGE__BUDGET_ENFORCEMENT=off` restores the request-cap behaviour for everyone (no ledger, no `meta.budget`). Nothing persisted needs reverting: the column and checkpoint fields are defaulted or nullable.
-- Known gaps (see the unit depth notes): the WebSocket reply has no `meta.budget`; the Model Plane does not map the 402 yet (execution-core reports the step failed); the WS10 trace row for `agent_budget_exhausted` is not built; no concurrent-run cap; no per-organization allowance.
+- Flags, both in the `quarry-edge` env blocks (`apps/Ingestion Plane/docker-compose.yml`, `apps/Ingestion Plane/Quarry-v2/deploy/compose/docker-compose.yml`):
+  - `QUARRY_SCRAPE_SESSION_ISOLATION`, default `on`. `0` or `false` restores the legacy host key, including the seeded host lease.
+  - `QUARRY_SCRAPE_HEAVY_PERMITS`, default `1`, clamped to the pool size (`1..=pool`). Nothing takes the heavy permit yet; the actions and capture slices (WS13.4, WS13.4a) do.
+- Both are read once, when the edge builds its browser adapter. A change needs a quarry-edge restart.
+- Rollback: set `QUARRY_SCRAPE_SESSION_ISOLATION=0` and restart quarry-edge. Nothing is migrated and no response shape changes.
+- Boot log: the line `browser driver registered (local chromiumoxide)` now carries `session_isolation` and `heavy_permits`.
+- Cost: an isolated fetch opens a fresh browser context and a fresh pinned proxy listener for its own key. Per-request setup cost is not measured yet (see the evidence owed below).
+- Managed providers (Browserbase) use the same adapter, so with isolation on each fetch asks the provider for its own session. This has not been measured.
+- Tests (written, compile-checked, NOT run in this build):
+  - Unit: `cargo test -p quarry-runtime browser_driver`. Covers distinct session keys for concurrent same-host fetches, the key shape, the org carried on the isolated lease, no return to the pool, the kill switch, and the flag and heavy-lane parsing.
+  - Live: `CHROMIUMOXIDE_TEST=1 QUARRY_BROWSER_NO_SANDBOX=1 CHROME=/usr/bin/chromium cargo test -p quarry-runtime --features chromiumoxide --test browser_session_isolation_live -- --test-threads=1`. It needs outbound HTTPS to `httpbin.org`, or `QUARRY_TEST_COOKIE_PAGE` pointing at a page that sets a cookie and echoes the jar.
+- Evidence owed (not done; WS13.1 definition of done): the live test must fail with `QUARRY_SCRAPE_SESSION_ISOLATION=0` on the old code, recorded; p50 of 20 sequential plain scrapes within 10 percent of the pre-change p50; two concurrent `POST /v1/scrape` at a cookie-reflecting page with two org tokens, each markdown holding only its own probe, with no `lease guard poisoned` in `docker logs quarry-edge`.
