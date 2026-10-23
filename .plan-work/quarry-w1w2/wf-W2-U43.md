@@ -1,0 +1,3 @@
+# wf-W2-U43 hand-over (WS6.D-s)
+
+See W2-U43-progress.md and depth/W2-U43.md. Traps found: (1) four full `AppState { .. }` literals really are main.rs, routes.rs test helper, test_support.rs and tests/support/mod.rs (the plan's line numbers moved); every other site uses struct update. (2) budget.rs has two test modules (`tests`, `segment_tests`): new tests belong in `tests`, which owns the `constraints` helper. (3) Hot files with other units' hunks are committed through qcommit-blobs-add.sh from the HEAD blob plus a re-run of the edit scripts (scratch dir W2-U43/head). (4) `docs/RUNBOOKS.md` in the working tree is not a superset of HEAD right now.
