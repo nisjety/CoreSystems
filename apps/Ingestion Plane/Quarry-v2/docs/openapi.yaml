@@ -1442,6 +1442,98 @@ paths:
                 type: object
         '404':
           description: Not found, a foreign id, or a job of another kind.
+    delete:
+      operationId: cancel_crawl
+      summary: Cancel a crawl (WS15.L2)
+      description: An accepted crawl is cancelled at once; a running one stops within one page and the control loop period (2 s). Org-scoped; service principals are refused.
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^job_'
+      responses:
+        '202':
+          description: The request is recorded and the orchestrator has yet to apply it (control.pending is true).
+          content:
+            application/json:
+              schema:
+                type: object
+        '200':
+          description: The job already reflects the request (an accepted job cancelled at once).
+          content:
+            application/json:
+              schema:
+                type: object
+        '404':
+          description: Not found, a foreign id, or a job of another kind.
+        '409':
+          description: The job ended, or the verb does not fit its state. details.reason is ended, not_running or not_controllable.
+        '501':
+          description: Job control is not enabled on this edge (QUARRY_EDGE__JOB_CONTROL).
+  /v1/crawl/{job_id}/pause:
+    post:
+      operationId: pause_crawl
+      summary: Pause a running crawl (WS15.L2)
+      description: The crawl stops before its next page and reports run_paused once per pause. Requires a running job.
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^job_'
+      responses:
+        '202':
+          description: The request is recorded and the orchestrator has yet to apply it (control.pending is true).
+          content:
+            application/json:
+              schema:
+                type: object
+        '200':
+          description: The job already reflects the request (an accepted job cancelled at once).
+          content:
+            application/json:
+              schema:
+                type: object
+        '404':
+          description: Not found, a foreign id, or a job of another kind.
+        '409':
+          description: The job ended, or the verb does not fit its state. details.reason is ended, not_running or not_controllable.
+        '501':
+          description: Job control is not enabled on this edge (QUARRY_EDGE__JOB_CONTROL).
+  /v1/crawl/{job_id}/resume:
+    post:
+      operationId: resume_crawl
+      summary: Resume a paused crawl (WS15.L2)
+      description: The crawl continues with its next page and reports run_resumed. Requires a paused job.
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^job_'
+      responses:
+        '202':
+          description: The request is recorded and the orchestrator has yet to apply it (control.pending is true).
+          content:
+            application/json:
+              schema:
+                type: object
+        '200':
+          description: The job already reflects the request (an accepted job cancelled at once).
+          content:
+            application/json:
+              schema:
+                type: object
+        '404':
+          description: Not found, a foreign id, or a job of another kind.
+        '409':
+          description: The job ended, or the verb does not fit its state. details.reason is ended, not_paused or not_controllable.
+        '501':
+          description: Job control is not enabled on this edge (QUARRY_EDGE__JOB_CONTROL).
   /v1/crawl/{job_id}/errors:
     get:
       operationId: get_crawl_errors
@@ -1510,6 +1602,98 @@ paths:
                 type: object
         '404':
           description: Not found, a foreign id, or a job of another kind.
+    delete:
+      operationId: cancel_batch
+      summary: Cancel a batch (WS15.L2)
+      description: The batch alias of DELETE /v1/crawl/{job_id}. A crawl id on this path is 404.
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^job_'
+      responses:
+        '202':
+          description: The request is recorded and the orchestrator has yet to apply it (control.pending is true).
+          content:
+            application/json:
+              schema:
+                type: object
+        '200':
+          description: The job already reflects the request (an accepted job cancelled at once).
+          content:
+            application/json:
+              schema:
+                type: object
+        '404':
+          description: Not found, a foreign id, or a job of another kind.
+        '409':
+          description: The job ended, or the verb does not fit its state. details.reason is ended, not_running or not_controllable.
+        '501':
+          description: Job control is not enabled on this edge (QUARRY_EDGE__JOB_CONTROL).
+  /v1/batch/{job_id}/pause:
+    post:
+      operationId: pause_batch
+      summary: Pause a running batch (WS15.L2)
+      description: The batch stops before its next URL. Batch alias of the crawl pause.
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^job_'
+      responses:
+        '202':
+          description: The request is recorded and the orchestrator has yet to apply it (control.pending is true).
+          content:
+            application/json:
+              schema:
+                type: object
+        '200':
+          description: The job already reflects the request (an accepted job cancelled at once).
+          content:
+            application/json:
+              schema:
+                type: object
+        '404':
+          description: Not found, a foreign id, or a job of another kind.
+        '409':
+          description: The job ended, or the verb does not fit its state. details.reason is ended, not_running or not_controllable.
+        '501':
+          description: Job control is not enabled on this edge (QUARRY_EDGE__JOB_CONTROL).
+  /v1/batch/{job_id}/resume:
+    post:
+      operationId: resume_batch
+      summary: Resume a paused batch (WS15.L2)
+      description: The batch continues with its next URL. Batch alias of the crawl resume.
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^job_'
+      responses:
+        '202':
+          description: The request is recorded and the orchestrator has yet to apply it (control.pending is true).
+          content:
+            application/json:
+              schema:
+                type: object
+        '200':
+          description: The job already reflects the request (an accepted job cancelled at once).
+          content:
+            application/json:
+              schema:
+                type: object
+        '404':
+          description: Not found, a foreign id, or a job of another kind.
+        '409':
+          description: The job ended, or the verb does not fit its state. details.reason is ended, not_paused or not_controllable.
+        '501':
+          description: Job control is not enabled on this edge (QUARRY_EDGE__JOB_CONTROL).
   /v1/batch/{job_id}/errors:
     get:
       operationId: get_batch_errors
