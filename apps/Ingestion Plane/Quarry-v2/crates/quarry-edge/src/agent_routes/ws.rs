@@ -136,6 +136,14 @@ pub(super) async fn browser_ws_loop(
                     }
                 }
             }
+            () = crate::drain::streams_closing() => {
+                // WS6.J: the edge is shutting down.
+                let _ = send_ws_json(&mut socket, serde_json::json!({
+                    "type": "done",
+                    "reason": "shutdown"
+                })).await;
+                break;
+            }
             message = socket.recv() => {
                 match message {
                     Some(Ok(Message::Text(text))) => {

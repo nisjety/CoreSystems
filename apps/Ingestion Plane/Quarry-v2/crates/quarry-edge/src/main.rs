@@ -1734,9 +1734,10 @@ async fn run() -> anyhow::Result<()> {
         fleets: quarry_edge::fleet_routes::new_fleet_state(),
     };
 
-    // What the drain releases once the server has stopped.
+    // What the shutdown drain ends and releases (WS6.J), and the meter it flushes last.
     #[cfg(feature = "browser-agent")]
-    let drain_handles = (app_state.agent_runs.clone(), app_state.agent_driver.clone());
+    let drain_state = app_state.clone();
+    let usage_meter = app_state.usage.clone();
 
     // Releases the browsers of runs nobody is using any more.
     #[cfg(feature = "browser-agent")]
@@ -1779,6 +1780,27 @@ async fn run() -> anyhow::Result<()> {
     let addr = format!("0.0.0.0:{}", cfg.port);
     tracing::info!(%addr, "quarry-edge-rs listening");
     let listener = TcpListener::bind(&addr).await?;
+    // WS6.J: the moment draining begins, end the live runs (each writes its last usage
+    // segment, emits `agent.expired` with reason `shutdown` and releases its browser), and
+    // only then ask the open streams to end, so a viewer sees why the run ended and graceful
+    // shutdown can finish with a viewer connected.
+    #[cfg(feature = "browser-agent")]
+    let early_drain = {
+        let state = drain_state.clone();
+        tokio::spawn(async move {
+            drain::started().await;
+            let report =
+                agent_routes::drain_runs_for_shutdown(&state, std::time::Duration::from_secs(5))
+                    .await;
+            tracing::info!(
+                released = report.released,
+                failed = report.failed,
+                in_use = report.in_use,
+                "drain: runs ended"
+            );
+            drain::close_streams();
+        })
+    };
     // Graceful shutdown waits for every open connection, and an SSE stream or
     // a WebSocket never ends on its own, so cap the wait: once draining has
     // begun, in-flight requests get `drain_deadline` and the rest are closed.
@@ -1805,9 +1827,14 @@ async fn run() -> anyhow::Result<()> {
     // with them; a non-ZDR run's checkpoint stays Active, so it can be resumed.
     #[cfg(feature = "browser-agent")]
     {
-        let (runs, driver) = drain_handles;
-        let report =
-            agent_routes::drain_runs(&runs, &driver, std::time::Duration::from_secs(5)).await;
+        // The early drain has normally finished; wait for it, then catch any run it missed.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(20), early_drain).await;
+        let report = agent_routes::drain_runs_for_shutdown(
+            &drain_state,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        let driver = drain_state.agent_driver.clone();
         tracing::info!(
             released = report.released,
             failed = report.failed,
@@ -1818,6 +1845,9 @@ async fn run() -> anyhow::Result<()> {
         // wait for it, instead of leaving that to the driver's Drop at process exit.
         driver.shutdown().await;
     }
+
+    // WS6.J: the usage events the drain just wrote leave the process before it does.
+    usage_meter.flush(std::time::Duration::from_secs(5)).await;
 
     // Serve returned, so no new requests can add to the corpus. Signal the
     // maintenance task and wait for its final commit — dropping straight out

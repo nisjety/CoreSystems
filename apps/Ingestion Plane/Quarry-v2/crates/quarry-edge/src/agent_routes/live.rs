@@ -20,6 +20,17 @@ pub(super) fn is_user_facing_event(event_type: quarry_core::event::EventType) ->
     )
 }
 
+/// WS6.J: the next event of a run's channel, or `None` when shutdown has asked the streams
+/// to end (so graceful shutdown never waits on a viewer).
+pub(super) async fn recv_unless_closing<T: Clone>(
+    rx: &mut tokio::sync::broadcast::Receiver<T>,
+) -> Option<Result<T, tokio::sync::broadcast::error::RecvError>> {
+    tokio::select! {
+        received = rx.recv() => Some(received),
+        () = crate::drain::streams_closing() => None,
+    }
+}
+
 /// Map a typed event to its SSE event name. The App Shell
 /// dispatches on this string.
 pub(super) fn event_name(event_type: quarry_core::event::EventType) -> &'static str {
@@ -297,9 +308,15 @@ pub async fn agent_events_stream(
             }
             let evt = match pending.pop_front() {
                 Some(evt) => evt,
-                None => match rx.recv().await {
-                    Ok(evt) => evt,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                None => match recv_unless_closing(&mut rx).await {
+                    None => {
+                        // WS6.J: the edge is shutting down; the run's own `agent.expired`
+                        // (reason `shutdown`) was sent before this.
+                        yield Ok(Event::default().event("done").data("shutdown"));
+                        break;
+                    }
+                    Some(Ok(evt)) => evt,
+                    Some(Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped))) => {
                         // Slow consumer: say so, then re-snapshot from the ring after the
                         // last seq this connection sent, so the live tail resumes without a gap.
                         yield Ok(Event::default()
@@ -320,7 +337,7 @@ pub async fn agent_events_stream(
                         }
                         continue;
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    Some(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
                         // Run closed. The terminal `agent.completed` / `agent.failed` event
                         // is already sent; `done` tells the App Shell to close its EventSource.
                         yield Ok(Event::default().event("done").data("run_closed"));
@@ -459,6 +476,10 @@ pub async fn live_frame_stream(
             }
         }
         loop {
+            if crate::drain::streams_are_closing() {
+                yield Ok(Event::default().event("done").data("shutdown"));
+                break;
+            }
             if max_frames > 0 && sequence >= max_frames {
                 yield Ok(Event::default().event("done").data("max_frames"));
                 break;
@@ -491,7 +512,10 @@ pub async fn live_frame_stream(
                 }
             }
 
-            tokio::time::sleep(interval).await;
+            tokio::select! {
+                () = tokio::time::sleep(interval) => {}
+                () = crate::drain::streams_closing() => {}
+            }
         }
     };
 

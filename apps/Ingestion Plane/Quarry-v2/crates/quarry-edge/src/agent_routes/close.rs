@@ -45,6 +45,24 @@ pub(super) enum CloseReason {
     Explicit,
     /// The sweeper released it.
     Expired(ExpireVerdict),
+    /// WS6.J: the edge is shutting down. The wait for a running action and the usage and
+    /// release steps are each bounded by this duration, so one hung run cannot hold up the
+    /// exit. Like an expiry it leaves a non-ZDR checkpoint `active` (the run can be resumed
+    /// after the restart), and it emits `agent.expired` with `reason: "shutdown"`.
+    Drain(std::time::Duration),
+}
+
+/// The error `finish_run` returns for a drain when an action still holds the run.
+const DRAIN_IN_USE: &str = "drain_in_use";
+/// The error `finish_run` returns for a drain when the browser session did not release.
+const DRAIN_RELEASE_FAILED: &str = "drain_release_failed";
+
+fn drain_error(reason: &'static str) -> QuarryError {
+    QuarryError::new(
+        ErrorCode::Internal,
+        "a run could not be released by the shutdown drain",
+    )
+    .with_details(serde_json::json!({ "reason": reason }))
 }
 
 /// The one path that ends a run, for the owner's `DELETE` and for the sweeper. It
@@ -61,8 +79,17 @@ pub(super) async fn finish_run(
     handle: RunHandle,
     reason: CloseReason,
 ) -> QuarryResult<Option<serde_json::Value>> {
-    // Waits for an action that is still running.
-    let mut entry = handle.entry.lock().await;
+    // Waits for an action that is still running (a drain waits only so long).
+    let mut entry = match reason {
+        CloseReason::Drain(wait) => match tokio::time::timeout(wait, handle.entry.lock()).await {
+            Ok(entry) => entry,
+            Err(_) => {
+                tracing::warn!(run_id, "drain: an action still holds this run");
+                return Err(drain_error(DRAIN_IN_USE));
+            }
+        },
+        _ => handle.entry.lock().await,
+    };
     if entry.closed {
         return Ok(None);
     }
@@ -71,9 +98,9 @@ pub(super) async fn finish_run(
     if !zdr.is_active() {
         let lifecycle = match reason {
             CloseReason::Explicit => BrowserTimelineLifecycle::Closed,
-            CloseReason::Expired(_) => BrowserTimelineLifecycle::Expired,
+            CloseReason::Expired(_) | CloseReason::Drain(_) => BrowserTimelineLifecycle::Expired,
         };
-        state
+        let appended = state
             .receipts
             .append_browser_timeline_event(BrowserTimelineEvent::new(
                 entry.org_id.clone(),
@@ -81,12 +108,24 @@ pub(super) async fn finish_run(
                 rid.to_string(),
                 BrowserTimelineEventKind::Lifecycle {
                     state: lifecycle,
-                    // The sweeper ended an expired run, not a person or an agent.
-                    initiated_by: matches!(reason, CloseReason::Expired(_))
+                    // The sweeper (or the shutdown) ended the run, not a person or an agent.
+                    initiated_by: matches!(reason, CloseReason::Expired(_) | CloseReason::Drain(_))
                         .then_some(BrowserTimelineInitiator::System),
                 },
             ))
-            .await?;
+            .await;
+        if let Err(error) = appended {
+            if matches!(reason, CloseReason::Drain(_)) {
+                // The browser must still be released at shutdown; the checkpoint stays active.
+                tracing::warn!(
+                    run_id,
+                    error_class = crate::zdr_log::class(&error),
+                    "drain: the timeline record failed; releasing anyway"
+                );
+            } else {
+                return Err(error);
+            }
+        }
         if matches!(reason, CloseReason::Explicit) {
             state
                 .receipts
@@ -107,12 +146,16 @@ pub(super) async fn finish_run(
     {
         let org_id = entry.org_id.clone();
         let run_id_text = rid.to_string();
-        let mut run_end = crate::zdr_tombstone::RunEnd::new(&run_id_text, &org_id, crate::zdr_tombstone::Kind::AgentRun).ended_as(
-            match reason {
-                CloseReason::Explicit => crate::zdr_tombstone::Outcome::Ok,
-                CloseReason::Expired(_) => crate::zdr_tombstone::Outcome::Timeout,
-            },
-        );
+        let mut run_end = crate::zdr_tombstone::RunEnd::new(
+            &run_id_text,
+            &org_id,
+            crate::zdr_tombstone::Kind::AgentRun,
+        )
+        .ended_as(match reason {
+            CloseReason::Explicit => crate::zdr_tombstone::Outcome::Ok,
+            CloseReason::Expired(_) => crate::zdr_tombstone::Outcome::Timeout,
+            CloseReason::Drain(_) => crate::zdr_tombstone::Outcome::Cancelled,
+        });
         if let Some(budget) = entry.budget.as_ref() {
             run_end = run_end.steps(budget.ledger.steps);
         }
@@ -138,20 +181,41 @@ pub(super) async fn finish_run(
     if let Some(segment) = segment_usage.as_ref() {
         let outcome = match reason {
             CloseReason::Explicit => crate::usage_attrs::Outcome::Ok,
-            CloseReason::Expired(_) => crate::usage_attrs::Outcome::Expired,
+            CloseReason::Expired(_) | CloseReason::Drain(_) => crate::usage_attrs::Outcome::Expired,
         };
-        crate::usage_attrs::emit_run_segment(
+        let rid_text = rid.to_string();
+        let emitted = crate::usage_attrs::emit_run_segment(
             &*state.usage,
-            &rid.to_string(),
+            &rid_text,
             &usage_org,
             &usage_actor,
             zdr.is_active(),
             segment,
             outcome,
-        )
-        .await;
+        );
+        match reason {
+            CloseReason::Drain(wait) => {
+                if tokio::time::timeout(wait, emitted).await.is_err() {
+                    tracing::warn!(run_id, "drain: the usage segment was not accepted in time");
+                }
+            }
+            _ => emitted.await,
+        }
     }
-    if let Err(error) = state.agent_driver.release(session).await {
+    let released = match reason {
+        CloseReason::Drain(wait) => {
+            match tokio::time::timeout(wait, state.agent_driver.release(session)).await {
+                Ok(released) => released,
+                Err(_) => Err(QuarryError::new(
+                    ErrorCode::Timeout,
+                    "releasing the browser session timed out",
+                )),
+            }
+        }
+        _ => state.agent_driver.release(session).await,
+    };
+    let release_failed = released.is_err();
+    if let Err(error) = released {
         tracing::warn!(run_id, error_class = crate::zdr_log::class(&error), "releasing a run's browser session failed");
     }
 
@@ -184,10 +248,31 @@ pub(super) async fn finish_run(
                 )
                 .await;
         }
+        CloseReason::Drain(_) => {
+            // WS6.J: the viewer is told why the run ended before its stream closes.
+            let (idle_s, age_s) = handle.live.idle_and_age_s(now_ms());
+            state
+                .event_sink
+                .emit_for_zdr(
+                    zdr,
+                    rid.clone(),
+                    EventType::AgentExpired,
+                    serde_json::json!({
+                        "reason": "shutdown",
+                        "idle_s": idle_s,
+                        "age_s": age_s,
+                    }),
+                    format!("{rid}:agent_expired"),
+                )
+                .await;
+        }
     }
     // WS10.S3: after the terminal event above, the run's trace (replay ring and live
     // channel) is released, so a live subscriber sees the channel close.
     state.event_sink.close_run(&rid);
+    if release_failed && matches!(reason, CloseReason::Drain(_)) {
+        return Err(drain_error(DRAIN_RELEASE_FAILED));
+    }
     Ok(usage)
 }
 
@@ -251,6 +336,58 @@ pub async fn drain_runs(
         }
     }
     // WS6.I: the runs this drain released ended with the `agent.expired` reason `shutdown`.
+    crate::metrics::record_run_expired("shutdown", report.released as u64);
+    report
+}
+
+/// WS6.J: the shutdown drain. Ends every live run through `finish_run` (the one path that
+/// ends a run), so each one writes its last usage segment, emits `agent.expired` with
+/// `reason: "shutdown"` and releases its browser session exactly once. Runs concurrently
+/// (8 at a time); `per_run_timeout` bounds the wait for a running action, the usage step and
+/// the release of each run, so one hung Chromium cannot hold up the rest.
+///
+/// A non-ZDR run's checkpoint is left `active` (the run can be resumed with `resume_run_id`
+/// after the restart). A ZDR run writes no timeline record and has no checkpoint. A run that
+/// another path (an explicit close or the sweeper) is already ending is not ended twice.
+/// Calling it again is a no-op once the registry is empty.
+pub async fn drain_runs_for_shutdown(
+    state: &AppState,
+    per_run_timeout: std::time::Duration,
+) -> DrainReport {
+    use futures_util::StreamExt;
+    let snapshot = state
+        .agent_runs
+        .lock()
+        .expect("agent_runs mutex poisoned")
+        .snapshot();
+    let outcomes: Vec<Option<bool>> = futures_util::stream::iter(snapshot)
+        .map(move |(run_id, handle)| async move {
+            match finish_run(state, &run_id, handle, CloseReason::Drain(per_run_timeout)).await {
+                Ok(_) => Some(true),
+                Err(error) => {
+                    let reason = error
+                        .details
+                        .as_ref()
+                        .and_then(|details| details["reason"].as_str());
+                    if reason == Some(DRAIN_IN_USE) {
+                        None
+                    } else {
+                        Some(false)
+                    }
+                }
+            }
+        })
+        .buffer_unordered(8)
+        .collect()
+        .await;
+    let mut report = DrainReport::default();
+    for outcome in outcomes {
+        match outcome {
+            Some(true) => report.released += 1,
+            Some(false) => report.failed += 1,
+            None => report.in_use += 1,
+        }
+    }
     crate::metrics::record_run_expired("shutdown", report.released as u64);
     report
 }

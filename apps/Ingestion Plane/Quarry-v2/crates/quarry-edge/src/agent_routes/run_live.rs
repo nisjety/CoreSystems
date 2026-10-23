@@ -303,6 +303,14 @@ impl RunLive {
         self.in_flight.load(Ordering::Acquire)
     }
 
+    /// WS6.J: how long the run sat idle and how long it lived at `now_ms`, in whole seconds
+    /// (the `idle_s` and `age_s` of an `agent.expired` event with `reason: "shutdown"`).
+    pub fn idle_and_age_s(&self, now_ms: u64) -> (u64, u64) {
+        let idle_s = now_ms.saturating_sub(self.last_activity_ms.load(Ordering::Acquire)) / 1000;
+        let age_s = now_ms.saturating_sub(self.started_ms) / 1000;
+        (idle_s, age_s)
+    }
+
     /// Hold while a person is watching (a WebSocket, a frame or event stream).
     pub fn viewer_guard(self: &Arc<Self>) -> ViewerGuard {
         self.viewers.fetch_add(1, Ordering::AcqRel);

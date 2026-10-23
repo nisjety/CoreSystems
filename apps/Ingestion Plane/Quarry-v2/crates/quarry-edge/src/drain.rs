@@ -14,7 +14,13 @@
 //!    Connections still open then (a stream with a viewer) are closed.
 //! 3. Release every remaining browser session. A non-ZDR run keeps its
 //!    checkpoint `Active`, so it can be resumed with `resume_run_id` after the
-//!    restart; a ZDR run has none and is simply gone.
+//!    restart; a ZDR run has none and is simply gone. Each released run emits its
+//!    last usage segment and an `agent.expired` event with `reason: "shutdown"`
+//!    (WS6.J), so a viewer sees why the run ended.
+//! 4. Close the streams that are still open ([`close_streams`]): an event stream, a
+//!    frame stream or a browser WebSocket ends with a `done` frame instead of
+//!    holding axum's graceful shutdown open until the platform kills the process.
+//! 5. Flush the usage meter, then exit.
 //!
 //! The flag is process-global, so only a test binary of its own may set it.
 
@@ -33,6 +39,8 @@ pub const RETRY_AFTER_SECONDS: u64 = 5;
 
 static DRAINING: AtomicBool = AtomicBool::new(false);
 static STARTED: Notify = Notify::const_new();
+static STREAMS_CLOSING: AtomicBool = AtomicBool::new(false);
+static STREAMS_CLOSED: Notify = Notify::const_new();
 
 /// How long to wait for in-flight requests before closing the rest. Unset is
 /// [`DEFAULT_DEADLINE_S`]; anything that is not an integer from 1 to 600 is an
@@ -76,6 +84,42 @@ pub async fn started() {
         }
         notified.await;
     }
+}
+
+/// Ask every open stream to end (WS6.J). Called once the runs have been released, so a
+/// viewer has already received the `agent.expired` event. Idempotent. The flag is
+/// process-global, like [`begin`].
+pub fn close_streams() {
+    if !STREAMS_CLOSING.swap(true, Ordering::SeqCst) {
+        STREAMS_CLOSED.notify_waiters();
+    }
+}
+
+/// Whether [`close_streams`] has been called.
+pub fn streams_are_closing() -> bool {
+    STREAMS_CLOSING.load(Ordering::SeqCst)
+}
+
+/// Resolves once [`close_streams`] has been called. A stream selects on this next to its
+/// own wait, so it ends the moment shutdown asks it to.
+pub async fn streams_closing() {
+    loop {
+        let notified = STREAMS_CLOSED.notified();
+        if streams_are_closing() {
+            return;
+        }
+        notified.await;
+    }
+}
+
+/// Put both process-global flags back (and the gauge). For an integration-test binary that
+/// runs the drain more than once; the edge itself never calls it.
+#[doc(hidden)]
+#[allow(dead_code)] // the binary compiles this module too and never calls it
+pub fn reset_for_tests() {
+    DRAINING.store(false, Ordering::SeqCst);
+    STREAMS_CLOSING.store(false, Ordering::SeqCst);
+    metrics::gauge!("quarry_edge_draining").set(0.0);
 }
 
 /// The refusal a request to start new work gets while draining, or `None` when
