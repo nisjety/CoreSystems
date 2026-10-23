@@ -208,6 +208,27 @@ impl QuarryError {
             format!("unsupported action: {action}"),
         )
     }
+
+    /// The text of this error that may go into a log line (WS12.S6). The
+    /// message goes through the WS12 Durable redaction rules, so a secret, a
+    /// token or a URL query value that a transport error or an excerpt carried
+    /// does not reach `tracing`. `details` are left out: a log line carries the
+    /// `error_class` field (`code.wire_name()`) instead. `Display` is unchanged
+    /// and still shows the message as the caller gets it.
+    pub fn log_message(&self) -> String {
+        self.log_message_under(crate::redaction::mode())
+    }
+
+    fn log_message_under(&self, mode: crate::redaction::Mode) -> String {
+        let mut tally = crate::redaction::Tally::new();
+        crate::redaction::redact_text_with(
+            mode,
+            &self.message,
+            crate::redaction::Profile::Durable,
+            &mut tally,
+        )
+        .into_owned()
+    }
 }
 
 /// The closed vocabulary of `details.reason` on a `TARGET_REPAIR_REQUIRED`
@@ -358,6 +379,46 @@ mod tests {
         assert_eq!(
             ErrorCode::TargetRepairRequired.wire_name(),
             "TARGET_REPAIR_REQUIRED"
+        );
+    }
+}
+
+#[cfg(test)]
+mod log_message_tests {
+    use super::*;
+    use crate::redaction::Mode;
+
+    #[test]
+    fn log_message_masks_a_secret_and_keeps_details_out() {
+        let err = QuarryError::new(
+            ErrorCode::DriverFailed,
+            "login failed: password=hunter2 on the form",
+        )
+        .with_details(serde_json::json!({ "url": "https://example.test/private/path" }));
+        // The log text: the secret is masked, the details never appear.
+        let logged = err.log_message_under(Mode::Enforce);
+        assert!(
+            !logged.contains("hunter2"),
+            "secret reached the log: {logged}"
+        );
+        assert!(
+            !logged.contains("private/path"),
+            "details reached the log: {logged}"
+        );
+        assert!(
+            logged.contains("login failed"),
+            "the message text is kept: {logged}"
+        );
+        // Display is untouched: it still carries the message the caller gets.
+        assert!(err.to_string().contains("hunter2"));
+    }
+
+    #[test]
+    fn log_message_under_off_returns_the_message_as_is() {
+        let err = QuarryError::new(ErrorCode::Internal, "plain text, nothing to mask");
+        assert_eq!(
+            err.log_message_under(Mode::Off),
+            "plain text, nothing to mask"
         );
     }
 }
