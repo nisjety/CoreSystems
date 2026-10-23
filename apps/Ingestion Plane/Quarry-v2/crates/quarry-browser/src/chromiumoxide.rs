@@ -73,6 +73,7 @@ use quarry_core::lease::{BrowserLease, BrowserViewport};
 
 use crate::actionability::{self, DialogWatch};
 use crate::capture_plan;
+use crate::stitch;
 use crate::actions::ScrollTarget;
 use crate::deadlines::{best_effort, deadline, read_with_retry, timeout_error, with_deadline, Op};
 use crate::navigation::{guard_navigation_target, guard_page_request_target};
@@ -3116,6 +3117,7 @@ async fn capture_screenshot_on(
     options: &ScreenshotOptions,
     device_scale_factor: f64,
     limits: &CaptureLimits,
+    stitch: Option<&crate::StitchPermit>,
 ) -> QuarryResult<CapturedImage> {
     let layout = with_deadline(Op::Screenshot, async {
         page.execute(GetLayoutMetricsParams::default())
@@ -3127,12 +3129,25 @@ async fn capture_screenshot_on(
     })
     .await?;
     let content = layout.result.css_content_size;
-    let plan = capture_plan::plan_screenshot(
-        content.width,
-        content.height,
-        options,
-        device_scale_factor,
-    )?;
+    // WS13.6: a full page one capture cannot hold is stitched when a heavy-lane
+    // permit was passed; without one it is cropped at the limit below.
+    if stitch.is_some()
+        && options.full_page
+        && options.clip.is_none()
+        && stitch::needs_stitch(content.height, device_scale_factor)
+    {
+        return stitch_full_page(
+            page,
+            content.width,
+            content.height,
+            device_scale_factor,
+            options,
+            limits,
+        )
+        .await;
+    }
+    let plan =
+        capture_plan::plan_screenshot(content.width, content.height, options, device_scale_factor)?;
     let format = options.format();
     let mut params = CaptureScreenshotParamsBuilder::default()
         .format(match format {
@@ -3171,6 +3186,83 @@ async fn capture_screenshot_on(
         height_px,
         tiles: 1,
         stitched: false,
+        truncated: plan.truncated,
+    })
+}
+
+/// WS13.6: JPEG quality for a stitched JPEG that did not ask for one.
+const DEFAULT_STITCH_JPEG_QUALITY: u8 = 85;
+
+/// WS13.6: a full page taller than one capture, as clip tiles stitched in page
+/// order (method A: no scrolling, no overlap). Each tile is a lossless PNG from
+/// Chromium; the stitched image is encoded once, in the requested format. Each
+/// tile has the per-capture deadline, and the whole stitch has `stitch_deadline`.
+async fn stitch_full_page(
+    page: &Page,
+    content_width: f64,
+    content_height: f64,
+    device_scale_factor: f64,
+    options: &ScreenshotOptions,
+    limits: &CaptureLimits,
+) -> QuarryResult<CapturedImage> {
+    let format = options.format();
+    let plan = stitch::plan_tiles(content_width, content_height, device_scale_factor, format)?;
+    let width_px = stitch::device_px(f64::from(plan.width_css), device_scale_factor);
+    let height_px = stitch::device_px(f64::from(plan.css_height), device_scale_factor);
+    let quality = options.quality.unwrap_or(DEFAULT_STITCH_JPEG_QUALITY);
+    let deadline = stitch::stitch_deadline(plan.tiles.len());
+    let tile_count = u32::try_from(plan.tiles.len()).unwrap_or(u32::MAX);
+    let mut bytes = Vec::new();
+    let work = async {
+        let mut stitcher = stitch::Stitcher::new(format, &mut bytes, width_px, height_px, quality)?;
+        for tile in &plan.tiles {
+            let params = CaptureScreenshotParamsBuilder::default()
+                .format(CaptureScreenshotFormat::Png)
+                .capture_beyond_viewport(true)
+                .clip(CdpViewport {
+                    x: 0.0,
+                    y: f64::from(tile.y),
+                    width: f64::from(plan.width_css),
+                    height: f64::from(tile.h),
+                    scale: 1.0,
+                })
+                .build();
+            let tile_bytes = with_deadline(Op::Screenshot, async {
+                page.screenshot(params).await.map_err(|_| {
+                    QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide screenshot failed")
+                        .with_details(json!({ "reason": "driver_error" }))
+                })
+            })
+            .await?;
+            stitcher.append_tile(
+                &tile_bytes,
+                stitch::tile_device_rows(*tile, device_scale_factor),
+            )?;
+        }
+        stitcher.finish()
+    };
+    match tokio::time::timeout(deadline, work).await {
+        Ok(result) => result?,
+        Err(_) => {
+            return Err(
+                QuarryError::new(ErrorCode::Timeout, "the stitched screenshot timed out")
+                    .with_details(json!({
+                        "op": "screenshot",
+                        "reason": "stitch_deadline",
+                        "deadline_ms": u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX),
+                        "effect": "none",
+                    })),
+            )
+        }
+    }
+    capture_plan::check_capture_size(bytes.len(), limits)?;
+    Ok(CapturedImage {
+        bytes,
+        format,
+        width_px,
+        height_px,
+        tiles: tile_count,
+        stitched: true,
         truncated: plan.truncated,
     })
 }
@@ -3996,6 +4088,48 @@ impl BrowserDriver for ChromiumoxideDriver {
         options: &ScreenshotOptions,
         limits: &CaptureLimits,
     ) -> QuarryResult<CapturedImage> {
+        self.capture_screenshot_stitched(session, options, limits, None)
+            .await
+    }
+
+    async fn screenshot_needs_stitch(
+        &self,
+        session: &BrowserSession,
+        options: &ScreenshotOptions,
+    ) -> QuarryResult<bool> {
+        if !options.full_page || options.clip.is_some() {
+            return Ok(false);
+        }
+        let page = self.current_page(session).await?;
+        let scale = options.viewport.map_or_else(
+            || resolve_viewport(session.lease.viewport).device_scale_factor,
+            |requested| requested.device_scale_factor,
+        );
+        let layout = with_deadline(Op::Screenshot, async {
+            page.execute(GetLayoutMetricsParams::default())
+                .await
+                .map_err(|_| {
+                    QuarryError::new(
+                        ErrorCode::DriverFailed,
+                        "chromiumoxide layout metrics failed",
+                    )
+                    .with_details(json!({ "reason": "driver_error" }))
+                })
+        })
+        .await?;
+        Ok(stitch::needs_stitch(
+            layout.result.css_content_size.height,
+            scale,
+        ))
+    }
+
+    async fn capture_screenshot_stitched(
+        &self,
+        session: &BrowserSession,
+        options: &ScreenshotOptions,
+        limits: &CaptureLimits,
+        stitch: Option<&crate::StitchPermit>,
+    ) -> QuarryResult<CapturedImage> {
         let page = self.current_page(session).await?;
         let lease_viewport = resolve_viewport(session.lease.viewport);
         // A viewport this capture asks for is applied for this capture only. The
@@ -4011,12 +4145,14 @@ impl BrowserDriver for ChromiumoxideDriver {
                 options,
                 lease_viewport.device_scale_factor,
                 limits,
+                stitch,
             )
             .await;
         };
         let captured = match set_capture_viewport(&page, viewport).await {
             Ok(()) => {
-                capture_screenshot_on(&page, options, viewport.device_scale_factor, limits).await
+                capture_screenshot_on(&page, options, viewport.device_scale_factor, limits, stitch)
+                    .await
             }
             Err(error) => Err(error),
         };
@@ -7701,6 +7837,8 @@ mod tests {
     include!("field_probe_live.rs");
     // WS13.3: scrape-time captures against a real Chromium.
     include!("capture_live.rs");
+    // WS13.6: tile-and-stitch against a real Chromium.
+    include!("stitch_live.rs");
 }
 
 /// WS3.D and WS3.F, the parts that need no browser: every CDP call is bounded, the
