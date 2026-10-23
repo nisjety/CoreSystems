@@ -771,3 +771,12 @@ The Ingestions Schedules surface offers only what the gateway says this installa
 - SPA: with `kinds: []` the composer shows the notice "No schedule types are enabled" and Save is disabled. Trigger is hidden unless `trigger` is on. If the capability read fails, the page treats everything as off.
 - Rollback: unset `QUARRY_SCHEDULE_CAPABILITIES` (or set `{}`) and restart the gateway. Later slices (S1 kinds, S2 overlap, S3 trigger and backfill) turn a flag on by changing this value only.
 - Deployment check (owed, not run): rebuild the gateway image, restart the Vite dev server (HMR does not see host edits), open Schedules: the notice shows, Save is disabled, no Trigger. Set `{"kinds":["crawl"]}`, reload: crawl appears.
+
+## Web policy catalogue and lattice: build notes (WS7.B, U02, built, NOT run, 2026-10-23)
+
+- What it is: `quarry_core::web_policy`, a pure library. It has no flag and no runtime effect until WS7.C wires the edge. Layers only tighten; `resolve()` names the layer that decided each key.
+- Reading a denial: `details.reason` is one of the closed set (`policy_denied`, `raw_script_denied`, `policy_unreadable`, `unknown_capability`, `ceiling_exceeded`, `domain_denied`, `domain_not_allowed`). `decision_source` is one of `invariant`, `zdr`, `org_policy`, `grant`, `baseline`, `request`, in that tie order. `policy_rev` is present only when `org_policy` decided.
+- `policy_unreadable` is deliberate: an org policy that cannot be read refuses the request. It never falls back to the baseline alone.
+- `raw_script_denied` keeps its reason and message from WS2.A and is decided by the invariant layer, so no layer can unlock `evaluate`.
+- Changing the catalogue: edit `src/web_policy/catalogue.rs`, then regenerate with `UPDATE_CONTRACT_GOLDEN=1 cargo test -p quarry-core --test web_policy catalogue_json_matches_the_checked_in_file_and_its_pin` (in `apps/Ingestion Plane/Quarry-v2`). Then update the digest in the GOLDENS row of `scripts/tests/zdr-contract-sync.test.sh` and run that script. Key strings become public once the claim carries them, so review with Control before WS7.H.
+- Rollback: revert the commit. Nothing else depends on the module until WS7.C.
