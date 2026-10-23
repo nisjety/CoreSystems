@@ -261,26 +261,46 @@ UPDATE jobs SET claimed_until = $1 + make_interval(secs => $4)
    AND status = 'accepted' AND (claimed_until IS NULL OR claimed_until <= $1)
 RETURNING ` + jobColumns
 
+// jobClaimLockKey is the transaction-scoped advisory lock that serialises
+// claims. Under READ COMMITTED every statement reads its own snapshot, so two
+// claimers that ran the claim statement at the same time could each count the
+// same jobs in use and each lease up to the cap. Taking the lock first makes
+// the second claimer wait for the first to commit; its statement then starts
+// after those leases are committed and sees them.
+const jobClaimLockKey int64 = 7245110311
+
 // ClaimAccepted implements store.JobsStore.
 func (s *jobsStore) ClaimAccepted(limit int, now time.Time, lease time.Duration, defaultCap int) ([]store.Job, error) {
 	if limit <= 0 {
 		return nil, nil
 	}
-	rows, err := s.pool.Query(context.Background(), claimAcceptedSQL,
-		now, defaultCap, limit, lease.Seconds())
+	ctx := context.Background()
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, mapPgErr(err)
 	}
-	defer rows.Close()
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, jobClaimLockKey); err != nil {
+		return nil, mapPgErr(err)
+	}
+	rows, err := tx.Query(ctx, claimAcceptedSQL, now, defaultCap, limit, lease.Seconds())
+	if err != nil {
+		return nil, mapPgErr(err)
+	}
 	var out []store.Job
 	for rows.Next() {
 		j, err := scanJob(rows)
 		if err != nil {
+			rows.Close()
 			return nil, err
 		}
 		out = append(out, j)
 	}
+	rows.Close()
 	if err := rows.Err(); err != nil {
+		return nil, mapPgErr(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return nil, mapPgErr(err)
 	}
 	// RETURNING has no order. Hand the jobs back in claim order: each

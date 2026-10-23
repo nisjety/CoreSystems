@@ -99,11 +99,14 @@ func (s *teamUsageStore) TokenUsage(orgID, period string) (store.TeamTokenUsageR
 	return row, nil
 }
 
+// Concurrency counts the organization's running jobs and, with job admission
+// on, the accepted jobs a dispatcher holds a lease on (they take a cap slot).
+// With admission off no accepted job has claimed_until set, so nothing changes.
 func (s *teamUsageStore) Concurrency(orgID string) (store.TeamConcurrencyRow, error) {
 	rows, err := s.pool.Query(context.Background(),
 		`SELECT j.params->>'url', COUNT(*) OVER ()
 		   FROM jobs j
-		  WHERE j.org_id = $1 AND j.status = 'running'
+		  WHERE j.org_id = $1 AND (j.status = 'running' OR (j.status = 'accepted' AND j.claimed_until > now()))
 		  ORDER BY created_at DESC`, orgID)
 	if err != nil {
 		return store.TeamConcurrencyRow{}, err
