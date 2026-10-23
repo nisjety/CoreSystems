@@ -451,8 +451,12 @@ async fn run() -> anyhow::Result<()> {
         let pool = Arc::new(RuntimeLeasePool::new(2).with_org_max_permits(pool_org_max));
         metrics::register_pool("chromium", (*pool).clone());
         let adapter = BrowserDriverAdapter::new(browser_driver, pool);
+        tracing::info!(
+            session_isolation = adapter.session_isolation(),
+            heavy_permits = adapter.heavy_permits_available(),
+            "browser driver registered (local chromiumoxide)"
+        );
         drivers.register(Arc::new(adapter));
-        tracing::info!("browser driver registered (local chromiumoxide)");
     }
 
     let default_driver = drivers
