@@ -1,0 +1,3 @@
+# Binary fixtures: never line-ending-converted or text-diffed.
+*.pdf binary
+*.docx binary
