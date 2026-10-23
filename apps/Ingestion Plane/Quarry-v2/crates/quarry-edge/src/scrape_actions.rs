@@ -17,6 +17,7 @@
 use std::sync::OnceLock;
 
 use quarry_core::capture::CaptureLimits;
+use quarry_core::error::{ErrorCode, QuarryError};
 use quarry_core::scrape::ResolvedScrapeOptions;
 use quarry_runtime::driver::RenderHints;
 use quarry_runtime::driver_plan::{plan_from_signals, DriverSignals};
@@ -121,6 +122,17 @@ pub fn requests_capture(formats: Option<&serde_json::Value>) -> bool {
                 matches!(name, Some("screenshot") | Some("pdf"))
             })
         })
+}
+
+/// WS13.4b: the refusal for a capture when no browser driver is wired. A
+/// browser plan with no browser registered would otherwise reach the default
+/// driver, which ignores the capture, so the page would come back without it.
+pub fn browser_unavailable() -> QuarryError {
+    QuarryError::new(
+        ErrorCode::Unsupported,
+        "screenshot and pdf need a browser, and none is available on this endpoint",
+    )
+    .with_details(serde_json::json!({ "reason": "browser_capability_unavailable" }))
 }
 
 #[cfg(test)]

@@ -652,6 +652,16 @@ async fn scrape_with(
         }
     }
 
+    // WS13.4b: a capture needs the browser. Without one, refuse with 501 rather
+    // than hand the plan to the default driver, which would drop the capture.
+    if !resolved.capture.is_empty() && !state.drivers.has(quarry_core::output::DriverKind::Browser) {
+        let error = crate::scrape_actions::browser_unavailable();
+        return Err((
+            StatusCode::from_u16(error.code.http_status()).unwrap_or(StatusCode::NOT_IMPLEMENTED),
+            Json(Envelope::<()>::err(&request_id, error)).into_response(),
+        ));
+    }
+
     let driver = pick_driver(&state, &plan, req.prefer_http3);
 
     let ingest_client = if req.ingest.unwrap_or(false) {
