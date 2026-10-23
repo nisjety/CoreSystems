@@ -2255,7 +2255,7 @@ pub(super) async fn dispatch_ticket_update_macro(
 // create/bind-then-confirm-membership sequence, and per-field length limits
 // enforced nowhere else. Reusing the exact function is the only way to
 // guarantee none of that is bypassed.
-fn owner_json_response_to_envelope(
+pub(super) fn owner_json_response_to_envelope(
     action_id: &str,
     user: &AuthenticatedUser,
     status: StatusCode,

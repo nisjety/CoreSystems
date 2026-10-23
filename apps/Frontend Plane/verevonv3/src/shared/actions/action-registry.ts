@@ -1117,6 +1117,15 @@ const browserRunControlInput = z.object({
   action: z.enum(['pause', 'resume', 'stop']),
 })
 
+const browserOmniboxSearchInput = z.object({
+  query: z.string().trim().min(1).max(500),
+  limit: z.number().int().min(1).max(10).optional(),
+})
+
+const browserOmniboxSuggestInput = z.object({
+  query: z.string().trim().min(1).max(200),
+})
+
 const browserProfileScopeEnum = z.enum(['user_private', 'org_shared', 'run_scoped'])
 
 const browserCreateSessionInput = z.object({
@@ -3017,6 +3026,28 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: true,
     inputSchema: browserRunControlInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'browser_omnibox.search',
+    label: 'Search from the browser omnibox',
+    description: 'Run a Verevon web search for free text typed in the browser address bar and show the results in the browser frame. Human-only: the person operates the omnibox, a model does not.',
+    ownerPlane: 'ingestion',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: browserOmniboxSearchInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'browser_omnibox.suggest',
+    label: 'Suggest browser omnibox queries',
+    description: 'Query suggestions for the browser omnibox dropdown. Empty for zero-data-retention callers. Human-only.',
+    ownerPlane: 'ingestion',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: browserOmniboxSuggestInput,
     outputSchema: envelopeStatusOutput,
   },
   {

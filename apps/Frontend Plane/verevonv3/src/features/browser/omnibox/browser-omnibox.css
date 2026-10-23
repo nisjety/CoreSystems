@@ -1,0 +1,145 @@
+/* Browser omnibox: the address-bar combobox and the search results in the frame stage.
+   Colours come from the surrounding theme tokens; the fallbacks keep it readable without them. */
+
+.browser-omnibox {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.browser-omnibox__input {
+  width: 100%;
+  min-width: 0;
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  outline: none;
+}
+
+.browser-omnibox__list {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 30;
+  max-height: 320px;
+  overflow: auto;
+  margin: 0;
+  padding: 4px 0;
+  list-style: none;
+  background: var(--surface-raised, #ffffff);
+  color: var(--text-primary, #1a1a1a);
+  border: 1px solid var(--border-subtle, rgba(0, 0, 0, 0.12));
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+
+.browser-omnibox__row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 12px;
+  cursor: pointer;
+  font-size: 0.875rem;
+}
+
+.browser-omnibox__row--active,
+.browser-omnibox__row:hover {
+  background: var(--surface-hover, rgba(0, 0, 0, 0.06));
+}
+
+.browser-omnibox__row-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.browser-omnibox__row-host {
+  flex: 0 0 auto;
+  color: var(--text-muted, #6b6b6b);
+  font-size: 0.75rem;
+}
+
+.browser-omnibox__note {
+  padding: 6px 12px;
+  color: var(--text-muted, #6b6b6b);
+  font-size: 0.8125rem;
+}
+
+.browser-search-results {
+  position: relative;
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px;
+  background: var(--surface-base, #ffffff);
+  color: var(--text-primary, #1a1a1a);
+}
+
+.browser-search-results__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.browser-search-results__close {
+  font: inherit;
+  padding: 4px 10px;
+  border: 1px solid var(--border-subtle, rgba(0, 0, 0, 0.12));
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.browser-search-results__note {
+  margin: 8px 0;
+  color: var(--text-muted, #6b6b6b);
+  font-size: 0.875rem;
+}
+
+.browser-search-results__list {
+  display: grid;
+  gap: 14px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.browser-search-results__item {
+  display: grid;
+  gap: 2px;
+  max-width: 640px;
+}
+
+.browser-search-results__title {
+  justify-self: start;
+  font: inherit;
+  font-size: 1rem;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--link, #1a5fb4);
+  cursor: pointer;
+  text-align: left;
+}
+
+.browser-search-results__host {
+  color: var(--text-muted, #6b6b6b);
+  font-size: 0.75rem;
+}
+
+.browser-search-results__snippet {
+  margin: 0;
+  font-size: 0.875rem;
+}
+
+@media (max-width: 480px) {
+  .browser-search-results {
+    padding: 12px;
+  }
+}

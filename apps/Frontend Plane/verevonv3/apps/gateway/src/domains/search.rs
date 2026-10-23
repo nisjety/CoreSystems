@@ -52,7 +52,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
 
 /// `POST /api/v1/search/web` — keyword search, or a single-page fetch when the
 /// query is a URL / bare domain. Mirrors verevonv2's `search/web` route.
-async fn search_web(
+pub(crate) async fn search_web(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
@@ -552,12 +552,19 @@ fn as_video_error(envelope: (StatusCode, Json<Value>)) -> (StatusCode, Json<Valu
 
 /// `GET /api/v1/search/suggestions` → autocomplete-core. Always degrades to an
 /// empty list (never an error) so the searchbar dropdown stays resilient.
-async fn search_suggestions(
+pub(crate) async fn search_suggestions(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> (StatusCode, Json<Value>) {
     let empty = || (StatusCode::OK, Json(ok(json!({ "suggestions": [] }))));
+    // Zero data retention: suggestions are built from what people have searched
+    // for, so a ZDR request (header, or an org whose posture is ZDR or unknown)
+    // gets none. Checked before anything else, including the autocomplete lookup.
+    if crate::zdr::request_zdr(&headers, None) || crate::zdr::org_zdr_enabled(&state, &user).await {
+        return empty();
+    }
 
     let query = params.get("q").map(|s| s.trim()).unwrap_or("");
     if query.len() < 2
@@ -1221,6 +1228,89 @@ mod tests {
             .into_iter()
             .filter(|key| key.starts_with("verevon:gw:search-web:"))
             .collect()
+    }
+
+    /// Zero data retention: suggestions are built from what people have searched
+    /// for, so a ZDR request gets none, and so does a ZDR org even without the
+    /// header. The autocomplete mock must never be called in those cases.
+    async fn suggestions_as(
+        world: &World,
+        org: &str,
+        extra_headers: &[(&'static str, &'static str)],
+    ) -> (StatusCode, Value) {
+        let mut headers = HeaderMap::new();
+        for (name, value) in extra_headers {
+            headers.insert(*name, axum::http::HeaderValue::from_static(value));
+        }
+        let params: HashMap<String, String> = HashMap::from([
+            ("q".to_owned(), "norwegian salmon".to_owned()),
+            ("scope".to_owned(), "queries".to_owned()),
+        ]);
+        let (status, Json(value)) = search_suggestions(
+            State(world.state.clone()),
+            Extension(member_of(org)),
+            headers,
+            Query(params),
+        )
+        .await;
+        (status, value)
+    }
+
+    async fn autocomplete_core() -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/suggestions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "suggestions": [{ "text": "norwegian salmon exports" }]
+            })))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    async fn autocomplete_calls(server: &MockServer) -> usize {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|request| request.url.path() == "/v1/suggestions")
+            .count()
+    }
+
+    fn with_autocomplete(world: &mut World, server: &MockServer) {
+        world.state.autocomplete_token = "test-token".to_owned();
+        world.state.autocomplete_core_url = server.uri();
+    }
+
+    #[tokio::test]
+    async fn search_suggestions_empty_under_zdr_header() {
+        let mut world = world(&[], &["org-plain"]).await;
+        let autocomplete = autocomplete_core().await;
+        with_autocomplete(&mut world, &autocomplete);
+
+        let (status, value) = suggestions_as(&world, "org-plain", &[("x-zdr", "1")]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["data"]["suggestions"], json!([]));
+        assert_eq!(autocomplete_calls(&autocomplete).await, 0);
+
+        // The control: the same request without the header is answered.
+        let (_, value) = suggestions_as(&world, "org-plain", &[]).await;
+        assert_eq!(value["data"]["suggestions"].as_array().map(Vec::len), Some(1));
+    }
+
+    #[tokio::test]
+    async fn search_suggestions_empty_under_org_zdr() {
+        let mut world = world(&["org-zdr"], &["org-plain"]).await;
+        let autocomplete = autocomplete_core().await;
+        with_autocomplete(&mut world, &autocomplete);
+
+        let (_, value) = suggestions_as(&world, "org-zdr", &[]).await;
+        assert_eq!(value["data"]["suggestions"], json!([]));
+        assert_eq!(autocomplete_calls(&autocomplete).await, 0);
+
+        let (_, value) = suggestions_as(&world, "org-plain", &[]).await;
+        assert_eq!(value["data"]["suggestions"].as_array().map(Vec::len), Some(1));
     }
 
     /// The cross-tenant test. The cached search body carries an `answer` that

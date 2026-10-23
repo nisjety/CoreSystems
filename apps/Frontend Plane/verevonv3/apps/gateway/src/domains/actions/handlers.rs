@@ -9,6 +9,8 @@ use serde_json::Value;
 
 use crate::{config::AppState, envelope::error, middleware::AuthenticatedUser};
 
+use super::browser_omnibox::{dispatch_browser_omnibox_search, dispatch_browser_omnibox_suggest};
+
 use super::dispatchers::{
     dispatch_audio_dictate, dispatch_audio_transcribe, dispatch_browser_blocked_try_other_source,
     dispatch_browser_close_session,
@@ -393,6 +395,12 @@ pub(super) async fn execute_action(
         }
         "browser_action.suggest" => {
             dispatch_browser_suggest_action(&state, &user, &headers, &body.input).await
+        }
+        "browser_omnibox.search" => {
+            dispatch_browser_omnibox_search(&state, &user, &headers, &body.input).await
+        }
+        "browser_omnibox.suggest" => {
+            dispatch_browser_omnibox_suggest(&state, &user, &headers, &body.input).await
         }
         "browser_profile.create" => {
             dispatch_browser_create_profile(&state, &user, &headers, &body.input).await

@@ -217,6 +217,7 @@ function BrowserSessionSurface(props: {
   onBrowserLoopPause?: () => void
   onBrowserLoopResume?: () => void
   onBrowserLoopStop?: () => void
+  onAskVerevon?: (text: string) => void
   onBrowserNewTab?: () => Promise<void> | void
   onBrowserSelectTab?: (tabId: string) => Promise<void> | void
   onBrowserSuggestAction?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
@@ -286,6 +287,7 @@ function BrowserSessionSurface(props: {
         onBrowserLoopPause={props.onBrowserLoopPause}
         onBrowserLoopResume={props.onBrowserLoopResume}
         onBrowserLoopStop={props.onBrowserLoopStop}
+        onAskVerevon={props.onAskVerevon}
         onBrowserNewTab={props.onBrowserNewTab}
         onBrowserSelectTab={props.onBrowserSelectTab}
         onBrowserSuggestAction={props.onBrowserSuggestAction}
@@ -416,6 +418,7 @@ export function ScrapePreviewPanel(props: {
   onBrowserLoopPause?: () => void
   onBrowserLoopResume?: () => void
   onBrowserLoopStop?: () => void
+  onAskVerevon?: (text: string) => void
   onBrowserNewTab?: () => Promise<void> | void
   onBrowserSelectTab?: (tabId: string) => Promise<void> | void
   onBrowserSuggestAction?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
@@ -474,6 +477,7 @@ export function ScrapePreviewPanel(props: {
         onBrowserLoopPause={props.onBrowserLoopPause}
         onBrowserLoopResume={props.onBrowserLoopResume}
         onBrowserLoopStop={props.onBrowserLoopStop}
+        onAskVerevon={props.onAskVerevon}
         onBrowserNewTab={props.onBrowserNewTab}
         onBrowserSelectTab={props.onBrowserSelectTab}
         onBrowserSuggestAction={props.onBrowserSuggestAction}

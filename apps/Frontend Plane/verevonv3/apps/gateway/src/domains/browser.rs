@@ -4681,6 +4681,24 @@ fn forward_quarry_failure(status: StatusCode, body: Value) -> Response {
         }
         return (StatusCode::CONFLICT, Json(response)).into_response();
     }
+    // A navigation outside the run's allowed domains (Quarry's 403 for a
+    // cross-host click). WS8 will emit a typed code; until then the match is
+    // on Quarry's message, and the SPA gets the typed code its copy is keyed on.
+    if status == StatusCode::FORBIDDEN
+        && body
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .is_some_and(|message| message.contains("outside the run's allowed domains"))
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "browser_navigation_outside_scope",
+                "This session is limited to the domains of its run.",
+            )),
+        )
+            .into_response();
+    }
     if body.get("error").is_some() {
         return (status, Json(body)).into_response();
     }
@@ -5243,6 +5261,24 @@ mod tests {
             .unwrap();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["error"]["code"], "RATE_LIMITED");
+    }
+
+    #[tokio::test]
+    async fn forward_quarry_failure_maps_navigation_scope() {
+        let quarry = json!({ "error": {
+            "code": "SECURITY_BLOCKED",
+            "message": "browser navigation is outside the run's allowed domains"
+        }});
+        let response = forward_quarry_failure(StatusCode::FORBIDDEN, quarry);
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = body_of(response).await;
+        assert_eq!(body["error"]["code"], "browser_navigation_outside_scope");
+        assert!(!body.to_string().contains("SECURITY_BLOCKED"));
+
+        // Another 403 keeps Quarry's own envelope.
+        let other = json!({ "error": { "code": "SECURITY_BLOCKED", "message": "blocked for another reason" } });
+        let response = forward_quarry_failure(StatusCode::FORBIDDEN, other);
+        assert_eq!(body_of(response).await["error"]["code"], "SECURITY_BLOCKED");
     }
 
     async fn body_of(response: Response) -> Value {

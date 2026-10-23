@@ -80,7 +80,14 @@ import {
   type BrowserTimelineViewEntry,
 } from './browser-session'
 import { BrowserTimelineDetailPanel, compactBrowserUrl, consoleTone, networkTone } from './BrowserTimelineDetail'
-import { browserOmniboxTarget } from './browser-omnibox'
+import { OmniboxField } from '@/features/browser/omnibox/OmniboxField'
+import { BrowserSearchResults } from '@/features/browser/omnibox/BrowserSearchResults'
+import { currentOmniboxHistoryKey, recordOmniboxVisit } from '@/features/browser/omnibox/omnibox-history'
+import {
+  browserOmniboxSearchEnabled,
+  resolveOmniboxIntent,
+  type OmniboxIntent,
+} from '@/features/browser/omnibox/omnibox-resolver'
 import { hostnameOf } from './knowledge-preview'
 
 export const SESSION_STATUS_LABELS: Record<BrowserSessionViewModel['status'], string> = {
@@ -436,6 +443,10 @@ export function BrowserChrome(props: {
   onBrowserLoopResume?: () => void
   onBrowserLoopStop?: () => void
   onBrowserNewTab?: () => Promise<void> | void
+  /** Omnibox "Ask Verevon": hands the typed text to chat. Omit it and the row is not offered. */
+  onAskVerevon?: (text: string) => void
+  /** Omnibox search (WS9.A). Defaults to the build flag VITE_BROWSER_OMNIBOX_SEARCH. */
+  searchEnabled?: boolean
   onBrowserSelectTab?: (tabId: string) => Promise<void> | void
   onBrowserSuggestAction?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
   onBrowserSocketObservation?: (observation: BrowserObservation, session?: BrowserSession) => void
@@ -462,6 +473,7 @@ export function BrowserChrome(props: {
   const [selectedTimelineStep, setSelectedTimelineStep] = createSignal<number | null>(null)
   const [brokenFrameUrl, setBrokenFrameUrl] = createSignal<string | null>(null)
   const [addressInput, setAddressInput] = createSignal('')
+  const [searchQuery, setSearchQuery] = createSignal<string | null>(null)
   const [lastObservedUrl, setLastObservedUrl] = createSignal('')
   const [selectorInput, setSelectorInput] = createSignal('')
   const [textInput, setTextInput] = createSignal('')
@@ -848,12 +860,25 @@ export function BrowserChrome(props: {
     event.preventDefault()
     runAction({ type: 'press', key })
   }
-  const navigateFromAddress = () => {
-    const target = browserOmniboxTarget(address(), session().url)
-    if (!target) return
-    setAddressInput(target)
-    runAction({ type: 'navigate', url: target })
+  const omniboxSearchEnabled = () => props.searchEnabled ?? browserOmniboxSearchEnabled()
+  // Runs what the omnibox resolved: a navigation, a Verevon search shown in the
+  // frame stage, or a hand-off to chat. A noop (empty field, search off) does nothing.
+  const submitOmnibox = (intent: OmniboxIntent) => {
+    if (intent.kind === 'navigate') {
+      setSearchQuery(null)
+      setAddressInput(intent.url)
+      runAction({ type: 'navigate', url: intent.url })
+      return
+    }
+    if (intent.kind === 'search') {
+      setSearchQuery(intent.query)
+      return
+    }
+    if (intent.kind === 'ask') props.onAskVerevon?.(intent.text)
   }
+  const navigateFromAddress = () =>
+    submitOmnibox(resolveOmniboxIntent(addressInput(), { searchEnabled: omniboxSearchEnabled(), fallbackUrl: session().url }))
+  const openSearchResult = (url: string) => submitOmnibox({ kind: 'navigate', url })
   const prepareNewTabNavigation = async () => {
     if (controlsDisabled()) return
     setSelectedTimelineStep(null)
@@ -892,6 +917,7 @@ export function BrowserChrome(props: {
       if (url && lastObserved !== url) {
         setAddressInput(url)
         setLastObservedUrl(url)
+        recordOmniboxVisit({ url, title: session().title }, { zdr: session().zdr })
       }
     },
   )
@@ -1192,19 +1218,18 @@ export function BrowserChrome(props: {
           >
             <LockKeyhole class="size-3.5" />
           </button>
-          <input
+          <OmniboxField
             ref={(element) => { addressInputRef = element }}
             value={addressInput()}
             disabled={controlsDisabled()}
-            aria-label="Nettleseradresse"
-            spellcheck={false}
-            onInput={(event) => setAddressInput(event.currentTarget.value)}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') {
-                event.preventDefault()
-                navigateFromAddress()
-              }
-            }}
+            label="Nettleseradresse"
+            searchEnabled={omniboxSearchEnabled()}
+            askEnabled={props.onAskVerevon !== undefined}
+            fallbackUrl={session().url}
+            historyKey={currentOmniboxHistoryKey}
+            zdr={() => session().zdr}
+            onValueChange={setAddressInput}
+            onIntent={submitOmnibox}
           />
           <button
             type="button"
@@ -1787,6 +1812,16 @@ export function BrowserChrome(props: {
       >
         <Show when={isLive()} fallback={props.children}>
           <div class="knowledge-browser-chrome__page" aria-label="Gjengitt nettleserside">
+            <Show when={searchQuery()}>
+              {(query) => (
+                <BrowserSearchResults
+                  query={query()}
+                  zdr={session().zdr}
+                  onOpen={openSearchResult}
+                  onClose={() => setSearchQuery(null)}
+                />
+              )}
+            </Show>
             <Show when={pendingApproval()}>
               {(approval) => (
                 <div
@@ -1872,10 +1907,10 @@ export function BrowserChrome(props: {
               )}
             </For>
             <Show
-              when={frameUrl()}
+              when={searchQuery() ? null : frameUrl()}
               keyed
               fallback={
-                <div class="knowledge-browser-chrome__domlist">
+                searchQuery() ? null : <div class="knowledge-browser-chrome__domlist">
                   <DomNodeList nodes={session().domNodes} />
                 </div>
               }

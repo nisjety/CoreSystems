@@ -249,6 +249,10 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
     no: 'En person har overtatt nettleseren, så agenten kan ikke handle akkurat nå. Vent til styringen er gitt tilbake.',
     en: 'A person has taken over the browser, so the agent cannot act right now. Wait until control is handed back.',
   },
+  browser_navigation_outside_scope: {
+    no: 'Denne økten er begrenset til domenene i kjøringen. Åpne siden i en ny økt, eller ta over nettleseren selv.',
+    en: 'This session is limited to the domains of its run. Open the page in a new session, or take over the browser yourself.',
+  },
   browser_site_blocked: {
     no: 'Nettstedet stopper automatisk nettlesing. Ta over nettleseren selv, eller prøv en annen kilde.',
     en: 'The site blocks automated browsing. Take over the browser yourself, or try another source.',
