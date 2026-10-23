@@ -445,6 +445,21 @@ Built so far (batches B01 to B07): WS01-S0, WS01-S1 (partial), WS01-S6; WS02-S1,
 | D1-334 | WS01-S13.code | live-proof | P1 | New test file is untracked with a non-executable mode here; sibling tests are 100755, so set the executable bit when committing | open |
 | D1-335 | WS01-S13.code | follow-up | P3 | 8 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-07.json | open |
 
+
+### Wave-mode batch W1-07 (2026-10-23)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D1-336 | WS06-S3 | risk | P1 | The purge verifies only the rows it is about to delete, linked to the newest signed checkpoint. It does not check that the head or the newest attested sequence still agree with the retained suffix, so a tampered retained row is caught only by S4's verifier, not by purge. | open |
+| D1-337 | WS06-S3 | risk | P1 | Attestations are never pruned and the attestor writes one per head change per org. On a hot org that is a row per interval at most. S4 or S9 should decide a retention rule (keep the newest per day) before the table grows. | open |
+| D1-338 | WS06-S3 | risk | P1 | The purge detects a tampered prefix but does not alert on it: there is no purge, incident or attestation metric (internal/metrics is not owned here), and S4 owns the rules. Add audit_core_chain_purge_blocked_total and an incident-count alert, or the incident table is only visible by querying it. | open |
+| D1-339 | WS06-S3 | risk | P1 | Replicas each run Attest and Purge. Attest is idempotent via ON CONFLICT DO NOTHING. A purge that loses the advisory lock skips that org until the next daily sweep, so a purger that stalls leaves expired rows for a day. | open |
+| D1-340 | WS06-S3 | risk | P1 | Checkpoint signatures cover created_at at microsecond precision, written by the Go side and stored verbatim. S4's verifier and the offline audit-verify CLI must format it with chain.SignedTimeLayout in UTC or every checkpoint will look invalid. | open |
+| D1-341 | WS06-S3 | live-proof | P1 | The purge, checkpoint and attest SQL has never run against Postgres. The plan's DoD (a purge leaves verification green, plus the live evidence) needs the DB tests and a dev-stack sweep before AUDIT_CHAIN_PRUNE_ENABLED is ever set to 1. | open |
+| D1-342 | WS06-S3 | risk | P1 | No purge, incident or attestation metrics or alerts exist (internal/metrics is not owned here). Blocked purges are visible only in logs and in audit_chain_incidents. S4 should add audit_core_chain_purge_blocked_total and an incident alert, and a blocked org writes a new incident row on every daily sweep. | open |
+| D1-343 | WS06-S3 | risk | P1 | Attestation rows are never pruned and one is written per head change per org per interval, so the table grows without bound. S4 or S9 should set a retention rule, for example the newest per day. | open |
+| D1-344 | WS06-S3 | follow-up | P3 | 15 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-07.json | open |
+
 ## Wave 2 (WS13 to WS27)
 
 Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS27-S0, WS27-S1. Wave 2 is not started as a wave: these came in with Wave 1 batches because they were Wave 1 prerequisites.
@@ -753,3 +768,4 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS06-S3 | data-loss, audit | W1-07 | no |
 | WS02-S2 | money, zdr | W1-07 | no |
 | WS01-S13.code | zdr, policy | W1-07 | no |
+| WS06-S3 | data-loss, audit | W1-07 | no |
