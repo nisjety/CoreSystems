@@ -189,7 +189,8 @@ impl Op {
             Op::PageClose => 5_000,
             Op::ContextClose => 5_000,
             Op::HealthProbe => 3_000,
-            Op::ProfileCapture => 5_000,
+            // 10 s since WS17.C1: cookies 2 s, web storage 4 s, IndexedDB 4 s inside it.
+            Op::ProfileCapture => 10_000,
             Op::DownloadBegin => 10_000,
             Op::DownloadComplete => 30_000,
             Op::Actionability => 2_000,

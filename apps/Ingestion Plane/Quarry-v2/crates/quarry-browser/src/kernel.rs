@@ -259,7 +259,7 @@ impl KernelDriver {
                         path: opt_string(&c.path),
                         secure: c.secure,
                         http_only: c.http_only,
-                        same_site: None, // Cookie struct in session.rs predates same_site
+                        same_site: c.same_site.map(|same_site| same_site.as_cdp().to_owned()),
                     })
                     .collect()
             })
@@ -415,6 +415,7 @@ impl KernelDriver {
                     secure: c.secure,
                     http_only: c.http_only,
                     expires: None,
+                    ..Default::default()
                 })
                 .collect(),
             local_storage: parsed
@@ -437,6 +438,7 @@ impl KernelDriver {
             }),
             locale: parsed.locale,
             timezone: parsed.timezone,
+            ..Default::default()
         };
         Ok(Some(snapshot))
     }
@@ -1131,6 +1133,7 @@ mod tests {
                         secure: true,
                         http_only: true,
                         expires: None,
+                        ..Default::default()
                     }],
                     local_storage: vec![("ui.theme".into(), "dark".into())],
                     user_agent: Some("CustomUA/1.0".into()),

@@ -78,6 +78,10 @@ use crate::screenshot_mask;
 use crate::actions::ScrollTarget;
 use crate::deadlines::{best_effort, deadline, read_with_retry, timeout_error, with_deadline, Op};
 use crate::navigation::{guard_navigation_target, guard_page_request_target};
+use crate::profile_capture;
+use crate::profile_snapshot::{
+    capture_v2_enabled, idb_capture_enabled, should_skip_empty_save, OriginJournal, ProfileCaps,
+};
 use crate::session::{Cookie, ProfileStore, SessionSnapshot, Viewport};
 use crate::slots::{
     Admission, BrowserPoolConfig, LossReason, PageRefusal, ReaperMode, SlotBook, SlotId,
@@ -275,6 +279,12 @@ struct SessionPages {
     /// Private download directory configured only for this isolated browser
     /// context. Dropping the session removes it after all tabs are closed.
     download_dir: Option<Arc<tempfile::TempDir>>,
+    /// WS17.C1: the origins this session visited and the web storage its pages flushed on
+    /// `pagehide`. Records nothing until a profile-enabled tab enables it (capture v2).
+    journal: Arc<std::sync::Mutex<OriginJournal>>,
+    /// WS17.C1: the profile loaded at attach held a cookie, storage or an origin. A capture
+    /// that then finds none is not saved over it (the empty-capture guard).
+    profile_loaded_nonempty: bool,
 }
 
 /// Local Chromium driver backed by chromiumoxide.
@@ -1336,6 +1346,24 @@ impl ChromiumoxideDriver {
         };
 
         let snapshot = self.load_snapshot(&session.lease).await;
+        // WS17.C1: a profile-enabled session under capture v2 keeps an origin journal and
+        // installs the pagehide flush on its tabs. Everything else records nothing.
+        let profile_journal = if session.lease.persist_profile
+            && self.profiles.is_some()
+            && capture_v2_enabled()
+        {
+            let mut pages = self.pages.lock().await;
+            let session_pages = pages.entry(session_key.clone()).or_default();
+            if let Ok(mut journal) = session_pages.journal.lock() {
+                journal.enable();
+            }
+            if snapshot.as_ref().is_some_and(SessionSnapshot::has_state) {
+                session_pages.profile_loaded_nonempty = true;
+            }
+            Some(session_pages.journal.clone())
+        } else {
+            None
+        };
         let new_page_params = CreateTargetParamsBuilder::default()
             .url("about:blank")
             .browser_context_id(context_id)
@@ -1409,6 +1437,16 @@ impl ChromiumoxideDriver {
             self.tab_egress_policies.clone(),
         )
         .await?;
+        if let Some(journal) = profile_journal.as_ref() {
+            // Best effort: without the flush a closed tab's web storage is simply not
+            // carried, and a live capture still reads every open tab.
+            if let Err(err) = profile_capture::install_profile_flush(&page, journal.clone()).await {
+                tracing::debug!(error_class = err.code.wire_name(), "profile flush unavailable");
+            }
+            if let Ok(mut journal) = journal.lock() {
+                journal.record_visit(initial_url);
+            }
+        }
         if initial_url != "about:blank" {
             with_deadline(Op::Navigate, async {
                 page.goto(initial_url).await.map_err(|e| {
@@ -1525,6 +1563,12 @@ impl ChromiumoxideDriver {
         let title = page_title(page).await;
         let mut pages = self.pages.lock().await;
         if let Some(session_pages) = pages.get_mut(session_key) {
+            // WS17.C1: the origin journal learns every http(s) origin a tab reaches.
+            if let Some(url) = url.as_deref() {
+                if let Ok(mut journal) = session_pages.journal.lock() {
+                    journal.record_visit(url);
+                }
+            }
             if let Some(tab) = session_pages
                 .tabs
                 .iter_mut()
@@ -1657,6 +1701,9 @@ impl ChromiumoxideDriver {
         let Some(store) = self.profiles.as_ref() else {
             return Ok(());
         };
+        if capture_v2_enabled() {
+            return self.persist_profile_v2(session, store).await;
+        }
         let Some((_tab_id, page)) = self.active_tab_page(session).await else {
             return Ok(());
         };
@@ -1675,6 +1722,117 @@ impl ChromiumoxideDriver {
         if !outcome.is_stored() {
             tracing::info!(reason = outcome.reason_class(), "browser profile capture ignored");
         }
+        Ok(())
+    }
+
+    /// Capture v2 (WS17.C1, `QUARRY_BROWSER_PROFILE_CAPTURE_V2=1`): the whole context jar,
+    /// the web storage and IndexedDB of every live tab, and the web storage the journal
+    /// holds for origins whose tabs are gone, within the caps. It needs no active tab. The
+    /// browser read lock is held only for this call (bounded by `Op::ProfileCapture`).
+    async fn persist_profile_v2(
+        &self,
+        session: &BrowserSession,
+        store: &Arc<dyn ProfileStore>,
+    ) -> QuarryResult<()> {
+        let session_key = Self::session_key(session);
+        let (context_id, journal, tabs, loaded_nonempty) = {
+            let pages = self.pages.lock().await;
+            let Some(session_pages) = pages.get(&session_key) else {
+                return Ok(());
+            };
+            let Some(context_id) = session_pages.browser_context_id.clone() else {
+                return Ok(());
+            };
+            let mut tabs: Vec<profile_capture::LiveTab> = session_pages
+                .tabs
+                .iter()
+                .map(|tab| profile_capture::LiveTab {
+                    page: tab.page.clone(),
+                    active: session_pages.active_tab_id.as_deref() == Some(tab.tab_id.as_str()),
+                })
+                .collect();
+            // The active tab first: it wins an origin that two tabs share and supplies the
+            // user agent, locale and timezone.
+            tabs.sort_by_key(|tab| !tab.active);
+            (
+                context_id,
+                session_pages.journal.clone(),
+                tabs,
+                session_pages.profile_loaded_nonempty,
+            )
+        };
+        // Ordering stamp = capture START (WS17.P1), as in the v1 path.
+        let captured_at = chrono::Utc::now();
+        let caps = ProfileCaps::from_env();
+        let capture = {
+            let browser_guard = self.browser.read().await;
+            let browser = browser_guard.as_ref().ok_or_else(browser_missing)?;
+            with_deadline(
+                Op::ProfileCapture,
+                profile_capture::capture_profile(
+                    browser,
+                    &context_id,
+                    tabs,
+                    &journal,
+                    caps,
+                    idb_capture_enabled(),
+                ),
+            )
+            .await?
+        };
+        let mut report = capture.report;
+        let mut snapshot = capture.snapshot;
+        snapshot.viewport = session.lease.viewport.map(session_viewport);
+        if should_skip_empty_save(loaded_nonempty, &snapshot) {
+            report.empty_skipped = true;
+            tracing::warn!(
+                event = "profile_capture_empty_skipped",
+                cookies = report.cookies,
+                origins_live = report.origins_live,
+                "browser profile capture found nothing while the loaded profile had state; not saved"
+            );
+            return Ok(());
+        }
+        // The flat legacy fields duplicate the active origin's entries: they are the first
+        // thing to give when the whole is over the cap.
+        if snapshot.plaintext_len() > caps.max_bytes {
+            snapshot.local_storage = Vec::new();
+            snapshot.session_storage = Vec::new();
+        }
+        if capture.outcome.over_cap || snapshot.plaintext_len() > caps.max_bytes {
+            tracing::warn!(
+                event = "profile_capture_over_cap",
+                cookies = report.cookies,
+                max_bytes = caps.max_bytes,
+                "browser profile capture is over its size cap; not saved"
+            );
+            return Err(QuarryError::new(
+                ErrorCode::DriverFailed,
+                "browser profile snapshot is over its size cap",
+            )
+            .with_details(json!({ "reason": "profile_snapshot_over_cap", "max_bytes": caps.max_bytes })));
+        }
+        let meta = crate::session::SaveMeta {
+            saved_at: captured_at,
+            owner: None,
+        };
+        let outcome = store
+            .save(&session.lease.org_id, &session.lease.profile_id, &snapshot, &meta)
+            .await?;
+        tracing::info!(
+            reason = outcome.reason_class(),
+            cookies = report.cookies,
+            origins_live = report.origins_live,
+            origins_flushed = report.origins_flushed,
+            idb_records = report.idb_records,
+            truncated = report.truncated,
+            storage_timed_out = report.storage_timed_out,
+            idb_timed_out = report.idb_timed_out,
+            cookies_ms = report.cookies_ms,
+            storage_ms = report.storage_ms,
+            idb_ms = report.idb_ms,
+            "browser profile captured (v2)"
+        );
         Ok(())
     }
 }
@@ -2959,6 +3117,7 @@ async fn capture_snapshot(page: &Page) -> QuarryResult<SessionSnapshot> {
             secure: cookie.secure,
             http_only: cookie.http_only,
             expires: None,
+            ..Default::default()
         })
         .collect();
 
@@ -3001,6 +3160,7 @@ async fn capture_snapshot(page: &Page) -> QuarryResult<SessionSnapshot> {
             .get("timezone")
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned),
+        ..Default::default()
     })
 }
 
@@ -7527,6 +7687,7 @@ mod tests {
                 secure: false,
                 http_only: false,
                 expires: None,
+                ..Default::default()
             }],
             local_storage: vec![],
             session_storage: vec![],
@@ -7535,6 +7696,7 @@ mod tests {
             viewport: None,
             locale: None,
             timezone: None,
+            ..Default::default()
         };
         profile_store
             .save(&lease.org_id, &profile_id, &snapshot, &crate::session::SaveMeta::now(None))
@@ -7911,6 +8073,8 @@ mod tests {
     include!("stitch_live.rs");
     // WS12.S5: screenshot masking against a real Chromium.
     include!("screenshot_mask_live.rs");
+    // WS17.C1: capture v2 against a real Chromium.
+    include!("profile_capture_live.rs");
 }
 
 /// WS3.D and WS3.F, the parts that need no browser: every CDP call is bounded, the

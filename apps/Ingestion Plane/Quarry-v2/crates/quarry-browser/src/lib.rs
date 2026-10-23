@@ -500,6 +500,11 @@ pub mod navigation;
 pub mod persistent_session;
 pub mod pool;
 pub mod session;
+/// WS17.C1: snapshot schema v2 types, caps, the origin journal and the capture flags (pure).
+pub mod profile_snapshot;
+/// WS17.C1: capture v2 (cookies of the whole context, web storage, IndexedDB) over CDP.
+#[cfg(feature = "chromiumoxide")]
+mod profile_capture;
 pub mod slots;
 pub mod tab_control;
 mod field_probe;

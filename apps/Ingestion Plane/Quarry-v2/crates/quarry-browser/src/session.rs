@@ -12,6 +12,11 @@ use serde::{Deserialize, Serialize};
 use quarry_core::ids::kinds::ProfileKind;
 use quarry_core::QuarryResult;
 
+pub use crate::profile_snapshot::{
+    CookiePriority, IdbDatabase, IdbIndex, IdbRecord, IdbStore, OriginState, PartitionKey,
+    SameSite, SourceScheme, SNAPSHOT_VERSION,
+};
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionSnapshot {
     pub cookies: Vec<Cookie>,
@@ -32,6 +37,120 @@ pub struct SessionSnapshot {
     pub locale: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timezone: Option<String>,
+    /// Schema version (WS17.C1). 0 on a legacy snapshot, 2 when capture v2 wrote it. The
+    /// flat `local_storage` / `session_storage` fields above stay readable: a legacy
+    /// snapshot restores them into the initial URL's origin ([`Self::effective_origins`]).
+    #[serde(default, skip_serializing_if = "crate::profile_snapshot::is_zero_u8")]
+    pub snapshot_version: u8,
+    /// Per-origin web storage and IndexedDB (capture v2). Empty on a legacy snapshot.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub origins: Vec<OriginState>,
+}
+
+impl SessionSnapshot {
+    /// Anything worth keeping: a cookie, any web storage, IndexedDB or an origin entry.
+    pub fn has_state(&self) -> bool {
+        !self.cookies.is_empty()
+            || !self.local_storage.is_empty()
+            || !self.session_storage.is_empty()
+            || !self.indexed_db.is_empty()
+            || !self.origins.is_empty()
+    }
+
+    /// The nearest expiry among cookies that have not expired at `now`. Session cookies
+    /// have none and do not count.
+    pub fn earliest_cookie_expiry(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.cookies
+            .iter()
+            .filter_map(|cookie| cookie.expires)
+            .filter(|at| *at > now)
+            .min()
+    }
+
+    /// The per-origin state a restore works from: `origins` when present, else one entry
+    /// holding the legacy flat web storage under the initial URL's origin (nothing when that
+    /// URL is not http(s) or the flat fields are empty).
+    pub fn effective_origins(&self, initial_url: &str) -> Vec<OriginState> {
+        if !self.origins.is_empty() {
+            return self.origins.clone();
+        }
+        let Some(origin) = crate::profile_snapshot::normalize_origin(initial_url) else {
+            return Vec::new();
+        };
+        if self.local_storage.is_empty() && self.session_storage.is_empty() {
+            return Vec::new();
+        }
+        vec![OriginState {
+            origin,
+            local_storage: self.local_storage.clone(),
+            session_storage: self.session_storage.clone(),
+            ..Default::default()
+        }]
+    }
+
+    /// The snapshot with every secret taken out and its shape kept: cookie values empty,
+    /// storage values empty, IndexedDB records removed (their count stays in the store's
+    /// `omitted` flag only when the store had any). Nothing here is a value.
+    pub fn redacted_view(&self) -> SessionSnapshot {
+        let blank = |entries: &[(String, String)]| -> Vec<(String, String)> {
+            entries.iter().map(|(k, _)| (k.clone(), String::new())).collect()
+        };
+        SessionSnapshot {
+            cookies: self
+                .cookies
+                .iter()
+                .map(|cookie| Cookie {
+                    value: String::new(),
+                    ..cookie.clone()
+                })
+                .collect(),
+            local_storage: blank(&self.local_storage),
+            session_storage: blank(&self.session_storage),
+            indexed_db: self
+                .indexed_db
+                .iter()
+                .map(|entry| IndexedDbEntry {
+                    value: serde_json::Value::Null,
+                    ..entry.clone()
+                })
+                .collect(),
+            origins: self
+                .origins
+                .iter()
+                .map(|origin| OriginState {
+                    local_storage: blank(&origin.local_storage),
+                    session_storage: blank(&origin.session_storage),
+                    indexed_db: origin
+                        .indexed_db
+                        .iter()
+                        .map(|db| IdbDatabase {
+                            stores: db
+                                .stores
+                                .iter()
+                                .map(|store| IdbStore {
+                                    omitted: store.omitted || !store.records.is_empty(),
+                                    records: Vec::new(),
+                                    ..store.clone()
+                                })
+                                .collect(),
+                            ..db.clone()
+                        })
+                        .collect(),
+                    ..origin.clone()
+                })
+                .collect(),
+            ..self.clone()
+        }
+    }
+
+    /// Size of the snapshot as stored in plaintext (its JSON), the unit of
+    /// `QUARRY_BROWSER_PROFILE_MAX_BYTES`.
+    pub fn plaintext_len(&self) -> usize {
+        serde_json::to_vec(self).map_or(0, |bytes| bytes.len())
+    }
 }
 
 /// One row inside an IndexedDB object store. `origin`/`database`/`store`
@@ -456,21 +575,32 @@ impl ProfileStore for InMemoryProfileStore {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Cookie {
     pub name: String,
     pub value: String,
+    /// As Chromium reports it: a leading dot means a domain cookie, none means host-only.
     pub domain: String,
     pub path: String,
     pub secure: bool,
     pub http_only: bool,
+    /// `None` for a session cookie (and on every legacy snapshot).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires: Option<chrono::DateTime<chrono::Utc>>,
+    // WS17.C1 additive attributes: absent on a legacy snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub same_site: Option<SameSite>,
+    /// Chromium's own session flag (a cookie with no expiry).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub session: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<CookiePriority>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partition_key: Option<PartitionKey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_scheme: Option<SourceScheme>,
 }
 
-// reason: the items below the test module are `#[cfg(feature = "chromiumoxide")]`-gated
-// imports/types used by `BrowserSession`; relocating the test module past them is awkward.
-#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -490,6 +620,7 @@ mod tests {
                 secure: true,
                 http_only: true,
                 expires: None,
+                ..Default::default()
             }],
             local_storage: vec![("theme".into(), "dark".into())],
             session_storage: vec![],
@@ -503,6 +634,7 @@ mod tests {
             }),
             locale: Some("en-US".into()),
             timezone: Some("America/New_York".into()),
+            ..Default::default()
         };
 
         store
@@ -543,6 +675,7 @@ mod tests {
             viewport: None,
             locale: None,
             timezone: None,
+            ..Default::default()
         };
         store
             .save("org_a", &pid, &snapshot, &SaveMeta::now(None))
@@ -793,6 +926,7 @@ mod tests {
                 secure: true,
                 http_only: false,
                 expires: None,
+                ..Default::default()
             }],
             local_storage: vec![("k".into(), "v".into())],
             session_storage: vec![],
@@ -806,6 +940,7 @@ mod tests {
             }),
             locale: None,
             timezone: None,
+            ..Default::default()
         };
         let json = serde_json::to_string(&snapshot).unwrap();
         let restored: SessionSnapshot = serde_json::from_str(&json).unwrap();
@@ -1026,65 +1161,142 @@ mod tests {
         store.delete("org_a", &pid).await.unwrap();
         assert!(!store.exists("org_a", &pid).await.unwrap());
     }
-}
 
-#[cfg(feature = "chromiumoxide")]
-use anyhow::Result;
-#[cfg(feature = "chromiumoxide")]
-use chromiumoxide::Page;
-#[cfg(feature = "chromiumoxide")]
-use std::sync::Arc;
-
-#[cfg(feature = "chromiumoxide")]
-pub struct BrowserSession {
-    pub page: Arc<Page>,
-}
-
-#[cfg(feature = "chromiumoxide")]
-impl BrowserSession {
-    pub async fn capture(&self) -> Result<SessionSnapshot> {
-        let raw = self.page.get_cookies().await?;
-        let cookies = raw
-            .into_iter()
-            .map(|c| Cookie {
-                name: c.name,
-                value: c.value,
-                domain: c.domain,
-                path: c.path,
-                secure: c.secure,
-                http_only: c.http_only,
-                expires: None,
-            })
-            .collect();
-        Ok(SessionSnapshot {
-            cookies,
-            local_storage: vec![],
-            session_storage: vec![],
-            indexed_db: vec![],
-            user_agent: None,
-            viewport: None,
-            locale: None,
-            timezone: None,
-        })
+    #[test]
+    fn legacy_flat_snapshot_deserializes_and_restores_into_initial_origin() {
+        // A snapshot written before capture v2: no version, no origins, no cookie attributes.
+        let legacy = r#"{
+            "cookies": [{"name":"sid","value":"v","domain":".a.test","path":"/","secure":true,"http_only":true}],
+            "local_storage": [["k","v"]],
+            "session_storage": [["s","1"]]
+        }"#;
+        let snapshot: SessionSnapshot = serde_json::from_str(legacy).unwrap();
+        assert_eq!(snapshot.snapshot_version, 0);
+        assert!(snapshot.origins.is_empty());
+        assert!(snapshot.cookies[0].same_site.is_none() && !snapshot.cookies[0].session);
+        let origins = snapshot.effective_origins("https://a.test/start?x=1");
+        assert_eq!(origins.len(), 1);
+        assert_eq!(origins[0].origin, "https://a.test");
+        assert_eq!(origins[0].local_storage, vec![("k".to_owned(), "v".to_owned())]);
+        assert_eq!(origins[0].session_storage, vec![("s".to_owned(), "1".to_owned())]);
+        // No http(s) initial URL: nothing to restore the flat entries into.
+        assert!(snapshot.effective_origins("about:blank").is_empty());
+        // A legacy snapshot with no storage has no origin entry either.
+        assert!(SessionSnapshot::default().effective_origins("https://a.test").is_empty());
     }
 
-    pub async fn hydrate(&self, snapshot: &SessionSnapshot) -> Result<()> {
-        let cookies: Vec<_> = snapshot
-            .cookies
-            .iter()
-            .map(|c| {
-                chromiumoxide::cdp::browser_protocol::network::CookieParam::builder()
-                    .name(c.name.clone())
-                    .value(c.value.clone())
-                    .domain(c.domain.clone())
-                    .path(c.path.clone())
-                    .secure(c.secure)
-                    .http_only(c.http_only)
-                    .build()
-                    .unwrap()
-            })
-            .collect();
-        self.page.set_cookies(cookies).await?;
-        Ok(())
+    #[test]
+    fn schema_v2_roundtrip_through_serde() {
+        let snapshot = SessionSnapshot {
+            snapshot_version: SNAPSHOT_VERSION,
+            cookies: vec![Cookie {
+                name: "sid".into(),
+                value: "secret".into(),
+                domain: ".a.test".into(),
+                path: "/".into(),
+                secure: true,
+                http_only: true,
+                expires: Some(chrono::Utc::now() + chrono::Duration::hours(24)),
+                same_site: Some(SameSite::Lax),
+                session: false,
+                priority: Some(CookiePriority::Medium),
+                partition_key: Some(PartitionKey {
+                    top_level_site: "https://a.test".into(),
+                    has_cross_site_ancestor: false,
+                }),
+                source_scheme: Some(SourceScheme::Secure),
+            }],
+            origins: vec![OriginState {
+                origin: "https://a.test".into(),
+                local_storage: vec![("k".into(), "v".into())],
+                indexed_db: vec![IdbDatabase {
+                    name: "db".into(),
+                    version: 3,
+                    stores: vec![IdbStore {
+                        name: "items".into(),
+                        key_path: serde_json::json!("id"),
+                        auto_increment: true,
+                        indexes: vec![IdbIndex {
+                            name: "by_name".into(),
+                            key_path: serde_json::json!("name"),
+                            unique: true,
+                            multi_entry: false,
+                        }],
+                        records: vec![IdbRecord {
+                            key: serde_json::json!(1),
+                            value: serde_json::json!({ "$t": "date", "v": 1_700_000_000_000.0 }),
+                        }],
+                        omitted: false,
+                    }],
+                }],
+                dropped_values: 2,
+                truncated: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let text = serde_json::to_string(&snapshot).unwrap();
+        let back: SessionSnapshot = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.snapshot_version, 2);
+        assert_eq!(back.origins, snapshot.origins);
+        assert_eq!(back.cookies[0].same_site, Some(SameSite::Lax));
+        assert_eq!(back.cookies[0].partition_key, snapshot.cookies[0].partition_key);
+        assert_eq!(back.cookies[0].expires, snapshot.cookies[0].expires);
+        // The additive fields are absent from a snapshot that has none of them.
+        let plain = serde_json::to_string(&SessionSnapshot::default()).unwrap();
+        assert!(!plain.contains("snapshot_version") && !plain.contains("origins"));
+        let plain_cookie = serde_json::to_string(&Cookie::default()).unwrap();
+        assert!(!plain_cookie.contains("same_site") && !plain_cookie.contains("session"));
+    }
+
+    #[test]
+    fn redacted_view_keeps_shape_and_no_value() {
+        let now = chrono::Utc::now();
+        let soon = now + chrono::Duration::hours(1);
+        let later = now + chrono::Duration::hours(9);
+        let snapshot = SessionSnapshot {
+            cookies: vec![
+                Cookie {
+                    name: "a".into(),
+                    value: "SECRET-COOKIE".into(),
+                    expires: Some(later),
+                    ..Default::default()
+                },
+                Cookie {
+                    name: "b".into(),
+                    value: "SECRET-TWO".into(),
+                    expires: Some(soon),
+                    ..Default::default()
+                },
+                Cookie {
+                    name: "gone".into(),
+                    expires: Some(now - chrono::Duration::hours(1)),
+                    ..Default::default()
+                },
+            ],
+            local_storage: vec![("k".into(), "SECRET-LS".into())],
+            origins: vec![OriginState {
+                origin: "https://a.test".into(),
+                local_storage: vec![("k".into(), "SECRET-ORIGIN".into())],
+                indexed_db: vec![IdbDatabase {
+                    name: "db".into(),
+                    version: 1,
+                    stores: vec![IdbStore {
+                        name: "s".into(),
+                        records: vec![IdbRecord {
+                            key: serde_json::json!("SECRET-KEY"),
+                            value: serde_json::json!("SECRET-VALUE"),
+                        }],
+                        ..Default::default()
+                    }],
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(snapshot.earliest_cookie_expiry(now), Some(soon));
+        let text = serde_json::to_string(&snapshot.redacted_view()).unwrap();
+        assert!(!text.contains("SECRET"), "{text}");
+        assert!(text.contains("\"db\"") && text.contains("\"https://a.test\""));
     }
 }
