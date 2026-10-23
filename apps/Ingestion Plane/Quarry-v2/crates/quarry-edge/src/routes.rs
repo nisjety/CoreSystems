@@ -672,7 +672,7 @@ async fn scrape_with(
 
     let runner = PageRunner {
         driver,
-        security: state.security.clone(),
+        security: crate::web_policy_edge::security_engine(&state.security, &state.policy, &decision),
         artifacts: state.artifacts.clone(),
         event_sink: state.event_sink.clone(),
         zdr,
@@ -1544,7 +1544,7 @@ async fn internal_run_page(
 
     let runner = PageRunner {
         driver,
-        security: state.security.clone(),
+        security: crate::web_policy_edge::security_engine(&state.security, &state.policy, &decision),
         artifacts: state.artifacts.clone(),
         event_sink: state.event_sink.clone(),
         zdr,
@@ -1736,7 +1736,7 @@ async fn scrape_stream(
 
         let runner = PageRunner {
             driver,
-            security: state.security.clone(),
+            security: crate::web_policy_edge::security_engine(&state.security, &state.policy, &decision),
             artifacts: state.artifacts.clone(),
             event_sink: state.event_sink.clone(),
             zdr,
