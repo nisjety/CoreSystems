@@ -1502,3 +1502,17 @@ depth file), the meter's capture counts (usage_attrs owns its closed key set), a
 Evidence owed: a rebuilt `quarry-edge` with the switch `on` against a real Chromium: the PNG and PDF magic bytes,
 the IHDR size against `captures.screenshot.width/height`, the 501 path with a browser that lacks the capability,
 and the ZDR inline bytes with no artifact list change.
+
+## Browser evidence panels (WS9.D, W2-U46)
+
+What ships. In the browser chrome (`BrowserChrome.tsx`, new code in `features/browser/evidence/*`): an Egress tab in the devtools panel (live allowed and blocked outgoing requests, redacted to method, origin and path), a filter bar over the Console tab (level chips, a substring match of up to 200 characters on the message text, debounced 250 ms, Escape clears; filtering runs in the browser), and a Procedure section in the evidence drawer ("Compile procedure", redacted steps, quality verdict, and the session's recent receipts). The panels read the gateway routes of WS9.C (`egress-receipts`, `receipts`, `procedure`).
+
+Flag. The only switch is the capability `evidence` in the two static session capability lists of `apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs`. The SPA shows none of the panels without it. Deploy order: `quarry-edge` (WS9.C filters already in tree), then the gateway, then the frontend. Rollback: remove the string from both lists and redeploy the gateway; the console falls back to the plain list.
+
+ZDR. A zero-data-retention session sends only the live egress read. The SPA never requests receipts or a procedure for it, the Compile button is disabled, and the gateway refuses both with a typed 409 (`browser_receipts_unavailable_zdr`). Egress rows are held in memory only; nothing is written to browser storage.
+
+Polling. Egress is read every 5 s while the panel is mounted and the document is visible. Hidden documents are not polled; the poll resumes on `visibilitychange`. Switching session aborts the in-flight read.
+
+Evidence owed (not run in the build phase). Frontend restart and the WS9.C stack: the Egress tab lists an allow row and a block row after navigating to a private address; "Compile procedure" on a session with two actions shows `quality.promotionAllowed` and typed steps as `skjult tekst (n tegn)`; the console filter hides non-matching rows (DOM count of `.knowledge-browser-console-row` before and after `Escape` and a level chip). The Playwright spec `tests/e2e/browser-workspace-evidence.spec.ts` pins the three owner-gate and refusal codes.
+
+Not built here: a server-side console filter (the console filter is client-side only), the observed live view (WS9.J), and the frontend copy of the procedure's `expectedOutcome` is shown as the gateway sends it (review before enabling for a session that types secrets; see the depth register).
