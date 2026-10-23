@@ -402,12 +402,29 @@ pub struct DevtoolsQuery {
     pub after_sequence: Option<u64>,
     #[serde(default)]
     pub limit: Option<usize>,
+    /// Comma-separated console levels (WS9.C): `debug`, `info`, `log`, `warn`,
+    /// `warning`, `error`, `verbose`; at most five. Absent means every level.
+    #[serde(default)]
+    pub levels: Option<String>,
+    /// Case-insensitive substring over `text`, `url` and `name` only; never `payload`.
+    #[serde(default)]
+    pub filter: Option<String>,
+    /// `console`, `network` or `lifecycle`.
+    #[serde(default)]
+    pub category: Option<String>,
+    /// A tab id as the driver reports it (`[A-Za-z0-9_-]{1,64}`).
+    #[serde(default)]
+    pub tab_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DevtoolsEventsData {
     pub events: Vec<BrowserDevtoolsEvent>,
+    /// The sequence of the last event this read examined (WS9.C). Pass it back
+    /// as `afterSequence` to continue past the scanned window, even when no
+    /// event matched the filter. Equals the request cursor when nothing was scanned.
+    pub next_sequence: u64,
     pub zdr: bool,
 }
 

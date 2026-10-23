@@ -368,6 +368,11 @@ pub async fn devtools_events(
     Query(query): Query<DevtoolsQuery>,
 ) -> Result<Json<Envelope<DevtoolsEventsData>>, ApiErr> {
     let request_id = crate::request_id::current();
+    // WS9.C: validate the optional filters before any lookup. The cursor is the
+    // caller's sequence; the filter scans the driver window and keeps `limit` matches.
+    let filter = DevtoolsFilter::from_query(&query)
+        .map_err(|message| status_err(StatusCode::BAD_REQUEST, &request_id, message))?;
+    let after_sequence = query.after_sequence.unwrap_or(0);
     let entry_arc = {
         let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
         map.get(&run_id).map(|handle| {
@@ -394,15 +399,13 @@ pub async fn devtools_events(
         ));
     }
 
-    let events = state
+    let scanned = state
         .agent_driver
-        .devtools_events(
-            &entry.session,
-            query.after_sequence.unwrap_or(0),
-            query.limit.unwrap_or(100).clamp(1, 512),
-        )
+        .devtools_events(&entry.session, after_sequence, DEVTOOLS_SCAN_LIMIT)
         .await
         .map_err(|e| driver_err(&request_id, e))?;
+    let (events, cursor) = filter_devtools_events(&scanned, &filter);
+    let next_sequence = cursor.unwrap_or(after_sequence);
     if let Some(last) = events.last() {
         record_browser_timeline_event(
             &state,
@@ -420,6 +423,7 @@ pub async fn devtools_events(
         request_id,
         DevtoolsEventsData {
             events,
+            next_sequence,
             zdr: matches!(entry.zdr, ZdrMode::On),
         },
     )))
@@ -476,4 +480,308 @@ pub async fn egress_receipts(
             zdr: matches!(entry.zdr, ZdrMode::On),
         },
     )))
+}
+
+/// Events one filtered devtools read may examine: the driver's whole buffer.
+const DEVTOOLS_SCAN_LIMIT: usize = 512;
+/// Longest substring filter, in characters.
+const DEVTOOLS_FILTER_MAX_CHARS: usize = 200;
+/// Most console levels one filter may name.
+const DEVTOOLS_LEVELS_MAX: usize = 5;
+
+/// A validated devtools read (WS9.C): the constraints a caller asked for and
+/// how many matches to return. Built only by [`DevtoolsFilter::from_query`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct DevtoolsFilter {
+    /// Canonical levels (`debug`, `info`, `warning`, `error`). Empty: every level.
+    levels: Vec<&'static str>,
+    /// Lower-cased substring. Matched against `text`, `url` and `name` only.
+    substring: Option<String>,
+    category: Option<&'static str>,
+    tab_id: Option<String>,
+    limit: usize,
+}
+
+impl DevtoolsFilter {
+    /// Validate the query. Errors are fixed messages: a caller's raw value is
+    /// never echoed back.
+    pub(super) fn from_query(query: &DevtoolsQuery) -> Result<Self, &'static str> {
+        let limit = query.limit.unwrap_or(100).clamp(1, 512);
+
+        let mut levels: Vec<&'static str> = Vec::new();
+        if let Some(raw) = query.levels.as_deref() {
+            let names: Vec<&str> = raw
+                .split(',')
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .collect();
+            if names.len() > DEVTOOLS_LEVELS_MAX {
+                return Err("too many levels in the devtools filter");
+            }
+            for name in names {
+                let canonical =
+                    canonical_level(name).ok_or("unsupported level in the devtools filter")?;
+                if !levels.contains(&canonical) {
+                    levels.push(canonical);
+                }
+            }
+        }
+
+        let raw_filter = query.filter.as_deref().unwrap_or("");
+        if raw_filter.chars().any(char::is_control) {
+            return Err("devtools filter contains a control character");
+        }
+        let text = raw_filter.trim();
+        let substring = if text.is_empty() {
+            None
+        } else if text.chars().count() > DEVTOOLS_FILTER_MAX_CHARS {
+            return Err("devtools filter is too long");
+        } else {
+            Some(text.to_lowercase())
+        };
+
+        let category = match query.category.as_deref().map(|value| value.trim().to_ascii_lowercase()) {
+            None => None,
+            Some(value) if value.is_empty() => None,
+            Some(value) => Some(match value.as_str() {
+                "console" => "console",
+                "network" => "network",
+                "lifecycle" => "lifecycle",
+                _ => return Err("unsupported devtools category"),
+            }),
+        };
+
+        let tab_id = match query.tab_id.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some(tab)
+                if tab.len() <= 64
+                    && tab
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_') =>
+            {
+                Some(tab.to_owned())
+            }
+            Some(_) => return Err("invalid tab id in the devtools filter"),
+        };
+
+        Ok(Self {
+            levels,
+            substring,
+            category,
+            tab_id,
+            limit,
+        })
+    }
+}
+
+/// Canonical console level for a caller's level name. `warn`, `log` and
+/// `verbose` are aliases of `warning`, `info` and `debug`; the same mapping
+/// normalises the level a driver reported.
+fn canonical_level(name: &str) -> Option<&'static str> {
+    match name.to_ascii_lowercase().as_str() {
+        "debug" | "verbose" => Some("debug"),
+        "info" | "log" => Some("info"),
+        "warning" | "warn" => Some("warning"),
+        "error" => Some("error"),
+        _ => None,
+    }
+}
+
+/// Pure filter over one scanned window (WS9.C). Returns at most `filter.limit`
+/// matching events in sequence order, and the sequence of the last event this
+/// call examined (`None` for an empty window). A caller resumes from that
+/// sequence, so a window with no match still advances the cursor.
+pub(super) fn filter_devtools_events(
+    events: &[BrowserDevtoolsEvent],
+    filter: &DevtoolsFilter,
+) -> (Vec<BrowserDevtoolsEvent>, Option<u64>) {
+    let mut matched = Vec::new();
+    let mut cursor = None;
+    for event in events {
+        cursor = Some(event.sequence);
+        if devtools_event_matches(event, filter) {
+            matched.push(event.clone());
+            if matched.len() >= filter.limit {
+                break;
+            }
+        }
+    }
+    (matched, cursor)
+}
+
+fn devtools_event_matches(event: &BrowserDevtoolsEvent, filter: &DevtoolsFilter) -> bool {
+    if let Some(category) = filter.category {
+        if !event.category.eq_ignore_ascii_case(category) {
+            return false;
+        }
+    }
+    if let Some(tab_id) = filter.tab_id.as_deref() {
+        if event.tab_id.as_deref() != Some(tab_id) {
+            return false;
+        }
+    }
+    if !filter.levels.is_empty() {
+        let level = event.level.as_deref().and_then(canonical_level);
+        if !level.is_some_and(|level| filter.levels.contains(&level)) {
+            return false;
+        }
+    }
+    if let Some(needle) = filter.substring.as_deref() {
+        let hit = [event.text.as_deref(), event.url.as_deref(), Some(event.name.as_str())]
+            .into_iter()
+            .flatten()
+            .any(|field| field.to_lowercase().contains(needle));
+        if !hit {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(test)]
+mod devtools_filter_tests {
+    use super::*;
+
+    fn query() -> DevtoolsQuery {
+        DevtoolsQuery {
+            after_sequence: None,
+            limit: None,
+            levels: None,
+            filter: None,
+            category: None,
+            tab_id: None,
+        }
+    }
+
+    fn event(
+        sequence: u64,
+        level: Option<&str>,
+        text: Option<&str>,
+        url: Option<&str>,
+    ) -> BrowserDevtoolsEvent {
+        BrowserDevtoolsEvent {
+            sequence,
+            tab_id: Some("tab-1".to_owned()),
+            category: "console".to_owned(),
+            name: "Runtime.consoleAPICalled".to_owned(),
+            level: level.map(str::to_owned),
+            method: None,
+            url: url.map(str::to_owned),
+            status: None,
+            text: text.map(str::to_owned),
+            timestamp_ms: sequence,
+            payload: serde_json::json!({ "args": "payload-only" }),
+        }
+    }
+
+    fn sequences(events: &[BrowserDevtoolsEvent]) -> Vec<u64> {
+        events.iter().map(|event| event.sequence).collect()
+    }
+
+    #[test]
+    fn devtools_filter_levels_normalise_warn_and_log() {
+        let events = vec![
+            event(1, Some("warning"), Some("a"), None),
+            event(2, Some("info"), Some("b"), None),
+            event(3, Some("log"), Some("c"), None),
+            event(4, Some("error"), Some("d"), None),
+            event(5, Some("debug"), Some("e"), None),
+        ];
+        let run = |levels: &str| {
+            let mut q = query();
+            q.levels = Some(levels.to_owned());
+            let filter = DevtoolsFilter::from_query(&q).expect("valid levels");
+            sequences(&filter_devtools_events(&events, &filter).0)
+        };
+        assert_eq!(run("warn"), vec![1], "warn is the warning level");
+        assert_eq!(run("log"), vec![2, 3], "log is the info level");
+        assert_eq!(run("verbose"), vec![5], "verbose is the debug level");
+        assert_eq!(run("warn,error"), vec![1, 4]);
+
+        let mut q = query();
+        q.levels = Some("trace".to_owned());
+        assert!(DevtoolsFilter::from_query(&q).is_err(), "an unknown level is refused");
+        let mut q = query();
+        q.levels = Some("debug,info,log,warn,warning,error".to_owned());
+        assert!(DevtoolsFilter::from_query(&q).is_err(), "more than five levels is refused");
+    }
+
+    #[test]
+    fn devtools_filter_substring_is_case_insensitive_and_ignores_payload() {
+        let mut payload_only = event(4, Some("info"), None, None);
+        payload_only.payload = serde_json::json!({ "args": "BOOM" });
+        let events = vec![
+            event(1, Some("error"), Some("Boom happened"), None),
+            event(2, Some("info"), None, Some("https://x.test/BOOM")),
+            event(3, Some("info"), Some("quiet"), None),
+            payload_only,
+        ];
+        let mut q = query();
+        q.filter = Some("boom".to_owned());
+        let filter = DevtoolsFilter::from_query(&q).expect("valid filter");
+        assert_eq!(
+            sequences(&filter_devtools_events(&events, &filter).0),
+            vec![1, 2],
+            "text and url match in any case; payload never matches"
+        );
+    }
+
+    #[test]
+    fn devtools_filter_resumes_from_scanned_sequence() {
+        let events: Vec<BrowserDevtoolsEvent> = (1..=6)
+            .map(|sequence| {
+                let level = if sequence % 2 == 0 { "error" } else { "info" };
+                event(sequence, Some(level), Some("row"), None)
+            })
+            .collect();
+        let mut q = query();
+        q.levels = Some("error".to_owned());
+        q.limit = Some(1);
+        let filter = DevtoolsFilter::from_query(&q).expect("valid filter");
+
+        let (first, cursor) = filter_devtools_events(&events, &filter);
+        assert_eq!(sequences(&first), vec![2], "the first error row");
+        assert_eq!(cursor, Some(2), "the cursor stops at the matched row");
+
+        let rest: Vec<BrowserDevtoolsEvent> = events
+            .iter()
+            .filter(|event| event.sequence > cursor.unwrap_or(0))
+            .cloned()
+            .collect();
+        let (second, next) = filter_devtools_events(&rest, &filter);
+        assert_eq!(sequences(&second), vec![4], "resuming continues after the cursor");
+        assert_eq!(next, Some(4));
+
+        let quiet: Vec<BrowserDevtoolsEvent> = events
+            .iter()
+            .filter(|event| event.sequence < 3 && event.sequence % 2 == 1)
+            .cloned()
+            .collect();
+        let (none, scanned_to) = filter_devtools_events(&quiet, &filter);
+        assert!(none.is_empty());
+        assert_eq!(scanned_to, Some(1), "a window with no match still advances the cursor");
+    }
+
+    #[test]
+    fn devtools_filter_rejects_overlong_filter() {
+        let mut q = query();
+        q.filter = Some("a".repeat(201));
+        assert!(DevtoolsFilter::from_query(&q).is_err(), "201 characters is refused");
+
+        let mut q = query();
+        q.filter = Some("a".repeat(200));
+        assert!(DevtoolsFilter::from_query(&q).is_ok(), "200 characters is allowed");
+
+        let mut q = query();
+        q.filter = Some("bad\nvalue".to_owned());
+        assert!(DevtoolsFilter::from_query(&q).is_err(), "a control character is refused");
+
+        let mut q = query();
+        q.category = Some("cookies".to_owned());
+        assert!(DevtoolsFilter::from_query(&q).is_err(), "an unknown category is refused");
+
+        let mut q = query();
+        q.tab_id = Some("tab/../x".to_owned());
+        assert!(DevtoolsFilter::from_query(&q).is_err(), "a malformed tab id is refused");
+    }
 }
