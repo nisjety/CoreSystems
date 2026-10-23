@@ -4,6 +4,17 @@
   "description": "The options a response was produced with, so a caller (or a model) can see\nwhat was applied and what was not.",
   "type": "object",
   "properties": {
+    "actions": {
+      "description": "The actions as counts only: never a text or a selector.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ActionsSummary"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "cache_state": {
       "$ref": "#/$defs/CacheState"
     },
@@ -78,6 +89,53 @@
     "strict"
   ],
   "$defs": {
+    "ActionOnError": {
+      "description": "What to do when an action fails: stop and report, or go on to the next one.\nThere is no retry: a replayed click or type can submit twice.",
+      "type": "string",
+      "enum": [
+        "abort",
+        "continue"
+      ]
+    },
+    "ActionsSummary": {
+      "description": "The echo of a request's actions in an effective-options response.",
+      "type": "object",
+      "properties": {
+        "capture_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "on_error": {
+          "$ref": "#/$defs/ActionOnError"
+        },
+        "total_wait_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "types": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          }
+        }
+      },
+      "required": [
+        "count",
+        "types",
+        "total_wait_ms",
+        "capture_count",
+        "on_error"
+      ]
+    },
     "CacheState": {
       "description": "Whether the page cache was consulted for this response.",
       "oneOf": [
@@ -105,14 +163,33 @@
       ]
     },
     "ScrapeFormat": {
-      "description": "What a scrape can return inline besides the stored artifacts.\n\n`Links` and `Metadata` are part of every response already; naming them is\naccepted and changes nothing. `Html` is the HTML the markdown was made from\n(after the cleaning options); `RawHtml` is the document as fetched.",
-      "type": "string",
-      "enum": [
-        "markdown",
-        "html",
-        "raw_html",
-        "links",
-        "metadata"
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "markdown",
+            "html",
+            "rawHtml",
+            "links",
+            "metadata",
+            "screenshot",
+            "pdf"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "enum": [
+                "screenshot",
+                "pdf"
+              ]
+            }
+          },
+          "required": [
+            "type"
+          ]
+        }
       ]
     }
   }
