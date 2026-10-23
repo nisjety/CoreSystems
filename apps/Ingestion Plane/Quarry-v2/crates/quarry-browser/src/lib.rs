@@ -422,6 +422,62 @@ pub mod chromiumoxide;
 pub mod capture_plan;
 /// WS13.6: tile-and-stitch planning and encoders (pure; no CDP call).
 pub mod stitch;
+/// WS12.S5: where the sensitive fields are on screen (the read-only scan).
+pub mod sensitive_rects;
+/// WS12.S5: painting those rectangles over a screenshot, or withholding it.
+pub mod screenshot_mask;
+
+/// WS12.S5: a screenshot after the sensitive fields were painted over.
+///
+/// `bytes` is `None` when the image was withheld: nothing may be stored or sent,
+/// and `note` says why in the closed `screenshot_withheld:<cause>` vocabulary.
+/// `rects` are the painted rectangles in image pixels; they stay in process (the
+/// stamp carries only their count).
+#[derive(Debug, Clone)]
+pub struct MaskedScreenshot {
+    pub bytes: Option<bytes::Bytes>,
+    pub state: quarry_core::redaction::ScreenshotState,
+    pub rects: Vec<screenshot_mask::PixelRect>,
+    pub oopif_frames: u32,
+    pub mask_ms: u32,
+    pub note: Option<&'static str>,
+}
+
+impl MaskedScreenshot {
+    /// An image that was not scanned: a driver with no masking reports `none`.
+    pub fn unmasked(bytes: bytes::Bytes) -> Self {
+        Self {
+            bytes: Some(bytes),
+            state: quarry_core::redaction::ScreenshotState::NotApplicable,
+            rects: Vec::new(),
+            oopif_frames: 0,
+            mask_ms: 0,
+            note: None,
+        }
+    }
+
+    /// An image that was withheld.
+    pub fn withheld(withheld: screenshot_mask::Withheld, oopif_frames: u32, mask_ms: u32) -> Self {
+        Self {
+            bytes: None,
+            state: quarry_core::redaction::ScreenshotState::Withheld,
+            rects: Vec::new(),
+            oopif_frames,
+            mask_ms,
+            note: Some(withheld.note()),
+        }
+    }
+
+    /// The error a caller that needs the image (an explicit `screenshot` action, a
+    /// scrape capture) gets when it was withheld: `SecurityBlocked`, 403.
+    pub fn withheld_error(note: &'static str) -> QuarryError {
+        QuarryError::new(
+            ErrorCode::SecurityBlocked,
+            "the screenshot was withheld because a sensitive field could not be masked",
+        )
+        .with_details(serde_json::json!({ "reason": note }))
+    }
+}
 
 /// WS13.6: a heavy-lane permit that lets one screenshot stitch tiles. The
 /// runtime takes it from the heavy semaphore only when the page needs stitching,
@@ -908,6 +964,18 @@ pub trait BrowserDriver: Send + Sync {
         session: &BrowserSession,
         full_page: bool,
     ) -> QuarryResult<bytes::Bytes>;
+    /// WS12.S5: a screenshot with the sensitive fields painted over. A driver that
+    /// cannot scan (the default) reports `none`: the image is as `screenshot` made it.
+    /// A driver that can scan overrides this and makes `screenshot` return the
+    /// masked bytes, so no caller can reach the raw image.
+    async fn screenshot_masked(
+        &self,
+        session: &BrowserSession,
+        full_page: bool,
+    ) -> QuarryResult<MaskedScreenshot> {
+        let bytes = self.screenshot(session, full_page).await?;
+        Ok(MaskedScreenshot::unmasked(bytes))
+    }
     async fn live_frame(
         &self,
         _session: &BrowserSession,

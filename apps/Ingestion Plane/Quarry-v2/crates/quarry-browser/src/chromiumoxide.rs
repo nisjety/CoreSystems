@@ -74,6 +74,7 @@ use quarry_core::lease::{BrowserLease, BrowserViewport};
 use crate::actionability::{self, DialogWatch};
 use crate::capture_plan;
 use crate::stitch;
+use crate::screenshot_mask;
 use crate::actions::ScrollTarget;
 use crate::deadlines::{best_effort, deadline, read_with_retry, timeout_error, with_deadline, Op};
 use crate::navigation::{guard_navigation_target, guard_page_request_target};
@@ -3129,6 +3130,9 @@ async fn capture_screenshot_on(
     })
     .await?;
     let content = layout.result.css_content_size;
+    // WS12.S5: every image is scanned for sensitive fields and painted over (or
+    // refused) before it leaves the driver.
+    let masking = screenshot_mask::MaskConfig::from_env();
     // WS13.6: a full page one capture cannot hold is stitched when a heavy-lane
     // permit was passed; without one it is cropped at the limit below.
     if stitch.is_some()
@@ -3136,15 +3140,29 @@ async fn capture_screenshot_on(
         && options.clip.is_none()
         && stitch::needs_stitch(content.height, device_scale_factor)
     {
-        return stitch_full_page(
+        let (content_width, content_height) = (content.width, content.height);
+        let (bytes, mut image) = screenshot_mask::capture_masked(
             page,
-            content.width,
-            content.height,
-            device_scale_factor,
-            options,
-            limits,
+            &masking,
+            screenshot_mask::Origin::Page(0.0, 0.0),
+            || async move {
+                let mut image = stitch_full_page(
+                    page,
+                    content_width,
+                    content_height,
+                    device_scale_factor,
+                    options,
+                    limits,
+                )
+                .await?;
+                Ok((std::mem::take(&mut image.bytes), image))
+            },
         )
-        .await;
+        .await?
+        .into_image()?;
+        image.bytes = bytes;
+        capture_plan::check_capture_size(image.bytes.len(), limits)?;
+        return Ok(image);
     }
     let plan =
         capture_plan::plan_screenshot(content.width, content.height, options, device_scale_factor)?;
@@ -3167,13 +3185,25 @@ async fn capture_screenshot_on(
             scale: 1.0,
         });
     }
-    let bytes = with_deadline(Op::Screenshot, async {
-        page.screenshot(params.build()).await.map_err(|_| {
-            QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide screenshot failed")
-                .with_details(json!({ "reason": "driver_error" }))
-        })
+    let params = params.build();
+    let origin = plan.clip.map_or(screenshot_mask::Origin::Legacy, |clip| {
+        screenshot_mask::Origin::Page(clip.x, clip.y)
+    });
+    let (bytes, ()) = screenshot_mask::capture_masked(page, &masking, origin, || {
+        let params = params.clone();
+        async move {
+            let bytes = with_deadline(Op::Screenshot, async {
+                page.screenshot(params).await.map_err(|_| {
+                    QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide screenshot failed")
+                        .with_details(json!({ "reason": "driver_error" }))
+                })
+            })
+            .await?;
+            Ok((bytes, ()))
+        }
     })
-    .await?;
+    .await?
+    .into_image()?;
     let (width_px, height_px) = capture_plan::image_dimensions(&bytes).ok_or_else(|| {
         QuarryError::new(ErrorCode::DriverFailed, "screenshot is not a PNG or JPEG")
             .with_details(json!({ "reason": "screenshot_unreadable" }))
@@ -3188,6 +3218,22 @@ async fn capture_screenshot_on(
         stitched: false,
         truncated: plan.truncated,
     })
+}
+
+/// WS12.S5: one raw PNG of the page. Only `capture_masked` may call it: the bytes
+/// it returns have not been painted over.
+async fn capture_png(page: &Page, full_page: bool) -> QuarryResult<Vec<u8>> {
+    let params = CaptureScreenshotParamsBuilder::default()
+        .format(CaptureScreenshotFormat::Png)
+        .capture_beyond_viewport(full_page)
+        .build();
+    with_deadline(Op::Screenshot, async {
+        page.screenshot(params).await.map_err(|e| {
+            QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide screenshot failed")
+                .with_details(json!({ "error": e.to_string(), "full_page": full_page }))
+        })
+    })
+    .await
 }
 
 /// WS13.6: JPEG quality for a stitched JPEG that did not ask for one.
@@ -3996,20 +4042,35 @@ impl BrowserDriver for ChromiumoxideDriver {
         })
     }
 
-    async fn screenshot(&self, _session: &BrowserSession, full_page: bool) -> QuarryResult<Bytes> {
-        let page = self.current_page(_session).await?;
-        let params = CaptureScreenshotParamsBuilder::default()
-            .format(CaptureScreenshotFormat::Png)
-            .capture_beyond_viewport(full_page)
-            .build();
-        let png = with_deadline(Op::Screenshot, async {
-            page.screenshot(params).await.map_err(|e| {
-                QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide screenshot failed")
-                    .with_details(json!({ "error": e.to_string(), "full_page": full_page }))
-            })
+    /// WS12.S5: never the raw image. The masked capture below, or a
+    /// `SecurityBlocked` error when it had to be withheld.
+    async fn screenshot(&self, session: &BrowserSession, full_page: bool) -> QuarryResult<Bytes> {
+        let masked = self.screenshot_masked(session, full_page).await?;
+        masked.bytes.ok_or_else(|| {
+            crate::MaskedScreenshot::withheld_error(masked.note.unwrap_or(
+                screenshot_mask::Withheld::SensitiveFieldUnresolved.note(),
+            ))
         })
+    }
+
+    async fn screenshot_masked(
+        &self,
+        session: &BrowserSession,
+        full_page: bool,
+    ) -> QuarryResult<crate::MaskedScreenshot> {
+        let page = self.current_page(session).await?;
+        let masking = screenshot_mask::MaskConfig::from_env();
+        let captured = screenshot_mask::capture_masked(
+            &page,
+            &masking,
+            screenshot_mask::Origin::Legacy,
+            || {
+                let page = page.clone();
+                async move { capture_png(&page, full_page).await.map(|png| (png, ())) }
+            },
+        )
         .await?;
-        Ok(Bytes::from(png))
+        Ok(captured.into_masked_screenshot())
     }
 
     async fn live_frame(
@@ -4072,6 +4133,11 @@ impl BrowserDriver for ChromiumoxideDriver {
 
     async fn pdf(&self, _session: &BrowserSession) -> QuarryResult<Bytes> {
         let page = self.current_page(_session).await?;
+        // WS12.S5: a PDF cannot be painted over, so it is refused while a sensitive
+        // field holds a value.
+        screenshot_mask::pdf_allowed(&page, &screenshot_mask::MaskConfig::from_env())
+            .await
+            .map_err(screenshot_mask::pdf_withheld_error)?;
         let pdf = with_deadline(Op::Pdf, async {
             page.pdf(PrintToPdfParams::default()).await.map_err(|e| {
                 QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide pdf failed")
@@ -4175,6 +4241,10 @@ impl BrowserDriver for ChromiumoxideDriver {
         limits: &CaptureLimits,
     ) -> QuarryResult<CapturedPdf> {
         let page = self.current_page(session).await?;
+        // WS12.S5: the same refusal as `pdf`.
+        screenshot_mask::pdf_allowed(&page, &screenshot_mask::MaskConfig::from_env())
+            .await
+            .map_err(screenshot_mask::pdf_withheld_error)?;
         let (paper_width, paper_height) = options.format.inches();
         let params = PrintToPdfParams {
             landscape: Some(options.landscape),
@@ -7839,6 +7909,8 @@ mod tests {
     include!("capture_live.rs");
     // WS13.6: tile-and-stitch against a real Chromium.
     include!("stitch_live.rs");
+    // WS12.S5: screenshot masking against a real Chromium.
+    include!("screenshot_mask_live.rs");
 }
 
 /// WS3.D and WS3.F, the parts that need no browser: every CDP call is bounded, the
