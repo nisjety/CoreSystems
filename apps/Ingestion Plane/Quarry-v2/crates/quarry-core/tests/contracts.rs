@@ -125,6 +125,7 @@ fn envelope_meta_serde_stable() {
     let m = EnvelopeMeta {
         request_id: "req_1".into(),
         page: None,
+        budget: None,
     };
     let v = serde_json::to_value(&m).unwrap();
     assert_eq!(v["request_id"], "req_1");
