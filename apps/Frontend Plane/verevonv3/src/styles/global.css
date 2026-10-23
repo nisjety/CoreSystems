@@ -48982,3 +48982,42 @@ so it
 .dark .verevon-space-room-composer__typing {
   color: var(--verevon-sidebar-text);
 }
+
+/* Chat -- the trays docked above the composer.
+   An approval, a plan awaiting a grant and messages sent into a live run wait
+   here, where the person is looking, instead of inside the transcript. One tray
+   shows at a time; its height is capped so a long plan scrolls inside it rather
+   than pushing the composer off screen. Empty, it takes no space. */
+.verevon-chat-composer-trays {
+  max-height: 40vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  margin-bottom: 8px;
+}
+
+/* Empty, it takes no space but stays in the accessibility tree: a live region
+   that is display:none is not reliably announced when it fills. */
+.verevon-chat-composer-trays[data-empty] {
+  max-height: 0;
+  margin: 0;
+  overflow: hidden;
+}
+
+/* The cards carry their own top margin for the transcript; here they are the
+   first thing in the tray. */
+.verevon-chat-composer-trays > :first-child {
+  margin-top: 0;
+}
+
+.verevon-chat-composer-trays__more {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: var(--verevon-text-muted);
+}
+
+/* What the transcript keeps of a docked control: one line saying where it went. */
+.verevon-chat-docked-pointer {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--verevon-text-muted);
+}

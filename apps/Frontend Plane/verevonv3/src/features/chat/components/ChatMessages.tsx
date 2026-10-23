@@ -57,6 +57,7 @@ import {
   type PlanApprovalStatus,
   type ToolIntent,
 } from '@/shared/chat-nodes'
+import type { DockedNodes } from '@/shared/chat-nodes/types'
 // The barrel does not re-export it yet; one more line there when it next changes.
 import { nodeKey } from '@/shared/chat-nodes/derive'
 import type { AutonomyRung, ChatPlanStep, MemoryOrigin, RecalledMemory } from '@/shared/api/chat-client'
@@ -194,6 +195,8 @@ export function MessageBlock(props: {
    * attest zero data retention.
    */
   temporaryChat?: boolean
+  /** Which of this turn's controls the composer dock holds; see `DockedNodes`. */
+  docked?: DockedNodes
 }) {
   // `<For>` invokes its mapper untracked in Solid 2. Read the store-backed
   // role through a memo so the conditional branch is established in a tracked
@@ -290,26 +293,40 @@ const CHAT_NODE_REGISTRY = createConversationNodeRegistry({
   approvals: {
     kind: 'approvals',
     render: (node, ctx) => (
-      <ApprovalRequests
-        approvals={node.approvals}
-        onDecide={ctx.onApprovalDecision}
-      />
+      <Show
+        when={ctx.docked?.approvals}
+        fallback={
+          <ApprovalRequests
+            approvals={node.approvals}
+            onDecide={ctx.onApprovalDecision}
+          />
+        }
+      >
+        <DockedPointer />
+      </Show>
     ),
   },
   'plan-approval': {
     kind: 'plan-approval',
     render: (node, ctx) => (
-      <PlanApprovalControl
-        planId={node.planId}
-        summary={node.summary}
-        steps={node.steps}
-        grantedRung={node.grantedRung}
-        rejected={node.rejected}
-        pending={node.pending}
-        error={node.error}
-        onApprove={ctx.onApprovePlan}
-        onReject={ctx.onRejectPlan}
-      />
+      <Show
+        when={ctx.docked?.plan}
+        fallback={
+          <PlanApprovalControl
+            planId={node.planId}
+            summary={node.summary}
+            steps={node.steps}
+            grantedRung={node.grantedRung}
+            rejected={node.rejected}
+            pending={node.pending}
+            error={node.error}
+            onApprove={ctx.onApprovePlan}
+            onReject={ctx.onRejectPlan}
+          />
+        }
+      >
+        <DockedPointer />
+      </Show>
     ),
   },
   'image-previews': {
@@ -345,6 +362,19 @@ const CHAT_NODE_REGISTRY = createConversationNodeRegistry({
     ),
   },
 })
+
+/**
+ * What the transcript keeps of a control the composer dock holds: where to look,
+ * not a second copy of the control. Gone, and the full card back, once it is decided.
+ */
+function DockedPointer() {
+  const i18n = useI18n()
+  return (
+    <p class="verevon-chat-docked-pointer">
+      {i18n.tr('Venter på svar, se over skrivefeltet', 'Waiting for an answer, see above the composer')}
+    </p>
+  )
+}
 
 /**
  * The answer region: thinking indicator, error, or content.
@@ -440,6 +470,8 @@ export function AssistantMessage(props: {
   threadId?: string | null
   /** See `MessageBlock`'s doc: disables "Les høyt". */
   temporaryChat?: boolean
+  /** See `MessageBlock`'s doc. */
+  docked?: DockedNodes
 }) {
   const i18n = useI18n()
   const [reaction, setReaction] = createSignal<'up' | 'down' | null>(null)
@@ -554,6 +586,7 @@ export function AssistantMessage(props: {
       citations: props.message.citations,
       threadId: props.threadId ?? null,
       temporaryChat: props.temporaryChat,
+      docked: props.docked,
     }
     return nodes().map((node) => ({ node, context }))
   })

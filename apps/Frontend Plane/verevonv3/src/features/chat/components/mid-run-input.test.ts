@@ -168,13 +168,18 @@ describe('mid-run input is never dropped', () => {
     expect(lookup).not.toContain('provider:')
   })
 
-  it('renders the strip, so a queued message is visible while it is in flight', async () => {
+  it('docks the strip above the composer, so a queued message is visible while it is in flight', async () => {
     const page = await source(PAGE)
+    // The strip is no longer mounted in the transcript: it is the queue tray of the
+    // composer dock, fed from `state.queuedInputs` by `selectDockedTrays`.
+    expect(page).not.toContain('<QueuedInputStrip')
     expect(
-      page.includes('<QueuedInputStrip entries={state.queuedInputs} />'),
+      page.includes('queuedInputs: state.queuedInputs') && page.includes('<ComposerTrays'),
       'nothing renders state.queuedInputs — the message is tracked but invisible, ' +
         'which is the bug with extra steps',
     ).toBe(true)
+    const trays = await source('src/features/chat/components/ComposerTrays.tsx')
+    expect(trays).toContain('<QueuedInputStrip entries={tray().entries} />')
   })
 
   it('promotes a pending message to delivered when the agent is handed it', async () => {

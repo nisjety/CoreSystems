@@ -159,6 +159,14 @@ export type ConversationNode =
 
 export type ConversationNodeKind = ConversationNode['kind']
 
+/**
+ * Which of a turn's controls the composer dock holds. A docked control renders
+ * as a one-line pointer in the transcript, so it is never in both places.
+ * Separate flags because the dock holds every pending approval but only the
+ * latest turn's plan.
+ */
+export type DockedNodes = { approvals: boolean; plan: boolean }
+
 /** Callbacks a node's renderer may need. Supplied once, never inside a node. */
 export type ConversationNodeContext = {
   onViewSteps: () => void
@@ -196,6 +204,8 @@ export type ConversationNodeContext = {
    * finishes. Absent means an ordinary thread.
    */
   temporaryChat?: boolean
+  /** Absent means nothing of this turn is docked: every control renders in full. */
+  docked?: DockedNodes
 }
 
 /** One node kind's renderer. */

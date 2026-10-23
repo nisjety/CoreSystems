@@ -30,7 +30,6 @@ import {
   DateDivider,
   EmptyChatState,
   MessageBlock,
-  QueuedInputStrip,
   rungLabel,
 } from './ChatMessages'
 import {
@@ -47,6 +46,7 @@ import {
 import {
   ChatLiveRunPanel,
 } from './ChatLiveRunPanel'
+import { ComposerTrays } from './ComposerTrays'
 import { ChatWideResearchPanel } from './ChatWideResearchPanel'
 import { ChatWorkspaceCanvas } from './ChatWorkspaceCanvas'
 import { ChatAttachmentCanvas } from './ChatAttachmentCanvas'
@@ -59,6 +59,7 @@ import {
 } from './chat-media-markdown'
 import { useChatController } from './use-chat-controller'
 import { useChatShortcuts } from '@/features/chat/lib/use-chat-shortcuts'
+import { dockedNodesFor, selectDockedTrays } from '../lib/composer-trays'
 import { deriveStreamActivity, streamActivityLabel } from '@/features/chat/lib/stream-activity'
 import { chatSurfaceClaimsFocus, isChatSurfaceAvailable, type ChatSurfaceAvailability } from '../lib/chat-surfaces'
 import { isWorkStep } from './chat-normalizers'
@@ -284,6 +285,19 @@ export default function ChatPage() {
     return null
   })
 
+  // What waits on the person, docked above the composer. The transcript keeps
+  // only a pointer for a control the dock holds (`dockedNodesFor` per row).
+  const dockedTrays = createMemo(() =>
+    selectDockedTrays({
+      turns: state.turns,
+      queuedInputs: state.queuedInputs,
+      planApproval: (turnId) => ({
+        pending: planApprovalPending() === turnId,
+        error: planApprovalError()[turnId],
+      }),
+    }),
+  )
+
   // `<For>` mappers are untracked in Solid 2. Derive the neighboring turns and
   // all per-row reactive values up front so each mapper receives plain row data
   // instead of reading the live store while it renders.
@@ -297,6 +311,7 @@ export default function ChatPage() {
       pending: planApprovalPending() === turn.id,
       error: planApprovalError()[turn.id],
     },
+    docked: dockedNodesFor(dockedTrays(), turn.id),
     version: index === turns.length - 1 ? finalExchangeVersion() : null,
     editLocked: turn.role === 'user' && isEffectfulChatTurn(turns[index + 1]?.effectClass),
   })))
@@ -863,6 +878,7 @@ export default function ChatPage() {
                         pinDisabled={pinnedMessagesFull(pinnedMessages())}
                         onTogglePin={() => togglePin(row().turn.id)}
                         planApproval={row().planApproval}
+                        docked={row().docked}
                         onSelectFollowUp={setInput}
                         onViewSteps={() => setActiveTab('steps')}
                         onViewAttachments={(attachmentId) => {
@@ -882,14 +898,6 @@ export default function ChatPage() {
                     </>
                   )}
                 </For>
-                {/*
-                  Below the in-progress answer, because that is where the newest
-                  thing the user did belongs. The durable record of these lives
-                  on the thread itself (written when the message was accepted),
-                  so a reload shows them as ordinary messages — this strip is
-                  only the live status of a delivery in flight.
-                */}
-                <QueuedInputStrip entries={state.queuedInputs} />
                 {/* The transcript's retry notice and live region already cover
                     an identical error. Distinct errors still need this alert
                     and keyboard focus, especially when partial output remains. */}
@@ -940,6 +948,24 @@ export default function ChatPage() {
               </button>
             </Show>
             <div class="verevon-chat-composer-dock__inner">
+              {/*
+                Approvals, the plan awaiting a grant and messages sent into the
+                live run: docked here, where the person is looking when a run
+                needs them. The durable record of a mid-run message lives on
+                the thread itself (written when it was accepted), so a reload
+                shows it as an ordinary message; the queue tray is only the
+                live status of a delivery in flight.
+              */}
+              <ComposerTrays
+                trays={dockedTrays()}
+                onApprovalDecision={(turnId, approvalId, decision) =>
+                  void handleApprovalDecision(turnId, approvalId, decision)
+                }
+                onApprovePlan={(turnId, rung, justification, steps) =>
+                  void approveTurnPlan(turnId, rung, justification, steps)
+                }
+                onRejectPlan={(turnId, reason) => void rejectTurnPlan(turnId, reason)}
+              />
               <Show when={isStreaming()}>
                 <div class="verevon-chat-stop-wrap">
                   <button type="button" class="verevon-chat-stop-btn" onClick={handleStop}>

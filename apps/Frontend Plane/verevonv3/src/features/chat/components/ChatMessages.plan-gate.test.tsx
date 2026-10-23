@@ -17,6 +17,7 @@ import { createSignal, createStore, flush } from 'solid-js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { __resetPlanDraftsForTests, AssistantMessage } from './ChatMessages'
 import type { ChatTurn } from './chat-types'
+import type { DockedNodes } from '@/shared/chat-nodes/types'
 
 const planTurn = (overrides: Partial<ChatTurn> = {}): ChatTurn => ({
   id: 'asst-1',
@@ -41,9 +42,10 @@ const planTurn = (overrides: Partial<ChatTurn> = {}): ChatTurn => ({
 
 type Status = { pending: boolean; error?: string } | undefined
 
-function mount(turn: ChatTurn, onApprovePlan = vi.fn(), onRejectPlan = vi.fn()) {
+function mount(turn: ChatTurn, onApprovePlan = vi.fn(), onRejectPlan = vi.fn(), initialDocked?: DockedNodes) {
   const [message, setMessage] = createStore<ChatTurn>(turn)
   const [status, setStatus] = createSignal<Status>(undefined)
+  const [docked, setDocked] = createSignal<DockedNodes | undefined>(initialDocked)
   const view = render(() => (
     <AssistantMessage
       copied={false}
@@ -56,6 +58,7 @@ function mount(turn: ChatTurn, onApprovePlan = vi.fn(), onRejectPlan = vi.fn()) 
       onApprovePlan={onApprovePlan}
       onRejectPlan={onRejectPlan}
       planApproval={status()}
+      docked={docked()}
       onViewSteps={() => {}}
     />
   ))
@@ -63,7 +66,7 @@ function mount(turn: ChatTurn, onApprovePlan = vi.fn(), onRejectPlan = vi.fn()) 
   const inputs = () =>
     view.container.querySelectorAll<HTMLInputElement>('.verevon-chat-plan__step-input')
   const reason = () => view.container.querySelector<HTMLTextAreaElement>('.verevon-chat-plan__reason')
-  return { ...view, message, setMessage, setStatus, inputs, reason, onApprovePlan, onRejectPlan }
+  return { ...view, message, setMessage, setStatus, setDocked, inputs, reason, onApprovePlan, onRejectPlan }
 }
 
 afterEach(() => {
@@ -148,5 +151,39 @@ describe('PlanApprovalControl inside AssistantMessage', () => {
     const view = mount(planTurn())
     expect(view.container.querySelector('.verevon-chat-plan')).not.toBeNull()
     expect(view.container.textContent).not.toMatch(/Planen ble avvist/)
+  })
+})
+
+describe('a plan the composer dock holds', () => {
+  const DOCKED: DockedNodes = { approvals: false, plan: true }
+
+  it('leaves a one-line pointer in the transcript instead of a second control', () => {
+    const view = mount(planTurn(), vi.fn(), vi.fn(), DOCKED)
+    expect(view.container.querySelector('.verevon-chat-plan')).toBeNull()
+    expect(view.container.querySelector('.verevon-chat-plan__approve')).toBeNull()
+    expect(view.container.querySelector('.verevon-chat-docked-pointer')?.textContent).toMatch(
+      /Venter på svar, se over skrivefeltet|Waiting for an answer, see above the composer/,
+    )
+  })
+
+  it('gives the full card back once the dock lets go of it', () => {
+    const view = mount(planTurn(), vi.fn(), vi.fn(), DOCKED)
+    view.setDocked({ approvals: false, plan: false })
+    flush()
+    expect(view.container.querySelector('.verevon-chat-docked-pointer')).toBeNull()
+    expect(view.container.querySelector('.verevon-chat-plan')).not.toBeNull()
+  })
+
+  it('says a decided plan was decided, not that it is still waiting', () => {
+    const view = mount(planTurn({ planRejected: true }))
+    expect(view.container.querySelector('.verevon-chat-docked-pointer')).toBeNull()
+    expect(view.container.textContent).toMatch(/Planen ble avvist|The plan was rejected/)
+  })
+
+  it('does not point away from an approval the dock does not hold', () => {
+    const view = mount(planTurn({ pendingApprovals: [{ id: 'a1', kind: 'APPROVAL_KIND_TOOL_CALL' }] }), vi.fn(), vi.fn(), DOCKED)
+    // The plan is docked, the approval is not: the approval keeps its card.
+    expect(view.container.querySelector('.verevon-chat-approvals')).not.toBeNull()
+    expect(view.container.querySelectorAll('.verevon-chat-docked-pointer')).toHaveLength(1)
   })
 })
