@@ -333,6 +333,10 @@ pub const FEATURES: &[Feature] = &[
         key: "video_generation",
         label: "video generation",
     },
+    Feature {
+        key: "connector_read",
+        label: "connected-app reads",
+    },
 ];
 
 /// The catalogue entry for `code`, if it is a catalogue code.

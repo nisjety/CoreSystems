@@ -554,6 +554,13 @@ async fn execute_step_inner(
             &mp_contracts::zdr_refusal::Refusal::feature_not_supported("mcp_execution").message(),
         );
     }
+    // A connected account's records are personal data, so no connector tool runs under ZDR
+    // or on a waived route. Refused before the capability gate, as MCP is.
+    if (zdr || waived) && crate::provenance::is_provider_tool(tool_name) {
+        return StepOutcome::failed(
+            &mp_contracts::zdr_refusal::Refusal::feature_not_supported("connector_read").message(),
+        );
+    }
     // The class and floor this call's policy decision carried. A governed MCP call is
     // compared with them at dispatch (`execute_governed_mcp`).
     let signed_class: crate::mcp_gateway::SignedToolClass;
@@ -2074,6 +2081,46 @@ pub(crate) fn authenticated_session_request<T>(
             .map_err(|_| "verified session credential is not forwardable".to_owned())?,
     );
     Ok(request)
+}
+
+#[cfg(test)]
+mod connector_tool_tests {
+    use super::*;
+
+    /// Reaching the capability gate for a refused connector call is itself the failure.
+    struct NoPolicy;
+
+    #[tonic::async_trait]
+    impl crate::capability_policy::CapabilityPolicy for NoPolicy {
+        async fn evaluate(
+            &self,
+            _tool_name: &str,
+            _run_id: &str,
+            _org_id: &str,
+        ) -> Result<crate::capability_policy::CapabilityDecision, tonic::Status> {
+            panic!("a refused connector call must not reach the capability gate")
+        }
+    }
+
+    #[tokio::test]
+    async fn connector_tools_are_refused_under_zdr_and_on_a_waived_route() {
+        let input = r#"{"connection_id":"conn-1","operation":"mail.messages"}"#;
+        for tool in ["list_provider_actions", "execute_provider_action"] {
+            for (zdr, waived) in [(true, false), (false, true)] {
+                let out = execute_step_inner(
+                    tool, input, "ask", "", "org-1", "user-1", "run-1", "step-1", "", None, None,
+                    None, zdr, waived, 0, None, None, None, &NoPolicy, None, None, None, None,
+                )
+                .await;
+                assert_eq!(out.status, "failed", "{tool} zdr={zdr} waived={waived}");
+                assert!(
+                    out.error.contains("connected-app reads"),
+                    "{tool} zdr={zdr} waived={waived}: {}",
+                    out.error
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]

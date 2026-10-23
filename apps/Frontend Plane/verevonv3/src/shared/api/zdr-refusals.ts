@@ -56,6 +56,7 @@ export type ZdrFeatureKey =
   | 'language_analysis'
   | 'realtime_voice'
   | 'video_generation'
+  | 'connector_read'
 
 /** The reader's-language chooser, the same shape the rest of the SPA passes around. */
 export type Translate = (noText: string, enText: string) => string
@@ -63,7 +64,7 @@ export type Translate = (noText: string, enText: string) => string
 type Copy = { readonly no: string; readonly en: string }
 
 /** The sha256 of `./contracts/zdr-refusals.json`. Changing the golden changes this too. */
-export const ZDR_REFUSALS_CONTRACT_SHA256 = '9c2b5458aac4b2b779ab9b63acb987f63df6c41b85a93a32ccfcaf97251b6d1e'
+export const ZDR_REFUSALS_CONTRACT_SHA256 = '15b12d17d34c49270889ce7a3b5fc66471bce3646499888ef7e7ee2cc1178cf1'
 
 export type ZdrRefusalText = {
   /** Norwegian. A feature refusal names the feature with `{feature}`. */
@@ -180,6 +181,7 @@ export const FEATURE_LABELS: Record<ZdrFeatureKey, Copy> = {
   language_analysis: { no: 'språkanalyse', en: 'language analysis' },
   realtime_voice: { no: 'sanntidsstemmeøkter', en: 'realtime voice sessions' },
   video_generation: { no: 'videogenerering', en: 'video generation' },
+  connector_read: { no: 'lesing fra tilkoblede apper', en: 'connected-app reads' },
 }
 
 /** A refusal whose feature the SPA does not know names it this way. */

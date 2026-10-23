@@ -564,6 +564,13 @@ fn both_loops_classify_through_one_trust_table_and_one_scanner() {
              ExternalWeb — as OrgInternal it gets no untrusted framing at all"
         );
     }
+    for required in ["read_provider_action", "execute_provider_action"] {
+        assert!(
+            table_block.contains(&format!("(\"{required}\", TrustClass::ConnectorContent)")),
+            "`{required}` returns connected-account content, so it must be ConnectorContent: \
+             framed and screened, never OrgInternal"
+        );
+    }
     assert!(
         table_block.contains("(\"browser_agent\", TrustClass::BrowserScraped)"),
         "`browser_agent` must stay BrowserScraped"

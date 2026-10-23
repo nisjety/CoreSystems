@@ -192,6 +192,10 @@
     {
       "key": "video_generation",
       "label_en": "video generation"
+    },
+    {
+      "key": "connector_read",
+      "label_en": "connected-app reads"
     }
   ],
   "generated_by": "mp-contracts zdr_refusal tests (MP_UPDATE_GOLDEN=1)",

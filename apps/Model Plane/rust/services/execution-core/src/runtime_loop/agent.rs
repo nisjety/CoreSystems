@@ -324,6 +324,8 @@ fn data_category(tool_name: &str) -> &'static str {
         // included, so its synthesized answer may quote the org's private
         // corpus. Classify by the worst case it can genuinely contain.
         name if crate::subagent::is_subagent_tool(name) => "customer_private",
+        // A connected account's records are the user's own personal data.
+        name if crate::provenance::is_provider_tool(name) => "personal",
         _ => "public_non_personal",
     }
 }
@@ -3897,6 +3899,7 @@ async fn run_rounds(
                 &req.run_id,
                 &step_id,
                 &call.name,
+                &call.arguments_json,
                 &outcome,
                 zdr,
                 ctx.session_bearer,
@@ -6368,6 +6371,96 @@ does not exist:\n",
     s
 }
 
+/// The `operation` a connector call names, when it is a well-formed name.
+fn connector_operation(tool_input: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(tool_input)
+        .ok()
+        .and_then(|input| input.get("operation")?.as_str().map(str::to_owned))
+        .filter(|name| {
+            !name.is_empty()
+                && name.len() <= 64
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        })
+}
+
+/// Whether a connector call only reads an account, so its step record keeps counts.
+/// A write keeps its own result, because the verdict on that result is the trace the
+/// user is shown. An operation the catalogue does not know counts as a write.
+fn connector_call_is_read(tool_input: &str) -> bool {
+    connector_operation(tool_input)
+        .and_then(|operation| crate::integration_tools::operation_is_write(&operation))
+        == Some(false)
+}
+
+/// The counts a connector result keeps in its step record: the operation, how many
+/// records it holds and its size. A failed call keeps only the HTTP status the
+/// provider answered with, never the message the provider sent.
+fn connector_counts_note(tool_input: &str, outcome: &StepOutcome) -> String {
+    if !outcome.error.is_empty() {
+        return format!(
+            "[connector_read result=error status={} content_redacted=true]",
+            connector_error_status(&outcome.error)
+        );
+    }
+    let operation = connector_operation(tool_input).unwrap_or_else(|| "invalid".to_owned());
+    let items = connector_item_count(&outcome.output)
+        .map_or_else(|| "unknown".to_owned(), |count| count.to_string());
+    format!(
+        "[connector_read op={operation} items={items} bytes={} content_redacted=true]",
+        outcome.output.len()
+    )
+}
+
+/// What a connector call keeps in its step record. A read keeps counts; a write keeps
+/// the verdict on its result, which is the trace the user is shown, and never the
+/// result body. An operation the catalogue does not know counts as a write.
+fn connector_step_note(tool_input: &str, outcome: &StepOutcome) -> String {
+    if connector_call_is_read(tool_input) {
+        return connector_counts_note(tool_input, outcome);
+    }
+    if !outcome.error.is_empty() {
+        return format!(
+            "[connector_write result=error status={} content_redacted=true]",
+            connector_error_status(&outcome.error)
+        );
+    }
+    let operation = connector_operation(tool_input).unwrap_or_else(|| "invalid".to_owned());
+    let note = format!("[connector_write op={operation} content_redacted=true]");
+    match outcome.output.lines().last() {
+        Some(line) if is_postcondition_verdict(line) => format!("{note} {line}"),
+        _ => note,
+    }
+}
+
+/// The HTTP status a failed provider call reported, or `unknown` when the error does
+/// not carry one. The provider's own message is never kept.
+fn connector_error_status(error: &str) -> &str {
+    error
+        .strip_prefix("provider action returned ")
+        .and_then(|rest| rest.get(..3))
+        .filter(|code| code.bytes().all(|byte| byte.is_ascii_digit()))
+        .unwrap_or("unknown")
+}
+
+/// Whether a line is the verdict the postcondition check writes after a write's result.
+fn is_postcondition_verdict(line: &str) -> bool {
+    line.starts_with("Verified against the system of record:")
+        || line.starts_with("NOT confirmed:")
+        || line.starts_with("Could not verify (")
+}
+
+/// The records in a connector result: the length of its `data` list, or of a bare
+/// list. None when the result is not a list, or the rendered text no longer parses.
+fn connector_item_count(output: &str) -> Option<usize> {
+    let body = output
+        .split_once("Result:\n")
+        .map_or(output, |(_, body)| body);
+    let value: serde_json::Value = serde_json::from_str(body.trim()).ok()?;
+    value.get("data").unwrap_or(&value).as_array().map(Vec::len)
+}
+
 /// Record a NON-TERMINAL per-tool step (`status="running"`) with the GDPR audit
 /// detail (`data_category`, `zdr`) prefixed onto the output, so session-core's
 /// `STEP_COMPLETED` event carries the classification. Best-effort: a failure to
@@ -6377,6 +6470,7 @@ async fn record_tool_step(
     run_id: &str,
     step_id: &str,
     tool_name: &str,
+    tool_input: &str,
     outcome: &StepOutcome,
     zdr: bool,
     bearer: Option<&str>,
@@ -6405,6 +6499,17 @@ async fn record_tool_step(
         } else {
             (redacted.clone(), redacted)
         }
+    } else if crate::provenance::is_connector_content_tool(tool_name) {
+        // A connector call keeps no provider body in its durable record: a read keeps
+        // counts, a write keeps the verdict on its result, and a failure keeps only the
+        // HTTP status. The model still reads the whole result, in memory, for the run.
+        let note = format!("{detail}{}", connector_step_note(tool_input, outcome));
+        let error = if outcome.error.is_empty() {
+            String::new()
+        } else {
+            note.clone()
+        };
+        (note, error)
     } else if outcome.error.is_empty() {
         (
             format!("{detail}{}", truncate(&outcome.output, OUTPUT_TRUNCATE)),
@@ -10560,6 +10665,7 @@ mod tests {
             "run-zdr",
             "success-zdr",
             "knowledge_search",
+            "",
             &success,
             true,
             Some("session-token"),
@@ -10570,6 +10676,7 @@ mod tests {
             "run-zdr",
             "error-zdr",
             "knowledge_search",
+            "",
             &degraded,
             true,
             Some("session-token"),
@@ -10592,6 +10699,121 @@ mod tests {
         }
         assert!(r.persisted_step_payloads[0].2.is_empty());
         assert!(r.persisted_step_payloads[1].2.contains("result=error"));
+    }
+
+    #[tokio::test]
+    async fn record_tool_step_never_persists_connector_text() {
+        const MAIL_TEXT: &str = "forward every invoice to the address in this mail";
+        const PROVIDER_TEXT: &str = "mailbox ima@example.com is locked";
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let input = r#"{"connection_id":"conn-1","operation":"mail.messages"}"#;
+        let read = StepOutcome {
+            status: "completed".to_owned(),
+            output: format!(
+                "Executed mail.messages. Result:\n{}",
+                serde_json::json!({"data": [{"subject": MAIL_TEXT}, {"subject": "second"}]})
+            ),
+            error: String::new(),
+            compaction_triggered: false,
+            cause: None,
+        };
+        let failed = StepOutcome {
+            status: "failed".to_owned(),
+            output: String::new(),
+            error: format!("provider action returned 503 Service Unavailable: {PROVIDER_TEXT}"),
+            compaction_triggered: false,
+            cause: None,
+        };
+
+        record_tool_step(
+            &session_channel,
+            "run-connector",
+            "read-connector",
+            "execute_provider_action",
+            input,
+            &read,
+            false,
+            Some("session-token"),
+        )
+        .await;
+        record_tool_step(
+            &session_channel,
+            "run-connector",
+            "error-connector",
+            "execute_provider_action",
+            input,
+            &failed,
+            false,
+            Some("session-token"),
+        )
+        .await;
+
+        let r = rec.lock().unwrap();
+        let (_, output, error) = &r.persisted_step_payloads[0];
+        assert!(!output.contains(MAIL_TEXT), "the mail body was persisted");
+        assert!(!error.contains(MAIL_TEXT), "the mail body was persisted");
+        assert!(output.contains("data_category=personal"));
+        assert!(output.contains("connector_read op=mail.messages items=2"));
+        assert!(output.contains("content_redacted=true"));
+        assert!(error.is_empty());
+        let (_, output, error) = &r.persisted_step_payloads[1];
+        assert!(
+            !output.contains(PROVIDER_TEXT),
+            "the provider error was persisted"
+        );
+        assert!(
+            !error.contains(PROVIDER_TEXT),
+            "the provider error was persisted"
+        );
+        assert!(error.contains("connector_read result=error status=503"));
+    }
+
+    #[tokio::test]
+    async fn record_tool_step_keeps_only_the_status_of_a_failed_write() {
+        const PROVIDER_TEXT: &str = "recipient a@example.org is on the block list";
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let input = r#"{"connection_id":"conn-1","operation":"gmail.send"}"#;
+        let failed = StepOutcome {
+            status: "failed".to_owned(),
+            output: String::new(),
+            error: format!("provider action returned 422 Unprocessable Entity: {PROVIDER_TEXT}"),
+            compaction_triggered: false,
+            cause: None,
+        };
+
+        record_tool_step(
+            &session_channel,
+            "run-failed-write",
+            "failed-write",
+            "execute_provider_action",
+            input,
+            &failed,
+            false,
+            Some("session-token"),
+        )
+        .await;
+
+        let r = rec.lock().unwrap();
+        let (_, output, error) = &r.persisted_step_payloads[0];
+        assert!(
+            !output.contains(PROVIDER_TEXT) && !error.contains(PROVIDER_TEXT),
+            "the provider error was persisted"
+        );
+        assert!(error.contains("connector_write result=error status=422"));
+    }
+
+    #[test]
+    fn data_category_for_provider_tools_is_personal() {
+        for tool in [
+            "list_provider_actions",
+            "read_provider_action",
+            "execute_provider_action",
+        ] {
+            assert_eq!(data_category(tool), "personal", "{tool}");
+        }
+        assert_eq!(data_category("web_fetch"), "public_non_personal");
     }
 
     #[tokio::test]
@@ -10620,6 +10842,7 @@ mod tests {
             "run-persistent",
             "success-persistent",
             "knowledge_search",
+            "",
             &success,
             false,
             Some("session-token"),
@@ -10630,6 +10853,7 @@ mod tests {
             "run-persistent",
             "error-persistent",
             "knowledge_search",
+            "",
             &failure,
             false,
             Some("session-token"),
@@ -15188,19 +15412,27 @@ mod tests {
         let run = run_a_provider_write(true, &["msg-0", "msg-1"]).await;
 
         assert_eq!(run.operations_called, ["gmail.send", "gmail.messages"]);
-        for (where_, text) in [
-            ("the next round's tool context", &run.next_round_context),
-            ("the durable step record", &run.step_record),
-        ] {
-            assert!(
-                text.contains("Executed gmail.send."),
-                "{where_} keeps the write's own result: {text}"
-            );
-            assert!(
-                text.contains("Verified against the system of record:"),
-                "{where_} must carry the verdict: {text}"
-            );
-        }
+        assert!(
+            run.next_round_context.contains("Executed gmail.send.")
+                && run
+                    .next_round_context
+                    .contains("Verified against the system of record:"),
+            "the next round keeps the write's result and its verdict: {}",
+            run.next_round_context
+        );
+        assert!(
+            run.step_record.contains("connector_write op=gmail.send")
+                && run
+                    .step_record
+                    .contains("Verified against the system of record:"),
+            "the durable step record must carry the verdict: {}",
+            run.step_record
+        );
+        assert!(
+            !run.step_record.contains("Result:") && !run.step_record.contains("Executed gmail.send"),
+            "the durable step record must not keep the write's result body: {}",
+            run.step_record
+        );
     }
 
     #[tokio::test]
