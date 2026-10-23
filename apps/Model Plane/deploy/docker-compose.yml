@@ -1776,6 +1776,11 @@ services:
       # docker-compose.override.yml) — a production instance must always be
       # able to verify, since any AcquireLease request could carry a space_id.
       SANDBOX_MANAGER_BACKEND_ID: ${SANDBOX_MANAGER_BACKEND_ID:-}
+      # WS22-S1: thread-scoped leases and the thread workspace RPCs. Empty keeps the switch off; do not set it to true in any environment
+      # until WS22-S5 (retention and erasure) ships, because DeleteThreadWorkspace is still unimplemented.
+      SANDBOX_MANAGER_THREAD_WORKSPACE: ${SANDBOX_MANAGER_THREAD_WORKSPACE:-}
+      SANDBOX_MANAGER_THREAD_MAX_FILES: ${SANDBOX_MANAGER_THREAD_MAX_FILES:-256}
+      SANDBOX_MANAGER_THREAD_MAX_BYTES: ${SANDBOX_MANAGER_THREAD_MAX_BYTES:-67108864}
       CONTROL_SPACE_DECISION_KEY_ID: ${CONTROL_SPACE_DECISION_KEY_ID:-}
       CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64: ${CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64:-}
     depends_on:
