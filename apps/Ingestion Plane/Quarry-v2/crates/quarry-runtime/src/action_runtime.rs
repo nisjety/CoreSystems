@@ -6,22 +6,28 @@
 
 use std::sync::Arc;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use quarry_browser::{
     actions::{Action, ActionScript, OnError, ScrollTarget},
     BrowserDriver, BrowserEgressPolicy, BrowserSession,
 };
 use quarry_core::{
-    error::{QuarryError, QuarryResult},
+    capture::{CaptureLimits, ImageFormat},
+    error::{ErrorCode, QuarryError, QuarryResult},
     event::EventType,
     ids::kinds::{ArtifactKind, RunKind},
     lease::BrowserLease,
 };
 use serde_json::json;
+use quarry_core::scrape_actions::{
+    ActionError, ActionOnError, ActionOutcome, ActionOutput, ActionStatus, ScrapeAction, ScrollDirection,
+    ScrollTo, ValidatedActions,
+};
+use tokio_util::sync::CancellationToken;
 use tracing::{trace, warn};
 
-use crate::{artifact_store::ArtifactStore, events::EventSink};
+use crate::{artifact_store::ArtifactStore, capture::ActionOutputBytes, events::EventSink};
 
 #[derive(Debug, Clone)]
 pub struct ActionResult {
@@ -75,6 +81,11 @@ pub struct ActionRuntime {
     /// runtime stores so the bytes are only readable back by that tenant. Set
     /// via [`ActionRuntime::with_run_context`].
     org_id: String,
+    /// WS13.5: `false` for a runtime attached to a session another fetch holds.
+    /// Such a runtime never acquires or releases that session.
+    owns_session: bool,
+    /// WS13.5: the point a direction scroll wheels at (CSS pixels).
+    viewport_centre: (f64, f64),
 }
 
 impl Default for ActionRuntime {
@@ -94,6 +105,8 @@ impl ActionRuntime {
             page_hash: None,
             egress_policy: BrowserEgressPolicy::deny_all(),
             org_id: String::new(),
+            owns_session: true,
+            viewport_centre: DEFAULT_VIEWPORT_CENTRE,
         }
     }
 
@@ -138,6 +151,13 @@ impl ActionRuntime {
     }
 
     pub async fn acquire(&mut self, lease: &BrowserLease) -> QuarryResult<()> {
+        if !self.owns_session {
+            return Err(QuarryError::new(
+                ErrorCode::BadRequest,
+                "an attached runtime does not acquire a session",
+            )
+            .with_details(serde_json::json!({ "reason": "attached_runtime" })));
+        }
         if let Some(driver) = &self.browser {
             let session = driver.acquire(lease).await?;
             if let Err(error) = driver
@@ -155,6 +175,9 @@ impl ActionRuntime {
     }
 
     pub async fn release(&mut self) -> QuarryResult<()> {
+        if !self.owns_session {
+            return Ok(());
+        }
         if let (Some(driver), Some(session)) = (self.browser.as_ref(), self.session.take()) {
             driver.release(session).await?;
         }
@@ -441,6 +464,750 @@ impl ActionRuntime {
             result = result.with_artifact(id);
         }
         Ok(result)
+    }
+}
+
+// WS13.5: scrape-time actions on the page a scrape has already opened.
+
+/// The longest one action may hold the driver, before the run's deadline.
+const PER_ACTION_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The viewport centre (CSS pixels) a direction scroll wheels at when the lease
+/// names no viewport.
+const DEFAULT_VIEWPORT_CENTRE: (f64, f64) = (640.0, 400.0);
+
+/// What one scrape-time action run may spend. The caller sets the deadline (the
+/// request's budget less the time already used) and the wait caps.
+#[derive(Debug, Clone)]
+pub struct ActionBudget {
+    pub deadline: Instant,
+    pub max_total_wait_ms: u64,
+    pub max_single_wait_ms: u64,
+    pub default_wait_for_ms: u64,
+    pub capture_limits: CaptureLimits,
+}
+
+/// The outcome of a scrape-time action run, in request order.
+#[derive(Debug, Clone, Default)]
+pub struct ScrapeActionRun {
+    pub outcomes: Vec<ActionOutcome>,
+    /// Output bytes per action, index-aligned with `outcomes`.
+    pub outputs: Vec<Option<ActionOutputBytes>>,
+    /// The action whose failure stopped the run under `abort`.
+    pub aborted_at: Option<usize>,
+}
+
+/// One action's successful result.
+struct StepDone {
+    meta: Option<ActionOutput>,
+    bytes: Option<ActionOutputBytes>,
+}
+
+impl StepDone {
+    fn nothing() -> Self {
+        Self {
+            meta: None,
+            bytes: None,
+        }
+    }
+}
+
+fn reason_error(code: ErrorCode, reason: &str) -> QuarryError {
+    QuarryError::new(code, reason).with_details(json!({ "reason": reason }))
+}
+
+/// The typed reason of a failure: its `details.reason` when it has one, else the
+/// error class. Never the driver's message, which can echo page text.
+fn failure_reason(error: &QuarryError) -> String {
+    error
+        .details
+        .as_ref()
+        .and_then(|details| details.get("reason"))
+        .and_then(serde_json::Value::as_str)
+        .map_or_else(|| error.code.wire_name().to_owned(), str::to_owned)
+}
+
+fn selector_of(selector: &Option<String>) -> QuarryResult<&str> {
+    selector
+        .as_deref()
+        .ok_or_else(|| reason_error(ErrorCode::BadRequest, "selector_required"))
+}
+
+/// Charge one wait against the run's budget. A single wait over its cap, or a
+/// run whose waits would pass the total, is a timeout.
+fn charge_wait(budget: &ActionBudget, waited_ms: &mut u64, ms: u64) -> QuarryResult<()> {
+    if ms > budget.max_single_wait_ms {
+        return Err(reason_error(ErrorCode::Timeout, "wait_too_long"));
+    }
+    if waited_ms.saturating_add(ms) > budget.max_total_wait_ms {
+        return Err(reason_error(ErrorCode::Timeout, "wait_budget_exhausted"));
+    }
+    *waited_ms = waited_ms.saturating_add(ms);
+    Ok(())
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+fn outcome(
+    index: usize,
+    kind: &str,
+    status: ActionStatus,
+    duration_ms: u64,
+    error: Option<ActionError>,
+    output: Option<ActionOutput>,
+) -> ActionOutcome {
+    ActionOutcome {
+        index,
+        kind: kind.to_owned(),
+        status,
+        duration_ms,
+        error,
+        output,
+    }
+}
+
+/// Lower one validated action to driver calls and run it. Nothing here retries.
+async fn lower_and_run(
+    driver: &dyn BrowserDriver,
+    session: &BrowserSession,
+    action: &ScrapeAction,
+    budget: &ActionBudget,
+    waited_ms: &mut u64,
+    viewport_centre: (f64, f64),
+) -> QuarryResult<StepDone> {
+    match action {
+        ScrapeAction::Wait {
+            milliseconds: Some(ms),
+            ..
+        } => {
+            charge_wait(budget, waited_ms, *ms)?;
+            tokio::time::sleep(Duration::from_millis(*ms)).await;
+            Ok(StepDone::nothing())
+        }
+        ScrapeAction::Wait {
+            selector: Some(selector),
+            timeout_ms,
+            ..
+        } => {
+            let ms = timeout_ms.unwrap_or(budget.default_wait_for_ms);
+            charge_wait(budget, waited_ms, ms)?;
+            let timeout = u32::try_from(ms).unwrap_or(u32::MAX);
+            driver.wait_for(session, selector, timeout).await?;
+            Ok(StepDone::nothing())
+        }
+        ScrapeAction::Wait { .. } => Err(reason_error(ErrorCode::BadRequest, "wait_needs_a_target")),
+        ScrapeAction::Click { selector } => {
+            driver.click(session, selector_of(selector)?).await?;
+            Ok(StepDone::nothing())
+        }
+        ScrapeAction::Write { selector, text } => {
+            driver
+                .type_text(session, selector_of(selector)?, text)
+                .await?;
+            Ok(StepDone::nothing())
+        }
+        ScrapeAction::Press { key } => {
+            driver.press(session, key).await?;
+            Ok(StepDone::nothing())
+        }
+        ScrapeAction::Scroll {
+            to,
+            selector,
+            direction,
+            pixels,
+        } => {
+            match (to, selector, direction) {
+                (Some(ScrollTo::Top), None, None) => {
+                    driver.scroll(session, &ScrollTarget::Top).await?;
+                }
+                (Some(ScrollTo::Bottom), None, None) => {
+                    driver.scroll(session, &ScrollTarget::Bottom).await?;
+                }
+                (None, Some(target), None) => {
+                    driver
+                        .scroll(session, &ScrollTarget::Selector(target.clone()))
+                        .await?;
+                }
+                (None, None, Some(direction)) => {
+                    let pixels = f64::from(pixels.unwrap_or(0));
+                    let delta_y = match direction {
+                        ScrollDirection::Up => -pixels,
+                        ScrollDirection::Down => pixels,
+                    };
+                    let (x, y) = viewport_centre;
+                    driver.mouse_wheel(session, x, y, 0.0, delta_y).await?;
+                }
+                _ => return Err(reason_error(ErrorCode::BadRequest, "scroll_needs_one_target")),
+            }
+            Ok(StepDone::nothing())
+        }
+        ScrapeAction::Select { selector, value } => {
+            driver
+                .select(session, selector_of(selector)?, value)
+                .await?;
+            Ok(StepDone::nothing())
+        }
+        ScrapeAction::Screenshot(options) => {
+            let image = driver
+                .capture_screenshot(session, options, &budget.capture_limits)
+                .await?;
+            let content_type = match image.format {
+                ImageFormat::Png => "image/png",
+                ImageFormat::Jpeg => "image/jpeg",
+            };
+            let meta = ActionOutput {
+                kind: "screenshot".to_owned(),
+                content_type: content_type.to_owned(),
+                bytes: u64::try_from(image.bytes.len()).unwrap_or(u64::MAX),
+                width: Some(image.width_px),
+                height: Some(image.height_px),
+            };
+            Ok(StepDone {
+                meta: Some(meta),
+                bytes: Some(ActionOutputBytes {
+                    content_type: content_type.to_owned(),
+                    bytes: image.bytes,
+                }),
+            })
+        }
+        ScrapeAction::Pdf(options) => {
+            let pdf = driver
+                .capture_pdf(session, options, &budget.capture_limits)
+                .await?;
+            let meta = ActionOutput {
+                kind: "pdf".to_owned(),
+                content_type: "application/pdf".to_owned(),
+                bytes: u64::try_from(pdf.bytes.len()).unwrap_or(u64::MAX),
+                width: None,
+                height: None,
+            };
+            Ok(StepDone {
+                meta: Some(meta),
+                bytes: Some(ActionOutputBytes {
+                    content_type: "application/pdf".to_owned(),
+                    bytes: pdf.bytes,
+                }),
+            })
+        }
+    }
+}
+
+impl ActionRuntime {
+    /// WS13.5: a runtime over a session that a scrape already holds. It never
+    /// acquires or releases the session (the fetch that opened it does), and it
+    /// has no artifact store, event sink or run context.
+    pub fn attached(driver: Arc<dyn BrowserDriver>, session: BrowserSession) -> Self {
+        let viewport_centre = session
+            .lease
+            .viewport
+            .as_ref()
+            .map_or(DEFAULT_VIEWPORT_CENTRE, |viewport| {
+                (f64::from(viewport.width) / 2.0, f64::from(viewport.height) / 2.0)
+            });
+        Self {
+            browser: Some(driver),
+            session: Some(session),
+            owns_session: false,
+            viewport_centre,
+            ..Self::new()
+        }
+    }
+
+    /// WS13.5: run a request's validated actions in order on the attached page.
+    ///
+    /// A missing driver or session is an `Err`, never a dry run. Each action
+    /// runs under the per-action timeout and the run's deadline, is never
+    /// retried, and reports a reason class (never the driver's message, which
+    /// can echo page text or the text typed). Under `abort` the first failure
+    /// stops the run and every later action is `skipped`; under `continue` the
+    /// run goes on. A cancelled token or an expired deadline stops the run before
+    /// the next action.
+    pub async fn run_scrape(
+        &self,
+        plan: &ValidatedActions,
+        budget: &ActionBudget,
+        cancel: &CancellationToken,
+    ) -> QuarryResult<ScrapeActionRun> {
+        let (Some(driver), Some(session)) = (self.browser.as_ref(), self.session.as_ref()) else {
+            return Err(reason_error(ErrorCode::DriverFailed, "no_browser_session"));
+        };
+        let mut run = ScrapeActionRun::default();
+        let mut waited_ms = 0_u64;
+        for (index, action) in plan.actions.iter().enumerate() {
+            let kind = action.type_name();
+            if run.aborted_at.is_some() {
+                run.outcomes
+                    .push(outcome(index, kind, ActionStatus::Skipped, 0, None, None));
+                run.outputs.push(None);
+                continue;
+            }
+            let started = Instant::now();
+            let step: QuarryResult<StepDone> = if cancel.is_cancelled() {
+                Err(reason_error(ErrorCode::Timeout, "actions_cancelled"))
+            } else if started >= budget.deadline {
+                Err(reason_error(ErrorCode::Timeout, "actions_deadline"))
+            } else {
+                let remaining = budget.deadline.saturating_duration_since(started);
+                let work = lower_and_run(
+                    driver.as_ref(),
+                    session,
+                    action,
+                    budget,
+                    &mut waited_ms,
+                    self.viewport_centre,
+                );
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => {
+                        Err(reason_error(ErrorCode::Timeout, "actions_cancelled"))
+                    }
+                    done = tokio::time::timeout(remaining.min(PER_ACTION_TIMEOUT), work) => {
+                        done.unwrap_or_else(|_| {
+                            Err(reason_error(ErrorCode::Timeout, "actions_deadline"))
+                        })
+                    }
+                }
+            };
+            match step {
+                Ok(done) => {
+                    run.outcomes.push(outcome(
+                        index,
+                        kind,
+                        ActionStatus::Ok,
+                        elapsed_ms(started),
+                        None,
+                        done.meta,
+                    ));
+                    run.outputs.push(done.bytes);
+                }
+                Err(error) => {
+                    let error_view = ActionError {
+                        code: error.code.wire_name().to_owned(),
+                        message: failure_reason(&error),
+                    };
+                    run.outcomes.push(outcome(
+                        index,
+                        kind,
+                        ActionStatus::Failed,
+                        elapsed_ms(started),
+                        Some(error_view),
+                        None,
+                    ));
+                    run.outputs.push(None);
+                    if plan.on_error == ActionOnError::Abort {
+                        run.aborted_at = Some(index);
+                    }
+                }
+            }
+        }
+        Ok(run)
+    }
+}
+
+#[cfg(test)]
+mod scrape_run_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use bytes::Bytes;
+    use quarry_browser::SessionInner;
+    use quarry_core::capture::{CapturedImage, ScreenshotOptions};
+    use quarry_core::ids::kinds;
+    use quarry_core::lease::{BrowserViewport, ProxyAffinity};
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex as StdMutex;
+    use tokio::sync::Mutex;
+
+    /// Records each call by kind and target, never by its text. Fails the
+    /// calls aimed at `fail_selector` with a typed reason.
+    #[derive(Default)]
+    struct Recorder {
+        calls: StdMutex<Vec<String>>,
+        acquires: AtomicUsize,
+        releases: AtomicUsize,
+        fail_selector: Option<String>,
+    }
+
+    impl Recorder {
+        fn failing(selector: &str) -> Self {
+            Self {
+                fail_selector: Some(selector.to_owned()),
+                ..Self::default()
+            }
+        }
+
+        fn log(&self, call: String) {
+            self.calls.lock().unwrap().push(call);
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+
+        fn check(&self, selector: &str) -> QuarryResult<()> {
+            if self.fail_selector.as_deref() == Some(selector) {
+                return Err(reason_error(ErrorCode::DriverFailed, "element_not_found"));
+            }
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl BrowserDriver for Recorder {
+        async fn acquire(&self, _lease: &BrowserLease) -> QuarryResult<BrowserSession> {
+            self.acquires.fetch_add(1, Ordering::SeqCst);
+            Ok(session(None))
+        }
+
+        async fn release(&self, _session: BrowserSession) -> QuarryResult<()> {
+            self.releases.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn goto(&self, _session: &BrowserSession, _url: &str) -> QuarryResult<()> {
+            Ok(())
+        }
+
+        async fn content(&self, _session: &BrowserSession) -> QuarryResult<Bytes> {
+            Ok(Bytes::new())
+        }
+
+        async fn screenshot(
+            &self,
+            _session: &BrowserSession,
+            _full_page: bool,
+        ) -> QuarryResult<Bytes> {
+            Ok(Bytes::from_static(&[1, 2, 3]))
+        }
+
+        async fn pdf(&self, _session: &BrowserSession) -> QuarryResult<Bytes> {
+            Ok(Bytes::from_static(&[4, 5]))
+        }
+
+        async fn click(&self, _session: &BrowserSession, selector: &str) -> QuarryResult<()> {
+            self.log(format!("click {selector}"));
+            self.check(selector)
+        }
+
+        async fn type_text(
+            &self,
+            _session: &BrowserSession,
+            selector: &str,
+            _text: &str,
+        ) -> QuarryResult<()> {
+            self.log(format!("type {selector}"));
+            self.check(selector)
+        }
+
+        async fn wait_for(
+            &self,
+            _session: &BrowserSession,
+            selector: &str,
+            timeout_ms: u32,
+        ) -> QuarryResult<()> {
+            self.log(format!("wait_for {selector} {timeout_ms}"));
+            self.check(selector)
+        }
+
+        async fn press(&self, _session: &BrowserSession, key: &str) -> QuarryResult<()> {
+            self.log(format!("press {key}"));
+            Ok(())
+        }
+
+        async fn select(
+            &self,
+            _session: &BrowserSession,
+            selector: &str,
+            value: &str,
+        ) -> QuarryResult<()> {
+            self.log(format!("select {selector} {value}"));
+            self.check(selector)
+        }
+
+        async fn scroll(
+            &self,
+            _session: &BrowserSession,
+            target: &ScrollTarget,
+        ) -> QuarryResult<()> {
+            self.log(format!("scroll {target:?}"));
+            Ok(())
+        }
+
+        async fn mouse_wheel(
+            &self,
+            _session: &BrowserSession,
+            x: f64,
+            y: f64,
+            delta_x: f64,
+            delta_y: f64,
+        ) -> QuarryResult<()> {
+            self.log(format!("wheel {x} {y} {delta_x} {delta_y}"));
+            Ok(())
+        }
+
+        async fn capture_screenshot(
+            &self,
+            _session: &BrowserSession,
+            _options: &ScreenshotOptions,
+            _limits: &CaptureLimits,
+        ) -> QuarryResult<CapturedImage> {
+            self.log("capture screenshot".to_owned());
+            Ok(CapturedImage {
+                bytes: vec![9, 9],
+                format: ImageFormat::Png,
+                width_px: 4,
+                height_px: 3,
+                tiles: 1,
+                stitched: false,
+                truncated: false,
+            })
+        }
+    }
+
+    fn session(viewport: Option<BrowserViewport>) -> BrowserSession {
+        BrowserSession {
+            lease: BrowserLease {
+                lease_id: kinds::LeaseKind::new(),
+                profile_id: kinds::ProfileKind::new(),
+                session_affinity_key: "test".into(),
+                proxy_affinity: ProxyAffinity {
+                    pool: "default".into(),
+                    sticky_key: None,
+                },
+                ttl_s: 30,
+                capabilities: vec![],
+                artifact_bucket: "default".into(),
+                persist_profile: false,
+                viewport,
+                org_id: "org_test".into(),
+            },
+            inner: Arc::new(Mutex::new(SessionInner::default())),
+            tab_pin: None,
+        }
+    }
+
+    fn viewport(width: u32, height: u32) -> Option<BrowserViewport> {
+        serde_json::from_value(json!({ "width": width, "height": height })).ok()
+    }
+
+    fn plan(actions: Vec<ScrapeAction>, on_error: ActionOnError) -> ValidatedActions {
+        ValidatedActions {
+            actions,
+            on_error,
+            total_wait_ms: 0,
+            capture_count: 0,
+            type_counts: BTreeMap::new(),
+        }
+    }
+
+    fn click(selector: &str) -> ScrapeAction {
+        ScrapeAction::Click {
+            selector: Some(selector.to_owned()),
+        }
+    }
+
+    fn wait_ms(ms: u64) -> ScrapeAction {
+        ScrapeAction::Wait {
+            milliseconds: Some(ms),
+            selector: None,
+            timeout_ms: None,
+        }
+    }
+
+    fn budget(max_total_wait_ms: u64) -> ActionBudget {
+        ActionBudget {
+            deadline: Instant::now() + Duration::from_secs(30),
+            max_total_wait_ms,
+            max_single_wait_ms: 30_000,
+            default_wait_for_ms: 5_000,
+            capture_limits: CaptureLimits::default(),
+        }
+    }
+
+    fn attached(recorder: &Arc<Recorder>, viewport: Option<BrowserViewport>) -> ActionRuntime {
+        let driver: Arc<dyn BrowserDriver> = recorder.clone();
+        ActionRuntime::attached(driver, session(viewport))
+    }
+
+    #[tokio::test]
+    async fn attached_runtime_never_acquires_or_releases_the_session() {
+        let recorder = Arc::new(Recorder::default());
+        let mut runtime = attached(&recorder, None);
+        let lease = session(None).lease;
+        assert!(runtime.acquire(&lease).await.is_err());
+        runtime.release().await.unwrap();
+        assert_eq!(recorder.acquires.load(Ordering::SeqCst), 0);
+        assert_eq!(recorder.releases.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn run_scrape_runs_actions_in_order_and_records_ordered_outcomes() {
+        let recorder = Arc::new(Recorder::default());
+        let runtime = attached(&recorder, None);
+        let actions = plan(
+            vec![
+                click("#swap"),
+                wait_ms(1),
+                ScrapeAction::Press {
+                    key: "Enter".into(),
+                },
+            ],
+            ActionOnError::Abort,
+        );
+        let run = runtime
+            .run_scrape(&actions, &budget(60_000), &CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(recorder.calls(), ["click #swap", "press Enter"]);
+        assert!(run.outcomes.iter().all(|o| o.status == ActionStatus::Ok));
+        let indices: Vec<usize> = run.outcomes.iter().map(|o| o.index).collect();
+        assert_eq!(indices, vec![0, 1, 2]);
+        assert_eq!(run.aborted_at, None);
+    }
+
+    #[tokio::test]
+    async fn abort_marks_later_actions_skipped() {
+        let recorder = Arc::new(Recorder::failing("#missing"));
+        let runtime = attached(&recorder, None);
+        let actions = plan(vec![click("#missing"), click("#later")], ActionOnError::Abort);
+        let run = runtime
+            .run_scrape(&actions, &budget(60_000), &CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(run.aborted_at, Some(0));
+        assert_eq!(run.outcomes[0].status, ActionStatus::Failed);
+        assert_eq!(
+            run.outcomes[0].error.as_ref().unwrap().message,
+            "element_not_found"
+        );
+        assert_eq!(run.outcomes[1].status, ActionStatus::Skipped);
+        assert_eq!(recorder.calls(), ["click #missing"]);
+    }
+
+    #[tokio::test]
+    async fn continue_records_failure_and_keeps_going() {
+        let recorder = Arc::new(Recorder::failing("#missing"));
+        let runtime = attached(&recorder, None);
+        let actions = plan(
+            vec![click("#missing"), click("#ok")],
+            ActionOnError::Continue,
+        );
+        let run = runtime
+            .run_scrape(&actions, &budget(60_000), &CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(run.aborted_at, None);
+        assert_eq!(run.outcomes[0].status, ActionStatus::Failed);
+        assert_eq!(run.outcomes[1].status, ActionStatus::Ok);
+        assert_eq!(recorder.calls(), ["click #missing", "click #ok"]);
+    }
+
+    #[tokio::test]
+    async fn no_retry_on_failure() {
+        let recorder = Arc::new(Recorder::failing("#submit"));
+        let runtime = attached(&recorder, None);
+        let actions = plan(vec![click("#submit")], ActionOnError::Continue);
+        runtime
+            .run_scrape(&actions, &budget(60_000), &CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(recorder.calls(), ["click #submit"]);
+    }
+
+    #[tokio::test]
+    async fn scroll_direction_maps_to_mouse_wheel_at_viewport_centre() {
+        let recorder = Arc::new(Recorder::default());
+        let runtime = attached(&recorder, viewport(1000, 800));
+        let actions = plan(
+            vec![ScrapeAction::Scroll {
+                to: None,
+                selector: None,
+                direction: Some(ScrollDirection::Down),
+                pixels: Some(300),
+            }],
+            ActionOnError::Abort,
+        );
+        runtime
+            .run_scrape(&actions, &budget(60_000), &CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(recorder.calls(), ["wheel 500 400 0 300"]);
+    }
+
+    #[tokio::test]
+    async fn wait_budget_and_deadline_stop_the_run_with_timeout() {
+        let recorder = Arc::new(Recorder::default());
+        let runtime = attached(&recorder, None);
+        let actions = plan(vec![wait_ms(40), wait_ms(40)], ActionOnError::Abort);
+        let run = runtime
+            .run_scrape(&actions, &budget(50), &CancellationToken::new())
+            .await
+            .unwrap();
+        let failed = run.outcomes[1].error.as_ref().unwrap();
+        assert_eq!(failed.code, "TIMEOUT");
+        assert_eq!(failed.message, "wait_budget_exhausted");
+
+        let expired = ActionBudget {
+            deadline: Instant::now(),
+            ..budget(60_000)
+        };
+        let run = runtime
+            .run_scrape(&plan(vec![click("#a")], ActionOnError::Abort), &expired, &CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            run.outcomes[0].error.as_ref().unwrap().message,
+            "actions_deadline"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_token_stops_between_actions() {
+        let recorder = Arc::new(Recorder::default());
+        let runtime = attached(&recorder, None);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let actions = plan(vec![click("#a")], ActionOnError::Abort);
+        let run = runtime
+            .run_scrape(&actions, &budget(60_000), &cancel)
+            .await
+            .unwrap();
+        assert_eq!(
+            run.outcomes[0].error.as_ref().unwrap().message,
+            "actions_cancelled"
+        );
+        assert!(recorder.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn error_messages_never_contain_write_text() {
+        let recorder = Arc::new(Recorder::failing("#q"));
+        let runtime = attached(&recorder, None);
+        let actions = plan(
+            vec![ScrapeAction::Write {
+                selector: Some("#q".into()),
+                text: "SECRET_TEXT_XYZ".into(),
+            }],
+            ActionOnError::Continue,
+        );
+        let run = runtime
+            .run_scrape(&actions, &budget(60_000), &CancellationToken::new())
+            .await
+            .unwrap();
+        let serialized = serde_json::to_string(&run.outcomes).unwrap();
+        assert!(!serialized.contains("SECRET_TEXT_XYZ"));
+    }
+
+    #[tokio::test]
+    async fn missing_driver_or_session_is_an_error_not_dry_run() {
+        let runtime = ActionRuntime::new();
+        let actions = plan(vec![click("#a")], ActionOnError::Abort);
+        let result = runtime
+            .run_scrape(&actions, &budget(60_000), &CancellationToken::new())
+            .await;
+        assert!(result.is_err());
     }
 }
 

@@ -13,6 +13,8 @@ use quarry_browser::{
     BrowserDriver as BrowserDriverTrait, BrowserEgressPolicy, BrowserSession, StitchPermit,
 };
 use quarry_core::capture::{CaptureLimits, CapturePlan};
+use quarry_core::scrape_actions::{ActionLimits, ActionStatus};
+use tokio_util::sync::CancellationToken;
 use quarry_core::output::DriverKind;
 use quarry_core::{
     ids::kinds,
@@ -21,6 +23,7 @@ use quarry_core::{
 };
 
 use crate::{
+    action_runtime::{ActionBudget, ActionRuntime, ScrapeActionRun},
     capture::{CaptureWarning, PageCaptures},
     driver::{Driver, FetchHints, ScrapeCapabilities},
     fetch::FetchResponse,
@@ -520,6 +523,18 @@ impl BrowserDriverAdapter {
         if hints.render.capture.is_some() && !self.inner.capabilities().capture_options {
             return Err(capture_unavailable());
         }
+        // WS13.5: actions need a browser that can run them. Refused before the pool is
+        // touched, like a capture.
+        if hints.render.actions.is_some() && !self.inner.capabilities().scrape_actions {
+            return Err(actions_unavailable());
+        }
+        // WS13.5: a request with actions holds one heavy-lane permit for the whole page
+        // run. A busy lane is a 429 at once, never a queue (a capture crops instead).
+        let _heavy_permit = if hints.render.actions.is_some() {
+            Some(self.heavy.clone().try_acquire_owned().map_err(|_| heavy_browser_busy())?)
+        } else {
+            None
+        };
         let key = url.host_str().unwrap_or("default").to_string();
         let mut guard = self
             .pool
@@ -624,6 +639,37 @@ impl BrowserDriverAdapter {
             }
         }
 
+        // WS13.5: scrape-time actions run on the page the fetch opened, after the
+        // selector wait and before the page is read. Under `abort` a failure releases
+        // the session and fails the fetch with the ordered outcomes; under `continue`
+        // the outcomes ride the captures and the run goes on. The page-level cancel
+        // token is never fired here: dropping the fetch future releases the session.
+        let mut actions_ran: Option<ScrapeActionRun> = None;
+        if let Some(plan) = hints.render.actions.as_deref() {
+            let limits = ActionLimits::default();
+            let budget = ActionBudget {
+                deadline: Instant::now() + hints.render.actions_deadline.unwrap_or(ACTIONS_DEADLINE),
+                max_total_wait_ms: limits.max_total_wait_ms,
+                max_single_wait_ms: limits.max_single_wait_ms,
+                default_wait_for_ms: limits.default_wait_for_ms,
+                capture_limits: hints.render.capture_limits.clone(),
+            };
+            let attached = ActionRuntime::attached(self.inner.clone(), session.clone());
+            let cancel = CancellationToken::new();
+            let run = match attached.run_scrape(plan, &budget, &cancel).await {
+                Ok(run) => run,
+                Err(e) => {
+                    let _ = held.finish(true).await;
+                    return Err(e);
+                }
+            };
+            if let Some(index) = run.aborted_at {
+                let _ = held.finish(true).await;
+                return Err(action_failed(&run, index));
+            }
+            actions_ran = Some(run);
+        }
+
         let mut body_bytes = match self.inner.content(session).await {
             Ok(b) => b,
             Err(e) => {
@@ -671,7 +717,7 @@ impl BrowserDriverAdapter {
 
         // WS13.4b: capture what the request asked for while the page is still
         // open, before the session is released.
-        let captures = match hints.render.capture.as_ref() {
+        let mut captures = match hints.render.capture.as_ref() {
             Some(plan) => {
                 // WS13.6: a stitch permit only when the page needs one and the heavy lane is free.
                 let stitch = self.stitch_permit_for(session, plan).await;
@@ -690,9 +736,30 @@ impl BrowserDriverAdapter {
             None => None,
         };
 
+        // WS13.5: the ordered action outcomes and their output bytes ride the captures,
+        // and the final URL is the page the actions left the browser on.
+        let final_url = match actions_ran.take() {
+            Some(run) => {
+                let caps = captures.get_or_insert_with(|| Box::new(PageCaptures::default()));
+                if run.outcomes.iter().any(|o| o.status == ActionStatus::Failed) {
+                    caps.warnings.push(CaptureWarning {
+                        code: "action_failed".into(),
+                        message: "an action failed and the run went on (continue)".into(),
+                    });
+                }
+                caps.actions = run.outcomes;
+                caps.action_outputs = run.outputs;
+                match self.inner.current_url(session).await {
+                    Ok(Some(raw)) => raw.parse::<Url>().unwrap_or_else(|_| url.clone()),
+                    _ => url.clone(),
+                }
+            }
+            None => url.clone(),
+        };
+
         let response = FetchResponse {
             status: 200,
-            final_url: url.clone(),
+            final_url,
             // A DOM snapshot is UTF-8 by construction (CDP hands it over
             // as a JSON string), but this response used to carry no
             // headers at all — leaving the pipeline's charset decode with
@@ -714,6 +781,43 @@ impl BrowserDriverAdapter {
 
         Ok(response)
     }
+}
+
+/// WS13.5: the longest a scrape-time action run may take when the caller set no
+/// deadline (the router allows 125 s with actions on; the handler bounds at 115 s).
+const ACTIONS_DEADLINE: Duration = Duration::from_secs(115);
+
+/// WS13.5: the typed refusal for actions on a browser that cannot run them.
+fn actions_unavailable() -> QuarryError {
+    QuarryError::new(
+        ErrorCode::Unsupported,
+        "this browser cannot run scrape actions",
+    )
+    .with_details(serde_json::json!({ "reason": "browser_capability_unavailable" }))
+}
+
+/// WS13.5: the heavy lane is held by another action run. Same 429 body as a rate limit.
+fn heavy_browser_busy() -> QuarryError {
+    QuarryError::new(
+        ErrorCode::RateLimited,
+        "the browser is busy with another action run; try again shortly",
+    )
+    .with_details(serde_json::json!({ "reason": "heavy_browser_busy" }))
+}
+
+/// WS13.5: an action failed under `abort`. The details carry every outcome in order,
+/// so the caller sees which action stopped the run and what was skipped. Never a
+/// driver message or a typed text.
+fn action_failed(run: &ScrapeActionRun, index: usize) -> QuarryError {
+    let action_type = run.outcomes.get(index).map_or("unknown", |o| o.kind.as_str());
+    QuarryError::new(ErrorCode::DriverFailed, "a scrape action failed").with_details(
+        serde_json::json!({
+            "reason": "action_failed",
+            "action_index": index,
+            "action_type": action_type,
+            "actions": run.outcomes,
+        }),
+    )
 }
 
 #[cfg(test)]

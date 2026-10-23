@@ -4,6 +4,11 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+use std::sync::Arc;
+use std::time::Duration;
+
+use quarry_core::scrape_actions::ValidatedActions;
+
 use quarry_core::capture::{CaptureLimits, CapturePlan};
 use quarry_core::output::DriverKind;
 use quarry_core::privacy::PrivacyPolicy;
@@ -86,12 +91,18 @@ pub struct RenderHints {
     /// Under ZDR, the inline cap for the capture bytes a response carries.
     /// `None` uses `capture::DEFAULT_INLINE_CAPTURE_MAX_BYTES`.
     pub capture_inline_max_bytes: Option<usize>,
+    /// WS13.5: the validated scrape-time actions to run on the settled page, after
+    /// the selector wait and before the page is read. `None` (default): no actions.
+    pub actions: Option<Arc<ValidatedActions>>,
+    /// WS13.5: how long the action run may take, counted from the start of the
+    /// run. `None` uses the built-in 115 s.
+    pub actions_deadline: Option<Duration>,
 }
 
 impl RenderHints {
-    /// Whether this render needs a browser: a capture is asked for.
+    /// Whether this render needs a browser: a capture or an action is asked for.
     pub fn needs_browser(&self) -> bool {
-        self.capture.is_some()
+        self.capture.is_some() || self.actions.is_some()
     }
 }
 
@@ -99,7 +110,7 @@ impl RenderHints {
 /// can do neither.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ScrapeCapabilities {
-    /// Scrape-time actions (WS13.5). Not in this slice.
+    /// Scrape-time actions (WS13.5): the driver runs them on the page a scrape opened.
     pub actions: bool,
     /// Scrape-time screenshots and PDFs (WS13.4b).
     pub capture: bool,
