@@ -49,6 +49,12 @@ pub struct RedactionStamp {
     pub probe: ProbeState,
     pub probe_ms: u32,
     pub screenshot: ScreenshotState,
+    /// WS12.S5: milliseconds the screenshot scan and mask took (0 when none ran).
+    pub mask_ms: u32,
+    /// WS12.S5: cross-origin iframes the scan could not look into. A count only.
+    pub oopif_frames: u32,
+    /// WS12.S5: how many rectangles were painted over (0 for `none` and `withheld`).
+    pub rects: u32,
 }
 
 impl Default for RedactionStamp {
@@ -62,6 +68,9 @@ impl Default for RedactionStamp {
             probe: ProbeState::default(),
             probe_ms: 0,
             screenshot: ScreenshotState::default(),
+            mask_ms: 0,
+            oopif_frames: 0,
+            rects: 0,
         }
     }
 }
@@ -98,6 +107,27 @@ mod tests {
         assert_eq!(s.rule_version, RULE_VERSION);
         assert_eq!(s.probe, ProbeState::Skipped);
         assert_eq!(s.screenshot, ScreenshotState::NotApplicable);
+        assert_eq!((s.mask_ms, s.oopif_frames, s.rects), (0, 0, 0));
+    }
+
+    #[test]
+    fn the_screenshot_fields_round_trip_and_an_older_stamp_still_reads() {
+        let mut s = RedactionStamp::default();
+        s.screenshot = ScreenshotState::Masked;
+        s.mask_ms = 12;
+        s.oopif_frames = 2;
+        s.rects = 3;
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["screenshot"], "masked");
+        assert_eq!(v["mask_ms"], 12);
+        assert_eq!(v["oopif_frames"], 2);
+        assert_eq!(v["rects"], 3);
+        let back: RedactionStamp = serde_json::from_value(v).unwrap();
+        assert_eq!(back, s);
+        // A stamp written before WS12.S5 has none of the three fields.
+        let old: RedactionStamp =
+            serde_json::from_str(r#"{"probe":"ok","screenshot":"none"}"#).unwrap();
+        assert_eq!((old.mask_ms, old.oopif_frames, old.rects), (0, 0, 0));
     }
 
     #[test]
