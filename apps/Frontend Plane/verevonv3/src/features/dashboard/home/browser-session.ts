@@ -65,6 +65,8 @@ export type BrowserSessionViewModel = {
   frameUrl?: string | null
   host: string
   controlMode: BrowserControlMode
+  /** Quarry's control epoch (WS9.I), when the projection carries one. */
+  controlEpoch?: number | null
   devtoolsEvents: BrowserDevtoolsEvent[]
   devtoolsUrl?: string | null
   liveFrameStreamUrl?: string | null
@@ -144,6 +146,7 @@ export function browserSessionFromPreview(preview: ScrapePreview): BrowserSessio
     frameUrl,
     host: hostnameOf(session?.url ?? preview.url),
     controlMode: session?.control?.mode ?? 'agent_control',
+    ...(typeof session?.control?.epoch === 'number' ? { controlEpoch: session.control.epoch } : {}),
     devtoolsEvents: session?.devtools?.events ?? [],
     devtoolsUrl,
     liveFrameStreamUrl,
@@ -375,7 +378,7 @@ export function attachBrowserObservation(
     observation,
     session: {
       ...session,
-      control: { mode: options?.controlMode ?? session.control?.mode ?? 'human_takeover' },
+      control: { ...session.control, mode: options?.controlMode ?? session.control?.mode ?? 'human_takeover' },
       frame: screenshotArtifactId
         ? {
             artifactId: screenshotArtifactId,
@@ -481,6 +484,7 @@ function normalizeBrowserTabs(
         tabId,
         title: tab.title?.trim() || null,
         url: tab.url?.trim() || null,
+        ...(tab.openedBy === 'agent' || tab.openedBy === 'human' ? { openedBy: tab.openedBy } : {}),
       },
     ]
   }, [])

@@ -170,6 +170,7 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
 
   // Browser control (advanced/internal surfaces — low pilot exposure, still safe to map)
   browser_human_takeover_active: { no: 'En person har overtatt styringen av denne nettleserøkten.', en: 'Human takeover is active for this browser session.' },
+  browser_control_epoch_stale: { no: 'Styringen av nettleseren ble endret et annet sted. Oppdatert; prøv igjen.', en: 'Browser control changed elsewhere. It has been refreshed; try again.' },
   browser_capacity_reached: { no: 'Det er for mange nettleserøkter i gang akkurat nå.', en: 'There are too many browser sessions running right now.', retryable: true },
   browser_session_not_found: { no: 'Fant ikke nettleserøkten.', en: 'Browser session not found.' },
   browser_procedure_not_compilable: { no: 'Prosedyren kan ikke kompileres ennå. Fullfør flere handlinger og prøv igjen.', en: 'The procedure cannot be compiled yet. Complete more actions and try again.' },

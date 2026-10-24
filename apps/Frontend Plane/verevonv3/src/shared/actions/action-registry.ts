@@ -1196,6 +1196,8 @@ const browserRunActionInput = z.object({
 const browserSetControlModeInput = z.object({
   sessionId: z.string().min(1),
   mode: z.enum(['agent_control', 'human_takeover']),
+  /** WS9.I: the control epoch the caller saw; a stale one is refused with a typed 409. */
+  expectedEpoch: z.number().int().nonnegative().optional(),
 })
 
 const browserSuggestActionInput = z.object({

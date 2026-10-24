@@ -1,3 +1,4 @@
+import { changeBrowserControl, STALE_CONTROL_COPY } from '@/features/browser/dock/browser-control'
 import {
   AlertCircle,
   ArrowRight,
@@ -33,7 +34,6 @@ import {
   renameBrowserProfile,
   runBrowserAction,
   selectBrowserTab,
-  setBrowserControlMode,
   suggestBrowserAction,
   type BrowserAction,
   type BrowserActionSuggestionResponse,
@@ -927,7 +927,7 @@ export function KnowledgeComposer(props: {
     }
   }
 
-  const updateBrowserControlMode = async (mode: BrowserControlMode) => {
+  const updateBrowserControlMode = async (mode: BrowserControlMode, expectedEpoch?: number | null) => {
     const current = preview()
     const sessionId = current?.browserSession?.session.id
     const id = orgId()
@@ -936,8 +936,15 @@ export function KnowledgeComposer(props: {
     setBrowserBusy(true)
     setFormError(null)
     try {
-      const nextSession = await setBrowserControlMode(id, sessionId, mode)
-      setPreview(attachBrowserSession(current, nextSession))
+      // Compare-and-set on the epoch the person saw (WS9.I); a stale epoch refetches once.
+      const outcome = await changeBrowserControl(
+        id,
+        sessionId,
+        mode,
+        expectedEpoch ?? current.browserSession?.session.control?.epoch ?? null,
+      )
+      setPreview(attachBrowserSession(current, outcome.response))
+      if (outcome.stale) setFormError(i18n.tr(STALE_CONTROL_COPY.no, STALE_CONTROL_COPY.en))
       void refreshBrowserOwnerTimeline(sessionId)
     } catch (reason) {
       setFormError(browserErrorMessage(reason, i18n.tr, { no: 'Kunne ikke endre nettleserkontroll.', en: 'Could not change browser control.' }))
@@ -1645,7 +1652,7 @@ export function KnowledgeComposer(props: {
             onBrowserNavigationDismiss={() => setBrowserNavigationError(null)}
             onBrowserNavigationRetry={(url) => void performBrowserAction({ type: 'navigate', url })}
             onBrowserAutoRun={beginBrowserAiRun}
-            onBrowserControlMode={(mode) => void updateBrowserControlMode(mode)}
+            onBrowserControlMode={(mode, expectedEpoch) => void updateBrowserControlMode(mode, expectedEpoch)}
             onBrowserLoopPause={() => browserLoop.requestPause()}
             onBrowserLoopResume={() => browserLoop.requestResume()}
             onBrowserLoopStop={() => browserLoop.requestStop()}

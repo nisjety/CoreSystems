@@ -235,6 +235,8 @@ export type BrowserTab = {
   tabId: string
   title?: string | null
   url?: string | null
+  /** Who opened the tab (WS8.F). Absent until Quarry reports it; the agent marker needs it. */
+  openedBy?: 'human' | 'agent' | null
 }
 
 export type BrowserSession = {
@@ -254,6 +256,8 @@ export type BrowserSession = {
   }
   control?: {
     mode: BrowserControlMode
+    /** Quarry's control epoch (WS9.I): the compare-and-set token for Take over and Give back. */
+    epoch?: number | null
   } | null
   renderMode: BrowserRenderMode
   status: BrowserSessionStatus
@@ -474,15 +478,35 @@ export async function runBrowserAction(
   })
 }
 
+/**
+ * Takes over or hands back browser control. With `expectedEpoch` the change is a
+ * compare-and-set (WS9.I): when the run has moved on the gateway answers 409
+ * `browser_control_epoch_stale` and nothing changes.
+ */
 export async function setBrowserControlMode(
   orgId: string,
   sessionId: string,
   mode: BrowserControlMode,
-  signal?: AbortSignal,
+  options?: { expectedEpoch?: number | null; signal?: AbortSignal },
 ): Promise<BrowserSessionResponse> {
+  const body: { mode: BrowserControlMode; expectedEpoch?: number } = { mode }
+  if (typeof options?.expectedEpoch === 'number') body.expectedEpoch = options.expectedEpoch
   return requestJson<BrowserSessionResponse>(`/api/v1/browser/sessions/${encodeURIComponent(sessionId)}/control`, {
     method: 'POST',
-    body: JSON.stringify({ mode }),
+    body: JSON.stringify(body),
+    headers: orgHeaders(orgId),
+    signal: options?.signal,
+  })
+}
+
+/** Reads one browser session projection (WS9.I: the refetch after a stale control epoch). */
+export async function getBrowserSession(
+  orgId: string,
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<BrowserSessionResponse> {
+  return requestJson<BrowserSessionResponse>(`/api/v1/browser/sessions/${encodeURIComponent(sessionId)}`, {
+    method: 'GET',
     headers: orgHeaders(orgId),
     signal,
   })

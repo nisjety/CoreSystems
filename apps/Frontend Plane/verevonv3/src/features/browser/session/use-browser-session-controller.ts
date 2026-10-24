@@ -8,7 +8,6 @@ import {
   getBrowserOwnerTimeline,
   runBrowserAction,
   selectBrowserTab,
-  setBrowserControlMode,
   type BrowserAction,
   type BrowserActionActor,
   type BrowserControlMode,
@@ -18,6 +17,7 @@ import {
   type BrowserTabsResponse,
   type CreateBrowserSessionRequest,
 } from '@/shared/api/browser-client'
+import { changeBrowserControl, STALE_CONTROL_COPY } from '@/features/browser/dock/browser-control'
 import { gatewayBaseUrl } from '@/shared/api/config'
 import { createAiRunStartKeyring, startBrowserAiRun } from '@/shared/api/browser-run-client'
 import { streamRunEvents } from '@/shared/api/run-console-client'
@@ -93,7 +93,7 @@ export type BrowserSessionController = {
   close: () => Promise<void>
   runAction: (action: BrowserAction, options?: { actor?: BrowserActionActor }) => Promise<void>
   /** Takes over (`human_takeover`) or hands back control. Pauses a running AI loop on takeover. */
-  setControlMode: (mode: BrowserControlMode) => Promise<void>
+  setControlMode: (mode: BrowserControlMode, options?: { expectedEpoch?: number | null }) => Promise<void>
   newTab: () => Promise<void>
   selectTab: (tabId: string) => Promise<void>
   closeTab: (tabId: string) => Promise<void>
@@ -289,7 +289,10 @@ export function createBrowserSessionController(
     }
   }
 
-  const setControlMode = async (mode: BrowserControlMode): Promise<void> => {
+  const setControlMode = async (
+    mode: BrowserControlMode,
+    options?: { expectedEpoch?: number | null },
+  ): Promise<void> => {
     const id = orgIdNow()
     const sessionId = currentSessionId()
     if (!id || !sessionId || busyFlag) return
@@ -297,11 +300,15 @@ export function createBrowserSessionController(
     setBusy(true)
     setError(null)
     try {
-      const next = await setBrowserControlMode(id, sessionId, mode)
+      // Compare-and-set on the epoch the person saw (WS9.I). A stale epoch is not retried:
+      // the projection is refetched once and the notice says so.
+      const expectedEpoch = options?.expectedEpoch ?? preview()?.browserSession?.session.control?.epoch ?? null
+      const outcome = await changeBrowserControl(id, sessionId, mode, expectedEpoch)
       setPreview((current) => {
         if (!current || current.browserSession?.session.id !== sessionId) return current
-        return attachBrowserSession(current, next)
+        return attachBrowserSession(current, outcome.response)
       })
+      if (outcome.stale) setError(tr(STALE_CONTROL_COPY.no, STALE_CONTROL_COPY.en))
       void refreshTimeline(sessionId)
     } catch (reason) {
       setError(browserErrorMessage(reason, tr, {

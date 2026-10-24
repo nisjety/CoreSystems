@@ -275,7 +275,7 @@ function BrowserSessionSurface(props: {
   onBrowserNavigationDismiss?: () => void
   onBrowserNavigationRetry?: (url: string) => void
   onBrowserAutoRun?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
-  onBrowserControlMode?: (mode: BrowserControlMode) => void
+  onBrowserControlMode?: (mode: BrowserControlMode, expectedEpoch?: number | null) => void
   onBrowserLoopPause?: () => void
   onBrowserLoopResume?: () => void
   onBrowserLoopStop?: () => void
@@ -483,7 +483,7 @@ export function ScrapePreviewPanel(props: {
   onBrowserNavigationDismiss?: () => void
   onBrowserNavigationRetry?: (url: string) => void
   onBrowserAutoRun?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
-  onBrowserControlMode?: (mode: BrowserControlMode) => void
+  onBrowserControlMode?: (mode: BrowserControlMode, expectedEpoch?: number | null) => void
   onBrowserLoopPause?: () => void
   onBrowserLoopResume?: () => void
   onBrowserLoopStop?: () => void

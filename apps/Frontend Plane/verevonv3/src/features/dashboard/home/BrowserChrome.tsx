@@ -94,6 +94,7 @@ import { hostnameOf } from './knowledge-preview'
 import { ConsoleFilterBar, emptyConsoleFilter, filterConsoleEntries, type ConsoleFilter } from '@/features/browser/evidence/ConsoleFilterBar'
 import { EgressReceiptsPanel } from '@/features/browser/evidence/EgressReceiptsPanel'
 import { ProcedurePanel } from '@/features/browser/evidence/ProcedurePanel'
+import { BrowserControlStrip } from '@/features/browser/dock/BrowserControlStrip'
 
 export const SESSION_STATUS_LABELS: Record<BrowserSessionViewModel['status'], string> = {
   closed: 'Lukket',
@@ -447,7 +448,7 @@ export function BrowserChrome(props: {
   onBrowserNavigationRetry?: (url: string) => void
   onBrowserAction?: (action: BrowserAction) => void
   onBrowserAutoRun?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
-  onBrowserControlMode?: (mode: BrowserSessionViewModel['controlMode']) => void
+  onBrowserControlMode?: (mode: BrowserSessionViewModel['controlMode'], expectedEpoch?: number | null) => void
   onBrowserLoopPause?: () => void
   onBrowserLoopResume?: () => void
   onBrowserLoopStop?: () => void
@@ -654,7 +655,7 @@ export function BrowserChrome(props: {
     if (browserControlModeDisabled()) return
     const nextMode = humanTakeoverActive() ? 'agent_control' : 'human_takeover'
     if (sendBrowserWsControl(nextMode)) return
-    props.onBrowserControlMode?.(nextMode)
+    props.onBrowserControlMode?.(nextMode, session().controlEpoch ?? null)
   }
   const runAction = (action: BrowserAction) => {
     if (controlsDisabled()) return
@@ -1168,6 +1169,7 @@ export function BrowserChrome(props: {
             >
               <For each={liveBrowserTabs()}>
                 {(tab) => (
+                  <>
                   <button
                     type="button"
                     role="tab"
@@ -1179,10 +1181,30 @@ export function BrowserChrome(props: {
                       if (!tab.active) void props.onBrowserSelectTab?.(tab.tabId)
                     }}
                   >
+                    <Show when={tab.openedBy === 'agent'}>
+                      <span class="knowledge-browser-tab__agent" role="img" aria-label="Åpnet av agenten" title="Åpnet av agenten">
+                        <Bot class="size-3" aria-hidden="true" />
+                      </span>
+                    </Show>
                     <span class="knowledge-browser-tab__dot" data-status={session().status} aria-hidden="true" />
                     <span class="knowledge-browser-tab__mode">Live</span>
                     <strong class="knowledge-browser-tab__label">{liveTabLabel(tab)}</strong>
                   </button>
+                  <Show when={tab.openedBy === 'agent' && !tab.active}>
+                    <button
+                      type="button"
+                      class="knowledge-browser-tab__reveal"
+                      aria-label="Vis agentens fane"
+                      title="Vis agentens fane"
+                      onClick={() => {
+                        setSelectedTimelineStep(null)
+                        void props.onBrowserSelectTab?.(tab.tabId)
+                      }}
+                    >
+                      Vis
+                    </button>
+                  </Show>
+                  </>
                 )}
               </For>
               <For each={timelineTabs()}>
@@ -1868,6 +1890,17 @@ export function BrowserChrome(props: {
         </div>
       </Show>
 
+      <Show when={isLive()}>
+        <BrowserControlStrip
+          controlMode={session().controlMode}
+          controlEpoch={session().controlEpoch ?? null}
+          agentWorking={loopRunning()}
+          busy={props.browserBusy === true}
+          disabled={browserControlModeDisabled()}
+          zdr={session().zdr}
+          onChangeMode={(mode, expectedEpoch) => props.onBrowserControlMode?.(mode, expectedEpoch)}
+        />
+      </Show>
       <Show when={isLive()}>
         <BrowserBlockedNotice
           challenge={session().observation?.challenge}
