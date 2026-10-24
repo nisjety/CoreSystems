@@ -3269,13 +3269,19 @@ pub(crate) async fn append_message_in_tx(
     let candidates = if conversation_only { Vec::new() } else {
         crate::dreaming::extract_memory_candidates(&req.role, &req.content, &req.thread_id)
     };
-    // A paused or off user learns nothing from this turn: no candidate is
-    // persisted and none reaches the Letta mirror. Asked under the user's row
-    // lock, which `persist_candidates` takes again, so the pause cannot land
-    // between the two.
+    // A paused or off user, or a thread set off, learns nothing from this turn:
+    // no candidate is persisted and none reaches the Letta mirror. Asked under the
+    // user's row lock, which `persist_candidates` takes again, so the pause cannot
+    // land between the two.
     let candidates = if candidates.is_empty() {
         candidates
-    } else if crate::memory_control::resolve_in_tx(tx, false, &thread.0, &thread.1)
+    } else if crate::memory_control::resolve_in_tx_for_thread(
+        tx,
+        false,
+        &thread.0,
+        &thread.1,
+        &req.thread_id,
+    )
         .await
         .map_err(|e| Status::internal(e.to_string()))?
         .generation_allowed
@@ -4067,6 +4073,101 @@ mod persona_db_tests {
                 .await
                 .unwrap();
         assert_eq!(title, None);
+    }
+
+    /// WS07 S6: a thread set off neither recalls nor learns, and the same user's other thread is
+    /// untouched. Needs a disposable Postgres.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn thread_off_blocks_read_and_write_for_that_thread_only() {
+        let pool = PgPool::connect(&std::env::var("DATABASE_URL").expect("disposable database required")).await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let suffix = new_ulid();
+        let org = format!("thread-memory-test-{suffix}");
+        let new_thread = |key: &str| {
+            create_thread_inner(&pool, pb::CreateThreadRequest {
+                session_key: format!("{key}-{suffix}"), org_id: org.clone(), user_id: "test-user".into(), ..Default::default()
+            })
+        };
+        let off_thread = new_thread("off").await.unwrap().into_inner().thread_id;
+        let other_thread = new_thread("other").await.unwrap().into_inner().thread_id;
+        let svc = test_service(pool.clone());
+        let set_mode = |thread: &str, mode: &str, identity: VerifiedIdentity| {
+            let mut request = Request::new(pb::UpdateThreadPresentationRequest {
+                org_id: org.clone(),
+                thread_id: thread.to_owned(),
+                memory_mode: Some(mode.to_owned()),
+                ..Default::default()
+            });
+            request.extensions_mut().insert(identity);
+            svc.update_thread_presentation(request)
+        };
+        let owner = || VerifiedIdentity::user_for_test(&org, "test-user");
+        let append = |thread: &str, content: &str| {
+            let pool = pool.clone();
+            let request = pb::AppendMessageRequest {
+                thread_id: thread.to_owned(),
+                role: "user".to_owned(),
+                content: content.to_owned(),
+                ..Default::default()
+            };
+            async move {
+                let mut tx = pool.begin().await.unwrap();
+                append_message_in_tx(&mut tx, &request, "test-user").await.unwrap();
+                tx.commit().await.unwrap();
+            }
+        };
+        let memory = || async {
+            sqlx::query_scalar::<_, String>("SELECT content FROM agent_memory WHERE org_id = $1")
+                .bind(&org)
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+        };
+        let recalled = |thread: &str| {
+            let thread = thread.to_owned();
+            let svc = &svc;
+            async move {
+                load_context_memory_rows(svc, MemoryRetention::Durable, &thread, None, &[])
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .any(|(_, content)| content.contains("Seeded user fact"))
+            }
+        };
+        sqlx::query(
+            "INSERT INTO agent_memory (id, org_id, session_id, scope, key, content, owner) \
+             VALUES ($1, $2, NULL, 'user', 'user:seed', 'Seeded user fact', 'test-user')",
+        )
+        .bind(new_ulid())
+        .bind(&org)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // The value is validated, and a ZDR caller cannot store the choice.
+        let invalid = set_mode(&off_thread, "paused", owner()).await.expect_err("only inherit or off");
+        assert_eq!(invalid.code(), tonic::Code::InvalidArgument);
+        let zdr = set_mode(&off_thread, "off", VerifiedIdentity::user_for_test_with_zdr(&org, "test-user", true))
+            .await
+            .expect_err("a ZDR caller stores no memory choice");
+        assert_eq!(zdr.code(), tonic::Code::FailedPrecondition);
+        assert!(recalled(&off_thread).await, "inherit is the default");
+
+        set_mode(&off_thread, "off", owner()).await.expect("owner sets the thread off");
+        append(&other_thread, "Husk at jeg heter Kari.").await;
+        append(&off_thread, "Husk at jeg heter Ima.").await;
+        let rows = memory().await;
+        assert!(rows.iter().any(|row| row.contains("Kari")), "the other thread still learns");
+        assert!(rows.iter().all(|row| !row.contains("Ima")), "the thread set off learns nothing");
+        assert!(!recalled(&off_thread).await, "the thread set off recalls nothing");
+        assert!(recalled(&other_thread).await, "the other thread still recalls");
+
+        // Back to inherit: the thread recalls and learns again.
+        set_mode(&off_thread, "inherit", owner()).await.expect("owner restores the thread");
+        append(&off_thread, "Husk at jeg heter Ola.").await;
+        assert!(memory().await.iter().any(|row| row.contains("Ola")));
+        assert!(recalled(&off_thread).await);
     }
 
     /// Owner decision 17: a zero-retention owner may archive and delete the threads they own. The owner
@@ -5616,7 +5717,7 @@ async fn load_context_memory_rows(
                 .unwrap_or(thread_user.as_str());
             // `false`: the retention posture keeps its own handling below
             // (`append_letta_memory_rows`), unchanged.
-            crate::memory_control::resolve(&svc.pool, false, org, gated_user)
+            crate::memory_control::resolve_for_thread(&svc.pool, false, org, gated_user, thread_id)
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?
                 .access
@@ -7211,6 +7312,12 @@ impl SessionCore for SessionService {
                 return Err(Refusal::DURABLE_MUTATION_FORBIDDEN
                     .grpc_status(tonic::Code::FailedPrecondition));
             }
+            // Memory is already off for a ZDR caller, so a per-thread choice has
+            // nothing to say and is not stored for it.
+            if caller.zdr() && req.memory_mode.is_some() {
+                return Err(Refusal::DURABLE_MUTATION_FORBIDDEN
+                    .grpc_status(tonic::Code::FailedPrecondition));
+            }
             if req.org_id.trim().is_empty() || req.thread_id.trim().is_empty() {
                 return Err(Status::invalid_argument(
                     "org_id and thread_id are required",
@@ -7221,11 +7328,21 @@ impl SessionCore for SessionService {
                 && req.pinned.is_none()
                 && req.persona_enabled.is_none()
                 && req.archived.is_none()
+                && req.memory_mode.is_none()
             {
                 return Err(Status::invalid_argument(
                     "at least one presentation field is required",
                 ));
             }
+            let memory_mode = req
+                .memory_mode
+                .as_deref()
+                .map(|value| {
+                    crate::memory_control::ThreadMemoryMode::from_wire(value).ok_or_else(|| {
+                        Status::invalid_argument("memory_mode must be \"inherit\" or \"off\"")
+                    })
+                })
+                .transpose()?;
             // Archiving writes the THREAD_ARCHIVED evidence event in ArchiveThread; this
             // RPC only restores, so a true here would hide a thread without that event.
             if req.archived == Some(true) {
@@ -7267,7 +7384,8 @@ impl SessionCore for SessionService {
                          ELSE pinned_at
                      END,
                      persona_enabled = CASE WHEN $10 THEN $11 ELSE persona_enabled END,
-                     archived_at = CASE WHEN $12 THEN NULL ELSE archived_at END
+                     archived_at = CASE WHEN $12 THEN NULL ELSE archived_at END,
+                     memory_mode = CASE WHEN $13 THEN $14 ELSE memory_mode END
                  WHERE id = $1 AND org_id = $2 AND (archived_at IS NULL OR $12)
                  RETURNING id, user_id",
             )
@@ -7286,11 +7404,20 @@ impl SessionCore for SessionService {
             .bind(req.persona_enabled.is_some())
             .bind(req.persona_enabled.unwrap_or(true))
             .bind(restores)
+            .bind(memory_mode.is_some())
+            .bind(memory_mode.map_or("inherit", |mode| mode.as_str()))
             .fetch_optional(&mut *tx)
             .await
             .map_err(|error| Status::internal(error.to_string()))?;
             let (_, thread_owner) =
                 changed.ok_or_else(|| Status::not_found("thread not found or archived"))?;
+            if memory_mode.is_some() {
+                // The same lock a memory writer holds while it asks the gate, so an
+                // extraction in flight finishes before the change commits.
+                crate::memory_control::lock_user(&mut tx, &req.org_id, &thread_owner)
+                    .await
+                    .map_err(|error| Status::internal(error.to_string()))?;
+            }
 
             let resource = format!("thread:{}", req.thread_id);
             let event_id = new_ulid();
@@ -7307,6 +7434,7 @@ impl SessionCore for SessionService {
                 "pinned": req.pinned,
                 "persona_enabled": req.persona_enabled,
                 "archived": req.archived,
+                "memory_mode": memory_mode.map(|mode| mode.as_str()),
             }))
             .bind(now)
             .bind(&req.org_id)

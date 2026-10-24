@@ -1178,6 +1178,12 @@ message UpdateThreadPresentationRequest {
   // which writes the THREAD_ARCHIVED evidence event. Omission leaves it
   // unchanged, the same tri-state contract as `pinned` above.
   optional bool archived = 9;
+  // Per-thread memory mode (build plan WS07 S6): "inherit" (the thread follows the
+  // user's memory state) or "off" (this thread neither recalls nor learns). Any
+  // other value is rejected. Omission leaves it unchanged, the same tri-state
+  // contract as `pinned` above. Rejected for a ZDR caller: memory is already off
+  // for it and the column is not written under that posture.
+  optional string memory_mode = 10;
 }
 
 // Receipt for a durable presentation update.

@@ -53,6 +53,33 @@ impl MemoryState {
     }
 }
 
+/// One thread's own choice, stored in `threads.memory_mode`. It narrows the
+/// user's state and never widens it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ThreadMemoryMode {
+    Inherit,
+    Off,
+}
+
+impl ThreadMemoryMode {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Inherit => "inherit",
+            Self::Off => "off",
+        }
+    }
+
+    /// Strict, for a value a caller supplied: anything but the two spellings is
+    /// refused rather than guessed at.
+    pub(crate) fn from_wire(value: &str) -> Option<Self> {
+        match value {
+            "inherit" => Some(Self::Inherit),
+            "off" => Some(Self::Off),
+            _ => None,
+        }
+    }
+}
+
 /// What the organization's memory policy says. Session-core has no mirror of it
 /// yet (build plan WS07 S4), so [`resolve`] passes `Allow` today; the other two
 /// are decided here already so the mirror only has to supply the value.
@@ -90,6 +117,7 @@ pub(crate) enum MemoryReason {
     On,
     UserPaused,
     UserOff,
+    ThreadOff,
     OrgDisabled,
     Zdr,
     PolicyUnavailable,
@@ -101,6 +129,7 @@ impl MemoryReason {
             Self::On => "on",
             Self::UserPaused => "user_paused",
             Self::UserOff => "user_off",
+            Self::ThreadOff => "thread_off",
             Self::OrgDisabled => "org_disabled",
             Self::Zdr => "zdr",
             Self::PolicyUnavailable => "policy_unavailable",
@@ -140,9 +169,13 @@ impl MemoryDecision {
 
     /// Whether the user's own rows are listed. A paused user still sees (and
     /// can delete) every row; an off user, or an org that disabled memory, does
-    /// not.
+    /// not. A thread set off hides nothing: the list is the user's, not the
+    /// thread's.
     pub(crate) fn list_visible(&self) -> bool {
-        matches!(self.reason, MemoryReason::On | MemoryReason::UserPaused)
+        matches!(
+            self.reason,
+            MemoryReason::On | MemoryReason::UserPaused | MemoryReason::ThreadOff
+        )
     }
 
     /// Wire form of a refusal to write, `failed_precondition` message text.
@@ -185,6 +218,21 @@ pub(crate) fn decide(zdr: bool, org: OrgMemoryPolicy, user: MemoryState) -> Memo
             generation_allowed: false,
             learning_allowed: false,
         },
+    }
+}
+
+/// Folds a thread's own mode into a user-level decision. A thread set off
+/// reads and writes nothing, org rows included. A denial that already leaves
+/// nothing readable (ZDR, org policy) keeps its reason, which says more than
+/// `thread_off`.
+pub(crate) fn apply_thread_mode(
+    decision: MemoryDecision,
+    mode: ThreadMemoryMode,
+) -> MemoryDecision {
+    match mode {
+        ThreadMemoryMode::Inherit => decision,
+        ThreadMemoryMode::Off if decision.access == MemoryAccess::None => decision,
+        ThreadMemoryMode::Off => MemoryDecision::denied(MemoryReason::ThreadOff),
     }
 }
 
@@ -268,6 +316,71 @@ pub(crate) async fn resolve_in_tx(
         return Ok(unrestricted());
     }
     Ok(decide(false, OrgMemoryPolicy::Allow, stored))
+}
+
+/// A thread's own mode. A thread that does not exist (or is another
+/// organization's) has no mode to restrict.
+async fn thread_mode<'e, E>(
+    executor: E,
+    org: &str,
+    thread_id: &str,
+) -> Result<ThreadMemoryMode, sqlx::Error>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    let mode: Option<String> =
+        sqlx::query_scalar("SELECT memory_mode FROM threads WHERE id = $1 AND org_id = $2")
+            .bind(thread_id)
+            .bind(org)
+            .fetch_optional(executor)
+            .await?;
+    // The CHECK constraint closes the set; an unknown value is treated as the
+    // most protective one.
+    Ok(mode.map_or(ThreadMemoryMode::Inherit, |value| {
+        ThreadMemoryMode::from_wire(&value).unwrap_or(ThreadMemoryMode::Off)
+    }))
+}
+
+/// [`resolve`] for a reader that works on one thread: the thread's own mode is
+/// folded in, so a thread set off recalls nothing while the user's other
+/// threads are untouched. The kill switch restores the behaviour before either
+/// choice existed.
+pub(crate) async fn resolve_for_thread(
+    pool: &PgPool,
+    zdr: bool,
+    org: &str,
+    user: &str,
+    thread_id: &str,
+) -> Result<MemoryDecision, sqlx::Error> {
+    let decision = resolve(pool, zdr, org, user).await?;
+    if zdr || !controls_enabled() {
+        return Ok(decision);
+    }
+    Ok(apply_thread_mode(
+        decision,
+        thread_mode(pool, org, thread_id).await?,
+    ))
+}
+
+/// [`resolve_in_tx`] for a writer that works on one thread. The thread's mode is
+/// read under the user's row lock, which the presentation update also takes
+/// ([`lock_user`]) when it changes the mode, so a thread set off while an
+/// extraction is in flight is seen at write time.
+pub(crate) async fn resolve_in_tx_for_thread(
+    tx: &mut Transaction<'_, Postgres>,
+    zdr: bool,
+    org: &str,
+    user: &str,
+    thread_id: &str,
+) -> Result<MemoryDecision, sqlx::Error> {
+    let decision = resolve_in_tx(tx, zdr, org, user).await?;
+    if zdr || !controls_enabled() {
+        return Ok(decision);
+    }
+    Ok(apply_thread_mode(
+        decision,
+        thread_mode(&mut **tx, org, thread_id).await?,
+    ))
 }
 
 /// Takes the row lock and reads the state under it. [`lock_user`] is the same
@@ -392,8 +505,10 @@ pub(crate) async fn permits_extraction(
     {
         return Ok(false);
     }
-    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM messages m JOIN threads t ON t.id = m.thread_id JOIN user_memory_controls c ON c.org_id = t.org_id AND c.user_id = t.user_id WHERE m.id = $3 AND t.org_id = $1 AND t.user_id = $2 AND m.created_at > c.extract_after)")
-        .bind(org).bind(user).bind(message_id).fetch_one(&mut **tx).await
+    // A message of a thread set off is not extracted from either (unless the kill
+    // switch restored the behaviour before the mode existed).
+    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM messages m JOIN threads t ON t.id = m.thread_id JOIN user_memory_controls c ON c.org_id = t.org_id AND c.user_id = t.user_id WHERE m.id = $3 AND t.org_id = $1 AND t.user_id = $2 AND m.created_at > c.extract_after AND (t.memory_mode = 'inherit' OR NOT $4))")
+        .bind(org).bind(user).bind(message_id).bind(controls_enabled()).fetch_one(&mut **tx).await
 }
 
 pub(crate) async fn record_forgetting(
@@ -643,12 +758,70 @@ mod tests {
         }
     }
 
+    /// A thread set off reads and writes nothing, whatever the user's state; a
+    /// thread that inherits changes nothing; an existing denial keeps its reason.
+    #[test]
+    fn a_thread_set_off_narrows_every_user_state_and_never_widens_one() {
+        use MemoryState::{Off, On, Paused};
+        use OrgMemoryPolicy::{Allow, Disabled};
+        for user in [On, Paused, Off] {
+            let base = decide(false, Allow, user);
+            assert_eq!(apply_thread_mode(base, ThreadMemoryMode::Inherit), base);
+        }
+        let off = apply_thread_mode(decide(false, Allow, On), ThreadMemoryMode::Off);
+        assert_eq!(
+            off,
+            MemoryDecision {
+                reason: MemoryReason::ThreadOff,
+                access: MemoryAccess::None,
+                generation_allowed: false,
+                learning_allowed: false,
+            }
+        );
+        // Paused leaves the org's rows readable; a thread set off does not.
+        let paused = apply_thread_mode(decide(false, Allow, Paused), ThreadMemoryMode::Off);
+        assert_eq!(paused.access, MemoryAccess::None);
+        assert_eq!(paused.reason, MemoryReason::ThreadOff);
+        // ZDR and org policy already deny everything and say why.
+        assert_eq!(
+            apply_thread_mode(decide(true, Allow, On), ThreadMemoryMode::Off).reason,
+            MemoryReason::Zdr
+        );
+        assert_eq!(
+            apply_thread_mode(decide(false, Disabled, On), ThreadMemoryMode::Off).reason,
+            MemoryReason::OrgDisabled
+        );
+        assert_eq!(off.skip_reason(), "thread_off");
+        assert!(off.list_visible(), "a thread set off hides no listed row");
+    }
+
+    #[test]
+    fn a_thread_mode_value_is_one_of_two_spellings() {
+        for mode in [ThreadMemoryMode::Inherit, ThreadMemoryMode::Off] {
+            assert_eq!(ThreadMemoryMode::from_wire(mode.as_str()), Some(mode));
+        }
+        for refused in ["", "OFF", "on", "paused", "inherit "] {
+            assert_eq!(ThreadMemoryMode::from_wire(refused), None);
+        }
+    }
+
+    #[test]
+    fn the_thread_migration_defaults_to_inherit_and_has_a_revert() {
+        let migration = include_str!("../migrations/0067_thread_memory_mode.sql");
+        assert!(migration
+            .contains("ADD COLUMN IF NOT EXISTS memory_mode TEXT NOT NULL DEFAULT 'inherit'"));
+        assert!(migration.contains("CHECK (memory_mode IN ('inherit', 'off'))"));
+        let revert = include_str!("../migrations/revert/0067_thread_memory_mode.down.sql");
+        assert!(revert.contains("DROP COLUMN IF EXISTS memory_mode"));
+    }
+
     #[test]
     fn reasons_are_the_closed_wire_tokens() {
         let tokens: Vec<&str> = [
             MemoryReason::On,
             MemoryReason::UserPaused,
             MemoryReason::UserOff,
+            MemoryReason::ThreadOff,
             MemoryReason::OrgDisabled,
             MemoryReason::Zdr,
             MemoryReason::PolicyUnavailable,
@@ -662,6 +835,7 @@ mod tests {
                 "on",
                 "user_paused",
                 "user_off",
+                "thread_off",
                 "org_disabled",
                 "zdr",
                 "policy_unavailable"
@@ -872,9 +1046,9 @@ mod tests {
             "pub(crate) async fn append_message_in_tx(",
             "/// Mirror an append's extracted memories into Letta",
         );
-        assert!(append.contains("memory_control::resolve_in_tx("));
+        assert!(append.contains("memory_control::resolve_in_tx_for_thread("));
         assert!(
-            append.find("memory_control::resolve_in_tx(").unwrap()
+            append.find("memory_control::resolve_in_tx_for_thread(").unwrap()
                 < append.find("persist_candidates(").unwrap(),
             "the inline gate must precede the persist"
         );
