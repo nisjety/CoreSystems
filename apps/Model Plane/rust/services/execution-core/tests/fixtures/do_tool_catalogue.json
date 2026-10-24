@@ -1,0 +1,204 @@
+{
+  "rung_input": "{}",
+  "schema": "do-tool-catalogue-v1",
+  "tools": [
+    {
+      "is_risky_tool": false,
+      "name": "yr_weather",
+      "rung_required_for": "read_only",
+      "trusted_capability_id": "cap.tool.information.read"
+    },
+    {
+      "is_risky_tool": false,
+      "name": "traffic",
+      "rung_required_for": "read_only",
+      "trusted_capability_id": "cap.tool.information.read"
+    },
+    {
+      "is_risky_tool": false,
+      "name": "news",
+      "rung_required_for": "read_only",
+      "trusted_capability_id": "cap.tool.information.read"
+    },
+    {
+      "is_risky_tool": false,
+      "name": "track_shipment",
+      "rung_required_for": "read_only",
+      "trusted_capability_id": "cap.tool.shipping.track"
+    },
+    {
+      "is_risky_tool": false,
+      "name": "company_lookup",
+      "rung_required_for": "read_only",
+      "trusted_capability_id": "cap.tool.information.read"
+    },
+    {
+      "is_risky_tool": false,
+      "name": "get_shipping_quotes",
+      "rung_required_for": "read_only",
+      "trusted_capability_id": "cap.tool.shipping.read"
+    },
+    {
+      "is_risky_tool": false,
+      "name": "shipping_carriers",
+      "rung_required_for": "read_only",
+      "trusted_capability_id": "cap.tool.shipping.read"
+    },
+    {
+      "is_risky_tool": true,
+      "name": "book_shipment",
+      "rung_required_for": "danger_full_access",
+      "trusted_capability_id": "cap.tool.shipping.book"
+    },
+    {
+      "is_risky_tool": false,
+      "name": "list_social_accounts",
+      "rung_required_for": "read_only",
+      "trusted_capability_id": "cap.tool.social.read"
+    },
+    {
+      "is_risky_tool": true,
+      "name": "publish_social_post",
+      "rung_required_for": "danger_full_access",
+      "trusted_capability_id": "cap.tool.social.publish"
+    },
+    {
+      "is_risky_tool": false,
+      "name": "knowledge_search",
+      "rung_required_for": "read_only",
+      "trusted_capability_id": "cap.retrieval.query"
+    },
+    {
+      "is_risky_tool": false,
+      "name": "list_provider_actions",
+      "rung_required_for": "read_only",
+      "trusted_capability_id": "cap.tool.provider.read"
+    },
+    {
+      "is_risky_tool": true,
+      "name": "execute_provider_action",
+      "rung_required_for": "danger_full_access",
+      "trusted_capability_id": "cap.tool.provider.execute"
+    },
+    {
+      "is_risky_tool": false,
+      "name": "web_search",
+      "rung_required_for": "read_only",
+      "trusted_capability_id": "cap.tool.http"
+    },
+    {
+      "is_risky_tool": false,
+      "name": "web_fetch",
+      "rung_required_for": "read_only",
+      "trusted_capability_id": "cap.tool.http"
+    },
+    {
+      "is_risky_tool": false,
+      "name": "web.search",
+      "rung_required_for": "read_only",
+      "trusted_capability_id": "cap.tool.http"
+    },
+    {
+      "is_risky_tool": false,
+      "name": "web.read",
+      "rung_required_for": "read_only",
+      "trusted_capability_id": "cap.tool.http"
+    },
+    {
+      "is_risky_tool": false,
+      "name": "code_interpreter",
+      "rung_required_for": "read_only",
+      "trusted_capability_id": "cap.command.sandbox"
+    },
+    {
+      "is_risky_tool": false,
+      "name": "save_memory",
+      "rung_required_for": "workspace_write",
+      "trusted_capability_id": "cap.memory.index"
+    },
+    {
+      "is_risky_tool": false,
+      "name": "recall_memory",
+      "rung_required_for": "read_only",
+      "trusted_capability_id": "cap.memory.search"
+    },
+    {
+      "is_risky_tool": false,
+      "name": "reattach_skill",
+      "rung_required_for": "read_only",
+      "trusted_capability_id": "cap.skill.summarize"
+    },
+    {
+      "is_risky_tool": false,
+      "name": "list_subagent_results",
+      "rung_required_for": "read_only",
+      "trusted_capability_id": "cap.agent.lineage.read"
+    },
+    {
+      "is_risky_tool": false,
+      "name": "read_subagent_result",
+      "rung_required_for": "read_only",
+      "trusted_capability_id": "cap.agent.lineage.read"
+    },
+    {
+      "is_risky_tool": false,
+      "name": "subagent.task",
+      "rung_required_for": "read_only",
+      "trusted_capability_id": "cap.agent.spawn"
+    },
+    {
+      "is_risky_tool": false,
+      "name": "subagent.research_fan_out",
+      "rung_required_for": "read_only",
+      "trusted_capability_id": "cap.agent.spawn"
+    },
+    {
+      "is_risky_tool": false,
+      "name": "plan.propose",
+      "rung_required_for": "read_only",
+      "trusted_capability_id": "cap.memory.index"
+    },
+    {
+      "is_risky_tool": false,
+      "name": "browser.observe",
+      "rung_required_for": "read_only",
+      "trusted_capability_id": "cap.browser.open"
+    },
+    {
+      "is_risky_tool": true,
+      "name": "browser.act",
+      "rung_required_for": "danger_full_access",
+      "trusted_capability_id": "cap.browser.open"
+    },
+    {
+      "is_risky_tool": false,
+      "name": "process_start",
+      "rung_required_for": "read_only",
+      "trusted_capability_id": "cap.process.background"
+    },
+    {
+      "is_risky_tool": false,
+      "name": "process_read",
+      "rung_required_for": "read_only",
+      "trusted_capability_id": "cap.process.background"
+    },
+    {
+      "is_risky_tool": false,
+      "name": "process_stdin",
+      "rung_required_for": "read_only",
+      "trusted_capability_id": "cap.process.background"
+    },
+    {
+      "is_risky_tool": false,
+      "name": "process_signal",
+      "rung_required_for": "read_only",
+      "trusted_capability_id": "cap.process.background"
+    },
+    {
+      "is_risky_tool": false,
+      "name": "process_list",
+      "rung_required_for": "read_only",
+      "trusted_capability_id": "cap.process.background"
+    }
+  ]
+}
