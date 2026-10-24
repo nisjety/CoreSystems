@@ -460,13 +460,23 @@ async fn fetch_memory_context(
         return Vec::new();
     };
     match client.search_memory(request).await {
-        Ok(resp) => resp
-            .into_inner()
-            .entries
-            .into_iter()
-            .map(|e| e.content)
-            .filter(|c| !c.trim().is_empty())
-            .collect(),
+        Ok(resp) => {
+            let resp = resp.into_inner();
+            let entries: Vec<String> = resp
+                .entries
+                .into_iter()
+                .map(|e| e.content)
+                .filter(|c| !c.trim().is_empty())
+                .collect();
+            // Memory switched off by the user or the org is its own outcome, the
+            // same label the streaming path records, not "nothing to recall".
+            if entries.is_empty() {
+                if let Some(outcome) = crate::sse::skipped_prefetch_outcome(&resp.skip_reason) {
+                    crate::sse::record_memory_prefetch_outcome(outcome);
+                }
+            }
+            entries
+        }
         Err(error) => {
             warn!(%error, "memory search failed; continuing without context");
             Vec::new()
@@ -3800,6 +3810,22 @@ mod tests {
                     ..Default::default()
                 },
             ))
+        }
+
+        async fn get_memory_controls(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::GetMemoryControlsRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::GetMemoryControlsResponse>, Status>
+        {
+            Err(Status::unimplemented("get_memory_controls not needed in test"))
+        }
+
+        async fn set_memory_controls(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::SetMemoryControlsRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::SetMemoryControlsResponse>, Status>
+        {
+            Err(Status::unimplemented("set_memory_controls not needed in test"))
         }
     }
 

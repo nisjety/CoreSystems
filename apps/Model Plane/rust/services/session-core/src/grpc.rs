@@ -3269,6 +3269,21 @@ pub(crate) async fn append_message_in_tx(
     let candidates = if conversation_only { Vec::new() } else {
         crate::dreaming::extract_memory_candidates(&req.role, &req.content, &req.thread_id)
     };
+    // A paused or off user learns nothing from this turn: no candidate is
+    // persisted and none reaches the Letta mirror. Asked under the user's row
+    // lock, which `persist_candidates` takes again, so the pause cannot land
+    // between the two.
+    let candidates = if candidates.is_empty() {
+        candidates
+    } else if crate::memory_control::resolve_in_tx(tx, false, &thread.0, &thread.1)
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?
+        .generation_allowed
+    {
+        candidates
+    } else {
+        Vec::new()
+    };
     if !candidates.is_empty() {
         let (org_id, user_id): (String, String) =
             sqlx::query_as("SELECT org_id, user_id FROM threads WHERE id = $1")
@@ -5582,35 +5597,67 @@ async fn load_context_memory_rows(
     user_id: Option<&str>,
     thread_messages: &[(String, String)],
 ) -> Result<Vec<(String, String)>, Status> {
-    let thread_org_id: Option<String> =
-        sqlx::query_scalar("SELECT org_id FROM threads WHERE id = $1")
+    let thread_owner: Option<(String, String)> =
+        sqlx::query_as("SELECT org_id, user_id FROM threads WHERE id = $1")
             .bind(thread_id)
             .fetch_optional(&svc.pool)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
+    let thread_org_id = thread_owner.as_ref().map(|(org, _)| org.clone());
 
-    let mut rows = sqlx::query_as::<_, (String, String)>(
-        "SELECT topic, content
-         FROM memory_index
-         WHERE thread_id = $1
-         ORDER BY updated_at DESC
-         LIMIT $2",
-    )
-    .bind(thread_id)
-    .bind(CONTEXT_MEMORY_LIMIT)
-    .fetch_all(&svc.pool)
-    .await
-    .map_err(|e| Status::internal(e.to_string()))?;
+    // The single memory gate, for the user this context is assembled for (the
+    // run's user when it names one, else the thread's owner, as the rows below
+    // are scoped). A thread that does not exist has no memory to gate.
+    let access = match thread_owner.as_ref() {
+        Some((org, thread_user)) => {
+            let gated_user = user_id
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(thread_user.as_str());
+            // `false`: the retention posture keeps its own handling below
+            // (`append_letta_memory_rows`), unchanged.
+            crate::memory_control::resolve(&svc.pool, false, org, gated_user)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?
+                .access
+        }
+        None => crate::memory_control::MemoryAccess::Full,
+    };
+
+    // The thread's own memory index is the user's content, so it is only used
+    // when the user's memory is.
+    let mut rows = if access == crate::memory_control::MemoryAccess::Full {
+        sqlx::query_as::<_, (String, String)>(
+            "SELECT topic, content
+             FROM memory_index
+             WHERE thread_id = $1
+             ORDER BY updated_at DESC
+             LIMIT $2",
+        )
+        .bind(thread_id)
+        .bind(CONTEXT_MEMORY_LIMIT)
+        .fetch_all(&svc.pool)
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?
+    } else {
+        Vec::new()
+    };
 
     let mut agent_rows = crate::dreaming::load_agent_memory_context_rows(
         &svc.pool,
         thread_id,
         user_id,
         crate::dreaming::AGENT_MEMORY_CONTEXT_LIMIT,
+        access,
     )
     .await
     .map_err(|e| Status::internal(e.to_string()))?;
     rows.append(&mut agent_rows);
+    // The semantic mirror holds the user's rows only, so it is skipped unless
+    // the user's memory is in use.
+    if access != crate::memory_control::MemoryAccess::Full {
+        return Ok(rows);
+    }
     append_letta_memory_rows(
         &svc.pool,
         svc.letta_memory.as_ref(),

@@ -2608,7 +2608,20 @@ async fn execute_save_memory(
             .to_string(),
             error: None,
         },
-        Err(status) => tool_error(format!("save_memory failed: {}", status.message())),
+        Err(status) => tool_error(save_memory_refusal(&status)),
+    }
+}
+
+/// The tool error for a refused `IndexMemory`. session-core answers a user who
+/// paused or switched memory off (or whose org disabled it) with
+/// `memory_not_enabled:<reason>`; the model is told that, plainly, so it does not
+/// report "saved" or retry as if the call had merely failed.
+fn save_memory_refusal(status: &tonic::Status) -> String {
+    match status.message().strip_prefix("memory_not_enabled:") {
+        Some(reason) => format!(
+            "save_memory: memory is not enabled for this user ({reason}); nothing was saved"
+        ),
+        None => format!("save_memory failed: {}", status.message()),
     }
 }
 
@@ -2797,21 +2810,16 @@ async fn execute_recall_memory(
     .await
     {
         Ok(response) => {
+            let response = response.into_inner();
+            let skip_reason = response.skip_reason;
             let entries: Vec<serde_json::Value> = response
-                .into_inner()
                 .entries
                 .into_iter()
                 .filter(|entry| !entry.content.trim().is_empty())
                 .map(|entry| serde_json::json!({ "topic": entry.topic, "content": entry.content }))
                 .collect();
-            let count = entries.len();
             tool_bridge::ToolExecution {
-                output: serde_json::json!({
-                    "status": if count == 0 { "no_memories" } else { "ok" },
-                    "count": count,
-                    "memories": entries,
-                })
-                .to_string(),
+                output: recall_memory_output(entries, &skip_reason),
                 error: None,
             }
         }
@@ -2819,9 +2827,66 @@ async fn execute_recall_memory(
     }
 }
 
+/// The `recall_memory` result. A search that left the user's own memory out
+/// (`skip_reason`) reports `unavailable` and why, never `no_memories`: the model
+/// would otherwise tell the person nothing is remembered about them. Org-owned
+/// entries the search still returned stay in `memories`.
+fn recall_memory_output(entries: Vec<serde_json::Value>, skip_reason: &str) -> String {
+    let count = entries.len();
+    let mut output = serde_json::json!({
+        "status": if !skip_reason.is_empty() {
+            "unavailable"
+        } else if count == 0 {
+            "no_memories"
+        } else {
+            "ok"
+        },
+        "count": count,
+        "memories": entries,
+    });
+    if !skip_reason.is_empty() {
+        output["reason"] = serde_json::Value::from(skip_reason);
+    }
+    output.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A paused user's `save_memory` comes back as a plain refusal naming the
+    /// reason, and any other failure keeps its old text.
+    #[test]
+    fn save_memory_maps_paused() {
+        let paused = tonic::Status::failed_precondition("memory_not_enabled:user_paused");
+        assert_eq!(
+            save_memory_refusal(&paused),
+            "save_memory: memory is not enabled for this user (user_paused); nothing was saved"
+        );
+        let other = tonic::Status::internal("boom");
+        assert_eq!(save_memory_refusal(&other), "save_memory failed: boom");
+    }
+
+    #[test]
+    fn recall_memory_reports_unavailable_not_no_memories_when_paused() {
+        let paused: serde_json::Value =
+            serde_json::from_str(&recall_memory_output(Vec::new(), "user_paused")).unwrap();
+        assert_eq!(paused["status"], "unavailable");
+        assert_eq!(paused["reason"], "user_paused");
+        assert_eq!(paused["count"], 0);
+
+        let empty: serde_json::Value =
+            serde_json::from_str(&recall_memory_output(Vec::new(), "")).unwrap();
+        assert_eq!(empty["status"], "no_memories");
+        assert!(empty.get("reason").is_none());
+
+        let hit: serde_json::Value = serde_json::from_str(&recall_memory_output(
+            vec![serde_json::json!({ "topic": "POLICY", "content": "x" })],
+            "",
+        ))
+        .unwrap();
+        assert_eq!((hit["status"].as_str(), hit["count"].as_u64()), (Some("ok"), Some(1)));
+    }
 
     struct FixedCapabilityPolicy(crate::capability_policy::CapabilityDecision);
 

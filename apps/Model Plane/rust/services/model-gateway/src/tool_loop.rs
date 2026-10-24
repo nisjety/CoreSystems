@@ -723,6 +723,22 @@ fn arg_bool(args_json: &str, key: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// The `recall_memory` tool result. A search that left the user's own memory out
+/// (`skip_reason`, set when they paused or switched it off, or their org
+/// disabled it) must not read as an empty one: the model would tell the person
+/// nothing is remembered about them. Org-owned entries the search still returned
+/// ride along as `items`.
+fn recall_memory_output(items: Vec<serde_json::Value>, skip_reason: &str) -> String {
+    if skip_reason.is_empty() {
+        return serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_owned());
+    }
+    let mut output = serde_json::json!({ "memory": "unavailable", "reason": skip_reason });
+    if !items.is_empty() {
+        output["items"] = serde_json::Value::Array(items);
+    }
+    output.to_string()
+}
+
 /// Inline chat tools execute without the execution-core approval workflow, so
 /// only read-only, side-effect-free tools may pass this gate. MCP tools are
 /// deliberately denied here: their remote side effects are unverifiable and
@@ -3308,8 +3324,9 @@ async fn dispatch_tool_with_cost(
                 .await
             {
                 Ok(resp) => {
+                    let resp = resp.into_inner();
+                    let skip_reason = resp.skip_reason;
                     let items: Vec<serde_json::Value> = resp
-                        .into_inner()
                         .entries
                         .iter()
                         .map(|e| {
@@ -3328,7 +3345,7 @@ async fn dispatch_tool_with_cost(
                     // so this hashes the assembled, already-truncated JSON —
                     // a known, documented residual gap versus fetch_url's
                     // screen-before-truncate ordering.
-                    let output = serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_owned());
+                    let output = recall_memory_output(items, &skip_reason);
                     ToolOutcome {
                         call_id: call.id.clone(),
                         name: call.name.clone(),
@@ -7065,6 +7082,7 @@ pub async fn run_tool_rounds_for_model(
                     // was composed from, so it names none until the composer's plan
                     // (`prompt_context::TieredPrompt::plan`) is carried in.
                     prompt_tiers: None,
+                    image_parts: Vec::new(),
                 },
                 inference_bearer,
             );
@@ -9513,6 +9531,46 @@ mod tests {
         let out = truncate_chars(&long, 5);
         assert_eq!(out.chars().count(), 6); // 5 + ellipsis
         assert!(out.ends_with('…'));
+    }
+
+    /// A paused user's recall says memory is off, with the reason, instead of
+    /// an empty list; a normal search keeps its array shape.
+    #[test]
+    fn recall_memory_reports_paused_not_empty() {
+        let paused: serde_json::Value =
+            serde_json::from_str(&recall_memory_output(Vec::new(), "user_paused")).unwrap();
+        assert_eq!(
+            paused,
+            serde_json::json!({ "memory": "unavailable", "reason": "user_paused" })
+        );
+
+        let org_row = serde_json::json!({ "topic": "POLICY", "content": "Invoices close on the 5th.", "score": 0.9 });
+        let with_org: serde_json::Value =
+            serde_json::from_str(&recall_memory_output(vec![org_row.clone()], "user_off")).unwrap();
+        assert_eq!(with_org["memory"], "unavailable");
+        assert_eq!(with_org["reason"], "user_off");
+        assert_eq!(with_org["items"], serde_json::json!([org_row.clone()]));
+
+        assert_eq!(recall_memory_output(Vec::new(), ""), "[]");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&recall_memory_output(vec![org_row.clone()], ""))
+                .unwrap(),
+            serde_json::json!([org_row])
+        );
+    }
+
+    /// Ask turns still cannot save: the memory state gate does not lift the
+    /// boundary between the two loops. `save_memory` stays refused here and has
+    /// no dispatch arm; the write path lives in execution-core's governed loop.
+    #[test]
+    fn inline_tool_allowed_still_refuses_save_memory() {
+        assert!(!inline_tool_allowed("save_memory"));
+        let source = include_str!("tool_loop.rs");
+        let production = &source[..source.find("#[cfg(test)]").expect("test module")];
+        assert!(
+            !production.contains("\"save_memory\" =>"),
+            "the inline loop must not grow a save_memory dispatch arm"
+        );
     }
 
     #[test]

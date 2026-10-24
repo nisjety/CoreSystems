@@ -7,13 +7,16 @@ use crate::{
         ZDR_MEMORY_WRITE_SUPPRESSED,
     },
     letta_adapter::LettaMemoryAdapter,
+    memory_control::{MemoryAccess, OrgMemoryPolicy},
 };
 use chrono::{DateTime, Utc};
 use mp_contracts::model_plane::v1::{
     memory_service_server::{MemoryService, MemoryServiceServer},
-    DeleteMemoryRequest, DeleteMemoryResponse, IndexMemoryRequest, IndexMemoryResponse,
-    ListMemoryRequest, ListMemoryResponse, MemoryEntry, MemoryHealthRequest, MemoryHealthResponse,
-    SearchMemoryRequest, SearchMemoryResponse,
+    DeleteMemoryRequest, DeleteMemoryResponse, GetMemoryControlsRequest,
+    GetMemoryControlsResponse, IndexMemoryRequest, IndexMemoryResponse, ListMemoryRequest,
+    ListMemoryResponse, MemoryControls, MemoryEntry, MemoryHealthRequest, MemoryHealthResponse,
+    MemoryState, SearchMemoryRequest, SearchMemoryResponse, SetMemoryControlsRequest,
+    SetMemoryControlsResponse,
 };
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -157,6 +160,7 @@ fn list_response(
         entries,
         degraded: degradation_reason.is_some(),
         degradation_reason: degradation_reason.unwrap_or_default().to_owned(),
+        hidden_reason: String::new(),
     }
 }
 
@@ -176,6 +180,7 @@ fn search_response(
         entries,
         degraded: degradation_reason.is_some(),
         degradation_reason: degradation_reason.unwrap_or_default().to_owned(),
+        skip_reason: String::new(),
     }
 }
 
@@ -370,6 +375,23 @@ impl MemoryService for MemoryGrpc {
                 .and_then(|nanos| DateTime::<Utc>::from_timestamp(ts.seconds, nanos))
         });
 
+        // The one memory gate. A user who paused or switched memory off (or an
+        // org that disabled it) gets no recall of their own rows: the reason is
+        // returned so a caller can say "memory is off" instead of "nothing found".
+        let decision = crate::memory_control::resolve(
+            &self.pool,
+            false,
+            req.org_id.trim(),
+            &owner_user_id,
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+        if decision.access == MemoryAccess::None {
+            let mut response = search_response(Vec::new(), None);
+            response.skip_reason = decision.skip_reason().to_owned();
+            return Ok(Response::new(response));
+        }
+
         let limit = if req.limit == 0 { 10 } else { req.limit };
         let topic_filter = req.topic_filter.clone();
         let query_trimmed = req.query.trim();
@@ -383,7 +405,9 @@ impl MemoryService for MemoryGrpc {
         // ranking bug, not genuinely redundant. It now runs on every non-
         // trivial query, bounded by the same timeout budget it already had.
         let letta_search = async {
-            if query_trimmed.is_empty() {
+            // The semantic mirror holds the user's rows only, so it is not asked
+            // when the user's memory is not in use.
+            if query_trimmed.is_empty() || decision.access != MemoryAccess::Full {
                 return None;
             }
             let letta = self.letta.as_ref()?;
@@ -408,6 +432,7 @@ impl MemoryService for MemoryGrpc {
             topic_filter: &topic_filter,
             limit,
             updated_after,
+            access: decision.access,
         };
         let (pg_result, letta_outcome) = tokio::join!(
             crate::dreaming::search_agent_memory(&self.pool, &pg_search_request),
@@ -438,7 +463,9 @@ impl MemoryService for MemoryGrpc {
             usize::try_from(limit).unwrap_or(usize::MAX),
         );
 
-        Ok(Response::new(search_response(entries, degradation_reason)))
+        let mut response = search_response(entries, degradation_reason);
+        response.skip_reason = decision.skip_reason().to_owned();
+        Ok(Response::new(response))
     }
 
     async fn index_memory(
@@ -468,6 +495,15 @@ impl MemoryService for MemoryGrpc {
         if conversation_only {
             return Err(Status::failed_precondition("Conversation-only tasks cannot create long-term memories."));
         }
+        // A paused or off user, or an org that disabled memory, saves nothing,
+        // whoever asks (the tool loop, a service, the user): the caller is told
+        // why rather than that nothing happened.
+        let gate = crate::memory_control::resolve(&self.pool, false, req.org_id.trim(), &owner_user_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        if !gate.generation_allowed {
+            return Err(Status::failed_precondition(gate.refusal()));
+        }
         let memory_id = crate::dreaming::index_agent_memory(
             &self.pool,
             req.org_id.trim(),
@@ -480,6 +516,15 @@ impl MemoryService for MemoryGrpc {
         .map_err(|e| Status::internal(e.to_string()))?;
 
         if memory_id.is_empty() {
+            // `authorize_thread` already proved the thread is the caller's, so an
+            // empty id is most likely the gate refusing under the row lock (a
+            // pause that committed after the check above). Ask again to say so.
+            let gate = crate::memory_control::resolve(&self.pool, false, req.org_id.trim(), &owner_user_id)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+            if !gate.generation_allowed {
+                return Err(Status::failed_precondition(gate.refusal()));
+            }
             return Err(Status::not_found("thread not found for org"));
         }
 
@@ -543,6 +588,17 @@ impl MemoryService for MemoryGrpc {
                 Vec::new(),
                 Some(ZDR_MEMORY_READ_SUPPRESSED),
             )));
+        }
+
+        // Paused keeps the list (rows stay visible and deletable); off, or an org
+        // that disabled memory, hides it and says why. Delete is never gated.
+        let decision = crate::memory_control::resolve(&self.pool, false, org_id, user_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        if !decision.list_visible() {
+            let mut response = list_response(Vec::new(), None);
+            response.hidden_reason = decision.skip_reason().to_owned();
+            return Ok(Response::new(response));
         }
 
         let limit = if req.limit == 0 { 100 } else { req.limit };
@@ -731,6 +787,135 @@ impl MemoryService for MemoryGrpc {
         let _caller = identity(&request)?;
         Ok(Response::new(health_response(self.letta.as_ref())))
     }
+
+    async fn get_memory_controls(
+        &self,
+        request: Request<GetMemoryControlsRequest>,
+    ) -> Result<Response<GetMemoryControlsResponse>, Status> {
+        let caller = identity(&request)?;
+        let req = request.into_inner();
+        if req.org_id.trim().is_empty() {
+            return Err(Status::invalid_argument("org_id is required"));
+        }
+        if req.user_id.trim().is_empty() {
+            return Err(Status::invalid_argument("user_id is required"));
+        }
+        let (org_id, user_id) = (req.org_id.trim(), req.user_id.trim());
+        // A ZDR caller is not refused: it is answered `zdr`, which reads and
+        // writes nothing.
+        authorize_user_memory_preflight(&caller, org_id, user_id, MEMORY_READ_SCOPE)?;
+        let controls = memory_controls_view(&self.pool, caller.zdr(), org_id, user_id).await?;
+        Ok(Response::new(GetMemoryControlsResponse {
+            controls: Some(controls),
+        }))
+    }
+
+    async fn set_memory_controls(
+        &self,
+        request: Request<SetMemoryControlsRequest>,
+    ) -> Result<Response<SetMemoryControlsResponse>, Status> {
+        let caller = identity(&request)?;
+        let req = request.into_inner();
+        if req.org_id.trim().is_empty() {
+            return Err(Status::invalid_argument("org_id is required"));
+        }
+        if req.user_id.trim().is_empty() {
+            return Err(Status::invalid_argument("user_id is required"));
+        }
+        let (org_id, user_id) = (req.org_id.trim(), req.user_id.trim());
+        caller.authorize_org(org_id)?;
+        // The state is the person's own choice: no service sets it for them.
+        if caller.is_service() {
+            return Err(Status::permission_denied(
+                "memory controls are set by the user themselves",
+            ));
+        }
+        caller.authorize_user(user_id)?;
+        // A new durable store, so a ZDR credential and a waived one (DEC-32) are
+        // both refused before anything is written.
+        if !matches!(MemoryRetention::of(&caller), MemoryRetention::Durable) {
+            return Err(Status::failed_precondition(
+                "ZDR credentials cannot change memory controls",
+            ));
+        }
+        let state = match MemoryState::try_from(req.state) {
+            Ok(MemoryState::On) => crate::memory_control::MemoryState::On,
+            Ok(MemoryState::Paused) => crate::memory_control::MemoryState::Paused,
+            Ok(MemoryState::Off) => crate::memory_control::MemoryState::Off,
+            _ => return Err(Status::invalid_argument("state is required")),
+        };
+        // With the gate switched off a stored choice would be recorded but not
+        // honoured, which tells the person something false.
+        if !crate::memory_control::controls_enabled() {
+            return Err(Status::failed_precondition(
+                "memory controls are disabled on this deployment",
+            ));
+        }
+        crate::memory_control::set_state(&self.pool, org_id, user_id, state, caller.principal_id())
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let controls = memory_controls_view(&self.pool, false, org_id, user_id).await?;
+        Ok(Response::new(SetMemoryControlsResponse {
+            controls: Some(controls),
+        }))
+    }
+}
+
+/// The state and the decision it produces, as the wire message. Content-free.
+async fn memory_controls_view(
+    pool: &PgPool,
+    zdr: bool,
+    org_id: &str,
+    user_id: &str,
+) -> Result<MemoryControls, Status> {
+    let internal = |error: sqlx::Error| Status::internal(error.to_string());
+    let decision = crate::memory_control::resolve(pool, zdr, org_id, user_id)
+        .await
+        .map_err(internal)?;
+    // A ZDR caller's stored state is neither read nor reported.
+    let stored = if zdr {
+        None
+    } else {
+        Some(
+            crate::memory_control::stored_state(pool, org_id, user_id)
+                .await
+                .map_err(internal)?,
+        )
+    };
+    let hidden_rows = if zdr || decision.list_visible() {
+        0
+    } else {
+        crate::dreaming::count_user_memory(pool, org_id, user_id)
+            .await
+            .map_err(internal)?
+    };
+    let state = match stored.map(|stored| stored.state) {
+        None => MemoryState::Unspecified,
+        Some(crate::memory_control::MemoryState::On) => MemoryState::On,
+        Some(crate::memory_control::MemoryState::Paused) => MemoryState::Paused,
+        Some(crate::memory_control::MemoryState::Off) => MemoryState::Off,
+    };
+    let org_policy = match decision.reason {
+        crate::memory_control::MemoryReason::OrgDisabled => OrgMemoryPolicy::Disabled,
+        crate::memory_control::MemoryReason::PolicyUnavailable => OrgMemoryPolicy::Unavailable,
+        _ => OrgMemoryPolicy::Allow,
+    };
+    Ok(MemoryControls {
+        state: state as i32,
+        org_memory_policy: org_policy.as_str().to_owned(),
+        org_learning_policy: String::new(),
+        use_allowed: decision.access == MemoryAccess::Full,
+        generation_allowed: decision.generation_allowed,
+        learning_allowed: decision.learning_allowed,
+        reason: decision.reason.as_str().to_owned(),
+        hidden_rows: u32::try_from(hidden_rows).unwrap_or(u32::MAX),
+        updated_at: stored
+            .and_then(|stored| stored.changed_at)
+            .map(|at| prost_types::Timestamp {
+                seconds: at.timestamp(),
+                nanos: i32::try_from(at.timestamp_subsec_nanos()).unwrap_or(i32::MAX),
+            }),
+    })
 }
 
 /// Map the store's provenance onto the wire enum.

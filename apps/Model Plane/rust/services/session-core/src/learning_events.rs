@@ -160,6 +160,8 @@ struct RunLearningIdentity {
     /// The run's retention receipt (Z-17). A waived run is persistent for the
     /// user but its transcript must not be sent to the paid review model.
     retention_class: String,
+    /// `threads.origin` of the run's thread; `None` for a run with no thread.
+    thread_origin: Option<String>,
 }
 
 /// Why a run's `RUN_COMPLETED` is withheld, or `None` when it may be announced.
@@ -187,9 +189,11 @@ async fn load_run_identity(
     sqlx::query_as::<_, RunLearningIdentity>(
         "SELECT r.org_id, r.user_id, r.thread_id,
                 COALESCE(o.zdr, false) AS zdr,
-                r.retention_class
+                r.retention_class,
+                t.origin AS thread_origin
          FROM runs AS r
          LEFT JOIN managed_run_terminalization_outbox AS o ON o.run_id = r.id
+         LEFT JOIN threads AS t ON t.id = r.thread_id
          WHERE r.id = $1",
     )
     .bind(run_id)
@@ -232,6 +236,22 @@ pub(crate) async fn enqueue_run_completed(
                 "waived run: RUN_COMPLETED learning event withheld (review would reach a paid model the user did not accept)"
             );
         }
+        Ok(Enqueued::SkippedMemoryState) => {
+            metrics::counter!("mp_session_learning_run_events_skipped_total", "reason" => "memory_state")
+                .increment(1);
+            tracing::debug!(
+                run_id,
+                "memory paused, off or disabled: RUN_COMPLETED learning event withheld"
+            );
+        }
+        Ok(Enqueued::SkippedOrigin) => {
+            metrics::counter!("mp_session_learning_run_events_skipped_total", "reason" => "origin")
+                .increment(1);
+            tracing::debug!(
+                run_id,
+                "thread is not a chat thread: RUN_COMPLETED learning event withheld"
+            );
+        }
         Ok(Enqueued::Replayed | Enqueued::NoRun) => {}
         Err(error) => {
             // The run is already terminal and durable. Learning is strictly
@@ -252,6 +272,10 @@ enum Enqueued {
     Replayed,
     SkippedZdr,
     SkippedWaived,
+    /// The owner paused or switched off memory, or the org disabled it.
+    SkippedMemoryState,
+    /// The run is not on a `threads.origin = 'chat'` thread.
+    SkippedOrigin,
     NoRun,
 }
 
@@ -295,6 +319,28 @@ async fn enqueue_row(
     // review would send the transcript to a paid model the user did not accept.
     if let Some(withheld) = withheld_reason(identity.zdr, &identity.retention_class) {
         return Ok(withheld);
+    }
+    // The owner's memory state decides whether anything may be learned from
+    // their conversations, and only a person's own chat is a source: a Space,
+    // an agent run, a support or system thread is not theirs to have distilled.
+    // Both go with the memory gate's kill switch, which restores the loop as it
+    // was. The state is read without the row lock: announcing a run writes no
+    // memory, and a pause that races it is caught again where the review's
+    // output would be written.
+    if crate::memory_control::controls_enabled() {
+        if identity.thread_origin.as_deref() != Some("chat") {
+            return Ok(Enqueued::SkippedOrigin);
+        }
+        let decision = crate::memory_control::resolve(
+            &mut **savepoint,
+            false,
+            &identity.org_id,
+            &identity.user_id,
+        )
+        .await?;
+        if !decision.learning_allowed {
+            return Ok(Enqueued::SkippedMemoryState);
+        }
     }
     let context = RunCompletedContext {
         run_id: run_id.to_owned(),
@@ -576,6 +622,26 @@ mod tests {
             withheld_reason(false, "unknown"),
             Some(Enqueued::SkippedZdr),
             "an unknown retention class fails closed"
+        );
+    }
+
+    /// The owner's memory state and the thread origin are checked before the
+    /// outbox insert, after the retention gate (which keeps its own counters).
+    #[test]
+    fn memory_state_and_origin_gates_precede_the_outbox_insert() {
+        let source = include_str!("learning_events.rs");
+        let position = |needle: &str| {
+            source
+                .find(needle)
+                .unwrap_or_else(|| panic!("expected {needle:?} in learning_events.rs"))
+        };
+        let retention = position("withheld_reason(identity.zdr, &identity.retention_class)");
+        let origin = position("identity.thread_origin.as_deref() != Some(\"chat\")");
+        let state = position("if !decision.learning_allowed {");
+        let insert = position("INSERT INTO session_audit_outbox");
+        assert!(
+            retention < origin && origin < state && state < insert,
+            "retention, then origin, then memory state, then the insert"
         );
     }
 

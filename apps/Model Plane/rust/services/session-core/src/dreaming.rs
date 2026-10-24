@@ -26,6 +26,7 @@
 
 use crate::dream_extractor::{DreamExtractor, ExistingSlots, WindowMessage, LLM_SOURCE_LINK};
 use crate::letta_adapter::LettaMemoryAdapter;
+use crate::memory_control::MemoryAccess;
 use crate::memory_grounding::{ExistingMatch, GroundingAction, GroundingClassifier};
 use chrono::{DateTime, Utc};
 use metrics::{counter, histogram};
@@ -201,6 +202,12 @@ pub(crate) async fn dream_once(
     grounding: Option<&GroundingClassifier>,
     limit: i64,
 ) -> anyhow::Result<i64> {
+    if !crate::memory_control::controls_enabled() {
+        tracing::error!(
+            env = crate::memory_control::CONTROLS_ENABLED_ENV,
+            "memory controls are switched off: a user's paused or off choice is NOT enforced"
+        );
+    }
     let messages = load_pending_messages(pool, limit).await?;
     let mut processed = 0i64;
 
@@ -1270,6 +1277,7 @@ async fn load_pending_messages(
          JOIN threads t ON t.id = m.thread_id \
          WHERE m.role IN ('user', 'assistant') \
            AND NOT EXISTS (SELECT 1 FROM user_memory_controls c WHERE c.org_id = t.org_id AND c.user_id = t.user_id AND m.created_at <= c.extract_after) \
+           AND NOT EXISTS (SELECT 1 FROM user_memory_controls c WHERE c.org_id = t.org_id AND c.user_id = t.user_id AND c.memory_state <> 'on' AND $2) \
            AND NOT EXISTS ( \
              SELECT 1 FROM dream_runs d \
              WHERE d.thread_id = m.thread_id \
@@ -1284,6 +1292,9 @@ async fn load_pending_messages(
          LIMIT $1",
     )
     .bind(limit)
+    // A paused or off user's messages are not read at all, so none reaches the
+    // extractor's model; after a resume `extract_after` keeps them out for good.
+    .bind(crate::memory_control::controls_enabled())
     .fetch_all(pool)
     .await?;
 
@@ -1323,6 +1334,7 @@ async fn load_preceding_context(
          WHERE m.thread_id = $1 \
            AND m.role IN ('user', 'assistant') \
            AND NOT EXISTS (SELECT 1 FROM user_memory_controls c WHERE c.org_id = t.org_id AND c.user_id = t.user_id AND m.created_at <= c.extract_after) \
+           AND NOT EXISTS (SELECT 1 FROM user_memory_controls c WHERE c.org_id = t.org_id AND c.user_id = t.user_id AND c.memory_state <> 'on' AND $4) \
            AND (m.created_at, m.sequence) < ( \
              SELECT b.created_at, b.sequence FROM messages b WHERE b.id = $2 \
            ) \
@@ -1332,6 +1344,7 @@ async fn load_preceding_context(
     .bind(thread_id)
     .bind(before_message_id)
     .bind(EXTRACTION_CONTEXT_MESSAGES)
+    .bind(crate::memory_control::controls_enabled())
     .fetch_all(pool)
     .await?;
     rows.reverse();
@@ -1346,7 +1359,11 @@ pub(crate) async fn load_agent_memory_context_rows(
     thread_id: &str,
     user_id_hint: Option<&str>,
     limit: i64,
+    access: MemoryAccess,
 ) -> Result<Vec<(String, String)>, sqlx::Error> {
+    if access == MemoryAccess::None {
+        return Ok(Vec::new());
+    }
     let Some((org_id, thread_user_id)) =
         sqlx::query_as::<_, (String, String)>("SELECT org_id, user_id FROM threads WHERE id = $1")
             .bind(thread_id)
@@ -1369,9 +1386,9 @@ pub(crate) async fn load_agent_memory_context_rows(
            AND is_latest = true \
            AND (expires_at IS NULL OR expires_at > now()) \
            AND ( \
-                session_id = $2 \
-                OR (session_id IS NULL AND scope IN ('org', 'global')) \
-                OR (session_id IS NULL AND scope = 'user' AND owner = $3) \
+                (session_id IS NULL AND scope IN ('org', 'global')) \
+                OR ($5 AND session_id = $2) \
+                OR ($5 AND session_id IS NULL AND scope = 'user' AND owner = $3) \
            ) \
          ORDER BY \
            CASE scope \
@@ -1388,6 +1405,7 @@ pub(crate) async fn load_agent_memory_context_rows(
     .bind(thread_id)
     .bind(user_id)
     .bind(limit)
+    .bind(access == MemoryAccess::Full)
     .fetch_all(pool)
     .await?;
 
@@ -1413,6 +1431,9 @@ pub(crate) struct AgentMemorySearch<'a> {
     pub(crate) topic_filter: &'a [String],
     pub(crate) limit: u32,
     pub(crate) updated_after: Option<DateTime<Utc>>,
+    /// What the memory gate allows this user's search to reach. `OrgOnly`
+    /// leaves out the user's own and the thread-bound rows.
+    pub(crate) access: MemoryAccess,
 }
 
 /// SQL candidate pool size, before relevance is scored and the result is
@@ -1444,6 +1465,9 @@ pub(crate) async fn search_agent_memory(
     pool: &PgPool,
     request: &AgentMemorySearch<'_>,
 ) -> Result<Vec<MemorySearchRow>, sqlx::Error> {
+    if request.access == MemoryAccess::None {
+        return Ok(Vec::new());
+    }
     let limit = i64::from(request.limit.clamp(1, 50));
     let candidate_limit = MAX_CANDIDATE_POOL.max(limit);
     let filters = normalize_topic_filters(request.topic_filter);
@@ -1470,9 +1494,9 @@ pub(crate) async fn search_agent_memory(
            AND review_state = 'accepted' \
            AND is_latest = true \
            AND (expires_at IS NULL OR expires_at > now()) \
-           AND (session_id = $2 \
+           AND (($7 AND session_id = $2) \
                 OR (session_id IS NULL AND scope <> 'user') \
-                OR (session_id IS NULL AND scope = 'user' AND owner = $3)) \
+                OR ($7 AND session_id IS NULL AND scope = 'user' AND owner = $3)) \
            AND ($4::timestamptz IS NULL OR updated_at > $4) \
            AND (cardinality($5::text[]) = 0 \
                 OR CASE \
@@ -1491,6 +1515,7 @@ pub(crate) async fn search_agent_memory(
     .bind(request.updated_after)
     .bind(&filters)
     .bind(candidate_limit)
+    .bind(request.access == MemoryAccess::Full)
     .fetch_all(pool)
     .await?;
 
@@ -1599,6 +1624,16 @@ pub(crate) async fn index_agent_memory(
     };
 
     let mut tx = pool.begin().await?;
+    // The gate under the user's row lock. A refusal comes back as the empty id
+    // (the same answer as a thread that is not the caller's); the handler asks
+    // the gate again to tell the two apart and name the reason.
+    if !crate::memory_control::resolve_in_tx(&mut tx, false, org_id, owner_user_id)
+        .await?
+        .generation_allowed
+    {
+        tx.rollback().await?;
+        return Ok(String::new());
+    }
     let memory_id = upsert_agent_memory(
         &mut tx,
         org_id,
@@ -1747,6 +1782,28 @@ pub(crate) async fn list_user_memory(
             },
         )
         .collect())
+}
+
+/// How many rows [`list_user_memory`] would show, for the count a hidden list
+/// reports in place of its rows.
+pub(crate) async fn count_user_memory(
+    pool: &PgPool,
+    org_id: &str,
+    owner_user_id: &str,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_memory \
+         WHERE org_id = $1 \
+           AND owner = $2 \
+           AND scope = 'user' \
+           AND review_state = 'accepted' \
+           AND is_latest = true \
+           AND (expires_at IS NULL OR expires_at > now())",
+    )
+    .bind(org_id)
+    .bind(owner_user_id)
+    .fetch_one(pool)
+    .await
 }
 
 /// What [`delete_user_memory`] found and did.

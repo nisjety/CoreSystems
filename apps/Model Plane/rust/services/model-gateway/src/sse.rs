@@ -5494,8 +5494,11 @@ async fn fetch_chat_memory_context(
     .await;
     let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
-    let recalled = match response {
-        Ok(Ok(resp)) => resp.into_inner().entries,
+    let (recalled, skip_reason) = match response {
+        Ok(Ok(resp)) => {
+            let resp = resp.into_inner();
+            (resp.entries, resp.skip_reason)
+        }
         Ok(Err(error)) => {
             tracing::warn!(%error, "chat memory prefetch failed; continuing without memory");
             record_memory_prefetch_outcome("error");
@@ -5519,6 +5522,12 @@ async fn fetch_chat_memory_context(
         .filter(|content| !content.trim().is_empty())
         .collect();
     if entries.is_empty() {
+        // Memory switched off by the user or the org is not "nothing to recall":
+        // the operator sees it as its own outcome.
+        if let Some(outcome) = skipped_prefetch_outcome(&skip_reason) {
+            record_memory_prefetch_outcome(outcome);
+            return (Vec::new(), None);
+        }
         record_memory_prefetch_outcome("empty");
         return (Vec::new(), None);
     }
@@ -5536,8 +5545,52 @@ async fn fetch_chat_memory_context(
 
 /// Outcome labels for [`MEMORY_PREFETCH_OUTCOME_METRIC`]. Kept as one closed
 /// list so a dashboard can assert the labels sum to the turn count.
-pub(crate) const MEMORY_PREFETCH_OUTCOMES: &[&str] =
-    &["hit", "empty", "timeout", "error", "no_credential"];
+pub(crate) const MEMORY_PREFETCH_OUTCOMES: &[&str] = &[
+    "hit",
+    "empty",
+    "timeout",
+    "error",
+    "no_credential",
+    "skipped_paused",
+    "skipped_off",
+    "skipped_org_policy",
+];
+
+/// The outcome label for a `SearchMemoryResponse.skip_reason` (the closed
+/// `MemoryControls.reason` tokens session-core returns), or `None` when the
+/// user's memory was used. `zdr` has no label: a ZDR turn never prefetches.
+pub(crate) fn skipped_prefetch_outcome(skip_reason: &str) -> Option<&'static str> {
+    match skip_reason {
+        "user_paused" => Some("skipped_paused"),
+        "user_off" => Some("skipped_off"),
+        "org_disabled" | "policy_unavailable" => Some("skipped_org_policy"),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod memory_prefetch_skip_tests {
+    use super::*;
+
+    /// Every closed skip token a user's or org's switch can produce maps to a
+    /// label the metric declares, and a used or unknown token maps to none.
+    #[test]
+    fn skip_reasons_map_to_declared_outcome_labels() {
+        for (reason, label) in [
+            ("user_paused", "skipped_paused"),
+            ("user_off", "skipped_off"),
+            ("org_disabled", "skipped_org_policy"),
+            ("policy_unavailable", "skipped_org_policy"),
+        ] {
+            let outcome = skipped_prefetch_outcome(reason).expect("a skip reason has a label");
+            assert_eq!(outcome, label);
+            assert!(MEMORY_PREFETCH_OUTCOMES.contains(&outcome));
+        }
+        for reason in ["", "zdr", "something_new"] {
+            assert_eq!(skipped_prefetch_outcome(reason), None, "{reason:?}");
+        }
+    }
+}
 
 /// Why this is a metric and not a user-facing notice.
 ///
