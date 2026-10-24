@@ -1323,6 +1323,10 @@ services:
       # Control public key set; an absent key keeps the lane disabled.
       EXECUTION_CORE_SCHEDULED_STEP_DECISION_KEY_ID: ${CONTROL_SPACE_DECISION_KEY_ID:-}
       EXECUTION_CORE_SCHEDULED_STEP_DECISION_PUBLIC_KEY_BASE64: ${CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64:-}
+      # WS20-S6: the scheduled Do lane (a scheduled fire runs the agent loop under its contract). Empty is off;
+      # execution-core and orchestrator-core must agree. Do not enable before the contract and the run's
+      # retention reach the lane (see the depth register).
+      EXECUTION_SCHEDULED_AGENT_ENABLED: ${EXECUTION_SCHEDULED_AGENT_ENABLED:-}
       # Governed tickets.create adapter. All bindings are intentionally empty
       # by default: the adapter stays disabled until Control, Conversation
       # Core, and Execution Core have distinct, least-privilege credentials.
@@ -1482,6 +1486,8 @@ services:
       NATS_USER: orchestrator-core-runtime
       NATS_PASSWORD: ${MODEL_ORCHESTRATOR_CORE_NATS_PASSWORD:?MODEL_ORCHESTRATOR_CORE_NATS_PASSWORD is required}
       SESSION_CORE_ADDR: session-core:9091
+      # WS20-S6: must agree with execution-core's switch of the same name. Empty is off.
+      EXECUTION_SCHEDULED_AGENT_ENABLED: ${EXECUTION_SCHEDULED_AGENT_ENABLED:-}
       LETTA_BRIDGE_AUTH_AUDIENCE: ${LETTA_BRIDGE_AUTH_AUDIENCE:-letta-bridge}
       AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}
       AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:?AUTH_CORE_JWKS_URL is required}
