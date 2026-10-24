@@ -155,6 +155,117 @@ pub async fn enqueue(
 }
 
 #[cfg(feature = "postgres-queue")]
+#[derive(Debug, Deserialize)]
+pub struct QueueEnqueueBatch {
+    pub org_id: String,
+    pub items: Vec<QueueBatchItem>,
+}
+
+#[cfg(feature = "postgres-queue")]
+#[derive(Debug, Deserialize)]
+pub struct QueueBatchItem {
+    pub request_id: String,
+    pub url: String,
+    #[serde(default)]
+    pub depth: u32,
+}
+
+#[cfg(feature = "postgres-queue")]
+#[derive(Debug, Serialize)]
+pub struct QueueBatchAck {
+    /// How many items the queue took. An item whose request id is already
+    /// queued is not counted.
+    pub accepted: u32,
+}
+
+/// WS14.S3: the most items one `enqueue_batch` call takes. The orchestrator sends one
+/// call per page, so this bounds a single page's fan-out.
+pub const ENQUEUE_BATCH_MAX: usize = 500;
+
+/// Refuse a batch that is too large or has an item with no request id or no URL.
+#[cfg(feature = "postgres-queue")]
+pub fn validate_batch(items: &[QueueBatchItem]) -> Result<(), QuarryError> {
+    if items.len() > ENQUEUE_BATCH_MAX {
+        return Err(QuarryError::new(
+            ErrorCode::BadRequest,
+            format!("enqueue_batch takes at most {ENQUEUE_BATCH_MAX} items"),
+        ));
+    }
+    if items
+        .iter()
+        .any(|item| item.request_id.trim().is_empty() || item.url.trim().is_empty())
+    {
+        return Err(QuarryError::new(
+            ErrorCode::BadRequest,
+            "every enqueue_batch item needs a request_id and a url",
+        ));
+    }
+    Ok(())
+}
+
+/// WS14.S3: enqueue one page's children in one call. Items are enqueued one by one in
+/// the bound queue; a failure part way leaves the earlier items queued, and the
+/// orchestrator's retry re-sends them with the same request ids (the queue refuses
+/// a duplicate request id, so they are not queued twice).
+#[cfg(feature = "postgres-queue")]
+pub async fn enqueue_batch(
+    State(state): State<AppState>,
+    Path(queue_name): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<QueueEnqueueBatch>,
+) -> Result<Json<Envelope<QueueBatchAck>>, ApiErr> {
+    let request_id = crate::request_id::current();
+    auth_and_scope(&state, &headers, &body.org_id, &queue_name)
+        .map_err(|e| error(&request_id, e))?;
+    validate_batch(&body.items).map_err(|e| error(&request_id, e))?;
+    let queue = bind(&state, &body.org_id, &queue_name)
+        .await
+        .map_err(|e| error(&request_id, e))?;
+    let mut accepted = 0u32;
+    for item in body.items {
+        let payload = serde_json::json!({ "depth": item.depth });
+        let taken = queue
+            .enqueue(item.request_id, item.url, Priority::default(), payload)
+            .await
+            .map_err(|e| error(&request_id, e))?;
+        if taken {
+            accepted += 1;
+        }
+    }
+    Ok(Json(Envelope::ok(request_id, QueueBatchAck { accepted })))
+}
+
+#[cfg(all(test, feature = "postgres-queue"))]
+mod batch_tests {
+    use super::*;
+
+    fn item(request_id: &str, url: &str) -> QueueBatchItem {
+        QueueBatchItem { request_id: request_id.into(), url: url.into(), depth: 1 }
+    }
+
+    #[test]
+    fn empty_batch_is_accepted() {
+        assert!(validate_batch(&[]).is_ok());
+    }
+
+    #[test]
+    fn cap_is_inclusive_and_one_more_is_refused() {
+        let ok: Vec<_> = (0..ENQUEUE_BATCH_MAX).map(|i| item(&format!("r{i}"), "https://a.test/")).collect();
+        assert!(validate_batch(&ok).is_ok());
+        let mut over = ok;
+        over.push(item("r-over", "https://a.test/"));
+        let err = validate_batch(&over).unwrap_err();
+        assert_eq!(err.code, ErrorCode::BadRequest);
+    }
+
+    #[test]
+    fn blank_request_id_or_url_is_refused() {
+        assert!(validate_batch(&[item(" ", "https://a.test/")]).is_err());
+        assert!(validate_batch(&[item("r1", "")]).is_err());
+    }
+}
+
+#[cfg(feature = "postgres-queue")]
 pub async fn pop(
     State(state): State<AppState>,
     Path(queue_name): Path<String>,
@@ -198,6 +309,7 @@ pub async fn ack(
 pub fn internal_router() -> Router<AppState> {
     Router::new()
         .route("/v1/internal/queues/:queue_name/enqueue", post(enqueue))
+        .route("/v1/internal/queues/:queue_name/enqueue_batch", post(enqueue_batch))
         .route("/v1/internal/queues/:queue_name/pop", post(pop))
         .route("/v1/internal/queues/:queue_name/ack", put(ack).post(ack))
 }

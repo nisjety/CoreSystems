@@ -232,6 +232,7 @@ pub(crate) async fn post_job(
         run_id: job.run_id,
         accepted_at: chrono::Utc::now(),
         limits: None,
+        effective: None,
     })
 }
 
