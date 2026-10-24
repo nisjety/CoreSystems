@@ -214,7 +214,13 @@ func main() {
 			// still runs). The decode→review→persist core is unit-tested
 			// (sessionreview.HandleRunCompleted); this wiring is e2e-verified
 			// only against the running stack.
-			startLearningConsumer(ctx, nc, sessionClient, inferenceClient)
+			// The consumer skips a user whose memory is paused or off (WS07-S7): it reads the controls
+			// through the memory client when one was dialed.
+			var learningOpts []sessionreview.Option
+			if memoryClient != nil {
+				learningOpts = append(learningOpts, sessionreview.WithMemoryControls(memoryClient))
+			}
+			startLearningConsumer(ctx, nc, sessionClient, inferenceClient, learningOpts...)
 
 			// Task lifecycle closer: a task the executor started stays in
 			// `running` until its run reaches a terminal state. Without this the
@@ -787,7 +793,7 @@ func learningReviewEnabled() bool {
 // runs without the learning loop rather than failing to start. The
 // decode→review→persist core is unit-tested; this subscribe wiring is
 // e2e-verified only against the stack.
-func startLearningConsumer(ctx context.Context, nc *nats.Conn, sc mpv1.SessionCoreClient, ic mpv1.InferenceCoreClient) {
+func startLearningConsumer(ctx context.Context, nc *nats.Conn, sc mpv1.SessionCoreClient, ic mpv1.InferenceCoreClient, opts ...sessionreview.Option) {
 	if !learningReviewEnabled() {
 		// Checked before anything touches nc: a disabled review must neither bind
 		// the durable consumer nor read a single transcript.
@@ -805,7 +811,7 @@ func startLearningConsumer(ctx context.Context, nc *nats.Conn, sc mpv1.SessionCo
 	}
 	model := os.Getenv("LEARNING_REVIEW_MODEL") // empty -> llmreviewer.DefaultModel
 	go func() {
-		if rerr := sessionreview.RunConsumer(ctx, js, sc, ic, model); rerr != nil {
+		if rerr := sessionreview.RunConsumer(ctx, js, sc, ic, model, opts...); rerr != nil {
 			slog.Warn("learning-review consumer stopped (is it pre-provisioned on "+sessionreview.RunEventsStream+"?)", "error", rerr)
 		}
 	}()

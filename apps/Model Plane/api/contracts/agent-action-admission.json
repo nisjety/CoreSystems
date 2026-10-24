@@ -1269,6 +1269,45 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "memory.remember",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "human_identity_or_security",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:0a25641c6a5823f3cba2c22258d2656cb6f99c2562640c475af911b68822189b",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "memory.reset",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "destructive",
+      "exemptReason": "irreversible_destructive",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:410e6082fd50dbff4d5d7477b37f2eca9466df545a467f04e94c20298f1fcba6",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "memory.set_state",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "human_identity_or_security",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:1be5d08b6a5ec30e1e1e82d02b97f13d18a5dc463c15853d44b981399a353407",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "monitoring.check_now",
       "registry": true,
       "access": "none",

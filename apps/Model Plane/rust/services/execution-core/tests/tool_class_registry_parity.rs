@@ -93,9 +93,14 @@ fn seeded_rows() -> Vec<Seeded> {
     let mut sql = read_text(
         "../../../go/services/capability-core/migrations/0016_capability_tool_classes.up.sql",
     );
-    sql.push_str(&read_text(
-        "../../../go/services/capability-core/migrations/0020_result_query_capability.up.sql",
-    ));
+    for later in [
+        "0020_result_query_capability.up.sql",
+        "0024_provider_read_tool.up.sql",
+    ] {
+        sql.push_str(&read_text(&format!(
+            "../../../go/services/capability-core/migrations/{later}"
+        )));
+    }
     let row = Regex::new(
         r"\('global', '([^']+)', '([^']+)', '([a-z_]+)', '([a-z_]+)', (NULL|'[a-z_]+'), 'seed'\)",
     )
