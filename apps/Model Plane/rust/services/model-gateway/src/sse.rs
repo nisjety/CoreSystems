@@ -921,7 +921,7 @@ pub async fn invoke_stream_sse(
     cost_bearer: Option<Extension<VerifiedCostBearer>>,
     ingestion_bearer: Option<Extension<VerifiedIngestionBearer>>,
     sandbox_bearer: Option<Extension<VerifiedSandboxBearer>>,
-    axum::Json(req): axum::Json<InvokeRequest>,
+    axum::Json(mut req): axum::Json<InvokeRequest>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let request_id = new_ulid();
     // The turn's clock starts with its id, so admission shares the origin of
@@ -942,7 +942,7 @@ pub async fn invoke_stream_sse(
     // Resolve the model the SAME way as the unary path (DEFAULT_MODEL env), not
     // the literal "default" — providers have no deployment named "default", so
     // sending it 404s and exhausts the chain (live-verified bug).
-    let model = req
+    let mut model = req
         .model
         .clone()
         .map(|m| m.trim().to_owned())
@@ -1063,6 +1063,34 @@ pub async fn invoke_stream_sse(
             return error_stream(&request_id, code, message, false);
         }
     };
+    // The organisation's model policy, asked of inference-core before a run, a
+    // thread or a message exists: a refused turn is the stream's one `error`
+    // frame and leaves nothing behind, and the ZDR branch below is under the
+    // same policy as the durable one.
+    match crate::model_access::admit(
+        &state.inference_client,
+        authenticated_inference_request((), &inference_bearer).metadata(),
+        &org_id,
+        &model,
+        &normalized.provider_hint,
+    )
+    .await
+    {
+        Ok(admitted) => {
+            if let Some(default) = admitted.model.clone() {
+                model = default;
+            }
+            admitted.clamp_effort(&mut req.effort, crate::thinking::ladder_enabled());
+        }
+        Err(refusal) => {
+            return error_stream(
+                &request_id,
+                refusal.code(),
+                &refusal.message(),
+                refusal.retryable(),
+            );
+        }
+    }
     // Caller's privacy floor as the wire numeric (0 = UNSPECIFIED). Captured
     // once here so every derived call site threads it without re-deriving.
     let min_privacy_tier_wire = crate::normalize::min_privacy_tier_wire(&normalized);
@@ -7382,10 +7410,19 @@ async fn run_infer_fallback(
                         crate::subscription_failure::FailureContext::Answer,
                     ),
                 ),
-                None => crate::sse_events::ChatEvent::Error {
-                    code: "model_plane_unavailable".to_owned(),
-                    message: e.message().to_owned(),
-                    retryable: true,
+                None => match mp_contracts::model_entitlement::Refusal::from_status(&e) {
+                    // The organisation's policy refused the model at
+                    // inference-core: the frame names that, not an outage.
+                    Some(refusal) => crate::sse_events::ChatEvent::Error {
+                        code: refusal.code().to_owned(),
+                        message: refusal.message(),
+                        retryable: refusal.retryable(),
+                    },
+                    None => crate::sse_events::ChatEvent::Error {
+                        code: "model_plane_unavailable".to_owned(),
+                        message: e.message().to_owned(),
+                        retryable: true,
+                    },
                 },
             };
             // Buffered like every other terminal frame: a client that resumed
@@ -8816,6 +8853,22 @@ async fn zdr_direct_stream(
                 "temporary chat refused: no provider deployment is attested for zero data retention"
             );
             return zdr_error_stream(&request_id, mp_contracts::zdr_refusal::Refusal::UNAVAILABLE);
+        }
+        // A model the organisation's policy does not allow, refused by
+        // inference-core's own check (PERMISSION_DENIED, or UNAVAILABLE for an
+        // unreadable policy; never the precondition arms above). It keeps its
+        // catalogue code instead of the generic inference failure.
+        Err(status)
+            if mp_contracts::model_entitlement::Refusal::from_status(&status).is_some() =>
+        {
+            let refusal = mp_contracts::model_entitlement::Refusal::from_status(&status)
+                .expect("checked by the guard");
+            return error_stream(
+                &request_id,
+                refusal.code(),
+                &refusal.message(),
+                refusal.retryable(),
+            );
         }
         Err(status) => {
             tracing::warn!(

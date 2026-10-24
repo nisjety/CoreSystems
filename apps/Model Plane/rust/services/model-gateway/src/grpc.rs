@@ -145,18 +145,34 @@ fn json_str(value: &serde_json::Value, key: &str) -> String {
         .to_owned()
 }
 
-/// Policy fields that still have no owning service.
+/// Policy fields this RPC refuses by name.
 ///
-/// The spend/token ceilings now live in Control Plane (`org_quotas`), so only
-/// `allowed_models` remains homeless. It is refused by name rather than banked
-/// locally: accepting a model allowlist that nothing consults would tell an
-/// operator they had restricted models when they had not.
+/// The spend/token ceilings live in Control Plane (`org_quotas`), so only
+/// `allowed_models` is refused. Its owner is org-core and `GetPolicy` reads it
+/// back, but a write here would bypass the admin route's role check, so it is
+/// refused rather than banked locally, and the refusal points to that route.
 fn unowned_policy_fields(policy: &OrgPolicy) -> Vec<&'static str> {
     let mut unowned = Vec::new();
     if !policy.allowed_models.trim().is_empty() {
         unowned.push("allowed_models");
     }
     unowned
+}
+
+/// What `SetPolicy` answers for a field it refuses by name. The model allowlist
+/// has an owner now, org-core, but it is written through the admin route that
+/// checks who may change it, not through this RPC, so the refusal says where.
+fn unowned_policy_refusal(unowned: &[&str]) -> String {
+    let mut message = format!(
+        "this call does not store these, so they cannot be enforced: {}. Everything else in OrgPolicy routes to its owner: spend/token caps to Control Plane quotas (org-core org_quotas), denied_tools to capability-core, rate_limit_rpm to this gateway's own limiter.",
+        unowned.join(", ")
+    );
+    if unowned.contains(&"allowed_models") {
+        message.push_str(
+            " allowed_models is set with PUT /api/v1/orgs/{id}/model-entitlement, which org-core stores and inference-core enforces.",
+        );
+    }
+    message
 }
 
 /// Map one capability-core task row onto the gateway's wire `TaskRecord`.
@@ -755,8 +771,23 @@ impl ModelGateway for GatewayService {
         }
 
         let request_id = request_id_or_new(&req.request_id);
-        let model = model_or_default(&req.model);
         let org_id = req.org_id.clone();
+        // The organisation's model policy, asked of inference-core before a
+        // managed run exists: a refused call leaves no thread or run behind, with
+        // the same code as the HTTP and SSE transports.
+        let admitted = crate::model_access::admit(
+            &self.state.inference_client,
+            identity.inference_request(())?.metadata(),
+            &org_id,
+            &req.model,
+            &req.provider,
+        )
+        .await
+        .map_err(|refusal| refusal.grpc_status())?;
+        let model = admitted
+            .model
+            .clone()
+            .unwrap_or_else(|| model_or_default(&req.model));
         let user_id = identity
             .user_id()
             .unwrap_or_else(|| identity.principal_id());
@@ -969,8 +1000,23 @@ impl ModelGateway for GatewayService {
         }
 
         let request_id = request_id_or_new(&req.request_id);
-        let model = model_or_default(&req.model);
         let org_id = req.org_id.clone();
+        // The organisation's model policy, asked of inference-core before a
+        // managed run exists: a refused call leaves no thread or run behind, with
+        // the same code as the HTTP and SSE transports.
+        let admitted = crate::model_access::admit(
+            &self.state.inference_client,
+            identity.inference_request(())?.metadata(),
+            &org_id,
+            &req.model,
+            &req.provider,
+        )
+        .await
+        .map_err(|refusal| refusal.grpc_status())?;
+        let model = admitted
+            .model
+            .clone()
+            .unwrap_or_else(|| model_or_default(&req.model));
         let user_id = identity
             .user_id()
             .unwrap_or_else(|| identity.principal_id());
@@ -2320,12 +2366,26 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<GetPolicyRequest>,
     ) -> Result<Response<GetPolicyResponse>, Status> {
-        authorize_rpc(&request, RpcAccess::Read)?;
+        let identity = authorize_rpc(&request, RpcAccess::Read)?;
         let req = request.into_inner();
         // `OrgPolicy` was one gateway-owned blob that nothing enforced. It is
         // now decomposed per owner and read back from those owners, so what an
-        // operator sees here is what is actually applied. `allowed_models`
-        // stays zero-valued because nothing stores it yet.
+        // operator sees here is what is actually applied. `allowed_models` is
+        // read back from inference-core's `GetModelAccess`, which applies the
+        // policy org-core stores; it stays zero-valued when that cannot be read
+        // (a caller who does not manage the policy, or the policy is not applied).
+        let allowed_models = match identity.inference_request(()) {
+            Ok(probe) => {
+                crate::model_access::allowed_models(
+                    &self.state.inference_client,
+                    probe.metadata(),
+                    &req.org_id,
+                )
+                .await
+            }
+            Err(_) => None,
+        }
+        .unwrap_or_default();
         let limits = crate::org_quota::fetch_org_limits(
             &self.state.http_client,
             &self.state.org_core_base_url,
@@ -2346,6 +2406,7 @@ impl ModelGateway for GatewayService {
                 max_tokens_per_run: limits
                     .max_tokens
                     .map_or(0, |tokens| i32::try_from(tokens).unwrap_or(i32::MAX)),
+                allowed_models,
                 ..OrgPolicy::default()
             }),
         }))
@@ -2371,10 +2432,7 @@ impl ModelGateway for GatewayService {
         // operator would set a spend cap that nothing ever applies.
         let unowned = unowned_policy_fields(&policy);
         if !unowned.is_empty() {
-            return Err(Status::unimplemented(format!(
-                "no service stores these yet, so they cannot be enforced: {}. Everything else in OrgPolicy now routes to its owner: spend/token caps to Control Plane quotas (org-core org_quotas), denied_tools to capability-core, rate_limit_rpm to this gateway's own limiter.",
-                unowned.join(", ")
-            )));
+            return Err(Status::unimplemented(unowned_policy_refusal(&unowned)));
         }
 
         // denied_tools -> capability-core, which owns tool permission (the same
@@ -2982,7 +3040,8 @@ mod tests {
     fn policy_fields_with_no_owning_service_are_named_not_silently_banked() {
         // Spend/token ceilings now have an owner — Control Plane `org_quotas`,
         // written through by SetPolicy — so they are stored rather than
-        // refused. Only the model allowlist is still homeless.
+        // refused. The model allowlist is read back but written elsewhere, so it
+        // is still refused by name, and the refusal says where to write it.
         let unowned = unowned_policy_fields(&mp_contracts::model_plane::v1::OrgPolicy {
             org_id: "org".into(),
             max_cost_per_run_usd: 5.0,
@@ -2991,6 +3050,9 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(unowned, vec!["allowed_models"]);
+        let refusal = unowned_policy_refusal(&unowned);
+        assert!(refusal.contains("allowed_models"), "{refusal}");
+        assert!(refusal.contains("PUT /api/v1/orgs/{id}/model-entitlement"), "{refusal}");
     }
 
     #[test]
@@ -3240,12 +3302,17 @@ mod tests {
             }))
         }
 
+        /// A policy that is applied and refuses the model named `policy-denied`;
+        /// every other model is allowed and not enforced, as with no policy.
         async fn get_model_access(
             &self,
-            _: tonic::Request<mp_contracts::model_plane::v1::GetModelAccessRequest>,
+            request: tonic::Request<mp_contracts::model_plane::v1::GetModelAccessRequest>,
         ) -> Result<tonic::Response<mp_contracts::model_plane::v1::GetModelAccessResponse>, tonic::Status> {
+            let denied = request.get_ref().model == "policy-denied";
             Ok(tonic::Response::new(mp_contracts::model_plane::v1::GetModelAccessResponse {
-                model_allowed: true,
+                enforced: denied,
+                model_allowed: !denied,
+                reason: if denied { "not_in_allow_list".to_owned() } else { String::new() },
                 ..Default::default()
             }))
         }
@@ -4936,6 +5003,50 @@ mod tests {
         assert!(drained
             .iter()
             .any(|(subject, _)| subject.starts_with("mp.v1.usage.")));
+        assert_direct_managed_terminal(&lifecycle, TerminalOutcome::Completed, "");
+    }
+
+    #[tokio::test]
+    async fn a_model_the_policy_refuses_is_refused_before_any_run_exists_on_both_invoke_rpcs() {
+        let (service, publisher, lifecycle) = test_service_with_lifecycle(MockInferenceOk).await;
+        let mut unary = make_request("hello");
+        unary.model = "policy-denied".to_owned();
+        let mut streaming = make_request("hello");
+        streaming.model = "policy-denied".to_owned();
+
+        let refused = [
+            service.invoke(authenticated(unary)).await.expect_err("refused"),
+            service
+                .invoke_stream(authenticated(streaming))
+                .await
+                .expect_err("refused"),
+        ];
+        for status in refused {
+            assert_eq!(status.code(), tonic::Code::PermissionDenied);
+            let refusal = mp_contracts::model_entitlement::Refusal::from_status(&status)
+                .expect("the status carries the catalogue trailers");
+            assert_eq!(refusal.code(), "model_not_entitled");
+            assert_eq!(
+                refusal.reason(),
+                Some(mp_contracts::model_entitlement::Reason::NotInAllowList)
+            );
+        }
+        assert!(
+            lifecycle.starts.lock().unwrap().is_empty(),
+            "no managed run may be started for a refused model"
+        );
+        assert!(publisher.drain().is_empty(), "no event may be published either");
+    }
+
+    #[tokio::test]
+    async fn a_model_the_policy_does_not_refuse_runs_as_before() {
+        let (service, _, lifecycle) = test_service_with_lifecycle(MockInferenceOk).await;
+        let mut request = make_request("hello");
+        request.model = "allowed-model".to_owned();
+        service
+            .invoke(authenticated(request))
+            .await
+            .expect("invoke ok");
         assert_direct_managed_terminal(&lifecycle, TerminalOutcome::Completed, "");
     }
 

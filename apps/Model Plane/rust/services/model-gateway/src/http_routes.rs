@@ -674,6 +674,11 @@ fn invoke_inference_error(
     subscription: Option<&crate::subscription_failure::SubscriptionFailure>,
 ) -> InvokeError {
     let Some(failure) = subscription else {
+        // A model the caller's organisation does not allow, refused by
+        // inference-core's own check, keeps its catalogue code and status.
+        if let Some(refusal) = mp_contracts::model_entitlement::Refusal::from_status(error) {
+            return crate::model_access::http(&refusal).into();
+        }
         return (
             StatusCode::BAD_GATEWAY,
             Json(json!({ "error": error.message() })),
@@ -6304,6 +6309,12 @@ pub(crate) fn grpc_status_to_http(error: &tonic::Status) -> HttpJsonError {
     if let Some(refusal) = mp_contracts::zdr_refusal::Refusal::from_status(error) {
         return (status, Json(refusal.json_body()));
     }
+    // A model-entitlement refusal (a different kind trailer, on PERMISSION_DENIED
+    // or UNAVAILABLE) keeps its catalogue code and takes the catalogue's status:
+    // 503 for an unreadable policy, where UNAVAILABLE alone would read 502.
+    if let Some(refusal) = mp_contracts::model_entitlement::Refusal::from_status(error) {
+        return crate::model_access::http(&refusal);
+    }
     (status, Json(json!({ "error": error.message() })))
 }
 
@@ -8654,6 +8665,31 @@ fn privacy_tier_label(value: i32) -> &'static str {
 #[derive(Debug, Serialize)]
 struct ListModelsHttpResponse {
     models: Vec<ModelDescriptor>,
+    /// What the organisation's model policy did to this catalogue. Left out
+    /// when no policy is applied, so a deploy with entitlement off serves the
+    /// same JSON as before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    entitlement: Option<ModelEntitlementMeta>,
+}
+
+/// `ModelAccessMeta` as the catalogue's sibling field: counts, a revision and
+/// policy defaults, never a model list or any content.
+#[derive(Debug, Serialize)]
+struct ModelEntitlementMeta {
+    /// `none`, `org`, `role` or `member_not_found`.
+    state: String,
+    enforced: bool,
+    revision: i64,
+    restricted: bool,
+    /// Chat models the policy removed from `models`.
+    hidden_count: u32,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    default_model: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    default_effort: String,
+    /// The highest reasoning effort allowed, a canonical name.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    max_effort: String,
 }
 
 /// chat-parity §2 — list available models with their per-model feature
@@ -8698,8 +8734,18 @@ async fn list_models(
             effort_levels: m.effort_levels,
         })
         .collect();
+    let entitlement = resp.access.map(|access| ModelEntitlementMeta {
+        state: access.state,
+        enforced: access.enforced,
+        revision: access.revision,
+        restricted: access.restricted,
+        hidden_count: access.hidden_count,
+        default_model: access.default_model,
+        default_effort: access.default_effort,
+        max_effort: access.max_effort,
+    });
 
-    Ok(Json(ListModelsHttpResponse { models }))
+    Ok(Json(ListModelsHttpResponse { models, entitlement }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -10012,7 +10058,7 @@ async fn invoke(
     inference_bearer: VerifiedInferenceBearer,
     capability_bearer: Option<Extension<VerifiedCapabilityBearer>>,
     cost_bearer: Option<Extension<VerifiedCostBearer>>,
-    Json(req): Json<InvokeRequest>,
+    Json(mut req): Json<InvokeRequest>,
 ) -> Result<Json<InvokeResponse>, InvokeError> {
     if req.features.iter().any(|f| f == "conversation_only") {
         return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": {
@@ -10039,7 +10085,23 @@ async fn invoke(
     }
 
     // Normalize and validate the request
-    let normalized = normalize::normalize(&req)?;
+    let mut normalized = normalize::normalize(&req)?;
+    // The organisation's model policy, asked of inference-core before anything
+    // durable exists: a refused turn leaves no thread, message or run behind, and
+    // the ZDR branch below is under the same policy as the durable one.
+    let admitted = crate::model_access::admit(
+        &state.inference_client,
+        authenticated_inference_request((), &inference_bearer).metadata(),
+        &claims.org_id,
+        &normalized.model,
+        &normalized.provider_hint,
+    )
+    .await
+    .map_err(|refusal| InvokeError::from(crate::model_access::http(&refusal)))?;
+    if let Some(model) = admitted.model.clone() {
+        normalized.model = model;
+    }
+    admitted.clamp_effort(&mut req.effort, crate::thinking::ladder_enabled());
     let effective_zdr = posture.zdr();
     let persistence = invoke_persistence_plan(effective_zdr);
     let capability_bearer = capability_bearer.map(|Extension(bearer)| bearer);

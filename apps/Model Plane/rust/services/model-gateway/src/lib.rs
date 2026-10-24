@@ -46,6 +46,7 @@ pub mod mcp_jsonrpc;
 pub mod mcp_oauth;
 pub mod memory_prefetch;
 pub mod memory_provenance;
+pub mod model_access;
 pub mod moderation;
 pub mod nats_connection;
 pub mod nats_publisher;

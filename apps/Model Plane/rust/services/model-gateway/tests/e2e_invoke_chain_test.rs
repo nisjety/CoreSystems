@@ -129,7 +129,19 @@ struct MockOk {
     /// added, so a test can act while an answer is provably in flight. Add
     /// plenty to release every stream, current and later, at once.
     stream_gate: Option<Arc<tokio::sync::Semaphore>>,
+    /// What `GetModelAccess` answers, by request. None answers as inference-core
+    /// does with no policy applied: the model is allowed and nothing is enforced.
+    model_access: Option<AccessAnswer>,
+    /// The `access` meta `ListModels` answers with. None leaves it off.
+    catalogue_access: Option<mpv1::ModelAccessMeta>,
 }
+
+/// How a test scripts the organisation's model policy.
+type AccessAnswer = Arc<
+    dyn Fn(&mpv1::GetModelAccessRequest) -> Result<mpv1::GetModelAccessResponse, Status>
+        + Send
+        + Sync,
+>;
 
 /// Where [`MockOk::refusal`] refuses, and with what.
 #[derive(Clone)]
@@ -172,6 +184,8 @@ impl MockOk {
             captured_cache_control: None,
             refusal: None,
             stream_gate: None,
+            model_access: None,
+            catalogue_access: None,
         }
     }
 
@@ -190,6 +204,8 @@ impl MockOk {
             captured_cache_control: None,
             refusal: None,
             stream_gate: None,
+            model_access: None,
+            catalogue_access: None,
         }
     }
 
@@ -208,6 +224,8 @@ impl MockOk {
             captured_cache_control: None,
             refusal: None,
             stream_gate: None,
+            model_access: None,
+            catalogue_access: None,
         }
     }
 
@@ -226,6 +244,8 @@ impl MockOk {
             captured_cache_control: None,
             refusal: None,
             stream_gate: None,
+            model_access: None,
+            catalogue_access: None,
         }
     }
 
@@ -478,8 +498,11 @@ impl InferenceCore for MockOk {
 
     async fn get_model_access(
         &self,
-        _: tonic::Request<mp_contracts::model_plane::v1::GetModelAccessRequest>,
+        request: tonic::Request<mp_contracts::model_plane::v1::GetModelAccessRequest>,
     ) -> Result<tonic::Response<mp_contracts::model_plane::v1::GetModelAccessResponse>, tonic::Status> {
+        if let Some(answer) = &self.model_access {
+            return answer(request.get_ref()).map(tonic::Response::new);
+        }
         Ok(tonic::Response::new(mp_contracts::model_plane::v1::GetModelAccessResponse {
             model_allowed: true,
             ..Default::default()
@@ -501,7 +524,7 @@ impl InferenceCore for MockOk {
                 residency: String::new(),
                 effort_levels: Vec::new(),
             }],
-            access: None,
+            access: self.catalogue_access.clone(),
         }))
     }
 
@@ -12884,4 +12907,350 @@ async fn agentic_run_without_reported_usage_publishes_nothing_and_shows_zero() {
     assert_eq!(frame["output_tokens"], 0);
     assert!(frame.get("cache_read_tokens").is_none());
     clear_model_auth_env();
+}
+
+// ---------------------------------------------------------------------------
+// Model entitlement admission (ADR-0005, WS10-S4): the organisation's policy is
+// asked of inference-core before a run exists, on every transport.
+// ---------------------------------------------------------------------------
+
+/// A policy that is applied and answers `allowed` for the model asked about.
+fn applied_policy(
+    allowed: impl Fn(&str) -> bool + Send + Sync + 'static,
+    max_effort: &'static str,
+) -> AccessAnswer {
+    Arc::new(move |request| {
+        let ok = allowed(&request.model);
+        Ok(mpv1::GetModelAccessResponse {
+            state: "role".to_owned(),
+            enforced: true,
+            revision: 7,
+            restricted: true,
+            model_allowed: ok,
+            reason: if ok { String::new() } else { "not_in_allow_list".to_owned() },
+            max_effort: max_effort.to_owned(),
+            ..Default::default()
+        })
+    })
+}
+
+fn chat_turn(model: &str) -> serde_json::Value {
+    serde_json::json!({ "content": "what is in the board pack", "model": model })
+}
+
+/// Nothing of the turn exists: no managed run, no thread, no message.
+fn assert_no_session_rows(turn: &SignedTurn) {
+    assert_eq!(managed_start_count(&turn.session), 0, "no managed run may start");
+    assert_eq!(turn.session.create_thread_count.load(Ordering::SeqCst), 0);
+    assert_eq!(turn.session.append_message_count.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn a_model_the_policy_refuses_is_a_typed_403_on_the_unary_route_before_any_run() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let inference = MockOk {
+        model_access: Some(applied_policy(|model| model == "allowed-model", "")),
+        ..MockOk::counting(Arc::clone(&calls))
+    };
+    let turn = signed_turn("/v1/invoke", false, chat_turn("gpt-forbidden"), inference).await;
+
+    assert_eq!(turn.status, StatusCode::FORBIDDEN, "{}", turn.body);
+    let body: serde_json::Value = serde_json::from_str(&turn.body).expect("a JSON body");
+    assert_eq!(body["error"]["code"], "model_not_entitled", "{body}");
+    assert_eq!(body["error"]["details"]["reason"], "not_in_allow_list");
+    assert_eq!(body["error"]["details"]["model"], "gpt-forbidden");
+    assert_eq!(body["error"]["retryable"], false);
+    assert!(!turn.body.contains("board pack"), "a refusal is content-free: {}", turn.body);
+    assert_no_session_rows(&turn);
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "no model may be called");
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn a_model_the_policy_refuses_is_the_same_code_in_one_error_frame_on_the_stream() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let inference = MockOk {
+        model_access: Some(applied_policy(|model| model == "allowed-model", "")),
+        ..MockOk::counting(Arc::clone(&calls))
+    };
+    let turn = signed_turn("/v1/invoke/stream", false, chat_turn("gpt-forbidden"), inference).await;
+
+    assert_eq!(turn.status, StatusCode::OK, "{}", turn.body);
+    let errors = error_frames(&turn.body);
+    assert_eq!(errors.len(), 1, "{}", turn.body);
+    assert_eq!(errors[0]["code"], "model_not_entitled", "{}", turn.body);
+    assert_eq!(errors[0]["retryable"], false);
+    assert!(
+        !turn.body.contains("event: chunk") && !turn.body.contains("event: done"),
+        "{}",
+        turn.body
+    );
+    assert!(!turn.body.contains("board pack"), "{}", turn.body);
+    assert_no_session_rows(&turn);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn a_zdr_turn_is_under_the_same_policy_and_refused_with_the_same_code() {
+    for uri in ["/v1/invoke", "/v1/invoke/stream"] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let inference = MockOk {
+            model_access: Some(applied_policy(|_| false, "")),
+            ..MockOk::counting(Arc::clone(&calls))
+        };
+        let turn = signed_turn(uri, true, chat_turn("gpt-forbidden"), inference).await;
+        assert!(
+            turn.body.contains("model_not_entitled"),
+            "{uri} must refuse under ZDR too: {}",
+            turn.body
+        );
+        assert_no_session_rows(&turn);
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "{uri}");
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn a_policy_that_cannot_be_read_is_a_503_and_one_retryable_frame_not_a_502() {
+    let unavailable = mp_contracts::model_entitlement::Refusal::unavailable().grpc_status();
+    let answer: AccessAnswer = Arc::new(move |_| Err(unavailable.clone()));
+
+    let turn = signed_turn(
+        "/v1/invoke",
+        false,
+        chat_turn("any-model"),
+        MockOk { model_access: Some(answer.clone()), ..MockOk::default() },
+    )
+    .await;
+    assert_eq!(turn.status, StatusCode::SERVICE_UNAVAILABLE, "{}", turn.body);
+    let body: serde_json::Value = serde_json::from_str(&turn.body).expect("a JSON body");
+    assert_eq!(body["error"]["code"], "model_entitlement_unavailable", "{body}");
+    assert_eq!(body["error"]["retryable"], true);
+    assert_no_session_rows(&turn);
+
+    let turn = signed_turn(
+        "/v1/invoke/stream",
+        false,
+        chat_turn("any-model"),
+        MockOk { model_access: Some(answer), ..MockOk::default() },
+    )
+    .await;
+    let errors = error_frames(&turn.body);
+    assert_eq!(errors.len(), 1, "{}", turn.body);
+    assert_eq!(errors[0]["code"], "model_entitlement_unavailable", "{}", turn.body);
+    assert_eq!(errors[0]["retryable"], true);
+    assert_no_session_rows(&turn);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn a_policy_that_is_not_applied_and_a_question_that_cannot_be_answered_change_nothing() {
+    // Shadow: the verdict says refuse, `enforced` says it is not applied.
+    let shadow: AccessAnswer = Arc::new(|_| {
+        Ok(mpv1::GetModelAccessResponse {
+            enforced: false,
+            model_allowed: false,
+            reason: "not_in_allow_list".to_owned(),
+            max_effort: "low".to_owned(),
+            ..Default::default()
+        })
+    });
+    // An inference-core that cannot answer at all gives no verdict: the turn goes
+    // on to inference-core's own pre-check.
+    let silent: AccessAnswer = Arc::new(|_| Err(Status::unavailable("down")));
+    for answer in [shadow, silent] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let inference = MockOk {
+            model_access: Some(answer),
+            ..MockOk::counting(Arc::clone(&calls))
+        };
+        let turn = signed_turn("/v1/invoke", false, chat_turn("gpt-any"), inference).await;
+        assert_eq!(turn.status, StatusCode::OK, "{}", turn.body);
+        assert_eq!(managed_start_count(&turn.session), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn the_question_names_the_org_the_model_and_the_chat_surface_and_nothing_else() {
+    let asked: Arc<Mutex<Vec<mpv1::GetModelAccessRequest>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&asked);
+    let answer: AccessAnswer = Arc::new(move |request| {
+        sink.lock().unwrap().push(request.clone());
+        Ok(mpv1::GetModelAccessResponse { model_allowed: true, ..Default::default() })
+    });
+    let turn = signed_turn(
+        "/v1/invoke",
+        false,
+        chat_turn("gpt-x"),
+        MockOk { model_access: Some(answer), ..MockOk::default() },
+    )
+    .await;
+    assert_eq!(turn.status, StatusCode::OK, "{}", turn.body);
+    let asked = asked.lock().unwrap();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].model, "gpt-x");
+    assert_eq!(asked[0].surface, "chat");
+    assert!(asked[0].draft.is_none() && !asked[0].include_catalogue);
+    assert!(!asked[0].org_id.is_empty());
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn an_unnamed_model_runs_on_the_policys_chat_default_and_the_default_is_judged_too() {
+    let requests: CapturedRequests = Arc::new(Mutex::new(Vec::new()));
+    let with_default: AccessAnswer = Arc::new(|_| {
+        Ok(mpv1::GetModelAccessResponse {
+            enforced: true,
+            restricted: true,
+            model_allowed: true,
+            default_model: "policy-default".to_owned(),
+            ..Default::default()
+        })
+    });
+    let inference = MockOk {
+        captured_requests: Some(Arc::clone(&requests)),
+        model_access: Some(with_default),
+        ..MockOk::default()
+    };
+    let turn = signed_turn("/v1/invoke", false, serde_json::json!({ "content": "hello" }), inference)
+        .await;
+    assert_eq!(turn.status, StatusCode::OK, "{}", turn.body);
+    assert_eq!(requests.lock().unwrap()[0].model, "policy-default");
+
+    // A default the same policy refuses is refused here, before any row.
+    let refusing_default: AccessAnswer = Arc::new(|request| {
+        let named = request.model == "policy-default";
+        Ok(mpv1::GetModelAccessResponse {
+            enforced: true,
+            restricted: true,
+            model_allowed: !named,
+            reason: if named { "explicitly_denied".to_owned() } else { String::new() },
+            default_model: "policy-default".to_owned(),
+            ..Default::default()
+        })
+    });
+    let turn = signed_turn(
+        "/v1/invoke",
+        false,
+        serde_json::json!({ "content": "hello" }),
+        MockOk { model_access: Some(refusing_default), ..MockOk::default() },
+    )
+    .await;
+    assert_eq!(turn.status, StatusCode::FORBIDDEN, "{}", turn.body);
+    assert_no_session_rows(&turn);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn the_effort_a_turn_asks_for_is_lowered_to_the_policys_ceiling_and_never_raised() {
+    // The persistence-free stream sends its reasoning request on one unary
+    // `Infer`, so the request the mock keeps is what the gateway asked for.
+    async fn asked(policy: Option<AccessAnswer>, effort: &str) -> mpv1::InferRequest {
+        let requests: CapturedRequests = Arc::new(Mutex::new(Vec::new()));
+        let inference = MockOk {
+            captured_requests: Some(Arc::clone(&requests)),
+            model_access: policy,
+            ..MockOk::default()
+        };
+        let turn = signed_turn(
+            "/v1/invoke/stream",
+            true,
+            serde_json::json!({ "content": "think it through", "model": "m", "effort": effort }),
+            inference,
+        )
+        .await;
+        assert_eq!(turn.status, StatusCode::OK, "{}", turn.body);
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1, "{}", turn.body);
+        requests[0].clone()
+    }
+    // The answer ceiling leaves room for `deep`'s whole budget.
+    let _ceiling = EnvGuard::set("MODEL_GATEWAY_ANSWER_TOKENS", Some("16384"));
+    let _ladder = EnvGuard::set("MODEL_GATEWAY_EFFORT_LADDER", None);
+
+    // The legacy budget: `deep` is 4096 and `quick` 1024.
+    assert_eq!(asked(None, "deep").await.thinking_budget_tokens, 4096);
+    let low = applied_policy(|_| true, "low");
+    assert_eq!(asked(Some(low.clone()), "deep").await.thinking_budget_tokens, 1024);
+    assert_eq!(asked(Some(low), "quick").await.thinking_budget_tokens, 1024);
+    let minimal = applied_policy(|_| true, "minimal");
+    assert_eq!(asked(Some(minimal), "deep").await.thinking_budget_tokens, 0);
+    let open = applied_policy(|_| true, "");
+    assert_eq!(asked(Some(open), "deep").await.thinking_budget_tokens, 4096);
+
+    // The ladder: the canonical level the turn asks for is lowered to the ceiling.
+    let _ladder = EnvGuard::set("MODEL_GATEWAY_EFFORT_LADDER", Some("true"));
+    let wire = |level: mpv1::ReasoningEffort| level as i32;
+    assert_eq!(asked(None, "max").await.reasoning_effort, wire(mpv1::ReasoningEffort::Max));
+    let medium = applied_policy(|_| true, "medium");
+    assert_eq!(
+        asked(Some(medium.clone()), "max").await.reasoning_effort,
+        wire(mpv1::ReasoningEffort::Medium)
+    );
+    assert_eq!(
+        asked(Some(medium), "low").await.reasoning_effort,
+        wire(mpv1::ReasoningEffort::Low),
+        "a request within the ceiling is not raised to it"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn the_catalogue_carries_the_policys_meta_as_a_sibling_field_or_nothing() {
+    async fn models(access: Option<mpv1::ModelAccessMeta>) -> serde_json::Value {
+        std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+        let client = spawn_mock(MockOk { catalogue_access: access, ..MockOk::default() }).await;
+        let (mock_session, _handles) = MockSessionCore::new();
+        let session_client = spawn_session_mock(mock_session).await;
+        let (state, _publisher) = make_state(client, session_client).await;
+        let (app, _jwks) = authenticated_user_router(
+            build_router(state, None),
+            "org_placeholder",
+            "user_placeholder",
+        )
+        .await;
+        let request = Request::builder()
+            .method("GET")
+            .uri("/v1/models")
+            .header(AUTHORIZATION, "Bearer dev")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&body).expect("a JSON body")
+    }
+
+    let plain = models(None).await;
+    assert!(plain.get("entitlement").is_none(), "no policy, the same JSON as before: {plain}");
+    assert!(plain["models"].is_array());
+
+    let applied = models(Some(mpv1::ModelAccessMeta {
+        state: "role".to_owned(),
+        enforced: true,
+        revision: 7,
+        restricted: true,
+        hidden_count: 3,
+        default_model: String::new(),
+        default_effort: String::new(),
+        max_effort: "medium".to_owned(),
+    }))
+    .await;
+    assert_eq!(
+        applied["entitlement"],
+        serde_json::json!({
+            "state": "role",
+            "enforced": true,
+            "revision": 7,
+            "restricted": true,
+            "hidden_count": 3,
+            "max_effort": "medium",
+        }),
+        "{applied}"
+    );
+    assert!(applied["models"].is_array());
 }
