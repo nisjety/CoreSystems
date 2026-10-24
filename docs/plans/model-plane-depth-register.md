@@ -1172,6 +1172,21 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D2-332 | WS20-S3 | live-proof | P1 | Scope check: the git status of the shared worktree lists many other modified files (sidebar-navigation.ts, DashboardComposer.tsx, chat-client.ts, Model Plane proto and session-core files, and others). They belong to other batches (W1-11, W1-17, W2-05 and similar), not to this slice's six files; the owned-file diffs contain only S3 changes. | open |
 | D2-333 | WS20-S3 | follow-up | P3 | 14 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-13.json | open |
 
+
+### Wave-mode batch W2-13 (2026-10-24)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D2-334 | WS24-S0 | live-proof | P1 | Worktree execution-core lib does not compile: E0063 for missing image_parts in InferRequest at runtime_loop/agent.rs:2720, caused by another batch's uncommitted proto change at apps/Model Plane/proto/model_plane/v1/inference.proto:241. Only the lead can resolve this, and it must be done before the fixture is committed in this worktree. | open |
+| D2-335 | WS24-S0 | live-proof | P1 | Ledger entries are not in apps/Model Plane/docs/decisions/ledger.md. They are a shared-edit the lead applies. The lead_todo refers to 'bodies as given in the earlier report', which this verifier did not receive, so the lead must supply the two entry bodies (WS24-S0 DEC-24 never-promote and DEC-25 tool naming, classification and rung entries) before the DoD 'ledger merged' can be met. | open |
+| D2-336 | WS24-S0 | live-proof | P1 | Docs and test slice with no runtime change: switch defaults, ZDR, proto tags, migration numbers and live proofs do not apply and were not exercised; no docker was run. | open |
+| D2-337 | WS24-S0 | live-proof | P1 | Unblock execution-core lib: the other batch's uncommitted proto change adds InferRequest.image_parts (tag 20) in apps/Model Plane/proto/model_plane/v1/inference.proto, but apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:2720 constructs pb::InferRequest without it. That batch must set image_parts (or the proto change must be held back) before any execution-core cargo build succeeds. | open |
+| D2-338 | WS24-S0 | live-proof | P1 | Once the lib compiles: cd "apps/Model Plane/rust" && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 DO_TOOL_CATALOGUE_UPDATE=1 cargo test -q -p execution-core --test tool_catalogue_characterisation . Review apps/Model Plane/rust/services/execution-core/tests/fixtures/do_tool_catalogue.json: expect 33 tools, matching the parser check above. | open |
+| D2-339 | WS24-S0 | live-proof | P1 | Then run the same command without DO_TOOL_CATALOGUE_UPDATE and expect it green. Then cargo test -q -p execution-core --lib, which should be unaffected apart from the workspace_hydrate.rs doc header. | open |
+| D2-340 | WS24-S0 | live-proof | P1 | Commit the fixture together with tests/tool_catalogue_characterisation.rs (new, untracked) and the Frontend model-eligibility.test.ts. | open |
+| D2-341 | WS24-S0 | test-gap | P2 | The golden's parser reads only `name: ` literal lines inside the three offer functions, so a tool added through a helper or a non-literal expression not in resolve_constant escapes detection, although the header says a new offered tool fails the test; add a runtime count check against the assembled offer lists or document the gap. | open |
+| D2-342 | WS24-S0 | follow-up | P3 | 2 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-13.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
