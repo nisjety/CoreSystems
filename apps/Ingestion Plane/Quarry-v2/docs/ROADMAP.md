@@ -33,6 +33,10 @@
 - Capture/restore via Browserless-style persistent sessions and Playwright-style storage state: cookies, localStorage, sessionStorage, IndexedDB, UA, viewport, locale, timezone, reconnect/stop URLs stored as secrets.
 
 ## Phase 5 — Crawl workers to Rust
+
+Status (2026-10-24, WS14.S8 closeout, partial): the crawl scope (WS14.S2, S3), the robots gate in observe (WS14.S4), the batch check (WS14.S5) and the crawl request v2 (WS14.S6) are built. Their switches default to `observe` (`QUARRY_EDGE__CRAWL_SCOPE_MODE`, `QUARRY_EDGE__CRAWL_ROBOTS`), so nothing is enforced by default. Still open and not flipped here: the enforce defaults (X-10 and the soak data), the removal of the legacy branch and of the `crawl-scope-v1` marker (a Temporal running-execution check on a live stack comes first), and the removal of the S0 characterization tests. See `docs/CRAWL_SCOPE_ROBOTS.md`.
+
+CrawlFrontier keep-or-delete: `CrawlFrontier` has no production caller in quarry-edge, quarry-runtime or the orchestrator (checked 2026-10-24: only the `crawl_filter.rs` tests and the `lib.rs` re-export). Its crawl loop runs in the orchestrator. Wire it when crawl workers move to Rust, otherwise delete it.
 - Go Temporal: start/pause/resume/backfill/cancel.
 - Rust: page execution + per-page queue + per-page progress events.
 - Port Quarry V1/Firecrawl crawl behavior: sitemap, robots, include/exclude paths, depth/discovery limits, external/subdomain/backward crawling controls, typed denial reasons.
