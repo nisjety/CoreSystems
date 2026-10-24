@@ -446,6 +446,10 @@ fn presented_run_budget(
 
 /// The only `DeriveRunGrant` purpose this route asks for.
 const DERIVE_PURPOSE_AI_RUN: &str = "ai_run";
+/// Most hosts a run may be derived with from a `human_browse` parent (WS8.C).
+/// The broker applies its own bound (`BROWSER_BROKER_MAX_RUN_DOMAINS`); this
+/// keeps an oversized list from reaching it.
+const MAX_HUMAN_BROWSE_RUN_DOMAINS: usize = 8;
 
 /// Resolves the caller's grant into the run grant the browser run executes
 /// under. `run_key` names both the managed run and the derived grant, so the
@@ -485,6 +489,47 @@ async fn resolve_browser_grant(
     if !response.active || response.grant_id.trim() != grant_id {
         // Never distinguish forged, expired, revoked, or cross-tenant grants.
         return Err(browser_grant_forbidden());
+    }
+    // A `human_browse` grant (WS8.C) is a person's own open web: it has no host
+    // list to canonicalize and is never lent to a run as it is. The run must name
+    // its hosts (at most MAX_HUMAN_BROWSE_RUN_DOMAINS); the broker also refuses a
+    // host under its deny-list. The hosts the broker hands back must not exceed
+    // the ones asked for, which stand in for the parent policy below.
+    if response.kind == "human_browse" {
+        // A ZDR grant must never back a durable run, whatever the request says.
+        if response.zdr {
+            return Err(browser_run_zdr_refusal());
+        }
+        let hosts = match request.allowed_domains.as_deref() {
+            None | Some([]) => {
+                return Err(bad_request(
+                    "allowed_domains required: a human_browse session never lends open web",
+                ))
+            }
+            Some(requested) => canonical_browser_domains(requested)
+                .map_err(|()| bad_request("allowed_domains must be a bounded hostname policy"))?,
+        };
+        if hosts.len() > MAX_HUMAN_BROWSE_RUN_DOMAINS {
+            return Err(bad_request(
+                "allowed_domains names too many hosts for a human_browse session",
+            ));
+        }
+        return derive_run_grant(
+            state,
+            request,
+            browser_bearer,
+            org_id,
+            run_key,
+            grant_id,
+            &hosts,
+            mint,
+            BudgetClaim::from_wire(
+                response.budget_micro_usd,
+                response.budget_max_steps,
+                response.budget_max_runtime_s,
+            ),
+        )
+        .await;
     }
     let broker_policy = canonical_browser_domains(&response.allowed_domains)
         .map_err(|()| browser_grant_forbidden())?;
@@ -628,6 +673,7 @@ async fn derive_run_grant(
             budget_max_runtime_s: claim.map_or(0, |claim| claim.max_runtime_s),
             budget_source: source.unwrap_or_default().to_owned(),
             budget_minted_at_unix: 0,
+            resource_id: String::new(),
         }
     };
     let mut broker = state.browser_client.clone();
@@ -1597,8 +1643,8 @@ mod tests {
         AcquireGrantRequest, AcquireGrantResponse, BrowserHealthRequest, BrowserHealthResponse,
         CancelRunRequest, CancelRunResponse, DeriveRunGrantResponse, ExecuteStepRequest,
         ExecuteStepResponse, PauseRunRequest, PauseRunResponse, ResumeRunRequest,
-        ResumeRunResponse, RevokeGrantRequest, RevokeGrantResponse, RunAgentRequest,
-        RunAgentResponse, ValidateGrantResponse,
+        RenewGrantRequest, RenewGrantResponse, ResumeRunResponse, RevokeGrantRequest,
+        RevokeGrantResponse, RunAgentRequest, RunAgentResponse, ValidateGrantResponse,
     };
     use tonic::{Response, Status};
 
@@ -1736,6 +1782,13 @@ mod tests {
                 Some(Ok(response)) => Ok(Response::new(response.clone())),
                 Some(Err(code)) => Err(Status::new(*code, "test broker rejection")),
             }
+        }
+
+        async fn renew_grant(
+            &self,
+            _request: tonic::Request<RenewGrantRequest>,
+        ) -> Result<Response<RenewGrantResponse>, Status> {
+            Err(Status::unimplemented("not used by validation test"))
         }
 
         async fn health(
@@ -2305,6 +2358,127 @@ mod tests {
             ["Bearer browser-user-token", "Bearer browser-user-token"],
             "validate and derive both use the delegated browser bearer"
         );
+    }
+
+    fn human_browse_validation(grant_id: &str) -> ValidateGrantResponse {
+        ValidateGrantResponse {
+            grant_id: grant_id.to_owned(),
+            active: true,
+            // An open-web grant has no host list: the policy is its mode.
+            allowed_domains: Vec::new(),
+            kind: "human_browse".to_owned(),
+            policy_mode: "open_web".to_owned(),
+            denied_domains: vec![".internal".to_owned(), "metadata.goog".to_owned()],
+            owner_id: "user-a".to_owned(),
+            ..Default::default()
+        }
+    }
+
+    fn human_browse_broker(
+        derive: Result<DeriveRunGrantResponse, tonic::Code>,
+    ) -> TestBrowserBroker {
+        TestBrowserBroker {
+            derive: Some(derive),
+            ..TestBrowserBroker::validating(Ok(human_browse_validation("human-1")))
+        }
+    }
+
+    #[tokio::test]
+    async fn derive_from_human_browse_without_domains_is_400() {
+        for allowed in [None, Some(Vec::new())] {
+            let mut request = browser_request("human-1");
+            request.allowed_domains = allowed;
+            let (result, broker) = resolve_with(
+                human_browse_broker(Ok(derived_run("run-1", "human-1", &["example.com"]))),
+                request,
+            )
+            .await;
+            let error = result.expect_err("a human_browse session never lends open web");
+            assert_eq!(error.0, StatusCode::BAD_REQUEST);
+            assert!(
+                error.1 .0["error"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("never lends open web")),
+                "{:?}",
+                error.1 .0
+            );
+            assert!(
+                broker.derive_requests.lock().expect("recorder").is_empty(),
+                "nothing reaches the broker's derive"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn derive_from_human_browse_passes_the_named_hosts_and_the_ai_run_purpose() {
+        let mut request = browser_request("human-1");
+        request.allowed_domains = Some(vec![" API.example.com ".to_owned()]);
+        request.start_url = Some("https://api.example.com/start".to_owned());
+        let (result, broker) = resolve_with(
+            human_browse_broker(Ok(derived_run("run-1", "human-1", &["api.example.com"]))),
+            request,
+        )
+        .await;
+        let grant = result.expect("derived run grant");
+        assert_eq!(grant.grant_id, "run-1");
+        assert_eq!(grant.allowed_domains, ["api.example.com"]);
+        assert_eq!(grant.parent_grant_id.as_deref(), Some("human-1"));
+        let derives = broker.derive_requests.lock().expect("derive recorder");
+        assert_eq!(derives.len(), 1);
+        assert_eq!(derives[0].allowed_domains, ["api.example.com"]);
+        assert_eq!(derives[0].purpose, "ai_run");
+        assert!(derives[0].resource_id.is_empty());
+    }
+
+    #[tokio::test]
+    async fn derive_from_human_browse_refuses_too_many_hosts_and_a_widening_answer() {
+        let mut request = browser_request("human-1");
+        request.allowed_domains = Some(
+            (0..=MAX_HUMAN_BROWSE_RUN_DOMAINS)
+                .map(|i| format!("h{i}.example.com"))
+                .collect(),
+        );
+        let (result, broker) = resolve_with(
+            human_browse_broker(Ok(derived_run("run-1", "human-1", &["h0.example.com"]))),
+            request,
+        )
+        .await;
+        assert_eq!(result.expect_err("nine hosts").0, StatusCode::BAD_REQUEST);
+        assert!(broker.derive_requests.lock().expect("recorder").is_empty());
+
+        // A broker that answers with a host the run did not ask for is refused:
+        // the requested hosts stand in for the (absent) parent policy.
+        let mut request = browser_request("human-1");
+        request.allowed_domains = Some(vec!["api.example.com".to_owned()]);
+        request.start_url = None;
+        let (result, _) = resolve_with(
+            human_browse_broker(Ok(derived_run(
+                "run-2",
+                "human-1",
+                &["api.example.com", "evil.example.net"],
+            ))),
+            request,
+        )
+        .await;
+        assert_eq!(result.expect_err("widened").0, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn a_zdr_human_browse_grant_never_backs_a_run() {
+        let mut validation = human_browse_validation("human-1");
+        validation.zdr = true;
+        let mut request = browser_request("human-1");
+        request.allowed_domains = Some(vec!["api.example.com".to_owned()]);
+        let (result, broker) = resolve_with(
+            TestBrowserBroker {
+                derive: Some(Ok(derived_run("run-1", "human-1", &["api.example.com"]))),
+                ..TestBrowserBroker::validating(Ok(validation))
+            },
+            request,
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(broker.derive_requests.lock().expect("recorder").is_empty());
     }
 
     #[tokio::test]

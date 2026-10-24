@@ -16,6 +16,13 @@
 //! Issuing a grant is allowed under ZDR (the grant is ephemeral and carries a
 //! `z_` id); only the durable run lifecycle is blocked for ZDR, in
 //! `browser_run`.
+//!
+//! WS8.C adds the `human_browse` kind (open web minus the broker's deny-list,
+//! for a person's own browsing) and `POST /v1/browser/grants/:grant_id/renew`,
+//! which extends a session or human_browse grant by one broker TTL up to its
+//! absolute cap. Both are the broker's decisions; this module only forwards the
+//! user's request with the user's browser bearer and maps the answer. A
+//! human_browse request names no hosts, and nothing here logs one.
 
 use axum::{
     extract::{Path, State},
@@ -23,7 +30,7 @@ use axum::{
     routing::{delete, post},
     Extension, Json, Router,
 };
-use mp_contracts::model_plane::v1::{AcquireGrantRequest, RevokeGrantRequest};
+use mp_contracts::model_plane::v1::{AcquireGrantRequest, RenewGrantRequest, RevokeGrantRequest};
 use mp_ids::new_ulid;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -43,18 +50,28 @@ const MAX_REQUEST_DOMAINS: usize = 32;
 const MAX_DOMAIN_LEN: usize = 253;
 const MAX_GRANT_ID_LEN: usize = 128;
 const REVOKE_REASON: &str = "session_closed";
+/// The only `kind` a caller may ask for besides the ordinary session grant. It
+/// is the broker that decides eligibility (user principal, policy switch); this
+/// is an allow-list so an unknown kind is a 400 here, not a broker 5xx.
+const KIND_HUMAN_BROWSE: &str = "human_browse";
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/v1/browser/grants", post(issue_grant))
         .route("/v1/browser/grants/:grant_id", delete(revoke_grant))
+        .route("/v1/browser/grants/:grant_id/renew", post(renew_grant))
 }
 
 #[derive(Debug, Deserialize)]
 struct IssueBrowserGrantRequest {
+    /// Required for a session grant, forbidden for a `human_browse` grant.
+    #[serde(default)]
     allowed_domains: Vec<String>,
     #[serde(default)]
     mode: Option<String>,
+    /// `None` (a session grant) or `"human_browse"`.
+    #[serde(default)]
+    kind: Option<String>,
     #[serde(default)]
     zdr: bool,
 }
@@ -77,8 +94,29 @@ fn require_user(claims: &Claims) -> Result<(), ApiError> {
     }
 }
 
-fn validate_request(req: &IssueBrowserGrantRequest) -> Result<&'static str, ApiError> {
-    if req.allowed_domains.is_empty()
+/// What a valid issue request asks for: the browser mode and the grant kind
+/// (`""` for an ordinary session grant, otherwise `KIND_HUMAN_BROWSE`).
+struct ValidatedIssue {
+    mode: &'static str,
+    grant_kind: &'static str,
+}
+
+fn validate_request(req: &IssueBrowserGrantRequest) -> Result<ValidatedIssue, ApiError> {
+    let grant_kind = match req.kind.as_deref().map(str::trim) {
+        None | Some("") => "",
+        Some(KIND_HUMAN_BROWSE) => KIND_HUMAN_BROWSE,
+        Some(_) => return Err(error(StatusCode::BAD_REQUEST, "unsupported_grant_kind")),
+    };
+    if grant_kind == KIND_HUMAN_BROWSE {
+        // Open web is a policy mode, not a host list: a client that names hosts is
+        // asking for a different grant.
+        if !req.allowed_domains.is_empty() {
+            return Err(error(
+                StatusCode::BAD_REQUEST,
+                "human_browse_takes_no_domains",
+            ));
+        }
+    } else if req.allowed_domains.is_empty()
         || req.allowed_domains.len() > MAX_REQUEST_DOMAINS
         || req
             .allowed_domains
@@ -87,11 +125,34 @@ fn validate_request(req: &IssueBrowserGrantRequest) -> Result<&'static str, ApiE
     {
         return Err(error(StatusCode::BAD_REQUEST, "invalid_allowed_domains"));
     }
-    match req.mode.as_deref().map(str::trim) {
-        None | Some("") | Some("cloud") => Ok("cloud"),
-        Some("local") => Ok("local"),
-        Some(_) => Err(error(StatusCode::BAD_REQUEST, "unsupported_browser_mode")),
+    let mode = match req.mode.as_deref().map(str::trim) {
+        None | Some("") | Some("cloud") => "cloud",
+        Some("local") => "local",
+        Some(_) => return Err(error(StatusCode::BAD_REQUEST, "unsupported_browser_mode")),
+    };
+    Ok(ValidatedIssue { mode, grant_kind })
+}
+
+/// Map a broker status for a renewal. A grant that cannot be renewed (at its
+/// cap, expired, revoked, another kind) and one that is not the caller's look
+/// the same: 409 `browser_grant_not_renewable`, so the answer never says whether
+/// an id exists. An older broker answers `Unimplemented`, which is a 502.
+fn renew_status_to_http(status: &tonic::Status) -> ApiError {
+    match status.code() {
+        tonic::Code::FailedPrecondition | tonic::Code::NotFound => {
+            error(StatusCode::CONFLICT, "browser_grant_not_renewable")
+        }
+        tonic::Code::InvalidArgument => error(StatusCode::BAD_REQUEST, "invalid_grant_id"),
+        _ => issue_status_to_http(status),
     }
+}
+
+fn is_valid_grant_id(grant_id: &str) -> bool {
+    !grant_id.is_empty()
+        && grant_id.len() <= MAX_GRANT_ID_LEN
+        && grant_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
 /// Map a broker status for issuance. A refused request is the caller's to fix;
@@ -128,7 +189,7 @@ async fn issue_grant(
     Json(req): Json<IssueBrowserGrantRequest>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     require_user(&claims)?;
-    let mode = validate_request(&req)?;
+    let ValidatedIssue { mode, grant_kind } = validate_request(&req)?;
     let zdr = claims.effective_zdr(req.zdr);
 
     let request = AcquireGrantRequest {
@@ -137,6 +198,7 @@ async fn issue_grant(
         org_id: claims.org_id.clone(),
         allowed_domains: req.allowed_domains,
         zdr,
+        grant_kind: grant_kind.to_owned(),
         ..Default::default()
     };
     let mut broker = state.browser_client.clone();
@@ -149,14 +211,26 @@ async fn issue_grant(
     info!(
         org_id = %claims.org_id,
         grant_id = %granted.grant_id,
+        kind = %granted.kind,
         zdr = granted.zdr,
         "browser grant issued"
     );
+    // A broker that predates WS8.C sends no mode: it only issues allow-lists.
+    let policy_mode = if granted.policy_mode.is_empty() {
+        "allowlist".to_owned()
+    } else {
+        granted.policy_mode.clone()
+    };
     let mut body = json!({
         "grant_id": granted.grant_id,
         "kind": granted.kind,
         "zdr": granted.zdr,
         "expires_at": expires_at_rfc3339(granted.expires_at.as_ref()),
+        "absolute_expires_at": expires_at_rfc3339(granted.absolute_expires_at.as_ref()),
+        "policy_mode": policy_mode,
+        // Config, never a host the user chose: the namespaces an open-web grant
+        // may not reach (empty for an allow-list grant).
+        "denied_domains": granted.denied_domains,
     });
     if !granted.zdr {
         body["allowed_domains"] = json!(granted.allowed_domains);
@@ -174,12 +248,7 @@ async fn revoke_grant(
     Path(grant_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     require_user(&claims)?;
-    let valid_id = !grant_id.is_empty()
-        && grant_id.len() <= MAX_GRANT_ID_LEN
-        && grant_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-');
-    if !valid_id {
+    if !is_valid_grant_id(&grant_id) {
         return Err(error(StatusCode::BAD_REQUEST, "invalid_grant_id"));
     }
 
@@ -205,6 +274,41 @@ async fn revoke_grant(
     }
 }
 
+/// `POST /v1/browser/grants/:grant_id/renew` — extend a session or
+/// human_browse grant by one broker TTL, never past its absolute expiry. The
+/// organization is the claims', the owner is the user behind the browser bearer
+/// (the broker pins both); a grant that is not renewable is a 409. Allowed under
+/// ZDR: a ZDR grant renews in the broker's memory like any other.
+async fn renew_grant(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    browser_bearer: VerifiedBrowserBearer,
+    Path(grant_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    require_user(&claims)?;
+    if !is_valid_grant_id(&grant_id) {
+        return Err(error(StatusCode::BAD_REQUEST, "invalid_grant_id"));
+    }
+    let mut broker = state.browser_client.clone();
+    let renewed = broker
+        .renew_grant(authenticated_browser_request(
+            RenewGrantRequest {
+                grant_id,
+                org_id: claims.org_id.clone(),
+            },
+            &browser_bearer,
+        )?)
+        .await
+        .map_err(|status| renew_status_to_http(&status))?
+        .into_inner();
+    // No grant id and no host in the log: a keep-alive runs every few minutes.
+    info!(org_id = %claims.org_id, "browser grant renewed");
+    Ok(Json(json!({
+        "expires_at": expires_at_rfc3339(renewed.expires_at.as_ref()),
+        "absolute_expires_at": expires_at_rfc3339(renewed.absolute_expires_at.as_ref()),
+    })))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,7 +319,8 @@ mod tests {
         browser_broker_client::BrowserBrokerClient,
         browser_broker_server::{BrowserBroker, BrowserBrokerServer},
         AcquireGrantResponse, BrowserHealthRequest, BrowserHealthResponse, DeriveRunGrantRequest,
-        DeriveRunGrantResponse, RevokeGrantResponse, ValidateGrantRequest, ValidateGrantResponse,
+        DeriveRunGrantResponse, RenewGrantResponse, RevokeGrantResponse, ValidateGrantRequest,
+        ValidateGrantResponse,
     };
     use tower::ServiceExt;
 
@@ -223,9 +328,11 @@ mod tests {
     struct Recorder {
         acquired: Arc<Mutex<Vec<AcquireGrantRequest>>>,
         revoked: Arc<Mutex<Vec<RevokeGrantRequest>>>,
+        renewed: Arc<Mutex<Vec<RenewGrantRequest>>>,
         authorizations: Arc<Mutex<Vec<String>>>,
         acquire_failure: Option<tonic::Code>,
         revoke_failure: Option<tonic::Code>,
+        renew_failure: Option<tonic::Code>,
     }
 
     #[tonic::async_trait]
@@ -247,17 +354,55 @@ mod tests {
                 return Err(tonic::Status::new(code, "test broker rejection"));
             }
             let id = if request.zdr { "z_abc" } else { "abc" };
+            let human = request.grant_kind == "human_browse";
             Ok(tonic::Response::new(AcquireGrantResponse {
                 grant_id: id.to_owned(),
-                kind: "session".to_owned(),
+                kind: if human { "human_browse" } else { "session" }.to_owned(),
                 zdr: request.zdr,
                 allowed_domains: request.allowed_domains,
                 expires_at: Some(prost_types::Timestamp {
                     seconds: 1_800_000_000,
                     nanos: 0,
                 }),
+                policy_mode: if human { "open_web" } else { "allowlist" }.to_owned(),
+                denied_domains: if human {
+                    vec![".internal".to_owned(), "metadata.goog".to_owned()]
+                } else {
+                    Vec::new()
+                },
+                absolute_expires_at: Some(prost_types::Timestamp {
+                    seconds: if human { 1_800_014_400 } else { 1_800_000_000 },
+                    nanos: 0,
+                }),
                 ..Default::default()
             }))
+        }
+
+        async fn renew_grant(
+            &self,
+            request: tonic::Request<RenewGrantRequest>,
+        ) -> Result<tonic::Response<RenewGrantResponse>, tonic::Status> {
+            if let Some(value) = request
+                .metadata()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+            {
+                self.authorizations.lock().unwrap().push(value.to_owned());
+            }
+            self.renewed.lock().unwrap().push(request.into_inner());
+            match self.renew_failure {
+                Some(code) => Err(tonic::Status::new(code, "test broker rejection")),
+                None => Ok(tonic::Response::new(RenewGrantResponse {
+                    expires_at: Some(prost_types::Timestamp {
+                        seconds: 1_800_000_900,
+                        nanos: 0,
+                    }),
+                    absolute_expires_at: Some(prost_types::Timestamp {
+                        seconds: 1_800_014_400,
+                        nanos: 0,
+                    }),
+                })),
+            }
         }
 
         async fn revoke_grant(
@@ -412,6 +557,173 @@ mod tests {
         assert_eq!(body["kind"], "session");
         assert_eq!(body["expires_at"], "2027-01-15T08:00:00Z");
         assert_eq!(body["allowed_domains"], json!(["example.com"]));
+    }
+
+    #[tokio::test]
+    async fn issue_human_browse_passes_kind_and_binds_org() {
+        let recorder = Recorder::default();
+        let router = app(recorder.clone(), user_claims(false), true).await;
+        let (status, body) = send(
+            router,
+            "POST",
+            "/v1/browser/grants",
+            json!({
+                "kind": "human_browse",
+                "org_id": "org-attacker",
+                "session_key": "forged"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let seen = recorder.acquired.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].grant_kind, "human_browse");
+        assert_eq!(seen[0].org_id, "org-a");
+        assert!(seen[0].session_key.starts_with("ui-") && seen[0].session_key != "forged");
+        assert!(seen[0].allowed_domains.is_empty(), "open web names no hosts");
+        assert!(seen[0].parent_grant_id.is_empty() && seen[0].allowed_actions.is_empty());
+        assert_eq!(
+            recorder.authorizations.lock().unwrap().as_slice(),
+            ["Bearer browser-token"]
+        );
+        assert_eq!(body["kind"], "human_browse");
+        assert_eq!(body["policy_mode"], "open_web");
+        assert_eq!(body["denied_domains"], json!([".internal", "metadata.goog"]));
+        assert_eq!(body["expires_at"], "2027-01-15T08:00:00Z");
+        assert_eq!(body["absolute_expires_at"], "2027-01-15T12:00:00Z");
+    }
+
+    #[tokio::test]
+    async fn issue_session_grant_reports_an_allowlist_and_sends_no_kind() {
+        let recorder = Recorder::default();
+        let router = app(recorder.clone(), user_claims(false), true).await;
+        let (status, body) = send(router, "POST", "/v1/browser/grants", issue_body()).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(recorder.acquired.lock().unwrap()[0].grant_kind, "");
+        assert_eq!(body["policy_mode"], "allowlist");
+        assert_eq!(body["denied_domains"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn issue_rejects_an_unknown_kind_and_human_browse_with_hosts() {
+        for body in [
+            json!({ "kind": "admin", "allowed_domains": ["example.com"] }),
+            json!({ "kind": "attach" }),
+            json!({ "kind": "human_browse", "allowed_domains": ["example.com"] }),
+        ] {
+            let recorder = Recorder::default();
+            let router = app(recorder.clone(), user_claims(false), true).await;
+            let (status, _) = send(router, "POST", "/v1/browser/grants", body.clone()).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert!(recorder.acquired.lock().unwrap().is_empty(), "{body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn issue_human_browse_is_allowed_under_zdr_and_stays_ephemeral() {
+        let recorder = Recorder::default();
+        let router = app(recorder.clone(), user_claims(true), true).await;
+        let (status, body) = send(
+            router,
+            "POST",
+            "/v1/browser/grants",
+            json!({ "kind": "human_browse" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(body["zdr"], true);
+        assert_eq!(body["grant_id"], "z_abc");
+        assert!(recorder.acquired.lock().unwrap()[0].zdr);
+    }
+
+    #[tokio::test]
+    async fn renew_extends_with_the_browser_bearer_and_the_claims_org() {
+        let recorder = Recorder::default();
+        let router = app(recorder.clone(), user_claims(false), true).await;
+        let (status, body) = send(
+            router,
+            "POST",
+            "/v1/browser/grants/abc-123_x/renew",
+            json!({ "org_id": "org-attacker", "grant_id": "forged" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["expires_at"], "2027-01-15T08:15:00Z");
+        assert_eq!(body["absolute_expires_at"], "2027-01-15T12:00:00Z");
+        assert!(
+            body.get("grant_id").is_none(),
+            "the response never echoes the grant id"
+        );
+        let seen = recorder.renewed.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].grant_id, "abc-123_x", "the id is the path's");
+        assert_eq!(seen[0].org_id, "org-a", "the org is the claims', never the body's");
+        assert_eq!(
+            recorder.authorizations.lock().unwrap().as_slice(),
+            ["Bearer browser-token"]
+        );
+    }
+
+    #[tokio::test]
+    async fn renew_maps_precondition_to_409() {
+        for (code, want, error_code) in [
+            (
+                tonic::Code::FailedPrecondition,
+                StatusCode::CONFLICT,
+                "browser_grant_not_renewable",
+            ),
+            (
+                tonic::Code::NotFound,
+                StatusCode::CONFLICT,
+                "browser_grant_not_renewable",
+            ),
+            (
+                tonic::Code::PermissionDenied,
+                StatusCode::FORBIDDEN,
+                "browser_grant_forbidden",
+            ),
+            (
+                tonic::Code::Unavailable,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "browser_broker_unavailable",
+            ),
+            (
+                tonic::Code::Unimplemented,
+                StatusCode::BAD_GATEWAY,
+                "browser_broker_error",
+            ),
+        ] {
+            let recorder = Recorder {
+                renew_failure: Some(code),
+                ..Default::default()
+            };
+            let router = app(recorder, user_claims(false), true).await;
+            let (status, body) =
+                send(router, "POST", "/v1/browser/grants/abc/renew", Value::Null).await;
+            assert_eq!(status, want, "{code:?}");
+            assert_eq!(body["error"], error_code, "{code:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn renew_requires_browser_bearer() {
+        let recorder = Recorder::default();
+        let router = app(recorder.clone(), user_claims(false), false).await;
+        let (status, _) = send(router, "POST", "/v1/browser/grants/abc/renew", Value::Null).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(recorder.renewed.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn renew_rejects_service_principals_and_bad_ids_before_the_broker() {
+        let recorder = Recorder::default();
+        let router = app(recorder.clone(), service_claims(), true).await;
+        let (status, _) = send(router, "POST", "/v1/browser/grants/abc/renew", Value::Null).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let router = app(recorder.clone(), user_claims(false), true).await;
+        let (status, _) = send(router, "POST", "/v1/browser/grants/a%20b/renew", Value::Null).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(recorder.renewed.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
