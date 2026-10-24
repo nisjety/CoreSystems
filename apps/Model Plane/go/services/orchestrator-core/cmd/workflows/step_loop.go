@@ -99,18 +99,20 @@ func executeScheduledStepLoop(ctx workflow.Context, in ScheduledRunInput) (activ
 	for i := range defaultMaxTurns {
 		stepIndex := uint32(i)
 		intent := activities.ScheduledStepExecutionIntent{
-			OrgID:          in.OrgID,
-			SpaceRef:       in.SpaceRef,
-			SubjectID:      in.SubjectID,
-			RunID:          in.RunID,
-			ThreadID:       in.ThreadID,
-			ScheduleID:     in.ScheduleID,
-			FireKey:        in.FireKey,
-			TemplateDigest: in.TemplateDigest,
-			StepID:         fmt.Sprintf("%s:step:%d", in.RunID, i),
-			StepIndex:      stepIndex,
-			PolicyDigest:   in.PolicyDigest,
-			IdempotencyKey: fmt.Sprintf("%s:step:%d", in.IdempotencyKey, i),
+			OrgID:             in.OrgID,
+			SpaceRef:          in.SpaceRef,
+			SubjectID:         in.SubjectID,
+			RunID:             in.RunID,
+			ThreadID:          in.ThreadID,
+			ScheduleID:        in.ScheduleID,
+			FireKey:           in.FireKey,
+			TemplateDigest:    in.TemplateDigest,
+			StepID:            fmt.Sprintf("%s:step:%d", in.RunID, i),
+			StepIndex:         stepIndex,
+			PolicyDigest:      in.PolicyDigest,
+			IdempotencyKey:    fmt.Sprintf("%s:step:%d", in.IdempotencyKey, i),
+			ContractDigest:    in.ContractDigest,
+			ContractExpiresAt: in.ContractExpiresAt,
 		}
 		var step activities.StepResult
 		if err := workflow.ExecuteActivity(ctx, "ExecuteScheduledStepActivity", intent).Get(ctx, &step); err != nil {

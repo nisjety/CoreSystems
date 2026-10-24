@@ -34,7 +34,18 @@ func signedScheduledRunExecutionToken(t *testing.T, private ed25519.PrivateKey, 
 		RecipientAudienceRevision: 2, EntitlementRevision: 3, Permissions: []string{"schedule:execute"},
 		IssuedAt: now.Add(-time.Second), ExpiresAt: now.Add(time.Minute), Nonce: "nonce-1",
 	}
-	decision.PayloadDigest = scheduledRunExecutionPayloadDigest(decision, intent)
+	schema := controlScheduledRunExecutionSchema
+	if intent.hasContract() {
+		schema = controlScheduledRunExecutionContractSchema
+		expiresAt, err := time.Parse(time.RFC3339, intent.ContractExpiresAt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decision.ContractDigest = intent.ContractDigest
+		decision.ContractExpiresAt = &expiresAt
+	}
+	decision.ActionSchemaHash = schema
+	decision.PayloadDigest = scheduledRunExecutionPayloadDigest(decision, intent, schema)
 	payload, err := json.Marshal(decision)
 	if err != nil {
 		t.Fatal(err)
@@ -93,6 +104,39 @@ func TestControlScheduledRunExecutionAuthorizerSendsExactWorkerIdentityAndBindsT
 	changed.ThreadID = "thread-2"
 	if _, err := authorizer.AuthorizeScheduledRunExecution(context.Background(), changed); err == nil {
 		t.Fatal("execution decision for another prepared thread was accepted")
+	}
+}
+
+func TestControlScheduledRunExecutionAuthorizerVerifiesContractBoundDecisionOnly(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	intent := validScheduledRunExecutionIntent()
+	intent.ContractDigest = "sha256:" + strings.Repeat("c", 64)
+	intent.ContractExpiresAt = now.Add(time.Hour).Format(time.RFC3339)
+	authorizer := &ControlScheduledRunExecutionAuthorizer{keyID: "key-1", public: public}
+	token := signedScheduledRunExecutionToken(t, private, "key-1", intent)
+	if err := authorizer.verify(token, intent, now); err != nil {
+		t.Fatalf("contract-bound execution decision denied: %v", err)
+	}
+
+	legacy := signedScheduledRunExecutionToken(t, private, "key-1", validScheduledRunExecutionIntent())
+	if err := authorizer.verify(legacy, intent, now); err == nil {
+		t.Fatal("a decision without the contract stood in for a contract-bound run")
+	}
+	other := intent
+	other.ContractDigest = "sha256:" + strings.Repeat("d", 64)
+	if err := authorizer.verify(token, other, now); err == nil {
+		t.Fatal("a decision was reused with a different contract digest")
+	}
+	expiresAt, err := time.Parse(time.RFC3339, intent.ContractExpiresAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scheduledContractMatches(intent.ContractDigest, intent.ContractExpiresAt, intent.ContractDigest, &expiresAt, expiresAt) {
+		t.Fatal("a contract stayed live at its own expiry instant")
 	}
 }
 

@@ -65,3 +65,51 @@ func TestScheduledStepAuthorityRequiresSessionBoundSubjectAndExactStep(t *testin
 		t.Fatal("authority accepted a step id not bound to its run")
 	}
 }
+
+func TestIssueScheduledStepDecisionBindsContractDigestAndExpiry(t *testing.T) {
+	evidence := validPersonalThreadEvidence()
+	evidence.ScheduleFireEntitled = true
+	evidence.AgentActionEntitled = true
+	now := time.Date(2026, 8, 16, 0, 0, 0, 0, time.UTC)
+	intent := normalizedScheduledStepIntent()
+	intent.ContractDigest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	intent.ContractExpiresAt = now.Add(time.Hour)
+
+	decision, err := IssueScheduledStepDecision(evidence, intent, "decision-1", "nonce-1", now)
+	if err != nil {
+		t.Fatalf("contract-bound step decision: %v", err)
+	}
+	if decision.ActionSchemaHash != scheduledStepSchemaContract || decision.ContractDigest != intent.ContractDigest ||
+		decision.ContractExpiresAt == nil || !decision.ContractExpiresAt.Equal(intent.ContractExpiresAt) {
+		t.Fatalf("contract-bound decision lost its binding: %#v", decision)
+	}
+
+	legacy, err := IssueScheduledStepDecision(evidence, normalizedScheduledStepIntent(), "decision-2", "nonce-2", now)
+	if err != nil {
+		t.Fatalf("legacy step decision: %v", err)
+	}
+	if legacy.ActionSchemaHash != scheduledStepSchema || legacy.ContractDigest != "" || legacy.ContractExpiresAt != nil {
+		t.Fatalf("legacy step decision must keep the v1 binding: %#v", legacy)
+	}
+
+	changed := intent
+	changed.ContractDigest = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+	other, err := IssueScheduledStepDecision(evidence, changed, "decision-3", "nonce-3", now)
+	if err != nil {
+		t.Fatalf("changed contract decision: %v", err)
+	}
+	if decision.PayloadDigest == other.PayloadDigest {
+		t.Fatal("step decision must bind the contract digest")
+	}
+
+	expired := intent
+	expired.ContractExpiresAt = now
+	if _, err := IssueScheduledStepDecision(evidence, expired, "decision-4", "nonce-4", now); err == nil {
+		t.Fatal("expired contract must not issue a step decision")
+	}
+	half := intent
+	half.ContractExpiresAt = time.Time{}
+	if _, err := IssueScheduledStepDecision(evidence, half, "decision-5", "nonce-5", now); err == nil {
+		t.Fatal("contract digest without expiry must fail closed")
+	}
+}

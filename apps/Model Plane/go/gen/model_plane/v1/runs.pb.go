@@ -265,14 +265,19 @@ func (x *GetScheduledStepContextRequest) GetOrgId() string {
 }
 
 type ScheduledStepContext struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	RunId         string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
-	ThreadId      string                 `protobuf:"bytes,2,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
-	OrgId         string                 `protobuf:"bytes,3,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
-	Goal          string                 `protobuf:"bytes,4,opt,name=goal,proto3" json:"goal,omitempty"`
-	Status        string                 `protobuf:"bytes,5,opt,name=status,proto3" json:"status,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	RunId    string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	ThreadId string                 `protobuf:"bytes,2,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
+	OrgId    string                 `protobuf:"bytes,3,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	Goal     string                 `protobuf:"bytes,4,opt,name=goal,proto3" json:"goal,omitempty"`
+	Status   string                 `protobuf:"bytes,5,opt,name=status,proto3" json:"status,omitempty"`
+	// Stored-consent contract for this scheduled step (WS20 S5). Empty when the
+	// schedule has no contract; the digest and expiry are re-verified per step.
+	ContractJson      string `protobuf:"bytes,6,opt,name=contract_json,json=contractJson,proto3" json:"contract_json,omitempty"`
+	ContractDigest    string `protobuf:"bytes,7,opt,name=contract_digest,json=contractDigest,proto3" json:"contract_digest,omitempty"`
+	ContractExpiresAt string `protobuf:"bytes,8,opt,name=contract_expires_at,json=contractExpiresAt,proto3" json:"contract_expires_at,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *ScheduledStepContext) Reset() {
@@ -336,6 +341,27 @@ func (x *ScheduledStepContext) GetGoal() string {
 func (x *ScheduledStepContext) GetStatus() string {
 	if x != nil {
 		return x.Status
+	}
+	return ""
+}
+
+func (x *ScheduledStepContext) GetContractJson() string {
+	if x != nil {
+		return x.ContractJson
+	}
+	return ""
+}
+
+func (x *ScheduledStepContext) GetContractDigest() string {
+	if x != nil {
+		return x.ContractDigest
+	}
+	return ""
+}
+
+func (x *ScheduledStepContext) GetContractExpiresAt() string {
+	if x != nil {
+		return x.ContractExpiresAt
 	}
 	return ""
 }
@@ -1228,8 +1254,12 @@ type ResolveScheduledStepAuthorityResponse struct {
 	StepIndex      uint32                 `protobuf:"varint,12,opt,name=step_index,json=stepIndex,proto3" json:"step_index,omitempty"`
 	IdempotencyKey string                 `protobuf:"bytes,13,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
 	RunStatus      string                 `protobuf:"bytes,14,opt,name=run_status,json=runStatus,proto3" json:"run_status,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Control-signed contract digest and expiry for this scheduled step (WS20 S5).
+	// Empty for a schedule without a contract.
+	ContractDigest    string `protobuf:"bytes,15,opt,name=contract_digest,json=contractDigest,proto3" json:"contract_digest,omitempty"`
+	ContractExpiresAt string `protobuf:"bytes,16,opt,name=contract_expires_at,json=contractExpiresAt,proto3" json:"contract_expires_at,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *ResolveScheduledStepAuthorityResponse) Reset() {
@@ -1356,6 +1386,20 @@ func (x *ResolveScheduledStepAuthorityResponse) GetIdempotencyKey() string {
 func (x *ResolveScheduledStepAuthorityResponse) GetRunStatus() string {
 	if x != nil {
 		return x.RunStatus
+	}
+	return ""
+}
+
+func (x *ResolveScheduledStepAuthorityResponse) GetContractDigest() string {
+	if x != nil {
+		return x.ContractDigest
+	}
+	return ""
+}
+
+func (x *ResolveScheduledStepAuthorityResponse) GetContractExpiresAt() string {
+	if x != nil {
+		return x.ContractExpiresAt
 	}
 	return ""
 }
@@ -1710,13 +1754,16 @@ const file_model_plane_v1_runs_proto_rawDesc = "" +
 	"\x1eGetScheduledStepContextRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1b\n" +
 	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\x15\n" +
-	"\x06org_id\x18\x03 \x01(\tR\x05orgId\"\x8d\x01\n" +
+	"\x06org_id\x18\x03 \x01(\tR\x05orgId\"\x8b\x02\n" +
 	"\x14ScheduledStepContext\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1b\n" +
 	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\x15\n" +
 	"\x06org_id\x18\x03 \x01(\tR\x05orgId\x12\x12\n" +
 	"\x04goal\x18\x04 \x01(\tR\x04goal\x12\x16\n" +
-	"\x06status\x18\x05 \x01(\tR\x06status\"\x98\x02\n" +
+	"\x06status\x18\x05 \x01(\tR\x06status\x12#\n" +
+	"\rcontract_json\x18\x06 \x01(\tR\fcontractJson\x12'\n" +
+	"\x0fcontract_digest\x18\a \x01(\tR\x0econtractDigest\x12.\n" +
+	"\x13contract_expires_at\x18\b \x01(\tR\x11contractExpiresAt\"\x98\x02\n" +
 	"\x0fListRunsRequest\x12\x1b\n" +
 	"\tthread_id\x18\x01 \x01(\tR\bthreadId\x12#\n" +
 	"\rstatus_filter\x18\x02 \x01(\tR\fstatusFilter\x12 \n" +
@@ -1791,7 +1838,7 @@ const file_model_plane_v1_runs_proto_rawDesc = "" +
 	"\n" +
 	"step_index\x18\t \x01(\rR\tstepIndex\x12'\n" +
 	"\x0fidempotency_key\x18\n" +
-	" \x01(\tR\x0eidempotencyKey\"\xd2\x03\n" +
+	" \x01(\tR\x0eidempotencyKey\"\xab\x04\n" +
 	"%ResolveScheduledStepAuthorityResponse\x12\x1a\n" +
 	"\bresolved\x18\x01 \x01(\bR\bresolved\x12\x15\n" +
 	"\x06run_id\x18\x02 \x01(\tR\x05runId\x12\x1b\n" +
@@ -1811,7 +1858,9 @@ const file_model_plane_v1_runs_proto_rawDesc = "" +
 	"step_index\x18\f \x01(\rR\tstepIndex\x12'\n" +
 	"\x0fidempotency_key\x18\r \x01(\tR\x0eidempotencyKey\x12\x1d\n" +
 	"\n" +
-	"run_status\x18\x0e \x01(\tR\trunStatus\"\xfd\x04\n" +
+	"run_status\x18\x0e \x01(\tR\trunStatus\x12'\n" +
+	"\x0fcontract_digest\x18\x0f \x01(\tR\x0econtractDigest\x12.\n" +
+	"\x13contract_expires_at\x18\x10 \x01(\tR\x11contractExpiresAt\"\xfd\x04\n" +
 	"\tRunDetail\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1b\n" +
 	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\"\n" +

@@ -478,6 +478,13 @@ message StartScheduledRunRequest {
   // Canonical digest of the Control policy snapshot used for each scheduled
   // step. The policy body never enters this request or durable workflow input.
   string policy_digest = 13;
+
+  // Stored-consent contract of the schedule (WS20 S5), absent for a schedule
+  // without one. contract_digest and contract_expires_at are the values Control
+  // signed; Session Core re-checks them on the direct hop before binding.
+  string contract_json = 14;
+  string contract_digest = 15;
+  string contract_expires_at = 16;
 }
 
 message PrepareScheduledRunThreadRequest {

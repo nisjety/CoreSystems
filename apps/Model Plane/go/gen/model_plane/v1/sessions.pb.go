@@ -923,9 +923,15 @@ type StartScheduledRunRequest struct {
 	IdempotencyKey string `protobuf:"bytes,12,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
 	// Canonical digest of the Control policy snapshot used for each scheduled
 	// step. The policy body never enters this request or durable workflow input.
-	PolicyDigest  string `protobuf:"bytes,13,opt,name=policy_digest,json=policyDigest,proto3" json:"policy_digest,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	PolicyDigest string `protobuf:"bytes,13,opt,name=policy_digest,json=policyDigest,proto3" json:"policy_digest,omitempty"`
+	// Stored-consent contract of the schedule (WS20 S5), absent for a schedule
+	// without one. contract_digest and contract_expires_at are the values Control
+	// signed; Session Core re-checks them on the direct hop before binding.
+	ContractJson      string `protobuf:"bytes,14,opt,name=contract_json,json=contractJson,proto3" json:"contract_json,omitempty"`
+	ContractDigest    string `protobuf:"bytes,15,opt,name=contract_digest,json=contractDigest,proto3" json:"contract_digest,omitempty"`
+	ContractExpiresAt string `protobuf:"bytes,16,opt,name=contract_expires_at,json=contractExpiresAt,proto3" json:"contract_expires_at,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *StartScheduledRunRequest) Reset() {
@@ -1045,6 +1051,27 @@ func (x *StartScheduledRunRequest) GetIdempotencyKey() string {
 func (x *StartScheduledRunRequest) GetPolicyDigest() string {
 	if x != nil {
 		return x.PolicyDigest
+	}
+	return ""
+}
+
+func (x *StartScheduledRunRequest) GetContractJson() string {
+	if x != nil {
+		return x.ContractJson
+	}
+	return ""
+}
+
+func (x *StartScheduledRunRequest) GetContractDigest() string {
+	if x != nil {
+		return x.ContractDigest
+	}
+	return ""
+}
+
+func (x *StartScheduledRunRequest) GetContractExpiresAt() string {
+	if x != nil {
+		return x.ContractExpiresAt
 	}
 	return ""
 }
@@ -6814,7 +6841,7 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x129\n" +
 	"\n" +
 	"created_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x12\x19\n" +
-	"\bowner_id\x18\x03 \x01(\tR\aownerId\"\xce\x03\n" +
+	"\bowner_id\x18\x03 \x01(\tR\aownerId\"\xcc\x04\n" +
 	"\x18StartScheduledRunRequest\x12\x1b\n" +
 	"\tthread_id\x18\x01 \x01(\tR\bthreadId\x12\x15\n" +
 	"\x06run_id\x18\x02 \x01(\tR\x05runId\x12\x15\n" +
@@ -6830,7 +6857,10 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	" \x01(\tR\x0ehumanSubjectId\x12'\n" +
 	"\x0ftemplate_digest\x18\v \x01(\tR\x0etemplateDigest\x12'\n" +
 	"\x0fidempotency_key\x18\f \x01(\tR\x0eidempotencyKey\x12#\n" +
-	"\rpolicy_digest\x18\r \x01(\tR\fpolicyDigest\"\xd1\x06\n" +
+	"\rpolicy_digest\x18\r \x01(\tR\fpolicyDigest\x12#\n" +
+	"\rcontract_json\x18\x0e \x01(\tR\fcontractJson\x12'\n" +
+	"\x0fcontract_digest\x18\x0f \x01(\tR\x0econtractDigest\x12.\n" +
+	"\x13contract_expires_at\x18\x10 \x01(\tR\x11contractExpiresAt\"\xd1\x06\n" +
 	" PrepareScheduledRunThreadRequest\x12\x15\n" +
 	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12(\n" +
 	"\x10human_subject_id\x18\x02 \x01(\tR\x0ehumanSubjectId\x12\x19\n" +

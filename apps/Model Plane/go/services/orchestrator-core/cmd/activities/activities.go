@@ -526,6 +526,7 @@ func (a *Activities) StartRunActivity(ctx context.Context, runID, threadID, orgI
 func (a *Activities) StartScheduledRunActivity(
 	ctx context.Context,
 	runID, threadID, orgID, spaceRef, subjectID, scheduleID, fireKey, templateDigest, idempotencyKey, goal, mode string,
+	contractJSON, contractDigest, contractExpiresAt string,
 ) (RunMetadata, error) {
 	fallback := RunMetadata{
 		RunID: runID, ThreadID: threadID, OrgID: orgID,
@@ -541,6 +542,7 @@ func (a *Activities) StartScheduledRunActivity(
 		OrgID: orgID, SpaceRef: spaceRef, SubjectID: subjectID, ThreadID: threadID,
 		ScheduleID: scheduleID, FireKey: fireKey, RunID: runID,
 		TemplateDigest: templateDigest, IdempotencyKey: idempotencyKey,
+		ContractDigest: contractDigest, ContractExpiresAt: contractExpiresAt,
 	})
 	if err != nil {
 		return fallback, fmt.Errorf("reauthorize prepared scheduled run %s: %w", runID, err)
@@ -557,6 +559,9 @@ func (a *Activities) StartScheduledRunActivity(
 		HumanSubjectId:                subjectID,
 		TemplateDigest:                templateDigest,
 		IdempotencyKey:                idempotencyKey,
+		ContractJson:                  contractJSON,
+		ContractDigest:                contractDigest,
+		ContractExpiresAt:             contractExpiresAt,
 	})
 	if err != nil {
 		return fallback, fmt.Errorf("start prepared scheduled run %s: %w", runID, err)

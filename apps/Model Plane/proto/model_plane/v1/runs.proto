@@ -110,6 +110,11 @@ message ScheduledStepContext {
   string org_id = 3;
   string goal = 4;
   string status = 5;
+  // Stored-consent contract for this scheduled step (WS20 S5). Empty when the
+  // schedule has no contract; the digest and expiry are re-verified per step.
+  string contract_json = 6;
+  string contract_digest = 7;
+  string contract_expires_at = 8;
 }
 
 message ListRunsRequest {
@@ -263,6 +268,10 @@ message ResolveScheduledStepAuthorityResponse {
   uint32 step_index = 12;
   string idempotency_key = 13;
   string run_status = 14;
+  // Control-signed contract digest and expiry for this scheduled step (WS20 S5).
+  // Empty for a schedule without a contract.
+  string contract_digest = 15;
+  string contract_expires_at = 16;
 }
 
 // RunDetail — full run metadata.

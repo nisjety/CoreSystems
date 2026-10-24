@@ -33,19 +33,24 @@ type InteractiveRunInput struct {
 // immutable owner/schedule facts let the first activity request fresh execution
 // authority; no Control bearer is ever persisted in Temporal history.
 type ScheduledRunInput struct {
-	RunID          string               `json:"run_id"`
-	ThreadID       string               `json:"thread_id"`
-	Goal           string               `json:"goal"`
-	Policy         string               `json:"policy"`
-	OrgID          string               `json:"org_id"`
-	SpaceRef       string               `json:"space_ref"`
-	SubjectID      string               `json:"subject_id"`
-	ScheduleID     string               `json:"schedule_id"`
-	FireKey        string               `json:"fire_key"`
-	TemplateDigest string               `json:"template_digest"`
-	PolicyDigest   string               `json:"policy_digest"`
-	IdempotencyKey string               `json:"idempotency_key"`
-	Retention      activities.Retention `json:"retention"`
+	RunID          string `json:"run_id"`
+	ThreadID       string `json:"thread_id"`
+	Goal           string `json:"goal"`
+	Policy         string `json:"policy"`
+	OrgID          string `json:"org_id"`
+	SpaceRef       string `json:"space_ref"`
+	SubjectID      string `json:"subject_id"`
+	ScheduleID     string `json:"schedule_id"`
+	FireKey        string `json:"fire_key"`
+	TemplateDigest string `json:"template_digest"`
+	PolicyDigest   string `json:"policy_digest"`
+	IdempotencyKey string `json:"idempotency_key"`
+	// The stored-consent contract the digest-verified template commits to (WS20
+	// S5). All three are empty for a schedule without a contract.
+	ContractJSON      string               `json:"contract_json,omitempty"`
+	ContractDigest    string               `json:"contract_digest,omitempty"`
+	ContractExpiresAt string               `json:"contract_expires_at,omitempty"`
+	Retention         activities.Retention `json:"retention"`
 }
 
 const (
@@ -217,6 +222,7 @@ func ScheduledRunSupervision(ctx workflow.Context, input ScheduledRunInput) erro
 		"StartScheduledRunActivity",
 		input.RunID, input.ThreadID, input.OrgID, input.SpaceRef, input.SubjectID,
 		input.ScheduleID, input.FireKey, input.TemplateDigest, input.IdempotencyKey, input.Goal, "execute",
+		input.ContractJSON, input.ContractDigest, input.ContractExpiresAt,
 	).Get(ctx, &runMeta)
 	if err != nil {
 		return handleFailure(ctx, input.RunID, input.OrgID, "", input.Retention, fmt.Sprintf("start scheduled run: %v", err))

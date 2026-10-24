@@ -153,6 +153,7 @@ func TestScheduledRun_UsesPreparedThreadAndCompletes(t *testing.T) {
 		"StartScheduledRunActivity",
 		mock.Anything, input.RunID, input.ThreadID, input.OrgID, input.SpaceRef, input.SubjectID,
 		input.ScheduleID, input.FireKey, input.TemplateDigest, input.IdempotencyKey, input.Goal, "execute",
+		input.ContractJSON, input.ContractDigest, input.ContractExpiresAt,
 	).Return(activities.RunMetadata{
 		RunID: input.RunID, ThreadID: input.ThreadID, OrgID: input.OrgID,
 		UserID: activities.SystemActorID,
@@ -190,6 +191,7 @@ func TestScheduledRun_UnknownOutcomeStopsWithoutAnotherStep(t *testing.T) {
 		"StartScheduledRunActivity",
 		mock.Anything, input.RunID, input.ThreadID, input.OrgID, input.SpaceRef, input.SubjectID,
 		input.ScheduleID, input.FireKey, input.TemplateDigest, input.IdempotencyKey, input.Goal, "execute",
+		input.ContractJSON, input.ContractDigest, input.ContractExpiresAt,
 	).Return(activities.RunMetadata{RunID: input.RunID, ThreadID: input.ThreadID, OrgID: input.OrgID, UserID: activities.SystemActorID}, nil).Once()
 	env.OnActivity("ExecuteScheduledStepActivity", mock.Anything, mock.Anything).
 		Return(activities.StepResult{
@@ -229,6 +231,7 @@ func TestScheduledRun_RetryKeepsTheSameStepIdempotencyTuple(t *testing.T) {
 		"StartScheduledRunActivity",
 		mock.Anything, input.RunID, input.ThreadID, input.OrgID, input.SpaceRef, input.SubjectID,
 		input.ScheduleID, input.FireKey, input.TemplateDigest, input.IdempotencyKey, input.Goal, "execute",
+		input.ContractJSON, input.ContractDigest, input.ContractExpiresAt,
 	).Return(activities.RunMetadata{
 		RunID: input.RunID, ThreadID: input.ThreadID, OrgID: input.OrgID,
 		UserID: activities.SystemActorID,

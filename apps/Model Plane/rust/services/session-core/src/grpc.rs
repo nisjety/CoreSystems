@@ -97,6 +97,11 @@ const CONTROL_SCHEDULED_RUN_SCHEMA: &str = "sha256:space-scheduled-run-v1";
 const CONTROL_SCHEDULED_RUN_EXECUTION_AUDIENCE: &str = "model-plane-session-core";
 const CONTROL_SCHEDULED_RUN_EXECUTION_ACTION: &str = "model.schedule.execute";
 const CONTROL_SCHEDULED_RUN_EXECUTION_SCHEMA: &str = "sha256:space-scheduled-run-execute-v1";
+// A run bound to a stored-consent contract (WS20 S5) uses its own schema hash;
+// the v1 digest stays byte-identical for every schedule without a contract.
+const CONTROL_SCHEDULED_RUN_EXECUTION_CONTRACT_SCHEMA: &str =
+    "sha256:space-scheduled-run-execute-v2";
+const MAX_SCHEDULED_CONTRACT_BYTES: usize = 64 * 1024;
 const MAX_CONTROL_SPACE_DECISION_TOKEN_BYTES: usize = 16 * 1024;
 // Delegated-identity design, Gap B (03-design-2-token-exchange.md §2.5). A
 // distinct envelope version from CONTROL_SPACE_DECISION_VERSION ("v2") --
@@ -744,6 +749,11 @@ struct ControlSpaceDecisionClaims {
     permissions: Vec<String>,
     issued_at: DateTime<Utc>,
     expires_at: DateTime<Utc>,
+    // Absent on every decision issued without a stored-consent contract.
+    #[serde(default)]
+    contract_digest: Option<String>,
+    #[serde(default)]
+    contract_expires_at: Option<DateTime<Utc>>,
 }
 
 /// Delegated-identity design, Gap B (03-design-2-token-exchange.md §2.2/§2.5).
@@ -1026,6 +1036,7 @@ struct ScheduledRunThreadContext {
 fn scheduled_run_execution_payload_digest(
     req: &pb::StartScheduledRunRequest,
     claims: &ControlSpaceDecisionClaims,
+    schema: &str,
 ) -> String {
     let mut digest = Sha256::new();
     digest.update(b"model.schedule.execute\0v1\0");
@@ -1052,7 +1063,7 @@ fn scheduled_run_execution_payload_digest(
             "resource_authorization_ref",
             claims.resource_authorization_ref.as_str(),
         ),
-        ("action_schema_hash", CONTROL_SCHEDULED_RUN_EXECUTION_SCHEMA),
+        ("action_schema_hash", schema),
         ("thread_id", req.thread_id.as_str()),
         ("idempotency_key", req.idempotency_key.as_str()),
     ] {
@@ -1075,7 +1086,49 @@ fn scheduled_run_execution_payload_digest(
         digest.update([0]);
         digest.update(value.to_be_bytes());
     }
+    if let (Some(contract_digest), Some(expires_at)) =
+        (&claims.contract_digest, claims.contract_expires_at)
+    {
+        digest.update(b"contract_digest\0");
+        digest.update((contract_digest.len() as u64).to_be_bytes());
+        digest.update(contract_digest.as_bytes());
+        digest.update(b"contract_expires_at\0");
+        digest.update(expires_at.timestamp().to_be_bytes());
+    }
     format!("sha256:{:x}", digest.finalize())
+}
+
+/// The stored-consent contract a scheduled run was created under, re-checked
+/// on the direct hop. The digest must be the hash of the exact body received,
+/// so a body that does not match what Control signed never reaches a run, and
+/// an expired contract is refused before any decision is verified.
+#[allow(clippy::result_large_err)]
+fn scheduled_run_contract(
+    req: &pb::StartScheduledRunRequest,
+    now: DateTime<Utc>,
+) -> Result<Option<DateTime<Utc>>, Status> {
+    if req.contract_json.is_empty()
+        && req.contract_digest.is_empty()
+        && req.contract_expires_at.is_empty()
+    {
+        return Ok(None);
+    }
+    if req.contract_json.len() > MAX_SCHEDULED_CONTRACT_BYTES
+        || !valid_scheduled_step_digest(&req.contract_digest)
+        || format!("sha256:{:x}", Sha256::digest(req.contract_json.as_bytes()))
+            != req.contract_digest
+    {
+        return Err(Status::invalid_argument(
+            "scheduled-run contract bindings are invalid",
+        ));
+    }
+    let expires_at = DateTime::parse_from_rfc3339(&req.contract_expires_at)
+        .map(|value| value.with_timezone(&Utc))
+        .map_err(|_| Status::invalid_argument("scheduled-run contract bindings are invalid"))?;
+    if expires_at <= now {
+        return Err(Status::failed_precondition("scheduled_contract_expired"));
+    }
+    Ok(Some(expires_at))
 }
 
 fn verify_scheduled_run_execution_decision(
@@ -1110,6 +1163,12 @@ fn verify_scheduled_run_execution_decision_with_keys(
             "scheduled-run execution bindings are invalid",
         ));
     }
+    let contract_expires_at = scheduled_run_contract(req, now)?;
+    let schema = if contract_expires_at.is_some() {
+        CONTROL_SCHEDULED_RUN_EXECUTION_CONTRACT_SCHEMA
+    } else {
+        CONTROL_SCHEDULED_RUN_EXECUTION_SCHEMA
+    };
     let parts: Vec<&str> = req.control_execution_decision_token.split('.').collect();
     if parts.len() != 4 || parts[0] != CONTROL_SPACE_DECISION_VERSION {
         return Err(Status::permission_denied(
@@ -1149,7 +1208,10 @@ fn verify_scheduled_run_execution_decision_with_keys(
         && claims.subject_id == req.human_subject_id
         && claims.service_audience == CONTROL_SCHEDULED_RUN_EXECUTION_AUDIENCE
         && claims.action_id == CONTROL_SCHEDULED_RUN_EXECUTION_ACTION
-        && claims.action_schema_hash == CONTROL_SCHEDULED_RUN_EXECUTION_SCHEMA
+        && claims.action_schema_hash == schema
+        && claims.contract_digest.as_deref()
+            == contract_expires_at.map(|_| req.contract_digest.as_str())
+        && claims.contract_expires_at == contract_expires_at
         && claims.idempotency_key == req.idempotency_key
         && claims.recipient_audience_ref == thread.recipient_audience_ref
         && claims.recipient_audience_revision == thread.recipient_audience_revision
@@ -1157,7 +1219,7 @@ fn verify_scheduled_run_execution_decision_with_keys(
         && claims.privacy_policy_ref == thread.privacy_policy_ref
         && claims.resource_authorization_ref == thread.resource_authorization_ref
         && claims.authority_revision == thread.authority_revision
-        && claims.payload_digest == scheduled_run_execution_payload_digest(req, &claims)
+        && claims.payload_digest == scheduled_run_execution_payload_digest(req, &claims, schema)
         && claims
             .permissions
             .iter()
@@ -1174,6 +1236,56 @@ fn verify_scheduled_run_execution_decision_with_keys(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod scheduled_contract_binding_tests {
+    use super::*;
+
+    fn request_with_contract(
+        contract_json: &str,
+        expires_at: DateTime<Utc>,
+    ) -> pb::StartScheduledRunRequest {
+        pb::StartScheduledRunRequest {
+            contract_json: contract_json.to_owned(),
+            contract_digest: format!("sha256:{:x}", Sha256::digest(contract_json.as_bytes())),
+            contract_expires_at: expires_at.to_rfc3339(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_schedule_without_a_contract_keeps_the_legacy_binding() {
+        let now = Utc::now();
+        let req = pb::StartScheduledRunRequest::default();
+        assert_eq!(scheduled_run_contract(&req, now).expect("legacy"), None);
+    }
+
+    #[test]
+    fn a_live_contract_binds_its_expiry() {
+        let now = Utc::now();
+        let expires_at = now + chrono::Duration::hours(1);
+        let req = request_with_contract(r#"{"v":1,"tools":[]}"#, expires_at);
+        let bound = scheduled_run_contract(&req, now).expect("live contract");
+        assert_eq!(bound.map(|value| value.timestamp()), Some(expires_at.timestamp()));
+    }
+
+    #[test]
+    fn a_body_that_does_not_match_the_signed_digest_is_refused() {
+        let now = Utc::now();
+        let mut req = request_with_contract(r#"{"v":1,"tools":[]}"#, now + chrono::Duration::hours(1));
+        req.contract_json = r#"{"v":1,"tools":[{"tool":"shell"}]}"#.to_owned();
+        let status = scheduled_run_contract(&req, now).expect_err("forged body");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn an_expired_contract_is_refused_before_any_decision_is_verified() {
+        let now = Utc::now();
+        let req = request_with_contract(r#"{"v":1,"tools":[]}"#, now - chrono::Duration::seconds(1));
+        let status = scheduled_run_contract(&req, now).expect_err("expired contract");
+        assert_eq!(status.message(), "scheduled_contract_expired");
+    }
 }
 
 fn valid_scheduled_run_identifier(value: &str) -> bool {
@@ -1823,7 +1935,7 @@ async fn persist_scheduled_run_bindings(
             "scheduled run owner binding is unavailable",
         ));
     };
-    let expected = serde_json::json!({
+    let mut expected = serde_json::json!({
         "source": "scheduled_run",
         "schedule_id": req.schedule_id,
         "fire_key": req.fire_key,
@@ -1834,6 +1946,13 @@ async fn persist_scheduled_run_bindings(
         "idempotency_key": req.idempotency_key,
         "origin": RunOrigin::Schedule.as_str(),
     });
+    if !req.contract_digest.is_empty() {
+        let body: serde_json::Value = serde_json::from_str(&req.contract_json)
+            .map_err(|_| Status::invalid_argument("scheduled-run contract body is invalid"))?;
+        expected["contract_digest"] = serde_json::json!(req.contract_digest);
+        expected["contract_expires_at"] = serde_json::json!(req.contract_expires_at);
+        expected["contract"] = body;
+    }
     let exact = [
         "schedule_id",
         "fire_key",
@@ -1842,6 +1961,9 @@ async fn persist_scheduled_run_bindings(
         "template_digest",
         "policy_digest",
         "idempotency_key",
+        "contract_digest",
+        "contract_expires_at",
+        "contract",
     ]
     .into_iter()
     .all(|key| metadata.get(key) == expected.get(key));
@@ -10282,7 +10404,11 @@ mod tests {
         let decoded: super::ControlSpaceDecisionClaims =
             serde_json::from_value(claims.clone()).expect("test claims");
         claims["payload_digest"] =
-            serde_json::json!(scheduled_run_execution_payload_digest(&request, &decoded));
+            serde_json::json!(scheduled_run_execution_payload_digest(
+                &request,
+                &decoded,
+                super::CONTROL_SCHEDULED_RUN_EXECUTION_SCHEMA
+            ));
         let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).expect("claims encode"));
         let encoded_key = URL_SAFE_NO_PAD.encode(key_id.as_bytes());
         let signing_input = format!("{CONTROL_SPACE_DECISION_VERSION}.{encoded_key}.{payload}");
