@@ -1006,18 +1006,32 @@ pub async fn invoke_stream_sse(
         Ok(turn_posture) => turn_posture,
         Err(refusal) => return zdr_refusal_stream(&request_id, refusal),
     };
+    let attachment_policy = crate::attachment_policy::AttachmentPolicy::from_env();
     // A waiver names one connection. Deep research, image generation and a vision turn (AnalyzeImage)
     // call the platform chain, which a waived turn must never reach, so they are refused before any run.
     // An execute turn (WS14 S2a) runs an executing loop under a stored plan grant; a waived turn keeps
     // no such state to run under, so it is refused the same way (the ZDR token is refused by
-    // `zdr_features::refusal`).
+    // `zdr_features::refusal`). Under the attachment contract every attachment counts, not only an image.
     if turn_posture.is_waived()
         && (req.deep_research
             || req.generate_image
             || req.execute_granted
-            || crate::vision::select_image(&req.attachments).is_some())
+            || crate::vision::select_image(&req.attachments).is_some()
+            || (attachment_policy.enabled() && !req.attachments.is_empty()))
     {
         return zdr_refusal_stream(&request_id, mp_contracts::zdr_refusal::Refusal::WAIVER_ROUTE_MISMATCH);
+    }
+    // The attachment contract, before normalisation (which refuses a subscription turn that carries
+    // attachments in a generic code) and before any run or model call. A ZDR turn skips it: the ZDR
+    // refusal of an attachment comes first and keeps its catalogue code.
+    if !turn_posture.zdr() {
+        let route = crate::attachment_policy::AttachmentRoute::named(
+            req.provider.as_deref(),
+            req.subscription_connection_id.as_deref(),
+        );
+        if let Err(refusal) = attachment_policy.validate(&req.attachments, route) {
+            return error_stream(&request_id, refusal.code.as_str(), &refusal.message, false);
+        }
     }
     // Normalize and validate BEFORE branching: an unknown tier numeric must
     // fail closed on both the durable and the persistence-free path, and the

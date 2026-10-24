@@ -414,6 +414,40 @@ function modelEntitlementStreamPresentation(
 }
 
 /**
+ * The words for a refusal by the server's attachment contract. Nothing was sent
+ * to a model, so each says what to change, not to retry.
+ */
+function attachmentRefusalMessage(code: string, tr: Translate): string {
+  switch (code) {
+    case 'attachment_media_unsupported':
+      return tr(
+        'Vedlegget ble ikke sendt: filtypen støttes ikke. Bruk PNG, JPEG, WebP eller GIF for bilder. Ingenting ble sendt.',
+        'The attachment was not sent: its type is not supported. Use PNG, JPEG, WebP or GIF for images. Nothing was sent.',
+      )
+    case 'attachment_too_large':
+      return tr(
+        'Vedlegget ble ikke sendt: det er for stort. Bruk en mindre fil eller færre vedlegg. Ingenting ble sendt.',
+        'The attachment was not sent: it is too large. Use a smaller file or fewer attachments. Nothing was sent.',
+      )
+    case 'attachment_count_exceeded':
+      return tr(
+        'Vedleggene ble ikke sendt: det er for mange i én melding. Fjern noen og prøv igjen. Ingenting ble sendt.',
+        'The attachments were not sent: there are too many in one message. Remove some and try again. Nothing was sent.',
+      )
+    case 'attachment_route_unsupported':
+      return tr(
+        'Vedleggene ble ikke sendt: ChatGPT-abonnementet leser ikke vedlegg. Fjern dem eller velg en annen modell. Ingenting ble sendt.',
+        'The attachments were not sent: the ChatGPT subscription does not read attachments. Remove them or pick another model. Nothing was sent.',
+      )
+    default:
+      return tr(
+        'Vedlegget ble ikke sendt: filen kunne ikke leses. Legg det ved på nytt. Ingenting ble sendt.',
+        'The attachment was not sent: the file could not be read. Attach it again. Nothing was sent.',
+      )
+  }
+}
+
+/**
  * Presentation for a server-reported stream failure, by its code.
  *
  * Only the codes that change what the reader must be told are named; every
@@ -522,6 +556,21 @@ export function streamFailurePresentation(
       // be refused the same way, so there is no retry.
       return {
         message: tr(noStrings.attachments.notSent, enStrings.attachments.notSent),
+        unsaved: true,
+        unavailable: false,
+        action: 'none',
+      }
+    case 'attachment_media_unsupported':
+    case 'attachment_too_large':
+    case 'attachment_count_exceeded':
+    case 'attachment_route_unsupported':
+    case 'attachment_encoding_invalid':
+      // The server's attachment contract (WS08 S2) refused the turn before any
+      // model ran. The same turn would be refused the same way, so there is no
+      // retry; each code says what to change. The server's text names a file and
+      // a limit in English and is never shown.
+      return {
+        message: attachmentRefusalMessage(code, tr),
         unsaved: true,
         unavailable: false,
         action: 'none',

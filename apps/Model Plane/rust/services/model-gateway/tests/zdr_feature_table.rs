@@ -198,6 +198,24 @@ fn cases() -> Vec<(&'static str, Value, Expect)> {
             ),
             refused("attachments"),
         ),
+        // The attachment contract never sees a ZDR turn: an inline image and a named
+        // file are refused with the same catalogue code, before any size or kind check.
+        (
+            "attachments",
+            with(
+                "attachments",
+                json!([{"kind": "image", "mime_type": "image/png", "data_base64": "aGk="}]),
+            ),
+            refused("attachments"),
+        ),
+        (
+            "attachments",
+            with(
+                "attachments",
+                json!([{"kind": "file", "name": "sales.csv", "data_base64": "aGk="}]),
+            ),
+            refused("attachments"),
+        ),
         (
             "generate_image",
             with("generate_image", json!(true)),

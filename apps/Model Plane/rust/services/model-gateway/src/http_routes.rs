@@ -137,7 +137,14 @@ pub fn build_router_with_readiness(
     // Auth-gated routes with rate limiting
     let authed = Router::new()
         .route("/v1/invoke", post(invoke))
-        .route("/v1/invoke/stream", post(sse::invoke_stream_sse))
+        // Attachments ride the body as base64, so the 2 MiB default would refuse two
+        // images the attachment policy admits (a 413 with no typed reason).
+        .route(
+            "/v1/invoke/stream",
+            post(sse::invoke_stream_sse).layer(DefaultBodyLimit::max(
+                crate::attachment_policy::stream_body_limit_bytes(),
+            )),
+        )
         .route("/v1/invoke/resume/:request_id", get(sse::invoke_resume_sse))
         // chat-parity §4: cooperative stop/cancel of an in-flight stream.
         .route("/v1/invoke/:request_id/cancel", post(invoke_cancel))
@@ -8670,6 +8677,10 @@ struct ListModelsHttpResponse {
     /// same JSON as before.
     #[serde(skip_serializing_if = "Option::is_none")]
     entitlement: Option<ModelEntitlementMeta>,
+    /// What a chat turn may attach, enforced by the stream route. Left out when
+    /// the attachment contract is off, so the client keeps its own constants.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attachment_policy: Option<crate::attachment_policy::DeclaredAttachmentPolicy>,
 }
 
 /// `ModelAccessMeta` as the catalogue's sibling field: counts, a revision and
@@ -8720,7 +8731,7 @@ async fn list_models(
         })?
         .into_inner();
 
-    let models = resp
+    let models: Vec<ModelDescriptor> = resp
         .models
         .into_iter()
         .map(|m| ModelDescriptor {
@@ -8745,7 +8756,17 @@ async fn list_models(
         max_effort: access.max_effort,
     });
 
-    Ok(Json(ListModelsHttpResponse { models, entitlement }))
+    let attachment_policy = crate::attachment_policy::AttachmentPolicy::from_env().declared(
+        models
+            .iter()
+            .any(|model| model.features.iter().any(|feature| feature == "vision")),
+    );
+
+    Ok(Json(ListModelsHttpResponse {
+        models,
+        entitlement,
+        attachment_policy,
+    }))
 }
 
 #[derive(Debug, Deserialize)]

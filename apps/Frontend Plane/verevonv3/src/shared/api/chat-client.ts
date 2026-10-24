@@ -2876,8 +2876,79 @@ function readBool(value: unknown): boolean | undefined {
   return undefined
 }
 
+/**
+ * What the server says a chat turn may attach (`attachment_policy` beside
+ * `models` on `/api/v1/models`). The server enforces these numbers; the client
+ * declares them instead of keeping a copy that can drift.
+ */
+export interface AttachmentPolicy {
+  readonly imageMimes: readonly string[]
+  readonly maxImages: number
+  readonly maxImageBytes: number
+  readonly maxFiles: number
+  readonly maxFileBytes: number
+  readonly maxTotalBytes: number
+  readonly modes: { readonly vision: boolean; readonly sandboxFiles: boolean }
+}
+
+function positiveInteger(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : undefined
+}
+
+/**
+ * The declared policy, or `undefined` when the response carries none or any
+ * field of it is malformed. Never half-trusted: a policy the client cannot read
+ * whole is the same as no policy, which keeps today's constants.
+ */
+export function parseAttachmentPolicy(value: unknown): AttachmentPolicy | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const raw = value as Record<string, unknown>
+  const modes = raw.modes && typeof raw.modes === 'object' ? (raw.modes as Record<string, unknown>) : undefined
+  const imageMimes = Array.isArray(raw.image_mimes)
+    ? raw.image_mimes.filter((mime): mime is string => typeof mime === 'string')
+    : undefined
+  const maxImages = positiveInteger(raw.max_images)
+  const maxImageBytes = positiveInteger(raw.max_image_bytes)
+  const maxFiles = positiveInteger(raw.max_files)
+  const maxFileBytes = positiveInteger(raw.max_file_bytes)
+  const maxTotalBytes = positiveInteger(raw.max_total_bytes)
+  if (
+    !imageMimes || imageMimes.length !== (raw.image_mimes as unknown[]).length
+    || maxImages === undefined || maxImageBytes === undefined
+    || maxFiles === undefined || maxFileBytes === undefined || maxTotalBytes === undefined
+    || !modes || typeof modes.vision !== 'boolean' || typeof modes.sandbox_files !== 'boolean'
+  ) {
+    return undefined
+  }
+  return {
+    imageMimes,
+    maxImages,
+    maxImageBytes,
+    maxFiles,
+    maxFileBytes,
+    maxTotalBytes,
+    modes: { vision: modes.vision, sandboxFiles: modes.sandbox_files },
+  }
+}
+
+let declaredAttachmentPolicy: AttachmentPolicy | undefined
+
+/**
+ * The attachment policy the last catalogue load declared. `undefined` before the
+ * catalogue answers, when the server declares none, or after a load that failed:
+ * callers then use today's constants. Set by {@link listModels}.
+ */
+export function getAttachmentPolicy(): AttachmentPolicy | undefined {
+  return declaredAttachmentPolicy
+}
+
 export async function listModels(): Promise<ModelInfo[]> {
   const raw = await requestJson<unknown>('/api/v1/models')
+  declaredAttachmentPolicy = parseAttachmentPolicy(
+    raw && typeof raw === 'object' && !Array.isArray(raw)
+      ? (raw as { attachment_policy?: unknown }).attachment_policy
+      : undefined,
+  )
   const source = Array.isArray(raw)
     ? raw
     : raw && typeof raw === 'object' && Array.isArray((raw as { models?: unknown }).models)

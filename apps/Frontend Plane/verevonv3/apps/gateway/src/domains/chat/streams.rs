@@ -1,7 +1,8 @@
 use axum::{
-    extract::{Extension, Path, Query, State},
+    extract::{DefaultBodyLimit, Extension, Path, Query, State},
     http::HeaderMap,
     response::{IntoResponse, Response},
+    routing::{post, MethodRouter},
     Json,
 };
 use reqwest::Method;
@@ -15,7 +16,21 @@ use crate::{
     upstream::{proxy_sse_stream_with_data_plane, proxy_sse_stream_with_session},
 };
 
-pub(super) async fn stream_chat(
+/// Request body ceiling of the chat stream route, and only that route.
+///
+/// Attachments ride the body as base64, so axum's 2 MiB default refused two
+/// images the model-gateway attachment policy admits. This matches
+/// model-gateway's `CHAT_STREAM_BODY_LIMIT_BYTES` default; the policy it
+/// declares on `/api/v1/models` is the number the client reads, this is only
+/// the transport room for it.
+pub(super) const CHAT_STREAM_BODY_LIMIT_BYTES: usize = 12 * 1024 * 1024;
+
+/// The stream route with its own body limit, so tests drive the same wiring.
+pub(super) fn stream_route() -> MethodRouter<AppState> {
+    post(stream_chat).layer(DefaultBodyLimit::max(CHAT_STREAM_BODY_LIMIT_BYTES))
+}
+
+async fn stream_chat(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
@@ -271,4 +286,71 @@ pub(super) async fn run_events_replay(
     )
     .await;
     (status, body).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::{
+        body::Body,
+        extract::{Extension, Request},
+        http::StatusCode,
+        Router,
+    };
+    use tower::ServiceExt;
+
+    use super::{stream_route, CHAT_STREAM_BODY_LIMIT_BYTES};
+    use crate::middleware::{AuthenticatedUser, AuthorizedMembership};
+
+    fn member() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.test".to_owned(),
+            user_name: "Chat User".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: Some(AuthorizedMembership {
+                organization_id: "org-1".to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    fn app() -> Router {
+        Router::new()
+            .route("/api/v1/chat/stream", stream_route())
+            .layer(Extension(member()))
+            .with_state(crate::tests::test_state(false))
+    }
+
+    fn post_json(bytes: usize) -> Request {
+        let padding = "A".repeat(bytes);
+        Request::builder()
+            .method("POST")
+            .uri("/api/v1/chat/stream")
+            .header("content-type", "application/json")
+            .body(Body::from(format!(r#"{{"content":"x","pad":"{padding}"}}"#)))
+            .expect("request")
+    }
+
+    #[tokio::test]
+    async fn the_chat_stream_takes_a_5_mib_body_and_refuses_one_over_its_limit() {
+        // Past axum's 2 MiB default and under the stream limit: the body limit lets it
+        // through, so whatever answers (the test state has no upstreams) is not a 413.
+        let accepted = app().oneshot(post_json(5 * 1024 * 1024)).await.expect("response");
+        assert_ne!(accepted.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+        let refused = app()
+            .oneshot(post_json(CHAT_STREAM_BODY_LIMIT_BYTES + 1))
+            .await
+            .expect("response");
+        assert_eq!(refused.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[test]
+    fn the_limit_holds_the_declared_attachment_total_as_base64() {
+        // 3 MiB of attachments (the model-gateway default) is 4 MiB of base64.
+        assert!(CHAT_STREAM_BODY_LIMIT_BYTES > (3 * 1024 * 1024 / 3) * 4);
+    }
 }

@@ -1,6 +1,7 @@
 //! model-gateway library crate — exposes modules for integration tests.
 
 pub mod approvals;
+pub mod attachment_policy;
 pub mod artifacts;
 pub mod audit;
 pub mod auth;

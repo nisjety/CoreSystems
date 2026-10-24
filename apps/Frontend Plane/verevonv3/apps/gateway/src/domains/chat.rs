@@ -14,7 +14,7 @@ use crate::{config::AppState, middleware::require_session};
 
 pub(crate) fn router(state: AppState) -> Router<AppState> {
     Router::new()
-        .route("/api/v1/chat/stream", post(streams::stream_chat))
+        .route("/api/v1/chat/stream", streams::stream_route())
         .route("/api/v1/chat/invoke", post(json_handlers::invoke_chat))
         .route(
             "/api/v1/chat/threads",
