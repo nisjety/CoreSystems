@@ -169,6 +169,12 @@ pub struct InferRequest {
     /// byte-for-byte. Read only by the Anthropic adapter, behind
     /// `INFERENCE_ANTHROPIC_TIERED_SYSTEM`, and never on a ZDR request.
     pub prompt_tiers: mp_contracts::prompt_tier::PromptTierPlan,
+    /// Images attached to messages of this request. Empty is a text-only
+    /// request and the pre-existing behaviour byte-for-byte. A non-empty list
+    /// is served only by a provider and model that accept images (see
+    /// [`model_accepts_images`]), bypasses the response cache, and is never
+    /// printed: [`ImagePart`]'s `Debug` carries the size, not the bytes.
+    pub image_parts: Vec<ImagePart>,
     /// Tenant scope for the Verevon intent layer's budget check (from gRPC
     /// metadata `x-org-id`; empty when the caller doesn't forward it).
     pub org_id: String,
@@ -200,6 +206,116 @@ pub struct ToolDefinition {
     pub description: String,
     /// JSON Schema (as a JSON string) for the tool's parameters.
     pub parameters_json: String,
+}
+
+/// One image attached to a message: raw bytes and their media type, never a URL.
+///
+/// The bytes are shared (`Arc`) so a chain that rewrites the model for a
+/// provider does not copy up to four images per attempt. `Debug` names the size
+/// only: a request is logged in places an image must never reach.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ImagePart {
+    /// Index into the request's `messages` as sent (system messages counted).
+    pub message_index: usize,
+    pub data: std::sync::Arc<[u8]>,
+    pub mime_type: String,
+}
+
+impl std::fmt::Debug for ImagePart {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ImagePart")
+            .field("message_index", &self.message_index)
+            .field("mime_type", &self.mime_type)
+            .field("bytes", &self.data.len())
+            .finish()
+    }
+}
+
+impl ImagePart {
+    /// The image as standard base64, the encoding both provider bodies carry.
+    pub(crate) fn base64(&self) -> String {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(&self.data)
+    }
+}
+
+/// The images that belong to the message at `index` of `req.messages`.
+pub(crate) fn images_for_message(
+    req: &InferRequest,
+    index: usize,
+) -> impl Iterator<Item = &ImagePart> {
+    req.image_parts
+        .iter()
+        .filter(move |part| part.message_index == index)
+}
+
+/// Extends the vision denylist (a list of ids, not a switch): comma-separated model ids, each
+/// an exact id or, with a trailing `*`, a prefix. Matching is case-insensitive.
+const VISION_DENYLIST_EXTRA_ENV: &str = "INFERENCE_VISION_MODEL_DENYLIST_EXTRA";
+
+/// Models known not to read images although their provider can, matched as a
+/// prefix. Conservative on purpose: a model left off this list is trusted to
+/// read an image when its provider does, so the list names what is known to
+/// fail, and the environment extends it without a build.
+const VISION_DENYLIST_PREFIXES: &[&str] = &["deepseek", "o1-mini", "gpt-3.5"];
+
+/// Embedding and reranking ids carry no image input whatever their provider says.
+const VISION_DENYLIST_MARKERS: &[&str] = &["embed", "rerank"];
+
+/// True when `model` is on the vision denylist, built-in or `extra`.
+fn vision_denylisted(model: &str, extra: Option<&str>) -> bool {
+    let model = model.trim().to_ascii_lowercase();
+    if model.is_empty() {
+        return false;
+    }
+    if VISION_DENYLIST_PREFIXES
+        .iter()
+        .any(|prefix| model.starts_with(prefix))
+        || VISION_DENYLIST_MARKERS
+            .iter()
+            .any(|marker| model.contains(marker))
+    {
+        return true;
+    }
+    extra.is_some_and(|extra| {
+        extra
+            .split(',')
+            .map(|entry| entry.trim().to_ascii_lowercase())
+            .filter(|entry| !entry.is_empty())
+            .any(|entry| match entry.strip_suffix('*') {
+                Some(prefix) => model.starts_with(prefix),
+                None => model == entry,
+            })
+    })
+}
+
+/// Whether `model`, served by the provider described by `caps`, accepts images:
+/// the provider's own flag AND the model is not on the denylist. The provider
+/// flag alone is per provider, so it over-claims for the families above.
+#[must_use]
+pub fn model_accepts_images(caps: &ProviderCapabilities, model: &str) -> bool {
+    caps.supports_vision
+        && !vision_denylisted(
+            model,
+            std::env::var(VISION_DENYLIST_EXTRA_ENV).ok().as_deref(),
+        )
+}
+
+/// The feature list `list_models` advertises for one model: the provider's
+/// families with `vision` withdrawn when this model cannot read an image.
+#[must_use]
+pub fn features_for_model(
+    caps: &ProviderCapabilities,
+    provider_features: &[String],
+    model: &str,
+) -> Vec<String> {
+    let vision = model_accepts_images(caps, model);
+    provider_features
+        .iter()
+        .filter(|feature| vision || feature.as_str() != "vision")
+        .cloned()
+        .collect()
 }
 
 /// A model-requested tool invocation (chat-parity §2).
@@ -1032,6 +1148,12 @@ pub enum ProviderError {
     #[error("required privacy tier unavailable: {0}")]
     TierUnavailable(String),
 
+    /// A request carried images and no matching provider and model accepts
+    /// them. Refused before any provider call, so the images are never dropped
+    /// to answer from the text alone.
+    #[error("vision unsupported: {0}")]
+    VisionUnsupported(String),
+
     /// The caller's organisation does not allow the model (or, for an automatic
     /// request, any model that could serve it). Refused before any provider was
     /// called. `model` is empty for an automatic request.
@@ -1349,5 +1471,79 @@ fn json_kind(value: &serde_json::Value) -> &'static str {
         serde_json::Value::String(_) => "string",
         serde_json::Value::Array(_) => "array",
         serde_json::Value::Object(_) => "object",
+    }
+}
+
+#[cfg(test)]
+mod vision_tests {
+    use super::*;
+
+    fn vision_caps() -> ProviderCapabilities {
+        ProviderCapabilities {
+            supports_vision: true,
+            ..ProviderCapabilities::default()
+        }
+    }
+
+    #[test]
+    fn denylisted_model_does_not_advertise_vision() {
+        let caps = vision_caps();
+        let provider_features = caps.feature_flags();
+        assert!(provider_features.contains(&"vision".to_owned()));
+
+        for id in [
+            "deepseek-r1",
+            "DeepSeek-V3",
+            "o1-mini",
+            "gpt-3.5-turbo",
+            "text-embedding-3-large",
+            "cohere-rerank-v3",
+        ] {
+            let features = features_for_model(&caps, &provider_features, id);
+            assert!(!features.contains(&"vision".to_owned()), "{id} must not advertise vision");
+            assert!(features.contains(&"usage".to_owned()), "{id}: only vision is withdrawn");
+            assert!(!model_accepts_images(&caps, id), "{id}");
+        }
+        for id in ["gpt-4o", "gpt-5", "claude-sonnet-4-6", ""] {
+            assert!(
+                features_for_model(&caps, &provider_features, id).contains(&"vision".to_owned()),
+                "{id}"
+            );
+            assert!(model_accepts_images(&caps, id), "{id}");
+        }
+    }
+
+    #[test]
+    fn a_provider_without_vision_never_advertises_it_for_any_model() {
+        let caps = ProviderCapabilities::default();
+        assert!(!model_accepts_images(&caps, "gpt-4o"));
+    }
+
+    #[test]
+    fn the_extra_denylist_takes_exact_ids_and_trailing_wildcard_prefixes() {
+        let extra = Some(" my-text-model , Llama-*,,");
+        assert!(vision_denylisted("my-text-model", extra));
+        assert!(vision_denylisted("llama-3-70b", extra));
+        assert!(!vision_denylisted("my-text-model-2", extra), "no wildcard, no prefix match");
+        assert!(!vision_denylisted("gpt-4o", extra));
+        assert!(!vision_denylisted("gpt-4o", None));
+        assert!(!vision_denylisted("gpt-4o", Some("")));
+    }
+
+    #[test]
+    fn the_debug_of_an_image_part_carries_the_size_and_never_the_bytes() {
+        let part = ImagePart {
+            message_index: 2,
+            data: std::sync::Arc::from(&b"SECRETPIXELS"[..]),
+            mime_type: "image/png".to_owned(),
+        };
+        let request = InferRequest {
+            image_parts: vec![part],
+            ..Default::default()
+        };
+        let printed = format!("{request:?}");
+        assert!(printed.contains("bytes: 12"), "{printed}");
+        assert!(!printed.contains("SECRETPIXELS"));
+        assert!(!printed.contains("83, 69"), "no decimal byte dump either: {printed}");
     }
 }

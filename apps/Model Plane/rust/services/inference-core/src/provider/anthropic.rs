@@ -851,6 +851,28 @@ fn log_applied_context_edits(model: &str, provider: &str, json: &serde_json::Val
     }
 }
 
+/// The content blocks of the message at `index` when images ride with it: one
+/// `image` block per image, then the text. `None` for a message with no image,
+/// which keeps its plain-string content. An empty text is left out, since the
+/// API rejects an empty text block.
+fn content_with_images(req: &InferRequest, index: usize, text: &str) -> Option<serde_json::Value> {
+    let mut blocks: Vec<serde_json::Value> = super::images_for_message(req, index)
+        .map(|image| {
+            serde_json::json!({
+                "type": "image",
+                "source": { "type": "base64", "media_type": image.mime_type, "data": image.base64() },
+            })
+        })
+        .collect();
+    if blocks.is_empty() {
+        return None;
+    }
+    if !text.is_empty() {
+        blocks.push(serde_json::json!({ "type": "text", "text": text }));
+    }
+    Some(serde_json::Value::Array(blocks))
+}
+
 fn build_request_body(req: &InferRequest) -> serde_json::Value {
     build_request_body_with_flags(
         req,
@@ -885,8 +907,14 @@ fn build_request_body_with_flags(
     let messages: Vec<serde_json::Value> = req
         .messages
         .iter()
-        .filter(|m| !m.role.eq_ignore_ascii_case("system"))
-        .map(|m| {
+        .enumerate()
+        .filter(|(_, m)| !m.role.eq_ignore_ascii_case("system"))
+        .map(|(index, m)| {
+            // The index is taken before the system messages are filtered out,
+            // so it names the same message the caller's `image_parts` did.
+            if let Some(content) = content_with_images(req, index, &m.content) {
+                return serde_json::json!({"role": m.role, "content": content});
+            }
             if m.role == "assistant" && !m.compaction_summary.trim().is_empty()
                 && model_supports_compaction(&req.model) && native_enabled {
                 return serde_json::json!({"role": "assistant", "content": [
@@ -1164,6 +1192,11 @@ impl ProviderRouter for AnthropicProvider {
         // Venice-style per-model privacy disclosure, derived from this
         // provider's own declared residency + ZDR attestation.
         let caps = self.capabilities();
+        let provider_features = vec![
+            "tools".to_owned(),
+            "vision".to_owned(),
+            "reasoning".to_owned(),
+        ];
         let privacy_tier = super::PrivacyTier::classify(&caps);
         let residency_label = if caps.residency == super::Residency::Global {
             String::new()
@@ -1174,16 +1207,13 @@ impl ProviderRouter for AnthropicProvider {
             .map(|id| {
                 let cheap = is_cheap_claude(&id);
                 let effort_levels = advertised_effort_levels(&id, ladder);
+                let features = super::features_for_model(&caps, &provider_features, &id);
                 ModelInfo {
                     id,
                     provider: provider.clone(),
                     modality: "chat".to_owned(),
                     streaming: true,
-                    features: vec![
-                        "tools".to_owned(),
-                        "vision".to_owned(),
-                        "reasoning".to_owned(),
-                    ],
+                    features,
                     cheap,
                     privacy_tier,
                     residency_label: residency_label.clone(),
@@ -1586,6 +1616,49 @@ mod tool_tests {
         assert_eq!(body["messages"][0]["role"], "user");
         // temperature is never forwarded to Anthropic.
         assert!(body.get("temperature").is_none());
+    }
+
+    #[test]
+    fn anthropic_body_indexes_before_system_filter() {
+        use crate::provider::{ChatMessage, ImagePart};
+        let message = |role: &str, content: &str| ChatMessage {
+            compaction_summary: String::new(),
+            role: role.to_owned(),
+            content: content.to_owned(),
+            name: String::new(),
+        };
+        let req = InferRequest {
+            model: "claude-opus-4-8".to_owned(),
+            max_tokens: 256,
+            messages: vec![
+                message("system", "You are Verevon."),
+                message("user", "first"),
+                message("assistant", "ok"),
+                message("user", "what is this"),
+            ],
+            // Index 3 of the ORIGINAL list; after the system message is hoisted it
+            // is the third of the messages Anthropic receives.
+            image_parts: vec![ImagePart {
+                message_index: 3,
+                data: std::sync::Arc::from(&b"one"[..]),
+                mime_type: "image/webp".to_owned(),
+            }],
+            ..Default::default()
+        };
+        let body = super::build_request_body_with_flags(&req, false, false);
+        let messages = body["messages"].as_array().expect("messages");
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0]["content"], "first", "other messages keep a string");
+        assert_eq!(messages[1]["content"], "ok");
+        let blocks = messages[2]["content"].as_array().expect("blocks");
+        assert_eq!(
+            blocks[0],
+            serde_json::json!({
+                "type": "image",
+                "source": {"type": "base64", "media_type": "image/webp", "data": "b25l"},
+            })
+        );
+        assert_eq!(blocks[1], serde_json::json!({"type": "text", "text": "what is this"}));
     }
 }
 

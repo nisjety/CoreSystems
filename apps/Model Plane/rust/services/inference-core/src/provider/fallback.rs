@@ -13,8 +13,8 @@ use super::routing_policy::RoutingPolicy;
 use super::timing::{CallClock, StreamClock};
 use super::{
     anthropic::AnthropicProvider, codex_subscription::CodexSubscriptionProvider,
-    effort, endpoint_region_is_non_eu, intent, is_eu_region, normalize_region_token,
-    openai::OpenAiProvider, EmbedRequest, EmbedResponse, InferChunk, InferRequest, InferResponse,
+    effort, endpoint_region_is_non_eu, intent, is_eu_region, model_accepts_images,
+    normalize_region_token, openai::OpenAiProvider, EmbedRequest, EmbedResponse, InferChunk, InferRequest, InferResponse,
     ModelFamily, ModelInfo, PrivacyTier, ProviderCapabilities, ProviderError, ProviderRouter,
     Residency,
 };
@@ -295,6 +295,15 @@ fn tier_unavailable_error(required: PrivacyTier) -> ProviderError {
     ))
 }
 
+/// The typed exhaustion error for a request that carries images whose entire
+/// matching chain was skipped for being unable to read them. Content-free: it
+/// names the cause, never the images.
+fn vision_unsupported_error() -> ProviderError {
+    ProviderError::VisionUnsupported(
+        "no configured provider serves this model with image input".to_owned(),
+    )
+}
+
 /// A refusal's reset time for the log line: RFC 3339 UTC, or empty if unknown.
 fn reset_label(resets_at: Option<chrono::DateTime<chrono::Utc>>) -> String {
     resets_at
@@ -351,6 +360,11 @@ struct ThrottleState {
     /// `model_not_entitled`, named before any zero-retention, residency or tier
     /// refusal.
     entitlement_denial: Option<Reason>,
+    /// A candidate that cleared every other gate was skipped only because the
+    /// request carries images and it cannot read them. With no attempt made it
+    /// ends the walk as `vision_unsupported`, ahead of the privacy, retention
+    /// and residency refusals, which a candidate that reached this gate passed.
+    vision_skipped: bool,
 }
 
 impl ThrottleState {
@@ -1294,6 +1308,10 @@ impl FallbackChain {
         });
         let req: &InferRequest = intent_req.as_ref().unwrap_or(req);
         validate_min_residency(req)?;
+        // An image is part of the question but not of the cache key, and a
+        // stored answer about one image must never answer another: a request
+        // with images neither reads nor fills the response cache.
+        let cache_response = cache_response && req.image_parts.is_empty();
 
         // Check cache first
         if cache_response {
@@ -1365,6 +1383,8 @@ impl FallbackChain {
 
         if let Some(refusal) = Self::entitlement_exhaustion(req, &throttle, total_attempts, pinned) {
             Err(refusal)
+        } else if throttle.vision_skipped && total_attempts == 0 {
+            Err(vision_unsupported_error())
         } else if req.min_privacy_tier > PrivacyTier::Unspecified && total_attempts == 0 {
             Err(tier_unavailable_error(req.min_privacy_tier))
         } else if req.zdr && total_attempts == 0 {
@@ -1469,6 +1489,19 @@ impl FallbackChain {
                 .and_then(|access| access.refuses(&call_req.model, name))
             {
                 throttle.entitlement_denial.get_or_insert(reason);
+                continue;
+            }
+            // Vision gate: a request that carries images is never sent to a
+            // provider or model that cannot read them, and never answered from
+            // its text alone. Skipped before any network call, like the gates
+            // above; the exhaustion below names it.
+            if !req.image_parts.is_empty() && !model_accepts_images(&caps, &call_req.model) {
+                warn!(
+                    provider = %name,
+                    request_id = %req.request_id,
+                    "provider skipped: the request carries images and this model does not accept them"
+                );
+                throttle.vision_skipped = true;
                 continue;
             }
             for attempt in 1..=self.max_retries {
@@ -1743,6 +1776,8 @@ impl FallbackChain {
 
         if let Some(refusal) = Self::entitlement_exhaustion(req, &throttle, total_attempts, pinned) {
             Err(refusal)
+        } else if throttle.vision_skipped && total_attempts == 0 {
+            Err(vision_unsupported_error())
         } else if req.min_privacy_tier > PrivacyTier::Unspecified && total_attempts == 0 {
             Err(tier_unavailable_error(req.min_privacy_tier))
         } else if req.zdr && total_attempts == 0 {
@@ -1815,6 +1850,19 @@ impl FallbackChain {
                 .and_then(|access| access.refuses(&call_req.model, name))
             {
                 throttle.entitlement_denial.get_or_insert(reason);
+                continue;
+            }
+            // Vision gate: a request that carries images is never sent to a
+            // provider or model that cannot read them, and never answered from
+            // its text alone. Skipped before any network call, like the gates
+            // above; the exhaustion below names it.
+            if !req.image_parts.is_empty() && !model_accepts_images(&caps, &call_req.model) {
+                warn!(
+                    provider = %name,
+                    request_id = %req.request_id,
+                    "provider skipped: the request carries images and this model does not accept them"
+                );
+                throttle.vision_skipped = true;
                 continue;
             }
             for attempt in 1..=self.max_retries {
@@ -2386,6 +2434,9 @@ mod resolution_tests {
         /// correctly refuse every `claude-*` model. `Default` gives
         /// `OpenAiCompatible`, so Claude-serving doubles set this explicitly.
         family: ModelFamily,
+        /// Whether this double reads images. `Default` gives `false`, so the
+        /// pre-existing tests never meet the vision gate.
+        vision: bool,
     }
 
     impl Default for RecordingProvider {
@@ -2395,6 +2446,7 @@ mod resolution_tests {
                 zdr_supported: false,
                 residency: Residency::Eu,
                 family: ModelFamily::OpenAiCompatible,
+                vision: false,
             }
         }
     }
@@ -2403,6 +2455,7 @@ mod resolution_tests {
     impl ProviderRouter for RecordingProvider {
         fn capabilities(&self) -> crate::provider::ProviderCapabilities {
             crate::provider::ProviderCapabilities {
+                supports_vision: self.vision,
                 supports_zdr: self.zdr_supported,
                 model_family: self.family,
                 residency: self.residency,
@@ -4477,5 +4530,89 @@ mod resolution_tests {
         let error = chain.create_embedding(&req).await.unwrap_err();
         assert!(matches!(error, ProviderError::ZdrUnavailable(_)));
         assert!(!*reached.lock().unwrap());
+    }
+
+    fn image_request(model: &str) -> InferRequest {
+        InferRequest {
+            request_id: "img-1".to_owned(),
+            model: model.to_owned(),
+            messages: vec![crate::provider::ChatMessage {
+                compaction_summary: String::new(),
+                role: "user".to_owned(),
+                content: "what is this".to_owned(),
+                name: String::new(),
+            }],
+            image_parts: vec![crate::provider::ImagePart {
+                message_index: 0,
+                data: Arc::from(&b"png"[..]),
+                mime_type: "image/png".to_owned(),
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn image_request_skips_non_vision_provider() {
+        let blind_seen = Arc::new(Mutex::new(None));
+        let sighted_seen = Arc::new(Mutex::new(None));
+        let blind: BoxedProvider =
+            Arc::new(RecordingProvider { seen_model: blind_seen.clone(), ..Default::default() });
+        let sighted: BoxedProvider = Arc::new(RecordingProvider {
+            seen_model: sighted_seen.clone(),
+            vision: true,
+            ..Default::default()
+        });
+        let chain = FallbackChain::new_with_providers(
+            vec![("blind".to_owned(), blind), ("sighted".to_owned(), sighted)],
+            1,
+        );
+
+        let response = chain.infer(&image_request("gpt-4o")).await.unwrap();
+        assert_eq!(response.model_used, "gpt-4o");
+        assert!(blind_seen.lock().unwrap().is_none(), "the provider that cannot read images is never called");
+        assert_eq!(sighted_seen.lock().unwrap().as_deref(), Some("gpt-4o"));
+
+        *sighted_seen.lock().unwrap() = None;
+        chain.infer_stream(&image_request("gpt-4o")).await.unwrap();
+        assert!(blind_seen.lock().unwrap().is_none());
+        assert_eq!(sighted_seen.lock().unwrap().as_deref(), Some("gpt-4o"));
+    }
+
+    #[tokio::test]
+    async fn image_request_with_no_vision_provider_fails_closed_typed() {
+        let seen = Arc::new(Mutex::new(None));
+        let blind: BoxedProvider =
+            Arc::new(RecordingProvider { seen_model: seen.clone(), ..Default::default() });
+        let denylisted: BoxedProvider = Arc::new(RecordingProvider {
+            seen_model: seen.clone(),
+            vision: true,
+            ..Default::default()
+        });
+        let chain = FallbackChain::new_with_providers(vec![("blind".to_owned(), blind)], 1);
+
+        let error = chain.infer(&image_request("gpt-4o")).await.unwrap_err();
+        assert!(matches!(error, ProviderError::VisionUnsupported(_)), "{error:?}");
+        let error = chain.infer_stream(&image_request("gpt-4o")).await.unwrap_err();
+        assert!(matches!(error, ProviderError::VisionUnsupported(_)), "{error:?}");
+
+        // A provider that reads images still refuses a model that does not.
+        let chain = FallbackChain::new_with_providers(vec![("sighted".to_owned(), denylisted)], 1);
+        let error = chain.infer(&image_request("deepseek-chat")).await.unwrap_err();
+        assert!(matches!(error, ProviderError::VisionUnsupported(_)), "{error:?}");
+
+        assert!(seen.lock().unwrap().is_none(), "no provider was called");
+    }
+
+    #[tokio::test]
+    async fn a_text_request_does_not_meet_the_vision_gate() {
+        let seen = Arc::new(Mutex::new(None));
+        let blind: BoxedProvider =
+            Arc::new(RecordingProvider { seen_model: seen.clone(), ..Default::default() });
+        let chain = FallbackChain::new_with_providers(vec![("blind".to_owned(), blind)], 1);
+        let mut text_only = image_request("gpt-4o");
+        text_only.image_parts.clear();
+
+        chain.infer(&text_only).await.unwrap();
+        assert_eq!(seen.lock().unwrap().as_deref(), Some("gpt-4o"));
     }
 }

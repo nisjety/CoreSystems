@@ -225,6 +225,32 @@ message InferRequest {
   // a counted message that is not a system message) is ignored, never an error:
   // it is a hint about layout, not an instruction. It carries counts only.
   PromptTierPlan prompt_tiers = 18;
+
+  // Images that ride with the messages, by index into `messages` as sent (the
+  // original list, system messages included). Empty (default) is a text-only
+  // request and is sent to the provider exactly as before.
+  //
+  // At most 4, each within the image size cap, an allowlisted mime type, and
+  // each on a `user` message; anything else is rejected with `invalid_argument`
+  // before a provider is chosen. A request that carries images is served only
+  // by a provider and model that accept them: where none does it fails with
+  // `FAILED_PRECONDITION` and the kind `vision_unsupported`, never by dropping
+  // the images. The bytes are request-scope memory only: never cached, never
+  // logged, and a field of the internal request that the Debug output redacts.
+  // Tag 19 is reserved by WS02 (`cache_scope_key`).
+  repeated InferImagePart image_parts = 20;
+}
+
+// InferImagePart — one image attached to a message of an InferRequest. Bytes
+// only: a URL is never fetched on the caller's behalf.
+message InferImagePart {
+  // Index of the message this image belongs to, in `InferRequest.messages` as
+  // sent. Must name a `user` message.
+  uint32 message_index = 1;
+  // The raw image bytes (not base64).
+  bytes data = 2;
+  // Media type of `data`: image/png, image/jpeg, image/webp or image/gif.
+  string mime_type = 3;
 }
 
 // PromptTierPlan — the Stable and Context tiers of a prompt, by message count

@@ -560,6 +560,27 @@ fn openai_stream_finish_reason(json: &serde_json::Value) -> Option<&str> {
 }
 
 /// Build the `OpenAI` chat completions request body.
+/// The `content` of the message at `index`: the plain string it always was, or,
+/// when images ride with it, the text part followed by one `image_url` part per
+/// image as a data URL. An empty text is left out rather than sent as an empty part.
+fn message_content(req: &InferRequest, index: usize, text: &str) -> serde_json::Value {
+    let mut images = super::images_for_message(req, index).peekable();
+    if images.peek().is_none() {
+        return serde_json::Value::String(text.to_owned());
+    }
+    let mut parts = Vec::new();
+    if !text.is_empty() {
+        parts.push(serde_json::json!({ "type": "text", "text": text }));
+    }
+    parts.extend(images.map(|image| {
+        serde_json::json!({
+            "type": "image_url",
+            "image_url": { "url": format!("data:{};base64,{}", image.mime_type, image.base64()) },
+        })
+    }));
+    serde_json::Value::Array(parts)
+}
+
 fn build_request_body(
     req: &InferRequest,
     stream: bool,
@@ -569,10 +590,11 @@ fn build_request_body(
     let messages: Vec<serde_json::Value> = req
         .messages
         .iter()
-        .map(|m| {
+        .enumerate()
+        .map(|(index, m)| {
             let mut msg = serde_json::json!({
                 "role": m.role,
-                "content": m.content,
+                "content": message_content(req, index, &m.content),
             });
             if !m.name.is_empty() {
                 msg["name"] = serde_json::Value::String(m.name.clone());
@@ -1159,7 +1181,7 @@ impl ProviderRouter for OpenAiProvider {
         // chat-parity §2: advertise the model's supported feature families so
         // the client can gate the opt-in `features[]` per model.
         let caps = self.capabilities();
-        let chat_features = caps.feature_flags();
+        let provider_features = caps.feature_flags();
         // Venice-style per-model privacy disclosure from this deployment's
         // declared residency + ZDR attestation. An undeclared (Global)
         // residency stays an empty label: "no commitment claimed".
@@ -1176,7 +1198,7 @@ impl ProviderRouter for OpenAiProvider {
                 provider: provider.clone(),
                 modality: model_modality(id),
                 streaming: true,
-                features: chat_features.clone(),
+                features: super::features_for_model(&caps, &provider_features, id),
                 cheap: is_cheap_model(id),
                 privacy_tier,
                 residency_label: residency_label.clone(),
@@ -1256,6 +1278,46 @@ mod tests {
             request_logprobs,
             ReasoningPlan::legacy(&req.model),
         )
+    }
+
+    fn image(message_index: usize, mime: &str, bytes: &[u8]) -> crate::provider::ImagePart {
+        crate::provider::ImagePart {
+            message_index,
+            data: std::sync::Arc::from(bytes),
+            mime_type: mime.to_owned(),
+        }
+    }
+
+    #[test]
+    fn openai_body_emits_image_url_part_for_indexed_message() {
+        let mut req = make_request("gpt-4o");
+        req.messages.insert(
+            0,
+            crate::provider::ChatMessage {
+                compaction_summary: String::new(),
+                role: "system".to_owned(),
+                content: "be brief".to_owned(),
+                name: String::new(),
+            },
+        );
+        // Index 1 is the user message once the system message leads.
+        req.image_parts = vec![image(1, "image/png", b"one"), image(1, "image/jpeg", b"two")];
+        let body = legacy_body(&req, false, false);
+
+        assert_eq!(body["messages"][0]["content"], "be brief", "an image-free message stays a string");
+        let parts = body["messages"][1]["content"].as_array().expect("parts");
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0], serde_json::json!({"type": "text", "text": "hello"}));
+        assert_eq!(parts[1]["type"], "image_url");
+        assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,b25l");
+        assert_eq!(parts[2]["image_url"]["url"], "data:image/jpeg;base64,dHdv");
+    }
+
+    #[test]
+    fn no_image_parts_is_byte_identical_to_today() {
+        let req = make_request("gpt-4o");
+        let body = legacy_body(&req, false, false);
+        assert_eq!(body["messages"][0], serde_json::json!({"role": "user", "content": "hello"}));
     }
 
     #[test]

@@ -40,6 +40,13 @@ const MAX_BATCH_TRANSLATE_ITEMS: usize = 100;
 const MAX_IMAGE_PROMPT_LEN: usize = 4_000;
 const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 const MAX_GENERATED_IMAGES: u32 = 4;
+/// Images one chat request may carry as parts of its messages.
+const MAX_IMAGE_PARTS: usize = 4;
+/// Media types a chat image part may declare; the set both provider bodies accept.
+const IMAGE_PART_MIME_TYPES: &[&str] = &["image/png", "image/jpeg", "image/webp", "image/gif"];
+/// Largest request tonic decodes. The 4 MiB default would refuse a request
+/// carrying even two images long before `MAX_IMAGE_BYTES` could apply.
+const MAX_REQUEST_DECODING_BYTES: usize = 16 * 1024 * 1024;
 const MAX_DOCUMENT_BYTES: usize = 50 * 1024 * 1024;
 const MAX_REALTIME_INSTRUCTIONS_LEN: usize = 8_000;
 const MAX_VIDEO_PROMPT_LEN: usize = 4_000;
@@ -1132,6 +1139,54 @@ fn infer_response_to_wire(
     }
 }
 
+/// The images of a chat request, checked against the messages they ride with.
+///
+/// Every limit is a refusal, never a trim: a request that names a fifth image,
+/// an oversize or empty one, a type outside the allowlist, or a message that is
+/// not a user message, is not a request the caller meant, and answering it from
+/// what is left would be a silent loss. Only sizes and indexes appear in the
+/// message, never bytes.
+///
+/// # Errors
+/// Returns `invalid_argument` naming the first limit a part breaks.
+fn image_parts_from_wire(req: &pb::InferRequest) -> Result<Vec<provider::ImagePart>, Status> {
+    if req.image_parts.len() > MAX_IMAGE_PARTS {
+        return Err(Status::invalid_argument(format!(
+            "at most {MAX_IMAGE_PARTS} image parts per request"
+        )));
+    }
+    req.image_parts
+        .iter()
+        .map(|part| {
+            let index = part.message_index as usize;
+            let message = req.messages.get(index).ok_or_else(|| {
+                Status::invalid_argument(format!("image part names message {index}, which does not exist"))
+            })?;
+            if !message.role.eq_ignore_ascii_case("user") {
+                return Err(Status::invalid_argument(format!(
+                    "image part {index} must ride on a user message"
+                )));
+            }
+            if part.data.is_empty() || part.data.len() > MAX_IMAGE_BYTES {
+                return Err(Status::invalid_argument(format!(
+                    "image part {index} must be between 1 byte and {} MB",
+                    MAX_IMAGE_BYTES / (1024 * 1024)
+                )));
+            }
+            if !IMAGE_PART_MIME_TYPES.contains(&part.mime_type.as_str()) {
+                return Err(Status::invalid_argument(format!(
+                    "image part {index} has an unsupported mime type"
+                )));
+            }
+            Ok(provider::ImagePart {
+                message_index: index,
+                data: std::sync::Arc::from(part.data.as_ref()),
+                mime_type: part.mime_type.clone(),
+            })
+        })
+        .collect()
+}
+
 /// Convert the public contract to the provider contract. Tenant, user, and
 /// issuer-enforced ZDR posture come only from the verified principal.
 ///
@@ -1189,6 +1244,7 @@ fn to_internal_request(
         tool_choice: req.tool_choice.clone(),
         min_residency: req.min_residency.clone(),
         subscription_connection_id: req.subscription_connection_id.clone(),
+        image_parts: image_parts_from_wire(req)?,
         prompt_tiers: req
             .prompt_tiers
             .as_ref()
@@ -1442,7 +1498,8 @@ pub async fn serve_with_providers_and_readiness(
         video,
     };
     // Every RPC is counted by the decorator, so none can ship unmetered.
-    let grpc_service = InferenceCoreServer::new(crate::metered::MeteredCore::new(service));
+    let grpc_service = InferenceCoreServer::new(crate::metered::MeteredCore::new(service))
+        .max_decoding_message_size(MAX_REQUEST_DECODING_BYTES);
     let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
     health_reporter
         .set_serving::<InferenceCoreServer<crate::metered::MeteredCore<InferenceService>>>()
@@ -1635,6 +1692,11 @@ pub const PROVIDER_ERROR_ZDR_UNAVAILABLE: &str = "zdr_unavailable";
 /// boundary. Refused before any provider is called.
 pub const PROVIDER_ERROR_RESIDENCY_UNAVAILABLE: &str = "residency_unavailable";
 
+/// Value of [`PROVIDER_ERROR_KIND_TRAILER`] when a request carried images and no
+/// matching provider and model accepts them. Refused before any provider is
+/// called, so the images are never dropped to answer from the text.
+pub const PROVIDER_ERROR_VISION_UNSUPPORTED: &str = "vision_unsupported";
+
 /// Value of [`PROVIDER_ERROR_KIND_TRAILER`] when no configured provider
 /// satisfies the requested minimum privacy tier. Refused before any provider
 /// is called.
@@ -1768,6 +1830,9 @@ fn provider_error_to_status(error: provider::ProviderError) -> Status {
         provider::ProviderError::ZdrUnavailable(message) => zdr_unavailable_status(message),
         provider::ProviderError::TierUnavailable(message) => {
             posture_refusal_status(PROVIDER_ERROR_TIER_UNAVAILABLE, message)
+        }
+        provider::ProviderError::VisionUnsupported(message) => {
+            posture_refusal_status(PROVIDER_ERROR_VISION_UNSUPPORTED, message)
         }
         // The two entitlement refusals. `PERMISSION_DENIED` and `UNAVAILABLE`,
         // never `FAILED_PRECONDITION`: the gateway reads that status as a
@@ -2656,6 +2721,97 @@ mod tests {
         }
     }
 
+    fn image_request(messages: &[&str], parts: Vec<pb::InferImagePart>) -> pb::InferRequest {
+        pb::InferRequest {
+            messages: messages
+                .iter()
+                .map(|role| pb::ChatMessage {
+                    role: (*role).to_owned(),
+                    content: "look".to_owned(),
+                    ..Default::default()
+                })
+                .collect(),
+            image_parts: parts,
+            ..Default::default()
+        }
+    }
+
+    fn image_part(message_index: u32, bytes: usize, mime: &str) -> pb::InferImagePart {
+        pb::InferImagePart {
+            message_index,
+            data: vec![7; bytes].into(),
+            mime_type: mime.to_owned(),
+        }
+    }
+
+    #[test]
+    fn image_parts_map_onto_the_internal_request_by_original_index() {
+        let principal = AuthenticatedPrincipal::for_test("org-a", Some("user-a"), false);
+        let request = image_request(
+            &["system", "user"],
+            vec![image_part(1, 3, "image/png"), image_part(1, 5, "image/webp")],
+        );
+        let mapped = to_internal_request(&request, &principal).expect("maps");
+        assert_eq!(mapped.image_parts.len(), 2);
+        assert_eq!(mapped.image_parts[0].message_index, 1);
+        assert_eq!(mapped.image_parts[1].data.len(), 5);
+        assert_eq!(mapped.image_parts[1].mime_type, "image/webp");
+
+        let text_only = to_internal_request(&image_request(&["user"], Vec::new()), &principal)
+            .expect("maps");
+        assert!(text_only.image_parts.is_empty());
+    }
+
+    #[test]
+    fn image_parts_that_break_a_limit_are_refused_never_trimmed() {
+        let principal = AuthenticatedPrincipal::for_test("org-a", Some("user-a"), false);
+        let refused = |request: pb::InferRequest| {
+            let status = to_internal_request(&request, &principal).expect_err("refused");
+            assert_eq!(status.code(), tonic::Code::InvalidArgument, "{}", status.message());
+            status.message().to_owned()
+        };
+        let five = (0..5).map(|_| image_part(0, 1, "image/png")).collect();
+        assert!(refused(image_request(&["user"], five)).contains("at most 4"));
+        assert!(refused(image_request(&["user"], vec![image_part(1, 1, "image/png")]))
+            .contains("does not exist"));
+        assert!(refused(image_request(
+            &["user", "assistant"],
+            vec![image_part(1, 1, "image/png")]
+        ))
+        .contains("user message"));
+        assert!(refused(image_request(&["user"], vec![image_part(0, 0, "image/png")]))
+            .contains("between 1 byte"));
+        assert!(refused(image_request(
+            &["user"],
+            vec![image_part(0, MAX_IMAGE_BYTES + 1, "image/png")]
+        ))
+        .contains("between 1 byte"));
+        let message = refused(image_request(&["user"], vec![image_part(0, 1, "image/svg+xml")]));
+        assert!(message.contains("unsupported mime"));
+        assert!(!message.contains("svg"), "the refusal never echoes caller text");
+
+        // The limits themselves are accepted.
+        let four = (0..4).map(|_| image_part(0, 1, "image/gif")).collect();
+        assert!(to_internal_request(&image_request(&["user"], four), &principal).is_ok());
+        assert!(to_internal_request(
+            &image_request(&["user"], vec![image_part(0, MAX_IMAGE_BYTES, "image/jpeg")]),
+            &principal
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn a_vision_refusal_is_failed_precondition_with_its_own_kind() {
+        let status = provider_error_to_status(provider::ProviderError::VisionUnsupported(
+            "no vision".to_owned(),
+        ));
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(status.message(), "no vision");
+        // A literal, not the constant: renaming the kind must fail this test.
+        assert_eq!(trailer(&status, "x-mp-provider-error"), Some("vision_unsupported"));
+        assert_eq!(trailer(&status, "x-mp-retry-after-ms"), None);
+    }
+
     /// Exhaustive on purpose: a new `ProviderError` variant does not compile
     /// until it is given a name here, so it cannot reach the wire without
     /// reaching the committed contract.
@@ -2674,6 +2830,7 @@ mod tests {
             E::ResidencyViolation(_) => "ProviderError::ResidencyViolation",
             E::ZdrUnavailable(_) => "ProviderError::ZdrUnavailable",
             E::TierUnavailable(_) => "ProviderError::TierUnavailable",
+            E::VisionUnsupported(_) => "ProviderError::VisionUnsupported",
             E::ModelNotEntitled { .. } => "ProviderError::ModelNotEntitled",
             E::EntitlementUnavailable => "ProviderError::EntitlementUnavailable",
         }
