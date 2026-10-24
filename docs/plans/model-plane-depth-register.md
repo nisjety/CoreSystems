@@ -1388,6 +1388,30 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D2-395 | WS24-S1 | risk | P2 | When the sandbox-manager credential fails at release, the workspace directory is still left on disk (pre-existing behaviour, now reported as unsaved); plaintext Space content therefore persists on the host until restart. | open |
 | D2-396 | WS24-S1 | follow-up | P3 | 9 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-16.json | open |
 
+
+### Wave-mode batch W2-17 (2026-10-24)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D2-397 | WS24-S2 | risk | P1 | The lib does not compile right now because a concurrent WS24-S6 change references `crate::owner_actions` (permission/mod.rs:84, runtime_loop/agent.rs:1302,1324) before lib.rs registers the module; this blocks verification of the state.rs test and the contract test. | open |
+| D2-398 | WS24-S2 | live-proof | P1 | After WS24-S6 registers `pub mod owner_actions;` in execution-core lib.rs, the lead must run the row's test command in the live tree to confirm the lib compiles with S2 and S6 together (the isolated run only proves S2 against HEAD of the other files). | open |
+| D2-399 | WS24-S2 | live-proof | P1 | Run `cargo fmt` on src/workspace_edit.rs and tests/workspace_edit_contract.rs before commit; the repo's rustfmt config (none found at rust/ root) is otherwise default and the implementer's new files are not formatted. | open |
+| D2-400 | WS24-S2 | live-proof | P1 | Line endings: the two new .rs files are LF in the working copy while every other execution-core source in the working copy is CRLF (index is LF because core.autocrlf=true). Cosmetic, normalise on commit. | open |
+| D2-401 | WS24-S2 | live-proof | P1 | No docker, compose, migration, proto or flag change in this slice, so no live proof is owed; the row's evidence belongs to S3/S4. | open |
+| D2-402 | WS24-S2 | live-proof | P1 | After the WS24-S6 batch registers `pub mod owner_actions;` in execution-core lib.rs, run: cd "apps/Model Plane/rust" && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib workspace_edit && cargo test -q -p execution-core --lib workspace_lock && cargo test -q -p execution-core --test workspace_edit_contract. Only the unit test for state.rs and the integration file have not compiled yet. | open |
+| D2-403 | WS24-S2 | live-proof | P1 | No docker, compose, migration, proto or flag change in this slice. No shared-edit lines are needed. The new file lives under execution-core src with no switch, so behaviour is unchanged while every edit path is unwired (the Do-loop tools are S3). | open |
+| D2-404 | WS24-S2 | test-gap | P2 | Glob has no `[...]` character classes and walks skip only `.verevon*` names; `attachments/` stays visible to read, grep and list, which the plan does not settle. | open |
+| D2-405 | WS24-S2 | follow-up | P3 | 13 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-17.json | open |
+| D2-406 | WS24-S6 | risk | P1 | execution-core capability_policy.rs (about line 474) rejects any model action view with more than one action, so enabling a second admitted row under table fails closed at the executor until that check changes. | open |
+| D2-407 | WS24-S6 | risk | P1 | capability_policy.rs ModelActionViewTool is deny_unknown_fields; class, authority and loop_tool_name must be accepted there in the same change that starts emitting them from capability-core. | open |
+| D2-408 | WS24-S6 | risk | P1 | resolveModelActionView (model_action_view.go, admission loop) returns early with the actions already accumulated plus reason_code when a later admitted row's capability is unavailable, so the offered set depends on action-id order and drops later available rows; fix before a second row can be admitted (exec-core currently rejects views with more than one action, so it fails closed today). | open |
+| D2-409 | WS24-S6 | risk | P1 | execution-core capability_policy.rs resolve_server_tool_definitions (about lines 450-490, outside this slice's ownership) rejects any view with more than one action and hard-codes tickets.create, so enabling a second admitted row fails the whole resolve closed; this must change before the table can offer a second action. | open |
+| D2-410 | WS24-S6 | live-proof | P1 | Lead shared-edit (required to compile): add `pub mod owner_actions;` to apps/Model Plane/rust/services/execution-core/src/lib.rs. The worktree execution-core does not compile without it. With that line added in a scratch copy, owner_actions (4), only_the_server_resolved_view_may_offer_ticket_create, the untrusted-tool guard and the full execution-core lib (1403 plus 2 slow tests) all pass. | open |
+| D2-411 | WS24-S6 | live-proof | P1 | Lead shared-edit: wire the switch in apps/Model Plane/go/services/capability-core/cmd/main.go as lead_todo says (WithAgentActionAdmissions with ModelActionAdmissionTableFromLookup). Until then the table code is unreachable in production; default stays off, so no behaviour change. | open |
+| D2-412 | WS24-S6 | live-proof | P1 | Proof-stack setting for MODEL_ACTION_ADMISSION=table (flag says table on the proof stack) was not supplied as a shared-edit for apps/Model Plane/deploy/docker-compose.yml. The lead should decide the exact line when running the proof. | open |
+| D2-413 | WS24-S6 | live-proof | P1 | Live proof not done here (no docker): capability-core migration 0022 applies at boot; MP/scripts/tests/tickets-create-proof.sh gives the same result with MODEL_ACTION_ADMISSION=table; decode the v2 claims (no secrets). Also run the DB test with -tags integration against DATABASE_URL. | open |
+| D2-414 | WS24-S6 | follow-up | P3 | 16 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-17.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
@@ -1521,3 +1545,5 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS19-S6 | authority, auth, audit, zdr | W2-16 | no |
 | WS24-S1 | data-loss, zdr | W2-16 | no |
 | WS08-S4.code | zdr, policy | W1-21 | no |
+| WS24-S2 | data-loss, policy | W2-17 | no |
+| WS24-S6 | authority, policy, zdr | W2-17 | no |
