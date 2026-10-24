@@ -598,6 +598,21 @@ Built so far (batches B01 to B07): WS01-S0, WS01-S1 (partial), WS01-S6; WS02-S1,
 | D1-451 | WS02-S9 | live-proof | P1 | gateway wiring (needs sse.rs, not owned): add a trailing parameter `prompt_tiers: Option<mp_contracts::model_plane::v1::PromptTierPlan>` to tool_loop::run_tool_rounds_for_model (run_tool_rounds passes None), set it at the InferRequest literal in tool_loop.rs where `prompt_tiers: None` now is, and have sse.rs build the prompt with PromptContext::render_tiered and pass TieredPrompt::plan() mapped to {stable_messages, context_messages}; the tool loop only appends system notices at the END of decision_messages so the plan stays valid every round. | open |
 | D1-452 | WS02-S9 | follow-up | P3 | 8 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-11.json | open |
 
+
+### Wave-mode batch W1-12 (2026-10-24)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D1-453 | WS10-S1 | live-proof | P1 | Row evidence not done (lead-run): rebuild model-gateway, run with ALLOWED_MODELS=a and model b on /v1/invoke and /v1/invoke/stream, capture the typed 403 and the SSE error frame with code model_not_entitled, restore env, and confirm the SPA shows the Norwegian text. | open |
+| D1-454 | WS10-S1 | risk | P1 | Clients that matched the old untyped 400 for an ALLOWED_MODELS refusal (grep of http.ts and the BFF gateway was not done; http.ts is not owned) will now see 403 with a nested error object; check before the model-gateway image ships. | open |
+| D1-455 | WS10-S1 | live-proof | P1 | Commit the golden, its .sha256 and the SPA vendored copy together, because the sync script fails if they differ. | open |
+| D1-456 | WS10-S1 | live-proof | P1 | Run the evidence flow: bash "apps/Model Plane/scripts/compose.sh" up -d --no-deps --build model-gateway with ALLOWED_MODELS=a, curl /v1/invoke and /v1/invoke/stream with model b, capture the 403 body and the SSE error frame, then restore env (use recreate-with-live-env.sh per the worktree deploy memory). | open |
+| D1-457 | WS10-S1 | live-proof | P1 | Optionally run python3 "apps/Model Plane/scripts/gen-sse-event-taxonomy.py" --check (HEAD already fails it per the plan; the error frame itself is unchanged). | open |
+| D1-458 | WS10-S1 | follow-up | P2 | ChatEvent::Error in model-gateway/src/sse_events.rs has no action or details fields, so the SSE frame cannot carry the reason or model id; add them (and update the sse-event-payloads golden) if the composer should show the refined per-reason sentence. | open |
+| D1-459 | WS10-S1 | follow-up | P2 | No gateway caller yet for Refusal::grpc_status: gRPC invoke (grpc.rs:683), unary http grpc_status_to_http (http_routes.rs) and sse.rs:8146-8176 must map the new trailers before FailedPrecondition in S4; infer-statuses.json gains the two new kinds in S3. | open |
+| D1-460 | WS10-S1 | test-gap | P2 | No test drives the sse.rs stream path end to end for the nested refusal (only the normalize unit tests and the Refusal::from_body round trip cover it); add one in the model-gateway stream tests with ALLOWED_MODELS set. | open |
+| D1-461 | WS10-S1 | follow-up | P3 | 2 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-12.json | open |
+
 ## Wave 2 (WS13 to WS27)
 
 Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS27-S0, WS27-S1. Wave 2 is not started as a wave: these came in with Wave 1 batches because they were Wave 1 prerequisites.
@@ -980,3 +995,4 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS06-S9 | audit, zdr | W1-11 | no |
 | WS08-S1 | data-loss, zdr | W1-11 | no |
 | WS02-S9 | zdr | W1-11 | no |
+| WS10-S1 | policy, zdr | W1-12 | no |
