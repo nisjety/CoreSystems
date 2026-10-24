@@ -652,6 +652,30 @@ Built so far (batches B01 to B07): WS01-S0, WS01-S1 (partial), WS01-S6; WS02-S1,
 | D1-487 | WS04-S7 | live-proof | P1 | The switch is not in the compose env; the lead adds it only if the owner wants it exposed (stays off in S9) | open |
 | D1-488 | WS04-S7 | follow-up | P3 | 9 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-14.json | open |
 
+
+### Wave-mode batch W1-15 (2026-10-24)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D1-489 | WS10-S5 | decision | P1 | The HTTP route and JSON shape of model-gateway's GetModelAccess for the BFF (POST /v1/models/access) is not specified by any slice; S4 must serve exactly what the guard sends and reads, or the guard fails closed for every ZDR org restricting PUT. | open |
+| D1-490 | WS10-S5 | risk | P1 | The guard takes attested model ids from GET /v1/models as the acting admin, which S4 filters by that admin's own stored policy. A model the admin currently cannot see but the draft would allow is not counted as attested, so the guard can refuse a legitimate ZDR policy (the safe direction). It needs an unfiltered attested set, for example an attested flag on ModelAccessEntry. | open |
+| D1-491 | WS10-S5 | risk | P1 | The guard sends min_privacy_tier as org-core's lower-case label (global, eu_resident, zdr_contractual, sovereign), but the proto field is the PrivacyTier enum. S4's JSON-to-proto mapping must accept the labels. | open |
+| D1-492 | WS10-S5 | live-proof | P1 | Needs the gateway image rebuilt (verevon-gateway-rs), a real org-core with the S2 migration, and real cookies. Not run: the wiremock suite proves the contract shape, not the real org-core delegation signature for the model-entitlement routes. | open |
+| D1-493 | WS10-S5 | decision | P1 | The model-gateway route and JSON shape that the guard calls (POST /v1/models/access with {draft, include_catalogue:true}, reading catalogue[{id, entitled}]) is named by no slice. WS10-S4 must serve exactly this, or the guard fails closed for every ZDR org on a restricting PUT. | open |
+| D1-494 | WS10-S5 | live-proof | P1 | Live proof not run: rebuild the verevon-gateway-rs image, set MODEL_ENTITLEMENT_ADMIN_ENABLED=true on a test stack only, and curl as owner and as member with real session cookies. Expected: owner PUT then GET round-trips the policy and revision, member PUT is 403, explain works for self and for another user, a ZDR-TEST org with a policy that strips every attested model gets 409 model_policy_leaves_no_zdr_model, and a stopped org-core gives a fail-closed refusal. This needs S2, S3 and S4 rebuilt first. | open |
+| D1-495 | WS10-S5 | live-proof | P1 | Shared edit left for the lead: add `MODEL_ENTITLEMENT_ADMIN_ENABLED: ${MODEL_ENTITLEMENT_ADMIN_ENABLED:-false}` to the verevon-gateway service environment in apps/Frontend Plane/verevonv3/docker-compose.yml, next to VEREVON_GATEWAY_CONTINUE_PARK_ENABLED, and a false line in docker-compose.production.yml if it lists gateway switches. | open |
+| D1-496 | WS10-S5 | live-proof | P1 | WS10-S4 must serve POST /v1/models/access on model-gateway and add the `entitlement` sibling (with hidden_count) to GET /v1/models. Until then the ZDR write guard fails closed with 503 for ZDR orgs on any restricting PUT, and the hidden_count read is inert. | open |
+| D1-497 | WS10-S5 | follow-up | P3 | 13 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-15.json | open |
+| D1-498 | WS10-S4 | risk | P1 | Gateway admission fails open on a non-typed GetModelAccess error, so under enforce a refused turn can still create thread/message/run rows before inference-core's PEP refuses it; decide whether enforce should fail closed at the gateway once the mode is exposed in the answer. | open |
+| D1-499 | WS10-S4 | risk | P1 | The effort clamp is not applied on the agentic path (RunAgentRequest to execution-core), so a capped role can still run a deep agent loop; the ceiling must reach execution-core before max_effort is promised. | open |
+| D1-500 | WS10-S4 | follow-up | P1 | Typed execution-core run failure is unbuilt (needs agent.rs and subscription_refusal.rs); until then an entitlement refusal in a governed run ends as the generic graceful reply. | open |
+| D1-501 | WS10-S4 | follow-up | P1 | Typed execution-core run failure for model_not_entitled / model_entitlement_unavailable is unbuilt (needs agent.rs and subscription_refusal.rs, not owned); pin it with the existing contract test wire when the lead does the shared edit. | open |
+| D1-502 | WS10-S4 | live-proof | P1 | Execution-core typed run failure is not built: the Err arm of the infer round in execution-core/src/runtime_loop/agent.rs and subscription_refusal.rs must read mp_contracts::model_entitlement::Refusal::from_status and fail the run with refusal.code() (lead shared-edit; only the contract test exists). Until then an entitlement refusal in a governed run ends as the generic graceful reply. | open |
+| D1-503 | WS10-S4 | live-proof | P1 | Live proof (docker, lead only): rebuild model-gateway, inference-core, execution-core; run the S7 flow via the BFF: restricted member refused on /v1/invoke, /v1/invoke/stream and gRPC, owner not, zero new thread/run rows, after S3 enforce is on. | open |
+| D1-504 | WS10-S4 | live-proof | P1 | model-gateway zdr_refusal_inventory fails on src/browser_run.rs:802 (an untyped ZDR refusal from other committed work); the lead should have that owner fix it before the all-targets command is green. | open |
+| D1-505 | WS10-S4 | live-proof | P1 | model-gateway cargo test --all-targets has one failure not from this slice: zdr_refusal_inventory flags src/browser_run.rs:802 as an untyped ZDR refusal. | open |
+| D1-506 | WS10-S4 | follow-up | P3 | 8 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-15.json | open |
+
 ## Wave 2 (WS13 to WS27)
 
 Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS27-S0, WS27-S1. Wave 2 is not started as a wave: these came in with Wave 1 batches because they were Wave 1 prerequisites.
@@ -1172,3 +1196,5 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS20-S5 | authority, auth, zdr | W2-11 | no |
 | WS21-S4 | authority, policy, cross-branch: the Quarry-side grant issuance endpoint and Quarry-to-broker identity are built on local branch quarryv2, not on model-plane; build against the contract with a stub and leave the live proof to the lead after quarryv2 merges | W2-11 | no |
 | WS21-S8 | policy, authority | W2-11 | no |
+| WS10-S5 | auth, authority, policy, zdr | W1-15 | no |
+| WS10-S4 | policy, authority, zdr | W1-15 | no |
