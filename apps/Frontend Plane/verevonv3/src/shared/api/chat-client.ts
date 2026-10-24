@@ -1127,6 +1127,22 @@ export function shouldRequestSupportContext(content: string): boolean {
   ].some((pattern) => pattern.test(query))
 }
 
+/**
+ * Thrown by `buildChatWireBody` when a turn carries media its route cannot
+ * deliver. The ChatGPT-subscription wire has no attachments, so the images used
+ * to be dropped while the transcript said they were added; nothing is sent now,
+ * and the code is typed so the chat can say so (`streamFailurePresentation`).
+ * The composer refuses these files first (`attachment-policy.ts`); this is the
+ * backstop for a turn that reaches the client by another path.
+ */
+export class AttachmentsNotSentError extends Error {
+  readonly code = 'attachments_not_sent'
+  constructor() {
+    super('attachments_not_sent')
+    this.name = 'AttachmentsNotSentError'
+  }
+}
+
 export function buildChatWireBody(request: ChatInvokeRequest): Record<string, unknown> {
   const conversationOnly = request.sourceScope === 'conversation'
   // Per-turn retrieval-source filter (chat-wave2 scope spec): conversation
@@ -1144,6 +1160,7 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
   const threadId = request.threadId?.trim() || undefined
   const supportReadOnly = isSupportChatThread(threadId)
   const subscriptionBacked = request.provider === 'openai-codex-subscription'
+  if (subscriptionBacked && (request.attachments ?? []).length > 0) throw new AttachmentsNotSentError()
   const tools = supportReadOnly || subscriptionBacked ? [] : buildToolSpecs(request)
   const features = new Set(request.features ?? DEFAULT_FEATURES)
   if (conversationOnly) features.add('conversation_only')
@@ -1177,7 +1194,8 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
   // switch is off is refused with the typed `agentic_subscription_disabled`
   // code, which the chat presents in words (`streamFailurePresentation`). The
   // body stays as narrow as before on every other axis: no client tools,
-  // browsing, image generation, deep research, skills or attachments.
+  // browsing, image generation, deep research or skills, and an image is
+  // refused (`AttachmentsNotSentError`), never dropped.
   //
   // An EXECUTE turn (WS14 S2a, the turn that runs an approved plan) is agentic
   // too, with plan_mode false: model-gateway runs it under the grant it holds
@@ -1261,7 +1279,7 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     // Never on an execute turn: the gateway refuses an agentic run with a
     // filtered scope, and the execute turn carries no per-turn source filter.
     ...(retrievalScope !== 'auto' && !executeGranted ? { retrieval_scope: retrievalScope } : {}),
-    attachments: subscriptionBacked ? [] : request.attachments ?? [],
+    attachments: request.attachments ?? [],
     // Opt-in only, like `min_privacy_tier` below: omitted entirely when
     // nothing is pinned, so an ordinary turn's body is byte-identical to
     // what it was before pinning existed. Support threads have this
@@ -2002,11 +2020,22 @@ export async function streamChat(
 ): Promise<void> {
   let connError: unknown
 
+  let body: string
+  try {
+    body = JSON.stringify(buildChatWireBody(request))
+  } catch (err) {
+    // Refused locally before any request: the typed code reaches the chat the
+    // way a server refusal does, instead of a rejected promise nobody awaits.
+    if (!(err instanceof AttachmentsNotSentError)) throw err
+    handlers.onError?.({ code: err.code, message: err.message })
+    return
+  }
+
   await readSseStream(
     '/api/v1/chat/stream',
     {
       method: 'POST',
-      body: JSON.stringify(buildChatWireBody(request)),
+      body,
       signal,
       lastEventId,
     },

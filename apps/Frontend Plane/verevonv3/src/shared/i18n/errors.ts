@@ -14,6 +14,8 @@
 // renders them from there.
 
 import { isZdrRefusalCode, zdrRefusalPresentation } from '@/shared/api/zdr-refusals'
+import { en as enStrings } from './en'
+import { no as noStrings } from './no'
 
 type ErrorCopy = { no: string; en: string }
 
@@ -158,6 +160,10 @@ const ERROR_COPY: Record<string, ErrorCopy> = {
   INVITATION_NOT_FOUND: { no: 'Fant ikke invitasjonen. Be om en ny.', en: 'Invitation not found. Ask for a new one.' },
   plan_upgrade_required: { no: 'Oppgrader planen din for å fortsette.', en: 'Upgrade your plan to continue.' },
   entitlement_required: { no: 'Denne funksjonen er ikke inkludert i planen din.', en: 'This feature is not included in your plan.' },
+
+  // A local refusal, thrown by the chat client before anything is sent: the
+  // ChatGPT-subscription route carries no images (shared/api/chat-client.ts).
+  attachments_not_sent: { no: noStrings.attachments.notSent, en: enStrings.attachments.notSent },
 
   // The org Zero Data Retention switch (gateway `orgs/settings.rs`), refused
   // when no AI provider has a recorded zero-retention attestation, or when that

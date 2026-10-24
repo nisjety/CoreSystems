@@ -1,4 +1,11 @@
 import { chatAppearanceActive } from "@/features/chat/lib/chat-appearance-preview";
+import {
+	ATTACHMENT_ACCEPT,
+	attachmentRefusalMessage,
+	evaluateAttachments,
+	isImageAttachment,
+	type AttachmentPolicyContext,
+} from "@/features/chat/lib/attachment-policy";
 import { useNavigate } from "@solidjs/router";
 import {
 	AlignCenter,
@@ -1758,6 +1765,17 @@ export function DashboardComposer(props: {
 		},
 	);
 
+	// What the send path can deliver for the turn as it is configured right
+	// now (see attachment-policy.ts). Read at pick time and again at submit,
+	// because the route, Do and Temporary chat can change after a file is added.
+	const attachmentPolicyContext = (): AttachmentPolicyContext => ({
+		subscriptionBacked: subscriptionBacked(),
+		planMode: planMode(),
+		zdr: temporaryChat(),
+		currentImageCount: files().filter(isImageAttachment).length,
+		currentTotalBytes: files().reduce((total, file) => total + file.size, 0),
+	});
+
 	const addFiles = (nextFiles: FileList | File[]) => {
 		const incoming = Array.from(nextFiles);
 		if (pendingFilePosition !== null && incoming[0]) {
@@ -1775,7 +1793,14 @@ export function DashboardComposer(props: {
 			return;
 		}
 
-		const created = Array.from(nextFiles).map((file, index) => ({
+		const { accepted, refused } = evaluateAttachments(incoming, attachmentPolicyContext());
+		if (refused.length > 0) {
+			setSubmitError(
+				refused.map((entry) => attachmentRefusalMessage(entry, i18n.tr)).join(" "),
+			);
+		}
+
+		const created = accepted.map((file, index) => ({
 			id: `${file.name}-${file.size}-${file.lastModified}-${Date.now()}-${index}`,
 			name: file.name,
 			size: file.size,
@@ -2506,6 +2531,18 @@ export function DashboardComposer(props: {
 			setSubmitError(message);
 			return { ok: false, message };
 		}
+		// A file added before the route, Do or Temporary chat changed can no
+		// longer be delivered: say so now, with the draft kept, instead of
+		// letting the send path drop or refuse it.
+		const { refused: refusedFiles } = evaluateAttachments(
+			initialSnapshot.files.filter((file) => file.source === undefined),
+			{ ...attachmentPolicyContext(), currentImageCount: 0, currentTotalBytes: 0 },
+		);
+		if (refusedFiles.length > 0) {
+			const message = `${refusedFiles.map((entry) => attachmentRefusalMessage(entry, i18n.tr)).join(" ")} ${i18n.tr("Fjern filen og send på nytt. Utkastet er beholdt.", "Remove the file and send again. Your draft has been kept.")}`;
+			setSubmitError(message);
+			return { ok: false, message };
+		}
 		// Everything the payload is built from is read here, before the tier
 		// lookup below may wait on the catalogue.
 		const payloadInput = {
@@ -3200,7 +3237,7 @@ export function DashboardComposer(props: {
 						fileInputRef = element;
 					}}
 					type="file"
-					accept="image/*,.pdf,.docx,.xlsx,.pptx,.txt,.md,.markdown,.csv,.json,.html,.htm"
+					accept={ATTACHMENT_ACCEPT}
 					multiple
 					class="sr-only"
 					aria-label={i18n.tr("Legg til filer", "Add files")}

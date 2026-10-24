@@ -25,7 +25,9 @@ import {
   writeClientValue,
 } from '@/shared/session/client-storage'
 import { supportQuestionFromPrompt } from '@/shared/chat/support-context-envelope'
+import { en as enStrings } from '@/shared/i18n/en'
 import { localeIntl, type Locale } from '@/shared/i18n/locales'
+import { no as noStrings } from '@/shared/i18n/no'
 import type { RunDetail } from '@/shared/api/runs-client'
 import {
   isChatArtifactVersion,
@@ -413,6 +415,8 @@ function zdrStreamPresentation(code: string, tr: Translate, feature: string | un
  * languages and an `action`: wait for a known reset, reconnect, retry, or
  * nothing. None of them ever retries by itself, and each says no other model
  * was used, because the subscription route never swaps.
+ * `attachments_not_sent` is the client's own refusal to send an image on the
+ * subscription route: nothing left the browser, and no retry is offered.
  * `agentic_subscription_disabled` is the server saying Do is off for the
  * subscription route: the reader is told to choose Ask or another model, and
  * no retry is offered. `plan_grant_unavailable` and `plan_execute_disabled` are
@@ -480,6 +484,16 @@ export function streamFailurePresentation(
           'ChatGPT avviste forespørselen. Endre eller kort ned meldingen, og prøv igjen. Ingen annen modell ble brukt.',
           'ChatGPT rejected the request. Change or shorten the message, then try again. No other model was used.',
         ),
+        unsaved: true,
+        unavailable: false,
+        action: 'none',
+      }
+    case 'attachments_not_sent':
+      // Raised by the client itself before anything was sent: the ChatGPT
+      // subscription route carries no images. Sending the same turn again would
+      // be refused the same way, so there is no retry.
+      return {
+        message: tr(noStrings.attachments.notSent, enStrings.attachments.notSent),
         unsaved: true,
         unavailable: false,
         action: 'none',
@@ -1153,24 +1167,6 @@ export function isComposerAttachment(value: unknown): value is ComposerAttachmen
     typeof record.type === 'string' &&
     typeof record.url === 'string'
   )
-}
-
-/**
- * Names the attachments the model will NOT receive.
- *
- * The composer accepts nine document types and renders a chip for each, and
- * the transcript then says "1 attachment added" — but only `image/*` survives
- * `toStreamAttachments`, so a PDF was silently discarded while every visible
- * signal told the user it had been sent. Callers use this to say so out loud.
- * Documents have their own working route: the per-file "Add to knowledge base"
- * button, which ingests them into the knowledge base for retrieval.
- */
-export function unsentAttachmentNames(
-  attachments: DashboardComposerSubmitPayload['attachments'],
-): string[] {
-  return attachments
-    .filter((attachment) => !attachment.url || !attachment.type.startsWith('image/'))
-    .map((attachment) => attachment.name?.trim() || 'uten navn')
 }
 
 /** Text files plus PDF/DOCX/XLSX/PPTX prepared by the ephemeral reader. */

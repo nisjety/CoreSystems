@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  AttachmentsNotSentError,
   approvePlan,
   buildChatWireBody,
   groupChatModels,
@@ -535,7 +536,6 @@ describe('chat-client tool wiring', () => {
       browseWeb: true,
       generateImage: true,
       deepResearch: true,
-      attachments: [{ kind: 'image', data_base64: 'abc' }],
     })
 
     expect(body).toMatchObject({
@@ -558,6 +558,51 @@ describe('chat-client tool wiring', () => {
     expect(body.features).not.toContain('agentic')
   })
 
+  // WS08-S1: the subscription wire has no attachments, so an image used to be
+  // dropped (`attachments: []`) while the transcript said it was added. The
+  // client now refuses to build the body, with a typed local error.
+  it('throws attachments_not_sent instead of dropping an image on a subscription turn', () => {
+    const build = () =>
+      buildChatWireBody({
+        content: 'what is in this picture',
+        model: 'gpt-5.6-luna',
+        provider: 'openai-codex-subscription',
+        subscriptionConnectionId: 'conn-subscription-1',
+        attachments: [{ kind: 'image', data_base64: 'abc', mime_type: 'image/png' }],
+      })
+
+    expect(build).toThrow(AttachmentsNotSentError)
+    expect(build).toThrow(expect.objectContaining({ code: 'attachments_not_sent' }))
+  })
+
+  it('keeps an image on every other route byte for byte', () => {
+    const body = buildChatWireBody({
+      content: 'what is in this picture',
+      attachments: [{ kind: 'image', data_base64: 'abc', mime_type: 'image/png' }],
+    })
+
+    expect(body.attachments).toEqual([{ kind: 'image', data_base64: 'abc', mime_type: 'image/png' }])
+  })
+
+  it('reports the refusal to the stream handlers and sends no request', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+    const onError = vi.fn()
+
+    await streamChat(
+      {
+        content: 'what is in this picture',
+        provider: 'openai-codex-subscription',
+        subscriptionConnectionId: 'conn-subscription-1',
+        attachments: [{ kind: 'image', data_base64: 'abc', mime_type: 'image/png' }],
+      },
+      { onError } as unknown as ChatStreamHandlers,
+    )
+
+    expect(onError).toHaveBeenCalledWith({ code: 'attachments_not_sent', message: 'attachments_not_sent' })
+    expect(fetchSpy).not.toHaveBeenCalled()
+    fetchSpy.mockRestore()
+  })
+
   // A5: Do on the ChatGPT subscription. The composer offers it only when the
   // server advertises the `agentic` capability; what reaches the wire is the
   // agentic feature and plan_mode, and nothing else the route cannot do.
@@ -573,7 +618,6 @@ describe('chat-client tool wiring', () => {
       browseWeb: true,
       generateImage: true,
       deepResearch: true,
-      attachments: [{ kind: 'image', data_base64: 'abc' }],
       actions: [{ id: 'skill-1', name: 'Quality report', kind: 'skill' }],
     })
 
