@@ -29,6 +29,9 @@ pub(crate) struct AppState {
     /// in-app browser obtains a BrowserBroker session grant, and whether a
     /// failure to obtain one stops the session (WS1.B).
     pub(crate) browser_grant_mode: BrowserGrantMode,
+    /// `BROWSER_HUMAN_BROWSE` (WS8.D): whether a session asks for a person's open-web
+    /// `human_browse` grant. Off unless set to a truthy value, in every environment.
+    pub(crate) browser_human_browse: bool,
     pub(crate) auth_core_url: String,
     pub(crate) verevon_public_origin: String,
     pub(crate) session_core_url: String,
@@ -210,6 +213,7 @@ pub(crate) async fn build_state() -> Result<AppState> {
             env::var("BROWSER_GRANT_ENFORCEMENT").ok().as_deref(),
             &env::var("APP_ENV").unwrap_or_default(),
         ),
+        browser_human_browse: human_browse_enabled(env::var("BROWSER_HUMAN_BROWSE").ok().as_deref()),
         auth_core_url: env_url("AUTH_CORE_URL", "http://auth-core:3011"),
         verevon_public_origin: canonical_public_origin(
             &env::var("VEREVON_PUBLIC_ORIGIN")
@@ -535,6 +539,13 @@ pub(crate) fn browser_grant_mode(raw: Option<&str>, app_env: &str) -> BrowserGra
     }
 }
 
+/// Parses `BROWSER_HUMAN_BROWSE` (WS8.D). Unset, blank or anything but a truthy word is off;
+/// the flag is never read against `APP_ENV`, so every environment defaults to off.
+pub(crate) fn human_browse_enabled(raw: Option<&str>) -> bool {
+    raw.map(|value| value.trim().to_ascii_lowercase())
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
+}
+
 fn env_bool(key: &str, fallback: bool) -> bool {
     env::var(key)
         .ok()
@@ -720,5 +731,24 @@ mod tests {
         assert_eq!(browser_grant_mode(Some("disabled"), ""), Permissive);
         assert!(!Off.issues_grants());
         assert!(Permissive.issues_grants() && Strict.issues_grants());
+    }
+}
+
+#[cfg(test)]
+mod human_browse_flag_tests {
+    use super::human_browse_enabled;
+
+    #[test]
+    fn human_browse_flag_defaults_off_in_every_environment() {
+        // The flag is read without APP_ENV: unset is off everywhere, production included.
+        assert!(!human_browse_enabled(None));
+        assert!(!human_browse_enabled(Some("")));
+        assert!(!human_browse_enabled(Some("   ")));
+        assert!(!human_browse_enabled(Some("0")));
+        assert!(!human_browse_enabled(Some("off")));
+        assert!(!human_browse_enabled(Some("garbage")));
+        assert!(human_browse_enabled(Some("1")));
+        assert!(human_browse_enabled(Some(" TRUE ")));
+        assert!(human_browse_enabled(Some("yes")));
     }
 }

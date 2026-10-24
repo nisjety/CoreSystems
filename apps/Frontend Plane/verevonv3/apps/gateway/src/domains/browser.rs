@@ -449,6 +449,11 @@ fn classed_routes(limiter: &crate::rate_limit::RateLimiter) -> Router<AppState> 
             "/api/v1/browser/sessions/{session_id}/suggestions",
             post(suggest_action),
         )
+        // WS8.D: extends a human session's browser grant by one broker TTL.
+        .route(
+            "/api/v1/browser/sessions/{session_id}/keepalive",
+            post(keepalive_session),
+        )
         // Pause / resume / stop a durable browser-agent run.
         .route(
             "/api/v1/browser/runs/{run_id}/control",
@@ -540,25 +545,33 @@ pub(crate) async fn create_session(
     // the flag is threaded through metadata so the SPA renders persistence
     // state from data instead of assuming it.
     let zdr = body.zdr;
-    // A BrowserBroker session grant for the start host, before Quarry is
-    // asked for a lease: in strict mode no grant means no session.
-    let grant_id =
-        match issue_session_grant(&state, &user, &headers, allowed_domain.as_deref(), zdr).await {
-            Ok(grant_id) => grant_id,
-            Err(response) => return response,
-        };
+    // WS8.D: a person's open-web session asks for a human_browse grant (no hosts) when the
+    // switch is on and grants are issued at all. Otherwise the start-host session grant.
+    let human_scope = state.browser_human_browse && state.browser_grant_mode.issues_grants();
+    let grant_scope = if human_scope {
+        SessionGrantScope::HumanBrowse
+    } else {
+        SessionGrantScope::StartHost(allowed_domain.as_deref())
+    };
+    // A BrowserBroker session grant, before Quarry is asked for a lease: in strict
+    // mode no grant means no session.
+    let grant_id = match issue_session_grant(&state, &user, &headers, grant_scope, zdr).await {
+        Ok(grant_id) => grant_id,
+        Err(response) => return response,
+    };
+    // Without a human_browse grant (switch off, or a permissive issuance failure) the
+    // first-host policy applies, as before WS8.D.
+    let human_grant = human_scope && grant_id.is_some();
     let mut start_body = json!({
-        "constraints": {
-            "max_steps": 12,
-            "allowed_domains": allowed_domain.map(|domain| vec![domain]).unwrap_or_default(),
-            "max_runtime_s": 120
-        },
         "viewport": {
             "width": viewport.width,
             "height": viewport.height
         },
         "zdr": zdr
     });
+    if let Some(constraints) = session_start_constraints(human_grant, allowed_domain.as_deref()) {
+        start_body["constraints"] = constraints;
+    }
     start_body["profile_scope"] = Value::String(profile_scope.as_str().to_owned());
     if let Some(profile_id) = profile_id {
         start_body["profile_id"] = Value::String(profile_id.to_owned());
@@ -638,6 +651,104 @@ pub(crate) async fn create_session(
         };
     let response = browser_response_from_owner_projection(&projection, Some(observation));
     (StatusCode::OK, Json(ok(response))).into_response()
+}
+
+/// `POST /api/v1/browser/sessions/:session_id/keepalive` (WS8.D): extends the session's
+/// browser grant by one broker TTL, never past its absolute cap. The owner gate is
+/// Quarry's owner projection, which is where the grant id is read; the id is never sent
+/// back. The answer carries the new expiry only. A grant that cannot be renewed (ended,
+/// revoked, at its cap, or not this person's) is 409 `browser_session_expired`.
+pub(crate) async fn keepalive_session(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+) -> Response {
+    if !is_valid_path_segment(&session_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_browser_session",
+                "The requested browser session id is invalid.",
+            )),
+        )
+            .into_response();
+    }
+    let cookie = cookie_header(&headers);
+    let token = quarry_token(&state, &user, &cookie).await;
+    let projection =
+        match owner_browser_session_projection(&state, &user, token.as_deref(), &session_id).await
+        {
+            Ok(projection) => projection,
+            Err(response) => return response,
+        };
+    let Some(grant_id) = projection_grant_id(&projection) else {
+        return keepalive_refusal(StatusCode::CONFLICT, "browser_session_expired");
+    };
+    let (model, browser) = tokio::join!(
+        model_token(&state, &user, &headers),
+        browser_broker_token(&state, &user, &headers),
+    );
+    let browser = match browser {
+        Ok(token) => token,
+        Err(error) => return delegated_auth_unavailable(error).into_response(),
+    };
+    let url = format!(
+        "{}/v1/browser/grants/{}/renew",
+        state.model_gateway_url,
+        urlencoding::encode(&grant_id)
+    );
+    let (status, Json(body)) = proxy_model_json_with_delegated(
+        &state,
+        Method::POST,
+        &url,
+        None,
+        model.as_deref(),
+        &[("x-browser-authorization", browser.as_str())],
+        &user,
+    )
+    .await;
+    match keepalive_outcome(status, &body) {
+        Ok(payload) => (StatusCode::OK, Json(ok(payload))).into_response(),
+        Err((status, code)) => keepalive_refusal(status, code),
+    }
+}
+
+/// The keep-alive answer for a renew response: the expiry, or the refusal's status and
+/// code. Model Gateway does not say why a renewal failed (expired, revoked, capped or
+/// not the caller's), so every 403, 404 and 409 is the same ended session for the SPA.
+/// Anything else is an upstream problem the person cannot act on.
+fn keepalive_outcome(
+    status: StatusCode,
+    body: &Value,
+) -> Result<Value, (StatusCode, &'static str)> {
+    if status.is_success() {
+        return Ok(keepalive_body(&unwrap_data(body)));
+    }
+    if matches!(
+        status,
+        StatusCode::CONFLICT | StatusCode::NOT_FOUND | StatusCode::FORBIDDEN
+    ) {
+        return Err((StatusCode::CONFLICT, "browser_session_expired"));
+    }
+    Err((StatusCode::SERVICE_UNAVAILABLE, "browser_grant_unavailable"))
+}
+
+/// The only field a keep-alive answer carries. The grant id and the absolute cap stay
+/// inside the BFF.
+fn keepalive_body(renewed: &Value) -> Value {
+    json!({
+        "expiresAt": renewed.get("expires_at").cloned().unwrap_or(Value::Null)
+    })
+}
+
+fn keepalive_refusal(status: StatusCode, code: &'static str) -> Response {
+    let message = if code == "browser_session_expired" {
+        "This browser session has ended. Reopen it to keep browsing."
+    } else {
+        "Browser access is temporarily unavailable."
+    };
+    (status, Json(error(code, message))).into_response()
 }
 
 /// Reads Quarry's browser-session projection. This is deliberately not a
@@ -3088,10 +3199,57 @@ fn browser_response_from_owner_projection(projection: &Value, observation: Optio
             "timeline": [],
             "replay": { "events": [], "eventCount": 0 },
             "zdr": projection.get("zdr").and_then(Value::as_bool).unwrap_or(false),
-            "capabilities": ["navigate", "back", "forward", "reload", "hard_reload", "click", "click_point", "type", "press", "scroll", "mouse_wheel", "wait_for", "select", "inspect_dom", "control_state", "human_takeover", "agent_control", "tabs", "live_frame", "live_frame_stream", "devtools_events", "screenshot_artifact", "visual_observation", "visual_change", "annotate", "persistent_profile", "evidence"]
+            "capabilities": browser_session_capabilities(projection)
         },
         "observation": observation
     })
+}
+
+/// The capabilities the SPA may act on for a session. The three WS8.D additions are read
+/// from Quarry's projection, so none is advertised until Quarry reports it: `human_browsing`
+/// needs `grantKind == "human_browse"`, `tab_control` the boolean `tabControl`, and `attach`
+/// the boolean `attachAvailable` (false until WS8.F).
+fn browser_session_capabilities(projection: &Value) -> Vec<&'static str> {
+    let flag = |key: &str| projection.get(key).and_then(Value::as_bool).unwrap_or(false);
+    let mut capabilities = vec![
+        "navigate",
+        "back",
+        "forward",
+        "reload",
+        "hard_reload",
+        "click",
+        "click_point",
+        "type",
+        "press",
+        "scroll",
+        "mouse_wheel",
+        "wait_for",
+        "select",
+        "inspect_dom",
+        "control_state",
+        "human_takeover",
+        "agent_control",
+        "tabs",
+        "live_frame",
+        "live_frame_stream",
+        "devtools_events",
+        "screenshot_artifact",
+        "visual_observation",
+        "visual_change",
+        "annotate",
+        "persistent_profile",
+        "evidence",
+    ];
+    if projection.get("grantKind").and_then(Value::as_str) == Some("human_browse") {
+        capabilities.push("human_browsing");
+    }
+    if flag("tabControl") {
+        capabilities.push("tab_control");
+    }
+    if flag("attachAvailable") {
+        capabilities.push("attach");
+    }
+    capabilities
 }
 
 /// Temporary typed view for BFF request normalization. It is reconstructed
@@ -4394,16 +4552,52 @@ fn session_grant_refusal(upstream: Option<StatusCode>) -> Response {
     (status, Json(error(code, message))).into_response()
 }
 
-/// Obtains a BrowserBroker session grant for the session's start host.
+/// What a session's BrowserBroker grant covers (WS8.D).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionGrantScope<'a> {
+    /// The start host only: the first-host session grant every session had before WS8.D.
+    StartHost(Option<&'a str>),
+    /// A person's own open-web browsing. A `human_browse` grant names no hosts.
+    HumanBrowse,
+}
+
+/// The `POST /v1/browser/grants` body for a scope (WS8.D). `None` means there is no
+/// host to grant (a start URL without one).
+fn session_grant_request_body(scope: SessionGrantScope<'_>, zdr: bool) -> Option<Value> {
+    match scope {
+        SessionGrantScope::StartHost(Some(host)) => {
+            Some(json!({ "allowed_domains": [host], "zdr": zdr }))
+        }
+        SessionGrantScope::StartHost(None) => None,
+        SessionGrantScope::HumanBrowse => Some(json!({ "kind": "human_browse", "zdr": zdr })),
+    }
+}
+
+/// The Quarry start-body `constraints` for a session (WS8.D). A human_browse session
+/// sends none: Quarry takes its bounds from the broker policy, so no step, time or host
+/// literal reaches it. Every other session keeps the first-host policy (12 steps, 120 s).
+fn session_start_constraints(human_grant: bool, start_host: Option<&str>) -> Option<Value> {
+    if human_grant {
+        return None;
+    }
+    Some(json!({
+        "max_steps": 12,
+        "allowed_domains": start_host.map(|domain| vec![domain]).unwrap_or_default(),
+        "max_runtime_s": 120
+    }))
+}
+
+/// Obtains a BrowserBroker grant for a session (WS8.D: the start host, or a person's
+/// open-web `human_browse` grant).
 ///
-/// `Ok(None)` means the session opens without a grant: the mode is `Off`, or
-/// it is `Permissive` and issuance failed. In `Strict` every failure is an
-/// error response and no Quarry run is started. Hosts are never logged.
+/// `Ok(None)` means the session opens without a grant: the mode is `Off`, or it is
+/// `Permissive` and issuance failed. In `Strict` every failure is an error response
+/// and no Quarry run is started. Hosts are never logged.
 async fn issue_session_grant(
     state: &AppState,
     user: &AuthenticatedUser,
     headers: &HeaderMap,
-    host: Option<&str>,
+    scope: SessionGrantScope<'_>,
     zdr: bool,
 ) -> Result<Option<String>, Response> {
     let mode = state.browser_grant_mode;
@@ -4411,7 +4605,7 @@ async fn issue_session_grant(
         return Ok(None);
     }
     let strict = mode == BrowserGrantMode::Strict;
-    let Some(host) = host else {
+    let Some(request_body) = session_grant_request_body(scope, zdr) else {
         return if strict {
             Err(session_grant_refusal(None))
         } else {
@@ -4438,7 +4632,7 @@ async fn issue_session_grant(
         state,
         Method::POST,
         &url,
-        Some(json!({ "allowed_domains": [host], "zdr": zdr })),
+        Some(request_body),
         model.as_deref(),
         &[("x-browser-authorization", browser.as_str())],
         user,
@@ -7640,6 +7834,7 @@ pub(crate) mod tests {
             internal_api_key: "test-key".into(),
             enforcement_mode: "off".to_string(),
             browser_grant_mode: BrowserGrantMode::Permissive,
+            browser_human_browse: false,
             auth_core_url: "http://127.0.0.1:1".into(),
             verevon_public_origin: "http://localhost:5173".into(),
             session_core_url: "http://127.0.0.1:1".into(),
@@ -9148,5 +9343,106 @@ pub(crate) mod tests {
             })),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod human_browse_session_tests {
+    use super::*;
+
+    // The HTTP path (create_session, keepalive_session) needs a live broker, model gateway
+    // and Quarry; these tests pin the pure decisions those handlers make. The wire-level
+    // legs are the Playwright and stack evidence of WS8.D, not run in the build.
+
+    #[test]
+    fn create_session_requests_human_browse_grant_and_omits_budget_literals() {
+        let grant = session_grant_request_body(SessionGrantScope::HumanBrowse, false)
+            .expect("a human_browse grant has a body");
+        assert_eq!(grant, json!({ "kind": "human_browse", "zdr": false }));
+        assert!(grant.get("allowed_domains").is_none(), "{grant}");
+        // With a human grant the start body carries no constraints at all: no max_steps,
+        // no max_runtime_s and no allowed_domains.
+        assert_eq!(session_start_constraints(true, Some("example.com")), None);
+    }
+
+    #[test]
+    fn create_session_off_keeps_legacy_first_host_policy() {
+        assert_eq!(
+            session_grant_request_body(SessionGrantScope::StartHost(Some("example.com")), true),
+            Some(json!({ "allowed_domains": ["example.com"], "zdr": true }))
+        );
+        assert_eq!(
+            session_grant_request_body(SessionGrantScope::StartHost(None), false),
+            None
+        );
+        assert_eq!(
+            session_start_constraints(false, Some("example.com")),
+            Some(json!({
+                "max_steps": 12,
+                "allowed_domains": ["example.com"],
+                "max_runtime_s": 120
+            }))
+        );
+    }
+
+    #[test]
+    fn keepalive_requires_owner_and_returns_expiry_only() {
+        let renewed = json!({
+            "expires_at": "2030-01-01T00:00:00Z",
+            "absolute_expires_at": "2030-01-01T04:00:00Z",
+            "grant_id": "g_secret"
+        });
+        let payload = keepalive_outcome(StatusCode::OK, &renewed).expect("a renewed grant");
+        assert_eq!(payload, json!({ "expiresAt": "2030-01-01T00:00:00Z" }));
+        assert!(!payload.to_string().contains("g_secret"), "{payload}");
+    }
+
+    #[test]
+    fn keepalive_maps_not_renewable_to_409() {
+        for status in [
+            StatusCode::CONFLICT,
+            StatusCode::NOT_FOUND,
+            StatusCode::FORBIDDEN,
+        ] {
+            assert_eq!(
+                keepalive_outcome(status, &json!({ "error": "browser_grant_not_renewable" })),
+                Err((StatusCode::CONFLICT, "browser_session_expired")),
+                "{status}"
+            );
+        }
+        assert_eq!(
+            keepalive_outcome(StatusCode::BAD_GATEWAY, &json!({})),
+            Err((StatusCode::SERVICE_UNAVAILABLE, "browser_grant_unavailable"))
+        );
+    }
+
+    #[test]
+    fn projection_never_exposes_grant_id() {
+        let projection = json!({
+            "runId": "run-1",
+            "grantId": "g_secret",
+            "grantKind": "human_browse",
+            "tabControl": true,
+            "attachAvailable": false,
+            "status": "live",
+            "live": true
+        });
+        let response = browser_response_from_owner_projection(&projection, None);
+        assert!(!response.to_string().contains("g_secret"), "{response}");
+        assert!(response.pointer("/session/grantId").is_none());
+        let capabilities = response["session"]["capabilities"]
+            .as_array()
+            .expect("capabilities array");
+        assert!(capabilities.iter().any(|c| c == "human_browsing"));
+        assert!(capabilities.iter().any(|c| c == "tab_control"));
+        assert!(!capabilities.iter().any(|c| c == "attach"));
+    }
+
+    #[test]
+    fn human_capabilities_are_not_advertised_without_quarry_saying_so() {
+        let caps = browser_session_capabilities(&json!({ "runId": "run-1" }));
+        assert!(!caps.contains(&"human_browsing"));
+        assert!(!caps.contains(&"tab_control"));
+        assert!(!caps.contains(&"attach"));
     }
 }
