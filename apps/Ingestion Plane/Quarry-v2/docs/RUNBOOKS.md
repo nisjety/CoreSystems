@@ -1897,3 +1897,22 @@ Not done (open, see `.plan-work/quarry-w1w2/depth/W2-U67.md`): the list-tabs vie
 - A close (explicit, expiry, drain) waits up to 5 s in total for a lane that is still running an action, then releases the browser session. A lane still held at that point is logged (`close: an action still holds a lane; releasing anyway`) and released anyway.
 - No flag and no route change. A run without an attachment has one lane; its behaviour is the same apart from the key note above.
 - Not built or not run: the browser-backed evidence (a delegate `wait` of 8 s with a person's `click` returning in under one second, measured), the sweeper release of an idle attachment and the `SessionEnded` end item at close (W2-U67 depth). Test phase: `cargo test -p quarry-edge agent_ lane` (the seven lane tests in `agent_routes/tests.rs`; they check the locks, not a real slow step).
+
+
+## Profile routes: redacted reads, service principals, ZDR gate, import scope (WS17.P0, W2-U30)
+
+What changed on `/v1/profiles*` (all flag-gated or fixed in this release, see the table below):
+
+- `GET /v1/profiles/:id` answers the redacted view. `cookies[].value` is `null` with `value_len` set; local and session storage appear as counts; IndexedDB appears as origin, database names and row counts. No response of any `/v1/profiles*` route carries a cookie value, a storage key or value, or an IndexedDB value.
+- `POST /v1/profiles/:id/restore_probe` adds `earliest_expiry` (nearest unexpired cookie expiry), `cookies_expired` and `origins_count`. A profile whose cookies have all expired is not restorable unless it holds storage.
+- A service principal gets 403 on every `/v1/profiles*` route. This is fixed, not a flag.
+- `POST /v1/profiles` (import) needs the `quarry:profiles:import` scope. No production token carries it. The dev bypass stub carries it, and the bypass is refused in production. A caller without it gets 403 `profile import requires the quarry:profiles:import scope`. Grant the scope only after the owner decides who may import.
+- The import body is capped at 4 MiB; past it the edge answers 413 (a plain body from the HTTP layer, not the Quarry envelope). The rest of `/v1/*` keeps its 1 MB cap.
+- Under a ZDR posture, `create`, `save`, `read`, `update`, `probe` and `attach` are refused only when `QUARRY_EDGE__ZDR_REFUSE_DURABLE_RESOURCES` is on (default off). With the flag off the edge logs `zdr.would_refuse` (row `profiles`, action as named) and serves the request. With it on: 403 `zdr_durable_mutation_forbidden`, `details.zdr_refusal.action` set. `list` and `delete` are never refused (wind-down).
+- Production boot logs a warning while the ZDR flag is off.
+
+Flags: `QUARRY_EDGE__ZDR_REFUSE_DURABLE_RESOURCES` (default false; observe first). The service-principal refusal, the import scope and the redaction are on in every mode. Rollback: revert the commit, or set the ZDR flag back to false.
+
+Reading a profile now: `curl -s -H "Authorization: Bearer $TOKEN" http://edge:8082/v1/profiles/<profile_id>` returns `data.cookies[].value_len` and `value: null`, never the value. The step above (`expires_at`, `viewport.is_mobile`) predates this change and is not rewritten here (this file is append-only for this batch); read `data.cookies[].expires` and `data.has_viewport` instead.
+
+Deployment evidence owed (test phase, not run in the build): (1) a user token creates a profile, saves a snapshot whose cookie value is `CANARY-d16-p0`, and loads it: `grep -c CANARY-d16-p0` on the body returns 0 and the body shows `"value":null`; (2) `docker logs quarry-edge 2>&1 | grep -c CANARY-d16-p0` returns 0; (3) the execution-core service token gets 403 on `GET /v1/profiles` and `POST /v1/profiles`; (4) with the ZDR flag on, a ZDR-org token gets 403 on `POST /v1/profiles/create` and `GET /v1/profiles/:id`, and 204 on `DELETE /v1/profiles/:id`; (5) a 5 MiB import returns 413; (6) `GET /api/ingestions/profiles` through the gateway lists the profile (object rows are read now).
