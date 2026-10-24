@@ -839,6 +839,21 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D2-215 | WS23-S2 | live-proof | P1 | Owner sign-off (K3-14) for the frozen-doc addendum is outstanding; docs/actions-surface-operations.md is correctly untouched. | open |
 | D2-216 | WS23-S2 | follow-up | P3 | 11 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-06.json | open |
 
+
+### Wave-mode batch W2-07 (2026-10-24)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D2-217 | WS20-S2 | decision | P1 | The birth stamp is a behaviour change for every user run (a new metadata write of origin=chat on each StartRun INSERT), and this slice declares no switch, so the 'byte-identical with switches off' rule does not hold for user runs; the owner should confirm the mandated default is acceptable before enabling. | open |
+| D2-218 | WS20-S2 | decision | P1 | The birth stamp (run_origin_at_birth in session-core grpc.rs) writes origin=chat into every user run's metadata with no switch, so user runs change behaviour on deploy; the row mandates the chat default, but the owner should confirm this as an unflagged change since the slice declares no flag. | open |
+| D2-219 | WS20-S2 | risk | P1 | The row's 'ZDR runs chat only' clause has no origin-level guard or test: persist_scheduled_run_bindings never checks runs.retention_class, and the clause holds only structurally (start_scheduled_run hard-codes RunRetention::persistent(), and Control refuses ZDR); add a refusal to stamp schedule when the run's retention is zdr or waived, with a test. | open |
+| D2-220 | WS20-S2 | live-proof | P1 | Run the two ignored DB tests through scripts/tests/session-core-db-tests.sh (scheduled_run_binding_stamps_origin and a_run_cannot_be_rebound_to_another_origin); not run by this verifier (no Postgres, docker forbidden). | open |
+| D2-221 | WS20-S2 | live-proof | P1 | Live proof: rebuild session-core via compose.sh, fire one scheduled run and send one chat message, then GetRun JSON: scheduled run metadata.origin must be schedule, chat run must be chat, and an older unstamped run must read chat in the FE. | open |
+| D2-222 | WS20-S2 | live-proof | P1 | Confirm the gateway GetRun response passes RunDetail.metadata through to the FE; the FE origin read in runs-client.ts is only true if the Struct field survives the gateway. | open |
+| D2-223 | WS20-S2 | live-proof | P1 | sse-event-taxonomy.md note not added: needs the generator change, then gen-sse-event-taxonomy.py --check, because the file is generated and CI checks drift. | open |
+| D2-224 | WS20-S2 | live-proof | P1 | ADR-0012 (DEC-17, apps/RUN_ORIGIN_VOCABULARY_ADR_<date>.md) not written; it needs the SPACE and QRY acknowledgement named in the plan row. | open |
+| D2-225 | WS20-S2 | follow-up | P3 | 17 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-07.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
@@ -916,3 +931,4 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS17-S1 | auth, zdr | W2-06 | no |
 | WS25-S4 | zdr, authority | W2-06 | no |
 | WS23-S2 | authority, policy | W2-06 | no |
+| WS20-S2 | policy, zdr | W2-07 | no |
