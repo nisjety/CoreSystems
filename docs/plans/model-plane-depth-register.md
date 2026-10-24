@@ -1094,6 +1094,21 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D2-314 | WS21-S8 | live-proof | P1 | Apply migration 032_space_browser_entitlement.up.sql through the user-core deploy recipe (lead only; not run here). | open |
 | D2-315 | WS21-S8 | follow-up | P3 | 17 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-11.json | open |
 
+
+### Wave-mode batch W2-12 (2026-10-24)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D2-316 | WS20-S6 | risk | P1 | The ZDR/waiver refusal is inert until ScheduledStepContext carries the run's retention and waiver (runs.proto and session-core, WS20-S5 scope); the caller it checks is built with constants. | open |
+| D2-317 | WS20-S6 | risk | P1 | session-core get_scheduled_step_context still returns no contract, so the agent lane is unreachable end to end (carried from round 1). | open |
+| D2-318 | WS20-S6 | risk | P1 | Pre-existing S1 legacy path: ExecuteScheduledStepActivity passes resp.Output into StepResult.Output, which flows into Temporal history; the plan forbids content in Temporal history. | open |
+| D2-319 | WS20-S6 | risk | P1 | The contract's max_tokens_per_round is now enforced per round, but the round count and token budget are not bounded by a run-level token cap; a long tool loop can still spend up to 8 rounds at 4096 tokens each. | open |
+| D2-320 | WS20-S6 | test-gap | P1 | No driver-level test proves a gated effect is withheld and never paused (the plan's EC/tests/scheduled_agent_contract.rs); the new LoopScope effects (max tokens, no result_query, no append) are covered only by compile and existing suites, not by a scoped test. | open |
+| D2-321 | WS20-S6 | risk | P1 | The scheduled egress guard covers only web_fetch URLs with a query string, but web_search sends the model-chosen query to a third-party provider and is contract-approved read class, so injected web content could move owner data out through a search query; owner decision needed before enabling. | open |
+| D2-322 | WS20-S6 | test-gap | P1 | No driver-level test exists (EC/tests/scheduled_agent_contract.rs is absent); the 15 scheduled_agent tests cover only pure helpers, so the agent.rs withhold branches, the egress refusal, the purpose-lock, the no-approval-row guarantee and execute_scheduled_agent_step are untested beyond compilation. | open |
+| D2-323 | WS20-S6 | live-proof | P1 | Lead, live proof (needs docker, not run here): rebuild execution-core, orchestrator-core and session-core; set EXECUTION_SCHEDULED_AGENT_ENABLED=true on both; run scheduled-step-proof.sh; capture a fire whose goal needs a web read and a write, then check the transcript (one answer with the withheld block), the scheduled_step_receipts row, Temporal history with no content, cost_entries for the run, and no approvals row. | open |
+| D2-324 | WS20-S6 | follow-up | P3 | 24 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-12.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
@@ -1198,3 +1213,4 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS21-S8 | policy, authority | W2-11 | no |
 | WS10-S5 | auth, authority, policy, zdr | W1-15 | no |
 | WS10-S4 | policy, authority, zdr | W1-15 | no |
+| WS20-S6 | authority, policy, zdr, audit | W2-12 | no |
