@@ -1310,6 +1310,21 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D2-350 | WS24-S5 | live-proof | P1 | Confirm the frontend build (pnpm build) before shipping; it was not run here. | open |
 | D2-351 | WS24-S5 | follow-up | P3 | 13 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-14.json | open |
 
+
+### Wave-mode batch W2-15 (2026-10-24)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D2-352 | WS23-S3.code | risk | P1 | execute_action (the existing write-path execute_provider_action client, around integration_tools.rs lines 369-451) still interpolates connection_id into the URL path without validation. Same retargeting risk as the reviewer's read finding. Not fixed here because it is outside the listed fixes; a follow-up for the lead to decide. | open |
+| D2-353 | WS23-S3.code | risk | P1 | Egress hold cause is still RiskyEffectUnderAsk, not tainted_egress, until the WS13 vocabulary shared-edit lands. The approval a person sees names the wrong gate until then. | open |
+| D2-354 | WS23-S3.code | risk | P1 | The screening taint lives only in memory (ConnectorTaint in LoopContext, runtime_loop/mod.rs ~311). A pause and resume starts a new loop with a default taint, so after one person-approved egress call, later web_fetch or execute_provider_action calls in the resumed run are not held even though the flagged content is still in history. Needed before the flag is switched on. | open |
+| D2-355 | WS23-S3.code | risk | P1 | execute_action (the write-path execute_provider_action client, integration_tools.rs ~369-451) still interpolates connection_id into the URL path with no is_connection_id check, the same retargeting risk the reviewer raised for reads. | open |
+| D2-356 | WS23-S3.code | live-proof | P1 | Live proof (lead only, docker): rebuild execution-core, set PROVIDER_READ_TOOL_ENABLED=true on the proof stack, and check a Do run with a selected connection (after WS23-S4) calls read_provider_action, STEP rows carry counts only, and a flagged read holds a following web_fetch with cause tainted_egress. | open |
+| D2-357 | WS23-S3.code | live-proof | P1 | The full named test set was not verified green on the live tree. The live runtime_loop/mod.rs did not compile at my check (concurrent WS07-S7 hunk, see required_fixes); the implementer's 1370-pass lib run predates that edit. Full crate and lib suites were not re-run by me. | open |
+| D2-358 | WS23-S3.code | live-proof | P1 | Compose and .env.example PROVIDER_READ_TOOL_ENABLED lines are shared-edits listed by the implementer and not applied (apps/Model Plane/deploy/docker-compose.yml, apps/Model Plane/deploy/.env.example). | open |
+| D2-359 | WS23-S3.code | live-proof | P1 | Ownership: git status shows no edits outside the owned set from this slice. The only foreign hunk in an owned file is the WS07-S7 reattach hunk in runtime_loop/mod.rs. | open |
+| D2-360 | WS23-S3.code | follow-up | P3 | 13 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-15.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
@@ -1434,3 +1449,4 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS08-S5 | zdr, authority | W1-19 | no |
 | WS07-S7 | authority, policy, zdr, audit | W1-20 | no |
 | WS07-S3 | auth, authority | W1-20 | no |
+| WS23-S3.code | authority, zdr, audit, policy | W2-15 | no |
