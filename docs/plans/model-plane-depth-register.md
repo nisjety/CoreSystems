@@ -911,6 +911,21 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D2-224 | WS20-S2 | live-proof | P1 | ADR-0012 (DEC-17, apps/RUN_ORIGIN_VOCABULARY_ADR_<date>.md) not written; it needs the SPACE and QRY acknowledgement named in the plan row. | open |
 | D2-225 | WS20-S2 | follow-up | P3 | 17 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-07.json | open |
 
+
+### Wave-mode batch W2-08 (2026-10-24)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D2-226 | WS17-S2 | risk | P1 | archive_threads (grpc.rs, bulk archive for a user, around line 7048) builds its THREAD_ARCHIVED idempotency key as format!("{thread_id}:archived"). After a restore that thread can be archived again through this path too, so the INSERT hits idx_events_idempotency_key and the whole bulk transaction rolls back. Same root cause as the fixed archive_thread bug; fix it the same way (key per archive instance, for example the archived_at value per row) in a follow-up or with the lead's approval. | open |
+| D2-227 | WS17-S2 | test-gap | P1 | Real-PG tests not run: unarchive_restores_thread_in_list and re_archive_after_restore_writes_a_second_archived_event need DATABASE_URL to a disposable Postgres and --ignored --test-threads=1. | open |
+| D2-228 | WS17-S2 | follow-up | P1 | The sidebar still loads the full active listing through listChatThreads and widens a display window with Load more, not server pages, because its local-cache reconcile and migration need a complete listing; a true server-paged sidebar needs that reconcile moved first. | open |
+| D2-229 | WS17-S2 | test-gap | P1 | No ZDR golden row covers presentation archived=false or the BFF archive/unarchive routes under a ZDR credential; the row asks that archive is allowed and title/preview refused, and zdr_posture_matrix.rs is live-only so the lead must add it. | open |
+| D2-230 | WS17-S2 | risk | P1 | archive_threads (bulk ArchiveThreads, session-core grpc.rs around line 7050) still keys THREAD_ARCHIVED as `{thread_id}:archived`; after a restore that thread can collide with an earlier bulk archive, so the whole bulk transaction rolls back with Status::internal. No caller of POST /v1/threads/archive exists in the repo, so it is latent; fix it with the same per-archive key as archive_thread, or in a follow-up with the lead's approval. | open |
+| D2-231 | WS17-S2 | live-proof | P1 | Run unarchive_restores_thread_in_list and re_archive_after_restore_writes_a_second_archived_event against a disposable Postgres: DATABASE_URL=<disposable> CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -p session-core --bin session-core <name> -- --ignored --test-threads=1, run from apps/Model Plane/rust. | open |
+| D2-232 | WS17-S2 | live-proof | P1 | Add the ZDR golden row (archive allowed; title and preview refused) to zdr_posture_matrix.rs and the zdr-contract-sync test. Both are live-only files outside this slice's ownership. | open |
+| D2-233 | WS17-S2 | live-proof | P1 | model-gateway does not compile in this worktree right now: cargo check -p model-gateway --all-targets fails with two E0425 errors at services/model-gateway/src/sse.rs:1692 (skills_truncated and skills_dropped are not in scope; lifecycle_events::skills_truncated is referenced). That is a sibling slice's in-flight edit to sse.rs and the untracked lifecycle_events.rs, not S2. The S2 MG change (one Option<bool> field on UpdateThreadPresentationBody and one initializer) is type-consistent with the generated archived field, but cargo test -p model-gateway has not been run for S2 and must run once that slice lands. | open |
+| D2-234 | WS17-S2 | follow-up | P3 | 26 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-08.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
@@ -996,3 +1011,4 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS08-S1 | data-loss, zdr | W1-11 | no |
 | WS02-S9 | zdr | W1-11 | no |
 | WS10-S1 | policy, zdr | W1-12 | no |
+| WS17-S2 | zdr | W2-08 | no |
