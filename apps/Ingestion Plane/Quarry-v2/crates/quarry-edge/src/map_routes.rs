@@ -184,11 +184,48 @@ pub async fn map(
         base.host_str().unwrap_or_default()
     );
 
+    // WS14.S4: with the gate enforcing, robots.txt comes from the shared gate (the
+    // guarded driver chain, the origin cache, query-aware matching, the product
+    // token set). Under ZDR the gate fetches and stores nothing. An unreachable
+    // robots.txt under the `disallow` policy refuses the map, since every URL
+    // would be disallowed. Off and observe keep the best-effort path below.
+    let mut gate_rules: Option<std::sync::Arc<quarry_transform::robots::RobotsTxt>> = None;
+    let mut gate_decided = false;
+    if let Some(gate) = state
+        .robots
+        .as_ref()
+        .filter(|g| g.mode() == quarry_runtime::RobotsEnforceMode::Enforce)
+    {
+        match gate
+            .rules_for_origin(&base, &claims.org_id, claims.effective_zdr(false))
+            .await
+        {
+            Some(quarry_runtime::RobotsState::Rules(rules)) => {
+                gate_rules = Some(rules);
+                gate_decided = true;
+            }
+            Some(quarry_runtime::RobotsState::Absent) => gate_decided = true,
+            Some(quarry_runtime::RobotsState::Unreachable) => {
+                if gate.config().unreachable == quarry_runtime::UnreachablePolicy::Disallow {
+                    return (
+                        StatusCode::FORBIDDEN,
+                        Json(forbidden(
+                            "robots.txt for the site could not be fetched, so no URL can be listed",
+                        )),
+                    )
+                        .into_response();
+                }
+                gate_decided = true;
+            }
+            None => {}
+        }
+    }
+
     // Best-effort robots for allow-filtering (never fatal), except a
     // transport-level rate limit which fails the request with the typed
     // 429 envelope instead of silently degrading to an empty map.
-    let robots = match Url::parse(&format!("{origin}/robots.txt")) {
-        Ok(u) => match fetch_text(&state, &u).await {
+    let robots = match Url::parse(&format!("{origin}/robots.txt")).ok().filter(|_| !gate_decided) {
+        Some(u) => match fetch_text(&state, &u).await {
             Ok(t) => t.map(|body| quarry_transform::robots::RobotsTxt::parse(&body)),
             Err(e) => {
                 return (
@@ -198,7 +235,7 @@ pub async fn map(
                     .into_response()
             }
         },
-        Err(_) => None,
+        None => None,
     };
 
     // Sitemap URLs (best-effort, one level of nested index).
@@ -266,6 +303,16 @@ pub async fn map(
 
     // Scope + dedup, then robots allow-filter.
     let mut urls = merge_and_scope(&seed_host, req.include_subdomains, candidates);
+    if let Some(rules) = &gate_rules {
+        urls.retain(|u| {
+            Url::parse(u).ok().is_none_or(|p| {
+                rules.is_allowed_any(
+                    &quarry_runtime::ROBOTS_PRODUCT_TOKENS,
+                    &quarry_transform::robots::path_and_query(&p),
+                )
+            })
+        });
+    }
     if let Some(rt) = &robots {
         urls.retain(|u| {
             Url::parse(u)

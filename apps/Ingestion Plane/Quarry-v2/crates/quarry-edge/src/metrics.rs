@@ -497,10 +497,48 @@ pub fn sample_runs() {
     }
 }
 
+fn robots_gate() -> &'static Mutex<Option<Arc<quarry_runtime::RobotsGate>>> {
+    static GATE: OnceLock<Mutex<Option<Arc<quarry_runtime::RobotsGate>>>> = OnceLock::new();
+    GATE.get_or_init(|| Mutex::new(None))
+}
+
+/// Make the robots.txt gate's counts visible to the sampler (WS14.S4). A later
+/// call replaces the earlier one.
+pub fn register_robots(gate: Arc<quarry_runtime::RobotsGate>) {
+    if let Ok(mut registered) = robots_gate().lock() {
+        *registered = Some(gate);
+    }
+}
+
+/// Publish the robots.txt gate's counts once. Content-free: the labels come from a
+/// closed set (the mode and the outcome), never a host, a path or a URL.
+pub fn sample_robots() {
+    let gate = match robots_gate().lock() {
+        Ok(registered) => registered.clone(),
+        Err(_) => return,
+    };
+    let Some(gate) = gate else {
+        return;
+    };
+    let stats = gate.stats();
+    for (mode, outcome, value) in [
+        ("any", "allowed", stats.allowed),
+        ("enforce", "denied", stats.denied),
+        ("enforce", "unreachable", stats.denied_unreachable),
+        ("observe", "would_deny", stats.would_deny),
+        ("observe", "would_unreachable", stats.would_deny_unreachable),
+    ] {
+        metrics::counter!("quarry_robots_decisions_total", "mode" => mode, "outcome" => outcome)
+            .absolute(value);
+    }
+    metrics::gauge!("quarry_robots_cache_entries").set(gate.len() as f64);
+}
+
 /// Publish every sampled series once: the pools, the live runs, the drain flag.
 pub fn sample_all() {
     sample_pools();
     sample_runs();
+    sample_robots();
     metrics::gauge!("quarry_edge_draining").set(if crate::drain::is_draining() { 1.0 } else { 0.0 });
 }
 

@@ -213,6 +213,17 @@ async fn run() -> anyhow::Result<()> {
     let crawl_scope = crawl_policy::CrawlScopeSwitch::from_env()
         .map_err(|e| anyhow::anyhow!("crawl scope: {e}"))?;
     tracing::info!(mode = crawl_scope.label(), "crawl scope: boot");
+    // WS14.S4: an unparsable robots setting (QUARRY_EDGE__CRAWL_ROBOTS and the four
+    // QUARRY_ROBOTS_* / QUARRY_CRAWL_DELAY_MAX_S values) fails boot.
+    let robots_config = quarry_runtime::RobotsGateConfig::from_env()
+        .map_err(|e| anyhow::anyhow!("robots gate: {e}"))?;
+    tracing::info!(
+        mode = robots_config.mode.as_str(),
+        unreachable_disallows = (robots_config.unreachable == quarry_runtime::UnreachablePolicy::Disallow),
+        crawl_delay_max_s = robots_config.crawl_delay_max.as_secs(),
+        cache_max_entries = robots_config.cache_max_entries,
+        "robots gate: boot"
+    );
     // WS14.S5: an unparsable QUARRY_EDGE__CRAWL_BATCH_MAX_URLS fails boot.
     let batch_cap = quarry_edge::batch_check::check_boot()
         .map_err(|e| anyhow::anyhow!("crawl batch cap: {e}"))?;
@@ -1673,6 +1684,16 @@ async fn run() -> anyhow::Result<()> {
     } else {
         None
     };
+    // WS14.S4: the robots.txt gate goes through the guarded default driver chain.
+    let robots = (robots_config.mode != quarry_runtime::RobotsEnforceMode::Off).then(|| {
+        std::sync::Arc::new(quarry_runtime::RobotsGate::new(
+            default_driver.clone(),
+            robots_config.clone(),
+        ))
+    });
+    if let Some(gate) = robots.clone() {
+        metrics::register_robots(gate);
+    }
     let app_state = state::AppState {
         readiness: state::ReadinessState {
             durable: durable_ready,
@@ -1727,6 +1748,7 @@ async fn run() -> anyhow::Result<()> {
         // WS7.C — web policy baseline and enforcement (see `policy_baseline`).
         // Each run's RunPolicy is derived from its resolved web policy per request.
         policy: web_policy,
+        robots,
         // Cycle 21 / cluster #3 — single shared HostScheduler with
         // default AIMD config. Cheap to share via Arc; per-host state
         // lives behind a tokio::Mutex<HashMap<host, slot>>.

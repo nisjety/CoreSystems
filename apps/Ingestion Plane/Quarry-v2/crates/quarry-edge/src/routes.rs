@@ -727,6 +727,7 @@ async fn scrape_with(
         source_registrar: None,
         title_enricher: if actions_safe { None } else { state.page_title_enricher.clone() },
         doc_routing,
+        robots: None,
     };
 
     let run_id: RunKind = quarry_core::ids::Id::new();
@@ -1442,11 +1443,22 @@ fn with_crawl(
     mut result: InternalRunPageResult,
     final_url: &str,
     scope: Option<&quarry_runtime::crawl_filter::CompiledScope>,
+    robots: Option<&quarry_runtime::RobotsGate>,
 ) -> InternalRunPageResult {
     let (Some(scope), Ok(page)) = (scope, Url::parse(final_url)) else {
         return result;
     };
-    let outcome = scope.evaluate(&page, &result.links, None);
+    // WS14.S4: cached robots rules filter the page's links, never a network call, and
+    // only when the gate enforces; in observe mode no link is dropped on robots.txt's
+    // word. The page's `Crawl-delay` is reported in every mode but off.
+    let peek = |link: &Url| robots.map_or(quarry_runtime::crawl_filter::RobotsPeek::Unknown, |g| g.peek(link));
+    let lookup: Option<quarry_runtime::crawl_filter::RobotsLookup<'_>> = robots
+        .filter(|g| g.mode() == quarry_runtime::RobotsEnforceMode::Enforce)
+        .map(|_| &peek as quarry_runtime::crawl_filter::RobotsLookup<'_>);
+    let mut outcome = scope.evaluate(&page, &result.links, lookup);
+    if let Some(gate) = robots {
+        outcome.report.crawl_delay_ms = gate.crawl_delay_ms(&page);
+    }
     result.links = outcome.links;
     result.crawl = Some(outcome.report);
     result
@@ -1647,6 +1659,14 @@ async fn internal_run_page(
         )),
         title_enricher: state.page_title_enricher.clone(),
         doc_routing: quarry_runtime::DocRouting::cached(),
+        // WS14.S4: a crawl or batch page is gated on robots.txt when its context says
+        // `robots: respect`, the gate exists and the mode is not off.
+        robots: match (&state.robots, crawl_scope.as_ref()) {
+            (Some(gate), Some(scope)) if scope.respects_robots() => Some(
+                quarry_runtime::RobotsEnforcement::new(gate.clone(), gate.mode()),
+            ),
+            _ => None,
+        },
     };
 
     let run_id: RunKind = match req.run_id.as_deref() {
@@ -1662,6 +1682,7 @@ async fn internal_run_page(
                     InternalRunPageResult::from_output(run_id.to_string(), &cached),
                     &cached.url.final_url,
                     crawl_scope.as_ref(),
+                    state.robots.as_deref(),
                 )));
             }
         }
@@ -1684,6 +1705,7 @@ async fn internal_run_page(
                 InternalRunPageResult::from_output(run_id.to_string(), &out),
                 &out.url.final_url,
                 crawl_scope.as_ref(),
+                state.robots.as_deref(),
             )))
         }
         Err(err) => Err((
@@ -1837,6 +1859,7 @@ async fn scrape_stream(
             source_registrar: None,
             title_enricher: state.page_title_enricher.clone(),
             doc_routing: quarry_runtime::DocRouting::cached(),
+            robots: None,
         };
         let run_id = RunKind::new();
         let mut rx = state.event_sink.subscribe(&run_id);
@@ -2120,6 +2143,7 @@ mod tests {
             usage: Arc::new(NoopUsageMeter),
             limits: Arc::new(crate::limits::StaticFloor),
             policy: crate::policy_baseline::PolicyBaseline::default(),
+            robots: None,
             scheduler: None,
             internal_signer: None,
             tombstones: None,

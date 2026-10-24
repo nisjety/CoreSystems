@@ -114,6 +114,11 @@ pub struct AppState {
     /// resolved policy (and the RunPolicy it implies) is decided per request
     /// from this; see `crate::policy_baseline`.
     pub policy: crate::policy_baseline::PolicyBaseline,
+    /// WS14.S4 — the robots.txt gate (cache of per-origin rules over the guarded
+    /// default driver). `None` when `QUARRY_EDGE__CRAWL_ROBOTS=off` and in tests
+    /// that do not exercise robots.txt; `/v1/map` and the crawl and batch page
+    /// route then behave as before.
+    pub robots: Option<Arc<quarry_runtime::RobotsGate>>,
     /// Cycle 21 / cluster #3 — per-host adaptive scheduler shared
     /// across handlers so concurrent scrapes coordinate. `None`
     /// disables throttling (test harnesses).

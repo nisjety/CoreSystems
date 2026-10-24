@@ -77,6 +77,7 @@ pub fn base_state(driver: Arc<dyn Driver>, event_sink: EventSink) -> AppState {
         usage: Arc::new(quarry_runtime::NoopUsageMeter),
         limits: Arc::new(quarry_edge::limits::StaticFloor),
         policy: quarry_edge::policy_baseline::PolicyBaseline::default(),
+        robots: None,
         scheduler: None,
         internal_signer: None,
         tombstones: None,
