@@ -556,6 +556,48 @@ Built so far (batches B01 to B07): WS01-S0, WS01-S1 (partial), WS01-S6; WS02-S1,
 | D1-415 | WS06-S8 | live-proof | P1 | DB tests (TestPGCursorsAdvanceOnlyForwardAndResetTheFailureStreak, TestExportStatusReadsTheCursorsOfOneOrgOnly) skipped without TEST_DATABASE_URL; they need postgres:16 through docker, lead only. | open |
 | D1-416 | WS06-S8 | follow-up | P3 | 17 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-10.json | open |
 
+
+### Wave-mode batch W1-11 (2026-10-24)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D1-417 | WS04-S3 | live-proof | P1 | Nothing here ran over real NATS: queue and probe on the real bus (no-responders mapping for a dead owner, the 750 ms timeout, request/reply inbox ACL for the queue payload up to 8 KiB) need the ignored live test and the two-replica stack before MODEL_GATEWAY_RUN_CONTROL_BUS is turned on. | open |
+| D1-418 | WS04-S3 | risk | P1 | Core NATS is at-most-once and the owner enqueues before it replies: a reply lost twice (original and the one retry) gives a 503 although the message may be queued on the owner and, the persist step being skipped, is never recorded; the client may resend it and the run could read it twice. WS04-S6 (client_message_id, persist-then-enqueue) is what closes this; do not flip the switch for production before it. | open |
+| D1-419 | WS04-S3 | live-proof | P1 | Live proof needs docker and the two-replica stack with MODEL_GATEWAY_RUN_CONTROL_BUS=true and the NATS ACL deployed: stream with a tool loop on A, queue via B, see the queued_input SSE on A, persisted:true, and queued_input_undelivered_total for a leftover. | open |
+| D1-420 | WS04-S3 | live-proof | P1 | Live proof: resume on B for a producer quiet more than 120 s still tails. Also run_control_requests_total{op=queue/probe,outcome=peer}. | open |
+| D1-421 | WS04-S3 | live-proof | P1 | The model-gateway image must be rebuilt before any live proof. | open |
+| D1-422 | WS04-S3 | live-proof | P1 | Matrix row e_zdr_token_queue_input_refused is absent. Enforcement rows are bearer x route decisions with no operation concept. Adding one needs the integrator to pick a shape, then a pin and vendored-copy update outside this slice's files. | open |
+| D1-423 | WS04-S3 | live-proof | P1 | Ledger entry for the persist-order correction (D3), and the ZDR.md and MODEL_PLANE_STATUS.md updates at S9. These are shared files, so the lead applies them (lead_todo from the implementer). | open |
+| D1-424 | WS04-S3 | live-proof | P1 | Rebuild the model-gateway image before any live proof (code changed in http_routes.rs, sse.rs, queued_input.rs, run_control.rs). | open |
+| D1-425 | WS04-S3 | follow-up | P3 | 13 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-11.json | open |
+| D1-426 | WS06-S9 | risk | P1 | A head marked broken has no repair path: chain.go:132 is the only writer of state 'broken', no code path sets it back to 'ok', and a broken org gets no new attestations and no purge. An owner decision and a repair procedure are needed before the chain is switched on. | open |
+| D1-427 | WS06-S9 | risk | P1 | No key-rotation command exists. run-control-plane.sh mints the audit-chain pair only when a value is missing and persist_if_missing never overwrites (lines 126-131, 217-228), so rotation is a manual secret-store change; a half-present ledger yields a mismatched pair that stops boot when the chain or pruning is on. | open |
+| D1-428 | WS06-S9 | risk | P1 | The details guard only counts oversize and denied keys (chain.go:30-38 and 332-335) and never rejects. The SIEM export sends details to customer endpoints, so content a producer puts in details reaches the customer's SIEM and is kept for the retention window. Decide enforce or observe before AUDIT_SIEM_EXPORT_ENABLED is switched on in any environment. | open |
+| D1-429 | WS06-S9 | decision | P1 | The enterprise entitlement that DEC-35 proposes for SIEM export (feature.siem_export; ruling Q-7a1-15) is not built. The operator switch ORG_SIEM_DESTINATIONS_ENABLED is the only gate on destinations, and the commercial ruling is open. | open |
+| D1-430 | WS06-S9 | live-proof | P1 | No live proof was run for WS06-S2, S4 or S8: no stack or docker in this slice. The lead must run the chain-on activation with a governed tool action, the mutate-row-via-GUC verifier check and the SIEM receiver capture before the S9 claims can cite them. | open |
+| D1-431 | WS06-S9 | decision | P1 | Counsel must confirm the register class for the SIEM destination (user-authorised, customer-directed, EXCLUDED) before the subprocessors row and trust-recipients entry are applied. | open |
+| D1-432 | WS06-S9 | decision | P1 | feature.siem_export entitlement (DEC-35, Q-7a1-15) is not built, so ORG_SIEM_DESTINATIONS_ENABLED is the only gate; the runbook says so, the commercial ruling is open. | open |
+| D1-433 | WS06-S9 | live-proof | P1 | No live captures for WS06 S2, S4, S8 exist; the trust-claim and honest-limits text must stay at 'built, off by default' until they do. | open |
+| D1-434 | WS06-S9 | follow-up | P3 | 25 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-11.json | open |
+| D1-435 | WS08-S1 | decision | P1 | Owner to confirm images-only gating on the subscription/Do/ZDR routes: the plan row says refuse every attachment, but documents are inlined as message text and work on all three routes today; under ZDR the server refuses the wire attachments field only, so inlined document text in a temporary chat is allowed by this slice. | open |
+| D1-436 | WS08-S1 | live-proof | P1 | Playwright tests/e2e/chat-attachment-gates.spec.ts not run (needs live stack plus sign-in; also playwright.config.ts CHAT_WORKSPACE_SPECS regex does not match the new spec, so the lead must make the one-line shared edit) | open |
+| D1-437 | WS08-S1 | live-proof | P1 | Evidence run still owed: second Vite dev server over the worktree, screenshots of the six refusals, and a network capture showing no /api/v1/chat/stream request | open |
+| D1-438 | WS08-S1 | live-proof | P1 | Evidence run per the plan: second Vite dev server over the worktree (:5173 is the main checkout), run 'pnpm test:e2e -- tests/e2e/chat-attachment-gates.spec.ts --project=chat' after the config edit, take screenshots of the six refusals and a network capture with no /api/v1/chat/stream request | open |
+| D1-439 | WS08-S1 | live-proof | P1 | Commit the new files attachment-policy.ts, attachment-policy.test.ts and chat-attachment-gates.spec.ts together with the edits | open |
+| D1-440 | WS08-S1 | test-gap | P2 | zdr-refusals.test.ts extension (plan marks it live-only after WS01) not written, and that file already fails on the vendored golden drift (pin sha256 and the new connector_read feature) independent of this slice. | open |
+| D1-441 | WS08-S1 | follow-up | P2 | S2 should make attachment-policy.ts constants server-declared (getAttachmentPolicy from /v1/models) and S4 should raise ATTACHMENT_MAX_IMAGES and add the model_no_vision reason; the single constants block is the seam. | open |
+| D1-442 | WS08-S1 | risk | P2 | Retry, edit and regenerate paths in use-chat-controller re-run toStreamAttachments on earlier user turns; a subscription thread whose history holds an image turn will now surface attachments_not_sent on retry instead of silently dropping the image, which is intended but unverified live. | open |
+| D1-443 | WS08-S1 | follow-up | P3 | 6 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-11.json | open |
+| D1-444 | WS02-S9 | risk | P1 | Before INFERENCE_ANTHROPIC_TIERED_SYSTEM is switched on, check that cache writes are not paid each turn for a Context tier that changes often; the plan says S2 baseline decides ship. | open |
+| D1-445 | WS02-S9 | follow-up | P1 | The gateway inline chat path sends no plan until sse.rs renders with render_tiered and run_tool_rounds_for_model carries the plan; today only the Do loop (execution-core) can benefit. | open |
+| D1-446 | WS02-S9 | follow-up | P1 | The gateway half of the row is not wired: tool_loop.rs sends prompt_tiers: None because run_tool_rounds_for_model's only caller is in sse.rs (not owned), so the inline chat path gets no tiered blocks until sse.rs renders with render_tiered and passes TieredPrompt::plan() through a new trailing parameter; only the Do loop benefits today. | open |
+| D1-447 | WS02-S9 | live-proof | P1 | shared-edit apps/Model Plane/deploy/docker-compose.yml: in the inference-core environment block, add INFERENCE_ANTHROPIC_TIERED_SYSTEM: ${INFERENCE_ANTHROPIC_TIERED_SYSTEM:-false} | open |
+| D1-448 | WS02-S9 | live-proof | P1 | Gateway wiring in sse.rs plus a plan parameter on tool_loop::run_tool_rounds_for_model (not owned by this slice) | open |
+| D1-449 | WS02-S9 | live-proof | P1 | Regenerate Go proto bindings (buf generate) for PromptTierPlan; optional wire-parity golden | open |
+| D1-450 | WS02-S9 | live-proof | P1 | Staging proof: deploy inference-core first then execution-core, switch on, two consecutive Anthropic Do turns with a changed volatile block show cache_read_input_tokens covering Stable+Context (S1 frames, S2 view) | open |
+| D1-451 | WS02-S9 | live-proof | P1 | gateway wiring (needs sse.rs, not owned): add a trailing parameter `prompt_tiers: Option<mp_contracts::model_plane::v1::PromptTierPlan>` to tool_loop::run_tool_rounds_for_model (run_tool_rounds passes None), set it at the InferRequest literal in tool_loop.rs where `prompt_tiers: None` now is, and have sse.rs build the prompt with PromptContext::render_tiered and pass TieredPrompt::plan() mapped to {stable_messages, context_messages}; the tool loop only appends system notices at the END of decision_messages so the plan stays valid every round. | open |
+| D1-452 | WS02-S9 | follow-up | P3 | 8 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-11.json | open |
+
 ## Wave 2 (WS13 to WS27)
 
 Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS27-S0, WS27-S1. Wave 2 is not started as a wave: these came in with Wave 1 batches because they were Wave 1 prerequisites.
@@ -932,3 +974,7 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS25-S4 | zdr, authority | W2-06 | no |
 | WS23-S2 | authority, policy | W2-06 | no |
 | WS20-S2 | policy, zdr | W2-07 | no |
+| WS04-S3 | authority, zdr, data-loss | W1-11 | no |
+| WS06-S9 | audit, zdr | W1-11 | no |
+| WS08-S1 | data-loss, zdr | W1-11 | no |
+| WS02-S9 | zdr | W1-11 | no |
