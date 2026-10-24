@@ -23,6 +23,7 @@ const (
 	serviceCredentialEnv      = "ORG_CORE_SERVICE_CREDENTIALS"
 	gatewayServicePrincipal   = "verevon-gateway"
 	siemExporterPrincipal     = "audit-core"
+	browserBrokerPrincipal    = "browser-broker"
 	serviceDelegationMaxAge   = 30 * time.Second
 	serviceDelegationSkew     = 5 * time.Second
 	serviceDelegationMaxBody  = 1 << 20
@@ -60,6 +61,11 @@ var orgServiceScopeAllowlist = map[string]struct{}{
 	// alone (validateServiceCredential); neither is org:read:any.
 	"org:siem:manage:self": {},
 	"org:siem:read:any":    {},
+	// Read-only access to one org's agent-browser site decision, through
+	// GET /internal/orgs/:orgId/browser-sites/resolve and nothing else (WS21-S3).
+	// Held by the browser broker alone (validateServiceCredential); the decision
+	// is the broker's input at grant mint, never a member's list.
+	"org:browser-site:read:any": {},
 }
 
 type serviceCredential struct {
@@ -159,6 +165,9 @@ func validateServiceCredential(credential serviceCredential, principals map[stri
 		// The exporter read returns plaintext destination secrets, so unlike the
 		// other :any scopes it is pinned to one principal.
 		if scope == "org:siem:read:any" && credential.Principal != siemExporterPrincipal {
+			return fmt.Errorf("scope %s is not valid for principal %s", scope, credential.Principal)
+		}
+		if scope == "org:browser-site:read:any" && credential.Principal != browserBrokerPrincipal {
 			return fmt.Errorf("scope %s is not valid for principal %s", scope, credential.Principal)
 		}
 		scopes[scope] = struct{}{}
@@ -318,6 +327,16 @@ func organizationAPIScopes(method string, rest []string) []string {
 		return []string{"org:settings:write:self"}
 	case len(rest) == 3 && method == http.MethodGet && rest[1] == "model-entitlement" && rest[2] == "explain":
 		return []string{"org:read:self"}
+	// The agent-browser site policy (WS21-S3): an admin reads and writes it, and a
+	// member reads and writes only their own choices, all on behalf of a signed user.
+	case len(rest) == 2 && method == http.MethodGet && rest[1] == "browser-sites":
+		return []string{"org:read:self"}
+	case len(rest) == 2 && method == http.MethodPut && rest[1] == "browser-sites":
+		return []string{"org:settings:write:self"}
+	case len(rest) == 3 && method == http.MethodGet && rest[1] == "browser-sites" && (rest[2] == "explain" || rest[2] == "me"):
+		return []string{"org:read:self"}
+	case len(rest) == 4 && rest[1] == "browser-sites" && rest[2] == "me" && (method == http.MethodPut || method == http.MethodDelete):
+		return []string{"org:settings:write:self"}
 	case len(rest) == 2 && method == http.MethodPost && rest[1] == "plan":
 		return []string{"org:settings:write:self"}
 	case len(rest) == 2 && method == http.MethodPatch && rest[1] == "settings":
@@ -402,6 +421,8 @@ func internalOrganizationScopes(method string, rest []string) []string {
 		return []string{"org:retention:read:any"}
 	case len(rest) == 2 && rest[1] == "model-entitlement" && method == http.MethodGet:
 		return []string{"org:model-entitlement:read:any"}
+	case len(rest) == 3 && rest[1] == "browser-sites" && rest[2] == "resolve" && method == http.MethodGet:
+		return []string{"org:browser-site:read:any"}
 	case len(rest) == 2 && rest[1] == "reconcile" && method == http.MethodPost:
 		return []string{"org:projection:write:any"}
 	case len(rest) == 3 && rest[1] == "members" && rest[2] == "reconcile" && method == http.MethodPost:

@@ -32,6 +32,10 @@ type Server struct {
 	modelEntitlements modelEntitlementService
 	callerRoles       callerRoleReader
 
+	// browserSites is set by SetBrowserSites (WS21-S3): the agent-browser site
+	// policy of record, read by the broker and administered through these routes.
+	browserSites browserSiteService
+
 	// siemEnabled mounts the SIEM destination routes (WS06-S7,
 	// ORG_SIEM_DESTINATIONS_ENABLED); siem is the service behind them.
 	siemEnabled bool
@@ -126,6 +130,16 @@ func (s *Server) setupRoutes() {
 	v1.GET("/organizations/:id/model-entitlement", s.getModelEntitlement)
 	v1.PUT("/organizations/:id/model-entitlement", guard, s.putModelEntitlement)
 	v1.GET("/organizations/:id/model-entitlement/explain", s.explainModelEntitlement)
+	// Agent-browser site policy (WS21-S3). An admin reads and writes the policy
+	// (owner or admin only); a member reads and writes only their own choices. The
+	// handlers check the role against the membership table; the guard is the same
+	// second layer the other mutations use.
+	v1.GET("/organizations/:id/browser-sites", s.getBrowserSites)
+	v1.PUT("/organizations/:id/browser-sites", guard, s.putBrowserSites)
+	v1.GET("/organizations/:id/browser-sites/explain", s.explainBrowserSite)
+	v1.GET("/organizations/:id/browser-sites/me", s.listBrowserSitePrefs)
+	v1.PUT("/organizations/:id/browser-sites/me/:host", guard, s.putBrowserSitePref)
+	v1.DELETE("/organizations/:id/browser-sites/me/:host", guard, s.deleteBrowserSitePref)
 	// createOrganization is intentionally NOT guarded: there is no :id to check
 	// membership against yet (the org is being created and the caller becomes
 	// its first owner). It still requires x-user-id in the handler.
@@ -212,6 +226,10 @@ func (s *Server) setupRoutes() {
 	// The resolved chat model policy for one org and user, for inference-core's
 	// pull (WS10-S2). Own scope org:model-entitlement:read:any; no-store.
 	internal.GET("/orgs/:orgId/model-entitlement", s.getModelEntitlementInternal)
+	// The resolved agent-browser site decision for the broker's grant mint
+	// (WS21-S3). Own scope org:browser-site:read:any, held by browser-broker alone;
+	// no-store.
+	internal.GET("/orgs/:orgId/browser-sites/resolve", s.getBrowserSitesInternal)
 	// The exporter's read of every enabled SIEM destination, secret unsealed
 	// (WS06-S7). Own scope org:siem:read:any, held by audit-core only; no-store.
 	// Registered even while the feature is off so the path cannot fall through to

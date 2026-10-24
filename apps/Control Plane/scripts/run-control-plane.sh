@@ -500,6 +500,11 @@ required_credentials=(
   # only). Minted here because org-core validates it in
   # ORG_CORE_SERVICE_CREDENTIALS and inference-core presents it.
   INFERENCE_ORG_CORE_SERVICE_TOKEN
+  # browser-broker's org-core principal (scope org:browser-site:read:any only),
+  # which the broker presents to read a member's site decision at grant mint
+  # (WS21-S3). Minted here because org-core validates it in
+  # ORG_CORE_SERVICE_CREDENTIALS and the broker presents it.
+  BROWSER_BROKER_ORG_CORE_SERVICE_TOKEN
   MODEL_NATS_PROVISIONER_PASSWORD
   ORG_GROUP_GRANT_SERVICE_TOKEN
   ORG_NATS_PASSWORD ORG_SHARED_NATS_PASSWORD QUARRY_AUTH_INTERNAL_SERVICE_TOKEN
