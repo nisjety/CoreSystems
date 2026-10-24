@@ -11,7 +11,7 @@ use quarry_core::contracts::{
 use quarry_core::envelope::{Envelope, EnvelopeMeta};
 use quarry_core::error::{ErrorCode, QuarryError};
 use quarry_core::ids::kinds;
-use quarry_core::policy::{BackoffKind, RunPolicy};
+use quarry_core::policy::{BackoffKind, JobPolicy};
 use quarry_core::zdr::ZdrMode;
 use serde_json::json;
 
@@ -133,12 +133,36 @@ fn envelope_meta_serde_stable() {
 }
 
 #[test]
-fn default_run_policy_sane() {
-    let p = RunPolicy::default();
+fn default_job_policy_sane() {
+    let p = JobPolicy::default();
     assert_eq!(p.concurrency.per_run, 8);
     assert_eq!(p.concurrency.per_domain, 2);
     assert!(matches!(p.retry.backoff, BackoffKind::Exp));
     assert!(p.delay.jitter);
+}
+
+// WS7.F serde golden: the default job policy's wire shape. A field rename or a
+// new non-skipped field changes every stored job policy, so it must be deliberate.
+#[test]
+fn default_job_policy_serde_golden() {
+    let v = serde_json::to_value(JobPolicy::default()).unwrap();
+    assert_eq!(
+        v,
+        json!({
+            "concurrency": {"per_run": 8, "per_domain": 2},
+            "delay": {"min_ms": 500, "max_ms": 2000, "jitter": true},
+            "retry": {"max": 3, "backoff": "exp", "base_ms": 1000},
+            "proxy": {"strategy": "none"},
+            "robots": "respect",
+            "ordering": "fifo",
+            "block": {"on": "challenge", "action": "escalate"},
+            "checkpoint": {"every_n_pages": 50, "every_s": 60},
+            "determinism": "best_effort"
+        })
+    );
+    // The golden must also parse back into the same type.
+    let back: JobPolicy = serde_json::from_value(v).unwrap();
+    assert_eq!(serde_json::to_value(&back).unwrap()["robots"], "respect");
 }
 
 #[test]
