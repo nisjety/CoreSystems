@@ -613,6 +613,21 @@ Built so far (batches B01 to B07): WS01-S0, WS01-S1 (partial), WS01-S6; WS02-S1,
 | D1-460 | WS10-S1 | test-gap | P2 | No test drives the sse.rs stream path end to end for the nested refusal (only the normalize unit tests and the Refusal::from_body round trip cover it); add one in the model-gateway stream tests with ALLOWED_MODELS set. | open |
 | D1-461 | WS10-S1 | follow-up | P3 | 2 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-12.json | open |
 
+
+### Wave-mode batch W1-13 (2026-10-24)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D1-462 | WS04-S6 | risk | P1 | The SPA now sends idempotency_key on every ordinary send whatever the gateway switch says, which activates the in-memory idempotency guard for the product (duplicate_in_flight, invalid_idempotency_key and a fail-closed 1,024-entry cap per replica, idempotency_registry.rs MAX_ENTRIES); the plan specifies it, but the 'switch off is byte-identical' claim does not hold for the stream path, so measure the in-flight claim count before this ships. | open |
+| D1-463 | WS04-S6 | risk | P1 | Peer-replica queue stores a message before it knows the stream's conversation_only scope (the probe reply carries only the thread): the first store is a guess retried once on FAILED_PRECONDITION; run_control.rs's Probe reply should carry conversation_only so the guess can go. | open |
+| D1-464 | WS04-S6 | risk | P1 | Persist-first leaves a stored row when the queue then refuses (429 Full, a bus 503): the message sits in the transcript undelivered; a resend with the same id dedupes, but a user who rewrites the text gets a second row; decide whether a refused or unavailable queue should be recorded as withdrawn (needs the WS17 marker) or accepted as is. | open |
+| D1-465 | WS04-S6 | risk | P1 | The end-of-run resend fires only on the live stream's done frame; if the queued_input delivery frame is lost (dropped connection, resume path, another tab) a delivered message is sent again as a new turn: one transcript row (same id) but a second answer. | open |
+| D1-466 | WS04-S6 | follow-up | P1 | Switch-on needs the sse_events payload golden, its .sha256 pins, the SPA vendored copy and the zdr-contract-sync digest regenerated, plus the tool_loop.rs and sse.rs call-ins (lead_todo); until then the new frame and the stream-path receipts do not exist. | open |
+| D1-467 | WS04-S6 | follow-up | P1 | Switch-on is blocked until the golden and pins, the sse.rs and tool_loop.rs call-ins and the compose default-off line land; until then the new delivery frame and the stream-path receipts do not exist. | open |
+| D1-468 | WS04-S6 | live-proof | P1 | Model-gateway lib tests do not compile in the real tree until the lead applies the AppendMessageResponse mock-literal fix at browser_run.rs:3486 and grpc.rs:3774 and in tests/e2e_invoke_chain_test.rs:1250 and tests/usage_meter_contract.rs:279 (add `..Default::default()`); execution-core agent.rs:9458 is already fixed in the tree. | open |
+| D1-469 | WS04-S6 | live-proof | P1 | Lead shared edits still unapplied: tool_loop.rs round-boundary drain (drain_receipted and emit QueuedInputReceipted when the switch is on) and sse.rs (switch the call to prepare_managed_run_authenticated_with_receipt with send_receipt_id, plus the source-text test at ~19876). Without them the streaming send path names no message to the transcript and the delivery frame carries no ids. I applied these exact edits in a scratch copy: the lib compiles and the 2214 lib tests pass. | open |
+| D1-470 | WS04-S6 | follow-up | P3 | 17 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-13.json | open |
+
 ## Wave 2 (WS13 to WS27)
 
 Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS27-S0, WS27-S1. Wave 2 is not started as a wave: these came in with Wave 1 batches because they were Wave 1 prerequisites.
@@ -1028,3 +1043,4 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS10-S1 | policy, zdr | W1-12 | no |
 | WS17-S2 | zdr | W2-08 | no |
 | WS19-S4 | authority, data-loss, zdr | W2-08 | no |
+| WS04-S6 | data-loss, zdr, audit | W1-13 | no |
