@@ -2801,9 +2801,13 @@ async fn run_rounds(
                 // reason inference-core declared on the status trailers, or the
                 // generic `subscription_route_unavailable`. Any other run keeps
                 // the graceful reply.
-                let refusal = ctx.route.is_pinned().then(|| {
-                    crate::subscription_refusal::refusal_for_failed_round(&error)
-                });
+                let refusal = if ctx.route.is_pinned() {
+                    Some(crate::subscription_refusal::refusal_for_failed_round(&error))
+                } else {
+                    // Not pinned, but inference-core may have refused the MODEL: the
+                    // organization's entitlement (WS10-S4). Typed, never run-wide, never parked.
+                    crate::subscription_refusal::entitlement_refusal_from_status(&error)
+                };
                 if let Some(refusal) = &refusal {
                     // Content-free on purpose: the gRPC code and the typed
                     // reason, never the status message, which for an untyped
@@ -2816,8 +2820,8 @@ async fn run_rounds(
                         retry_after_ms = ?refusal.retry_after_ms,
                         resets_at = ?refusal.resets_at_label(),
                         run_wide = refusal.latches(),
-                        "run_agent: the ChatGPT subscription route refused an inference round; \
-                         finalizing run as failed with a typed reason"
+                        "run_agent: inference-core refused an inference round with a typed reason; \
+                         finalizing run as failed with it"
                     );
                 } else {
                     warn!(
@@ -2841,7 +2845,7 @@ async fn run_rounds(
                 // The failed round stays charged (`rounds_executed` already counts it), the
                 // history is the boundary's (nothing of the failed round was appended), and any
                 // other outcome is the committed one below.
-                if let Some(refusal) = refusal.as_ref() {
+                if let Some(refusal) = refusal.as_ref().filter(|_| ctx.route.is_pinned()) {
                     if let Some(parked) = park_at_boundary(
                         ctx,
                         &mut folds,
