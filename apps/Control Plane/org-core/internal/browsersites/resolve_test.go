@@ -74,6 +74,39 @@ func TestDecideMatchesTheSharedMatrix(t *testing.T) {
 	}
 }
 
+func TestApplySpaceFloorRefusesEveryHostForAnUnentitledSpace(t *testing.T) {
+	now := time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)
+	set := PolicySet{Revision: 7, Mode: ModeOpen, Rules: []Rule{{Host: "blocked.example.com", Rule: RuleBlock}}}
+	resolution := Resolve(set, nil, []string{"blocked.example.com", "open.example.com"}, now)
+
+	floored := ApplySpaceFloor(resolution, true, false)
+	if floored.Revision != 7 || len(floored.Decisions) != 2 {
+		t.Fatalf("the floor must keep the revision and every host: %+v", floored)
+	}
+	if floored.Decisions[0].Effective != EffectiveDeny || floored.Decisions[0].Source != SourceOrgBlock {
+		t.Errorf("a host already refused keeps its reason: %+v", floored.Decisions[0])
+	}
+	if floored.Decisions[1].Effective != EffectiveDeny || floored.Decisions[1].Source != SourceSpaceFloor {
+		t.Errorf("an open host under an unentitled Space must be refused by the floor: %+v", floored.Decisions[1])
+	}
+	if resolution.Decisions[1].Effective != EffectiveAsk {
+		t.Errorf("the floor must not change the resolution it was given: %+v", resolution.Decisions[1])
+	}
+}
+
+func TestApplySpaceFloorOnlyNarrows(t *testing.T) {
+	now := time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)
+	set := PolicySet{Revision: 7, Mode: ModeOpen}
+	resolution := Resolve(set, nil, []string{"open.example.com"}, now)
+
+	if got := ApplySpaceFloor(resolution, false, false); got.Decisions[0] != resolution.Decisions[0] {
+		t.Errorf("an unscoped call must not be narrowed by a floor: %+v", got.Decisions[0])
+	}
+	if got := ApplySpaceFloor(resolution, true, true); got.Decisions[0] != resolution.Decisions[0] {
+		t.Errorf("an entitled Space must keep the admin's answer: %+v", got.Decisions[0])
+	}
+}
+
 func TestResolveAnswersEveryHostInOrderAndCarriesTheRevision(t *testing.T) {
 	now := time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)
 	set := PolicySet{Revision: 7, Mode: ModeOpen, Rules: []Rule{{Host: "blocked.example.com", Rule: RuleBlock}}}

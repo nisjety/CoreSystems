@@ -64,6 +64,32 @@ func Decide(set PolicySet, prefs map[string]Pref, host string, now time.Time) De
 	return decision
 }
 
+// SourceSpaceFloor names a refusal made because the Space a call is made for is not
+// entitled to the agent browser (DEC-19 D9).
+const SourceSpaceFloor = "space_floor"
+
+// ApplySpaceFloor is the Space floor. A call made for a Space must clear that
+// Space's browser_entitled answer before any host is reached: an unentitled Space is
+// refused every host, whatever the admin allows or the member chose. The floor only
+// narrows. An unscoped call and an entitled Space are returned unchanged, and a
+// refusal already decided keeps its reason. A caller that cannot read the floor
+// passes entitled=false, so an unknown floor refuses.
+func ApplySpaceFloor(resolution Resolution, scoped, entitled bool) Resolution {
+	if !scoped || entitled {
+		return resolution
+	}
+	decisions := make([]Decision, 0, len(resolution.Decisions))
+	for _, decision := range resolution.Decisions {
+		if decision.Effective != EffectiveDeny {
+			decision.Effective = EffectiveDeny
+			decision.Source = SourceSpaceFloor
+		}
+		decisions = append(decisions, decision)
+	}
+	resolution.Decisions = decisions
+	return resolution
+}
+
 // Resolve answers for each host in order. prefs is nil for a service call, which
 // then gets the admin's answer alone and never a member's choice.
 func Resolve(set PolicySet, prefs map[string]Pref, hosts []string, now time.Time) Resolution {
