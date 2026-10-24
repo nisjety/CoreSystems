@@ -1358,6 +1358,21 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D2-386 | WS19-S6 | live-proof | P1 | Lead: apply the cmd/main.go shared edit from the implementer's lead_todo (import skillbundle; add api.NewSkillBundlesHandler(pool, api.SkillBundlesAPIFromLookup(os.Getenv)).Register(protectedMux); chain .WithSkillBundles(skillbundle.NewStore(pool), api.SkillBundlesAPIFromLookup(os.Getenv)) onto capSrv). Until then the bundle routes are not mounted and the RPC reads are off. The exact edit compiled under the overlay. | open |
 | D2-387 | WS19-S6 | follow-up | P3 | 21 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-16.json | open |
 
+
+### Wave-mode batch W2-16 (2026-10-24)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D2-388 | WS24-S1 | decision | P1 | The 'Workspace changes were not saved.' notice is added to RunAgentResponse.final_output after finalize has already persisted the assistant answer, so the durable thread copy does not carry it; only the streamed reply does. Owner decision needed before the flag-on path is trusted as an honest record. | open |
+| D2-389 | WS24-S1 | decision | P1 | The 'Workspace changes were not saved.' line is appended to response.final_output after finalize has persisted the answer (agent.rs ~1865), so the durable thread copy lacks it while the streamed answer (model-gateway sse.rs:11232) carries it; the owner must decide whether the flag-on path needs a second persist or a finalize reorder. | open |
+| D2-390 | WS24-S1 | live-proof | P1 | Test gate not run: `cargo test -q -p execution-core --lib workspace_hydrate sandbox_lease` cannot compile in the current tree because of two E0046 errors (capability_policy.rs:2588 MockCapabilityCore and mcp_gateway.rs:1212 StandIn miss list_skill_bundles, get_skill_bundle_manifest and get_skill_blob) from WS19-S6's uncommitted capabilities.proto change. Re-run both the workspace_hydrate/sandbox_lease filter and `an_unsaved_workspace_is_named_in_the_summary_after_the_answer` once those stubs land; the sandbox_lease success/failure tests and the agent test have never passed in this tree. | open |
+| D2-391 | WS24-S1 | live-proof | P1 | Live proof (lead, docker, not run by this verifier): a Space Do run that writes a file through code_interpreter with the CAS upload stopped; expect the streamed answer to end with 'Workspace changes were not saved.' and workspace_upload_failed_total to increment. | open |
+| D2-392 | WS24-S1 | live-proof | P1 | Dependency bookkeeping: WS24-S0 ledger entries are still not in apps/Model Plane/docs/decisions/ledger.md (depth register D2-335), a shared edit the lead must apply. | open |
+| D2-393 | WS24-S1 | live-proof | P1 | Re-run once the concurrent WS19-S6 work stubs the three skill-bundle RPCs in the execution-core test mocks (capability_policy.rs MockCapabilityCore ~line 2588 and mcp_gateway.rs StandIn ~line 1212): cd "apps/Model Plane/rust" && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib sandbox_lease, then cargo test -q -p execution-core --lib an_unsaved_workspace_is_named_in_the_summary. Expect all new tests named above to pass; if a_credential_failure... fails, check that release_sandbox_lease_if_any returns Some for a run with a hydrated workspace. | open |
+| D2-394 | WS24-S1 | live-proof | P1 | Decide whether the not-saved notice should also be persisted to the thread (requires a second AppendMessage or changing finalize ordering, outside this slice). | open |
+| D2-395 | WS24-S1 | risk | P2 | When the sandbox-manager credential fails at release, the workspace directory is still left on disk (pre-existing behaviour, now reported as unsaved); plaintext Space content therefore persists on the host until restart. | open |
+| D2-396 | WS24-S1 | follow-up | P3 | 9 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-16.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
@@ -1489,3 +1504,4 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS17-S3 | auth, zdr | W2-16 | no |
 | WS24-S1 | data-loss, zdr | W2-16 | no |
 | WS19-S6 | authority, auth, audit, zdr | W2-16 | no |
+| WS24-S1 | data-loss, zdr | W2-16 | no |
