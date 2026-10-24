@@ -13,7 +13,9 @@
 
 use chrono::{DateTime, Utc};
 use mp_contracts::loop_fold::{
-    park_ref, parks_in, LoopFoldV1, ParkReason, PauseKind, FOLD_VERSION, MAX_PARKS_PER_RUN,
+    child_ceiling_in, park_ref, parks_in, route_connection_in, route_model_in, LoopFoldV1,
+    ParkReason, PauseKind, PendingPause, EXT_EFFECT_LEDGER, EXT_PARKS, FOLD_VERSION,
+    MAX_PARKS_PER_RUN,
 };
 use mp_contracts::zdr_refusal::Refusal;
 use mp_events::idempotency::derive_idempotency_hash;
@@ -41,6 +43,27 @@ const PARK_TTL_DEFAULT_SECONDS: i64 = 86_400;
 const PARK_TTL_MIN_SECONDS: i64 = 60;
 const PARK_TTL_MAX_SECONDS: i64 = 2_592_000;
 const PARK_TTL_ENV: &str = "SESSION_CORE_PARK_TTL_SECONDS";
+
+/// How long a crash park waits before a continuation may claim it, and how far every heartbeat
+/// of a run that proves to be alive pushes it on (build plan WS03 S8-B): the recovery worker's
+/// own deadline period, so a loop that is silent for less than two periods is never continued
+/// under itself. Counted on the database clock only.
+pub(crate) const CRASH_PARK_GRACE_SECONDS: f64 = 900.0;
+
+/// The extension key of the thread position (the highest message sequence of the run's thread)
+/// a round fold was saved at. [`save`] stamps it while crash parking is on, and the recovery
+/// worker and the claim of a crash park compare it with the thread as it stands: a message
+/// above it means the run's own answer, or another turn, already reached the thread, and a
+/// continuation would answer it a second time. A fold without it is never crash parked. It is
+/// a number, never content.
+const THREAD_WATERMARK_KEY: &str = "thread_watermark";
+
+/// The round budget a fold's authority resolves to, as execution-core resolves it
+/// (`resume::resolved_max_rounds`): zero means the default, and nothing exceeds the ceiling.
+/// **KEEP IN SYNC with `runtime_loop::agent::{DEFAULT_MAX_ROUNDS, MAX_ROUNDS_CEILING}`.** A drift
+/// can only make a park the executor then refuses to resume, never a wrong resume.
+const DEFAULT_ROUND_BUDGET: u32 = 12;
+const ROUND_BUDGET_CEILING: u32 = 32;
 
 /// The wait in `value`, a whole number of seconds clamped to
 /// `[PARK_TTL_MIN_SECONDS, PARK_TTL_MAX_SECONDS]`; the default when it is absent or is not one.
@@ -291,6 +314,42 @@ fn validate_park_save(
     Ok(())
 }
 
+/// `fold` with the thread position stamped into its extensions, or `None` when it cannot be (the
+/// fold is not an object with an object `extensions`, or the stamped fold would pass the size
+/// cap). Such a fold is stored as it came and is never crash parked.
+fn stamp_thread_watermark(fold: &str, position: i64) -> Option<String> {
+    let mut value: serde_json::Value = serde_json::from_str(fold).ok()?;
+    value
+        .get_mut("extensions")?
+        .as_object_mut()?
+        .insert(THREAD_WATERMARK_KEY.to_owned(), json!(position));
+    let stamped = serde_json::to_string(&value).ok()?;
+    (stamped.len() <= MAX_FOLD_BYTES).then_some(stamped)
+}
+
+/// The highest message sequence of the run's thread, read under the thread's row lock so an
+/// append in flight is either counted or waited for. `None` when an append (or any other holder)
+/// has the thread locked: it is never waited for here, because the answer-append path takes the
+/// thread lock before the run's and a caller holding the run's lock would deadlock with it. A
+/// thread with no messages reads 0.
+async fn thread_position_locked(
+    tx: &mut Transaction<'_, Postgres>,
+    run_id: &str,
+) -> Result<Option<i64>, Status> {
+    let row: Option<(i64,)> = sqlx::query_as(
+        "SELECT (SELECT COALESCE(MAX(m.sequence), 0) FROM messages AS m
+                  WHERE m.thread_id = t.id)::bigint
+           FROM threads AS t JOIN runs AS r ON r.thread_id = t.id
+          WHERE r.id = $1
+            FOR UPDATE OF t SKIP LOCKED",
+    )
+    .bind(run_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(internal)?;
+    Ok(row.map(|(position,)| position))
+}
+
 /// Store a run's fold, latest wins. Returns the seq the fold was stored under and whether it was
 /// accepted as a park.
 pub(crate) async fn save(
@@ -382,6 +441,23 @@ pub(crate) async fn save(
         }
         Some((seq, _)) => seq + 1,
     };
+
+    // While crash parking is on, a round fold also records how far its thread had got. An unlocked
+    // read is enough: a message that lands after it only makes the later comparison refuse.
+    let stamped = if input.kind == "round" && crate::terminalization::crash_park_active() {
+        let position: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(m.sequence), 0)::bigint FROM messages AS m
+              WHERE m.thread_id = (SELECT thread_id FROM runs WHERE id = $1)",
+        )
+        .bind(input.run_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(internal)?;
+        stamp_thread_watermark(plaintext, position)
+    } else {
+        None
+    };
+    let plaintext = stamped.as_deref().unwrap_or(plaintext);
 
     let ciphertext = cipher
         .seal(
@@ -603,7 +679,36 @@ pub(crate) async fn claim(
     let plaintext = cipher
         .open(&scope_aad(run_id, &org_id, &user_id, seq), &ciphertext)
         .map_err(|_| Status::failed_precondition("loop checkpoint did not authenticate"))?;
-    check_fold(run_id, plaintext.as_bytes())?;
+    let claimed_fold = check_fold(run_id, plaintext.as_bytes())?;
+
+    // A crash park (it carries the thread position its round fold was saved at) is continued only
+    // while its thread has not moved: a message above that position is the run's own answer, or
+    // another turn, and a continuation would answer it again. The check runs under the thread's
+    // lock, so an append in flight is counted. It is keyed on the stamp, not on the crash-park
+    // switch: a park written before the switch went off stays checked. A thread held by an
+    // append is not waited for (see `thread_position_locked`): the claim is refused and rolls
+    // back, and the park stays as it was.
+    if park_claim {
+        if let Some(stamp) = claimed_fold.extensions.get(THREAD_WATERMARK_KEY) {
+            let Some(position) = thread_position_locked(&mut tx, run_id).await? else {
+                return Err(Status::aborted("loop_checkpoint_claim_held"));
+            };
+            if stamp.as_i64().is_none_or(|watermark| position > watermark) {
+                sqlx::query(
+                    "UPDATE run_loop_checkpoints
+                        SET state = 'closed', ciphertext = '', claim_token_hash = NULL,
+                            claim_expires_at = NULL, park_until = NULL, updated_at = now()
+                      WHERE run_id = $1",
+                )
+                .bind(run_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(internal)?;
+                tx.commit().await.map_err(internal)?;
+                return Err(Status::failed_precondition("loop_checkpoint_not_claimable"));
+            }
+        }
+    }
 
     record_event(
         &mut tx,
@@ -625,6 +730,246 @@ pub(crate) async fn claim(
         authority_digest,
         kind,
     })
+}
+
+/// What the recovery worker found when it asked to park a crashed run's fold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CrashPark {
+    /// The fold was re-sealed as a `crash_interrupted` park, stored under this seq.
+    Parked(i64),
+    /// The fold is not parkable, for this closed reason. Nothing was written; the caller takes
+    /// the committed path.
+    Refused(&'static str),
+    /// The run's thread is locked by a writer, so the run's producer is alive and finishing. Nothing
+    /// was written; the caller leaves the run alone for now.
+    Busy,
+}
+
+/// The first reason a stored round fold may not be crash parked, or `None` when it may. A crash
+/// park is held for the park wait, so it is made only when a continuation could actually resume
+/// it: every rule here is one `park::check_park_fold` applies to the fold on resume (or a fact it
+/// cannot see), and a fold that fails one would be held for the wait and then refused.
+///
+/// `thread_position` is the highest message sequence of the run's thread now. The fold carries
+/// the executor's markers only on a run that was parkable when it started (a fresh root request
+/// with a derivable tool set, never an approval continuation): the route keys, the park count
+/// and the sub-agent ceiling, written on its round folds.
+fn crash_park_refusal(
+    fold: &LoopFoldV1,
+    stored_authority_digest: &str,
+    thread_position: i64,
+) -> Option<&'static str> {
+    if !fold.is_resumable() {
+        return Some("not_resumable");
+    }
+    if fold.extensions.get(EXT_EFFECT_LEDGER) != Some(&serde_json::Value::Bool(true)) {
+        return Some("ledger_off_in_fold");
+    }
+    if fold.messages.first().map(|message| message.role.as_str()) != Some("system") {
+        return Some("history_invalid");
+    }
+    if stored_authority_digest != fold.authority.digest() {
+        return Some("authority_digest_mismatch");
+    }
+    if fold.round_in_flight.is_some() {
+        return Some("round_open");
+    }
+    if fold.pending.is_some() {
+        return Some("pending_pause");
+    }
+    if !fold.authority.space_id.is_empty() {
+        return Some("space_scope");
+    }
+    if parks_in(fold) >= MAX_PARKS_PER_RUN {
+        return Some("park_limit");
+    }
+    let budget = match fold.authority.max_rounds {
+        0 => DEFAULT_ROUND_BUDGET,
+        raw => raw.min(ROUND_BUDGET_CEILING),
+    };
+    if fold.rounds_executed.saturating_add(fold.delegated_rounds) >= budget {
+        return Some("budget_spent");
+    }
+    if fold.authority.provider_hint.is_empty()
+        || route_model_in(fold).is_none()
+        || route_connection_in(fold).is_none()
+        || child_ceiling_in(fold).is_none_or(|ceiling| ceiling == 0)
+    {
+        return Some("route_unrecorded");
+    }
+    match fold
+        .extensions
+        .get(THREAD_WATERMARK_KEY)
+        .and_then(serde_json::Value::as_i64)
+    {
+        None => Some("no_watermark"),
+        Some(watermark) if thread_position > watermark => Some("thread_moved"),
+        Some(_) => None,
+    }
+}
+
+/// The park fold of a crashed round fold: the same fold, pending the run's next park, with the
+/// park count it records. Its shape is the one the executor's own park fold has, so the resume's
+/// structural rules read it the same way.
+fn crash_park_fold(run_id: &str, fold: &LoopFoldV1) -> LoopFoldV1 {
+    let count = parks_in(fold).saturating_add(1);
+    let mut parked = fold.clone();
+    parked.pending = Some(PendingPause {
+        kind: PauseKind::Park,
+        pause_ref: park_ref(run_id, count),
+        step_id: String::new(),
+        call: String::new(),
+        action_fingerprint: String::new(),
+    });
+    parked
+        .extensions
+        .insert(EXT_PARKS.to_owned(), serde_json::Value::from(count));
+    parked
+}
+
+/// Park the fold a crashed run left active (build plan WS03 S8-B), inside the recovery worker's
+/// transaction, which already holds the run's row and its obligation.
+///
+/// Only an `active` fold of kind `round` is a candidate: a `pre_effect` fold has an effect in
+/// flight, a `pause` is the approval path's, and a park is already one. The run must be
+/// persistent (a zero-retention or waived run never keeps a fold, and is refused again here), no
+/// approval may be open, and the effect ledger must hold no open reservation and no row newer
+/// than the fold (an effect the fold does not know of would run twice on a resume). The thread
+/// is read under its lock, so an answer append in flight is counted.
+///
+/// The fold is re-sealed at `seq + 1` as a park with `park_reason` `crash_interrupted`, due after
+/// [`CRASH_PARK_GRACE_SECONDS`]. `updated_at` becomes now: the park's age, which its TTL counts
+/// from. A loop that is still alive finds its next fold save stale.
+///
+/// # Errors
+///
+/// A database failure. A fold that cannot be opened or read is [`CrashPark::Refused`]: the run
+/// takes the committed outcome.
+pub(crate) async fn park_crashed(
+    tx: &mut Transaction<'_, Postgres>,
+    cipher: &DescriptorCipher,
+    run_id: &str,
+) -> Result<CrashPark, Status> {
+    let stored: Option<(i64, String, String, String, String, String, String)> = sqlx::query_as(
+        "SELECT seq, kind, state, ciphertext, authority_digest, org_id, user_id
+           FROM run_loop_checkpoints WHERE run_id = $1 FOR UPDATE",
+    )
+    .bind(run_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(internal)?;
+    let Some((seq, kind, state, ciphertext, authority_digest, org_id, user_id)) = stored else {
+        return Ok(CrashPark::Refused("no_fold"));
+    };
+    if kind != "round" || state != "active" {
+        return Ok(CrashPark::Refused("not_an_active_round_fold"));
+    }
+    let retention: Option<String> =
+        sqlx::query_scalar("SELECT retention_class FROM runs WHERE id = $1")
+            .bind(run_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(internal)?;
+    if retention.as_deref() != Some("persistent") {
+        return Ok(CrashPark::Refused("not_persistent"));
+    }
+    let open_facts: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM approvals
+                         WHERE run_id = $1 AND consumed_at IS NULL
+                           AND status IN ('requested', 'granted'))
+             OR EXISTS (SELECT 1 FROM session_tool_audit_intents AS i
+                         WHERE i.run_id = $1
+                           AND (i.status = 'reserved'
+                                OR i.reserved_at >= (SELECT updated_at FROM run_loop_checkpoints
+                                                      WHERE run_id = $1)))",
+    )
+    .bind(run_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(internal)?;
+    if open_facts {
+        return Ok(CrashPark::Refused("open_approval_or_effect"));
+    }
+    let Some(position) = thread_position_locked(tx, run_id).await? else {
+        return Ok(CrashPark::Busy);
+    };
+    let Ok(plaintext) = cipher.open(&scope_aad(run_id, &org_id, &user_id, seq), &ciphertext)
+    else {
+        return Ok(CrashPark::Refused("fold_unreadable"));
+    };
+    let Ok(fold) = check_fold(run_id, plaintext.as_bytes()) else {
+        return Ok(CrashPark::Refused("fold_invalid"));
+    };
+    if let Some(reason) = crash_park_refusal(&fold, &authority_digest, position) {
+        return Ok(CrashPark::Refused(reason));
+    }
+    let Ok(parked) = crash_park_fold(run_id, &fold).to_bytes() else {
+        return Ok(CrashPark::Refused("fold_unwritable"));
+    };
+    let next_seq = seq + 1;
+    let Ok(sealed) = cipher.seal(
+        &scope_aad(run_id, &org_id, &user_id, next_seq),
+        std::str::from_utf8(&parked).map_err(internal)?,
+    ) else {
+        return Ok(CrashPark::Refused("key_unavailable"));
+    };
+    let count = parks_in(&fold).saturating_add(1);
+    let updated = sqlx::query(
+        "UPDATE run_loop_checkpoints
+            SET seq = $2, kind = 'park', state = 'parked', pause_ref = $3,
+                park_reason = $4, park_until = now() + make_interval(secs => $5),
+                ciphertext = $6, fold_digest = $7, claim_token_hash = NULL,
+                claim_expires_at = NULL, updated_at = now()
+          WHERE run_id = $1 AND seq = $8 AND kind = 'round' AND state = 'active'",
+    )
+    .bind(run_id)
+    .bind(next_seq)
+    .bind(park_ref(run_id, count))
+    .bind(ParkReason::CrashInterrupted.as_str())
+    .bind(CRASH_PARK_GRACE_SECONDS)
+    .bind(&sealed)
+    .bind(sha256_hex(&parked))
+    .bind(seq)
+    .execute(&mut **tx)
+    .await
+    .map_err(internal)?;
+    if updated.rows_affected() != 1 {
+        return Ok(CrashPark::Refused("fold_moved"));
+    }
+    record_event(
+        tx,
+        run_id,
+        &org_id,
+        &user_id,
+        "CHECKPOINT_SAVED",
+        crate::grpc::CHECKPOINT_SAVED_TYPE_URL,
+        next_seq,
+        "",
+        "park",
+    )
+    .await?;
+    Ok(CrashPark::Parked(next_seq))
+}
+
+/// A heartbeat of a run whose fold is a crash park proves its loop is alive: the park is pushed
+/// a full grace period on, and is not claimable until that has passed without another heartbeat.
+/// Only a crash park that is still parked moves (a claimed one is a continuation's), `park_until`
+/// never moves back, and `updated_at`, the park's age, is left alone. Returns the rows moved.
+pub(crate) async fn push_crash_park(
+    tx: &mut Transaction<'_, Postgres>,
+    run_id: &str,
+) -> Result<u64, sqlx::Error> {
+    let pushed = sqlx::query(
+        "UPDATE run_loop_checkpoints
+            SET park_until = GREATEST(park_until, now() + make_interval(secs => $2))
+          WHERE run_id = $1 AND kind = 'park' AND state = 'parked' AND park_reason = $3",
+    )
+    .bind(run_id)
+    .bind(CRASH_PARK_GRACE_SECONDS)
+    .bind(ParkReason::CrashInterrupted.as_str())
+    .execute(&mut **tx)
+    .await?;
+    Ok(pushed.rows_affected())
 }
 
 /// Close a run's fold once its loop has finished. The ciphertext is dropped at
@@ -778,6 +1123,96 @@ pub(crate) mod test_support {
         });
         value["extensions"]["parks"] = json!(parks);
         serde_json::to_vec(&value).expect("fold json")
+    }
+
+    /// The golden fold turned into the round fold a crash-parkable run leaves (WS03 S8-B): at a
+    /// round boundary, nothing pending, with the system message first, the ledger flag and the
+    /// executor's route keys, and a pinned provider. The thread stamp is NOT here: the store
+    /// writes it on save while crash parking is on.
+    pub(crate) fn crash_parkable_value(run_id: &str) -> Value {
+        let mut value: Value = serde_json::from_str(FIXTURE).expect("fixture json");
+        value["run_id"] = json!(run_id);
+        value["round_in_flight"] = Value::Null;
+        value["pending"] = Value::Null;
+        value["messages"] = json!([
+            { "role": "system", "content": "system prompt" },
+            { "role": "user", "content": "do the work" },
+            { "role": "assistant", "content": "working on it" }
+        ]);
+        value["authority"]["provider_hint"] = json!("openai-codex-subscription");
+        value["extensions"]["effect_ledger"] = json!(true);
+        value["extensions"]["route_model"] = json!("model-x");
+        value["extensions"]["route_connection_id"] = json!("conn-1");
+        value["extensions"]["child_ceiling"] = json!(2);
+        value
+    }
+
+    /// The bytes of [`crash_parkable_value`] and the authority digest its fold computes, which
+    /// is what the store keeps beside it.
+    pub(crate) fn crash_parkable_fold(run_id: &str) -> (Vec<u8>, String) {
+        digest_and_bytes(&crash_parkable_value(run_id))
+    }
+
+    /// Serialize a fold value and compute its authority digest.
+    pub(crate) fn digest_and_bytes(value: &Value) -> (Vec<u8>, String) {
+        let fold: LoopFoldV1 = serde_json::from_value(value.clone()).expect("a fold");
+        (serde_json::to_vec(value).expect("fold json"), fold.authority.digest())
+    }
+
+    /// Store a crash-parkable round fold through the real `save`. The thread stamp is written
+    /// only while crash parking is on, so the caller sets the switches first.
+    pub(crate) async fn seed_crash_fold(pool: &PgPool, run_id: &str, kind: &str) -> i64 {
+        let (fold, digest) = crash_parkable_fold(run_id);
+        save(
+            pool,
+            &cipher(),
+            SaveInput {
+                run_id,
+                expected_seq: 0,
+                kind,
+                fold: &fold,
+                authority_digest: &digest,
+                pause_ref: "",
+                park_reason: "",
+                park_until: None,
+            },
+        )
+        .await
+        .expect("the round fold is stored")
+        .seq
+    }
+
+    /// Write a fold row straight into the table, sealed as the store seals it, for a run the
+    /// store would refuse (a zero-retention or waived run): the premise of a test that the
+    /// crash park refuses such a row even if one existed.
+    pub(crate) async fn plant_round_fold(pool: &PgPool, run_id: &str, fold: &[u8], digest: &str) {
+        let (org, user): (String, String) =
+            sqlx::query_as("SELECT org_id, user_id FROM runs WHERE id = $1")
+                .bind(run_id)
+                .fetch_one(pool)
+                .await
+                .expect("the run");
+        let sealed = cipher()
+            .seal(
+                &scope_aad(run_id, &org, &user, 1),
+                std::str::from_utf8(fold).expect("utf8"),
+            )
+            .expect("seal");
+        sqlx::query(
+            "INSERT INTO run_loop_checkpoints
+                (run_id, org_id, user_id, seq, kind, state, authority_digest, segment_no,
+                 ciphertext, fold_digest)
+             VALUES ($1, $2, $3, 1, 'round', 'active', $4, 1, $5, $6)",
+        )
+        .bind(run_id)
+        .bind(&org)
+        .bind(&user)
+        .bind(digest)
+        .bind(&sealed)
+        .bind(sha256_hex(fold))
+        .execute(pool)
+        .await
+        .expect("plant the fold");
     }
 
     /// Store a fold through the real `save`, the way a loop does. `kind` is
@@ -1300,6 +1735,145 @@ mod tests {
         let _park_on = park_test_switch::Forced::set(true);
         let _store_off = test_switch::Forced::set(false);
         assert!(!crate::terminalization::park_recovery_active());
+    }
+
+    fn crash_fold(edit: impl FnOnce(&mut Value)) -> (LoopFoldV1, String) {
+        let mut value = test_support::crash_parkable_value("run-crash");
+        value["extensions"]["thread_watermark"] = serde_json::json!(7);
+        edit(&mut value);
+        let (bytes, digest) = test_support::digest_and_bytes(&value);
+        (check_fold("run-crash", &bytes).expect("a fold"), digest)
+    }
+
+    #[test]
+    fn a_crash_parkable_round_fold_is_accepted_and_each_rule_refuses_with_its_own_token() {
+        let (fold, digest) = crash_fold(|_| {});
+        assert_eq!(crash_park_refusal(&fold, &digest, 7), None, "the thread is where the fold left it");
+        assert_eq!(crash_park_refusal(&fold, &digest, 3), None, "a thread below the stamp is no move");
+
+        type Edit = fn(&mut Value);
+        let cases: &[(&str, &str, Edit)] = &[
+            ("not_resumable", "a tombstone", |v| v["extensions"]["not_resumable"] = "oversize".into()),
+            ("ledger_off_in_fold", "no ledger flag", |v| { v["extensions"].as_object_mut().unwrap().remove("effect_ledger"); }),
+            ("ledger_off_in_fold", "a ledger flag that is not true", |v| v["extensions"]["effect_ledger"] = "true".into()),
+            ("history_invalid", "no system message first", |v| v["messages"][0]["role"] = "user".into()),
+            ("round_open", "a round in flight", |v| v["round_in_flight"] = serde_json::json!({"assistant_content": "", "calls": [], "completed": []})),
+            ("pending_pause", "a pending pause", |v| v["pending"] = serde_json::json!({"kind": "approval", "pause_ref": "a"})),
+            ("space_scope", "a Space run", |v| v["authority"]["space_id"] = "space-1".into()),
+            ("park_limit", "the park cap spent", |v| v["extensions"]["parks"] = 5.into()),
+            ("budget_spent", "the round budget spent", |v| v["rounds_executed"] = 8.into()),
+            ("budget_spent", "delegated rounds count", |v| v["delegated_rounds"] = 6.into()),
+            ("route_unrecorded", "no pinned provider", |v| v["authority"]["provider_hint"] = "".into()),
+            ("route_unrecorded", "no route model", |v| { v["extensions"].as_object_mut().unwrap().remove("route_model"); }),
+            ("route_unrecorded", "no route connection", |v| v["extensions"]["route_connection_id"] = "".into()),
+            ("route_unrecorded", "no child ceiling", |v| { v["extensions"].as_object_mut().unwrap().remove("child_ceiling"); }),
+            ("route_unrecorded", "a zero child ceiling", |v| v["extensions"]["child_ceiling"] = 0.into()),
+            ("no_watermark", "no thread stamp", |v| { v["extensions"].as_object_mut().unwrap().remove("thread_watermark"); }),
+            ("no_watermark", "a stamp that is not a number", |v| v["extensions"]["thread_watermark"] = "7".into()),
+        ];
+        for (token, what, edit) in cases {
+            let (fold, digest) = crash_fold(edit);
+            assert_eq!(crash_park_refusal(&fold, &digest, 7), Some(*token), "{what}");
+        }
+
+        let (fold, digest) = crash_fold(|_| {});
+        assert_eq!(crash_park_refusal(&fold, &digest, 8), Some("thread_moved"), "a message above the stamp");
+        assert_eq!(
+            crash_park_refusal(&fold, "another-digest", 7),
+            Some("authority_digest_mismatch"),
+            "the stored digest must be the fold's own"
+        );
+    }
+
+    #[test]
+    fn the_round_budget_mirrors_the_executors_and_a_default_budget_is_charged() {
+        let (spent_by_default, digest) = crash_fold(|v| {
+            v["authority"]["max_rounds"] = 0.into();
+            v["rounds_executed"] = 12.into();
+        });
+        assert_eq!(crash_park_refusal(&spent_by_default, &digest, 7), Some("budget_spent"));
+        let (left_by_default, digest) = crash_fold(|v| {
+            v["authority"]["max_rounds"] = 0.into();
+            v["rounds_executed"] = 11.into();
+        });
+        assert_eq!(crash_park_refusal(&left_by_default, &digest, 7), None);
+        let (clamped, digest) = crash_fold(|v| {
+            v["authority"]["max_rounds"] = 500.into();
+            v["rounds_executed"] = 32.into();
+        });
+        assert_eq!(crash_park_refusal(&clamped, &digest, 7), Some("budget_spent"), "the ceiling applies");
+    }
+
+    #[test]
+    fn a_crash_park_fold_has_the_shape_of_the_executors_park_fold() {
+        let (fold, _) = crash_fold(|v| v["extensions"]["parks"] = 2.into());
+        let parked = crash_park_fold("run-crash", &fold);
+        let pending = parked.pending.as_ref().expect("a pending park");
+        assert_eq!(pending.kind, PauseKind::Park);
+        assert_eq!(pending.pause_ref, park_ref("run-crash", 3));
+        assert!(pending.step_id.is_empty() && pending.call.is_empty() && pending.action_fingerprint.is_empty());
+        assert_eq!(parks_in(&parked), 3, "the count includes this park");
+        assert!(parked.round_in_flight.is_none());
+        assert_eq!(parked.messages, fold.messages, "the history is untouched");
+        assert_eq!(parked.authority.digest(), fold.authority.digest());
+        assert_eq!(route_model_in(&parked), route_model_in(&fold));
+        assert_eq!(
+            parked.extensions.get(THREAD_WATERMARK_KEY),
+            fold.extensions.get(THREAD_WATERMARK_KEY),
+            "the stamp rides along, so the claim can check the thread again"
+        );
+        let bytes = parked.to_bytes().expect("it serializes");
+        assert!(check_fold("run-crash", &bytes).is_ok());
+    }
+
+    #[test]
+    fn the_thread_stamp_is_added_to_the_extensions_and_nowhere_else() {
+        let (bytes, _) = test_support::crash_parkable_fold("run-crash");
+        let plain = std::str::from_utf8(&bytes).expect("utf8");
+        let stamped = stamp_thread_watermark(plain, 42).expect("stamped");
+        let (before, after): (Value, Value) = (
+            serde_json::from_str(plain).expect("json"),
+            serde_json::from_str(&stamped).expect("json"),
+        );
+        assert_eq!(after["extensions"][THREAD_WATERMARK_KEY], 42);
+        let mut without = after.clone();
+        without["extensions"].as_object_mut().expect("object").remove(THREAD_WATERMARK_KEY);
+        assert_eq!(without, before, "nothing else changed");
+        assert_eq!(stamp_thread_watermark("[]", 1), None, "not an object");
+        assert_eq!(stamp_thread_watermark("{\"v\":1}", 1), None, "no extensions to stamp");
+        assert_eq!(stamp_thread_watermark("not json", 1), None);
+        let mut huge = before;
+        huge["messages"][0]["content"] = "x".repeat(MAX_FOLD_BYTES - 40).into();
+        assert_eq!(
+            stamp_thread_watermark(&serde_json::to_string(&huge).expect("json"), 1_000_000_000),
+            None,
+            "a stamp that would pass the size cap is not written"
+        );
+    }
+
+    #[test]
+    fn crash_parking_is_off_unless_both_switches_are_true() {
+        use crate::terminalization::{crash_park_active, crash_test_switch, park_test_switch};
+        let _store = test_switch::Forced::set(true);
+        for (park, crash, expected) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, false),
+            (true, true, true),
+        ] {
+            let _park = park_test_switch::Forced::set(park);
+            let _crash = crash_test_switch::Forced::set(crash);
+            assert_eq!(crash_park_active(), expected, "park recovery {park}, crash park {crash}");
+        }
+        let _park = park_test_switch::Forced::set(true);
+        let _crash = crash_test_switch::Forced::set(true);
+        let _store_off = test_switch::Forced::set(false);
+        assert!(!crash_park_active(), "the fold store is a precondition too");
+    }
+
+    #[test]
+    fn the_crash_park_grace_is_the_workers_deadline_period() {
+        assert!((CRASH_PARK_GRACE_SECONDS - 900.0).abs() < f64::EPSILON);
     }
 
     #[test]
