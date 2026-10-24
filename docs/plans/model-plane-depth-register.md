@@ -1460,6 +1460,21 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D2-431 | WS24-S7 | live-proof | P1 | Reconcile execution-core browser_events.rs:355 and :436 (missing decision_source and scope in DecideApprovalRequest initializers) owned by another slice, then run cargo test -q -p execution-core --lib ticket_tools to execute the new unit test. | open |
 | D2-432 | WS24-S7 | follow-up | P3 | 16 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-18.json | open |
 
+
+### Wave-mode batch W2-18 (2026-10-24)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D2-433 | WS13-S3 | risk | P1 | The slice cannot be proven until the shared edits land: session-core, execution-core and model-gateway do not compile because mp-orchestration's proto_shim.rs literal is missing the new fields (E0063, reproduced this round). | open |
+| D2-434 | WS13-S3 | risk | P1 | session-core stores THREAD/RUN as a scope with no grant store behind it (S6). It must refuse THREAD/RUN with a typed error until the grant store exists. | open |
+| D2-435 | WS13-S3 | risk | P1 | decide_approval_recorded trusts decision_source from any internal gRPC caller; approval_delivery.rs and run_service_grpc.rs record 'unattributed'. Decide which callers should name a source. | open |
+| D2-436 | WS13-S3 | risk | P1 | session-core accepts scope THREAD or RUN in decide_approval (orchestration_grpc.rs handler, approval_scope_to_str) and records it in metadata.decision.scope and the audit row with no grant store behind it (S6 not built); refuse THREAD/RUN with a typed error until S6. The gateway pins ONCE today, so only internal callers reach it. | open |
+| D2-437 | WS13-S3 | risk | P1 | The row's ApprovalDecisionRecord on Approval is not implemented, so clients cannot read decision provenance except through metadata; this is also a required fix above, so the lead must either add it or amend the row. | open |
+| D2-438 | WS13-S3 | live-proof | P1 | Live proof is still owed: rebuild session-core, execution-core, model-gateway and audit-core; check psql metadata->'decision', exactly one session_audit_outbox row, and SSE cause_code on click-approve; replay adds no second row; audit-core must accept the row on the proof stack before APPROVAL_AUDIT_EVENTS_ENABLED is flipped on. | open |
+| D2-439 | WS13-S3 | live-proof | P1 | Lead: apply the three shared edits (proto_shim.rs, browser_events.rs with explicit TIMEOUT/SYSTEM, sse.rs projection) and add Approval.decision, or amend the row; then run cargo check -p session-core --bin session-core --tests and the session-core approval unit tests, approval_decided_wire_fixture_matches_the_builder without UPDATE_AUDIT_CORE_FIXTURES set (the update variant writes into the tree, so I did not run it), and the DB-gated tests: DATABASE_URL=<scratch test db> cargo test -p session-core --bin session-core approval_decision_db -- --ignored --test-threads=1. | open |
+| D2-440 | WS13-S3 | live-proof | P1 | Lead: regenerate apps/Model Plane/go/gen/model_plane/v1/orchestration.pb.go with native protoc-gen-go and buf (not runnable by me); then go vet and go test in services that import model_plane/v1. | open |
+| D2-441 | WS13-S3 | follow-up | P3 | 23 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-18.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
@@ -1598,3 +1613,4 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS24-S7 | authority, auth, policy, zdr | W2-18 | no |
 | WS07-S8 | audit, authority, data-loss | W1-22 | no |
 | WS08-S6 | zdr, authority, data-loss | W1-22 | no |
+| WS13-S3 | audit, authority | W2-18 | no |
