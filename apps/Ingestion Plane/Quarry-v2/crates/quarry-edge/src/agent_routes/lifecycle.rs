@@ -581,7 +581,8 @@ pub async fn start_run(
         org_id: org_id.clone(),
         actor_id,
         session,
-        ctx: ObservationContext {
+        // WS8.H: the person's lane and the run summary start from the same checkpoint.
+        human_lane: LaneRef::new(LaneState { ctx: ObservationContext {
             step: resume_checkpoint.as_ref().map_or(0, |cp| cp.step),
             current_url: resume_checkpoint
                 .as_ref()
@@ -612,6 +613,16 @@ pub async fn start_run(
             // WS7.G: the run's web-policy deny list, installed with every action's egress policy.
             egress_denied: web_decision.policy().denied_hosts(),
             ..Default::default()
+        }, last_observation: None }),
+        summary: LaneSummary {
+            current_url: resume_checkpoint
+                .as_ref()
+                .map_or_else(String::new, |cp| cp.current_url.clone()),
+            page_hash: resume_checkpoint
+                .as_ref()
+                .map_or_else(String::new, |cp| cp.page_hash.clone()),
+            step: resume_checkpoint.as_ref().map_or(0, |cp| cp.step),
+            last_observation: None,
         },
         lease,
         constraints,
@@ -627,7 +638,6 @@ pub async fn start_run(
             .map_or(0, |checkpoint| checkpoint.control_epoch),
         profile_scope,
         execution_tier,
-        last_observation: None,
         used_sensitive_approval_grants: HashSet::new(),
         budget,
         closed: false,
@@ -644,7 +654,8 @@ pub async fn start_run(
     // The lifetime is the run's effective one: a resumed run's stored constraints
     // are authoritative (see above), so the resume request cannot lengthen it.
     .with_run(run_class, entry.constraints.max_runtime_s.map(u64::from))
-    .with_policy(web_decision);
+    .with_policy(web_decision)
+    .with_resume_step(entry.summary.step);
 
     if !zdr.is_active() {
         let checkpoint = checkpoint_for_entry(&entry);

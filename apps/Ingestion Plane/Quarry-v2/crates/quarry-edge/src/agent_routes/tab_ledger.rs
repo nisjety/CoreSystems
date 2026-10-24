@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use quarry_core::contracts::AgentAction;
 use quarry_runtime::step_receipts::{BrowserAttachState, BrowserTabHolder};
 
-use super::RunLive;
+use super::{LaneRef, LaneState, RunLive};
 
 /// Who opened a tab. Recorded once, at open; never changes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -286,6 +286,9 @@ pub struct AttachState {
     /// The hosts the attach grant allows (1 to 8, canonical).
     pub allowed_domains: Vec<String>,
     pub budget: AttachBudget,
+    /// WS8.H: the delegate's own lane. Its steps never wait for the person's lane, and the
+    /// person's steps never wait for it.
+    pub lane: LaneRef,
     /// `Attached` while live; any other value is an ended attachment.
     pub phase: BrowserAttachState,
     pub started_ms: u64,
@@ -398,6 +401,7 @@ mod tests {
             tab_id: tab.to_owned(),
             allowed_domains: vec!["example.com".to_owned()],
             budget,
+            lane: LaneRef::new(LaneState::default()),
             phase: BrowserAttachState::Attached,
             started_ms: 0,
             last_activity_ms: 0,

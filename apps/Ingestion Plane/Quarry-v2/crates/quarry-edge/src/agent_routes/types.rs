@@ -10,7 +10,12 @@ pub struct RunEntry {
     /// the tenant; an org membership alone is not browser-run authority.
     pub actor_id: String,
     pub session: BrowserSession,
-    pub ctx: ObservationContext,
+    /// WS8.H: the person's lane (observation context and last observation). A step of the
+    /// attached delegate runs on its own lane (`AttachState.lane`). See `LaneState`.
+    pub human_lane: LaneRef,
+    /// WS8.H: what a projection, a checkpoint, the legacy step cap and the refusal receipts
+    /// read. Written under the entry lock after every finished action, in either lane.
+    pub summary: LaneSummary,
     pub lease: BrowserLease,
     pub constraints: AgentConstraints,
     pub zdr: ZdrMode,
@@ -21,9 +26,6 @@ pub struct RunEntry {
     pub control_epoch: u64,
     pub profile_scope: BrowserProfileScope,
     pub execution_tier: BrowserExecutionTier,
-    /// Current live observation. It is intentionally process-local for a
-    /// ZDR run, while non-ZDR proof remains in immutable receipts.
-    pub last_observation: Option<BrowserObservation>,
     /// A sensitive approval grant can authorize one irreversible action
     /// only. It is deliberately process-local: a resumed run must obtain
     /// fresh authority instead of replaying a prior approval.
@@ -46,6 +48,71 @@ pub struct RunEntry {
     /// The navigation authority this run holds (WS8.B): its own allow-list, or open
     /// web minus the broker's denied list for a person's `human_browse` run.
     pub nav_policy: super::human_browse::RunNavPolicy,
+}
+
+/// WS8.H: the state one lane of a run owns. A lane is the person's browsing or one
+/// attachment's delegate steps; each has its own observation context, so two lanes never
+/// share a diff base, an active snapshot or a current page.
+///
+/// Lock order (never reversed): a lane, then `RunEntry`. Code that holds `RunEntry` never
+/// waits for a lane. A step holds its lane across the browser call and drops the entry
+/// lock while the browser runs, so a projection or a person's action on the other lane
+/// does not wait for it.
+#[derive(Default)]
+pub struct LaneState {
+    pub ctx: ObservationContext,
+    /// The last observation this lane took. Process-local, as before: a ZDR run keeps no
+    /// durable copy; non-ZDR proof stays in the immutable receipts.
+    pub last_observation: Option<Arc<BrowserObservation>>,
+}
+
+/// A lane behind its async lock, shared between the run and its attachment. Equality is
+/// identity (the same lane), so a value that carries one stays comparable and printable.
+#[derive(Clone)]
+pub struct LaneRef(pub Arc<TokioMutex<LaneState>>);
+
+impl LaneRef {
+    pub fn new(state: LaneState) -> Self {
+        Self(Arc::new(TokioMutex::new(state)))
+    }
+}
+
+impl PartialEq for LaneRef {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for LaneRef {}
+
+impl std::fmt::Debug for LaneRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LaneRef")
+    }
+}
+
+/// WS8.H: the run-level view that a projection, a checkpoint, the legacy step cap and the
+/// refusal receipts read. It lives on `RunEntry` and is written by `LaneSummary::record`
+/// after every finished action, whichever lane ran it. Small: the observation is shared.
+#[derive(Clone, Default)]
+pub struct LaneSummary {
+    pub current_url: String,
+    pub page_hash: String,
+    /// Successful steps taken by the run, in any lane.
+    pub step: u32,
+    /// The last observation of the run, in any lane.
+    pub last_observation: Option<Arc<BrowserObservation>>,
+}
+
+impl LaneSummary {
+    /// Record a finished, successful action of either lane. Called while the entry lock is
+    /// held, after the lane has run the action, so the lane and the summary move together.
+    pub fn record(&mut self, ctx: &ObservationContext, observation: Arc<BrowserObservation>) {
+        self.current_url = ctx.current_url.clone();
+        self.page_hash = ctx.page_hash.clone();
+        self.step = self.step.saturating_add(1);
+        self.last_observation = Some(observation);
+    }
 }
 
 /// Who opened a tab: the initiator class and, for an agent, which one. The owner

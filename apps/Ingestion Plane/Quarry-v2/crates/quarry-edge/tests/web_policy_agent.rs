@@ -44,7 +44,7 @@ fn navigate_action(url: &str) -> Value {
 async fn steps_taken(edge: &Edge, run: &str) -> u32 {
     let handle = edge.live(run).expect("the run is live");
     let entry = handle.entry.lock().await;
-    entry.ctx.step
+    entry.summary.step
 }
 
 /// A run whose policy disables interaction (clicks, pointer input).

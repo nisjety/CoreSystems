@@ -268,6 +268,9 @@ pub(super) struct AdmitInput<'a> {
     pub action: &'a AgentAction,
     /// Refuse (not just log) an agent action while a person holds the browser.
     pub enforce_takeover: bool,
+    /// WS8.H: the last observation of the lane this action runs on (the approval checks read
+    /// the dialogs and targets it names). `None` before the lane has observed anything.
+    pub last_observation: Option<&'a BrowserObservation>,
 }
 
 /// 409 `USER_TOOK_OVER` with the state that caused it: `control_mode`, `control_epoch`
@@ -335,7 +338,7 @@ async fn record_takeover_skip(
     if entry.zdr.is_active() {
         return;
     }
-    let receipt = ReceiptBuilder::start(entry.run_id.to_string(), entry.ctx.step)
+    let receipt = ReceiptBuilder::start(entry.run_id.to_string(), entry.summary.step)
         .org_id(entry.org_id.clone())
         .actor_id(entry.actor_id.clone())
         .initiator(initiator.class, snapshot.epoch)
@@ -424,7 +427,7 @@ pub(super) async fn admit_action(
     }
 
     // 10. sensitive approval (the only gate that consumes state)
-    if let Some(approval) = sensitive_approval_for_action(entry, action)? {
+    if let Some(approval) = sensitive_approval_for_action(entry, action, input.last_observation)? {
         validate_sensitive_approval(state, &entry.org_id, &approval).await?;
         if !entry
             .used_sensitive_approval_grants

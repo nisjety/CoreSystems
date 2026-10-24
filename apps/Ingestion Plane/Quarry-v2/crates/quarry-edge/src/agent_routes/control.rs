@@ -7,17 +7,17 @@ pub(super) fn checkpoint_for_entry(entry: &RunEntry) -> AgentRunCheckpoint {
         run_id: entry.run_id.to_string(),
         lease_id: entry.lease.lease_id.to_string(),
         profile_id: entry.lease.profile_id.to_string(),
-        step: entry.ctx.step,
+        step: entry.summary.step,
         // WS12.S3: whatever the run's navigation policy keeps of the URL, a secret query value,
         // fragment value or userinfo in it never reaches the checkpoint.
         current_url: quarry_core::redaction::redact_url(
-            &super::human_browse::checkpoint_url(&entry.nav_policy, &entry.ctx.current_url),
+            &super::human_browse::checkpoint_url(&entry.nav_policy, &entry.summary.current_url),
             quarry_core::redaction::Profile::Durable,
             &mut quarry_core::redaction::Tally::new(),
         )
         .into_owned(),
         policy_mode: Some(entry.nav_policy.mode_name().to_owned()),
-        page_hash: entry.ctx.page_hash.clone(),
+        page_hash: entry.summary.page_hash.clone(),
         constraints: entry.constraints.clone(),
         persist_profile: entry.lease.persist_profile,
         profile_scope: entry.profile_scope,

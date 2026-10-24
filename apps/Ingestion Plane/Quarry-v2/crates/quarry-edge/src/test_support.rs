@@ -21,6 +21,7 @@ use quarry_runtime::driver_registry::DriverRegistry;
 use quarry_runtime::fetch::FetchResponse;
 use quarry_runtime::{EventSink, NoopUsageMeter};
 
+use crate::agent_routes::{LaneRef, LaneState, LaneSummary};
 use crate::auth::Claims;
 use crate::state::AppState;
 
@@ -218,7 +219,6 @@ pub fn insert_live_run(state: &AppState, claims: &Claims) -> crate::agent_routes
     use quarry_core::ids::Id;
     use quarry_core::lease::BrowserLease;
     use quarry_core::zdr::ZdrMode;
-    use quarry_runtime::observation::ObservationContext;
     use quarry_runtime::step_receipts::{BrowserControlMode, BrowserProfileScope};
 
     use crate::agent_routes::{BrowserExecutionTier, RunEntry, RunHandle, RunLive};
@@ -244,7 +244,8 @@ pub fn insert_live_run(state: &AppState, claims: &Claims) -> crate::agent_routes
             tab_pin: None,
             inner: Arc::new(tokio::sync::Mutex::new(SessionInner::default())),
         },
-        ctx: ObservationContext::default(),
+        human_lane: LaneRef::new(LaneState::default()),
+        summary: LaneSummary::default(),
         lease,
         constraints: AgentConstraints {
             max_steps: 5,
@@ -258,7 +259,6 @@ pub fn insert_live_run(state: &AppState, claims: &Claims) -> crate::agent_routes
         control_epoch: 0,
         profile_scope: BrowserProfileScope::Ephemeral,
         execution_tier: BrowserExecutionTier::Chromium,
-        last_observation: None,
         used_sensitive_approval_grants: Default::default(),
         budget: None,
         closed: false,

@@ -3,7 +3,7 @@ use super::*;
 use quarry_runtime::action_cost::CostSource;
 
 pub(super) fn enforce_step_budget(entry: &RunEntry) -> Result<(), &'static str> {
-    if entry.constraints.max_steps > 0 && entry.ctx.step >= entry.constraints.max_steps {
+    if entry.constraints.max_steps > 0 && entry.summary.step >= entry.constraints.max_steps {
         return Err("agent step budget exhausted");
     }
     Ok(())

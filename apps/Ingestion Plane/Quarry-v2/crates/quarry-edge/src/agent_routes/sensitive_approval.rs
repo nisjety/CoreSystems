@@ -12,6 +12,8 @@ pub(super) struct SensitiveApproval {
 pub(super) fn sensitive_approval_for_action(
     entry: &RunEntry,
     action: &AgentAction,
+    // WS8.H: the observation of the lane this action runs on, which the approval names.
+    last_observation: Option<&BrowserObservation>,
 ) -> QuarryResult<Option<SensitiveApproval>> {
     match action {
         AgentAction::RespondDialog {
@@ -25,9 +27,7 @@ pub(super) fn sensitive_approval_for_action(
                     "sensitive browser action requires a parent BrowserBroker run grant",
                 )
             })?;
-            let dialog = entry
-                .last_observation
-                .as_ref()
+            let dialog = last_observation
                 .and_then(|observation| {
                     observation
                         .dialogs
@@ -70,9 +70,7 @@ pub(super) fn sensitive_approval_for_action(
                     "sensitive browser action requires a parent BrowserBroker run grant",
                 )
             })?;
-            let target = entry
-                .last_observation
-                .as_ref()
+            let target = last_observation
                 .and_then(|observation| observation.snapshot.as_ref())
                 .filter(|snapshot| {
                     snapshot.snapshot_id == *snapshot_id && snapshot.generation == *generation
@@ -117,9 +115,7 @@ pub(super) fn sensitive_approval_for_action(
                     "sensitive browser action requires a parent BrowserBroker run grant",
                 )
             })?;
-            let target = entry
-                .last_observation
-                .as_ref()
+            let target = last_observation
                 .and_then(|observation| observation.snapshot.as_ref())
                 .filter(|snapshot| {
                     snapshot.snapshot_id == *snapshot_id && snapshot.generation == *generation

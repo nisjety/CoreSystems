@@ -97,7 +97,7 @@ async fn step_refuses_raw_script_and_consumes_nothing() {
     );
 
     let entry = entry_arc.lock().await;
-    assert_eq!(entry.ctx.step, 0, "a denial does not consume a step");
+    assert_eq!(entry.summary.step, 0, "a denial does not consume a step");
     assert!(entry.used_sensitive_approval_grants.is_empty());
 }
 
@@ -206,7 +206,7 @@ fn step_budget_is_fail_closed_once_limit_is_reached() {
             tab_pin: None,
             inner: Arc::new(TokioMutex::new(SessionInner::default())),
         },
-        ctx: ObservationContext {
+        human_lane: LaneRef::new(LaneState { ctx: ObservationContext {
             step: 2,
             current_url: String::new(),
             page_hash: String::new(),
@@ -218,7 +218,8 @@ fn step_budget_is_fail_closed_once_limit_is_reached() {
             observed_action_count: 0,
             challenge_observation_count: 0,
             ..Default::default()
-        },
+        }, last_observation: None }),
+        summary: LaneSummary { step: 2, ..Default::default() },
         lease: BrowserLease {
             lease_id: Id::new(),
             profile_id: Id::new(),
@@ -243,7 +244,6 @@ fn step_budget_is_fail_closed_once_limit_is_reached() {
         control_epoch: 0,
         profile_scope: BrowserProfileScope::Ephemeral,
         execution_tier: BrowserExecutionTier::Chromium,
-        last_observation: None,
         used_sensitive_approval_grants: HashSet::new(),
         budget: None,
         closed: false,
@@ -278,7 +278,7 @@ fn entry_with_budget(budget: Option<crate::budget::RunBudget>) -> RunEntry {
             tab_pin: None,
             inner: Arc::new(TokioMutex::new(SessionInner::default())),
         },
-        ctx: ObservationContext {
+        human_lane: LaneRef::new(LaneState { ctx: ObservationContext {
             step: 0,
             current_url: String::new(),
             page_hash: String::new(),
@@ -290,7 +290,8 @@ fn entry_with_budget(budget: Option<crate::budget::RunBudget>) -> RunEntry {
             observed_action_count: 0,
             challenge_observation_count: 0,
             ..Default::default()
-        },
+        }, last_observation: None }),
+        summary: LaneSummary { step: 0, ..Default::default() },
         lease,
         constraints: AgentConstraints {
             max_steps: 0,
@@ -304,7 +305,6 @@ fn entry_with_budget(budget: Option<crate::budget::RunBudget>) -> RunEntry {
         control_epoch: 0,
         profile_scope: BrowserProfileScope::Ephemeral,
         execution_tier: BrowserExecutionTier::Chromium,
-        last_observation: None,
         used_sensitive_approval_grants: HashSet::new(),
         budget,
         closed: false,
@@ -408,10 +408,10 @@ fn a_budget_refusal_leaves_the_step_counter_and_approvals_alone() {
     entry
         .used_sensitive_approval_grants
         .insert("grant_1".into());
-    let before = (entry.ctx.step, entry.used_sensitive_approval_grants.clone());
+    let before = (entry.summary.step, entry.used_sensitive_approval_grants.clone());
     assert!(budget_gate_with(&mut entry, &AgentAction::Back, BudgetMode::On).is_err());
     assert_eq!(
-        (entry.ctx.step, entry.used_sensitive_approval_grants.clone()),
+        (entry.summary.step, entry.used_sensitive_approval_grants.clone()),
         before
     );
 }
@@ -491,7 +491,7 @@ async fn a_budget_refusal_comes_first_and_burns_no_single_use_approval() {
     assert_eq!(body["error"]["details"]["dimension"], "steps");
     let entry = entry_arc.lock().await;
     assert!(entry.used_sensitive_approval_grants.is_empty());
-    assert_eq!(entry.ctx.step, 0, "a refusal does not run the action");
+    assert_eq!(entry.summary.step, 0, "a refusal does not run the action");
 }
 
 #[tokio::test]
@@ -841,6 +841,16 @@ fn input(initiator: StepInitiator, action: &AgentAction, enforce: bool) -> Admit
         initiator: initiator.into(),
         action,
         enforce_takeover: enforce,
+        last_observation: None,
+    }
+}
+
+fn input_observed<'a>(initiator: StepInitiator, action: &'a AgentAction, enforce: bool, lane: &'a LaneState) -> AdmitInput<'a> {
+    AdmitInput {
+        initiator: initiator.into(),
+        action,
+        enforce_takeover: enforce,
+        last_observation: lane.last_observation.as_deref(),
     }
 }
 
@@ -1321,7 +1331,7 @@ async fn takeover_refusal_consumes_no_budget_and_no_approval_grant() {
         .expect_err("refused");
     assert_eq!(error.code, ErrorCode::UserTookOver);
     assert!(entry.used_sensitive_approval_grants.is_empty());
-    assert_eq!(entry.ctx.step, 0);
+    assert_eq!(entry.summary.step, 0);
     assert_eq!(
         entry
             .budget
@@ -2253,7 +2263,7 @@ async fn admission_validates_the_run_and_its_approval_for_the_runs_org() {
     let mut entry = entry_with_budget(None);
     entry.org_id = "org-of-the-run".into();
     entry.grant_id = Some("grant_run_1".into());
-    entry.last_observation = Some(
+    let observed = Arc::new(
         serde_json::from_value(serde_json::json!({
             "run_id": entry.run_id,
             "step": 1,
@@ -2269,10 +2279,13 @@ async fn admission_validates_the_run_and_its_approval_for_the_runs_org() {
         .expect("a minimal observation with one open dialog"),
     );
     let handle = handle_for(entry);
+    let lane_ref = handle.entry.lock().await.human_lane.clone();
+    lane_ref.0.lock().await.last_observation = Some(observed);
+    let lane = lane_ref.0.lock().await;
     let mut entry = handle.entry.lock().await;
 
     let action = respond_dialog();
-    admit_action(&state, &handle, &mut entry, input(StepInitiator::Agent, &action, true))
+    admit_action(&state, &handle, &mut entry, input_observed(StepInitiator::Agent, &action, true, &lane))
         .await
         .expect("the run grant and the approval grant are both usable");
 
@@ -2288,4 +2301,110 @@ async fn admission_validates_the_run_and_its_approval_for_the_runs_org() {
         entry.used_sensitive_approval_grants.contains("grant_approval_1"),
         "the approval grant is consumed once it validated"
     );
+}
+
+// WS8.H: execution lanes. These are the lock-level contracts of the two lanes. The
+// browser-backed proof (an 8 s `wait` on the delegate with a person's click returning
+// under one second) is the deployment evidence of the slice, not a unit test.
+
+#[tokio::test]
+async fn human_action_is_not_blocked_by_in_flight_agent_step() {
+    let handle = handle_for(entry_with_budget(None));
+    // An in-flight delegate step holds its own lane, and the run entry is released while
+    // the browser runs. The person's lane and the entry must both stay available.
+    let delegate_lane = LaneRef::new(LaneState::default());
+    let _delegate_step = delegate_lane.0.lock().await;
+    let human = tokio::time::timeout(Duration::from_secs(1), human_lane_of(&handle))
+        .await
+        .expect("the person's lane is handed out while a delegate step runs");
+    tokio::time::timeout(Duration::from_secs(1), human.0.lock())
+        .await
+        .expect("the person's lane is free while a delegate step runs");
+    tokio::time::timeout(Duration::from_secs(1), handle.entry.lock())
+        .await
+        .expect("the run entry is free while a delegate step runs");
+    assert!(delegate_lane != human, "the two lanes are distinct");
+}
+
+#[tokio::test]
+async fn agent_step_is_not_blocked_by_in_flight_human_action() {
+    let handle = handle_for(entry_with_budget(None));
+    let human = human_lane_of(&handle).await;
+    // A person's action in flight holds the person's lane only.
+    let _person_action = human.0.lock().await;
+    let delegate_lane = LaneRef::new(LaneState::default());
+    tokio::time::timeout(Duration::from_secs(1), delegate_lane.0.lock())
+        .await
+        .expect("the delegate's lane is free while the person's action runs");
+    tokio::time::timeout(Duration::from_secs(1), handle.entry.lock())
+        .await
+        .expect("the run entry is free while the person's action runs");
+}
+
+#[tokio::test]
+async fn lanes_use_distinct_observation_contexts() {
+    let handle = handle_for(entry_with_budget(None));
+    let human = human_lane_of(&handle).await;
+    let delegate = LaneRef::new(LaneState::default());
+    {
+        let mut lane = human.0.lock().await;
+        lane.ctx.step = 5;
+        lane.ctx.current_url = "https://example.test/a".to_owned();
+    }
+    let lane = delegate.0.lock().await;
+    assert_eq!(lane.ctx.step, 0, "the delegate starts from its own step count");
+    assert!(lane.ctx.current_url.is_empty(), "the delegate sees no page of the person's lane");
+    assert!(lane.last_observation.is_none());
+}
+
+#[tokio::test]
+async fn event_keys_are_unique_across_lanes() {
+    let handle = handle_for(entry_with_budget(None));
+    // Both lanes reserve from the one run-wide counter, in any interleaving.
+    let keys: Vec<u32> = (0..64).map(|_| handle.live.reserve_step()).collect();
+    let unique: std::collections::HashSet<u32> = keys.iter().copied().collect();
+    assert_eq!(unique.len(), keys.len(), "no two steps of the run share a key");
+    assert_eq!(keys, (0..64).collect::<Vec<u32>>(), "keys run consecutively from the start");
+}
+
+#[tokio::test]
+async fn receipt_epoch_is_the_admission_epoch() {
+    let state = test_state_with_static_driver();
+    let handle = handle_for(entry_with_budget(None));
+    let mut entry = handle.entry.lock().await;
+    let action = AgentAction::Navigate {
+        url: "https://example.com/".to_owned(),
+    };
+    let admitted = admit_action(&state, &handle, &mut entry, input(StepInitiator::Agent, &action, true))
+        .await
+        .expect("an agent navigate in agent control is admitted");
+    // The receipt of the step is stamped with the epoch the admission saw, not a later one.
+    assert_eq!(admitted.control_epoch, handle.live.snapshot().epoch);
+}
+
+#[tokio::test]
+async fn finish_run_waits_for_in_flight_lane_with_timeout() {
+    let handle = handle_for(entry_with_budget(None));
+    let lanes = vec![human_lane_of(&handle).await];
+    // A running action holds its lane. A close waits for it, but only so long.
+    let _running = lanes[0].0.lock().await;
+    let started = std::time::Instant::now();
+    wait_for_lanes("run_lane_wait", &lanes, Duration::from_millis(200)).await;
+    let waited = started.elapsed();
+    assert!(waited >= Duration::from_millis(150), "the close waited for the running action");
+    assert!(waited < Duration::from_secs(3), "the close gave up at its bound");
+}
+
+#[tokio::test]
+async fn projection_does_not_wait_for_a_running_step() {
+    let handle = handle_for(entry_with_budget(None));
+    let lane = human_lane_of(&handle).await;
+    // A step is running: it holds its lane and has released the entry.
+    let _running = lane.0.lock().await;
+    let entry = tokio::time::timeout(Duration::from_secs(1), handle.entry.lock())
+        .await
+        .expect("the entry is free while a step runs");
+    let json = serde_json::to_value(live_browser_session_projection(&entry, Vec::new()))
+        .expect("the projection serializes");
+    assert_eq!(json["step"], serde_json::json!(entry.summary.step));
 }

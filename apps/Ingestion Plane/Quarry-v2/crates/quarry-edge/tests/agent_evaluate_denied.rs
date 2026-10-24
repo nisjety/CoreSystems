@@ -101,7 +101,7 @@ async fn consumed(edge: &Edge, run: &str) -> Consumed {
         .as_ref()
         .expect("the default budget mode accounts an agent run");
     Consumed {
-        ctx_step: entry.ctx.step,
+        ctx_step: entry.summary.step,
         budget_steps: budget.ledger.steps,
         budget_attempts: budget.ledger.attempts,
         spent_approvals: entry.used_sensitive_approval_grants.len(),

@@ -227,6 +227,9 @@ pub struct RunLive {
     /// WS8.F: who holds each tab, and the run's attach. Locked for one read or change only.
     pub(super) tabs: StdMutex<TabLedger>,
     pub(super) attaches: StdMutex<AttachRegistry>,
+    /// WS8.H: the next step key. Shared by every lane, so the events and receipts keyed by a
+    /// step are unique across the run. Reserved once an action is admitted (a refusal takes none).
+    steps_reserved: AtomicU32,
 }
 
 impl RunLive {
@@ -250,7 +253,20 @@ impl RunLive {
             policy: None,
             tabs: StdMutex::new(TabLedger::new()),
             attaches: StdMutex::new(AttachRegistry::default()),
+            steps_reserved: AtomicU32::new(0),
         }
+    }
+
+    /// WS8.H: start the step keys at a resumed run's checkpoint step.
+    pub fn with_resume_step(mut self, step: u32) -> Self {
+        *self.steps_reserved.get_mut() = step;
+        self
+    }
+
+    /// WS8.H: reserve the next step key for an admitted action (any lane). Reserved while the
+    /// entry lock is held, after admission, so a refusal takes none.
+    pub fn reserve_step(&self) -> u32 {
+        self.steps_reserved.fetch_add(1, Ordering::AcqRel)
     }
 
     /// Say what kind of run this is and how long its caller asked for.

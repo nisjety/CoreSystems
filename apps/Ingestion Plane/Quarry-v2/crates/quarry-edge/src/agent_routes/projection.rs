@@ -46,8 +46,8 @@ pub(super) fn live_browser_session_projection(
         },
         profile_scope: entry.profile_scope,
         viewport: entry.lease.viewport,
-        current_url: safe_display_url(&entry.ctx.current_url),
-        step: entry.ctx.step,
+        current_url: safe_display_url(&entry.summary.current_url),
+        step: entry.summary.step,
         status: AgentRunStatus::Active,
         live: true,
         zdr: entry.zdr.is_active(),
@@ -62,10 +62,11 @@ pub(super) fn live_browser_session_projection(
             })
             .collect(),
         profile_restore: entry
+            .summary
             .last_observation
-            .as_ref()
+            .as_deref()
             .and_then(|observation| observation.telemetry.profile_restore.clone()),
-        last_observation: entry.last_observation.clone(),
+        last_observation: entry.summary.last_observation.as_deref().cloned(),
         grant_id: entry.grant_id.clone(),
     }
 }

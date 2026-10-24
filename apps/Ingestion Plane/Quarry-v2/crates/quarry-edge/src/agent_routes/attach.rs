@@ -273,6 +273,7 @@ pub async fn attach_run(
             tab_id: tab_id.clone(),
             allowed_domains: allowed_domains.clone(),
             budget: AttachBudget::new(max_steps, max_runtime_s),
+            lane: LaneRef::new(LaneState::default()),
             phase: BrowserAttachState::Attached,
             started_ms: started,
             last_activity_ms: started,
@@ -560,6 +561,32 @@ pub async fn control_tab(
 /// One step of the delegate lane: the attachment's agent acts on its own tab. Called by
 /// `step` when the caller does not own the run. Every refusal is the same 404 unless the
 /// caller is the live attachment's delegate (the lane check), so nothing else is revealed.
+/// The live attachment this caller may use as its delegate, or `None` (every delegate refusal
+/// is the same 404). The caller holds the entry lock; no lane lock is taken here.
+fn delegate_attach_of(
+    handle: &RunHandle,
+    entry: &RunEntry,
+    claims: &crate::auth::Claims,
+    grant_id: Option<&str>,
+) -> Option<AttachState> {
+    let attaches = handle.live.attaches();
+    match attaches.live() {
+        Some(live)
+            if delegate_matches(
+                live,
+                &entry.org_id,
+                &claims.org_id,
+                claims.actor_id(),
+                claims.is_service(),
+                grant_id,
+            ) =>
+        {
+            Some(live.clone())
+        }
+        _ => None,
+    }
+}
+
 pub(super) async fn delegate_step(
     state: &AppState,
     handle: &RunHandle,
@@ -569,29 +596,25 @@ pub(super) async fn delegate_step(
 ) -> Result<Json<Envelope<BrowserObservation>>, ApiErr> {
     let not_found = || status_err(StatusCode::NOT_FOUND, request_id, "agent run not found");
     let _in_flight = handle.live.in_flight_guard();
-    let mut entry = handle.entry.lock().await;
-    let attach = {
-        let attaches = handle.live.attaches();
-        match attaches.live() {
-            Some(live)
-                if delegate_matches(
-                    live,
-                    &entry.org_id,
-                    &claims.org_id,
-                    claims.actor_id(),
-                    claims.is_service(),
-                    body.grant_id.as_deref(),
-                ) =>
-            {
-                live.clone()
-            }
-            _ => return Err(not_found()),
+
+    // WS8.H: the delegate's lane is the attachment's own. It is taken before the entry, and
+    // the entry is released while the browser runs, so a person's action on the other lane
+    // does not wait for this step.
+    let lane_ref = {
+        let entry = handle.entry.lock().await;
+        match delegate_attach_of(handle, &entry, claims, body.grant_id.as_deref()) {
+            Some(attach) => attach.lane,
+            None => return Err(not_found()),
         }
     };
+    let mut lane = lane_ref.0.lock().await;
+    let mut entry = handle.entry.lock().await;
+    // The attachment may have ended, or the run closed, while this step waited for its lane.
+    let attach = match delegate_attach_of(handle, &entry, claims, body.grant_id.as_deref()) {
+        Some(attach) if attach.lane == lane_ref && !entry.closed => attach,
+        _ => return Err(not_found()),
+    };
     handle.live.touch();
-    if entry.closed {
-        return Err(not_found());
-    }
 
     // The tab gate: a person holds the tab, so the delegate is refused (USER_TOOK_OVER).
     let passive = is_passive(&body.action);
@@ -622,15 +645,22 @@ pub(super) async fn delegate_step(
     }
 
     // The attachment's own grant is revalidated on every step. One that is no longer
-    // usable ends the attachment (Revoked) and refuses with 403, never a 5xx.
+    // usable ends the attachment (Revoked) and refuses with 403, never a 5xx. The grant is
+    // checked without the entry lock, so the other lane does not wait for the network.
+    let org_id = entry.org_id.clone();
     let owner = entry.actor_id.clone();
     let run_id_text = entry.run_id.to_string();
     let parent = entry.grant_id.clone().unwrap_or_default();
+    drop(entry);
     let grant = state
         .grant_validator
-        .validate_for_org(&entry.org_id, &attach.grant_id)
+        .validate_for_org(&org_id, &attach.grant_id)
         .await
         .map_err(|error| driver_err(request_id, error))?;
+    let mut entry = handle.entry.lock().await;
+    if entry.closed || !handle.live.attaches().live().is_some_and(|live| live.attach_id == attach.attach_id) {
+        return Err(not_found());
+    }
     if attach_grant_refusal(&grant, &run_id_text, &owner, &parent).is_some() {
         let ended = handle
             .live
@@ -669,6 +699,7 @@ pub(super) async fn delegate_step(
             initiator: derive_initiator_ref(claims, body.initiated_by, &body.advisory_agent()),
             action: &body.action,
             enforce_takeover: crate::run_limits::takeover_enforced(),
+            last_observation: lane.last_observation.as_deref(),
         },
     )
     .await
@@ -697,11 +728,14 @@ pub(super) async fn delegate_step(
         zdr: entry.zdr,
         extraction_profile: body.extraction_profile,
     };
-    let receipt_step = entry.ctx.step;
+    // WS8.H: the step key is reserved after admission (a refusal takes none), shared with
+    // the person's lane, so the events and receipts of the two lanes never collide.
+    let receipt_step = handle.live.reserve_step();
+    lane.ctx.step = receipt_step;
     let receipt_run_id = entry.run_id.to_string();
     let receipt_action = req.action.clone();
     let typed_kind =
-        quarry_runtime::observation::typed_field_kind(entry.ctx.active_snapshot.as_ref(), &req.action);
+        quarry_runtime::observation::typed_field_kind(lane.ctx.active_snapshot.as_ref(), &req.action);
     let runner = ObservationRunner {
         browser: state.agent_driver.clone(),
         artifacts: Some(state.artifacts.clone()),
@@ -709,20 +743,26 @@ pub(super) async fn delegate_step(
         visual_processor: state.visual_processor.clone(),
         org_id: entry.org_id.clone(),
     };
+    let receipt_org = entry.org_id.clone();
+    let receipt_actor = entry.actor_id.clone();
+    // The run entry is released while the browser runs (WS8.H).
+    drop(entry);
+
     // The step is admitted: it is charged to the attachment whether or not the browser
     // action succeeds, so a failing delegate cannot retry past its budget.
     if let Some(live) = handle.live.attaches().live_mut() {
         live.budget.charge();
         live.last_activity_ms = unix_ms_now();
     }
-    let step_result = runner.execute(&req, &pinned, &mut entry.ctx).await;
+    let step_result = runner.execute(&req, &pinned, &mut lane.ctx).await;
+    let mut entry = handle.entry.lock().await;
     let observation = match step_result {
         Ok(observation) => {
             let cost_usd = receipt_cost_usd(&observation.telemetry, &receipt_action);
             let cost_source = receipt_cost_source(&observation.telemetry);
             let receipt = ReceiptBuilder::start(receipt_run_id, receipt_step)
-                .org_id(entry.org_id.clone())
-                .actor_id(entry.actor_id.clone())
+                .org_id(receipt_org.clone())
+                .actor_id(receipt_actor.clone())
                 .initiator(StepInitiator::Agent, admitted.control_epoch)
                 .agent(admitted.agent.clone())
                 .cost_source(cost_source)
@@ -738,8 +778,8 @@ pub(super) async fn delegate_step(
         }
         Err(error) => {
             let receipt = ReceiptBuilder::start(receipt_run_id, receipt_step)
-                .org_id(entry.org_id.clone())
-                .actor_id(entry.actor_id.clone())
+                .org_id(receipt_org)
+                .actor_id(receipt_actor)
                 .initiator(StepInitiator::Agent, admitted.control_epoch)
                 .agent(admitted.agent.clone())
                 .failed_cost(estimated_action_cost_usd(&receipt_action))
@@ -755,7 +795,9 @@ pub(super) async fn delegate_step(
             return Err(driver_err(request_id, error));
         }
     };
-    entry.last_observation = Some(observation.clone());
+    let shared = Arc::new(observation.clone());
+    lane.last_observation = Some(shared.clone());
+    entry.summary.record(&lane.ctx, shared);
     if !entry.zdr.is_active() {
         state
             .receipts

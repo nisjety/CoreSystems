@@ -2,9 +2,18 @@ use super::*;
 
 use quarry_runtime::action_cost::CostSource;
 
+/// WS8.H: the person's lane of a run. Reads the entry lock for one clone of the handle.
+pub(super) async fn human_lane_of(handle: &RunHandle) -> LaneRef {
+    handle.entry.lock().await.human_lane.clone()
+}
+
 /// `POST /v1/agent/runs/{run_id}/step` — execute one action, return the
-/// resulting observation. `ObservationRunner` advances `ctx.step` and emits
-/// `ActionStarted`/`ObservationReady` itself.
+/// resulting observation. `ObservationRunner` emits `ActionStarted`/`ObservationReady`
+/// itself, keyed by the step key this lane reserved.
+///
+/// WS8.H: the step runs on the person's lane. The run entry is held for admission and
+/// for the bookkeeping after the browser call, and not while the browser runs, so a
+/// delegate step on the attached lane (or a projection) never waits for this one.
 pub async fn step(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
@@ -22,9 +31,12 @@ pub async fn step(
         return super::attach::delegate_step(&state, &handle, &claims, &request_id, body).await;
     }
 
-    // Counts as in flight from before it waits for the run lock, so the sweeper
+    // Counts as in flight from before it waits for its lane, so the sweeper
     // never releases a run an action is queued on.
     let _in_flight = handle.live.in_flight_guard();
+    // The lane first, then the entry (the order `LaneState` documents).
+    let lane_ref = human_lane_of(&handle).await;
+    let mut lane = lane_ref.0.lock().await;
     let mut entry = handle.entry.lock().await;
     entry.zdr.mark_current_span();
     if !caller_owns_live_run(&entry, &claims) {
@@ -35,7 +47,7 @@ pub async fn step(
         ));
     }
     handle.live.touch();
-    // The run was closed while this step waited for its lock.
+    // The run was closed while this step waited for its lane.
     if entry.closed {
         return Err(run_closed_err(&state, &claims, &request_id, &run_id).await);
     }
@@ -49,6 +61,7 @@ pub async fn step(
             initiator: derive_initiator_ref(&claims, body.initiated_by, &body.advisory_agent()),
             action: &body.action,
             enforce_takeover: crate::run_limits::takeover_enforced(),
+            last_observation: lane.last_observation.as_deref(),
         },
     )
     .await
@@ -74,13 +87,15 @@ pub async fn step(
         zdr: entry.zdr,
         extraction_profile: body.extraction_profile,
     };
-    let receipt_step = entry.ctx.step;
+    // WS8.H: the step key is reserved now, after admission, so a refusal takes none.
+    let receipt_step = handle.live.reserve_step();
+    lane.ctx.step = receipt_step;
     let receipt_run_id = entry.run_id.to_string();
     let receipt_action = req.action.clone();
     // WS12.S3: the kind of the control a typing action goes to, read from the snapshot the
     // action names. `execute` replaces `ctx.active_snapshot`, so this is read before it runs.
     let typed_kind =
-        quarry_runtime::observation::typed_field_kind(entry.ctx.active_snapshot.as_ref(), &req.action);
+        quarry_runtime::observation::typed_field_kind(lane.ctx.active_snapshot.as_ref(), &req.action);
 
     let runner = ObservationRunner {
         browser: state.agent_driver.clone(),
@@ -91,22 +106,24 @@ pub async fn step(
         // the tenant every observation artifact is stamped with.
         org_id: entry.org_id.clone(),
     };
+    let session = entry.session.clone();
+    let org_id = entry.org_id.clone();
+    let actor_id = entry.actor_id.clone();
+    // The run entry is released while the browser runs (WS8.H).
+    drop(entry);
 
-    // Disjoint borrows: &session (shared) + &mut ctx (exclusive).
-    let entry_mut: &mut RunEntry = &mut entry;
     // A completed browser call is not automatically a verified business
     // effect; the observation carries that distinction. Persist an
     // immutable receipt for both success and failure so a planner or
     // reviewer can replay the exact action sequence.
     let step_started = std::time::Instant::now();
-    let step_result = runner
-        .execute(&req, &entry_mut.session, &mut entry_mut.ctx)
-        .await;
+    let step_result = runner.execute(&req, &session, &mut lane.ctx).await;
     crate::metrics::record_agent_step(
         browser_action_name(&receipt_action),
         step_result.is_ok(),
         step_started.elapsed(),
     );
+    let mut entry = handle.entry.lock().await;
     let (obs, cost_source) = match step_result {
         Ok(obs) => {
             // W4: when the driver omits a provider-billed cost, fall
@@ -118,8 +135,8 @@ pub async fn step(
                 budget_charge(&mut entry, true, cost_usd);
             }
             let receipt = ReceiptBuilder::start(receipt_run_id.clone(), receipt_step)
-                .org_id(entry.org_id.clone())
-                .actor_id(entry.actor_id.clone())
+                .org_id(org_id.clone())
+                .actor_id(actor_id.clone())
                 .initiator(admitted.initiator, admitted.control_epoch)
                 .agent(admitted.agent.clone())
                 .cost_source(cost_source)
@@ -141,8 +158,8 @@ pub async fn step(
                 budget_charge(&mut entry, false, flat_usd);
             }
             let receipt = ReceiptBuilder::start(receipt_run_id, receipt_step)
-                .org_id(entry.org_id.clone())
-                .actor_id(entry.actor_id.clone())
+                .org_id(org_id.clone())
+                .actor_id(actor_id.clone())
                 .initiator(admitted.initiator, admitted.control_epoch)
                 .agent(admitted.agent.clone())
                 .failed_cost(flat_usd)
@@ -160,7 +177,9 @@ pub async fn step(
         }
     };
 
-    entry.last_observation = Some(obs.clone());
+    let observation = Arc::new(obs.clone());
+    lane.last_observation = Some(observation.clone());
+        entry.summary.record(&lane.ctx, observation);
 
     // Persist the continuation only after the immutable outcome receipt is
     // durable. If this write fails, surface an internal error rather than
@@ -205,6 +224,8 @@ pub(super) async fn execute_ws_action(
     hint: Option<InitiatorHint>,
 ) -> QuarryResult<BrowserObservation> {
     let _in_flight = handle.live.in_flight_guard();
+    let lane_ref = human_lane_of(handle).await;
+    let mut lane = lane_ref.0.lock().await;
     let mut entry = handle.entry.lock().await;
     handle.live.touch();
     let admitted = admit_action(
@@ -215,6 +236,7 @@ pub(super) async fn execute_ws_action(
             initiator: derive_initiator_ref(claims, hint, &AdvisoryAgent::default()),
             action: &action,
             enforce_takeover: crate::run_limits::takeover_enforced(),
+            last_observation: lane.last_observation.as_deref(),
         },
     )
     .await?;
@@ -236,12 +258,13 @@ pub(super) async fn execute_ws_action(
         zdr: entry.zdr,
         extraction_profile: None,
     };
-    let receipt_step = entry.ctx.step;
+    let receipt_step = handle.live.reserve_step();
+    lane.ctx.step = receipt_step;
     let receipt_action = req.action.clone();
     // WS12.S3: the kind of the control a typing action goes to, read from the snapshot the
     // action names. `execute` replaces `ctx.active_snapshot`, so this is read before it runs.
     let typed_kind =
-        quarry_runtime::observation::typed_field_kind(entry.ctx.active_snapshot.as_ref(), &req.action);
+        quarry_runtime::observation::typed_field_kind(lane.ctx.active_snapshot.as_ref(), &req.action);
     let receipt_run_id = entry.run_id.to_string();
     let runner = ObservationRunner {
         browser: state.agent_driver.clone(),
@@ -252,16 +275,19 @@ pub(super) async fn execute_ws_action(
         // the tenant every observation artifact is stamped with.
         org_id: entry.org_id.clone(),
     };
-    let entry_mut: &mut RunEntry = &mut entry;
+    let session = entry.session.clone();
+    let org_id = entry.org_id.clone();
+    let actor_id = entry.actor_id.clone();
+    // The run entry is released while the browser runs (WS8.H).
+    drop(entry);
     let step_started = std::time::Instant::now();
-    let step_result = runner
-        .execute(&req, &entry_mut.session, &mut entry_mut.ctx)
-        .await;
+    let step_result = runner.execute(&req, &session, &mut lane.ctx).await;
     crate::metrics::record_agent_step(
         browser_action_name(&receipt_action),
         step_result.is_ok(),
         step_started.elapsed(),
     );
+    let mut entry = handle.entry.lock().await;
     let observation = match step_result {
         Ok(observation) => {
             let cost_usd = receipt_cost_usd(&observation.telemetry, &receipt_action);
@@ -270,8 +296,8 @@ pub(super) async fn execute_ws_action(
             }
             if receipt_plan != super::human_browse::ReceiptPlan::Skip {
                 let receipt = ReceiptBuilder::start(receipt_run_id.clone(), receipt_step)
-                    .org_id(entry.org_id.clone())
-                    .actor_id(entry.actor_id.clone())
+                    .org_id(org_id.clone())
+                    .actor_id(actor_id.clone())
                     .initiator(admitted.initiator, admitted.control_epoch)
                     .agent(admitted.agent.clone())
                     .typed_field(typed_kind)
@@ -295,8 +321,8 @@ pub(super) async fn execute_ws_action(
             }
             if receipt_plan != super::human_browse::ReceiptPlan::Skip {
                 let receipt = ReceiptBuilder::start(receipt_run_id, receipt_step)
-                    .org_id(entry.org_id.clone())
-                    .actor_id(entry.actor_id.clone())
+                    .org_id(org_id.clone())
+                    .actor_id(actor_id.clone())
                     .initiator(admitted.initiator, admitted.control_epoch)
                     .agent(admitted.agent.clone())
                     .typed_field(typed_kind)
@@ -306,7 +332,9 @@ pub(super) async fn execute_ws_action(
             return Err(error);
         }
     };
-    entry.last_observation = Some(observation.clone());
+    let shared = Arc::new(observation.clone());
+    lane.last_observation = Some(shared.clone());
+    entry.summary.record(&lane.ctx, shared);
     if !entry.zdr.is_active() {
         state
             .receipts

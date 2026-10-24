@@ -65,6 +65,31 @@ fn drain_error(reason: &'static str) -> QuarryError {
     .with_details(serde_json::json!({ "reason": reason }))
 }
 
+/// WS8.H: how long a close waits for an action that still runs on a lane.
+const LANE_WAIT: Duration = Duration::from_secs(5);
+
+/// WS8.H: every lane of a run, the person's and the live attachment's. Read under the entry lock.
+pub(super) fn lane_refs(entry: &RunEntry, live: &RunLive) -> Vec<LaneRef> {
+    let mut lanes = vec![entry.human_lane.clone()];
+    if let Some(attach) = live.attaches().live() {
+        lanes.push(attach.lane.clone());
+    }
+    lanes
+}
+
+/// WS8.H: wait, bounded in total, for each lane's running action to finish, so the browser
+/// session is not released under a call that is still running. A lane still held when the
+/// wait ends is logged and the session is released anyway (the drain has always done so).
+pub(super) async fn wait_for_lanes(run_id: &str, lanes: &[LaneRef], wait: Duration) {
+    let deadline = tokio::time::Instant::now() + wait;
+    for lane in lanes {
+        if tokio::time::timeout_at(deadline, lane.0.lock()).await.is_err() {
+            tracing::warn!(run_id, "close: an action still holds a lane; releasing anyway");
+            return;
+        }
+    }
+}
+
 /// The one path that ends a run, for the owner's `DELETE` and for the sweeper. It
 /// writes the durable record first (a failure leaves the run registered and
 /// untouched), then marks the run closed so an action that was waiting for the lock
@@ -177,7 +202,10 @@ pub(super) async fn finish_run(
     let usage_org = entry.org_id.clone();
     let usage_actor = entry.actor_id.clone();
     let session = entry.session.clone();
+    // WS8.H: the lanes are named while the entry is held, and waited for once it is released.
+    let lanes = lane_refs(&entry, &handle.live);
     drop(entry);
+    wait_for_lanes(run_id, &lanes, LANE_WAIT).await;
     if let Some(segment) = segment_usage.as_ref() {
         let outcome = match reason {
             CloseReason::Explicit => crate::usage_attrs::Outcome::Ok,
@@ -310,7 +338,9 @@ pub async fn drain_runs(
                 }
                 entry.closed = true;
                 let session = entry.session.clone();
+                let lanes = lane_refs(&entry, &handle.live);
                 drop(entry);
+                wait_for_lanes(&run_id.to_string(), &lanes, per_run_timeout).await;
                 match tokio::time::timeout(per_run_timeout, driver.release(session)).await {
                     Ok(Ok(())) => Some(true),
                     Ok(Err(error)) => {
