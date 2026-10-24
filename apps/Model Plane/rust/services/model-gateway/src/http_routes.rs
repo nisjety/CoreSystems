@@ -9329,6 +9329,7 @@ async fn update_thread_presentation(
                 pinned: body.pinned,
                 persona_enabled: body.persona_enabled,
                 archived: body.archived,
+                memory_mode: None,
             },
             &bearer,
         )?)

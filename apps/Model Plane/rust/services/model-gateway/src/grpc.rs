@@ -3827,6 +3827,13 @@ mod tests {
         {
             Err(Status::unimplemented("set_memory_controls not needed in test"))
         }
+
+        async fn reset_memory(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::ResetMemoryRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::ResetMemoryResponse>, Status> {
+            Err(Status::unimplemented("reset_memory not needed in test"))
+        }
     }
 
     async fn spawn_memory_client(

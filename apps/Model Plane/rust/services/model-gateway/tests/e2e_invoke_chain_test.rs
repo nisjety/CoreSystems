@@ -11991,6 +11991,13 @@ impl mpv1::memory_service_server::MemoryService for MockMemory {
     ) -> Result<Response<mpv1::SetMemoryControlsResponse>, Status> {
         Err(Status::unimplemented("set_memory_controls not needed in test"))
     }
+
+    async fn reset_memory(
+        &self,
+        _: TReq<mpv1::ResetMemoryRequest>,
+    ) -> Result<Response<mpv1::ResetMemoryResponse>, Status> {
+        Err(Status::unimplemented("reset_memory not needed in test"))
+    }
 }
 
 async fn spawn_memory_mock(

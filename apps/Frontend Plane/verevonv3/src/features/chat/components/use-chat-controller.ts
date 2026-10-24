@@ -42,7 +42,7 @@ import {
   withBrregLookupAction,
 } from '@/features/chat/lib/brreg-action'
 import {
-  consumePendingChatLaunch,
+  consumePendingChatLaunchAsync,
 } from '@/features/chat/lib/pending-chat-launch'
 import {
   bindSupportChatThread,
@@ -2046,7 +2046,7 @@ export function useChatController() {
           // The chat can still run with the gateway default model.
         }
 
-        const pending = consumePendingChatLaunch()
+        const pending = await consumePendingChatLaunchAsync()
         if (pending) {
           if (pending.startNewThread) {
             // A contextual handoff is a new Chat conversation by contract. The

@@ -4329,7 +4329,13 @@ type UpdateThreadPresentationRequest struct {
 	// archived thread to ordinary history. Archiving goes through ArchiveThread,
 	// which writes the THREAD_ARCHIVED evidence event. Omission leaves it
 	// unchanged, the same tri-state contract as `pinned` above.
-	Archived      *bool `protobuf:"varint,9,opt,name=archived,proto3,oneof" json:"archived,omitempty"`
+	Archived *bool `protobuf:"varint,9,opt,name=archived,proto3,oneof" json:"archived,omitempty"`
+	// Per-thread memory mode (build plan WS07 S6): "inherit" (the thread follows the
+	// user's memory state) or "off" (this thread neither recalls nor learns). Any
+	// other value is rejected. Omission leaves it unchanged, the same tri-state
+	// contract as `pinned` above. Rejected for a ZDR caller: memory is already off
+	// for it and the column is not written under that posture.
+	MemoryMode    *string `protobuf:"bytes,10,opt,name=memory_mode,json=memoryMode,proto3,oneof" json:"memory_mode,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4411,6 +4417,13 @@ func (x *UpdateThreadPresentationRequest) GetArchived() bool {
 		return *x.Archived
 	}
 	return false
+}
+
+func (x *UpdateThreadPresentationRequest) GetMemoryMode() string {
+	if x != nil && x.MemoryMode != nil {
+		return *x.MemoryMode
+	}
+	return ""
 }
 
 // Receipt for a durable presentation update.
@@ -7115,7 +7128,7 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\x13ListThreadsResponse\x127\n" +
 	"\athreads\x18\x01 \x03(\v2\x1d.model_plane.v1.ThreadSummaryR\athreads\x12\x1f\n" +
 	"\vnext_cursor\x18\x02 \x01(\tR\n" +
-	"nextCursor\"\xbd\x02\n" +
+	"nextCursor\"\xf3\x02\n" +
 	"\x1fUpdateThreadPresentationRequest\x12\x15\n" +
 	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x1b\n" +
 	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\x19\n" +
@@ -7123,13 +7136,17 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\apreview\x18\x04 \x01(\tH\x01R\apreview\x88\x01\x01\x12\x1b\n" +
 	"\x06pinned\x18\x05 \x01(\bH\x02R\x06pinned\x88\x01\x01\x12,\n" +
 	"\x0fpersona_enabled\x18\x06 \x01(\bH\x03R\x0epersonaEnabled\x88\x01\x01\x12\x1f\n" +
-	"\barchived\x18\t \x01(\bH\x04R\barchived\x88\x01\x01B\b\n" +
+	"\barchived\x18\t \x01(\bH\x04R\barchived\x88\x01\x01\x12$\n" +
+	"\vmemory_mode\x18\n" +
+	" \x01(\tH\x05R\n" +
+	"memoryMode\x88\x01\x01B\b\n" +
 	"\x06_titleB\n" +
 	"\n" +
 	"\b_previewB\t\n" +
 	"\a_pinnedB\x12\n" +
 	"\x10_persona_enabledB\v\n" +
-	"\t_archived\"?\n" +
+	"\t_archivedB\x0e\n" +
+	"\f_memory_mode\"?\n" +
 	" UpdateThreadPresentationResponse\x12\x1b\n" +
 	"\tthread_id\x18\x01 \x01(\tR\bthreadId\"J\n" +
 	"\x14ArchiveThreadRequest\x12\x15\n" +

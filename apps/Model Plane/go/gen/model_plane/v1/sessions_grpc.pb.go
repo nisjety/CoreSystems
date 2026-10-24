@@ -51,6 +51,7 @@ const (
 	SessionCore_ClaimScheduledStep_FullMethodName         = "/model_plane.v1.SessionCore/ClaimScheduledStep"
 	SessionCore_RecordScheduledStepReceipt_FullMethodName = "/model_plane.v1.SessionCore/RecordScheduledStepReceipt"
 	SessionCore_RecordRunContext_FullMethodName           = "/model_plane.v1.SessionCore/RecordRunContext"
+	SessionCore_RecordScheduledRunResult_FullMethodName   = "/model_plane.v1.SessionCore/RecordScheduledRunResult"
 )
 
 // SessionCoreClient is the client API for SessionCore service.
@@ -200,6 +201,12 @@ type SessionCoreClient interface {
 	// (`runs.metadata.run_context`). Counts and closed tokens only; refused for
 	// zero-retention and waived credentials like every durable run mutation.
 	RecordRunContext(ctx context.Context, in *RecordRunContextRequest, opts ...grpc.CallOption) (*RecordRunContextResponse, error)
+	// Persist the answer of a claimed scheduled step into the scheduled thread
+	// and complete its receipt in one transaction. Idempotent on (run_id,
+	// step_id). Refused for zero-retention and waived runs. Off unless
+	// SESSION_CORE_SCHEDULED_RESULT_PERSIST is `true`; off keeps the receipt-only
+	// path. `output` is content and is accepted only on this direct hop.
+	RecordScheduledRunResult(ctx context.Context, in *RecordScheduledRunResultRequest, opts ...grpc.CallOption) (*RecordScheduledRunResultResponse, error)
 }
 
 type sessionCoreClient struct {
@@ -539,6 +546,16 @@ func (c *sessionCoreClient) RecordRunContext(ctx context.Context, in *RecordRunC
 	return out, nil
 }
 
+func (c *sessionCoreClient) RecordScheduledRunResult(ctx context.Context, in *RecordScheduledRunResultRequest, opts ...grpc.CallOption) (*RecordScheduledRunResultResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RecordScheduledRunResultResponse)
+	err := c.cc.Invoke(ctx, SessionCore_RecordScheduledRunResult_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // SessionCoreServer is the server API for SessionCore service.
 // All implementations must embed UnimplementedSessionCoreServer
 // for forward compatibility.
@@ -686,6 +703,12 @@ type SessionCoreServer interface {
 	// (`runs.metadata.run_context`). Counts and closed tokens only; refused for
 	// zero-retention and waived credentials like every durable run mutation.
 	RecordRunContext(context.Context, *RecordRunContextRequest) (*RecordRunContextResponse, error)
+	// Persist the answer of a claimed scheduled step into the scheduled thread
+	// and complete its receipt in one transaction. Idempotent on (run_id,
+	// step_id). Refused for zero-retention and waived runs. Off unless
+	// SESSION_CORE_SCHEDULED_RESULT_PERSIST is `true`; off keeps the receipt-only
+	// path. `output` is content and is accepted only on this direct hop.
+	RecordScheduledRunResult(context.Context, *RecordScheduledRunResultRequest) (*RecordScheduledRunResultResponse, error)
 	mustEmbedUnimplementedSessionCoreServer()
 }
 
@@ -791,6 +814,9 @@ func (UnimplementedSessionCoreServer) RecordScheduledStepReceipt(context.Context
 }
 func (UnimplementedSessionCoreServer) RecordRunContext(context.Context, *RecordRunContextRequest) (*RecordRunContextResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RecordRunContext not implemented")
+}
+func (UnimplementedSessionCoreServer) RecordScheduledRunResult(context.Context, *RecordScheduledRunResultRequest) (*RecordScheduledRunResultResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RecordScheduledRunResult not implemented")
 }
 func (UnimplementedSessionCoreServer) mustEmbedUnimplementedSessionCoreServer() {}
 func (UnimplementedSessionCoreServer) testEmbeddedByValue()                     {}
@@ -1382,6 +1408,24 @@ func _SessionCore_RecordRunContext_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SessionCore_RecordScheduledRunResult_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RecordScheduledRunResultRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionCoreServer).RecordScheduledRunResult(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionCore_RecordScheduledRunResult_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionCoreServer).RecordScheduledRunResult(ctx, req.(*RecordScheduledRunResultRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // SessionCore_ServiceDesc is the grpc.ServiceDesc for SessionCore service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1512,6 +1556,10 @@ var SessionCore_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RecordRunContext",
 			Handler:    _SessionCore_RecordRunContext_Handler,
+		},
+		{
+			MethodName: "RecordScheduledRunResult",
+			Handler:    _SessionCore_RecordScheduledRunResult_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

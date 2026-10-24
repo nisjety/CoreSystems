@@ -861,6 +861,9 @@ services:
       # (about 15 minutes), so the executor never parks against it. Roll it back AFTER executor
       # parking is off, and before any gateway or BFF park switch (see the flip order).
       SESSION_CORE_PARK_RECOVERY_ENABLED: ${SESSION_CORE_PARK_RECOVERY_ENABLED:-false}
+      # WS03-S8: park a crashed run instead of ending it (needs park recovery and the fold store on). Off by
+      # default and owner-gated: the executor half is not built, so the worker parks nothing yet.
+      SESSION_CORE_CRASH_PARK_ENABLED: ${SESSION_CORE_CRASH_PARK_ENABLED:-false}
       # How long a parked run waits for its continuation, in seconds, counted from the park save
       # (WS03 S8-4). Default one day, clamped to 60..2592000. Only read while park recovery is on.
       SESSION_CORE_PARK_TTL_SECONDS: ${SESSION_CORE_PARK_TTL_SECONDS:-86400}
@@ -963,6 +966,8 @@ services:
       MODEL_ENTITLEMENT_MODE: ${MODEL_ENTITLEMENT_MODE:-off}
       ORG_CORE_URL: ${ORG_CORE_URL:-http://org-core:8080}
       INFERENCE_ORG_CORE_SERVICE_TOKEN: ${INFERENCE_ORG_CORE_SERVICE_TOKEN:-}
+      # WS08-S7: sets the decode limit for attachments; unset keeps the 16 MiB floor.
+      CHAT_ATTACHMENT_MAX_TOTAL_BYTES: ${CHAT_ATTACHMENT_MAX_TOTAL_BYTES:-3145728}
       # WS02-S9: tiered Anthropic system blocks (Stable, Context, per-turn). Only the
       # literal true enables it; ZDR requests never take the tiered form.
       INFERENCE_ANTHROPIC_TIERED_SYSTEM: ${INFERENCE_ANTHROPIC_TIERED_SYSTEM:-false}
@@ -1341,6 +1346,8 @@ services:
       # execution-core and orchestrator-core must agree. Do not enable before the contract and the run's
       # retention reach the lane (see the depth register).
       EXECUTION_SCHEDULED_AGENT_ENABLED: ${EXECUTION_SCHEDULED_AGENT_ENABLED:-}
+      # WS08-S7: sets the decode limit for attachments; unset keeps the 16 MiB floor.
+      CHAT_ATTACHMENT_MAX_TOTAL_BYTES: ${CHAT_ATTACHMENT_MAX_TOTAL_BYTES:-3145728}
       # Governed tickets.create adapter. All bindings are intentionally empty
       # by default: the adapter stays disabled until Control, Conversation
       # Core, and Execution Core have distinct, least-privilege credentials.

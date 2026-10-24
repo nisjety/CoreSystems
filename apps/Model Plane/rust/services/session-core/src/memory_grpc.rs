@@ -23,6 +23,8 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
 const MEMORY_READ_SCOPE: &str = "memory:read";
+/// The scope capability-core presents to read a user's memory controls for its proxy (WS07-S5).
+const MEMORY_CONTROLS_READ_SCOPE: &str = "session:memory-controls:read";
 const MEMORY_WRITE_SCOPE: &str = "memory:write";
 /// Reported when this process has no letta endpoint at all. Shared with
 /// [`crate::memory_erasure`] so the two surfaces cannot drift into two
@@ -803,7 +805,7 @@ impl MemoryService for MemoryGrpc {
         let (org_id, user_id) = (req.org_id.trim(), req.user_id.trim());
         // A ZDR caller is not refused: it is answered `zdr`, which reads and
         // writes nothing.
-        authorize_user_memory_preflight(&caller, org_id, user_id, MEMORY_READ_SCOPE)?;
+        authorize_user_memory_preflight(&caller, org_id, user_id, MEMORY_CONTROLS_READ_SCOPE)?;
         let controls = memory_controls_view(&self.pool, caller.zdr(), org_id, user_id).await?;
         Ok(Response::new(GetMemoryControlsResponse {
             controls: Some(controls),
