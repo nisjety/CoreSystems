@@ -24,6 +24,7 @@ use mp_contracts::model_plane::v1::{
     session_retention_service_server::{SessionRetentionService, SessionRetentionServiceServer},
     thread_autonomy_server::{ThreadAutonomy, ThreadAutonomyServer},
 };
+use mp_contracts::run_origin::{RunOrigin, ORIGIN_METADATA_KEY};
 use mp_contracts::zdr_refusal::Refusal;
 use mp_events::idempotency::derive_idempotency_hash;
 use mp_ids::new_ulid;
@@ -1831,6 +1832,7 @@ async fn persist_scheduled_run_bindings(
         "template_digest": req.template_digest,
         "policy_digest": req.policy_digest,
         "idempotency_key": req.idempotency_key,
+        "origin": RunOrigin::Schedule.as_str(),
     });
     let exact = [
         "schedule_id",
@@ -1843,6 +1845,11 @@ async fn persist_scheduled_run_bindings(
     ]
     .into_iter()
     .all(|key| metadata.get(key) == expected.get(key));
+    // A run bound before the origin stamp existed carries none. It may take the
+    // stamp, but a run already stamped with any other origin is never rebound.
+    let stamped = metadata.get(ORIGIN_METADATA_KEY).is_some();
+    let origin_bindable =
+        !stamped || RunOrigin::from_metadata(&metadata) == Some(RunOrigin::Schedule);
     if !metadata.is_object() || metadata.as_object().is_none() || metadata == serde_json::json!({})
     {
         sqlx::query(
@@ -1854,10 +1861,22 @@ async fn persist_scheduled_run_bindings(
         .execute(&mut *tx)
         .await
         .map_err(|error| Status::internal(error.to_string()))?;
-    } else if !exact {
+    } else if !exact || !origin_bindable {
         return Err(Status::permission_denied(
             "scheduled run id is bound to different immutable schedule metadata",
         ));
+    } else if !stamped {
+        sqlx::query(
+            "UPDATE runs SET metadata = metadata || jsonb_build_object($4::text, $2::text), updated_at = now()
+             WHERE id = $1 AND org_id = $3",
+        )
+        .bind(&req.run_id)
+        .bind(RunOrigin::Schedule.as_str())
+        .bind(&org_id)
+        .bind(ORIGIN_METADATA_KEY)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| Status::internal(error.to_string()))?;
     }
     tx.commit()
         .await
@@ -3723,6 +3742,17 @@ mod persona_db_tests {
     }
 }
 
+/// The run metadata stamped at birth (WS20 S2). A person's run is a chat run. A
+/// system owner's run gets no stamp here: a scheduled run is stamped by its own
+/// binding, and an unstamped run reads as chat.
+fn run_origin_at_birth(user_id: &str) -> serde_json::Value {
+    if crate::auth::is_system_run_owner(user_id) {
+        serde_json::json!({})
+    } else {
+        serde_json::json!({ ORIGIN_METADATA_KEY: RunOrigin::Chat.as_str() })
+    }
+}
+
 /// Core of `SessionCore::start_run`, factored out to keep the trait method
 /// small. Inserts the run row and its `RUN_STARTED` event in one tx.
 pub(crate) async fn start_run_inner(
@@ -3770,10 +3800,10 @@ pub(crate) async fn start_run_inner(
     let inherited_space_context: Option<(Option<String>, Option<String>, Option<String>, Option<i64>, Option<String>, Option<String>, Option<String>, Option<i64>)> = sqlx::query_as(
         "INSERT INTO runs (id, thread_id, parent_run_id, agent_id, goal, mode, org_id, user_id, status, residency, created_at, updated_at,
                           space_id, space_decision_ref, recipient_audience_ref, recipient_audience_revision, recipient_audience_hash, privacy_policy_ref, resource_authorization_ref, authority_revision,
-                          retention_class, waiver_ack_id, waiver_connection_id)
+                          retention_class, waiver_ack_id, waiver_connection_id, metadata)
          SELECT $1, t.id, NULLIF($3, ''), $4, $5, $6, $7, $8, 'queued', $9, $10, $10,
                 t.space_id, t.space_decision_ref, t.recipient_audience_ref, t.recipient_audience_revision, t.recipient_audience_hash, t.privacy_policy_ref, t.resource_authorization_ref, t.authority_revision,
-                $11, $12, $13
+                $11, $12, $13, $14
          FROM threads t
          WHERE t.id = $2 AND t.org_id = $7
          ON CONFLICT (id) DO NOTHING
@@ -3792,6 +3822,7 @@ pub(crate) async fn start_run_inner(
     .bind(retention.class.as_str())
     .bind(retention.ack_id())
     .bind(retention.connection_id())
+    .bind(run_origin_at_birth(&req.user_id))
     .fetch_optional(&mut *tx)
     .await
     .map_err(|e| Status::internal(e.to_string()))?;
@@ -8841,9 +8872,11 @@ mod tests {
         agent_run_thread_key, append_letta_memory_rows, assemble_segments,
         assistant_reply_slot_is_open, authorize_dataplane, claim_scheduled_step_inner,
         complete_step_inner, derive_idempotency_hash, finalize_tool_action_inner,
-        normalize_thread_presentation_text, pb, record_scheduled_run_result_inner,
+        normalize_thread_presentation_text, pb, persist_scheduled_run_bindings,
+        record_scheduled_run_result_inner,
         record_scheduled_step_receipt_inner, reserve_tool_action_inner, resolve_dataplane_addr,
-        resolve_residency, resolve_thread_origin, scheduled_run_execution_payload_digest,
+        resolve_residency, resolve_thread_origin, run_origin_at_birth,
+        scheduled_run_execution_payload_digest,
         semantic_context_search_status, support_thread_id, thread_append_payload_digest,
         thread_create_payload_digest, valid_scheduled_run_identifier,
         valid_scheduled_step_digest, validate_append_space_context_shape,
@@ -9087,6 +9120,217 @@ mod tests {
         .execute(pool)
         .await
         .expect("seed fire");
+    }
+
+    /// Unit proof for WS20 S2: a person's run is stamped chat at birth, and a system
+    /// owner's run carries no stamp, so a scheduled run takes its origin from its binding.
+    #[test]
+    fn run_origin_is_stamped_at_birth_for_people_only() {
+        assert_eq!(
+            run_origin_at_birth("user-123"),
+            serde_json::json!({"origin": "chat"})
+        );
+        assert_eq!(
+            run_origin_at_birth("service:orchestrator-core"),
+            serde_json::json!({})
+        );
+    }
+
+    /// The immutable binding a scheduled run must carry, as `persist_scheduled_run_bindings`
+    /// reads it back. Without the `origin` key: that is the shape a legacy run has.
+    fn scheduled_binding_metadata(suffix: &str) -> serde_json::Value {
+        serde_json::json!({
+            "source": "scheduled_run",
+            "schedule_id": format!("schedule-{suffix}"),
+            "fire_key": format!("fire-{suffix}"),
+            "space_id": format!("scheduled-space-{suffix}"),
+            "subject_id": format!("subject-{suffix}"),
+            "template_digest": format!("sha256:{}", "a".repeat(64)),
+            "policy_digest": format!("sha256:{}", "b".repeat(64)),
+            "idempotency_key": format!("fire-{suffix}:step:0"),
+        })
+    }
+
+    /// The bind request matching `scheduled_binding_metadata`, for the same run and thread.
+    fn scheduled_bind_request(
+        run_id: &str,
+        thread_id: &str,
+        org_id: &str,
+        suffix: &str,
+    ) -> pb::StartScheduledRunRequest {
+        pb::StartScheduledRunRequest {
+            thread_id: thread_id.to_owned(),
+            run_id: run_id.to_owned(),
+            org_id: org_id.to_owned(),
+            schedule_id: format!("schedule-{suffix}"),
+            fire_key: format!("fire-{suffix}"),
+            goal: "scheduled proof goal".to_owned(),
+            human_subject_id: format!("subject-{suffix}"),
+            template_digest: format!("sha256:{}", "a".repeat(64)),
+            policy_digest: format!("sha256:{}", "b".repeat(64)),
+            idempotency_key: format!("fire-{suffix}:step:0"),
+            ..Default::default()
+        }
+    }
+
+    /// Seeds a scheduled thread and a bare run owned by Orchestrator Core carrying
+    /// `metadata`, so `persist_scheduled_run_bindings` has a run to bind.
+    async fn seeded_unbound_scheduled_run(
+        pool: &sqlx::PgPool,
+        suffix: &str,
+        metadata: serde_json::Value,
+    ) -> (String, String, String) {
+        let run_id = format!("scheduled-run-{suffix}");
+        let thread_id = format!("scheduled-thread-{suffix}");
+        let org_id = format!("scheduled-org-{suffix}");
+        let space_id = format!("scheduled-space-{suffix}");
+        let audience_hash = format!("sha256:{}", "c".repeat(64));
+        sqlx::query(
+            "INSERT INTO threads
+             (id, session_key, org_id, user_id, space_id, space_decision_ref,
+              recipient_audience_ref, recipient_audience_revision,
+              recipient_audience_hash, privacy_policy_ref,
+              resource_authorization_ref, authority_revision, origin)
+             VALUES ($1,$2,$3,'service:orchestrator-core',$4,$5,$6,1,$7,$8,$9,1,'space')",
+        )
+        .bind(&thread_id)
+        .bind(&thread_id)
+        .bind(&org_id)
+        .bind(&space_id)
+        .bind(format!("decision-{suffix}"))
+        .bind(format!("audience-{suffix}"))
+        .bind(&audience_hash)
+        .bind(format!("privacy-{suffix}"))
+        .bind(format!("resource-{suffix}"))
+        .execute(pool)
+        .await
+        .expect("seed scheduled thread");
+        sqlx::query(
+            "INSERT INTO runs
+             (id, thread_id, goal, org_id, user_id, status, metadata,
+              space_id, space_decision_ref, recipient_audience_ref,
+              recipient_audience_revision, recipient_audience_hash,
+              privacy_policy_ref, resource_authorization_ref, authority_revision)
+             VALUES ($1,$2,'scheduled proof goal',$3,'service:orchestrator-core',
+                     'queued',$4,$5,$6,$7,1,$8,$9,$10,1)",
+        )
+        .bind(&run_id)
+        .bind(&thread_id)
+        .bind(&org_id)
+        .bind(metadata)
+        .bind(&space_id)
+        .bind(format!("decision-{suffix}"))
+        .bind(format!("audience-{suffix}"))
+        .bind(&audience_hash)
+        .bind(format!("privacy-{suffix}"))
+        .bind(format!("resource-{suffix}"))
+        .execute(pool)
+        .await
+        .expect("seed scheduled run");
+        (run_id, thread_id, org_id)
+    }
+
+    /// Real-Postgres proof for WS20 S2: a scheduled binding stamps `origin: schedule`
+    /// into the run's immutable metadata, and a legacy run that carries the exact
+    /// binding but no stamp takes it in place, keeping every other key.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn scheduled_run_binding_stamps_origin() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+
+        let suffix = mp_ids::new_ulid();
+        let (run_id, thread_id, org_id) =
+            seeded_unbound_scheduled_run(&pool, &suffix, serde_json::json!({})).await;
+        persist_scheduled_run_bindings(
+            &pool,
+            &scheduled_bind_request(&run_id, &thread_id, &org_id, &suffix),
+        )
+        .await
+        .expect("a fresh scheduled run binds");
+        let origin: String =
+            sqlx::query_scalar("SELECT metadata->>'origin' FROM runs WHERE id = $1")
+                .bind(&run_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read origin");
+        assert_eq!(origin, "schedule");
+
+        let legacy = mp_ids::new_ulid();
+        let (legacy_run, legacy_thread, legacy_org) =
+            seeded_unbound_scheduled_run(&pool, &legacy, scheduled_binding_metadata(&legacy))
+                .await;
+        persist_scheduled_run_bindings(
+            &pool,
+            &scheduled_bind_request(&legacy_run, &legacy_thread, &legacy_org, &legacy),
+        )
+        .await
+        .expect("a legacy run with the exact binding takes the stamp");
+        let (stamped, schedule_id): (String, String) = sqlx::query_as(
+            "SELECT metadata->>'origin', metadata->>'schedule_id' FROM runs WHERE id = $1",
+        )
+        .bind(&legacy_run)
+        .fetch_one(&pool)
+        .await
+        .expect("read legacy metadata");
+        assert_eq!(stamped, "schedule");
+        assert_eq!(schedule_id, format!("schedule-{legacy}"));
+    }
+
+    /// Real-Postgres proof for WS20 S2: a run already stamped with another origin is
+    /// never rebound to a schedule, and its stamp is left as it was. A run already
+    /// stamped `schedule` with the same binding still binds, so a retry is idempotent.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn a_run_cannot_be_rebound_to_another_origin() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+
+        let suffix = mp_ids::new_ulid();
+        let mut chat_metadata = scheduled_binding_metadata(&suffix);
+        chat_metadata["origin"] = serde_json::json!("chat");
+        let (run_id, thread_id, org_id) =
+            seeded_unbound_scheduled_run(&pool, &suffix, chat_metadata).await;
+        let status = persist_scheduled_run_bindings(
+            &pool,
+            &scheduled_bind_request(&run_id, &thread_id, &org_id, &suffix),
+        )
+        .await
+        .expect_err("a chat-stamped run must not bind as a schedule");
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+        let origin: String =
+            sqlx::query_scalar("SELECT metadata->>'origin' FROM runs WHERE id = $1")
+                .bind(&run_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read origin");
+        assert_eq!(origin, "chat");
+
+        let retry = mp_ids::new_ulid();
+        let mut scheduled_metadata = scheduled_binding_metadata(&retry);
+        scheduled_metadata["origin"] = serde_json::json!("schedule");
+        let (retry_run, retry_thread, retry_org) =
+            seeded_unbound_scheduled_run(&pool, &retry, scheduled_metadata).await;
+        persist_scheduled_run_bindings(
+            &pool,
+            &scheduled_bind_request(&retry_run, &retry_thread, &retry_org, &retry),
+        )
+        .await
+        .expect("a retry of an already-stamped schedule binds again");
     }
 
     /// Real-Postgres proof for WS20 S1: a scheduled answer is appended to its thread

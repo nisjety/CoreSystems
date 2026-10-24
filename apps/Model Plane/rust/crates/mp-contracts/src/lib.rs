@@ -12,6 +12,7 @@ pub mod prompt_tier;
 pub mod provider_reads;
 pub mod retention;
 pub mod run_context;
+pub mod run_origin;
 pub mod skill_recovery;
 pub mod tool_arguments;
 pub mod tool_class;
