@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -31,6 +32,7 @@ import (
 	"github.com/triodelab/model-plane/services/capability-core/internal/authz"
 	"github.com/triodelab/model-plane/services/capability-core/internal/crypto"
 	"github.com/triodelab/model-plane/services/capability-core/internal/reconcile"
+	"github.com/triodelab/model-plane/services/capability-core/internal/skillbundle"
 )
 
 type registryDatabase interface {
@@ -356,6 +358,197 @@ func (h *SkillsHandler) update(w http.ResponseWriter, r *http.Request, id string
 func (h *SkillsHandler) delete(w http.ResponseWriter, r *http.Request, id string) {
 	result, err := h.pool.Exec(r.Context(), `DELETE FROM agent_skills WHERE id=$1 AND org_id=$2`, id, verifiedOrganizationID(r))
 	if !writeSingleScopedMutation(w, "agent skill", result, err) {
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---------------------------------------------------------------------------
+// SkillBundlesHandler  /api/v1/skills/{id}/bundle (WS19-S6)
+// ---------------------------------------------------------------------------
+
+const skillBundlesAPIEnv = "SKILL_BUNDLES_ENABLED"
+
+// maxSkillBundleBodyBytes bounds an upload before it is read: the caps on the unpacked files
+// and room for the zip headers of the most entries a bundle may hold.
+const maxSkillBundleBodyBytes = skillbundle.MaxTotalBytes + 256<<10
+
+// SkillBundlesAPIFromLookup reads SKILL_BUNDLES_ENABLED strictly: only the literal "true"
+// turns the surface on, so a typo or a stray "1" leaves it dark.
+func SkillBundlesAPIFromLookup(lookup func(string) string) bool {
+	return lookup(skillBundlesAPIEnv) == "true"
+}
+
+// SkillBundlesHandler serves PUT, GET and DELETE on /api/v1/skills/{id}/bundle. Every route is
+// an org admin's: uploading a bundle puts executable scripts in front of the agent, so the
+// surface is org configuration, never a member's. While the switch is off every route is a 404
+// before anything is read or written.
+type SkillBundlesHandler struct {
+	store   *skillbundle.Store
+	enabled bool
+}
+
+// NewSkillBundlesHandler constructs the handler; enabled comes from SkillBundlesAPIFromLookup.
+func NewSkillBundlesHandler(db skillbundle.DB, enabled bool) *SkillBundlesHandler {
+	return &SkillBundlesHandler{store: skillbundle.NewStore(db), enabled: enabled}
+}
+
+// Register mounts the bundle route. Its more specific pattern takes precedence over the
+// /api/v1/skills/ subtree that SkillsHandler serves.
+func (h *SkillBundlesHandler) Register(mux *http.ServeMux) {
+	mux.HandleFunc("/api/v1/skills/{id}/bundle", h.serve)
+}
+
+type skillBundleFileView struct {
+	Path       string `json:"path"`
+	SHA256     string `json:"sha256"`
+	SizeBytes  int64  `json:"size_bytes"`
+	Executable bool   `json:"executable"`
+	Binary     bool   `json:"binary"`
+}
+
+type skillBundleManifestView struct {
+	SkillID        string                `json:"skill_id"`
+	ManifestSHA256 string                `json:"manifest_sha256"`
+	Files          []skillBundleFileView `json:"files"`
+}
+
+type skillBundleSummaryView struct {
+	SkillID        string    `json:"skill_id"`
+	ManifestSHA256 string    `json:"manifest_sha256"`
+	FileCount      int       `json:"file_count"`
+	TotalBytes     int64     `json:"total_bytes"`
+	CreatedBy      string    `json:"created_by"`
+	CreatedAt      time.Time `json:"created_at"`
+	Replaced       bool      `json:"replaced"`
+}
+
+func (h *SkillBundlesHandler) serve(w http.ResponseWriter, r *http.Request) {
+	if !h.enabled {
+		http.NotFound(w, r)
+		return
+	}
+	principal, ok := authctx.PrincipalFromContext(r.Context())
+	if !ok || principal.OrganizationID == "" || principal.ActorID == "" {
+		jsonErr(w, "authentication required", http.StatusUnauthorized)
+		return
+	}
+	if !verifiedIsAdmin(r) {
+		jsonErr(w, "only an admin may manage skill bundles", http.StatusForbidden)
+		return
+	}
+	skillID := r.PathValue("id")
+	if !mcpIdentifier.MatchString(skillID) {
+		jsonErr(w, "invalid skill id", http.StatusBadRequest)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		h.get(w, r, principal.OrganizationID, skillID)
+	case http.MethodPut:
+		if !skillBundleWriter(w, principal) {
+			return
+		}
+		h.put(w, r, principal, skillID)
+	case http.MethodDelete:
+		if !skillBundleWriter(w, principal) {
+			return
+		}
+		h.delete(w, r, principal, skillID)
+	default:
+		jsonErr(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// skillBundleWriter answers the refusals a write needs: a person holding the capability write
+// scope. A workload identity, even one with admin scopes, may not put a bundle in place.
+func skillBundleWriter(w http.ResponseWriter, principal authctx.Principal) bool {
+	if principal.PrincipalType != "user" {
+		jsonErr(w, "only a person may change a skill bundle", http.StatusForbidden)
+		return false
+	}
+	if !principal.HasScope(authz.WriteScope) {
+		jsonErr(w, "capability write scope required", http.StatusForbidden)
+		return false
+	}
+	return true
+}
+
+// get is GET /api/v1/skills/{id}/bundle: the manifest of the org's bundle for the skill. The
+// bytes are read by digest through the RPC, so the manifest carries no file body.
+func (h *SkillBundlesHandler) get(w http.ResponseWriter, r *http.Request, orgID, skillID string) {
+	manifest, err := h.store.Manifest(r.Context(), orgID, skillID)
+	if errors.Is(err, skillbundle.ErrNotFound) {
+		jsonErr(w, "skill bundle not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		slog.Error("read skill bundle manifest failed", "error", err)
+		jsonErr(w, "database unavailable", http.StatusInternalServerError)
+		return
+	}
+	files := make([]skillBundleFileView, 0, len(manifest.Files))
+	for _, file := range manifest.Files {
+		files = append(files, skillBundleFileView{Path: file.Path, SHA256: file.SHA256, SizeBytes: file.Size, Executable: file.Executable, Binary: file.Binary})
+	}
+	writeJSON(w, skillBundleManifestView{SkillID: skillID, ManifestSHA256: manifest.ManifestSHA256, Files: files})
+}
+
+// put is PUT /api/v1/skills/{id}/bundle: the body is the bundle zip. A bundle that fails any
+// check is refused with its closed code and nothing is stored. A new upload replaces the
+// skill's bundle, and answers 201 for a first upload and 200 for a replacement.
+func (h *SkillBundlesHandler) put(w http.ResponseWriter, r *http.Request, principal authctx.Principal, skillID string) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxSkillBundleBodyBytes)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			jsonErr(w, "bundle_too_large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		jsonErr(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	bundle, err := skillbundle.Parse(body)
+	if err != nil {
+		var refusal *skillbundle.RefusalError
+		if errors.As(err, &refusal) {
+			jsonErr(w, refusal.Code, http.StatusUnprocessableEntity)
+			return
+		}
+		jsonErr(w, "invalid skill bundle", http.StatusUnprocessableEntity)
+		return
+	}
+	result, err := h.store.Put(r.Context(), principal.OrganizationID, skillID, principal.ActorID, bundle)
+	if err != nil {
+		slog.Error("write skill bundle failed", "error", err)
+		jsonErr(w, "database unavailable", http.StatusInternalServerError)
+		return
+	}
+	status := http.StatusCreated
+	if result.Replaced {
+		status = http.StatusOK
+	}
+	summary := result.Summary
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(skillBundleSummaryView{
+		SkillID: summary.SkillID, ManifestSHA256: summary.ManifestSHA256, FileCount: summary.FileCount,
+		TotalBytes: summary.TotalBytes, CreatedBy: summary.CreatedBy, CreatedAt: summary.CreatedAt, Replaced: result.Replaced,
+	})
+}
+
+// delete is DELETE /api/v1/skills/{id}/bundle: removes the org's bundle; its files cascade and
+// blobs no other bundle names are dropped.
+func (h *SkillBundlesHandler) delete(w http.ResponseWriter, r *http.Request, principal authctx.Principal, skillID string) {
+	err := h.store.Delete(r.Context(), principal.OrganizationID, skillID, principal.ActorID)
+	if errors.Is(err, skillbundle.ErrNotFound) {
+		jsonErr(w, "skill bundle not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		slog.Error("delete skill bundle failed", "error", err)
+		jsonErr(w, "database unavailable", http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

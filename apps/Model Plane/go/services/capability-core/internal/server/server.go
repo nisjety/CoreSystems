@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
 	"github.com/triodelab/model-plane/pkg/authctx"
@@ -16,6 +17,7 @@ import (
 	"github.com/triodelab/model-plane/services/capability-core/internal/models"
 	"github.com/triodelab/model-plane/services/capability-core/internal/policy"
 	"github.com/triodelab/model-plane/services/capability-core/internal/registry"
+	"github.com/triodelab/model-plane/services/capability-core/internal/skillbundle"
 	"github.com/triodelab/model-plane/services/capability-core/internal/telemetry"
 
 	"github.com/jackc/pgx/v5"
@@ -40,6 +42,8 @@ type Server struct {
 	toolRank            toolDefinitionSearcher
 	decisionProofSigner *DecisionProofSigner
 	toolDB              toolBindingDatabase // optional: enables tool-level binding
+	skillBundles        skillBundleReader
+	skillBundlesEnabled bool
 }
 
 // modelCapabilitySource is the narrow slice of the models registry the
@@ -50,6 +54,14 @@ type Server struct {
 type modelCapabilitySource interface {
 	ListAsCapabilitiesForOrg(ctx context.Context, orgID string) ([]*models.Capability, error)
 	GetByCapabilityIDForOrg(ctx context.Context, id, orgID string) (*registry.Model, error)
+}
+
+// skillBundleReader is the read side of the skill bundle store. *skillbundle.Store
+// satisfies it; the RPCs take the narrow slice so tests can stand a fake in.
+type skillBundleReader interface {
+	List(ctx context.Context, orgID string, skillIDs []string) ([]skillbundle.Summary, error)
+	Manifest(ctx context.Context, orgID, skillID string) (skillbundle.Manifest, error)
+	Blob(ctx context.Context, orgID, skillID, digest string) ([]byte, error)
 }
 
 type toolDefinitionSearcher interface {
@@ -159,6 +171,15 @@ func (s *Server) WithDecisionProofSigner(signer *DecisionProofSigner) *Server {
 // than the tool's own declaration.
 func (s *Server) WithToolBindingDatabase(db toolBindingDatabase) *Server {
 	s.toolDB = db
+	return s
+}
+
+// WithSkillBundles attaches the skill bundle store the bundle read RPCs serve from. The
+// switch arrives already parsed, so only the literal "true" of SKILL_BUNDLES_ENABLED turns
+// the reads on; with it off, or with no store, they answer an empty list or NotFound.
+func (s *Server) WithSkillBundles(store skillBundleReader, enabled bool) *Server {
+	s.skillBundles = store
+	s.skillBundlesEnabled = enabled && store != nil
 	return s
 }
 
@@ -890,6 +911,91 @@ func (s *Server) ValidateSkillBundle(ctx context.Context, req *mpv1.ValidateSkil
 	}
 	detail := toDetail(capability)
 	return &mpv1.ValidateSkillBundleResponse{Valid: len(validationErrors) == 0, Errors: validationErrors, Capability: detail}, nil
+}
+
+// ListSkillBundles returns the org's skill bundle summaries, narrowed to the requested skill
+// ids when any are given. While SKILL_BUNDLES_ENABLED is off it answers an empty list.
+func (s *Server) ListSkillBundles(ctx context.Context, req *mpv1.ListSkillBundlesRequest) (*mpv1.ListSkillBundlesResponse, error) {
+	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "ListSkillBundles")))
+	orgID, err := verifiedOrganizationID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !s.skillBundlesEnabled {
+		return &mpv1.ListSkillBundlesResponse{}, nil
+	}
+	summaries, err := s.skillBundles.List(ctx, orgID, req.SkillIds)
+	if err != nil {
+		return nil, skillBundleErr(err)
+	}
+	bundles := make([]*mpv1.SkillBundleSummary, 0, len(summaries))
+	for _, summary := range summaries {
+		bundles = append(bundles, &mpv1.SkillBundleSummary{
+			SkillId:        summary.SkillID,
+			ManifestSha256: summary.ManifestSHA256,
+			FileCount:      int32(summary.FileCount),
+			TotalBytes:     summary.TotalBytes,
+			CreatedBy:      summary.CreatedBy,
+			CreatedAt:      summary.CreatedAt.UTC().Format(time.RFC3339),
+		})
+	}
+	return &mpv1.ListSkillBundlesResponse{Bundles: bundles}, nil
+}
+
+// GetSkillBundleManifest returns the digest and file metadata of the org's bundle for a skill,
+// never a file body. While SKILL_BUNDLES_ENABLED is off every skill reads as having no bundle.
+func (s *Server) GetSkillBundleManifest(ctx context.Context, req *mpv1.GetSkillBundleManifestRequest) (*mpv1.SkillBundleManifest, error) {
+	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "GetSkillBundleManifest")))
+	orgID, err := verifiedOrganizationID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !s.skillBundlesEnabled {
+		return nil, skillBundleErr(skillbundle.ErrNotFound)
+	}
+	manifest, err := s.skillBundles.Manifest(ctx, orgID, req.SkillId)
+	if err != nil {
+		return nil, skillBundleErr(err)
+	}
+	files := make([]*mpv1.SkillBundleFile, 0, len(manifest.Files))
+	for _, file := range manifest.Files {
+		files = append(files, &mpv1.SkillBundleFile{
+			Path:       file.Path,
+			Sha256:     file.SHA256,
+			SizeBytes:  file.Size,
+			Executable: file.Executable,
+			Binary:     file.Binary,
+		})
+	}
+	return &mpv1.SkillBundleManifest{SkillId: req.SkillId, ManifestSha256: manifest.ManifestSHA256, Files: files}, nil
+}
+
+// GetSkillBlob returns one file body of the org's bundle for a skill, addressed by digest. A
+// digest the skill's own bundle does not name is NotFound, even when another skill stores the
+// same bytes.
+func (s *Server) GetSkillBlob(ctx context.Context, req *mpv1.GetSkillBlobRequest) (*mpv1.GetSkillBlobResponse, error) {
+	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "GetSkillBlob")))
+	orgID, err := verifiedOrganizationID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !s.skillBundlesEnabled {
+		return nil, skillBundleErr(skillbundle.ErrNotFound)
+	}
+	content, err := s.skillBundles.Blob(ctx, orgID, req.SkillId, req.Sha256)
+	if err != nil {
+		return nil, skillBundleErr(err)
+	}
+	return &mpv1.GetSkillBlobResponse{Content: content}, nil
+}
+
+// skillBundleErr maps a skill bundle store error to a status. The store's own messages name SQL
+// steps, so any failure other than a missing bundle answers a fixed Internal message.
+func skillBundleErr(err error) error {
+	if errors.Is(err, skillbundle.ErrNotFound) {
+		return status.Error(codes.NotFound, "skill bundle not found")
+	}
+	return status.Error(codes.Internal, "skill bundle store unavailable")
 }
 
 // CheckSkillPromotion validates whether a skill may move between scopes.

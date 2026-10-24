@@ -34,6 +34,15 @@ service CapabilityCore {
 
   // Promote a skill to a new scope.
   rpc PromoteSkill(PromoteSkillRequest) returns (PromoteSkillResponse);
+
+  // List the skill bundles an org holds, optionally narrowed to some skills.
+  rpc ListSkillBundles(ListSkillBundlesRequest) returns (ListSkillBundlesResponse);
+
+  // Read one skill bundle manifest: its files, digests and sizes.
+  rpc GetSkillBundleManifest(GetSkillBundleManifestRequest) returns (SkillBundleManifest);
+
+  // Read one blob of a skill bundle by its sha256 digest.
+  rpc GetSkillBlob(GetSkillBlobRequest) returns (GetSkillBlobResponse);
 }
 
 message ListCapabilitiesRequest {
@@ -305,4 +314,52 @@ message PromoteSkillResponse {
   repeated string checks = 2;
   string reason = 3;
   CapabilityDetail capability = 4;
+}
+
+message ListSkillBundlesRequest {
+  // Empty lists every skill bundle of the caller's organization.
+  repeated string skill_ids = 1;
+}
+
+message ListSkillBundlesResponse {
+  repeated SkillBundleSummary bundles = 1;
+}
+
+message SkillBundleSummary {
+  string skill_id = 1;
+  string manifest_sha256 = 2;
+  int32 file_count = 3;
+  int64 total_bytes = 4;
+  string created_by = 5;
+  // RFC3339 timestamp of the upload that holds this bundle.
+  string created_at = 6;
+}
+
+message GetSkillBundleManifestRequest {
+  string skill_id = 1;
+}
+
+message SkillBundleManifest {
+  string skill_id = 1;
+  string manifest_sha256 = 2;
+  repeated SkillBundleFile files = 3;
+}
+
+message SkillBundleFile {
+  // Relative path inside the bundle, always with forward slashes.
+  string path = 1;
+  string sha256 = 2;
+  int64 size_bytes = 3;
+  bool executable = 4;
+  // True when the file is not UTF-8 text, so a reader returns metadata only.
+  bool binary = 5;
+}
+
+message GetSkillBlobRequest {
+  string skill_id = 1;
+  string sha256 = 2;
+}
+
+message GetSkillBlobResponse {
+  bytes content = 1;
 }
