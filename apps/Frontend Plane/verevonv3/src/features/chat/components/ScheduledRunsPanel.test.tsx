@@ -24,13 +24,21 @@ vi.mock('@/shared/api/cron-client', async (importOriginal) => {
     listCronSchedules: vi.fn(),
     updateCronSchedule: vi.fn(),
     deleteCronSchedule: vi.fn(),
+    listScheduleFires: vi.fn(),
   }
 })
 
-import { listCronSchedules, updateCronSchedule, deleteCronSchedule, type CronSchedule } from '@/shared/api/cron-client'
+import {
+  listCronSchedules,
+  listScheduleFires,
+  updateCronSchedule,
+  deleteCronSchedule,
+  type CronSchedule,
+} from '@/shared/api/cron-client'
 import { ScheduledRunsPanel } from './ScheduledRunsPanel'
 
 const mockedList = vi.mocked(listCronSchedules)
+const mockedFires = vi.mocked(listScheduleFires)
 const mockedUpdate = vi.mocked(updateCronSchedule)
 const mockedDelete = vi.mocked(deleteCronSchedule)
 
@@ -52,6 +60,7 @@ function schedule(overrides: Partial<CronSchedule>): CronSchedule {
 afterEach(() => {
   vi.clearAllMocks()
   vi.restoreAllMocks()
+  vi.unstubAllEnvs()
 })
 
 describe('ScheduledRunsPanel', () => {
@@ -76,6 +85,65 @@ describe('ScheduledRunsPanel', () => {
 
     const button = await screen.findByText('Se resultater')
     expect((button as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('keeps "Se resultater" disabled while VITE_SCHEDULE_RESULTS is off', async () => {
+    mockedList.mockResolvedValue({ schedules: [schedule({})] })
+
+    render(() => <ScheduledRunsPanel />)
+
+    const button = await screen.findByText('Se resultater')
+    expect((button as HTMLButtonElement).disabled).toBe(true)
+    expect(mockedFires).not.toHaveBeenCalled()
+  })
+
+  it('opens the last fires of a schedule with status, origin, withheld count and a transcript link', async () => {
+    vi.stubEnv('VITE_SCHEDULE_RESULTS', 'true')
+    mockedList.mockResolvedValue({ schedules: [schedule({})] })
+    mockedFires.mockResolvedValue([
+      {
+        id: 'fire_1',
+        fired_at: '2026-10-23T07:00:00Z',
+        status: 'completed',
+        outcome: 'needs_review',
+        run_id: 'run_1',
+        thread_id: 'thread_1',
+        withheld_effects: 2,
+      },
+    ])
+
+    render(() => <ScheduledRunsPanel />)
+    fireEvent.click(await screen.findByText('Se resultater'))
+
+    await waitFor(() => expect(mockedFires).toHaveBeenCalledWith('org-1', 'cron_1'))
+    expect(await screen.findByText('Fullført')).toBeTruthy()
+    expect(screen.getByText('Trenger gjennomgang')).toBeTruthy()
+    expect(screen.getByText('Plan')).toBeTruthy()
+    expect(screen.getByText(/Holdt tilbake: 2/)).toBeTruthy()
+    const link = screen.getByText('Åpne samtalen').closest('a')
+    expect(link?.getAttribute('href')).toBe('/chat?thread_id=thread_1')
+  })
+
+  it('says so when a schedule has no fires yet', async () => {
+    vi.stubEnv('VITE_SCHEDULE_RESULTS', 'true')
+    mockedList.mockResolvedValue({ schedules: [schedule({})] })
+    mockedFires.mockResolvedValue([])
+
+    render(() => <ScheduledRunsPanel />)
+    fireEvent.click(await screen.findByText('Se resultater'))
+
+    expect(await screen.findByText('Ingen kjøringer ennå.')).toBeTruthy()
+  })
+
+  it('shows an honest error when the fires cannot be loaded', async () => {
+    vi.stubEnv('VITE_SCHEDULE_RESULTS', 'true')
+    mockedList.mockResolvedValue({ schedules: [schedule({})] })
+    mockedFires.mockRejectedValue(new Error('upstream down'))
+
+    render(() => <ScheduledRunsPanel />)
+    fireEvent.click(await screen.findByText('Se resultater'))
+
+    expect(await screen.findByText('Kunne ikke laste resultatene.')).toBeTruthy()
   })
 
   it('pauses an active schedule via updateCronSchedule', async () => {

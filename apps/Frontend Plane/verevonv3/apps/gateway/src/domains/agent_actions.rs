@@ -53,6 +53,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/cron/{cron_id}",
             post(update_cron).delete(delete_cron),
         )
+        .route("/api/v1/cron/{cron_id}/fires", get(list_cron_fires))
         .route("/api/v1/capabilities", get(list_capabilities))
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
 }
@@ -446,6 +447,52 @@ async fn list_cron(
     .await
 }
 
+/// The recent fires of one schedule, for "See results". Creator-scoped like
+/// update and delete: an org admin/owner, or the schedule's own creator. The
+/// fires themselves are read from capability-core for the verified org.
+async fn list_cron_fires(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(cron_id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let token = shared::model_token(&state, &user, &headers).await;
+    let capability = match shared::required_capability_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(err) => return shared::delegated_auth_unavailable(err).into_response(),
+    };
+    if let Err(response) = authorize_own_schedule(
+        &state,
+        &user,
+        &cron_id,
+        token.as_deref(),
+        &capability,
+        "Only an organization admin or this schedule's own creator can see its results.",
+    )
+    .await
+    {
+        return response.into_response();
+    }
+    let url = format!(
+        "{}/v1/cron/{}/fires{}",
+        state.model_gateway_url,
+        urlencoding::encode(&cron_id),
+        build_query(&params)
+    );
+    shared::proxy_model_json_with_capability(
+        &state,
+        Method::GET,
+        &url,
+        None,
+        token.as_deref(),
+        Some(&capability),
+        &user,
+    )
+    .await
+    .into_response()
+}
+
 /// SCHEDULE_CONTRACT_ENABLED (DEC-16). Read strictly: only the literal `true`
 /// lets a create carry a stored-consent contract to Control, so anything else
 /// leaves schedules draft-only.
@@ -699,7 +746,12 @@ async fn list_capabilities(
 mod tests {
     use super::{can_author_own_schedule, cron_create_names_explicit_space};
     use crate::middleware::AuthenticatedUser;
-    use serde_json::json;
+    use axum::{body::Body, http::Request};
+    use http_body_util::BodyExt;
+    use serde_json::{json, Value};
+    use tower::ServiceExt;
+    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn member(user_id: &str) -> AuthenticatedUser {
         AuthenticatedUser {
@@ -766,5 +818,117 @@ mod tests {
     #[test]
     fn create_cron_with_an_explicit_space_ref_still_requires_admin() {
         assert!(cron_create_names_explicit_space(&json!({"space_ref": "space-1"})));
+    }
+
+    // list_cron_fires — router-through: the session decides the org and the
+    // creator gate, and a forged org header never reaches model-gateway.
+    async fn fires_test_servers(creator: &str) -> (MockServer, MockServer, MockServer) {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+        for path in ["/api/model-plane/token", "/api/capability-core/token"] {
+            Mock::given(wm_method("GET"))
+                .and(wm_path(path))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({"token": "delegated-token"})),
+                )
+                .mount(&auth)
+                .await;
+        }
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId": "user-1", "orgId": "org-1", "role": "member", "onboardingStatus": "COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        let model = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/cron/cron_1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "cron_1", "creator_subject_id": creator
+            })))
+            .mount(&model)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/cron/cron_1/fires"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [{
+                "id": "fire_1", "status": "completed", "outcome": "completed",
+                "run_id": "run_1", "thread_id": "thread_1", "withheld_effects": 0
+            }]})))
+            .mount(&model)
+            .await;
+        (auth, user_core, model)
+    }
+
+    fn fires_test_state(
+        auth: &MockServer,
+        user_core: &MockServer,
+        model: &MockServer,
+    ) -> crate::config::AppState {
+        let mut state = crate::tests::test_state(false);
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        state.model_gateway_url = model.uri();
+        state
+    }
+
+    #[tokio::test]
+    async fn list_cron_fires_forwards_org_scope() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (auth, user_core, model) = fires_test_servers("user-1").await;
+        let state = fires_test_state(&auth, &user_core, &model);
+        let response = crate::build_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/cron/cron_1/fires?limit=5")
+                    .header("cookie", "better-auth.session_token=session-1")
+                    .header("x-verevon-org-id", "org-forged")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body["data"][0]["thread_id"], "thread_1");
+        let model_requests = model.received_requests().await.unwrap();
+        let fires = model_requests
+            .iter()
+            .find(|request| request.url.path() == "/v1/cron/cron_1/fires")
+            .expect("fires request reaches model-gateway");
+        assert_eq!(fires.url.query(), Some("limit=5"));
+        assert!(fires.headers.get("x-verevon-org-id").is_none());
+    }
+
+    #[tokio::test]
+    async fn list_cron_fires_refuses_a_member_who_did_not_create_the_schedule() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (auth, user_core, model) = fires_test_servers("user-2").await;
+        let state = fires_test_state(&auth, &user_core, &model);
+        let response = crate::build_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/cron/cron_1/fires")
+                    .header("cookie", "better-auth.session_token=session-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+        let model_requests = model.received_requests().await.unwrap();
+        assert!(model_requests
+            .iter()
+            .all(|request| request.url.path() != "/v1/cron/cron_1/fires"));
     }
 }

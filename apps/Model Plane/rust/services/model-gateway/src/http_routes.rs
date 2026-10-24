@@ -396,6 +396,7 @@ fn proxy_routes() -> Router<AppState> {
                 .patch(patch_cron_proxy)
                 .delete(delete_cron_proxy),
         )
+        .route("/v1/cron/:id/fires", get(list_cron_fires_proxy))
         // Memory
         .route(
             "/v1/memory",
@@ -6076,6 +6077,52 @@ async fn delete_cron_proxy(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
     proxy_to_capability_core(&s, &c, &bearer, &format!("cron/{id}"), "DELETE", None).await
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CronFiresQuery {
+    limit: Option<u32>,
+}
+
+/// The recent fires of one schedule. `limit` is typed, so only a number ever
+/// reaches the upstream path; capability-core applies the bounds.
+async fn list_cron_fires_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(id): Path<String>,
+    Query(query): Query<CronFiresQuery>,
+) -> Result<Json<Value>, HttpJsonError> {
+    proxy_to_capability_core(
+        &s,
+        &c,
+        &bearer,
+        &cron_fires_path(&id, query.limit),
+        "GET",
+        None,
+    )
+    .await
+}
+
+fn cron_fires_path(id: &str, limit: Option<u32>) -> String {
+    match limit {
+        Some(limit) => format!("cron/{id}/fires?limit={limit}"),
+        None => format!("cron/{id}/fires"),
+    }
+}
+
+#[cfg(test)]
+mod cron_fires_path_tests {
+    use super::cron_fires_path;
+
+    #[test]
+    fn fires_path_forwards_only_a_numeric_limit() {
+        assert_eq!(
+            cron_fires_path("cron_1", Some(5)),
+            "cron/cron_1/fires?limit=5"
+        );
+        assert_eq!(cron_fires_path("cron_1", None), "cron/cron_1/fires");
+    }
 }
 
 async fn list_memory_proxy(
