@@ -87,7 +87,7 @@ func applyMigration(t *testing.T, pool *pgxpool.Pool, name string) {
 	}
 }
 
-// newTestDB creates a fresh database with 0001 and 0003 applied and returns a pool on it.
+// newTestDB creates a fresh database with 0001, 0003 and 0004 applied and returns a pool on it.
 func newTestDB(t *testing.T) (*pgxpool.Pool, *pgxpool.Config) {
 	t.Helper()
 	bg := context.Background()
@@ -122,6 +122,7 @@ func newTestDB(t *testing.T) (*pgxpool.Pool, *pgxpool.Config) {
 	})
 	applyMigration(t, pool, "0001_browser_grants.up.sql")
 	applyMigration(t, pool, "0003_browser_grants_budget.up.sql")
+	applyMigration(t, pool, "0004_browser_grants_policy.up.sql")
 	return pool, cfg
 }
 

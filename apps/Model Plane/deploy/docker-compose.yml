@@ -1632,6 +1632,19 @@ services:
       # Same rule as the other limits: not a positive integer stops the broker at
       # boot; clamped to 32.
       BROWSER_BROKER_MAX_RUN_DOMAINS: ${BROWSER_BROKER_MAX_RUN_DOMAINS:-8}
+      # Human browsing and attach (WS8.C, internal/server/config.go). The switch is
+      # ON in this development compose and OFF in docker-compose.production.yml: a
+      # human_browse grant is open web minus the deny-list and is renewable for up to
+      # the absolute TTL (seconds, clamped to 30 s - 24 h). Anything but 1, 0, true
+      # or false stops the broker at boot. The deny-list is comma-separated DNS
+      # names (a leading dot is a pure suffix); unset uses the built-in default
+      # (.internal .local .localhost .localdomain .lan .home.arpa .svc
+      # metadata.google.internal metadata.goog). One attach grant holds at most
+      # MAX_ATTACH_DOMAINS hosts.
+      BROWSER_BROKER_HUMAN_BROWSE_ENABLED: ${BROWSER_BROKER_HUMAN_BROWSE_ENABLED:-1}
+      BROWSER_BROKER_HUMAN_ABSOLUTE_TTL_SECONDS: ${BROWSER_BROKER_HUMAN_ABSOLUTE_TTL_SECONDS:-14400}
+      BROWSER_BROKER_DENY_SUFFIXES: ${BROWSER_BROKER_DENY_SUFFIXES:-}
+      BROWSER_BROKER_MAX_ATTACH_DOMAINS: ${BROWSER_BROKER_MAX_ATTACH_DOMAINS:-8}
       # Durable grant store (WS1.C). Required: without it the broker exits 1 at
       # boot unless BROWSER_BROKER_ALLOW_EPHEMERAL_DEVELOPMENT=true (dev only).
       # Quarry's Postgres server (ingestion-postgres, reached over the

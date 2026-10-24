@@ -24,6 +24,11 @@ service BrowserBroker {
   // parent's, revoked with it. Idempotent on (parent_grant_id, session_key).
   rpc DeriveRunGrant(DeriveRunGrantRequest) returns (DeriveRunGrantResponse);
 
+  // Extend a renewable grant ("session" or "human_browse") by one TTL, never
+  // past its absolute expiry (WS8.C). User principals only: a service cannot
+  // keep a person's browser session alive.
+  rpc RenewGrant(RenewGrantRequest) returns (RenewGrantResponse);
+
   // Health check.
   rpc Health(BrowserHealthRequest) returns (BrowserHealthResponse);
 }
@@ -77,6 +82,13 @@ message AcquireGrantRequest {
   // Stamped by the broker when the claim is stored; a request that sets it
   // is refused.
   int64 budget_minted_at_unix = 44;
+
+  // Grant kind (WS8.C, field numbers 50-59 are the WS8 ledger entry of R-6).
+  // "" is the ordinary session or sensitive-approval path; "human_browse"
+  // asks for an open-web grant for a person's own browsing. Eligibility is
+  // server-decided: a human_browse request needs a user principal, carries no
+  // allowed_domains, and is refused when the broker's policy has it off.
+  string grant_kind = 50;
 }
 
 message AcquireGrantResponse {
@@ -121,6 +133,17 @@ message AcquireGrantResponse {
   // Stamped by the broker when the claim is stored; a request that sets it
   // is refused.
   int64 budget_minted_at_unix = 44;
+
+  // Navigation policy mode (WS8.C): "allowlist" (allowed_domains is the whole
+  // policy) or "open_web" (a human_browse grant: every public host except
+  // denied_domains). Never an empty value from a WS8.C broker.
+  string policy_mode = 50;
+  // Host suffixes an open_web grant may never reach (internal namespaces and
+  // metadata names). Empty for an allowlist grant.
+  repeated string denied_domains = 51;
+  // The hard backstop a renewal can never pass. Equals expires_at for a kind
+  // that is not renewable.
+  google.protobuf.Timestamp absolute_expires_at = 52;
 }
 
 message RevokeGrantRequest {
@@ -195,6 +218,13 @@ message ValidateGrantResponse {
   // Stamped by the broker when the claim is stored; a request that sets it
   // is refused.
   int64 budget_minted_at_unix = 44;
+
+  // Same values as AcquireGrantResponse (WS8.C).
+  string policy_mode = 50;
+  repeated string denied_domains = 51;
+  google.protobuf.Timestamp absolute_expires_at = 52;
+  // The run an "attach" grant is bound to; empty for every other kind.
+  string resource_id = 53;
 }
 
 message DeriveRunGrantRequest {
@@ -214,7 +244,8 @@ message DeriveRunGrantRequest {
   // host must equal or be a subdomain of a parent host.
   repeated string allowed_domains = 4;
 
-  // Why the run grant is derived. Only "ai_run" is accepted today.
+  // Why the run grant is derived: "ai_run", or "attach" (WS8.C) for a child of
+  // a session or human_browse grant bound to one run.
   string purpose = 5;
 
   // Requested lifetime in seconds; 0 uses the broker default. The expiry is
@@ -238,6 +269,10 @@ message DeriveRunGrantRequest {
   // Stamped by the broker when the claim is stored; a request that sets it
   // is refused.
   int64 budget_minted_at_unix = 44;
+
+  // The run an "attach" grant is bound to (WS8.C); required for purpose
+  // "attach", refused for "ai_run".
+  string resource_id = 50;
 }
 
 message DeriveRunGrantResponse {
@@ -247,7 +282,7 @@ message DeriveRunGrantResponse {
   // Canonical hosts of the run grant.
   repeated string allowed_domains = 4;
   string parent_grant_id = 5;
-  // Always "run".
+  // "run" for purpose ai_run, "attach" for purpose attach.
   string kind = 6;
   // Inherited from the parent; never lower than the parent's.
   bool zdr = 7;
@@ -269,4 +304,23 @@ message DeriveRunGrantResponse {
   // Stamped by the broker when the claim is stored; a request that sets it
   // is refused.
   int64 budget_minted_at_unix = 44;
+
+  // Echo of the bound run for an "attach" grant; empty for an ai_run grant.
+  string resource_id = 50;
+}
+
+message RenewGrantRequest {
+  // The grant to extend: kind "session" or "human_browse", owned by the caller.
+  string grant_id = 1;
+
+  // Tenant identifier; must equal the verified token's organization.
+  string org_id = 2;
+}
+
+message RenewGrantResponse {
+  // The new expiry: min(now + the broker TTL, absolute_expires_at).
+  google.protobuf.Timestamp expires_at = 1;
+
+  // The hard backstop; a renewal at the cap is FAILED_PRECONDITION.
+  google.protobuf.Timestamp absolute_expires_at = 2;
 }

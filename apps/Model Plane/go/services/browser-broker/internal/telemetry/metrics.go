@@ -18,6 +18,8 @@ var (
 	GrantsRevokedTotal metric.Int64Counter
 	// GrantsValidatedTotal counts grant validation attempts, labelled by outcome.
 	GrantsValidatedTotal metric.Int64Counter
+	// GrantsRenewedTotal counts renewal attempts (WS8.C), labelled by outcome.
+	GrantsRenewedTotal metric.Int64Counter
 	// GatewayRateLimitedTotal counts requests rejected by the gateway rate limiter, labelled by method.
 	GatewayRateLimitedTotal metric.Int64Counter
 	// GrantStoreErrorsTotal counts grant store failures (the database, not a
@@ -42,6 +44,10 @@ func init() {
 	GrantsValidatedTotal, _ = meter.Int64Counter(
 		"browser_broker_grants_validated_total",
 		metric.WithDescription("Total browser grant validation attempts, labelled by outcome."),
+	)
+	GrantsRenewedTotal, _ = meter.Int64Counter(
+		"browser_broker_grants_renewed_total",
+		metric.WithDescription("Total browser grant renewal attempts, labelled by outcome."),
 	)
 	GatewayRateLimitedTotal, _ = meter.Int64Counter(
 		"browser_broker_gateway_rate_limited_total",

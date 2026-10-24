@@ -178,12 +178,11 @@ func contractDerive_WideParentMustBeNarrowedExplicitly(t *testing.T, mk storeFac
 }
 
 // R-16: a derive from any derivable parent kind other than session must name
-// a non-empty host list of at most the run bound. No such kind ships yet
-// (human_browse is WS8.C), so the test registers one for its duration.
+// a non-empty host list of at most the run bound. human_browse (WS8.C) is that
+// kind; this test re-labels an allowlist parent as one to pin the rule on the
+// allowlist path (the open-web path is in humanbrowse_test.go).
 func TestDerive_NonSessionDerivableKindRequiresExplicitHosts(t *testing.T) {
-	const humanBrowse Kind = "human_browse"
-	derivableParents[humanBrowse] = derivePolicy{explicitHosts: true}
-	t.Cleanup(func() { delete(derivableParents, humanBrowse) })
+	const humanBrowse = KindHumanBrowse
 
 	store, _ := clockedRepo()
 	parent := session(t, store, CreateSessionParams{AllowedDomains: []string{"example.com"}})
@@ -509,6 +508,10 @@ func contractDerive_IsBoundedPerParentAndDoesNotConsumeTheOwnerCap(t *testing.T,
 type denyAll struct{}
 
 func (denyAll) CheckSession(context.Context, string, []string) error { return ErrDomainNotGrantable }
+
+func (denyAll) ResolveHumanBrowse(context.Context, string, string) (HumanBrowsePolicy, error) {
+	return HumanBrowsePolicy{}, nil
+}
 
 func contractDerive_RechecksTheHostPolicy(t *testing.T, mk storeFactory) {
 	store, _ := mk(t)

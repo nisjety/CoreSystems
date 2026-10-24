@@ -151,7 +151,7 @@ func scenarioC(t *testing.T, e *env) {
 	_, err = e.derive(userA, e.runReq(parent, "run-wide2", []string{"badexample.com"}))
 	s.code(err, codes.PermissionDenied, "badexample.com is not 'below' example.com (dot boundary)")
 	badPurpose := e.runReq(parent, "run-purpose", nil)
-	badPurpose.Purpose = "attach"
+	badPurpose.Purpose = "bogus" // "attach" is a real purpose since WS8.C
 	_, err = e.derive(userA, badPurpose)
 	s.code(err, codes.InvalidArgument, "an unknown purpose is refused")
 

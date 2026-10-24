@@ -53,6 +53,16 @@ func (r *recordingRepo) Derive(ctx context.Context, p DeriveParams) (*Grant, err
 	return r.inner.Derive(ctx, p)
 }
 
+func (r *recordingRepo) CreateHumanBrowse(ctx context.Context, p CreateHumanBrowseParams) (*Grant, error) {
+	r.record("create_human_browse", "", p.Zdr)
+	return r.inner.CreateHumanBrowse(ctx, p)
+}
+
+func (r *recordingRepo) Renew(ctx context.Context, p RenewParams) (*Grant, error) {
+	r.record("renew", p.GrantID, false)
+	return r.inner.Renew(ctx, p)
+}
+
 func (r *recordingRepo) GetScoped(ctx context.Context, id, orgID, ownerID string) (*Grant, error) {
 	r.record("get", id, false)
 	return r.inner.GetScoped(ctx, id, orgID, ownerID)

@@ -54,6 +54,11 @@ func main() {
 		"max_session_domains", cfg.MaxSessionDomains,
 		"max_active_grants_per_owner", cfg.MaxActivePerOwner,
 		"max_run_domains", cfg.MaxRunDomains,
+		// WS8.C: the effective human-browse settings, never a host or an org.
+		"human_browse_enabled", cfg.HumanBrowseEnabled,
+		"human_absolute_ttl_seconds", int(cfg.HumanAbsoluteTTL.Seconds()),
+		"max_attach_domains", cfg.MaxAttachDomains,
+		"deny_suffix_count", denySuffixCount(cfg),
 	)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
@@ -128,6 +133,15 @@ func main() {
 	slog.Info("shutting down")
 	grpcServer.GracefulStop()
 	_ = healthServer.Shutdown(context.Background())
+}
+
+// denySuffixCount is the size of the effective human-browse deny-list: the
+// configured one, or the built-in default.
+func denySuffixCount(cfg bbserver.Config) int {
+	if len(cfg.DenySuffixes) > 0 {
+		return len(cfg.DenySuffixes)
+	}
+	return len(grant.DefaultDeniedSuffixes)
 }
 
 // Purge cadence and retention (WS1.C): every 10 minutes, grants that expired
