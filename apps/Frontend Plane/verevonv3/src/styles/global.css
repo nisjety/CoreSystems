@@ -2780,6 +2780,28 @@ h3 {
   font-weight: 700;
 }
 
+.core-chat-sidebar__archive-toggle,
+.core-chat-sidebar__load-more {
+  display: flex;
+  height: 36px;
+  width: 100%;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 13px;
+  background: transparent;
+  margin-top: 6px;
+  color: var(--subtle);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.core-chat-sidebar__archive-toggle:hover,
+.core-chat-sidebar__load-more:hover {
+  background: var(--verevon-surface-soft);
+}
+
 .core-sidebar-dedicated-panel {
   display: flex;
   min-width: 0;

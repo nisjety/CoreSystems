@@ -54,3 +54,5 @@
 .chat-project-dialog__manage { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; margin-top: 20px; }
 .chat-project-dialog__footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 24px; }
 .chat-project-dialog__footer button[type='submit'] { background: var(--verevon-text); color: var(--panel); border-color: var(--verevon-text); }
+.chat-organizer__load-more { display: flex; width: 100%; min-height: 36px; align-items: center; justify-content: center; margin-top: 6px; border: 0; border-radius: 8px; color: inherit; background: transparent; font-size: 12px; font-weight: 700; cursor: pointer; }
+.chat-organizer__load-more:hover { background: var(--verevon-surface-soft); }
