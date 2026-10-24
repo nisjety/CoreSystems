@@ -1249,6 +1249,7 @@ process_signal             risky=no/no restricted=no rung=read_only/read_only ow
 process_start              risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
 process_stdin              risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
 publish_social_post        risky=yes/yes restricted=no rung=danger_full_access/danger_full_access owner=no consent=no ask=AwaitApproval/AwaitApproval auto=Allow/Allow
+read_provider_action       risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
 read_subagent_result       risky=no/no restricted=no rung=read_only/read_only owner=no consent=yes ask=AwaitApproval/AwaitApproval auto=AwaitApproval/AwaitApproval
 reattach_skill             risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
 recall_memory              risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow

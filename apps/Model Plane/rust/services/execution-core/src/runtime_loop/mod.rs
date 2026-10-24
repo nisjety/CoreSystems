@@ -19,6 +19,8 @@ pub mod subagent_results;
 pub(crate) mod session_core_rules_double;
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use mp_contracts::approval_cause::{self, CauseCode};
 use mp_contracts::model_plane::v1::{
@@ -142,6 +144,9 @@ const PUBLISH_SOCIAL_POST_TOOL: &str = "publish_social_post";
 /// write-approval check.
 const LIST_PROVIDER_ACTIONS_TOOL: &str = "list_provider_actions";
 const EXECUTE_PROVIDER_ACTION_TOOL: &str = "execute_provider_action";
+/// One read on a connected account the user selected for the turn (WS23-S3). Read-only: no body,
+/// a closed operation list, and an `integration:read` token.
+pub(crate) const READ_PROVIDER_ACTION_TOOL: &str = "read_provider_action";
 
 /// Namespace prefix for tools proxied to a registered MCP server
 /// (`mcp__<server_id>__<tool>`). Routed back through the gateway's
@@ -159,6 +164,9 @@ pub struct StepOutcome {
     /// Why the step paused for a person. Set only with `awaiting_approval`, so the
     /// loop that raises the approval can say which gate held the call.
     pub cause: Option<CauseCode>,
+    /// Set on a `read_provider_action` result that screening flagged or could not verify. The
+    /// loop that ran the read takes it into the run's [`ConnectorTaint`].
+    pub screening_taint: bool,
 }
 
 impl StepOutcome {
@@ -169,6 +177,7 @@ impl StepOutcome {
             error: String::new(),
             compaction_triggered: false,
             cause: None,
+            screening_taint: false,
         }
     }
 
@@ -179,6 +188,7 @@ impl StepOutcome {
             error: error.to_owned(),
             compaction_triggered: false,
             cause: None,
+            screening_taint: false,
         }
     }
 
@@ -189,6 +199,7 @@ impl StepOutcome {
             error: String::new(),
             compaction_triggered: false,
             cause: Some(cause),
+            screening_taint: false,
         }
     }
 
@@ -199,6 +210,7 @@ impl StepOutcome {
             error: "permission denied by policy".to_owned(),
             compaction_triggered: false,
             cause: None,
+            screening_taint: false,
         }
     }
 
@@ -209,6 +221,7 @@ impl StepOutcome {
             error: reason,
             compaction_triggered: false,
             cause: None,
+            screening_taint: false,
         }
     }
 
@@ -219,6 +232,7 @@ impl StepOutcome {
             error: reason,
             compaction_triggered: false,
             cause: None,
+            screening_taint: false,
         }
     }
 
@@ -229,6 +243,7 @@ impl StepOutcome {
             error: reason,
             compaction_triggered: false,
             cause: None,
+            screening_taint: false,
         }
     }
 
@@ -239,6 +254,7 @@ impl StepOutcome {
             error: reason,
             compaction_triggered: false,
             cause: None,
+            screening_taint: false,
         }
     }
 
@@ -249,6 +265,7 @@ impl StepOutcome {
             error: reason,
             compaction_triggered: false,
             cause: None,
+            screening_taint: false,
         }
     }
 }
@@ -288,6 +305,53 @@ fn browser_execution_to_step_outcome(
         tool_bridge::BrowserAgentExecution::AwaitingApproval => {
             StepOutcome::awaiting_approval(CauseCode::BrowserActionRisk)
         }
+    }
+}
+
+/// Whether a connected-app read this run has made came back flagged by screening (WS23-S3).
+/// Shared with every delegated child, so one flagged read holds the egress tools for the rest of
+/// the run. It lives in memory only: a pause or a restart forgets it.
+#[derive(Clone, Default)]
+pub(crate) struct ConnectorTaint(Arc<AtomicBool>);
+
+impl ConnectorTaint {
+    pub(crate) fn mark(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn is_marked(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+/// Whether a call that leaves the run is held for a person: an egress tool after a flagged
+/// connector read, unless the person has released this call. A read earlier in the same round
+/// counts as a flagged one, because a round's calls start before any of their results is seen.
+#[must_use]
+pub(crate) fn tainted_egress_held(tainted: bool, released: bool, tool_name: &str) -> bool {
+    tainted && !released && matches!(tool_name, WEB_FETCH_TOOL | EXECUTE_PROVIDER_ACTION_TOOL)
+}
+
+#[cfg(test)]
+mod connector_taint_tests {
+    use super::{tainted_egress_held, ConnectorTaint};
+
+    #[test]
+    fn a_flagged_connector_read_holds_egress_until_the_call_is_released() {
+        let taint = ConnectorTaint::default();
+        assert!(!taint.is_marked());
+        taint.mark();
+        let delegated_child = taint.clone();
+        assert!(delegated_child.is_marked(), "a child shares the run's flag");
+        assert!(tainted_egress_held(true, false, "web_fetch"));
+        assert!(tainted_egress_held(true, false, "execute_provider_action"));
+        assert!(
+            !tainted_egress_held(true, true, "execute_provider_action"),
+            "a released call runs"
+        );
+        assert!(!tainted_egress_held(false, false, "web_fetch"), "a clean run is not held");
+        assert!(!tainted_egress_held(true, false, "read_provider_action"), "a read is not egress");
+        assert!(!tainted_egress_held(true, false, "knowledge_search"));
     }
 }
 
@@ -639,6 +703,11 @@ async fn execute_step_inner(
             &mp_contracts::zdr_refusal::Refusal::feature_not_supported("connector_read").message(),
         );
     }
+    // A connected-app read is refused in a Space room too (DEC-06). A Space-scoped step is the
+    // one that carries the sandbox context, and only a Space run has one.
+    if tool_name == READ_PROVIDER_ACTION_TOOL && sandbox.is_some() {
+        return StepOutcome::failed("read_provider_action is not available in a Space room");
+    }
     // The class and floor this call's policy decision carried. A governed MCP call is
     // compared with them at dispatch (`execute_governed_mcp`).
     let signed_class: crate::mcp_gateway::SignedToolClass;
@@ -936,6 +1005,8 @@ async fn execute_step_inner(
         execute_publish_social_post(tool_input, org_id, user_id, run_id).await
     } else if tool_name == LIST_PROVIDER_ACTIONS_TOOL {
         execute_list_provider_actions(org_id, session_bearer).await
+    } else if tool_name == READ_PROVIDER_ACTION_TOOL {
+        execute_read_provider_action(tool_input, org_id, session_bearer).await
     } else if tool_name == EXECUTE_PROVIDER_ACTION_TOOL {
         execute_provider_action(
             tool_input,
@@ -1031,6 +1102,8 @@ async fn execute_step_inner(
         });
     let mut outcome = StepOutcome::completed(parked.unwrap_or(rendered));
     outcome.compaction_triggered = output.len() > 2048;
+    outcome.screening_taint =
+        tool_name == READ_PROVIDER_ACTION_TOOL && provenance.is_audit_worthy();
     outcome
 }
 
@@ -1936,6 +2009,56 @@ async fn execute_company_lookup(tool_input: &str) -> tool_bridge::ToolExecution 
     }
 }
 
+/// `read_provider_action` tool — one read on a connected account the user selected for this turn
+/// (WS23-S3). Read-only by construction: the schema has no body, the operation is checked against
+/// the contract's reads, and the token is `integration:read`. The result is framed and screened at
+/// the render seam like all connector content, and a flagged one sets the run's taint.
+async fn execute_read_provider_action(
+    tool_input: &str,
+    org_id: &str,
+    session_bearer: Option<&str>,
+) -> tool_bridge::ToolExecution {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ReadInput {
+        connection_id: String,
+        operation: String,
+        #[serde(default)]
+        params: serde_json::Value,
+        #[serde(default)]
+        max_results: Option<u64>,
+        #[serde(default)]
+        page_token: Option<String>,
+    }
+    let input: ReadInput = match serde_json::from_str(tool_input) {
+        Ok(input) => input,
+        Err(e) => return tool_error(format!("invalid read_provider_action input: {e}")),
+    };
+    let Some(client) = crate::integration_tools::IntegrationActionsClient::from_env() else {
+        return tool_error(
+            "read_provider_action unavailable: integration client could not be built".to_owned(),
+        );
+    };
+    match client
+        .read_action(
+            org_id,
+            &input.connection_id,
+            &input.operation,
+            &input.params,
+            input.max_results,
+            input.page_token.as_deref(),
+            session_bearer,
+        )
+        .await
+    {
+        Ok(read) => tool_bridge::ToolExecution {
+            output: crate::integration_tools::render_provider_read(&read),
+            error: None,
+        },
+        Err(e) => tool_error(e.message()),
+    }
+}
+
 /// `list_provider_actions` tool — read-only discovery of the org's connected
 /// providers and their callable operations. `org_id` comes from the run
 /// context (tenant scope). No approval gate.
@@ -2449,6 +2572,7 @@ async fn execute_reattach_skill(
             // disabled rather than as missing, and that distinction only exists
             // if the row comes back.
             enabled_only: false,
+            for_user_id: String::new(),
         },
         bearer,
     ) {
@@ -2459,11 +2583,17 @@ async fn execute_reattach_skill(
             ))
         }
     };
-    let skills = match SessionCoreClient::new(channel.clone())
+    let skills: Vec<mp_contracts::model_plane::v1::AgentSkill> = match SessionCoreClient::new(channel.clone())
         .list_agent_skills(request)
         .await
     {
-        Ok(response) => response.into_inner().skills,
+        Ok(response) => response
+            .into_inner()
+            .skills
+            .into_iter()
+            // A learned proposal its owner has not accepted is not usable (WS07-S7).
+            .filter(|skill| skill.review_state.is_empty() || skill.review_state == "accepted")
+            .collect(),
         Err(error) => {
             tracing::warn!(code = ?error.code(), %org_id, "reattach_skill: skill read failed");
             return tool_error(format!(

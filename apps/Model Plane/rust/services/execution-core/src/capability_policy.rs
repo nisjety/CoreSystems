@@ -1546,7 +1546,7 @@ pub fn trusted_capability_id(tool_name: &str) -> Option<String> {
         "book_shipment" => "cap.tool.shipping.book",
         "list_social_accounts" => "cap.tool.social.read",
         "publish_social_post" => "cap.tool.social.publish",
-        "list_provider_actions" => "cap.tool.provider.read",
+        "list_provider_actions" | "read_provider_action" => "cap.tool.provider.read",
         "execute_provider_action" => "cap.tool.provider.execute",
         // A Conversation Core ticket is a model-proposed effect, never a
         // generic service call. The executor's dedicated adapter obtains a

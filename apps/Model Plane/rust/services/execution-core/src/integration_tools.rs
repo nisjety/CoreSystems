@@ -39,6 +39,7 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
+use mp_contracts::provider_reads::READ_OPERATIONS;
 use serde_json::Value;
 
 use crate::attestation;
@@ -509,8 +510,8 @@ impl IntegrationActionsClient {
         params: Value,
         session_bearer: Option<&str>,
     ) -> Result<Value, String> {
-        if connection_id.trim().is_empty() {
-            return Err("read_action_json requires connection_id".to_owned());
+        if !is_connection_id(connection_id) {
+            return Err("read_action_json requires a valid connection_id".to_owned());
         }
         if operation.trim().is_empty() {
             return Err("read_action_json requires operation".to_owned());
@@ -520,6 +521,28 @@ impl IntegrationActionsClient {
             "params": params,
             "body": serde_json::json!({}),
         });
+        let (status, value) = self
+            .send_read(org_id, connection_id, request, session_bearer)
+            .await?;
+        if !status.is_success() {
+            return Err(format!(
+                "integration-corev2 read returned {status}: {}",
+                truncate(&value.to_string())
+            ));
+        }
+        Ok(value)
+    }
+
+    /// POST one read request with an `integration:read` token and return the gateway's status
+    /// and body. Shared by [`Self::read_action_json`] and [`Self::read_action`], so both reads
+    /// name the same credential and endpoint.
+    async fn send_read(
+        &self,
+        org_id: &str,
+        connection_id: &str,
+        request: Value,
+        session_bearer: Option<&str>,
+    ) -> Result<(reqwest::StatusCode, Value), String> {
         let token = self
             .resolve_ingestion_token(org_id, "integration:read", session_bearer)
             .await?;
@@ -540,13 +563,72 @@ impl IntegrationActionsClient {
             .json()
             .await
             .map_err(|e| format!("integration-corev2 read decode failed: {e}"))?;
-        if !status.is_success() {
-            return Err(format!(
-                "integration-corev2 read returned {status}: {}",
-                truncate(&value.to_string())
+        Ok((status, value))
+    }
+
+    /// One connected-app read for the model (WS23-S3). The operation must be one the contract
+    /// lists as a read, so a write cannot reach the executor from here. The parameters are cut
+    /// to that operation's own list (a body is never sent), `maxResults` is clamped, and the
+    /// answer is shaped to the fields the model needs. The token is `integration:read` only.
+    ///
+    /// # Errors
+    ///
+    /// [`ReadError::UnknownOperation`] for any operation the contract does not list as a read,
+    /// [`ReadError::Refused`] for a missing connection, and [`ReadError::Upstream`] for a
+    /// transport or provider failure. A connection that needs reconnecting or a missing
+    /// capability is an answer, not an error: it comes back as a typed status.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn read_action(
+        &self,
+        org_id: &str,
+        connection_id: &str,
+        operation: &str,
+        params: &Value,
+        max_results: Option<u64>,
+        page_token: Option<&str>,
+        session_bearer: Option<&str>,
+    ) -> Result<ProviderRead, ReadError> {
+        let Some(allowed) = read_operation_params(operation) else {
+            return Err(ReadError::UnknownOperation(operation.trim().to_owned()));
+        };
+        if !is_connection_id(connection_id) {
+            return Err(ReadError::Refused(
+                "read_provider_action requires a valid connection_id".to_owned(),
             ));
         }
-        Ok(value)
+        let mut request_params = serde_json::Map::new();
+        if let Value::Object(given) = params {
+            for (key, value) in given {
+                if allowed.contains(&key.as_str()) {
+                    request_params.insert(key.clone(), value.clone());
+                }
+            }
+        }
+        if allowed.contains(&"maxResults") {
+            let limit = max_results
+                .unwrap_or(READ_MAX_RESULTS)
+                .clamp(1, READ_MAX_RESULTS);
+            request_params.insert("maxResults".to_owned(), Value::from(limit));
+        }
+        if let Some(token) = page_token.map(str::trim).filter(|token| !token.is_empty()) {
+            if allowed.contains(&"pageToken") {
+                request_params.insert("pageToken".to_owned(), Value::from(token));
+            }
+        }
+        let request = serde_json::json!({
+            "operation": operation,
+            "params": request_params,
+            "body": serde_json::json!({}),
+        });
+        let (status, value) = self
+            .send_read(org_id, connection_id, request, session_bearer)
+            .await
+            .map_err(ReadError::Upstream)?;
+        if !status.is_success() {
+            return read_failure(&value);
+        }
+        let result = value.pointer("/data/action/result").unwrap_or(&Value::Null);
+        Ok(shape_read(operation, &request_params, result))
     }
 
     async fn mint_ingestion_token(&self, org_id: &str, scope: &str) -> Result<String, String> {
@@ -698,6 +780,347 @@ impl IntegrationActionsClient {
 /// one failure mode `resolve_ingestion_token` treats as "fall back," never
 /// surfaced to a tool caller directly.
 const DELEGATION_NOT_CONFIGURED: &str = "__delegation_not_configured__";
+
+/// Largest text the model reads back from one connected-app read, in characters. The render
+/// drops items that do not fit and says how many, so a read is never silently cut.
+pub const READ_RESULT_CHAR_CAP: usize = 12_000;
+/// Most items one read asks the provider for; a larger request is clamped to it.
+pub const READ_MAX_RESULTS: u64 = 25;
+/// Largest mail body or file text kept on one item.
+const BODY_CHAR_CAP: usize = 8_000;
+/// Keys a provider list response carries its rows under (Graph, Gmail, Drive and Sites).
+const LIST_KEYS: &[&str] = &["value", "messages", "events", "files", "sites", "drives", "items"];
+
+/// The environment switch for the read tool. Only the literal `true` enables it, and it is
+/// read on every offer, so a restart is not needed to turn it off.
+pub const PROVIDER_READ_TOOL_ENV: &str = "PROVIDER_READ_TOOL_ENABLED";
+
+/// Whether the deployment has switched the connected-app read tool on.
+#[must_use]
+pub fn provider_read_tool_enabled() -> bool {
+    parse_provider_read_tool_enabled(std::env::var(PROVIDER_READ_TOOL_ENV).ok().as_deref())
+}
+
+#[must_use]
+pub fn parse_provider_read_tool_enabled(raw: Option<&str>) -> bool {
+    raw == Some("true")
+}
+
+/// Whether a run is offered `read_provider_action` (WS23-S3, K3-15). It needs the switch, a run
+/// that is neither zero-retention nor Space-scoped, and at least one connection the user selected
+/// for the run. Nothing else selects a connection, so a run with no selection never gets the tool.
+#[must_use]
+pub fn read_provider_action_offered(
+    switched_on: bool,
+    zdr: bool,
+    space_scoped: bool,
+    connector_scope: &[String],
+) -> bool {
+    switched_on && !zdr && !space_scoped && !connector_scope.is_empty()
+}
+
+/// A connection id is spliced into the gateway path, so only the characters an id is made of may
+/// reach it: anything else (a `/`, `?` or `#`) could retarget the authenticated read.
+fn is_connection_id(connection_id: &str) -> bool {
+    !connection_id.is_empty()
+        && connection_id.len() <= 128
+        && connection_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+/// The read operations the tool may name, once each and sorted, for its closed `operation` enum.
+#[must_use]
+pub fn read_operation_names() -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = READ_OPERATIONS.iter().map(|read| read.operation).collect();
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
+/// The parameter names an operation's reads take, across the providers that serve it, or `None`
+/// when the contract lists no read by that name (a write, or an operation not yet catalogued).
+fn read_operation_params(operation: &str) -> Option<Vec<&'static str>> {
+    let mut names: Vec<&'static str> = Vec::new();
+    let mut found = false;
+    for read in READ_OPERATIONS
+        .iter()
+        .filter(|read| read.operation == operation)
+    {
+        found = true;
+        for name in read.params {
+            if !names.contains(name) {
+                names.push(name);
+            }
+        }
+    }
+    found.then_some(names)
+}
+
+/// The typed status of one read, as the model is told it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadStatus {
+    Ok,
+    NoResults,
+    ReconnectRequired,
+    CapabilityMissing,
+    TooLarge,
+    UnsupportedContent,
+}
+
+impl ReadStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::NoResults => "no_results",
+            Self::ReconnectRequired => "reconnect_required",
+            Self::CapabilityMissing => "capability_missing",
+            Self::TooLarge => "too_large",
+            Self::UnsupportedContent => "unsupported_content",
+        }
+    }
+}
+
+/// One connected-app read, shaped for the model. Built by [`IntegrationActionsClient::read_action`]
+/// and rendered once by [`render_provider_read`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProviderRead {
+    pub status: ReadStatus,
+    pub items: Vec<Value>,
+    pub next_page_token: Option<String>,
+    pub more_available: bool,
+}
+
+impl ProviderRead {
+    fn bare(status: ReadStatus) -> Self {
+        Self {
+            status,
+            items: Vec::new(),
+            next_page_token: None,
+            more_available: false,
+        }
+    }
+}
+
+/// Why a read did not run. A refusal the model should see as a tool error, not a status.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadError {
+    UnknownOperation(String),
+    Refused(String),
+    Upstream(String),
+}
+
+impl ReadError {
+    #[must_use]
+    pub fn message(&self) -> String {
+        match self {
+            Self::UnknownOperation(operation) => format!(
+                "unknown_operation: '{operation}' is not a read operation; read_provider_action only reads"
+            ),
+            Self::Refused(message) | Self::Upstream(message) => message.clone(),
+        }
+    }
+}
+
+/// The gateway's refusal of a read. A connection that needs reconnecting and a missing capability
+/// are answers the model reports; anything else is a provider error.
+fn read_failure(value: &Value) -> Result<ProviderRead, ReadError> {
+    let status = match value.pointer("/error/code").and_then(Value::as_str) {
+        Some("reconnect_required") => ReadStatus::ReconnectRequired,
+        Some("capability_not_granted" | "capability_required") => ReadStatus::CapabilityMissing,
+        _ => {
+            let message = value
+                .pointer("/error/message")
+                .and_then(Value::as_str)
+                .map_or_else(|| truncate(&value.to_string()), str::to_owned);
+            return Err(ReadError::Upstream(message));
+        }
+    };
+    Ok(ProviderRead::bare(status))
+}
+
+/// Shape a successful read's provider payload to the fields its operation lists. Fields outside
+/// the list are dropped, a mail body is capped, and file content is returned only as text.
+fn shape_read(
+    operation: &str,
+    request: &serde_json::Map<String, Value>,
+    result: &Value,
+) -> ProviderRead {
+    if operation == "drive.file.content" {
+        return shape_file_content(request, result);
+    }
+    let fields = read_fields(operation);
+    let rows: Vec<&Value> = if operation.ends_with(".get") || operation == "profile" {
+        vec![result]
+    } else {
+        LIST_KEYS
+            .iter()
+            .find_map(|key| result.get(*key).and_then(Value::as_array))
+            .map(|rows| rows.iter().collect())
+            .unwrap_or_default()
+    };
+    let items: Vec<Value> = rows
+        .into_iter()
+        .filter(|row| row.is_object())
+        .map(|row| shape_item(row, fields))
+        .collect();
+    let next_page_token = result
+        .get("nextPageToken")
+        .or_else(|| result.get("next_page_token"))
+        .and_then(Value::as_str)
+        .filter(|token| !token.is_empty())
+        .map(str::to_owned);
+    let status = if items.is_empty() {
+        ReadStatus::NoResults
+    } else {
+        ReadStatus::Ok
+    };
+    ProviderRead {
+        status,
+        items,
+        more_available: next_page_token.is_some(),
+        next_page_token,
+    }
+}
+
+/// File content is text or nothing: a binary file is `unsupported_content`, not a blob the model
+/// is handed. The text is capped and says so when it was cut.
+fn shape_file_content(request: &serde_json::Map<String, Value>, result: &Value) -> ProviderRead {
+    let mime = result
+        .get("mimeType")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let exported_as_text = request.get("exportAs").and_then(Value::as_str) == Some("text");
+    let Some(content) = result
+        .get("content")
+        .and_then(Value::as_str)
+        .filter(|_| exported_as_text || mime.starts_with("text/"))
+    else {
+        return ProviderRead::bare(ReadStatus::UnsupportedContent);
+    };
+    let (text, cut) = cap_chars(content, BODY_CHAR_CAP);
+    ProviderRead {
+        status: if cut {
+            ReadStatus::TooLarge
+        } else {
+            ReadStatus::Ok
+        },
+        items: vec![serde_json::json!({ "mimeType": mime, "text": text })],
+        next_page_token: None,
+        more_available: false,
+    }
+}
+
+fn shape_item(row: &Value, fields: &[&str]) -> Value {
+    let mut out = serde_json::Map::new();
+    for field in fields.iter().filter(|field| **field != "bodyText") {
+        if let Some(value) = row.get(*field) {
+            out.insert((*field).to_owned(), value.clone());
+        }
+    }
+    // Graph nests a sender's address; the model needs the address and name themselves.
+    if let Some(address) = out
+        .get("from")
+        .and_then(|from| from.pointer("/emailAddress"))
+        .cloned()
+    {
+        out.insert("from".to_owned(), address);
+    }
+    if fields.contains(&"bodyText") {
+        let body = row
+            .get("bodyText")
+            .or_else(|| row.pointer("/body/content"))
+            .and_then(Value::as_str);
+        if let Some(body) = body {
+            let (text, _) = cap_chars(body, BODY_CHAR_CAP);
+            out.insert("bodyText".to_owned(), Value::from(text));
+        }
+    }
+    Value::Object(out)
+}
+
+/// The fields an operation's rows keep. A field not named here never reaches the model.
+fn read_fields(operation: &str) -> &'static [&'static str] {
+    match operation {
+        "mail.messages" | "gmail.messages" => &[
+            "id",
+            "subject",
+            "from",
+            "receivedDateTime",
+            "snippet",
+            "webLink",
+        ],
+        "mail.messages.get" | "gmail.messages.get" => &[
+            "id",
+            "subject",
+            "from",
+            "receivedDateTime",
+            "snippet",
+            "webLink",
+            "bodyText",
+        ],
+        "calendar.events" => &[
+            "subject",
+            "start",
+            "end",
+            "location",
+            "organizer",
+            "webLink",
+        ],
+        "drive.files" | "sharepoint.drives" => &[
+            "id",
+            "name",
+            "mimeType",
+            "size",
+            "modifiedTime",
+            "lastModifiedDateTime",
+            "webUrl",
+            "webViewLink",
+        ],
+        "sharepoint.sites" => &["id", "name", "webUrl"],
+        "profile" => &["displayName", "mail", "userPrincipalName", "email"],
+        _ => &[],
+    }
+}
+
+/// The first `max` characters of `text`, and whether anything was cut.
+fn cap_chars(text: &str, max: usize) -> (String, bool) {
+    match text.char_indices().nth(max) {
+        Some((cut, _)) => (text[..cut].to_owned(), true),
+        None => (text.to_owned(), false),
+    }
+}
+
+/// The model's copy of one connected-app read: a JSON object with the typed status, the items,
+/// paging and how many items did not fit. It is capped at [`READ_RESULT_CHAR_CAP`] characters.
+/// Items that do not fit are dropped from the end and counted in `omitted`, and a read that
+/// dropped any reports `too_large`, so a partial answer is reported as partial.
+#[must_use]
+pub fn render_provider_read(read: &ProviderRead) -> String {
+    let mut items = read.items.clone();
+    let mut omitted = 0usize;
+    loop {
+        let status = if omitted > 0 {
+            ReadStatus::TooLarge
+        } else {
+            read.status
+        };
+        let rendered = serde_json::json!({
+            "status": status.as_str(),
+            "items": items,
+            "next_page_token": read.next_page_token,
+            "more_available": read.more_available,
+            "omitted": omitted,
+        })
+        .to_string();
+        if rendered.chars().count() <= READ_RESULT_CHAR_CAP || items.is_empty() {
+            return rendered;
+        }
+        items.pop();
+        omitted += 1;
+    }
+}
 
 fn parse_connections(value: &Value) -> Vec<ConnectionSummary> {
     // Envelope tolerance: {data:{connections:[…]}}, {connections:[…]}, or a
@@ -1152,6 +1575,258 @@ mod tests {
 
         assert_eq!(catalogued, contract);
         assert_eq!(contract.len(), READ_OPERATIONS.len(), "golden rows are unique");
+    }
+
+    // -------------------------------------------------------------------
+    // Connected-app reads (WS23-S3).
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn a_write_operation_is_not_a_read_and_reads_list_their_own_params() {
+        assert!(read_operation_params("mail.send").is_none());
+        assert!(read_operation_params("drive.file.delete").is_none());
+        let gmail = read_operation_params("gmail.messages").expect("a read");
+        assert!(gmail.contains(&"query") && gmail.contains(&"maxResults"));
+        assert!(!gmail.contains(&"body"));
+    }
+
+    #[test]
+    fn the_operation_enum_names_only_reads() {
+        let names = read_operation_names();
+        assert!(names.contains(&"calendar.events") && names.contains(&"gmail.messages.get"));
+        for name in names {
+            for verb in ["send", "create", "delete", "update", "post", "publish", "upload"] {
+                assert!(!name.contains(verb), "{name} reads nothing");
+            }
+        }
+    }
+
+    #[test]
+    fn the_switch_is_on_only_for_the_literal_true() {
+        for raw in [None, Some(""), Some("1"), Some("TRUE"), Some("yes"), Some("false")] {
+            assert!(!parse_provider_read_tool_enabled(raw), "{raw:?}");
+        }
+        assert!(parse_provider_read_tool_enabled(Some("true")));
+    }
+
+    #[test]
+    fn the_tool_is_offered_only_to_a_selected_connection_outside_zdr_and_space() {
+        let scope = vec!["conn_1".to_owned()];
+        assert!(read_provider_action_offered(true, false, false, &scope));
+        assert!(!read_provider_action_offered(false, false, false, &scope));
+        assert!(!read_provider_action_offered(true, true, false, &scope));
+        assert!(!read_provider_action_offered(true, false, true, &scope));
+        assert!(!read_provider_action_offered(true, false, false, &[]));
+    }
+
+    #[test]
+    fn a_rendered_read_is_capped_and_says_what_it_dropped() {
+        let row = serde_json::json!({ "id": "m", "subject": "x".repeat(1000) });
+        let read = ProviderRead {
+            status: ReadStatus::Ok,
+            items: vec![row; 40],
+            next_page_token: Some("next".to_owned()),
+            more_available: true,
+        };
+        let rendered = render_provider_read(&read);
+        let parsed: Value = serde_json::from_str(&rendered).expect("valid json");
+        assert!(rendered.chars().count() <= READ_RESULT_CHAR_CAP);
+        assert_eq!(parsed["status"], "too_large");
+        let kept = parsed["items"].as_array().expect("items").len() as u64;
+        assert!(kept < 40);
+        assert_eq!(parsed["omitted"].as_u64(), Some(40 - kept));
+        assert_eq!(parsed["next_page_token"], "next");
+    }
+
+    #[test]
+    fn a_mail_body_is_capped_and_no_other_field_passes_through() {
+        let row = serde_json::json!({
+            "id": "m1",
+            "bodyText": "b".repeat(9_000),
+            "internetMessageHeaders": [{"name": "Authorization"}],
+        });
+        let shaped = shape_item(&row, read_fields("mail.messages.get"));
+        assert_eq!(shaped["bodyText"].as_str().map(str::len), Some(8_000));
+        assert!(shaped.get("internetMessageHeaders").is_none());
+        assert_eq!(shaped["id"], "m1");
+    }
+
+    #[test]
+    fn binary_file_content_is_unsupported_and_text_is_returned() {
+        let request = serde_json::Map::new();
+        let pdf = serde_json::json!({ "mimeType": "application/pdf", "content": "%PDF" });
+        assert_eq!(
+            shape_read("drive.file.content", &request, &pdf).status,
+            ReadStatus::UnsupportedContent
+        );
+        let mut exported = serde_json::Map::new();
+        exported.insert("exportAs".to_owned(), Value::from("text"));
+        let doc = serde_json::json!({ "mimeType": "application/pdf", "content": "hello" });
+        assert_eq!(
+            shape_read("drive.file.content", &exported, &doc).status,
+            ReadStatus::Ok
+        );
+    }
+
+    async fn mount_org_token(auth_core: &MockServer) {
+        Mock::given(method("POST"))
+            .and(path("/api/ingestion/internal-token"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"token": "org-scoped-token"})),
+            )
+            .mount(auth_core)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn read_action_sends_only_the_listed_params_and_clamps_max_results() {
+        let auth_core = MockServer::start().await;
+        let integration = MockServer::start().await;
+        mount_org_token(&auth_core).await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/connections/conn_1/actions"))
+            .and(header("authorization", "Bearer org-scoped-token"))
+            .and(body_json(serde_json::json!({
+                "operation": "gmail.messages",
+                "params": {"query": "invoice", "maxResults": 25},
+                "body": {},
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"success": true, "data": {"action": {"result": {"messages": []}}}}),
+            ))
+            .expect(1)
+            .mount(&integration)
+            .await;
+        let client = test_client(&auth_core.uri(), &integration.uri());
+        let params = serde_json::json!({"query": "invoice", "body": {"raw": "x"}, "evil": 1});
+        let read = client
+            .read_action("org-1", "conn_1", "gmail.messages", &params, Some(100), None, None)
+            .await
+            .expect("the read runs");
+        assert_eq!(read.status, ReadStatus::NoResults);
+    }
+
+    #[tokio::test]
+    async fn read_action_shapes_mail_and_returns_the_page_token() {
+        let auth_core = MockServer::start().await;
+        let integration = MockServer::start().await;
+        mount_org_token(&auth_core).await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/connections/conn_1/actions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "success": true,
+                "data": {"action": {"result": {
+                    "value": [{
+                        "id": "m1",
+                        "subject": "Invoice",
+                        "from": {"emailAddress": {"address": "a@example.no", "name": "A"}},
+                        "receivedDateTime": "2026-10-20T08:00:00Z",
+                        "snippet": "hi",
+                        "webLink": "https://outlook.example/m1",
+                        "secretHeader": "drop me",
+                    }],
+                    "nextPageToken": "page-2",
+                }}},
+            })))
+            .mount(&integration)
+            .await;
+        let client = test_client(&auth_core.uri(), &integration.uri());
+        let read = client
+            .read_action(
+                "org-1",
+                "conn_1",
+                "mail.messages",
+                &serde_json::json!({}),
+                None,
+                Some("page-1"),
+                None,
+            )
+            .await
+            .expect("the read runs");
+        assert_eq!(read.status, ReadStatus::Ok);
+        assert_eq!(read.items[0]["from"]["address"], "a@example.no");
+        assert!(read.items[0].get("secretHeader").is_none());
+        assert_eq!(read.next_page_token.as_deref(), Some("page-2"));
+        assert!(read.more_available);
+    }
+
+    #[tokio::test]
+    async fn read_action_reports_a_reconnect_and_a_missing_capability_as_statuses() {
+        let auth_core = MockServer::start().await;
+        let integration = MockServer::start().await;
+        mount_org_token(&auth_core).await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/connections/conn_stale/actions"))
+            .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+                "error": {"code": "reconnect_required", "message": "reconnect"}
+            })))
+            .mount(&integration)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/connections/conn_nocap/actions"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": {"code": "capability_not_granted", "message": "no calendar"}
+            })))
+            .mount(&integration)
+            .await;
+        let client = test_client(&auth_core.uri(), &integration.uri());
+        let empty = serde_json::json!({});
+        let stale = client
+            .read_action("org-1", "conn_stale", "calendar.events", &empty, None, None, None)
+            .await
+            .expect("a status, not an error");
+        assert_eq!(stale.status, ReadStatus::ReconnectRequired);
+        let nocap = client
+            .read_action("org-1", "conn_nocap", "calendar.events", &empty, None, None, None)
+            .await
+            .expect("a status, not an error");
+        assert_eq!(nocap.status, ReadStatus::CapabilityMissing);
+    }
+
+    #[tokio::test]
+    async fn read_action_refuses_a_write_before_any_call_is_made() {
+        let client = test_client("http://unused.invalid", "http://unused.invalid");
+        let refused = client
+            .read_action("org-1", "conn_1", "mail.send", &serde_json::json!({}), None, None, None)
+            .await;
+        assert!(matches!(refused, Err(ReadError::UnknownOperation(_))));
+        assert!(refused
+            .expect_err("a write is refused")
+            .message()
+            .starts_with("unknown_operation:"));
+    }
+
+    #[tokio::test]
+    async fn a_connection_id_that_could_leave_the_connection_path_makes_no_call() {
+        let integration = MockServer::start().await;
+        let client = test_client("http://unused.invalid", &integration.uri());
+        for hostile in ["conn/../x#", "conn_1?x=1", "..", " ", ""] {
+            let refused = client
+                .read_action(
+                    "org-1",
+                    hostile,
+                    "mail.messages",
+                    &serde_json::json!({}),
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+            assert!(
+                matches!(refused, Err(ReadError::Refused(_))),
+                "{hostile:?} is refused"
+            );
+            assert!(client
+                .read_action_json("org-1", hostile, "mail.messages", serde_json::json!({}), None)
+                .await
+                .is_err());
+        }
+        assert!(integration
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty());
     }
 
     // -------------------------------------------------------------------

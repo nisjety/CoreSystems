@@ -430,6 +430,23 @@ mod tests {
     }
 
     #[test]
+    fn a_connector_read_retries_only_on_a_transient_failure() {
+        // `read_provider_action` is read-only and never a risky call, so its one failure mode
+        // that matters is a transport fault: that retries, a deterministic refusal does not.
+        let read = r#"{"connection_id":"conn_1","operation":"mail.messages"}"#;
+        assert!(legacy_retryable(
+            "read_provider_action",
+            read,
+            "operation timed out"
+        ));
+        assert!(!legacy_retryable(
+            "read_provider_action",
+            read,
+            "invalid json: expected value"
+        ));
+    }
+
+    #[test]
     fn a_read_classified_provider_action_still_never_retries() {
         // `execute_provider_action` is operation-aware: a READ operation is
         // not "risky" for approval purposes. It is still a provider round
