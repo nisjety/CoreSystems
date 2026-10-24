@@ -21,7 +21,8 @@ var seedRowPattern = regexp.MustCompile(`\('global', '([^']+)', '([^']+)', '([a-
 
 func readSeedRows(t *testing.T) []seedRow {
 	t.Helper()
-	sql := readMigration(t, "0016_capability_tool_classes.up.sql")
+	// 0016 seeds the classes; 0020 adds the row of the one tool registered after it.
+	sql := readMigration(t, "0016_capability_tool_classes.up.sql") + readMigration(t, "0020_result_query_capability.up.sql")
 	var rows []seedRow
 	for _, m := range seedRowPattern.FindAllStringSubmatch(sql, -1) {
 		refinement := strings.Trim(m[5], "'")

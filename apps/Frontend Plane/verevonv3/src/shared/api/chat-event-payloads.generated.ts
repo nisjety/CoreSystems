@@ -99,8 +99,9 @@ export type ChatEventPayloads = {
     steps: unknown[]
     summary: string
   }
-  /** Rust variants: QueuedInput. */
+  /** Rust variants: QueuedInput, QueuedInputReceipted. */
   queued_input: {
+    ids?: unknown[]
     messages: unknown[]
     request_id: string
   }

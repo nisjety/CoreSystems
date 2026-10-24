@@ -276,7 +276,7 @@ impl SessionCore for ScriptedSession {
         &self,
         _: TReq<mpv1::AppendMessageRequest>,
     ) -> Result<Response<mpv1::AppendMessageResponse>, Status> {
-        Ok(Response::new(mpv1::AppendMessageResponse { sequence: 1 }))
+        Ok(Response::new(mpv1::AppendMessageResponse { sequence: 1, ..Default::default() }))
     }
     async fn start_run(
         &self,

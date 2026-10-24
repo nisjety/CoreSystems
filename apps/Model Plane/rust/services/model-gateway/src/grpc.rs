@@ -3771,7 +3771,7 @@ mod tests {
             &self,
             _: Request<AppendMessageRequest>,
         ) -> Result<Response<AppendMessageResponse>, Status> {
-            Ok(Response::new(AppendMessageResponse { sequence: 1 }))
+            Ok(Response::new(AppendMessageResponse { sequence: 1, ..Default::default() }))
         }
 
         async fn start_run(

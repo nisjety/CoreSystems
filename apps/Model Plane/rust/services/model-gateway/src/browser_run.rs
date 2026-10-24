@@ -3483,7 +3483,7 @@ mod tests {
                                 return Err(Status::unavailable("append is down"));
                             }
                             this.appends.lock().expect("appends").push(r.into_inner());
-                            Ok(tonic::Response::new(AppendMessageResponse { sequence: 1 }))
+                            Ok(tonic::Response::new(AppendMessageResponse { sequence: 1, ..Default::default() }))
                         })
                         .await)
                     }),

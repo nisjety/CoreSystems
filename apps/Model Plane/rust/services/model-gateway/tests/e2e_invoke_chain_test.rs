@@ -1247,7 +1247,7 @@ impl SessionCore for MockSessionCore {
             .lock()
             .unwrap()
             .push((req.role, req.thread_id, req.content));
-        Ok(Response::new(AppendMessageResponse { sequence: 1 }))
+        Ok(Response::new(AppendMessageResponse { sequence: 1, ..Default::default() }))
     }
 
     async fn start_run(

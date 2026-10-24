@@ -300,6 +300,10 @@ services:
       # degraded and behaving as off, never the gateway down. Roll back with off plus a restart.
       MODEL_GATEWAY_RUN_CONTROL_BUS: ${MODEL_GATEWAY_RUN_CONTROL_BUS:-off}
       MODEL_GATEWAY_RUN_CONTROL_TIMEOUT_MS: ${MODEL_GATEWAY_RUN_CONTROL_TIMEOUT_MS:-750}
+      # WS04-S6: durable send receipts (client_message_id on a send, dedupe in session-core, ids on the queued_input
+      # delivery event). Off by default; only the literal `true` turns it on. Deploy order: session-core (migration
+      # 0052) first, then model-gateway, then the BFF and frontend, then this switch. Roll back with off plus a restart.
+      MODEL_GATEWAY_SEND_RECEIPTS: ${MODEL_GATEWAY_SEND_RECEIPTS:-false}
       # WS11-S5: derive the reasoning level once in the gateway and send it to inference-core. Off by default; only the
       # literal `true` turns it on. Roll out in this order: inference-core adapter flags on first, then this switch. With
       # this on and the adapter flags off, a deep request sends budget 0 and a level nothing renders (no thinking).
@@ -1145,6 +1149,8 @@ services:
       # before it runs and finalized after, and a call that cannot be reserved is not
       # run. OFF by default. Needs session-core's migration 0048.
       EXECUTION_EFFECT_LEDGER_ENABLED: ${EXECUTION_EFFECT_LEDGER_ENABLED:-false}
+      # WS25-S5: run-scoped result handles and result_query. `on` or `true` enables; off by default.
+      EXECUTION_RESULT_HANDLES: ${EXECUTION_RESULT_HANDLES:-off}
       # Durable loop fold writer (WS03 S6): the Do loop saves its history, counters and
       # open tool round to session-core at the end of a round, before an effectful call
       # and before a pause for approval. OFF by default; with it off the loop makes no

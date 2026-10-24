@@ -1510,6 +1510,8 @@ pub fn trusted_capability_id(tool_name: &str) -> Option<String> {
         "browser_agent" | "browser.observe" | "browser.act" => "cap.browser.open",
         "web_search" | "web_fetch" | "web.search" | "web.read" => "cap.tool.http",
         "knowledge_search" => "cap.retrieval.query",
+        // Reads back a result the same run parked under a handle (WS25-S5).
+        "result_query" => "cap.result.query",
         // The two context-memory tools. `cap.memory.index`/`cap.memory.search`
         // are the registry's own seeded ids (capability-core's
         // `registry.go`, both `RiskLow`, scope `workspace`) — not new names

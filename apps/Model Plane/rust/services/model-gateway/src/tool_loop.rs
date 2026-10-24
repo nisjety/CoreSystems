@@ -6904,7 +6904,8 @@ pub async fn run_tool_rounds_for_model(
         // message is never a candidate for this round's own payload clearing,
         // and so a message that landed before the first inference still reaches
         // the model's first look at the turn.
-        let queued = state.queued_inputs.drain(request_id);
+        let drained = state.queued_inputs.drain_receipted(request_id);
+        let queued: Vec<String> = drained.iter().map(|message| message.text.clone()).collect();
         if queued.is_empty() && scoped_revision_complete { break; }
         if !queued.is_empty() {
             scoped_revision_complete = false;
@@ -6927,7 +6928,17 @@ pub async fn run_tool_rounds_for_model(
             // acceptance, and what the client cannot otherwise know is when the
             // agent actually saw it.
             events
-                .push(ChatEvent::QueuedInput { messages: queued })
+                .push(if crate::queued_input::send_receipts_enabled() {
+                    ChatEvent::QueuedInputReceipted {
+                        messages: queued,
+                        ids: drained
+                            .iter()
+                            .map(|message| message.client_message_id.clone())
+                            .collect(),
+                    }
+                } else {
+                    ChatEvent::QueuedInput { messages: queued }
+                })
                 .await;
         }
 

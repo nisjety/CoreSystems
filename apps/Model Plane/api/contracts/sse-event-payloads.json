@@ -472,9 +472,16 @@
     "queued_input": {
       "family": null,
       "variants": [
-        "QueuedInput"
+        "QueuedInput",
+        "QueuedInputReceipted"
       ],
       "keys": {
+        "ids": {
+          "types": [
+            "array"
+          ],
+          "presence": "optional"
+        },
         "messages": {
           "types": [
             "array"
