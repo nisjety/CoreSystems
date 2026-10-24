@@ -1837,7 +1837,7 @@ async fn run_agent_with_route_parkable(
     if let Some(store) = &context.result_store {
         store.release_run(&req.org_id, &req.run_id);
     }
-    let response = finalized?;
+    let mut response = finalized?;
 
     // Only reached once `finalize` actually made the run terminal (it
     // returns `Err` — never mutating `StateStore` — when the durable receipt
@@ -1851,7 +1851,7 @@ async fn run_agent_with_route_parkable(
     // `process_*` tools existed to give a lease children. It must stay real:
     // release diffs and uploads the workspace, and a process still writing
     // into it would make the promoted snapshot a picture of a moving target.
-    crate::sandbox_lease::release_sandbox_lease_if_any(
+    let workspace_outcome = crate::sandbox_lease::release_sandbox_lease_if_any(
         state,
         sandbox_manager_client,
         sandbox_tokens,
@@ -1861,8 +1861,25 @@ async fn run_agent_with_route_parkable(
         &req.org_id,
     )
     .await;
+    if workspace_outcome.is_some_and(|outcome| !outcome.uploaded) {
+        append_workspace_not_saved(&mut response.final_output);
+    }
 
     Ok(response)
+}
+
+/// The line the run summary carries when this run's Space workspace changes
+/// did not reach the Space.
+const WORKSPACE_NOT_SAVED: &str = "Workspace changes were not saved.";
+
+/// Adds [`WORKSPACE_NOT_SAVED`] to the answer the caller streams. It is added
+/// after `finalize` wrote the answer to the thread, because the upload only
+/// runs once the run is terminal, so the stored answer does not carry it.
+fn append_workspace_not_saved(final_output: &mut String) {
+    if !final_output.is_empty() {
+        final_output.push_str("\n\n");
+    }
+    final_output.push_str(WORKSPACE_NOT_SAVED);
 }
 
 /// How many matched skills to inject per run — mirrors model-gateway's own
@@ -7797,6 +7814,17 @@ mod tests {
         transport::{Endpoint, Server},
         Request, Response, Status,
     };
+
+    #[test]
+    fn an_unsaved_workspace_is_named_in_the_summary_after_the_answer() {
+        let mut answered = String::from("Renamed it.");
+        append_workspace_not_saved(&mut answered);
+        assert_eq!(answered, "Renamed it.\n\nWorkspace changes were not saved.");
+
+        let mut silent = String::new();
+        append_workspace_not_saved(&mut silent);
+        assert_eq!(silent, "Workspace changes were not saved.");
+    }
 
     #[tokio::test]
     async fn continuation_descriptor_binds_the_exact_action_and_refuses_zdr() {
