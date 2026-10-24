@@ -808,6 +808,30 @@ Built so far (batches B01 to B07): WS01-S0, WS01-S1 (partial), WS01-S6; WS02-S1,
 | D1-613 | WS08-S5 | live-proof | P1 | Go bindings: apps/Model Plane/go/gen/model_plane/v1/execution.pb.go must be regenerated with buf generate, then buf lint/breaking, for the new RunAttachment, RunAttachmentKind and ExecuteStepRequest.attachments. | open |
 | D1-614 | WS08-S5 | follow-up | P3 | 20 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-19.json | open |
 
+
+### Wave-mode batch W1-20 (2026-10-24)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D1-615 | WS07-S7 | risk | P0 | Pre-existing in capability-core registry_apis.go: PATCH and DELETE /api/v1/skills/{id} are scoped only by id and org_id, so any org member holding the id of another user's private skill or proposal can edit its content or delete it (enabling a proposal is now refused, content edit and delete are not); add an owner/admin check or a scope predicate to both statements. | open |
+| D1-616 | WS07-S7 | follow-up | P1 | learning/reviewer.go ParseReviewJSON does not read the reason field yet, so every proposal is stored with an empty proposal_reason until the lead applies the parser edit. | open |
+| D1-617 | WS07-S7 | follow-up | P1 | capability-core main.go must pass sessionreview.WithMemoryControls(memoryClient) or the consumer's pre-read gate is off (the session-core announcement gate and the upsert gate still hold, but the transcript read and the paid review run before the upsert refuses). | open |
+| D1-618 | WS07-S7 | live-proof | P1 | Nothing here is live-verified: the two-user proof (proposal row shape, B's /api/v1/skills and chat turn, A's skill absent from B's MatchSkills, paused user writes nothing) and the DB harness run of the six ignored tests are still to do. | open |
+| D1-619 | WS07-S7 | risk | P1 | Migration 0058 drops agent_skills_org_name_uq: an older session-core cannot run its ON CONFLICT (org_id, name) over this schema, so rollback needs the revert file together with the image rollback; capability-core's new SELECT also fails until 0058 has applied, so deploy session-core first. | open |
+| D1-620 | WS07-S7 | risk | P1 | There is no accept or reject path yet (S8 DecideSkillProposal): proposals stay disabled and unusable until S8 lands, and the gateway cache can lag an owner's later decision by up to SKILL_CACHE_TTL_SECONDS (60 s default). | open |
+| D1-621 | WS07-S7 | follow-up | P1 | learning/reviewer.go ParseReviewJSON does not read reason. The parser is not strict about unknown fields, so the prompt and schema asking for reason do not break parsing. Proposals just carry an empty proposal_reason until the lead applies the 3-line edit handed back in lead_todo. | open |
+| D1-622 | WS07-S7 | live-proof | P1 | Run the six ignored session-core DB tests through scripts/tests/session-core-db-tests.sh (background_review_is_forced_to_disabled_user_scope, user_b_cannot_overwrite_user_a_learned_skill, conflict_never_reenables_an_admin_disabled_row, accepted_row_is_not_rewritten, list_agent_skills_scope_enforcement_against_real_pg, set_run_mode_and_upsert_skill_against_real_pg) and update the harness count. They assume an ungoverned org policy (no credentials means learning is allowed), so run them without org-core credentials. | open |
+| D1-623 | WS07-S7 | follow-up | P3 | 21 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-20.json | open |
+| D1-624 | WS07-S3 | live-proof | P1 | Nothing in this slice has run against a real session-core: the BFF to model-gateway to session-core path for controls, reset and remember is covered only by wiremock and unit tests, and the new e2e has not been run. | open |
+| D1-625 | WS07-S3 | follow-up | P1 | model-access.ts rows and the admission golden for memory.set_state, memory.reset and memory.remember are not in the tree yet (lead wiring); until then typecheck and the admission-contract test fail. | open |
+| D1-626 | WS07-S3 | follow-up | P1 | Until the lead adds the model-access.ts rows and regenerates the admission golden, the frontend suite is red (11 tests) and typecheck fails; the tree must not be committed without that wiring, as in c2853992d. | open |
+| D1-627 | WS07-S3 | live-proof | P1 | shared-edit apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts: add the three exempt rows for memory.set_state (human_identity_or_security, external_write), memory.reset (irreversible_destructive, destructive) and memory.remember (human_identity_or_security, external_write) after the memory.delete row; until then 11 frontend tests fail and typecheck fails on that file. I re-ran and confirmed that every vitest failure comes from these rows. | open |
+| D1-628 | WS07-S3 | live-proof | P1 | Regenerate the admission golden (VEREVON_UPDATE_GOLDEN=1 pnpm vitest run src/shared/actions/admission-contract.test.ts), refresh agent-action-admission.json.sha256 and re-vendor the copies named in scripts/tests/zdr-contract-sync.test.sh. | open |
+| D1-629 | WS07-S3 | live-proof | P1 | Re-run cargo test -q -p model-gateway --lib memory_controls_route once the WS07-S7 model-gateway consumers (grpc.rs, sse.rs, tool_loop.rs, skills.rs) are updated for the new proto fields. The crate does not compile today for that reason. | open |
+| D1-630 | WS07-S3 | live-proof | P1 | Live proof: rebuild model-gateway and the verevonv3 gateway, run tests/e2e/product-memory.spec.ts including 'paused user: no recall, no new memory, resume works' (needs session-core migration 0051 live), second Vite server for the worktree, screenshots of the three states, network capture of PUT /api/v1/memory/controls. | open |
+| D1-631 | WS07-S3 | live-proof | P1 | Full pnpm lint failing set diffed against HEAD was not run; only the touched files were linted, and they are clean. | open |
+| D1-632 | WS07-S3 | follow-up | P3 | 13 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-20.json | open |
+
 ## Wave 2 (WS13 to WS27)
 
 Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS27-S0, WS27-S1. Wave 2 is not started as a wave: these came in with Wave 1 batches because they were Wave 1 prerequisites.
@@ -1408,3 +1432,5 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS24-S5 | authority, policy | W2-14 | no |
 | WS07-S4 | policy, authority, auth | W1-19 | no |
 | WS08-S5 | zdr, authority | W1-19 | no |
+| WS07-S7 | authority, policy, zdr, audit | W1-20 | no |
+| WS07-S3 | auth, authority | W1-20 | no |
