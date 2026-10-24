@@ -876,6 +876,10 @@ services:
       # Turn it on (=1) only for a deployment that accepts a paid extraction
       # model, or after Dreaming can run on the user's own route.
       DREAMING_LLM_EXTRACTION: ${DREAMING_LLM_EXTRACTION:-0}
+      # WS07-S1 kill switch. Default true: the memory gate enforces each user's paused/off state. false restores
+      # pre-S1 behaviour (every user treated as on) and logs ERROR once per Dreaming cycle; SetMemoryControls is
+      # then refused.
+      MEMORY_CONTROLS_ENABLED: ${MEMORY_CONTROLS_ENABLED:-true}
       DREAMING_LLM_MODEL: ${DREAMING_LLM_MODEL:-claude-haiku-4-5}
       # Write-time memory grounding (memory_grounding.rs). Off by default --
       # set MEMORY_GROUNDING_ENABLED=1 to let Dreaming classify a candidate as

@@ -100,10 +100,6 @@ export type SidebarSection = {
   panelGroups: SidebarPanelGroup[]
 }
 
-// `VerevonRoute` (shell-data.ts) does not list this settings route yet, so the cast
-// stands until it does; the href is matched as a plain path either way.
-const MODEL_ACCESS_HREF = '/settings/model-access' as SidebarHref
-
 export const sidebarSections: SidebarSection[] = [
   {
     id: 'overview',
@@ -385,7 +381,7 @@ export const sidebarSections: SidebarSection[] = [
           { id: 'settings-router-policy', label: 'Router policy', href: '/settings/router-policy', icon: Route, description: 'Intent-laget: kompleksitet, budsjett og modellrute.' },
           { id: 'settings-finetune', label: 'Fine-tune jobs', href: '/settings/finetune', icon: TestTubeDiagonal, description: 'Azure-finjustering: opplasting, jobber og status.' },
           { id: 'settings-mcp', label: 'MCP-servere', href: '/settings/mcp', icon: ServerCog, description: 'Eksterne MCP-tjenere og tillatte verktøy for agenten.' },
-          { id: 'settings-model-access', label: 'Modelltilgang', href: MODEL_ACCESS_HREF, icon: BrainCircuit, description: 'Hvilke AI-modeller og hvilken resonneringsinnsats medlemmene kan bruke.' },
+          { id: 'settings-model-access', label: 'Modelltilgang', href: '/settings/model-access', icon: BrainCircuit, description: 'Hvilke AI-modeller og hvilken resonneringsinnsats medlemmene kan bruke.' },
         ],
       },
     ],

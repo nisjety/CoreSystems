@@ -2772,6 +2772,7 @@ async fn run_rounds(
             // Which leading messages a provider may cache across rounds and runs.
             // Counts only; inference-core reads it behind its own switch.
             prompt_tiers: prompt_tier_plan(req.run_context.as_ref(), &messages),
+            image_parts: Vec::new(),
         });
         infer_request.metadata_mut().insert(
             "authorization",
