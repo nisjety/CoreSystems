@@ -867,6 +867,8 @@ services:
       # WS17-S3: the conversation search query path (SearchMessages). Off by default; the index itself is built
       # by migration 0055 either way.
       SESSION_CORE_MESSAGE_SEARCH_ENABLED: ${SESSION_CORE_MESSAGE_SEARCH_ENABLED:-false}
+      # WS13-S3: the approval decision audit event and its provenance record. Off by default.
+      APPROVAL_AUDIT_EVENTS_ENABLED: ${APPROVAL_AUDIT_EVENTS_ENABLED:-false}
       # WS03-S8: park a crashed run instead of ending it (needs park recovery and the fold store on). Off by
       # default and owner-gated: the executor half is not built, so the worker parks nothing yet.
       SESSION_CORE_CRASH_PARK_ENABLED: ${SESSION_CORE_CRASH_PARK_ENABLED:-false}

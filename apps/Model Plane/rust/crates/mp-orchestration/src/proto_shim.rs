@@ -297,6 +297,8 @@ impl From<OrchestrationEvent> for ProtoOrchestrationEvent {
                     approval_kind: approval_kind_to_proto(approval_kind),
                     to: approval_state_to_proto(to),
                     decided_by,
+                    // The decision provenance fields (WS13-S3) are not carried by this event shim.
+                    ..Default::default()
                 }),
             ),
             OrchestrationEvent::SubagentAttached {

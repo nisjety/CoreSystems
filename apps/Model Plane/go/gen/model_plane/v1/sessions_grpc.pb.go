@@ -2246,3 +2246,208 @@ var MessageSearch_ServiceDesc = grpc.ServiceDesc{
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "model_plane/v1/sessions.proto",
 }
+
+const (
+	LearningGovernanceService_DecideSkillProposal_FullMethodName = "/model_plane.v1.LearningGovernanceService/DecideSkillProposal"
+	LearningGovernanceService_UndoLearningEntry_FullMethodName   = "/model_plane.v1.LearningGovernanceService/UndoLearningEntry"
+	LearningGovernanceService_ListLearningLedger_FullMethodName  = "/model_plane.v1.LearningGovernanceService/ListLearningLedger"
+)
+
+// LearningGovernanceServiceClient is the client API for LearningGovernanceService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// LearningGovernanceService: the owner's decisions on what Verevon learned from their
+// conversations (WS07 S8). A separate service, as MessageSearch is, so that
+// SessionCore and every mock of it stay source-compatible. Every RPC is the
+// owner's own: a service credential is refused, and a person never reaches
+// another person's skill proposals or ledger.
+type LearningGovernanceServiceClient interface {
+	// Accept or reject one learned-skill proposal. Only the person the proposal
+	// belongs to may decide, and only while it is still proposed.
+	DecideSkillProposal(ctx context.Context, in *DecideSkillProposalRequest, opts ...grpc.CallOption) (*DecideSkillProposalResponse, error)
+	// Undo one ledger entry of a skill by restoring the snapshot taken before it.
+	// Only the latest entry of a skill can be undone, and only by its owner. A
+	// learned memory is not undone here: it is erased by DeleteMemory.
+	UndoLearningEntry(ctx context.Context, in *UndoLearningEntryRequest, opts ...grpc.CallOption) (*UndoLearningEntryResponse, error)
+	// The owner's ledger of what was learned and changed: skill revisions and the
+	// memories the extractor wrote, newest first.
+	ListLearningLedger(ctx context.Context, in *ListLearningLedgerRequest, opts ...grpc.CallOption) (*ListLearningLedgerResponse, error)
+}
+
+type learningGovernanceServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewLearningGovernanceServiceClient(cc grpc.ClientConnInterface) LearningGovernanceServiceClient {
+	return &learningGovernanceServiceClient{cc}
+}
+
+func (c *learningGovernanceServiceClient) DecideSkillProposal(ctx context.Context, in *DecideSkillProposalRequest, opts ...grpc.CallOption) (*DecideSkillProposalResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DecideSkillProposalResponse)
+	err := c.cc.Invoke(ctx, LearningGovernanceService_DecideSkillProposal_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *learningGovernanceServiceClient) UndoLearningEntry(ctx context.Context, in *UndoLearningEntryRequest, opts ...grpc.CallOption) (*UndoLearningEntryResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UndoLearningEntryResponse)
+	err := c.cc.Invoke(ctx, LearningGovernanceService_UndoLearningEntry_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *learningGovernanceServiceClient) ListLearningLedger(ctx context.Context, in *ListLearningLedgerRequest, opts ...grpc.CallOption) (*ListLearningLedgerResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListLearningLedgerResponse)
+	err := c.cc.Invoke(ctx, LearningGovernanceService_ListLearningLedger_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// LearningGovernanceServiceServer is the server API for LearningGovernanceService service.
+// All implementations must embed UnimplementedLearningGovernanceServiceServer
+// for forward compatibility.
+//
+// LearningGovernanceService: the owner's decisions on what Verevon learned from their
+// conversations (WS07 S8). A separate service, as MessageSearch is, so that
+// SessionCore and every mock of it stay source-compatible. Every RPC is the
+// owner's own: a service credential is refused, and a person never reaches
+// another person's skill proposals or ledger.
+type LearningGovernanceServiceServer interface {
+	// Accept or reject one learned-skill proposal. Only the person the proposal
+	// belongs to may decide, and only while it is still proposed.
+	DecideSkillProposal(context.Context, *DecideSkillProposalRequest) (*DecideSkillProposalResponse, error)
+	// Undo one ledger entry of a skill by restoring the snapshot taken before it.
+	// Only the latest entry of a skill can be undone, and only by its owner. A
+	// learned memory is not undone here: it is erased by DeleteMemory.
+	UndoLearningEntry(context.Context, *UndoLearningEntryRequest) (*UndoLearningEntryResponse, error)
+	// The owner's ledger of what was learned and changed: skill revisions and the
+	// memories the extractor wrote, newest first.
+	ListLearningLedger(context.Context, *ListLearningLedgerRequest) (*ListLearningLedgerResponse, error)
+	mustEmbedUnimplementedLearningGovernanceServiceServer()
+}
+
+// UnimplementedLearningGovernanceServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedLearningGovernanceServiceServer struct{}
+
+func (UnimplementedLearningGovernanceServiceServer) DecideSkillProposal(context.Context, *DecideSkillProposalRequest) (*DecideSkillProposalResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DecideSkillProposal not implemented")
+}
+func (UnimplementedLearningGovernanceServiceServer) UndoLearningEntry(context.Context, *UndoLearningEntryRequest) (*UndoLearningEntryResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method UndoLearningEntry not implemented")
+}
+func (UnimplementedLearningGovernanceServiceServer) ListLearningLedger(context.Context, *ListLearningLedgerRequest) (*ListLearningLedgerResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListLearningLedger not implemented")
+}
+func (UnimplementedLearningGovernanceServiceServer) mustEmbedUnimplementedLearningGovernanceServiceServer() {
+}
+func (UnimplementedLearningGovernanceServiceServer) testEmbeddedByValue() {}
+
+// UnsafeLearningGovernanceServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to LearningGovernanceServiceServer will
+// result in compilation errors.
+type UnsafeLearningGovernanceServiceServer interface {
+	mustEmbedUnimplementedLearningGovernanceServiceServer()
+}
+
+func RegisterLearningGovernanceServiceServer(s grpc.ServiceRegistrar, srv LearningGovernanceServiceServer) {
+	// If the following call panics, it indicates UnimplementedLearningGovernanceServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&LearningGovernanceService_ServiceDesc, srv)
+}
+
+func _LearningGovernanceService_DecideSkillProposal_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DecideSkillProposalRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(LearningGovernanceServiceServer).DecideSkillProposal(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: LearningGovernanceService_DecideSkillProposal_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(LearningGovernanceServiceServer).DecideSkillProposal(ctx, req.(*DecideSkillProposalRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _LearningGovernanceService_UndoLearningEntry_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UndoLearningEntryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(LearningGovernanceServiceServer).UndoLearningEntry(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: LearningGovernanceService_UndoLearningEntry_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(LearningGovernanceServiceServer).UndoLearningEntry(ctx, req.(*UndoLearningEntryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _LearningGovernanceService_ListLearningLedger_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListLearningLedgerRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(LearningGovernanceServiceServer).ListLearningLedger(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: LearningGovernanceService_ListLearningLedger_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(LearningGovernanceServiceServer).ListLearningLedger(ctx, req.(*ListLearningLedgerRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// LearningGovernanceService_ServiceDesc is the grpc.ServiceDesc for LearningGovernanceService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var LearningGovernanceService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "model_plane.v1.LearningGovernanceService",
+	HandlerType: (*LearningGovernanceServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "DecideSkillProposal",
+			Handler:    _LearningGovernanceService_DecideSkillProposal_Handler,
+		},
+		{
+			MethodName: "UndoLearningEntry",
+			Handler:    _LearningGovernanceService_UndoLearningEntry_Handler,
+		},
+		{
+			MethodName: "ListLearningLedger",
+			Handler:    _LearningGovernanceService_ListLearningLedger_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "model_plane/v1/sessions.proto",
+}

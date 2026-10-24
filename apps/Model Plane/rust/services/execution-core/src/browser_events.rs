@@ -358,6 +358,8 @@ impl BrowserEventSink for OrchestrationEventSink {
                     decided_by: "system:user-cancelled".to_owned(),
                     decision_reason: "run cancelled by user while awaiting approval".to_owned(),
                     org_id: config.org_id.clone(),
+                    decision_source: pb::ApprovalDecisionSource::System as i32,
+                    ..Default::default()
                 }) {
                     let _ = orchestration.decide_approval(request).await;
                 }
@@ -439,6 +441,8 @@ impl BrowserEventSink for OrchestrationEventSink {
                     decided_by: "system:approval-timeout".to_owned(),
                     decision_reason: "browser action approval wait budget exceeded".to_owned(),
                     org_id: config.org_id.clone(),
+                    decision_source: pb::ApprovalDecisionSource::Timeout as i32,
+                    ..Default::default()
                 }) {
                     let _ = orchestration.decide_approval(request).await;
                 }

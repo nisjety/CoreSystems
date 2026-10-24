@@ -29,7 +29,7 @@ use tracing::{info, warn};
 use mp_contracts::model_plane::v1::{
     orchestration_core_service_client::OrchestrationCoreServiceClient, Approval, ApprovalKind,
     ApprovalState, ApproveApprovalRequest, ApproveApprovalResponse, CreateApprovalRequest,
-    DecideApprovalRequest, DenyApprovalRequest, DenyApprovalResponse, GatewayApproval,
+    ApprovalDecisionSource, DecideApprovalRequest, DenyApprovalRequest, DenyApprovalResponse, GatewayApproval,
     GetApprovalRequest, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
     OrgPendingApprovalsRequest, RequestApprovalRequest, RequestApprovalResponse,
 };
@@ -142,6 +142,9 @@ pub fn to_decide_approval_request(a: &GatewayApproval) -> DecideApprovalRequest 
         // function is ever reached, so asserting it here is a real,
         // already-verified ownership check, not a no-op.
         org_id: a.org_id.clone(),
+        // A gateway decision is a person's click; the server records the source, never the client.
+        decision_source: ApprovalDecisionSource::User as i32,
+        ..Default::default()
     }
 }
 
