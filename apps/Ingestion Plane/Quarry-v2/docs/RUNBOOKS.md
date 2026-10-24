@@ -1758,3 +1758,21 @@ The render-pool share is separate: `QUARRY_EDGE__POOL_ORG_MAX_PERMITS` (default 
 Rollback: nothing to switch off while the source is `static`. Once a plan source exists, `QUARRY_EDGE__LIMITS_SOURCE=static` removes every plan bound.
 
 Not done, owed in the test phase: `cargo test -p quarry-edge plan_cap_tests`, `cargo test -p quarry-edge --lib resolver_tests`, `cargo test -p quarry-edge --test org_capacity`, the gateway `cargo test forward_quarry_failure`, and the deployment evidence in the plan (billing-core key `quarry.cap.agent_runs = 1` for one organization on a live stack, which needs the billing source).
+
+## Browser control strip and the stale-epoch take over (WS9.I, unit W2-U62, built, NOT run, 2026-10-24)
+
+What it is: a strip under the browser toolbar (`apps/Frontend Plane/verevonv3/src/features/browser/dock/BrowserControlStrip.tsx`) that says who holds the browser (the agent is working, the agent has control, or you are in control and the agent is paused because you took over) and offers Take over or Give back. The strip renders from the projection only. Its button sends the control epoch it showed (`expectedEpoch`), so Quarry applies the change only if the epoch is still the one the person saw.
+
+Wire contract (gateway, Verevon side):
+- `POST /api/v1/browser/sessions/{id}/control` takes `{ mode, expectedEpoch? }` (camelCase on the SPA side; the gateway forwards `expected_epoch` to Quarry). Without `expectedEpoch` the change is unconditional, as before.
+- The owner projection carries the epoch as `session.control.epoch`. A Take over moves it to 1, a Give back to 2 (the epoch moves only when the mode really changes).
+- A stale epoch: Quarry answers `409 CONFLICT` with `details.control_epoch`; the gateway answers `409 browser_control_epoch_stale` with the same details and changes nothing.
+- `browser_action.set_control_mode` (action registry) takes the same optional `expectedEpoch`; a non-integer is a 400.
+
+SPA behaviour: on `browser_control_epoch_stale` the SPA refetches `GET /api/v1/browser/sessions/{id}` exactly once and shows the copy "Browser control changed elsewhere. It has been refreshed; try again." It never retries the change by itself; the person decides again. `USER_TOOK_OVER` stays the takeover error copy.
+
+Tab provenance: a live tab opened by the agent (`tabs[].openedBy === 'agent'`, WS8.F) gets an agent marker, and a non-active agent tab gets a Reveal button ("Vis"). Quarry does not report `openedBy` until WS8.F is built, so no marker shows today.
+
+Flags: none. The strip is shown whenever a live session is open. The Crawl composer's control chip is unchanged.
+
+Not done, owed in the test phase (written, not run): `src/features/browser/dock/browser-control.test.ts`, `src/features/browser/dock/BrowserControlStrip.test.tsx`, `src/features/dashboard/home/browser-session-control.test.ts`, the gateway tests `control_body_forwards_expected_epoch` and `stale_epoch_maps_to_typed_conflict` (in `apps/gateway/src/domains/browser.rs`), and the Playwright test `take over and give back move the control epoch, and a stale epoch is refused` in `tests/e2e/browser-workspace-live-takeover.spec.ts`. The Playwright test needs the stack with WS2.C deployed (the stack evidence for WS9.I: `controlEpoch` 1 after Take over, a stale `expectedEpoch: 0` returns the typed 409, Give back gives 2).
