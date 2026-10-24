@@ -1291,8 +1291,10 @@ pub async fn invoke_stream_sse(
     // client `idempotency_key` mid-flight) is rejected so a double-click /
     // retry never spawns a second generation; a completed key replays its
     // cached answer; the guard releases the claim when the stream ends (Drop),
-    // so a later regenerate is free to run.
-    let idem_guard = match req
+    // so a later regenerate is free to run. With `MODEL_GATEWAY_SHARED_IDEMPOTENCY` on, a
+    // duplicate that finds the key held by another request attaches to that request's stream
+    // instead (`attach_to_original`); with it off nothing below reads Redis.
+    let mut idem_guard = match req
         .idempotency_key
         .as_deref()
         .map(str::trim)
@@ -1304,6 +1306,16 @@ pub async fn invoke_stream_sse(
                 return replay_cached_stream(v, request_id);
             }
             crate::idempotency_registry::Claim::InFlight => {
+                // The original is on this replica, which only the shared claim can name.
+                if let Some(store) = crate::idempotency_registry::shared_store().await {
+                    if let Some(original) =
+                        crate::idempotency_registry::lookup_shared(&store, &org_id, &user_id, key)
+                            .await
+                    {
+                        timing.hand_off("idempotent_attach");
+                        return attach_to_original(&state, &org_id, &user_id, &original).await;
+                    }
+                }
                 return error_stream(
                     &request_id,
                     "duplicate_in_flight",
@@ -1331,7 +1343,21 @@ pub async fn invoke_stream_sse(
                     true,
                 );
             }
-            crate::idempotency_registry::Claim::Proceed(g) => Some(g),
+            crate::idempotency_registry::Claim::Proceed(mut guard) => {
+                if let Some(store) = crate::idempotency_registry::shared_store().await {
+                    if let crate::idempotency_registry::SharedAttempt::Attach(original) = guard
+                        .claim_shared(&store, &request_id, &state.stream_buffers, &buffer_key)
+                        .await
+                    {
+                        // The local claim is released here, so a retry after the original
+                        // ends is decided by the shared record alone.
+                        drop(guard);
+                        timing.hand_off("idempotent_attach");
+                        return attach_to_original(&state, &org_id, &user_id, &original).await;
+                    }
+                }
+                Some(guard)
+            }
         },
         None => None,
     };
@@ -1439,6 +1465,9 @@ pub async fn invoke_stream_sse(
             );
         }
     };
+    if let Some(guard) = idem_guard.as_mut() {
+        guard.record_run(&session_run.run_id, &session_run.thread_id);
+    }
     if session_run.already_started {
         return error_stream(
             &request_id,
@@ -7584,7 +7613,48 @@ pub async fn invoke_resume_sse(
         .get("last-event-id")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u64>().ok());
+    resume_stream_for(
+        &state,
+        &claims.org_id,
+        &claims.user_id,
+        &request_id,
+        after_seq,
+    )
+    .await
+}
 
+/// A duplicate send whose idempotency key another request already holds: serve that request's
+/// buffered stream from its first frame, so both clients see the same frames and no second run
+/// starts. When the original is no longer resumable (its buffer was evicted, or Redis lost it)
+/// the duplicate gets an error that names the original request id and starts nothing.
+async fn attach_to_original(
+    state: &AppState,
+    org_id: &str,
+    user_id: &str,
+    original: &crate::idempotency_registry::SharedClaimValue,
+) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
+    match resume_stream_for(state, org_id, user_id, &original.request_id, None).await {
+        Ok(stream) => stream,
+        Err(_) => error_stream(
+            &original.request_id,
+            "duplicate_in_flight",
+            "the original request for this idempotency_key is no longer resumable",
+            false,
+        ),
+    }
+}
+
+/// The replay-and-tail of a buffered chat stream for one verified caller, shared by the resume
+/// route and by a duplicate send that attaches to the original run
+/// (`MODEL_GATEWAY_SHARED_IDEMPOTENCY`). The caller's identity, never the request id alone,
+/// addresses the buffer.
+async fn resume_stream_for(
+    state: &AppState,
+    org_id: &str,
+    user_id: &str,
+    request_id: &str,
+    after_seq: Option<u64>,
+) -> Result<Sse<ReceiverStream<Result<Event, Infallible>>>, HttpJsonError> {
     // Address the buffer through the CALLER's verified identity, never the
     // bare request id. A request id is not a secret — it ships in the
     // `connected` event, every chunk, and the cancel URL — so keying on it
@@ -7595,8 +7665,7 @@ pub async fn invoke_resume_sse(
     // (sse.rs:272), and for a service principal acting for a user the two
     // differ — reading with `sub` would miss every such stream and resume
     // would fail silently rather than loudly.
-    let buffer_key =
-        crate::stream_buffer::scoped_stream_key(&claims.org_id, &claims.user_id, &request_id);
+    let buffer_key = crate::stream_buffer::scoped_stream_key(org_id, user_id, request_id);
 
     let replay = state
         .stream_buffers
@@ -7611,9 +7680,9 @@ pub async fn invoke_resume_sse(
     let mut producer_live = crate::run_control::ProducerLiveness::new(
         state.cancels.clone(),
         state.run_control.clone(),
-        &request_id,
-        &claims.org_id,
-        &claims.user_id,
+        request_id,
+        org_id,
+        user_id,
     );
     if !replay.found && !producer_live.is_live().await {
         return Err((
@@ -7623,7 +7692,7 @@ pub async fn invoke_resume_sse(
     }
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
-    let req_id = request_id.clone();
+    let req_id = request_id.to_owned();
     let tail_key = buffer_key.clone();
     let buffers = state.stream_buffers.clone();
     tokio::spawn(async move {
@@ -20031,5 +20100,98 @@ mod lifecycle_tests {
         assert!(live.try_recv().is_err(), "no frame reaches a flag-off stream");
         assert_eq!(seq, 0, "no cursor is consumed");
         assert!(buffers.replay_after(&key, None).await.deltas.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod shared_idempotency_tests {
+    use super::*;
+    use crate::idempotency_registry::{SharedClaimState, SharedClaimValue};
+    use axum::response::IntoResponse;
+
+    fn original(request_id: &str) -> SharedClaimValue {
+        SharedClaimValue {
+            request_id: request_id.to_owned(),
+            run_id: Some("run-1".to_owned()),
+            thread_id: Some("thr-1".to_owned()),
+            state: SharedClaimState::Pending,
+        }
+    }
+
+    async fn body_of(stream: Sse<ReceiverStream<Result<Event, Infallible>>>) -> String {
+        let bytes = axum::body::to_bytes(stream.into_response().into_body(), usize::MAX)
+            .await
+            .expect("the attached stream ends");
+        String::from_utf8(bytes.to_vec()).expect("sse is utf-8")
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_attaches_to_the_originals_buffered_frames() {
+        let state = AppState::new();
+        let key = crate::stream_buffer::scoped_stream_key("org-1", "user-1", "req-A");
+        state
+            .stream_buffers
+            .append(&key, 1, "chunk", r#"{"delta":"hello"}"#)
+            .await;
+        state
+            .stream_buffers
+            .finish(
+                &key,
+                crate::stream_buffer::StreamDone {
+                    seq: 2,
+                    model_used: "m".into(),
+                    input_tokens: 1,
+                    output_tokens: 1,
+                },
+            )
+            .await;
+        let body = body_of(attach_to_original(&state, "org-1", "user-1", &original("req-A")).await)
+            .await;
+        assert!(body.contains(r#"{"delta":"hello"}"#), "{body}");
+        assert!(body.contains("event: done"), "{body}");
+        assert!(body.contains("req-A"), "the frames are the original's: {body}");
+    }
+
+    #[tokio::test]
+    async fn an_evicted_original_answers_an_error_naming_it_and_starts_nothing() {
+        let state = AppState::new();
+        let body = body_of(attach_to_original(&state, "org-1", "user-1", &original("req-gone")).await)
+            .await;
+        assert!(body.contains("event: error"), "{body}");
+        assert!(body.contains("req-gone"), "the error names the original: {body}");
+        assert!(body.contains("duplicate_in_flight"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn another_callers_identity_cannot_attach_to_the_original() {
+        let state = AppState::new();
+        let key = crate::stream_buffer::scoped_stream_key("org-1", "user-1", "req-A");
+        state
+            .stream_buffers
+            .append(&key, 1, "chunk", r#"{"delta":"secret"}"#)
+            .await;
+        state
+            .stream_buffers
+            .finish(
+                &key,
+                crate::stream_buffer::StreamDone {
+                    seq: 2,
+                    model_used: "m".into(),
+                    input_tokens: 1,
+                    output_tokens: 1,
+                },
+            )
+            .await;
+        let body = body_of(attach_to_original(&state, "org-2", "user-1", &original("req-A")).await)
+            .await;
+        assert!(!body.contains("secret"), "{body}");
+        assert!(body.contains("event: error"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn resume_of_an_unknown_stream_is_still_a_404() {
+        let state = AppState::new();
+        let refused = resume_stream_for(&state, "org-1", "user-1", "req-none", None).await;
+        assert_eq!(refused.err().map(|(status, _)| status), Some(StatusCode::NOT_FOUND));
     }
 }

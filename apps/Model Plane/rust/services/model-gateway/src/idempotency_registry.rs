@@ -11,9 +11,10 @@
 //!   - `Cached`  — a fresh completed result exists; return it verbatim.
 //!   - `InFlight`— another request holds the key right now; reject as duplicate.
 //!
-//! Cheap (`DashMap` + `Instant`), no new deps. In-memory + single-replica today
-//! — promote the cache to session-core/Postgres for durable, cross-replica
-//! dedup later (same matrix-style note as `cancel_registry`).
+//! Cheap (`DashMap` + `Instant`), no new deps. In-memory and per replica by default; with
+//! `MODEL_GATEWAY_SHARED_IDEMPOTENCY` on, the streaming path also claims the key in Redis (see
+//! the shared claim section below) so a duplicate that lands on another replica attaches to the
+//! original run. The unary `/v1/invoke` path stays per replica.
 //!
 //! # SECURITY: the claim key is namespaced by verified identity
 //!
@@ -29,10 +30,16 @@
 //! unscoped entry point, so a caller cannot forget to namespace — the same
 //! "secure by construction" shape as `stream_buffer::scoped_stream_key`.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
+use futures::future::BoxFuture;
+use redis::AsyncCommands;
+use serde::{Deserialize, Serialize};
+
+use crate::stream_buffer::StreamBufferStore;
 
 /// Separator between the identity components of a claim key. ASCII unit
 /// separator, chosen to match `stream_buffer::KEY_SEPARATOR`.
@@ -194,6 +201,7 @@ impl IdempotencyRegistry {
             state: self.state.clone(),
             key: key.to_owned(),
             committed: false,
+            shared: None,
         })
     }
 
@@ -236,6 +244,8 @@ pub struct CommitGuard {
     state: Arc<RegistryState>,
     key: String,
     committed: bool,
+    /// Set only when this request won the shared claim; settled when the guard drops.
+    shared: Option<SharedRelease>,
 }
 
 impl CommitGuard {
@@ -267,6 +277,13 @@ impl CommitGuard {
 
 impl Drop for CommitGuard {
     fn drop(&mut self) {
+        if let Some(release) = self.shared.take() {
+            // The stream has ended: the settle reads the buffer and writes Redis, so it cannot
+            // run in `drop` itself. Outside a runtime (a unit test) the claim simply expires.
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(release.settle());
+            }
+        }
         if !self.committed {
             // Only drop our own still-Pending claim; never clobber a sibling's Done.
             let _admission = self
@@ -279,6 +296,360 @@ impl Drop for CommitGuard {
                 .remove_if(&self.key, |_, e| matches!(e, Entry::Pending { .. }));
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Shared (cross-replica) claim
+// ---------------------------------------------------------------------------
+
+/// The switch for the shared claim. Default off; `true` and nothing else turns it on.
+pub const SHARED_IDEMPOTENCY_ENV: &str = "MODEL_GATEWAY_SHARED_IDEMPOTENCY";
+
+/// The strict parser of [`SHARED_IDEMPOTENCY_ENV`].
+#[must_use]
+pub fn shared_idempotency_enabled_from(value: Option<&str>) -> bool {
+    mp_contracts::loop_fold::switch_from(value)
+}
+
+/// Whether the shared claim is on, read from the environment at each call.
+#[must_use]
+pub fn shared_idempotency_enabled() -> bool {
+    shared_idempotency_enabled_from(std::env::var(SHARED_IDEMPOTENCY_ENV).ok().as_deref())
+}
+
+const SHARED_PREFIX: &str = "mp:gw:idem:";
+
+fn shared_key_of(scoped_key: &str) -> String {
+    format!("{SHARED_PREFIX}{scoped_key}")
+}
+
+/// The Redis key of a caller's idempotency key. Built from the same identity-scoped key as the
+/// local map, so another tenant derives a different key and never sees this one.
+#[must_use]
+pub fn shared_claim_key(org_id: &str, user_id: &str, client_key: &str) -> String {
+    shared_key_of(&scoped_idempotency_key(org_id, user_id, client_key))
+}
+
+/// Where a shared claim is in its life.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SharedClaimState {
+    Pending,
+    Done,
+}
+
+/// What Redis holds for a claimed key: ids and a state, never an answer. The original stream's
+/// frames stay in the stream buffer, which is identity-scoped and has its own ZDR rules.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharedClaimValue {
+    pub request_id: String,
+    pub run_id: Option<String>,
+    pub thread_id: Option<String>,
+    pub state: SharedClaimState,
+}
+
+/// The result of trying to take a shared claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SharedClaimOutcome {
+    /// This request owns the key.
+    Won,
+    /// Another request (usually on another replica) owns it.
+    Held(SharedClaimValue),
+    /// Redis could not answer; the caller falls back to the local registry alone.
+    Unavailable,
+}
+
+/// The shared half of the claim, behind a seam so the two-replica behaviour runs against a fake.
+pub trait SharedClaimStore: Send + Sync {
+    /// `SET NX` of `value` for [`PENDING_TTL`].
+    fn claim<'a>(
+        &'a self,
+        key: &'a str,
+        value: &'a SharedClaimValue,
+    ) -> BoxFuture<'a, SharedClaimOutcome>;
+    /// The current value, or `None` for a missing key, an unreadable value and an outage alike.
+    fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, Option<SharedClaimValue>>;
+    /// Writes `done` for [`DONE_TTL`], or deletes the key when `None`, only while the key still
+    /// belongs to `request_id`: a claim that expired and was taken by another request is theirs.
+    fn settle<'a>(
+        &'a self,
+        key: &'a str,
+        request_id: &'a str,
+        done: Option<&'a SharedClaimValue>,
+    ) -> BoxFuture<'a, ()>;
+}
+
+/// What a request that holds the local claim learns from the shared one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SharedAttempt {
+    /// This request owns the shared key; it settles when the guard drops.
+    Owner,
+    /// Another request owns the key: attach to its run instead of starting a second one.
+    Attach(SharedClaimValue),
+    /// The shared store is unavailable: behave exactly as the local registry says.
+    Local,
+}
+
+/// Everything the guard needs, when it drops, to turn its claim into `Done` or remove it.
+struct SharedRelease {
+    store: Arc<dyn SharedClaimStore>,
+    key: String,
+    request_id: String,
+    run_id: Option<String>,
+    thread_id: Option<String>,
+    stream_buffers: StreamBufferStore,
+    buffer_key: String,
+}
+
+impl SharedRelease {
+    /// A stream that buffered its `done` frame is a completed answer a duplicate can still
+    /// attach to for [`DONE_TTL`]. Any other end (an error, a stop, a refusal before the run
+    /// started) removes the claim, as the local guard releases its own, so a retry is free to run.
+    async fn settle(self) {
+        let completed = self
+            .stream_buffers
+            .replay_after(&self.buffer_key, None)
+            .await
+            .done
+            .is_some();
+        let done = completed.then(|| SharedClaimValue {
+            request_id: self.request_id.clone(),
+            run_id: self.run_id.clone(),
+            thread_id: self.thread_id.clone(),
+            state: SharedClaimState::Done,
+        });
+        self.store
+            .settle(&self.key, &self.request_id, done.as_ref())
+            .await;
+    }
+}
+
+impl CommitGuard {
+    /// Take the shared claim for this request, after the local one. `buffer_key` is the
+    /// request's identity-scoped stream-buffer key, read when the guard drops to tell a
+    /// completed answer from an abandoned one.
+    pub async fn claim_shared(
+        &mut self,
+        store: &Arc<dyn SharedClaimStore>,
+        request_id: &str,
+        stream_buffers: &StreamBufferStore,
+        buffer_key: &str,
+    ) -> SharedAttempt {
+        let key = shared_key_of(&self.key);
+        let pending = SharedClaimValue {
+            request_id: request_id.to_owned(),
+            run_id: None,
+            thread_id: None,
+            state: SharedClaimState::Pending,
+        };
+        match store.claim(&key, &pending).await {
+            SharedClaimOutcome::Won => {
+                self.shared = Some(SharedRelease {
+                    store: store.clone(),
+                    key,
+                    request_id: request_id.to_owned(),
+                    run_id: None,
+                    thread_id: None,
+                    stream_buffers: stream_buffers.clone(),
+                    buffer_key: buffer_key.to_owned(),
+                });
+                SharedAttempt::Owner
+            }
+            SharedClaimOutcome::Held(original) => SharedAttempt::Attach(original),
+            SharedClaimOutcome::Unavailable => SharedAttempt::Local,
+        }
+    }
+
+    /// Record the run this request started, so the `Done` value names it. A no-op without a
+    /// shared claim.
+    pub fn record_run(&mut self, run_id: &str, thread_id: &str) {
+        if let Some(release) = self.shared.as_mut() {
+            release.run_id = Some(run_id.to_owned());
+            release.thread_id = Some(thread_id.to_owned());
+        }
+    }
+}
+
+/// The shared claim of a key this replica already holds locally as in flight: the duplicate
+/// landed on the original's own replica, and the local map does not know the original's request
+/// id. `None` when nothing is held, or the store cannot answer.
+pub async fn lookup_shared(
+    store: &Arc<dyn SharedClaimStore>,
+    org_id: &str,
+    user_id: &str,
+    client_key: &str,
+) -> Option<SharedClaimValue> {
+    store
+        .get(&shared_claim_key(org_id, user_id, client_key))
+        .await
+}
+
+/// Longest one Redis command may take before it is given up on; the same bound as the stream
+/// buffer's, so an outage costs a send no more than a frame write.
+const SHARED_OP_TIMEOUT: Duration = Duration::from_millis(250);
+/// After a failed or timed-out command Redis is left alone for this long.
+const SHARED_COOLDOWN: Duration = Duration::from_secs(5);
+const SHARED_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// The Redis implementation: one `ConnectionManager` and a cooldown breaker of its own.
+struct RedisClaimStore {
+    conn: redis::aio::ConnectionManager,
+    origin: tokio::time::Instant,
+    open_until_ms: Arc<AtomicU64>,
+}
+
+impl RedisClaimStore {
+    fn now_ms(&self) -> u64 {
+        u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// One command under the timeout and the breaker; `None` for a failure, a timeout and an
+    /// open breaker alike. Logs carry the operation, never the key (it holds org and user ids).
+    async fn run<T>(
+        &self,
+        what: &'static str,
+        op: impl std::future::Future<Output = redis::RedisResult<T>>,
+    ) -> Option<T> {
+        if self.now_ms() < self.open_until_ms.load(Ordering::Relaxed) {
+            return None;
+        }
+        let failure = match tokio::time::timeout(SHARED_OP_TIMEOUT, op).await {
+            Ok(Ok(value)) => return Some(value),
+            Ok(Err(error)) => error.to_string(),
+            Err(_) => "timed out".to_owned(),
+        };
+        tracing::warn!(
+            error = %failure,
+            op = what,
+            cooldown_secs = SHARED_COOLDOWN.as_secs(),
+            "redis idempotency op failed; not using redis for the cooldown"
+        );
+        let cooldown = u64::try_from(SHARED_COOLDOWN.as_millis()).unwrap_or(u64::MAX);
+        self.open_until_ms
+            .store(self.now_ms().saturating_add(cooldown), Ordering::Relaxed);
+        None
+    }
+
+    async fn read(&self, key: &str) -> Option<SharedClaimValue> {
+        let mut conn = self.conn.clone();
+        let raw = self
+            .run("get", conn.get::<_, Option<String>>(key))
+            .await
+            .flatten()?;
+        serde_json::from_str(&raw).ok()
+    }
+}
+
+impl SharedClaimStore for RedisClaimStore {
+    fn claim<'a>(
+        &'a self,
+        key: &'a str,
+        value: &'a SharedClaimValue,
+    ) -> BoxFuture<'a, SharedClaimOutcome> {
+        Box::pin(async move {
+            let Ok(raw) = serde_json::to_string(value) else {
+                return SharedClaimOutcome::Unavailable;
+            };
+            let mut conn = self.conn.clone();
+            let ttl_ms = u64::try_from(PENDING_TTL.as_millis()).unwrap_or(u64::MAX);
+            let mut set = redis::cmd("SET");
+            set.arg(key).arg(raw).arg("NX").arg("PX").arg(ttl_ms);
+            match self
+                .run("claim", set.query_async::<Option<String>>(&mut conn))
+                .await
+            {
+                None => SharedClaimOutcome::Unavailable,
+                Some(Some(_)) => SharedClaimOutcome::Won,
+                // Held. A holder that expired between the two commands, or an unreadable value,
+                // leaves the send to the local registry rather than guessing.
+                Some(None) => self
+                    .read(key)
+                    .await
+                    .map_or(SharedClaimOutcome::Unavailable, SharedClaimOutcome::Held),
+            }
+        })
+    }
+
+    fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, Option<SharedClaimValue>> {
+        Box::pin(self.read(key))
+    }
+
+    fn settle<'a>(
+        &'a self,
+        key: &'a str,
+        request_id: &'a str,
+        done: Option<&'a SharedClaimValue>,
+    ) -> BoxFuture<'a, ()> {
+        Box::pin(async move {
+            // A read then a write, not one atomic step: the window is the 250 ms command bound,
+            // and the worst outcome is overwriting a claim that expired in it.
+            if self
+                .read(key)
+                .await
+                .is_none_or(|held| held.request_id != request_id)
+            {
+                return;
+            }
+            let mut conn = self.conn.clone();
+            match done.and_then(|value| serde_json::to_string(value).ok()) {
+                Some(raw) => {
+                    let ttl_ms = u64::try_from(DONE_TTL.as_millis()).unwrap_or(u64::MAX);
+                    let mut set = redis::cmd("SET");
+                    set.arg(key).arg(raw).arg("PX").arg(ttl_ms);
+                    self.run("settle_done", set.query_async::<()>(&mut conn))
+                        .await;
+                }
+                None => {
+                    self.run("settle_delete", conn.del::<_, ()>(key)).await;
+                }
+            }
+        })
+    }
+}
+
+static SHARED_STORE: tokio::sync::OnceCell<Option<Arc<dyn SharedClaimStore>>> =
+    tokio::sync::OnceCell::const_new();
+
+async fn connect_shared_store() -> Option<Arc<dyn SharedClaimStore>> {
+    let Ok(url) = std::env::var("REDIS_URL") else {
+        tracing::warn!("shared idempotency is on but REDIS_URL is unset; claims stay per replica");
+        return None;
+    };
+    let client = match redis::Client::open(url) {
+        Ok(client) => client,
+        Err(error) => {
+            tracing::warn!(%error, "invalid REDIS_URL; shared idempotency claims stay per replica");
+            return None;
+        }
+    };
+    let config = redis::aio::ConnectionManagerConfig::new()
+        .set_connection_timeout(SHARED_CONNECT_TIMEOUT)
+        .set_response_timeout(SHARED_OP_TIMEOUT)
+        .set_number_of_retries(1);
+    match redis::aio::ConnectionManager::new_with_config(client, config).await {
+        Ok(conn) => {
+            tracing::info!("shared idempotency: Redis claim store active");
+            Some(Arc::new(RedisClaimStore {
+                conn,
+                origin: tokio::time::Instant::now(),
+                open_until_ms: Arc::new(AtomicU64::new(0)),
+            }))
+        }
+        Err(error) => {
+            tracing::warn!(%error, "shared idempotency: Redis connect failed; claims stay per replica");
+            None
+        }
+    }
+}
+
+/// The shared claim store, or `None` when the switch is off, `REDIS_URL` is unset or the first
+/// connect failed (the outcome is kept until restart, like the stream buffer's backend choice).
+/// With the switch off nothing connects and nothing is read.
+pub async fn shared_store() -> Option<Arc<dyn SharedClaimStore>> {
+    if !shared_idempotency_enabled() {
+        return None;
+    }
+    SHARED_STORE.get_or_init(connect_shared_store).await.clone()
 }
 
 fn cached_value_bytes(value: &CachedInvoke) -> usize {
@@ -484,5 +855,257 @@ mod tests {
             ),
             "the prefix is server-side overhead, not part of the public limit"
         );
+    }
+
+    // -- The shared claim ----------------------------------------------------------------
+
+    /// A Redis stand-in two registries (two replicas) can share. `down` makes it answer
+    /// nothing, like an open breaker.
+    #[derive(Default)]
+    struct FakeShared {
+        map: Mutex<std::collections::HashMap<String, SharedClaimValue>>,
+        down: std::sync::atomic::AtomicBool,
+    }
+
+    impl FakeShared {
+        fn is_down(&self) -> bool {
+            self.down.load(Ordering::SeqCst)
+        }
+        fn held(&self, key: &str) -> Option<SharedClaimValue> {
+            self.map.lock().unwrap().get(key).cloned()
+        }
+    }
+
+    impl SharedClaimStore for FakeShared {
+        fn claim<'a>(
+            &'a self,
+            key: &'a str,
+            value: &'a SharedClaimValue,
+        ) -> BoxFuture<'a, SharedClaimOutcome> {
+            Box::pin(async move {
+                if self.is_down() {
+                    return SharedClaimOutcome::Unavailable;
+                }
+                let mut map = self.map.lock().unwrap();
+                match map.get(key) {
+                    Some(held) => SharedClaimOutcome::Held(held.clone()),
+                    None => {
+                        map.insert(key.to_owned(), value.clone());
+                        SharedClaimOutcome::Won
+                    }
+                }
+            })
+        }
+        fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, Option<SharedClaimValue>> {
+            Box::pin(async move { (!self.is_down()).then(|| self.held(key)).flatten() })
+        }
+        fn settle<'a>(
+            &'a self,
+            key: &'a str,
+            request_id: &'a str,
+            done: Option<&'a SharedClaimValue>,
+        ) -> BoxFuture<'a, ()> {
+            Box::pin(async move {
+                if self.is_down() {
+                    return;
+                }
+                let mut map = self.map.lock().unwrap();
+                if map.get(key).is_none_or(|held| held.request_id != request_id) {
+                    return;
+                }
+                match done {
+                    Some(value) => {
+                        map.insert(key.to_owned(), value.clone());
+                    }
+                    None => {
+                        map.remove(key);
+                    }
+                }
+            })
+        }
+    }
+
+    fn fake() -> (Arc<FakeShared>, Arc<dyn SharedClaimStore>) {
+        let fake = Arc::new(FakeShared::default());
+        let store: Arc<dyn SharedClaimStore> = fake.clone();
+        (fake, store)
+    }
+
+    /// A claim taken the way `invoke_sse` takes it: local first, then shared.
+    async fn send(
+        reg: &IdempotencyRegistry,
+        store: &Arc<dyn SharedClaimStore>,
+        org: &str,
+        request_id: &str,
+        buffers: &StreamBufferStore,
+    ) -> (CommitGuard, SharedAttempt) {
+        let Claim::Proceed(mut guard) = reg.claim(org, USER, "send-1") else {
+            panic!("a fresh replica's local claim must proceed");
+        };
+        let buffer_key = crate::stream_buffer::scoped_stream_key(org, USER, request_id);
+        let attempt = guard
+            .claim_shared(store, request_id, buffers, &buffer_key)
+            .await;
+        (guard, attempt)
+    }
+
+    async fn until(mut ready: impl FnMut() -> bool) {
+        for _ in 0..200 {
+            if ready() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("the guard's settle never landed");
+    }
+
+    #[test]
+    fn the_shared_switch_is_on_for_true_and_nothing_else() {
+        assert!(shared_idempotency_enabled_from(Some("true")));
+        assert!(shared_idempotency_enabled_from(Some(" TRUE ")));
+        for off in [None, Some(""), Some("1"), Some("yes"), Some("on"), Some("truee")] {
+            assert!(!shared_idempotency_enabled_from(off), "{off:?}");
+        }
+    }
+
+    #[test]
+    fn the_shared_key_is_identity_scoped() {
+        assert_eq!(
+            shared_claim_key("org_A", "user_1", "k"),
+            format!("mp:gw:idem:org_A{KEY_SEPARATOR}user_1{KEY_SEPARATOR}k")
+        );
+        assert_ne!(
+            shared_claim_key("org_A", "user_1", "k"),
+            shared_claim_key("org_B", "user_1", "k")
+        );
+        assert_ne!(
+            shared_claim_key("org_A", "user_1", "k"),
+            shared_claim_key("org_A", "user_2", "k")
+        );
+    }
+
+    #[test]
+    fn a_shared_value_holds_ids_and_a_state_only() {
+        let value = SharedClaimValue {
+            request_id: "req-1".into(),
+            run_id: Some("run-1".into()),
+            thread_id: Some("thr-1".into()),
+            state: SharedClaimState::Done,
+        };
+        let json: serde_json::Value = serde_json::to_value(&value).unwrap();
+        let mut keys: Vec<_> = json.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(keys, ["request_id", "run_id", "state", "thread_id"]);
+        assert_eq!(json["state"], "done");
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_on_another_replica_attaches_to_the_original() {
+        let (_, store) = fake();
+        let buffers = StreamBufferStore::new();
+        let (replica_a, replica_b) = (IdempotencyRegistry::new(), IdempotencyRegistry::new());
+        let (_owner, first) = send(&replica_a, &store, ORG, "req-A", &buffers).await;
+        assert_eq!(first, SharedAttempt::Owner);
+        let (_dup, second) = send(&replica_b, &store, ORG, "req-B", &buffers).await;
+        match second {
+            SharedAttempt::Attach(original) => {
+                assert_eq!(original.request_id, "req-A");
+                assert_eq!(original.state, SharedClaimState::Pending);
+            }
+            other => panic!("the duplicate must attach, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn another_orgs_identical_key_does_not_attach() {
+        let (_, store) = fake();
+        let buffers = StreamBufferStore::new();
+        let (replica_a, replica_b) = (IdempotencyRegistry::new(), IdempotencyRegistry::new());
+        let (_owner, first) = send(&replica_a, &store, "org_A", "req-A", &buffers).await;
+        assert_eq!(first, SharedAttempt::Owner);
+        let (_other, second) = send(&replica_b, &store, "org_B", "req-B", &buffers).await;
+        assert_eq!(
+            second,
+            SharedAttempt::Owner,
+            "a foreign tenant derives another key, so it neither attaches nor learns of the first"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unavailable_store_leaves_the_local_behaviour() {
+        let (fake, store) = fake();
+        fake.down.store(true, Ordering::SeqCst);
+        let buffers = StreamBufferStore::new();
+        let reg = IdempotencyRegistry::new();
+        let (guard, attempt) = send(&reg, &store, ORG, "req-A", &buffers).await;
+        assert_eq!(attempt, SharedAttempt::Local);
+        assert!(guard.shared.is_none(), "nothing to settle without a shared claim");
+        // The local registry still protects the key on this replica.
+        assert!(matches!(reg.claim(ORG, USER, "send-1"), Claim::InFlight));
+        drop(guard);
+        assert!(matches!(reg.claim(ORG, USER, "send-1"), Claim::Proceed(_)));
+        assert!(lookup_shared(&store, ORG, USER, "send-1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_completed_stream_leaves_a_done_claim_naming_its_run() {
+        let (fake, store) = fake();
+        let buffers = StreamBufferStore::new();
+        let reg = IdempotencyRegistry::new();
+        let (mut guard, attempt) = send(&reg, &store, ORG, "req-A", &buffers).await;
+        assert_eq!(attempt, SharedAttempt::Owner);
+        guard.record_run("run-1", "thr-1");
+        let buffer_key = crate::stream_buffer::scoped_stream_key(ORG, USER, "req-A");
+        buffers
+            .finish(
+                &buffer_key,
+                crate::stream_buffer::StreamDone {
+                    seq: 3,
+                    model_used: "m".into(),
+                    input_tokens: 1,
+                    output_tokens: 1,
+                },
+            )
+            .await;
+        drop(guard);
+        let key = shared_claim_key(ORG, USER, "send-1");
+        until(|| fake.held(&key).is_some_and(|v| v.state == SharedClaimState::Done)).await;
+        let done = lookup_shared(&store, ORG, USER, "send-1").await.unwrap();
+        assert_eq!(done.request_id, "req-A");
+        assert_eq!(done.run_id.as_deref(), Some("run-1"));
+        assert_eq!(done.thread_id.as_deref(), Some("thr-1"));
+        // A later duplicate, on any replica, still finds the original.
+        let (_dup, attempt) = send(&IdempotencyRegistry::new(), &store, ORG, "req-B", &buffers).await;
+        assert!(matches!(attempt, SharedAttempt::Attach(v) if v.request_id == "req-A"));
+    }
+
+    #[tokio::test]
+    async fn an_abandoned_stream_removes_its_claim_so_a_retry_can_run() {
+        let (fake, store) = fake();
+        let buffers = StreamBufferStore::new();
+        let reg = IdempotencyRegistry::new();
+        let (guard, attempt) = send(&reg, &store, ORG, "req-A", &buffers).await;
+        assert_eq!(attempt, SharedAttempt::Owner);
+        // No `done` frame was buffered: the request errored or was refused.
+        drop(guard);
+        let key = shared_claim_key(ORG, USER, "send-1");
+        until(|| fake.held(&key).is_none()).await;
+        let (_retry, attempt) = send(&reg, &store, ORG, "req-B", &buffers).await;
+        assert_eq!(attempt, SharedAttempt::Owner);
+    }
+
+    #[tokio::test]
+    async fn a_settle_never_touches_a_claim_another_request_took() {
+        let (fake, store) = fake();
+        let key = shared_claim_key(ORG, USER, "send-1");
+        let theirs = SharedClaimValue {
+            request_id: "req-theirs".into(),
+            run_id: None,
+            thread_id: None,
+            state: SharedClaimState::Pending,
+        };
+        assert_eq!(store.claim(&key, &theirs).await, SharedClaimOutcome::Won);
+        store.settle(&key, "req-mine", None).await;
+        assert_eq!(fake.held(&key), Some(theirs));
     }
 }
