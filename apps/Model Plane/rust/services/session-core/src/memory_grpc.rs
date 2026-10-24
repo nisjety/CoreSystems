@@ -15,8 +15,8 @@ use mp_contracts::model_plane::v1::{
     DeleteMemoryRequest, DeleteMemoryResponse, GetMemoryControlsRequest,
     GetMemoryControlsResponse, IndexMemoryRequest, IndexMemoryResponse, ListMemoryRequest,
     ListMemoryResponse, MemoryControls, MemoryEntry, MemoryHealthRequest, MemoryHealthResponse,
-    MemoryState, SearchMemoryRequest, SearchMemoryResponse, SetMemoryControlsRequest,
-    SetMemoryControlsResponse,
+    MemoryState, ResetMemoryRequest, ResetMemoryResponse, SearchMemoryRequest,
+    SearchMemoryResponse, SetMemoryControlsRequest, SetMemoryControlsResponse,
 };
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -859,6 +859,78 @@ impl MemoryService for MemoryGrpc {
             controls: Some(controls),
         }))
     }
+
+    async fn reset_memory(
+        &self,
+        request: Request<ResetMemoryRequest>,
+    ) -> Result<Response<ResetMemoryResponse>, Status> {
+        let caller = identity(&request)?;
+        let req = request.into_inner();
+        if req.org_id.trim().is_empty() {
+            return Err(Status::invalid_argument("org_id is required"));
+        }
+        if req.user_id.trim().is_empty() {
+            return Err(Status::invalid_argument("user_id is required"));
+        }
+        let (org_id, user_id) = (req.org_id.trim(), req.user_id.trim());
+        caller.authorize_org(org_id)?;
+        // An erase of everything is the person's own act: no service resets
+        // memory for them.
+        if caller.is_service() {
+            return Err(Status::permission_denied(
+                "memory is reset by the user themselves",
+            ));
+        }
+        caller.authorize_user(user_id)?;
+        if !req.confirm {
+            return Err(Status::invalid_argument("confirm must be true to reset memory"));
+        }
+        // No retention check: this only removes, and a ZDR user may hold rows
+        // written before ZDR applied (the same rule as `delete_memory`).
+        let erased = crate::dreaming::reset_user_memory(
+            &self.pool,
+            org_id,
+            user_id,
+            caller.principal_id(),
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+        // The semantic copy was tagged with the user id, whatever the durable
+        // row's `owner` column holds for a thread-bound row.
+        let erased_rows: Vec<crate::memory_erasure::ErasedMemory> = erased
+            .iter()
+            .map(|memory_id| crate::memory_erasure::ErasedMemory {
+                memory_id: memory_id.clone(),
+                owner: user_id.to_owned(),
+            })
+            .collect();
+        let semantic =
+            crate::memory_erasure::erase_semantic_copies(self.letta.as_ref(), org_id, &erased_rows)
+                .await;
+        metrics::counter!("mp_session_memory_resets_total").increment(1);
+        if !semantic.is_complete() {
+            tracing::warn!(
+                unconfirmed = semantic.unconfirmed,
+                "memory reset left semantic copies unconfirmed; recall stays suppressed"
+            );
+        }
+        Ok(Response::new(reset_response(erased.len(), &semantic)))
+    }
+}
+
+fn reset_response(
+    durable_deleted: usize,
+    semantic: &crate::memory_erasure::SemanticErasure,
+) -> ResetMemoryResponse {
+    ResetMemoryResponse {
+        durable_deleted: u32::try_from(durable_deleted).unwrap_or(u32::MAX),
+        semantic_unconfirmed: u32::try_from(semantic.unconfirmed).unwrap_or(u32::MAX),
+        degraded: !semantic.is_complete(),
+        degradation_reason: semantic
+            .degradation_reason
+            .unwrap_or_default()
+            .to_owned(),
+    }
 }
 
 /// The state and the decision it produces, as the wire message. Content-free.
@@ -1293,6 +1365,278 @@ mod tests {
             exists(foreign_memory.clone()).await,
             "a refused delete leaves the row alone"
         );
+    }
+
+    fn reset_request(org_id: &str, user_id: &str, confirm: bool) -> ResetMemoryRequest {
+        ResetMemoryRequest {
+            org_id: org_id.to_owned(),
+            user_id: user_id.to_owned(),
+            confirm,
+        }
+    }
+
+    /// A reset cannot be undone, so an unset `confirm` is refused before the
+    /// database is reached, and only the user themselves can ask at all.
+    #[tokio::test]
+    async fn reset_requires_confirm() {
+        let auth = MockServer::start().await;
+        let (service, _ownership) = guarded_service(&auth.uri(), "user-a");
+        let user = || VerifiedIdentity::user_for_test("org-a", "user-a");
+
+        let unconfirmed = service
+            .reset_memory(request(reset_request("org-a", "user-a", false), user()))
+            .await
+            .expect_err("a reset without confirm is refused");
+        assert_eq!(unconfirmed.code(), tonic::Code::InvalidArgument);
+
+        let other_user = service
+            .reset_memory(request(reset_request("org-a", "user-b", true), user()))
+            .await
+            .expect_err("a user cannot reset another user's memory");
+        assert_eq!(other_user.code(), tonic::Code::PermissionDenied);
+
+        let other_org = service
+            .reset_memory(request(reset_request("org-b", "user-a", true), user()))
+            .await
+            .expect_err("a user cannot reset memory in another org");
+        assert_eq!(other_org.code(), tonic::Code::PermissionDenied);
+
+        let service_caller = service
+            .reset_memory(request(
+                reset_request("org-a", "user-a", true),
+                VerifiedIdentity::service_for_test("org-a", &["memory:write"], false),
+            ))
+            .await
+            .expect_err("no service resets a person's memory for them");
+        assert_eq!(service_caller.code(), tonic::Code::PermissionDenied);
+    }
+
+    async fn scratch_pool() -> PgPool {
+        let url =
+            std::env::var("DATABASE_URL").expect("a scratch database whose name contains test");
+        let database = url
+            .rsplit('/')
+            .next()
+            .and_then(|tail| tail.split('?').next())
+            .unwrap_or_default();
+        assert!(
+            database.contains("test"),
+            "DATABASE_URL must name a scratch database whose name contains \"test\""
+        );
+        let pool = PgPool::connect(&url).await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        pool
+    }
+
+    async fn seed_reset_thread(pool: &PgPool, org: &str, user: &str) -> String {
+        let thread = mp_ids::new_ulid();
+        sqlx::query("INSERT INTO threads (id, session_key, org_id, user_id) VALUES ($1, $1, $2, $3)")
+            .bind(&thread)
+            .bind(org)
+            .bind(user)
+            .execute(pool)
+            .await
+            .unwrap();
+        thread
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn seed_reset_memory(
+        pool: &PgPool,
+        org: &str,
+        session: Option<&str>,
+        scope: &str,
+        owner: &str,
+        is_latest: bool,
+        supersedes: Option<&str>,
+    ) -> String {
+        let id = mp_ids::new_ulid();
+        sqlx::query(
+            "INSERT INTO agent_memory (id, org_id, session_id, scope, key, content, owner, is_latest, supersedes_id) \
+             VALUES ($1, $2, $3, $4, $1, 'seeded content', $5, $6, $7)",
+        )
+        .bind(&id)
+        .bind(org)
+        .bind(session)
+        .bind(scope)
+        .bind(owner)
+        .bind(is_latest)
+        .bind(supersedes)
+        .execute(pool)
+        .await
+        .unwrap();
+        id
+    }
+
+    async fn memory_exists(pool: &PgPool, id: &str) -> bool {
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM agent_memory WHERE id = $1)")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn is_forgotten(pool: &PgPool, org: &str, user: &str, id: &str) -> bool {
+        sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM forgotten_memory_ids WHERE org_id = $1 AND user_id = $2 AND memory_id = $3)",
+        )
+        .bind(org)
+        .bind(user)
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    /// The caller's current rows, their retired ancestors and their thread rows
+    /// go; the org's row, another user's row and the same user's row in another
+    /// org stay. A message written before the reset can no longer be mined.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres whose name contains \"test\""]
+    async fn reset_erases_user_rows_not_org_rows_and_blocks_remining() {
+        let pool = scratch_pool().await;
+        let org = format!("reset-memory-{}", mp_ids::new_ulid());
+        let other_org = format!("reset-memory-other-{}", mp_ids::new_ulid());
+        let thread = seed_reset_thread(&pool, &org, "user-a").await;
+        let retired = seed_reset_memory(&pool, &org, None, "user", "user-a", false, None).await;
+        let head =
+            seed_reset_memory(&pool, &org, None, "user", "user-a", true, Some(&retired)).await;
+        let thread_row =
+            seed_reset_memory(&pool, &org, Some(&thread), "thread", "", true, None).await;
+        let org_row = seed_reset_memory(&pool, &org, None, "org", "", true, None).await;
+        let other_user = seed_reset_memory(&pool, &org, None, "user", "user-b", true, None).await;
+        let other_org_row =
+            seed_reset_memory(&pool, &other_org, None, "user", "user-a", true, None).await;
+        let message = mp_ids::new_ulid();
+        sqlx::query("INSERT INTO messages (id, thread_id, role, content) VALUES ($1, $2, 'user', 'jeg heter Ima')")
+            .bind(&message)
+            .bind(&thread)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let service = MemoryGrpc::new(pool.clone(), None);
+        let response = service
+            .reset_memory(request(
+                reset_request(&org, "user-a", true),
+                VerifiedIdentity::user_for_test(&org, "user-a"),
+            ))
+            .await
+            .expect("the owner may reset their memory")
+            .into_inner();
+        assert_eq!(response.durable_deleted, 3);
+
+        for id in [&retired, &head, &thread_row] {
+            assert!(!memory_exists(&pool, id).await, "{id} must be erased");
+            assert!(is_forgotten(&pool, &org, "user-a", id).await);
+        }
+        for id in [&org_row, &other_user, &other_org_row] {
+            assert!(memory_exists(&pool, id).await, "{id} is not the caller's");
+        }
+
+        let mut tx = pool.begin().await.unwrap();
+        assert!(
+            !crate::memory_control::permits_extraction(&mut tx, &org, "user-a", &message)
+                .await
+                .unwrap(),
+            "what was said before the reset must not be mined back into memory"
+        );
+        tx.rollback().await.unwrap();
+
+        let events: Vec<(String, serde_json::Value)> = sqlx::query_as(
+            "SELECT event, detail FROM memory_control_events WHERE org_id = $1 AND user_id = 'user-a'",
+        )
+        .bind(&org)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "reset");
+        assert_eq!(events[0].1, serde_json::json!({"durable_deleted": 3}));
+    }
+
+    /// The same user id in another org, and another user in the same org, are
+    /// out of reach; a caller of another org or user is refused outright.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres whose name contains \"test\""]
+    async fn reset_is_tenant_scoped() {
+        let pool = scratch_pool().await;
+        let org = format!("reset-tenant-{}", mp_ids::new_ulid());
+        let other_org = format!("reset-tenant-other-{}", mp_ids::new_ulid());
+        let own = seed_reset_memory(&pool, &org, None, "user", "user-a", true, None).await;
+        let other_org_row =
+            seed_reset_memory(&pool, &other_org, None, "user", "user-a", true, None).await;
+        let other_user = seed_reset_memory(&pool, &org, None, "user", "user-b", true, None).await;
+        let service = MemoryGrpc::new(pool.clone(), None);
+
+        let refused = [
+            service
+                .reset_memory(request(
+                    reset_request(&org, "user-a", true),
+                    VerifiedIdentity::user_for_test(&org, "user-b"),
+                ))
+                .await
+                .unwrap_err(),
+            service
+                .reset_memory(request(
+                    reset_request(&org, "user-a", true),
+                    VerifiedIdentity::user_for_test(&other_org, "user-a"),
+                ))
+                .await
+                .unwrap_err(),
+        ];
+        for error in refused {
+            assert_eq!(error.code(), tonic::Code::PermissionDenied);
+        }
+        for id in [&own, &other_org_row, &other_user] {
+            assert!(memory_exists(&pool, id).await, "a refused reset erases nothing");
+        }
+
+        service
+            .reset_memory(request(
+                reset_request(&org, "user-a", true),
+                VerifiedIdentity::user_for_test(&org, "user-a"),
+            ))
+            .await
+            .unwrap();
+        assert!(!memory_exists(&pool, &own).await);
+        assert!(memory_exists(&pool, &other_org_row).await);
+        assert!(memory_exists(&pool, &other_user).await);
+    }
+
+    /// Erasure only removes, so a ZDR user may reset rows written before ZDR
+    /// applied. With no semantic tier configured the copies are reported
+    /// unconfirmed, never claimed erased, and the event holds a count only.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres whose name contains \"test\""]
+    async fn reset_allowed_for_zdr_caller() {
+        let pool = scratch_pool().await;
+        let org = format!("reset-zdr-{}", mp_ids::new_ulid());
+        let own = seed_reset_memory(&pool, &org, None, "user", "user-a", true, None).await;
+        let service = MemoryGrpc::new(pool.clone(), None);
+
+        let response = service
+            .reset_memory(request(
+                reset_request(&org, "user-a", true),
+                VerifiedIdentity::user_for_test_with_zdr(&org, "user-a", true),
+            ))
+            .await
+            .expect("a ZDR owner may reset their own memory")
+            .into_inner();
+        assert_eq!(response.durable_deleted, 1);
+        assert_eq!(response.semantic_unconfirmed, 1);
+        assert!(response.degraded);
+        assert_eq!(response.degradation_reason, LETTA_NOT_CONFIGURED);
+        assert!(!memory_exists(&pool, &own).await);
+
+        let detail: serde_json::Value = sqlx::query_scalar(
+            "SELECT detail FROM memory_control_events WHERE org_id = $1 AND event = 'reset'",
+        )
+        .bind(&org)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(detail, serde_json::json!({"durable_deleted": 1}));
     }
 
     #[test]

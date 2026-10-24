@@ -1910,6 +1910,77 @@ pub(crate) async fn delete_user_memory(
     Ok(MemoryDeletion::Absent)
 }
 
+/// Erases every durable memory the caller owns, in one transaction, and returns
+/// the ids it removed.
+///
+/// "Owns" is exactly [`delete_user_memory`]'s boundary: `scope = 'user'` rows
+/// with no session whose `owner` is the caller, and thread-bound rows of the
+/// caller's own threads. Org-owned rows (`scope` org or global) are never
+/// matched, so a reset cannot reach what the organization wrote. The predicate
+/// has no `is_latest` or `review_state` filter, which is what takes the retired
+/// ancestors of a `supersedes_id` chain, pending rows and expired rows with it.
+///
+/// Every erased id is recorded as forgotten, so a semantic copy that survives
+/// the follow-up erasure is still filtered from every read, and `extract_after`
+/// moves to now so a conversation that already happened is not mined back into
+/// memory by the next Dreaming pass. The `reset` event keeps a count, never a
+/// row. All of it runs under the user's control-row lock, the lock a pause and
+/// an in-flight extraction take, so none of them can interleave with the erase.
+pub(crate) async fn reset_user_memory(
+    pool: &PgPool,
+    org_id: &str,
+    owner_user_id: &str,
+    actor: &str,
+) -> Result<Vec<String>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    crate::memory_control::lock_user(&mut tx, org_id, owner_user_id).await?;
+    let mut erased: Vec<String> = sqlx::query_scalar(
+        "DELETE FROM agent_memory m \
+         WHERE m.org_id = $1 \
+           AND ((m.session_id IS NULL AND m.scope = 'user' AND m.owner = $2) \
+                OR (m.session_id IS NOT NULL AND m.scope NOT IN ('org', 'global') AND EXISTS ( \
+                      SELECT 1 FROM threads t \
+                      WHERE t.id = m.session_id AND t.org_id = m.org_id AND t.user_id = $2))) \
+         RETURNING m.id",
+    )
+    .bind(org_id)
+    .bind(owner_user_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    erased.sort();
+    sqlx::query(
+        "INSERT INTO forgotten_memory_ids (org_id, user_id, memory_id) \
+         SELECT $1, $2, id FROM unnest($3::text[]) AS erased(id) ON CONFLICT DO NOTHING",
+    )
+    .bind(org_id)
+    .bind(owner_user_id)
+    .bind(&erased)
+    .execute(&mut *tx)
+    .await?;
+    // clock_timestamp is measured after the lock, not when a waiting tx began.
+    sqlx::query(
+        "UPDATE user_memory_controls SET extract_after = clock_timestamp() \
+         WHERE org_id = $1 AND user_id = $2",
+    )
+    .bind(org_id)
+    .bind(owner_user_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO memory_control_events (id, org_id, user_id, event, actor, detail) \
+         VALUES ($1, $2, $3, 'reset', $4, jsonb_build_object('durable_deleted', $5::bigint))",
+    )
+    .bind(new_ulid())
+    .bind(org_id)
+    .bind(owner_user_id)
+    .bind(actor)
+    .bind(i64::try_from(erased.len()).unwrap_or(i64::MAX))
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(erased)
+}
+
 fn extract_user_candidates(content: &str) -> Vec<DreamMemoryCandidate> {
     let mut candidates = Vec::new();
     if let Some(name) = extract_first_marker_value(

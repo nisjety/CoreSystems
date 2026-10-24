@@ -36,6 +36,11 @@ service MemoryService {
   // Set the user's own memory state (on, paused, off). User callers only, for
   // themselves; refused for a ZDR or waived credential.
   rpc SetMemoryControls(SetMemoryControlsRequest) returns (SetMemoryControlsResponse);
+
+  // Erase every durable memory the caller owns, with its supersession lineage
+  // and semantic copies, in one confirmed step. Org-owned memory is left alone.
+  // Open to a ZDR caller too: erasure only removes, and pre-ZDR rows may exist.
+  rpc ResetMemory(ResetMemoryRequest) returns (ResetMemoryResponse);
 }
 
 message SearchMemoryRequest {
@@ -314,4 +319,31 @@ message GetMemoryControlsResponse {
 
 message SetMemoryControlsResponse {
   MemoryControls controls = 1;
+}
+
+message ResetMemoryRequest {
+  // Tenant context.
+  string org_id = 1;
+
+  // The user whose memory is erased. Must be the caller.
+  string user_id = 2;
+
+  // Must be true. A reset cannot be undone, so an unset field is a refusal,
+  // never a default.
+  bool confirm = 3;
+}
+
+message ResetMemoryResponse {
+  // How many durable rows were erased (current rows and retired ancestors).
+  uint32 durable_deleted = 1;
+
+  // Durable rows whose semantic copy could not be confirmed erased. Their reads
+  // stay suppressed, because every erased id is recorded as forgotten.
+  uint32 semantic_unconfirmed = 2;
+
+  // True when semantic_unconfirmed is not zero.
+  bool degraded = 3;
+
+  // Stable machine-readable reason, empty when nothing is degraded.
+  string degradation_reason = 4;
 }
