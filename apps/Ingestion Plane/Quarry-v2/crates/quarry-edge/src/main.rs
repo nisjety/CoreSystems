@@ -313,6 +313,13 @@ async fn run() -> anyhow::Result<()> {
             "QUARRY_EDGE__CROSS_PLANE_AUTH_DEV_BYPASS must never be enabled in production"
         );
     }
+    // WS17.P0: with the flag off, a ZDR organization is served on every profile route and only
+    // logged (zdr.would_refuse). Say so at boot in production.
+    if matches!(environment.as_str(), "prod" | "production") && !cfg.zdr_refuse_durable_resources {
+        tracing::warn!(
+            "QUARRY_EDGE__ZDR_REFUSE_DURABLE_RESOURCES is off in production: ZDR organizations are served on durable resources (profiles, schedules, change monitors) and only observed"
+        );
+    }
     // Metrics are opt-in. An unreadable setting, or an enabled listener in
     // production without a usable token, stops the edge here rather than
     // starting an open or unusable endpoint.

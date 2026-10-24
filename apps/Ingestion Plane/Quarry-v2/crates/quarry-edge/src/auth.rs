@@ -599,7 +599,9 @@ fn dev_bypass_stub_claims() -> Claims {
         service_id: None,
         nbf: None,
         aud: None,
-        scopes: Vec::new(),
+        // WS17.P0: the dev stub carries the profile import scope so a local run and the edge
+        // tests can save a profile. The bypass is refused in production, so no real token does.
+        scopes: vec![crate::profile_guard::IMPORT_SCOPE.to_owned()],
         // The dev stub asserts no posture: it can only ever run on the body flag.
         zdr: None,
     }

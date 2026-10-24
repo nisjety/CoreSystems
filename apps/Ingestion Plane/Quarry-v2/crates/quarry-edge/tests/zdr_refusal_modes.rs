@@ -388,8 +388,11 @@ async fn observe_mode_serves_a_zdr_org_as_before_and_logs_one_content_free_event
         "a declared ZDR record is served as before (no store: 501), not refused"
     );
     expected.insert(("change_record_internal".to_owned(), "record".to_owned()));
+    // WS17.P0: the restore probe is a flag-gated refusal, so under observe it is observed too.
+    expected.insert(("profiles".to_owned(), "probe".to_owned()));
 
-    // Wind-down reads and writes are never observed.
+    // Wind-down reads and writes are never observed (the list and the delete; the probe is
+    // observed, see above).
     for response in [
         harness.get(&user_in_zdr_org(), "/v1/schedules").await,
         harness.get(&user_in_zdr_org(), "/v1/profiles").await,
@@ -663,8 +666,11 @@ async fn enforced_zdr_org_can_still_wind_down() {
         vec![held.to_string().as_str()],
         "the held profile is listed"
     );
+    // WS17.P0: under the flag a read and a probe are refused; the list and the delete stay open.
     let read = harness.get(&zdr, &format!("/v1/profiles/{held}")).await;
-    assert_eq!(read.status().as_u16(), 200, "profile read");
+    assert_eq!(read.status().as_u16(), 403, "profile read is refused");
+    let read: Value = read.json().await.unwrap();
+    assert_eq!(read["error"]["details"]["zdr_refusal"]["action"], "read", "{read}");
     let probed = harness
         .post(
             &zdr,
@@ -672,12 +678,9 @@ async fn enforced_zdr_org_can_still_wind_down() {
             json!({ "url": "https://page.test/restore" }),
         )
         .await;
-    assert_eq!(probed.status().as_u16(), 200, "profile restore_probe");
+    assert_eq!(probed.status().as_u16(), 403, "profile restore_probe is refused");
     let probed: Value = probed.json().await.unwrap();
-    assert!(
-        probed["error"]["details"]["zdr_refusal"].is_null(),
-        "{probed}"
-    );
+    assert_eq!(probed["error"]["details"]["zdr_refusal"]["action"], "probe", "{probed}");
     let erased = harness.delete(&zdr, &format!("/v1/profiles/{held}")).await;
     assert_eq!(
         erased.status().as_u16(),

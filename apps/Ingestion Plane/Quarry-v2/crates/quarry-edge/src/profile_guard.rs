@@ -33,6 +33,7 @@ use serde::Deserialize;
 
 use crate::auth::Claims;
 use crate::state::AppState;
+use crate::zdr_refusal::{self, Refused};
 
 /// Mode of the owner check. `Observe` is the default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -109,6 +110,101 @@ impl ProfileOp {
     /// Operations an org-shared profile reserves for its owner.
     fn owner_only_on_shared(self) -> bool {
         matches!(self, Self::Update | Self::Delete)
+    }
+}
+
+/// The scope a profile import (`save_profile`) needs (WS17.P0). No token carries it in
+/// production today, so an HTTP import is refused for everyone until one is issued.
+pub const IMPORT_SCOPE: &str = "quarry:profiles:import";
+
+/// The 403 message of a service principal. It names no caller data.
+pub const SERVICE_PRINCIPAL_MESSAGE: &str =
+    "profiles are not available to service principals; they never read or write browser state";
+
+impl ProfileOp {
+    /// The matrix action label a ZDR refusal of this op carries (`docs/ERROR_REASONS.md`).
+    /// `None` for the two wind-down operations a ZDR organization keeps: list, and delete
+    /// (erasing what it already holds).
+    pub fn zdr_action(self) -> Option<&'static str> {
+        match self {
+            Self::List | Self::Delete => None,
+            Self::Create => Some("create"),
+            Self::Import => Some("save"),
+            Self::Read => Some("read"),
+            Self::Update => Some("update"),
+            Self::Probe => Some("probe"),
+            Self::Attach => Some("attach"),
+        }
+    }
+}
+
+/// A refusal decided from the principal alone, before the ownership check and the ZDR posture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrincipalRefusal {
+    /// A service principal, on any profile operation.
+    ServicePrincipal,
+    /// An import from a token that lacks [`IMPORT_SCOPE`].
+    MissingImportScope,
+}
+
+impl PrincipalRefusal {
+    /// The closed log label.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ServicePrincipal => "service_principal",
+            Self::MissingImportScope => "missing_import_scope",
+        }
+    }
+
+    fn message(self) -> &'static str {
+        match self {
+            Self::ServicePrincipal => SERVICE_PRINCIPAL_MESSAGE,
+            Self::MissingImportScope => {
+                "profile import requires the quarry:profiles:import scope"
+            }
+        }
+    }
+}
+
+/// The principal check: a service principal never reaches a profile, and an import needs
+/// [`IMPORT_SCOPE`]. Pure, so the table is unit-tested without a store.
+pub fn principal_refusal(claims: &Claims, op: ProfileOp) -> Option<PrincipalRefusal> {
+    if claims.is_service() {
+        return Some(PrincipalRefusal::ServicePrincipal);
+    }
+    if op == ProfileOp::Import && !claims.has_scope(IMPORT_SCOPE) {
+        return Some(PrincipalRefusal::MissingImportScope);
+    }
+    None
+}
+
+/// The first gate of every `/v1/profiles*` handler (WS17.P0), before any store read: the
+/// principal check, then the ZDR posture. The ZDR half is WS4.H's helper: it observes
+/// (logs `zdr.would_refuse`, serves) until `QUARRY_EDGE__ZDR_REFUSE_DURABLE_RESOURCES` is
+/// on, and then answers 403 `zdr_durable_mutation_forbidden`. List and delete are never
+/// refused on the ZDR side.
+pub fn precheck(
+    state: &AppState,
+    claims: &Claims,
+    op: ProfileOp,
+    request_id: &str,
+) -> Result<(), Refused> {
+    if let Some(refusal) = principal_refusal(claims, op) {
+        tracing::info!(
+            op = op.as_str(),
+            reason = refusal.as_str(),
+            "profile.precheck.refused"
+        );
+        return Err(zdr_refusal::respond(
+            request_id,
+            QuarryError::new(ErrorCode::Forbidden, refusal.message()),
+        ));
+    }
+    match op.zdr_action() {
+        Some(action) => {
+            zdr_refusal::refuse_for_claims(state, claims, None, request_id, "profiles", action)
+        }
+        None => Ok(()),
     }
 }
 
@@ -329,6 +425,64 @@ mod tests {
         ProfileOp::Delete,
         ProfileOp::Attach,
     ];
+
+    fn principal(service: bool, scopes: &[&str]) -> Claims {
+        let actor = if service { "execution-core" } else { OWNER };
+        Claims {
+            web_policy: None,
+            sub: actor.to_owned(),
+            iss: "test".to_owned(),
+            exp: i64::MAX,
+            org_id: "org_guard".to_owned(),
+            user_id: if service { String::new() } else { actor.to_owned() },
+            principal_type: Some(if service { "service" } else { "user" }.to_owned()),
+            service_id: service.then(|| actor.to_owned()),
+            nbf: None,
+            aud: None,
+            scopes: scopes.iter().map(|s| (*s).to_owned()).collect(),
+            zdr: None,
+        }
+    }
+
+    #[test]
+    fn service_principal_is_refused_for_every_op() {
+        // Even a service token that holds the import scope gets 403 on every profile op.
+        let service = principal(true, &[IMPORT_SCOPE]);
+        for op in ALL_OPS {
+            assert_eq!(
+                principal_refusal(&service, op),
+                Some(PrincipalRefusal::ServicePrincipal),
+                "{op:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn import_requires_scope() {
+        let user = principal(false, &[]);
+        assert_eq!(
+            principal_refusal(&user, ProfileOp::Import),
+            Some(PrincipalRefusal::MissingImportScope)
+        );
+        // Every other op needs no scope from a user token.
+        for op in ALL_OPS {
+            if op != ProfileOp::Import {
+                assert_eq!(principal_refusal(&user, op), None, "{op:?}");
+            }
+        }
+        let importer = principal(false, &[IMPORT_SCOPE]);
+        assert_eq!(principal_refusal(&importer, ProfileOp::Import), None);
+    }
+
+    #[test]
+    fn zdr_wind_down_is_list_and_delete_only() {
+        // The op set a ZDR organization keeps: list and delete. Every other op is refused
+        // when the flag is on (the flag half is in tests/profile_guard.rs).
+        for op in ALL_OPS {
+            let wind_down = matches!(op, ProfileOp::List | ProfileOp::Delete);
+            assert_eq!(op.zdr_action().is_none(), wind_down, "{op:?}");
+        }
+    }
 
     #[test]
     fn owner_can_use_user_private() {

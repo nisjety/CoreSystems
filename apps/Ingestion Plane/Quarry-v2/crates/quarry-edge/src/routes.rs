@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::{HeaderMap, StatusCode},
     middleware,
     response::IntoResponse,
@@ -130,6 +130,18 @@ pub fn router(state: AppState) -> Router {
         )
         .merge(crate::queue_routes::internal_router());
 
+    // WS17.P0 — the profile list and import. Their own router: the import body is a whole
+    // snapshot, up to 4 MiB, past the 1 MB cap of the surface below. Both methods of the path
+    // live here, so no path is split across two routers. The auth chain is the surface's.
+    let profile_import = Router::new()
+        .route("/v1/profiles", post(crate::profile_routes::save_profile))
+        .route("/v1/profiles", get(crate::profile_routes::list_profiles))
+        .layer(DefaultBodyLimit::max(crate::profile_routes::IMPORT_MAX_BYTES))
+        .layer(RequestBodyLimitLayer::new(crate::profile_routes::IMPORT_MAX_BYTES))
+        .layer(middleware::from_fn(crate::auth::require_service_route_scope))
+        .layer(middleware::from_fn(crate::zdr_log::mark_floor))
+        .layer(middleware::from_fn(crate::auth::require_auth));
+
     // Protected surface — every /v1/* route. The auth middleware
     // verifies an `Authorization: Bearer <jwt>` against the Control
     // Plane's `auth-core` JWKS (or dev-bypass), then inserts `Claims`
@@ -162,8 +174,6 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/batch/:id/events", get(crate::resource_routes::list_batch_events))
         .route("/v1/jobs/:id", get(crate::job_lifecycle_routes::get_job))
         .route("/v1/jobs/:id/errors", get(crate::job_lifecycle_routes::job_errors))
-        .route("/v1/profiles", post(crate::profile_routes::save_profile))
-        .route("/v1/profiles", get(crate::profile_routes::list_profiles))
         // Browser Workspace Phase 3 continuation — explicit named/scoped
         // profile create + rename/rescope, independent of the internal
         // snapshot-capture `save_profile` write path above.
@@ -328,11 +338,16 @@ pub fn router(state: AppState) -> Router {
     // default body-limit middleware is permissive; this layer is
     // explicit and tunable.
     let body_limit = RequestBodyLimitLayer::new(1024 * 1024);
-
-    Router::new()
+    // The 1 MB cap covers the surface; the profile import has its own cap (WS17.P0).
+    let limited = Router::new()
         .merge(public)
         .merge(internal)
         .merge(protected)
+        .layer(body_limit);
+
+    Router::new()
+        .merge(limited)
+        .merge(profile_import)
         .layer(middleware::from_fn(crate::retry_after::retry_after_header))
         // Method and path only: tower-http's default span records the full URI,
         // query string included.
@@ -341,7 +356,6 @@ pub fn router(state: AppState) -> Router {
                 crate::request_id::make_request_span(request)
             }),
         )
-        .layer(body_limit)
         // WS13.5: path-aware deadline (60 s, or 125 s for POST /v1/scrape with actions on).
         .layer(middleware::from_fn(crate::scrape_actions::path_deadline))
         // WS10.S1: outermost, so the span above sees the id and the
