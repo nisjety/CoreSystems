@@ -62,6 +62,8 @@ mod ws;
 #[cfg(feature = "browser-agent")]
 mod tabs;
 #[cfg(feature = "browser-agent")]
+mod tab_ledger;
+#[cfg(feature = "browser-agent")]
 mod router;
 #[cfg(all(test, feature = "browser-agent"))]
 mod tests;
@@ -100,6 +102,8 @@ pub use self::live::*;
 pub use self::ws::*;
 #[cfg(feature = "browser-agent")]
 pub use self::tabs::*;
+#[cfg(feature = "browser-agent")]
+use self::tab_ledger::*;
 #[cfg(feature = "browser-agent")]
 pub use self::router::*;
 

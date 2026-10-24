@@ -77,6 +77,34 @@ pub fn parse_human_receipt_mode(raw: Option<&str>) -> Result<HumanReceiptMode, S
     }
 }
 
+/// The switch for agent attachments (WS8.F). Unset or `0` is off; anything else that
+/// is not a boolean word is an error at boot (`RunLimits::from_lookup`). Read at each
+/// start, so the next request sees a change; an unreadable value is off here.
+pub const ENV_ATTACH: &str = "QUARRY_EDGE__ATTACH";
+
+/// Parse the attach switch with the same words as the other switches.
+pub fn parse_attach(raw: Option<&str>) -> Result<bool, String> {
+    match raw.map(|value| value.trim().to_ascii_lowercase()).as_deref() {
+        None | Some("") | Some("0") | Some("false") | Some("off") => Ok(false),
+        Some("1") | Some("true") | Some("on") => Ok(true),
+        Some(other) => Err(format!("{ENV_ATTACH} must be 0, 1, on, off, true or false, got {other:?}")),
+    }
+}
+
+/// Whether an agent may attach to a live run now (WS8.F). Unreadable is off.
+pub fn attach_enabled() -> bool {
+    parse_attach(std::env::var(ENV_ATTACH).ok().as_deref()).unwrap_or(false)
+}
+
+/// The attachment idle limit now (WS8.F): 180 seconds unless the variable says otherwise.
+pub fn attach_idle_ttl_s() -> u64 {
+    std::env::var("QUARRY_EDGE__ATTACH_IDLE_TTL_S")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|value| *value >= 1)
+        .unwrap_or(180)
+}
+
 /// Whether human-browse grants are accepted now. Read at each start, so a test or an
 /// operator changing the variable is seen by the next start; unreadable is off.
 pub fn human_browse_enabled() -> bool {
@@ -121,6 +149,11 @@ pub struct RunLimits {
     pub max_interactive_runs_per_org: u32,
     /// What a refused start tells the caller to wait.
     pub cap_retry_after_s: u64,
+    /// WS8.F: whether an agent may attach to a person's live run (`QUARRY_EDGE__ATTACH`).
+    /// Off in every environment until the WS8.H evidence; a value that does not parse fails at boot.
+    pub attach_enabled: bool,
+    /// WS8.F: an attachment with no activity for this long is released (`QUARRY_EDGE__ATTACH_IDLE_TTL_S`).
+    pub attach_idle_ttl_s: u64,
 }
 
 impl Default for RunLimits {
@@ -141,6 +174,8 @@ impl Default for RunLimits {
             max_runs_per_org: 8,
             max_interactive_runs_per_org: 6,
             cap_retry_after_s: 10,
+            attach_enabled: false,
+            attach_idle_ttl_s: 180,
         }
     }
 }
@@ -222,6 +257,8 @@ impl RunLimits {
                 defaults.max_interactive_runs_per_org,
             )?,
             cap_retry_after_s: number("RUN_CAP_RETRY_AFTER_S", defaults.cap_retry_after_s, 1)?,
+            attach_enabled: flag("ATTACH", defaults.attach_enabled)?,
+            attach_idle_ttl_s: number("ATTACH_IDLE_TTL_S", defaults.attach_idle_ttl_s, 1)?,
         };
         Ok(limits)
     }

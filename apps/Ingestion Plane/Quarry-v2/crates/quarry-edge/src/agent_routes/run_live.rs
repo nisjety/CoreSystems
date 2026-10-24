@@ -224,6 +224,9 @@ pub struct RunLive {
     /// WS7.D: the run's web-policy decision, resolved at start (see `agent_policy_gate`).
     /// `None` only for a run built outside `start_run`.
     policy: Option<crate::policy_baseline::Decision>,
+    /// WS8.F: who holds each tab, and the run's attach. Locked for one read or change only.
+    pub(super) tabs: StdMutex<TabLedger>,
+    pub(super) attaches: StdMutex<AttachRegistry>,
 }
 
 impl RunLive {
@@ -245,6 +248,8 @@ impl RunLive {
             in_flight: AtomicU32::new(0),
             explicit_runtime_s: None,
             policy: None,
+            tabs: StdMutex::new(TabLedger::new()),
+            attaches: StdMutex::new(AttachRegistry::default()),
         }
     }
 
