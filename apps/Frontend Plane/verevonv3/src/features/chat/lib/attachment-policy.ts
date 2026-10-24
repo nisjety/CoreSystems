@@ -42,6 +42,16 @@ export function visionAsPartsEnabled(): boolean {
   return import.meta.env.VITE_CHAT_VISION_AS_PARTS_ENABLED === 'true'
 }
 
+/**
+ * Whether the server carries a turn's attachments through a Do run (its
+ * `CHAT_DO_ATTACHMENTS_ENABLED`). Flipped together with that switch, like
+ * `visionAsPartsEnabled`; off, a Do turn refuses images as it always did. A Do
+ * run reads an image with the picked model, so the same model-vision gates apply.
+ */
+export function doAttachmentsEnabled(): boolean {
+  return import.meta.env.VITE_CHAT_DO_ATTACHMENTS_ENABLED === 'true'
+}
+
 /** The `accept` value of the file input, so the picker and the policy cannot drift. */
 export const ATTACHMENT_ACCEPT = [...ATTACHMENT_IMAGE_MIME_TYPES, ...ATTACHMENT_DOCUMENT_EXTENSIONS].join(',')
 
@@ -70,8 +80,10 @@ export type ImagePartsContext = {
 export type AttachmentPolicyContext = {
   /** The turn goes through a connected ChatGPT subscription, which carries no attachments. */
   subscriptionBacked: boolean
-  /** The turn is a Do turn; its agent loop never sees an image. */
+  /** The turn is a Do turn; its agent loop sees an image only when `doAttachments` is set. */
   planMode: boolean
+  /** The server carries attachments through a Do run (`doAttachmentsEnabled`). Absent: it does not. */
+  doAttachments?: boolean
   /** Temporary chat: the server refuses attachments under zero data retention. */
   zdr: boolean
   currentImageCount: number
@@ -105,7 +117,9 @@ export function evaluateAttachment(file: AttachmentFileLike, ctx: AttachmentPoli
   // Zero retention first: it is the refusal that holds whatever else is chosen.
   if (ctx.zdr) return { ok: false, reason: 'zdr_refused' }
   if (ctx.subscriptionBacked) return { ok: false, reason: 'route_unsupported' }
-  if (ctx.planMode) return { ok: false, reason: 'do_images_unsupported' }
+  // A Do run reads the image with the picked model, so it needs the model-vision context
+  // too: without it the answer is the old refusal, never an image the run cannot read.
+  if (ctx.planMode && (!ctx.doAttachments || !ctx.imageParts)) return { ok: false, reason: 'do_images_unsupported' }
   if (ctx.imageParts && !ctx.imageParts.modelReadsImages) return { ok: false, reason: 'model_no_vision' }
   if (ctx.currentImageCount >= (ctx.imageParts?.maxImages ?? ATTACHMENT_MAX_IMAGES)) {
     return { ok: false, reason: 'too_many_images' }

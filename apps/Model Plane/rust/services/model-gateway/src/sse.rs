@@ -117,6 +117,105 @@ type HttpJsonError = (StatusCode, Json<Value>);
 
 /// One-shot SSE stream that emits a single structured error and closes.
 /// Used to reject a duplicate in-flight stream (chat-parity §1 idempotency).
+/// The switch that lets a Do turn carry attachments (WS08-S6). Opt-in: only the literal `true`
+/// enables it, so a typo or an unset variable keeps today's behaviour.
+const DO_ATTACHMENTS_VAR: &str = "CHAT_DO_ATTACHMENTS_ENABLED";
+
+fn do_attachments_enabled() -> bool {
+    do_attachments_enabled_with(&|key| std::env::var(key).ok())
+}
+
+fn do_attachments_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
+    get(DO_ATTACHMENTS_VAR).is_some_and(|value| value.trim() == "true")
+}
+
+/// The attachments a Do run carries, as `RunAttachment`s: files (staged read-only for the
+/// run's `code_interpreter` calls) and images (parts of every inference round), decoded once,
+/// measured and hashed, files first. Nothing is dropped: an attachment that cannot be carried
+/// refuses the turn with a typed code. `model_reads_images` is what the catalogue said about
+/// the picked model (`None` = unknown).
+///
+/// # Errors
+/// The typed refusal for the first attachment that cannot be carried, for a zero-retention or
+/// waived turn (`persistence_free`), or for an image the picked model does not read.
+fn do_run_attachments(
+    attachments: &[crate::vision::InvokeAttachment],
+    persistence_free: bool,
+    model_reads_images: Option<bool>,
+) -> Result<Vec<mp_contracts::model_plane::v1::RunAttachment>, crate::attachment_policy::AttachmentRefusal> {
+    use crate::attachment_policy::{AttachmentCode, AttachmentRefusal, IMAGE_MIMES};
+    use base64::Engine as _;
+    use mp_contracts::model_plane::v1::RunAttachmentKind;
+
+    let refuse = |code: AttachmentCode, message: &str| AttachmentRefusal {
+        code,
+        message: message.to_owned(),
+    };
+    if attachments.is_empty() {
+        return Ok(Vec::new());
+    }
+    if persistence_free {
+        return Err(refuse(
+            AttachmentCode::MediaUnsupported,
+            "Attachments are not read on a zero-retention turn.",
+        ));
+    }
+    let mut carried =
+        crate::turn_attachments::ValidatedAttachments::from_invoke(attachments, true, false)?
+            .run_attachments()
+            .to_vec();
+    for (index, attachment) in attachments.iter().enumerate() {
+        if !crate::vision::parts::has_images(std::slice::from_ref(attachment)) {
+            continue;
+        }
+        if model_reads_images == Some(false) {
+            return Err(refuse(
+                AttachmentCode::MediaUnsupported,
+                "The selected model cannot read images in a Do turn. Pick a model that reads images or send the message in Ask mode.",
+            ));
+        }
+        let mime = attachment
+            .mime_type
+            .as_deref()
+            .unwrap_or_default()
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        if !IMAGE_MIMES.contains(&mime.as_str()) {
+            return Err(refuse(
+                AttachmentCode::MediaUnsupported,
+                "Images must be PNG, JPEG, WebP or GIF.",
+            ));
+        }
+        let content = attachment
+            .data_base64
+            .as_deref()
+            .filter(|data| !data.is_empty())
+            .map(|data| data.rsplit(',').next().unwrap_or(data))
+            .and_then(|payload| base64::engine::general_purpose::STANDARD.decode(payload).ok())
+            .filter(|content| !content.is_empty())
+            .ok_or_else(|| {
+                refuse(
+                    AttachmentCode::EncodingInvalid,
+                    "An attached image could not be read as sent.",
+                )
+            })?;
+        carried.push(mp_contracts::model_plane::v1::RunAttachment {
+            id: format!("att-{index}"),
+            // Never a path: images are not staged, and the name is not shown to the model.
+            name: format!("image-{index}"),
+            mime,
+            size_bytes: content.len() as u64,
+            sha256: mp_contracts::attachments::sha256_hex(&content),
+            content,
+            kind: RunAttachmentKind::Image as i32,
+        });
+    }
+    Ok(carried)
+}
+
 fn error_stream(
     request_id: &str,
     code: &str,
@@ -749,6 +848,7 @@ mod agent_route_tests {
             budget,
             None,
             None,
+            Vec::new(),
         )
     }
 
@@ -1445,7 +1545,18 @@ pub async fn invoke_stream_sse(
     // image is refused here rather than silently losing its tools to that diversion.
     let wants_image_parts = crate::vision::parts::enabled()
         && crate::vision::parts::has_images(&req.attachments);
-    let reads_images = wants_image_parts && !agentic_requested && !effective_zdr && {
+    // A Do turn's attachments (WS08-S6) are carried by the run itself, so with their switch on
+    // the Ask-side refusal of a Do turn with an image does not apply to it.
+    let carries_do_attachments = agentic_requested && do_attachments_enabled();
+    // Whether the picked model reads images, from inference-core's catalogue; `None` when it
+    // cannot be read. Asked only when an image rides as a part of an Ask turn or of a Do run.
+    // Not knowing is the caller's to weigh: an Ask turn falls back to the vision diversion, a
+    // Do turn goes on and inference-core refuses a round no provider can serve
+    // (`vision_unsupported`) rather than dropping the image.
+    let picked_model_reads_images = if crate::vision::parts::has_images(&req.attachments)
+        && !effective_zdr
+        && ((wants_image_parts && !agentic_requested) || carries_do_attachments)
+    {
         match state
             .inference_client
             .clone()
@@ -1455,17 +1566,25 @@ pub async fn invoke_stream_sse(
             ))
             .await
         {
-            Ok(listed) => crate::vision::parts::route_reads_images(&listed.into_inner().models, &model),
+            Ok(listed) => Some(crate::vision::parts::route_reads_images(
+                &listed.into_inner().models,
+                &model,
+            )),
             Err(error) => {
-                // Not knowing is not a reason to refuse: the diversion serves the turn as before.
-                tracing::warn!(%error, request_id = %request_id, "model catalogue unavailable; images keep the vision diversion");
-                false
+                tracing::warn!(%error, request_id = %request_id, "model catalogue unavailable; images keep their fallback");
+                None
             }
         }
+    } else {
+        None
     };
+    let reads_images = wants_image_parts
+        && !agentic_requested
+        && !effective_zdr
+        && picked_model_reads_images.unwrap_or(false);
     let image_parts = match crate::vision::parts::admit(
         wants_image_parts,
-        agentic_requested,
+        agentic_requested && !carries_do_attachments,
         effective_zdr,
         &req.attachments,
         reads_images,
@@ -1476,6 +1595,25 @@ pub async fn invoke_stream_sse(
     if !image_parts.is_empty() {
         let (images, bytes) = image_parts.summary();
         tracing::info!(request_id = %request_id, images, bytes, "images ride as parts of the turn");
+    }
+    // The attachments a Do run carries: judged and hashed here, before any run exists, so a
+    // refusal leaves no run behind. Empty (and nothing is read) with the switch off.
+    let do_attachments = if carries_do_attachments && !req.attachments.is_empty() {
+        match do_run_attachments(
+            &req.attachments,
+            effective_zdr || retention_class.is_some(),
+            picked_model_reads_images,
+        ) {
+            Ok(list) => list,
+            Err(refusal) => {
+                return error_stream(&request_id, refusal.code.as_str(), &refusal.message, false);
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    if !do_attachments.is_empty() {
+        tracing::info!(request_id = %request_id, attachments = do_attachments.len(), "attachments ride the Do run");
     }
 
     // Start keys are durable Session Core metadata. Keep the raw browser/API
@@ -1589,7 +1727,9 @@ pub async fn invoke_stream_sse(
     // the turn through inference-core AnalyzeImage (the vision owner) with the
     // user message as the prompt and stream the analysis as the answer. A turn whose images ride
     // as parts (WS08-S4) never takes this: it keeps its history, tools and memory.
-    if let Some(image) = crate::vision::select_image(&req.attachments).filter(|_| image_parts.is_empty()) {
+    if let Some(image) = crate::vision::select_image(&req.attachments)
+        .filter(|_| image_parts.is_empty() && do_attachments.is_empty())
+    {
         timing.hand_off("vision");
         return vision_stream(
             state.clone(),
@@ -1720,6 +1860,7 @@ pub async fn invoke_stream_sse(
                     }
                 },
             ),
+            do_attachments,
         );
     }
 
@@ -9802,6 +9943,8 @@ fn spawn_run_dispatch(
     // The composed run context (build plan WS02 S6); `None` with the switch off, for a
     // continuation and for every request built before it existed.
     run_context: Option<mp_contracts::model_plane::v1::RunContext>,
+    // The attachments of a Do turn (build plan WS08-S6); empty for every other dispatch.
+    attachments: Vec<mp_contracts::model_plane::v1::RunAttachment>,
     // What the run's rounds cost, published by the task itself the moment the executor
     // answers (build plan WS02 S3), so a follower that has given up cannot lose it.
     usage_ledger: AgentUsageLedger,
@@ -9890,6 +10033,7 @@ fn spawn_run_dispatch(
         budget,
         resume,
         run_context,
+        attachments,
     );
     let run_agent_req = authenticated_run_agent_request(
         run_agent_req,
@@ -9997,6 +10141,7 @@ fn resolved_run_agent_request(
     budget: crate::run_budget::RunBudget,
     resume: Option<mp_contracts::model_plane::v1::AgentResume>,
     run_context: Option<mp_contracts::model_plane::v1::RunContext>,
+    attachments: Vec<mp_contracts::model_plane::v1::RunAttachment>,
 ) -> RunAgentRequest {
     let autonomy_rung = dispatch_autonomy_rung(plan_mode, resume.is_some(), granted);
     build_run_agent_request(
@@ -10017,6 +10162,7 @@ fn resolved_run_agent_request(
         budget,
         resume,
         run_context,
+        attachments,
     )
 }
 
@@ -10045,6 +10191,7 @@ fn build_run_agent_request(
     budget: crate::run_budget::RunBudget,
     resume: Option<mp_contracts::model_plane::v1::AgentResume>,
     run_context: Option<mp_contracts::model_plane::v1::RunContext>,
+    attachments: Vec<mp_contracts::model_plane::v1::RunAttachment>,
 ) -> RunAgentRequest {
     RunAgentRequest {
         run_id: run.run_id.clone(),
@@ -10111,6 +10258,10 @@ fn build_run_agent_request(
         run_context,
         // A continuation segment carries its resume; every other run sends none.
         resume,
+        // What the person attached to a Do turn, validated and hashed by the gateway
+        // (`do_run_attachments`); empty with `CHAT_DO_ATTACHMENTS_ENABLED` off, for a
+        // turn without attachments and for a continuation.
+        attachments,
     }
 }
 
@@ -10518,6 +10669,9 @@ fn agentic_run_stream(
     // The run context to compose for this run (build plan WS02 S6): `None` with
     // `MODEL_GATEWAY_RUN_CONTEXT` off and for every continuation.
     run_context_request: Option<crate::run_context::RunContextRequest>,
+    // The validated attachments of a Do turn (build plan WS08-S6): files for the sandbox and
+    // images for every round. Empty with `CHAT_DO_ATTACHMENTS_ENABLED` off and for a continuation.
+    attachments: Vec<mp_contracts::model_plane::v1::RunAttachment>,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     tokio::spawn(async move {
@@ -10630,6 +10784,7 @@ fn agentic_run_stream(
             &route,
             resume.clone(),
             run_context,
+            attachments,
             AgentUsageLedger {
                 publisher: state.publisher.clone(),
                 enabled: agent_usage_envelope_enabled(&|key| std::env::var(key).ok()),
@@ -16349,6 +16504,8 @@ pub(crate) async fn continue_run(
             approval_spend_for(resume_enabled),
             // A continuation resumes the run's own context.
             None,
+            // And re-requests its attachments rather than carrying them (v1).
+            Vec::new(),
         )
     };
     if !resume_enabled {
@@ -16631,6 +16788,7 @@ mod continue_run_tests {
             budget,
             Some(resume),
             None,
+            Vec::new(),
         )
     }
 
@@ -18187,6 +18345,7 @@ mod continue_run_tests {
             Some(continue_resume("appr-1", "claim-1", "loop")),
             ApprovalSpend::SpentByGateway,
             None,
+            Vec::new(),
         );
         let frames = frames_of_stream(stream).await;
         let names: Vec<&str> = frames.iter().map(|(name, _)| name.as_str()).collect();
@@ -19498,6 +19657,7 @@ mod continue_run_tests {
             Some(continue_resume("", "claim-1", "park")),
             ApprovalSpend::NotSpent,
             None,
+            Vec::new(),
         );
         let frames = frames_of_stream(stream).await;
         let names: Vec<&str> = frames.iter().map(|(name, _)| name.as_str()).collect();
@@ -20350,5 +20510,154 @@ mod shared_idempotency_tests {
         let state = AppState::new();
         let refused = resume_stream_for(&state, "org-1", "user-1", "req-none", None).await;
         assert_eq!(refused.err().map(|(status, _)| status), Some(StatusCode::NOT_FOUND));
+    }
+}
+
+#[cfg(test)]
+mod do_attachment_tests {
+    use super::*;
+    use crate::attachment_policy::AttachmentCode;
+    use crate::vision::InvokeAttachment;
+    use base64::Engine as _;
+    use mp_contracts::model_plane::v1::RunAttachmentKind;
+
+    fn file(name: &str, bytes: &[u8]) -> InvokeAttachment {
+        InvokeAttachment {
+            kind: Some("file".to_owned()),
+            name: Some(name.to_owned()),
+            data_base64: Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
+            mime_type: Some("text/csv".to_owned()),
+            ..InvokeAttachment::default()
+        }
+    }
+
+    fn image(bytes: &[u8], mime: &str) -> InvokeAttachment {
+        InvokeAttachment {
+            kind: Some("image".to_owned()),
+            data_base64: Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
+            mime_type: Some(mime.to_owned()),
+            ..InvokeAttachment::default()
+        }
+    }
+
+    #[test]
+    fn the_do_attachments_switch_is_off_unless_the_value_is_literally_true() {
+        for value in [None, Some(""), Some("1"), Some("TRUE"), Some("yes"), Some("false")] {
+            let value = value.map(str::to_owned);
+            assert!(!do_attachments_enabled_with(&|_| value.clone()), "{value:?}");
+        }
+        assert!(do_attachments_enabled_with(&|key| {
+            (key == "CHAT_DO_ATTACHMENTS_ENABLED").then(|| " true ".to_owned())
+        }));
+    }
+
+    #[test]
+    fn a_turn_without_attachments_carries_nothing() {
+        assert!(do_run_attachments(&[], false, None).expect("nothing to carry").is_empty());
+        assert!(do_run_attachments(&[], true, Some(false)).expect("still nothing").is_empty());
+    }
+
+    #[test]
+    fn files_then_images_are_decoded_measured_and_hashed() {
+        let carried = do_run_attachments(
+            &[
+                image(b"png-bytes", "image/png; charset=binary"),
+                file("sales.csv", b"a,b\n1,2\n"),
+            ],
+            false,
+            Some(true),
+        )
+        .expect("carried");
+        assert_eq!(carried.len(), 2);
+        assert_eq!(carried[0].kind, RunAttachmentKind::File as i32);
+        assert_eq!(carried[0].name, "sales.csv");
+        assert_eq!(carried[1].kind, RunAttachmentKind::Image as i32);
+        assert_eq!(carried[1].mime, "image/png");
+        assert_eq!(carried[1].content, b"png-bytes");
+        assert_eq!(carried[1].size_bytes, 9);
+        assert_eq!(carried[1].sha256, mp_contracts::attachments::sha256_hex(b"png-bytes"));
+        assert_ne!(carried[1].name, "", "an image has an opaque name, never a path");
+        assert!(!carried[1].name.contains('/'));
+        // Files and images pass the contract the executor applies on arrival, as the executor
+        // splits them: the files as a list of files.
+        mp_contracts::attachments::validate(&carried[..1], false).expect("the file list is valid");
+    }
+
+    #[test]
+    fn a_zero_retention_turn_refuses_every_attachment() {
+        for list in [
+            vec![file("a.csv", b"1")],
+            vec![image(b"x", "image/png")],
+        ] {
+            let refusal = do_run_attachments(&list, true, Some(true)).expect_err("ZDR");
+            assert_eq!(refusal.code, AttachmentCode::MediaUnsupported);
+        }
+    }
+
+    #[test]
+    fn an_image_that_cannot_be_carried_refuses_the_turn_and_is_never_dropped() {
+        let svg = do_run_attachments(&[image(b"<svg/>", "image/svg+xml")], false, Some(true))
+            .expect_err("not an allowed type");
+        assert_eq!(svg.code, AttachmentCode::MediaUnsupported);
+        let mut broken = image(b"x", "image/png");
+        broken.data_base64 = Some("!!!".to_owned());
+        let broken = do_run_attachments(&[broken], false, Some(true)).expect_err("not base64");
+        assert_eq!(broken.code, AttachmentCode::EncodingInvalid);
+        let mut link = image(b"x", "image/png");
+        link.data_base64 = None;
+        link.url = Some("https://example.invalid/a.png".to_owned());
+        let link = do_run_attachments(&[link], false, Some(true)).expect_err("a link is not fetched");
+        assert_eq!(link.code, AttachmentCode::EncodingInvalid);
+        let blind = do_run_attachments(&[image(b"x", "image/png")], false, Some(false))
+            .expect_err("the picked model does not read images");
+        assert_eq!(blind.code, AttachmentCode::MediaUnsupported);
+        // Not knowing is not a refusal: inference-core fails a round no provider can serve.
+        assert!(do_run_attachments(&[image(b"x", "image/png")], false, None).is_ok());
+        // A bad file refuses too, with the contract's code.
+        let bad = do_run_attachments(&[file("../a.csv", b"1")], false, None).expect_err("name");
+        assert_eq!(bad.code, AttachmentCode::EncodingInvalid);
+    }
+
+    #[test]
+    fn the_run_request_carries_the_attachments_and_an_empty_list_changes_nothing() {
+        let run = crate::session_flow::SessionRun {
+            thread_id: "thread-1".to_owned(),
+            run_id: "run-1".to_owned(),
+            org_id: "org-1".to_owned(),
+            already_started: false,
+            terminal_source: mp_contracts::model_plane::v1::ManagedRunSource::ExecutionAgent,
+        };
+        let build = |attachments: Vec<mp_contracts::model_plane::v1::RunAttachment>| {
+            build_run_agent_request(
+                &run,
+                "org-1",
+                "user-1",
+                "gpt-5.6-terra",
+                "analyse the sheet",
+                &[],
+                false,
+                0,
+                "ask",
+                false,
+                0,
+                "",
+                None,
+                &AgentRoute::default(),
+                crate::run_budget::RunBudget::default(),
+                None,
+                None,
+                attachments,
+            )
+        };
+        let carried = do_run_attachments(&[file("sales.csv", b"a,b")], false, None).expect("ok");
+        let with = build(carried.clone());
+        assert_eq!(with.attachments, carried);
+        let without = build(Vec::new());
+        assert!(without.attachments.is_empty());
+        // proto3 leaves an empty repeated field off the wire: a request with none is the same
+        // bytes it was before the field existed, so an older executor reads it identically.
+        let mut cleared = with;
+        cleared.attachments.clear();
+        assert_eq!(prost::Message::encode_to_vec(&cleared), prost::Message::encode_to_vec(&without));
     }
 }

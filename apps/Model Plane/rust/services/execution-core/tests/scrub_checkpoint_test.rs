@@ -326,3 +326,48 @@ fn a_credential_shaped_word_is_stubbed_and_reported_so_the_writer_can_tombstone_
     assert_eq!(fold.messages[1].content, "Delete the stale records");
     assert_eq!(fold.messages[0].content, "You are a careful agent.");
 }
+
+// ---- Attachments of a Do run (build plan WS08-S6) ----
+//
+// A run's attachments are request-scope memory: files in the run-inputs registry, images
+// as inference parts. The saved fold holds the conversation only, so the one trace an
+// attachment leaves in it is the seed's note, which names a file and its size and never
+// carries its bytes. The fold has no field an attachment could be written to.
+
+#[test]
+fn a_fold_of_a_run_with_attachments_carries_the_note_but_never_the_bytes() {
+    use mp_contracts::attachments::{sandbox_note, sha256_hex};
+    use mp_contracts::model_plane::v1::{RunAttachment, RunAttachmentKind};
+
+    let secret_cells = b"month,revenue\nsecret-cell-4711,10\n";
+    let image_bytes = b"\x89PNG-bytes-that-must-not-leak";
+    let attachment = |name: &str, content: &[u8], kind: RunAttachmentKind| RunAttachment {
+        id: name.to_owned(),
+        name: name.to_owned(),
+        mime: "application/octet-stream".to_owned(),
+        size_bytes: content.len() as u64,
+        sha256: sha256_hex(content),
+        content: content.to_vec(),
+        kind: kind as i32,
+    };
+    let files = [attachment("sales.csv", secret_cells, RunAttachmentKind::File)];
+    let _image = attachment("shot.png", image_bytes, RunAttachmentKind::Image);
+
+    let mut fold = open_round_fold();
+    fold.messages.insert(1, message("system", &sandbox_note(&files)));
+    let report = scrub_fold(&mut fold);
+    assert!(!report.conversation_withheld(), "the note is not credential-shaped");
+
+    let bytes = fold.to_bytes().expect("the fold serializes");
+    let text = String::from_utf8(bytes).expect("a fold is JSON text");
+    assert!(text.contains("attachments/sales.csv"), "the note names the file: {text}");
+    assert!(!text.contains("secret-cell-4711"), "file bytes in the fold");
+    assert!(!text.contains("PNG-bytes-that-must-not-leak"), "image bytes in the fold");
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    for key in value.as_object().expect("a fold is an object").keys() {
+        assert!(
+            !key.contains("attach") && !key.contains("image"),
+            "the fold grew a field an attachment could ride in: {key}"
+        );
+    }
+}

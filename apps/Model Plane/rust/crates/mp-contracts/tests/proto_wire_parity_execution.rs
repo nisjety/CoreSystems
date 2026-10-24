@@ -360,3 +360,53 @@ fn a_run_usage_with_legs_encodes_to_the_golden_bytes_and_decodes_back() {
     let old = RunAgentResponse::decode(unhex(USAGE_WIRE_HEX).as_slice()).expect("decode");
     assert!(old.usage.expect("usage").legs.is_empty());
 }
+
+// ---- RunAgentRequest.attachments (field 20, build plan WS08-S6) ----
+
+/// A run that carries one file: id `a`, name `a.csv`, three bytes `1,2`, kind file.
+/// Field 20 is a repeated message (key bytes `a201`); the nested numbers are those of
+/// `RunAttachment`, shared with `ExecuteStepRequest.attachments` (field 12).
+const RUN_ATTACHMENT_WIRE_HEX: &str =
+    "0a027231a201130a0161 1205612e637376 2003 3203312c32 3801";
+
+fn run_with_attachment() -> mp_contracts::model_plane::v1::RunAgentRequest {
+    use mp_contracts::model_plane::v1::{RunAgentRequest, RunAttachment, RunAttachmentKind};
+    RunAgentRequest {
+        run_id: "r1".to_owned(),
+        attachments: vec![RunAttachment {
+            id: "a".to_owned(),
+            name: "a.csv".to_owned(),
+            size_bytes: 3,
+            content: b"1,2".to_vec(),
+            kind: RunAttachmentKind::File as i32,
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn a_run_attachment_encodes_to_the_golden_bytes() {
+    assert_eq!(
+        hex(&run_with_attachment().encode_to_vec()),
+        RUN_ATTACHMENT_WIRE_HEX.replace(' ', "")
+    );
+}
+
+#[test]
+fn the_attachment_golden_bytes_decode_and_an_absent_list_stays_empty() {
+    use mp_contracts::model_plane::v1::{RunAgentRequest, RunAttachmentKind};
+    let wire = RUN_ATTACHMENT_WIRE_HEX.replace(' ', "");
+    let decoded = RunAgentRequest::decode(unhex(&wire).as_slice()).expect("decode");
+    assert_eq!(decoded.attachments.len(), 1, "field 20 present");
+    let attachment = &decoded.attachments[0];
+    assert_eq!((attachment.id.as_str(), attachment.name.as_str()), ("a", "a.csv"));
+    assert_eq!(attachment.content, b"1,2");
+    assert_eq!(attachment.kind, RunAttachmentKind::File as i32);
+    // A request with none adds no bytes: it is what an executor that predates the field reads
+    // and writes, so an empty list is today's behaviour.
+    let before = RunAgentRequest { run_id: "r1".to_owned(), ..Default::default() };
+    assert_eq!(hex(&before.encode_to_vec()), "0a027231");
+    let decoded = RunAgentRequest::decode(before.encode_to_vec().as_slice()).expect("decode");
+    assert!(decoded.attachments.is_empty());
+}

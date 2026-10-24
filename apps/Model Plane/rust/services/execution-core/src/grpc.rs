@@ -1040,14 +1040,8 @@ fn register_step_attachments(
     if req.tool_name != "code_interpreter" {
         return Err(Status::invalid_argument("attachments_unsupported_tool"));
     }
-    mp_contracts::attachments::validate(&req.attachments, zdr_or_waived).map_err(|refusal| {
-        if refusal == mp_contracts::attachments::AttachmentRefusal::Zdr {
-            mp_contracts::zdr_refusal::Refusal::feature_not_supported("attachments")
-                .grpc_status(tonic::Code::FailedPrecondition)
-        } else {
-            Status::invalid_argument(refusal.token())
-        }
-    })?;
+    mp_contracts::attachments::validate(&req.attachments, zdr_or_waived)
+        .map_err(attachment_refusal_status)?;
     crate::run_inputs::global()
         .register(&req.org_id, &req.run_id, &req.attachments)
         .map_err(|refusal| {
@@ -1056,6 +1050,90 @@ fn register_step_attachments(
                 crate::run_inputs::RegisterError::ByteCap => "run_inputs_byte_cap",
             })
         })
+}
+
+/// The status a refused attachment list answers with: the zero-retention catalogue
+/// refusal for a ZDR or waived caller, the closed token for everything else.
+fn attachment_refusal_status(refusal: mp_contracts::attachments::AttachmentRefusal) -> Status {
+    if refusal == mp_contracts::attachments::AttachmentRefusal::Zdr {
+        mp_contracts::zdr_refusal::Refusal::feature_not_supported("attachments")
+            .grpc_status(tonic::Code::FailedPrecondition)
+    } else {
+        Status::invalid_argument(refusal.token())
+    }
+}
+
+/// Most images one run may carry: what inference-core accepts on a request.
+const MAX_RUN_IMAGES: usize = 4;
+/// The image types inference-core allows as parts of a message.
+const RUN_IMAGE_MIMES: [&str; 4] = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+
+/// Judges the attachments of a `RunAgent` request at the boundary (WS08-S6). Files
+/// meet the contract the `ExecuteStep` path applies; images, which the sandbox
+/// never receives, meet the bounds inference-core will apply to them. A zero-retention
+/// or waived caller never carries either. The list is partitioned by moving the
+/// entries, so no attachment byte is copied, and put back with files first.
+#[allow(clippy::result_large_err)]
+fn enforce_run_attachments(
+    req: &mut pb::RunAgentRequest,
+    zdr_or_waived: bool,
+) -> Result<(), Status> {
+    if req.attachments.is_empty() {
+        return Ok(());
+    }
+    let (images, files): (Vec<pb::RunAttachment>, Vec<pb::RunAttachment>) =
+        std::mem::take(&mut req.attachments)
+            .into_iter()
+            .partition(|attachment| attachment.kind == pb::RunAttachmentKind::Image as i32);
+    let judged = judge_run_attachments(&files, &images, zdr_or_waived);
+    req.attachments = files;
+    req.attachments.extend(images);
+    judged
+}
+
+#[allow(clippy::result_large_err)]
+fn judge_run_attachments(
+    files: &[pb::RunAttachment],
+    images: &[pb::RunAttachment],
+    zdr_or_waived: bool,
+) -> Result<(), Status> {
+    use mp_contracts::attachments::{
+        sha256_hex, validate, AttachmentRefusal as Refusal, MAX_ATTACHMENT_BYTES, MAX_TOTAL_BYTES,
+    };
+    validate(files, zdr_or_waived).map_err(attachment_refusal_status)?;
+    if images.is_empty() {
+        return Ok(());
+    }
+    if zdr_or_waived {
+        return Err(attachment_refusal_status(Refusal::Zdr));
+    }
+    if images.len() > MAX_RUN_IMAGES {
+        return Err(attachment_refusal_status(Refusal::TooMany));
+    }
+    let mut total: usize = files.iter().map(|file| file.content.len()).sum();
+    for image in images {
+        if !RUN_IMAGE_MIMES.contains(&image.mime.as_str()) {
+            return Err(attachment_refusal_status(Refusal::KindUnsupported));
+        }
+        let size = image.content.len();
+        if size == 0 {
+            return Err(attachment_refusal_status(Refusal::Empty));
+        }
+        if size > MAX_ATTACHMENT_BYTES {
+            return Err(attachment_refusal_status(Refusal::TooLarge));
+        }
+        if image.size_bytes != size as u64 {
+            return Err(attachment_refusal_status(Refusal::SizeMismatch));
+        }
+        if image.sha256 != sha256_hex(&image.content) {
+            return Err(attachment_refusal_status(Refusal::HashMismatch));
+        }
+        total = total.saturating_add(size);
+    }
+    if total > MAX_TOTAL_BYTES {
+        return Err(attachment_refusal_status(Refusal::TotalTooLarge));
+    }
+    Ok(())
 }
 
 fn enforce_persistence_free_execution(
@@ -1663,11 +1741,15 @@ impl ExecutionCore for ExecutionService {
                     .await?,
             )
         };
-        let req = request.into_inner();
+        let mut req = request.into_inner();
         caller.authorize(&req.org_id, Some(&req.user_id))?;
         self.authorize_run(&caller, &req.run_id, &session_bearer)
             .await?;
         enforce_persistence_free_execution(&caller, req.zdr, "agent_run")?;
+        // The attachments are judged right after the zero-retention gate and before
+        // any run work: a waived caller passes that gate yet never carries one.
+        let persistence_free = req.zdr || caller.zdr || caller.zdr_waiver.is_some();
+        enforce_run_attachments(&mut req, persistence_free)?;
         // The run context is judged at the boundary like the route below: a
         // context that breaks its bounds, or that carries conversation content
         // on a zero-retention run, is refused with the closed token only.
@@ -2844,5 +2926,111 @@ mod step_attachment_tests {
         assert!(crate::run_inputs::global().get(ORG, "run-held").is_some());
         drop(held);
         assert!(crate::run_inputs::global().get(ORG, "run-held").is_none());
+    }
+}
+
+#[cfg(test)]
+mod run_attachment_tests {
+    use super::*;
+    use mp_contracts::attachments::sha256_hex;
+
+    fn attachment(name: &str, content: &[u8], kind: pb::RunAttachmentKind, mime: &str) -> pb::RunAttachment {
+        pb::RunAttachment {
+            id: name.to_owned(),
+            name: name.to_owned(),
+            mime: mime.to_owned(),
+            size_bytes: content.len() as u64,
+            sha256: sha256_hex(content),
+            content: content.to_vec(),
+            kind: kind as i32,
+        }
+    }
+
+    fn file(name: &str, content: &[u8]) -> pb::RunAttachment {
+        attachment(name, content, pb::RunAttachmentKind::File, "text/csv")
+    }
+
+    fn image(name: &str, content: &[u8]) -> pb::RunAttachment {
+        attachment(name, content, pb::RunAttachmentKind::Image, "image/png")
+    }
+
+    fn run_with(attachments: Vec<pb::RunAttachment>) -> pb::RunAgentRequest {
+        pb::RunAgentRequest {
+            run_id: "run-attachments".to_owned(),
+            attachments,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_run_without_attachments_passes_even_when_persistence_free() {
+        for zdr in [false, true] {
+            let mut req = run_with(Vec::new());
+            assert!(enforce_run_attachments(&mut req, zdr).is_ok());
+            assert!(req.attachments.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_do_run_with_attachments_under_zdr_is_refused_at_the_boundary() {
+        for list in [
+            vec![file("sales.csv", b"a,b")],
+            vec![image("shot.png", b"png")],
+            vec![image("shot.png", b"png"), file("sales.csv", b"a,b")],
+        ] {
+            let mut req = run_with(list);
+            let refused = enforce_run_attachments(&mut req, true).expect_err("zero retention");
+            assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+            assert!(
+                !refused.message().contains("sales") && !refused.message().contains("shot"),
+                "the refusal carries no client text: {}",
+                refused.message()
+            );
+        }
+    }
+
+    #[test]
+    fn files_and_images_pass_and_files_come_first() {
+        let mut req = run_with(vec![
+            image("one.png", b"1"),
+            file("sales.csv", b"a,b"),
+            image("two.png", b"2"),
+        ]);
+        enforce_run_attachments(&mut req, false).expect("a good list");
+        let order: Vec<&str> = req.attachments.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(order, ["sales.csv", "one.png", "two.png"]);
+    }
+
+    #[test]
+    fn a_bad_file_or_image_refuses_the_whole_list_with_its_closed_token() {
+        let mut tampered = image("shot.png", b"png");
+        tampered.content = b"gnp".to_vec();
+        let mut wrong_size = image("shot.png", b"png");
+        wrong_size.size_bytes = 1;
+        let mut svg = image("shot.svg", b"<svg/>");
+        svg.mime = "image/svg+xml".to_owned();
+        let cases = [
+            (vec![tampered], "attachments_hash_mismatch"),
+            (vec![wrong_size], "attachments_size_mismatch"),
+            (vec![svg], "attachments_kind_unsupported"),
+            (vec![image("empty.png", b"")], "attachments_empty"),
+            (
+                (0..=MAX_RUN_IMAGES)
+                    .map(|index| image(&format!("{index}.png"), b"x"))
+                    .collect(),
+                "attachments_too_many",
+            ),
+            (vec![file("../a.csv", b"1,2")], "attachments_name_invalid"),
+            (
+                vec![attachment("a", b"x", pb::RunAttachmentKind::Unspecified, "text/csv")],
+                "attachments_kind_unsupported",
+            ),
+        ];
+        for (list, token) in cases {
+            let mut req = run_with(list);
+            let refused = enforce_run_attachments(&mut req, false).expect_err(token);
+            assert_eq!(refused.code(), tonic::Code::InvalidArgument, "{token}");
+            assert_eq!(refused.message(), token);
+        }
     }
 }

@@ -229,6 +229,17 @@ message RunAgentRequest {
   // only narrow the authority the run paused with. Field 19 is reserved for this
   // message in the build plan's proto reservation table (section 4.3).
   AgentResume resume = 19;
+
+  // What the person attached to this turn (build plan WS08-S6): files staged
+  // read-only for the run's `code_interpreter` calls and images that ride as
+  // `InferRequest.image_parts` on every round. The gateway validates, decodes and
+  // hashes them from the request body; the model cannot add or alter an entry.
+  // Empty = today's behaviour. Request-scope memory only: never in a checkpoint,
+  // an event or a log, and released when the run ends or is cancelled. A
+  // zero-retention or waived run refuses a non-empty list at the boundary, and a
+  // delegated subagent does not inherit it. Field 20 is reserved for this
+  // message in the build plan's proto reservation table (section 4.3).
+  repeated RunAttachment attachments = 20;
 }
 
 // AgentResume names the approved call a continuation segment may release, and

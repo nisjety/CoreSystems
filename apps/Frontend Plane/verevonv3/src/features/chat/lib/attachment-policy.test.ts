@@ -70,6 +70,30 @@ describe('evaluateAttachment', () => {
     expect(evaluateAttachment(sheet, { ...ask, planMode: true })).toEqual({ ok: true })
   })
 
+  it('a_do_turn_reads_images_only_when_the_run_carries_attachments_and_the_model_reads_them', () => {
+    const doTurn = { ...ask, planMode: true }
+    // The server does not carry them: the old refusal, whatever the model reads.
+    expect(evaluateAttachment(png, { ...asParts({ capabilities: ['vision'] }, declared(true)), planMode: true })).toEqual({
+      ok: false,
+      reason: 'do_images_unsupported',
+    })
+    // The run carries them but the picker declared nothing: fail closed, never an unread image.
+    expect(evaluateAttachment(png, { ...doTurn, doAttachments: true })).toEqual({
+      ok: false,
+      reason: 'do_images_unsupported',
+    })
+    const reads = { ...asParts({ capabilities: ['vision'] }, declared(true)), planMode: true, doAttachments: true }
+    expect(evaluateAttachment(png, reads)).toEqual({ ok: true })
+    const blind = { ...asParts({ capabilities: [] }, declared(true)), planMode: true, doAttachments: true }
+    expect(evaluateAttachment(png, blind)).toEqual({ ok: false, reason: 'model_no_vision' })
+    // Zero retention and the subscription route still come first.
+    expect(evaluateAttachment(png, { ...reads, zdr: true })).toEqual({ ok: false, reason: 'zdr_refused' })
+    expect(evaluateAttachment(png, { ...reads, subscriptionBacked: true })).toEqual({
+      ok: false,
+      reason: 'route_unsupported',
+    })
+  })
+
   it('a_second_image_is_refused_not_ignored', () => {
     expect(ATTACHMENT_MAX_IMAGES).toBe(1)
     expect(evaluateAttachment(png, { ...ask, currentImageCount: 1 })).toEqual({ ok: false, reason: 'too_many_images' })

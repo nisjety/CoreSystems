@@ -3,6 +3,7 @@ import {
 	ATTACHMENT_ACCEPT,
 	ATTACHMENT_MAX_IMAGES,
 	attachmentRefusalMessage,
+	doAttachmentsEnabled,
 	evaluateAttachments,
 	isImageAttachment,
 	visionAsPartsEnabled,
@@ -1837,12 +1838,14 @@ export function DashboardComposer(props: {
 	const attachmentPolicyContext = (): AttachmentPolicyContext => ({
 		subscriptionBacked: subscriptionBacked(),
 		planMode: planMode(),
+		doAttachments: doAttachmentsEnabled(),
 		zdr: temporaryChat(),
 		currentImageCount: files().filter(isImageAttachment).length,
 		currentTotalBytes: files().reduce((total, file) => total + file.size, 0),
-		// With images riding as parts the picked model is the reader, so the picker
-		// declares what it can read; otherwise the diversion serves any model.
-		imageParts: visionAsPartsEnabled()
+		// With images riding as parts, or on a Do turn that carries attachments, the
+		// picked model is the reader, so the picker declares what it can read;
+		// otherwise the diversion serves any model.
+		imageParts: visionAsPartsEnabled() || (planMode() && doAttachmentsEnabled())
 			? {
 					modelReadsImages: modelSupportsVision(
 						selectedCatalogModel(),

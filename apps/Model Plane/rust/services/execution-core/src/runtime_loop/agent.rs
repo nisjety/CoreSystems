@@ -1604,6 +1604,10 @@ async fn run_agent_with_route_parkable(
 ) -> Result<pb::RunAgentResponse, tonic::Status> {
     let plan_id = format!("plan_{}", req.run_id);
 
+    // The attached files, held for the whole run and released when this scope ends on any
+    // path, a cancelled request included (WS08-S6).
+    let _run_inputs = register_run_inputs(&req)?;
+
     // A continuation (build plan WS03 S3, S7b): consume the granted approval exactly once,
     // then either restore the paused loop from its fold (the in-place resume) or start the
     // segment of stage 1. Its tools and mode come from the retained snapshot, never from the
@@ -2311,6 +2315,90 @@ fn seed_order(
     messages
 }
 
+/// The files and the images of a run's attachments. The boundary
+/// (`grpc::enforce_run_attachments`) puts files first, so the split is two
+/// slices of the one list, not a copy of any byte.
+fn split_attachments(
+    list: &[pb::RunAttachment],
+) -> (&[pb::RunAttachment], &[pb::RunAttachment]) {
+    let image = pb::RunAttachmentKind::Image as i32;
+    let split = list.partition_point(|attachment| attachment.kind != image);
+    debug_assert!(
+        list[split..].iter().all(|attachment| attachment.kind == image),
+        "run attachments reach the loop files first"
+    );
+    list.split_at(split)
+}
+
+/// Holds the files of a run in the registry `code_interpreter` reads, for as long as the
+/// returned guard lives: the loop's own scope, so a terminal, an error and a cancelled
+/// request (the dropped future) all release them. Images are not staged. `None` for the
+/// run with no files, which is every run today.
+#[allow(clippy::result_large_err)]
+fn register_run_inputs(
+    req: &pb::RunAgentRequest,
+) -> Result<Option<crate::run_inputs::RunInputsGuard>, tonic::Status> {
+    crate::run_inputs::global()
+        .register(
+            &req.org_id,
+            &req.run_id,
+            split_attachments(&req.attachments).0,
+        )
+        .map_err(|refusal| {
+            tonic::Status::resource_exhausted(match refusal {
+                crate::run_inputs::RegisterError::EntryCap => "run_inputs_entry_cap",
+                crate::run_inputs::RegisterError::ByteCap => "run_inputs_byte_cap",
+            })
+        })
+}
+
+/// A fresh root loop's seed with the note that names the attached files, placed just before
+/// the goal. Composed from validated names and measured sizes only
+/// (`mp_contracts::attachments::sandbox_note`). A delegated child never gets one: it does not
+/// inherit the files, so telling its model they exist would only send it looking.
+fn with_attachment_note(
+    mut messages: Vec<pb::ChatMessage>,
+    req: &pb::RunAgentRequest,
+    depth: u32,
+) -> Vec<pb::ChatMessage> {
+    if depth != 0 {
+        return messages;
+    }
+    let note = mp_contracts::attachments::sandbox_note(split_attachments(&req.attachments).0);
+    if note.is_empty() {
+        return messages;
+    }
+    let goal = messages.len().saturating_sub(1);
+    messages.insert(goal, seed_message("system", note));
+    messages
+}
+
+/// The images that ride on EVERY `InferRequest` of the run, as parts of the goal message (the
+/// last message of the seed; the loop only appends after it, so the index holds on every
+/// round). Request-scope memory: never stored with the messages, so no fold carries a byte.
+/// Empty for a delegated child, a zero-retention run and a run without images.
+fn run_image_parts(
+    req: &pb::RunAgentRequest,
+    depth: u32,
+    goal_index: usize,
+) -> Vec<pb::InferImagePart> {
+    if depth != 0 || req.zdr {
+        return Vec::new();
+    }
+    let Ok(message_index) = u32::try_from(goal_index) else {
+        return Vec::new();
+    };
+    split_attachments(&req.attachments)
+        .1
+        .iter()
+        .map(|image| pb::InferImagePart {
+            message_index,
+            data: image.content.clone(),
+            mime_type: image.mime.clone(),
+        })
+        .collect()
+}
+
 /// The leading messages of a round's prompt that sit in the Stable and Context tiers
 /// (see [`seed_order`]): the system preamble, and the authored instructions when the run
 /// carries them. Read back from the messages rather than assumed, so a prompt that does not
@@ -2375,12 +2463,16 @@ async fn seed_messages(ctx: &LoopContext<'_>, goal: &str) -> Vec<pb::ChatMessage
             "run_agent: seeded run context"
         );
     }
-    seed_order(
-        compose_system_prompt(&ctx.allowlist),
-        run_context,
-        root,
-        skills,
-        goal,
+    with_attachment_note(
+        seed_order(
+            compose_system_prompt(&ctx.allowlist),
+            run_context,
+            root,
+            skills,
+            goal,
+        ),
+        ctx.req,
+        ctx.depth,
     )
 }
 
@@ -2437,6 +2529,9 @@ async fn run_rounds(
     // otherwise (`permission::RunGate`).
     let run_gate = crate::permission::RunGate::for_run(&req.org_id, &req.run_id);
 
+    // Set only by a fresh seed: a restored or parked conversation re-requests its attachments
+    // rather than keeping them (v1), so its rounds carry no image.
+    let mut image_parts: Vec<pb::InferImagePart> = Vec::new();
     let mut messages = match (restored.as_mut(), parked.as_mut()) {
         // The paused conversation: its own history, the system prompt it was paused under
         // included. The request's goal and brief are never read, and the skills a fresh
@@ -2444,7 +2539,11 @@ async fn run_rounds(
         (Some(restored), _) => std::mem::take(&mut restored.messages),
         // The parked conversation (WS03 S8-6), the same way: the fold's own history.
         (None, Some(parked)) => std::mem::take(&mut parked.messages),
-        (None, None) => seed_messages(ctx, goal).await,
+        (None, None) => {
+            let seeded = seed_messages(ctx, goal).await;
+            image_parts = run_image_parts(ctx.req, ctx.depth, seeded.len().saturating_sub(1));
+            seeded
+        }
     };
 
     let mut inference = InferenceCoreClient::new(ctx.inference_channel.clone());
@@ -2808,7 +2907,8 @@ async fn run_rounds(
             // Which leading messages a provider may cache across rounds and runs.
             // Counts only; inference-core reads it behind its own switch.
             prompt_tiers: prompt_tier_plan(req.run_context.as_ref(), &messages),
-            image_parts: Vec::new(),
+            // The run's images, on every round beside the goal they were attached to.
+            image_parts: image_parts.clone(),
         });
         infer_request.metadata_mut().insert(
             "authorization",
@@ -9091,6 +9191,9 @@ mod tests {
 
     type ObservedTiers = Arc<Mutex<Vec<i32>>>;
 
+    /// The image parts each `InferRequest` carried, in call order.
+    type ObservedImages = Arc<Mutex<Vec<Vec<pb::InferImagePart>>>>;
+
     /// `(tools offered, tool_choice)` of each `InferRequest`, in call order.
     type ObservedTooling = Arc<Mutex<Vec<(usize, String)>>>;
 
@@ -9150,6 +9253,8 @@ mod tests {
         /// carried, in call order: the evidence of which round was made to answer
         /// without tools.
         observed_tooling: ObservedTooling,
+        /// The image parts each `InferRequest` carried, in call order.
+        observed_images: ObservedImages,
         /// When set, every `infer` call holds for `delay` while counting itself
         /// in-flight, so a test can read back how many ran AT ONCE. Absent for
         /// every ordinary test: no sleep, no counting.
@@ -9186,6 +9291,7 @@ mod tests {
                 observed_tiers: Arc::new(Mutex::new(Vec::new())),
                 observed_messages: Arc::new(Mutex::new(Vec::new())),
                 observed_tooling: Arc::default(),
+                observed_images: Arc::default(),
                 probe: None,
             }
         }
@@ -9198,6 +9304,7 @@ mod tests {
                 observed_tiers: Arc::new(Mutex::new(Vec::new())),
                 observed_messages: Arc::new(Mutex::new(Vec::new())),
                 observed_tooling: Arc::default(),
+                observed_images: Arc::default(),
                 probe: None,
             }
         }
@@ -9213,6 +9320,7 @@ mod tests {
                 observed_tiers: Arc::new(Mutex::new(Vec::new())),
                 observed_messages,
                 observed_tooling: Arc::default(),
+                observed_images: Arc::default(),
                 probe: None,
             }
         }
@@ -9225,6 +9333,7 @@ mod tests {
                 observed_tiers,
                 observed_messages: Arc::new(Mutex::new(Vec::new())),
                 observed_tooling: Arc::default(),
+                observed_images: Arc::default(),
                 probe: None,
             }
         }
@@ -9237,6 +9346,7 @@ mod tests {
                 observed_tiers: Arc::new(Mutex::new(Vec::new())),
                 observed_messages: Arc::new(Mutex::new(Vec::new())),
                 observed_tooling: Arc::default(),
+                observed_images: Arc::default(),
                 probe: Some(probe),
             }
         }
@@ -9258,6 +9368,7 @@ mod tests {
                 observed_tiers: Arc::new(Mutex::new(Vec::new())),
                 observed_messages: Arc::new(Mutex::new(Vec::new())),
                 observed_tooling: Arc::default(),
+                observed_images: Arc::default(),
                 probe: None,
             }
         }
@@ -9299,6 +9410,10 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((tools_offered, observed.tool_choice.clone()));
+            self.observed_images
+                .lock()
+                .unwrap()
+                .push(observed.image_parts);
             self.observed_messages
                 .lock()
                 .unwrap()
@@ -10813,6 +10928,8 @@ mod tests {
             subscription_connection_id: String::new(),
             run_context: None,
             resume: None,
+            // Nothing attached, which is what every run before the field sent.
+            attachments: Vec::new(),
         }
     }
 
@@ -25536,6 +25653,7 @@ mod tests {
         observed: ObservedRoutes,
         messages: ObservedMessages,
         tooling: ObservedTooling,
+        images: ObservedImages,
     }
 
     /// `run_agent`, the production entry, against the mock session-core over `rec`.
@@ -25550,9 +25668,11 @@ mod tests {
         let observed: ObservedRoutes = Arc::new(Mutex::new(Vec::new()));
         let messages: ObservedMessages = Arc::default();
         let tooling: ObservedTooling = Arc::default();
+        let images: ObservedImages = Arc::default();
         let inference_channel = spawn_inference_channel_inner(MockInference {
             observed_messages: messages.clone(),
             observed_tooling: tooling.clone(),
+            observed_images: images.clone(),
             ..MockInference::with_route_probe(script, observed.clone(), Serving::Echo)
         })
         .await;
@@ -25582,6 +25702,7 @@ mod tests {
             observed,
             messages,
             tooling,
+            images,
         }
     }
 
@@ -26580,5 +26701,254 @@ mod tests {
                 assert_eq!(root_receipts(&r), failed_receipt("provider_unavailable"));
             }
         }
+    }
+
+    // --- Attachments of a Do run (WS08-S6) ---
+
+    const PNG_ONE: &[u8] = b"\x89PNG-one";
+    const PNG_TWO: &[u8] = b"\x89PNG-two";
+
+    fn attachment_of(
+        name: &str,
+        content: &[u8],
+        kind: pb::RunAttachmentKind,
+        mime: &str,
+    ) -> pb::RunAttachment {
+        pb::RunAttachment {
+            id: name.to_owned(),
+            name: name.to_owned(),
+            mime: mime.to_owned(),
+            size_bytes: content.len() as u64,
+            sha256: mp_contracts::attachments::sha256_hex(content),
+            content: content.to_vec(),
+            kind: kind as i32,
+        }
+    }
+
+    /// A file and two images, in the order the boundary leaves them (files first).
+    fn attached_request(run_id: &str) -> pb::RunAgentRequest {
+        pb::RunAgentRequest {
+            run_id: run_id.to_owned(),
+            max_rounds: 8,
+            attachments: vec![
+                attachment_of(
+                    "sales.csv",
+                    b"month,revenue\n1,10\n",
+                    pb::RunAttachmentKind::File,
+                    "text/csv",
+                ),
+                attachment_of("one.png", PNG_ONE, pb::RunAttachmentKind::Image, "image/png"),
+                attachment_of("two.png", PNG_TWO, pb::RunAttachmentKind::Image, "image/png"),
+            ],
+            ..sample_request()
+        }
+    }
+
+    fn weather_round() -> Scripted {
+        Scripted::ToolCalls {
+            content: String::new(),
+            calls: vec![failing_tool_call("wx")],
+        }
+    }
+
+    /// Where the goal sits in a round's messages: the last user message of the seed.
+    fn goal_index(messages: &[pb::ChatMessage], goal: &str) -> usize {
+        messages
+            .iter()
+            .position(|message| message.role == "user" && message.content == goal)
+            .expect("the goal is in the prompt")
+    }
+
+    #[tokio::test]
+    async fn images_ride_every_round_of_the_run() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let req = attached_request("run-att-rounds");
+        let goal = req.goal.clone();
+        let run = run_agent_on(
+            &rec,
+            &plain_caller(),
+            &ALLOW_CAPABILITY_POLICY,
+            req,
+            vec![weather_round(), weather_round(), Scripted::Answer("Done.".to_owned())],
+        )
+        .await;
+        let response = run.result.expect("the run completes");
+        assert_eq!(response.status, "completed", "{}", response.final_output);
+
+        let images = run.images.lock().unwrap();
+        let messages = run.messages.lock().unwrap();
+        assert_eq!(images.len(), 3, "three rounds");
+        for (round, parts) in images.iter().enumerate() {
+            assert_eq!(parts.len(), 2, "round {round} carries both images");
+            let goal_at = goal_index(&messages[round], &goal);
+            for part in parts {
+                assert_eq!(part.message_index as usize, goal_at, "round {round}");
+                assert_eq!(part.mime_type, "image/png");
+            }
+            assert_eq!(parts[0].data, PNG_ONE);
+            assert_eq!(parts[1].data, PNG_TWO);
+        }
+        // The seed names the file, just before the goal, and never an image.
+        let goal_at = goal_index(&messages[0], &goal);
+        let note = &messages[0][goal_at - 1];
+        assert_eq!(note.role, "system");
+        assert!(note.content.contains("attachments/sales.csv"), "{}", note.content);
+        assert!(!note.content.contains("one.png"), "{}", note.content);
+        // No message of any round holds image bytes: they travel as parts only.
+        for round in messages.iter() {
+            for message in round {
+                assert!(!message.content.contains("PNG-one"), "image bytes in a message");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_run_without_attachments_sends_no_image_and_no_note() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let mut req = sample_request();
+        req.run_id = "run-att-none".to_owned();
+        let run = run_agent_on(
+            &rec,
+            &plain_caller(),
+            &ALLOW_CAPABILITY_POLICY,
+            req,
+            vec![Scripted::Answer("Done.".to_owned())],
+        )
+        .await;
+        run.result.expect("the run completes");
+        assert!(run.images.lock().unwrap().iter().all(Vec::is_empty));
+        for round in run.messages.lock().unwrap().iter() {
+            assert!(round.iter().all(|message| !message.content.contains("attachments/")));
+        }
+    }
+
+    #[tokio::test]
+    async fn children_do_not_inherit_attachments() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let req = attached_request("run-att-child");
+        let run = run_agent_on(
+            &rec,
+            &plain_caller(),
+            &ALLOW_CAPABILITY_POLICY,
+            req,
+            vec![
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![subagent_call("sub-a", r#"{"goal":"look something up","max_rounds":2}"#)],
+                },
+                Scripted::Answer("Child found it.".to_owned()),
+                Scripted::Answer("Parent done.".to_owned()),
+            ],
+        )
+        .await;
+        let response = run.result.expect("the run completes");
+        assert_eq!(response.status, "completed", "{}", response.final_output);
+
+        let images = run.images.lock().unwrap();
+        let messages = run.messages.lock().unwrap();
+        assert_eq!(images.len(), 3, "parent, child, parent");
+        assert_eq!(images[0].len(), 2, "the parent's first round");
+        assert!(images[1].is_empty(), "the child's round carries no image");
+        assert_eq!(images[2].len(), 2, "the parent's next round still does");
+        let child = messages[1]
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(child.contains("look something up"), "{child}");
+        assert!(!child.contains("attachments/"), "the child is not told of files it cannot read");
+    }
+
+    #[tokio::test]
+    async fn run_inputs_released_on_terminal_and_on_cancel() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let req = attached_request("run-att-terminal");
+        let (org, run_id) = (req.org_id.clone(), req.run_id.clone());
+        let run = run_agent_on(
+            &rec,
+            &plain_caller(),
+            &ALLOW_CAPABILITY_POLICY,
+            req,
+            vec![Scripted::Answer("Done.".to_owned())],
+        )
+        .await;
+        assert_eq!(run.result.expect("the run completes").status, "completed");
+        assert!(
+            crate::run_inputs::global().get(&org, &run_id).is_none(),
+            "released when the run ends"
+        );
+
+        // A run stuck in inference, then cancelled: dropping the request's future is what a
+        // client hang-up does, and it must release the files with it.
+        let req = attached_request("run-att-cancel");
+        let (org, run_id) = (req.org_id.clone(), req.run_id.clone());
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let inference_channel = spawn_inference_channel_inner(MockInference::with_concurrency_probe(
+            vec![Scripted::Answer("never".to_owned())],
+            ConcurrencyProbe::new(std::time::Duration::from_secs(60)),
+        ))
+        .await;
+        let state = crate::state::StateStore::new();
+        let caller = plain_caller();
+        let sandbox_manager = test_sandbox_manager_client();
+        let sandbox_tokens = test_sandbox_tokens();
+        // Boxed, not `pin!`ed: dropping the box drops the future itself, which is what a
+        // cancelled request does.
+        let mut stuck = Box::pin(run_agent(
+            &state,
+            session_channel,
+            inference_channel,
+            &caller,
+            req,
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &sandbox_manager,
+            "test-backend",
+            None,
+            &sandbox_tokens,
+            None,
+        ));
+        // The run reaches its registration after its tool offer is resolved, so wait for the
+        // files to appear (bounded) while the run is held in inference.
+        let started = std::time::Instant::now();
+        while crate::run_inputs::global().get(&org, &run_id).is_none() {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(20),
+                "the run never held its files"
+            );
+            tokio::select! {
+                _ = &mut stuck => panic!("the run cannot finish while inference is held"),
+                () = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+            }
+        }
+        drop(stuck);
+        assert!(
+            crate::run_inputs::global().get(&org, &run_id).is_none(),
+            "released when the request is cancelled"
+        );
+    }
+
+    #[test]
+    fn attachments_are_split_into_files_and_images_without_a_copy() {
+        let req = attached_request("run-att-split");
+        let (files, images) = split_attachments(&req.attachments);
+        assert_eq!(files.len(), 1);
+        assert_eq!(images.len(), 2);
+        assert!(std::ptr::eq(files.as_ptr(), req.attachments.as_ptr()));
+        let none = pb::RunAgentRequest::default();
+        assert!(run_image_parts(&none, 0, 1).is_empty());
+        assert!(with_attachment_note(vec![seed_message("user", "g".to_owned())], &none, 0).len() == 1);
+        // A child and a zero-retention run take nothing, whatever the request holds.
+        assert!(run_image_parts(&req, 1, 1).is_empty());
+        let zdr = pb::RunAgentRequest { zdr: true, ..req.clone() };
+        assert!(run_image_parts(&zdr, 0, 1).is_empty());
+        let seed = vec![seed_message("system", "p".to_owned()), seed_message("user", "g".to_owned())];
+        assert_eq!(with_attachment_note(seed.clone(), &req, 1), seed);
+        assert_eq!(with_attachment_note(seed, &req, 0).len(), 3);
     }
 }
