@@ -307,6 +307,8 @@ func main() {
 	// independently, once NATS is available (see startRunWatchConsumer).
 	api.NewRunWatchersHandler(pool).Register(protectedMux)
 	cronHandler := api.NewCronHandler(pool)
+	// WS20-S4: stored-consent schedule contracts. Strict literal true; off by default.
+	cronHandler.WithScheduleContract(os.Getenv("SCHEDULE_CONTRACT_ENABLED") == "true")
 	if cronVerifier, cronVerifierErr := cronDecisionVerifierFromEnv(os.Getenv); cronVerifierErr != nil {
 		slog.Warn("Space-scoped cron creation unavailable; Control decision verifier is required", "error", cronVerifierErr)
 	} else {

@@ -16,6 +16,7 @@ pub mod result_query;
 pub mod retention;
 pub mod run_context;
 pub mod run_origin;
+pub mod scheduled_contract;
 pub mod skill_recovery;
 pub mod tool_arguments;
 pub mod tool_class;

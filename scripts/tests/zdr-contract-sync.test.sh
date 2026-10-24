@@ -108,6 +108,10 @@ GOLDENS=(
   # the loader with --refusals). The SPA's own copy is vendored by Z-05b.
   "apps/Model Plane/api/contracts/zdr-refusals.json|15b12d17d34c49270889ce7a3b5fc66471bce3646499888ef7e7ee2cc1178cf1"
 
+  # WS25-S7: the org agent policy schema. AUTHORED (not generated), read by mp-contracts and by
+  # capability-core's org agent policy API.
+  "apps/Model Plane/api/contracts/org-agent-policy-schema.json|4e845cb768ad0d9df4b6cfee5af242df612b161b2e2fb5029f2da178deb270a1"
+
   # QB-T02: every Auth Core service-token request quarry-edge makes. AUTHORED data owned
   # by Quarry, not generated: the Rust loader, the source scan and the wire tests in
   # "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime" read it as it is. To change a

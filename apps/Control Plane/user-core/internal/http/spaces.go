@@ -770,10 +770,12 @@ type personalImportDecisionRequest struct {
 }
 
 type scheduleCreateDecisionRequest struct {
-	SpaceRef       string `json:"space_ref"`
-	ScheduleID     string `json:"schedule_id"`
-	TemplateDigest string `json:"template_digest"`
-	IdempotencyKey string `json:"idempotency_key"`
+	SpaceRef          string `json:"space_ref"`
+	ScheduleID        string `json:"schedule_id"`
+	TemplateDigest    string `json:"template_digest"`
+	IdempotencyKey    string `json:"idempotency_key"`
+	ContractDigest    string `json:"contract_digest"`
+	ContractExpiresAt string `json:"contract_expires_at"`
 }
 
 type watchCreateDecisionRequest struct {
@@ -911,6 +913,8 @@ func (s *Server) issueScheduleCreateDecision(c *gin.Context) {
 	decision, err := spaces.IssueScheduleCreateDecision(evidence, spaces.ScheduleCreateRequest{
 		DecisionRef: decisionRef, ScheduleID: request.ScheduleID, TemplateDigest: request.TemplateDigest,
 		IdempotencyKey: request.IdempotencyKey, Nonce: nonce,
+		ContractDigest: request.ContractDigest, ContractExpiresAt: request.ContractExpiresAt,
+		ContractsEnabled: s.scheduleContractsEnabled,
 	}, time.Now().UTC())
 	if err != nil {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Space schedule creation is not authorized"})

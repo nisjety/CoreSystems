@@ -1579,6 +1579,10 @@ services:
       CAPABILITY_CORE_AUTH_AUDIENCE: ${CAPABILITY_CORE_AUTH_AUDIENCE:-capability-core}
       CAPABILITY_CORE_DECISION_SIGNING_KEY: ${CAPABILITY_CORE_DECISION_SIGNING_KEY:-}
       CAPABILITY_CORE_DECISION_SIGNING_KID: ${CAPABILITY_CORE_DECISION_SIGNING_KID:-capability-decision-v1}
+      # WS25-S7: org agent policy API (routes answer 404 while off). Only the literal `true` enables it.
+      ORG_AGENT_POLICY_API: ${ORG_AGENT_POLICY_API:-false}
+      # WS20-S4: stored-consent schedule contracts. Only the literal `true` enables it; user-core takes the same name.
+      SCHEDULE_CONTRACT_ENABLED: ${SCHEDULE_CONTRACT_ENABLED:-false}
       # Outbound service-token minting for the skill-learning review, which
       # calls session-core (read the transcript, upsert the skill) and
       # inference-core (review it). The two JWKS/ISSUER vars above verify
