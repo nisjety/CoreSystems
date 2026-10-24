@@ -3,13 +3,26 @@
 | Field | Value |
 |---|---|
 | Date | 2026-10-14 |
-| Status | Approved 2026-10-15 by the user; the recommended defaults for all 13 open questions in 7.1 are accepted. Build in progress on the local branch `quarryv2` and, from `bed81d16`, its continuation `quarryv2-next` (not pushed, no pull requests): see the build ledger below. Evidence runs on rebuilt images in isolated stacks are listed under the ledger; the live stack still runs the `quarry-edge` image of 2026-10-01 (revision `2f2c3e83`); the one change made to the live stack since is the browser broker, redeployed on 2026-10-20 from `e7c321d5` on a database of its own (see the "Live stack change" row below), so nothing else counts as deployed. |
+| Status | STOPPED FOR VERIFICATION on 2026-10-24 (see the status block above the build ledger). Approved 2026-10-15 by the user; the recommended defaults for all 13 open questions in 7.1 are accepted. Build in progress on the local branch `quarryv2` and, from `bed81d16`, its continuation `quarryv2-next` (not pushed, no pull requests): see the build ledger below. Evidence runs on rebuilt images in isolated stacks are listed under the ledger; the live stack still runs the `quarry-edge` image of 2026-10-01 (revision `2f2c3e83`); the one change made to the live stack since is the browser broker, redeployed on 2026-10-20 from `e7c321d5` on a database of its own (see the "Live stack change" row below), so nothing else counts as deployed. |
 | Input audit | `C:/dev/verevon-audit-2026-10-14/02-quarry-and-browser-audit.md`, sha256 `60d32ec5270718b82a8baf90d2659e1d55dffa07814abc7153bdcd456ed4d49e` (evidence pack: `C:/dev/verevon-audit-2026-10-14/audit-evidence/`; the folder is read-only) |
 | Target | Commit `afb83928` (2026-10-10) of the live tree `C:/dev/CoresSystem` plus about 324 uncommitted entries (197 modified, 122 untracked, 5 deleted) |
 | Branch note | The planning worktree (branch `claude/gracious-gagarin-087139`, HEAD `828d9d55`) is 61 commits behind main. All code was therefore read from the live tree `C:/dev/CoresSystem`, never from the worktree. Files that exist only as uncommitted work are tagged `[U]` (untracked); files committed at `afb83928` but modified in the live tree are tagged `[M]`; committed and unchanged is `[C]`; a file this plan would create is `[NEW]`. |
 | Scope of this document | Priority items and waves W1 and W2 in file-level detail; waves W3 to W5 as epics. Nothing is built by the planning pipeline. |
 | Path convention | Every product path is written in full, relative to the repo root `C:/dev/CoresSystem/`. Shorthand is allowed in one place only: inside a single table cell or sentence, files that sit in the same directory as the first full path may be written by file name. |
 | Slice ids | `WS<n>.<letter>`, one workstream per design (WS1 grants, WS2 run control, WS3 driver, WS4 ZDR and tenant boundary, WS5 scrape contract, WS6 budgets, WS7 web policy, WS8 shared-browser backend, WS9 shared-browser frontend, WS10 run trace, WS11 planner, WS12 redaction, WS13 scrape actions and capture, WS14 crawl scope and robots, WS15 job lifecycle and schedules, WS16 extraction, WS17 profiles). `WS3.D` is design D3's slice S3. The slice catalogue gives the letter-to-design mapping. |
+
+## STATUS AT THE STOP (2026-10-24): building is stopped, verification comes first
+
+The user stopped all Quarry building on 2026-10-24 to update the documents and plans first; after that W1 and W2 are tested and proven before anything else is built. Nothing is running. Full status, resume instructions and traps: `.plan-work/quarry-w1w2/STATUS-2026-10-24.md`.
+
+| Wave | Built to scope | Days built | Proven |
+|---|---|---|---|
+| W1 (39 slices) | 38 of 39 (the Model Plane half of WS3.J is the Model Plane session's, `model-plane` commit `e336de32`) | 144.25 of 148.25 (97 %) | about 6 days at rebuilt-image level, none at L2; SC1 to SC7 all NOT-RUN |
+| W2 (69 queue units) | 68 of 69 units; 62 of 112 slices; 41 not built (other planes, decisions, counsel) | 268.5 of 493.5 (54 %) | one light pass: Rust 3560 passed and 64 failed in 23 targets; Go (13), node (4) and SPA (16, plus 5 new tsc errors) failures |
+| W3 (E3.1 to E3.9, estimate 278 d, 202 to 372) | batches B1 to B3 (15 units) | 38.5 of 278 (about 14 %) | not tested; B4 and later not built |
+| W4, W5 | not started, on hold | | |
+
+Next, in order: (1) STEP 1, code without a stack: fix the compile error in `lab/evals/src/browser_benchmark.rs:221`, triage the failing tests (see `W2-rust-lane-failures.md`), fix the known small bugs of the depth registers, re-run the lanes to green; (2) STEP 2, one stack-evidence session on rebuilt images with the user signing in for L2 (`L2-signed-in-steps.md`), SC1 to SC7 PASS or FAIL; (3) a decisions round in parallel with step 1: X-10, X-12, D16 Q2, X-19, X-9, ADR-6. Only then W3 B4 and later, and the gated W2 slices. The owner-delegated decisions of 2026-10-23 (end of this document) stand. The wave strategy stands: one wave at a time, depth documented, tests at the end of each wave.
 
 ## Build ledger (branches `quarryv2` and `quarryv2-next`, local only)
 

@@ -86,3 +86,9 @@ Log: C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-work
 
 ## Next
 - Nothing left in this unit. Return the result. No commits were made and no code was edited.
+
+## Re-launch (2026-10-24)
+- Free space on C: 305.59 GB. docker info answered (rc=0). No job was started and nothing was re-run.
+- Log re-checked: JOB_EXIT rc=0 and QTEST_DONE check_rc=0 test_rc=0 at the end. 56 test result groups, passed 2323, failed 0, ignored 3. No FAILED, panicked or error lines.
+- Scope: the run finished at 2026-10-23 17:26:44. The last commit before it was 2ac764f1f (the W1 closeout). Since then, 130 commits to the Quarry crates have landed and five uncommitted in-scope files were modified (quarry-edge lib.rs, main.rs, tests/support/agent_harness.rs, fixture_site.rs, quarry-runtime step_receipts.rs). The counts describe the W1 end state, not HEAD 226a7f2ff.
+- depth/W1-tests.md: nothing appended, because this unit had no failures or timeouts.
