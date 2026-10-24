@@ -95,3 +95,49 @@ test('Q06/Q07 isolated task survives reload, rejects widening, and creates no pe
   expect(denied).not.toMatch(/event: (connected|tool_call|memory_recall)/)
   expect((await memories(page)).some(m => m.content.includes(marker))).toBe(false)
 })
+
+async function setMemoryState(page: Page, state: 'on' | 'paused' | 'off') {
+  const response = await page.request.put('/api/v1/memory/controls', { data: { state } })
+  expect(response.status()).toBe(200)
+  const controls = await response.json()
+  expect(controls.state).toBe(state)
+  return controls as { state: string; use_allowed: boolean; generation_allowed: boolean; reason: string }
+}
+
+test('paused user: no recall, no new memory, resume works', async ({ page }, info) => {
+  const stamp = Date.now()
+  const before = `minnefor${stamp}`
+  const during = `minnepause${stamp}`
+  const after = `minneetter${stamp}`
+  await openFresh(page)
+  try {
+    await send(page, `Husk at ${before} er ravgul. Dette er en uttrykkelig varig testpreferanse. Bekreft kort.`, info, 'remember-before-pause')
+    await expect.poll(async () => (await memories(page)).filter(m => m.content.includes(before)).length).toBeGreaterThan(0)
+
+    const paused = await setMemoryState(page, 'paused')
+    expect(paused).toMatchObject({ reason: 'user_paused', use_allowed: false, generation_allowed: false })
+
+    // A paused user's rows stay listed and deletable, but nothing is recalled and nothing new is written.
+    await fresh(page)
+    const recalled = await send(page, `Hva husker du om ${before}? Ikke gjett hvis det ikke finnes et lagret minne.`, info, 'recall-while-paused')
+    expect(recalled?.turns.at(-1)?.content).not.toContain('ravgul')
+    await expect(page.locator('.verevon-chat-memory-recall__toggle')).toHaveCount(0)
+
+    await send(page, `Husk at ${during} er blå. Dette er en uttrykkelig varig testpreferanse. Bekreft kort.`, info, 'remember-while-paused')
+    expect((await memories(page)).filter(m => m.content.includes(during))).toEqual([])
+
+    await setMemoryState(page, 'on')
+
+    // Resuming does not mine what was said while paused; a fact stated afterwards is saved.
+    await fresh(page)
+    await send(page, `Husk at ${after} er grønn. Dette er en uttrykkelig varig testpreferanse. Bekreft kort.`, info, 'remember-after-resume')
+    await expect.poll(async () => (await memories(page)).filter(m => m.content.includes(after)).length).toBeGreaterThan(0)
+    expect((await memories(page)).filter(m => m.content.includes(during))).toEqual([])
+    await page.screenshot({ path: info.outputPath('memory-resumed.png'), fullPage: true })
+  } finally {
+    await page.request.put('/api/v1/memory/controls', { data: { state: 'on' } })
+    for (const memory of (await memories(page)).filter(m => [before, during, after].some(key => m.content.includes(key)))) {
+      await page.request.delete(`/api/v1/memory/${encodeURIComponent(memory.memory_id)}`)
+    }
+  }
+})

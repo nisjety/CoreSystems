@@ -52,7 +52,10 @@ use crate::domains::knowledge::documents::create_document;
 use crate::domains::knowledge::products::{extract_products, summarize_products};
 use crate::domains::knowledge::sync::register_sharepoint;
 use crate::domains::mcp::{delete_server as delete_mcp_server, share_server as share_mcp_server};
-use crate::domains::memory::delete_memory;
+use crate::domains::memory::{
+    delete_memory, remember_memory, reset_memory, set_memory_controls, RememberBody, ResetBody,
+    SetControlsBody,
+};
 use crate::domains::monitoring::{check_now, CheckRequest};
 use crate::domains::orchestration::{
     cancel_run as cancel_orchestration_run, decide_approval as decide_orchestration_approval,
@@ -3454,6 +3457,81 @@ pub(super) async fn dispatch_memory_delete(
     .into_response();
     let (status, payload) = response_to_status_and_json(response).await;
     owner_json_response_to_envelope("memory.delete", user, status, payload)
+}
+
+// The three memory actions below reuse memory.rs's handlers for the same reason
+// as memory.delete: the cookie-derived tokens and the user-bound hop stay in one
+// place, and the browser never names whose memory it changes.
+pub(super) async fn dispatch_memory_set_state(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let requested = ticket_string(input, "state");
+    if !matches!(requested, "on" | "paused" | "off") {
+        return ticket_bad_request("memory.set_state requires state of on, paused, or off");
+    }
+    let response = set_memory_controls(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        Json(SetControlsBody {
+            state: requested.to_owned(),
+        }),
+    )
+    .await
+    .into_response();
+    let (status, payload) = response_to_status_and_json(response).await;
+    owner_json_response_to_envelope("memory.set_state", user, status, payload)
+}
+
+pub(super) async fn dispatch_memory_reset(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    // An erase that cannot be undone needs the literal `true`, not a truthy value.
+    if input.get("confirm").and_then(Value::as_bool) != Some(true) {
+        return ticket_bad_request("memory.reset requires confirm: true");
+    }
+    let response = reset_memory(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        Json(ResetBody { confirm: true }),
+    )
+    .await
+    .into_response();
+    let (status, payload) = response_to_status_and_json(response).await;
+    owner_json_response_to_envelope("memory.reset", user, status, payload)
+}
+
+pub(super) async fn dispatch_memory_remember(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let thread_id = ticket_string(input, "threadId");
+    let content = ticket_string(input, "content");
+    if thread_id.is_empty() || content.trim().is_empty() {
+        return ticket_bad_request("memory.remember requires 'threadId' and non-empty 'content'");
+    }
+    let response = remember_memory(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        Json(RememberBody {
+            thread_id: thread_id.to_owned(),
+            content: content.to_owned(),
+        }),
+    )
+    .await
+    .into_response();
+    let (status, payload) = response_to_status_and_json(response).await;
+    owner_json_response_to_envelope("memory.remember", user, status, payload)
 }
 
 pub(super) async fn dispatch_settings_update_me(

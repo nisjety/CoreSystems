@@ -410,4 +410,30 @@ describe('action registry', () => {
       roles: { member: { allow_mode: 'some' } },
     }).success).toBe(false)
   })
+
+  it('registers the memory controls with their risk: pausing is light, resetting is gated and final', () => {
+    const setState = getActionDescriptor('memory.set_state')
+    const reset = getActionDescriptor('memory.reset')
+    const remember = getActionDescriptor('memory.remember')
+
+    expect(setState).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
+    expect(remember).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false })
+    expect(reset).toMatchObject({ ownerPlane: 'model', risk: 'high', requiresApproval: true, reversible: false })
+    // A model cannot pause, erase or write the user's memory on their behalf.
+    for (const id of ['memory.set_state', 'memory.reset', 'memory.remember'] as const) {
+      expect(isModelExecutableAction(id)).toBe(false)
+    }
+
+    // Only the three literal states; a typo must not silently mean "on".
+    expect(setState?.inputSchema.safeParse({ state: 'paused' }).success).toBe(true)
+    expect(setState?.inputSchema.safeParse({ state: 'ON' }).success).toBe(false)
+    expect(setState?.inputSchema.safeParse({}).success).toBe(false)
+    // The reset needs the literal confirmation, never a truthy stand-in.
+    expect(reset?.inputSchema.safeParse({ confirm: true }).success).toBe(true)
+    expect(reset?.inputSchema.safeParse({ confirm: false }).success).toBe(false)
+    expect(reset?.inputSchema.safeParse({ confirm: 'yes' }).success).toBe(false)
+    expect(reset?.inputSchema.safeParse({}).success).toBe(false)
+    expect(remember?.inputSchema.safeParse({ threadId: 't1', content: 'Jeg heter Ima' }).success).toBe(true)
+    expect(remember?.inputSchema.safeParse({ threadId: 't1', content: '   ' }).success).toBe(false)
+  })
 })

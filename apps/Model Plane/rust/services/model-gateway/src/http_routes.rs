@@ -254,6 +254,13 @@ pub fn build_router_with_readiness(
         // memory" flow (create the fix, then delete the original by id) has a
         // real write to call instead of inventing new persistence here.
         .route("/v1/memories", get(list_memories).post(create_memory))
+        // The user's own memory state (on / paused / off) and the reset. Static
+        // segments win over `:memory_id`, so these never reach the delete route.
+        .route(
+            "/v1/memories/controls",
+            get(get_memory_controls).put(set_memory_controls),
+        )
+        .route("/v1/memories/reset", post(reset_memory))
         .route("/v1/memories/:memory_id", delete(delete_memory_entry))
         // chat-parity §2: list models + per-model feature families for the picker.
         .route("/v1/models", get(list_models))
@@ -6566,6 +6573,25 @@ fn session_memory_error(context: &str, error: &tonic::Status) -> HttpJsonError {
                 }
             })),
         ),
+        // The memory gate's typed refusals (`memory_not_enabled:<reason>`) and the
+        // ZDR refusal of a state change: the caller can act on them, so they are
+        // not an upstream outage.
+        tonic::Code::FailedPrecondition => {
+            let (code, reason) = error
+                .message()
+                .split_once(':')
+                .unwrap_or((error.message(), ""));
+            (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": {
+                        "code": code,
+                        "message": error.message(),
+                        "details": { "reason": reason },
+                    }
+                })),
+            )
+        }
         _ => (
             StatusCode::BAD_GATEWAY,
             Json(json!({
@@ -10171,6 +10197,182 @@ async fn delete_memory_entry(
         degraded: response.degraded,
         degradation_reason: response.degradation_reason,
     }))
+}
+
+fn memory_state_label(tag: i32) -> &'static str {
+    use mp_contracts::model_plane::v1::MemoryState;
+    match MemoryState::try_from(tag) {
+        Ok(MemoryState::On) => "on",
+        Ok(MemoryState::Paused) => "paused",
+        Ok(MemoryState::Off) => "off",
+        _ => "unspecified",
+    }
+}
+
+/// Only the three literal words; anything else is refused rather than defaulted,
+/// because a typo must never silently turn memory back on.
+fn parse_memory_state(word: &str) -> Option<mp_contracts::model_plane::v1::MemoryState> {
+    use mp_contracts::model_plane::v1::MemoryState;
+    match word {
+        "on" => Some(MemoryState::On),
+        "paused" => Some(MemoryState::Paused),
+        "off" => Some(MemoryState::Off),
+        _ => None,
+    }
+}
+
+/// Content-free: the stored choice, the decision taken from it and why.
+fn memory_controls_json(controls: &mp_contracts::model_plane::v1::MemoryControls) -> Value {
+    json!({
+        "state": memory_state_label(controls.state),
+        "org_memory_policy": controls.org_memory_policy,
+        "org_learning_policy": controls.org_learning_policy,
+        "use_allowed": controls.use_allowed,
+        "generation_allowed": controls.generation_allowed,
+        "learning_allowed": controls.learning_allowed,
+        "reason": controls.reason,
+        "hidden_rows": controls.hidden_rows,
+        "updated_at": controls
+            .updated_at
+            .as_ref()
+            .map_or(Value::Null, prost_ts_to_rfc3339),
+    })
+}
+
+/// The signed-in user's memory state and the decision taken from it. A ZDR
+/// caller is answered `reason=zdr` by session-core, so there is no ZDR branch
+/// here.
+async fn get_memory_controls(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+) -> Result<Json<Value>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::GetMemoryControlsRequest;
+
+    let response = state
+        .memory_client
+        .clone()
+        .get_memory_controls(authenticated_session_request(
+            GetMemoryControlsRequest {
+                org_id: claims.org_id.clone(),
+                user_id: claims.user_id.clone(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|e| session_memory_error("session-core get_memory_controls failed", &e))?
+        .into_inner();
+
+    Ok(Json(
+        response
+            .controls
+            .as_ref()
+            .map_or(Value::Null, memory_controls_json),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct SetMemoryControlsBody {
+    state: String,
+}
+
+/// Sets the signed-in user's own state. Org and user come from the verified
+/// claims, never the body; session-core refuses a service, ZDR or waived
+/// credential.
+async fn set_memory_controls(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Json(body): Json<SetMemoryControlsBody>,
+) -> Result<Json<Value>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::SetMemoryControlsRequest;
+
+    let Some(requested) = parse_memory_state(body.state.trim()) else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": {
+                    "code": "invalid_memory_state",
+                    "message": "state must be one of: on, paused, off",
+                }
+            })),
+        ));
+    };
+
+    let response = state
+        .memory_client
+        .clone()
+        .set_memory_controls(authenticated_session_request(
+            SetMemoryControlsRequest {
+                org_id: claims.org_id.clone(),
+                user_id: claims.user_id.clone(),
+                state: requested as i32,
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|e| session_memory_error("session-core set_memory_controls failed", &e))?
+        .into_inner();
+
+    Ok(Json(
+        response
+            .controls
+            .as_ref()
+            .map_or(Value::Null, memory_controls_json),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct ResetMemoryBody {
+    #[serde(default)]
+    confirm: bool,
+}
+
+/// Erases everything the signed-in user's memory holds. Not blocked for a ZDR
+/// caller: erasure is allowed because rows from before ZDR may exist.
+/// Irreversible, so an absent `confirm` is a refusal here as well as in
+/// session-core.
+async fn reset_memory(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Json(body): Json<ResetMemoryBody>,
+) -> Result<Json<Value>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::ResetMemoryRequest;
+
+    if !body.confirm {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": {
+                    "code": "confirm_required",
+                    "message": "resetting memory cannot be undone; send confirm: true",
+                }
+            })),
+        ));
+    }
+
+    let response = state
+        .memory_client
+        .clone()
+        .reset_memory(authenticated_session_request(
+            ResetMemoryRequest {
+                org_id: claims.org_id.clone(),
+                user_id: claims.user_id.clone(),
+                confirm: true,
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|e| session_memory_error("session-core reset_memory failed", &e))?
+        .into_inner();
+
+    Ok(Json(json!({
+        "durable_deleted": response.durable_deleted,
+        "semantic_unconfirmed": response.semantic_unconfirmed,
+        "degraded": response.degraded,
+        "degradation_reason": response.degradation_reason,
+    })))
 }
 
 #[allow(clippy::too_many_lines)]
@@ -14074,5 +14276,50 @@ mod tool_policy_proxy_tests {
         assert_eq!(refused.0, StatusCode::BAD_REQUEST);
         assert!(seen.lock().expect("lock").is_empty());
         task.abort();
+    }
+}
+
+#[cfg(test)]
+mod memory_controls_route_tests {
+    use super::*;
+    use mp_contracts::model_plane::v1::{MemoryControls, MemoryState};
+
+    #[test]
+    fn only_the_three_literal_words_parse_as_a_state() {
+        assert_eq!(parse_memory_state("on"), Some(MemoryState::On));
+        assert_eq!(parse_memory_state("paused"), Some(MemoryState::Paused));
+        assert_eq!(parse_memory_state("off"), Some(MemoryState::Off));
+        for refused in ["", "ON", "pause", "true", "unspecified"] {
+            assert_eq!(parse_memory_state(refused), None, "{refused:?}");
+        }
+    }
+
+    #[test]
+    fn controls_json_carries_the_decision_and_no_content() {
+        let controls = MemoryControls {
+            state: MemoryState::Off as i32,
+            org_memory_policy: "allow".to_owned(),
+            use_allowed: false,
+            reason: "user_off".to_owned(),
+            hidden_rows: 4,
+            ..Default::default()
+        };
+        let body = memory_controls_json(&controls);
+        assert_eq!(body["state"], "off");
+        assert_eq!(body["reason"], "user_off");
+        assert_eq!(body["hidden_rows"], 4);
+        assert_eq!(body["use_allowed"], false);
+        assert!(body["updated_at"].is_null());
+    }
+
+    #[test]
+    fn a_gate_refusal_is_a_typed_conflict_not_an_outage() {
+        let refused = session_memory_error(
+            "session-core index_memory failed",
+            &tonic::Status::failed_precondition("memory_not_enabled:user_paused"),
+        );
+        assert_eq!(refused.0, StatusCode::CONFLICT);
+        assert_eq!(refused.1 .0["error"]["code"], "memory_not_enabled");
+        assert_eq!(refused.1 .0["error"]["details"]["reason"], "user_paused");
     }
 }

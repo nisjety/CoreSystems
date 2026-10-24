@@ -744,6 +744,24 @@ const memoryDeleteInput = z.object({
   memoryId: z.string().min(1),
 })
 
+// The caller's own memory state; whose memory it is comes from the session.
+const memorySetStateInput = z.object({
+  state: z.enum(['on', 'paused', 'off']),
+})
+
+// Erases every memory about the caller. The literal `true` is the user's
+// confirmation: an absent or false value never reaches the owner.
+const memoryResetInput = z.object({
+  confirm: z.literal(true),
+})
+
+// `threadId` only proves the caller owns a thread (IndexMemory resolves the
+// user from it); the saved fact is not scoped to it.
+const memoryRememberInput = z.object({
+  threadId: z.string().min(1),
+  content: z.string().trim().min(1),
+})
+
 const settingsUpdateMeInput = z.object({
   name: z.string().trim().optional(),
   displayName: z.string().trim().optional(),
@@ -2565,6 +2583,39 @@ export const actionRegistry = [
     requiresApproval: true,
     reversible: false,
     inputSchema: memoryDeleteInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'memory.set_state',
+    label: 'Set memory state',
+    description: 'Turn the caller\'s own memory on, pause it, or turn it off. Paused keeps what is stored but neither recalls nor learns; off also hides it.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: memorySetStateInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'memory.reset',
+    label: 'Reset memory',
+    description: 'Erase everything Verevon remembers about the caller. Destructive and non-recoverable.',
+    ownerPlane: 'model',
+    risk: 'high',
+    requiresApproval: true,
+    reversible: false,
+    inputSchema: memoryResetInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'memory.remember',
+    label: 'Remember this',
+    description: 'Save one fact the caller chose to a durable personal memory. Refused while memory is paused, off, or disabled by the organization.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: memoryRememberInput,
     outputSchema: envelopeStatusOutput,
   },
   {

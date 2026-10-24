@@ -66,7 +66,7 @@ import { readChatThreadHistory } from '../lib/chat-thread-history'
 import { chatAppearanceActive } from '../lib/chat-appearance-preview'
 import { MIN_PLAN_JUSTIFICATION_CHARS } from '@/shared/api/chat-client'
 import { answerProcessingNote } from '@/shared/api/privacy-tier'
-import { correctMemory, deleteMemory, listMemories } from '@/shared/api/memory-client'
+import { correctMemory, deleteMemory, listMemories, rememberMemory } from '@/shared/api/memory-client'
 import { ApiError } from '@/shared/api/http'
 import {
   For,
@@ -507,6 +507,23 @@ export function AssistantMessage(props: {
   const [readAloudBlockedShown, setReadAloudBlockedShown] = createSignal(false)
   const readAloudUnavailable = () =>
     Boolean(props.temporaryChat) || props.message.streaming || !props.message.content.trim()
+  // "Husk dette" (memory.remember): a user action, never the model's. `paused`
+  // is its own outcome so a refused save is never shown as a failure of the
+  // network, nor as a save.
+  const [remembered, setRemembered] = createSignal<'idle' | 'saving' | 'saved' | 'paused' | 'failed'>('idle')
+  const canRemember = () =>
+    !props.temporaryChat && Boolean(props.threadId) && !props.message.streaming && Boolean(props.message.content.trim())
+  const rememberThis = async () => {
+    const threadId = props.threadId
+    if (!threadId || remembered() === 'saving') return
+    setRemembered('saving')
+    try {
+      await rememberMemory(threadId, props.message.content)
+      setRemembered('saved')
+    } catch (err) {
+      setRemembered(err instanceof ApiError && err.code === 'memory_not_enabled' ? 'paused' : 'failed')
+    }
+  }
   const toggleReadAloud = () => {
     if (player.playingId() === props.message.id) {
       player.stop()
@@ -767,6 +784,14 @@ export function AssistantMessage(props: {
             <MessageAction label={props.copied ? 'Copied' : 'Copy'} onClick={props.onCopy}>
               {props.copied ? <Check size={14} /> : <Copy size={14} />}
             </MessageAction>
+            <Show when={canRemember()}>
+              <MessageAction
+                label={remembered() === 'saved' ? i18n.tr('Husket', 'Remembered') : i18n.tr('Husk dette', 'Remember this')}
+                onClick={() => void rememberThis()}
+              >
+                {remembered() === 'saved' ? <Check size={14} /> : <Brain size={14} />}
+              </MessageAction>
+            </Show>
             {/*
               A dedicated, always-visible export button once the answer is
               long enough to be worth a document of its own (Copilot's own
@@ -920,6 +945,19 @@ export function AssistantMessage(props: {
           <Show when={readAloudFailed()}>
             <p class="verevon-chat-feedback-reasons__note" role="alert">
               {readAloudUnavailableMessage(i18n.tr)}
+            </p>
+          </Show>
+          <Show when={remembered() === 'paused'}>
+            <p class="verevon-chat-feedback-reasons__note" role="status">
+              {i18n.tr(
+                'Minnet er pauset, av eller slått av av organisasjonen, så dette ble ikke lagret.',
+                'Memory is paused, off or turned off by your organization, so this was not saved.',
+              )}
+            </p>
+          </Show>
+          <Show when={remembered() === 'failed'}>
+            <p class="verevon-chat-feedback-reasons__note" role="alert">
+              {i18n.tr('Kunne ikke lagre minnet.', 'Could not save the memory.')}
             </p>
           </Show>
           <Show when={exportError()}>

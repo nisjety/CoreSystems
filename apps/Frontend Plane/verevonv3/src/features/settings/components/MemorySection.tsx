@@ -3,9 +3,14 @@ import { createMemo, createSignal, For, Show } from 'solid-js'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import {
   deleteMemory,
+  getMemoryControls,
   listMemories,
+  resetMemory,
+  setMemoryState,
+  type MemoryControls,
   type MemoryEntry,
   type MemoryProvenance,
+  type MemoryState,
 } from '@/shared/api/memory-client'
 import { translateApiError, useI18n } from '@/shared/i18n'
 import { SectionHeader, SettingsButton } from '@/features/settings/components/settings-ui'
@@ -66,15 +71,132 @@ function topicLabel(topic: string, i18n: ReturnType<typeof useI18n>): string {
   }
 }
 
+const MEMORY_STATES: readonly MemoryState[] = ['on', 'paused', 'off']
+
+function stateLabel(state: MemoryState, i18n: ReturnType<typeof useI18n>): string {
+  switch (state) {
+    case 'on':
+      return i18n.tr('På', 'On')
+    case 'paused':
+      return i18n.tr('Pause', 'Paused')
+    case 'off':
+      return i18n.tr('Av', 'Off')
+  }
+}
+
+function stateDescription(state: MemoryState, i18n: ReturnType<typeof useI18n>): string {
+  switch (state) {
+    case 'on':
+      return i18n.tr(
+        'Verevon husker og bruker det du deler.',
+        'Verevon remembers and uses what you share.',
+      )
+    case 'paused':
+      return i18n.tr(
+        'Det som er lagret blir stående, men brukes ikke, og ingenting nytt læres. Det du skriver mens minnet står på pause, blir aldri lagret i ettertid.',
+        'What is stored stays, but is not used, and nothing new is learned. What you write while memory is paused is never saved afterwards.',
+      )
+    case 'off':
+      return i18n.tr(
+        'Som pause, og det lagrede skjules også fra listen. Ingenting slettes.',
+        'As paused, and what is stored is also hidden from the list. Nothing is deleted.',
+      )
+  }
+}
+
+/** The banner for a decision that overrides the user's own choice, or `null`. */
+function overrideNotice(controls: MemoryControls, i18n: ReturnType<typeof useI18n>): string | null {
+  switch (controls.reason) {
+    case 'org_disabled':
+      return i18n.tr(
+        'Organisasjonen din har slått av minne. Valget ditt her gjelder først når en administrator slår det på igjen.',
+        'Your organization has turned memory off. Your choice here only applies once an administrator turns it back on.',
+      )
+    case 'zdr':
+      return i18n.tr(
+        'Zero Data Retention er aktiv for denne økten. Minne brukes ikke, og tilstanden kan ikke endres herfra. Du kan fortsatt nullstille.',
+        'Zero Data Retention is on for this session. Memory is not used, and the state cannot be changed from here. You can still reset.',
+      )
+    case 'policy_unavailable':
+      return i18n.tr(
+        'Organisasjonens minnepolicy kan ikke leses akkurat nå, så minne er satt på pause til den er tilgjengelig igjen.',
+        'Your organization\'s memory policy cannot be read right now, so memory is paused until it is available again.',
+      )
+    default:
+      return null
+  }
+}
+
 export function MemorySection() {
   const i18n = useI18n()
   const [memories, { refetch }] = createResource(() => listMemories())
+  const [controls, { refetch: refetchControls, mutate: setControls }] = createResource(() =>
+    getMemoryControls(),
+  )
   const [busyId, setBusyId] = createSignal<string | null>(null)
   const [confirmId, setConfirmId] = createSignal<string | null>(null)
   const [actionError, setActionError] = createSignal<string | null>(null)
+  const [stateBusy, setStateBusy] = createSignal(false)
+  const [resetStep, setResetStep] = createSignal<'idle' | 'confirm' | 'busy'>('idle')
+  const [resetNote, setResetNote] = createSignal<string | null>(null)
 
   const list = createMemo(() => memories()?.memories ?? [])
   const degraded = createMemo(() => memories()?.degraded ?? false)
+
+  const handleState = async (next: MemoryState) => {
+    if (stateBusy() || controls()?.state === next) return
+    setStateBusy(true)
+    setActionError(null)
+    setResetNote(null)
+    try {
+      setControls(await setMemoryState(next))
+      // Off hides the list and the others show it again, so it is read afresh.
+      await refetch()
+    } catch (err) {
+      setActionError(
+        translateApiError(err, i18n.tr, {
+          no: 'Kunne ikke endre minneinnstillingen.',
+          en: 'Could not change the memory setting.',
+        }),
+      )
+      await refetchControls()
+    } finally {
+      setStateBusy(false)
+    }
+  }
+
+  // Irreversible, so the first click only arms it: the same two-step pattern as
+  // deleting a single memory.
+  const handleReset = async () => {
+    if (resetStep() === 'busy') return
+    if (resetStep() === 'idle') {
+      setResetStep('confirm')
+      return
+    }
+    setResetStep('busy')
+    setActionError(null)
+    try {
+      const result = await resetMemory()
+      setResetNote(
+        result.semanticUnconfirmed > 0
+          ? i18n.tr(
+              'Minnet er nullstilt. Noen kopier i søkeindeksen kunne ikke bekreftes slettet, men de brukes ikke.',
+              'Memory was reset. Some copies in the search index could not be confirmed erased, but they are not used.',
+            )
+          : i18n.tr('Minnet er nullstilt.', 'Memory was reset.'),
+      )
+      await Promise.all([refetch(), refetchControls()])
+    } catch (err) {
+      setActionError(
+        translateApiError(err, i18n.tr, {
+          no: 'Kunne ikke nullstille minnet.',
+          en: 'Could not reset memory.',
+        }),
+      )
+    } finally {
+      setResetStep('idle')
+    }
+  }
 
   const handleDelete = async (entry: MemoryEntry) => {
     if (busyId()) return
@@ -115,6 +237,65 @@ export function MemorySection() {
           <p class="verevon-settings-status-message verevon-settings-status-message--error" role="alert">
             {message()}
           </p>
+        )}
+      </Show>
+
+      <Show when={resetNote()}>
+        {(message) => (
+          <p class="verevon-settings-status-message verevon-settings-status-message--success" role="status">
+            {message()}
+          </p>
+        )}
+      </Show>
+
+      <Show when={controls.error}>
+        <p class="verevon-settings-status-message verevon-settings-status-message--error" role="alert">
+          {i18n.tr('Kunne ikke laste minneinnstillingen.', 'Could not load the memory setting.')}
+        </p>
+      </Show>
+
+      <Show when={controls()}>
+        {(current) => (
+          <div class="verevon-settings-list-card">
+            <div
+              role="radiogroup"
+              aria-label={i18n.tr('Minne', 'Memory')}
+              class="verevon-settings-integration-row"
+            >
+              <For each={MEMORY_STATES}>
+                {(state) => (
+                  <SettingsButton
+                    role="radio"
+                    aria-checked={current().state === state ? 'true' : 'false'}
+                    variant={current().state === state ? 'primary' : 'secondary'}
+                    settingsSize="sm"
+                    disabled={stateBusy() || current().reason === 'zdr'}
+                    onClick={() => void handleState(state)}
+                  >
+                    {stateLabel(state, i18n)}
+                  </SettingsButton>
+                )}
+              </For>
+            </div>
+            <Show when={current().state}>
+              {(state) => <p class="verevon-settings-subnote">{stateDescription(state(), i18n)}</p>}
+            </Show>
+            <Show when={overrideNotice(current(), i18n)}>
+              {(notice) => (
+                <p class="verevon-settings-subnote" role="status">
+                  {notice()}
+                </p>
+              )}
+            </Show>
+            <Show when={current().hiddenRows > 0}>
+              <p class="verevon-settings-subnote" role="status">
+                {i18n.tr(
+                  `${current().hiddenRows} minner er skjult mens minnet er av. De er ikke slettet.`,
+                  `${current().hiddenRows} memories are hidden while memory is off. They are not deleted.`,
+                )}
+              </p>
+            </Show>
+          </div>
         )}
       </Show>
 
@@ -217,6 +398,59 @@ export function MemorySection() {
           </div>
         </Show>
       </Show>
+
+      <div class="verevon-settings-list-card">
+        <div class="verevon-settings-integration-row">
+          <div>
+            <p>{i18n.tr('Nullstill minne', 'Reset memory')}</p>
+            <span>
+              <Show
+                when={resetStep() === 'idle'}
+                fallback={i18n.tr(
+                  'Dette sletter alt Verevon har lagret om deg, og kan ikke angres.',
+                  'This erases everything Verevon has stored about you and cannot be undone.',
+                )}
+              >
+                {i18n.tr(
+                  'Slett alt Verevon har lagret om deg i ett steg.',
+                  'Erase everything Verevon has stored about you in one step.',
+                )}
+              </Show>
+            </span>
+          </div>
+          <div>
+            <Show when={resetStep() !== 'idle'}>
+              <SettingsButton
+                settingsSize="sm"
+                disabled={resetStep() === 'busy'}
+                onClick={() => setResetStep('idle')}
+              >
+                {i18n.tr('Avbryt', 'Cancel')}
+              </SettingsButton>{' '}
+            </Show>
+            <SettingsButton
+              settingsSize="sm"
+              danger
+              disabled={resetStep() === 'busy'}
+              onClick={() => void handleReset()}
+            >
+              <Show
+                when={resetStep() === 'busy'}
+                fallback={
+                  <>
+                    <Trash2 size={14} aria-hidden="true" />{' '}
+                    {resetStep() === 'confirm'
+                      ? i18n.tr('Bekreft nullstilling', 'Confirm reset')
+                      : i18n.tr('Nullstill', 'Reset')}
+                  </>
+                }
+              >
+                <Loader2 size={14} aria-hidden="true" /> {i18n.tr('Nullstiller…', 'Resetting…')}
+              </Show>
+            </SettingsButton>
+          </div>
+        </div>
+      </div>
     </>
   )
 }

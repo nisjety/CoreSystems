@@ -77,6 +77,15 @@ describe('provisional Action Catalog manifest', () => {
     })
   })
 
+  it('lists the memory controls as human-only actions', async () => {
+    const manifest = await buildActionCatalogManifest()
+    for (const id of ['memory.set_state', 'memory.reset', 'memory.remember']) {
+      const entry = manifest.actions.find((action) => action.id === id)
+      expect(entry, id).toBeDefined()
+      expect(entry?.allowedActorTypes).toEqual(['human'])
+    }
+  })
+
   it('produces a stable SHA-256 digest', async () => {
     await expect(actionCatalogSha256()).resolves.toMatch(/^[a-f0-9]{64}$/)
     await expect(actionCatalogSha256()).resolves.toBe(await actionCatalogSha256())
