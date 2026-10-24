@@ -1846,3 +1846,14 @@ What it is: a crawl or batch page (`POST /v1/internal/run_page` with a `crawl` c
 - Rollback: set the flag back to lenient and restart the edge. The flag does not switch off the unsupported_option or policy_denied refusals; those stay on until their options are built, so a caller that sent them gets a 400 or 403 rather than a silent drop.
 - Operator check: `request_warnings` in the crawl ack names the ignored keys (names only, never values).
 - Test phase (not yet run): `cargo test -p quarry-edge crawl_request`; `cargo test --manifest-path apps/gateway/Cargo.toml normalize_crawl`; `pnpm vitest --run` on the action-registry guard test once it exists.
+
+## Human browser sessions: grant, keep-alive and the dark switch (WS8.D)
+
+Status: built, dark. Nothing is deployed and the switch is off in every environment until the dev and evidence stacks set it.
+
+- **Switch.** Gateway `BROWSER_HUMAN_BROWSE` (`1`, `true`, `yes` or `on` turns it on; anything else, or unset, is off). It is read without `APP_ENV`. It only takes effect when `BROWSER_GRANT_ENFORCEMENT` is not `off`, because a human session needs a broker grant.
+- **What changes when on.** A new session asks Model Gateway for a `human_browse` grant (no hosts; the broker's deny-list is the policy) and sends Quarry no `constraints` block, so no 12-step, 120-second or first-host literal reaches the run. If the grant is not issued (permissive mode), the session opens on the first-host policy, as before.
+- **Keep-alive.** `POST /api/v1/browser/sessions/{session_id}/keepalive` renews the session grant by one broker TTL and returns `{"data":{"expiresAt":...}}` only. A grant that cannot be renewed answers 409 `browser_session_expired`: reopen the session. The SPA runs this every 300 seconds only while the tab is visible and the session advertises `human_browsing`.
+- **Capabilities.** `human_browsing`, `tab_control` and `attach` are advertised only when Quarry's owner projection says so (`grantKind`, `tabControl`, `attachAvailable`). Until Quarry emits `grantKind`, no session advertises `human_browsing`.
+- **Rollback.** Unset `BROWSER_HUMAN_BROWSE` (or set `0`) and restart the gateway. Sessions opened in the meantime keep their grant until it expires on its own TTL.
+- **Check the switch.** With the switch on, a new session's grant is a `human_browse` grant (`kind` in the broker's grant record), and the keep-alive answer carries no grant id.
