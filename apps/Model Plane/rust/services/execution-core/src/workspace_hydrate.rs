@@ -3,12 +3,14 @@
 //! apps/Frontend Plane/verevonv3/docs/S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md
 //! §3 and §8 item 3.5.C.
 //!
-//! Called from `sandbox_lease.rs` for Space-scoped `code_interpreter` runs:
-//! `ensure_hydrated_workspace` hydrates on the first call, and
-//! `release_sandbox_lease_if_any` diffs and uploads when the run ends. The
-//! inline `ExecuteStep` path has no run-end signal, so its edits are not
-//! uploaded (see the module doc of `sandbox_lease.rs`). Thread-scoped
-//! workspaces do not call this module yet.
+//! Driven by `sandbox_lease.rs`, the only module that calls `hydrate` and
+//! `diff_and_upload`. The first Space-scoped `code_interpreter` call or
+//! `process_start` of a run reaches `hydrate` through `ensure_hydrated_workspace`
+//! (the other `process_*` tools reuse an existing lease), and
+//! `release_sandbox_lease_if_any` reaches `diff_and_upload` when the run ends:
+//! from `CancelRun` or the `RunAgent` finalise. A run driven only by
+//! `ExecuteStep` calls has no run-end signal, so its edits are not uploaded
+//! (see the module doc of `sandbox_lease.rs`).
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
