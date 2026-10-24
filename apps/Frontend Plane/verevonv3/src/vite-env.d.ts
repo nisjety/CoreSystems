@@ -6,6 +6,7 @@ interface ImportMetaEnv {
 	readonly VITE_ALLOW_DEV_AUTH_BYPASS?: string;
 	readonly VITE_TURNSTILE_SITE_KEY?: string;
 	readonly VITE_PLAN_EXECUTE_ENABLED?: string;
+	readonly VITE_CHAT_VISION_AS_PARTS_ENABLED?: string;
 }
 
 interface ImportMeta {

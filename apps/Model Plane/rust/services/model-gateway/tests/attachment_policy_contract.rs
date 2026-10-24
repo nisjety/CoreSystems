@@ -70,8 +70,17 @@ fn the_real_stream_route_carries_the_body_limit() {
         "the body limit must be on the stream route itself, not a later route"
     );
     assert!(
-        routes[route..route + 400].contains("attachment_policy::stream_body_limit_bytes()"),
-        "the stream route's limit is the one the attachment policy declares"
+        routes[route..route + 400].contains("DefaultBodyLimit::max(stream_body_limit_bytes())"),
+        "the stream route's limit is the derived one"
+    );
+    // The derived limit starts from the one the attachment policy declares (WS08-S7 raises it only
+    // when the declared attachment total would not fit).
+    let derived = routes
+        .find("fn stream_body_limit_bytes()")
+        .expect("the derived stream body limit");
+    assert!(
+        routes[derived..derived + 400].contains("attachment_policy::stream_body_limit_bytes()"),
+        "the derived limit starts from the attachment policy's declared one"
     );
 }
 

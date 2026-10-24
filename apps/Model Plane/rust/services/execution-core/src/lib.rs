@@ -48,6 +48,7 @@ pub mod social_tools;
 pub mod state;
 pub mod subagent;
 pub(crate) mod subscription_refusal;
+pub mod owner_actions;
 pub mod ticket_tools;
 pub mod tool_bridge;
 pub mod user_core_client;

@@ -267,6 +267,10 @@ func main() {
 		if modelActionViewVerifier, viewVerifierErr := modelActionViewVerifierFromEnv(os.Getenv); viewVerifierErr != nil {
 			slog.Warn("run-bound Model owner-action view unavailable; Control public key is required", "error", viewVerifierErr)
 		} else {
+			// The admission table can only be on when its store is available and the lookup says so (WS24-S6).
+			if admissionStore, storeErr := registry.NewAgentActionAdmissionsStore(pool); storeErr == nil {
+				modelActionViewVerifier.WithAgentActionAdmissions(admissionStore, api.ModelActionAdmissionTableFromLookup(os.Getenv))
+			}
 			ch = ch.WithModelActionViewVerifier(modelActionViewVerifier)
 		}
 		ch.Register(protectedMux)
