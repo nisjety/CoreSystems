@@ -2716,6 +2716,27 @@ mod tests {
         ) -> Result<Response<PromoteSkillResponse>, Status> {
             Err(Status::unimplemented("not used"))
         }
+
+        async fn list_skill_bundles(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::ListSkillBundlesRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::ListSkillBundlesResponse>, Status> {
+            Err(Status::unimplemented("not used"))
+        }
+
+        async fn get_skill_bundle_manifest(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::GetSkillBundleManifestRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::SkillBundleManifest>, Status> {
+            Err(Status::unimplemented("not used"))
+        }
+
+        async fn get_skill_blob(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::GetSkillBlobRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::GetSkillBlobResponse>, Status> {
+            Err(Status::unimplemented("not used"))
+        }
     }
 
     fn wire_binding(name: &str, class: &str, floor: &str) -> WireToolBinding {

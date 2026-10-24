@@ -13,6 +13,7 @@ use mp_contracts::model_plane::v1::{
     execution_core_client::ExecutionCoreClient, finetune_jobs_client::FinetuneJobsClient,
     inference_core_client::InferenceCoreClient,
     managed_run_lifecycle_client::ManagedRunLifecycleClient,
+    message_search_client::MessageSearchClient,
     memory_service_client::MemoryServiceClient,
     orchestration_core_service_client::OrchestrationCoreServiceClient,
     run_service_client::RunServiceClient, sandbox_manager_client::SandboxManagerClient,
@@ -99,6 +100,8 @@ pub struct AppState {
     pub rate_limiter: RateLimiter,
     pub inference_client: InferenceCoreClient<Channel>,
     pub session_client: SessionCoreClient<Channel>,
+    /// Session Core's MessageSearch service, on the same endpoint as `session_client` (WS17-S3).
+    pub message_search_client: MessageSearchClient<Channel>,
     /// Additive managed-run terminalization service hosted by Session Core on
     /// the same gRPC endpoint. It deliberately remains separate from the
     /// legacy `SessionCore` client so existing callers retain their contracts.
@@ -410,6 +413,7 @@ impl AppState {
             publisher: Arc::new(DynPublisher::InMemory(InMemoryPublisher::new())),
             rate_limiter: RateLimiter::from_env(),
             inference_client: InferenceCoreClient::new(inference_channel),
+            message_search_client: MessageSearchClient::new(session_channel.clone()),
             session_client: SessionCoreClient::new(session_channel),
             managed_run_client: ManagedRunLifecycleClient::new(managed_run_channel),
             session_terminal_tokens: None,
@@ -562,6 +566,11 @@ impl AppState {
             "http://localhost:9092",
         )?);
         let session_client = SessionCoreClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
+        let message_search_client = MessageSearchClient::new(Self::lazy_channel(
             "SESSION_CORE_URL",
             "SESSION_CORE_ADDR",
             "http://localhost:9091",
@@ -765,6 +774,7 @@ impl AppState {
             let mut state = Self::with_nats(nats);
             state.inference_client = inference_client;
             state.session_client = session_client;
+            state.message_search_client = message_search_client;
             state.managed_run_client = managed_run_client;
             state.session_terminal_tokens = Some(session_terminal_tokens);
             state.mail_task_bridge_tokens = mail_task_bridge_tokens.clone();
@@ -816,6 +826,7 @@ impl AppState {
             let mut state = Self::new();
             state.inference_client = inference_client;
             state.session_client = session_client;
+            state.message_search_client = message_search_client;
             state.managed_run_client = managed_run_client;
             state.session_terminal_tokens = Some(session_terminal_tokens);
             state.mail_task_bridge_tokens = mail_task_bridge_tokens;

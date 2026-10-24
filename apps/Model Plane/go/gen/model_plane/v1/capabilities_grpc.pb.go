@@ -19,13 +19,16 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	CapabilityCore_ListCapabilities_FullMethodName    = "/model_plane.v1.CapabilityCore/ListCapabilities"
-	CapabilityCore_GetCapability_FullMethodName       = "/model_plane.v1.CapabilityCore/GetCapability"
-	CapabilityCore_EvaluatePolicy_FullMethodName      = "/model_plane.v1.CapabilityCore/EvaluatePolicy"
-	CapabilityCore_ResolveToolBindings_FullMethodName = "/model_plane.v1.CapabilityCore/ResolveToolBindings"
-	CapabilityCore_ValidateSkillBundle_FullMethodName = "/model_plane.v1.CapabilityCore/ValidateSkillBundle"
-	CapabilityCore_CheckSkillPromotion_FullMethodName = "/model_plane.v1.CapabilityCore/CheckSkillPromotion"
-	CapabilityCore_PromoteSkill_FullMethodName        = "/model_plane.v1.CapabilityCore/PromoteSkill"
+	CapabilityCore_ListCapabilities_FullMethodName       = "/model_plane.v1.CapabilityCore/ListCapabilities"
+	CapabilityCore_GetCapability_FullMethodName          = "/model_plane.v1.CapabilityCore/GetCapability"
+	CapabilityCore_EvaluatePolicy_FullMethodName         = "/model_plane.v1.CapabilityCore/EvaluatePolicy"
+	CapabilityCore_ResolveToolBindings_FullMethodName    = "/model_plane.v1.CapabilityCore/ResolveToolBindings"
+	CapabilityCore_ValidateSkillBundle_FullMethodName    = "/model_plane.v1.CapabilityCore/ValidateSkillBundle"
+	CapabilityCore_CheckSkillPromotion_FullMethodName    = "/model_plane.v1.CapabilityCore/CheckSkillPromotion"
+	CapabilityCore_PromoteSkill_FullMethodName           = "/model_plane.v1.CapabilityCore/PromoteSkill"
+	CapabilityCore_ListSkillBundles_FullMethodName       = "/model_plane.v1.CapabilityCore/ListSkillBundles"
+	CapabilityCore_GetSkillBundleManifest_FullMethodName = "/model_plane.v1.CapabilityCore/GetSkillBundleManifest"
+	CapabilityCore_GetSkillBlob_FullMethodName           = "/model_plane.v1.CapabilityCore/GetSkillBlob"
 )
 
 // CapabilityCoreClient is the client API for CapabilityCore service.
@@ -56,6 +59,12 @@ type CapabilityCoreClient interface {
 	CheckSkillPromotion(ctx context.Context, in *CheckSkillPromotionRequest, opts ...grpc.CallOption) (*CheckSkillPromotionResponse, error)
 	// Promote a skill to a new scope.
 	PromoteSkill(ctx context.Context, in *PromoteSkillRequest, opts ...grpc.CallOption) (*PromoteSkillResponse, error)
+	// List the skill bundles an org holds, optionally narrowed to some skills.
+	ListSkillBundles(ctx context.Context, in *ListSkillBundlesRequest, opts ...grpc.CallOption) (*ListSkillBundlesResponse, error)
+	// Read one skill bundle manifest: its files, digests and sizes.
+	GetSkillBundleManifest(ctx context.Context, in *GetSkillBundleManifestRequest, opts ...grpc.CallOption) (*SkillBundleManifest, error)
+	// Read one blob of a skill bundle by its sha256 digest.
+	GetSkillBlob(ctx context.Context, in *GetSkillBlobRequest, opts ...grpc.CallOption) (*GetSkillBlobResponse, error)
 }
 
 type capabilityCoreClient struct {
@@ -136,6 +145,36 @@ func (c *capabilityCoreClient) PromoteSkill(ctx context.Context, in *PromoteSkil
 	return out, nil
 }
 
+func (c *capabilityCoreClient) ListSkillBundles(ctx context.Context, in *ListSkillBundlesRequest, opts ...grpc.CallOption) (*ListSkillBundlesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListSkillBundlesResponse)
+	err := c.cc.Invoke(ctx, CapabilityCore_ListSkillBundles_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *capabilityCoreClient) GetSkillBundleManifest(ctx context.Context, in *GetSkillBundleManifestRequest, opts ...grpc.CallOption) (*SkillBundleManifest, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SkillBundleManifest)
+	err := c.cc.Invoke(ctx, CapabilityCore_GetSkillBundleManifest_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *capabilityCoreClient) GetSkillBlob(ctx context.Context, in *GetSkillBlobRequest, opts ...grpc.CallOption) (*GetSkillBlobResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetSkillBlobResponse)
+	err := c.cc.Invoke(ctx, CapabilityCore_GetSkillBlob_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // CapabilityCoreServer is the server API for CapabilityCore service.
 // All implementations must embed UnimplementedCapabilityCoreServer
 // for forward compatibility.
@@ -164,6 +203,12 @@ type CapabilityCoreServer interface {
 	CheckSkillPromotion(context.Context, *CheckSkillPromotionRequest) (*CheckSkillPromotionResponse, error)
 	// Promote a skill to a new scope.
 	PromoteSkill(context.Context, *PromoteSkillRequest) (*PromoteSkillResponse, error)
+	// List the skill bundles an org holds, optionally narrowed to some skills.
+	ListSkillBundles(context.Context, *ListSkillBundlesRequest) (*ListSkillBundlesResponse, error)
+	// Read one skill bundle manifest: its files, digests and sizes.
+	GetSkillBundleManifest(context.Context, *GetSkillBundleManifestRequest) (*SkillBundleManifest, error)
+	// Read one blob of a skill bundle by its sha256 digest.
+	GetSkillBlob(context.Context, *GetSkillBlobRequest) (*GetSkillBlobResponse, error)
 	mustEmbedUnimplementedCapabilityCoreServer()
 }
 
@@ -194,6 +239,15 @@ func (UnimplementedCapabilityCoreServer) CheckSkillPromotion(context.Context, *C
 }
 func (UnimplementedCapabilityCoreServer) PromoteSkill(context.Context, *PromoteSkillRequest) (*PromoteSkillResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method PromoteSkill not implemented")
+}
+func (UnimplementedCapabilityCoreServer) ListSkillBundles(context.Context, *ListSkillBundlesRequest) (*ListSkillBundlesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListSkillBundles not implemented")
+}
+func (UnimplementedCapabilityCoreServer) GetSkillBundleManifest(context.Context, *GetSkillBundleManifestRequest) (*SkillBundleManifest, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetSkillBundleManifest not implemented")
+}
+func (UnimplementedCapabilityCoreServer) GetSkillBlob(context.Context, *GetSkillBlobRequest) (*GetSkillBlobResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetSkillBlob not implemented")
 }
 func (UnimplementedCapabilityCoreServer) mustEmbedUnimplementedCapabilityCoreServer() {}
 func (UnimplementedCapabilityCoreServer) testEmbeddedByValue()                        {}
@@ -342,6 +396,60 @@ func _CapabilityCore_PromoteSkill_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _CapabilityCore_ListSkillBundles_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListSkillBundlesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CapabilityCoreServer).ListSkillBundles(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CapabilityCore_ListSkillBundles_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CapabilityCoreServer).ListSkillBundles(ctx, req.(*ListSkillBundlesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _CapabilityCore_GetSkillBundleManifest_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetSkillBundleManifestRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CapabilityCoreServer).GetSkillBundleManifest(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CapabilityCore_GetSkillBundleManifest_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CapabilityCoreServer).GetSkillBundleManifest(ctx, req.(*GetSkillBundleManifestRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _CapabilityCore_GetSkillBlob_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetSkillBlobRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CapabilityCoreServer).GetSkillBlob(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CapabilityCore_GetSkillBlob_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CapabilityCoreServer).GetSkillBlob(ctx, req.(*GetSkillBlobRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // CapabilityCore_ServiceDesc is the grpc.ServiceDesc for CapabilityCore service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -376,6 +484,18 @@ var CapabilityCore_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "PromoteSkill",
 			Handler:    _CapabilityCore_PromoteSkill_Handler,
+		},
+		{
+			MethodName: "ListSkillBundles",
+			Handler:    _CapabilityCore_ListSkillBundles_Handler,
+		},
+		{
+			MethodName: "GetSkillBundleManifest",
+			Handler:    _CapabilityCore_GetSkillBundleManifest_Handler,
+		},
+		{
+			MethodName: "GetSkillBlob",
+			Handler:    _CapabilityCore_GetSkillBlob_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
