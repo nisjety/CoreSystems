@@ -1157,6 +1157,21 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D2-323 | WS20-S6 | live-proof | P1 | Lead, live proof (needs docker, not run here): rebuild execution-core, orchestrator-core and session-core; set EXECUTION_SCHEDULED_AGENT_ENABLED=true on both; run scheduled-step-proof.sh; capture a fire whose goal needs a web read and a write, then check the transcript (one answer with the withheld block), the scheduled_step_receipts row, Temporal history with no content, cost_entries for the run, and no approvals row. | open |
 | D2-324 | WS20-S6 | follow-up | P3 | 24 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-12.json | open |
 
+
+### Wave-mode batch W2-13 (2026-10-24)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D2-325 | WS20-S3 | live-proof | P1 | The transcript link depends on the owner being able to read a service:orchestrator-core-owned scheduled thread through the BFF transcript route (plan D12); this has not been checked live, and the flag must not be flipped until it has. | open |
+| D2-326 | WS20-S3 | live-proof | P1 | The Open transcript link opens a thread owned by service:orchestrator-core (plan D12); the owner's read through the BFF transcript route is unverified, so VITE_SCHEDULE_RESULTS must stay off until a real fire's thread opens for its owner. | open |
+| D2-327 | WS20-S3 | live-proof | P1 | Apply the lead_todo shared-edit to apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts to register schedule.fires.list (contract text in the implementer's lead_todo); outside the ownership set, so only the lead can close it. | open |
+| D2-328 | WS20-S3 | live-proof | P1 | Live proof: rebuild the gateway image (agent_actions.rs), rebuild model-gateway via compose.sh, restart the verevonv3 frontend (Vite bind mount, cache-bust global.css), and with a real S1 fire confirm the owner's Open transcript link opens and screenshot the expander. Docker and live steps are lead-only. | open |
+| D2-329 | WS20-S3 | live-proof | P1 | Complete the model-gateway unit test run (cargo test -p model-gateway --lib cron_fires_path); it did not finish during this verification. | open |
+| D2-330 | WS20-S3 | live-proof | P1 | Whole-project pnpm lint was not run by this verifier; only eslint on the four owned files was run (exit 0). | open |
+| D2-331 | WS20-S3 | live-proof | P1 | Before enabling VITE_SCHEDULE_RESULTS, confirm S1 (session-core persistence and capability-core fires listing) is live in the target environment, since this slice depends on cron_fires rows carrying run_id and thread_id. | open |
+| D2-332 | WS20-S3 | live-proof | P1 | Scope check: the git status of the shared worktree lists many other modified files (sidebar-navigation.ts, DashboardComposer.tsx, chat-client.ts, Model Plane proto and session-core files, and others). They belong to other batches (W1-11, W1-17, W2-05 and similar), not to this slice's six files; the owned-file diffs contain only S3 changes. | open |
+| D2-333 | WS20-S3 | follow-up | P3 | 14 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-13.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
