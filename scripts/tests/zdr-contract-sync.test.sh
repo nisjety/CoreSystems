@@ -106,7 +106,7 @@ GOLDENS=(
   # (MP_UPDATE_GOLDEN=1 cargo test -p mp-contracts zdr_refusal), never written by hand.
   # Every refusal code the matrix can expect must be in it (check_schema passes it to
   # the loader with --refusals). The SPA's own copy is vendored by Z-05b.
-  "apps/Model Plane/api/contracts/zdr-refusals.json|9c2b5458aac4b2b779ab9b63acb987f63df6c41b85a93a32ccfcaf97251b6d1e"
+  "apps/Model Plane/api/contracts/zdr-refusals.json|15b12d17d34c49270889ce7a3b5fc66471bce3646499888ef7e7ee2cc1178cf1"
 
   # QB-T02: every Auth Core service-token request quarry-edge makes. AUTHORED data owned
   # by Quarry, not generated: the Rust loader, the source scan and the wire tests in

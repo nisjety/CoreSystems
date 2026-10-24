@@ -16,7 +16,7 @@ pub enum TrustClass {
     BrowserScraped,
     /// A third-party MCP server's tool result.
     ThirdPartyMcp,
-    /// Content pulled from a connected external account. No tool maps to it yet.
+    /// Content read from, or acted on in, a connected account.
     ConnectorContent,
     /// Text from an earlier conversation. No tool maps to it yet.
     PriorConversation,
@@ -35,6 +35,8 @@ const TOOL_TRUST: &[(&str, TrustClass)] = &[
     ("web.search", TrustClass::ExternalWeb),
     ("web.read", TrustClass::ExternalWeb),
     ("browser_agent", TrustClass::BrowserScraped),
+    ("read_provider_action", TrustClass::ConnectorContent),
+    ("execute_provider_action", TrustClass::ConnectorContent),
 ];
 
 impl TrustClass {
@@ -93,6 +95,10 @@ mod tests {
             assert_eq!(TrustClass::classify(name), TrustClass::ExternalWeb, "{name}");
         }
         assert_eq!(TrustClass::classify("browser_agent"), TrustClass::BrowserScraped);
+        for name in ["read_provider_action", "execute_provider_action"] {
+            assert_eq!(TrustClass::classify(name), TrustClass::ConnectorContent, "{name}");
+        }
+        assert_eq!(TrustClass::classify("list_provider_actions"), TrustClass::OrgInternal);
         assert_eq!(TrustClass::classify("mcp__srv__create_order"), TrustClass::ThirdPartyMcp);
     }
 
