@@ -878,35 +878,6 @@ async fn scrape_with(
     }
 }
 
-#[derive(Debug, Deserialize)]
-pub struct CrawlRequest {
-    pub url: String,
-    #[serde(default)]
-    pub max_pages: Option<u32>,
-    /// BFS depth cap forwarded to the orchestrator's `CrawlJobInput`
-    /// (`params.max_depth`). Absent = orchestrator default. Onboarding's
-    /// crawl preview pins this to 1 so previews stay shallow.
-    #[serde(default)]
-    pub max_depth: Option<u32>,
-    /// Selective ingest (Phase 2): true = successful crawled pages are durably
-    /// persisted+embedded into the Data Plane (owner=initiator/private via
-    /// Phase 1). Absent/false = working-set only (default NEVER). The gateway
-    /// sets this from the user's crawl_ingest_mode (auto|never|prompt).
-    #[serde(default)]
-    pub ingest: Option<bool>,
-    /// Zero data retention. The durable job path cannot honour it today (see
-    /// [`refuse_durable_job_under_zdr`]), so a request that asks for it, or
-    /// that the token's ZDR floor imposes, is refused rather than ignored.
-    #[serde(default)]
-    pub zdr: Option<bool>,
-    /// WS14.S3: follow links to subdomains of the seed host. Absent = false.
-    #[serde(default)]
-    pub allow_subdomains: Option<bool>,
-    /// WS14.S3: follow links to hosts unrelated to the seed host. Absent = false.
-    #[serde(default)]
-    pub allow_external_links: Option<bool>,
-}
-
 /// Fail closed: `/v1/crawl` and `/v1/batch` are durable by construction. The
 /// job record lives in the control plane, the Temporal history carries the URLs
 /// and the per-page runs go through `/v1/internal/run_page`, which the
@@ -969,13 +940,43 @@ fn limits_refusal(
     )
 }
 
+/// WS14.S6: a refused crawl request as the canonical envelope. A 400 for fields that cannot
+/// be accepted; a 403 `policy_denied` for an option this request may not use. Nothing was created.
+fn crawl_request_refusal(
+    request_id: &str,
+    refusal: crate::crawl_request::Refusal,
+) -> (StatusCode, Json<Envelope<()>>) {
+    let fields = crate::crawl_request::fields_json(refusal.fields());
+    let (status, error) = match refusal {
+        crate::crawl_request::Refusal::Invalid(_) => (
+            StatusCode::BAD_REQUEST,
+            QuarryError::new(ErrorCode::BadRequest, "the crawl request has invalid fields")
+                .with_details(serde_json::json!({ "fields": fields })),
+        ),
+        crate::crawl_request::Refusal::PolicyDenied(_) => (
+            StatusCode::FORBIDDEN,
+            QuarryError::new(
+                ErrorCode::Forbidden,
+                "the crawl request asks for an option this request may not use",
+            )
+            .with_details(serde_json::json!({ "reason": "policy_denied", "fields": fields })),
+        ),
+    };
+    (status, Json(Envelope::<()>::err(request_id, error)))
+}
+
 async fn crawl_handoff(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
     headers: HeaderMap,
-    Json(req): Json<CrawlRequest>,
+    body: axum::body::Bytes,
 ) -> Result<Json<Envelope<HandoffAck>>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = crate::request_id::current();
+    let req = crate::crawl_request::parse_body(
+        &body,
+        crate::crawl_request::CrawlRequestSettings::current(),
+    )
+    .map_err(|refusal| crawl_request_refusal(&request_id, refusal))?;
     refuse_durable_job_under_zdr(&claims, req.zdr, &request_id, "crawl")?;
     refuse_while_draining(&request_id)?;
     // WS7.E: the seed is gated by the web policy before the handoff. A denial is a 403 and
@@ -1041,9 +1042,10 @@ async fn crawl_handoff(
     // The switch is read once at boot; `off` stamps `legacy` so the orchestrator runs it as before.
     let scope = crate::crawl_policy::handoff_scope(
         crate::crawl_policy::CrawlScopeSwitch::current(),
-        req.allow_subdomains.unwrap_or(false),
-        req.allow_external_links.unwrap_or(false),
-    );
+        req.scope.allow_subdomains,
+        req.scope.allow_external_links,
+    )
+    .with_request_scope(&req.scope);
     let origin = crate::handoff::run_origin_from_request(&claims, &headers);
     let idempotency_key = crate::handoff::idempotency_key_from_request(&headers);
     let ack = crate::handoff::forward_job_signed(
@@ -1115,7 +1117,20 @@ async fn crawl_handoff(
     }
     match ack {
         Ok(mut v) => {
-            v.effective = Some(scope.effective(limits.max_pages.effective, limits.max_depth.effective));
+            let mut effective =
+                scope.effective(limits.max_pages.effective, limits.max_depth.effective);
+            if let Some(object) = effective.as_object_mut() {
+                object.insert(
+                    "request_warnings".to_owned(),
+                    serde_json::Value::Array(
+                        req.warnings
+                            .iter()
+                            .map(|w| serde_json::json!({ "code": w.code, "field": w.field }))
+                            .collect(),
+                    ),
+                );
+            }
+            v.effective = Some(effective);
             v.limits = Some(limits.into());
             Ok(Json(Envelope::ok(request_id, v)))
         }
@@ -1133,7 +1148,7 @@ pub struct BatchRequest {
     /// = working-set only (default NEVER). Gateway sets from crawl_ingest_mode.
     #[serde(default)]
     pub ingest: Option<bool>,
-    /// See [`CrawlRequest::zdr`].
+    /// See [`crate::crawl_request::ParsedCrawl::zdr`].
     #[serde(default)]
     pub zdr: Option<bool>,
 }

@@ -127,6 +127,26 @@ pub fn handoff_scope(
 
 impl HandoffScope {
     /// The wire name of the scope mode.
+    /// WS14.S6: the patterns, the domain switch and the extension list the caller
+    /// asked for. Under `observe` the patterns are reported but not applied, and
+    /// under `off` (legacy) they are not applied at all; both say so in `warnings`.
+    pub fn with_request_scope(mut self, requested: &CrawlScope) -> Self {
+        self.scope.include_paths = requested.include_paths.clone();
+        self.scope.exclude_paths = requested.exclude_paths.clone();
+        self.scope.deny_extensions = requested.deny_extensions.clone();
+        self.scope.crawl_entire_domain = requested.crawl_entire_domain;
+        let has_patterns = !requested.include_paths.is_empty() || !requested.exclude_paths.is_empty();
+        if !requested.crawl_entire_domain {
+            self.warnings.push("same_directory_only");
+        }
+        if has_patterns && self.legacy {
+            self.warnings.push("scope_not_applied_legacy");
+        } else if has_patterns && self.scope_mode == ScopeMode::Observe {
+            self.warnings.push("patterns_reported_not_enforced");
+        }
+        self
+    }
+
     pub fn scope_mode_label(&self) -> &'static str {
         match self.scope_mode {
             ScopeMode::Enforce => "enforce",

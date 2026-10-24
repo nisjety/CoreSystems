@@ -51,6 +51,7 @@ mod internal_routes;
 mod job_lifecycle_routes;
 mod job_stream;
 mod crawl_policy;
+mod crawl_request;
 mod batch_check;
 mod limits;
 mod map_routes;
