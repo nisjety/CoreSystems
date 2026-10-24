@@ -13,8 +13,11 @@ into `browser_capacity_reached` with `Retry-After`. Retryable.
 | `global_run_cap` | `global` | the edge has this many live runs | `MAX_CONCURRENT_RUNS` (32) |
 | `org_run_cap` | `org` | this organization has this many live runs | `MAX_CONCURRENT_RUNS_PER_ORG` (8) |
 | `org_interactive_run_cap` | `org` | this organization has this many of a person's own sessions open; the sub-cap leaves room for its agent runs | `MAX_INTERACTIVE_RUNS_PER_ORG` (6) |
+| `org_plan_cap` | `org` | the organization's plan bounds this class of run (agent runs or a person's sessions) and it has this many live; `limit` is the plan value, never above `MAX_CONCURRENT_RUNS` | the plan keys `quarry.cap.agent_runs` and `quarry.cap.interactive_runs`; nothing by default (see below) |
 
 `0` disables a cap.
+
+`org_plan_cap` (WS6.G) appears only when the limits source reports a plan bound for the class of the start. The default source (`QUARRY_EDGE__LIMITS_SOURCE=static`) reports none, so nothing changes until a billing source is built. A class the plan bounds answers to the plan value alone, in place of `org_run_cap` and `org_interactive_run_cap` (so a plan can raise an organization above the floor, never above `global_run_cap`); a class the plan does not bound keeps the static caps. A plan value of `0` refuses every start of the class; a plan that says nothing is absent, not `0`.
 
 ## 429 `RATE_LIMITED` on `POST /v1/crawl` and `POST /v1/batch`
 

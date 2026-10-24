@@ -429,12 +429,27 @@ pub async fn start_run(
     // records it and serves); what is left becomes a runtime ceiling below. A person's
     // session is never limited here (human seconds are metered, never capped). The static
     // source configures no allowance, so nothing changes until a source reports one.
-    let agent_seconds = if run_class == crate::budget::RunClass::Agent {
-        let org_limits = state
+    //
+    // WS6.G: the same read carries the plan's run caps (`quarry.cap.agent_runs`,
+    // `quarry.cap.interactive_runs`). A person's session still never fails on an
+    // unreadable source: for it the answer is the floor (no plan bound), whatever
+    // the fail mode; only an agent run follows `closed`.
+    let org_limits = if run_class == crate::budget::RunClass::Agent {
+        state
             .limits
             .org_limits(&org_id)
             .await
-            .map_err(|error| driver_err(&request_id, error))?;
+            .map_err(|error| driver_err(&request_id, error))?
+    } else {
+        match state.limits.org_limits(&org_id).await {
+            Ok(limits) => limits,
+            Err(_) => {
+                tracing::warn!("organization limits unreadable; a person's session uses the floor");
+                crate::limits::OrgLimits::floor()
+            }
+        }
+    };
+    let agent_seconds = if run_class == crate::budget::RunClass::Agent {
         if org_limits.browser_seconds_agent.is_exhausted() {
             match crate::budget::current_mode() {
                 crate::budget::BudgetMode::On => {
@@ -473,7 +488,7 @@ pub async fn start_run(
     };
     let slot = state
         .agent_runs
-        .try_reserve(&org_id, run_class)
+        .try_reserve_with(&org_id, run_class, org_limits.run_override())
         .map_err(|denied| {
             crate::metrics::record_run_denied(denied.reason);
             crate::metrics::record_run_start(run_class.label(), "denied");

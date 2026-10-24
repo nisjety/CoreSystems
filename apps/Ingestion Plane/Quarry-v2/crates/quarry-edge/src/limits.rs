@@ -410,6 +410,71 @@ impl OrgLimits {
     }
 }
 
+/// Plan bounds on how many runs one organization may have live, per class
+/// (WS6.G): the billing-core plan keys `quarry.cap.agent_runs` and
+/// `quarry.cap.interactive_runs`. `None` for a class means no plan bound: the
+/// process-wide caps of `RunLimits` apply as they always did.
+///
+/// A class with a plan bound answers to that bound alone (it replaces the
+/// static per-organization caps for that class, so a plan can raise an
+/// organization above the floor), and never to more than the process-wide cap
+/// (`bound_for`). A bound of `0` is an explicit "no runs of this class" and
+/// refuses every start; a plan that says nothing is `None`, not `0`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RunCapOverride {
+    pub agent_runs: Option<u32>,
+    pub interactive_runs: Option<u32>,
+}
+
+impl RunCapOverride {
+    /// No plan bound for either class.
+    pub const NONE: Self = Self {
+        agent_runs: None,
+        interactive_runs: None,
+    };
+
+    /// The plan value for one class.
+    pub fn for_class(self, class: crate::budget::RunClass) -> Option<u32> {
+        match class {
+            crate::budget::RunClass::Agent => self.agent_runs,
+            crate::budget::RunClass::Interactive => self.interactive_runs,
+        }
+    }
+
+    /// The bound a start of `class` answers to: the plan value, capped by the
+    /// process-wide cap (`global_cap`, `0` = none). `None` when the plan sets
+    /// no bound for the class.
+    pub fn bound_for(self, class: crate::budget::RunClass, global_cap: u32) -> Option<u32> {
+        self.for_class(class).map(|plan| {
+            if global_cap == 0 {
+                plan
+            } else {
+                plan.min(global_cap)
+            }
+        })
+    }
+}
+
+impl OrgLimits {
+    /// The run bounds this answer sets (see [`RunCapOverride`]). The floor sets
+    /// none. Under fail mode `open` the organization's cap is the process-wide
+    /// cap (the same rule as [`effective_capacity`]), so both classes are bounded
+    /// only by the global cap. An entitlement carries the plan's two run keys.
+    pub fn run_override(&self) -> RunCapOverride {
+        match self.origin {
+            LimitsOrigin::Floor => RunCapOverride::NONE,
+            LimitsOrigin::Open => RunCapOverride {
+                agent_runs: Some(u32::MAX),
+                interactive_runs: Some(u32::MAX),
+            },
+            LimitsOrigin::Entitlement => RunCapOverride {
+                agent_runs: self.caps.agent_runs,
+                interactive_runs: self.caps.interactive_runs,
+            },
+        }
+    }
+}
+
 /// A capacity value for one organization: the plan's value capped by the
 /// process-wide cap; the floor when the plan says nothing; the process-wide cap
 /// itself when the answer is `open`. Never above `global_cap`.
@@ -780,6 +845,41 @@ mod resolver_tests {
             browser_seconds_agent: Allowance::Remaining(seconds),
             caps: PlanCaps::default(),
         }
+    }
+
+    #[test]
+    fn run_override_is_empty_for_the_floor_and_carries_the_plan_for_an_entitlement() {
+        use crate::budget::RunClass::{Agent, Interactive};
+        assert_eq!(OrgLimits::floor().run_override(), RunCapOverride::NONE);
+
+        let mut limits = entitled(1, 1, 1);
+        assert_eq!(limits.run_override(), RunCapOverride::NONE, "a plan that says nothing is no bound");
+        limits.caps.agent_runs = Some(3);
+        let over = limits.run_override();
+        assert_eq!(over.for_class(Agent), Some(3));
+        assert_eq!(over.for_class(Interactive), None);
+        limits.caps.interactive_runs = Some(0);
+        assert_eq!(limits.run_override().for_class(Interactive), Some(0), "an explicit zero is kept");
+    }
+
+    #[test]
+    fn a_run_bound_never_exceeds_the_process_wide_cap() {
+        use crate::budget::RunClass::{Agent, Interactive};
+        let over = RunCapOverride {
+            agent_runs: Some(50),
+            interactive_runs: Some(2),
+        };
+        assert_eq!(over.bound_for(Agent, 16), Some(16));
+        assert_eq!(over.bound_for(Interactive, 16), Some(2));
+        assert_eq!(over.bound_for(Agent, 0), Some(50), "no global cap, the plan value stands");
+        assert_eq!(RunCapOverride::NONE.bound_for(Agent, 16), None);
+    }
+
+    #[test]
+    fn fail_open_bounds_runs_only_by_the_global_cap() {
+        use crate::budget::RunClass::Agent;
+        let over = OrgLimits::open().run_override();
+        assert_eq!(over.bound_for(Agent, 16), Some(16));
     }
 
     #[test]

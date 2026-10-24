@@ -1,6 +1,7 @@
 use super::*;
 
 use crate::budget::RunClass;
+use crate::limits::RunCapOverride;
 use crate::run_limits::RunLimits;
 
 /// The live-run state under one lock: the runs, and the starts that were admitted
@@ -48,7 +49,7 @@ impl Inner {
     }
 }
 
-/// Why a start was refused. The three reasons are the closed list in
+/// Why a start was refused. The reasons are the closed list in
 /// `docs/ERROR_REASONS.md`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapacityDenied {
@@ -133,10 +134,27 @@ impl RunRegistry {
     /// Admit a start against the caps, in order: global, organization, and (for a
     /// person's own session) the organization's interactive sub-cap. The returned
     /// slot counts until it is committed with the run or dropped. `0` means no cap.
+    /// No plan bound: see [`try_reserve_with`](Self::try_reserve_with).
     pub fn try_reserve(
         self: &Arc<Self>,
         org_id: &str,
         class: RunClass,
+    ) -> Result<RunSlot, CapacityDenied> {
+        self.try_reserve_with(org_id, class, RunCapOverride::NONE)
+    }
+
+    /// As [`try_reserve`](Self::try_reserve), with the organization's plan bounds
+    /// (WS6.G). The global cap is checked first and always. A class the plan
+    /// bounds then answers to that bound alone (counting the organization's live
+    /// and pending runs of that class), refused as `org_plan_cap`; the static
+    /// per-organization caps do not apply to it, so a plan can raise an
+    /// organization above the floor, but never above the global cap. A class the
+    /// plan does not bound is checked against the static caps as before.
+    pub fn try_reserve_with(
+        self: &Arc<Self>,
+        org_id: &str,
+        class: RunClass,
+        plan: RunCapOverride,
     ) -> Result<RunSlot, CapacityDenied> {
         let limits = &self.limits;
         let mut inner = self.inner.lock().expect("agent_runs mutex poisoned");
@@ -170,19 +188,29 @@ impl RunRegistry {
                 global,
             ));
         }
-        if limits.max_runs_per_org > 0 && in_org >= limits.max_runs_per_org as usize {
-            return Err(denied("org_run_cap", "org", limits.max_runs_per_org, in_org));
-        }
-        if class == RunClass::Interactive
-            && limits.max_interactive_runs_per_org > 0
-            && interactive_in_org >= limits.max_interactive_runs_per_org as usize
-        {
-            return Err(denied(
-                "org_interactive_run_cap",
-                "org",
-                limits.max_interactive_runs_per_org,
-                interactive_in_org,
-            ));
+        if let Some(bound) = plan.bound_for(class, limits.max_concurrent_runs) {
+            let in_class = match class {
+                RunClass::Interactive => interactive_in_org,
+                RunClass::Agent => in_org.saturating_sub(interactive_in_org),
+            };
+            if in_class >= bound as usize {
+                return Err(denied("org_plan_cap", "org", bound, in_class));
+            }
+        } else {
+            if limits.max_runs_per_org > 0 && in_org >= limits.max_runs_per_org as usize {
+                return Err(denied("org_run_cap", "org", limits.max_runs_per_org, in_org));
+            }
+            if class == RunClass::Interactive
+                && limits.max_interactive_runs_per_org > 0
+                && interactive_in_org >= limits.max_interactive_runs_per_org as usize
+            {
+                return Err(denied(
+                    "org_interactive_run_cap",
+                    "org",
+                    limits.max_interactive_runs_per_org,
+                    interactive_in_org,
+                ));
+            }
         }
         inner.pending_global += 1;
         *inner.pending_org.entry(org_id.to_owned()).or_default() += 1;
@@ -258,5 +286,111 @@ impl Drop for RunSlot {
                 self.release_pending(&mut inner);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod plan_cap_tests {
+    use super::*;
+    use RunClass::{Agent, Interactive};
+
+    fn registry(max_concurrent: u32, per_org: u32, interactive_per_org: u32) -> Arc<RunRegistry> {
+        Arc::new(RunRegistry::new(RunLimits {
+            max_concurrent_runs: max_concurrent,
+            max_runs_per_org: per_org,
+            max_interactive_runs_per_org: interactive_per_org,
+            ..RunLimits::default()
+        }))
+    }
+
+    fn agents(n: u32) -> RunCapOverride {
+        RunCapOverride {
+            agent_runs: Some(n),
+            interactive_runs: None,
+        }
+    }
+
+    #[test]
+    fn a_plan_bound_refuses_the_next_run_of_its_class_as_org_plan_cap() {
+        let runs = registry(0, 0, 0);
+        let _first = runs.try_reserve_with("org_a", Agent, agents(1)).unwrap();
+        let denied = runs.try_reserve_with("org_a", Agent, agents(1)).unwrap_err();
+        assert_eq!(denied.reason, "org_plan_cap");
+        assert_eq!(denied.scope, "org");
+        assert_eq!((denied.limit, denied.active), (1, 1));
+        // Another organization is unaffected by it.
+        assert!(runs.try_reserve_with("org_b", Agent, agents(1)).is_ok());
+    }
+
+    #[test]
+    fn a_plan_can_raise_an_organization_above_the_static_floor_but_not_above_the_global_cap() {
+        // Floor: two runs per organization; global: four. The plan says three.
+        let runs = registry(4, 2, 0);
+        let _slots: Vec<_> = (0..3)
+            .map(|_| runs.try_reserve_with("org_a", Agent, agents(3)).unwrap())
+            .collect();
+        let denied = runs.try_reserve_with("org_a", Agent, agents(3)).unwrap_err();
+        assert_eq!(denied.reason, "org_plan_cap", "the plan bound is the org's own");
+        // Another organization takes the fourth global slot, then the global cap answers.
+        let _other = runs.try_reserve_with("org_b", Agent, agents(3)).unwrap();
+        let denied = runs.try_reserve_with("org_b", Agent, agents(3)).unwrap_err();
+        assert_eq!(denied.reason, "global_run_cap");
+    }
+
+    #[test]
+    fn a_plan_value_above_the_global_cap_is_clamped_to_it() {
+        let runs = registry(2, 0, 0);
+        let _a = runs.try_reserve_with("org_a", Agent, agents(50)).unwrap();
+        let _b = runs.try_reserve_with("org_a", Agent, agents(50)).unwrap();
+        // The global check runs first, so the refusal names the global cap.
+        let denied = runs.try_reserve_with("org_a", Agent, agents(50)).unwrap_err();
+        assert_eq!(denied.reason, "global_run_cap");
+    }
+
+    #[test]
+    fn a_class_the_plan_does_not_bound_keeps_the_static_caps() {
+        let runs = registry(0, 0, 1);
+        let _agent = runs.try_reserve_with("org_a", Agent, agents(5)).unwrap();
+        let _person = runs.try_reserve_with("org_a", Interactive, agents(5)).unwrap();
+        let denied = runs
+            .try_reserve_with("org_a", Interactive, agents(5))
+            .unwrap_err();
+        assert_eq!(denied.reason, "org_interactive_run_cap");
+    }
+
+    #[test]
+    fn the_agent_bound_counts_agent_runs_only() {
+        let runs = registry(0, 0, 0);
+        let _people: Vec<_> = (0..3)
+            .map(|_| runs.try_reserve_with("org_a", Interactive, agents(1)).unwrap())
+            .collect();
+        assert!(runs.try_reserve_with("org_a", Agent, agents(1)).is_ok());
+    }
+
+    #[test]
+    fn an_explicit_zero_refuses_every_start_of_the_class() {
+        let runs = registry(0, 0, 0);
+        let denied = runs.try_reserve_with("org_a", Agent, agents(0)).unwrap_err();
+        assert_eq!(denied.reason, "org_plan_cap");
+        assert_eq!((denied.limit, denied.active), (0, 0));
+    }
+
+    #[test]
+    fn a_dropped_slot_gives_the_plan_capacity_back() {
+        let runs = registry(0, 0, 0);
+        let slot = runs.try_reserve_with("org_a", Agent, agents(1)).unwrap();
+        assert!(runs.try_reserve_with("org_a", Agent, agents(1)).is_err());
+        drop(slot);
+        assert!(runs.try_reserve_with("org_a", Agent, agents(1)).is_ok());
+    }
+
+    #[test]
+    fn no_plan_bound_is_the_static_behaviour() {
+        let runs = registry(0, 1, 0);
+        let _first = runs.try_reserve_with("org_a", Agent, RunCapOverride::NONE).unwrap();
+        let denied = runs
+            .try_reserve_with("org_a", Agent, RunCapOverride::NONE)
+            .unwrap_err();
+        assert_eq!(denied.reason, "org_run_cap");
     }
 }

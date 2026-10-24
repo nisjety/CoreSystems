@@ -4666,8 +4666,9 @@ fn step_request_body(action: Value, actor: BrowserActionActor, advisory: &AgentA
 /// 429 with `Retry-After`. Only the retry hint survives; nothing else from the
 /// upstream body is echoed. `None` for any other 429.
 ///
-/// - The run caps (`global_run_cap`, `org_run_cap`, `org_interactive_run_cap`)
-///   and the driver's session cap (`browser_session_cap`, WS3.F) are one thing
+/// - The run caps (`global_run_cap`, `org_run_cap`, `org_interactive_run_cap`,
+///   and the plan's own `org_plan_cap`), the organization's share of the render
+///   pool (`org_render_cap`, WS6.G) and the driver's session cap (`browser_session_cap`, WS3.F) are one thing
 ///   to a person: the browser is full, try shortly. `browser_capacity_reached`.
 /// - The driver's page cap (`browser_page_cap`) is a different one: this
 ///   browser holds too many tabs, and closing one also helps.
@@ -4676,7 +4677,12 @@ fn browser_capacity_response(body: &Value) -> Option<Response> {
     let details = body.pointer("/error/details")?;
     let reason = details.get("reason")?.as_str()?;
     let (code, message) = match reason {
-        "global_run_cap" | "org_run_cap" | "org_interactive_run_cap" | "browser_session_cap" => (
+        "global_run_cap"
+        | "org_run_cap"
+        | "org_interactive_run_cap"
+        | "org_plan_cap"
+        | "org_render_cap"
+        | "browser_session_cap" => (
             "browser_capacity_reached",
             "Browser capacity is full. Try again shortly.",
         ),
@@ -5379,22 +5385,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn forward_quarry_failure_maps_cap_denial_to_browser_capacity_reached() {
         for reason in ["global_run_cap", "org_run_cap", "org_interactive_run_cap"] {
-            let quarry = json!({ "error": {
-                "code": "RATE_LIMITED",
-                "message": "browser capacity is full; try again shortly",
-                "details": { "reason": reason, "scope": "org", "limit": 3, "active": 3, "retry_after_seconds": 12 },
-                "retryable": true
-            }});
-            let response = forward_quarry_failure(StatusCode::TOO_MANY_REQUESTS, quarry);
-            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-            assert_eq!(response.headers().get("retry-after").unwrap(), "12");
-            let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
-                .await
-                .unwrap();
-            let body: Value = serde_json::from_slice(&bytes).unwrap();
-            assert_eq!(body["error"]["code"], "browser_capacity_reached");
-            assert_eq!(body["error"]["retryAfterSeconds"], 12);
-            assert!(!body.to_string().contains("RATE_LIMITED"));
+            assert_capacity_reason_maps(reason).await;
         }
         // Any other 429 passes through untouched.
         let other = json!({ "error": { "code": "RATE_LIMITED", "details": { "reason": "something_else" } } });
@@ -5404,6 +5395,34 @@ pub(crate) mod tests {
             .unwrap();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["error"]["code"], "RATE_LIMITED");
+    }
+
+    /// WS6.G: the plan's own cap and the organization's render share are the same
+    /// person-facing thing as the process caps, with the same retry copy.
+    #[tokio::test]
+    async fn forward_quarry_failure_maps_org_caps_to_browser_capacity_reached() {
+        for reason in ["org_plan_cap", "org_render_cap"] {
+            assert_capacity_reason_maps(reason).await;
+        }
+    }
+
+    async fn assert_capacity_reason_maps(reason: &str) {
+        let quarry = json!({ "error": {
+            "code": "RATE_LIMITED",
+            "message": "browser capacity is full; try again shortly",
+            "details": { "reason": reason, "scope": "org", "limit": 3, "active": 3, "retry_after_seconds": 12 },
+            "retryable": true
+        }});
+        let response = forward_quarry_failure(StatusCode::TOO_MANY_REQUESTS, quarry);
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers().get("retry-after").unwrap(), "12");
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], "browser_capacity_reached");
+        assert_eq!(body["error"]["retryAfterSeconds"], 12);
+        assert!(!body.to_string().contains("RATE_LIMITED"), "{reason}");
     }
 
     #[tokio::test]
@@ -5493,6 +5512,8 @@ pub(crate) mod tests {
             ("global_run_cap", "browser_capacity_reached"),
             ("org_run_cap", "browser_capacity_reached"),
             ("org_interactive_run_cap", "browser_capacity_reached"),
+            ("org_plan_cap", "browser_capacity_reached"),
+            ("org_render_cap", "browser_capacity_reached"),
             ("browser_session_cap", "browser_capacity_reached"),
             ("browser_page_cap", "browser_tab_limit_reached"),
         ] {
