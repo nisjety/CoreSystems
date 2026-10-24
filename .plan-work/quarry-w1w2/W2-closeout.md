@@ -204,3 +204,8 @@ Not built in W3: B4 (E3.5-4, E3.2-g, E3.4-8; 12.5 d), B5 (E3.5-1 with E3.5-7, E3
 2. The decisions of 2026-10-23 already answer the estimate's open questions (ADR-2 split ratified, crawl approval above 50 pages, Office hybrid and fail-closed PII approved, D9 inline card and chip, OD13 consent language flag-off, migration 021 shared with the E3.5-6 tag column, the WS1.A2 gate lifted for code). They do not cover: X-9, ADR-1, ADR-3 detail and X-1 (gate E3.2, E3.3, E3.4 and parts of E3.7), D11 thresholds, the retention of the parse cache, or crawl-approval UI wording.
 3. Control Plane (the R-13 registry row for audience ingestion; migration slots for E3.5-1 and E3.5-6), the Model Plane session (WS11.S0 and the provenance seam for E3.3 and E3.9.3, E3.9.4, the 402 mapping, execution-core reading the reject reason) and the Data Plane contract (E3.8.8).
 4. For anything that goes beyond code: a live stack, the Chromium lane in a pinned image and the first push, so the CI rows can turn into evidence.
+
+
+## Addendum 2026-10-24: the Quarry Rust lane was run (the close workflow had not run it)
+
+See `W2-rust-lane-failures.md`: **3560 passed, 64 failed, 23 targets failed** at HEAD a6a9b44c7. This replaces the statement that the Rust lane was not run. The Go and Node failures reported by the light pass (5 orchestrator, 8 quarry-control, 4 openapi node tests, 16 SPA tests, 5 new tsc errors) are separate depth items. All are depth, none reopens the build.
