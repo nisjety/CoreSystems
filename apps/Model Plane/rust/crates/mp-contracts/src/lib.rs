@@ -11,6 +11,7 @@ pub mod office_verification;
 pub mod park_reason;
 pub mod prompt_tier;
 pub mod provider_reads;
+pub mod result_query;
 pub mod retention;
 pub mod run_context;
 pub mod run_origin;

@@ -486,6 +486,9 @@ struct LoopContext<'a> {
     /// context and cloned into every delegated child's, so the clones share one
     /// tally and the response reports the run's rounds and its delegates' together.
     usage: UsageTally,
+    /// The run's held results (WS25-S5), shared with every delegated child. `None` unless
+    /// the switch is on for this run, and never set for a zero-retention or waived run.
+    result_store: Option<std::sync::Arc<super::result_handles::ResultHandles>>,
 }
 
 /// The inference this invocation of a run has spent, summed across the root loop
@@ -1607,10 +1610,20 @@ async fn run_agent_with_route_parkable(
         // resume is the one reader that restores such a fold: the holder of the consume's
         // claim token, in this same request.
     }
-    let tools = match resumed.as_ref() {
+    let mut tools = match resumed.as_ref() {
         Some(segment) => segment.tools.clone(),
         None => tools,
     };
+    // Run-scoped result handles (WS25-S5). A fresh run is offered `result_query` only when
+    // it holds results; a continuation keeps the tools its snapshot was offered.
+    let result_store = if resumed.is_none() {
+        super::result_handles::for_run(req.zdr, route.is_waived(), MAX_TOOL_CONTEXT_CHARS)
+    } else {
+        None
+    };
+    if result_store.is_some() {
+        tools.push(super::result_handles::tool_definition());
+    }
 
     // Posture: deployed agents default to `ask` (risky tools gated behind a
     // human approval). Only an explicit `auto` opens the gate; an unknown/empty
@@ -1707,6 +1720,7 @@ async fn run_agent_with_route_parkable(
         child_ceiling,
         deadline,
         usage: UsageTally::default(),
+        result_store: result_store.clone(),
     };
 
     // 2. The governed ReAct loop.
@@ -1763,7 +1777,7 @@ async fn run_agent_with_route_parkable(
         ),
     };
 
-    let response = finalize(
+    let finalized = finalize(
         state,
         &session_channel,
         &plan_id,
@@ -1778,7 +1792,12 @@ async fn run_agent_with_route_parkable(
         session_bearer.as_deref(),
         terminal_tokens,
     )
-    .await?;
+    .await;
+    // Nothing reads a handle after the run ends, so the store drops what it held (WS25-S5).
+    if let Some(store) = &context.result_store {
+        store.release_run(&req.org_id, &req.run_id);
+    }
+    let response = finalized?;
 
     // Only reached once `finalize` actually made the run terminal (it
     // returns `Err` — never mutating `StateStore` — when the durable receipt
@@ -3743,7 +3762,7 @@ async fn run_rounds(
                             ))
                             .await;
                         }
-                        let result = runtime_loop::execute_step_with_subagent(
+                        let result = runtime_loop::execute_step_with_result_handles(
                             &call.name,
                             &call.arguments_json,
                             ctx.permission_wire,
@@ -3770,6 +3789,7 @@ async fn run_rounds(
                             // Only the resume segment holds a release, and it
                             // covers exactly one call.
                             ctx.release.as_ref(),
+                            ctx.result_store.as_deref(),
                         )
                         .await;
                         // The ledger's word first: a call that holds an effectful reservation
@@ -5127,6 +5147,7 @@ async fn run_delegated_child(
         deadline: parent.deadline,
         // The parent's tally, shared: the delegate's rounds are the run's.
         usage: parent.usage.clone(),
+        result_store: parent.result_store.clone(),
     };
 
     info!(
@@ -9434,7 +9455,7 @@ mod tests {
                     .appended_assistant
                     .push(req.content);
             }
-            Ok(Response::new(pb::AppendMessageResponse { sequence: 1 }))
+            Ok(Response::new(pb::AppendMessageResponse { sequence: 1, message_id: String::new(), deduplicated: false }))
         }
 
         async fn start_run(

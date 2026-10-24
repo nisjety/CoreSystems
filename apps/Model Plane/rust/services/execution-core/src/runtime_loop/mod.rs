@@ -7,6 +7,7 @@ pub(crate) mod fold;
 pub(crate) mod park;
 pub(crate) mod post_mutation;
 pub mod retry;
+pub(crate) mod result_handles;
 pub(crate) mod resume;
 pub(crate) mod skill_budget;
 pub mod subagent_results;
@@ -365,6 +366,7 @@ pub async fn execute_step(
         None,
         sandbox,
         None,
+        None,
     )
     .await
 }
@@ -430,6 +432,7 @@ pub(crate) async fn execute_step_with_browser_grant(
         None,
         sandbox,
         None,
+        None,
     )
     .await
 }
@@ -476,6 +479,74 @@ pub(crate) async fn execute_step_with_subagent(
     sandbox: Option<&crate::sandbox_lease::SandboxLeaseContext<'_>>,
     release: Option<&resume::ApprovedRelease>,
 ) -> StepOutcome {
+    execute_step_with_result_handles(
+        tool_name,
+        tool_input,
+        permission_mode,
+        hook_context,
+        org_id,
+        user_id,
+        run_id,
+        step_id,
+        thread_id,
+        session_channel,
+        browser_event_sink,
+        state,
+        zdr,
+        waived,
+        min_privacy_tier,
+        data_plane_bearer,
+        session_bearer,
+        inference_bearer,
+        capability_policy,
+        subagent_dispatch,
+        sandbox,
+        release,
+        None,
+    )
+    .await
+}
+
+/// Run a step as [`execute_step_with_subagent`] does, with the run's held results.
+///
+/// Only an agent loop holds a store (WS25-S5): it is what parks an oversized read
+/// and answers `result_query`. A delegated child shares its parent's store because
+/// they carry the same run.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn execute_step_with_result_handles(
+
+    tool_name: &str,
+    tool_input: &str,
+    permission_mode: &str,
+    hook_context: &str,
+    org_id: &str,
+    user_id: &str,
+    run_id: &str,
+    step_id: &str,
+    // Thread the step's run belongs to. Empty for callers with no thread
+    // context (the direct ExecuteStep RPC, scheduled steps) — memory tools
+    // fail closed there, same authority class as subagent delegation.
+    thread_id: &str,
+    session_channel: Option<Channel>,
+    browser_event_sink: Option<&dyn crate::browser_agent::BrowserEventSink>,
+    state: Option<&crate::state::StateStore>,
+    zdr: bool,
+    // The run's route is the caller's waived route (Z-18); see
+    // `execute_step_with_browser_grant`.
+    waived: bool,
+    // `ExecuteStepRequest.min_privacy_tier` (field 10) / `RunAgentRequest`'s
+    // field of the same name, depending on caller. Only reaches
+    // `knowledge_search` today — see `execute_knowledge_search`.
+    min_privacy_tier: i32,
+    data_plane_bearer: Option<&str>,
+    session_bearer: Option<&str>,
+    inference_bearer: Option<&str>,
+    capability_policy: &dyn crate::capability_policy::CapabilityPolicy,
+    subagent_dispatch: Option<&dyn subagent::SubagentDispatch>,
+    sandbox: Option<&crate::sandbox_lease::SandboxLeaseContext<'_>>,
+    release: Option<&resume::ApprovedRelease>,
+    result_store: Option<&result_handles::ResultHandles>,
+) -> StepOutcome {
     execute_step_inner(
         tool_name,
         tool_input,
@@ -500,6 +571,7 @@ pub(crate) async fn execute_step_with_subagent(
         subagent_dispatch,
         sandbox,
         release,
+        result_store,
     )
     .await
 }
@@ -543,6 +615,9 @@ async fn execute_step_inner(
     // three `ask` gates below, for exactly this step, tool and arguments; it
     // never lifts a deny, a missing-evidence refusal or the autonomy rung.
     release: Option<&resume::ApprovedRelease>,
+    // The run's held results (WS25-S5). Present only for an agent loop of a run that
+    // holds them; read by the parking tail and by `result_query`.
+    result_store: Option<&result_handles::ResultHandles>,
 ) -> StepOutcome {
     let released = release.is_some_and(|r| r.covers(step_id, tool_name, tool_input));
     // An MCP tool carries the call's content to a third-party server, so it is
@@ -690,6 +765,16 @@ async fn execute_step_inner(
             run_id,
             zdr,
         );
+    }
+
+    // `result_query` reads a result this run held, so it is answered from the run's own
+    // store and never reaches a tool. It passed the capability, hook and permission
+    // gates above like any other read. Without a store the name falls through as it did.
+    if tool_name == result_handles::RESULT_QUERY_TOOL && result_store.is_some() {
+        return match result_handles::execute_result_query(tool_input, org_id, run_id, result_store) {
+            Ok(output) => StepOutcome::completed(output),
+            Err(error) => StepOutcome::failed(&error),
+        };
     }
 
     // G1: the `shell` tool runs a REAL sandboxed process (executor primitive);
@@ -917,7 +1002,20 @@ async fn execute_step_inner(
     let provenance = crate::provenance::assess(tool_name, &output);
     crate::provenance::audit(tool_name, org_id, run_id, zdr, &provenance);
     let rendered = crate::provenance::render(&output, &provenance);
-    let mut outcome = StepOutcome::completed(rendered);
+    // An oversized read-class result is held by the run and the model gets its handle
+    // (WS25-S5). The label is the render prefix alone, so the held body is exactly the
+    // tool's output, and every read repeats the same verdict.
+    let parked = result_store
+        .filter(|_| result_handles::is_parkable_tool(tool_name))
+        .and_then(|store| {
+            let prefix = crate::provenance::render("", &provenance);
+            let label = prefix.strip_suffix('\n').unwrap_or(&prefix);
+            store
+                .park(org_id, run_id, label, &output)
+                .ok()
+                .map(|handle_id| result_handles::handle_envelope(&handle_id, label, &output))
+        });
+    let mut outcome = StepOutcome::completed(parked.unwrap_or(rendered));
     outcome.compaction_triggered = output.len() > 2048;
     outcome
 }
@@ -2110,6 +2208,7 @@ mod connector_tool_tests {
                 let out = execute_step_inner(
                     tool, input, "ask", "", "org-1", "user-1", "run-1", "step-1", "", None, None,
                     None, zdr, waived, 0, None, None, None, &NoPolicy, None, None, None, None,
+                    None,
                 )
                 .await;
                 assert_eq!(out.status, "failed", "{tool} zdr={zdr} waived={waived}");
