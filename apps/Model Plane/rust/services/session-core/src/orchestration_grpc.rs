@@ -318,16 +318,70 @@ fn pin_approval_decision_identity(
     Ok(())
 }
 
+/// Whether a decision request repeats the one already recorded. A retry must also name the
+/// same scope: a different scope is a different decision, and it is refused rather than
+/// reported as success.
 fn is_idempotent_approval_retry(
     approval: &store::ApprovalRow,
     status: &str,
     decided_by: &str,
     decision_reason: &str,
+    scope: &str,
 ) -> bool {
     !decided_by.is_empty()
         && approval.status == status
         && approval.decided_by == decided_by
         && approval.decision_reason == decision_reason
+        && stored_decision_scope(approval) == scope
+}
+
+/// The scope a decision was recorded under. A row decided before the record existed was
+/// decided under the only scope that existed, `once`.
+fn stored_decision_scope(approval: &store::ApprovalRow) -> &str {
+    approval.metadata["decision"]["scope"]
+        .as_str()
+        .unwrap_or("once")
+}
+
+/// The decision fields a state event carries, read from the approval's stored record (build
+/// plan WS13 S3).
+struct DecisionFields {
+    cause_code: String,
+    rule_id: String,
+    scope: i32,
+    decision_source: i32,
+    step_up_verified: bool,
+}
+
+fn decision_fields(approval: &store::ApprovalRow) -> DecisionFields {
+    let decision = &approval.metadata["decision"];
+    DecisionFields {
+        cause_code: approval.metadata["cause"]["code"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned(),
+        rule_id: approval.metadata["cause"]["rule_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned(),
+        scope: approval_scope_from_str(stored_decision_scope(approval)),
+        decision_source: approval_decision_source_from_str(
+            decision["source"].as_str().unwrap_or_default(),
+        ),
+        step_up_verified: decision["step_up_verified"].as_bool().unwrap_or(false),
+    }
+}
+
+/// Whether an audited decision enqueues its `approval_decided` audit row (build plan WS13 S3).
+/// Default off: only the literal `true` enables it.
+fn approval_audit_events_enabled() -> bool {
+    approval_audit_switch_from(std::env::var(APPROVAL_AUDIT_EVENTS_ENV).ok().as_deref())
+}
+
+const APPROVAL_AUDIT_EVENTS_ENV: &str = "APPROVAL_AUDIT_EVENTS_ENABLED";
+
+fn approval_audit_switch_from(value: Option<&str>) -> bool {
+    value.is_some_and(|value| value.trim().eq_ignore_ascii_case("true"))
 }
 
 // ---------------------------------------------------------------------------
@@ -722,6 +776,54 @@ pub(crate) fn approval_kind_to_str(code: i32) -> Option<&'static str> {
         proto::ApprovalKind::Destructive => Some("destructive"),
         proto::ApprovalKind::Cost => Some("cost"),
     }
+}
+
+/// The name a decision is recorded under in `metadata.decision.source` (build plan WS13 S3).
+/// UNSPECIFIED is `unattributed`: a caller that states no source is counted, never guessed.
+/// `None` for a number outside the enum.
+pub(crate) fn approval_decision_source_to_str(code: i32) -> Option<&'static str> {
+    Some(match proto::ApprovalDecisionSource::try_from(code).ok()? {
+        proto::ApprovalDecisionSource::Unspecified => "unattributed",
+        proto::ApprovalDecisionSource::User => "user",
+        proto::ApprovalDecisionSource::PostureAuto => "posture_auto",
+        proto::ApprovalDecisionSource::StandingGrant => "standing_grant",
+        proto::ApprovalDecisionSource::Timeout => "timeout",
+        proto::ApprovalDecisionSource::System => "system",
+    })
+}
+
+/// The inverse of [`approval_decision_source_to_str`]. A name this build does not know reads
+/// as UNSPECIFIED.
+pub(crate) fn approval_decision_source_from_str(name: &str) -> i32 {
+    let source = match name {
+        "user" => proto::ApprovalDecisionSource::User,
+        "posture_auto" => proto::ApprovalDecisionSource::PostureAuto,
+        "standing_grant" => proto::ApprovalDecisionSource::StandingGrant,
+        "timeout" => proto::ApprovalDecisionSource::Timeout,
+        "system" => proto::ApprovalDecisionSource::System,
+        _ => proto::ApprovalDecisionSource::Unspecified,
+    };
+    source as i32
+}
+
+/// The name of a decision's scope (build plan WS13 S3). UNSPECIFIED is read as `once`; `None`
+/// for a number outside the enum.
+pub(crate) fn approval_scope_to_str(code: i32) -> Option<&'static str> {
+    Some(match proto::ApprovalScope::try_from(code).ok()? {
+        proto::ApprovalScope::Unspecified | proto::ApprovalScope::Once => "once",
+        proto::ApprovalScope::Thread => "thread",
+        proto::ApprovalScope::Run => "run",
+    })
+}
+
+/// The inverse of [`approval_scope_to_str`]. Anything but `thread` or `run` reads as `once`.
+pub(crate) fn approval_scope_from_str(name: &str) -> i32 {
+    let scope = match name {
+        "thread" => proto::ApprovalScope::Thread,
+        "run" => proto::ApprovalScope::Run,
+        _ => proto::ApprovalScope::Once,
+    };
+    scope as i32
 }
 
 pub(crate) fn approval_state_from_str(s: &str) -> i32 {
@@ -2068,6 +2170,7 @@ fn broadcast_approval_decision_events(
     if !transition_applied {
         return;
     }
+    let fields = decision_fields(approval);
 
     broadcast_event(
         tx,
@@ -2082,6 +2185,11 @@ fn broadcast_approval_decision_events(
                     approval_kind: approval_kind_from_str(&approval.kind),
                     to: decision,
                     decided_by: approval.decided_by.clone(),
+                    cause_code: fields.cause_code,
+                    rule_id: fields.rule_id,
+                    scope: fields.scope,
+                    decision_source: fields.decision_source,
+                    step_up_verified: fields.step_up_verified,
                 },
             )),
         },
@@ -3181,6 +3289,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                             approval_kind: approval_kind_from_str(&row.kind),
                             to: proto::ApprovalState::Requested as i32,
                             decided_by: String::new(),
+                            ..Default::default()
                         },
                     )),
                 },
@@ -3516,7 +3625,11 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 ));
             }
 
-            let decision_write = store::decide_approval(
+            let source = approval_decision_source_to_str(req.decision_source)
+                .ok_or_else(|| Status::invalid_argument("invalid decision source"))?;
+            let scope = approval_scope_to_str(req.scope)
+                .ok_or_else(|| Status::invalid_argument("invalid decision scope"))?;
+            let decision_write = store::decide_approval_recorded(
                 &self.pool,
                 &req.approval_id,
                 &req.org_id,
@@ -3524,10 +3637,19 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 new_status,
                 &req.decided_by,
                 &req.decision_reason,
+                &store::DecisionRecord {
+                    source,
+                    scope,
+                    audit: approval_audit_events_enabled(),
+                },
             )
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
             let updated = decision_write.updated;
+            if updated {
+                metrics::counter!("mp_session_approval_decisions_total", "source" => source)
+                    .increment(1);
+            }
 
             let after = store::get_approval_for_org(
                 &self.pool,
@@ -3545,6 +3667,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                             new_status,
                             &req.decided_by,
                             &req.decision_reason,
+                            scope,
                         ) => {}
                     Some(_) => {
                         return Err(Status::failed_precondition("approval is already decided"));
@@ -4824,14 +4947,60 @@ mod tests {
             consumed_at: None,
         };
         assert!(is_idempotent_approval_retry(
-            &row, "granted", "user-1", "approved"
+            &row, "granted", "user-1", "approved", "once"
         ));
         assert!(!is_idempotent_approval_retry(
-            &row, "denied", "user-1", "approved"
+            &row, "denied", "user-1", "approved", "once"
         ));
         assert!(!is_idempotent_approval_retry(
-            &row, "granted", "user-2", "approved"
+            &row, "granted", "user-2", "approved", "once"
         ));
+    }
+
+    #[test]
+    fn an_unspecified_source_is_recorded_as_unattributed() {
+        assert_eq!(approval_decision_source_to_str(0), Some("unattributed"));
+        assert_eq!(approval_decision_source_to_str(1), Some("user"));
+        assert_eq!(approval_decision_source_to_str(2), Some("posture_auto"));
+        assert_eq!(approval_decision_source_to_str(99), None, "a number outside the enum is refused");
+        assert_eq!(approval_decision_source_from_str("unattributed"), 0);
+        assert_eq!(approval_decision_source_from_str("a_future_source"), 0);
+    }
+
+    #[test]
+    fn a_retry_with_a_different_scope_conflicts() {
+        let row = store::ApprovalRow {
+            id: "appr-1".to_owned(),
+            run_id: "run-1".to_owned(),
+            plan_id: None,
+            kind: "tool_call".to_owned(),
+            status: "granted".to_owned(),
+            requested_by: "user-1".to_owned(),
+            decided_by: "user-1".to_owned(),
+            decision_reason: "approved".to_owned(),
+            org_id: "org-1".to_owned(),
+            user_id: "user-1".to_owned(),
+            idempotency_key: String::new(),
+            metadata: serde_json::json!({ "decision": { "source": "user", "scope": "once" } }),
+            requested_at: Utc::now(),
+            decided_at: Some(Utc::now()),
+            expires_at: None,
+            continuation_mode: String::new(),
+            consumed_at: None,
+        };
+        assert!(is_idempotent_approval_retry(&row, "granted", "user-1", "approved", "once"));
+        assert!(!is_idempotent_approval_retry(&row, "granted", "user-1", "approved", "thread"));
+        assert!(!is_idempotent_approval_retry(&row, "granted", "user-1", "approved", "run"));
+    }
+
+    #[test]
+    fn the_approval_audit_switch_is_on_only_for_the_literal_true() {
+        assert!(!approval_audit_switch_from(None));
+        for value in ["", "1", "yes", "on", "false"] {
+            assert!(!approval_audit_switch_from(Some(value)), "{value:?} must not enable it");
+        }
+        assert!(approval_audit_switch_from(Some("true")));
+        assert!(approval_audit_switch_from(Some(" TRUE ")));
     }
 
     fn create_with_cause(code: &str) -> proto::CreateApprovalRequest {
@@ -5270,6 +5439,7 @@ mod tests {
                     approval_kind: 0,
                     to: 0,
                     decided_by: String::new(),
+                    ..Default::default()
                 },
             )),
         };

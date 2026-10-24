@@ -414,6 +414,35 @@ message Approval {
   ApprovalCause cause = 16;
 }
 
+// Who recorded an approval decision (build plan WS13 S3). Stored as
+// `metadata.decision.source`. UNSPECIFIED is recorded as `unattributed` and
+// counted, never guessed from the caller.
+enum ApprovalDecisionSource {
+  APPROVAL_DECISION_SOURCE_UNSPECIFIED = 0;
+  // A person decided it.
+  APPROVAL_DECISION_SOURCE_USER = 1;
+  // The chat posture recorded the interactive user's decision for them.
+  APPROVAL_DECISION_SOURCE_POSTURE_AUTO = 2;
+  // A standing grant released the call without a new decision (WS13 S6).
+  APPROVAL_DECISION_SOURCE_STANDING_GRANT = 3;
+  // The wait budget ran out before anyone decided.
+  APPROVAL_DECISION_SOURCE_TIMEOUT = 4;
+  // The system ended the wait, for example because the run was cancelled.
+  APPROVAL_DECISION_SOURCE_SYSTEM = 5;
+}
+
+// How far an approval decision reaches (build plan WS13 S3). Space's
+// "conversation" is THREAD. UNSPECIFIED is read as ONCE.
+enum ApprovalScope {
+  APPROVAL_SCOPE_UNSPECIFIED = 0;
+  // This one call only.
+  APPROVAL_SCOPE_ONCE = 1;
+  // Identical calls later in this thread (WS13 S6).
+  APPROVAL_SCOPE_THREAD = 2;
+  // Identical calls later in this run (WS13 S6).
+  APPROVAL_SCOPE_RUN = 3;
+}
+
 // Why an approval was asked for (build plan WS13 S1). The code is a closed
 // vocabulary (`mp-contracts` approval_cause, `api/contracts/approval-causes.json`);
 // an unknown code is stored as `unclassified_gate`. Never carries argument
@@ -918,6 +947,13 @@ message DecideApprovalRequest {
   // decision is only applied when the approval belongs to this org; a
   // mismatch is treated as not-found, never a distinguishable "forbidden".
   string org_id = 5;
+
+  // Who recorded the decision (build plan WS13 S3). The gateway sends USER and
+  // never forwards a client-supplied value.
+  ApprovalDecisionSource decision_source = 6;
+
+  // How far the decision reaches (build plan WS13 S3).
+  ApprovalScope scope = 7;
 }
 
 message DecideApprovalResponse {
@@ -1251,6 +1287,19 @@ message OrchestrationEvent {
     ApprovalKind approval_kind = 3;
     ApprovalState to = 4;
     string decided_by = 5;
+
+    // Why the approval was asked for, from `approvals.metadata.cause.code` (WS13 S3).
+    string cause_code = 6;
+
+    // Standing rule that decided it (WS13 S7). Empty until rules exist.
+    string rule_id = 7;
+
+    ApprovalScope scope = 8;
+
+    ApprovalDecisionSource decision_source = 9;
+
+    // True when a recent re-authentication was verified for the decision (WS13 S5).
+    bool step_up_verified = 10;
   }
 
   message SubagentAttached {

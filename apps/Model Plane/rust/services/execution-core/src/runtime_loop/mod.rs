@@ -2285,17 +2285,7 @@ async fn resolve_write_approval(
             };
             client
                 .decide_approval(authenticated_session_request(
-                    pb::DecideApprovalRequest {
-                        approval_id: approval.id.clone(),
-                        decision: pb::ApprovalState::Granted as i32,
-                        decided_by,
-                        decision_reason:
-                            "auto (chat) posture: interactive user is the live approver".to_owned(),
-                        // Cross-org IDOR fix (Phase 6): this approval was just
-                        // created with this same org_id above, so asserting it
-                        // here is a real ownership check, not a no-op.
-                        org_id: org_id.to_owned(),
-                    },
+                    auto_posture_decision_request(&approval.id, decided_by, org_id),
                     bearer,
                 )?)
                 .await
@@ -2304,6 +2294,43 @@ async fn resolve_write_approval(
                 })?;
         }
         Ok(approval.id)
+    }
+}
+
+/// The decision the chat posture records for the interactive user (build plan WS13 S3). It is
+/// labelled POSTURE_AUTO, so the record never reads as a person's own click.
+fn auto_posture_decision_request(
+    approval_id: &str,
+    decided_by: String,
+    org_id: &str,
+) -> pb::DecideApprovalRequest {
+    pb::DecideApprovalRequest {
+        approval_id: approval_id.to_owned(),
+        decision: pb::ApprovalState::Granted as i32,
+        decided_by,
+        decision_reason: "auto (chat) posture: interactive user is the live approver".to_owned(),
+        // Cross-org IDOR fix (Phase 6): this approval was just created with this same org_id
+        // above, so asserting it here is a real ownership check, not a no-op.
+        org_id: org_id.to_owned(),
+        decision_source: pb::ApprovalDecisionSource::PostureAuto as i32,
+        scope: pb::ApprovalScope::Once as i32,
+    }
+}
+
+#[cfg(test)]
+mod auto_posture_decision_tests {
+    use super::*;
+
+    #[test]
+    fn the_auto_posture_record_is_labelled_posture_auto() {
+        let request = auto_posture_decision_request("appr-1", "user-1".to_owned(), "org-1");
+        assert_eq!(
+            request.decision_source,
+            pb::ApprovalDecisionSource::PostureAuto as i32
+        );
+        assert_eq!(request.decided_by, "user-1");
+        assert_eq!(request.decision, pb::ApprovalState::Granted as i32);
+        assert_eq!(request.org_id, "org-1");
     }
 }
 

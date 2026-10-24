@@ -759,6 +759,23 @@ pub struct ApprovalDecisionWrite {
 /// # Errors
 ///
 /// Returns an error if the update fails.
+/// Who recorded a decision, how far it reaches and whether it is audited (build plan WS13
+/// S3). `audit` is the `APPROVAL_AUDIT_EVENTS_ENABLED` switch, read by the caller so this
+/// module never reads the environment.
+#[derive(Debug, Clone, Copy)]
+pub struct DecisionRecord<'a> {
+    pub source: &'a str,
+    pub scope: &'a str,
+    pub audit: bool,
+}
+
+/// The record of a caller that states no source: `unattributed`, one call only, not audited.
+const UNATTRIBUTED_DECISION: DecisionRecord<'static> = DecisionRecord {
+    source: "unattributed",
+    scope: "once",
+    audit: false,
+};
+
 pub async fn decide_approval(
     pool: &Pool,
     id: &str,
@@ -767,6 +784,38 @@ pub async fn decide_approval(
     status: &str,
     decided_by: &str,
     decision_reason: &str,
+) -> Result<ApprovalDecisionWrite> {
+    decide_approval_recorded(
+        pool,
+        id,
+        org_id,
+        user_id,
+        status,
+        decided_by,
+        decision_reason,
+        &UNATTRIBUTED_DECISION,
+    )
+    .await
+}
+
+/// Decide an approval and record its provenance (build plan WS13 S3): the decision's source
+/// and scope go into `metadata.decision` in the same compare-and-set as the state change, and
+/// an audited decision enqueues one content-free `approval_decided` outbox row in that same
+/// transaction. A replay changes nothing, so it enqueues nothing.
+///
+/// # Errors
+///
+/// Returns an error if the update or the outbox insert fails.
+#[allow(clippy::too_many_arguments)]
+pub async fn decide_approval_recorded(
+    pool: &Pool,
+    id: &str,
+    org_id: &str,
+    user_id: Option<&str>,
+    status: &str,
+    decided_by: &str,
+    decision_reason: &str,
+    record: &DecisionRecord<'_>,
 ) -> Result<ApprovalDecisionWrite> {
     if org_id.trim().is_empty() {
         bail!("org_id is required");
@@ -778,6 +827,11 @@ pub async fn decide_approval(
         bail!("unsupported approval decision status");
     }
 
+    let decision = serde_json::json!({
+        "source": record.source,
+        "scope": record.scope,
+        "step_up_verified": false,
+    });
     let mut transaction = pool.begin().await?;
     let updated = sqlx::query_as::<_, (String,)>(DECIDE_APPROVAL_SQL)
         .bind(id)
@@ -786,6 +840,7 @@ pub async fn decide_approval(
         .bind(decided_by)
         .bind(decision_reason)
         .bind(user_id)
+        .bind(&decision)
         .fetch_optional(&mut *transaction)
         .await?;
     let updated = updated.is_some();
@@ -843,6 +898,40 @@ pub async fn decide_approval(
     } else {
         None
     };
+
+    if updated && record.audit {
+        let (kind, run_id, owner_user_id, metadata): (String, String, String, JsonValue) =
+            sqlx::query_as(APPROVAL_AUDIT_CONTEXT_SQL)
+                .bind(id)
+                .bind(org_id)
+                .fetch_one(&mut *transaction)
+                .await?;
+        let body = crate::audit_publisher::build_approval_decision_body(
+            &crate::audit_publisher::ApprovalDecisionAudit {
+                org_id,
+                user_id: &owner_user_id,
+                run_id: &run_id,
+                approval_id: id,
+                kind: &kind,
+                outcome: status,
+                cause_code: &cause_text(&metadata, "code"),
+                tool: &cause_text(&metadata, "tool"),
+                effect_class: &cause_text(&metadata, "effect_class"),
+                rule_id: &cause_text(&metadata, "rule_id"),
+                scope: record.scope,
+                decision_source: record.source,
+                step_up_verified: false,
+                occurred_at: Utc::now(),
+            },
+        );
+        let event_id = crate::audit_publisher::approval_decision_event_id(id, status);
+        sqlx::query(INSERT_APPROVAL_AUDIT_OUTBOX_SQL)
+            .bind(event_id)
+            .bind(crate::audit_publisher::approval_decision_subject())
+            .bind(&body)
+            .execute(&mut *transaction)
+            .await?;
+    }
 
     transaction.commit().await?;
     Ok(ApprovalDecisionWrite {
@@ -1204,8 +1293,8 @@ async fn read_consumed_call(
 
 const DECIDE_APPROVAL_SQL: &str =
     "UPDATE approvals SET status = $3, decided_by = $4, decision_reason = $5, \
-     metadata = CASE WHEN $3 IN ('denied', 'timed_out') \
-       THEN metadata - 'continuation_descriptor' ELSE metadata END, \
+     metadata = jsonb_set(CASE WHEN $3 IN ('denied', 'timed_out') \
+       THEN metadata - 'continuation_descriptor' ELSE metadata END, '{decision}', $7::jsonb, true), \
      decided_at = now() WHERE id = $1 AND org_id = $2 AND status = 'requested' \
      AND ($3 <> 'granted' OR expires_at IS NULL OR expires_at > now()) \
      AND ($6::text IS NULL OR user_id = $6) \
@@ -1219,11 +1308,28 @@ const INSERT_APPROVAL_DELIVERY_OUTBOX_SQL: &str = "INSERT INTO approval_delivery
        AND ($4::text IS NULL OR user_id = $4) \
      RETURNING delivery_id";
 
+/// The approval fields an audit row is built from, read in the decision's own transaction.
+const APPROVAL_AUDIT_CONTEXT_SQL: &str = "SELECT kind, run_id, user_id, metadata FROM approvals \
+     WHERE id = $1 AND org_id = $2";
+
+/// Replays of the same decision name the same event id and are ignored, so a row is enqueued once.
+const INSERT_APPROVAL_AUDIT_OUTBOX_SQL: &str = "INSERT INTO session_audit_outbox \
+         (event_id, subject, payload) VALUES ($1, $2, $3) ON CONFLICT (event_id) DO NOTHING";
+
 const GET_APPROVAL_DELIVERY_SQL: &str = "SELECT approval_delivery_outbox.delivery_id \
      FROM approval_delivery_outbox \
      JOIN approvals ON approvals.id = approval_delivery_outbox.approval_id \
      WHERE approvals.id = $1 AND approvals.org_id = $2 \
        AND ($3::text IS NULL OR approvals.user_id = $3)";
+
+/// A text field of an approval's stored cause (build plan WS13 S1); empty when the approval
+/// stated no cause.
+fn cause_text(metadata: &JsonValue, key: &str) -> String {
+    metadata["cause"][key]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned()
+}
 
 /// List approvals for a run.
 ///
@@ -2278,6 +2384,14 @@ mod tests {
     }
 
     #[test]
+    fn decision_provenance_is_written_by_the_same_compare_and_set() {
+        assert!(DECIDE_APPROVAL_SQL.contains("jsonb_set(CASE WHEN $3 IN ('denied', 'timed_out')"));
+        assert!(DECIDE_APPROVAL_SQL.contains("'{decision}', $7::jsonb, true)"));
+        assert!(INSERT_APPROVAL_AUDIT_OUTBOX_SQL.contains("ON CONFLICT (event_id) DO NOTHING"));
+        assert!(APPROVAL_AUDIT_CONTEXT_SQL.contains("id = $1 AND org_id = $2"));
+    }
+
+    #[test]
     fn approval_delivery_insert_rejects_expired_grants() {
         assert!(INSERT_APPROVAL_DELIVERY_OUTBOX_SQL
             .contains("expires_at IS NULL OR expires_at > now()"));
@@ -2606,6 +2720,200 @@ mod tests {
         let source = production_source();
         let reader = function_text(&source, "async fn read_consumed_call(");
         assert!(reader.contains("let Some((ciphertext,)) = row else {\n        return Ok(None);\n    };"));
+    }
+}
+
+/// Build plan WS13 S3: DB-backed checks of decision provenance. Run with
+/// `DATABASE_URL=... cargo test -p session-core --bin session-core approval_decision_db -- --ignored --test-threads=1`
+/// against a scratch Postgres (the database name must say it is a test database).
+#[cfg(test)]
+mod approval_decision_db_tests {
+    use super::*;
+    use sqlx::postgres::PgPoolOptions;
+
+    async fn scratch_pool() -> Option<Pool> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return None;
+        };
+        assert!(url.contains("test"), "the scratch database name must say test");
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&url)
+            .await
+            .expect("connect pg");
+        sqlx::migrate!("./migrations").run(&pool).await.expect("migrate");
+        Some(pool)
+    }
+
+    /// One requested provider-write approval whose cause is stated, in a fresh org.
+    async fn requested_approval(pool: &Pool, tag: &str) -> (String, String, String) {
+        let sfx = mp_ids::new_ulid();
+        let (thread_id, run_id, org, user, id) = (
+            format!("ad-t-{tag}-{sfx}"),
+            format!("ad-r-{tag}-{sfx}"),
+            format!("ad-org-{sfx}"),
+            "u1".to_owned(),
+            format!("appr_{}", mp_ids::new_ulid()),
+        );
+        sqlx::query("INSERT INTO threads (id,session_key,org_id,user_id) VALUES ($1,$1,$2,$3)")
+            .bind(&thread_id)
+            .bind(&org)
+            .bind(&user)
+            .execute(pool)
+            .await
+            .expect("seed thread");
+        sqlx::query("INSERT INTO runs (id,thread_id,goal,org_id,user_id) VALUES ($1,$2,'g',$3,$4)")
+            .bind(&run_id)
+            .bind(&thread_id)
+            .bind(&org)
+            .bind(&user)
+            .execute(pool)
+            .await
+            .expect("seed run");
+        let metadata = serde_json::json!({
+            "cause": {
+                "code": "provider_write",
+                "tool": "execute_provider_action",
+                "effect_class": "external_write",
+            }
+        });
+        request_approval(
+            pool,
+            &id,
+            &run_id,
+            None,
+            "tool_call",
+            &user,
+            &org,
+            &user,
+            "",
+            &metadata,
+            None,
+            Some(Utc::now() + chrono::Duration::minutes(5)),
+            "",
+        )
+        .await
+        .expect("request approval")
+        .expect("inserted");
+        (id, org, user)
+    }
+
+    async fn audit_rows(pool: &Pool, approval_id: &str, outcome: &str) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM session_audit_outbox WHERE event_id = $1")
+            .bind(crate::audit_publisher::approval_decision_event_id(approval_id, outcome))
+            .fetch_one(pool)
+            .await
+            .expect("count audit rows")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn decision_provenance_is_recorded_in_metadata_and_outbox_in_one_transaction() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let (id, org, user) = requested_approval(&pool, "one-tx").await;
+        let record = DecisionRecord {
+            source: "user",
+            scope: "once",
+            audit: true,
+        };
+        let write = decide_approval_recorded(
+            &pool,
+            &id,
+            &org,
+            Some(user.as_str()),
+            "granted",
+            &user,
+            "ok",
+            &record,
+        )
+        .await
+        .expect("decide");
+        assert!(write.updated);
+        let source: String =
+            sqlx::query_scalar("SELECT metadata->'decision'->>'source' FROM approvals WHERE id = $1")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .expect("read decision");
+        assert_eq!(source, "user");
+        let payload: serde_json::Value = sqlx::query_scalar(
+            "SELECT payload FROM session_audit_outbox WHERE event_id = $1",
+        )
+        .bind(crate::audit_publisher::approval_decision_event_id(&id, "granted"))
+        .fetch_one(&pool)
+        .await
+        .expect("one audit row");
+        assert_eq!(payload["event"], "approval_decided");
+        assert_eq!(payload["details"]["cause_code"], "provider_write");
+        assert_eq!(payload["details"]["decision_source"], "user");
+        assert!(payload.get("decision_reason").is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn a_replayed_decision_enqueues_one_audit_row() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let (id, org, user) = requested_approval(&pool, "replay").await;
+        let record = DecisionRecord {
+            source: "user",
+            scope: "once",
+            audit: true,
+        };
+        for attempt in 0..2 {
+            let write = decide_approval_recorded(
+                &pool,
+                &id,
+                &org,
+                Some(user.as_str()),
+                "granted",
+                &user,
+                "ok",
+                &record,
+            )
+            .await
+            .expect("decide");
+            assert_eq!(write.updated, attempt == 0, "only the first decision transitions");
+        }
+        assert_eq!(audit_rows(&pool, &id, "granted").await, 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn decision_without_the_switch_is_recorded_but_not_audited() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let (id, org, user) = requested_approval(&pool, "switch-off").await;
+        let record = DecisionRecord {
+            source: "posture_auto",
+            scope: "once",
+            audit: false,
+        };
+        decide_approval_recorded(
+            &pool,
+            &id,
+            &org,
+            Some(user.as_str()),
+            "granted",
+            &user,
+            "ok",
+            &record,
+        )
+        .await
+        .expect("decide");
+        let source: String =
+            sqlx::query_scalar("SELECT metadata->'decision'->>'source' FROM approvals WHERE id = $1")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .expect("read decision");
+        assert_eq!(source, "posture_auto");
+        assert_eq!(audit_rows(&pool, &id, "granted").await, 0);
     }
 }
 

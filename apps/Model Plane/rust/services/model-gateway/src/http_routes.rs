@@ -19,7 +19,8 @@ use chrono::Utc;
 use metrics_exporter_prometheus::PrometheusHandle;
 use mp_contracts::model_plane::v1::{
     AnalyzeDocumentRequest, AnalyzeImageRequest, AnalyzeLanguageRequest, AnswerRunQuestionRequest,
-    Approval, ApprovalCause, ApprovalKind, ApprovalProof, ApprovalState, BatchTranslateTextRequest,
+    Approval, ApprovalCause, ApprovalDecisionSource, ApprovalKind, ApprovalProof, ApprovalScope,
+    ApprovalState, BatchTranslateTextRequest,
     CancelRunRequest, ListRunQuestionsRequest, QuestionAnswerItem, QuestionState, RunQuestion,
     ContinuationExecution, CreateEmbeddingRequest, CreateRealtimeSessionRequest,
     CreateVideoGenerationJobRequest, DecideApprovalRequest, DetectTextLanguageRequest, Event,
@@ -1805,6 +1806,29 @@ fn require_once_scope(scope: &str) -> Result<(), HttpJsonError> {
     ))
 }
 
+/// The durable decision this gateway records for a browser decision (build plan WS13 S3). The
+/// source is always USER: the body has no field for it, so a client-supplied value cannot
+/// reach the record. The scope is ONCE, the only scope the body can name today.
+fn user_decision_request(
+    approval_id: String,
+    target_state: ApprovalState,
+    user_id: &str,
+    org_id: &str,
+    reason: String,
+) -> DecideApprovalRequest {
+    DecideApprovalRequest {
+        approval_id,
+        decision: target_state as i32,
+        decided_by: user_id.to_owned(),
+        decision_reason: reason,
+        // Cross-org IDOR fix (Phase 6): scope to the caller's verified
+        // JWT org, never a client-suppliable value.
+        org_id: org_id.to_owned(),
+        decision_source: ApprovalDecisionSource::User as i32,
+        scope: ApprovalScope::Once as i32,
+    }
+}
+
 async fn decide_approval(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -1847,15 +1871,13 @@ async fn decide_approval(
         .orchestration_client
         .clone()
         .decide_approval(authenticated_session_request(
-            DecideApprovalRequest {
+            user_decision_request(
                 approval_id,
-                decision: target_state as i32,
-                decided_by: claims.user_id.clone(),
-                decision_reason: body.reason,
-                // Cross-org IDOR fix (Phase 6): scope to the caller's verified
-                // JWT org, never a client-suppliable value.
-                org_id: claims.org_id.clone(),
-            },
+                target_state,
+                &claims.user_id,
+                &claims.org_id,
+                body.reason,
+            ),
             &session_bearer,
         )?)
         .await
@@ -6821,6 +6843,27 @@ mod approval_value_tests {
             !value.to_string().contains("secret-argument-text"),
             "{value}"
         );
+    }
+
+    #[test]
+    fn decide_ignores_client_supplied_decision_source() {
+        let body: DecideApprovalBody = serde_json::from_value(json!({
+            "decision": "approve",
+            "reason": "ok",
+            "decisionSource": "SYSTEM",
+            "decision_source": 5,
+        }))
+        .expect("the body parses; unknown keys are ignored");
+        let request = user_decision_request(
+            "appr-1".to_owned(),
+            ApprovalState::Granted,
+            "user-1",
+            "org-1",
+            body.reason,
+        );
+        assert_eq!(request.decision_source, ApprovalDecisionSource::User as i32);
+        assert_eq!(request.scope, ApprovalScope::Once as i32);
+        assert_eq!(request.decided_by, "user-1");
     }
 
     #[test]
