@@ -6727,6 +6727,7 @@ pub async fn run_tool_rounds(
         ingestion_bearer,
         sandbox_bearer,
         sink,
+        &crate::vision::parts::ImageParts::none(),
     )
     .await
 }
@@ -6775,6 +6776,8 @@ pub async fn run_tool_rounds_for_model(
     ingestion_bearer: Option<&VerifiedIngestionBearer>,
     sandbox_bearer: Option<&VerifiedSandboxBearer>,
     sink: Option<&crate::sse_events::RichEventSink>,
+    // The turn's images (WS08-S4): carried on every round's request, never altered here.
+    images: &crate::vision::parts::ImageParts,
 ) -> Result<ToolRounds, &'static str> {
     run_tool_rounds_for_model_with_attachments(
         state,
@@ -6805,6 +6808,7 @@ pub async fn run_tool_rounds_for_model(
         sandbox_bearer,
         sink,
         &crate::turn_attachments::ValidatedAttachments::none(),
+        images,
     )
     .await
 }
@@ -6849,6 +6853,7 @@ pub async fn run_tool_rounds_for_model_with_attachments(
     sandbox_bearer: Option<&VerifiedSandboxBearer>,
     sink: Option<&crate::sse_events::RichEventSink>,
     attachments: &crate::turn_attachments::ValidatedAttachments,
+    images: &crate::vision::parts::ImageParts,
 ) -> Result<ToolRounds, &'static str> {
     // Resolved ONCE for the whole turn rather than per call: the entitlement is a
     // property of the turn, and a value re-derived per round is a value that can
@@ -6869,6 +6874,9 @@ pub async fn run_tool_rounds_for_model_with_attachments(
     // other routes) times nothing.
     let timing = sink.and_then(crate::sse_events::RichEventSink::timing);
     let mut messages = base_messages;
+    // The images name a message by index, so the rounds may only append to the
+    // prompt: checked when the loop ends.
+    let prefix_len = messages.len();
     let mut resolved_model: Option<String> = None;
     let mut last_round_tools: Vec<ToolDefinition> = Vec::new();
     let mut any_tool_succeeded = false;
@@ -7194,6 +7202,7 @@ pub async fn run_tool_rounds_for_model_with_attachments(
                 },
                 inference_bearer,
             );
+            crate::vision::parts::attach(decision.get_mut(), images);
             decision.metadata_mut().insert("cache-control", "no-store".parse().expect("static metadata"));
             let infer = client.infer(decision);
             // Timed from just before the call is awaited. A Stop, the deadline or a
@@ -7954,6 +7963,7 @@ pub async fn run_tool_rounds_for_model_with_attachments(
     if pending_checked_document(&turn_question, source_context.is_some(), document_written_for_instruction) {
         return Err(crate::result_validation::VALIDATION_FAILED);
     }
+    debug_assert!(messages.len() >= prefix_len, "the tool rounds only append to the prompt");
     Ok(ToolRounds {
         messages,
         events: events.into_buffer(),

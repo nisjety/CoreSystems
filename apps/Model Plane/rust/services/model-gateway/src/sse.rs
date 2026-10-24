@@ -1440,6 +1440,43 @@ pub async fn invoke_stream_sse(
     ) {
         return error_stream(&request_id, code, message, false);
     }
+    // Images as parts of the turn (WS08-S4), decided before any run exists. With the switch off
+    // this is empty and the vision diversion below decides, as it always did. A Do turn with an
+    // image is refused here rather than silently losing its tools to that diversion.
+    let wants_image_parts = crate::vision::parts::enabled()
+        && crate::vision::parts::has_images(&req.attachments);
+    let reads_images = wants_image_parts && !agentic_requested && !effective_zdr && {
+        match state
+            .inference_client
+            .clone()
+            .list_models(authenticated_inference_request(
+                mp_contracts::model_plane::v1::ListModelsRequest::default(),
+                &inference_bearer,
+            ))
+            .await
+        {
+            Ok(listed) => crate::vision::parts::route_reads_images(&listed.into_inner().models, &model),
+            Err(error) => {
+                // Not knowing is not a reason to refuse: the diversion serves the turn as before.
+                tracing::warn!(%error, request_id = %request_id, "model catalogue unavailable; images keep the vision diversion");
+                false
+            }
+        }
+    };
+    let image_parts = match crate::vision::parts::admit(
+        wants_image_parts,
+        agentic_requested,
+        effective_zdr,
+        &req.attachments,
+        reads_images,
+    ) {
+        Ok(image_parts) => image_parts,
+        Err(refusal) => return error_stream(&request_id, refusal.code, &refusal.message, false),
+    };
+    if !image_parts.is_empty() {
+        let (images, bytes) = image_parts.summary();
+        tracing::info!(request_id = %request_id, images, bytes, "images ride as parts of the turn");
+    }
 
     // Start keys are durable Session Core metadata. Keep the raw browser/API
     // retry identifier in the in-memory idempotency guard only; persist its
@@ -1550,8 +1587,9 @@ pub async fn invoke_stream_sse(
 
     // chat-parity §2: multimodal vision input. If an image is attached, route
     // the turn through inference-core AnalyzeImage (the vision owner) with the
-    // user message as the prompt and stream the analysis as the answer.
-    if let Some(image) = crate::vision::select_image(&req.attachments) {
+    // user message as the prompt and stream the analysis as the answer. A turn whose images ride
+    // as parts (WS08-S4) never takes this: it keeps its history, tools and memory.
+    if let Some(image) = crate::vision::select_image(&req.attachments).filter(|_| image_parts.is_empty()) {
         timing.hand_off("vision");
         return vision_stream(
             state.clone(),
@@ -2266,6 +2304,8 @@ pub async fn invoke_stream_sse(
     // history: it goes with the system blocks.
     prompt.user_supplied_args = crate::tool_loop::user_supplied_args_notice(&tool_defs);
     let mut messages = prompt.render(cache_options.prompt_order());
+    // The images belong to the user turn this prompt ends with; from here the prompt only grows.
+    let image_parts = image_parts.bind(&messages);
 
     // chat-parity §4: register this stream so POST /v1/invoke/{id}/cancel can
     // stop it cooperatively. `cancels` is moved into the task to finish() on end.
@@ -2769,6 +2809,7 @@ pub async fn invoke_stream_sse(
                 ingestion_bearer.as_ref(),
                 sandbox_bearer.as_ref(),
                 Some(&sink),
+                &image_parts,
             )
             .await;
             seq = sink.sync_cursor(seq).await;
@@ -2886,6 +2927,7 @@ pub async fn invoke_stream_sse(
             reasoning_effort: thinking_plan.effort_wire(),
             ..Default::default()
         };
+        crate::vision::parts::attach(&mut grpc_req, &image_parts);
         // Read before any retry rewrites the request: on a subscription route
         // the turn is never priced from API list prices, including an
         // artifact turn whose synthetic answer names no serving provider.
@@ -3133,12 +3175,15 @@ pub async fn invoke_stream_sse(
                 crate::compaction::drop_oldest_group
             };
             let before_shed = grpc_req.messages.len();
+            // Shedding moves the images' message: they follow it, and a turn whose image message
+            // was itself shed fails like any other prompt that stays too long.
             if length_retries >= MAX_CONTEXT_LENGTH_RETRIES
                 || !shed(
                     &mut grpc_req.messages,
                     CONTEXT_LENGTH_DROP_GROUP,
                     CONTEXT_LENGTH_KEEP_TAIL,
                 )
+                || !crate::vision::parts::rebase(&mut grpc_req, &image_parts)
             {
                 tracing::error!(
                     error = %error,

@@ -1,9 +1,11 @@
 import { chatAppearanceActive } from "@/features/chat/lib/chat-appearance-preview";
 import {
 	ATTACHMENT_ACCEPT,
+	ATTACHMENT_MAX_IMAGES,
 	attachmentRefusalMessage,
 	evaluateAttachments,
 	isImageAttachment,
+	visionAsPartsEnabled,
 	type AttachmentPolicyContext,
 } from "@/features/chat/lib/attachment-policy";
 import { useNavigate } from "@solidjs/router";
@@ -106,6 +108,7 @@ import {
 	effortLevelWithin,
 	enforcedMaxEffort,
 	extractChatDocument,
+	getAttachmentPolicy,
 	getModelEntitlementMeta,
 	groupChatModels,
 	hasZeroRetentionModel,
@@ -114,6 +117,7 @@ import {
 	listModels,
 	modelEffortLevels,
 	modelSupportsAgentic,
+	modelSupportsVision,
 	saveChatThreadSnapshot,
 	selectionIsStale,
 	verevonModeById,
@@ -1836,6 +1840,25 @@ export function DashboardComposer(props: {
 		zdr: temporaryChat(),
 		currentImageCount: files().filter(isImageAttachment).length,
 		currentTotalBytes: files().reduce((total, file) => total + file.size, 0),
+		// With images riding as parts the picked model is the reader, so the picker
+		// declares what it can read; otherwise the diversion serves any model.
+		imageParts: visionAsPartsEnabled()
+			? {
+					modelReadsImages: modelSupportsVision(
+						selectedCatalogModel(),
+						getAttachmentPolicy(),
+						{
+							verevonMode:
+								!selectedModel() ||
+								verevonModeById(selectedModel()) !== undefined,
+						},
+					),
+					visionModelName: flatChatModels().find((model) =>
+						modelSupportsVision(model, undefined),
+					)?.name,
+					maxImages: getAttachmentPolicy()?.maxImages ?? ATTACHMENT_MAX_IMAGES,
+				}
+			: undefined,
 	});
 
 	const addFiles = (nextFiles: FileList | File[]) => {

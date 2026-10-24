@@ -8,6 +8,11 @@
 use base64::Engine as _;
 use serde::Deserialize;
 
+// Images carried as parts of the turn rather than diverted to `AnalyzeImage` (WS08-S4).
+// Declared here, a child of this module, so it reaches the private `is_image` below.
+#[path = "vision_parts.rs"]
+pub mod parts;
+
 /// An attachment on a chat request. Images are routed to vision; other kinds
 /// are ignored here (the attachment policy refuses them before this point).
 #[derive(Debug, Clone, Deserialize, Default)]

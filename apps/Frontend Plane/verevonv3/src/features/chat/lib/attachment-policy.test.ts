@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { streamFailurePresentation } from '@/features/chat/components/chat-normalizers'
+import { modelSupportsVision, type AttachmentPolicy } from '@/shared/api/chat-client'
 import { translateApiError } from '@/shared/i18n/errors'
 import {
   ATTACHMENT_ACCEPT,
@@ -18,6 +19,30 @@ const ask: AttachmentPolicyContext = {
   currentImageCount: 0,
   currentTotalBytes: 0,
 }
+
+const declared = (vision: boolean): AttachmentPolicy => ({
+  imageMimes: ['image/png', 'image/jpeg', 'image/webp', 'image/gif'],
+  maxImages: 4,
+  maxImageBytes: 1_000_000,
+  maxFiles: 3,
+  maxFileBytes: 1_000_000,
+  maxTotalBytes: 3_145_728,
+  modes: { vision, sandboxFiles: false },
+})
+
+/** The context of a turn on which images ride as parts, for the picked model as `modelSupportsVision` reads it. */
+const asParts = (
+  model: { capabilities?: string[] } | undefined,
+  policy: AttachmentPolicy | undefined,
+  verevonMode = false,
+): AttachmentPolicyContext => ({
+  ...ask,
+  imageParts: {
+    modelReadsImages: modelSupportsVision(model, policy, { verevonMode }),
+    visionModelName: 'gpt-4o',
+    maxImages: policy?.maxImages ?? 1,
+  },
+})
 
 const png = { name: 'chart.png', size: 20_000, type: 'image/png' }
 const sheet = { name: 'sales.xlsx', size: 40_000, type: 'application/octet-stream' }
@@ -93,6 +118,52 @@ describe('evaluateAttachment', () => {
 
   it('trusts the extension over an empty or generic MIME type for a document', () => {
     expect(evaluateAttachment({ name: 'notes.MD', size: 100, type: '' }, ask)).toEqual({ ok: true })
+  })
+})
+
+describe('the picked model reads the image (images as parts)', () => {
+  it('a_non_vision_catalogue_model_refuses_images', () => {
+    const ctx = asParts({ capabilities: ['tools'] }, declared(true))
+    expect(evaluateAttachment(png, ctx)).toEqual({ ok: false, reason: 'model_no_vision' })
+    // A document is read in the browser: the model's eyes do not matter to it.
+    expect(evaluateAttachment(sheet, ctx)).toEqual({ ok: true })
+    expect(evaluateAttachment(png, asParts({ capabilities: ['tools', 'vision'] }, declared(true)))).toEqual({ ok: true })
+    const { refused } = evaluateAttachments([png], ctx)
+    const [first] = refused
+    expect(first).toMatchObject({ reason: 'model_no_vision', visionModelName: 'gpt-4o' })
+    expect(attachmentRefusalMessage(first!, norwegian)).toContain('gpt-4o')
+    expect(attachmentRefusalMessage(first!, english)).toContain('"chart.png"')
+  })
+
+  it('a_verevon_mode_follows_the_declared_policy', () => {
+    expect(evaluateAttachment(png, asParts(undefined, declared(true), true))).toEqual({ ok: true })
+    expect(evaluateAttachment(png, asParts(undefined, declared(false), true))).toEqual({
+      ok: false,
+      reason: 'model_no_vision',
+    })
+    expect(modelSupportsVision(undefined, undefined, { verevonMode: true })).toBe(false)
+  })
+
+  it('an_unloaded_catalogue_blocks_images', () => {
+    // Not a Verevon mode and not listed: the catalogue has not answered.
+    expect(evaluateAttachment(png, asParts(undefined, declared(true)))).toEqual({
+      ok: false,
+      reason: 'model_no_vision',
+    })
+    expect(modelSupportsVision(undefined, declared(true))).toBe(false)
+  })
+
+  it('uses the declared image limit once the model reads the images', () => {
+    const ctx = asParts({ capabilities: ['vision'] }, declared(true))
+    const four = Array.from({ length: 5 }, (_, index) => ({ ...png, name: `p${index}.png` }))
+    const { accepted, refused } = evaluateAttachments(four, ctx)
+    expect(accepted).toHaveLength(4)
+    expect(refused).toEqual([{ file: expect.objectContaining({ name: 'p4.png' }), reason: 'too_many_images', maxImages: 4 }])
+  })
+
+  it('leaves the current gates alone while images keep the diversion', () => {
+    // No imageParts context: any model serves an image, as before.
+    expect(evaluateAttachment(png, ask)).toEqual({ ok: true })
   })
 })
 

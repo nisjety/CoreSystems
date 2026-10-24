@@ -32,6 +32,16 @@ export const ATTACHMENT_MAX_IMAGES = 1
 /** The server default S2 declares; there is no per-turn byte total on the client today. */
 export const ATTACHMENT_MAX_TOTAL_BYTES = 3_145_728
 
+/**
+ * Whether images are read by the picked model instead of the vision-only diversion
+ * (the server's `CHAT_VISION_AS_PARTS_ENABLED`). Flipped together with that switch,
+ * like `VITE_PLAN_EXECUTE_ENABLED`; off, the diversion serves any model and none of
+ * the model-vision gates below apply.
+ */
+export function visionAsPartsEnabled(): boolean {
+  return import.meta.env.VITE_CHAT_VISION_AS_PARTS_ENABLED === 'true'
+}
+
 /** The `accept` value of the file input, so the picker and the policy cannot drift. */
 export const ATTACHMENT_ACCEPT = [...ATTACHMENT_IMAGE_MIME_TYPES, ...ATTACHMENT_DOCUMENT_EXTENSIONS].join(',')
 
@@ -42,6 +52,20 @@ export type AttachmentRefusalReason =
   | 'do_images_unsupported'
   | 'too_many_images'
   | 'zdr_refused'
+  | 'model_no_vision'
+
+/**
+ * How images are read on this turn, present only while images ride as parts of the
+ * turn: the picked model is then the reader, and the server's declared limits apply.
+ */
+export type ImagePartsContext = {
+  /** `modelSupportsVision` for the picked model; `false` while the catalogue has not loaded. */
+  modelReadsImages: boolean
+  /** One catalogue model that reads images, named in the refusal. */
+  visionModelName?: string
+  /** `attachment_policy.max_images`. */
+  maxImages: number
+}
 
 export type AttachmentPolicyContext = {
   /** The turn goes through a connected ChatGPT subscription, which carries no attachments. */
@@ -52,6 +76,8 @@ export type AttachmentPolicyContext = {
   zdr: boolean
   currentImageCount: number
   currentTotalBytes: number
+  /** Absent: images go through today's vision diversion, which any model serves. */
+  imageParts?: ImagePartsContext
 }
 
 export type AttachmentFileLike = { name: string; size: number; type: string }
@@ -80,11 +106,21 @@ export function evaluateAttachment(file: AttachmentFileLike, ctx: AttachmentPoli
   if (ctx.zdr) return { ok: false, reason: 'zdr_refused' }
   if (ctx.subscriptionBacked) return { ok: false, reason: 'route_unsupported' }
   if (ctx.planMode) return { ok: false, reason: 'do_images_unsupported' }
-  if (ctx.currentImageCount >= ATTACHMENT_MAX_IMAGES) return { ok: false, reason: 'too_many_images' }
+  if (ctx.imageParts && !ctx.imageParts.modelReadsImages) return { ok: false, reason: 'model_no_vision' }
+  if (ctx.currentImageCount >= (ctx.imageParts?.maxImages ?? ATTACHMENT_MAX_IMAGES)) {
+    return { ok: false, reason: 'too_many_images' }
+  }
   return { ok: true }
 }
 
-export type AttachmentRefusal = { file: AttachmentFileLike; reason: AttachmentRefusalReason }
+export type AttachmentRefusal = {
+  file: AttachmentFileLike
+  reason: AttachmentRefusalReason
+  /** For `model_no_vision`: one model that would read the image. */
+  visionModelName?: string
+  /** For `too_many_images`: the limit that applied to the turn. */
+  maxImages?: number
+}
 
 /**
  * Evaluates files one after the other, each counted against the ones accepted
@@ -101,7 +137,14 @@ export function evaluateAttachments<T extends AttachmentFileLike>(
   for (const file of files) {
     const verdict = evaluateAttachment(file, { ...ctx, currentImageCount: imageCount, currentTotalBytes: totalBytes })
     if (!verdict.ok) {
-      refused.push({ file, reason: verdict.reason })
+      refused.push({
+        file,
+        reason: verdict.reason,
+        ...(verdict.reason === 'model_no_vision' && ctx.imageParts?.visionModelName
+          ? { visionModelName: ctx.imageParts.visionModelName }
+          : {}),
+        ...(verdict.reason === 'too_many_images' && ctx.imageParts ? { maxImages: ctx.imageParts.maxImages } : {}),
+      })
       continue
     }
     accepted.push(file)
@@ -117,6 +160,23 @@ export function attachmentRefusalMessage(
   tr: (noText: string, enText: string) => string,
 ): string {
   const name = refusal.file.name.trim() || tr('uten navn', 'unnamed')
-  const limits = { maxFileBytes: ATTACHMENT_MAX_FILE_BYTES, maxTotalBytes: ATTACHMENT_MAX_TOTAL_BYTES, maxImages: ATTACHMENT_MAX_IMAGES }
-  return tr(no.attachments.refusal[refusal.reason](name, limits), en.attachments.refusal[refusal.reason](name, limits))
+  if (refusal.reason === 'model_no_vision') {
+    // Worded here rather than in the i18n catalogues: it is the one reason that names a model.
+    const alternative = refusal.visionModelName
+    const why = tr(
+      `«${name}» ble ikke lagt ved: den valgte modellen kan ikke lese bilder.`,
+      `"${name}" was not attached: the selected model cannot read images.`,
+    )
+    const example = alternative ?? ''
+    const noExample = alternative ? `, for eksempel ${example}` : ''
+    const enExample = alternative ? `, for example ${example}` : ''
+    return `${why} ${tr(`Velg en modell som kan lese bilder${noExample}.`, `Pick a model that supports images${enExample}.`)}`
+  }
+  const limits = {
+    maxFileBytes: ATTACHMENT_MAX_FILE_BYTES,
+    maxTotalBytes: ATTACHMENT_MAX_TOTAL_BYTES,
+    maxImages: refusal.maxImages ?? ATTACHMENT_MAX_IMAGES,
+  }
+  const reason = refusal.reason
+  return tr(no.attachments.refusal[reason](name, limits), en.attachments.refusal[reason](name, limits))
 }

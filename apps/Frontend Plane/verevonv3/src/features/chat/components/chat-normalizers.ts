@@ -1,3 +1,4 @@
+import { ATTACHMENT_MAX_TOTAL_BYTES } from '@/features/chat/lib/attachment-policy'
 import {
   type ChatThreadTranscriptStep,
   type ChatThreadTranscriptTurn,
@@ -440,6 +441,11 @@ function attachmentRefusalMessage(code: string, tr: Translate): string {
         'Vedleggene ble ikke sendt: ChatGPT-abonnementet leser ikke vedlegg. Fjern dem eller velg en annen modell. Ingenting ble sendt.',
         'The attachments were not sent: the ChatGPT subscription does not read attachments. Remove them or pick another model. Nothing was sent.',
       )
+    case 'attachment_do_unsupported':
+      return tr(
+        'Bildet ble ikke sendt: Utfør kan ikke bruke bilder ennå. Send meldingen i Spør-modus. Ingenting ble sendt.',
+        'The image was not sent: Do cannot use images yet. Send the message in Ask mode. Nothing was sent.',
+      )
     default:
       return tr(
         'Vedlegget ble ikke sendt: filen kunne ikke leses. Legg det ved på nytt. Ingenting ble sendt.',
@@ -566,7 +572,8 @@ export function streamFailurePresentation(
     case 'attachment_count_exceeded':
     case 'attachment_route_unsupported':
     case 'attachment_encoding_invalid':
-      // The server's attachment contract (WS08 S2) refused the turn before any
+    case 'attachment_do_unsupported':
+      // The server's attachment contract (WS08 S2, S4) refused the turn before any
       // model ran. The same turn would be refused the same way, so there is no
       // retry; each code says what to change. The server's text names a file and
       // a limit in English and is never shown.
@@ -1336,10 +1343,26 @@ export function contentWithPreparedSources(text: string, attachments: ComposerAt
 /** The document kinds a program can usefully read as bytes (the spreadsheet or PDF behind the inlined text). */
 const SANDBOX_FILE_EXTENSIONS = /\.(xlsx|csv|pdf|json|docx|pptx)$/i
 
+/** The decoded size of base64 text, without decoding it. */
+function base64ByteLength(base64: string): number {
+  const padding = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0
+  return Math.floor((base64.length * 3) / 4) - padding
+}
+
 export async function toStreamAttachments(
   attachments: DashboardComposerSubmitPayload['attachments'],
 ): Promise<StreamAttachment[]> {
   const out: StreamAttachment[] = []
+  // Every image rides the wire, so the turn's bytes are bounded here as the server bounds
+  // them: the declared total, or today's constant before the catalogue has answered.
+  const budget = getAttachmentPolicy()?.maxTotalBytes ?? ATTACHMENT_MAX_TOTAL_BYTES
+  let used = 0
+  const spend = (base64: string, name: string) => {
+    used += base64ByteLength(base64)
+    if (used > budget) {
+      throw new Error(`Vedleggene er for store til å sendes i én melding («${name}» passerte grensen). Fjern noen og prøv igjen.`)
+    }
+  }
   for (const attachment of attachments) {
     if (!attachment.type.startsWith('image/')) {
       // Documents are included as text by inlineTextAttachments before inference.
@@ -1350,6 +1373,7 @@ export async function toStreamAttachments(
       }
       continue
     }
+    let parsed: ReturnType<typeof parseDataUrl>
     try {
       if (!attachment.url) throw new Error('missing image')
       let dataUrl = attachment.url
@@ -1358,12 +1382,13 @@ export async function toStreamAttachments(
         if (!response.ok) throw new Error('unreadable image')
         dataUrl = await blobToDataUrl(await response.blob())
       }
-      const parsed = parseDataUrl(dataUrl)
+      parsed = parseDataUrl(dataUrl)
       if (!parsed || !parsed.base64) throw new Error('invalid image encoding')
-      out.push({ kind: 'image', data_base64: parsed.base64, mime_type: parsed.mime || attachment.type })
     } catch {
       throw new Error(`Kunne ikke lese bildet «${attachment.name}». Prøv igjen eller fjern bildet.`)
     }
+    spend(parsed.base64, attachment.name)
+    out.push({ kind: 'image', data_base64: parsed.base64, mime_type: parsed.mime || attachment.type })
   }
   return out
 }

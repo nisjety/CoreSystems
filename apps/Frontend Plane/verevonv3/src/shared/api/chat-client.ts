@@ -3186,6 +3186,30 @@ export function modelSupportsAgentic(model: Pick<ModelInfo, 'capabilities'> | un
 }
 
 /**
+ * The per-model capability flag inference-core lists on a model that reads
+ * images (`list_models` emits `vision` per model, not per provider).
+ */
+export const VISION_CAPABILITY = 'vision'
+
+/**
+ * Whether the picked model can read an attached image, for the turns on which
+ * the model, not the vision-only diversion, is the reader (images as parts).
+ *
+ * An explicit catalogue model answers for itself. A Verevon mode is not a
+ * catalogue entry (`model` is `undefined` for it), so it follows the server's
+ * declared policy: some model that reads images exists. Anything else is
+ * `false`: a catalogue that has not answered never switches images on by guess.
+ */
+export function modelSupportsVision(
+  model: Pick<ModelInfo, 'capabilities'> | undefined,
+  policy: Pick<AttachmentPolicy, 'modes'> | undefined,
+  options: { verevonMode?: boolean } = {},
+): boolean {
+  if (model) return model.capabilities?.includes(VISION_CAPABILITY) ?? false
+  return options.verevonMode === true && (policy?.modes.vision ?? false)
+}
+
+/**
  * The reasoning levels the catalogue lists for a model, weakest first. Empty
  * for a model that is not listed or lists none, so a catalogue that has not
  * answered never offers a level by guess.
