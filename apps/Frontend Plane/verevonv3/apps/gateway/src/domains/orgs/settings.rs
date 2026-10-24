@@ -33,7 +33,7 @@ const ZDR_TIERS: [&str; 2] = ["zdr_contractual", "sovereign"];
 /// so it never opens the gate. Exact string matches on purpose: the wire is
 /// lower-case snake_case, and a lookalike (`zdr_ready`, `ZDR`) is not an
 /// attestation.
-fn model_attests_zdr_for_chat(model: &Value) -> bool {
+pub(super) fn model_attests_zdr_for_chat(model: &Value) -> bool {
     if model.get("modality").and_then(Value::as_str) != Some("chat") {
         return false;
     }
@@ -62,7 +62,70 @@ fn catalogue_attests_zdr_chat_model(catalogue: &Value) -> Option<bool> {
 enum ZdrSwitchGate {
     Open,
     NoAttestedProvider,
+    /// The admin sees no attested model, but the org's model policy hides some:
+    /// the cause is the policy, not the deployment (WS10-S5).
+    ModelsNotEntitled,
     Unavailable,
+}
+
+/// The two bearers model-gateway's catalogue and access routes require: the
+/// `aud=model-gateway` token plus the separately minted `aud=inference-core`
+/// token. `None` when either cannot be minted, never a partial pair.
+pub(super) async fn mint_model_plane_credentials(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+) -> Option<(String, String)> {
+    let (model_token, inference_token) = tokio::join!(
+        model_plane::model_token(state, user, headers),
+        model_plane::required_inference_token(state, user, headers),
+    );
+    let (Some(model_token), Ok(inference_token)) = (model_token, inference_token) else {
+        tracing::warn!("org ZDR check: the catalogue credentials could not be minted");
+        return None;
+    };
+    Some((model_token, inference_token))
+}
+
+/// `GET /v1/models` as the acting admin. `None` when it cannot be read: a
+/// caller that needs the answer treats that as unknown, never as a verdict.
+pub(super) async fn read_model_catalogue(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    model_token: &str,
+    inference_token: &str,
+) -> Option<Value> {
+    let url = format!("{}/v1/models", state.model_gateway_url);
+    let (status, Json(catalogue)) = model_plane::proxy_model_json_with_inference(
+        state,
+        Method::GET,
+        &url,
+        None,
+        Some(model_token),
+        Some(inference_token),
+        user,
+    )
+    .await;
+    if !status.is_success() {
+        tracing::warn!(
+            status = status.as_u16(),
+            "org ZDR check: the model catalogue could not be read"
+        );
+        return None;
+    }
+    Some(catalogue)
+}
+
+/// How many chat models the caller's org policy hides from this catalogue
+/// (`entitlement.hidden_count`, the sibling field model-gateway adds when the
+/// policy is enforced). Zero when the field is absent: a catalogue with no
+/// entitlement meta hides nothing.
+fn catalogue_hidden_count(catalogue: &Value) -> u64 {
+    catalogue
+        .get("entitlement")
+        .and_then(|meta| meta.get("hidden_count"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
 }
 
 /// Read the model catalogue as the acting admin and decide whether the org ZDR
@@ -74,6 +137,12 @@ enum ZdrSwitchGate {
 /// plus the separately minted `aud=inference-core` bearer that model-gateway's
 /// catalogue route requires.
 ///
+/// Once the model policy is enforced the catalogue is per caller, so "no
+/// attested model" can be the admin's own entitlement rather than the
+/// deployment: when the admin switch is on and the catalogue reports hidden
+/// models, the answer says so (`ModelsNotEntitled`) instead of blaming the
+/// provider.
+///
 /// Fails closed: a catalogue that cannot be read is `Unavailable`, never
 /// treated as attested and never as "none attested".
 async fn zdr_switch_gate(
@@ -81,34 +150,22 @@ async fn zdr_switch_gate(
     user: &AuthenticatedUser,
     headers: &HeaderMap,
 ) -> ZdrSwitchGate {
-    let (model_token, inference_token) = tokio::join!(
-        model_plane::model_token(state, user, headers),
-        model_plane::required_inference_token(state, user, headers),
-    );
-    let (Some(model_token), Ok(inference_token)) = (model_token, inference_token) else {
-        tracing::warn!("org ZDR gate: the catalogue credentials could not be minted");
+    let Some((model_token, inference_token)) =
+        mint_model_plane_credentials(state, user, headers).await
+    else {
         return ZdrSwitchGate::Unavailable;
     };
-    let url = format!("{}/v1/models", state.model_gateway_url);
-    let (status, Json(catalogue)) = model_plane::proxy_model_json_with_inference(
-        state,
-        Method::GET,
-        &url,
-        None,
-        Some(&model_token),
-        Some(&inference_token),
-        user,
-    )
-    .await;
-    if !status.is_success() {
-        tracing::warn!(
-            status = status.as_u16(),
-            "org ZDR gate: the model catalogue could not be read"
-        );
+    let Some(catalogue) = read_model_catalogue(state, user, &model_token, &inference_token).await
+    else {
         return ZdrSwitchGate::Unavailable;
-    }
+    };
     match catalogue_attests_zdr_chat_model(&catalogue) {
         Some(true) => ZdrSwitchGate::Open,
+        Some(false)
+            if state.model_entitlement_admin_enabled && catalogue_hidden_count(&catalogue) > 0 =>
+        {
+            ZdrSwitchGate::ModelsNotEntitled
+        }
         Some(false) => ZdrSwitchGate::NoAttestedProvider,
         None => {
             tracing::warn!("org ZDR gate: the model catalogue answer was not a catalogue");
@@ -149,6 +206,19 @@ pub(crate) async fn zdr_enable_refusal(
                 Json(error(
                     "zdr_no_attested_provider",
                     "Zero Data Retention cannot be turned on: no AI provider in this environment has a recorded zero-retention attestation, so every interactive request would be refused.",
+                )),
+            ))
+        }
+        ZdrSwitchGate::ModelsNotEntitled => {
+            tracing::info!(
+                org_id = org_id.unwrap_or("(not created yet)"),
+                "org ZDR switch refused: the model policy leaves no attested model for this admin"
+            );
+            Some((
+                StatusCode::CONFLICT,
+                Json(error(
+                    "zdr_models_not_entitled",
+                    "Zero Data Retention cannot be turned on: this organization's model policy hides every model that has a zero-retention attestation. Allow an attested model in the model policy first.",
                 )),
             ))
         }
@@ -672,6 +742,71 @@ mod tests {
 
         let (status, body) =
             patch_settings(up.state(true), json!({"zeroDataRetention": true})).await;
+        assert_eq!(status, 200, "{body}");
+    }
+
+    /// A catalogue with no attested chat model, whose `entitlement` meta says the admin's own
+    /// policy hides `hidden` models (model-gateway adds the meta once the policy is enforced).
+    fn catalogue_hiding(hidden: u64) -> Value {
+        json!({
+            "models": [{"id": "gpt-open", "modality": "chat", "features": []}],
+            "entitlement": {"state": "role", "enforced": true, "hidden_count": hidden}
+        })
+    }
+
+    #[tokio::test]
+    async fn hidden_models_turn_no_attested_provider_into_zdr_models_not_entitled_when_the_admin_switch_is_on()
+    {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let up = Upstreams::with_default_mint("admin").await;
+        up.catalogue_answers(ResponseTemplate::new(200).set_body_json(catalogue_hiding(2)))
+            .await;
+        up.org_core_accepts(json!({"zeroDataRetention": true}), stored_zdr(true))
+            .await;
+        let mut state = up.state(true);
+        state.model_entitlement_admin_enabled = true;
+
+        let (status, body) = patch_settings(state, json!({"zeroDataRetention": true})).await;
+
+        assert_eq!(status, 409, "{body}");
+        assert_eq!(body["error"]["code"], "zdr_models_not_entitled", "{body}");
+        assert_eq!(up.org_core_requests().await, 0, "a refused switch writes nothing");
+    }
+
+    #[tokio::test]
+    async fn with_the_admin_switch_off_or_nothing_hidden_the_gate_answers_as_before() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        // Switch off: the meta is not read at all, so the refusal is byte-identical to the
+        // one from before the policy existed.
+        let up = Upstreams::with_default_mint("admin").await;
+        up.catalogue_answers(ResponseTemplate::new(200).set_body_json(catalogue_hiding(2)))
+            .await;
+        let (status, body) =
+            patch_settings(up.state(true), json!({"zeroDataRetention": true})).await;
+        assert_eq!(status, 409, "{body}");
+        assert_eq!(body["error"]["code"], "zdr_no_attested_provider", "{body}");
+
+        // Switch on but nothing hidden: the deployment really has no attested model.
+        let up = Upstreams::with_default_mint("admin").await;
+        up.catalogue_answers(ResponseTemplate::new(200).set_body_json(catalogue_hiding(0)))
+            .await;
+        let mut state = up.state(true);
+        state.model_entitlement_admin_enabled = true;
+        let (status, body) = patch_settings(state, json!({"zeroDataRetention": true})).await;
+        assert_eq!(status, 409, "{body}");
+        assert_eq!(body["error"]["code"], "zdr_no_attested_provider", "{body}");
+
+        // Hidden models do not matter once an attested one is visible.
+        let up = Upstreams::with_default_mint("admin").await;
+        let mut catalogue = catalogue_hiding(2);
+        catalogue["models"] = json!([{"id": "gpt-attested", "modality": "chat", "features": ["zdr"]}]);
+        up.catalogue_answers(ResponseTemplate::new(200).set_body_json(catalogue))
+            .await;
+        up.org_core_accepts(json!({"zeroDataRetention": true}), stored_zdr(true))
+            .await;
+        let mut state = up.state(true);
+        state.model_entitlement_admin_enabled = true;
+        let (status, body) = patch_settings(state, json!({"zeroDataRetention": true})).await;
         assert_eq!(status, 200, "{body}");
     }
 

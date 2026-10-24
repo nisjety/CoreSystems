@@ -809,6 +809,7 @@ mod tests {
             mail_task_nats_user: String::new(),
             mail_task_nats_password: String::new(),
             continue_park_form: false,
+            model_entitlement_admin_enabled: false,
             mail_task_pipeline: None,
         }
     }

@@ -379,4 +379,35 @@ describe('action registry', () => {
     expect(approve?.inputSchema.safeParse({ ...base, tool: '' }).success).toBe(false)
     expect(approve?.inputSchema.safeParse({ ...base, orgId: 'org_x' }).success).toBe(false)
   })
+
+  it('keeps org model access approval-gated, high risk and out of reach of the model', () => {
+    const action = getActionDescriptor('org.set_model_entitlement')
+    const base = {
+      orgId: 'org_1',
+      expected_revision: 0,
+      roles: { member: { allow_mode: 'listed', allow: ['gpt-5'] } },
+    }
+
+    expect(action?.ownerPlane).toBe('control')
+    expect(action?.risk).toBe('high')
+    expect(action?.requiresApproval).toBe(true)
+    // A model must not edit which models it, or its org, may use.
+    expect(isModelExecutableAction('org.set_model_entitlement')).toBe(false)
+
+    expect(action?.inputSchema.safeParse(base).success).toBe(true)
+    expect(action?.inputSchema.safeParse({ ...base, org_default: null }).success).toBe(true)
+    // The revision it was edited from is required: a write is never a blind overwrite.
+    expect(action?.inputSchema.safeParse({ orgId: 'org_1' }).success).toBe(false)
+    expect(action?.inputSchema.safeParse({ ...base, expected_revision: -1 }).success).toBe(false)
+    // Unknown fields are refused, at the top level and inside a policy.
+    expect(action?.inputSchema.safeParse({ ...base, denied: ['x'] }).success).toBe(false)
+    expect(action?.inputSchema.safeParse({
+      ...base,
+      roles: { member: { allow_mode: 'listed', denied: ['x'] } },
+    }).success).toBe(false)
+    expect(action?.inputSchema.safeParse({
+      ...base,
+      roles: { member: { allow_mode: 'some' } },
+    }).success).toBe(false)
+  })
 })

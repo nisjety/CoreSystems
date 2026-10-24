@@ -1013,6 +1013,28 @@ const orgSetQuotaInput = z.object({
   reset_period: z.enum(['daily', 'monthly', 'none']).optional(),
 })
 
+// One layer of an org model policy (WS10-S5). The limits mirror org-core's; org-core stays the
+// owner of every semantic rule (known efforts and tiers, defaults against the policy they sit in).
+// Strict, so a misspelled field is refused instead of being dropped and read as set.
+const modelPolicyLayer = z.object({
+  allow_mode: z.enum(['all', 'listed']),
+  allow: z.array(z.string().max(128)).max(500).optional(),
+  deny: z.array(z.string().max(128)).max(500).optional(),
+  max_effort: z.string().optional(),
+  min_privacy_tier: z.string().optional(),
+  defaults: z.record(
+    z.string(),
+    z.object({ model: z.string().optional(), effort: z.string().optional() }).strict(),
+  ).optional(),
+}).strict()
+
+const orgSetModelEntitlementInput = z.object({
+  orgId: z.string().min(1),
+  expected_revision: z.number().int().nonnegative(),
+  org_default: modelPolicyLayer.nullable().optional(),
+  roles: z.record(z.string().min(1), modelPolicyLayer).optional(),
+}).strict()
+
 const orgUpdateInstructionsInput = z.object({
   orgId: z.string().min(1),
   instructions: z.string().trim().optional(),
@@ -2933,6 +2955,17 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: true,
     inputSchema: orgSetQuotaInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'org.set_model_entitlement',
+    label: 'Set organization model access',
+    description: 'Replace which chat models the organization and each role may use. Takes effect for every member and is refused when it would leave a Zero Data Retention organization with no attested model.',
+    ownerPlane: 'control',
+    risk: 'high',
+    requiresApproval: true,
+    reversible: true,
+    inputSchema: orgSetModelEntitlementInput,
     outputSchema: envelopeStatusOutput,
   },
   {

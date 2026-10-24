@@ -129,6 +129,9 @@ Internal-key style service auth; identity forwarded from gateway. RBAC/member ma
 | GET | `/api/v1/organizations/:id` | Org details | internal key | HTTP | core |
 | GET | `/api/v1/organizations/:id/entitlements` | Org entitlements (feature gating/paywall) | internal key | HTTP | core |
 | GET | `/api/v1/organizations/:id/members/search` | Search members | internal key | HTTP | core |
+| GET / PUT | `/api/v1/organizations/:id/model-entitlement` | Org and per-role chat model policy (WS10-S2, ADR-0005): GET reads the set, PUT replaces it with `expected_revision` (409 `revision_conflict`); owner/admin only, checked again against org-core's membership table. The gateway serves it as `GET\|PUT /api/v1/orgs/:id/model-entitlement` behind `MODEL_ENTITLEMENT_ADMIN_ENABLED` (default off: GET answers `{enabled:false}`, writes 404) and, while org ZDR is on, refuses a PUT that leaves no attested model (409 `model_policy_leaves_no_zdr_model`, 503 fail closed) | service delegation (`org:read:self` / `org:settings:write:self`) | HTTP | core |
+| GET | `/api/v1/organizations/:id/model-entitlement/explain[?user_id=]` | Why a member sees the models they see; another member's explain is owner/admin only. Gateway: `GET /api/v1/orgs/:id/model-entitlement/explain` | service delegation (`org:read:self`) | HTTP | core |
+| GET | `/internal/orgs/:orgId/model-entitlement?user_id=` | inference-core's pull of the resolved policy; `Cache-Control: no-store` | service token (`org:model-entitlement:read:any`) | HTTP | none |
 | POST | `/api/v1/organizations/:id/plan` | Update org plan | internal key | HTTP | onboarding |
 | PATCH | `/api/v1/organizations/:id/brreg` | Verify/attach BRREG registry data | internal key | HTTP | onboarding |
 | GET | `/api/v1/brreg/search` | Search BRREG companies by name | internal key | HTTP | onboarding |
@@ -521,6 +524,7 @@ JWT Bearer via JWKS from auth-core on all non-health routes; rate-limited; dev b
 | POST | `/v1/invoke/:request_id/cancel` | Cooperative stop | JWT | HTTP | core |
 | GET | `/v1/threads/:thread_id/messages` | Reload thread history | JWT | HTTP | core |
 | GET | `/v1/models` | Model picker list + feature families | JWT | HTTP | core |
+| POST | `/v1/models/access` | Verdict of a draft model policy per catalogue model (`GetModelAccess` with `draft` + `include_catalogue`): the gateway's ZDR write guard for `PUT /api/v1/orgs/:id/model-entitlement`. Served by WS10-S4; until then the guard fails closed (503) for ZDR orgs | JWT | HTTP | none |
 | POST | `/v1/chat/documents` | Upload doc from chat into Data Plane for RAG | JWT | HTTP | core |
 | POST | `/v1/feedback` | Operator feedback (skill-promotion signal) | JWT | HTTP | core |
 | GET | `/v1/runs/:run_id/events` | Run/orchestration event stream (live agent-run UI; backs v3 action runs) | JWT | SSE | core |

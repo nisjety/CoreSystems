@@ -47,7 +47,8 @@ use super::dispatchers::{
     dispatch_notification_mark_read, dispatch_notification_update_preference,
     dispatch_orchestration_cancel_run, dispatch_orchestration_decide_approval,
     dispatch_orchestration_resume_run, dispatch_org_acknowledge_deletion,
-    dispatch_org_mark_exported, dispatch_org_restore, dispatch_org_set_quota,
+    dispatch_org_mark_exported, dispatch_org_restore, dispatch_org_set_model_entitlement,
+    dispatch_org_set_quota,
     dispatch_org_soft_delete, dispatch_org_update_instructions,
     dispatch_org_update_support_ai_mode, dispatch_org_update_zdr,
     dispatch_organization_switch_active, dispatch_ownership_revoke_document_share,
@@ -302,6 +303,9 @@ pub(super) async fn execute_action(
             dispatch_org_acknowledge_deletion(&state, &user, &body.input).await
         }
         "org.set_quota" => dispatch_org_set_quota(&state, &user, &body.input).await,
+        "org.set_model_entitlement" => {
+            dispatch_org_set_model_entitlement(&state, &user, &headers, &body.input).await
+        }
         "org.update_instructions" => {
             dispatch_org_update_instructions(&state, &user, &body.input).await
         }

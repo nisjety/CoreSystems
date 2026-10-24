@@ -67,6 +67,7 @@ use crate::domains::orgs::members::{
     invite_member as invite_org_member, remove_member as remove_org_member,
     update_member_role as update_org_member_role,
 };
+use crate::domains::orgs::model_entitlement::put_model_entitlement;
 use crate::domains::orgs::quotas::set_quota as set_org_quota;
 use crate::domains::orgs::settings::update_org_settings;
 use crate::domains::orgs::switch::switch_active_org;
@@ -4361,6 +4362,32 @@ pub(super) async fn dispatch_org_set_quota(
     )
     .await;
     owner_json_response_to_envelope("org.set_quota", user, status, resp)
+}
+
+pub(super) async fn dispatch_org_set_model_entitlement(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let org_id = ticket_string(input, "orgId");
+    if org_id.is_empty() {
+        return ticket_bad_request("org.set_model_entitlement requires a non-empty 'orgId'");
+    }
+    // Everything but the org id is the PUT body. The headers carry the session
+    // cookie the ZDR write guard needs to read the catalogue as this admin: the
+    // action goes through the same guard as the route, not around it.
+    let mut body = input.as_object().cloned().unwrap_or_default();
+    body.remove("orgId");
+    let (status, Json(resp)) = put_model_entitlement(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        PathExtractor(org_id.to_owned()),
+        Json(Value::Object(body)),
+    )
+    .await;
+    owner_json_response_to_envelope("org.set_model_entitlement", user, status, resp)
 }
 
 pub(super) async fn dispatch_org_update_instructions(
