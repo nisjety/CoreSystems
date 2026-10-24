@@ -702,6 +702,12 @@ export type CrawlWorkflowEvent = {
   pagesFailed?: number
   /** Best-estimate total work, when the producer can compute it. */
   total?: number
+  /** WS14.S3: pages the edge refused (robots or scope), from `run_*` payloads. */
+  pagesBlocked?: number
+  /** WS14.S3: links the crawl scope refused, from `run_*` payloads. */
+  linksDenied?: number
+  /** WS14.S3: denial counts by code (`denials.counts`), from `run_*` payloads. */
+  denialCounts?: Record<string, number>
 }
 
 export type CrawlWorkflowHandlers = {
@@ -807,6 +813,18 @@ function normalizeDiscoveredPage(raw: unknown): DiscoveredPage | null {
   }
 }
 
+/** WS14.S3: `payload.denials.counts` as code → count; undefined when absent or malformed. */
+function denialCountsField(payload: Record<string, unknown>): Record<string, number> | undefined {
+  const denials = asRecord(payload.denials)
+  const counts = denials ? asRecord(denials.counts) : undefined
+  if (!counts) return undefined
+  const out: Record<string, number> = {}
+  for (const [code, value] of Object.entries(counts)) {
+    if (typeof value === 'number' && Number.isFinite(value)) out[code] = value
+  }
+  return Object.keys(out).length > 0 ? out : undefined
+}
+
 function normalizeCrawlEvent(event: string | undefined, data: string): CrawlWorkflowEvent {
   if (!data) return { detail: event ?? 'Crawl updated.', event }
   try {
@@ -838,6 +856,10 @@ function normalizeCrawlEvent(event: string | undefined, data: string): CrawlWork
       ?? numberField(record, 'pages_failed')
     const total = numberField(payload, 'total')
       ?? numberField(record, 'total')
+    // WS14.S3: the scope summary of a terminal event. Absent for a legacy crawl.
+    const pagesBlocked = numberField(payload, 'pages_blocked')
+    const linksDenied = numberField(payload, 'links_denied')
+    const denialCounts = denialCountsField(payload)
 
     const detail = stringField(payload, 'url')
       ?? stringField(record, 'message')
@@ -860,6 +882,9 @@ function normalizeCrawlEvent(event: string | undefined, data: string): CrawlWork
       ...(pagesVisited !== undefined ? { pagesVisited } : {}),
       ...(pagesFailed !== undefined ? { pagesFailed } : {}),
       ...(total !== undefined ? { total } : {}),
+      ...(pagesBlocked !== undefined ? { pagesBlocked } : {}),
+      ...(linksDenied !== undefined ? { linksDenied } : {}),
+      ...(denialCounts ? { denialCounts } : {}),
     }
   } catch {
     return { detail: data, event }
