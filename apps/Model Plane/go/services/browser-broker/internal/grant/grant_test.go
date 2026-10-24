@@ -264,6 +264,19 @@ func TestSensitiveApproval_RejectsAnApprovalParentAndMismatchedSession(t *testin
 	}
 }
 
+func TestSensitiveApproval_RefusesAReadOnlyParent(t *testing.T) {
+	store := NewMemoryRepository()
+	parent := session(t, store, CreateSessionParams{Zdr: true, ReadOnly: true})
+	_, err := store.CreateScopedSensitiveApproval(ctx, ApprovalParams{
+		OrgID: "org-a", OwnerID: "user-a", SessionKey: "session-a", ScopeURL: "browser://cloud",
+		AllowedDomains: []string{"example.com"}, AllowedActions: []string{"download_ref"},
+		AllowedFrameIDs: []string{"frame-1"}, ParentGrantID: parent.ID, TTL: time.Minute,
+	})
+	if !errors.Is(err, ErrApprovalParentInvalid) {
+		t.Fatalf("approval under a read-only parent: want ErrApprovalParentInvalid, got %v", err)
+	}
+}
+
 func TestStaticPolicy(t *testing.T) {
 	policy := StaticPolicy{MaxDomains: 2}
 	for _, ok := range [][]string{

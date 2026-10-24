@@ -145,8 +145,11 @@ type Grant struct {
 	// ParentGrantID binds a sensitive approval to one ordinary run grant.
 	// It is empty only for ordinary grants, never for an approval.
 	ParentGrantID string
-	ExpiresAt     time.Time
-	Revoked       bool
+	// ReadOnly narrows the grant to the read level (WS21-S4). It is never
+	// cleared by a derive: a run grant is never wider than its parent.
+	ReadOnly  bool
+	ExpiresAt time.Time
+	Revoked   bool
 	// RevokedReason is a short caller-supplied label, never a domain or URL.
 	RevokedReason string
 }
@@ -157,6 +160,8 @@ type CreateSessionParams struct {
 	AllowedDomains                       []string
 	TTL                                  time.Duration
 	Zdr                                  bool
+	// ReadOnly issues the grant at the read level (WS21-S4).
+	ReadOnly bool
 	// Budget is an optional budget claim (see Budget). MintedAtUnix must be
 	// zero; the store stamps it.
 	Budget Budget
@@ -268,6 +273,7 @@ func (s *MemoryRepository) CreateSession(_ context.Context, p CreateSessionParam
 		SessionKey:     p.SessionKey,
 		ScopeURL:       p.ScopeURL,
 		Zdr:            p.Zdr,
+		ReadOnly:       p.ReadOnly,
 		Budget:         budget,
 		AllowedDomains: domains,
 		ExpiresAt:      s.now().Add(p.TTL),
@@ -294,7 +300,9 @@ func (s *MemoryRepository) CreateScopedSensitiveApproval(_ context.Context, p Ap
 	if err != nil {
 		return nil, err
 	}
-	if _, ok := approvalParents[parent.Kind]; !ok || parent.SessionKey != p.SessionKey || len(parent.AllowedActions) != 0 {
+	// A read-only parent carries no act authority, so an approval under it
+	// would widen the grant it came from.
+	if _, ok := approvalParents[parent.Kind]; !ok || parent.SessionKey != p.SessionKey || len(parent.AllowedActions) != 0 || parent.ReadOnly {
 		return nil, ErrApprovalParentInvalid
 	}
 	domains, err := NormalizeAllowedDomains(p.AllowedDomains)
@@ -455,6 +463,7 @@ func (s *MemoryRepository) Derive(ctx context.Context, p DeriveParams) (*Grant, 
 		SessionKey:     p.SessionKey,
 		ScopeURL:       parent.ScopeURL,
 		Zdr:            parent.Zdr,
+		ReadOnly:       parent.ReadOnly,
 		Budget:         budget,
 		AllowedDomains: domains,
 		ParentGrantID:  parent.ID,

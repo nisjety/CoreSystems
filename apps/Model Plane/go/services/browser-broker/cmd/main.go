@@ -18,6 +18,7 @@ import (
 	"github.com/triodelab/model-plane/services/browser-broker/internal/authz"
 	"github.com/triodelab/model-plane/services/browser-broker/internal/grant"
 	bbserver "github.com/triodelab/model-plane/services/browser-broker/internal/server"
+	"github.com/triodelab/model-plane/services/browser-broker/internal/sitepolicy"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
 	grpc_health_v1 "google.golang.org/grpc/health/grpc_health_v1"
@@ -111,8 +112,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	options, err := serverOptionsFromEnv(os.Getenv)
+	if err != nil {
+		slog.Error("browser-broker site policy configuration is invalid", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("browser site policy", "mode", string(options.SitePolicy))
+
 	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(authz.UnaryInterceptor(verifier)))
-	bbserver.Register(grpcServer, bbserver.NewServerWithConfig(grants, cfg))
+	bbserver.Register(grpcServer, bbserver.NewServerWithConfig(grants, cfg).WithOptions(options))
 	healthServerGRPC := health.NewServer()
 	grpc_health_v1.RegisterHealthServer(grpcServer, healthServerGRPC)
 	healthServerGRPC.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
@@ -161,6 +169,51 @@ func purgeOnce(ctx context.Context, purger grant.Purger, now time.Time) {
 	if n > 0 {
 		slog.Info("browser grants purged", "purged", n)
 	}
+}
+
+// Environment variables read by serverOptionsFromEnv.
+const (
+	envSitePolicy      = "BROWSER_BROKER_SITE_POLICY"
+	envGrantMaxTTL     = "BROWSER_GRANT_MAX_TTL"
+	envOrgCoreURL      = "ORG_CORE_URL"
+	envOrgCoreToken    = "BROWSER_BROKER_ORG_CORE_TOKEN"
+	browserBrokerSvcID = "browser-broker"
+)
+
+// serverOptionsFromEnv reads the site-policy mode, the lifetime cap and, when the
+// policy is on, the org-core client. Enforce and shadow both refuse to start
+// without the client: a broker that cannot ask org-core must not run as if it had.
+func serverOptionsFromEnv(getenv func(string) string) (bbserver.Options, error) {
+	options := bbserver.Options{SitePolicy: sitepolicy.ParseMode(getenv(envSitePolicy))}
+	maxTTL, err := grantMaxTTLFromEnv(getenv)
+	if err != nil {
+		return bbserver.Options{}, err
+	}
+	options.MaxRequestTTL = maxTTL
+	if options.SitePolicy == sitepolicy.ModeOff {
+		return options, nil
+	}
+	resolver, err := sitepolicy.NewClient(getenv(envOrgCoreURL), browserBrokerSvcID, getenv(envOrgCoreToken))
+	if err != nil {
+		return bbserver.Options{}, err
+	}
+	options.SiteResolver = resolver
+	return options, nil
+}
+
+// grantMaxTTLFromEnv reads BROWSER_GRANT_MAX_TTL as a Go duration, default 30m.
+// A value that does not parse stops the broker, like the other grant limits; the
+// result is held to the broker's grant lifetime range.
+func grantMaxTTLFromEnv(getenv func(string) string) (time.Duration, error) {
+	raw := strings.TrimSpace(getenv(envGrantMaxTTL))
+	if raw == "" {
+		return bbserver.DefaultMaxRequestTTL, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, errors.New("BROWSER_GRANT_MAX_TTL must be a duration such as 30m")
+	}
+	return min(max(d, bbserver.MinGrantTTL), bbserver.MaxGrantTTL), nil
 }
 
 // errStartupRefused means no durable database is configured and the

@@ -65,8 +65,18 @@ type AcquireGrantRequest struct {
 	// Stamped by the broker when the claim is stored; a request that sets it
 	// is refused.
 	BudgetMintedAtUnix int64 `protobuf:"varint,44,opt,name=budget_minted_at_unix,json=budgetMintedAtUnix,proto3" json:"budget_minted_at_unix,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// The Space the run belongs to (WS21-S8). The site policy reads the Space
+	// floor from it; empty outside a Space. Tag 11 (R-6 allocates 10 to zdr).
+	SpaceId string `protobuf:"bytes,11,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	// Ask for a read-only grant (WS21-S4): the broker narrows the grant to the
+	// read level and reports read_only. Until the durable store persists the
+	// flag, a read-only request is refused unless the grant is Zero Data Retention.
+	ReadOnly bool `protobuf:"varint,12,opt,name=read_only,json=readOnly,proto3" json:"read_only,omitempty"`
+	// Requested lifetime in seconds (WS21-S4). Zero uses the broker default; the
+	// broker's maximum (BROWSER_GRANT_MAX_TTL) caps it.
+	TtlSeconds    int32 `protobuf:"varint,13,opt,name=ttl_seconds,json=ttlSeconds,proto3" json:"ttl_seconds,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *AcquireGrantRequest) Reset() {
@@ -204,6 +214,27 @@ func (x *AcquireGrantRequest) GetBudgetMintedAtUnix() int64 {
 	return 0
 }
 
+func (x *AcquireGrantRequest) GetSpaceId() string {
+	if x != nil {
+		return x.SpaceId
+	}
+	return ""
+}
+
+func (x *AcquireGrantRequest) GetReadOnly() bool {
+	if x != nil {
+		return x.ReadOnly
+	}
+	return false
+}
+
+func (x *AcquireGrantRequest) GetTtlSeconds() int32 {
+	if x != nil {
+		return x.TtlSeconds
+	}
+	return 0
+}
+
 type AcquireGrantResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Grant identifier (ULID).
@@ -241,8 +272,14 @@ type AcquireGrantResponse struct {
 	// Stamped by the broker when the claim is stored; a request that sets it
 	// is refused.
 	BudgetMintedAtUnix int64 `protobuf:"varint,44,opt,name=budget_minted_at_unix,json=budgetMintedAtUnix,proto3" json:"budget_minted_at_unix,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// True when the grant is read-only (WS21-S4). Quarry must refuse a mutating
+	// action on it.
+	ReadOnly bool `protobuf:"varint,12,opt,name=read_only,json=readOnly,proto3" json:"read_only,omitempty"`
+	// Hosts the site policy dropped from the request (WS21-S4), at most nine.
+	// Empty when the policy is off or nothing was dropped.
+	DeniedDomains []string `protobuf:"bytes,13,rep,name=denied_domains,json=deniedDomains,proto3" json:"denied_domains,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *AcquireGrantResponse) Reset() {
@@ -385,6 +422,20 @@ func (x *AcquireGrantResponse) GetBudgetMintedAtUnix() int64 {
 		return x.BudgetMintedAtUnix
 	}
 	return 0
+}
+
+func (x *AcquireGrantResponse) GetReadOnly() bool {
+	if x != nil {
+		return x.ReadOnly
+	}
+	return false
+}
+
+func (x *AcquireGrantResponse) GetDeniedDomains() []string {
+	if x != nil {
+		return x.DeniedDomains
+	}
+	return nil
 }
 
 type RevokeGrantRequest struct {
@@ -653,8 +704,11 @@ type ValidateGrantResponse struct {
 	// Stamped by the broker when the claim is stored; a request that sets it
 	// is refused.
 	BudgetMintedAtUnix int64 `protobuf:"varint,44,opt,name=budget_minted_at_unix,json=budgetMintedAtUnix,proto3" json:"budget_minted_at_unix,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// True when the grant is read-only (WS21-S4). Consumers must refuse a
+	// mutating action on it.
+	ReadOnly      bool `protobuf:"varint,13,opt,name=read_only,json=readOnly,proto3" json:"read_only,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ValidateGrantResponse) Reset() {
@@ -804,6 +858,13 @@ func (x *ValidateGrantResponse) GetBudgetMintedAtUnix() int64 {
 		return x.BudgetMintedAtUnix
 	}
 	return 0
+}
+
+func (x *ValidateGrantResponse) GetReadOnly() bool {
+	if x != nil {
+		return x.ReadOnly
+	}
+	return false
 }
 
 type DeriveRunGrantRequest struct {
@@ -1104,7 +1165,7 @@ var File_model_plane_v1_browser_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\n" +
-	"\x1cmodel_plane/v1/browser.proto\x12\x0emodel_plane.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xd6\x04\n" +
+	"\x1cmodel_plane/v1/browser.proto\x12\x0emodel_plane.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xaf\x05\n" +
 	"\x13AcquireGrantRequest\x12\x1f\n" +
 	"\vsession_key\x18\x01 \x01(\tR\n" +
 	"sessionKey\x12\x12\n" +
@@ -1122,7 +1183,11 @@ const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\x10budget_max_steps\x18) \x01(\x05R\x0ebudgetMaxSteps\x12/\n" +
 	"\x14budget_max_runtime_s\x18* \x01(\x05R\x11budgetMaxRuntimeS\x12#\n" +
 	"\rbudget_source\x18+ \x01(\tR\fbudgetSource\x121\n" +
-	"\x15budget_minted_at_unix\x18, \x01(\x03R\x12budgetMintedAtUnix\"\x91\x05\n" +
+	"\x15budget_minted_at_unix\x18, \x01(\x03R\x12budgetMintedAtUnix\x12\x19\n" +
+	"\bspace_id\x18\v \x01(\tR\aspaceId\x12\x1b\n" +
+	"\tread_only\x18\f \x01(\bR\breadOnly\x12\x1f\n" +
+	"\vttl_seconds\x18\r \x01(\x05R\n" +
+	"ttlSeconds\"\xd5\x05\n" +
 	"\x14AcquireGrantResponse\x12\x19\n" +
 	"\bgrant_id\x18\x01 \x01(\tR\agrantId\x12\x1a\n" +
 	"\bendpoint\x18\x02 \x01(\tR\bendpoint\x129\n" +
@@ -1141,7 +1206,9 @@ const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\x10budget_max_steps\x18) \x01(\x05R\x0ebudgetMaxSteps\x12/\n" +
 	"\x14budget_max_runtime_s\x18* \x01(\x05R\x11budgetMaxRuntimeS\x12#\n" +
 	"\rbudget_source\x18+ \x01(\tR\fbudgetSource\x121\n" +
-	"\x15budget_minted_at_unix\x18, \x01(\x03R\x12budgetMintedAtUnix\"G\n" +
+	"\x15budget_minted_at_unix\x18, \x01(\x03R\x12budgetMintedAtUnix\x12\x1b\n" +
+	"\tread_only\x18\f \x01(\bR\breadOnly\x12%\n" +
+	"\x0edenied_domains\x18\r \x03(\tR\rdeniedDomains\"G\n" +
 	"\x12RevokeGrantRequest\x12\x19\n" +
 	"\bgrant_id\x18\x01 \x01(\tR\agrantId\x12\x16\n" +
 	"\x06reason\x18\x02 \x01(\tR\x06reason\"/\n" +
@@ -1151,7 +1218,7 @@ const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\x15BrowserHealthResponse\x12\x16\n" +
 	"\x06status\x18\x01 \x01(\tR\x06status\"1\n" +
 	"\x14ValidateGrantRequest\x12\x19\n" +
-	"\bgrant_id\x18\x01 \x01(\tR\agrantId\"\xa9\x05\n" +
+	"\bgrant_id\x18\x01 \x01(\tR\agrantId\"\xc6\x05\n" +
 	"\x15ValidateGrantResponse\x12\x19\n" +
 	"\bgrant_id\x18\x01 \x01(\tR\agrantId\x12\x16\n" +
 	"\x06active\x18\x02 \x01(\bR\x06active\x129\n" +
@@ -1171,7 +1238,8 @@ const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\x10budget_max_steps\x18) \x01(\x05R\x0ebudgetMaxSteps\x12/\n" +
 	"\x14budget_max_runtime_s\x18* \x01(\x05R\x11budgetMaxRuntimeS\x12#\n" +
 	"\rbudget_source\x18+ \x01(\tR\fbudgetSource\x121\n" +
-	"\x15budget_minted_at_unix\x18, \x01(\x03R\x12budgetMintedAtUnix\"\xb8\x03\n" +
+	"\x15budget_minted_at_unix\x18, \x01(\x03R\x12budgetMintedAtUnix\x12\x1b\n" +
+	"\tread_only\x18\r \x01(\bR\breadOnly\"\xb8\x03\n" +
 	"\x15DeriveRunGrantRequest\x12&\n" +
 	"\x0fparent_grant_id\x18\x01 \x01(\tR\rparentGrantId\x12\x1f\n" +
 	"\vsession_key\x18\x02 \x01(\tR\n" +

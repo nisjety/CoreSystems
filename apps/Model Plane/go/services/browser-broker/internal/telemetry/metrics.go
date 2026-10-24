@@ -23,6 +23,12 @@ var (
 	// GrantStoreErrorsTotal counts grant store failures (the database, not a
 	// refused grant), labelled by op only: never an org, owner or domain.
 	GrantStoreErrorsTotal metric.Int64Counter
+	// GrantsDeniedTotal counts grants the broker refused, labelled by reason
+	// only: never an org, owner or domain.
+	GrantsDeniedTotal metric.Int64Counter
+	// SitePolicyVerdictsTotal counts org-core site verdicts at mint, labelled by
+	// outcome (allowed, narrowed, denied, shadow_would_deny, policy_unavailable).
+	SitePolicyVerdictsTotal metric.Int64Counter
 )
 
 func init() {
@@ -50,5 +56,13 @@ func init() {
 	GrantStoreErrorsTotal, _ = meter.Int64Counter(
 		"browser_broker_grant_store_errors_total",
 		metric.WithDescription("Total browser grant store failures, labelled by op."),
+	)
+	GrantsDeniedTotal, _ = meter.Int64Counter(
+		"browser_broker_grants_denied_total",
+		metric.WithDescription("Total browser grants refused by the broker, labelled by reason."),
+	)
+	SitePolicyVerdictsTotal, _ = meter.Int64Counter(
+		"browser_broker_site_policy_verdicts_total",
+		metric.WithDescription("Total org-core browser site verdicts at grant mint, labelled by outcome."),
 	)
 }

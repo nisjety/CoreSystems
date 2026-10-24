@@ -10,9 +10,11 @@ import (
 	"github.com/triodelab/model-plane/pkg/authctx"
 	"github.com/triodelab/model-plane/services/browser-broker/internal/authz"
 	"github.com/triodelab/model-plane/services/browser-broker/internal/grant"
+	"github.com/triodelab/model-plane/services/browser-broker/internal/sitepolicy"
 	"github.com/triodelab/model-plane/services/browser-broker/internal/telemetry"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -26,6 +28,26 @@ type Server struct {
 	cfg       Config
 	baseURL   string
 	principal func(context.Context) (authctx.Principal, error)
+	options   Options
+}
+
+// Options is the optional wiring a broker main sets after NewServerWithConfig.
+// The zero value is the default: the site policy is off and a requested
+// lifetime is capped at DefaultMaxRequestTTL.
+type Options struct {
+	// SitePolicy and SiteResolver say how org-core's site decision is read at
+	// mint (WS21-S4). Off makes no call.
+	SitePolicy   sitepolicy.Mode
+	SiteResolver sitepolicy.Resolver
+	// MaxRequestTTL caps a caller's requested grant lifetime
+	// (BROWSER_GRANT_MAX_TTL).
+	MaxRequestTTL time.Duration
+}
+
+// WithOptions sets the optional wiring and returns the server.
+func (s *Server) WithOptions(options Options) *Server {
+	s.options = options
+	return s
 }
 
 // NewServer constructs a Server with the default Config.
@@ -101,16 +123,37 @@ func (s *Server) AcquireGrant(ctx context.Context, req *AcquireGrantRequest) (*A
 	if len(allowedActions) != 0 && budget.IsSet() {
 		return nil, status.Error(codes.InvalidArgument, "a sensitive browser approval cannot carry a budget claim")
 	}
+	readOnly := req.GetReadOnly()
+	if readOnly && len(allowedActions) != 0 {
+		return nil, status.Error(codes.InvalidArgument, "a sensitive browser approval cannot be read-only")
+	}
+	// The durable store has no read-only column yet, so a durable grant would
+	// report full access. Refuse rather than drop the narrowing silently.
+	if readOnly && !zdr {
+		return nil, status.Error(codes.FailedPrecondition, "a read-only browser grant must be Zero Data Retention until the durable store persists it")
+	}
+	var deniedDomains []string
 	var g *grant.Grant
 	if len(allowedActions) == 0 {
+		// ttl_seconds only shortens a run grant. A sensitive approval is single-action
+		// authority and always takes the configured TTL, whatever the caller asks for.
+		ttl, ttlErr := s.requestTTL(req.GetTtlSeconds())
+		if ttlErr != nil {
+			return nil, ttlErr
+		}
+		allowedDomains, deniedDomains, err = s.applySitePolicy(ctx, principal, allowedDomains, readOnly)
+		if err != nil {
+			return nil, err
+		}
 		g, err = s.grants.CreateSession(ctx, grant.CreateSessionParams{
 			OrgID:             principal.OrganizationID,
 			OwnerID:           principal.ActorID,
 			SessionKey:        req.GetSessionKey(),
 			ScopeURL:          scopeURL,
 			AllowedDomains:    allowedDomains,
-			TTL:               s.cfg.TTL,
+			TTL:               ttl,
 			Zdr:               zdr,
+			ReadOnly:          readOnly,
 			Budget:            budget,
 			MaxActivePerOwner: s.cfg.MaxActivePerOwner,
 		})
@@ -156,6 +199,8 @@ func (s *Server) AcquireGrant(ctx context.Context, req *AcquireGrantRequest) (*A
 		BudgetMaxRuntimeS:  g.Budget.MaxRuntimeS,
 		BudgetSource:       g.Budget.Source,
 		BudgetMintedAtUnix: g.Budget.MintedAtUnix,
+		ReadOnly:           g.ReadOnly,
+		DeniedDomains:      deniedDomains,
 	}, nil
 }
 
@@ -214,6 +259,7 @@ func (s *Server) ValidateGrant(ctx context.Context, req *ValidateGrantRequest) (
 		BudgetMaxRuntimeS:  g.Budget.MaxRuntimeS,
 		BudgetSource:       g.Budget.Source,
 		BudgetMintedAtUnix: g.Budget.MintedAtUnix,
+		ReadOnly:           g.ReadOnly,
 	}, nil
 }
 
@@ -261,16 +307,16 @@ func (s *Server) DeriveRunGrant(ctx context.Context, req *DeriveRunGrantRequest)
 		return nil, err
 	}
 	g, err := s.grants.Derive(ctx, grant.DeriveParams{
-		OrgID:             principal.OrganizationID,
-		OwnerID:           authz.OwnerFilter(principal),
-		ParentGrantID:     req.GetParentGrantId(),
-		SessionKey:        sessionKey,
-		RunDomains:        req.GetAllowedDomains(),
-		TTL:               ttl,
-		PrincipalZdr:      principal.ZeroDataRetention,
-		Budget:            budget,
-		MaxRunDomains:     s.cfg.MaxRunDomains,
-		Policy:            s.cfg.Policy,
+		OrgID:         principal.OrganizationID,
+		OwnerID:       authz.OwnerFilter(principal),
+		ParentGrantID: req.GetParentGrantId(),
+		SessionKey:    sessionKey,
+		RunDomains:    req.GetAllowedDomains(),
+		TTL:           ttl,
+		PrincipalZdr:  principal.ZeroDataRetention,
+		Budget:        budget,
+		MaxRunDomains: s.cfg.MaxRunDomains,
+		Policy:        s.cfg.Policy,
 	})
 	if err != nil {
 		telemetry.GrantsIssuedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", grantOutcome(err))))
@@ -352,4 +398,135 @@ func scopeURLForMode(mode string) (string, error) {
 	default:
 		return "", status.Errorf(codes.InvalidArgument, "unsupported browser mode %q", mode)
 	}
+}
+
+// DefaultMaxRequestTTL caps a caller's requested grant lifetime when
+// BROWSER_GRANT_MAX_TTL is unset.
+const DefaultMaxRequestTTL = 30 * time.Minute
+
+// maxDeniedDomainsReported bounds the hosts a refusal or a narrowed grant names:
+// the start host and at most eight more, the most a grant's fence may hold.
+const maxDeniedDomainsReported = 9
+
+// siteDeniedReason is the ErrorInfo reason of a refusal by the site policy.
+const siteDeniedReason = "BROWSER_SITE_DENIED"
+
+// requestTTL resolves a caller's requested lifetime. Zero is the configured
+// default; a value under the minimum is refused, and one above the cap is
+// clamped to it.
+func (s *Server) requestTTL(seconds int32) (time.Duration, error) {
+	if seconds == 0 {
+		return s.cfg.TTL, nil
+	}
+	if seconds < 0 || time.Duration(seconds)*time.Second < MinGrantTTL {
+		return 0, status.Error(codes.InvalidArgument, "ttl_seconds is below the minimum grant lifetime")
+	}
+	limit := s.options.MaxRequestTTL
+	if limit <= 0 {
+		limit = DefaultMaxRequestTTL
+	}
+	return min(time.Duration(seconds)*time.Second, limit), nil
+}
+
+// applySitePolicy narrows an ordinary grant's hosts to what org-core allows for
+// this caller at the requested level. It returns the hosts to grant and the
+// hosts it dropped. Off makes no call. Shadow counts the verdict and grants as
+// asked. Enforce grants only what is allowed, and refuses the mint when nothing
+// is left or org-core cannot be read: a broker must not mint from a policy it
+// cannot see.
+func (s *Server) applySitePolicy(ctx context.Context, principal authctx.Principal, domains []string, readOnly bool) ([]string, []string, error) {
+	mode := s.options.SitePolicy
+	if mode == sitepolicy.ModeOff || mode == "" {
+		return domains, nil, nil
+	}
+	shadow := mode == sitepolicy.ModeShadow
+	resolution, err := s.resolveSites(ctx, principal, domains)
+	if err != nil {
+		recordSiteVerdict(ctx, "policy_unavailable")
+		if shadow {
+			return domains, nil, nil
+		}
+		telemetry.GrantsDeniedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "site_policy_unavailable")))
+		return nil, nil, status.Error(codes.Unavailable, sitepolicy.ErrUnavailable.Error())
+	}
+	allowed, denied := splitByPolicy(domains, resolution, readOnly)
+	switch {
+	case len(denied) == 0:
+		recordSiteVerdict(ctx, "allowed")
+		return domains, nil, nil
+	case shadow:
+		recordSiteVerdict(ctx, "shadow_would_deny")
+		return domains, nil, nil
+	case len(allowed) == 0:
+		recordSiteVerdict(ctx, "denied")
+		telemetry.GrantsDeniedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "site_policy")))
+		return nil, nil, siteDeniedError(denied)
+	default:
+		recordSiteVerdict(ctx, "narrowed")
+		return allowed, reportedDenied(denied), nil
+	}
+}
+
+func (s *Server) resolveSites(ctx context.Context, principal authctx.Principal, domains []string) (sitepolicy.Resolution, error) {
+	if s.options.SiteResolver == nil {
+		return sitepolicy.Resolution{}, sitepolicy.ErrUnavailable
+	}
+	return s.options.SiteResolver.Resolve(ctx, principal.OrganizationID, authz.OwnerFilter(principal), domains)
+}
+
+// splitByPolicy keeps the hosts org-core allows at the requested level. A read
+// grant takes read and act hosts (the grant is then read-only); an act grant
+// takes act hosts only. Ask and deny are dropped: an ask host has no member
+// choice yet, and the member must be asked before anything runs. A host that
+// org-core did not answer for is dropped too.
+func splitByPolicy(domains []string, resolution sitepolicy.Resolution, readOnly bool) (allowed, denied []string) {
+	effective := make(map[string]string, len(resolution.Decisions))
+	for _, decision := range resolution.Decisions {
+		effective[decision.Host] = decision.Effective
+	}
+	for _, host := range domains {
+		if permitsLevel(effective[host], readOnly) {
+			allowed = append(allowed, host)
+		} else {
+			denied = append(denied, host)
+		}
+	}
+	return allowed, denied
+}
+
+func permitsLevel(effective string, readOnly bool) bool {
+	switch effective {
+	case sitepolicy.EffectiveAct:
+		return true
+	case sitepolicy.EffectiveRead:
+		return readOnly
+	default:
+		return false
+	}
+}
+
+func reportedDenied(denied []string) []string {
+	if len(denied) > maxDeniedDomainsReported {
+		denied = denied[:maxDeniedDomainsReported]
+	}
+	return append([]string(nil), denied...)
+}
+
+// siteDeniedError refuses a mint the site policy allows for none of its hosts.
+// The denied hosts ride in the error details, not the message, so a log line
+// that carries the message carries no host.
+func siteDeniedError(denied []string) error {
+	st := status.New(codes.PermissionDenied, "browser site policy denies every requested domain")
+	withDetails, err := st.WithDetails(&errdetails.ErrorInfo{
+		Reason:   siteDeniedReason,
+		Metadata: map[string]string{"denied_domains": strings.Join(reportedDenied(denied), ",")},
+	})
+	if err != nil {
+		return st.Err()
+	}
+	return withDetails.Err()
+}
+
+func recordSiteVerdict(ctx context.Context, outcome string) {
+	telemetry.SitePolicyVerdictsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", outcome)))
 }

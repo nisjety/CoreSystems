@@ -77,6 +77,19 @@ message AcquireGrantRequest {
   // Stamped by the broker when the claim is stored; a request that sets it
   // is refused.
   int64 budget_minted_at_unix = 44;
+
+  // The Space the run belongs to (WS21-S8). The site policy reads the Space
+  // floor from it; empty outside a Space. Tag 11 (R-6 allocates 10 to zdr).
+  string space_id = 11;
+
+  // Ask for a read-only grant (WS21-S4): the broker narrows the grant to the
+  // read level and reports read_only. Until the durable store persists the
+  // flag, a read-only request is refused unless the grant is Zero Data Retention.
+  bool read_only = 12;
+
+  // Requested lifetime in seconds (WS21-S4). Zero uses the broker default; the
+  // broker's maximum (BROWSER_GRANT_MAX_TTL) caps it.
+  int32 ttl_seconds = 13;
 }
 
 message AcquireGrantResponse {
@@ -121,6 +134,14 @@ message AcquireGrantResponse {
   // Stamped by the broker when the claim is stored; a request that sets it
   // is refused.
   int64 budget_minted_at_unix = 44;
+
+  // True when the grant is read-only (WS21-S4). Quarry must refuse a mutating
+  // action on it.
+  bool read_only = 12;
+
+  // Hosts the site policy dropped from the request (WS21-S4), at most nine.
+  // Empty when the policy is off or nothing was dropped.
+  repeated string denied_domains = 13;
 }
 
 message RevokeGrantRequest {
@@ -195,6 +216,10 @@ message ValidateGrantResponse {
   // Stamped by the broker when the claim is stored; a request that sets it
   // is refused.
   int64 budget_minted_at_unix = 44;
+
+  // True when the grant is read-only (WS21-S4). Consumers must refuse a
+  // mutating action on it.
+  bool read_only = 13;
 }
 
 message DeriveRunGrantRequest {
