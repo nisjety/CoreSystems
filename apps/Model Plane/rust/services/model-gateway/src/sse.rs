@@ -1017,6 +1017,17 @@ pub async fn invoke_stream_sse(
             if let Some(refusal) = mp_contracts::zdr_refusal::Refusal::from_body(&error) {
                 return zdr_refusal_stream(&request_id, refusal);
             }
+            // A model the caller may not use (today the deployment allowlist)
+            // arrives nested, `{"error": {code, message, ...}}`. Its code, text
+            // and retry flag are the frame's; the flat shape below stays as it was.
+            if let Some(refusal) = mp_contracts::model_entitlement::Refusal::from_body(&error) {
+                return error_stream(
+                    &request_id,
+                    refusal.code(),
+                    &refusal.message(),
+                    refusal.retryable(),
+                );
+            }
             let message = error
                 .get("error")
                 .and_then(Value::as_str)

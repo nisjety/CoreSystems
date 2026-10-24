@@ -92,6 +92,29 @@ fn load_allowed_models() -> Option<Vec<String>> {
     })
 }
 
+/// The typed refusal for a model the operator's deployment allowlist
+/// (`ALLOWED_MODELS`) leaves out: a 403 whose body is the model-entitlement
+/// catalogue's `model_not_entitled` with reason `deployment_allowlist`, not the
+/// untyped 400 it used to be. `None` when no allowlist is set, the list is
+/// empty, the model is unspecified (inference-core resolves it to a provider
+/// default downstream, so there is nothing to check yet) or the model is on the
+/// list. The body names the model id and the reason, never the list itself.
+fn deployment_allowlist_refusal(
+    allowed: Option<&[String]>,
+    model: &str,
+) -> Option<(StatusCode, Json<serde_json::Value>)> {
+    let allowed = allowed?;
+    if model.is_empty() || allowed.is_empty() || allowed.iter().any(|entry| entry == model) {
+        return None;
+    }
+    let refusal = mp_contracts::model_entitlement::Refusal::not_entitled(
+        model,
+        mp_contracts::model_entitlement::Reason::DeploymentAllowlist,
+    );
+    let status = StatusCode::from_u16(refusal.http_status()).unwrap_or(StatusCode::FORBIDDEN);
+    Some((status, Json(refusal.json_body())))
+}
+
 /// Load the default model from `DEFAULT_MODEL` env var. Shared with the SSE
 /// stream path so it resolves an unspecified model identically to the unary
 /// path. When unset, returns an EMPTY string on purpose: inference-core's
@@ -370,18 +393,8 @@ fn normalize_with(
     // Validate model against allowlist — but skip when the model is unspecified
     // (empty): inference-core resolves it to a provider default downstream, so
     // there is nothing to validate against the allowlist yet.
-    if let Some(allowed) = load_allowed_models() {
-        if !model.is_empty() && !allowed.is_empty() && !allowed.contains(&model) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": format!(
-                        "model '{}' is not in the allowed list: {:?}",
-                        model, allowed
-                    )
-                })),
-            ));
-        }
+    if let Some(refusal) = deployment_allowlist_refusal(load_allowed_models().as_deref(), &model) {
+        return Err(refusal);
     }
 
     if let Some(max_cost) = req.max_cost_usd {
@@ -442,6 +455,51 @@ fn normalize_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn listed(models: &[&str]) -> Vec<String> {
+        models.iter().map(|model| (*model).to_owned()).collect()
+    }
+
+    #[test]
+    fn a_model_off_the_deployment_allowlist_is_a_typed_403_naming_the_model_and_the_reason() {
+        let allowed = listed(&["a"]);
+        let (status, Json(body)) =
+            deployment_allowlist_refusal(Some(&allowed), "b").expect("b is not on the list");
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "model_not_entitled");
+        assert_eq!(body["error"]["retryable"], false);
+        assert_eq!(body["error"]["action"], "choose_another_model");
+        assert_eq!(body["error"]["details"]["model"], "b");
+        assert_eq!(body["error"]["details"]["reason"], "deployment_allowlist");
+        // The list itself is the operator's, not the caller's.
+        assert!(!body.to_string().contains("\"a\""));
+        assert_eq!(
+            mp_contracts::model_entitlement::Refusal::from_body(&body)
+                .and_then(|refusal| refusal.reason()),
+            Some(mp_contracts::model_entitlement::Reason::DeploymentAllowlist)
+        );
+    }
+
+    #[test]
+    fn the_deployment_allowlist_refuses_nothing_it_did_not_refuse_before() {
+        let allowed = listed(&["a", "b"]);
+        assert!(
+            deployment_allowlist_refusal(None, "z").is_none(),
+            "no list set"
+        );
+        assert!(
+            deployment_allowlist_refusal(Some(&[]), "z").is_none(),
+            "an empty list"
+        );
+        assert!(
+            deployment_allowlist_refusal(Some(&allowed), "").is_none(),
+            "no model named"
+        );
+        assert!(
+            deployment_allowlist_refusal(Some(&allowed), "b").is_none(),
+            "a listed model"
+        );
+    }
 
     fn make_request(content: &str, model: Option<&str>) -> InvokeRequest {
         InvokeRequest {

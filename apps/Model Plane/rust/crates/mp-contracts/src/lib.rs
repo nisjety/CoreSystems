@@ -6,6 +6,7 @@ pub mod durable_gate;
 pub mod effect_ledger;
 pub mod lifecycle_notice;
 pub mod loop_fold;
+pub mod model_entitlement;
 pub mod office_verification;
 pub mod park_reason;
 pub mod prompt_tier;

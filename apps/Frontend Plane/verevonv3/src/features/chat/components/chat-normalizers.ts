@@ -11,6 +11,11 @@ import {
   type RecalledMemory,
 } from '@/shared/api/chat-client'
 import {
+  isModelEntitlementCode,
+  type ModelEntitlementCode,
+  modelEntitlementPresentation,
+} from '@/shared/api/model-entitlement-refusals'
+import {
   isZdrCode,
   type Translate,
   type ZdrRefusalAction,
@@ -387,6 +392,27 @@ function zdrStreamPresentation(code: string, tr: Translate, feature: string | un
 }
 
 /**
+ * A model the organisation does not allow this reader, or an answer about that
+ * which could not be read. Both are refused before a model runs, so nothing was
+ * saved and what streamed is not the answer. A refusal, not an outage. The words
+ * are the catalogue's, in the reader's language; the server's own text is never
+ * shown. Retry is the button for the unavailable answer; for a model that is not
+ * available the same turn would be refused again, so the words say what to change.
+ */
+function modelEntitlementStreamPresentation(
+  code: ModelEntitlementCode,
+  tr: Translate,
+): StreamFailurePresentation {
+  const shown = modelEntitlementPresentation(code, tr)
+  return {
+    message: shown.next === null ? shown.message : `${shown.message} ${shown.next}`,
+    unsaved: true,
+    unavailable: false,
+    action: shown.action === 'retry' ? 'retry' : 'none',
+  }
+}
+
+/**
  * Presentation for a server-reported stream failure, by its code.
  *
  * Only the codes that change what the reader must be told are named; every
@@ -436,6 +462,7 @@ export function streamFailurePresentation(
   // Every zero-retention code, the ones this SPA does not know included: the
   // server's text for them is English operator wording, never shown.
   if (code !== undefined && isZdrCode(code)) return zdrStreamPresentation(code, tr, details.feature)
+  if (isModelEntitlementCode(code)) return modelEntitlementStreamPresentation(code, tr)
   const server = serverMessage.trim()
   const now = details.now ?? Date.now()
   switch (code) {
