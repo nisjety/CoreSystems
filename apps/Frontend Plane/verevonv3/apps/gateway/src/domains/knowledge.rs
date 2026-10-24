@@ -3,7 +3,7 @@ pub(crate) mod documents;
 mod imports;
 mod operating_map;
 pub(crate) mod products;
-mod quarry;
+pub(crate) mod quarry;
 mod retrieval;
 pub(crate) mod shared;
 pub(crate) mod sync;

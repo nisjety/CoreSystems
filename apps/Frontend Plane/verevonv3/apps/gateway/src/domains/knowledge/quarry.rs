@@ -698,7 +698,7 @@ fn invalid_crawl(message: String) -> Response {
         .into_response()
 }
 
-fn normalize_crawl_body(input: &Value) -> Result<Value, String> {
+pub(crate) fn normalize_crawl_body(input: &Value) -> Result<Value, String> {
     let raw_url = input
         .get("url")
         .and_then(Value::as_str)
@@ -724,6 +724,13 @@ fn normalize_crawl_body(input: &Value) -> Result<Value, String> {
     // Quarry defaults to NEVER when absent, so a missing flag = working-set only.
     if let Some(ingest) = input.get("ingest").and_then(Value::as_bool) {
         body["ingest"] = json!(ingest);
+    }
+    // WS14.S3: the two scope switches, camel or snake case. Absent means the edge default (false).
+    if let Some(allow) = input.get("allowSubdomains").or_else(|| input.get("allow_subdomains")).and_then(Value::as_bool) {
+        body["allow_subdomains"] = json!(allow);
+    }
+    if let Some(allow) = input.get("allowExternalLinks").or_else(|| input.get("allow_external_links")).and_then(Value::as_bool) {
+        body["allow_external_links"] = json!(allow);
     }
 
     Ok(body)
@@ -1084,6 +1091,28 @@ fn crawl_job_status(value: &Value) -> Option<&str> {
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
+
+    /// WS14.S3: the scope switches are forwarded in snake case from either spelling, and
+    /// are absent when the caller sends neither.
+    #[test]
+    fn crawl_body_forwards_scope_switches_in_both_spellings() {
+        let camel = normalize_crawl_body(&json!({
+            "url": "https://example.com/",
+            "allowSubdomains": true,
+            "allowExternalLinks": true,
+        }))
+        .unwrap();
+        assert_eq!(camel["allow_subdomains"], json!(true));
+        assert_eq!(camel["allow_external_links"], json!(true));
+
+        let snake = normalize_crawl_body(&json!({
+            "url": "https://example.com/",
+            "allow_subdomains": false,
+        }))
+        .unwrap();
+        assert_eq!(snake["allow_subdomains"], json!(false));
+        assert!(snake.get("allow_external_links").is_none());
+    }
 
     #[tokio::test]
     async fn start_crawl_maps_backlog_429() {

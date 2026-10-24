@@ -320,21 +320,23 @@ pub(super) async fn dispatch_crawl_site(
     headers: &HeaderMap,
     input: &Value,
 ) -> Response {
-    let target = input.get("url").and_then(|v| v.as_str()).unwrap_or("");
-    let org_id = crate::upstream::authorized_org_id(state, user).await;
     let cookie = cookie_header(headers);
     let token = quarry_token(state, user, &cookie).await;
 
     let url = format!("{}/v1/crawl", state.quarry_edge_url);
-    let mut crawl_body = json!({ "url": target, "org_id": org_id });
-    if let Some(max_pages) = input.get("maxPages").and_then(|v| v.as_u64()) {
-        crawl_body["max_pages"] = json!(max_pages);
-    }
-    // Phase 6 selective ingest: forward the resolved decision (default NEVER at
-    // quarry when absent → working-set only).
-    if let Some(ingest) = input.get("ingest").and_then(|v| v.as_bool()) {
-        crawl_body["ingest"] = json!(ingest);
-    }
+    // WS14.S3: the body goes through the knowledge route's normaliser, so the URL is checked
+    // (SSRF) and the page bound clamped. The org id is not sent: the edge takes it from the
+    // verified token. Ingest and the scope switches are forwarded when present.
+    let crawl_body = match crate::domains::knowledge::quarry::normalize_crawl_body(input) {
+        Ok(body) => body,
+        Err(message) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": { "code": "invalid_crawl_request", "message": message } })),
+            )
+                .into_response();
+        }
+    };
 
     let (status, Json(resp)) = proxy_bearer_json(
         state,
