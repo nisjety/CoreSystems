@@ -314,6 +314,9 @@ fn project_scheduled_step_authority(
         step_index: req.step_index,
         idempotency_key,
         run_status: row.run_status,
+        // The contract fields (WS20-S5) are not read from the run's metadata yet: empty means
+        // "no contract" to every consumer, which is today's behaviour.
+        ..Default::default()
     })
 }
 
@@ -626,6 +629,9 @@ impl RunService for RunServiceImpl {
             org_id,
             goal,
             status,
+            // The contract body, digest and expiry (WS20-S5) are not served yet: empty means
+            // "no contract".
+            ..Default::default()
         }))
     }
 
