@@ -1837,3 +1837,12 @@ What it is: a crawl or batch page (`POST /v1/internal/run_page` with a `crawl` c
 - Metrics (content-free): `quarry_robots_decisions_total{mode,outcome}` (`allowed`, `denied`, `unreachable`, `would_deny`, `would_unreachable`), `quarry_robots_cache_entries`. No host, path or URL in a label or a log line.
 - Not built or not run: every test of this slice (written, compile-checked only), the e2e evidence (`scripts/e2e/crawl-scope-robots.sh --expect enforce`: one `GET /robots.txt`, no `GET /private/secret`, starts at least 2 s apart, the 503 and metadata-redirect legs), the Knowledge composer summary row, and the `enforce` flip itself (X-10).
 - Test phase (not yet run): `cargo test -p quarry-transform robots`; `cargo test -p quarry-runtime robots_cache robots_gate host_scheduler pipeline::robots_gate_tests`; `cargo test -p quarry-runtime --test robots_gate_ssrf`; `cargo test -p quarry-edge --test crawl_scope_robots`.
+
+## Crawl request contract (WS14.S6, unit W2-U65, built dark, NOT run)
+
+- Flag: `QUARRY_EDGE__CRAWL_REQUEST_VALIDATION=lenient` (default) or `strict`. Unknown keys are warnings in lenient and 400 in strict. Reserved keys are 400 in both modes.
+- A bad request returns 400 `BAD_REQUEST` with `details.fields[] {path, code, message}`. Look up the codes in `docs/CRAWL_SCOPE_ROBOTS.md` section 12.
+- `ignore_robots_txt: true` returns 403 with `details.reason = policy_denied` for every request until WS14.S7 is built.
+- Rollback: set the flag back to lenient and restart the edge. The flag does not switch off the unsupported_option or policy_denied refusals; those stay on until their options are built, so a caller that sent them gets a 400 or 403 rather than a silent drop.
+- Operator check: `request_warnings` in the crawl ack names the ignored keys (names only, never values).
+- Test phase (not yet run): `cargo test -p quarry-edge crawl_request`; `cargo test --manifest-path apps/gateway/Cargo.toml normalize_crawl`; `pnpm vitest --run` on the action-registry guard test once it exists.

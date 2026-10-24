@@ -6215,6 +6215,54 @@ components:
           description: >-
             WS14.S3. Follow links to hosts unrelated to the seed host. Absent means false.
             The effective scope is echoed in `effective`.
+        include_paths:
+          type: array
+          maxItems: 100
+          items:
+            type: string
+            maxLength: 512
+          description: >-
+            WS14.S6. Patterns a link must match at least one of (glob by default; `re:`
+            prefixes a regular expression). At most 100 patterns across include_paths and
+            exclude_paths together, 512 characters each, 8192 in total. A bad pattern is a 400
+            with `details.fields[]` (path, code `invalid_pattern`). Enforced only when the
+            scope mode is enforce; under observe the response carries `patterns_reported_not_enforced`.
+        exclude_paths:
+          type: array
+          maxItems: 100
+          items:
+            type: string
+            maxLength: 512
+          description: >-
+            WS14.S6. Patterns that deny a link; they beat include_paths. Same caps as include_paths.
+        deny_extensions:
+          type: array
+          maxItems: 100
+          items:
+            type: string
+            maxLength: 16
+          description: WS14.S6. Extensions to deny, without the dot. Absent takes the built-in list.
+        crawl_entire_domain:
+          type: boolean
+          default: true
+          description: >-
+            WS14.S6. Absent or true follows links across the whole domain. false keeps the
+            crawl under the seed URL's directory (reported as `same_directory_only`).
+        sitemap:
+          type: string
+          enum: [skip]
+          description: WS14.S6. Only `skip` is accepted; any other value is a 400 `unsupported_option` (F-t2-041).
+        ignore_query_parameters:
+          type: boolean
+          description: WS14.S6. Reserved; any value is a 400 `unsupported_option` (F-t2-041).
+        scrape_options:
+          type: object
+          description: WS14.S6. Reserved; any value is a 400 `unsupported_option` until WS5 slice 4 (references only).
+        ignore_robots_txt:
+          type: boolean
+          description: >-
+            WS14.S6. `true` is a 403 `policy_denied` for every request until the entitlement
+            (WS14.S7) is built. `false` is accepted. Service principals are refused in any case.
     BatchRequest:
       type: object
       required:

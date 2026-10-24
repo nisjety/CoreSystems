@@ -120,3 +120,53 @@ Crawl and batch refuse ZDR. The refusal (`refuse_durable_job_under_zdr`, `quarry
 - Go (`services/quarry-orchestrator/internal/workflows`): `TestCrawlJobWF_CharacterizesExternalLinkFollowing_Legacy`, `TestCrawlJobDurable_EnqueuesEveryLinkWithOneActivityEach` (WS14.S0). Later: `TestCrawlJobWF_SendsCrawlContextOnEveryRunPage`, `TestCrawlJobWF_RefusesChildrenWhenEdgeDoesNotApplyScope` (S3).
 - Rust: `crawl_filter` unit tests and `crawl_denial` unique-code tests (S2).
 - Go job CI: the `go-test` job in `.github/workflows/quarry-v2-ci.yml` runs `go test ./...` for `services/quarry-control`, `services/quarry-orchestrator` and `pkg/quarrycontracts` and blocks the merge (WS14.S0b). Until this job is green on the branch, Go tests in these modules gate nothing except through the report-only `go-coverage` job.
+
+## 12. Request contract and shared caps (WS14.S6, built dark, unit W2-U65)
+
+The `/v1/crawl` body is read as a JSON value and checked field by field (`quarry-edge/src/crawl_request.rs`).
+
+Flag: `QUARRY_EDGE__CRAWL_REQUEST_VALIDATION`: `lenient` (default; unknown keys are warnings in `effective.request_warnings`) or `strict` (unknown keys and `max_pages: 0` are 400). An unknown value is logged and treated as `lenient`.
+
+Accepted options and their spellings (canonical first):
+
+| Option | Spellings | Type and rule |
+|---|---|---|
+| `url` | `url` | required, non-empty string |
+| `max_pages` | `max_pages`, `maxPages`, `limit` | whole number; 0 is the default (lenient) or 400 `invalid_option` (strict) |
+| `max_depth` | `max_depth`, `maxDepth`, `max_discovery_depth` | whole number; 0 or absent is the default; hard ceiling 10 |
+| `ingest`, `zdr` | unchanged | boolean |
+| `allow_subdomains` | `allow_subdomains`, `allowSubdomains` | boolean, default false |
+| `allow_external_links` | `allow_external_links`, `allowExternalLinks` | boolean, default false; UI only (the gateway drops it on the Model path) |
+| `crawl_entire_domain` | `crawl_entire_domain`, `crawlEntireDomain` | boolean, default true |
+| `include_paths` | `include_paths`, `includePaths` | array of strings (D3 grammar) |
+| `exclude_paths` | `exclude_paths`, `excludePaths` | array of strings (D3 grammar) |
+| `deny_extensions` | `deny_extensions`, `denyExtensions` | array of alphanumeric extensions, at most 16 characters each |
+| `sitemap` | `sitemap` | only `skip`; anything else 400 `unsupported_option` (F-t2-041) |
+| `ignore_query_parameters` | both spellings | any value 400 `unsupported_option` (F-t2-041) |
+| `scrape_options` | both spellings | any value 400 `unsupported_option` until WS5 slice 4 |
+| `ignore_robots_txt` | `ignore_robots_txt`, `ignoreRobotsTxt`, `ignoreRobots` | `true` is 403 `policy_denied` (WS14.S7 owns the entitlement); `false` accepted |
+
+Refused in both modes (400 `reserved_field`): `headers`, `proxy`, `proxy_url`, `skip_tls_verification`, `stealth`, `mobile`, `webhook`, `delay`, `max_concurrency` (and their camel forms). Two spellings of one option: 400 `invalid_option`.
+
+Errors are the canonical envelope: 400 `BAD_REQUEST` with `details.fields[] {path, code, message}`, or 403 `FORBIDDEN` with `details.reason = policy_denied`. The `path` is the spelling the caller sent. A message never echoes a caller's value.
+
+Ack: `HandoffAck.effective` carries `scope`, `scope_mode`, `robots`, `max_pages`, `max_depth`, `legacy`, `warnings` (scope notes such as `patterns_reported_not_enforced`, `scope_not_applied_legacy`, `same_directory_only`) and `request_warnings` (`{code, field}` for ignored keys).
+
+### Shared caps (one table, two trees)
+
+Gateway `domains/knowledge/quarry.rs` (`CRAWL_MAX_*`) and edge `quarry-core/src/crawl_scope.rs` enforce the same numbers:
+
+| Cap | Value | Constant (edge) | Constant (gateway) |
+|---|---|---|---|
+| Patterns across include and exclude | 100 | `MAX_PATTERNS` | `CRAWL_MAX_PATTERNS` |
+| Characters per pattern | 512 | `MAX_PATTERN_CHARS` | `CRAWL_MAX_PATTERN_CHARS` |
+| Characters across all patterns | 8192 | `MAX_PATTERN_TOTAL_CHARS` | `CRAWL_MAX_PATTERN_TOTAL_CHARS` |
+| Extensions in `deny_extensions` | 100 | `MAX_EXTENSIONS` | not forwarded by the UI |
+| Max depth | 10 | edge limits (WS6.A hard ceiling) | `CRAWL_MAX_DEPTH` |
+| Max pages | 5000 | edge limits (WS6.A hard ceiling) | clamped in `normalize_crawl_body_for` |
+
+Test pins: edge `crawl_request` boundary tests (100/101, 512/513, 8192/8193); gateway `pattern_caps_match_the_edge_boundaries`.
+
+### Model boundary (WS14.S6)
+
+The Model may propose `knowledge.crawl_site` with `url`, `maxPages`, `maxDepth`, `includePaths`, `excludePaths` and `allowSubdomains` only. The gateway builds that body with `Surface::Model`: `allow_external_links` is dropped, and no key containing `robot` is forwarded.
