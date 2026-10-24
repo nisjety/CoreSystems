@@ -13,7 +13,10 @@ package workflows
 // max_depth), so the wrapper reads the same bounds on every fire.
 
 import (
+	"encoding/json"
 	"errors"
+
+	"github.com/triodelab/quarry-v2/services/quarry-orchestrator/internal/activities"
 )
 
 // ScrapeInputFromParams builds a ScrapeJobWF input from a job's params.
@@ -48,15 +51,22 @@ func CrawlInputFromParams(params map[string]any, runID, jobID string, maxDepth, 
 	if maxDepth == 0 || maxPages == 0 {
 		return CrawlJobInput{}, errors.New("crawl job has no resolved depth or page bound")
 	}
+	scope, err := scopeFromParams(params)
+	if err != nil {
+		return CrawlJobInput{}, err
+	}
 	return CrawlJobInput{
-		UserID:   UserFromParams(params),
-		Ingest:   IngestFromParams(params),
-		RunID:    runID,
-		JobID:    jobID,
-		OrgID:    OrgFromParams(params),
-		Seeds:    seeds,
-		MaxDepth: maxDepth,
-		MaxPages: maxPages,
+		UserID:    UserFromParams(params),
+		Ingest:    IngestFromParams(params),
+		RunID:     runID,
+		JobID:     jobID,
+		OrgID:     OrgFromParams(params),
+		Seeds:     seeds,
+		MaxDepth:  maxDepth,
+		MaxPages:  maxPages,
+		Scope:     scope,
+		ScopeMode: stringFromParam(params["scope_mode"]),
+		Robots:    stringFromParam(params["robots"]),
 	}, nil
 }
 
@@ -74,6 +84,31 @@ func BatchInputFromParams(params map[string]any, runID, jobID string) (BatchJobI
 		OrgID:  OrgFromParams(params),
 		URLs:   urls,
 	}, nil
+}
+
+// scopeFromParams reads the crawl scope the edge stamped on the job (WS14.S3).
+// A job accepted before scope existed has no scope object and becomes a legacy
+// crawl. A scope object that does not decode is refused, not guessed at.
+func scopeFromParams(params map[string]any) (*activities.CrawlScope, error) {
+	raw, ok := params["scope"]
+	if !ok || raw == nil {
+		return &activities.CrawlScope{Legacy: true}, nil
+	}
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return nil, errors.New("crawl job has an unreadable params.scope")
+	}
+	var scope activities.CrawlScope
+	if err := json.Unmarshal(encoded, &scope); err != nil {
+		return nil, errors.New("crawl job has an unreadable params.scope")
+	}
+	return &scope, nil
+}
+
+// stringFromParam reads a string param, "" when it is absent or not a string.
+func stringFromParam(v any) string {
+	s, _ := v.(string)
+	return s
 }
 
 // IngestFromParams reads the selective-ingest flag (Phase 2) from a job's

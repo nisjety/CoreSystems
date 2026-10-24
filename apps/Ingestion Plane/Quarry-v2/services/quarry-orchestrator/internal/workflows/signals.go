@@ -79,6 +79,10 @@ type crawlProgress struct {
 	Visited uint32 `json:"visited"`
 	Failed  uint32 `json:"failed"`
 	Pending uint32 `json:"pending"`
+	// Blocked counts the pages the edge refused (WS14.S3). Denied counts the links
+	// the scope refused. Both are zero, and omitted, for a legacy crawl.
+	Blocked uint32 `json:"blocked,omitempty"`
+	Denied  uint32 `json:"denied,omitempty"`
 }
 
 func newCrawlControl() *crawlControl {

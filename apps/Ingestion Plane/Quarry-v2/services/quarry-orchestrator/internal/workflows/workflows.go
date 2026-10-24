@@ -91,6 +91,13 @@ type CrawlJobInput struct {
 	MaxDepth uint32   `json:"max_depth"`
 	MaxPages uint32   `json:"max_pages"`
 	Policy   Policy   `json:"policy,omitempty"`
+	// Scope is the crawl scope the edge stamped on the job (WS14.S3). Nil or
+	// Legacy runs the crawl as it did before scope existed.
+	Scope *activities.CrawlScope `json:"scope,omitempty"`
+	// ScopeMode is enforce or observe. Empty means observe.
+	ScopeMode string `json:"scope_mode,omitempty"`
+	// Robots is respect or ignore. Empty means respect.
+	Robots string `json:"robots,omitempty"`
 }
 
 type frontierEntry struct {
@@ -170,14 +177,7 @@ func deterministicEventID(idemHex string) quarrycontracts.ID {
 	return quarrycontracts.ID("evt_" + suffix)
 }
 
-// runPage invokes the page activity and emits lifecycle events based on the
-// returned error's classification.
-//
-// org is the originating tenant id. It rides into the RunPageInput so the
-// activity can HMAC-bind org_id+url on the /v1/internal/run_page call (a
-// leaked runtime bearer can't then forge another tenant's org). Empty org
-// is allowed at this layer (the edge enforces a non-empty org_id itself);
-// passing it through is deterministic — no new wall-clock/rand calls.
+// runPage is runPageWith for a page that carries no crawl context.
 func runPage(
 	ctx workflow.Context,
 	a *activities.Activities,
@@ -188,6 +188,28 @@ func runPage(
 	kind string,
 	url string,
 ) (activities.RunPageResult, error) {
+	return runPageWith(ctx, a, ids, org, userID, ingest, kind, url, nil)
+}
+
+// runPageWith invokes the page activity and emits lifecycle events based on the
+// returned error's classification.
+//
+// org is the originating tenant id. It rides into the RunPageInput so the
+// activity can HMAC-bind org_id+url on the /v1/internal/run_page call (a
+// leaked runtime bearer can't then forge another tenant's org). Empty org
+// is allowed at this layer (the edge enforces a non-empty org_id itself);
+// passing it through is deterministic — no new wall-clock/rand calls.
+func runPageWith(
+	ctx workflow.Context,
+	a *activities.Activities,
+	ids runIDs,
+	org string,
+	userID string,
+	ingest bool,
+	kind string,
+	url string,
+	crawl *activities.CrawlContext,
+) (activities.RunPageResult, error) {
 	var res activities.RunPageResult
 	err := workflow.ExecuteActivity(ctx, a.RunPage, activities.RunPageInput{
 		RunID:  ids.RunID,
@@ -196,6 +218,7 @@ func runPage(
 		UserID: userID,
 		Ingest: ingest,
 		Kind:   kind,
+		Crawl:  crawl,
 	}).Get(ctx, &res)
 	if err != nil {
 		cat := errs.CategoryUnknown
@@ -204,13 +227,27 @@ func runPage(
 		}
 		// final: the activity's retries are exhausted, so this attempt is the last
 		// one and the control errors view lists it. code is the closed category.
-		_ = emitEvent(ctx, a, ids, cat.Event(), map[string]any{
+		payload := map[string]any{
 			"url":      url,
 			"category": cat.String(),
 			"code":     cat.String(),
 			"final":    true,
 			"error":    err.Error(),
-		}, ids.RunID, url, string(cat.Event()))
+		}
+		if crawl != nil {
+			// WS14.S3: a page under scope reports the edge's denial (code, message, remedy)
+			// and counts as blocked when the edge refused it.
+			cat = errs.CategoryOf(err)
+			payload["category"] = cat.String()
+			payload["code"] = cat.String()
+			payload["source"] = "fetch"
+			if denial, ok := errs.DenialOf(err); ok {
+				payload["code"] = denial["code"]
+				payload["message"] = denial["message"]
+				payload["remedy"] = denial["remedy"]
+			}
+		}
+		_ = emitEvent(ctx, a, ids, cat.Event(), payload, ids.RunID, url, string(cat.Event()))
 		return res, err
 	}
 	_ = emitEvent(ctx, a, ids, quarrycontracts.EvtPageFetched, map[string]any{
@@ -505,6 +542,13 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 		}
 	}
 
+	// WS14.S3: a crawl that carries a scope runs under the crawl-scope-v1 marker.
+	// Executions recorded before it run as they did. A legacy crawl has no scope.
+	var scope *crawlScopeRun
+	if workflow.GetVersion(ctx, "crawl-scope-v1", workflow.DefaultVersion, 1) >= 1 {
+		scope = newCrawlScopeRun(in)
+	}
+
 	ctrl, err := installControlHandlers(ctx)
 	if err != nil {
 		return err
@@ -519,7 +563,7 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 		return err
 	}
 	if a.DurableFrontier {
-		return crawlJobDurableFrontier(ctx, in, a, ids, ctrl, bounded)
+		return crawlJobDurableFrontier(ctx, in, a, ids, ctrl, bounded, scope)
 	}
 
 	visited := map[string]struct{}{}
@@ -535,7 +579,7 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 		visited[seed] = struct{}{}
 	}
 
-	var pagesVisited, pagesFailed uint32
+	var pagesVisited, pagesFailed, pagesBlocked uint32
 	stopReason := ""
 	stats := newJobStatistics(workflow.Now(ctx))
 
@@ -570,7 +614,19 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 		cur := frontier[0]
 		frontier = frontier[1:]
 
-		res, err := runPage(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, "crawl", cur.URL)
+		var crawl *activities.CrawlContext
+		if scope != nil {
+			crawl = scope.contextFor(cur.Depth)
+		}
+		res, err := runPageWith(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, "crawl", cur.URL, crawl)
+		if err != nil && scope != nil && errs.CategoryOf(err) == errs.CategoryBlocklist {
+			// The edge refused the page (scope or robots). It is counted as blocked.
+			pagesBlocked++
+			ctrl.progress.Blocked = pagesBlocked
+			ctrl.progress.Denied = scope.linksDenied
+			ctrl.progress.Pending = uint32(len(frontier))
+			continue
+		}
 		if err != nil {
 			pagesFailed++
 			stats.recordFailure(err)
@@ -583,6 +639,15 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 				break
 			}
 			continue
+		}
+		if scope != nil {
+			// An edge that did not apply the scope ends the run: nothing of this page is followed.
+			if !appliedBy(res.Crawl) {
+				stopReason = edgeScopeUnsupported
+				break
+			}
+			scope.absorb(res.Crawl)
+			ctrl.progress.Denied = scope.linksDenied
 		}
 		pagesVisited++
 		stats.recordPage(res)
@@ -629,6 +694,20 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 		"pages_failed":  pagesFailed,
 		"statistics":    stats.payload(pagesVisited, pagesFailed, workflow.Now(ctx)),
 	}
+	if stopReason == edgeScopeUnsupported {
+		return emitEvent(ctx, a, ids, quarrycontracts.EvtRunFailed, map[string]any{
+			"code":          edgeScopeUnsupported,
+			"message":       "the edge did not apply the crawl scope; no link of the refused page was followed",
+			"pages_visited": pagesVisited,
+			"pages_failed":  pagesFailed,
+			"pages_blocked": pagesBlocked,
+		}, in.RunID, string(quarrycontracts.EvtRunFailed))
+	}
+	if scope != nil {
+		for k, v := range scope.terminal(pagesBlocked) {
+			completed[k] = v
+		}
+	}
 	if stopReason != "" {
 		completed["reason"] = stopReason
 	}
@@ -659,6 +738,7 @@ func crawlJobDurableFrontier(
 	ids runIDs,
 	ctrl *crawlControl,
 	bounded bool,
+	scope *crawlScopeRun,
 ) error {
 	queueName := durableFrontierQueueName(in.RunID)
 	for _, seed := range in.Seeds {
@@ -672,7 +752,7 @@ func crawlJobDurableFrontier(
 		}
 	}
 
-	var pagesVisited, pagesFailed uint32
+	var pagesVisited, pagesFailed, pagesBlocked uint32
 	stopReason := ""
 	stats := newJobStatistics(workflow.Now(ctx))
 	emitPaused := false
@@ -706,17 +786,33 @@ func crawlJobDurableFrontier(
 			break
 		}
 		depth := frontierPayloadDepth(item.Payload)
-		res, pageErr := runPage(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, "crawl", item.URL)
-		if pageErr != nil {
+		var crawl *activities.CrawlContext
+		if scope != nil {
+			crawl = scope.contextFor(depth)
+		}
+		res, pageErr := runPageWith(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, "crawl", item.URL, crawl)
+		if pageErr != nil && scope != nil && errs.CategoryOf(pageErr) == errs.CategoryBlocklist {
+			pagesBlocked++
+		} else if pageErr != nil {
 			pagesFailed++
 			stats.recordFailure(pageErr)
 			if bounded && pagesFailed >= in.MaxPages {
 				stopReason = crawlStopMaxFailures
 			}
+		} else if scope != nil && !appliedBy(res.Crawl) {
+			stopReason = edgeScopeUnsupported
 		} else {
+			if scope != nil {
+				scope.absorb(res.Crawl)
+			}
 			pagesVisited++
 			stats.recordPage(res)
-			if in.MaxDepth == 0 || depth+1 <= in.MaxDepth {
+			if scope != nil && (in.MaxDepth == 0 || depth+1 <= in.MaxDepth) {
+				// WS14.S3: the children of a page under scope go in one batch call.
+				if err := enqueueChildrenBatch(ctx, a, queueName, in.OrgID, in.RunID, depth+1, res.Links); err != nil {
+					return err
+				}
+			} else if in.MaxDepth == 0 || depth+1 <= in.MaxDepth {
 				for _, link := range res.Links {
 					if strings.TrimSpace(link) == "" {
 						continue
@@ -736,6 +832,7 @@ func crawlJobDurableFrontier(
 		}
 		ctrl.progress.Visited = pagesVisited
 		ctrl.progress.Failed = pagesFailed
+		ctrl.progress.Blocked = pagesBlocked
 		ctrl.progress.Pending = 0 // queue depth is read from the durable queue view
 		if pagesVisited > 0 && pagesVisited%50 == 0 {
 			_ = workflow.ExecuteActivity(ctx, a.Checkpoint, activities.CheckpointInput{
@@ -756,6 +853,20 @@ func crawlJobDurableFrontier(
 	completed := map[string]any{
 		"pages_visited": pagesVisited, "pages_failed": pagesFailed,
 		"statistics": stats.payload(pagesVisited, pagesFailed, workflow.Now(ctx)),
+	}
+	if stopReason == edgeScopeUnsupported {
+		return emitEvent(ctx, a, ids, quarrycontracts.EvtRunFailed, map[string]any{
+			"code":          edgeScopeUnsupported,
+			"message":       "the edge did not apply the crawl scope; no link of the refused page was followed",
+			"pages_visited": pagesVisited,
+			"pages_failed":  pagesFailed,
+			"pages_blocked": pagesBlocked,
+		}, in.RunID, string(quarrycontracts.EvtRunFailed))
+	}
+	if scope != nil {
+		for k, v := range scope.terminal(pagesBlocked) {
+			completed[k] = v
+		}
 	}
 	if stopReason != "" {
 		completed["reason"] = stopReason

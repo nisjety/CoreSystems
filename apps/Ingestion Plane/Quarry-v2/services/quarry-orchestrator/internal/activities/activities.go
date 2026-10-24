@@ -188,6 +188,10 @@ type RunPageInput struct {
 	// monitor) leaves the body byte-identical to before. The edge meters only a crawl page
 	// (quarry.crawl.page, WS6.C-e).
 	Kind string `json:"kind,omitempty"`
+	// Crawl is the scope of a crawl page (WS14.S3). Nil for scrape, monitor and
+	// batch pages and for a crawl accepted before scope existed: the body is then
+	// byte-identical to before.
+	Crawl *CrawlContext `json:"crawl,omitempty"`
 }
 
 // RunPageResult is returned by the runtime after a successful page execution.
@@ -215,6 +219,9 @@ type RunPageResult struct {
 	WordCount    uint64 `json:"word_count,omitempty"`
 	Lang         string `json:"lang,omitempty"`
 	Driver       string `json:"driver,omitempty"`
+	// Crawl is the edge's report on the scope, set only when the request carried a
+	// `crawl` context (WS14.S3).
+	Crawl *CrawlReport `json:"crawl,omitempty"`
 }
 
 // RunPage executes a single page via Quarry Runtime.
@@ -226,6 +233,9 @@ func (a *Activities) RunPage(ctx context.Context, in RunPageInput) (RunPageResul
 	}
 	if in.Kind != "" {
 		payload["kind"] = in.Kind
+	}
+	if in.Crawl != nil {
+		payload["crawl"] = in.Crawl
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -269,7 +279,7 @@ func (a *Activities) RunPage(ctx context.Context, in RunPageInput) (RunPageResul
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return RunPageResult{}, errs.FromHTTPStatus(op, resp.StatusCode, respBody).Temporal()
+		return RunPageResult{}, errs.FromHTTPResponse(op, resp.StatusCode, respBody).Temporal()
 	}
 
 	var out RunPageResult
