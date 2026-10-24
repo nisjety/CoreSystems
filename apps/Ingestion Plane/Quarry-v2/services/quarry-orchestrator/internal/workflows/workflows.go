@@ -76,6 +76,8 @@ type BatchJobInput struct {
 	OrgID  string   `json:"org_id,omitempty"`
 	URLs   []string `json:"urls"`
 	Policy Policy   `json:"policy,omitempty"`
+	// Robots is the robots mode the batch runs with (WS14.S5). Absent or unknown is respect.
+	Robots string `json:"robots,omitempty"`
 }
 
 // CrawlJobInput drives a bounded BFS crawl.
@@ -250,14 +252,21 @@ func runPageWith(
 		_ = emitEvent(ctx, a, ids, cat.Event(), payload, ids.RunID, url, string(cat.Event()))
 		return res, err
 	}
-	_ = emitEvent(ctx, a, ids, quarrycontracts.EvtPageFetched, map[string]any{
+	fetched := map[string]any{
 		"url":          url,
 		"status":       res.Status,
 		"fingerprint":  res.Fingerprint,
 		"links":        len(res.Links),
 		"content_type": res.ContentType,
 		"title":        res.Title,
-	}, ids.RunID, url, string(quarrycontracts.EvtPageFetched))
+	}
+	// WS14.S4: the host's robots.txt Crawl-delay, when the edge reported one. Only a
+	// page run under scope (the crawl-scope-v1 path) carries a crawl report.
+	if crawl != nil && res.Crawl != nil && res.Crawl.CrawlDelayMS != nil {
+		fetched["crawl_delay_ms"] = *res.Crawl.CrawlDelayMS
+	}
+	_ = emitEvent(ctx, a, ids, quarrycontracts.EvtPageFetched, fetched,
+		ids.RunID, url, string(quarrycontracts.EvtPageFetched))
 	// Re-emit branding extracted from the seed page back through the
 	// control event log so consumers polling /v1/jobs/{id}/events see it
 	// alongside page_fetched. The runtime emits BrandingExtracted on its
@@ -444,9 +453,12 @@ func BatchJobWF(ctx workflow.Context, in BatchJobInput, a *activities.Activities
 		return err
 	}
 
-	var visited, failed uint32
+	var visited, failed, blocked uint32
 	stats := newJobStatistics(workflow.Now(ctx))
 	cancelled := false
+	// WS14.S5: the batch context on each page and the blocked count. A history recorded before
+	// the marker runs as it did (no context, no blocked count).
+	checked := workflow.GetVersion(ctx, batchCheckVersion, workflow.DefaultVersion, 1) >= 1
 	for i, url := range in.URLs {
 		if ctrl != nil {
 			remaining := uint32(len(in.URLs) - i)
@@ -456,8 +468,17 @@ func BatchJobWF(ctx workflow.Context, in BatchJobInput, a *activities.Activities
 				break
 			}
 		}
-		res, err := runPage(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, "batch", url)
+		var crawl *activities.CrawlContext
+		if checked {
+			crawl = batchCrawlContext(in.Robots)
+		}
+		res, err := runPageWith(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, "batch", url, crawl)
 		if err != nil {
+			if checked && errs.CategoryOf(err) == errs.CategoryBlocklist {
+				// WS14.S5: a page the edge refused (a denial) is also counted as blocked. It stays
+				// in pages_failed and the error classes, so the statistics keep their shape.
+				blocked++
+			}
 			failed++
 			stats.recordFailure(err)
 			continue
@@ -467,19 +488,27 @@ func BatchJobWF(ctx workflow.Context, in BatchJobInput, a *activities.Activities
 	}
 
 	if cancelled {
-		return emitEvent(ctx, a, ids, quarrycontracts.EvtRunCancelled, map[string]any{
+		cancelPayload := map[string]any{
 			"pages_visited": visited,
 			"pages_failed":  failed,
 			"pending":       uint32(len(in.URLs)) - visited - failed,
 			"statistics":    stats.payload(visited, failed, workflow.Now(ctx)),
-		}, in.RunID, string(quarrycontracts.EvtRunCancelled))
+		}
+		if checked {
+			cancelPayload["pages_blocked"] = blocked
+		}
+		return emitEvent(ctx, a, ids, quarrycontracts.EvtRunCancelled, cancelPayload, in.RunID, string(quarrycontracts.EvtRunCancelled))
 	}
 
-	return emitEvent(ctx, a, ids, quarrycontracts.EvtRunCompleted, map[string]any{
+	completed := map[string]any{
 		"pages_visited": visited,
 		"pages_failed":  failed,
 		"statistics":    stats.payload(visited, failed, workflow.Now(ctx)),
-	}, in.RunID, string(quarrycontracts.EvtRunCompleted))
+	}
+	if checked {
+		completed["pages_blocked"] = blocked
+	}
+	return emitEvent(ctx, a, ids, quarrycontracts.EvtRunCompleted, completed, in.RunID, string(quarrycontracts.EvtRunCompleted))
 }
 
 // controlGate holds the workflow at a safe boundary while it is paused. It emits

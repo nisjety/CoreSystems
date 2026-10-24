@@ -83,6 +83,7 @@ func BatchInputFromParams(params map[string]any, runID, jobID string) (BatchJobI
 		JobID:  jobID,
 		OrgID:  OrgFromParams(params),
 		URLs:   urls,
+		Robots: stringFromParam(params["robots"]),
 	}, nil
 }
 
