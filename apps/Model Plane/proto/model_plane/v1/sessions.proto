@@ -1147,6 +1147,11 @@ message UpdateThreadPresentationRequest {
   // column, only the persona TEXT (a different, unconditional layer) fires
   // on a ZDR turn by default.
   optional bool persona_enabled = 6;
+  // Optional archive state. Only `false` is honoured here: it restores an
+  // archived thread to ordinary history. Archiving goes through ArchiveThread,
+  // which writes the THREAD_ARCHIVED evidence event. Omission leaves it
+  // unchanged, the same tri-state contract as `pinned` above.
+  optional bool archived = 9;
 }
 
 // Receipt for a durable presentation update.

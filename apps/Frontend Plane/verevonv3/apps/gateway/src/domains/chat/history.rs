@@ -409,6 +409,93 @@ pub(crate) async fn clear_threads(
     Json(ok(ThreadsResponse { sessions: vec![] })).into_response()
 }
 
+/// Hide one chat thread from the ordinary list. Its transcript and audit
+/// evidence stay; `unarchive_thread` brings it back.
+pub(super) async fn archive_thread(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(thread_id): Path<String>,
+) -> Response {
+    change_archive_state(&state, &user, &headers, &thread_id, true).await
+}
+
+pub(super) async fn unarchive_thread(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(thread_id): Path<String>,
+) -> Response {
+    change_archive_state(&state, &user, &headers, &thread_id, false).await
+}
+
+async fn change_archive_state(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    thread_id: &str,
+    archived: bool,
+) -> Response {
+    if let Err(response) = scope_for(state, user).await {
+        return response;
+    }
+    let thread_id = normalize_id(thread_id);
+    if thread_id.is_empty() {
+        return bad_request("thread_id is required.");
+    }
+    // Only a chat thread the caller owns can change archive state here; the
+    // lookup also keeps a Space or Support thread out of this route.
+    match read_durable_thread(state, user, headers, &thread_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return thread_not_found(),
+        Err(response) => return response,
+    }
+    let (url, body) = archive_state_call(&state.model_gateway_url, &thread_id, archived);
+    let token = shared::model_token(state, user, headers).await;
+    let session_token = match shared::required_session_token(state, user, headers).await {
+        Ok(token) => token,
+        Err(error) => return shared::delegated_auth_unavailable(error).into_response(),
+    };
+    let (status, Json(payload)) = shared::proxy_model_json_with_session(
+        state,
+        Method::POST,
+        &url,
+        body,
+        token.as_deref(),
+        Some(&session_token),
+        user,
+    )
+    .await;
+    if !status.is_success() {
+        return (status, Json(payload)).into_response();
+    }
+    match read_durable_thread(state, user, headers, &thread_id).await {
+        Ok(Some(session)) => Json(ok(ThreadResponse {
+            session,
+            transcript: None,
+        }))
+        .into_response(),
+        Ok(None) => thread_not_found(),
+        Err(response) => response,
+    }
+}
+
+/// The Model Gateway call that changes an archive state. Archiving uses the
+/// archive route, which writes Session Core's THREAD_ARCHIVED evidence event.
+/// Restoring uses the presentation route, which Session Core accepts only as
+/// `archived: false`.
+fn archive_state_call(base: &str, thread_id: &str, archived: bool) -> (String, Option<Value>) {
+    let thread_id = urlencoding::encode(thread_id);
+    if archived {
+        (format!("{base}/v1/threads/{thread_id}/archive"), None)
+    } else {
+        (
+            format!("{base}/v1/threads/{thread_id}/presentation"),
+            Some(json!({ "archived": false })),
+        )
+    }
+}
+
 async fn scope_for(state: &AppState, user: &AuthenticatedUser) -> Result<(), Response> {
     let org_id = authorized_org_id(state, user).await;
     if org_id.trim().is_empty() {
@@ -1540,5 +1627,19 @@ mod thread_paging_tests {
             url,
             "http://model-gateway/v1/threads?limit=50&origin=chat&cursor=abc-_123"
         );
+    }
+
+    #[test]
+    fn archive_goes_to_the_archive_route_without_a_body() {
+        let (url, body) = archive_state_call("http://model-gateway", "thread-9", true);
+        assert_eq!(url, "http://model-gateway/v1/threads/thread-9/archive");
+        assert_eq!(body, None);
+    }
+
+    #[test]
+    fn restore_goes_to_the_presentation_route_as_archived_false() {
+        let (url, body) = archive_state_call("http://model-gateway", "thread-9", false);
+        assert_eq!(url, "http://model-gateway/v1/threads/thread-9/presentation");
+        assert_eq!(body, Some(json!({ "archived": false })));
     }
 }

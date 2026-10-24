@@ -18,6 +18,7 @@ import {
   type PrivacyTier,
 } from './privacy-tier'
 import { createSelectedAgentToolSpecs } from '@/shared/actions/agent-tools'
+import { parseChatHistoryAction } from '@/shared/actions/chat-history'
 import { isSupportChatThread } from '@/shared/chat/support-chat-thread'
 import { isAgUiEventName, toVerevonUiEvent, type VerevonUiEvent } from '@/shared/chat/verevon-ui-events'
 import {
@@ -2482,6 +2483,39 @@ export async function getChatThread(threadId: string): Promise<ChatThreadSession
   let raw: unknown
   try {
     raw = await requestJson<unknown>(`/api/v1/chat/threads/${encodeURIComponent(threadId)}`)
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) return null
+    throw error
+  }
+  applyRetentionFrom(raw)
+  return normalizeChatThreadSession(objectValue(raw)?.session)
+}
+
+/**
+ * Hide a thread from the ordinary list, or bring it back. Both return the
+ * thread's session as the server now holds it (`archivedAt` set or absent), and
+ * null when the server no longer has it as a chat thread.
+ */
+export async function archiveChatThread(threadId: string): Promise<ChatThreadSession | null> {
+  parseChatHistoryAction({ type: 'thread.archive', threadId })
+  return postChatThreadArchiveState(threadId, 'archive')
+}
+
+export async function unarchiveChatThread(threadId: string): Promise<ChatThreadSession | null> {
+  parseChatHistoryAction({ type: 'thread.unarchive', threadId })
+  return postChatThreadArchiveState(threadId, 'unarchive')
+}
+
+async function postChatThreadArchiveState(
+  threadId: string,
+  verb: 'archive' | 'unarchive',
+): Promise<ChatThreadSession | null> {
+  let raw: unknown
+  try {
+    raw = await requestJson<unknown>(
+      `/api/v1/chat/threads/${encodeURIComponent(threadId)}/${verb}`,
+      { method: 'POST' },
+    )
   } catch (error) {
     if (error instanceof ApiError && error.status === 404) return null
     throw error

@@ -6795,11 +6795,20 @@ impl SessionCore for SessionService {
                 && req.preview.is_none()
                 && req.pinned.is_none()
                 && req.persona_enabled.is_none()
+                && req.archived.is_none()
             {
                 return Err(Status::invalid_argument(
                     "at least one presentation field is required",
                 ));
             }
+            // Archiving writes the THREAD_ARCHIVED evidence event in ArchiveThread; this
+            // RPC only restores, so a true here would hide a thread without that event.
+            if req.archived == Some(true) {
+                return Err(Status::invalid_argument(
+                    "archived=true is not accepted here; use ArchiveThread",
+                ));
+            }
+            let restores = req.archived == Some(false);
             caller.authorize_org(&req.org_id)?;
             authorize_thread_owner(&self.pool, &caller, &req.thread_id, OwnerIntent::Mutate)
                 .await?;
@@ -6832,8 +6841,9 @@ impl SessionCore for SessionService {
                          WHEN $7 THEN CASE WHEN $8 THEN $9 ELSE NULL END
                          ELSE pinned_at
                      END,
-                     persona_enabled = CASE WHEN $10 THEN $11 ELSE persona_enabled END
-                 WHERE id = $1 AND org_id = $2 AND archived_at IS NULL
+                     persona_enabled = CASE WHEN $10 THEN $11 ELSE persona_enabled END,
+                     archived_at = CASE WHEN $12 THEN NULL ELSE archived_at END
+                 WHERE id = $1 AND org_id = $2 AND (archived_at IS NULL OR $12)
                  RETURNING id, user_id",
             )
             .bind(&req.thread_id)
@@ -6850,6 +6860,7 @@ impl SessionCore for SessionService {
             // same non-value for a column that is itself `NOT NULL`.
             .bind(req.persona_enabled.is_some())
             .bind(req.persona_enabled.unwrap_or(true))
+            .bind(restores)
             .fetch_optional(&mut *tx)
             .await
             .map_err(|error| Status::internal(error.to_string()))?;
@@ -6870,6 +6881,7 @@ impl SessionCore for SessionService {
                 "preview_overridden": preview.is_some(),
                 "pinned": req.pinned,
                 "persona_enabled": req.persona_enabled,
+                "archived": req.archived,
             }))
             .bind(now)
             .bind(&req.org_id)
@@ -6935,6 +6947,8 @@ impl SessionCore for SessionService {
             .await
             .map_err(|error| Status::internal(error.to_string()))?;
             let archived_at = if let Some((archived_at,)) = newly_archived_at {
+                // The key is per archive, not per thread: a restore lets the thread be
+                // archived again, and events is unique on (org_id, idempotency_key).
                 let resource = format!("thread:{}", req.thread_id);
                 sqlx::query(
                     "INSERT INTO events (id, event_type, run_id, payload, ts, org_id, user_id, correlation_id, causation_id, idempotency_key, resource_ref, type_url, producer, schema_version)
@@ -6950,7 +6964,7 @@ impl SessionCore for SessionService {
                     "session-core",
                     "THREAD_ARCHIVED",
                     &resource,
-                    &format!("{}:archived", req.thread_id),
+                    &format!("{}:archived:{}", req.thread_id, archived_at.to_rfc3339()),
                 ))
                 .bind(&resource)
                 .bind(THREAD_ARCHIVED_TYPE_URL)
@@ -16393,6 +16407,114 @@ mod thread_list_db_tests {
         )
         .await;
         assert_eq!(all.threads.len(), 3);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn unarchive_restores_thread_in_list() {
+        let pool = connect().await;
+        let suffix = new_ulid();
+        let org = format!("unarchive-test-{suffix}");
+        let user = "unarchive-user";
+        let archived_id = format!("{suffix}-x1");
+        seed_thread(&pool, &org, user, &archived_id, 1, false, true).await;
+        let svc = service(pool.clone());
+        let update = |request: pb::UpdateThreadPresentationRequest| {
+            let mut request = Request::new(pb::UpdateThreadPresentationRequest {
+                org_id: org.clone(),
+                thread_id: archived_id.clone(),
+                ..request
+            });
+            request
+                .extensions_mut()
+                .insert(VerifiedIdentity::user_for_test(&org, user));
+            svc.update_thread_presentation(request)
+        };
+
+        // Only a restore is accepted here: archiving goes through ArchiveThread.
+        let refused = update(pb::UpdateThreadPresentationRequest {
+            archived: Some(true),
+            ..Default::default()
+        })
+        .await
+        .expect_err("archived=true must be refused");
+        assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+
+        // An archived thread still refuses ordinary presentation writes.
+        let pin_on_archived = update(pb::UpdateThreadPresentationRequest {
+            pinned: Some(true),
+            ..Default::default()
+        })
+        .await
+        .expect_err("a pin write must not reach an archived thread");
+        assert_eq!(pin_on_archived.code(), tonic::Code::NotFound);
+
+        update(pb::UpdateThreadPresentationRequest {
+            archived: Some(false),
+            ..Default::default()
+        })
+        .await
+        .expect("restore");
+        let active = list(&svc, &org, user, pb::ListThreadsRequest::default()).await;
+        assert_eq!(active.threads.len(), 1);
+        assert_eq!(active.threads[0].thread_id, archived_id);
+        assert!(active.threads[0].archived_at.is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn re_archive_after_restore_writes_a_second_archived_event() {
+        let pool = connect().await;
+        let suffix = new_ulid();
+        let org = format!("re-archive-test-{suffix}");
+        let user = "re-archive-user";
+        let thread_id = format!("{suffix}-r1");
+        seed_thread(&pool, &org, user, &thread_id, 1, false, false).await;
+        let svc = service(pool.clone());
+        let archive = || {
+            let mut request = Request::new(pb::ArchiveThreadRequest {
+                org_id: org.clone(),
+                thread_id: thread_id.clone(),
+            });
+            request
+                .extensions_mut()
+                .insert(VerifiedIdentity::user_for_test(&org, user));
+            svc.archive_thread(request)
+        };
+        let restore = || {
+            let mut request = Request::new(pb::UpdateThreadPresentationRequest {
+                org_id: org.clone(),
+                thread_id: thread_id.clone(),
+                archived: Some(false),
+                ..Default::default()
+            });
+            request
+                .extensions_mut()
+                .insert(VerifiedIdentity::user_for_test(&org, user));
+            svc.update_thread_presentation(request)
+        };
+
+        archive().await.expect("first archive");
+        restore().await.expect("restore");
+        archive().await.expect("re-archive after restore");
+
+        let archived_events: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM events
+             WHERE org_id = $1 AND event_type = 'THREAD_ARCHIVED' AND resource_ref = $2",
+        )
+        .bind(&org)
+        .bind(format!("thread:{thread_id}"))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(archived_events, 2, "each archive writes its own event");
+        let archived: bool =
+            sqlx::query_scalar("SELECT archived_at IS NOT NULL FROM threads WHERE id = $1")
+                .bind(&thread_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(archived);
     }
 
     #[tokio::test]

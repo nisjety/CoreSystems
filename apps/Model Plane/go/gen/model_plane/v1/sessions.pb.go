@@ -4261,8 +4261,13 @@ type UpdateThreadPresentationRequest struct {
 	// column, only the persona TEXT (a different, unconditional layer) fires
 	// on a ZDR turn by default.
 	PersonaEnabled *bool `protobuf:"varint,6,opt,name=persona_enabled,json=personaEnabled,proto3,oneof" json:"persona_enabled,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Optional archive state. Only `false` is honoured here: it restores an
+	// archived thread to ordinary history. Archiving goes through ArchiveThread,
+	// which writes the THREAD_ARCHIVED evidence event. Omission leaves it
+	// unchanged, the same tri-state contract as `pinned` above.
+	Archived      *bool `protobuf:"varint,9,opt,name=archived,proto3,oneof" json:"archived,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *UpdateThreadPresentationRequest) Reset() {
@@ -4333,6 +4338,13 @@ func (x *UpdateThreadPresentationRequest) GetPinned() bool {
 func (x *UpdateThreadPresentationRequest) GetPersonaEnabled() bool {
 	if x != nil && x.PersonaEnabled != nil {
 		return *x.PersonaEnabled
+	}
+	return false
+}
+
+func (x *UpdateThreadPresentationRequest) GetArchived() bool {
+	if x != nil && x.Archived != nil {
+		return *x.Archived
 	}
 	return false
 }
@@ -7032,19 +7044,21 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\x13ListThreadsResponse\x127\n" +
 	"\athreads\x18\x01 \x03(\v2\x1d.model_plane.v1.ThreadSummaryR\athreads\x12\x1f\n" +
 	"\vnext_cursor\x18\x02 \x01(\tR\n" +
-	"nextCursor\"\x8f\x02\n" +
+	"nextCursor\"\xbd\x02\n" +
 	"\x1fUpdateThreadPresentationRequest\x12\x15\n" +
 	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x1b\n" +
 	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\x19\n" +
 	"\x05title\x18\x03 \x01(\tH\x00R\x05title\x88\x01\x01\x12\x1d\n" +
 	"\apreview\x18\x04 \x01(\tH\x01R\apreview\x88\x01\x01\x12\x1b\n" +
 	"\x06pinned\x18\x05 \x01(\bH\x02R\x06pinned\x88\x01\x01\x12,\n" +
-	"\x0fpersona_enabled\x18\x06 \x01(\bH\x03R\x0epersonaEnabled\x88\x01\x01B\b\n" +
+	"\x0fpersona_enabled\x18\x06 \x01(\bH\x03R\x0epersonaEnabled\x88\x01\x01\x12\x1f\n" +
+	"\barchived\x18\t \x01(\bH\x04R\barchived\x88\x01\x01B\b\n" +
 	"\x06_titleB\n" +
 	"\n" +
 	"\b_previewB\t\n" +
 	"\a_pinnedB\x12\n" +
-	"\x10_persona_enabled\"?\n" +
+	"\x10_persona_enabledB\v\n" +
+	"\t_archived\"?\n" +
 	" UpdateThreadPresentationResponse\x12\x1b\n" +
 	"\tthread_id\x18\x01 \x01(\tR\bthreadId\"J\n" +
 	"\x14ArchiveThreadRequest\x12\x15\n" +

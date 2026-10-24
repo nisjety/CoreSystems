@@ -8679,6 +8679,10 @@ struct UpdateThreadPresentationBody {
     /// same tri-state contract as `pinned`.
     #[serde(default)]
     persona_enabled: Option<bool>,
+    /// Restore an archived thread (`false`). Session Core refuses `true`:
+    /// archiving goes through `POST /v1/threads/{id}/archive`.
+    #[serde(default)]
+    archived: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -8940,6 +8944,7 @@ async fn update_thread_presentation(
                 preview: body.preview,
                 pinned: body.pinned,
                 persona_enabled: body.persona_enabled,
+                archived: body.archived,
             },
             &bearer,
         )?)

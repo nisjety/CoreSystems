@@ -31,6 +31,14 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             get(history::get_thread_transcript),
         )
         .route(
+            "/api/v1/chat/threads/{thread_id}/archive",
+            post(history::archive_thread),
+        )
+        .route(
+            "/api/v1/chat/threads/{thread_id}/unarchive",
+            post(history::unarchive_thread),
+        )
+        .route(
             "/api/v1/chat/stream/resume/{request_id}",
             get(streams::resume_stream),
         )

@@ -79,7 +79,36 @@ probe_id="${PROOF_PREFIX}-$(printf '%03d' "${PROBE_INDEX}")"
 probe="$(curl -fsS -b "${PROOF_COOKIE_JAR}" "${PROOF_BFF_URL}/api/v1/chat/threads/${probe_id}")"
 printf '%s' "${probe}" | python3 -c 'import json,sys; s=json.load(sys.stdin)["data"]["session"]; assert s["threadId"]=="'"${probe_id}"'", s; print("ok: opened", s["threadId"])'
 
+echo "== archive thread ${PROBE_INDEX}, then restore it (S2)"
+# Walks every page of one archive state and reports whether the probe is listed.
+probe_listed() {
+  local mode="$1"
+  local cursor=""
+  local url body next
+  while :; do
+    url="${PROOF_BFF_URL}/api/v1/chat/threads?limit=${PAGE_SIZE}&archived=${mode}"
+    if [ -n "${cursor}" ]; then url="${url}&cursor=${cursor}"; fi
+    body="$(curl -fsS -b "${PROOF_COOKIE_JAR}" "${url}")"
+    if printf '%s' "${body}" | python3 -c 'import json,sys; ids=[s["threadId"] for s in json.load(sys.stdin)["data"]["sessions"]]; sys.exit(0 if "'"${probe_id}"'" in ids else 1)'; then
+      echo yes
+      return
+    fi
+    next="$(printf '%s' "${body}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"].get("nextCursor") or "")')"
+    if [ -z "${next}" ]; then
+      echo no
+      return
+    fi
+    cursor="${next}"
+  done
+}
+curl -fsS -b "${PROOF_COOKIE_JAR}" -X POST "${PROOF_BFF_URL}/api/v1/chat/threads/${probe_id}/archive" > /dev/null
+[ "$(probe_listed active)" = "no" ] || { echo "FAIL: archived thread still in the active list" >&2; exit 1; }
+[ "$(probe_listed archived)" = "yes" ] || { echo "FAIL: archived thread missing from the archived list" >&2; exit 1; }
+curl -fsS -b "${PROOF_COOKIE_JAR}" -X POST "${PROOF_BFF_URL}/api/v1/chat/threads/${probe_id}/unarchive" > /dev/null
+[ "$(probe_listed active)" = "yes" ] || { echo "FAIL: restored thread missing from the active list" >&2; exit 1; }
+echo "ok: archive and restore moved ${probe_id} between the lists"
+
 echo "== plan check: the newest-first keyset uses the owner-activity index"
 psql "${PROOF_DATABASE_URL}" -q -c "EXPLAIN (ANALYZE, BUFFERS) SELECT t.id FROM threads t WHERE t.org_id = '${PROOF_ORG_ID}' AND t.user_id = '${PROOF_USER_ID}' AND t.archived_at IS NULL ORDER BY (t.pinned_at IS NOT NULL) DESC, t.last_activity_at DESC, t.id DESC LIMIT 51"
 
-echo "PASS: WS17 S1 history paging proof (${PROOF_PREFIX})"
+echo "PASS: WS17 S1 and S2 history proof (${PROOF_PREFIX})"

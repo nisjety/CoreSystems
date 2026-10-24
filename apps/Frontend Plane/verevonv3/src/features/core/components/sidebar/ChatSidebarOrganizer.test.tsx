@@ -159,4 +159,18 @@ describe('chat organizer interactions', () => {
     flush()
     expect(screen.getByLabelText('Project')).toBeTruthy()
   })
+
+  it('offers Load more only while the server has more chats, and asks for the next page', () => {
+    const onLoadMore = vi.fn()
+    render(() => <ChatSidebarOrganizer sessions={[thread]} loading={false} hasMore onLoadMore={onLoadMore} onNewChat={() => {}} renderRow={(item) => <span>{item.title}</span>} />)
+    flush()
+    fireEvent.click(screen.getByRole('button', { name: 'Load more chats' }))
+    expect(onLoadMore).toHaveBeenCalledTimes(1)
+  })
+
+  it('hides Load more on the last page', () => {
+    mount()
+    flush()
+    expect(screen.queryByRole('button', { name: 'Load more chats' })).toBeNull()
+  })
 })

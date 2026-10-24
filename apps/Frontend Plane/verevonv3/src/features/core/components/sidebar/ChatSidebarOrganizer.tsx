@@ -17,6 +17,9 @@ export function ChatSidebarOrganizer(props: {
   loading: boolean
   onNewChat: () => void
   renderRow: (item: ChatThreadHistoryItem, onMove?: () => void) => JSX.Element
+  /** More chats can be shown; the caller reveals the next page when asked. */
+  hasMore?: boolean
+  onLoadMore?: () => void
 }) {
   const i18n = useI18n()
   const session = getSession()
@@ -238,6 +241,9 @@ export function ChatSidebarOrganizer(props: {
           </Show>
         </Show>
       </nav>
+      <Show when={props.hasMore}>
+        <button type="button" class="chat-organizer__load-more" onClick={() => props.onLoadMore?.()}>{i18n.tr('Last flere samtaler', 'Load more chats')}</button>
+      </Show>
       <p class="chat-organizer__move-notice" role="status" aria-live="polite">{moveNotice()}</p>
       <p class="chat-organizer__local-note">{i18n.tr('Prosjekter lagres i denne nettleseren.', 'Projects are saved in this browser.')}</p>
 
