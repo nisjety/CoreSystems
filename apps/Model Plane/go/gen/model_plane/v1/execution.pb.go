@@ -176,8 +176,15 @@ type ExecuteScheduledStepResponse struct {
 	Output         string                 `protobuf:"bytes,4,opt,name=output,proto3" json:"output,omitempty"`
 	Error          string                 `protobuf:"bytes,5,opt,name=error,proto3" json:"error,omitempty"`
 	UnknownOutcome bool                   `protobuf:"varint,6,opt,name=unknown_outcome,json=unknownOutcome,proto3" json:"unknown_outcome,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Counts of the scheduled Do lane (WS20 S6). Zero on the single-inference lane.
+	// They carry no content: the withheld effects are named only in the transcript.
+	RoundsExecuted  uint32 `protobuf:"varint,7,opt,name=rounds_executed,json=roundsExecuted,proto3" json:"rounds_executed,omitempty"`
+	WithheldEffects uint32 `protobuf:"varint,8,opt,name=withheld_effects,json=withheldEffects,proto3" json:"withheld_effects,omitempty"`
+	ToolCalls       uint32 `protobuf:"varint,9,opt,name=tool_calls,json=toolCalls,proto3" json:"tool_calls,omitempty"`
+	InputTokens     uint32 `protobuf:"varint,10,opt,name=input_tokens,json=inputTokens,proto3" json:"input_tokens,omitempty"`
+	OutputTokens    uint32 `protobuf:"varint,11,opt,name=output_tokens,json=outputTokens,proto3" json:"output_tokens,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *ExecuteScheduledStepResponse) Reset() {
@@ -250,6 +257,41 @@ func (x *ExecuteScheduledStepResponse) GetUnknownOutcome() bool {
 		return x.UnknownOutcome
 	}
 	return false
+}
+
+func (x *ExecuteScheduledStepResponse) GetRoundsExecuted() uint32 {
+	if x != nil {
+		return x.RoundsExecuted
+	}
+	return 0
+}
+
+func (x *ExecuteScheduledStepResponse) GetWithheldEffects() uint32 {
+	if x != nil {
+		return x.WithheldEffects
+	}
+	return 0
+}
+
+func (x *ExecuteScheduledStepResponse) GetToolCalls() uint32 {
+	if x != nil {
+		return x.ToolCalls
+	}
+	return 0
+}
+
+func (x *ExecuteScheduledStepResponse) GetInputTokens() uint32 {
+	if x != nil {
+		return x.InputTokens
+	}
+	return 0
+}
+
+func (x *ExecuteScheduledStepResponse) GetOutputTokens() uint32 {
+	if x != nil {
+		return x.OutputTokens
+	}
+	return 0
 }
 
 // RunAgentRequest — drive one agent run from goal to terminal answer.
@@ -1620,7 +1662,7 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	" \x01(\rR\tstepIndex\x12#\n" +
 	"\rpolicy_digest\x18\v \x01(\tR\fpolicyDigest\x12'\n" +
 	"\x0fidempotency_key\x18\f \x01(\tR\x0eidempotencyKey\x124\n" +
-	"\x16control_decision_token\x18\r \x01(\tR\x14controlDecisionToken\"\xc5\x01\n" +
+	"\x16control_decision_token\x18\r \x01(\tR\x14controlDecisionToken\"\x80\x03\n" +
 	"\x1cExecuteScheduledStepResponse\x12\x17\n" +
 	"\astep_id\x18\x01 \x01(\tR\x06stepId\x12\x16\n" +
 	"\x06status\x18\x02 \x01(\tR\x06status\x12\x1d\n" +
@@ -1628,7 +1670,14 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"receipt_id\x18\x03 \x01(\tR\treceiptId\x12\x16\n" +
 	"\x06output\x18\x04 \x01(\tR\x06output\x12\x14\n" +
 	"\x05error\x18\x05 \x01(\tR\x05error\x12'\n" +
-	"\x0funknown_outcome\x18\x06 \x01(\bR\x0eunknownOutcome\"\xd6\x05\n" +
+	"\x0funknown_outcome\x18\x06 \x01(\bR\x0eunknownOutcome\x12'\n" +
+	"\x0frounds_executed\x18\a \x01(\rR\x0eroundsExecuted\x12)\n" +
+	"\x10withheld_effects\x18\b \x01(\rR\x0fwithheldEffects\x12\x1d\n" +
+	"\n" +
+	"tool_calls\x18\t \x01(\rR\ttoolCalls\x12!\n" +
+	"\finput_tokens\x18\n" +
+	" \x01(\rR\vinputTokens\x12#\n" +
+	"\routput_tokens\x18\v \x01(\rR\foutputTokens\"\xd6\x05\n" +
 	"\x0fRunAgentRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1b\n" +
 	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\x12\n" +

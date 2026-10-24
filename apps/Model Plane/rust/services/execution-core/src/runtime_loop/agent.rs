@@ -489,6 +489,8 @@ struct LoopContext<'a> {
     /// The run's held results (WS25-S5), shared with every delegated child. `None` unless
     /// the switch is on for this run, and never set for a zero-retention or waived run.
     result_store: Option<std::sync::Arc<super::result_handles::ResultHandles>>,
+    /// The per-round output cap: the fixed cap, or the scheduled contract's own (WS20 S6).
+    max_tokens: i32,
 }
 
 /// The inference this invocation of a run has spent, summed across the root loop
@@ -780,6 +782,7 @@ pub(crate) async fn run_agent(
         sandbox_tokens,
         process_host,
         None,
+        None,
     )
     .await
 }
@@ -881,17 +884,18 @@ async fn resume_parked_run(
         sandbox_tokens,
         process_host,
         Some(super::park::ParkClaimed { claimed }),
+        None,
     )
     .await
 }
 
 /// The tools a run is offered, and whether a park resume could derive the same set again.
-struct OfferedTools {
-    defs: Vec<pb::ToolDefinition>,
+pub(crate) struct OfferedTools {
+    pub(crate) defs: Vec<pb::ToolDefinition>,
     /// The set is the built-in tools and the server-resolved view and nothing a caller or an
     /// MCP server added, so a resume rebuilds it by name and digest (WS03 S8-A). It is what a
     /// run needs to park at all.
-    derivable: bool,
+    pub(crate) derivable: bool,
 }
 
 /// The tools `req` is offered, by what kind of request it is (WS03 S8-A):
@@ -959,7 +963,7 @@ fn offer_is_waived(req: &pb::RunAgentRequest, caller: &crate::auth::Authenticate
 /// the process family for a Space run on a host that runs processes. A park resume derives
 /// its tool set from this and the server-resolved view alone, so it is a function of the
 /// deployment and the run's Space and nothing else.
-pub(super) fn base_tool_defs(space_scoped: bool) -> Vec<pb::ToolDefinition> {
+pub(crate) fn base_tool_defs(space_scoped: bool) -> Vec<pb::ToolDefinition> {
     let mut tools = offered_tool_defs();
     // Wide-research kill switch (`WIDE_RESEARCH_FAN_OUT_ENABLED`): when the
     // deployment switches the fan-out off, the model is simply not shown it.
@@ -1376,6 +1380,7 @@ async fn run_agent_with_tools(
         sandbox_tokens,
         process_host,
         None,
+        None,
     )
     .await
 }
@@ -1407,7 +1412,7 @@ fn subscription_switches() -> mp_contracts::agentic_subscription::Switches {
 /// does not resolve, or is not pinned, is `park_route_unavailable`, and a waived route is the
 /// zero-retention refusal (a waived run keeps no durable state, so it resumes none).
 #[allow(clippy::too_many_arguments)]
-async fn run_agent_with_offered(
+pub(crate) async fn run_agent_with_offered(
     state: &crate::state::StateStore,
     session_channel: Channel,
     inference_channel: Channel,
@@ -1427,6 +1432,7 @@ async fn run_agent_with_offered(
     sandbox_tokens: &crate::sandbox_lease::SandboxManagerTokenProvider,
     process_host: Option<&crate::process_host::ProcessHost>,
     park: Option<super::park::ParkClaimed>,
+    scheduled: Option<super::scheduled_agent::LoopScope>,
 ) -> Result<pb::RunAgentResponse, tonic::Status> {
     let route = crate::agent_route::ModelRoute::resolve(
         &req,
@@ -1490,6 +1496,7 @@ async fn run_agent_with_offered(
         deadline,
         tools.derivable,
         park,
+        scheduled,
     )
     .await
 }
@@ -1543,6 +1550,7 @@ async fn run_agent_with_route(
         deadline,
         false,
         None,
+        None,
     )
     .await
 }
@@ -1575,6 +1583,7 @@ async fn run_agent_with_route_parkable(
     deadline: crate::run_budget::RunDeadline,
     derivable: bool,
     park: Option<super::park::ParkClaimed>,
+    scheduled: Option<super::scheduled_agent::LoopScope>,
 ) -> Result<pb::RunAgentResponse, tonic::Status> {
     let plan_id = format!("plan_{}", req.run_id);
 
@@ -1615,8 +1624,9 @@ async fn run_agent_with_route_parkable(
         None => tools,
     };
     // Run-scoped result handles (WS25-S5). A fresh run is offered `result_query` only when
-    // it holds results; a continuation keeps the tools its snapshot was offered.
-    let result_store = if resumed.is_none() {
+    // it holds results; a continuation keeps the tools its snapshot was offered. A scheduled
+    // run is offered its contract's tools and nothing the loop adds, so it holds no handles.
+    let result_store = if resumed.is_none() && scheduled.is_none() {
         super::result_handles::for_run(req.zdr, route.is_waived(), MAX_TOOL_CONTEXT_CHARS)
     } else {
         None
@@ -1721,6 +1731,7 @@ async fn run_agent_with_route_parkable(
         deadline,
         usage: UsageTally::default(),
         result_store: result_store.clone(),
+        max_tokens: scheduled.map_or(MAX_TOKENS, |scope| scope.max_tokens_per_round),
     };
 
     // 2. The governed ReAct loop.
@@ -1791,6 +1802,9 @@ async fn run_agent_with_route_parkable(
         context.usage.snapshot(),
         session_bearer.as_deref(),
         terminal_tokens,
+        // The scheduled lane writes its transcript through RecordScheduledRunResult, which
+        // is the one answer the thread gets: the plain append would carry it twice.
+        scheduled.is_none(),
     )
     .await;
     // Nothing reads a handle after the run ends, so the store drops what it held (WS25-S5).
@@ -2725,7 +2739,7 @@ async fn run_rounds(
                 messages.clone()
             },
             temperature: TEMPERATURE,
-            max_tokens: MAX_TOKENS,
+            max_tokens: ctx.max_tokens,
             structured_output_schema: String::new(),
             zdr,
             // PRIVACY FLOOR: the run's `min_privacy_tier` rides on EVERY
@@ -3192,10 +3206,44 @@ async fn run_rounds(
                         granted = mp_contracts::autonomy::label(granted),
                         "run_agent: rejecting a tool the run's autonomy rung does not cover"
                     );
+                    // A scheduled run has no one to approve a gated call: the refusal is also
+                    // recorded as withheld, so the owner sees it (WS20 S6).
+                    super::scheduled_agent::withhold(
+                        ctx.state,
+                        &req.run_id,
+                        &call.name,
+                        &call.arguments_json,
+                        super::scheduled_agent::REASON_NOT_COVERED,
+                    );
                     slots.push(CallSlot::Rejected(ToolStepResult {
                         name: call.name.clone(),
                         output: String::new(),
                         error: Some(refusal),
+                    }));
+                    continue;
+                }
+            }
+
+            // An unattended run may not send its own content out in a URL query (WS20 S6).
+            if ctx.state.is_unattended(&req.run_id) {
+                if let Some(reason) =
+                    super::scheduled_agent::egress_refusal(&call.name, &call.arguments_json)
+                {
+                    super::scheduled_agent::withhold(
+                        ctx.state,
+                        &req.run_id,
+                        &call.name,
+                        &call.arguments_json,
+                        reason,
+                    );
+                    slots.push(CallSlot::Rejected(ToolStepResult {
+                        name: call.name.clone(),
+                        output: String::new(),
+                        error: Some(format!(
+                            "tool '{}' was withheld: a scheduled run may not send its own content \
+                             out in a URL query string. Fetch the plain page address instead.",
+                            call.name
+                        )),
                     }));
                     continue;
                 }
@@ -3303,6 +3351,13 @@ async fn run_rounds(
                     depth = ctx.depth,
                     tool = %call.name,
                     "run_agent: rejecting risky tool while the run is in plan mode"
+                );
+                super::scheduled_agent::withhold(
+                    ctx.state,
+                    &req.run_id,
+                    &call.name,
+                    &call.arguments_json,
+                    super::scheduled_agent::REASON_NOT_COVERED,
                 );
                 slots.push(CallSlot::Rejected(ToolStepResult {
                     name: call.name.clone(),
@@ -3880,6 +3935,26 @@ async fn run_rounds(
                     unreachable!("every ToDispatch slot produced an outcome in phase 2")
                 }
             };
+
+            // A scheduled run is unattended: a gated call is withheld and recorded, and the model
+            // is told so, instead of pausing for an approval no one can give (WS20 S6). The gated
+            // call never ran, so nothing is undone.
+            if outcome.status == "awaiting_approval"
+                && super::scheduled_agent::withhold(
+                    ctx.state,
+                    &req.run_id,
+                    &call.name,
+                    &call.arguments_json,
+                    super::scheduled_agent::REASON_NOT_COVERED,
+                )
+            {
+                outcomes.push(ToolStepResult {
+                    name: call.name.clone(),
+                    output: String::new(),
+                    error: Some(super::scheduled_agent::withheld_refusal(&call.name)),
+                });
+                continue;
+            }
 
             // HITL: a gated tool may be reported as paused only after the
             // durable approval write succeeds. Otherwise propagate an explicit
@@ -5148,6 +5223,7 @@ async fn run_delegated_child(
         // The parent's tally, shared: the delegate's rounds are the run's.
         usage: parent.usage.clone(),
         result_store: parent.result_store.clone(),
+        max_tokens: parent.max_tokens,
     };
 
     info!(
@@ -7038,6 +7114,8 @@ async fn finalize(
     usage: pb::RunUsage,
     bearer: Option<&str>,
     terminal_tokens: &dyn ManagedRunTokenProvider,
+    // False for a scheduled run, whose answer its own lane persists (WS20 S6).
+    append_answer: bool,
 ) -> Result<pb::RunAgentResponse, tonic::Status> {
     let mut session = SessionCoreClient::new(session_channel.clone());
     let mut terminal_success = success;
@@ -7045,7 +7123,7 @@ async fn finalize(
 
     // 3. Persist the assistant answer only when retention permits it. An
     // append failure becomes a durable failed receipt, never a success.
-    if !req.zdr && refusal.is_none() {
+    if !req.zdr && refusal.is_none() && append_answer {
         let append_request = authenticated_session_request(
             pb::AppendMessageRequest {
                 thread_id: req.thread_id.clone(),
@@ -24083,6 +24161,7 @@ mod tests {
             deadline,
             how.derivable,
             None,
+            None,
         )
         .await;
         ParkRun {
@@ -25008,6 +25087,7 @@ mod tests {
             route,
             credential_deadline_already_spent(std::time::Instant::now()),
             true,
+            None,
             None,
         )
         .await;
@@ -26116,6 +26196,7 @@ mod tests {
             &test_sandbox_tokens(),
             None,
             Some(runtime_loop::park::ParkClaimed { claimed }),
+            None,
         )
         .await
         .expect_err("an unpinned rebuild is refused");

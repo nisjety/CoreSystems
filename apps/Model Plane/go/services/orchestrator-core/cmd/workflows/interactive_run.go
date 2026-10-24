@@ -65,6 +65,11 @@ const (
 	// replayable while new fires use the dedicated service-owned step activity.
 	scheduledStepLaneChange  = "scheduled-step-lane"
 	scheduledStepLaneVersion = 1
+
+	// scheduledAgentLaneChange gates the bounded agent loop for a fire under a stored-consent
+	// contract (WS20 S6). Histories that predate it keep the step loops below.
+	scheduledAgentLaneChange  = "scheduled-agent-lane"
+	scheduledAgentLaneVersion = 1
 )
 
 // InteractiveRunSupervision orchestrates an interactive agent run.
@@ -232,14 +237,21 @@ func ScheduledRunSupervision(ctx workflow.Context, input ScheduledRunInput) erro
 	}
 
 	var stepOutput activities.StepLoopOutput
-	if workflow.GetVersion(ctx, scheduledStepLaneChange, workflow.DefaultVersion, scheduledStepLaneVersion) == workflow.DefaultVersion {
+	// The agent lane is decided once, from the answer the start recorded. A fire without a
+	// contract never takes it, and a history that predates it replays with the marker absent.
+	agentLane := input.ContractJSON != "" && runMeta.AgentLane &&
+		workflow.GetVersion(ctx, scheduledAgentLaneChange, workflow.DefaultVersion, scheduledAgentLaneVersion) == scheduledAgentLaneVersion
+	switch {
+	case agentLane:
+		stepOutput, err = executeScheduledAgentStep(actCtx, input)
+	case workflow.GetVersion(ctx, scheduledStepLaneChange, workflow.DefaultVersion, scheduledStepLaneVersion) == workflow.DefaultVersion:
 		// Replay-only compatibility for histories created before the dedicated
 		// service-owned lane existed. New fires must never take this branch.
 		stepOutput, err = runStepLoop(actCtx, activities.StepLoopInput{
 			RunID: input.RunID, ThreadID: input.ThreadID, Goal: input.Goal,
 			Policy: input.Policy, MaxTurns: defaultMaxTurns, OrgID: input.OrgID,
 		})
-	} else {
+	default:
 		stepOutput, err = executeScheduledStepLoop(actCtx, input)
 	}
 	if err != nil {
@@ -251,10 +263,14 @@ func ScheduledRunSupervision(ctx workflow.Context, input ScheduledRunInput) erro
 	if cancelled {
 		return handleFailure(ctx, input.RunID, input.OrgID, "", input.Retention, "cancelled")
 	}
+	summary := stepOutput.Summary
+	if agentLane {
+		summary = scheduledAgentOutcomeSummary(input.RunID, stepOutput)
+	}
 	completionInput := activities.CompletionInput{
 		RunID:     input.RunID,
 		OrgID:     input.OrgID,
-		Summary:   stepOutput.Summary,
+		Summary:   summary,
 		Retention: input.Retention,
 	}
 	if err := workflow.ExecuteActivity(actCtx, "CompleteRunActivity", completionInput).Get(ctx, nil); err != nil {

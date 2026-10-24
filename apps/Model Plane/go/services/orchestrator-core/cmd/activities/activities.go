@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/triodelab/model-plane/services/orchestrator-core/internal/feedback"
 	"github.com/triodelab/model-plane/services/orchestrator-core/internal/grpcclient"
 	"github.com/triodelab/model-plane/services/orchestrator-core/internal/servicecred"
+	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/temporal"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -31,6 +33,10 @@ type RunMetadata struct {
 	OrgID     string
 	UserID    string
 	StartedAt time.Time
+
+	// AgentLane is true when a fire under a stored-consent contract may take the bounded
+	// agent loop (WS20 S6). It is read once, at start, and recorded in workflow history.
+	AgentLane bool
 }
 type StepResult struct {
 	StepIndex     int
@@ -43,6 +49,10 @@ type StepResult struct {
 	// receipt instead of dispatching another step or blindly retrying.
 	UnknownOutcome bool
 	Metadata       map[string]string
+
+	// Counts of a scheduled agent-lane step (WS20 S6); zero on every other lane.
+	RoundsExecuted  int
+	WithheldEffects int
 }
 type StepLoopInput struct {
 	RunID    string
@@ -75,6 +85,40 @@ type StepInput struct {
 	StepIndex int
 }
 
+// scheduledStepHeartbeatEvery is how often a running scheduled step proves it is alive, so an
+// agent-lane step that runs for minutes is not reclaimed as stuck (WS20 S6). It must stay well
+// under the workflow's HeartbeatTimeout (one minute): a ticker equal to the timeout sends its first
+// heartbeat at the instant the timeout expires.
+const scheduledStepHeartbeatEvery = 20 * time.Second
+
+// startScheduledStepHeartbeat records heartbeats until the returned stop function runs. Outside an
+// activity context there is nothing to heartbeat, so it does nothing.
+func startScheduledStepHeartbeat(ctx context.Context) func() {
+	if !activity.IsActivity(ctx) {
+		return func() {}
+	}
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(scheduledStepHeartbeatEvery)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				activity.RecordHeartbeat(ctx)
+			}
+		}
+	}()
+	return func() { close(done) }
+}
+
+// scheduledAgentLaneEnabled reads the switch that gates the scheduled Do lane (WS20 S6). Only the
+// literal true enables it, as execution-core reads it.
+func scheduledAgentLaneEnabled() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("EXECUTION_SCHEDULED_AGENT_ENABLED")), "true")
+}
+
 // ExecuteScheduledStepActivity is the dedicated service-owned scheduled turn
 // boundary. The Control decision is minted inside this activity and exists only
 // in the direct RPC request; it is never part of Temporal input/history. The
@@ -90,6 +134,8 @@ func (a *Activities) ExecuteScheduledStepActivity(
 	if a.clients == nil || a.clients.ExecutionCore == nil {
 		return StepResult{}, errors.New("execution-core scheduled-step lane is unavailable")
 	}
+	stopHeartbeat := startScheduledStepHeartbeat(ctx)
+	defer stopHeartbeat()
 	decisionToken, err := a.AuthorizeScheduledStepActivity(ctx, intent)
 	if err != nil {
 		return StepResult{}, fmt.Errorf("authorize scheduled step: %w", err)
@@ -163,7 +209,7 @@ func (a *Activities) ExecuteScheduledStepActivity(
 				nil,
 			)
 	}
-	return StepResult{
+	step := StepResult{
 		StepIndex:     int(intent.StepIndex),
 		ToolName:      "scheduled-step",
 		Output:        resp.Output,
@@ -173,7 +219,10 @@ func (a *Activities) ExecuteScheduledStepActivity(
 			"receipt_id":      resp.ReceiptId,
 			"unknown_outcome": fmt.Sprintf("%t", resp.UnknownOutcome),
 		},
-	}, nil
+	}
+	step.RoundsExecuted = int(resp.GetRoundsExecuted())
+	step.WithheldEffects = int(resp.GetWithheldEffects())
+	return step, nil
 }
 
 // Retention is a run's Zero Data Retention posture as it travels from the
@@ -569,6 +618,7 @@ func (a *Activities) StartScheduledRunActivity(
 	if resp.GetRunId() != runID || resp.GetOwnerId() != SystemActorID {
 		return fallback, fmt.Errorf("prepared scheduled run %s received mismatched Session Core receipt", runID)
 	}
+	fallback.AgentLane = scheduledAgentLaneEnabled()
 	return fallback, nil
 }
 

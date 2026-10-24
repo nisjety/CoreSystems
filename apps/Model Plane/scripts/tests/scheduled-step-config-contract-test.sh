@@ -125,3 +125,19 @@ rg -Fq 'contract_expires_at = 16' "$ROOT_DIR/proto/model_plane/v1/sessions.proto
 }
 
 echo "scheduled-step config contract: exact bindings and Auth Core scopes declared, empty by default, and fail-closed"
+
+echo "scheduled-step config contract: exact bindings and Auth Core scopes declared, empty by default, and fail-closed"
+
+# WS20 S6: the scheduled Do lane is switched by one name, default off, read by both the
+# execution-core lane and the orchestrator that chooses it. Only the source is checked here; the
+# deploy overlay is the owner's rollout step, and this script never enables the lane.
+rg -q 'SWITCH_ENV: &str = "EXECUTION_SCHEDULED_AGENT_ENABLED"' \
+  "$ROOT_DIR/rust/services/execution-core/src/scheduled_agent.rs" || {
+  echo "execution-core scheduled agent switch name is missing or changed" >&2
+  exit 1
+}
+rg -Fq 'os.Getenv("EXECUTION_SCHEDULED_AGENT_ENABLED")' \
+  "$ROOT_DIR/go/services/orchestrator-core/cmd/activities/activities.go" || {
+  echo "orchestrator scheduled agent switch name is missing or changed" >&2
+  exit 1
+}

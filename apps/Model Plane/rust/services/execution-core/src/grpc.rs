@@ -317,6 +317,7 @@ impl ExecutionService {
                 output: String::new(),
                 error: String::new(),
                 unknown_outcome: claim.status == "unknown_outcome",
+                ..Default::default()
             }));
         }
 
@@ -375,6 +376,7 @@ impl ExecutionService {
                 output: String::new(),
                 error: error_code.to_owned(),
                 unknown_outcome: false,
+                ..Default::default()
             }));
         }
         if run.goal.trim().is_empty() {
@@ -396,7 +398,23 @@ impl ExecutionService {
                 output: String::new(),
                 error: "missing_scheduled_goal".to_owned(),
                 unknown_outcome: false,
+                ..Default::default()
             }));
+        }
+
+        // A step whose schedule stored a consent contract takes the bounded agent lane when
+        // its switch is on (WS20 S6). Without a contract, or with the switch off, the
+        // single-inference lane below runs byte-for-byte as before.
+        if !run.contract_json.is_empty() && runtime_loop::scheduled_agent::enabled() {
+            return self
+                .execute_scheduled_agent_step(
+                    &req,
+                    &run,
+                    &session_bearer,
+                    &inference_bearer,
+                    &claim.receipt_id,
+                )
+                .await;
         }
 
         let inference_request = scheduled_inference_request(&req, &run.goal);
@@ -446,6 +464,7 @@ impl ExecutionService {
                     output,
                     error: String::new(),
                     unknown_outcome: false,
+                    ..Default::default()
                 }))
             }
             Err(error) => {
@@ -468,6 +487,7 @@ impl ExecutionService {
                     output: String::new(),
                     error: error_code.to_owned(),
                     unknown_outcome: unknown,
+                    ..Default::default()
                 }))
             }
         }
@@ -494,6 +514,179 @@ impl ExecutionService {
                 warn!(code = ?error.code(), "scheduled-step result persistence failed");
                 Status::unavailable("scheduled-step result persistence unavailable")
             })
+    }
+
+    /// Run one scheduled Do step in the bounded agent loop (WS20 S6). The stored contract is
+    /// verified again here, then the loop runs under the service identity, unattended: a gated
+    /// effect is withheld and counted, never paused for. A transport loss or the wall clock is
+    /// an unknown outcome, reconciled from the receipt and never retried.
+    async fn execute_scheduled_agent_step(
+        &self,
+        req: &pb::ExecuteScheduledStepRequest,
+        run: &pb::ScheduledStepContext,
+        session_bearer: &str,
+        inference_bearer: &str,
+        receipt_id: &str,
+    ) -> Result<Response<pb::ExecuteScheduledStepResponse>, Status> {
+        // Zero retention and waivers are refused before any work: the lane keeps no durable
+        // state for an unattended run (WS20 S6, ZDR clause). The caller is the lane's own
+        // identity, which carries no retention until the step context does.
+        let caller = AuthenticatedUser {
+            org_id: req.org_id.clone(),
+            user_id: req.subject_id.clone(),
+            zdr: false,
+            org_zdr: None,
+            zdr_waiver: None,
+        };
+        if let Some(code) = runtime_loop::scheduled_agent::refuses_retention(
+            caller.zdr,
+            caller.zdr_waiver.is_some(),
+        ) {
+            return self
+                .finish_scheduled_agent_step(
+                    req,
+                    session_bearer,
+                    receipt_id,
+                    &AgentStepOutcome::failed(code),
+                )
+                .await;
+        }
+        let now = chrono::Utc::now();
+        let contract = match runtime_loop::scheduled_agent::admit(
+            &run.contract_json,
+            &run.contract_digest,
+            &run.contract_expires_at,
+            now,
+        ) {
+            Ok(contract) => contract,
+            Err(code) => {
+                return self
+                    .finish_scheduled_agent_step(
+                        req,
+                        session_bearer,
+                        receipt_id,
+                        &AgentStepOutcome::failed(code),
+                    )
+                    .await;
+            }
+        };
+        let tools = runtime_loop::agent::OfferedTools {
+            defs: runtime_loop::scheduled_agent::offered_defs(
+                &contract,
+                runtime_loop::agent::base_tool_defs(!req.space_id.is_empty()),
+            ),
+            derivable: false,
+        };
+        let run_req = runtime_loop::scheduled_agent::run_request(req, &run.goal, &contract);
+        self.state.begin_unattended(&req.run_id);
+        let driven = tokio::time::timeout(
+            runtime_loop::scheduled_agent::wall_clock(&contract, now),
+            runtime_loop::agent::run_agent_with_offered(
+                &self.state,
+                self.session_channel.clone(),
+                self.inference_channel(),
+                &caller,
+                run_req,
+                tools,
+                None,
+                Some(session_bearer.to_owned()),
+                inference_bearer.to_owned(),
+                self.capability_policy.as_ref(),
+                self.terminal_tokens.as_ref(),
+                None,
+                self.capability_client.as_ref(),
+                &self.sandbox_manager_client,
+                &self.backend_id,
+                self.cas_client.as_ref(),
+                &self.sandbox_tokens,
+                self.process_host.as_deref(),
+                None,
+                Some(runtime_loop::scheduled_agent::loop_scope(&contract)),
+            ),
+        )
+        .await;
+        let withheld = self.state.take_withheld(&req.run_id);
+        let outcome = match driven {
+            Ok(Ok(response)) => {
+                let usage = response.usage.unwrap_or_default();
+                AgentStepOutcome {
+                    status: if response.status == "completed" {
+                        "completed"
+                    } else {
+                        "failed"
+                    },
+                    output: runtime_loop::scheduled_agent::transcript_text(
+                        &response.final_output,
+                        &withheld,
+                    ),
+                    error_code: if response.status == "completed" {
+                        ""
+                    } else {
+                        "scheduled_run_incomplete"
+                    },
+                    unknown: false,
+                    rounds_executed: response.rounds_executed,
+                    withheld_effects: u32::try_from(withheld.len()).unwrap_or(u32::MAX),
+                    input_tokens: u32::try_from(usage.input_tokens).unwrap_or(u32::MAX),
+                    output_tokens: u32::try_from(usage.output_tokens).unwrap_or(u32::MAX),
+                }
+            }
+            Ok(Err(error)) => {
+                warn!(code = ?error.code(), "scheduled agent run failed");
+                let (status, error_code, unknown) = scheduled_step_failure_status(error.code());
+                AgentStepOutcome {
+                    status,
+                    error_code,
+                    unknown,
+                    ..AgentStepOutcome::failed("")
+                }
+            }
+            Err(_elapsed) => AgentStepOutcome {
+                status: "unknown_outcome",
+                error_code: "scheduled_run_deadline",
+                unknown: true,
+                ..AgentStepOutcome::failed("")
+            },
+        };
+        self.finish_scheduled_agent_step(req, session_bearer, receipt_id, &outcome)
+            .await
+    }
+
+    /// Complete a claimed agent-lane step through Session Core, which appends the transcript and
+    /// records the counts. The answer is content and travels only on this direct hop; the
+    /// response to the orchestrator carries counts and no output.
+    async fn finish_scheduled_agent_step(
+        &self,
+        req: &pb::ExecuteScheduledStepRequest,
+        bearer: &str,
+        receipt_id: &str,
+        outcome: &AgentStepOutcome,
+    ) -> Result<Response<pb::ExecuteScheduledStepResponse>, Status> {
+        let receipt = self
+            .session_client()
+            .record_scheduled_run_result(authenticated_session_request(
+                scheduled_agent_result_request(req, receipt_id, outcome),
+                bearer,
+            )?)
+            .await
+            .map(|response| response.into_inner())
+            .map_err(|error| {
+                warn!(code = ?error.code(), "scheduled agent result persistence failed");
+                Status::unavailable("scheduled-step result persistence unavailable")
+            })?;
+        Ok(Response::new(pb::ExecuteScheduledStepResponse {
+            step_id: req.step_id.clone(),
+            status: receipt.status,
+            receipt_id: receipt.receipt_id,
+            output: String::new(),
+            error: outcome.error_code.to_owned(),
+            unknown_outcome: outcome.unknown,
+            rounds_executed: outcome.rounds_executed,
+            withheld_effects: outcome.withheld_effects,
+            tool_calls: 0,
+            input_tokens: outcome.input_tokens,
+            output_tokens: outcome.output_tokens,
+        }))
     }
 
     async fn record_scheduled_step_receipt(
@@ -558,6 +751,59 @@ fn scheduled_run_result_request(
         status: "completed".to_owned(),
         output: output.to_owned(),
         ..Default::default()
+    }
+}
+
+/// What one agent-lane step reports to Session Core (WS20 S6). The counts carry no content;
+/// `output` is the transcript text and travels only on the direct hop.
+struct AgentStepOutcome {
+    status: &'static str,
+    output: String,
+    error_code: &'static str,
+    unknown: bool,
+    rounds_executed: u32,
+    withheld_effects: u32,
+    input_tokens: u32,
+    output_tokens: u32,
+}
+
+impl AgentStepOutcome {
+    fn failed(error_code: &'static str) -> Self {
+        Self {
+            status: "failed",
+            output: String::new(),
+            error_code,
+            unknown: false,
+            rounds_executed: 0,
+            withheld_effects: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+        }
+    }
+}
+
+/// The Session Core result for an agent-lane step. `tool_calls` is not reported by the
+/// driver yet, so it stays zero.
+fn scheduled_agent_result_request(
+    req: &pb::ExecuteScheduledStepRequest,
+    receipt_id: &str,
+    outcome: &AgentStepOutcome,
+) -> pb::RecordScheduledRunResultRequest {
+    pb::RecordScheduledRunResultRequest {
+        run_id: req.run_id.clone(),
+        step_id: req.step_id.clone(),
+        org_id: req.org_id.clone(),
+        idempotency_key: req.idempotency_key.clone(),
+        receipt_id: receipt_id.to_owned(),
+        status: outcome.status.to_owned(),
+        output: outcome.output.clone(),
+        error_code: outcome.error_code.to_owned(),
+        unknown_outcome: outcome.unknown,
+        rounds_executed: outcome.rounds_executed,
+        withheld_effects: outcome.withheld_effects,
+        tool_calls: 0,
+        input_tokens: outcome.input_tokens,
+        output_tokens: outcome.output_tokens,
     }
 }
 

@@ -503,3 +503,109 @@ func TestInteractiveRun_CancelMidActivity_StillEmitsRunFailed(t *testing.T) {
 	assert.Equal(t, input.RunID, decoded.CorrelationID)
 	assert.Equal(t, input.RunID+":failed", decoded.IdempotencyKey)
 }
+
+// agentLaneInput is a fire under a stored-consent contract (WS20 S6): the one shape that may take
+// the agent lane, and only when the start activity records that the switch is on.
+func agentLaneInput(fireKey string) ScheduledRunInput {
+	return ScheduledRunInput{
+		RunID: "task-schedule-" + fireKey, ThreadID: "thread-schedule-" + fireKey, OrgID: "org-1",
+		SpaceRef: "space-1", SubjectID: "user-1", ScheduleID: "schedule-1", FireKey: fireKey,
+		TemplateDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		PolicyDigest:   "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		IdempotencyKey: "schedule-1:" + fireKey, Goal: "summarise the work queue", Policy: "execute",
+		ContractJSON:      `{"expires_at":"2026-11-23T10:00:00Z","max_rounds":6,"max_tokens_per_round":2048,"tools":[{"approved_at":"2026-10-24T10:00:00Z","capability":"cap.tool.web_search","class":"read","tool":"web_search"}],"v":1}`,
+		ContractDigest:    "sha256:3d4828c85b976a25447098498e5077de75aa531a0e64aebe2d68bfc8f7953d55",
+		ContractExpiresAt: "2026-11-23T10:00:00Z",
+		Retention:         activities.RetentionDurable,
+	}
+}
+
+// TestScheduledRun_AgentLaneCompletesWithWithheldEffects verifies that a contract-bearing fire
+// that the start recorded as agent-lane takes one agent step, and that a withheld effect completes
+// the run as needs_review with counts only.
+func TestScheduledRun_AgentLaneCompletesWithWithheldEffects(t *testing.T) {
+	env, _, stub := newTestEnv(t)
+	input := agentLaneInput("fire-agent-withheld")
+	env.OnActivity(
+		"StartScheduledRunActivity",
+		mock.Anything, input.RunID, input.ThreadID, input.OrgID, input.SpaceRef, input.SubjectID,
+		input.ScheduleID, input.FireKey, input.TemplateDigest, input.IdempotencyKey, input.Goal, "execute",
+		input.ContractJSON, input.ContractDigest, input.ContractExpiresAt,
+	).Return(activities.RunMetadata{
+		RunID: input.RunID, ThreadID: input.ThreadID, OrgID: input.OrgID,
+		UserID: activities.SystemActorID, AgentLane: true,
+	}, nil).Once()
+	env.OnActivity("ExecuteScheduledStepActivity", mock.Anything, mock.MatchedBy(func(intent activities.ScheduledStepExecutionIntent) bool {
+		return intent.StepID == input.RunID+":step:0" && intent.ContractDigest == input.ContractDigest
+	})).Return(activities.StepResult{
+		StepIndex: 0, ToolName: "scheduled-step", Completed: true,
+		RoundsExecuted: 3, WithheldEffects: 1,
+	}, nil).Once()
+
+	env.ExecuteWorkflow(ScheduledRunSupervision, input)
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+	_, decoded := decodeOnlyEnvelope(t, stub.Events())
+	assert.Equal(t, "RUN_COMPLETED", decoded.EventType)
+	assert.Contains(t, string(decoded.Payload), "needs_review")
+	env.AssertExpectations(t)
+}
+
+// TestScheduledRun_AgentLaneUnknownOutcomeStopsWithoutRetry verifies that an unknown agent-lane
+// outcome stops the run after exactly one step attempt: no retry and no second step.
+func TestScheduledRun_AgentLaneUnknownOutcomeStopsWithoutRetry(t *testing.T) {
+	env, _, stub := newTestEnv(t)
+	input := agentLaneInput("fire-agent-unknown")
+	env.OnActivity(
+		"StartScheduledRunActivity",
+		mock.Anything, input.RunID, input.ThreadID, input.OrgID, input.SpaceRef, input.SubjectID,
+		input.ScheduleID, input.FireKey, input.TemplateDigest, input.IdempotencyKey, input.Goal, "execute",
+		input.ContractJSON, input.ContractDigest, input.ContractExpiresAt,
+	).Return(activities.RunMetadata{
+		RunID: input.RunID, ThreadID: input.ThreadID, OrgID: input.OrgID,
+		UserID: activities.SystemActorID, AgentLane: true,
+	}, nil).Once()
+	env.OnActivity("ExecuteScheduledStepActivity", mock.Anything, mock.Anything).
+		Return(activities.StepResult{
+			StepIndex: 0, ToolName: "scheduled-step", UnknownOutcome: true,
+			Metadata: map[string]string{"receipt_id": "receipt-agent-unknown"},
+		}, nil).Once()
+
+	env.ExecuteWorkflow(ScheduledRunSupervision, input)
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.Error(t, env.GetWorkflowError())
+	_, decoded := decodeOnlyEnvelope(t, stub.Events())
+	assert.Equal(t, "RUN_FAILED", decoded.EventType)
+	env.AssertExpectations(t)
+}
+
+// TestScheduledRun_AgentLaneIncompleteStepReportsFailed verifies that an agent-lane step that did
+// not complete (a refused contract, for example) is summarised as failed, even with no effect
+// withheld, and never as completed or needs_review.
+func TestScheduledRun_AgentLaneIncompleteStepReportsFailed(t *testing.T) {
+	env, _, stub := newTestEnv(t)
+	input := agentLaneInput("fire-agent-incomplete")
+	env.OnActivity(
+		"StartScheduledRunActivity",
+		mock.Anything, input.RunID, input.ThreadID, input.OrgID, input.SpaceRef, input.SubjectID,
+		input.ScheduleID, input.FireKey, input.TemplateDigest, input.IdempotencyKey, input.Goal, "execute",
+		input.ContractJSON, input.ContractDigest, input.ContractExpiresAt,
+	).Return(activities.RunMetadata{
+		RunID: input.RunID, ThreadID: input.ThreadID, OrgID: input.OrgID,
+		UserID: activities.SystemActorID, AgentLane: true,
+	}, nil).Once()
+	env.OnActivity("ExecuteScheduledStepActivity", mock.Anything, mock.Anything).
+		Return(activities.StepResult{StepIndex: 0, ToolName: "scheduled-step", Completed: false}, nil).Once()
+
+	env.ExecuteWorkflow(ScheduledRunSupervision, input)
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+	_, decoded := decodeOnlyEnvelope(t, stub.Events())
+	assert.Equal(t, "RUN_COMPLETED", decoded.EventType)
+	assert.Contains(t, string(decoded.Payload), "outcome failed")
+	assert.NotContains(t, string(decoded.Payload), "needs_review")
+	env.AssertExpectations(t)
+}

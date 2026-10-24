@@ -70,6 +70,13 @@ message ExecuteScheduledStepResponse {
   string output = 4;
   string error = 5;
   bool unknown_outcome = 6;
+  // Counts of the scheduled Do lane (WS20 S6). Zero on the single-inference lane.
+  // They carry no content: the withheld effects are named only in the transcript.
+  uint32 rounds_executed = 7;
+  uint32 withheld_effects = 8;
+  uint32 tool_calls = 9;
+  uint32 input_tokens = 10;
+  uint32 output_tokens = 11;
 }
 
 // RunAgentRequest — drive one agent run from goal to terminal answer.
