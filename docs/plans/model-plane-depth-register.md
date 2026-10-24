@@ -926,6 +926,21 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D2-233 | WS17-S2 | live-proof | P1 | model-gateway does not compile in this worktree right now: cargo check -p model-gateway --all-targets fails with two E0425 errors at services/model-gateway/src/sse.rs:1692 (skills_truncated and skills_dropped are not in scope; lifecycle_events::skills_truncated is referenced). That is a sibling slice's in-flight edit to sse.rs and the untracked lifecycle_events.rs, not S2. The S2 MG change (one Option<bool> field on UpdateThreadPresentationBody and one initializer) is type-consistent with the generated archived field, but cargo test -p model-gateway has not been run for S2 and must run once that slice lands. | open |
 | D2-234 | WS17-S2 | follow-up | P3 | 26 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-08.json | open |
 
+
+### Wave-mode batch W2-08 (2026-10-24)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D2-235 | WS19-S4 | risk | P1 | check.py render_check: the 50 s soffice budget excludes the four poppler calls (20 s each), so with render on a slow file the total can exceed the caller's 60 s OFFICE_VERIFY_TIMEOUT_SECS and the whole structural report is lost as skipped, contrary to the code comment; fold poppler time into the budget before enabling render. | open |
+| D2-236 | WS19-S4 | risk | P1 | declared_fonts scans all of styles.xml and theme fonts, and Calibri Light is not in METRIC_COMPATIBLE, so any document whose styles mention the heading font gets a 'fonts' warning even when no text uses it; add the mapping or restrict to fonts used in body text before switching render on. | open |
+| D2-237 | WS19-S4 | live-proof | P1 | Run the cfg(target_os = linux) tests (a_missing_font_is_listed_as_substituted, libreoffice_converts..., recalc_reports_div0...) in a rust:1 container with soffice, poppler-utils and openpyxl present; they are unexecuted on Windows. | open |
+| D2-238 | WS19-S4 | live-proof | P1 | Shared edit to code_interpreter.rs (line ~614 uses office.reports only): wire Verification.previews into CodeResult so the preview and thumbnail frames reach the S5 consumer. | open |
+| D2-239 | WS19-S4 | live-proof | P1 | Docker image build: confirm the apt package names and that soffice is on PATH in debian:bookworm-slim; record image size delta. | open |
+| D2-240 | WS19-S4 | live-proof | P1 | Run scripts/verify-office-render.sh (needs docker) and the live H5 prompts (corrupt xlsx/docx) with CODE_INTERPRETER_OFFICE_VERIFY=render. | open |
+| D2-241 | WS19-S4 | live-proof | P1 | verify-sandbox-isolation.sh adds only a generic profile-write probe under bwrap, not an actual soffice run; a live bwrap run on Linux is needed for the LibreOffice case. | open |
+| D2-242 | WS19-S4 | live-proof | P1 | Read the full lib run log (path in notes) and confirm 1295 passed plus the pre-existing provenance failure only; the Windows run does not include the linux-gated test. | open |
+| D2-243 | WS19-S4 | follow-up | P3 | 10 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-08.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
@@ -1012,3 +1027,4 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS02-S9 | zdr | W1-11 | no |
 | WS10-S1 | policy, zdr | W1-12 | no |
 | WS17-S2 | zdr | W2-08 | no |
+| WS19-S4 | authority, data-loss, zdr | W2-08 | no |
