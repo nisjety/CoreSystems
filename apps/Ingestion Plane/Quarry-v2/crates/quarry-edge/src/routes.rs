@@ -898,6 +898,12 @@ pub struct CrawlRequest {
     /// that the token's ZDR floor imposes, is refused rather than ignored.
     #[serde(default)]
     pub zdr: Option<bool>,
+    /// WS14.S3: follow links to subdomains of the seed host. Absent = false.
+    #[serde(default)]
+    pub allow_subdomains: Option<bool>,
+    /// WS14.S3: follow links to hosts unrelated to the seed host. Absent = false.
+    #[serde(default)]
+    pub allow_external_links: Option<bool>,
 }
 
 /// Fail closed: `/v1/crawl` and `/v1/batch` are durable by construction. The
@@ -1030,6 +1036,13 @@ async fn crawl_handoff(
 
     // Phase 3+: POST to orchestrator with verified tenant identity. The job
     // carries its origin (WS15.L1) and the caller's Idempotency-Key, if sent.
+    // WS14.S3: the scope this crawl runs with, stamped into the job and echoed in the ack.
+    // The switch is read once at boot; `off` stamps `legacy` so the orchestrator runs it as before.
+    let scope = crate::crawl_policy::handoff_scope(
+        crate::crawl_policy::CrawlScopeSwitch::current(),
+        req.allow_subdomains.unwrap_or(false),
+        req.allow_external_links.unwrap_or(false),
+    );
     let origin = crate::handoff::run_origin_from_request(&claims, &headers);
     let idempotency_key = crate::handoff::idempotency_key_from_request(&headers);
     let ack = crate::handoff::forward_job_signed(
@@ -1039,6 +1052,9 @@ async fn crawl_handoff(
         serde_json::json!({
             "kind": "crawl",
             "url": req.url,
+            "scope": scope.scope_value(),
+            "scope_mode": scope.scope_mode_label(),
+            "robots": scope.robots_label(),
             "max_pages": limits.max_pages.effective,
             "max_depth": limits.max_depth.effective,
             "max_pages_requested": req.max_pages,
@@ -1098,6 +1114,7 @@ async fn crawl_handoff(
     }
     match ack {
         Ok(mut v) => {
+            v.effective = Some(scope.effective(limits.max_pages.effective, limits.max_depth.effective));
             v.limits = Some(limits.into());
             Ok(Json(Envelope::ok(request_id, v)))
         }
@@ -1240,6 +1257,9 @@ pub struct HandoffAck {
     /// (`/v1/batch`, WS6.D-s). Absent for other kinds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<crate::limits::HandoffLimits>,
+    /// WS14.S3: the scope and bounds a crawl runs with (`crawl` only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective: Option<serde_json::Value>,
 }
 
 /// Internal endpoint called by orchestrator activities.

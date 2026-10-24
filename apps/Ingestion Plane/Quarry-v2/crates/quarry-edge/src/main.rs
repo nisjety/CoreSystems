@@ -50,6 +50,7 @@ mod internal_auth;
 mod internal_routes;
 mod job_lifecycle_routes;
 mod job_stream;
+mod crawl_policy;
 mod limits;
 mod map_routes;
 mod metrics;
@@ -207,6 +208,10 @@ async fn run() -> anyhow::Result<()> {
     // A crawl bound that cannot be read must stop the process here, naming the
     // variable, rather than silently become "no bound" later.
     limits::CrawlLimits::from_env().map_err(|e| anyhow::anyhow!("crawl limits: {e}"))?;
+    // WS14.S3: an unparsable QUARRY_EDGE__CRAWL_SCOPE_MODE fails boot.
+    let crawl_scope = crawl_policy::CrawlScopeSwitch::from_env()
+        .map_err(|e| anyhow::anyhow!("crawl scope: {e}"))?;
+    tracing::info!(mode = crawl_scope.label(), "crawl scope: boot");
     // WS10.S3: the agent event replay ring bounds (env-only; an unparsable value aborts boot).
     let trace_ring = trace_config::TraceConfig::from_env()
         .map_err(|e| anyhow::anyhow!("trace: {e}"))?
