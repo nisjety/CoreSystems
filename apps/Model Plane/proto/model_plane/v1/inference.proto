@@ -207,6 +207,26 @@ message InferRequest {
   // request silently weakened. Effort is a request parameter only and is never
   // persisted, so it needs no Zero Data Retention handling.
   ReasoningEffort reasoning_effort = 17;
+
+  // Which leading messages are standing text a provider may cache across
+  // turns. Absent (default) names none, and a request without it is sent to the
+  // provider exactly as before. Only the Anthropic adapter reads it, and only
+  // when INFERENCE_ANTHROPIC_TIERED_SYSTEM is on and the request is not Zero
+  // Data Retention; every other provider and every ZDR request ignores it.
+  // A plan that does not describe the request (counts past the message list, or
+  // a counted message that is not a system message) is ignored, never an error:
+  // it is a hint about layout, not an instruction. It carries counts only.
+  PromptTierPlan prompt_tiers = 18;
+}
+
+// PromptTierPlan — the Stable and Context tiers of a prompt, by message count
+// from index 0 (see mp-contracts `prompt_tier`). Stable is the standing platform
+// text; Context is text authored for the org, Space, persona and user.
+message PromptTierPlan {
+  // Leading messages in the Stable tier.
+  uint32 stable_messages = 1;
+  // Messages in the Context tier, directly after the Stable ones.
+  uint32 context_messages = 2;
 }
 
 // ToolDefinition — a function the model may call (chat-parity §2).

@@ -15,6 +15,8 @@ use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+use mp_contracts::prompt_tier::PromptTier;
+
 use super::effort::{self, Family, Wire};
 use super::zdr::ZdrAttestation;
 use super::{InferChunk, InferRequest, InferResponse, ModelInfo, ProviderError, ProviderRouter};
@@ -241,6 +243,65 @@ const fn estimated_tokens(bytes: usize) -> usize {
     bytes / 4
 }
 
+/// Switch for sending the system prompt as ordered blocks, one per prompt tier,
+/// with the Stable and Context blocks marked for caching (build plan WS02-S9).
+/// Off, the system prompt is the single joined string it always was. Only the
+/// literal `true` enables it, so a typo can never change the wire shape.
+const TIERED_SYSTEM_ENV: &str = "INFERENCE_ANTHROPIC_TIERED_SYSTEM";
+
+fn tiered_system_enabled() -> bool {
+    tiered_system_flag_enabled(std::env::var(TIERED_SYSTEM_ENV).ok().as_deref())
+}
+
+/// Pure parser behind [`tiered_system_enabled`], for the same reason as
+/// [`context_management_flag_enabled`].
+fn tiered_system_flag_enabled(raw: Option<&str>) -> bool {
+    matches!(raw, Some("true"))
+}
+
+/// The system text of a request whose caller named a tier plan: one block per
+/// non-empty tier, in prompt order (Stable, Context, then the per-turn
+/// remainder as Volatile). `None` when the plan does not describe the request,
+/// so a stale or wrong plan degrades to the single joined string instead of
+/// marking text that changes every turn.
+///
+/// The plan counts messages from index 0, so it only holds when every counted
+/// message is a system message; the remainder is every later system message in
+/// order, which is what the joined string held.
+fn tiered_system_blocks(req: &InferRequest) -> Option<Vec<(PromptTier, String)>> {
+    let plan = req.prompt_tiers;
+    let counted = plan.stable.checked_add(plan.context)?;
+    if counted == 0 || counted > req.messages.len() {
+        return None;
+    }
+    if !req.messages[..counted]
+        .iter()
+        .all(|m| m.role.eq_ignore_ascii_case("system"))
+    {
+        return None;
+    }
+    let join = |messages: &[super::ChatMessage]| -> String {
+        messages
+            .iter()
+            .filter(|m| m.role.eq_ignore_ascii_case("system"))
+            .map(|m| m.content.trim())
+            .filter(|content| !content.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    };
+    let (stable, rest) = req.messages.split_at(plan.stable);
+    let (context, rest) = rest.split_at(plan.context);
+    let blocks: Vec<(PromptTier, String)> = [
+        (PromptTier::Stable, join(stable)),
+        (PromptTier::Context, join(context)),
+        (PromptTier::Volatile, join(rest)),
+    ]
+    .into_iter()
+    .filter(|(_, text)| !text.is_empty())
+    .collect();
+    (!blocks.is_empty()).then_some(blocks)
+}
+
 /// Mark the stable prefix of an Anthropic request with prompt-cache
 /// breakpoints.
 ///
@@ -316,7 +377,34 @@ fn apply_prompt_caching(body: &mut serde_json::Value, req: &InferRequest) {
     // 2. System prompt — byte-identical across rounds; its prefix subsumes the
     //    tool block. A marked system prompt must use the structured block form,
     //    since the plain-string form has nowhere to hang `cache_control`.
-    if let Some(system) = body
+    //
+    //    A tiered request already is in block form, one block per tier: the
+    //    Stable and Context blocks are marked (when the prefix so far is long
+    //    enough), the per-turn remainder never is. That is at most two
+    //    breakpoints here, so tools (1) + system (2) + last message (1) stay
+    //    inside the limit of four.
+    let tiered = body
+        .get("system")
+        .is_some_and(serde_json::Value::is_array)
+        .then(|| tiered_system_blocks(req))
+        .flatten();
+    if let Some(blocks) = tiered {
+        if let Some(system) = body
+            .get_mut("system")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for (block, (tier, text)) in system.iter_mut().zip(&blocks) {
+                prefix_bytes += text.len();
+                if *tier != PromptTier::Volatile
+                    && breakpoints < MAX_CACHE_BREAKPOINTS
+                    && estimated_tokens(prefix_bytes) >= min_tokens
+                {
+                    block["cache_control"] = ephemeral_cache_control();
+                    breakpoints += 1;
+                }
+            }
+        }
+    } else if let Some(system) = body
         .get("system")
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned)
@@ -764,10 +852,22 @@ fn log_applied_context_edits(model: &str, provider: &str, json: &serde_json::Val
 }
 
 fn build_request_body(req: &InferRequest) -> serde_json::Value {
-    build_request_body_with_context_management(req, native_context_management_enabled())
+    build_request_body_with_flags(
+        req,
+        native_context_management_enabled(),
+        tiered_system_enabled(),
+    )
 }
 
 fn build_request_body_with_context_management(req: &InferRequest, native_enabled: bool) -> serde_json::Value {
+    build_request_body_with_flags(req, native_enabled, tiered_system_enabled())
+}
+
+fn build_request_body_with_flags(
+    req: &InferRequest,
+    native_enabled: bool,
+    tiered_enabled: bool,
+) -> serde_json::Value {
     // The Anthropic Messages API takes the system prompt as a TOP-LEVEL `system`
     // parameter, not as a message with role "system" — sending it inline 400s:
     // "messages.0: use the top-level 'system' parameter for the initial system
@@ -813,7 +913,21 @@ fn build_request_body_with_context_management(req: &InferRequest, native_enabled
     // forwarding a chat temperature 400s on those. Anthropic's own default
     // sampling is used instead; structured output is steered via the prompt
     // (see the response_format note above), not the temperature.
-    if !system.is_empty() {
+    // A ZDR request never takes the tiered form: it has nothing to mark, and
+    // keeping the plain string means no structured rewrite can hint at caching.
+    let tiered = if tiered_enabled && !req.zdr {
+        tiered_system_blocks(req)
+    } else {
+        None
+    };
+    if let Some(blocks) = tiered {
+        body["system"] = serde_json::Value::Array(
+            blocks
+                .into_iter()
+                .map(|(_, text)| serde_json::json!({ "type": "text", "text": text }))
+                .collect(),
+        );
+    } else if !system.is_empty() {
         body["system"] = serde_json::Value::String(system);
     }
 
@@ -1478,10 +1592,12 @@ mod tool_tests {
 #[cfg(test)]
 mod prompt_cache_tests {
     use super::{
-        anthropic_message_delta_stop_reason, build_request_body, min_cacheable_tokens,
-        parse_response, total_input_tokens, MAX_CACHE_BREAKPOINTS,
+        anthropic_message_delta_stop_reason, build_request_body, build_request_body_with_flags,
+        min_cacheable_tokens, parse_response, tiered_system_flag_enabled, total_input_tokens,
+        MAX_CACHE_BREAKPOINTS,
     };
     use crate::provider::{ChatMessage, InferRequest, ToolDefinition};
+    use mp_contracts::prompt_tier::PromptTierPlan;
 
     /// Recursively count `cache_control` keys anywhere in the body.
     fn count_cache_control(value: &serde_json::Value) -> usize {
@@ -1713,6 +1829,173 @@ mod prompt_cache_tests {
             0,
             "6 KiB is under the Haiku-class floor — marking it would be inert"
         );
+    }
+
+    fn system_message(content: String) -> ChatMessage {
+        ChatMessage {
+            compaction_summary: String::new(),
+            role: "system".to_owned(),
+            content,
+            name: String::new(),
+        }
+    }
+
+    /// A tiered prompt: a Stable and a Context system message, each big enough
+    /// to clear the Sonnet-class floor together, then a per-turn (Volatile)
+    /// system message and the user turn.
+    fn tiered_request() -> InferRequest {
+        InferRequest {
+            model: "claude-sonnet-4-6".to_owned(),
+            max_tokens: 1024,
+            prompt_tiers: PromptTierPlan {
+                stable: 1,
+                context: 1,
+            },
+            messages: vec![
+                system_message(format!("STABLE {}", "s".repeat(5_000))),
+                system_message(format!("CONTEXT {}", "c".repeat(5_000))),
+                system_message("VOLATILE Today is Tuesday.".to_owned()),
+                ChatMessage {
+                    compaction_summary: String::new(),
+                    role: "user".to_owned(),
+                    content: "Hva er på lager?".to_owned(),
+                    name: String::new(),
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn tiered_system_marks_stable_and_context_not_volatile() {
+        let body = build_request_body_with_flags(&tiered_request(), false, true);
+        let system = body["system"].as_array().expect("ordered system blocks");
+
+        assert_eq!(system.len(), 3);
+        assert!(system[0]["text"].as_str().expect("text").starts_with("STABLE"));
+        assert!(system[1]["text"].as_str().expect("text").starts_with("CONTEXT"));
+        assert!(system[2]["text"].as_str().expect("text").starts_with("VOLATILE"));
+        assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(system[1]["cache_control"]["type"], "ephemeral");
+        assert!(
+            system[2].get("cache_control").is_none(),
+            "the per-turn block changes every turn: marking it would write the cache for nothing"
+        );
+        // Stable, Context and the rolling last message.
+        assert_eq!(count_cache_control(&body), 3);
+    }
+
+    #[test]
+    fn tiered_system_never_exceeds_four_breakpoints() {
+        let mut req = tiered_request();
+        req.tools = (0..12).map(|_| padded_tool(4_000)).collect();
+        for i in 0..24 {
+            req.messages.push(ChatMessage {
+                compaction_summary: String::new(),
+                role: if i % 2 == 0 { "assistant" } else { "user" }.to_owned(),
+                content: format!("round {i} {}", "h".repeat(2_000)),
+                name: String::new(),
+            });
+        }
+
+        let body = build_request_body_with_flags(&req, false, true);
+        // Tools, Stable, Context and the last message: exactly the limit.
+        assert_eq!(count_cache_control(&body), MAX_CACHE_BREAKPOINTS);
+    }
+
+    #[test]
+    fn no_tiers_is_byte_identical_to_today() {
+        let mut untiered = tiered_request();
+        untiered.prompt_tiers = PromptTierPlan::default();
+        let plain = build_request_body_with_flags(&untiered, false, false);
+
+        // The switch on with no plan changes nothing.
+        assert_eq!(build_request_body_with_flags(&untiered, false, true), plain);
+        // A plan with the switch off changes nothing either.
+        assert_eq!(
+            build_request_body_with_flags(&tiered_request(), false, false),
+            plain
+        );
+        assert!(plain["system"].is_array(), "the untiered marked form is unchanged");
+        assert_eq!(plain["system"].as_array().expect("blocks").len(), 1);
+    }
+
+    #[test]
+    fn a_plan_that_does_not_describe_the_request_is_ignored() {
+        let untiered = {
+            let mut req = tiered_request();
+            req.prompt_tiers = PromptTierPlan::default();
+            build_request_body_with_flags(&req, false, true)
+        };
+
+        // A counted message that is not a system message.
+        let mut not_system = tiered_request();
+        not_system.messages[1].role = "user".to_owned();
+        let untiered_not_system = {
+            let mut req = not_system.clone();
+            req.prompt_tiers = PromptTierPlan::default();
+            build_request_body_with_flags(&req, false, true)
+        };
+        assert_eq!(
+            build_request_body_with_flags(&not_system, false, true),
+            untiered_not_system
+        );
+
+        // Counts past the end of the message list.
+        let mut too_many = tiered_request();
+        too_many.prompt_tiers = PromptTierPlan {
+            stable: usize::MAX,
+            context: 1,
+        };
+        assert_eq!(build_request_body_with_flags(&too_many, false, true), untiered);
+    }
+
+    #[test]
+    fn below_minimum_prefix_marks_nothing() {
+        let mut req = tiered_request();
+        req.messages[0].content = "STABLE small".to_owned();
+        req.messages[1].content = "CONTEXT small".to_owned();
+
+        let body = build_request_body_with_flags(&req, false, true);
+        assert_eq!(count_cache_control(&body), 0, "{body}");
+        // Still ordered blocks, just none of them marked.
+        assert_eq!(body["system"].as_array().expect("blocks").len(), 3);
+    }
+
+    #[test]
+    fn a_prefix_that_only_the_context_tier_completes_marks_only_that_block() {
+        let mut req = tiered_request();
+        // 3 KiB alone is under the 1024-token floor; with the context it is over.
+        req.messages[0].content = format!("STABLE {}", "s".repeat(3_000));
+        req.messages[1].content = format!("CONTEXT {}", "c".repeat(3_000));
+
+        let body = build_request_body_with_flags(&req, false, true);
+        assert!(body["system"][0].get("cache_control").is_none());
+        assert_eq!(body["system"][1]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn zdr_tiered_request_sends_no_cache_control_and_one_system_string() {
+        let mut req = tiered_request();
+        req.zdr = true;
+
+        let body = build_request_body_with_flags(&req, false, true);
+        let serialized = serde_json::to_string(&body).expect("serialize body");
+        assert!(
+            !serialized.contains("cache_control"),
+            "ZDR VIOLATION: prompt-cache breakpoint sent to the provider: {serialized}"
+        );
+        let system = body["system"].as_str().expect("ZDR keeps the plain system string");
+        assert!(system.starts_with("STABLE"));
+        assert!(system.contains("CONTEXT") && system.contains("VOLATILE"));
+    }
+
+    #[test]
+    fn the_tiered_switch_is_enabled_only_by_the_literal_true() {
+        assert!(tiered_system_flag_enabled(Some("true")));
+        for raw in [None, Some(""), Some("1"), Some("True"), Some("yes"), Some("false")] {
+            assert!(!tiered_system_flag_enabled(raw), "{raw:?}");
+        }
     }
 
     #[test]

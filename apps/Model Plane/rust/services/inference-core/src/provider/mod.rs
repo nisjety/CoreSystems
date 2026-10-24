@@ -164,6 +164,11 @@ pub struct InferRequest {
     /// included in the prompt-cache scope so two connections cannot share a
     /// cached response or bypass the broker's per-connection audit boundary.
     pub subscription_connection_id: String,
+    /// How many leading messages are standing (Stable) and authored (Context)
+    /// text. The default names none and is the pre-existing behaviour
+    /// byte-for-byte. Read only by the Anthropic adapter, behind
+    /// `INFERENCE_ANTHROPIC_TIERED_SYSTEM`, and never on a ZDR request.
+    pub prompt_tiers: mp_contracts::prompt_tier::PromptTierPlan,
     /// Tenant scope for the Verevon intent layer's budget check (from gRPC
     /// metadata `x-org-id`; empty when the caller doesn't forward it).
     pub org_id: String,

@@ -2242,6 +2242,32 @@ fn seed_order(
     messages
 }
 
+/// The leading messages of a round's prompt that sit in the Stable and Context tiers
+/// (see [`seed_order`]): the system preamble, and the authored instructions when the run
+/// carries them. Read back from the messages rather than assumed, so a prompt that does not
+/// start the way a seed does (a restored fold, say) names fewer tiers instead of a wrong
+/// one. `None` when the first message is not a system message.
+fn prompt_tier_plan(
+    run_context: Option<&pb::RunContext>,
+    messages: &[pb::ChatMessage],
+) -> Option<pb::PromptTierPlan> {
+    if messages.first()?.role != "system" {
+        return None;
+    }
+    let instructions = run_context
+        .map(|run_context| run_context.authored_instructions.as_str())
+        .filter(|text| !text.is_empty());
+    let context = instructions.is_some_and(|text| {
+        messages
+            .get(1)
+            .is_some_and(|message| message.role == "system" && message.content == text)
+    });
+    Some(pb::PromptTierPlan {
+        stable_messages: 1,
+        context_messages: u32::from(context),
+    })
+}
+
 /// The history a fresh loop starts from: the system prompt, the run context the gateway
 /// composed (see [`seed_order`]), the matched skills and this loop's goal. Not read by an
 /// in-place resume, which continues the paused conversation.
@@ -2710,6 +2736,9 @@ async fn run_rounds(
             // meaning without a subscription connection. `false` is also what
             // this loop sent before the field existed.
             prefer_priority_service_tier: false,
+            // Which leading messages a provider may cache across rounds and runs.
+            // Counts only; inference-core reads it behind its own switch.
+            prompt_tiers: prompt_tier_plan(req.run_context.as_ref(), &messages),
         });
         infer_request.metadata_mut().insert(
             "authorization",
@@ -16346,6 +16375,34 @@ mod tests {
             roles_and_contents(&seeded),
             vec![("system", "PREAMBLE"), ("user", "real turn"), ("user", "GOAL")]
         );
+    }
+
+    #[test]
+    fn the_round_names_its_stable_and_context_messages_for_the_provider_cache() {
+        let plan = |messages: &[pb::ChatMessage], context: Option<&pb::RunContext>| {
+            prompt_tier_plan(context, messages)
+                .map(|plan| (plan.stable_messages, plan.context_messages))
+        };
+        let context = full_run_context();
+        let seeded = seed_order(
+            "PREAMBLE".to_owned(),
+            Some(&context),
+            true,
+            Some("SKILLS".to_owned()),
+            "GOAL",
+        );
+        assert_eq!(plan(&seeded, Some(&context)), Some((1, 1)));
+
+        // No run context: the skills sit right after the preamble and are not Context.
+        let plain = seed_order("PREAMBLE".to_owned(), None, true, Some("SKILLS".to_owned()), "GOAL");
+        assert_eq!(plan(&plain, None), Some((1, 0)));
+
+        // Instructions the request carries but the prompt does not start with are not claimed.
+        assert_eq!(plan(&plain, Some(&context)), Some((1, 0)));
+
+        // A prompt that does not open with a system message names nothing.
+        assert_eq!(plan(&[seed_message("user", "GOAL".to_owned())], None), None);
+        assert_eq!(plan(&[], None), None);
     }
 
     /// The first `InferRequest` a run sent, read through the real loop.

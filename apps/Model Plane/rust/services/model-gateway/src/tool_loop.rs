@@ -7050,6 +7050,10 @@ pub async fn run_tool_rounds_for_model(
                     min_residency: String::new(),
                     // The broker proposes calls as data; the gateway owns execution.
                     subscription_connection_id: subscription_connection_id.to_owned(),
+                    // This loop is handed a finished message list, not the tiers it
+                    // was composed from, so it names none until the composer's plan
+                    // (`prompt_context::TieredPrompt::plan`) is carried in.
+                    prompt_tiers: None,
                 },
                 inference_bearer,
             );

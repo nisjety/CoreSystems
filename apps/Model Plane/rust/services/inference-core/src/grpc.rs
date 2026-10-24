@@ -1141,6 +1141,14 @@ fn to_internal_request(
         tool_choice: req.tool_choice.clone(),
         min_residency: req.min_residency.clone(),
         subscription_connection_id: req.subscription_connection_id.clone(),
+        prompt_tiers: req
+            .prompt_tiers
+            .as_ref()
+            .map(|plan| mp_contracts::prompt_tier::PromptTierPlan {
+                stable: plan.stable_messages as usize,
+                context: plan.context_messages as usize,
+            })
+            .unwrap_or_default(),
         org_id: principal.org_id.clone(),
         user_id: principal.budget_user_id(),
         // The verified caller's own token, forwarded so the intent layer's
@@ -1618,6 +1626,21 @@ mod tests {
                 .expect("every known level maps onto the internal contract");
             assert_eq!(mapped.reasoning_effort, internal, "{wire:?}");
         }
+    }
+
+    #[test]
+    fn the_prompt_tier_plan_maps_to_counts_and_absent_means_none() {
+        let principal = AuthenticatedPrincipal::for_test("org-signed", Some("user-signed"), false);
+        let mut request = effort_request(0);
+        let absent = to_internal_request(&request, &principal).expect("maps");
+        assert_eq!(absent.prompt_tiers, Default::default());
+
+        request.prompt_tiers = Some(pb::PromptTierPlan {
+            stable_messages: 2,
+            context_messages: 3,
+        });
+        let mapped = to_internal_request(&request, &principal).expect("maps");
+        assert_eq!((mapped.prompt_tiers.stable, mapped.prompt_tiers.context), (2, 3));
     }
 
     #[test]
