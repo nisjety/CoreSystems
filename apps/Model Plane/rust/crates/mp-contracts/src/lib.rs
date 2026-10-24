@@ -8,6 +8,7 @@ pub mod lifecycle_notice;
 pub mod loop_fold;
 pub mod model_entitlement;
 pub mod office_verification;
+pub mod org_agent_policy;
 pub mod park_reason;
 pub mod prompt_tier;
 pub mod provider_reads;

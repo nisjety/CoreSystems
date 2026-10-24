@@ -239,3 +239,34 @@ func TestAuthorizeHTTPPinsToolPolicyRoutes(t *testing.T) {
 		})
 	}
 }
+
+func TestAuthorizeHTTPPinsOrgAgentPolicyRoutes(t *testing.T) {
+	member := authctx.Principal{OrganizationID: "org-a", ActorID: "user-a", PrincipalType: "user", RetentionPolicyPresent: true}
+	admin := authctx.Principal{OrganizationID: "org-a", ActorID: "user-admin", PrincipalType: "user", Scopes: []string{WriteScope, "org:admin"}, RetentionPolicyPresent: true}
+	zdrAdmin := admin
+	zdrAdmin.ZeroDataRetention = true
+
+	tests := []struct {
+		name      string
+		principal authctx.Principal
+		method    string
+		target    string
+		wantErr   bool
+	}{
+		{name: "a member reads the org policy", principal: member, method: http.MethodGet, target: "/api/v1/org-agent-policy"},
+		{name: "a member reads the effective policy", principal: member, method: http.MethodGet, target: "/api/v1/org-agent-policy/effective?user=me"},
+		{name: "a ZDR admin may still read the policy", principal: zdrAdmin, method: http.MethodGet, target: "/api/v1/org-agent-policy/history"},
+		{name: "a forged org on the read is denied", principal: member, method: http.MethodGet, target: "/api/v1/org-agent-policy?org_id=org-b", wantErr: true},
+		{name: "an admin writes the policy", principal: admin, method: http.MethodPut, target: "/api/v1/org-agent-policy"},
+		{name: "a ZDR admin may not write it", principal: zdrAdmin, method: http.MethodPut, target: "/api/v1/org-agent-policy", wantErr: true},
+		{name: "a member without the write scope may not write it", principal: member, method: http.MethodPut, target: "/api/v1/org-agent-policy", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := AuthorizeHTTP(tc.principal, httptest.NewRequest(tc.method, tc.target, nil))
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("AuthorizeHTTP() error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}

@@ -268,6 +268,8 @@ func main() {
 	// recPub makes reconcile.Emit a no-op).
 	api.NewSkillsHandler(pool).WithPublisher(recPub).Register(protectedMux)
 	api.NewPluginsHandler(pool).WithPublisher(recPub).Register(protectedMux)
+	// Behind ORG_AGENT_POLICY_API (off by default): the handler answers 404 while it is off.
+	api.NewOrgAgentPolicyHandler(pool, api.OrgAgentPolicyAPIFromLookup(os.Getenv)).Register(protectedMux)
 	mcpHandler := api.NewMCPHandler(pool).WithPublisher(recPub).WithVault(mcpVault).WithMCPServiceToken(mcpServiceToken)
 	mcpHandler.Register(protectedMux)
 	// Deliberately on publicMux, not protectedMux: see RegisterInternal's doc
