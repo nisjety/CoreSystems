@@ -304,6 +304,16 @@ services:
       # delivery event). Off by default; only the literal `true` turns it on. Deploy order: session-core (migration
       # 0052) first, then model-gateway, then the BFF and frontend, then this switch. Roll back with off plus a restart.
       MODEL_GATEWAY_SEND_RECEIPTS: ${MODEL_GATEWAY_SEND_RECEIPTS:-false}
+      # WS08-S2: the server attachment contract (route, count and size limits, typed refusals). It only
+      # tightens, so it is on by default; CHAT_ATTACHMENT_POLICY_ENABLED=false turns it off. Do not pass
+      # CHAT_SANDBOX_ATTACHMENTS_ENABLED: that opt-in belongs to WS08-S5.
+      CHAT_ATTACHMENT_POLICY_ENABLED: ${CHAT_ATTACHMENT_POLICY_ENABLED:-true}
+      CHAT_ATTACHMENT_MAX_IMAGES: ${CHAT_ATTACHMENT_MAX_IMAGES:-4}
+      CHAT_ATTACHMENT_MAX_IMAGE_BYTES: ${CHAT_ATTACHMENT_MAX_IMAGE_BYTES:-1000000}
+      CHAT_ATTACHMENT_MAX_FILES: ${CHAT_ATTACHMENT_MAX_FILES:-3}
+      CHAT_ATTACHMENT_MAX_FILE_BYTES: ${CHAT_ATTACHMENT_MAX_FILE_BYTES:-1000000}
+      CHAT_ATTACHMENT_MAX_TOTAL_BYTES: ${CHAT_ATTACHMENT_MAX_TOTAL_BYTES:-3145728}
+      CHAT_STREAM_BODY_LIMIT_BYTES: ${CHAT_STREAM_BODY_LIMIT_BYTES:-12582912}
       # WS11-S5: derive the reasoning level once in the gateway and send it to inference-core. Off by default; only the
       # literal `true` turns it on. Roll out in this order: inference-core adapter flags on first, then this switch. With
       # this on and the adapter flags off, a deep request sends budget 0 and a level nothing renders (no thinking).
