@@ -2942,20 +2942,120 @@ export function getAttachmentPolicy(): AttachmentPolicy | undefined {
   return declaredAttachmentPolicy
 }
 
-export async function listModels(): Promise<ModelInfo[]> {
+/**
+ * What the organisation's model policy did to this catalogue (`entitlement` beside
+ * `models` on `/api/v1/models`): counts, a revision and defaults, never a model
+ * list. The server enforces it; the client only reconciles what it shows.
+ */
+export interface ModelEntitlementMeta {
+  /** `none`, `org`, `role` or `member_not_found`. */
+  readonly state: string
+  /** False in shadow mode: the policy is counted but nothing is hidden or lowered. */
+  readonly enforced: boolean
+  readonly revision: number
+  readonly restricted: boolean
+  /** Chat models the policy removed from the catalogue. */
+  readonly hiddenCount: number
+  readonly defaultModel?: string
+  readonly defaultEffort?: string
+  /** The highest reasoning level the policy allows. */
+  readonly maxEffort?: EffortLevel
+}
+
+/**
+ * The declared meta, or `undefined` when the response carries none or a required
+ * field of it is malformed. Never half-trusted: without it the catalogue is shown
+ * as served and the server's own refusal stays the only gate.
+ */
+export function parseModelEntitlementMeta(value: unknown): ModelEntitlementMeta | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const raw = value as Record<string, unknown>
+  const state = str(raw.state)
+  if (
+    state === undefined
+    || typeof raw.enforced !== 'boolean'
+    || typeof raw.restricted !== 'boolean'
+    || typeof raw.revision !== 'number' || !Number.isFinite(raw.revision)
+    || typeof raw.hidden_count !== 'number' || !Number.isFinite(raw.hidden_count)
+  ) {
+    return undefined
+  }
+  const defaultModel = str(raw.default_model)
+  const defaultEffort = str(raw.default_effort)
+  return {
+    state,
+    enforced: raw.enforced,
+    revision: raw.revision,
+    restricted: raw.restricted,
+    hiddenCount: Math.max(0, Math.trunc(raw.hidden_count)),
+    ...(defaultModel ? { defaultModel } : {}),
+    ...(defaultEffort ? { defaultEffort } : {}),
+    ...(isEffortLevel(raw.max_effort) ? { maxEffort: raw.max_effort } : {}),
+  }
+}
+
+let declaredModelEntitlement: ModelEntitlementMeta | undefined
+
+/**
+ * The entitlement meta the last catalogue load declared. `undefined` before the
+ * catalogue answers or when no policy applies. Set by
+ * {@link listModels}, like {@link getAttachmentPolicy}, so a caller that already
+ * loads the catalogue reads it without a second request.
+ */
+export function getModelEntitlementMeta(): ModelEntitlementMeta | undefined {
+  return declaredModelEntitlement
+}
+
+/** The catalogue and what the organisation's policy did to it. */
+export interface ModelCatalogue {
+  readonly models: ModelInfo[]
+  readonly entitlement?: ModelEntitlementMeta
+}
+
+/**
+ * The ceiling the server applies to a request's reasoning effort, or `undefined`
+ * when it applies none (no policy, shadow mode, or no `max_effort`).
+ */
+export function enforcedMaxEffort(meta: ModelEntitlementMeta | undefined): EffortLevel | undefined {
+  return meta?.enforced ? meta.maxEffort : undefined
+}
+
+/** Whether `level` is within the ceiling; no ceiling allows every level. */
+export function effortLevelWithin(level: EffortLevel, ceiling: EffortLevel | undefined): boolean {
+  return ceiling === undefined || EFFORT_LEVELS.indexOf(level) <= EFFORT_LEVELS.indexOf(ceiling)
+}
+
+/**
+ * Whether a selection the policy no longer offers must be dropped. Only an
+ * enforced, restrictive policy resets, and only against a catalogue that lists
+ * chat models: an empty catalogue is an outage (`listModels()` swallows one into
+ * `[]`), and a pinned Verevon mode is resolved server-side so it is never absent.
+ */
+export function selectionIsStale(
+  selection: { readonly model: string; readonly provider?: string },
+  catalogue: readonly ModelInfo[],
+  meta: ModelEntitlementMeta | undefined,
+): boolean {
+  if (!meta?.enforced || !meta.restricted) return false
+  if (!selection.model || isVerevonModeId(selection.model)) return false
+  const chat = catalogue.filter(isChatModel)
+  if (chat.length === 0) return false
+  return !chat.some((model) => model.id === selection.model && model.provider === selection.provider)
+}
+
+export async function listModelCatalogue(): Promise<ModelCatalogue> {
   const raw = await requestJson<unknown>('/api/v1/models')
-  declaredAttachmentPolicy = parseAttachmentPolicy(
-    raw && typeof raw === 'object' && !Array.isArray(raw)
-      ? (raw as { attachment_policy?: unknown }).attachment_policy
-      : undefined,
-  )
+  const envelope = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : undefined
+  declaredAttachmentPolicy = parseAttachmentPolicy(envelope?.attachment_policy)
+  const entitlement = parseModelEntitlementMeta(envelope?.entitlement)
+  declaredModelEntitlement = entitlement
   const source = Array.isArray(raw)
     ? raw
     : raw && typeof raw === 'object' && Array.isArray((raw as { models?: unknown }).models)
       ? (raw as { models: unknown[] }).models
       : []
 
-  return source
+  const models = source
     .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object')
     .map((item) => {
       const id = str(item.id) ?? ''
@@ -2990,6 +3090,11 @@ export async function listModels(): Promise<ModelInfo[]> {
       }
     })
     .filter((model) => model.id.length > 0)
+  return { models, ...(entitlement ? { entitlement } : {}) }
+}
+
+export async function listModels(): Promise<ModelInfo[]> {
+  return (await listModelCatalogue()).models
 }
 
 /** Product-facing label for a ChatGPT-plan model. `codex` is an implementation

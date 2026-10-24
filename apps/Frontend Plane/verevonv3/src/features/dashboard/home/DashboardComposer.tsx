@@ -103,7 +103,10 @@ import { PendingChatLaunchError, writePendingChatLaunch } from "@/features/chat/
 import { ScheduleDialog } from "@/features/chat/components/ScheduleDialog";
 import { prepareChatAttachments } from "@/features/chat/lib/prepare-chat-attachments";
 import {
+	effortLevelWithin,
+	enforcedMaxEffort,
 	extractChatDocument,
+	getModelEntitlementMeta,
 	groupChatModels,
 	hasZeroRetentionModel,
 	isExpensiveModel,
@@ -112,6 +115,7 @@ import {
 	modelEffortLevels,
 	modelSupportsAgentic,
 	saveChatThreadSnapshot,
+	selectionIsStale,
 	verevonModeById,
 	VEREVON_BALANCE_MODE_ID,
 	VEREVON_MODES,
@@ -162,6 +166,14 @@ import {
 // "max" is the Maksimal level: offered only while the selected model's catalogue
 // entry lists `xhigh`, and sent as that canonical level, never as a profile.
 type ResponseMode = "auto" | "quick" | "deep" | "max";
+
+// The canonical level each response mode sends as `effort` (see `composerWireFields`);
+// Auto sends none, so no ceiling can lower it.
+const RESPONSE_MODE_EFFORT: Partial<Record<ResponseMode, EffortLevel>> = {
+	quick: "low",
+	deep: "high",
+	max: "xhigh",
+};
 
 type ResponseModeOption = {
 	announcement: {
@@ -1158,12 +1170,37 @@ export function DashboardComposer(props: {
 	// `responseMode` (so switching back to such a model restores it) but never
 	// acted on for a model that lacks the level: the select, the payload and the
 	// receipt all read `effectiveResponseMode`, which falls back to Deep.
-	const maxEffortAvailable = createMemo(() =>
-		modelEffortLevels(selectedCatalogModel()).includes("xhigh"),
+	// The organisation's policy can lower that ceiling further: inference-core
+	// clamps a request above `max_effort`, so a level the policy forbids is not
+	// offered and a pick made before the policy changed falls to the strongest
+	// level still allowed. Read after the catalogue answers, which is what sets it.
+	const entitlementMeta = createMemo(() => {
+		models();
+		return getModelEntitlementMeta();
+	});
+	const effortCeiling = createMemo(() => enforcedMaxEffort(entitlementMeta()));
+	const responseModeAllowed = (mode: ResponseMode): boolean => {
+		const level = RESPONSE_MODE_EFFORT[mode];
+		return level === undefined || effortLevelWithin(level, effortCeiling());
+	};
+	const maxEffortAvailable = createMemo(
+		() =>
+			modelEffortLevels(selectedCatalogModel()).includes("xhigh") &&
+			responseModeAllowed("max"),
 	);
-	const effectiveResponseMode = createMemo<ResponseMode>(() =>
-		responseMode() === "max" && !maxEffortAvailable() ? "deep" : responseMode(),
-	);
+	const effectiveResponseMode = createMemo<ResponseMode>(() => {
+		const asked = responseMode();
+		if (asked === "max" && !maxEffortAvailable()) {
+			return responseModeAllowed("deep") ? "deep" : responseModeAllowed("quick") ? "quick" : "auto";
+		}
+		if (asked === "deep" && !responseModeAllowed("deep")) {
+			return responseModeAllowed("quick") ? "quick" : "auto";
+		}
+		return asked === "quick" && !responseModeAllowed("quick") ? "auto" : asked;
+	});
+	// Only the policy's ceiling: a model that lacks `xhigh` also lowers Maksimal,
+	// but that is not the organisation's doing.
+	const effortCappedNotice = createMemo(() => !responseModeAllowed(responseMode()));
 	// Do (plan mode on execution-core's agentic loop) on the ChatGPT subscription
 	// depends on the SERVER, not on the provider name: inference-core adds the
 	// `agentic` capability to the subscription models only while
@@ -1208,6 +1245,7 @@ export function DashboardComposer(props: {
 		createSignal(false);
 	const selectModel = (id: string, provider?: string) => {
 		setStaleSubscriptionNotice(false);
+		setPolicyResetModel(null);
 		setSubmitError(null);
 		setSelectedModel(id);
 		setSelectedModelProvider(provider);
@@ -1227,6 +1265,30 @@ export function DashboardComposer(props: {
 		});
 		setModelOpen(false);
 	};
+	// The model the organisation's policy took from this person, by name, until
+	// they choose again. A selection is local state (and remembered in the browser),
+	// so a policy change leaves a stale one behind; sending it would be refused.
+	const [policyResetModel, setPolicyResetModel] = createSignal<string | null>(null);
+	createEffect(
+		() => ({
+			catalogue: models() ?? [],
+			meta: entitlementMeta(),
+			model: selectedModel(),
+			provider: selectedModelProvider(),
+		}),
+		(state) => {
+			if (!selectionIsStale({ model: state.model, provider: state.provider }, state.catalogue, state.meta)) {
+				return;
+			}
+			const label = selectedModelLabel();
+			const preferred = state.meta?.defaultModel
+				? flatChatModels().find((model) => model.id === state.meta?.defaultModel)
+				: undefined;
+			if (preferred) selectModel(preferred.id, preferred.provider);
+			else selectModel(VEREVON_BALANCE_MODE_ID);
+			setPolicyResetModel(label);
+		},
+	);
 	// Keep that last-known tier current: every time the catalogue lists the
 	// selected model, store what it says now. This also gives a selection
 	// saved before the tier was stored (or by another picker) its tier.
@@ -2746,6 +2808,37 @@ export function DashboardComposer(props: {
 					<span>{i18n.tr("Kontrollerer ChatGPT-abonnementet …", "Checking your ChatGPT subscription …")}</span>
 				</div>
 			</Show>
+			<Show when={policyResetModel()}>
+				{(modelName) => (
+					<div
+						class="dashboard-composer-stale-model-notice"
+						role="status"
+						style={COMPOSER_NOTICE_STYLE}
+					>
+						<Zap class="size-3.5" />
+						<span>
+							{i18n.tr(
+								`Organisasjonen din tillater ikke lenger ${modelName()}. Modellen er byttet, så velg en annen hvis du vil.`,
+								`Your organisation no longer allows ${modelName()}. The model was changed; choose another if you like.`,
+							)}
+						</span>
+					</div>
+				)}
+			</Show>
+			<Show when={effortCappedNotice()}>
+				<div
+					class="dashboard-composer-stale-model-notice"
+					role="status"
+					style={COMPOSER_NOTICE_STYLE}
+				>
+					<span>
+						{i18n.tr(
+							"Organisasjonen din begrenser svarinnsatsen, så denne meldingen sendes med lavere innsats.",
+							"Your organisation limits response effort, so this message is sent with a lower effort.",
+						)}
+					</span>
+				</div>
+			</Show>
 			<Show when={staleSubscriptionNotice() && !subscriptionConnectionPending()}>
 				<div
 					class="dashboard-composer-stale-model-notice"
@@ -3653,10 +3746,10 @@ export function DashboardComposer(props: {
 								when={props.appearance === "chat"}
 								fallback={
 									<div class="dashboard-composer-response-group">
-										<For each={responseModes.filter((mode) => mode.id !== "max")}>
+										<For each={responseModes.filter((mode) => mode.id !== "max" && responseModeAllowed(mode.id))}>
 											{(mode) => (
 												<ComposerIconButton
-													active={responseMode() === mode.id}
+													active={effectiveResponseMode() === mode.id}
 													label={i18n.tr(mode.label.no, mode.label.en)}
 													onClick={() => handleResponseMode(mode.id)}
 													variant="toolbar"
@@ -3676,9 +3769,13 @@ export function DashboardComposer(props: {
 										value={effectiveResponseMode()}
 										onChange={(event) => handleResponseMode(event.currentTarget.value as ResponseMode)}
 									>
-										<option value="quick">{i18n.tr("Rask", "Quick")}</option>
+										<Show when={responseModeAllowed("quick")}>
+											<option value="quick">{i18n.tr("Rask", "Quick")}</option>
+										</Show>
 										<option value="auto">{i18n.tr("Standard", "Standard")}</option>
-										<option value="deep">{i18n.tr("Grundig", "Deep")}</option>
+										<Show when={responseModeAllowed("deep")}>
+											<option value="deep">{i18n.tr("Grundig", "Deep")}</option>
+										</Show>
 										<Show when={maxEffortAvailable()}>
 											<option value="max">{i18n.tr("Maksimal", "Maximum")}</option>
 										</Show>

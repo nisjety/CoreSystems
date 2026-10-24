@@ -11,8 +11,10 @@
 // This is the seam — not a claim that every gateway code is covered yet.
 // The zero-retention refusals of the Model Plane catalogue are the exception:
 // their words live with the catalogue (shared/api/zdr-refusals.ts), so this seam
-// renders them from there.
+// renders them from there. The model-entitlement refusals do the same
+// (shared/api/model-entitlement-refusals.ts).
 
+import { isModelEntitlementCode, modelEntitlementPresentation } from '@/shared/api/model-entitlement-refusals'
 import { isZdrRefusalCode, zdrRefusalPresentation } from '@/shared/api/zdr-refusals'
 import { en as enStrings } from './en'
 import { no as noStrings } from './no'
@@ -175,6 +177,29 @@ const ERROR_COPY: Record<string, ErrorCopy> = {
     no: 'Zero Data Retention kan ikke slås på ennå: ingen AI-leverandør har en registrert nullbevaringsgodkjenning. Fortsett uten, og slå det på i innstillingene når en leverandør er godkjent.',
     en: 'Zero Data Retention cannot be turned on yet: no AI provider has a recorded zero-retention attestation. Carry on without it, and turn it on in the settings once a provider is attested.',
   },
+  // The org model-access policy (gateway `orgs/model_entitlement.rs`, org-core
+  // `modelentitlement`): the refusals of an admin save. A member's refusal to use a
+  // model is a catalogue code, rendered below from its own module.
+  revision_conflict: {
+    no: 'Modelltilgangen ble endret av noen andre. Last inn på nytt og gjør endringen igjen.',
+    en: 'Model access was changed by someone else. Reload and make the change again.',
+  },
+  invalid_model_policy: {
+    no: 'Modelltilgangen er ikke gyldig. Sjekk modell-ID-ene, effektnivået og personvernnivået.',
+    en: 'The model access policy is not valid. Check the model ids, the effort level and the privacy tier.',
+  },
+  model_policy_leaves_no_zdr_model: {
+    no: 'Denne modelltilgangen ville latt en rolle stå uten modell med nullbevaringsgodkjenning, og Zero Data Retention er på. Tillat minst én godkjent modell.',
+    en: 'This model access would leave a role with no zero-retention attested model while Zero Data Retention is on. Allow at least one attested model.',
+  },
+  model_policy_guard_unavailable: {
+    no: 'Kunne ikke kontrollere modelltilgangen mot Zero Data Retention akkurat nå, så ingenting ble lagret. Prøv igjen om litt.',
+    en: 'Model access could not be checked against Zero Data Retention right now, so nothing was saved. Try again shortly.',
+  },
+  zdr_models_not_entitled: {
+    no: 'Zero Data Retention kan ikke slås på: modelltilgangen tillater ingen modell med nullbevaringsgodkjenning. Endre modelltilgangen først.',
+    en: 'Zero Data Retention cannot be turned on: the model access allows no zero-retention attested model. Change the model access first.',
+  },
   zdr_gate_unavailable: {
     no: 'Kunne ikke kontrollere hvilke leverandører som har registrert ZDR-godkjenning, så Zero Data Retention kan ikke slås på akkurat nå. Prøv igjen om litt, eller fortsett uten og slå det på senere.',
     en: 'We could not check which providers have a recorded ZDR attestation, so Zero Data Retention cannot be turned on right now. Try again shortly, or carry on without it and turn it on later.',
@@ -198,6 +223,12 @@ export function translateApiError(
   if (code && isZdrRefusalCode(code)) {
     const feature = (err as { feature?: unknown } | null | undefined)?.feature
     const shown = zdrRefusalPresentation(code, typeof feature === 'string' ? feature : null, tr)
+    return shown.next === null ? shown.message : `${shown.message} ${shown.next}`
+  }
+  // A model-entitlement refusal of the Model Plane catalogue: its own words and
+  // the next step. The reason and model refine it only where a caller has them.
+  if (code && isModelEntitlementCode(code)) {
+    const shown = modelEntitlementPresentation(code, tr)
     return shown.next === null ? shown.message : `${shown.message} ${shown.next}`
   }
   const copy = (code && ERROR_COPY[code]) || fallback || GENERIC_FALLBACK

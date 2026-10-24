@@ -3,6 +3,7 @@ import {
   BarChart3,
   BookOpen,
   Bot,
+  BrainCircuit,
   CalendarDays,
   CheckCheck,
   CircleUserRound,
@@ -98,6 +99,10 @@ export type SidebarSection = {
   panelTabs?: SidebarPanelTab[]
   panelGroups: SidebarPanelGroup[]
 }
+
+// `VerevonRoute` (shell-data.ts) does not list this settings route yet, so the cast
+// stands until it does; the href is matched as a plain path either way.
+const MODEL_ACCESS_HREF = '/settings/model-access' as SidebarHref
 
 export const sidebarSections: SidebarSection[] = [
   {
@@ -380,6 +385,7 @@ export const sidebarSections: SidebarSection[] = [
           { id: 'settings-router-policy', label: 'Router policy', href: '/settings/router-policy', icon: Route, description: 'Intent-laget: kompleksitet, budsjett og modellrute.' },
           { id: 'settings-finetune', label: 'Fine-tune jobs', href: '/settings/finetune', icon: TestTubeDiagonal, description: 'Azure-finjustering: opplasting, jobber og status.' },
           { id: 'settings-mcp', label: 'MCP-servere', href: '/settings/mcp', icon: ServerCog, description: 'Eksterne MCP-tjenere og tillatte verktøy for agenten.' },
+          { id: 'settings-model-access', label: 'Modelltilgang', href: MODEL_ACCESS_HREF, icon: BrainCircuit, description: 'Hvilke AI-modeller og hvilken resonneringsinnsats medlemmene kan bruke.' },
         ],
       },
     ],
@@ -407,17 +413,35 @@ const DEMO_MODE_HIDDEN_ITEM_IDS = new Set<string>([
   'insights-experiments',
 ])
 
-export function applyDemoModeNavGate(sections: SidebarSection[]): SidebarSection[] {
-  if (!DEMO_MODE_HIDE_UNFINISHED_NAV) return sections
+/**
+ * The Model access tab exists only while the gateway reports the admin switch on
+ * (`GET /api/v1/orgs/:id/model-entitlement` answers `enabled`). It is never a
+ * build-time flag: a deploy that has not switched it on must not show a tab that
+ * leads to a policy nothing enforces.
+ */
+export const MODEL_ACCESS_NAV_ITEM_ID = 'settings-model-access'
+
+export type NavGateOptions = {
+  /** What the BFF reported for the model-entitlement admin switch. Absent means off. */
+  modelAccessEnabled?: boolean
+}
+
+export function applyDemoModeNavGate(
+  sections: SidebarSection[],
+  options: NavGateOptions = {},
+): SidebarSection[] {
+  const hiddenItemIds = new Set<string>(DEMO_MODE_HIDE_UNFINISHED_NAV ? DEMO_MODE_HIDDEN_ITEM_IDS : [])
+  if (options.modelAccessEnabled !== true) hiddenItemIds.add(MODEL_ACCESS_NAV_ITEM_ID)
+  const hiddenSectionIds = DEMO_MODE_HIDE_UNFINISHED_NAV ? DEMO_MODE_HIDDEN_SECTION_IDS : new Set<string>()
 
   return sections
-    .filter((section) => !DEMO_MODE_HIDDEN_SECTION_IDS.has(section.id))
+    .filter((section) => !hiddenSectionIds.has(section.id))
     .map((section) => ({
       ...section,
       panelGroups: section.panelGroups
         .map((group) => ({
           ...group,
-          items: group.items.filter((item) => !DEMO_MODE_HIDDEN_ITEM_IDS.has(item.id)),
+          items: group.items.filter((item) => !hiddenItemIds.has(item.id)),
         }))
         .filter((group) => group.items.length > 0),
     }))

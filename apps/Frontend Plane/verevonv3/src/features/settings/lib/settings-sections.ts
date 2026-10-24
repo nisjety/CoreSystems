@@ -16,6 +16,7 @@ export const workspaceSettingsSectionIds = [
   'plugins',
   'cron',
   'quotas',
+  'model-access',
   'memory',
 ] as const
 
@@ -149,6 +150,13 @@ export const workspaceSettingsSections: SectionDetail[] = [
     title: 'Forbrukstak',
     description: 'Tak for kostnad og tokens per kjøring. Model Plane leser disse og håndhever dem i budsjettsjekken — de er ikke det samme som plankvotene under Fakturering.',
     saveLabel: 'Lagre tak',
+  },
+  {
+    id: 'model-access',
+    label: 'Modelltilgang',
+    title: 'Modelltilgang',
+    description: 'Hvilke AI-modeller medlemmene kan bruke, og hvor mye resonnering de kan be om. Håndheves av Model Plane; en modell som ikke er tillatt vises ikke i modellvelgeren.',
+    saveLabel: 'Lagre modelltilgang',
   },
   {
     id: 'memory',

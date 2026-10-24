@@ -10,6 +10,7 @@ import { OrgInstructionsSection } from '@/features/settings/components/OrgInstru
 import { PersonaSection } from '@/features/settings/components/PersonaSection'
 import { PluginsSection } from '@/features/settings/components/PluginsSection'
 import { CronSchedulesSection } from '@/features/settings/components/CronSchedulesSection'
+import { OrgModelAccessSection } from '@/features/settings/components/OrgModelAccessSection'
 import { OrgQuotasSection } from '@/features/settings/components/OrgQuotasSection'
 import { MemorySection } from '@/features/settings/components/MemorySection'
 import { ChatGptSubscriptionPanel } from '@/features/integrations/components/ChatGptSubscriptionPanel'
@@ -234,6 +235,8 @@ const sectionStatusCards: Record<WorkspaceSettingsSectionId, StatusCard[]> = {
   // Quotas render their own live fields with the persisted limit and usage, so
   // no shared status grid — and no fabricated "within limits" posture.
   quotas: [],
+  // Model access renders its own live policy editor, so no shared status grid.
+  'model-access': [],
   // Memory renders its own live list, so it carries no shared status grid.
   memory: [],
 }
@@ -493,6 +496,9 @@ function WorkspaceSettingsSection(props: {
       </Match>
       <Match when={props.section === 'quotas'}>
         <OrgQuotasSection />
+      </Match>
+      <Match when={props.section === 'model-access'}>
+        <OrgModelAccessSection />
       </Match>
       <Match when={props.section === 'memory'}>
         <MemorySection />
