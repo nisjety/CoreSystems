@@ -1568,6 +1568,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "org.update_agent_learning_policy",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "human_identity_or_security",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:e988ab20df349f9d3f2160f8ff6c703b5baaa0cfa7af3b370c1177bd5acef858",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "org.update_instructions",
       "registry": true,
       "access": "none",

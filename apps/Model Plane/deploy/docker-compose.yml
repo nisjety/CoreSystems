@@ -883,6 +883,14 @@ services:
       # pre-S1 behaviour (every user treated as on) and logs ERROR once per Dreaming cycle; SetMemoryControls is
       # then refused.
       MEMORY_CONTROLS_ENABLED: ${MEMORY_CONTROLS_ENABLED:-true}
+      # WS07-S4: the org memory and learning policy mirror. An empty service token keeps the whole mirror
+      # dormant; ORG_POLICY_FAIL_CLOSED is the strict literal true; ORG_POLICY_MAX_STALE is in seconds.
+      ORG_CORE_URL: ${ORG_CORE_URL:-http://org-core:8080}
+      SESSION_ORG_CORE_SERVICE_TOKEN: ${SESSION_ORG_CORE_SERVICE_TOKEN:-}
+      ORG_POLICY_POLL_SECS: ${ORG_POLICY_POLL_SECS:-60}
+      ORG_POLICY_MAX_STALE: ${ORG_POLICY_MAX_STALE:-900}
+      ORG_POLICY_FAIL_CLOSED: ${ORG_POLICY_FAIL_CLOSED:-false}
+      ORG_LEARNING_DEFAULT: ${ORG_LEARNING_DEFAULT:-disabled}
       DREAMING_LLM_MODEL: ${DREAMING_LLM_MODEL:-claude-haiku-4-5}
       # Write-time memory grounding (memory_grounding.rs). Off by default --
       # set MEMORY_GROUNDING_ENABLED=1 to let Dreaming classify a candidate as

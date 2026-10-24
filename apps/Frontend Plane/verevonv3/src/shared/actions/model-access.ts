@@ -234,6 +234,7 @@ export const MODEL_ACCESS: Readonly<Record<ActionId, ModelAccessEntry>> = {
   'org.update_instructions': exempt('human_identity_or_security', 'external_write'),
   'org.update_zdr': exempt('human_identity_or_security', 'external_write'),
   'org.update_support_ai_mode': exempt('human_identity_or_security', 'external_write'),
+  'org.update_agent_learning_policy': exempt('human_identity_or_security', 'external_write'),
   'membership.invite_member': exempt('human_identity_or_security', 'external_write'),
   'membership.remove_member': exempt('human_identity_or_security', 'external_write'),
   'membership.update_member_role': exempt('human_identity_or_security', 'external_write'),
