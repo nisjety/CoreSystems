@@ -45,13 +45,16 @@ import type { MetaFacebookSdkConfig } from '@/shared/integrations/meta-facebook-
 import { getSession } from '@/shared/session/session-store'
 import { hasWorkspaceAdminAccess } from '@/shared/session/access'
 import {
+  getOrganizationAgentLearningPolicy,
   getOrganizationSupportAIMode,
   getOrganizationZdr,
   getOrganizationZdrEntitled,
+  updateOrganizationAgentLearningPolicy,
   updateOrganizationSupportAIMode,
   updateOrganizationZdr,
   ZDR_GATE_UNAVAILABLE,
   ZDR_NO_ATTESTED_PROVIDER,
+  type AgentLearningPolicy,
   type SupportAIMode,
 } from '@/shared/api/organization-client'
 import { hasZeroRetentionModel, listModels } from '@/shared/api/chat-client'
@@ -1356,6 +1359,10 @@ function OrgSecuritySection() {
   const [supportAiLoaded, setSupportAiLoaded] = createSignal(false)
   const [supportAiBusy, setSupportAiBusy] = createSignal(false)
   const [supportAiError, setSupportAiError] = createSignal<string | null>(null)
+  const [agentPolicy, setAgentPolicy] = createSignal<AgentLearningPolicy>({ memory: 'allow', learningReview: 'disabled' })
+  const [agentPolicyLoaded, setAgentPolicyLoaded] = createSignal(false)
+  const [agentPolicyBusy, setAgentPolicyBusy] = createSignal(false)
+  const [agentPolicyError, setAgentPolicyError] = createSignal<string | null>(null)
 
   createEffect(
     () => undefined,
@@ -1365,8 +1372,14 @@ function OrgSecuritySection() {
         if (!id) {
           setZdrLoaded(true)
           setSupportAiLoaded(true)
+          setAgentPolicyLoaded(true)
           return
         }
+        // Its own read: a failure here must not hold back the posture, and the
+        // controls stay locked until it has answered.
+        void getOrganizationAgentLearningPolicy(id)
+          .then(setAgentPolicy, () => undefined)
+          .finally(() => setAgentPolicyLoaded(true))
         // Read beside the posture, never in front of it: a slow or failed catalogue
         // must not hold back the posture and the plan lock.
         void listModels().then(
@@ -1443,6 +1456,25 @@ function OrgSecuritySection() {
     }
   }
 
+  async function changeAgentPolicy(change: Partial<AgentLearningPolicy>) {
+    const id = orgId()
+    if (!id || agentPolicyBusy()) return
+    const previous = agentPolicy()
+    setAgentPolicy({ ...previous, ...change })
+    setAgentPolicyBusy(true)
+    setAgentPolicyError(null)
+    try {
+      setAgentPolicy(await updateOrganizationAgentLearningPolicy(id, change))
+    } catch (reason) {
+      setAgentPolicy(previous)
+      setAgentPolicyError(
+        reason instanceof Error ? reason.message : i18n.tr('Kunne ikke oppdatere minnepolicyen.', 'Could not update the memory policy.'),
+      )
+    } finally {
+      setAgentPolicyBusy(false)
+    }
+  }
+
   // Enabling ZDR is plan-gated; disabling is always allowed. Block the control
   // only when the org can't enable it and it is currently off.
   const zdrLocked = createMemo(() => !zdrEntitled() && !zdr())
@@ -1491,6 +1523,46 @@ function OrgSecuritySection() {
             ]}
           />
         </div>
+        <div class="verevon-settings-toggle-row">
+          <div>
+            <p class="verevon-settings-toggle-title">{i18n.tr('Minne', 'Memory')}</p>
+            <span>{i18n.tr(
+              'Når minne er avslått for organisasjonen, husker Verevon ingenting fra samtalene til noen medlem, og tidligere minner brukes ikke. Det som ble sagt mens det var avslått, læres aldri senere.',
+              'When memory is disabled for the organization, Verevon remembers nothing from any member\'s conversations and earlier memories are not used. What was said while it was disabled is never learned later.',
+            )}</span>
+          </div>
+          <SettingsSelect
+            id="org-memory-policy"
+            label={i18n.tr('Minne', 'Memory')}
+            value={agentPolicy().memory}
+            disabled={!isAdmin() || agentPolicyBusy() || !agentPolicyLoaded() || !orgId()}
+            onChange={(event) => void changeAgentPolicy({ memory: event.currentTarget.value as AgentLearningPolicy['memory'] })}
+            options={[
+              { value: 'allow', label: i18n.tr('Tillatt', 'Allowed') },
+              { value: 'disabled', label: i18n.tr('Avslått', 'Disabled') },
+            ]}
+          />
+        </div>
+        <div class="verevon-settings-toggle-row">
+          <div>
+            <p class="verevon-settings-toggle-title">{i18n.tr('Læring fra samtaler', 'Learning from conversations')}</p>
+            <span>{i18n.tr(
+              'Når dette er på, leser en betalt vurderingsmodell fullførte samtaler og foreslår ferdigheter. Forslagene er avslått og tilhører den som hadde samtalen, og ingenting aktiveres uten at personen godkjenner det.',
+              'When on, a paid review model reads completed conversations and proposes skills. Proposals start disabled and belong to the person who had the conversation; nothing is activated until that person accepts it.',
+            )}</span>
+          </div>
+          <SettingsSelect
+            id="org-learning-review-policy"
+            label={i18n.tr('Læring fra samtaler', 'Learning from conversations')}
+            value={agentPolicy().learningReview}
+            disabled={!isAdmin() || agentPolicyBusy() || !agentPolicyLoaded() || !orgId() || agentPolicy().memory === 'disabled'}
+            onChange={(event) => void changeAgentPolicy({ learningReview: event.currentTarget.value as AgentLearningPolicy['learningReview'] })}
+            options={[
+              { value: 'disabled', label: i18n.tr('Av', 'Off') },
+              { value: 'proposals', label: i18n.tr('Forslag', 'Proposals') },
+            ]}
+          />
+        </div>
         <For each={getSecurityControls(i18n)}>
           {(control) => (
             <ToggleRow title={control.title} description={control.description} enabled={false} disabled />
@@ -1502,6 +1574,9 @@ function OrgSecuritySection() {
       </Show>
       <Show when={supportAiError()}>
         <p class="verevon-settings-panel-note" role="alert">{supportAiError()}</p>
+      </Show>
+      <Show when={agentPolicyError()}>
+        <p class="verevon-settings-panel-note" role="alert">{agentPolicyError()}</p>
       </Show>
       <Show when={zdrLoaded() && zdrLocked()}>
         <p class="verevon-settings-panel-note">

@@ -159,6 +159,7 @@ pub struct PurgeSummary {
     pub user_memory_controls: u64,
     pub forgotten_memory_ids: u64,
     pub memory_control_events: u64,
+    pub org_learning_policy_mirror: u64,
     pub finetune_jobs: u64,
     pub dream_runs: u64,
     pub session_audit_outbox: u64,
@@ -201,6 +202,7 @@ impl PurgeSummary {
             + self.user_memory_controls
             + self.forgotten_memory_ids
             + self.memory_control_events
+            + self.org_learning_policy_mirror
             + self.finetune_jobs
             + self.dream_runs
             + self.session_audit_outbox
@@ -425,6 +427,8 @@ pub async fn purge_organization_data(
         .bind(org_id).execute(&mut *tx).await?.rows_affected();
     summary.memory_control_events = sqlx::query("DELETE FROM memory_control_events WHERE org_id = $1")
         .bind(org_id).execute(&mut *tx).await?.rows_affected();
+    summary.org_learning_policy_mirror = sqlx::query("DELETE FROM org_learning_policy_mirror WHERE org_id = $1")
+        .bind(org_id).execute(&mut *tx).await?.rows_affected();
 
     summary.finetune_jobs = sqlx::query("DELETE FROM finetune_jobs WHERE org_id = $1")
         .bind(org_id)
@@ -636,6 +640,7 @@ mod tests {
             user_memory_controls: 1,
             forgotten_memory_ids: 1,
             memory_control_events: 1,
+            org_learning_policy_mirror: 1,
             finetune_jobs: 1,
             dream_runs: 1,
             session_audit_outbox: 1,
@@ -651,7 +656,7 @@ mod tests {
         };
         assert_eq!(
             summary.total(),
-            26,
+            27,
             "total() must count only Postgres rows; semantic-tier counts belong \
              to erasure_is_complete(), not to this sum"
         );

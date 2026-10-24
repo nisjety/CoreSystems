@@ -50,7 +50,8 @@ use super::dispatchers::{
     dispatch_org_mark_exported, dispatch_org_restore, dispatch_org_set_model_entitlement,
     dispatch_org_set_quota,
     dispatch_org_soft_delete, dispatch_org_update_instructions,
-    dispatch_org_update_support_ai_mode, dispatch_org_update_zdr,
+    dispatch_org_update_agent_learning_policy, dispatch_org_update_support_ai_mode,
+    dispatch_org_update_zdr,
     dispatch_organization_switch_active, dispatch_ownership_revoke_document_share,
     dispatch_ownership_share_document, dispatch_privacy_erase_my_account,
     dispatch_router_policy_update, dispatch_settings_create_api_key,
@@ -312,6 +313,9 @@ pub(super) async fn execute_action(
         "org.update_zdr" => dispatch_org_update_zdr(&state, &user, &headers, &body.input).await,
         "org.update_support_ai_mode" => {
             dispatch_org_update_support_ai_mode(&state, &user, &headers, &body.input).await
+        }
+        "org.update_agent_learning_policy" => {
+            dispatch_org_update_agent_learning_policy(&state, &user, &headers, &body.input).await
         }
         "membership.invite_member" => {
             dispatch_membership_invite_member(&state, &user, &headers, &body.input).await

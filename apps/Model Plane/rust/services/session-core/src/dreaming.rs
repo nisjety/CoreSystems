@@ -1271,8 +1271,12 @@ async fn load_pending_messages(
     pool: &PgPool,
     limit: i64,
 ) -> Result<Vec<PendingMessage>, sqlx::Error> {
+    // The org's own policy, on top of the user's: an org that disabled memory is
+    // not mined, nor is the period it had memory off after it is switched back on.
+    let org_filter = crate::org_policy::pending_filter(3, 4, 5);
+    let gate = crate::org_policy::pending_gate();
     let rows = sqlx::query_as::<_, (String, String, String, String, String, String, bool)>(
-        "SELECT m.id, m.thread_id, m.role, m.content, t.org_id, t.user_id, t.source_scope = 'conversation' \
+        &format!("SELECT m.id, m.thread_id, m.role, m.content, t.org_id, t.user_id, t.source_scope = 'conversation' \
          FROM messages m \
          JOIN threads t ON t.id = m.thread_id \
          WHERE m.role IN ('user', 'assistant') \
@@ -1288,13 +1292,17 @@ async fn load_pending_messages(
              WHERE wr.thread_id = m.thread_id \
                AND wr.retention_class = 'zdr_waived' \
            ) \
+           {org_filter} \
          ORDER BY m.created_at ASC, m.sequence ASC \
-         LIMIT $1",
+         LIMIT $1"),
     )
     .bind(limit)
     // A paused or off user's messages are not read at all, so none reaches the
     // extractor's model; after a resume `extract_after` keeps them out for good.
     .bind(crate::memory_control::controls_enabled())
+    .bind(gate.active)
+    .bind(gate.fail_closed)
+    .bind(gate.max_stale_secs)
     .fetch_all(pool)
     .await?;
 
@@ -1327,24 +1335,32 @@ async fn load_preceding_context(
     let Some(before_message_id) = before_message_id else {
         return Ok(Vec::new());
     };
+    // The same org filter as the pending query: the turns an org had memory off
+    // for are not shown to the extractor as context either.
+    let org_filter = crate::org_policy::pending_filter(5, 6, 7);
+    let gate = crate::org_policy::pending_gate();
     let mut rows = sqlx::query_as::<_, (String, String)>(
-        "SELECT m.role, m.content \
+        &format!("SELECT m.role, m.content \
          FROM messages m \
          JOIN threads t ON t.id = m.thread_id \
          WHERE m.thread_id = $1 \
            AND m.role IN ('user', 'assistant') \
            AND NOT EXISTS (SELECT 1 FROM user_memory_controls c WHERE c.org_id = t.org_id AND c.user_id = t.user_id AND m.created_at <= c.extract_after) \
            AND NOT EXISTS (SELECT 1 FROM user_memory_controls c WHERE c.org_id = t.org_id AND c.user_id = t.user_id AND c.memory_state <> 'on' AND $4) \
+           {org_filter} \
            AND (m.created_at, m.sequence) < ( \
              SELECT b.created_at, b.sequence FROM messages b WHERE b.id = $2 \
            ) \
          ORDER BY m.created_at DESC, m.sequence DESC \
-         LIMIT $3",
+         LIMIT $3"),
     )
     .bind(thread_id)
     .bind(before_message_id)
     .bind(EXTRACTION_CONTEXT_MESSAGES)
     .bind(crate::memory_control::controls_enabled())
+    .bind(gate.active)
+    .bind(gate.fail_closed)
+    .bind(gate.max_stale_secs)
     .fetch_all(pool)
     .await?;
     rows.reverse();

@@ -33,6 +33,7 @@ mod nats_connection;
 mod orchestration_grpc;
 mod orchestration_nats;
 mod orchestration_store;
+mod org_policy;
 mod retention_receipt;
 mod routing_policy_grpc;
 mod run_service_grpc;
@@ -165,6 +166,14 @@ async fn main() -> Result<()> {
             async move { dreaming::run(pool, letta).await }
         },
     ));
+    let org_policy_pool = pool.clone();
+    let org_policy_handle = tokio::spawn(supervise_background(
+        "session-core org agent policy poller",
+        move || {
+            let pool = org_policy_pool.clone();
+            async move { org_policy::run(pool).await }
+        },
+    ));
     let semantic_reconciliation_handle = {
         let pool = pool.clone();
         let letta = letta_memory.clone();
@@ -216,6 +225,7 @@ async fn main() -> Result<()> {
         result = space_membership_handle => result??,
         result = compaction_handle => result??,
         result = dreaming_handle => result??,
+        result = org_policy_handle => result??,
         result = semantic_reconciliation_handle => result??,
         result = terminalization_handle => result??,
         result = tool_ledger_handle => result??,

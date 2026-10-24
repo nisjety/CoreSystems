@@ -50,6 +50,10 @@ var orgServiceScopeAllowlist = map[string]struct{}{
 	// GET /internal/orgs/:orgId/retention-posture and nothing else. Deliberately
 	// not org:read:any, which returns the whole organization record.
 	"org:retention:read:any": {},
+	// Read-only access to one org's memory and learning-review policy, through
+	// GET /internal/orgs/:orgId/agent-policy and nothing else (WS07-S4). Held by
+	// session-core, which mirrors it; deliberately not org:read:any.
+	"org:agent-policy:read:any": {},
 	// Read-only access to the resolved chat model policy of one org and user,
 	// through GET /internal/orgs/:orgId/model-entitlement and nothing else. Held
 	// by inference-core (the enforcement point, ADR-0005) and by model-gateway
@@ -419,6 +423,8 @@ func internalOrganizationScopes(method string, rest []string) []string {
 		return []string{"org:onboarding:write:self", "org:onboarding:write:any"}
 	case len(rest) == 2 && rest[1] == "retention-posture" && method == http.MethodGet:
 		return []string{"org:retention:read:any"}
+	case len(rest) == 2 && rest[1] == "agent-policy" && method == http.MethodGet:
+		return []string{"org:agent-policy:read:any"}
 	case len(rest) == 2 && rest[1] == "model-entitlement" && method == http.MethodGet:
 		return []string{"org:model-entitlement:read:any"}
 	case len(rest) == 3 && rest[1] == "browser-sites" && rest[2] == "resolve" && method == http.MethodGet:

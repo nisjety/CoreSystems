@@ -1,11 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   getOrganizationAISettings,
+  getOrganizationAgentLearningPolicy,
   getOrganizationZdr,
   getOrganizationSupportAIMode,
   getOrganizationZdrEntitled,
   listOrganizations,
   switchActiveOrganization,
+  updateOrganizationAgentLearningPolicy,
   updateOrganizationZdr,
   updateOrganizationSupportAIMode,
 } from './organization-client'
@@ -86,6 +88,40 @@ describe('organization client', () => {
     await expect(updateOrganizationSupportAIMode('org_1', 'assist')).resolves.toBe('assist')
     const [, init] = fetchMock.mock.calls[1] as unknown as [string, RequestInit]
     expect(JSON.parse(String(init.body))).toEqual({ supportAiMode: 'assist' })
+  })
+
+  it('reads the memory and learning policy with org-core\'s defaults and strictness', async () => {
+    const policyFor = async (agentLearning: unknown) => {
+      vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ id: 'org_1', metadata: { agentLearning } })))
+      return getOrganizationAgentLearningPolicy('org_1')
+    }
+    // Nothing stored: memory allowed, learning review is opt-in and off.
+    await expect(policyFor(undefined)).resolves.toEqual({ memory: 'allow', learningReview: 'disabled' })
+    await expect(policyFor({ memory: 'disabled', learningReview: 'proposals' })).resolves.toEqual({
+      memory: 'disabled',
+      learningReview: 'proposals',
+    })
+    // A value this client does not know never reads as allowed or opted in.
+    await expect(policyFor({ memory: 'maybe', learningReview: 'auto' })).resolves.toEqual({
+      memory: 'disabled',
+      learningReview: 'disabled',
+    })
+    await expect(policyFor('nonsense')).resolves.toEqual({ memory: 'allow', learningReview: 'disabled' })
+  })
+
+  it('persists the memory and learning policy through the org-admin settings route', async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({ id: 'org_1', metadata: { agentLearning: { memory: 'disabled', learningReview: 'disabled' } } }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const stored = await updateOrganizationAgentLearningPolicy('org_1', { memory: 'disabled' })
+
+    const [path, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    expect(path).toBe('/api/v1/orgs/org_1/settings')
+    expect(init.method).toBe('PATCH')
+    expect(JSON.parse(String(init.body))).toEqual({ agentLearningPolicy: { memory: 'disabled' } })
+    expect(stored).toEqual({ memory: 'disabled', learningReview: 'disabled' })
   })
 
   it('reads the combined AI operating settings in one canonical org request', async () => {

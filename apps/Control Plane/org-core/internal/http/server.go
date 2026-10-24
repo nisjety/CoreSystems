@@ -21,6 +21,7 @@ type Server struct {
 	orgService       *orgcore.Service
 	rbacRepo         *rbac.Repository // U6-3 (ui-ux-verevon-gap.md §10)
 	retentionPosture retentionPostureReader
+	agentPolicy      agentPolicyReader
 	authService      string
 	userService      string
 	userServiceToken string
@@ -67,6 +68,7 @@ func NewServer(port int, orgService *orgcore.Service, rbacRepo *rbac.Repository,
 		// Assigned only when present: a typed-nil *Service in the interface
 		// would defeat the handler's nil check.
 		s.retentionPosture = orgService
+		s.agentPolicy = orgService
 		s.callerRoles = orgService
 	}
 	if siemDestinationsEnabled(os.Getenv) {
@@ -223,6 +225,9 @@ func (s *Server) setupRoutes() {
 	// (not org:read:any, which returns the whole organization record). Computed
 	// from the database on every call; see getRetentionPostureInternal.
 	internal.GET("/orgs/:orgId/retention-posture", s.getRetentionPostureInternal)
+	// The org's memory and learning-review policy for session-core's mirror
+	// (WS07-S4), behind its own scope org:agent-policy:read:any; no-store.
+	internal.GET("/orgs/:orgId/agent-policy", s.getAgentPolicyInternal)
 	// The resolved chat model policy for one org and user, for inference-core's
 	// pull (WS10-S2). Own scope org:model-entitlement:read:any; no-store.
 	internal.GET("/orgs/:orgId/model-entitlement", s.getModelEntitlementInternal)

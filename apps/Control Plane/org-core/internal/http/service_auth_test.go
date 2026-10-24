@@ -167,6 +167,18 @@ func TestOrgRetentionReadScopeIsMachineOnly(t *testing.T) {
 	}
 }
 
+func TestOrgAgentPolicyReadScopeIsMachineOnly(t *testing.T) {
+	// Same shape as the retention scope: :any keeps it off the gateway principal
+	// and it needs no acting user.
+	if _, err := parseServiceCredentials(orgServiceTestRegistry("org:agent-policy:read:any")); err == nil {
+		t.Fatal("expected org:agent-policy:read:any to be refused for the gateway principal")
+	}
+	credentials, err := parseServiceCredentials(`[{"principal":"session-core","audience":"org-core","token":"fedcba9876543210fedcba9876543210","scopes":["org:read:any","org:agent-policy:read:any"]}]`)
+	if err != nil || len(credentials) != 1 {
+		t.Fatalf("machine principal with org:agent-policy:read:any rejected: credentials=%d err=%v", len(credentials), err)
+	}
+}
+
 func TestOrgServiceScopeForRequest(t *testing.T) {
 	tests := []struct {
 		method string
@@ -225,6 +237,15 @@ func TestOrgServiceScopeForRequest(t *testing.T) {
 		{method: http.MethodGet, path: "/internal/orgs/org-1/retention-posture/extra", want: nil},
 		{method: http.MethodGet, path: "/api/v1/organizations/org-1/retention-posture", want: nil},
 		{method: http.MethodGet, path: "/orgs/org-1/retention-posture", want: nil},
+		// The agent policy read is one narrow scope like the posture read: one
+		// verb, one path, never org:read:any, and no signed-user route reaches it.
+		{method: http.MethodGet, path: "/internal/orgs/org-1/agent-policy", want: []string{"org:agent-policy:read:any"}},
+		{method: http.MethodPost, path: "/internal/orgs/org-1/agent-policy", want: nil},
+		{method: http.MethodPut, path: "/internal/orgs/org-1/agent-policy", want: nil},
+		{method: http.MethodDelete, path: "/internal/orgs/org-1/agent-policy", want: nil},
+		{method: http.MethodGet, path: "/internal/orgs/org-1/agent-policy/extra", want: nil},
+		{method: http.MethodGet, path: "/api/v1/organizations/org-1/agent-policy", want: nil},
+		{method: http.MethodGet, path: "/orgs/org-1/agent-policy", want: nil},
 		// The model policy is one narrow machine scope on the internal route, and
 		// signed-user scopes on the admin routes; org:read:any never reaches it.
 		{method: http.MethodGet, path: "/internal/orgs/org-1/model-entitlement", want: []string{"org:model-entitlement:read:any"}},

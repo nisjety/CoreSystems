@@ -80,9 +80,9 @@ impl ThreadMemoryMode {
     }
 }
 
-/// What the organization's memory policy says. Session-core has no mirror of it
-/// yet (build plan WS07 S4), so [`resolve`] passes `Allow` today; the other two
-/// are decided here already so the mirror only has to supply the value.
+/// What the organization's memory policy says, from the mirror of org-core's
+/// policy (`org_policy`). `Unavailable` is a mirror that is missing or too old
+/// while `ORG_POLICY_FAIL_CLOSED` is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OrgMemoryPolicy {
     Allow,
@@ -278,6 +278,63 @@ where
     })
 }
 
+/// The user's stored state and the org's mirrored policy, in one statement so a
+/// reader that holds a single executor can ask for both.
+async fn stored_inputs<'e, E>(
+    executor: E,
+    org: &str,
+    user: &str,
+) -> Result<(MemoryState, Option<crate::org_policy::MirrorRow>), sqlx::Error>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    type Row = (
+        Option<String>,
+        Option<bool>,
+        Option<String>,
+        Option<DateTime<Utc>>,
+    );
+    let (state, memory_allowed, learning_mode, fetched_at): Row = sqlx::query_as(
+        "SELECT c.memory_state, p.memory_allowed, p.learning_mode, p.fetched_at \
+         FROM (SELECT 1) one \
+         LEFT JOIN user_memory_controls c ON c.org_id = $1 AND c.user_id = $2 \
+         LEFT JOIN org_learning_policy_mirror p ON p.org_id = $1",
+    )
+    .bind(org)
+    .bind(user)
+    .fetch_one(executor)
+    .await?;
+    let mirror = match (memory_allowed, learning_mode, fetched_at) {
+        (Some(memory_allowed), Some(learning_mode), Some(fetched_at)) => {
+            Some(crate::org_policy::MirrorRow {
+                memory_allowed,
+                learning_mode,
+                fetched_at,
+            })
+        }
+        _ => None,
+    };
+    // No row is `on`; the CHECK constraint closes the set, so an unknown value is
+    // treated as the most protective one.
+    let state = state.map_or(MemoryState::On, |state| {
+        MemoryState::from_storage(&state).unwrap_or(MemoryState::Off)
+    });
+    Ok((state, mirror))
+}
+
+/// Folds the org's mirrored policy into the decision for one user. Learning also
+/// needs the org's opt-in to learning review.
+fn decide_with_org(
+    zdr: bool,
+    user: MemoryState,
+    mirror: Option<&crate::org_policy::MirrorRow>,
+) -> MemoryDecision {
+    let view = crate::org_policy::view_from_row(mirror, Utc::now(), crate::org_policy::settings());
+    let mut decision = decide(zdr, view.memory, user);
+    decision.learning_allowed &= view.learning_review;
+    decision
+}
+
 /// The decision for a reader. `zdr` is the caller's retention posture; a ZDR
 /// caller is answered without touching the stored state.
 pub(crate) async fn resolve<'e, E>(
@@ -295,8 +352,8 @@ where
     if !controls_enabled() {
         return Ok(unrestricted());
     }
-    let stored = stored_state(executor, org, user).await?;
-    Ok(decide(false, OrgMemoryPolicy::Allow, stored.state))
+    let (state, mirror) = stored_inputs(executor, org, user).await?;
+    Ok(decide_with_org(false, state, mirror.as_ref()))
 }
 
 /// The decision for a writer, taken under the user's row lock and so ordered
@@ -315,7 +372,11 @@ pub(crate) async fn resolve_in_tx(
     if !controls_enabled() {
         return Ok(unrestricted());
     }
-    Ok(decide(false, OrgMemoryPolicy::Allow, stored))
+    // The mirror is read under the user's lock like the state, but is not itself
+    // locked: the poller writes it without the user's lock, so a refresh that
+    // lands mid-write is seen by the next writer, within one poll interval.
+    let mirror = crate::org_policy::mirror_row(&mut **tx, org).await?;
+    Ok(decide_with_org(false, stored, mirror.as_ref()))
 }
 
 /// A thread's own mode. A thread that does not exist (or is another
@@ -506,9 +567,10 @@ pub(crate) async fn permits_extraction(
         return Ok(false);
     }
     // A message of a thread set off is not extracted from either (unless the kill
-    // switch restored the behaviour before the mode existed).
-    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM messages m JOIN threads t ON t.id = m.thread_id JOIN user_memory_controls c ON c.org_id = t.org_id AND c.user_id = t.user_id WHERE m.id = $3 AND t.org_id = $1 AND t.user_id = $2 AND m.created_at > c.extract_after AND (t.memory_mode = 'inherit' OR NOT $4))")
-        .bind(org).bind(user).bind(message_id).bind(controls_enabled()).fetch_one(&mut **tx).await
+    // switch restored the behaviour before the mode existed). Nor is one written
+    // while the org had memory off: it is at or before the mirror's watermark.
+    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM messages m JOIN threads t ON t.id = m.thread_id JOIN user_memory_controls c ON c.org_id = t.org_id AND c.user_id = t.user_id WHERE m.id = $3 AND t.org_id = $1 AND t.user_id = $2 AND m.created_at > c.extract_after AND (t.memory_mode = 'inherit' OR NOT $4) AND (NOT $5 OR NOT EXISTS (SELECT 1 FROM org_learning_policy_mirror p WHERE p.org_id = t.org_id AND m.created_at <= p.memory_enabled_since)))")
+        .bind(org).bind(user).bind(message_id).bind(controls_enabled()).bind(crate::org_policy::settings().governed).fetch_one(&mut **tx).await
 }
 
 pub(crate) async fn record_forgetting(

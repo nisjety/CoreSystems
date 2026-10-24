@@ -1050,6 +1050,12 @@ const orgUpdateSupportAiModeInput = z.object({
   supportAiMode: z.enum(['off', 'assist', 'review']),
 })
 
+const orgUpdateAgentLearningPolicyInput = z.object({
+  orgId: z.string().min(1),
+  memory: z.enum(['allow', 'disabled']).optional(),
+  learningReview: z.enum(['disabled', 'proposals']).optional(),
+})
+
 const membershipInviteMemberInput = z.object({
   orgId: z.string().min(1),
   email: z.string().trim().email().max(320),
@@ -2999,6 +3005,17 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: true,
     inputSchema: orgUpdateSupportAiModeInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'org.update_agent_learning_policy',
+    label: 'Update organization memory and learning policy',
+    description: 'Allow or disable memory for the whole organization, and opt in or out of learning review of conversations. Affects every member.',
+    ownerPlane: 'control',
+    risk: 'high',
+    requiresApproval: true,
+    reversible: true,
+    inputSchema: orgUpdateAgentLearningPolicyInput,
     outputSchema: envelopeStatusOutput,
   },
   {

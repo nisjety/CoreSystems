@@ -431,6 +431,54 @@ func (r *Repository) SetSupportAIMode(ctx context.Context, orgID, mode, changedB
 	})
 }
 
+// SetAgentLearningPolicy stores the organization's memory and learning-review
+// policy under metadata.agentLearning. A nil field keeps the stored value (or
+// the default when none is stored), so the admin can change one row at a time;
+// the revision rises on every write so a reader can tell two policies apart.
+// The values are validated by the service.
+func (r *Repository) SetAgentLearningPolicy(ctx context.Context, orgID string, memory, learningReview *string, changedBy string) error {
+	const q = `
+UPDATE organizations
+SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{agentLearning}', jsonb_build_object(
+        'memory', COALESCE($2::text, metadata -> 'agentLearning' ->> 'memory', 'allow'),
+        'learningReview', COALESCE($3::text, metadata -> 'agentLearning' ->> 'learningReview', 'disabled'),
+        'revision', COALESCE(CASE WHEN jsonb_typeof(metadata -> 'agentLearning' -> 'revision') = 'number'
+                                  THEN (metadata -> 'agentLearning' ->> 'revision')::numeric::bigint END, 0) + 1,
+        'updatedAt', $4::text,
+        'updatedBy', $5::text), true),
+    updated_at = NOW()
+WHERE id = $1 AND deleted_at IS NULL`
+	return r.db.WithOrgScope(ctx, orgID, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, q, orgID, memory, learningReview, time.Now().UTC().Format(time.RFC3339), changedBy)
+		if err != nil {
+			return fmt.Errorf("update agent learning policy: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrNotFound
+		}
+		return nil
+	})
+}
+
+// GetAgentLearningPolicy reads metadata.agentLearning straight from the table
+// and returns it normalised: an absent policy is the defaults, a malformed one
+// is the strictest reading (see normalizeAgentLearningPolicy). Soft-deleted
+// organizations read as not found. RLS-scoped like GetOrganization.
+func (r *Repository) GetAgentLearningPolicy(ctx context.Context, id string) (AgentLearningPolicy, error) {
+	const q = `SELECT metadata -> 'agentLearning' FROM organizations WHERE id = $1 AND deleted_at IS NULL`
+	var raw []byte
+	err := r.db.WithOrgScope(ctx, id, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, q, id).Scan(&raw)
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return AgentLearningPolicy{}, ErrNotFound
+		}
+		return AgentLearningPolicy{}, fmt.Errorf("query agent learning policy: %w", err)
+	}
+	return normalizeAgentLearningPolicy(raw), nil
+}
+
 func (r *Repository) ClaimPlanChangeOutbox(ctx context.Context, limit int) ([]PlanChangeOutboxRow, error) {
 	if limit < 1 || limit > 1000 {
 		return nil, fmt.Errorf("plan change outbox limit must be between 1 and 1000")

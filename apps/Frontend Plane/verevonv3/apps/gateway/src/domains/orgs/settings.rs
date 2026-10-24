@@ -232,9 +232,40 @@ pub(crate) async fn zdr_enable_refusal(
     }
 }
 
+/// The memory and learning-review policy an org admin sets, checked against the
+/// two spellings org-core accepts so a typo is refused here with a reason instead
+/// of as an opaque upstream 400. Anything outside the three keys, or a value that is
+/// not exactly one of its two spellings, is refused; at least one row is required.
+/// Returns the object to forward.
+fn agent_learning_policy(value: &Value) -> Result<Value, &'static str> {
+    const SHAPE: &str = "agentLearningPolicy must be an object with memory (allow or disabled) and/or learningReview (disabled or proposals).";
+    let Some(object) = value.as_object() else {
+        return Err(SHAPE);
+    };
+    let mut forwarded = serde_json::Map::new();
+    for (key, row) in object {
+        let allowed: &[&str] = match key.as_str() {
+            "memory" => &["allow", "disabled"],
+            "learningReview" => &["disabled", "proposals"],
+            _ => return Err(SHAPE),
+        };
+        match row.as_str() {
+            Some(text) if allowed.contains(&text) => {
+                forwarded.insert(key.clone(), Value::String(text.to_owned()));
+            }
+            _ => return Err(SHAPE),
+        }
+    }
+    if forwarded.is_empty() {
+        return Err(SHAPE);
+    }
+    Ok(Value::Object(forwarded))
+}
+
 /// PATCH /api/v1/orgs/:id/settings — org-admin-gated organization settings.
 ///
-/// Currently carries the interactive Zero-Data-Retention posture. The value is
+/// Carries the interactive Zero-Data-Retention posture, the support-AI mode and the
+/// memory and learning-review policy, exactly one per request. The ZDR value is
 /// persisted as durable organization intent in org-core; live token-issue
 /// enforcement remains with auth-core's managed, attested retention policy.
 /// This route deliberately never becomes a per-request ZDR override: it only
@@ -263,16 +294,28 @@ pub(crate) async fn update_org_settings(
     }
     let zdr = body.get("zeroDataRetention").and_then(Value::as_bool);
     let support_ai_mode = body.get("supportAiMode").and_then(Value::as_str);
-    if (zdr.is_some() && support_ai_mode.is_some()) || (zdr.is_none() && support_ai_mode.is_none())
-    {
+    let agent_learning = body.get("agentLearningPolicy");
+    let provided = usize::from(zdr.is_some())
+        + usize::from(support_ai_mode.is_some())
+        + usize::from(agent_learning.is_some());
+    if provided != 1 {
         return (
             StatusCode::BAD_REQUEST,
             Json(error(
                 "validation_error",
-                "provide exactly one of zeroDataRetention or supportAiMode.",
+                "provide exactly one of zeroDataRetention, supportAiMode or agentLearningPolicy.",
             )),
         );
     }
+    let agent_learning = match agent_learning.map(agent_learning_policy).transpose() {
+        Ok(policy) => policy,
+        Err(message) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(error("validation_error", message)),
+            )
+        }
+    };
     if let Some(mode) = support_ai_mode {
         if !matches!(mode, "off" | "assist" | "review") {
             return (
@@ -298,9 +341,10 @@ pub(crate) async fn update_org_settings(
         &state,
         Method::PATCH,
         &url,
-        Some(match (zdr, support_ai_mode) {
-            (Some(zdr), None) => json!({ "zeroDataRetention": zdr }),
-            (None, Some(mode)) => json!({ "supportAiMode": mode }),
+        Some(match (zdr, support_ai_mode, agent_learning) {
+            (Some(zdr), None, None) => json!({ "zeroDataRetention": zdr }),
+            (None, Some(mode), None) => json!({ "supportAiMode": mode }),
+            (None, None, Some(policy)) => json!({ "agentLearningPolicy": policy }),
             _ => unreachable!(),
         }),
         Some(&id),
@@ -910,6 +954,65 @@ mod tests {
         assert_eq!(status, 200, "{body}");
         assert_eq!(up.catalogue_requests().await, 0);
         assert_eq!(up.token_mints().await, 0);
+    }
+
+    #[tokio::test]
+    async fn org_agent_policy_requires_admin() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let policy = json!({"agentLearningPolicy": {"memory": "disabled"}});
+
+        // A plain member reaches neither org-core nor any credential mint.
+        let up = Upstreams::with_default_mint("member").await;
+        up.org_core_accepts(policy.clone(), json!({"id": "org-1"})).await;
+        let (status, body) = patch_settings(up.state(false), policy.clone()).await;
+        assert_eq!(status, 403, "{body}");
+        assert_eq!(up.org_core_requests().await, 0);
+        assert_eq!(up.token_mints().await, 0);
+
+        // An admin is forwarded with exactly the validated body, and the setting is
+        // not gated on the provider catalogue (it is not a ZDR switch).
+        let up = Upstreams::with_default_mint("admin").await;
+        up.org_core_accepts(
+            json!({"agentLearningPolicy": {"memory": "disabled", "learningReview": "proposals"}}),
+            json!({"id": "org-1", "metadata": {"agentLearning": {"memory": "disabled", "learningReview": "proposals"}}}),
+        )
+        .await;
+        let (status, body) = patch_settings(
+            up.state(false),
+            json!({"agentLearningPolicy": {"memory": "disabled", "learningReview": "proposals"}}),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(up.org_core_requests().await, 1);
+        assert_eq!(up.catalogue_requests().await, 0);
+        assert_eq!(up.token_mints().await, 0);
+    }
+
+    #[tokio::test]
+    async fn org_agent_policy_refuses_anything_but_the_documented_shape() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let up = Upstreams::with_default_mint("admin").await;
+        up.org_core_accepts(
+            json!({"agentLearningPolicy": {"memory": "allow"}}),
+            json!({"id": "org-1"}),
+        )
+        .await;
+        for body in [
+            json!({"agentLearningPolicy": {}}),
+            json!({"agentLearningPolicy": null}),
+            json!({"agentLearningPolicy": "disabled"}),
+            json!({"agentLearningPolicy": {"memory": "Allow"}}),
+            json!({"agentLearningPolicy": {"memory": true}}),
+            json!({"agentLearningPolicy": {"learningReview": "allow"}}),
+            json!({"agentLearningPolicy": {"memory": "allow", "revision": 9}}),
+            // Exactly one of the three settings per request.
+            json!({"agentLearningPolicy": {"memory": "allow"}, "supportAiMode": "off"}),
+            json!({"agentLearningPolicy": {"memory": "allow"}, "zeroDataRetention": false}),
+        ] {
+            let (status, response) = patch_settings(up.state(false), body.clone()).await;
+            assert_eq!(status, 400, "{body} -> {response}");
+        }
+        assert_eq!(up.org_core_requests().await, 0);
     }
 
     #[tokio::test]

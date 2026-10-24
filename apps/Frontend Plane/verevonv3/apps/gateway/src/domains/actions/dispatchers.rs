@@ -4464,6 +4464,40 @@ pub(super) async fn dispatch_org_update_support_ai_mode(
     owner_json_response_to_envelope("org.update_support_ai_mode", user, status, resp)
 }
 
+pub(super) async fn dispatch_org_update_agent_learning_policy(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let org_id = ticket_string(input, "orgId");
+    let memory = input.get("memory").filter(|value| !value.is_null());
+    let learning_review = input.get("learningReview").filter(|value| !value.is_null());
+    if org_id.is_empty() || (memory.is_none() && learning_review.is_none()) {
+        return ticket_bad_request(
+            "org.update_agent_learning_policy requires 'orgId' and memory and/or learningReview",
+        );
+    }
+    // The settings route validates the values; the action only names the fields it
+    // forwards, so no other key reaches org-core through it.
+    let mut policy = serde_json::Map::new();
+    if let Some(memory) = memory {
+        policy.insert("memory".to_owned(), memory.clone());
+    }
+    if let Some(learning_review) = learning_review {
+        policy.insert("learningReview".to_owned(), learning_review.clone());
+    }
+    let (status, Json(resp)) = update_org_settings(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        PathExtractor(org_id.to_owned()),
+        Json(json!({ "agentLearningPolicy": policy })),
+    )
+    .await;
+    owner_json_response_to_envelope("org.update_agent_learning_policy", user, status, resp)
+}
+
 pub(super) async fn dispatch_membership_invite_member(
     state: &AppState,
     user: &AuthenticatedUser,
