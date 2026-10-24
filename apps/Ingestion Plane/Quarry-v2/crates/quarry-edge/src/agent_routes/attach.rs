@@ -777,6 +777,43 @@ pub(super) async fn delegate_step(
     Ok(Json(Envelope::ok(request_id.to_owned(), observation)))
 }
 
+/// D8-7 for a person's own action: when the tab the action addresses (the active tab) is held
+/// by the agent, a non-passive action takes it over in this step and the timeline records the
+/// change. A passive read does not. Without a live attachment no tab is agent-held, so this is
+/// a no-op for every run that has never attached.
+pub(super) async fn person_tab_gate(
+    state: &AppState,
+    handle: &RunHandle,
+    entry: &RunEntry,
+    initiator: StepInitiator,
+    action: &AgentAction,
+) -> QuarryResult<()> {
+    if initiator != StepInitiator::Human || handle.live.attaches().live().is_none() {
+        return Ok(());
+    }
+    let Some(tab_id) = state.agent_driver.active_tab_id(&entry.session).await? else {
+        return Ok(());
+    };
+    let admit = handle
+        .live
+        .tabs()
+        .gate_action(&tab_id, Actor::Human, is_passive(action));
+    if let Ok(TabAdmit::TakenOver { tab_epoch }) = admit {
+        record_browser_timeline_event(
+            state,
+            entry,
+            BrowserTimelineEventKind::TabControl {
+                tab_id,
+                holder: BrowserTabHolder::Human,
+                initiated_by: StepInitiator::Human,
+                tab_epoch,
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod attach_tests {
     use super::*;

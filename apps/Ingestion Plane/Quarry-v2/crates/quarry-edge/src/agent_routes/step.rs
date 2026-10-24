@@ -53,6 +53,9 @@ pub async fn step(
     )
     .await
     .map_err(|error| driver_err(&request_id, error))?;
+    super::attach::person_tab_gate(&state, &handle, &entry, admitted.initiator, &body.action)
+        .await
+        .map_err(|error| driver_err(&request_id, error))?;
     // WS8.B: the receipt plan and the budget exemption of this step.
     let receipt_plan = super::human_browse::receipt_plan(
         admitted.initiator,
@@ -215,6 +218,7 @@ pub(super) async fn execute_ws_action(
         },
     )
     .await?;
+    super::attach::person_tab_gate(state, handle, &entry, admitted.initiator, &action).await?;
     // WS8.B: the receipt plan and the budget exemption of this step.
     let receipt_plan = super::human_browse::receipt_plan(
         admitted.initiator,
