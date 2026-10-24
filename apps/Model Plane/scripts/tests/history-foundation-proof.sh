@@ -111,4 +111,26 @@ echo "ok: archive and restore moved ${probe_id} between the lists"
 echo "== plan check: the newest-first keyset uses the owner-activity index"
 psql "${PROOF_DATABASE_URL}" -q -c "EXPLAIN (ANALYZE, BUFFERS) SELECT t.id FROM threads t WHERE t.org_id = '${PROOF_ORG_ID}' AND t.user_id = '${PROOF_USER_ID}' AND t.archived_at IS NULL ORDER BY (t.pinned_at IS NOT NULL) DESC, t.last_activity_at DESC, t.id DESC LIMIT 51"
 
-echo "PASS: WS17 S1 and S2 history proof (${PROOF_PREFIX})"
+echo "== search the probe thread by a word only it holds (S3)"
+# Message search needs a word no other thread holds. The token is lower-case
+# alphanumeric from the run stamp, so the query reads it as one prefix word.
+PROOF_TOKEN="ws17s3probe$(printf '%s' "${PROOF_RUN}" | tr -cd 'a-z0-9')"
+psql "${PROOF_DATABASE_URL}" -v ON_ERROR_STOP=1 -q <<SQL
+INSERT INTO messages (id, thread_id, role, content)
+VALUES ('${PROOF_PREFIX}-search', '${probe_id}', 'user', 'the ${PROOF_TOKEN} marker');
+SQL
+search_body="$(curl -fsS -b "${PROOF_COOKIE_JAR}" "${PROOF_BFF_URL}/api/v1/chat/threads/search?q=${PROOF_TOKEN}")"
+printf '%s' "${search_body}" | python3 -c '
+import json, sys
+hits = json.load(sys.stdin)["data"]["hits"]
+probe = sys.argv[1]
+mine = [h for h in hits if h["threadId"] == probe]
+assert len(mine) == 1, f"expected one hit in the probe thread, saw {len(mine)}"
+assert "\ue000" in mine[0]["snippet"] and "\ue001" in mine[0]["snippet"], mine[0]["snippet"]
+print("ok: search found the probe thread once, highlight markers present")
+' "${probe_id}"
+
+echo "== plan check: the search predicate uses the content index"
+psql "${PROOF_DATABASE_URL}" -q -c "EXPLAIN (ANALYZE, BUFFERS) SELECT m.id FROM messages m WHERE m.role IN ('user', 'assistant') AND to_tsvector('simple', left(m.content, 65536)) @@ to_tsquery('simple', '${PROOF_TOKEN}':*)"
+
+echo "PASS: WS17 S1-S3 history proof (${PROOF_PREFIX})"

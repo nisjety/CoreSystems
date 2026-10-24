@@ -28,6 +28,7 @@ mod memory_control;
 mod memory_dedup;
 mod memory_grounding;
 mod memory_grpc;
+mod message_search;
 mod nats;
 mod nats_connection;
 mod orchestration_grpc;

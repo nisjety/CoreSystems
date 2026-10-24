@@ -2,6 +2,7 @@ pub(crate) mod documents;
 pub(crate) mod history;
 pub(crate) mod json_handlers;
 pub(crate) mod shared;
+mod search;
 mod streams;
 pub(crate) mod support;
 
@@ -20,6 +21,8 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/chat/threads",
             get(history::list_threads).delete(history::clear_threads),
         )
+        // Full-text search over the caller's chat threads (build plan WS17 S3).
+        .route("/api/v1/chat/threads/search", get(search::search_threads))
         .route(
             "/api/v1/chat/threads/{thread_id}",
             put(history::save_thread)

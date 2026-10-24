@@ -259,6 +259,17 @@ service ThreadAutonomy {
   rpc GetThreadGrant(GetThreadGrantRequest) returns (GetThreadGrantResponse);
 }
 
+// MessageSearch: full-text search over the durable conversation record. A
+// separate service, as ThreadAutonomy and SessionRetentionService are, so that
+// SessionCore and every mock of it stay source-compatible. Read-only.
+service MessageSearch {
+  // Search the messages of threads the caller may list, with the same owner and
+  // Space-audience rules as ListThreads. Refused with unavailable
+  // `message_search_disabled` while SESSION_CORE_MESSAGE_SEARCH_ENABLED is not
+  // `true`. A query that holds no searchable word answers an empty page.
+  rpc SearchMessages(SearchMessagesRequest) returns (SearchMessagesResponse);
+}
+
 // --- CreateThread ---
 
 message CreateThreadRequest {
@@ -1632,4 +1643,80 @@ message ToolActionState {
 message ListToolActionsResponse {
   // One entry per ledger row found for the asked ids, in reservation order.
   repeated ToolActionState actions = 1;
+}
+
+// --- SearchMessages (conversation search) ---
+
+// Which caller a search serves. UI is the person at the keyboard and lists every
+// thread they own. RECALL feeds the read-only recall tool, which runs on a prompt the
+// model writes and so reads only the caller's own unscoped threads, never a thread
+// that holds a zero-retention or waived run.
+enum SearchPurpose {
+  // The person at the keyboard. The zero value, so a caller that sets nothing searches as UI.
+  SEARCH_PURPOSE_UI = 0;
+  // The read-only recall tool. Excludes zero-retention and waived threads.
+  SEARCH_PURPOSE_RECALL = 1;
+}
+
+// The parameters of one SearchMessages page.
+message SearchMessagesRequest {
+  // Required. Only this org's messages are searched.
+  string org_id = 1;
+  // Required. The owner, or the caller's own identity for a Space read.
+  string user_id = 2;
+  // The words the person typed. Non-alphanumeric characters split words; a word is
+  // matched as a prefix. Empty answers an empty page.
+  string query = 3;
+  // Optional. 0 means server default; clamped to a maximum.
+  uint32 limit = 4;
+  // Keyset cursor from the previous page's SearchMessagesResponse.next_cursor.
+  // Opaque; a malformed cursor is invalid_argument.
+  string cursor = 5;
+  // Optional canonical Space filter, with the same decision contract as
+  // ListThreadsRequest. Empty searches the owner's unscoped threads only.
+  string space_id = 6;
+  // Control-issued Space read decision and its token, as ListThreadsRequest carries them.
+  string space_read_decision_ref = 7;
+  // The token that proves the decision, carried in the request body only.
+  string space_read_decision_token = 8;
+  // Optional origin filter (see ListThreadsRequest.origin). The chat page passes "chat".
+  string origin = 9;
+  // Optional. Only hits in this thread, one per message and not one per thread.
+  string thread_id = 10;
+  // Optional. Hits in every other thread are left out; the current thread of a recall.
+  string exclude_thread_id = 11;
+  // Which caller this search serves. Set by the caller, never by the browser.
+  SearchPurpose purpose = 12;
+  // Which archive state to search. Unspecified searches the active threads.
+  ArchiveFilter archived = 13;
+}
+
+// One matching message, with the thread it belongs to.
+message SearchHit {
+  // The thread the message belongs to.
+  string thread_id = 1;
+  // The matching message.
+  string message_id = 2;
+  // "user" or "assistant".
+  string role = 3;
+  // The matching text, with each matched word wrapped in U+E000 and U+E001. The
+  // markers are the only control characters a snippet carries; a client renders
+  // the highlight from them and never parses the text as markup.
+  string snippet = 4;
+  // When the matching message was written.
+  google.protobuf.Timestamp created_at = 5;
+  // The thread's title, as ListThreads shows it.
+  string thread_title = 6;
+  // The Space the thread is in, empty for an owner's own thread.
+  string space_id = 7;
+  // Whether the thread is archived.
+  bool archived = 8;
+}
+
+// One page of SearchMessages hits.
+message SearchMessagesResponse {
+  // Newest first. At most one hit per thread unless the request names a thread.
+  repeated SearchHit hits = 1;
+  // Empty when there is no further page.
+  string next_cursor = 2;
 }

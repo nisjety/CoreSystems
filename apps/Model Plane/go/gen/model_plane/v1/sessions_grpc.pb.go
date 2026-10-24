@@ -2128,3 +2128,121 @@ var ThreadAutonomy_ServiceDesc = grpc.ServiceDesc{
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "model_plane/v1/sessions.proto",
 }
+
+const (
+	MessageSearch_SearchMessages_FullMethodName = "/model_plane.v1.MessageSearch/SearchMessages"
+)
+
+// MessageSearchClient is the client API for MessageSearch service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// MessageSearch: full-text search over the durable conversation record. A
+// separate service, as ThreadAutonomy and SessionRetentionService are, so that
+// SessionCore and every mock of it stay source-compatible. Read-only.
+type MessageSearchClient interface {
+	// Search the messages of threads the caller may list, with the same owner and
+	// Space-audience rules as ListThreads. Refused with unavailable
+	// `message_search_disabled` while SESSION_CORE_MESSAGE_SEARCH_ENABLED is not
+	// `true`. A query that holds no searchable word answers an empty page.
+	SearchMessages(ctx context.Context, in *SearchMessagesRequest, opts ...grpc.CallOption) (*SearchMessagesResponse, error)
+}
+
+type messageSearchClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewMessageSearchClient(cc grpc.ClientConnInterface) MessageSearchClient {
+	return &messageSearchClient{cc}
+}
+
+func (c *messageSearchClient) SearchMessages(ctx context.Context, in *SearchMessagesRequest, opts ...grpc.CallOption) (*SearchMessagesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SearchMessagesResponse)
+	err := c.cc.Invoke(ctx, MessageSearch_SearchMessages_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// MessageSearchServer is the server API for MessageSearch service.
+// All implementations must embed UnimplementedMessageSearchServer
+// for forward compatibility.
+//
+// MessageSearch: full-text search over the durable conversation record. A
+// separate service, as ThreadAutonomy and SessionRetentionService are, so that
+// SessionCore and every mock of it stay source-compatible. Read-only.
+type MessageSearchServer interface {
+	// Search the messages of threads the caller may list, with the same owner and
+	// Space-audience rules as ListThreads. Refused with unavailable
+	// `message_search_disabled` while SESSION_CORE_MESSAGE_SEARCH_ENABLED is not
+	// `true`. A query that holds no searchable word answers an empty page.
+	SearchMessages(context.Context, *SearchMessagesRequest) (*SearchMessagesResponse, error)
+	mustEmbedUnimplementedMessageSearchServer()
+}
+
+// UnimplementedMessageSearchServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedMessageSearchServer struct{}
+
+func (UnimplementedMessageSearchServer) SearchMessages(context.Context, *SearchMessagesRequest) (*SearchMessagesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SearchMessages not implemented")
+}
+func (UnimplementedMessageSearchServer) mustEmbedUnimplementedMessageSearchServer() {}
+func (UnimplementedMessageSearchServer) testEmbeddedByValue()                       {}
+
+// UnsafeMessageSearchServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to MessageSearchServer will
+// result in compilation errors.
+type UnsafeMessageSearchServer interface {
+	mustEmbedUnimplementedMessageSearchServer()
+}
+
+func RegisterMessageSearchServer(s grpc.ServiceRegistrar, srv MessageSearchServer) {
+	// If the following call panics, it indicates UnimplementedMessageSearchServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&MessageSearch_ServiceDesc, srv)
+}
+
+func _MessageSearch_SearchMessages_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SearchMessagesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MessageSearchServer).SearchMessages(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MessageSearch_SearchMessages_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MessageSearchServer).SearchMessages(ctx, req.(*SearchMessagesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// MessageSearch_ServiceDesc is the grpc.ServiceDesc for MessageSearch service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var MessageSearch_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "model_plane.v1.MessageSearch",
+	HandlerType: (*MessageSearchServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "SearchMessages",
+			Handler:    _MessageSearch_SearchMessages_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "model_plane/v1/sessions.proto",
+}

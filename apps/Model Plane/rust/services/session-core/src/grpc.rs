@@ -17,6 +17,7 @@ use mp_contracts::model_plane::v1::{
     finetune_jobs_server::FinetuneJobsServer,
     managed_run_lifecycle_server::{ManagedRunLifecycle, ManagedRunLifecycleServer},
     memory_service_server::MemoryServiceServer,
+    message_search_server::MessageSearchServer,
     orchestration_core_service_server::OrchestrationCoreServiceServer,
     routing_policy_server::RoutingPolicyServer,
     run_service_server::RunServiceServer,
@@ -75,7 +76,7 @@ const CONTEXT_MESSAGE_LIMIT: i64 = 20;
 const CONTEXT_MEMORY_LIMIT: i64 = 64;
 const DEFAULT_THREAD_LIST_LIMIT: i64 = 80;
 const MAX_THREAD_LIST_LIMIT: i64 = 200;
-const THREAD_TITLE_MAX_CHARS: usize = 96;
+pub(crate) const THREAD_TITLE_MAX_CHARS: usize = 96;
 const THREAD_PREVIEW_MAX_CHARS: usize = 180;
 
 /// EU data-residency default for Model-Plane processing (P0.4). Sweden Central
@@ -151,7 +152,7 @@ fn nanos_to_i32(nanos: u32) -> i32 {
     i32::try_from(nanos).unwrap_or(i32::MAX)
 }
 
-fn to_proto_timestamp(ts: DateTime<Utc>) -> prost_types::Timestamp {
+pub(crate) fn to_proto_timestamp(ts: DateTime<Utc>) -> prost_types::Timestamp {
     prost_types::Timestamp {
         seconds: ts.timestamp(),
         nanos: nanos_to_i32(ts.timestamp_subsec_nanos()),
@@ -240,7 +241,11 @@ mod thread_cursor_tests {
     }
 }
 
-fn compact_thread_text(value: Option<String>, fallback: &str, max_chars: usize) -> String {
+pub(crate) fn compact_thread_text(
+    value: Option<String>,
+    fallback: &str,
+    max_chars: usize,
+) -> String {
     let text = value
         .map(|value| value.split_whitespace().collect::<Vec<_>>().join(" "))
         .filter(|value| !value.trim().is_empty())
@@ -277,7 +282,7 @@ fn normalize_thread_presentation_text(
     Ok((!normalized.is_empty()).then_some(normalized))
 }
 
-fn record_metrics(method: &'static str, started: Instant, is_ok: bool) {
+pub(crate) fn record_metrics(method: &'static str, started: Instant, is_ok: bool) {
     let status = if is_ok { "ok" } else { "error" };
     metrics::counter!("mp_session_grpc_requests_total", "method" => method, "status" => status)
         .increment(1);
@@ -9216,6 +9221,12 @@ pub async fn serve(
         grant_columns,
     };
 
+    // Read once, at boot: the switch is a deploy setting (build plan WS17 S3).
+    let message_search = crate::message_search::MessageSearchGrpc {
+        pool: pool.clone(),
+        enabled: crate::message_search::message_search_enabled(),
+    };
+
     let session = SessionService {
         pool,
         retrieval_client,
@@ -9254,6 +9265,10 @@ pub async fn serve(
         ))
         .add_service(ThreadAutonomyServer::with_interceptor(
             thread_autonomy,
+            auth.clone(),
+        ))
+        .add_service(MessageSearchServer::with_interceptor(
+            message_search,
             auth.clone(),
         ))
         .add_service(RunServiceServer::with_interceptor(runs, auth))

@@ -206,6 +206,8 @@ pub fn build_router_with_readiness(
         .route("/v1/invoke/:request_id/queue", post(invoke_queue_input))
         // chat-parity §1: reload a thread's conversation (cross-device resume).
         .route("/v1/threads", get(list_threads).delete(delete_threads))
+        // Conversation search over the owner's own threads (build plan WS17 S3).
+        .route("/v1/threads/search", get(crate::thread_search_routes::search_threads))
         // Archiving remains available as a non-destructive administrative
         // operation; DELETE is reserved for the durable erase contract below.
         .route("/v1/threads/archive", post(archive_threads))
@@ -695,7 +697,7 @@ async fn version() -> Json<Value> {
     }))
 }
 
-type HttpJsonError = (StatusCode, Json<Value>);
+pub(crate) type HttpJsonError = (StatusCode, Json<Value>);
 
 /// `/v1/invoke`'s error: a status and JSON body as elsewhere, plus a
 /// `Retry-After` header for a subscription failure whose wait is known.
@@ -797,7 +799,7 @@ fn authenticated_inference_request<T>(
     request
 }
 
-fn authenticated_session_request<T>(
+pub(crate) fn authenticated_session_request<T>(
     value: T,
     bearer: &VerifiedModelBearer,
 ) -> Result<tonic::Request<T>, HttpJsonError> {
@@ -6502,7 +6504,7 @@ fn not_found(message: &str) -> HttpJsonError {
 /// semantics. Every other code — including transport failures (`Unavailable`,
 /// `Internal`, …) — stays `502`, preserving the prior "upstream is unhappy"
 /// default for these routes.
-fn session_thread_error(context: &str, error: &tonic::Status) -> HttpJsonError {
+pub(crate) fn session_thread_error(context: &str, error: &tonic::Status) -> HttpJsonError {
     match error.code() {
         tonic::Code::InvalidArgument => (
             StatusCode::BAD_REQUEST,
@@ -9744,7 +9746,7 @@ async fn prepare_mail_task_thread_for_gateway_bff(
     }))
 }
 
-fn timestamp_to_rfc3339(value: Option<prost_types::Timestamp>) -> String {
+pub(crate) fn timestamp_to_rfc3339(value: Option<prost_types::Timestamp>) -> String {
     let Some(value) = value else {
         return String::new();
     };

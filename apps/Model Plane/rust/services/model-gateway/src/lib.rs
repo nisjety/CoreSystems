@@ -90,6 +90,7 @@ pub mod state;
 pub mod stream_buffer;
 pub mod subscription_failure;
 pub mod thinking;
+pub mod thread_search_routes;
 pub mod tool_loop;
 pub mod tool_result_handles;
 pub mod tool_retry;
