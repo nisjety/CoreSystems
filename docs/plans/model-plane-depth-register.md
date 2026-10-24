@@ -676,6 +676,21 @@ Built so far (batches B01 to B07): WS01-S0, WS01-S1 (partial), WS01-S6; WS02-S1,
 | D1-505 | WS10-S4 | live-proof | P1 | model-gateway cargo test --all-targets has one failure not from this slice: zdr_refusal_inventory flags src/browser_run.rs:802 as an untyped ZDR refusal. | open |
 | D1-506 | WS10-S4 | follow-up | P3 | 8 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-15.json | open |
 
+
+### Wave-mode batch W1-16 (2026-10-24)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D1-507 | WS08-S2.code | risk | P1 | CHAT_SANDBOX_ATTACHMENTS_ENABLED=true makes the policy accept kind:"file" and publish modes.sandbox_files, but no consumer exists until WS08-S5. A file would validate and then be ignored by the stream, so the switch must not be turned on before S5. | open |
+| D1-508 | WS08-S2.code | risk | P1 | An image attachment given as a hosted `url` with no bytes still passes validation (size counted as 0) and is fetched by inference-core's AnalyzeImage as before. The policy declares no URL allowlist, so the owner should decide whether URL images stay allowed. | open |
+| D1-509 | WS08-S2.code | live-proof | P1 | Lead: apply the shared-edit to apps/Model Plane/deploy/docker-compose.yml model-gateway block (CHAT_ATTACHMENT_POLICY_ENABLED, _MAX_IMAGES, _MAX_IMAGE_BYTES, _MAX_FILES, _MAX_FILE_BYTES, _MAX_TOTAL_BYTES, CHAT_STREAM_BODY_LIMIT_BYTES pass-through lines from the implementer's lead_todo; not CHAT_SANDBOX_ATTACHMENTS_ENABLED). | open |
+| D1-510 | WS08-S2.code | live-proof | P1 | Live proof needs docker: rebuild model-gateway and the BFF image; curl /v1/invoke/stream with provider openai-codex-subscription plus an image and expect an error frame attachment_route_unsupported with no session-core run row; a 5 MiB body through both hops returns 200; capture /api/v1/models and confirm attachment_policy beside models with modes.vision=true. | open |
+| D1-511 | WS08-S2.code | live-proof | P1 | /api/v1/models reaches the client through the BFF proxy_model_json_with_inference verbatim (read-only check), so attachment_policy should survive the hop; confirm in the live capture. | open |
+| D1-512 | WS08-S2.code | live-proof | P1 | Check that the vision-feature scan of the /v1/models catalogue gives modes.vision=true on the live stack. | open |
+| D1-513 | WS08-S2.code | test-gap | P2 | No test drives the real /v1/invoke/stream handler end to end: attachment_route_unsupported arriving as an error SSE frame with no run row, and a 13 MiB 413 on the real route. Both are source-pinned or proven on a mini router, so the lead's live curl proof is the only end-to-end check. | open |
+| D1-514 | WS08-S2.code | test-gap | P2 | No golden rows were added for (file, waived) and (attachment, subscription, non-ZDR) in zdr_posture_matrix.rs or zdr_waiver_route_tests.rs. The waiver path is source-pinned only. | open |
+| D1-515 | WS08-S2.code | follow-up | P3 | 7 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-16.json | open |
+
 ## Wave 2 (WS13 to WS27)
 
 Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS27-S0, WS27-S1. Wave 2 is not started as a wave: these came in with Wave 1 batches because they were Wave 1 prerequisites.
@@ -1216,3 +1231,4 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS10-S5 | auth, authority, policy, zdr | W1-15 | no |
 | WS10-S4 | policy, authority, zdr | W1-15 | no |
 | WS20-S6 | authority, policy, zdr, audit | W2-12 | no |
+| WS08-S2.code | zdr, policy, data-loss | W1-16 | no |
