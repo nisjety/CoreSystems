@@ -600,6 +600,55 @@ mod tests {
         assert_eq!(persona_segment_token_estimate("Always be terse."), 4);
     }
 
+    /// With send receipts on, the ended race still names the message: the 200 body keeps the
+    /// receipt fields, so the browser resends under the same id and the transcript holds one row.
+    #[test]
+    fn ended_queue_race_keeps_the_receipt_of_a_message_that_was_already_stored() {
+        let (status, Json(body)) = normalize_queue_response((
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "queued": false,
+                "error": "no active stream",
+                "resend_as_new_turn": true,
+                "persisted": true,
+                "client_message_id": "msg-1",
+                "message_id": "01J00000000000000000000000",
+            })),
+        ));
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["resend_as_new_turn"], true);
+        assert_eq!(body["persisted"], true);
+        assert_eq!(body["client_message_id"], "msg-1");
+        assert_eq!(body["message_id"], "01J00000000000000000000000");
+    }
+
+    /// Only the run-ended race is rewritten: a conflict on the message id, a message the owner
+    /// could not record and a bus that could not answer keep their own status, so the browser
+    /// never reads a refusal as a delivery.
+    #[test]
+    fn queue_refusals_with_a_receipt_keep_their_status() {
+        for (status, error) in [
+            (StatusCode::CONFLICT, "client_message_id_conflict"),
+            (StatusCode::SERVICE_UNAVAILABLE, "message_not_recorded"),
+            (StatusCode::SERVICE_UNAVAILABLE, "run_control_unavailable"),
+            (StatusCode::TOO_MANY_REQUESTS, "too many messages already waiting for this run"),
+        ] {
+            let (out_status, Json(body)) = normalize_queue_response((
+                status,
+                Json(json!({
+                    "queued": false,
+                    "error": error,
+                    "persisted": false,
+                    "client_message_id": "msg-1",
+                })),
+            ));
+            assert_eq!(out_status, status, "{error}");
+            assert_eq!(body["error"], error);
+            assert_eq!(body["client_message_id"], "msg-1");
+        }
+    }
+
     #[test]
     fn unrelated_not_found_response_stays_not_found() {
         let (status, Json(body)) = normalize_queue_response((

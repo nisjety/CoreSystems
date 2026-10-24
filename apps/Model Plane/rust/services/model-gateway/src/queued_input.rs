@@ -31,6 +31,13 @@
 //! ([`crate::run_control::RunControl::queue_input`]); the owner applies it to this
 //! same registry, so the bounds, the ownership check and the order are one code
 //! path whichever replica the user reached.
+//!
+//! # Send receipts
+//!
+//! With `MODEL_GATEWAY_SEND_RECEIPTS` on, a message is stored in the transcript under its
+//! `client_message_id` before it is queued, and that id is the queue's `op_id`: a repeat after a
+//! lost reply is queued once, and the loop takes each message with its id
+//! ([`QueuedInputRegistry::drain_receipted`]) so the delivery event can name what it carries.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -41,7 +48,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::Claims;
 use crate::normalize::RetrievalScope;
-use crate::run_control::{RunControlMsg, RunControlOp};
+use crate::run_control::{RunControl, RunControlError, RunControlMsg, RunControlOp, RunControlSubject};
 use crate::zdr_posture::{decide_for, Route, TurnPosture};
 
 /// The instruction that turns delivery into a pause rather than an interruption.
@@ -70,6 +77,35 @@ pub const MAX_QUEUED_CHARS: usize = 2_000;
 /// Per run. Past a few, the user is not steering — they are typing at a wall,
 /// and delivering all of it would bury the task the run is actually on.
 pub const MAX_QUEUED_MESSAGES: usize = 3;
+
+/// The switch for durable send receipts (WS04 S6). Off, a queued message is enqueued first and
+/// persisted after, and a send names no message to the transcript; on, a message is persisted
+/// under its `client_message_id` before it is delivered, and the id is the receipt the SPA's tray
+/// reports against. Strict: only the literal `true` turns it on.
+pub const SEND_RECEIPTS_ENV: &str = "MODEL_GATEWAY_SEND_RECEIPTS";
+
+/// The strict parser of [`SEND_RECEIPTS_ENV`]: `true` in any case with surrounding whitespace, and
+/// nothing else, so a typo never turns receipts on.
+#[must_use]
+pub fn send_receipts_enabled_from(value: Option<&str>) -> bool {
+    mp_contracts::loop_fold::switch_from(value)
+}
+
+/// Whether durable send receipts are on, read from the environment at each call.
+#[must_use]
+pub fn send_receipts_enabled() -> bool {
+    send_receipts_enabled_from(std::env::var(SEND_RECEIPTS_ENV).ok().as_deref())
+}
+
+/// Whether `id` can be a `client_message_id`: the shape session-core's `messages` CHECK allows.
+/// It rides the run-control bus as the message's `op_id`, in the body and never in a subject.
+#[must_use]
+pub fn valid_client_message_id(id: &str) -> bool {
+    let mut bytes = id.bytes();
+    bytes.next().is_some_and(|first| first.is_ascii_alphanumeric())
+        && id.len() <= 128
+        && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
 
 /// How many accepted `op_id`s a run remembers. One per lost reply is all a repeat needs, and a
 /// run takes at most [`MAX_QUEUED_MESSAGES`] at a time, so this is generous without being a
@@ -146,11 +182,34 @@ mod retrieval_scope_wire {
 /// What waits for a run, and which attempts it has already accepted.
 #[derive(Default)]
 struct QueueState {
-    pending: VecDeque<String>,
+    /// `(text, op_id)`, oldest first. With send receipts on, the op id is the message's
+    /// `client_message_id`, which is what lets the delivery event name the messages it carries.
+    pending: VecDeque<(String, String)>,
     /// `(op_id, pending count answered)` of recently accepted enqueues, oldest first. A repeat
     /// of one (the caller's reply was lost, so it asked again) is answered the same and queues
     /// nothing, so a retry can never deliver a message twice.
     seen_ops: VecDeque<(String, usize)>,
+}
+
+/// One message the loop takes at a round boundary, with the id its sender gave it (empty when
+/// none) so the delivery can be reported against the message the user sees in the tray.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedMessage {
+    pub text: String,
+    pub client_message_id: String,
+}
+
+/// Why `text` can never be queued, whatever run it is aimed at. Checked before a message is
+/// persisted as well as before it is queued, so a message that is refused for its own shape
+/// leaves no trace in the transcript.
+#[must_use]
+pub fn bounds_refusal(text: &str) -> Option<EnqueueOutcome> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Some(EnqueueOutcome::Empty);
+    }
+    let chars = trimmed.chars().count();
+    (chars > MAX_QUEUED_CHARS).then_some(EnqueueOutcome::TooLong { chars })
 }
 
 struct QueuedEntry {
@@ -205,11 +264,19 @@ impl QueuedInputRegistry {
     /// authority check but still reaches the model.
     #[must_use]
     pub fn thread_for(&self, request_id: &str, org_id: &str, user_id: &str) -> Option<String> {
+        self.stream_for(request_id, org_id, user_id)
+            .map(|(thread_id, _)| thread_id)
+    }
+
+    /// [`thread_for`](Self::thread_for) with the stream's `conversation_only` scope, which a
+    /// message persisted ahead of its delivery has to be written under.
+    #[must_use]
+    pub fn stream_for(&self, request_id: &str, org_id: &str, user_id: &str) -> Option<(String, bool)> {
         let entry = self.inner.get(request_id)?;
         if entry.org_id != org_id || entry.user_id != user_id {
             return None;
         }
-        Some(entry.thread_id.clone())
+        Some((entry.thread_id.clone(), entry.conversation_only))
     }
 
     /// Queue `text` for delivery at the run's next tool-round boundary, after the checks that
@@ -249,14 +316,10 @@ impl QueuedInputRegistry {
                 };
             }
         }
+        if let Some(refusal) = bounds_refusal(text) {
+            return refusal;
+        }
         let trimmed = text.trim();
-        if trimmed.is_empty() {
-            return EnqueueOutcome::Empty;
-        }
-        let chars = trimmed.chars().count();
-        if chars > MAX_QUEUED_CHARS {
-            return EnqueueOutcome::TooLong { chars };
-        }
         let Some(entry) = entry else {
             return EnqueueOutcome::NoActiveStream;
         };
@@ -283,7 +346,7 @@ impl QueuedInputRegistry {
                 pending: state.pending.len(),
             };
         }
-        state.pending.push_back(trimmed.to_owned());
+        state.pending.push_back((trimmed.to_owned(), op_id.to_owned()));
         let pending = state.pending.len();
         if !op_id.is_empty() {
             if state.seen_ops.len() >= MAX_SEEN_OPS {
@@ -301,6 +364,16 @@ impl QueuedInputRegistry {
     /// read to the model as the user repeating themselves.
     #[must_use]
     pub fn drain(&self, request_id: &str) -> Vec<String> {
+        self.drain_receipted(request_id)
+            .into_iter()
+            .map(|message| message.text)
+            .collect()
+    }
+
+    /// [`drain`](Self::drain), with each message's `client_message_id`. The same take-everything,
+    /// leave-nothing contract: it is the one consumer, so a delivery is exactly once.
+    #[must_use]
+    pub fn drain_receipted(&self, request_id: &str) -> Vec<QueuedMessage> {
         let Some(entry) = self.inner.get(request_id) else {
             return Vec::new();
         };
@@ -308,7 +381,11 @@ impl QueuedInputRegistry {
             Ok(state) => state,
             Err(poisoned) => poisoned.into_inner(),
         };
-        state.pending.drain(..).collect()
+        state
+            .pending
+            .drain(..)
+            .map(|(text, client_message_id)| QueuedMessage { text, client_message_id })
+            .collect()
     }
 
     /// Stop accepting mid-run input for a finished stream (idempotent). Returns how many
@@ -389,6 +466,57 @@ pub fn bus_message(
     msg.text = Some(text.to_owned());
     msg.claimed_thread_id = claimed_thread_id.map(str::to_owned);
     Ok(msg)
+}
+
+/// Where the stream a message is aimed at runs, and the thread it is on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamThread {
+    /// On this replica, with the stream's own source scope.
+    Here {
+        thread_id: String,
+        conversation_only: bool,
+    },
+    /// On another replica, which said so over the run-control bus. Its source scope is not on
+    /// the bus.
+    Peer(String),
+    /// No stream of this caller is live anywhere: it ended, never ran, or is somebody else's.
+    Gone,
+    /// The bus could not say, so the stream may or may not be live.
+    Unavailable,
+}
+
+/// The thread of the caller's stream `request_id`, learned before anything is written: a message
+/// is persisted to the thread the *stream* is on (never one the client names) and before it is
+/// delivered, so the thread has to be known first. The local registry answers first; only a
+/// stream that is not here is asked about, over the bus, and only when the bus is on.
+pub async fn stream_thread(
+    queued_inputs: &QueuedInputRegistry,
+    control: &RunControl,
+    request_id: &str,
+    org_id: &str,
+    user_id: &str,
+) -> StreamThread {
+    if let Some((thread_id, conversation_only)) = queued_inputs.stream_for(request_id, org_id, user_id) {
+        return StreamThread::Here { thread_id, conversation_only };
+    }
+    let Ok(subject) = RunControlSubject::request(request_id, RunControlOp::Probe) else {
+        return StreamThread::Gone;
+    };
+    let mut msg = RunControlMsg::new(RunControlOp::Probe, org_id, user_id);
+    request_id.clone_into(&mut msg.request_id);
+    match control.request(&subject, &msg).await {
+        Ok(reply) if reply.found => reply.thread_id.map_or(StreamThread::Gone, StreamThread::Peer),
+        Ok(_)
+        | Err(
+            RunControlError::NoOwner | RunControlError::Disabled | RunControlError::InvalidSubject,
+        ) => StreamThread::Gone,
+        Err(
+            RunControlError::Timeout
+            | RunControlError::BadReply
+            | RunControlError::PayloadTooLarge
+            | RunControlError::Unavailable(_),
+        ) => StreamThread::Unavailable,
+    }
 }
 
 #[cfg(test)]
@@ -800,5 +928,105 @@ mod tests {
         );
         assert_eq!(msg.text.as_deref(), Some("plain words"));
         assert_eq!(msg.claimed_thread_id.as_deref(), Some("thread-1"));
+    }
+
+    #[test]
+    fn the_send_receipts_switch_is_strict_and_defaults_off() {
+        assert!(!send_receipts_enabled_from(None));
+        for off in ["", "false", "1", "yes", "on", "tru", "truee", "enabled"] {
+            assert!(!send_receipts_enabled_from(Some(off)), "{off:?}");
+        }
+        for on in ["true", "TRUE", " True "] {
+            assert!(send_receipts_enabled_from(Some(on)), "{on:?}");
+        }
+    }
+
+    #[test]
+    fn a_client_message_id_has_the_shape_session_core_stores() {
+        for good in ["a", "0", "msg_01-X", &"a".repeat(128)] {
+            assert!(valid_client_message_id(good), "{good}");
+        }
+        for bad in ["", "-a", "_a", "a b", "a.b", "a/b", "é", "a\n", &"a".repeat(129)] {
+            assert!(!valid_client_message_id(bad), "{bad:?}");
+        }
+    }
+
+    /// The delivery event names what it carries: the loop takes the ids with the texts, in order,
+    /// and a message sent without one carries an empty id.
+    #[test]
+    fn a_drain_hands_back_each_message_with_its_client_message_id() {
+        let registry = registry();
+        registry.enqueue_checked("req-1", "org-a", "user-a", " first ", None, "msg-1");
+        registry.enqueue_checked("req-1", "org-a", "user-a", "second", None, "");
+        assert_eq!(
+            registry.drain_receipted("req-1"),
+            vec![
+                QueuedMessage { text: "first".into(), client_message_id: "msg-1".into() },
+                QueuedMessage { text: "second".into(), client_message_id: String::new() },
+            ]
+        );
+        assert!(registry.drain_receipted("req-1").is_empty(), "a delivery is exactly once");
+        // The plain drain is the same take, texts only.
+        registry.enqueue_checked("req-1", "org-a", "user-a", "third", None, "msg-3");
+        assert_eq!(registry.drain("req-1"), vec!["third".to_owned()]);
+    }
+
+    #[test]
+    fn a_message_that_is_refused_for_its_shape_is_refused_before_anything_is_written() {
+        assert_eq!(bounds_refusal("  \n "), Some(EnqueueOutcome::Empty));
+        let long = "x".repeat(MAX_QUEUED_CHARS + 1);
+        assert_eq!(
+            bounds_refusal(&long),
+            Some(EnqueueOutcome::TooLong { chars: MAX_QUEUED_CHARS + 1 })
+        );
+        assert_eq!(bounds_refusal(&"x".repeat(MAX_QUEUED_CHARS)), None);
+        assert_eq!(bounds_refusal(" hi "), None);
+    }
+
+    fn replica(hub: &crate::run_control::LoopbackHub) -> RunControl {
+        RunControl::loopback(hub.clone(), std::time::Duration::from_millis(200))
+    }
+
+    /// The thread is learned before the message is persisted: from the local registry, or from the
+    /// replica that owns the stream, and never for somebody else's stream or one that ended.
+    #[tokio::test]
+    async fn the_thread_of_a_stream_is_learned_here_or_from_its_owner_and_never_for_a_stranger() {
+        let hub = crate::run_control::LoopbackHub::new();
+        let (owner, peer) = (replica(&hub), replica(&hub));
+        let (owner_cancels, owner_queue) = (crate::cancel_registry::CancelRegistry::new(), registry());
+        let peer_queue = QueuedInputRegistry::new();
+        let _flag = owner_cancels.register_run("req-1", "org-a", "user-a", "run-1");
+        assert!(owner.attach(&owner_cancels, &owner_queue, "req-1", "run-1").await);
+
+        let ask = |queue: &QueuedInputRegistry, control: &RunControl, org: &str, user: &str| {
+            let (queue, control, org, user) = (queue.clone(), control.clone(), org.to_owned(), user.to_owned());
+            async move { stream_thread(&queue, &control, "req-1", &org, &user).await }
+        };
+        assert_eq!(
+            ask(&owner_queue, &owner, "org-a", "user-a").await,
+            StreamThread::Here { thread_id: "thread-1".into(), conversation_only: false }
+        );
+        assert_eq!(
+            ask(&peer_queue, &peer, "org-a", "user-a").await,
+            StreamThread::Peer("thread-1".into())
+        );
+        for (org, user) in [("org-b", "user-a"), ("org-a", "user-b")] {
+            assert_eq!(ask(&peer_queue, &peer, org, user).await, StreamThread::Gone, "{org}/{user}");
+            assert_eq!(ask(&owner_queue, &owner, org, user).await, StreamThread::Gone, "{org}/{user}");
+        }
+
+        // An owner that does not answer is not "gone": the message may belong to a live run.
+        hub.mute(true);
+        assert_eq!(ask(&peer_queue, &peer, "org-a", "user-a").await, StreamThread::Unavailable);
+        hub.mute(false);
+
+        // The stream ends: nobody owns it any more.
+        owner_cancels.finish("req-1");
+        assert_eq!(ask(&peer_queue, &peer, "org-a", "user-a").await, StreamThread::Gone);
+        // With the bus off an unknown stream is gone, and nothing is asked.
+        assert_eq!(
+            ask(&peer_queue, &RunControl::off(), "org-a", "user-a").await,
+            StreamThread::Gone
+        );
     }
 }

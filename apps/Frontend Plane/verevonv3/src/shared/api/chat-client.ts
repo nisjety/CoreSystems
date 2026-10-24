@@ -158,6 +158,13 @@ export type ChatInvokeRequest = {
    */
   executeGranted?: boolean
   /**
+   * The id this send is named with (the receipt). Sent as `idempotency_key`, which the gateway
+   * already reads as the retry identity of a send; with send receipts on it also stores the
+   * user's message under it, so a repeat of the send is one transcript row. Never sent for a
+   * zero-retention turn.
+   */
+  clientMessageId?: string
+  /**
    * This turn is a REGENERATE of the previous answer, not a new question.
    *
    * Client-declared because the server cannot infer it: a regenerate arrives as
@@ -260,8 +267,12 @@ export type ChatVerificationEvent = {
   webAllowed: boolean
 }
 
-/** Mid-run user messages the agent has just been handed. */
-export type ChatQueuedInputEvent = { messages: string[] }
+/**
+ * Mid-run user messages the agent has just been handed. `ids` (additive, send receipts on)
+ * holds the `client_message_id` of each message in `messages`, in order, with an empty string
+ * for one sent without an id; absent when the gateway names none of them.
+ */
+export type ChatQueuedInputEvent = { messages: string[]; ids?: string[] }
 /**
  * An answer produced in a reduced form (`retrieval_notice`). `code` is the stable reason and `wordingKey` the
  * key the client's wording is filed under: the gateway sends no sentence, so the text is the client's to write.
@@ -1298,6 +1309,9 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     // matching the rest of this body keeps one convention.
     regenerated: request.regenerated ?? false,
     edited_resubmit: request.editResubmit ?? false,
+    // The send's receipt id, omitted unless set so every other body is byte-identical to what it
+    // was before this field existed. Never on a zero-retention turn.
+    ...(request.clientMessageId && !request.zdr ? { idempotency_key: request.clientMessageId } : {}),
     // Tier selection is opt-in ONLY: omitted unless the user explicitly picked
     // a tier, so a default send stays byte-identical to today's behavior
     // (UNSPECIFIED ⇒ no constraint server-side). Same pattern as
@@ -1879,17 +1893,24 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
       break
     }
     case 'queued_input': {
-      const messages = Array.isArray(payload.messages)
-        ? payload.messages.filter(
-            (item): item is string =>
-              typeof item === 'string' && item.trim().length > 0,
-          )
-        : []
+      const messages: string[] = []
+      const ids: string[] = []
+      if (Array.isArray(payload.messages)) {
+        // `ids` is parallel to `messages`: the pair is kept together, so dropping an unreadable
+        // message drops its id and never shifts the rest.
+        const wireIds: unknown[] = Array.isArray(payload.ids) ? payload.ids : []
+        payload.messages.forEach((item: unknown, index: number) => {
+          if (typeof item !== 'string' || item.trim().length === 0) return
+          messages.push(item)
+          const id = wireIds[index]
+          ids.push(typeof id === 'string' ? id : '')
+        })
+      }
       // A delivery with no readable text is a malformed frame, not a delivery.
       // Reporting it would tell the user their message arrived when we cannot
       // show which one.
       if (messages.length > 0) {
-        handlers.onQueuedInput?.({ messages })
+        handlers.onQueuedInput?.(ids.some((id) => id.length > 0) ? { messages, ids } : { messages })
       }
       break
     }
@@ -2203,17 +2224,30 @@ export async function rejectPlan(
  * simply returned, and the user's words were gone.
  */
 export type QueuedInputResult =
-  /** Delivered to the running agent at its next tool-round boundary. */
-  | { outcome: 'queued'; pending: number; persisted: boolean }
+  /**
+   * Accepted for delivery to the running agent at its next tool-round boundary.
+   * With send receipts on, `clientMessageId` and `messageId` name the stored message.
+   */
+  | {
+      outcome: 'queued'
+      pending: number
+      persisted: boolean
+      clientMessageId?: string
+      messageId?: string
+    }
   /**
    * The run finished before the message landed. Not an error — the caller should
-   * send it as an ordinary turn instead, so nothing is lost.
+   * send it as an ordinary turn instead, under the same id, so nothing is lost and
+   * the transcript holds it once (`persisted`: it was already stored).
    */
-  | { outcome: 'run_ended' }
-  /** Refused with a reason worth showing: too many pending, or too long. */
+  | { outcome: 'run_ended'; persisted?: boolean; clientMessageId?: string }
+  /**
+   * Refused with a reason worth showing: too many pending, too long, or the gateway
+   * could not say (`unavailable`, retryable).
+   */
   | {
       outcome: 'refused'
-      reason: 'too_many' | 'too_long' | 'other'
+      reason: 'too_many' | 'too_long' | 'unavailable' | 'other'
       message: string
     }
 
@@ -2228,7 +2262,7 @@ export type QueuedInputResult =
 export async function queueInvocationInput(
   requestId: string,
   content: string,
-  options: { threadId?: string; spaceRef?: string } = {},
+  options: { threadId?: string; spaceRef?: string; clientMessageId?: string } = {},
 ): Promise<QueuedInputResult> {
   try {
     const raw = await requestJson<Record<string, unknown>>(
@@ -2239,6 +2273,8 @@ export async function queueInvocationInput(
           content,
           ...(options.threadId ? { thread_id: options.threadId } : {}),
           ...(options.spaceRef ? { space_ref: options.spaceRef } : {}),
+          // The receipt: what the gateway stores the message under and names in the delivery.
+          ...(options.clientMessageId ? { client_message_id: options.clientMessageId } : {}),
         }),
       },
     )
@@ -2248,7 +2284,11 @@ export async function queueInvocationInput(
     // adds a misleading red entry to DevTools. Keep accepting a legacy 404 in
     // the catch below while older gateways roll out.
     if (raw.queued === false && raw.resend_as_new_turn === true) {
-      return { outcome: 'run_ended' }
+      return {
+        outcome: 'run_ended',
+        ...(typeof raw.persisted === 'boolean' ? { persisted: raw.persisted } : {}),
+        ...(typeof raw.client_message_id === 'string' ? { clientMessageId: raw.client_message_id } : {}),
+      }
     }
     return {
       outcome: 'queued',
@@ -2257,6 +2297,8 @@ export async function queueInvocationInput(
       // record it. Surfaced rather than swallowed: the reply would otherwise
       // appear in history answering nothing.
       persisted: raw.persisted !== false,
+      ...(typeof raw.client_message_id === 'string' ? { clientMessageId: raw.client_message_id } : {}),
+      ...(typeof raw.message_id === 'string' ? { messageId: raw.message_id } : {}),
     }
   } catch (error) {
     if (!(error instanceof ApiError)) {
@@ -2277,6 +2319,12 @@ export async function queueInvocationInput(
     }
     if (error.status === 413) {
       return { outcome: 'refused', reason: 'too_long', message: error.message }
+    }
+    // The gateway could not tell whether the message was queued (the run-control bus did not
+    // answer, or the message could not be recorded): nothing was claimed, and sending again
+    // under the same id stores it once.
+    if (error.status === 503) {
+      return { outcome: 'refused', reason: 'unavailable', message: error.message }
     }
     return { outcome: 'refused', reason: 'other', message: error.message }
   }

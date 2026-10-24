@@ -1089,11 +1089,19 @@ const chatCancelInvocationInput = z.object({
   requestId: z.string().min(1),
 })
 
+// `clientMessageId` is the send's receipt, minted by the caller: the owner stores the message under it
+// before delivering it and names it in the delivery, so a repeat of the same send (a retry after a lost
+// reply, or the message sent again as a new turn because the run never took it) is one transcript row.
+// The shape is the one the owner stores (it checks again). Omitted for a zero-retention thread.
 const chatQueueInvocationInput = z.object({
   requestId: z.string().min(1),
   content: z.string().trim().min(1),
   threadId: z.string().optional(),
   spaceRef: z.string().optional(),
+  clientMessageId: z
+    .string()
+    .regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/)
+    .optional(),
 })
 
 // The granted approval named here is the gate for the continuation, so the entry
@@ -3040,7 +3048,7 @@ export const actionRegistry = [
   {
     id: 'chat.queue_invocation_input',
     label: 'Queue invocation input',
-    description: 'Deliver a message typed mid-stream to a running agent invocation.',
+    description: 'Deliver a message typed mid-stream to a running agent invocation. With a clientMessageId the owner stores the message under that id before delivering it: a repeat of the same id is one transcript row, and the answer names the message (client_message_id, message_id, persisted). A run that ended before the message landed answers resend_as_new_turn (persisted says whether it was already stored): send it as an ordinary turn under the same id.',
     ownerPlane: 'model',
     risk: 'low',
     requiresApproval: false,

@@ -487,9 +487,19 @@ type AppendMessageRequest struct {
 	// claim: the invocation itself was authorized upstream (Control membership
 	// ∩ binding), and a later rename must not rewrite what the room saw. Empty
 	// for user/system/tool messages and for un-personified assistant turns.
-	AgentName     string `protobuf:"bytes,17,opt,name=agent_name,json=agentName,proto3" json:"agent_name,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	AgentName string `protobuf:"bytes,17,opt,name=agent_name,json=agentName,proto3" json:"agent_name,omitempty"`
+	// The caller's id for this message, so a repeat of the same send (a retry
+	// after a lost reply, a queued message the run never took and the client
+	// then sends as a new turn) lands as ONE transcript row. Unique within the
+	// thread: a repeat with the same role and content answers with the first
+	// row's sequence and message id and `deduplicated = true` (no second event,
+	// no second memory extraction); the same id with different content is
+	// ALREADY_EXISTS. Opaque: matches ^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$, never
+	// derived from content, and never sent for a zero-retention turn (such a
+	// credential cannot append at all). Empty = no receipt, today's behaviour.
+	ClientMessageId string `protobuf:"bytes,18,opt,name=client_message_id,json=clientMessageId,proto3" json:"client_message_id,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *AppendMessageRequest) Reset() {
@@ -641,10 +651,23 @@ func (x *AppendMessageRequest) GetAgentName() string {
 	return ""
 }
 
+func (x *AppendMessageRequest) GetClientMessageId() string {
+	if x != nil {
+		return x.ClientMessageId
+	}
+	return ""
+}
+
 type AppendMessageResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Assigned message sequence number within the thread.
-	Sequence      uint64 `protobuf:"varint,1,opt,name=sequence,proto3" json:"sequence,omitempty"`
+	Sequence uint64 `protobuf:"varint,1,opt,name=sequence,proto3" json:"sequence,omitempty"`
+	// Durable id of the stored message: the new row's, or, when `deduplicated`,
+	// the earlier row's the caller's id already named.
+	MessageId string `protobuf:"bytes,2,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
+	// True when the append found the caller's `client_message_id` already stored
+	// and wrote nothing.
+	Deduplicated  bool `protobuf:"varint,3,opt,name=deduplicated,proto3" json:"deduplicated,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -684,6 +707,20 @@ func (x *AppendMessageResponse) GetSequence() uint64 {
 		return x.Sequence
 	}
 	return 0
+}
+
+func (x *AppendMessageResponse) GetMessageId() string {
+	if x != nil {
+		return x.MessageId
+	}
+	return ""
+}
+
+func (x *AppendMessageResponse) GetDeduplicated() bool {
+	if x != nil {
+		return x.Deduplicated
+	}
+	return false
 }
 
 type StartRunRequest struct {
@@ -6738,7 +6775,7 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\x14CreateThreadResponse\x12\x1b\n" +
 	"\tthread_id\x18\x01 \x01(\tR\bthreadId\x129\n" +
 	"\n" +
-	"created_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\"\xf7\x05\n" +
+	"created_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\"\xa3\x06\n" +
 	"\x14AppendMessageRequest\x12\x1b\n" +
 	"\tthread_id\x18\x01 \x01(\tR\bthreadId\x12\x12\n" +
 	"\x04role\x18\x02 \x01(\tR\x04role\x12\x18\n" +
@@ -6758,9 +6795,13 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\x0epayload_digest\x18\x0f \x01(\tR\rpayloadDigest\x12'\n" +
 	"\x0fidempotency_key\x18\x10 \x01(\tR\x0eidempotencyKey\x12\x1d\n" +
 	"\n" +
-	"agent_name\x18\x11 \x01(\tR\tagentName\"3\n" +
+	"agent_name\x18\x11 \x01(\tR\tagentName\x12*\n" +
+	"\x11client_message_id\x18\x12 \x01(\tR\x0fclientMessageId\"v\n" +
 	"\x15AppendMessageResponse\x12\x1a\n" +
-	"\bsequence\x18\x01 \x01(\x04R\bsequence\"\xc5\x01\n" +
+	"\bsequence\x18\x01 \x01(\x04R\bsequence\x12\x1d\n" +
+	"\n" +
+	"message_id\x18\x02 \x01(\tR\tmessageId\x12\"\n" +
+	"\fdeduplicated\x18\x03 \x01(\bR\fdeduplicated\"\xc5\x01\n" +
 	"\x0fStartRunRequest\x12\x1b\n" +
 	"\tthread_id\x18\x01 \x01(\tR\bthreadId\x12\"\n" +
 	"\rparent_run_id\x18\x02 \x01(\tR\vparentRunId\x12\x19\n" +

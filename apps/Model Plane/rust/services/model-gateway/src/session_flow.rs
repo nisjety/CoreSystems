@@ -247,6 +247,15 @@ fn user_message_metadata(
     }
 }
 
+/// What Session Core stored for an append that named a `client_message_id`: the row's id, and
+/// whether the id had already been stored (the repeat wrote nothing).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AppendReceipt {
+    pub message_id: String,
+    pub deduplicated: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn append_user_message(
     client: &mut mp_contracts::model_plane::v1::session_core_client::SessionCoreClient<
         tonic::transport::Channel,
@@ -257,7 +266,10 @@ async fn append_user_message(
     space: Option<&ThreadSpaceContext>,
     conversation_only: bool,
     retrieval_scope: Option<&str>,
-) -> Result<(), tonic::Status> {
+    // The send's receipt id (see [`send_receipt_id`]); `None` sends none, which is the append as it
+    // was before receipts existed.
+    client_message_id: Option<&str>,
+) -> Result<AppendReceipt, tonic::Status> {
     let space = space.cloned().unwrap_or_else(|| ThreadSpaceContext {
         space_id: String::new(),
         space_decision_ref: String::new(),
@@ -292,11 +304,48 @@ async fn append_user_message(
             action_schema_hash: space.action_schema_hash,
             payload_digest: space.payload_digest,
             idempotency_key: space.idempotency_key,
+            client_message_id: client_message_id.unwrap_or_default().to_owned(),
         },
         bearer,
     )
     .map_err(|_| tonic::Status::unauthenticated("verified session credential required"))?;
-    client.append_message(request).await.map(|_| ())
+    client.append_message(request).await.map(|response| {
+        let response = response.into_inner();
+        AppendReceipt {
+            message_id: response.message_id,
+            deduplicated: response.deduplicated,
+        }
+    })
+}
+
+/// The `client_message_id` a user send persists under, or `None` for none.
+///
+/// The SPA names every send with the id it mints (`idempotency_key` on a send, `client_message_id`
+/// on a queued message), so a repeat of the same send (a retry after a lost reply, a queued message
+/// the run never took and the client then sends as a new turn) lands as one transcript row. None
+/// when:
+/// - the switch is off (`enabled` is [`crate::queued_input::send_receipts_enabled`]): the append is
+///   then byte-identical to before receipts;
+/// - the turn is ZDR: nothing of it is stored, and an id is a stored fact;
+/// - the send is a regenerate or an edited resubmit: it states the previous question again on
+///   purpose, as a new message, whatever key it carries;
+/// - the key is not an id session-core would store (it is free-form for the idempotency guard).
+#[must_use]
+// Each bool is one of the named conditions above, read off the request as the caller has it.
+#[allow(clippy::fn_params_excessive_bools)]
+pub fn send_receipt_id(
+    enabled: bool,
+    zdr: bool,
+    regenerated: bool,
+    edited_resubmit: bool,
+    idempotency_key: Option<&str>,
+) -> Option<&str> {
+    if !enabled || zdr || regenerated || edited_resubmit {
+        return None;
+    }
+    idempotency_key
+        .map(str::trim)
+        .filter(|key| crate::queued_input::valid_client_message_id(key))
 }
 
 /// Ensure the request has a thread, persist the user prompt, and create a run.
@@ -383,6 +432,54 @@ pub async fn prepare_managed_run_authenticated(
     // caller of this function, matching today's byte-identical behavior.
     retrieval_scope: Option<&str>,
 ) -> Result<SessionRun> {
+    prepare_managed_run_authenticated_with_receipt(
+        state,
+        requested_thread_id,
+        requested_session_key,
+        org_id,
+        user_id,
+        goal,
+        agent_id,
+        mode,
+        start_key,
+        source,
+        zdr,
+        bearer,
+        space,
+        append_space,
+        conversation_only,
+        retrieval_scope,
+        None,
+    )
+    .await
+}
+
+/// [`prepare_managed_run_authenticated`] for a user send that names itself: the prompt is persisted
+/// under `client_message_id` (from [`send_receipt_id`]), so a repeat of the send finds the first
+/// row instead of writing a second.
+///
+/// # Errors
+/// As [`prepare_managed_run_authenticated`].
+#[allow(clippy::too_many_arguments)]
+pub async fn prepare_managed_run_authenticated_with_receipt(
+    state: &AppState,
+    requested_thread_id: Option<&str>,
+    requested_session_key: Option<&str>,
+    org_id: &str,
+    user_id: &str,
+    goal: &str,
+    agent_id: &str,
+    mode: &str,
+    start_key: &str,
+    source: ManagedRunSource,
+    zdr: bool,
+    bearer: &VerifiedSessionBearer,
+    space: Option<&ThreadSpaceContext>,
+    append_space: Option<&ThreadSpaceContext>,
+    conversation_only: bool,
+    retrieval_scope: Option<&str>,
+    client_message_id: Option<&str>,
+) -> Result<SessionRun> {
     prepare_managed_run_with_bearer(
         state,
         requested_thread_id,
@@ -400,6 +497,7 @@ pub async fn prepare_managed_run_authenticated(
         append_space,
         conversation_only,
         retrieval_scope,
+        client_message_id,
     )
     .await
 }
@@ -438,6 +536,7 @@ pub(crate) async fn prepare_managed_run_with_token(
         None,
         None,
         false,
+        None,
         None,
     )
     .await
@@ -518,6 +617,7 @@ pub(crate) async fn prepare_idempotent_browser_run(
             None,
             false,
             None,
+            None,
         )
         .await
         {
@@ -563,6 +663,7 @@ async fn prepare_managed_run_with_bearer(
     append_space: Option<&ThreadSpaceContext>,
     conversation_only: bool,
     retrieval_scope: Option<&str>,
+    client_message_id: Option<&str>,
 ) -> Result<SessionRun> {
     let thread_id = if zdr {
         // Do not persist a caller-provided thread id or prompt before Session
@@ -585,7 +686,7 @@ async fn prepare_managed_run_with_bearer(
             .await?
         };
         if let Err(error) =
-            append_user_message(&mut session_client, &thread_id, goal, bearer, append_space, conversation_only, retrieval_scope).await
+            append_user_message(&mut session_client, &thread_id, goal, bearer, append_space, conversation_only, retrieval_scope, client_message_id).await
         {
             if non_empty(requested_thread_id).is_some() && missing_thread_append_error(&error) {
                 tracing::info!(
@@ -601,7 +702,7 @@ async fn prepare_managed_run_with_bearer(
                     space,
                 )
                 .await?;
-                append_user_message(&mut session_client, &thread_id, goal, bearer, append_space, conversation_only, retrieval_scope)
+                append_user_message(&mut session_client, &thread_id, goal, bearer, append_space, conversation_only, retrieval_scope, client_message_id)
                     .await
                     .context("session-core append_message(user) failed")?;
             } else {
@@ -742,7 +843,7 @@ async fn prepare_run_with_bearer(
         .await?
     };
 
-    if let Err(error) = append_user_message(&mut client, &thread_id, goal, bearer, None, false, None).await {
+    if let Err(error) = append_user_message(&mut client, &thread_id, goal, bearer, None, false, None, None).await {
         if non_empty(requested_thread_id).is_some() && missing_thread_append_error(&error) {
             tracing::info!(
                 requested_thread_id = %thread_id,
@@ -757,7 +858,7 @@ async fn prepare_run_with_bearer(
                 None,
             )
             .await?;
-            append_user_message(&mut client, &thread_id, goal, bearer, None, false, None)
+            append_user_message(&mut client, &thread_id, goal, bearer, None, false, None, None)
                 .await
                 .context("session-core append_message(user) failed")?;
         } else {
@@ -1743,6 +1844,9 @@ fn json_to_prost_value(value: &serde_json::Value) -> prost_types::Value {
 /// append has always sent, so this path grants no authority the normal send
 /// path does not.
 ///
+/// `client_message_id` is the receipt the SPA's tray reports against (`None` with send receipts
+/// off): a repeat of a queued message the thread already holds answers with the first row.
+///
 /// # Errors
 /// Returns an error when the credential cannot be forwarded, or Session Core
 /// rejects or cannot complete the append.
@@ -1753,7 +1857,8 @@ pub async fn append_queued_user_message(
     bearer: &VerifiedSessionBearer,
     space: Option<&ThreadSpaceContext>,
     conversation_only: bool,
-) -> Result<(), tonic::Status> {
+    client_message_id: Option<&str>,
+) -> Result<AppendReceipt, tonic::Status> {
     let mut client = state.session_client.clone();
     append_user_message(
         &mut client,
@@ -1769,6 +1874,7 @@ pub async fn append_queued_user_message(
         // of this item's receipt/citation guarantee (see `EnqueueOutcome`'s
         // doc comment in `queued_input.rs`).
         None,
+        client_message_id,
     )
     .await
     .map_err(|error| {
@@ -1883,6 +1989,23 @@ impl StringExt for String {
 
 #[cfg(test)]
 mod tests {
+    /// A send names itself to the transcript only with the switch on, only when the turn keeps a
+    /// transcript at all, and never when it restates the previous question on purpose.
+    #[test]
+    fn a_send_is_named_only_when_receipts_are_on_and_the_turn_is_neither_zdr_nor_a_redo() {
+        use super::send_receipt_id as id;
+        assert_eq!(id(true, false, false, false, Some("msg-1")), Some("msg-1"));
+        assert_eq!(id(true, false, false, false, Some(" msg-1 ")), Some("msg-1"));
+        assert_eq!(id(false, false, false, false, Some("msg-1")), None, "switch off: byte-identical");
+        assert_eq!(id(true, true, false, false, Some("msg-1")), None, "a zdr turn names nothing");
+        assert_eq!(id(true, false, true, false, Some("msg-1")), None, "regenerate");
+        assert_eq!(id(true, false, false, true, Some("msg-1")), None, "edited resubmit");
+        assert_eq!(id(true, false, false, false, None), None);
+        for free_form in ["", "  ", "has space", "-lead", "x".repeat(129).as_str(), "emoji-\u{1F600}"] {
+            assert_eq!(id(true, false, false, false, Some(free_form)), None, "{free_form:?}");
+        }
+    }
+
     #[test]
     fn native_checkpoint_survives_durable_metadata_encoding_and_respects_zdr() {
         use prost::Message;

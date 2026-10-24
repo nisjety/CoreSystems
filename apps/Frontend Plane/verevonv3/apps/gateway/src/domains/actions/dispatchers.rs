@@ -4618,6 +4618,14 @@ pub(super) async fn dispatch_chat_queue_invocation_input(
     if let Some(space_ref) = input.get("spaceRef") {
         body.insert("spaceRef".to_owned(), space_ref.clone());
     }
+    // The send's receipt: Model Gateway stores the message under it and names it in the answer.
+    // Passed as the one opaque string the contract allows; the owner checks its shape again.
+    if let Some(client_message_id) = input.get("clientMessageId").and_then(Value::as_str) {
+        body.insert(
+            "client_message_id".to_owned(),
+            Value::String(client_message_id.to_owned()),
+        );
+    }
     let response = queue_chat_invocation_input(
         StateExtractor(state.clone()),
         ExtensionExtractor(user.clone()),

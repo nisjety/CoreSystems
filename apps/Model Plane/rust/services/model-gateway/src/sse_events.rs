@@ -364,6 +364,15 @@ pub enum ChatEvent {
     /// watching for it. Hiding it behind a feature family would reproduce the
     /// exact bug it exists to fix — a message that seems to have vanished.
     QueuedInput { messages: Vec<String> },
+    /// [`ChatEvent::QueuedInput`] with the `client_message_id` of each delivered message (WS04 S6,
+    /// behind `MODEL_GATEWAY_SEND_RECEIPTS`): the same `queued_input` frame plus an additive `ids`
+    /// key, parallel to `messages`, an empty string for a message sent without one. The SPA's tray
+    /// matches a delivery to the message it sent by id instead of by text. A separate variant so
+    /// the frame with the switch off stays exactly what it was.
+    QueuedInputReceipted {
+        messages: Vec<String>,
+        ids: Vec<String>,
+    },
     /// The turn's answer was produced in a reduced form, and the user must be told (Z-41b). Emitted once
     /// per such answer, before the answer streams, and only on a turn whose retrieval was restrictive: a
     /// ZDR answer whose query embedding had no ZDR-approved route answered from text search alone.
@@ -474,6 +483,7 @@ impl ChatEvent {
             // The user typed this and is watching for it — gating it would
             // reproduce the vanishing-message bug it exists to fix.
             | ChatEvent::QueuedInput { .. }
+            | ChatEvent::QueuedInputReceipted { .. }
             // A reduced answer's notice (Z-41b) — a client that never opted in still has to hear it.
             | ChatEvent::RetrievalNotice { .. }
             | ChatEvent::Stopped { .. }
@@ -523,7 +533,7 @@ impl ChatEvent {
             ChatEvent::Title { .. } => "title",
             ChatEvent::FollowUps { .. } => "follow_ups",
             ChatEvent::PlanProposed { .. } => "plan_proposed",
-            ChatEvent::QueuedInput { .. } => "queued_input",
+            ChatEvent::QueuedInput { .. } | ChatEvent::QueuedInputReceipted { .. } => "queued_input",
             ChatEvent::RetrievalNotice { .. } => "retrieval_notice",
             ChatEvent::Stopped { .. } => "stopped",
             ChatEvent::Error { .. }
@@ -721,6 +731,9 @@ impl ChatEvent {
             }),
             ChatEvent::QueuedInput { messages } => {
                 json!({ "messages": messages, "request_id": request_id })
+            }
+            ChatEvent::QueuedInputReceipted { messages, ids } => {
+                json!({ "messages": messages, "ids": ids, "request_id": request_id })
             }
             // The typed code and the wording key, and nothing else: see the variant's docs.
             ChatEvent::RetrievalNotice { notice } => json!({
@@ -2309,6 +2322,7 @@ mod payload_contract {
         "Verification",
         "MemoryRecall",
         "QueuedInput",
+        "QueuedInputReceipted",
         "RetrievalNotice",
         "Stopped",
         "Error",
@@ -2340,6 +2354,7 @@ mod payload_contract {
             ChatEvent::Verification { .. } => "Verification",
             ChatEvent::MemoryRecall { .. } => "MemoryRecall",
             ChatEvent::QueuedInput { .. } => "QueuedInput",
+            ChatEvent::QueuedInputReceipted { .. } => "QueuedInputReceipted",
             ChatEvent::RetrievalNotice { .. } => "RetrievalNotice",
             ChatEvent::Stopped { .. } => "Stopped",
             ChatEvent::Error { .. } => "Error",
@@ -2563,6 +2578,8 @@ mod payload_contract {
             memory_recall(true),
             ChatEvent::QueuedInput { messages: Vec::new() },
             ChatEvent::QueuedInput { messages: vec![s("one more thing")] },
+            ChatEvent::QueuedInputReceipted { messages: Vec::new(), ids: Vec::new() },
+            ChatEvent::QueuedInputReceipted { messages: vec![s("one more thing")], ids: vec![s("msg-1")] },
             ChatEvent::RetrievalNotice {
                 notice: crate::retrieval_metadata::notice_for_code("zdr_dense_unavailable")
                     .expect("the ZDR notice is catalogued"),

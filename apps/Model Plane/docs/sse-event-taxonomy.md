@@ -31,6 +31,7 @@ asserted, not just reported.
 | `memory_recall` | `memory` | `ChatEvent::MemoryRecall` | ✅ |
 | `plan_proposed` | — (control) | `ChatEvent::PlanProposed` | ✅ |
 | `queued_input` | — (control) | `ChatEvent::QueuedInput` | ✅ |
+| `queued_input` | — (control) | `ChatEvent::QueuedInputReceipted` | ✅ |
 | `reasoning_delta` | `reasoning` | `ChatEvent::ReasoningDelta` | ✅ |
 | `result_receipt` | `usage` | `ChatEvent::ResultReceipt` | ✅ |
 | `retrieval_notice` | — (control) | `ChatEvent::RetrievalNotice` | ✅ |

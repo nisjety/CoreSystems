@@ -489,9 +489,10 @@ export type ChatStatus = 'idle' | 'streaming' | 'error'
  * A message the user typed while a run was streaming.
  *
  * Session-only and deliberately not persisted: the durable record of the message
- * is written by the Model Plane at enqueue time, on the thread itself. This is
- * only the live status of a delivery in flight, which is meaningless after a
- * reload — by then it either arrived (and is in the transcript) or it did not.
+ * is written by the Model Plane on the thread itself (before it is delivered,
+ * with send receipts on). This is only the live status of a delivery in flight,
+ * which is meaningless after a reload — by then it either arrived (and is in the
+ * transcript) or it did not.
  */
 export type QueuedInput = {
   id: string
@@ -499,10 +500,24 @@ export type QueuedInput = {
   /**
    * `pending` — accepted, not yet handed to the agent.
    * `delivered` — the agent has it (the `queued_input` SSE event arrived).
+   * `resent` — the run ended without taking it, so it went out again as an
+   * ordinary turn under the same `clientMessageId`: the transcript holds it once.
    * `refused` — it was not accepted, and `note` says why. Never silent.
    */
-  state: 'pending' | 'delivered' | 'refused'
+  state: 'pending' | 'delivered' | 'resent' | 'refused'
   note?: string
+  /**
+   * The id the send was named with. The gateway stores the message under it and
+   * names it in the delivery event, so a delivery is matched to its message by id
+   * (text is the fallback for a gateway that sends no ids).
+   */
+  clientMessageId?: string
+  /**
+   * The gateway accepted the message (and, with receipts on, stored it). Only an
+   * accepted message that the run never took is resent when the run ends: one
+   * that was refused or never reached the gateway is not.
+   */
+  accepted?: boolean
 }
 
 export type ChatState = {
@@ -580,6 +595,20 @@ export type SendOptions = {
   displayAttachments?: ChatTurnAttachment[]
   generateImage?: boolean
   appendUser?: boolean
+  /**
+   * The id this send is named with (the receipt the transcript dedupes on). Minted
+   * by `sendContent` for an ordinary send; carried here only by a send that
+   * repeats an earlier one, a queued message the run never took, so both land as
+   * one transcript row. Never set for a zero-retention turn, a regenerate or an
+   * edited resubmit.
+   */
+  clientMessageId?: string
+  /**
+   * This send is a queued message going out again as an ordinary turn. Its
+   * mid-run strip entry stays on screen, as "resent", instead of being cleared
+   * with the previous run's strip.
+   */
+  resendOfQueued?: boolean
   tools?: ComposerToolId[]
   /**
    * Temporary chat (Zero Data Retention): the request opts the whole turn

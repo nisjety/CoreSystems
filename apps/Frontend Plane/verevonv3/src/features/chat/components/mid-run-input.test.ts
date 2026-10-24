@@ -123,6 +123,8 @@ describe('mid-run input is never dropped', () => {
     const effect = text.slice(start, text.indexOf('  const addAssistantCitation', start))
 
     expect(delivery).toContain('{ content, modelOverride, options: { ...options } }')
+    // A message the run ended before receiving keeps its route and goes out under its own id.
+    expect(delivery).toContain('{ content, modelOverride, options: { ...options, clientMessageId, resendOfQueued: true } }')
     expect(effect).toContain('sendContent(next.content, next.modelOverride, next.options)')
   })
 
@@ -189,6 +191,14 @@ describe('mid-run input is never dropped', () => {
       text.indexOf('onMemoryRecall:'),
     )
     expect(handler.length, 'onQueuedInput is not wired').toBeGreaterThan(0)
-    expect(handler).toContain("'delivered'")
+    // The promotion itself is `markQueuedInputsDelivered` (by id, then by text): the handler must
+    // go through it, and it must be the thing that writes `delivered`.
+    expect(handler).toContain('markQueuedInputsDelivered(s.queuedInputs, messages, ids)')
+    const normalizers = await source('src/features/chat/components/chat-normalizers.ts')
+    const promotion = normalizers.slice(
+      normalizers.indexOf('export function markQueuedInputsDelivered'),
+      normalizers.indexOf('export function settleQueuedInputsAtRunEnd'),
+    )
+    expect(promotion).toContain("'delivered'")
   })
 })

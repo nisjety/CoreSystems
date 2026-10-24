@@ -8218,11 +8218,101 @@ struct QueueInputRequest {
     /// spent on this one, even though both belong to the same user.
     #[serde(default)]
     thread_id: Option<String>,
+    /// The id the SPA minted for this message (the send receipt). Read only with
+    /// `MODEL_GATEWAY_SEND_RECEIPTS` on, where it names the message to the transcript and to the
+    /// owner's queue; the SPA sends it whatever the switch says, so this is ignored when off.
+    #[serde(default, alias = "clientMessageId")]
+    client_message_id: Option<String>,
+}
+
+/// The answer to a queued message that was not accepted, for every outcome but `Queued`.
+///
+/// One mapping for both orders of the handler, so a refusal reads the same with
+/// `MODEL_GATEWAY_SEND_RECEIPTS` on and off.
+fn queue_refusal(
+    request_id: &str,
+    outcome: &crate::queued_input::EnqueueOutcome,
+    claimed_thread_id: Option<&str>,
+) -> (StatusCode, serde_json::Value) {
+    use crate::queued_input::{EnqueueOutcome, MAX_QUEUED_CHARS, MAX_QUEUED_MESSAGES};
+
+    match outcome {
+        EnqueueOutcome::Queued { .. } => unreachable!("an accepted message is not a refusal"),
+        EnqueueOutcome::ThreadMismatch { streaming_thread_id } => {
+            tracing::warn!(
+                %request_id,
+                streaming = %streaming_thread_id,
+                claimed = claimed_thread_id.unwrap_or_default(),
+                "queued message named a thread other than the stream's; refusing"
+            );
+            (
+                StatusCode::CONFLICT,
+                serde_json::json!({
+                    "request_id": request_id,
+                    "queued": false,
+                    "error": "this run is not streaming that thread",
+                }),
+            )
+        }
+        EnqueueOutcome::NoActiveStream => (
+            StatusCode::NOT_FOUND,
+            serde_json::json!({
+                "request_id": request_id,
+                "queued": false,
+                "error": "no active stream",
+                // Names the client's next move: this is the case where the
+                // run already finished, and an ordinary send is correct.
+                "resend_as_new_turn": true,
+            }),
+        ),
+        EnqueueOutcome::Full { pending } => (
+            StatusCode::TOO_MANY_REQUESTS,
+            serde_json::json!({
+                "request_id": request_id,
+                "queued": false,
+                "error": "too many messages already waiting for this run",
+                "pending": pending,
+                "max_pending": MAX_QUEUED_MESSAGES,
+            }),
+        ),
+        EnqueueOutcome::TooLong { chars } => (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            serde_json::json!({
+                "request_id": request_id,
+                "queued": false,
+                "error": "message is too long to deliver mid-run",
+                "chars": chars,
+                "max_chars": MAX_QUEUED_CHARS,
+            }),
+        ),
+        EnqueueOutcome::Empty => (
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({
+                "request_id": request_id,
+                "queued": false,
+                "error": "content is required",
+            }),
+        ),
+    }
+}
+
+/// The 503 for a bus that could not say whether the message was queued: retryable, and nothing is
+/// claimed either way.
+fn run_control_unavailable(request_id: &str) -> (StatusCode, serde_json::Value) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        serde_json::json!({
+            "request_id": request_id,
+            "queued": false,
+            "error": "run_control_unavailable",
+            "retryable": true,
+        }),
+    )
 }
 
 /// Deliver a message the user typed WHILE a run was streaming.
 ///
-/// Two things happen, in this order:
+/// Two things happen:
 ///
 /// 1. The message is queued for the run's next tool-round boundary, where it arrives with the
 ///    classify-and-continue pause (`queued_input`). With the run-control bus on, a run that is
@@ -8231,9 +8321,10 @@ struct QueueInputRequest {
 /// 2. It is persisted to the thread the *stream* is on, so the transcript holds what the user
 ///    said whether or not the run lives long enough to read it.
 ///
-/// The ledger (2026-08-24) says persist first; this handler has always queued first, and the
-/// reorder is the send-receipts slice (WS04-S6, decision D3). Until then a message that is
-/// queued and then fails to persist says so (`persisted: false`).
+/// The ledger (2026-08-24) says persist first; this handler has always queued first, and with
+/// `MODEL_GATEWAY_SEND_RECEIPTS` off it still does: a message that is queued and then fails to
+/// persist says so (`persisted: false`). With the switch on the order is the ledger's, and the
+/// message carries a receipt: see [`queue_input_with_receipts`] (WS04-S6, decision D3).
 ///
 /// The thread id comes from the stream's own registration, never from the request: a client that
 /// could name the thread could aim a message at a conversation it is not streaming. A thread the
@@ -8248,11 +8339,30 @@ async fn invoke_queue_input(
     Path(request_id): Path<String>,
     Json(body): Json<QueueInputRequest>,
 ) -> Response {
-    use crate::queued_input::{EnqueueOutcome, MAX_QUEUED_CHARS, MAX_QUEUED_MESSAGES};
+    use crate::queued_input::EnqueueOutcome;
 
     // Queued input changes a run's durable state: a ZDR or a waived token cannot do that.
     if let Err(rejection) = require_non_zdr_durable_mutation(&claims) {
         return rejection.into_response();
+    }
+
+    if crate::queued_input::send_receipts_enabled() {
+        let persist = |thread_id: String, conversation_only: bool, client_message_id: String| {
+            let (state, bearer, body) = (&state, &bearer, &body);
+            async move {
+                crate::session_flow::append_queued_user_message(
+                    state,
+                    &thread_id,
+                    body.content.trim(),
+                    bearer,
+                    body.space_append_context.as_ref(),
+                    conversation_only,
+                    Some(&client_message_id),
+                )
+                .await
+            }
+        };
+        return queue_input_with_receipts(&state, &claims, &request_id, &body, persist).await;
     }
 
     // One id for this attempt: a request repeated because its reply was lost is recognised by
@@ -8277,16 +8387,8 @@ async fn invoke_queue_input(
         QueueRoute::NoOwner => EnqueueOutcome::NoActiveStream,
         // Neither queued nor refused is known, so say so and persist nothing: the client retries.
         QueueRoute::Unavailable => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({
-                    "request_id": request_id,
-                    "queued": false,
-                    "error": "run_control_unavailable",
-                    "retryable": true,
-                })),
-            )
-                .into_response();
+            let (status, body) = run_control_unavailable(&request_id);
+            return (status, Json(body)).into_response();
         }
     };
     // `retrieval_scope` rides on `EnqueueOutcome::Queued` for parity with
@@ -8298,73 +8400,9 @@ async fn invoke_queue_input(
     // reflected in citations" surface the way the turn's own persistence is.
     let (pending, thread_id, conversation_only) = match outcome {
         EnqueueOutcome::Queued { pending, thread_id, conversation_only, .. } => (pending, thread_id, conversation_only),
-        EnqueueOutcome::ThreadMismatch { streaming_thread_id } => {
-            tracing::warn!(
-                %request_id,
-                streaming = %streaming_thread_id,
-                claimed = body.thread_id.as_deref().unwrap_or_default(),
-                "queued message named a thread other than the stream's; refusing"
-            );
-            return (
-                StatusCode::CONFLICT,
-                Json(serde_json::json!({
-                    "request_id": request_id,
-                    "queued": false,
-                    "error": "this run is not streaming that thread",
-                })),
-            )
-                .into_response();
-        }
-        EnqueueOutcome::NoActiveStream => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({
-                    "request_id": request_id,
-                    "queued": false,
-                    "error": "no active stream",
-                    // Names the client's next move: this is the case where the
-                    // run already finished, and an ordinary send is correct.
-                    "resend_as_new_turn": true,
-                })),
-            )
-                .into_response();
-        }
-        EnqueueOutcome::Full { pending } => {
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(serde_json::json!({
-                    "request_id": request_id,
-                    "queued": false,
-                    "error": "too many messages already waiting for this run",
-                    "pending": pending,
-                    "max_pending": MAX_QUEUED_MESSAGES,
-                })),
-            )
-                .into_response()
-        }
-        EnqueueOutcome::TooLong { chars } => {
-            return (
-                StatusCode::PAYLOAD_TOO_LARGE,
-                Json(serde_json::json!({
-                    "request_id": request_id,
-                    "queued": false,
-                    "error": "message is too long to deliver mid-run",
-                    "chars": chars,
-                    "max_chars": MAX_QUEUED_CHARS,
-                })),
-            )
-                .into_response()
-        }
-        EnqueueOutcome::Empty => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "request_id": request_id,
-                    "queued": false,
-                    "error": "content is required",
-                })),
-            )
-                .into_response()
+        refusal => {
+            let (status, body) = queue_refusal(&request_id, &refusal, body.thread_id.as_deref());
+            return (status, Json(body)).into_response();
         }
     };
 
@@ -8378,6 +8416,7 @@ async fn invoke_queue_input(
         &bearer,
         body.space_append_context.as_ref(),
         conversation_only,
+        None,
     )
     .await;
     if let Err(error) = &persisted {
@@ -8399,6 +8438,183 @@ async fn invoke_queue_input(
         })),
     )
         .into_response()
+}
+
+/// [`invoke_queue_input`] with durable send receipts (`MODEL_GATEWAY_SEND_RECEIPTS` on, WS04 S6).
+///
+/// The ledger's order, persist then deliver, which closes decision D3: the message is written to the
+/// transcript under its `client_message_id` before it can reach the model, so a message the run
+/// read is never missing from the thread, and a message that cannot be recorded is not delivered.
+/// Every answer names the message (`client_message_id`, and `message_id` once it is stored) and
+/// says whether it is stored (`persisted`), which is what the SPA's tray reports against.
+///
+/// 1. The id is the SPA's, or the gateway's own for a client from before receipts; the bounds are
+///    checked before anything is written, so a message refused for its shape leaves no trace.
+/// 2. The thread comes from the *stream's* registration, on this replica or (bus on) from its owner,
+///    never from the request. No live stream is a 404 with `resend_as_new_turn` and nothing written:
+///    the resend is the one send, and carries the same id.
+/// 3. The message is stored. A repeat of an id the thread holds answers with the first row
+///    (`deduplicated`) and writes nothing; the same id with other content is a 409.
+/// 4. The message is queued, with the id as the owner's `op_id`, so a repeat after a lost reply is
+///    queued once. A run that ended between the store and the queue answers 404
+///    `resend_as_new_turn` with `persisted: true`: the resend carries the id and finds its row.
+///
+/// Nothing leaves this replica before the ZDR and waived gate, which the caller ran and
+/// `bus_message` runs again.
+// One ordered sequence of refusals and effects; splitting it would scatter the order it exists to state.
+#[allow(clippy::too_many_lines)]
+async fn queue_input_with_receipts<P, Fut>(
+    state: &AppState,
+    claims: &Claims,
+    request_id: &str,
+    body: &QueueInputRequest,
+    persist: P,
+) -> Response
+where
+    P: Fn(String, bool, String) -> Fut,
+    Fut: std::future::Future<Output = Result<crate::session_flow::AppendReceipt, tonic::Status>>,
+{
+    use crate::queued_input::{bounds_refusal, stream_thread, EnqueueOutcome, StreamThread};
+
+    let client_message_id = match body
+        .client_message_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        Some(id) if crate::queued_input::valid_client_message_id(id) => id.to_owned(),
+        Some(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "request_id": request_id,
+                    "queued": false,
+                    "error": "client_message_id is not a valid message id",
+                })),
+            )
+                .into_response();
+        }
+        // A client from before receipts names nothing: the gateway names the message, so the
+        // answer carries an id either way and the owner's repeat check has one.
+        None => format!("msg-{:032x}", rand::random::<u128>()),
+    };
+    let msg = match crate::queued_input::bus_message(
+        claims,
+        request_id,
+        &body.content,
+        body.thread_id.as_deref(),
+        &client_message_id,
+    ) {
+        Ok(msg) => msg,
+        Err(refusal) => return crate::zdr_posture::http(&refusal).into_response(),
+    };
+    // Every answer past this point names the message and says whether it is stored.
+    let answer = |(status, mut answer): (StatusCode, serde_json::Value),
+                  stored: Option<&crate::session_flow::AppendReceipt>| {
+        answer["client_message_id"] = serde_json::json!(client_message_id);
+        answer["persisted"] = serde_json::json!(stored.is_some());
+        if let Some(stored) = stored {
+            answer["message_id"] = serde_json::json!(stored.message_id);
+            answer["deduplicated"] = serde_json::json!(stored.deduplicated);
+        }
+        (status, Json(answer)).into_response()
+    };
+
+    if let Some(refusal) = bounds_refusal(&body.content) {
+        return answer(queue_refusal(request_id, &refusal, None), None);
+    }
+    let (thread_id, known_scope) = match stream_thread(
+        &state.queued_inputs,
+        &state.run_control,
+        request_id,
+        &claims.org_id,
+        &claims.user_id,
+    )
+    .await
+    {
+        StreamThread::Here { thread_id, conversation_only } => (thread_id, Some(conversation_only)),
+        StreamThread::Peer(thread_id) => (thread_id, None),
+        StreamThread::Gone => {
+            return answer(queue_refusal(request_id, &EnqueueOutcome::NoActiveStream, None), None);
+        }
+        // The stream may be live: neither stored nor refused is known, so say so and write nothing.
+        StreamThread::Unavailable => return answer(run_control_unavailable(request_id), None),
+    };
+    if let Some(claimed) = body.thread_id.as_deref().map(str::trim).filter(|id| !id.is_empty()) {
+        if claimed != thread_id {
+            let mismatch = EnqueueOutcome::ThreadMismatch { streaming_thread_id: thread_id };
+            return answer(queue_refusal(request_id, &mismatch, Some(claimed)), None);
+        }
+    }
+
+    // A stream on this replica states its own source scope. One on another replica does not on the
+    // bus: its message is first tried as an ordinary one, and a conversation-only thread's refusal
+    // (the one precondition a wrong guess can fail) is answered by the same message under the
+    // conversation-only scope.
+    let mut stored = persist(thread_id.clone(), known_scope.unwrap_or(false), client_message_id.clone()).await;
+    if known_scope.is_none()
+        && matches!(&stored, Err(status) if status.code() == tonic::Code::FailedPrecondition)
+    {
+        stored = persist(thread_id.clone(), true, client_message_id.clone()).await;
+    }
+    let stored = match stored {
+        Ok(stored) => stored,
+        Err(status) => {
+            tracing::warn!(
+                code = ?status.code(),
+                %request_id,
+                %thread_id,
+                "mid-run message could not be recorded; not delivered"
+            );
+            let (code, error, retryable) = match status.code() {
+                tonic::Code::AlreadyExists => (StatusCode::CONFLICT, "client_message_id_conflict", false),
+                tonic::Code::PermissionDenied | tonic::Code::FailedPrecondition => {
+                    (StatusCode::FORBIDDEN, "message_not_recorded", false)
+                }
+                tonic::Code::InvalidArgument => (StatusCode::BAD_REQUEST, "message_not_recorded", false),
+                _ => (StatusCode::SERVICE_UNAVAILABLE, "message_not_recorded", true),
+            };
+            return answer(
+                (
+                    code,
+                    serde_json::json!({
+                        "request_id": request_id,
+                        "queued": false,
+                        "error": error,
+                        "retryable": retryable,
+                    }),
+                ),
+                None,
+            );
+        }
+    };
+
+    match state.run_control.queue_input(&state.queued_inputs, &msg).await {
+        QueueRoute::Local(EnqueueOutcome::Queued { pending, .. })
+        | QueueRoute::Peer(EnqueueOutcome::Queued { pending, .. }) => answer(
+            (
+                StatusCode::ACCEPTED,
+                serde_json::json!({
+                    "request_id": request_id,
+                    "queued": true,
+                    "pending": pending,
+                }),
+            ),
+            Some(&stored),
+        ),
+        QueueRoute::Local(refusal) | QueueRoute::Peer(refusal) => {
+            answer(queue_refusal(request_id, &refusal, body.thread_id.as_deref()), Some(&stored))
+        }
+        // The run ended between the store and the queue: the message is in the thread, and the
+        // resend carries its id.
+        QueueRoute::NoOwner => answer(
+            queue_refusal(request_id, &EnqueueOutcome::NoActiveStream, None),
+            Some(&stored),
+        ),
+        // Stored, and the bus could not say whether it was queued: a retry with the same id stores
+        // nothing new and is queued once.
+        QueueRoute::Unavailable => answer(run_control_unavailable(request_id), Some(&stored)),
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -10006,7 +10222,7 @@ async fn invoke(
         &request_id,
         "gateway-direct",
     );
-    let session_run = session_flow::prepare_managed_run_authenticated(
+    let session_run = session_flow::prepare_managed_run_authenticated_with_receipt(
         &state,
         normalized.thread_id.as_deref(),
         normalized.session_key.as_deref(),
@@ -10023,6 +10239,14 @@ async fn invoke(
         normalized.space_append_context.as_ref(),
         false,
         None,
+        // The prompt is stored under the send's own id, so a retry of it lands as one row.
+        session_flow::send_receipt_id(
+            crate::queued_input::send_receipts_enabled(),
+            effective_zdr,
+            req.regenerated,
+            req.edited_resubmit,
+            req.idempotency_key.as_deref(),
+        ),
     )
     .await
     .map_err(|error| {
@@ -11961,6 +12185,417 @@ mod run_owner_publish_tests {
             })
             .collect();
         assert_eq!(via, ["unavailable", "peer", "local"]);
+    }
+
+    // ---- durable send receipts (WS04 S6): `queue_input_with_receipts` ----
+
+    /// What the fake transcript was asked to store: `(thread, conversation_only, client_message_id)`,
+    /// and how many messages sat in the stream's queue at that moment (the proof of the order).
+    #[derive(Clone, Default)]
+    struct FakeTranscript {
+        rows: Arc<std::sync::Mutex<Vec<(String, bool, String)>>>,
+        queue_depth_at_store: Arc<std::sync::Mutex<Vec<usize>>>,
+        /// Answered instead of storing.
+        fail_with: Option<tonic::Code>,
+        /// A thread this transcript holds as conversation-only: a store that does not say so is
+        /// refused, as session-core refuses it.
+        conversation_only: bool,
+        /// Run just after the store, to stand in for the run ending in the middle of a send.
+        after_store: Option<Arc<dyn Fn() + Send + Sync>>,
+        /// Leave the queue alone at the store (by default the store takes what waits, to show
+        /// what was queued before it).
+        leave_queue: bool,
+    }
+
+    impl FakeTranscript {
+        fn persist(
+            &self,
+            queued: &crate::queued_input::QueuedInputRegistry,
+            request_id: &str,
+        ) -> impl Fn(
+            String,
+            bool,
+            String,
+        ) -> std::future::Ready<Result<crate::session_flow::AppendReceipt, tonic::Status>> {
+            let (this, queued, request_id) = (self.clone(), queued.clone(), request_id.to_owned());
+            move |thread: String, conversation_only: bool, id: String| {
+                // Taking everything leaves the queue empty, so the later queue is what puts the
+                // message there: a queue-first order would see it here.
+                let depth = if this.leave_queue { 0 } else { queued.drain(&request_id).len() };
+                this.queue_depth_at_store.lock().unwrap().push(depth);
+                if let Some(code) = this.fail_with {
+                    return std::future::ready(Err(tonic::Status::new(code, "scripted")));
+                }
+                if this.conversation_only && !conversation_only {
+                    return std::future::ready(Err(tonic::Status::failed_precondition(
+                        "This conversation requires conversation-only source scope.",
+                    )));
+                }
+                let mut rows = this.rows.lock().unwrap();
+                let held = rows.iter().position(|(_, _, held)| *held == id);
+                let deduplicated = held.is_some();
+                let index = held.unwrap_or_else(|| {
+                    rows.push((thread, conversation_only, id));
+                    rows.len() - 1
+                });
+                drop(rows);
+                if let Some(after) = &this.after_store {
+                    after();
+                }
+                std::future::ready(Ok(crate::session_flow::AppendReceipt {
+                    message_id: format!("message-{index}"),
+                    deduplicated,
+                }))
+            }
+        }
+
+        fn rows(&self) -> Vec<(String, bool, String)> {
+            self.rows.lock().unwrap().clone()
+        }
+    }
+
+    fn queue_body(content: &str, id: Option<&str>) -> QueueInputRequest {
+        QueueInputRequest {
+            content: content.to_owned(),
+            space_append_context: None,
+            thread_id: None,
+            client_message_id: id.map(str::to_owned),
+        }
+    }
+
+    async fn send_queued(
+        state: &AppState,
+        who: &Claims,
+        transcript: &FakeTranscript,
+        body: &QueueInputRequest,
+    ) -> (StatusCode, serde_json::Value) {
+        let response = queue_input_with_receipts(
+            state,
+            who,
+            "req-1",
+            body,
+            transcript.persist(&state.queued_inputs, "req-1"),
+        )
+        .await;
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        (status, serde_json::from_slice(&bytes).expect("a JSON answer"))
+    }
+
+    /// A state whose stream `req-1` of `org-a/user-a` is running on this replica.
+    async fn streaming(conversation_only: bool) -> AppState {
+        let (state, _publisher) = test_state().await;
+        state.queued_inputs.register(
+            "req-1",
+            "org-a",
+            "user-a",
+            "thread-1",
+            conversation_only,
+            crate::normalize::RetrievalScope::Auto,
+        );
+        state
+    }
+
+    #[tokio::test]
+    async fn a_message_is_stored_under_its_id_before_it_is_queued_and_the_answer_is_the_receipt() {
+        let state = streaming(false).await;
+        let transcript = FakeTranscript::default();
+        let (status, answer) =
+            send_queued(&state, &claims("org-a", "user-a"), &transcript, &queue_body(" use EUR ", Some("msg-1"))).await;
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(answer["queued"], true);
+        assert_eq!(answer["persisted"], true);
+        assert_eq!(answer["client_message_id"], "msg-1");
+        assert_eq!(answer["message_id"], "message-0");
+        assert_eq!(answer["deduplicated"], false);
+        assert_eq!(answer["pending"], 1);
+        assert_eq!(transcript.rows(), [("thread-1".to_owned(), false, "msg-1".to_owned())]);
+        assert_eq!(
+            *transcript.queue_depth_at_store.lock().unwrap(),
+            [0],
+            "the message was not in the queue yet when it was stored"
+        );
+        let delivered = state.queued_inputs.drain_receipted("req-1");
+        assert_eq!(
+            delivered,
+            [crate::queued_input::QueuedMessage { text: "use EUR".into(), client_message_id: "msg-1".into() }],
+            "the loop takes the message with its id"
+        );
+    }
+
+    /// The plan's retry case: the reply was lost, the client asks again with the same id.
+    #[tokio::test]
+    async fn a_repeat_after_a_lost_reply_is_stored_once_and_queued_once() {
+        let state = streaming(false).await;
+        let transcript = FakeTranscript { leave_queue: true, ..FakeTranscript::default() };
+        let who = claims("org-a", "user-a");
+        let body = queue_body("use EUR", Some("msg-1"));
+        let first = send_queued(&state, &who, &transcript, &body).await;
+        let again = send_queued(&state, &who, &transcript, &body).await;
+
+        assert_eq!(first.0, StatusCode::ACCEPTED);
+        assert_eq!(again.0, StatusCode::ACCEPTED);
+        assert_eq!(again.1["deduplicated"], true);
+        assert_eq!(again.1["message_id"], first.1["message_id"]);
+        assert_eq!(transcript.rows().len(), 1, "one transcript row");
+        assert_eq!(
+            state.queued_inputs.drain_receipted("req-1").len(),
+            1,
+            "the repeat queued nothing a second time"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_id_that_names_a_different_message_is_a_conflict_and_nothing_is_delivered() {
+        let state = streaming(false).await;
+        let transcript = FakeTranscript { fail_with: Some(tonic::Code::AlreadyExists), ..FakeTranscript::default() };
+        let (status, answer) =
+            send_queued(&state, &claims("org-a", "user-a"), &transcript, &queue_body("hi", Some("msg-1"))).await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(answer["error"], "client_message_id_conflict");
+        assert_eq!((answer["queued"].clone(), answer["persisted"].clone()), (false.into(), false.into()));
+        assert!(state.queued_inputs.drain("req-1").is_empty());
+    }
+
+    /// A message that cannot be recorded is not delivered: the model never reads a message the
+    /// thread does not hold.
+    #[tokio::test]
+    async fn a_message_that_cannot_be_recorded_is_not_delivered() {
+        let state = streaming(false).await;
+        let who = claims("org-a", "user-a");
+        for (code, expected, retryable) in [
+            (tonic::Code::Unavailable, StatusCode::SERVICE_UNAVAILABLE, true),
+            (tonic::Code::Internal, StatusCode::SERVICE_UNAVAILABLE, true),
+            (tonic::Code::PermissionDenied, StatusCode::FORBIDDEN, false),
+            (tonic::Code::InvalidArgument, StatusCode::BAD_REQUEST, false),
+        ] {
+            let transcript = FakeTranscript { fail_with: Some(code), ..FakeTranscript::default() };
+            let (status, answer) =
+                send_queued(&state, &who, &transcript, &queue_body("hi", Some("msg-1"))).await;
+            assert_eq!(status, expected, "{code:?}");
+            assert_eq!(answer["retryable"], retryable, "{code:?}");
+            assert_eq!(answer["persisted"], false);
+            assert!(state.queued_inputs.drain("req-1").is_empty(), "{code:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn no_live_stream_is_a_404_that_stores_nothing_and_names_the_resend() {
+        let (state, _publisher) = test_state().await;
+        let transcript = FakeTranscript::default();
+        let (status, answer) =
+            send_queued(&state, &claims("org-a", "user-a"), &transcript, &queue_body("hi", Some("msg-1"))).await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(answer["resend_as_new_turn"], true);
+        assert_eq!(answer["persisted"], false);
+        assert_eq!(answer["client_message_id"], "msg-1", "the resend carries the same id");
+        assert!(transcript.rows().is_empty());
+    }
+
+    /// Somebody else's stream answers exactly as a missing one does, and stores nothing.
+    #[tokio::test]
+    async fn a_strangers_message_is_a_404_and_stores_nothing() {
+        let state = streaming(false).await;
+        for (org, user) in [("org-b", "user-a"), ("org-a", "user-b")] {
+            let transcript = FakeTranscript::default();
+            let (status, answer) =
+                send_queued(&state, &claims(org, user), &transcript, &queue_body("hi", Some("msg-1"))).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{org}/{user}");
+            assert_eq!(answer["persisted"], false);
+            assert!(transcript.rows().is_empty(), "{org}/{user}");
+        }
+        assert!(state.queued_inputs.drain("req-1").is_empty());
+    }
+
+    /// The run ends between the store and the queue: the message is in the thread, the answer says
+    /// so, and the resend (same id) finds its row instead of writing a second.
+    #[tokio::test]
+    async fn a_run_that_ends_between_the_store_and_the_queue_leaves_one_row_and_names_the_resend() {
+        let state = streaming(false).await;
+        let ending = state.queued_inputs.clone();
+        let transcript = FakeTranscript {
+            after_store: Some(Arc::new(move || {
+                ending.finish("req-1");
+            })),
+            ..FakeTranscript::default()
+        };
+        let (status, answer) =
+            send_queued(&state, &claims("org-a", "user-a"), &transcript, &queue_body("hi", Some("msg-1"))).await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(answer["resend_as_new_turn"], true);
+        assert_eq!(answer["persisted"], true, "the message is in the thread");
+        assert_eq!(answer["message_id"], "message-0");
+        // The resend: the same id, now an ordinary send.
+        let resend = transcript.persist(&state.queued_inputs, "req-1")("thread-1".into(), false, "msg-1".into()).await;
+        assert!(resend.expect("stored").deduplicated);
+        assert_eq!(transcript.rows().len(), 1, "exactly one transcript row");
+    }
+
+    #[tokio::test]
+    async fn a_message_refused_for_its_shape_or_its_id_writes_nothing() {
+        let state = streaming(false).await;
+        let who = claims("org-a", "user-a");
+        let long = "x".repeat(crate::queued_input::MAX_QUEUED_CHARS + 1);
+        for (body, expected) in [
+            (queue_body("   ", Some("msg-1")), StatusCode::BAD_REQUEST),
+            (queue_body(&long, Some("msg-1")), StatusCode::PAYLOAD_TOO_LARGE),
+            (queue_body("hi", Some("not a valid id")), StatusCode::BAD_REQUEST),
+        ] {
+            let transcript = FakeTranscript::default();
+            let (status, _) = send_queued(&state, &who, &transcript, &body).await;
+            assert_eq!(status, expected);
+            assert!(transcript.rows().is_empty());
+        }
+        assert!(state.queued_inputs.drain("req-1").is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_thread_the_stream_is_not_on_is_refused_before_anything_is_stored() {
+        let state = streaming(false).await;
+        let transcript = FakeTranscript::default();
+        let mut body = queue_body("hi", Some("msg-1"));
+        body.thread_id = Some("thread-9".to_owned());
+        let (status, _) = send_queued(&state, &claims("org-a", "user-a"), &transcript, &body).await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(transcript.rows().is_empty());
+        assert!(state.queued_inputs.drain("req-1").is_empty());
+    }
+
+    /// A client from before receipts sends no id: the gateway names the message, and the answer
+    /// carries the id either way.
+    #[tokio::test]
+    async fn a_message_sent_without_an_id_is_named_by_the_gateway() {
+        let state = streaming(false).await;
+        let transcript = FakeTranscript::default();
+        let (status, answer) =
+            send_queued(&state, &claims("org-a", "user-a"), &transcript, &queue_body("hi", None)).await;
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let id = answer["client_message_id"].as_str().expect("an id");
+        assert!(crate::queued_input::valid_client_message_id(id), "{id}");
+        assert_eq!(transcript.rows()[0].2, id);
+    }
+
+    /// ZDR keeps nothing: neither a store nor a bus message is ever built for it.
+    #[tokio::test]
+    async fn a_zdr_message_is_refused_and_stores_and_queues_nothing() {
+        let state = streaming(false).await;
+        let mut zdr = claims("org-a", "user-a");
+        zdr.zdr = true;
+        let transcript = FakeTranscript::default();
+        let (status, _) = send_queued(&state, &zdr, &transcript, &queue_body("secret", Some("msg-1"))).await;
+
+        assert!(status.is_client_error(), "{status}");
+        assert!(transcript.rows().is_empty());
+        assert!(transcript.queue_depth_at_store.lock().unwrap().is_empty(), "the store was never reached");
+        assert!(state.queued_inputs.drain("req-1").is_empty());
+    }
+
+    /// A conversation-only stream on this replica stores its message under that scope, which the
+    /// thread requires.
+    #[tokio::test]
+    async fn a_conversation_only_stream_stores_under_its_own_scope() {
+        let state = streaming(true).await;
+        let transcript = FakeTranscript { conversation_only: true, ..FakeTranscript::default() };
+        let (status, _) =
+            send_queued(&state, &claims("org-a", "user-a"), &transcript, &queue_body("hi", Some("msg-1"))).await;
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(transcript.rows(), [("thread-1".to_owned(), true, "msg-1".to_owned())]);
+    }
+
+    /// Two replicas over one bus: the message is stored from the replica the user reached, with the
+    /// thread the owner reported, and queued on the owner, once, with its id.
+    #[tokio::test]
+    async fn a_message_sent_to_another_replica_is_stored_there_and_queued_on_the_owner() {
+        use crate::run_control::{LoopbackHub, RunControl};
+        let hub = LoopbackHub::new();
+        let owner = streaming(true).await;
+        let (mut peer, _publisher) = test_state().await;
+        let mut owner = owner;
+        for state in [&mut owner, &mut peer] {
+            state.run_control = RunControl::loopback(hub.clone(), std::time::Duration::from_millis(200));
+        }
+        let _flag = owner.cancels.register_run("req-1", "org-a", "user-a", "run-1");
+        assert!(owner.run_control.attach(&owner.cancels, &owner.queued_inputs, "req-1", "run-1").await);
+
+        // The owner's thread is conversation-only and the peer cannot know: the first store is
+        // refused for it and the same message is stored under the conversation-only scope.
+        let transcript = FakeTranscript { conversation_only: true, ..FakeTranscript::default() };
+        let who = claims("org-a", "user-a");
+        let (status, answer) = send_queued(&peer, &who, &transcript, &queue_body("use EUR", Some("msg-1"))).await;
+
+        assert_eq!(status, StatusCode::ACCEPTED, "{answer}");
+        assert_eq!(answer["persisted"], true);
+        assert_eq!(transcript.rows(), [("thread-1".to_owned(), true, "msg-1".to_owned())]);
+        assert!(peer.queued_inputs.drain("req-1").is_empty(), "nothing is queued on the replica that was reached");
+        assert_eq!(
+            owner.queued_inputs.drain_receipted("req-1"),
+            [crate::queued_input::QueuedMessage { text: "use EUR".into(), client_message_id: "msg-1".into() }]
+        );
+
+        // The retry after a lost reply is the same id: stored once, queued once.
+        let again = send_queued(&peer, &who, &transcript, &queue_body("use EUR", Some("msg-1"))).await;
+        assert_eq!(again.1["deduplicated"], true);
+        assert_eq!(transcript.rows().len(), 1);
+        assert_eq!(
+            owner.queued_inputs.drain_receipted("req-1").len(),
+            0,
+            "the owner remembers the id it already took: the retry is answered and queues nothing"
+        );
+
+        // An owner that does not answer: nothing is stored or claimed.
+        hub.mute(true);
+        let silent = FakeTranscript::default();
+        let (status, answer) = send_queued(&peer, &who, &silent, &queue_body("hi", Some("msg-2"))).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(answer["error"], "run_control_unavailable");
+        assert_eq!(answer["persisted"], false);
+        assert!(silent.rows().is_empty());
+    }
+
+    /// One id, one queued delivery, even when the retry comes while the first copy still waits.
+    #[tokio::test]
+    async fn a_retry_while_the_first_copy_still_waits_queues_once() {
+        use crate::run_control::{LoopbackHub, RunControl};
+        let hub = LoopbackHub::new();
+        let mut owner = streaming(false).await;
+        let (mut peer, _publisher) = test_state().await;
+        for state in [&mut owner, &mut peer] {
+            state.run_control = RunControl::loopback(hub.clone(), std::time::Duration::from_millis(200));
+        }
+        let _flag = owner.cancels.register_run("req-1", "org-a", "user-a", "run-1");
+        assert!(owner.run_control.attach(&owner.cancels, &owner.queued_inputs, "req-1", "run-1").await);
+
+        // A transcript that leaves the queue alone, so the first copy is still waiting.
+        let rows = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let who = claims("org-a", "user-a");
+        let body = queue_body("use EUR", Some("msg-1"));
+        let persist = {
+            let rows = rows.clone();
+            move |thread: String, _scope: bool, id: String| {
+                let mut rows = rows.lock().unwrap();
+                let deduplicated = rows.iter().any(|(_, held): &(String, String)| *held == id);
+                if !deduplicated {
+                    rows.push((thread, id));
+                }
+                std::future::ready(Ok(crate::session_flow::AppendReceipt {
+                    message_id: "message-0".to_owned(),
+                    deduplicated,
+                }))
+            }
+        };
+        for _ in 0..2 {
+            let response = queue_input_with_receipts(&peer, &who, "req-1", &body, &persist).await;
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+        }
+        assert_eq!(rows.lock().unwrap().len(), 1);
+        assert_eq!(owner.queued_inputs.drain("req-1").len(), 1, "one delivery");
     }
 
     /// One captured log line as `(field, value)` pairs.

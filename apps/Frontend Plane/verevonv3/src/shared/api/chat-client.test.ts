@@ -491,6 +491,119 @@ describe('mid-run queued input', () => {
     // it looking for a decision that cannot exist.
     expect(JSON.parse(bodies[0] ?? '')).toEqual({ content: 'bruk EUR' })
   })
+
+  describe('send receipts', () => {
+    it('names the message to the gateway, and only when it has an id', async () => {
+      const bodies: string[] = []
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockImplementation((_url: unknown, init?: RequestInit) => {
+          bodies.push(String(init?.body ?? ''))
+          return Promise.resolve(jsonResponse(202, { queued: true, pending: 1, persisted: true }))
+        }),
+      )
+      await queueInvocationInput('req-1', 'bruk EUR', { clientMessageId: 'msg-1' })
+      await queueInvocationInput('req-1', 'bruk EUR')
+      expect(JSON.parse(bodies[0] ?? '')).toEqual({ content: 'bruk EUR', client_message_id: 'msg-1' })
+      expect(JSON.parse(bodies[1] ?? '')).toEqual({ content: 'bruk EUR' })
+    })
+
+    it('reports the stored message the gateway names', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue(
+          jsonResponse(202, {
+            request_id: 'req-1',
+            queued: true,
+            pending: 1,
+            persisted: true,
+            client_message_id: 'msg-1',
+            message_id: '01J00000000000000000000000',
+            deduplicated: false,
+          }),
+        ),
+      )
+      await expect(queueInvocationInput('req-1', 'bruk EUR', { clientMessageId: 'msg-1' })).resolves.toEqual({
+        outcome: 'queued',
+        pending: 1,
+        persisted: true,
+        clientMessageId: 'msg-1',
+        messageId: '01J00000000000000000000000',
+      })
+    })
+
+    /**
+     * The run ended after the message was stored: the caller still sends it as a new turn,
+     * under the same id, and the transcript holds it once.
+     */
+    it('says the run ended and whether the message was already stored', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue(
+          jsonResponse(200, {
+            request_id: 'req-1',
+            queued: false,
+            error: 'no active stream',
+            resend_as_new_turn: true,
+            persisted: true,
+            client_message_id: 'msg-1',
+            message_id: '01J00000000000000000000000',
+          }),
+        ),
+      )
+      await expect(queueInvocationInput('req-1', 'bruk EUR', { clientMessageId: 'msg-1' })).resolves.toEqual({
+        outcome: 'run_ended',
+        persisted: true,
+        clientMessageId: 'msg-1',
+      })
+    })
+
+    it('tells a gateway that could not say apart from a refusal', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue(
+          jsonResponse(503, {
+            error: { code: 'run_control_unavailable', message: 'run control unavailable' },
+          }),
+        ),
+      )
+      await expect(queueInvocationInput('req-1', 'a', { clientMessageId: 'msg-1' })).resolves.toMatchObject({
+        outcome: 'refused',
+        reason: 'unavailable',
+      })
+    })
+
+    it('reads the ids of a delivery in step with its messages', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue(
+          sseResponse([
+            // The unreadable message goes with its id, and the ids after it keep their messages.
+            `event: queued_input\ndata: ${JSON.stringify({ messages: ['one', '  ', 'two'], ids: ['msg-1', 'msg-x', ''] })}\n\n`,
+            // No ids at all: the frame is exactly what it was before ids existed.
+            `event: queued_input\ndata: ${JSON.stringify({ messages: ['three'] })}\n\n`,
+            `event: queued_input\ndata: ${JSON.stringify({ messages: ['four'], ids: [''] })}\n\n`,
+          ]),
+        ),
+      )
+      const onQueuedInput = vi.fn()
+      await streamChat({ content: 'hi' }, { onQueuedInput })
+
+      expect(onQueuedInput.mock.calls.map(([event]) => event)).toEqual([
+        { messages: ['one', 'two'], ids: ['msg-1', ''] },
+        { messages: ['three'] },
+        { messages: ['four'] },
+      ])
+    })
+
+    it('puts the send id on the wire as the idempotency key, never for zero retention', () => {
+      expect(buildChatWireBody({ content: 'hi', clientMessageId: 'msg-1' }).idempotency_key).toBe('msg-1')
+      // Byte-identical to before when the turn names no id, and never for a zero-retention turn.
+      expect('idempotency_key' in buildChatWireBody({ content: 'hi' })).toBe(false)
+      expect('idempotency_key' in buildChatWireBody({ content: 'hi', clientMessageId: 'msg-1', zdr: true })).toBe(false)
+      expect('idempotency_key' in buildChatWireBody({ content: 'hi', clientMessageId: '' })).toBe(false)
+    })
+  })
 })
 
 describe('chat-client tool wiring', () => {

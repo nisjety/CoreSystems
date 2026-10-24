@@ -64,6 +64,7 @@ import {
   type ComposerAttachment,
   type ComposerToolId,
   type GeneratedFile,
+  type QueuedInput,
   type StreamAttachment,
   type StreamFailureAction,
   TOOL_LABELS,
@@ -1312,6 +1313,91 @@ export function createId(prefix: string) {
     return `${prefix}-${crypto.randomUUID()}`
   }
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+}
+
+/**
+ * The id an ordinary send is named with, or `undefined` for none.
+ *
+ * The gateway stores the user's message under it, so a repeat of the same send (a retry after
+ * a lost reply, a queued message the run never took and `sendContent` then sends as a new turn)
+ * lands as ONE transcript row. Sent regardless of the gateway's `MODEL_GATEWAY_SEND_RECEIPTS`
+ * switch (which only decides whether it is honoured). Never for a zero-retention turn (nothing
+ * of it is stored, and an id would be a stored fact), a regenerate or an edited resubmit (both
+ * state the previous question again on purpose, as a new message), or a send that appends no
+ * user turn (continue generation). A send that repeats an earlier one passes its id in.
+ */
+export function sendClientMessageId(
+  options: {
+    zdr?: boolean
+    regenerated?: boolean
+    editResubmit?: boolean
+    appendUser?: boolean
+    clientMessageId?: string
+  },
+  mint: () => string,
+): string | undefined {
+  if (options.zdr || options.regenerated || options.editResubmit || options.appendUser === false) {
+    return undefined
+  }
+  return options.clientMessageId ?? mint()
+}
+
+/**
+ * Promote the mid-run messages a `queued_input` delivery names to delivered.
+ *
+ * By id when the delivery carries ids and the message has one: the id is ours, so this stays
+ * right when two messages say the same words. By text otherwise (a gateway that sends no ids,
+ * or a message queued before ids existed), which is also what keeps a message queued by
+ * another tab on the same run correct.
+ */
+export function markQueuedInputsDelivered(
+  entries: readonly QueuedInput[],
+  messages: readonly string[],
+  ids: readonly string[] = [],
+): QueuedInput[] {
+  const deliveredIds = new Set(ids.filter((id) => id.length > 0))
+  const deliveredTexts = new Set(messages.map((message) => message.trim()))
+  return entries.map((entry) => {
+    if (entry.state !== 'pending') return entry
+    const named = deliveredIds.size > 0 && Boolean(entry.clientMessageId)
+    const delivered = named
+      ? deliveredIds.has(entry.clientMessageId as string)
+      : deliveredTexts.has(entry.content.trim())
+    return delivered ? { ...entry, state: 'delivered', note: undefined } : entry
+  })
+}
+
+/**
+ * The run ended on its own. A message the gateway accepted that the run never took (it ended
+ * between two tool-round boundaries) is told apart from every other entry: it is returned in
+ * `resend`, to go out again as an ordinary turn under the same id, and marked `resent` in the
+ * strip. A refused message, one already delivered, and one that never reached the gateway
+ * (already waiting to go out) are left as they are.
+ */
+export function settleQueuedInputsAtRunEnd(entries: readonly QueuedInput[]): {
+  entries: QueuedInput[]
+  resend: QueuedInput[]
+} {
+  const resend: QueuedInput[] = []
+  const settled = entries.map((entry): QueuedInput => {
+    if (entry.state !== 'pending' || !entry.accepted) return entry
+    resend.push(entry)
+    return { ...entry, state: 'resent', accepted: false, note: undefined }
+  })
+  return { entries: settled, resend }
+}
+
+/**
+ * The mid-run strip a new turn starts with. A new turn owns the strip, so the previous run's
+ * entries go (they landed in the transcript or were reported refused); a turn that is itself a
+ * queued message going out again keeps the entries that say so, or "resent" would be gone the
+ * moment it appeared.
+ */
+export function queuedInputsForNewTurn(
+  entries: readonly QueuedInput[],
+  resendOfQueued: boolean,
+): QueuedInput[] {
+  return resendOfQueued ? entries.filter((entry) => entry.state === 'resent') : []
 }
 
 export function buildTaskSteps(

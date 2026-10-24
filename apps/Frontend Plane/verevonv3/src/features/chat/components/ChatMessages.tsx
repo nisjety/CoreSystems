@@ -2201,6 +2201,9 @@ export function QueuedInputStrip(props: { entries: QueuedInput[] }) {
   const label = (entry: QueuedInput) => {
     if (entry.state === 'delivered') return 'levert til agenten'
     if (entry.state === 'refused') return 'ikke levert'
+    // The run ended without taking it, so it went out again as an ordinary turn (same id: the
+    // transcript holds it once).
+    if (entry.state === 'resent') return i18n.tr('sendt på nytt som ny melding', 'resent as a new message')
     return 'venter'
   }
   return (

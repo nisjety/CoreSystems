@@ -126,6 +126,7 @@ import {
   extractCitationsFromToolOutput,
   formatUsageSummary,
   humanizeToolName,
+  markQueuedInputsDelivered,
   mergeServerTurnsWithCachedMetadata,
   messageToTurn,
   ACTIVE_RUN_STATUSES,
@@ -138,9 +139,12 @@ import {
   normalizeGeneratedFile,
   normalizeStep,
   normalizeToolCall,
+  queuedInputsForNewTurn,
   readBrowseWebPreference,
   searchCompletionDetail,
   searchQueryFromArgs,
+  sendClientMessageId,
+  settleQueuedInputsAtRunEnd,
   streamFailurePresentation,
   summarizeGrounding,
   summarizeToolResult,
@@ -2387,12 +2391,47 @@ export function useChatController() {
    */
   const followUpPending = createMemo(() => midRunDeliveries() > 0 || deferredSends().length > 0)
 
-  const noteQueuedInput =(id: string, next: QueuedInput['state'], note?: string) => {
+  const noteQueuedInput = (
+    id: string,
+    next: QueuedInput['state'],
+    note?: string,
+    patch: Partial<QueuedInput> = {},
+  ) => {
     setState((s) => {
       s.queuedInputs = s.queuedInputs.map((entry) =>
-        entry.id === id ? { ...entry, state: next, note } : entry,
+        entry.id === id ? { ...entry, ...patch, state: next, note } : entry,
       )
     })
+  }
+
+  /**
+   * What an accepted mid-run message was sent with (its model route and options), by strip entry
+   * id, so a message the run never took goes out again under the route it was typed with.
+   */
+  const queuedSendContext = new Map<string, { modelOverride: string | undefined; options: SendOptions }>()
+
+  /**
+   * The run ended on its own. A message the gateway accepted that the run never took (it ended
+   * between two tool-round boundaries) goes out again as an ordinary turn under the SAME id, so
+   * the transcript holds it once (the gateway stored it when it accepted it, and the resend finds
+   * that row) and the agent answers it. The strip says "resent" instead of leaving it waiting.
+   */
+  const resendUntakenQueuedInputs = () => {
+    const { entries, resend } = settleQueuedInputsAtRunEnd(state.queuedInputs)
+    if (resend.length === 0) return
+    setState((s) => { s.queuedInputs = entries })
+    setDeferredSends((pending) => [
+      ...pending,
+      ...resend.map((entry) => {
+        const sent = queuedSendContext.get(entry.id)
+        queuedSendContext.delete(entry.id)
+        return {
+          content: entry.content,
+          modelOverride: sent?.modelOverride,
+          options: { ...sent?.options, clientMessageId: entry.clientMessageId, resendOfQueued: true },
+        }
+      }),
+    ])
   }
 
   const deliverMidRun = async (
@@ -2402,7 +2441,14 @@ export function useChatController() {
   ) => {
     const requestId = state.requestId
     const id = createId('queued')
-    setState((s) => { s.queuedInputs = [...s.queuedInputs, { id, content, state: 'pending' }] })
+    // Named like any send, so the gateway stores it under the id before delivering it and the
+    // delivery can say which message it carries. Not for a zero-retention thread: nothing of it
+    // is stored, and the gateway refuses queued input there anyway.
+    const zdrThread = Boolean(options.zdr) || untrack(() => isTemporaryThread(state.threadId))
+    const clientMessageId = sendClientMessageId({ zdr: zdrThread }, () => createId('msg'))
+    setState((s) => {
+      s.queuedInputs = [...s.queuedInputs, { id, content, state: 'pending', clientMessageId }]
+    })
     if (!requestId) {
       // Streaming but no request id yet — the stream is still opening, so there
       // is nothing to deliver to. Deferring is right: the run is about to exist
@@ -2417,6 +2463,7 @@ export function useChatController() {
       result = await queueInvocationInput(requestId, content, {
         threadId: state.threadId ?? undefined,
         spaceRef: scopedThreadRefs.get(state.threadId ?? ''),
+        clientMessageId,
       })
     } finally {
       // Settled in the same batch as the outcome below, so a deferral is
@@ -2424,16 +2471,22 @@ export function useChatController() {
       setMidRunDeliveries((count) => count - 1)
     }
     if (result.outcome === 'queued') {
+      queuedSendContext.set(id, { modelOverride, options: { ...options } })
       noteQueuedInput(
         id,
         'pending',
         result.persisted ? undefined : 'Levert, men ikke lagret i samtalehistorikken.',
+        { accepted: true },
       )
       return
     }
     if (result.outcome === 'run_ended') {
-      setDeferredSends((pending) => [...pending, { content, modelOverride, options: { ...options } }])
-      noteQueuedInput(id, 'pending', 'Kjøringen ble ferdig – sendes som ny melding.')
+      // Under the same id: when the gateway already stored the message, the resend finds its row.
+      setDeferredSends((pending) => [
+        ...pending,
+        { content, modelOverride, options: { ...options, clientMessageId, resendOfQueued: true } },
+      ])
+      noteQueuedInput(id, 'resent', 'Kjøringen ble ferdig – sendes som ny melding.')
       return
     }
     noteQueuedInput(id, 'refused', result.message)
@@ -2466,7 +2519,9 @@ export function useChatController() {
     }
     // A new turn owns the mid-run strip: whatever the previous run showed there
     // has either landed in the transcript or been reported as refused.
-    if (state.queuedInputs.length > 0) setState((s) => { s.queuedInputs = [] })
+    if (state.queuedInputs.length > 0) {
+      setState((s) => { s.queuedInputs = queuedInputsForNewTurn(s.queuedInputs, options.resendOfQueued === true) })
+    }
 
     // WS14 S2a: the one place a turn becomes the turn that runs the approved
     // plan. The composer only REQUESTS it (`options.executeGranted`); every
@@ -2805,6 +2860,9 @@ export function useChatController() {
           zdr: options.zdr,
           regenerated: options.regenerated,
           editResubmit: options.editResubmit,
+          // The send's receipt. Absent for a zero-retention turn, a regenerate and an edited
+          // resubmit; a queued message sent again carries its original id.
+          clientMessageId: sendClientMessageId(options, () => createId('msg')),
           // Opt-in only: set just when the user picked a tiered catalog model.
           minPrivacyTier: options.minPrivacyTier,
           // Read at send time rather than captured earlier: the user may pin
@@ -2958,6 +3016,9 @@ export function useChatController() {
             }
             stopStreaming(undefined)
             markOpenSteps('done', 'Completed.', assistantId)
+            // The run is over: what it was handed is settled, and what it never took goes out
+            // again as an ordinary turn.
+            if (projection.accepts()) resendUntakenQueuedInputs()
             updateLocalRunHint(activeThreadId, 'completed', state.turns.find((turn) => turn.id === assistantId)?.runId)
             addAnswerVerificationStep(assistantId, turnTitle, tools.includes('search') || tools.includes('research'))
             // Proof is committed after the run settles. Read the server-owned
@@ -3483,18 +3544,13 @@ export function useChatController() {
       // delivered message showing as pending and a recall unshown. Each is
       // idempotent — a status promotion and two plain assignments — so a
       // replay from the start changes nothing it already set.
-      onQueuedInput: ({ messages }: Parameters<NonNullable<ChatStreamHandlers['onQueuedInput']>>[0]) => {
-        // The agent now has it. Matched by content rather than by id: the
-        // backend echoes the text it delivered, and the id is ours alone —
-        // matching on text is what makes this correct even for a message
-        // queued by another tab on the same run.
-        const delivered = new Set(messages.map((message) => message.trim()))
+      onQueuedInput: ({ messages, ids }: Parameters<NonNullable<ChatStreamHandlers['onQueuedInput']>>[0]) => {
+        // The agent now has it. By the message's own id when the delivery names ids (right even
+        // when two messages say the same words), by content otherwise: the backend echoes the
+        // text it delivered, and matching on text is what keeps a message queued by another tab
+        // on the same run correct.
         setState((s) => {
-          s.queuedInputs = s.queuedInputs.map((entry) =>
-            delivered.has(entry.content.trim()) && entry.state === 'pending'
-              ? { ...entry, state: 'delivered', note: undefined }
-              : entry,
-          )
+          s.queuedInputs = markQueuedInputsDelivered(s.queuedInputs, messages, ids)
         })
       },
       onMemoryRecall: ({ count, latencyMs, memories }: Parameters<NonNullable<ChatStreamHandlers['onMemoryRecall']>>[0]) => {

@@ -374,11 +374,30 @@ message AppendMessageRequest {
   // ∩ binding), and a later rename must not rewrite what the room saw. Empty
   // for user/system/tool messages and for un-personified assistant turns.
   string agent_name = 17;
+
+  // The caller's id for this message, so a repeat of the same send (a retry
+  // after a lost reply, a queued message the run never took and the client
+  // then sends as a new turn) lands as ONE transcript row. Unique within the
+  // thread: a repeat with the same role and content answers with the first
+  // row's sequence and message id and `deduplicated = true` (no second event,
+  // no second memory extraction); the same id with different content is
+  // ALREADY_EXISTS. Opaque: matches ^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$, never
+  // derived from content, and never sent for a zero-retention turn (such a
+  // credential cannot append at all). Empty = no receipt, today's behaviour.
+  string client_message_id = 18;
 }
 
 message AppendMessageResponse {
   // Assigned message sequence number within the thread.
   uint64 sequence = 1;
+
+  // Durable id of the stored message: the new row's, or, when `deduplicated`,
+  // the earlier row's the caller's id already named.
+  string message_id = 2;
+
+  // True when the append found the caller's `client_message_id` already stored
+  // and wrote nothing.
+  bool deduplicated = 3;
 }
 
 // --- StartRun ---

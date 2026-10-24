@@ -2839,7 +2839,18 @@ async fn append_message_inner(
 
     Ok(Response::new(pb::AppendMessageResponse {
         sequence: appended.sequence,
+        message_id: appended.message_id,
+        deduplicated: appended.deduplicated,
     }))
+}
+
+/// A caller's `client_message_id` has the shape the `messages` CHECK allows, so a malformed one is
+/// refused as a bad argument here instead of surfacing as a database error from the CHECK.
+fn valid_client_message_id(id: &str) -> bool {
+    let mut bytes = id.bytes();
+    bytes.next().is_some_and(|first| first.is_ascii_alphanumeric())
+        && id.len() <= 128
+        && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
 /// Memory candidates an append extracted inside its transaction, to mirror
@@ -2854,6 +2865,11 @@ pub(crate) struct AppendedMemory {
 /// One message appended inside a caller's still-open transaction.
 pub(crate) struct AppendedMessage {
     pub(crate) sequence: u64,
+    /// The stored row's id: the new row's, or the earlier row's when `deduplicated`.
+    pub(crate) message_id: String,
+    /// The caller's `client_message_id` was already stored, so nothing was written (no event, no
+    /// memory extraction).
+    pub(crate) deduplicated: bool,
     pub(crate) memory: Option<AppendedMemory>,
 }
 
@@ -2876,6 +2892,12 @@ pub(crate) async fn append_message_in_tx(
     } else {
         ""
     };
+    let client_message_id = req.client_message_id.trim();
+    if !client_message_id.is_empty() && !valid_client_message_id(client_message_id) {
+        return Err(Status::invalid_argument(
+            "client_message_id must match [A-Za-z0-9][A-Za-z0-9_-]{0,127}",
+        ));
+    }
     let msg_id = new_ulid();
     let now = Utc::now();
     let mut letta_sync: Option<AppendedMemory> = None;
@@ -3004,6 +3026,39 @@ pub(crate) async fn append_message_in_tx(
         metadata_json.as_object_mut().map(|map| map.remove("retrieval_scope"));
     }
 
+    // A repeat of a send the thread already holds (the caller's reply was lost, or it sends as a
+    // new turn a mid-run message the run never took) is answered with the first row and writes
+    // nothing: no second row, event or memory extraction. Looked up under the thread lock and
+    // after every authority check above, so a replay is held to the same checks as the first
+    // send and two concurrent repeats serialise here; the unique index is only the backstop.
+    // Compared trimmed: the queue path stores the trimmed text and the resend carries the
+    // composer's own.
+    if !client_message_id.is_empty() {
+        let existing: Option<(String, i64, String, String)> = sqlx::query_as(
+            "SELECT id, sequence, role, content FROM messages
+             WHERE thread_id = $1 AND client_message_id = $2",
+        )
+        .bind(&req.thread_id)
+        .bind(client_message_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+        if let Some((existing_id, existing_sequence, existing_role, existing_content)) = existing {
+            if existing_role != req.role || existing_content.trim() != req.content.trim() {
+                return Err(Status::already_exists(
+                    "client_message_id already names a different message in this thread",
+                ));
+            }
+            return Ok(AppendedMessage {
+                sequence: u64::try_from(existing_sequence)
+                    .map_err(|_| Status::internal("message sequence out of range"))?,
+                message_id: existing_id,
+                deduplicated: true,
+                memory: None,
+            });
+        }
+    }
+
     let row: (i64, Option<String>, Option<String>, Option<i64>, Option<String>, Option<i64>, Option<String>) = sqlx::query_as(
         "INSERT INTO messages
          (id, thread_id, role, content, created_at, agent_name, metadata, space_id, recipient_audience_ref,
@@ -3027,6 +3082,17 @@ pub(crate) async fn append_message_in_tx(
     .fetch_one(&mut **tx)
     .await
     .map_err(|e| Status::internal(e.to_string()))?;
+
+    // A separate statement, and only when an id came with the send, so a send without one never
+    // touches the column (the same INSERT as before the column existed).
+    if !client_message_id.is_empty() {
+        sqlx::query("UPDATE messages SET client_message_id = $2 WHERE id = $1")
+            .bind(&msg_id)
+            .bind(client_message_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+    }
 
     // The list's paging key, written in the same transaction as the message so
     // the cursor moves exactly when the message does. Non-owner Space appends
@@ -3125,6 +3191,8 @@ pub(crate) async fn append_message_in_tx(
 
     Ok(AppendedMessage {
         sequence,
+        message_id: msg_id,
+        deduplicated: false,
         memory: letta_sync,
     })
 }
@@ -3276,6 +3344,194 @@ mod source_scope_db_tests {
             .bind(&org).fetch_all(&pool).await.unwrap();
         assert!(contents.iter().any(|value| value.contains("sjøgrønn")), "new explicit learning remains available");
         assert!(contents.iter().all(|value| !value.contains("ravgul")));
+    }
+}
+
+/// Durable send receipts (WS04 S6): `AppendMessage` with a `client_message_id`.
+#[cfg(test)]
+mod send_receipt_tests {
+    use super::*;
+    use mp_contracts::model_plane::v1::session_core_server::SessionCore;
+
+    #[test]
+    fn a_client_message_id_has_the_shape_the_messages_check_allows() {
+        for good in ["a", "0", "msg_01-X", &"a".repeat(128), "Z9_-_-"] {
+            assert!(valid_client_message_id(good), "{good}");
+        }
+        for bad in ["", "-a", "_a", "a b", "a.b", "a/b", "é", &"a".repeat(129), "a\n"] {
+            assert!(!valid_client_message_id(bad), "{bad:?}");
+        }
+    }
+
+    /// A zero-retention credential cannot append at all, so no message row and no client id of a
+    /// zero-retention turn can exist. Served through the trait method: the refusal comes before
+    /// any thread lookup (the pool goes nowhere) and is the closed durable-write refusal, never a
+    /// dedupe answer.
+    #[tokio::test]
+    async fn a_zdr_credential_cannot_reach_append_message_with_a_client_id() {
+        let service = SessionService {
+            pool: sqlx::postgres::PgPoolOptions::new()
+                .acquire_timeout(std::time::Duration::from_millis(250))
+                .connect_lazy("postgresql://session-core@127.0.0.1:1/session_core")
+                .expect("lazy pool"),
+            retrieval_client: None,
+            graph_client: None,
+            knowledge_client: None,
+            letta_memory: None,
+            audit_publisher: None,
+            auth: None,
+            grant_columns: crate::grpc::ThreadGrantColumns::present(),
+        };
+        let mut request = Request::new(pb::AppendMessageRequest {
+            thread_id: "thread-1".into(),
+            role: "user".into(),
+            content: "hello".into(),
+            client_message_id: "msg-1".into(),
+            ..Default::default()
+        });
+        request
+            .extensions_mut()
+            .insert(VerifiedIdentity::user_for_test_with_zdr("org-1", "u1", true));
+        let refused = service
+            .append_message(request)
+            .await
+            .expect_err("a zero-retention credential writes nothing");
+        assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+    }
+
+    async fn connect() -> PgPool {
+        let pool = PgPool::connect(&std::env::var("DATABASE_URL").expect("disposable database required"))
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        pool
+    }
+
+    async fn thread(pool: &PgPool, org: &str, key: &str) -> String {
+        create_thread_inner(
+            pool,
+            pb::CreateThreadRequest {
+                session_key: key.into(),
+                org_id: org.into(),
+                user_id: "test-user".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .thread_id
+    }
+
+    fn send(thread: &str, role: &str, content: &str, id: &str) -> pb::AppendMessageRequest {
+        pb::AppendMessageRequest {
+            thread_id: thread.into(),
+            role: role.into(),
+            content: content.into(),
+            client_message_id: id.into(),
+            ..Default::default()
+        }
+    }
+
+    async fn append(pool: &PgPool, req: pb::AppendMessageRequest) -> Result<pb::AppendMessageResponse, Status> {
+        append_message_inner(pool, None, MemoryRetention::Durable, req, "test-user")
+            .await
+            .map(Response::into_inner)
+    }
+
+    async fn count(pool: &PgPool, sql: &str, bind: &str) -> i64 {
+        sqlx::query_scalar(sql).bind(bind).fetch_one(pool).await.unwrap()
+    }
+
+    /// The plan's receipt test: a repeat of one id is one row, one `MESSAGE_APPENDED` event and
+    /// one memory extraction, and answers with the first row's sequence and id.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn a_duplicate_send_is_one_row_one_event_and_one_memory_extraction() {
+        let pool = connect().await;
+        let suffix = new_ulid();
+        let org = format!("receipt-test-{suffix}");
+        let thread = thread(&pool, &org, &format!("receipt-{suffix}")).await;
+        // The extractor learns from "Husk at ...": a second extraction would be a second memory row.
+        let said = "Husk at kvitteringstesten er ravgul.";
+
+        let first = append(&pool, send(&thread, "user", said, "msg-1")).await.unwrap();
+        // The queue path stores the trimmed text and the resend carries the composer's own.
+        let again = append(&pool, send(&thread, "user", &format!("  {said}\n"), "msg-1")).await.unwrap();
+
+        assert!(!first.deduplicated && !first.message_id.is_empty());
+        assert!(again.deduplicated);
+        assert_eq!((again.sequence, &again.message_id), (first.sequence, &first.message_id));
+        let rows = count(&pool, "SELECT COUNT(*) FROM messages WHERE thread_id = $1", &thread).await;
+        assert_eq!(rows, 1, "one transcript row");
+        let events = count(
+            &pool,
+            "SELECT COUNT(*) FROM events WHERE event_type = 'MESSAGE_APPENDED' AND run_id = $1",
+            &thread,
+        )
+        .await;
+        assert_eq!(events, 1, "one MESSAGE_APPENDED event");
+        let memories = count(&pool, "SELECT COUNT(*) FROM agent_memory WHERE org_id = $1", &org).await;
+        assert_eq!(memories, 1, "one memory extraction");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn the_same_id_with_other_content_or_role_is_a_conflict_and_writes_nothing() {
+        let pool = connect().await;
+        let suffix = new_ulid();
+        let thread = thread(&pool, &format!("receipt-test-{suffix}"), &format!("conflict-{suffix}")).await;
+        append(&pool, send(&thread, "user", "first words", "msg-1")).await.unwrap();
+
+        for other in [send(&thread, "user", "other words", "msg-1"), send(&thread, "assistant", "first words", "msg-1")] {
+            let refused = append(&pool, other).await.unwrap_err();
+            assert_eq!(refused.code(), tonic::Code::AlreadyExists);
+        }
+        let rows = count(&pool, "SELECT COUNT(*) FROM messages WHERE thread_id = $1", &thread).await;
+        assert_eq!(rows, 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn an_id_names_a_message_within_its_thread_and_a_send_without_one_is_never_deduplicated() {
+        let pool = connect().await;
+        let suffix = new_ulid();
+        let org = format!("receipt-test-{suffix}");
+        let (one, two) = (
+            thread(&pool, &org, &format!("one-{suffix}")).await,
+            thread(&pool, &org, &format!("two-{suffix}")).await,
+        );
+        let a = append(&pool, send(&one, "user", "same words", "msg-1")).await.unwrap();
+        let b = append(&pool, send(&two, "user", "same words", "msg-1")).await.unwrap();
+        assert!(!a.deduplicated && !b.deduplicated, "the same id on another thread is another message");
+        assert_ne!(a.message_id, b.message_id);
+
+        // No id: today's behaviour, two identical sends are two rows.
+        append(&pool, send(&one, "user", "no id", "")).await.unwrap();
+        let again = append(&pool, send(&one, "user", "no id", "")).await.unwrap();
+        assert!(!again.deduplicated);
+        let rows = count(&pool, "SELECT COUNT(*) FROM messages WHERE thread_id = $1", &one).await;
+        assert_eq!(rows, 3);
+
+        let malformed = append(&pool, send(&one, "user", "x", "has space")).await.unwrap_err();
+        assert_eq!(malformed.code(), tonic::Code::InvalidArgument);
+    }
+
+    /// Concurrent repeats serialise on the thread lock: one writes, the rest are told it exists.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn concurrent_duplicates_serialise_on_the_thread_lock() {
+        let pool = connect().await;
+        let suffix = new_ulid();
+        let thread = thread(&pool, &format!("receipt-test-{suffix}"), &format!("race-{suffix}")).await;
+        let attempts = (0..8).map(|_| append(&pool, send(&thread, "user", "racing words", "msg-race")));
+        let answers = futures::future::join_all(attempts).await;
+
+        let answers: Vec<_> = answers.into_iter().map(|answer| answer.expect("every attempt is answered")).collect();
+        assert_eq!(answers.iter().filter(|answer| !answer.deduplicated).count(), 1, "one writer");
+        assert!(answers.iter().all(|answer| answer.message_id == answers[0].message_id));
+        let rows = count(&pool, "SELECT COUNT(*) FROM messages WHERE thread_id = $1", &thread).await;
+        assert_eq!(rows, 1);
     }
 }
 
