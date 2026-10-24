@@ -1412,6 +1412,30 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D2-413 | WS24-S6 | live-proof | P1 | Live proof not done here (no docker): capability-core migration 0022 applies at boot; MP/scripts/tests/tickets-create-proof.sh gives the same result with MODEL_ACTION_ADMISSION=table; decode the v2 claims (no secrets). Also run the DB test with -tags integration against DATABASE_URL. | open |
 | D2-414 | WS24-S6 | follow-up | P3 | 16 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-17.json | open |
 
+
+### Wave-mode batch W2-18 (2026-10-24)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D2-415 | WS17-S4 | follow-up | P1 | CoreSidebar.tsx does not yet pass onOpenSearchHit={openThread} to ChatSidebarOrganizer (shared edit in lead_todo), so clicking or pressing Enter on a server hit does nothing; apply the one-line prop before the behaviour is switched on. | open |
+| D2-416 | WS17-S4 | follow-up | P1 | chat-sidebar-organizer.css has zero .chat-search-results rules, so the results block renders unstyled; the lead_todo CSS block must be appended before the browser proof. | open |
+| D2-417 | WS17-S4 | live-proof | P1 | Live Playwright run: cd 'apps/Frontend Plane/verevonv3' && pnpm test:e2e -- chat-history (needs the auth setup and the stack at localhost:5199; lead runs it). | open |
+| D2-418 | WS17-S4 | live-proof | P1 | Browser proof on the rebuilt stack: seed a thread older than page 1 with a distinctive body word, capture the search request and response, screenshots in no and en, and typing-to-option time (target <= 1 s), then click the hit and confirm the thread opens. | open |
+| D2-419 | WS17-S4 | live-proof | P1 | Flag-off case: confirm the local filter still works and the unavailable message shows. | open |
+| D2-420 | WS17-S4 | live-proof | P1 | Apply the lead_todo shared edits (CoreSidebar.tsx prop and the chat-sidebar-organizer.css rules) before the proof; neither is in this slice's ownership set. | open |
+| D2-421 | WS17-S4 | live-proof | P1 | Rebuild the gateway (docker compose ... up -d --no-deps --build gateway) and keep SESSION_CORE_MESSAGE_SEARCH_ENABLED on in the proof stack; the lead owns Docker. | open |
+| D2-422 | WS17-S4 | live-proof | P1 | DoD evidence (lead-run, after the shared edits above): rebuild the gateway with docker compose -f "apps/Frontend Plane/verevonv3/docker-compose.yml" up -d --no-deps --build gateway (restarts the frontend container). Keep WS17-S3 flag SESSION_CORE_MESSAGE_SEARCH_ENABLED on in the proof stack, and run a second Vite dev server on this worktree (:5173 is the main checkout). Seed a thread older than page 1 with a distinctive body word, then capture: the search request and its response, a screenshot of the results above the list in no and en, and the time from typing to the option appearing (target <= 1 s). Then click the hit and confirm the thread opens. Also run the flag-off case and confirm the local filter stands with the unavailable message. | open |
+| D2-423 | WS17-S4 | follow-up | P3 | 12 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-18.json | open |
+| D2-424 | WS24-S7 | risk | P1 | ValidateForAgentAction still requires agent_action entitlement for every row, so a read-class row cannot be offered without it; WS24-S8 must add a read-class validator before any read row is seeded. | open |
+| D2-425 | WS24-S7 | test-gap | P1 | The execution-core lib test target does not compile at this worktree state (RunAgentRequest.attachments and DecideApprovalRequest decision_source/scope), so ticket_tools' new unit test has not been run. | open |
+| D2-426 | WS24-S7 | risk | P1 | The decision lane ignores RUN_ACTION_TARGETS: RunActionDecisionRequest.Validate and IssueRunActionDecision use the full table via runActionTarget/runActionTargetFor, and ValidateCurrentRunActionDecision dropped its tickets.create pin, so under tickets_only a decision for any seeded row is issued and validated; this must be mode-gated before a second row is seeded (no current effect, since only tickets.create is seeded). | open |
+| D2-427 | WS24-S7 | risk | P1 | RunActionDecisionRequest.Validate and the decision path never compare ActionSchemaHash to the admitted table row's SchemaHash (pre-existing at HEAD), so a decision can commit to a schema hash other than the one the view offered; bind it to target.SchemaHash with a test before the table is widened. | open |
+| D2-428 | WS24-S7 | follow-up | P1 | The read-class branch from the row (class read needs no agent_action entitlement) is not implemented: ValidateForAgentAction requires AgentActionEntitled for every row, which is safe for the single write row but must be reworked by WS24-S8 before any read row is seeded. | open |
+| D2-429 | WS24-S7 | test-gap | P1 | The execution-core lib test target does not compile in this worktree because of browser_events.rs:355/:436 (another slice's proto/source mismatch), so the new ticket_tools test model_action_view_request_names_pinned_actions_only_with_the_table has not been run; non-test lib check passes. | open |
+| D2-430 | WS24-S7 | live-proof | P1 | Lead shared edit in apps/Control Plane/user-core/internal/http/model_action_decision.go (outside this slice's ownership): add ActionIDs []string `json:"action_ids,omitempty"` to modelActionViewRequest; when non-empty call spaces.IssueModelActionViewV2 with Targets from spaces.RunActionTargetsModeFromLookup(os.Getenv), then spaces.SignModelActionViewV2; keep the v1 path unchanged when empty. Add an HTTP test for action_ids. Do not enable MODEL_ACTION_ADMISSION=table in execution-core before this lands. | open |
+| D2-431 | WS24-S7 | live-proof | P1 | Reconcile execution-core browser_events.rs:355 and :436 (missing decision_source and scope in DecideApprovalRequest initializers) owned by another slice, then run cargo test -q -p execution-core --lib ticket_tools to execute the new unit test. | open |
+| D2-432 | WS24-S7 | follow-up | P3 | 16 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-18.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
@@ -1547,3 +1571,4 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS08-S4.code | zdr, policy | W1-21 | no |
 | WS24-S2 | data-loss, policy | W2-17 | no |
 | WS24-S6 | authority, policy, zdr | W2-17 | no |
+| WS24-S7 | authority, auth, policy, zdr | W2-18 | no |
