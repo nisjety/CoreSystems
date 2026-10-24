@@ -106,10 +106,70 @@ type skillRow struct {
 	ProposalReason string    `json:"proposal_reason,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
+	// PromotedFrom is read on create only: the id of the shared, accepted user
+	// skill an admin is copying into an org skill. The copy is a new row; the
+	// source is untouched, and the revision log records where it came from.
+	PromotedFrom string `json:"promoted_from,omitempty"`
 }
 
 func validSkillScope(value string) bool {
 	return value == "org" || value == "user"
+}
+
+// skillActorSQL names the actor of the skill change the transaction is about to
+// make. Skill revisions are written by a trigger on agent_skills (session-core
+// migration 0064), which reads these transaction-local settings; the names are
+// pinned to the migration by TestSkillActorSettingsMatchTheMigration. run_id and
+// thread_id are session-core's (a learned proposal's source); the registry has none.
+const skillActorSQL = `SELECT set_config('mp.actor_kind', $1, true), set_config('mp.actor_id', $2, true),
+	set_config('mp.run_id', '', true), set_config('mp.thread_id', '', true),
+	set_config('mp.reason', $3, true), set_config('mp.skill_action', $4, true)`
+
+// skillTxBeginner is the pool's transaction entry point. The registry's own
+// interface stays Exec/Query/QueryRow so fakes need not implement it; a skill
+// mutation needs it, and a database without it cannot mutate a skill at all.
+type skillTxBeginner interface {
+	Begin(context.Context) (pgx.Tx, error)
+}
+
+var errSkillTransactionUnavailable = errors.New("skill mutations need a transactional database")
+
+// skillActor is the verified caller as the revision log names it: "user" or
+// "service" and the principal id, never anything the request body claims.
+func skillActor(r *http.Request) (kind, id string) {
+	principal, ok := authctx.PrincipalFromContext(r.Context())
+	if !ok {
+		return "", ""
+	}
+	if principal.PrincipalType == "user" || principal.PrincipalType == "service" {
+		kind = principal.PrincipalType
+	}
+	return kind, principal.ActorID
+}
+
+// mutateSkill runs fn in one transaction that has first named the caller as the
+// actor, so the revision the trigger writes for every row fn changes carries who
+// did it. action is "" unless the change is a decision the trigger cannot derive
+// ("promoted").
+func (h *SkillsHandler) mutateSkill(r *http.Request, action, reason string, fn func(tx registryDatabase) error) error {
+	beginner, ok := h.pool.(skillTxBeginner)
+	if !ok {
+		return errSkillTransactionUnavailable
+	}
+	ctx := r.Context()
+	tx, err := beginner.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	kind, id := skillActor(r)
+	if _, err := tx.Exec(ctx, skillActorSQL, kind, id, reason, action); err != nil {
+		return err
+	}
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // normalizeSkillShares validates and cleans a caller-supplied grantee list:
@@ -226,13 +286,47 @@ func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 		fp, _ := json.Marshal(s.TriggerFilePatterns)
 		tr, _ := json.Marshal(s.ToolRestrictions)
 		sw, _ := json.Marshal(s.SharedWith)
-		_, err := h.pool.Exec(r.Context(), `
-			INSERT INTO agent_skills (id, org_id, name, description, content,
-			    trigger_keywords, trigger_file_patterns, tool_restrictions,
-			    enabled, scope, owner_user_id, shared_with, created_at, updated_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
-		`, s.ID, s.OrgID, s.Name, s.Description, s.Content, kw, fp, tr, s.Enabled,
-			s.Scope, s.OwnerUserID, sw, now, now)
+		// A promotion copies a skill that was shared with the admin into an org
+		// skill. It is never a way to reach a private one: the source must be a
+		// user skill its owner accepted and shared, by the same rule the list uses.
+		action, reason := "", ""
+		promotedFrom := strings.TrimSpace(s.PromotedFrom)
+		if promotedFrom != "" {
+			if !mcpIdentifier.MatchString(promotedFrom) || s.Scope != "org" {
+				jsonErr(w, "promoted_from must name a skill and create an org skill", http.StatusUnprocessableEntity)
+				return
+			}
+			action, reason = "promoted", "promoted_from:"+promotedFrom
+		}
+		var sourceMissing bool
+		err := h.mutateSkill(r, action, reason, func(tx registryDatabase) error {
+			if promotedFrom != "" {
+				var visible bool
+				if err := tx.QueryRow(r.Context(), `
+					SELECT EXISTS (SELECT 1 FROM agent_skills
+					WHERE id = $1 AND org_id = $2 AND scope = 'user' AND review_state = 'accepted'
+					  AND (shared_with ? $3 OR ($4 AND jsonb_array_length(shared_with) > 0)))
+				`, promotedFrom, s.OrgID, verifiedActorID(r), verifiedIsAdmin(r)).Scan(&visible); err != nil {
+					return err
+				}
+				if !visible {
+					sourceMissing = true
+					return nil
+				}
+			}
+			_, err := tx.Exec(r.Context(), `
+				INSERT INTO agent_skills (id, org_id, name, description, content,
+				    trigger_keywords, trigger_file_patterns, tool_restrictions,
+				    enabled, scope, owner_user_id, shared_with, created_at, updated_at)
+				VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+			`, s.ID, s.OrgID, s.Name, s.Description, s.Content, kw, fp, tr, s.Enabled,
+				s.Scope, s.OwnerUserID, sw, now, now)
+			return err
+		})
+		if sourceMissing {
+			jsonErr(w, "promotion source not found", http.StatusNotFound)
+			return
+		}
 		if err != nil {
 			jsonErr(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -332,22 +426,32 @@ func (h *SkillsHandler) update(w http.ResponseWriter, r *http.Request, id string
 	}
 	// A learned skill becomes active by its owner's decision, never by a switch:
 	// enabling is refused for anything not accepted, in the statement itself so
-	// no write can race the check.
-	result, err := h.pool.Exec(r.Context(), `
-		UPDATE agent_skills
-		SET enabled=COALESCE($1, enabled), description=COALESCE(NULLIF($2, ''), description),
-			content=COALESCE(NULLIF($3, ''), content), shared_with=COALESCE($4, shared_with),
-			updated_at=$5
-		WHERE id=$6 AND org_id=$7 AND ($1::boolean IS NOT TRUE OR review_state = 'accepted')
-	`, enabled, update.Description, update.Content, sharedJSON, now, id, orgID)
-	if err == nil && result.RowsAffected() == 0 && update.Enabled != nil && *update.Enabled {
-		var reviewState string
-		if h.pool.QueryRow(r.Context(), `
-			SELECT review_state FROM agent_skills WHERE id=$1 AND org_id=$2
-		`, id, orgID).Scan(&reviewState) == nil && reviewState != "accepted" {
-			jsonErr(w, "proposal_requires_decision", http.StatusConflict)
-			return
+	// no write can race the check. The change runs in a transaction that names
+	// the caller, so its revision carries the actor.
+	var result pgconn.CommandTag
+	proposalUndecided := false
+	err := h.mutateSkill(r, "", "", func(tx registryDatabase) error {
+		var err error
+		result, err = tx.Exec(r.Context(), `
+			UPDATE agent_skills
+			SET enabled=COALESCE($1, enabled), description=COALESCE(NULLIF($2, ''), description),
+				content=COALESCE(NULLIF($3, ''), content), shared_with=COALESCE($4, shared_with),
+				updated_at=$5
+			WHERE id=$6 AND org_id=$7 AND ($1::boolean IS NOT TRUE OR review_state = 'accepted')
+		`, enabled, update.Description, update.Content, sharedJSON, now, id, orgID)
+		if err == nil && result.RowsAffected() == 0 && update.Enabled != nil && *update.Enabled {
+			var reviewState string
+			if tx.QueryRow(r.Context(), `
+				SELECT review_state FROM agent_skills WHERE id=$1 AND org_id=$2
+			`, id, orgID).Scan(&reviewState) == nil && reviewState != "accepted" {
+				proposalUndecided = true
+			}
 		}
+		return err
+	})
+	if proposalUndecided {
+		jsonErr(w, "proposal_requires_decision", http.StatusConflict)
+		return
 	}
 	if !writeSingleScopedMutation(w, "agent skill", result, err) {
 		return
@@ -356,7 +460,12 @@ func (h *SkillsHandler) update(w http.ResponseWriter, r *http.Request, id string
 }
 
 func (h *SkillsHandler) delete(w http.ResponseWriter, r *http.Request, id string) {
-	result, err := h.pool.Exec(r.Context(), `DELETE FROM agent_skills WHERE id=$1 AND org_id=$2`, id, verifiedOrganizationID(r))
+	var result pgconn.CommandTag
+	err := h.mutateSkill(r, "", "", func(tx registryDatabase) error {
+		var err error
+		result, err = tx.Exec(r.Context(), `DELETE FROM agent_skills WHERE id=$1 AND org_id=$2`, id, verifiedOrganizationID(r))
+		return err
+	})
 	if !writeSingleScopedMutation(w, "agent skill", result, err) {
 		return
 	}

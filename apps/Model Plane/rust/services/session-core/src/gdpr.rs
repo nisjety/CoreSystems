@@ -155,6 +155,7 @@ pub struct PurgeSummary {
     pub threads: u64,
     pub hook_configs: u64,
     pub agent_skills: u64,
+    pub skill_revisions: u64,
     pub agent_memory: u64,
     pub user_memory_controls: u64,
     pub forgotten_memory_ids: u64,
@@ -198,6 +199,7 @@ impl PurgeSummary {
             + self.threads
             + self.hook_configs
             + self.agent_skills
+            + self.skill_revisions
             + self.agent_memory
             + self.user_memory_controls
             + self.forgotten_memory_ids
@@ -392,6 +394,15 @@ pub async fn purge_organization_data(
         .rows_affected();
 
     summary.agent_skills = sqlx::query("DELETE FROM agent_skills WHERE org_id = $1")
+        .bind(org_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+
+    // After the skills, not before: deleting a skill row writes a `deleted`
+    // revision holding its text (agent_skills_revision_trg), and that revision
+    // must be erased with the rest.
+    summary.skill_revisions = sqlx::query("DELETE FROM skill_revisions WHERE org_id = $1")
         .bind(org_id)
         .execute(&mut *tx)
         .await?
@@ -636,6 +647,7 @@ mod tests {
             threads: 1,
             hook_configs: 1,
             agent_skills: 1,
+            skill_revisions: 1,
             agent_memory: 1,
             user_memory_controls: 1,
             forgotten_memory_ids: 1,
@@ -656,7 +668,7 @@ mod tests {
         };
         assert_eq!(
             summary.total(),
-            27,
+            28,
             "total() must count only Postgres rows; semantic-tier counts belong \
              to erasure_is_complete(), not to this sum"
         );
@@ -757,5 +769,10 @@ mod tests {
             "events' run_id sweep must run while runs still exist"
         );
         assert!(runs < threads, "runs must be purged before threads");
+        assert!(
+            pos("DELETE FROM agent_skills WHERE org_id = $1")
+                < pos("DELETE FROM skill_revisions WHERE org_id = $1"),
+            "deleting a skill writes a revision holding its text, so the revisions are purged after the skills"
+        );
     }
 }

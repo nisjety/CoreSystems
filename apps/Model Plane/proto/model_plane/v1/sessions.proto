@@ -270,6 +270,26 @@ service MessageSearch {
   rpc SearchMessages(SearchMessagesRequest) returns (SearchMessagesResponse);
 }
 
+// LearningGovernanceService: the owner's decisions on what Verevon learned from their
+// conversations (WS07 S8). A separate service, as MessageSearch is, so that
+// SessionCore and every mock of it stay source-compatible. Every RPC is the
+// owner's own: a service credential is refused, and a person never reaches
+// another person's skill proposals or ledger.
+service LearningGovernanceService {
+  // Accept or reject one learned-skill proposal. Only the person the proposal
+  // belongs to may decide, and only while it is still proposed.
+  rpc DecideSkillProposal(DecideSkillProposalRequest) returns (DecideSkillProposalResponse);
+
+  // Undo one ledger entry of a skill by restoring the snapshot taken before it.
+  // Only the latest entry of a skill can be undone, and only by its owner. A
+  // learned memory is not undone here: it is erased by DeleteMemory.
+  rpc UndoLearningEntry(UndoLearningEntryRequest) returns (UndoLearningEntryResponse);
+
+  // The owner's ledger of what was learned and changed: skill revisions and the
+  // memories the extractor wrote, newest first.
+  rpc ListLearningLedger(ListLearningLedgerRequest) returns (ListLearningLedgerResponse);
+}
+
 // --- CreateThread ---
 
 message CreateThreadRequest {
@@ -983,8 +1003,8 @@ message UpsertAgentSkillResponse {
   // "org_policy", "zdr", "protected", "accepted_exists", "rejected_exists",
   // "owner_required". Empty when the write happened.
   string skip_reason = 4;
-  // The row's revision after the write. Reserved for the revision ledger (S8);
-  // 0 until then.
+  // The row's revision number after the write, from the revision log; 0 when
+  // nothing was written.
   int64 revision = 5;
 }
 
@@ -1028,7 +1048,7 @@ message AgentSkill {
   string proposal_reason = 16;
   // RFC 3339, UTC.
   string updated_at = 17;
-  // Reserved for the revision ledger (S8); 0 until then.
+  // The skill's newest revision number in the revision log.
   int64 revision = 18;
 }
 
@@ -1719,4 +1739,107 @@ message SearchMessagesResponse {
   repeated SearchHit hits = 1;
   // Empty when there is no further page.
   string next_cursor = 2;
+}
+
+// --- LearningGovernance (WS07 S8) ---
+
+// The owner's decision on a proposal. Values are prefixed because proto enum
+// values share the package scope.
+enum SkillDecision {
+  SKILL_DECISION_UNSPECIFIED = 0;
+  SKILL_DECISION_ACCEPT = 1;
+  SKILL_DECISION_REJECT = 2;
+}
+
+// The owner's decision on one learned-skill proposal.
+message DecideSkillProposalRequest {
+  // Tenant. Must equal the verified caller's organization.
+  string org_id = 1;
+  // The proposal, by id.
+  string skill_id = 2;
+  SkillDecision decision = 3;
+}
+
+// The skill as the decision left it.
+message DecideSkillProposalResponse {
+  // The skill's review state after the call: "accepted" or "rejected".
+  string review_state = 1;
+  // Whether the skill is injected now. An accepted skill is; a rejected one is not.
+  bool enabled = 2;
+  // The skill's revision after the decision.
+  int64 revision = 3;
+}
+
+// The ledger entry to undo.
+message UndoLearningEntryRequest {
+  // Tenant. Must equal the verified caller's organization.
+  string org_id = 1;
+  // The ledger entry to undo (`LearningLedgerEntry.entry_id`).
+  string entry_id = 2;
+}
+
+// What the undo did to the skill.
+message UndoLearningEntryResponse {
+  // What the undo did to the skill: "restored" (its before-snapshot is back) or
+  // "deleted" (the entry had created the skill).
+  string action = 1;
+  string skill_id = 2;
+  // The skill's revision after the undo.
+  int64 revision = 3;
+}
+
+// One page of the owner's ledger.
+message ListLearningLedgerRequest {
+  // Tenant. Must equal the verified caller's organization.
+  string org_id = 1;
+  // Whose ledger. Must equal the verified caller.
+  string user_id = 2;
+  // Keyset cursor from the previous page's `next_cursor`. Opaque; a malformed
+  // cursor is invalid_argument.
+  string cursor = 3;
+  // Optional. 0 means server default; clamped to a maximum.
+  uint32 limit = 4;
+  // Optional filter: "skill", "memory". Empty lists both.
+  repeated string kinds = 5;
+}
+
+// One thing that was learned or changed, with who did it and the snapshots around it.
+message LearningLedgerEntry {
+  // A skill revision id, or an agent_memory id for a memory.
+  string entry_id = 1;
+  // "skill" or "memory".
+  string kind = 2;
+  // Skill: created, proposed, updated, accepted, rejected, enabled, disabled,
+  // edited, deleted, restored or promoted. Memory: learned.
+  string action = 3;
+  string skill_id = 4;
+  string skill_name = 5;
+  // The skill's revision number; 0 for a memory.
+  int64 revision = 6;
+  // Who made the change: user, service, system or unattributed.
+  string actor_kind = 7;
+  string actor_id = 8;
+  string run_id = 9;
+  string thread_id = 10;
+  string reason = 11;
+  // The skill snapshots before and after the change, as JSON; empty on the side
+  // that does not exist. For a memory, `after_json` is {"content": ...}.
+  string before_json = 12;
+  string after_json = 13;
+  // Whether the entry has been undone by a later entry.
+  bool undone = 14;
+  // Whether UndoLearningEntry would be accepted now.
+  bool undoable = 15;
+  google.protobuf.Timestamp created_at = 16;
+}
+
+// One page of the owner's ledger.
+message ListLearningLedgerResponse {
+  // Newest first.
+  repeated LearningLedgerEntry entries = 1;
+  // Empty when there is no further page.
+  string next_cursor = 2;
+  // Why the memory entries were left out, as MemoryControls.reason spells it;
+  // empty when they were not.
+  string memory_skip_reason = 3;
 }

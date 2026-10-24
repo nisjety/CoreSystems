@@ -44,6 +44,11 @@ type recordingDatabase struct {
 	// that persists through `INSERT ... RETURNING` needs a scannable result,
 	// not the ErrNoRows default; queue one with expectUpsertReturningID.
 	nextRows []pgx.Row
+	// actorCalls are the statements that named the actor of a skill mutation
+	// (skillActorSQL), kept apart from execs so a test of the mutation itself
+	// still sees its own statements first. commits counts committed transactions.
+	actorCalls []databaseCall
+	commits    int
 }
 
 // databaseCalls counts every statement the stub has seen. Registration guards

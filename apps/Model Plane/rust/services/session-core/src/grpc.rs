@@ -15,6 +15,7 @@ use mp_contracts::dataplane::retrieval_v2::{
 use mp_contracts::model_plane::v1::{
     self as pb,
     finetune_jobs_server::FinetuneJobsServer,
+    learning_governance_service_server::{LearningGovernanceService, LearningGovernanceServiceServer},
     managed_run_lifecycle_server::{ManagedRunLifecycle, ManagedRunLifecycleServer},
     memory_service_server::MemoryServiceServer,
     message_search_server::MessageSearchServer,
@@ -1953,6 +1954,64 @@ fn learned_skill_withheld(
             "org_policy"
         }
     })
+}
+
+/// Who is changing a skill and why, as the revision log records it. The fields
+/// travel as the transaction-local settings `mp.actor_kind`, `mp.actor_id`,
+/// `mp.run_id`, `mp.thread_id`, `mp.reason` and `mp.skill_action` that
+/// `agent_skills_revision_fn` (migration 0064) reads; capability-core sets the
+/// same names in its own SQL, and `skill_revision_settings_match_the_migration`
+/// pins them to the trigger. An empty `action` lets the trigger derive it from
+/// what changed; `accepted`, `rejected` and `restored` are the decisions it
+/// cannot derive.
+struct SkillChange<'a> {
+    actor_kind: &'a str,
+    actor_id: &'a str,
+    run_id: &'a str,
+    thread_id: &'a str,
+    reason: &'a str,
+    action: &'a str,
+}
+
+fn skill_actor_kind(caller: &VerifiedIdentity) -> &'static str {
+    if caller.is_service() {
+        "service"
+    } else {
+        "user"
+    }
+}
+
+/// Name the actor of the skill change this transaction is about to make. The
+/// settings last to the end of the transaction, so they cover every statement in it.
+async fn name_skill_change(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    change: &SkillChange<'_>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "SELECT set_config('mp.actor_kind', $1, true), set_config('mp.actor_id', $2, true),
+                set_config('mp.run_id', $3, true), set_config('mp.thread_id', $4, true),
+                set_config('mp.reason', $5, true), set_config('mp.skill_action', $6, true)",
+    )
+    .bind(change.actor_kind)
+    .bind(change.actor_id)
+    .bind(change.run_id)
+    .bind(change.thread_id)
+    .bind(change.reason)
+    .bind(change.action)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// The newest revision number of a skill, 0 when it has none.
+async fn latest_skill_revision(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    skill_id: &str,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar("SELECT COALESCE(MAX(revision), 0) FROM skill_revisions WHERE skill_id = $1")
+        .bind(skill_id)
+        .fetch_one(&mut **tx)
+        .await
 }
 
 /// Bind the non-secret schedule identity to the deterministic run row. This
@@ -6573,6 +6632,24 @@ impl SessionCore for SessionService {
             // Only an accepted skill can be switched on: a proposal becomes active
             // by its owner's decision, never by a flag flip. Switching off is
             // always allowed, so a quarantine sweep is never refused.
+            let mut tx = self
+                .pool
+                .begin()
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?;
+            name_skill_change(
+                &mut tx,
+                &SkillChange {
+                    actor_kind: skill_actor_kind(&caller),
+                    actor_id: caller.principal_id(),
+                    run_id: "",
+                    thread_id: "",
+                    reason: &req.reason,
+                    action: "",
+                },
+            )
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
             let updated: Option<(bool,)> = sqlx::query_as(
                 "UPDATE agent_skills SET enabled = $1, updated_at = now() \
                  WHERE id = $2 AND org_id = $3 AND (NOT $1 OR review_state = 'accepted') \
@@ -6581,7 +6658,7 @@ impl SessionCore for SessionService {
             .bind(req.enabled)
             .bind(&req.skill_id)
             .bind(&req.org_id)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *tx)
             .await
             .map_err(|error| Status::internal(error.to_string()))?;
 
@@ -6593,7 +6670,7 @@ impl SessionCore for SessionService {
                     )
                     .bind(&req.skill_id)
                     .bind(&req.org_id)
-                    .fetch_one(&self.pool)
+                    .fetch_one(&mut *tx)
                     .await
                     .map_err(|error| Status::internal(error.to_string()))?;
                     if undecided {
@@ -6608,6 +6685,9 @@ impl SessionCore for SessionService {
                     enabled: false,
                 }));
             };
+            tx.commit()
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?;
             tracing::info!(
                 skill_id = %req.skill_id,
                 org_id = %req.org_id,
@@ -6685,11 +6765,34 @@ impl SessionCore for SessionService {
                 }
             };
             let id = new_ulid();
+            let source_run_id = bounded_provenance(&req.source_run_id);
+            let source_thread_id = bounded_provenance(&req.source_thread_id);
+            let proposal_reason: String = req
+                .proposal_reason
+                .trim()
+                .chars()
+                .take(MAX_PROPOSAL_REASON_CHARS)
+                .collect();
             let mut tx = self
                 .pool
                 .begin()
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
+            // The revision log is written by a trigger on the row; the writer
+            // names itself in this transaction so the entry carries the actor.
+            name_skill_change(
+                &mut tx,
+                &SkillChange {
+                    actor_kind: skill_actor_kind(&caller),
+                    actor_id: caller.principal_id(),
+                    run_id: &source_run_id,
+                    thread_id: &source_thread_id,
+                    reason: &proposal_reason,
+                    action: "",
+                },
+            )
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
             if origin == "background_review" {
                 // Under the owner's row lock, so a pause that commits first is
                 // seen here and one that waits lands after this write. The
@@ -6762,15 +6865,9 @@ impl SessionCore for SessionService {
             .bind(scope)
             .bind(&owner)
             .bind(review_state)
-            .bind(bounded_provenance(&req.source_run_id))
-            .bind(bounded_provenance(&req.source_thread_id))
-            .bind(
-                req.proposal_reason
-                    .trim()
-                    .chars()
-                    .take(MAX_PROPOSAL_REASON_CHARS)
-                    .collect::<String>(),
-            )
+            .bind(&source_run_id)
+            .bind(&source_thread_id)
+            .bind(&proposal_reason)
             .fetch_optional(&mut *tx)
             .await
             .map_err(|e| {
@@ -6779,13 +6876,18 @@ impl SessionCore for SessionService {
             })?;
 
             let resp = match row {
-                Some((id, created)) => pb::UpsertAgentSkillResponse {
-                    id,
-                    created,
-                    skipped_protected: false,
-                    skip_reason: String::new(),
-                    revision: 0,
-                },
+                Some((id, created)) => {
+                    let revision = latest_skill_revision(&mut tx, &id)
+                        .await
+                        .map_err(|e| Status::internal(e.to_string()))?;
+                    pb::UpsertAgentSkillResponse {
+                        id,
+                        created,
+                        skipped_protected: false,
+                        skip_reason: String::new(),
+                        revision,
+                    }
+                }
                 None => {
                     // Only a learned write can lose a conflict. Say why: the row
                     // is a human's, or its owner already decided on it.
@@ -7089,6 +7191,7 @@ impl SessionCore for SessionService {
             source_thread_id: String,
             proposal_reason: String,
             updated_at: DateTime<Utc>,
+            revision: i64,
         }
 
         let started = Instant::now();
@@ -7128,7 +7231,9 @@ impl SessionCore for SessionService {
                 "SELECT id, name, description, content, trigger_keywords,
                         trigger_file_patterns, tool_restrictions, enabled, origin,
                         scope, owner_user_id, shared_with, review_state,
-                        source_run_id, source_thread_id, proposal_reason, updated_at
+                        source_run_id, source_thread_id, proposal_reason, updated_at,
+                        (SELECT COALESCE(MAX(r.revision), 0) FROM skill_revisions r
+                         WHERE r.skill_id = agent_skills.id) AS revision
                  FROM agent_skills
                  WHERE org_id = $1 AND (NOT $2 OR enabled)
                    AND (scope = 'org' OR owner_user_id = $3
@@ -7164,7 +7269,7 @@ impl SessionCore for SessionService {
                     source_thread_id: row.source_thread_id,
                     proposal_reason: row.proposal_reason,
                     updated_at: row.updated_at.to_rfc3339(),
-                    revision: 0,
+                    revision: row.revision,
                 })
                 .collect();
             Ok(Response::new(pb::ListAgentSkillsResponse { skills }))
@@ -9221,6 +9326,8 @@ pub async fn serve(
         grant_columns,
     };
 
+    let learning_governance = LearningGovernanceGrpc { pool: pool.clone() };
+
     // Read once, at boot: the switch is a deploy setting (build plan WS17 S3).
     let message_search = crate::message_search::MessageSearchGrpc {
         pool: pool.clone(),
@@ -9269,6 +9376,10 @@ pub async fn serve(
         ))
         .add_service(MessageSearchServer::with_interceptor(
             message_search,
+            auth.clone(),
+        ))
+        .add_service(LearningGovernanceServiceServer::with_interceptor(
+            learning_governance,
             auth.clone(),
         ))
         .add_service(RunServiceServer::with_interceptor(runs, auth))
@@ -9611,6 +9722,517 @@ impl ThreadAutonomy for ThreadAutonomyGrpc {
         }
         .await;
         record_metrics("get_thread_grant", started, result.is_ok());
+        result
+    }
+}
+
+/// `LearningGovernanceService`: the owner's decisions on learned skills and the
+/// ledger of what was learned (build plan WS07 S8). Served behind the verifying
+/// interceptor and beside `SessionCore`, so that trait and its mocks are unchanged.
+/// Every call is the owner's own: a service credential is refused, and nothing
+/// here reaches another person's proposals, revisions or memories.
+pub struct LearningGovernanceGrpc {
+    pub pool: PgPool,
+}
+
+const LEDGER_DEFAULT_LIMIT: i64 = 50;
+const LEDGER_MAX_LIMIT: i64 = 200;
+
+/// Writes a skill row back from a revision snapshot: the whole row, not only the
+/// fields a person could have edited, so an undo returns the skill to exactly the
+/// state the snapshot recorded. `org_id` in the conflict guard keeps the write
+/// inside the snapshot's own tenant.
+const RESTORE_SKILL_SQL: &str = "INSERT INTO agent_skills
+        (id, org_id, name, description, content, trigger_keywords, trigger_file_patterns,
+         tool_restrictions, enabled, origin, scope, owner_user_id, shared_with, review_state,
+         source_run_id, source_thread_id, proposal_reason, created_at, updated_at)
+     SELECT r.id, r.org_id, r.name, r.description, r.content, r.trigger_keywords,
+            r.trigger_file_patterns, r.tool_restrictions, r.enabled, r.origin, r.scope,
+            r.owner_user_id, r.shared_with, r.review_state, r.source_run_id,
+            r.source_thread_id, r.proposal_reason, now(), now()
+     FROM jsonb_to_record($1::jsonb) AS r(
+            id text, org_id text, name text, description text, content text,
+            trigger_keywords jsonb, trigger_file_patterns jsonb, tool_restrictions jsonb,
+            enabled boolean, origin text, scope text, owner_user_id text, shared_with jsonb,
+            review_state text, source_run_id text, source_thread_id text, proposal_reason text)
+     ON CONFLICT (id) DO UPDATE SET
+         name = EXCLUDED.name,
+         description = EXCLUDED.description,
+         content = EXCLUDED.content,
+         trigger_keywords = EXCLUDED.trigger_keywords,
+         trigger_file_patterns = EXCLUDED.trigger_file_patterns,
+         tool_restrictions = EXCLUDED.tool_restrictions,
+         enabled = EXCLUDED.enabled,
+         origin = EXCLUDED.origin,
+         scope = EXCLUDED.scope,
+         owner_user_id = EXCLUDED.owner_user_id,
+         shared_with = EXCLUDED.shared_with,
+         review_state = EXCLUDED.review_state,
+         source_run_id = EXCLUDED.source_run_id,
+         source_thread_id = EXCLUDED.source_thread_id,
+         proposal_reason = EXCLUDED.proposal_reason,
+         updated_at = now()
+     WHERE agent_skills.org_id = EXCLUDED.org_id";
+
+/// The person a learning-governance call acts for, in the caller's own org. A
+/// service identity has no one to act for and is refused.
+#[allow(clippy::result_large_err)]
+fn learning_owner(caller: &VerifiedIdentity, org_id: &str) -> Result<String, Status> {
+    caller.authorize_org(org_id)?;
+    caller.user_id().map(str::to_owned).ok_or_else(|| {
+        Status::permission_denied("service identity cannot impersonate a user")
+    })
+}
+
+/// Which halves of the ledger a request asks for: (skills, memories).
+#[allow(clippy::result_large_err)]
+fn ledger_kinds(kinds: &[String]) -> Result<(bool, bool), Status> {
+    if kinds.is_empty() {
+        return Ok((true, true));
+    }
+    let (mut skills, mut memories) = (false, false);
+    for kind in kinds {
+        match kind.as_str() {
+            "skill" => skills = true,
+            "memory" => memories = true,
+            other => return Err(Status::invalid_argument(format!("invalid kind: {other}"))),
+        }
+    }
+    Ok((skills, memories))
+}
+
+fn encode_ledger_cursor(at: DateTime<Utc>, id: &str) -> String {
+    format!("{}:{id}", at.timestamp_micros())
+}
+
+#[allow(clippy::result_large_err)]
+fn decode_ledger_cursor(cursor: &str) -> Result<Option<(DateTime<Utc>, String)>, Status> {
+    if cursor.is_empty() {
+        return Ok(None);
+    }
+    let malformed = || Status::invalid_argument("malformed cursor");
+    let (micros, id) = cursor.split_once(':').ok_or_else(malformed)?;
+    let at = micros
+        .parse::<i64>()
+        .ok()
+        .and_then(DateTime::<Utc>::from_timestamp_micros)
+        .ok_or_else(malformed)?;
+    if id.is_empty() || id.len() > 128 {
+        return Err(malformed());
+    }
+    Ok(Some((at, id.to_owned())))
+}
+
+#[derive(sqlx::FromRow)]
+struct LedgerSkillRow {
+    id: String,
+    skill_id: String,
+    skill_name: String,
+    revision: i64,
+    action: String,
+    actor_kind: String,
+    actor_id: String,
+    run_id: String,
+    thread_id: String,
+    reason: String,
+    before_json: Option<String>,
+    after_json: Option<String>,
+    undone: bool,
+    undoable: bool,
+    created_at: DateTime<Utc>,
+}
+
+#[tonic::async_trait]
+impl LearningGovernanceService for LearningGovernanceGrpc {
+    async fn decide_skill_proposal(
+        &self,
+        request: Request<pb::DecideSkillProposalRequest>,
+    ) -> Result<Response<pb::DecideSkillProposalResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<pb::DecideSkillProposalResponse>, Status> = async {
+            let caller = identity(&request)?;
+            // A decision writes a revision that holds skill text, so a ZDR
+            // credential is refused here as it is for any durable write.
+            authorize_operation(&caller, "session:skills:write")?;
+            let req = request.into_inner();
+            if req.skill_id.trim().is_empty() {
+                return Err(Status::invalid_argument("skill_id is required"));
+            }
+            let (review_state, enabled) = match pb::SkillDecision::try_from(req.decision) {
+                Ok(pb::SkillDecision::Accept) => ("accepted", true),
+                Ok(pb::SkillDecision::Reject) => ("rejected", false),
+                _ => return Err(Status::invalid_argument("decision is required")),
+            };
+            let owner = learning_owner(&caller, &req.org_id)?;
+            let mut tx = self
+                .pool
+                .begin()
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+            let row: Option<(String, String, String)> = sqlx::query_as(
+                "SELECT owner_user_id, scope, review_state FROM agent_skills
+                 WHERE id = $1 AND org_id = $2 FOR UPDATE",
+            )
+            .bind(&req.skill_id)
+            .bind(&req.org_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+            let (skill_owner, scope, state) =
+                row.ok_or_else(|| Status::not_found("skill not found"))?;
+            // Only the person a proposal belongs to decides on it: an org skill
+            // has no owner here, and another person's proposal is not theirs.
+            if scope != "user" || skill_owner != owner {
+                return Err(Status::permission_denied("only the owner can decide on a proposal"));
+            }
+            if state != "proposed" {
+                return Err(Status::failed_precondition("not_proposed"));
+            }
+            name_skill_change(
+                &mut tx,
+                &SkillChange {
+                    actor_kind: "user",
+                    actor_id: caller.principal_id(),
+                    run_id: "",
+                    thread_id: "",
+                    reason: "",
+                    action: review_state,
+                },
+            )
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+            sqlx::query(
+                "UPDATE agent_skills SET review_state = $3, enabled = $4, updated_at = now()
+                 WHERE id = $1 AND org_id = $2",
+            )
+            .bind(&req.skill_id)
+            .bind(&req.org_id)
+            .bind(review_state)
+            .bind(enabled)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+            let revision = latest_skill_revision(&mut tx, &req.skill_id)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+            tx.commit()
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+            Ok(Response::new(pb::DecideSkillProposalResponse {
+                review_state: review_state.to_owned(),
+                enabled,
+                revision,
+            }))
+        }
+        .await;
+        record_metrics("decide_skill_proposal", started, result.is_ok());
+        result
+    }
+
+    async fn undo_learning_entry(
+        &self,
+        request: Request<pb::UndoLearningEntryRequest>,
+    ) -> Result<Response<pb::UndoLearningEntryResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<pb::UndoLearningEntryResponse>, Status> = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "session:skills:write")?;
+            let req = request.into_inner();
+            if req.entry_id.trim().is_empty() {
+                return Err(Status::invalid_argument("entry_id is required"));
+            }
+            let owner = learning_owner(&caller, &req.org_id)?;
+            let mut tx = self
+                .pool
+                .begin()
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+            let entry: Option<(
+                String,
+                String,
+                i64,
+                Option<serde_json::Value>,
+                Option<String>,
+            )> = sqlx::query_as(
+                "SELECT skill_id, owner_user_id, revision, before, undone_by
+                 FROM skill_revisions WHERE id = $1 AND org_id = $2",
+            )
+            .bind(&req.entry_id)
+            .bind(&req.org_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+            let Some((skill_id, entry_owner, revision, before, undone_by)) = entry else {
+                // A learned memory is on the ledger too, but it is erased through
+                // the one path that also forgets its semantic copy.
+                let memory: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM agent_memory
+                     WHERE id = $1 AND org_id = $2 AND owner = $3 AND scope = 'user')",
+                )
+                .bind(&req.entry_id)
+                .bind(&req.org_id)
+                .bind(&owner)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+                return Err(if memory {
+                    Status::failed_precondition("memory_undo_via_delete")
+                } else {
+                    Status::not_found("ledger entry not found")
+                });
+            };
+            if entry_owner != owner {
+                return Err(Status::permission_denied("only the owner can undo an entry"));
+            }
+            if undone_by.is_some() {
+                return Err(Status::failed_precondition("already_undone"));
+            }
+            // The skill row is locked so no writer slips a revision in between
+            // the check below and the restore. A deleted skill has no row to lock.
+            sqlx::query("SELECT 1 FROM agent_skills WHERE id = $1 AND org_id = $2 FOR UPDATE")
+                .bind(&skill_id)
+                .bind(&req.org_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+            // Only the newest entry of a skill: every change leaves a revision, so
+            // the newest entry's after-state is the row as it is now, and undoing
+            // an older one would silently discard everything after it.
+            if latest_skill_revision(&mut tx, &skill_id)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?
+                != revision
+            {
+                return Err(Status::failed_precondition("entry_superseded"));
+            }
+            name_skill_change(
+                &mut tx,
+                &SkillChange {
+                    actor_kind: "user",
+                    actor_id: caller.principal_id(),
+                    run_id: "",
+                    thread_id: "",
+                    reason: &format!("undo:{}", req.entry_id),
+                    action: if before.is_some() { "restored" } else { "" },
+                },
+            )
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+            let action = match before {
+                // The entry created the skill: undoing it removes the skill.
+                None => {
+                    sqlx::query("DELETE FROM agent_skills WHERE id = $1 AND org_id = $2")
+                        .bind(&skill_id)
+                        .bind(&req.org_id)
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(|e| Status::internal(e.to_string()))?;
+                    "deleted"
+                }
+                Some(snapshot) => {
+                    if snapshot.get("truncated").and_then(serde_json::Value::as_bool) == Some(true)
+                    {
+                        return Err(Status::failed_precondition("snapshot_truncated"));
+                    }
+                    let belongs = snapshot.get("id").and_then(serde_json::Value::as_str)
+                        == Some(skill_id.as_str())
+                        && snapshot.get("org_id").and_then(serde_json::Value::as_str)
+                            == Some(req.org_id.as_str());
+                    if !belongs {
+                        return Err(Status::internal("revision snapshot is not this skill's"));
+                    }
+                    sqlx::query(RESTORE_SKILL_SQL)
+                        .bind(&snapshot)
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(|e| match &e {
+                            // The snapshot's name is taken now by another skill.
+                            sqlx::Error::Database(db) if db.code().as_deref() == Some("23505") => {
+                                Status::failed_precondition("name_taken")
+                            }
+                            _ => Status::internal(e.to_string()),
+                        })?;
+                    "restored"
+                }
+            };
+            let latest: (String, i64) = sqlx::query_as(
+                "SELECT id, revision FROM skill_revisions
+                 WHERE skill_id = $1 ORDER BY revision DESC LIMIT 1",
+            )
+            .bind(&skill_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+            sqlx::query("UPDATE skill_revisions SET undone_by = $2 WHERE id = $1")
+                .bind(&req.entry_id)
+                .bind(&latest.0)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+            tx.commit()
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+            Ok(Response::new(pb::UndoLearningEntryResponse {
+                action: action.to_owned(),
+                skill_id,
+                revision: latest.1,
+            }))
+        }
+        .await;
+        record_metrics("undo_learning_entry", started, result.is_ok());
+        result
+    }
+
+    async fn list_learning_ledger(
+        &self,
+        request: Request<pb::ListLearningLedgerRequest>,
+    ) -> Result<Response<pb::ListLearningLedgerResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<pb::ListLearningLedgerResponse>, Status> = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "session:skills:read")?;
+            let req = request.into_inner();
+            let owner = learning_owner(&caller, &req.org_id)?;
+            caller.authorize_user(&req.user_id)?;
+            let (want_skills, want_memories) = ledger_kinds(&req.kinds)?;
+            let cursor = decode_ledger_cursor(&req.cursor)?;
+            let limit = match i64::from(req.limit) {
+                0 => LEDGER_DEFAULT_LIMIT,
+                requested => requested.min(LEDGER_MAX_LIMIT),
+            };
+            let (cursor_at, cursor_id) = match cursor {
+                Some((at, id)) => (Some(at), Some(id)),
+                None => (None, None),
+            };
+
+            let mut entries: Vec<(DateTime<Utc>, pb::LearningLedgerEntry)> = Vec::new();
+            if want_skills {
+                let rows: Vec<LedgerSkillRow> = sqlx::query_as(
+                    "SELECT r.id, r.skill_id,
+                            COALESCE(r.after ->> 'name', r.before ->> 'name', '') AS skill_name,
+                            r.revision, r.action, r.actor_kind, r.actor_id, r.run_id,
+                            r.thread_id, r.reason,
+                            r.before::text AS before_json, r.after::text AS after_json,
+                            r.undone_by IS NOT NULL AS undone,
+                            (r.undone_by IS NULL
+                             AND r.revision = (SELECT MAX(m.revision) FROM skill_revisions m
+                                               WHERE m.skill_id = r.skill_id)
+                             AND COALESCE((r.before ->> 'truncated')::boolean, false) = false
+                            ) AS undoable,
+                            r.created_at
+                     FROM skill_revisions r
+                     WHERE r.org_id = $1 AND r.owner_user_id = $2
+                       AND ($3::timestamptz IS NULL OR (r.created_at, r.id) < ($3, $4))
+                     ORDER BY r.created_at DESC, r.id DESC
+                     LIMIT $5",
+                )
+                .bind(&req.org_id)
+                .bind(&owner)
+                .bind(cursor_at)
+                .bind(&cursor_id)
+                .bind(limit + 1)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| {
+                    warn!(error = %e, "list_learning_ledger skills failed");
+                    Status::internal(e.to_string())
+                })?;
+                entries.extend(rows.into_iter().map(|row| {
+                    (
+                        row.created_at,
+                        pb::LearningLedgerEntry {
+                            entry_id: row.id,
+                            kind: "skill".to_owned(),
+                            action: row.action,
+                            skill_id: row.skill_id,
+                            skill_name: row.skill_name,
+                            revision: row.revision,
+                            actor_kind: row.actor_kind,
+                            actor_id: row.actor_id,
+                            run_id: row.run_id,
+                            thread_id: row.thread_id,
+                            reason: row.reason,
+                            before_json: row.before_json.unwrap_or_default(),
+                            after_json: row.after_json.unwrap_or_default(),
+                            undone: row.undone,
+                            undoable: row.undoable,
+                            created_at: Some(to_proto_timestamp(row.created_at)),
+                        },
+                    )
+                }));
+            }
+
+            // Memories ride the same gate as the memory list: a person who paused
+            // or turned memory off, an org that disabled it and a ZDR caller get
+            // no memory entries, and the reason says why.
+            let mut memory_skip_reason = String::new();
+            if want_memories {
+                let decision =
+                    crate::memory_control::resolve(&self.pool, caller.zdr(), &req.org_id, &owner)
+                        .await
+                        .map_err(|e| Status::internal(e.to_string()))?;
+                if decision.list_visible() {
+                    let rows: Vec<(String, String, DateTime<Utc>)> = sqlx::query_as(
+                        "SELECT id, content, created_at FROM agent_memory
+                         WHERE org_id = $1 AND owner = $2 AND scope = 'user'
+                           AND review_state = 'accepted' AND is_latest = true
+                           AND (expires_at IS NULL OR expires_at > now())
+                           AND ('extractor:llm' = ANY(source_links) OR supersedes_id IS NOT NULL)
+                           AND ($3::timestamptz IS NULL OR (created_at, id) < ($3, $4))
+                         ORDER BY created_at DESC, id DESC
+                         LIMIT $5",
+                    )
+                    .bind(&req.org_id)
+                    .bind(&owner)
+                    .bind(cursor_at)
+                    .bind(&cursor_id)
+                    .bind(limit + 1)
+                    .fetch_all(&self.pool)
+                    .await
+                    .map_err(|e| {
+                        warn!(error = %e, "list_learning_ledger memories failed");
+                        Status::internal(e.to_string())
+                    })?;
+                    entries.extend(rows.into_iter().map(|(id, content, created_at)| {
+                        (
+                            created_at,
+                            pb::LearningLedgerEntry {
+                                entry_id: id,
+                                kind: "memory".to_owned(),
+                                action: "learned".to_owned(),
+                                actor_kind: "system".to_owned(),
+                                after_json: serde_json::json!({ "content": content }).to_string(),
+                                created_at: Some(to_proto_timestamp(created_at)),
+                                ..Default::default()
+                            },
+                        )
+                    }));
+                } else {
+                    memory_skip_reason = decision.skip_reason().to_owned();
+                }
+            }
+
+            entries.sort_by(|(a_at, a), (b_at, b)| {
+                (b_at, &b.entry_id).cmp(&(a_at, &a.entry_id))
+            });
+            let page = usize::try_from(limit).unwrap_or(usize::MAX);
+            let next_cursor = if entries.len() > page {
+                entries.truncate(page);
+                entries
+                    .last()
+                    .map(|(at, entry)| encode_ledger_cursor(*at, &entry.entry_id))
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            Ok(Response::new(pb::ListLearningLedgerResponse {
+                entries: entries.into_iter().map(|(_, entry)| entry).collect(),
+                next_cursor,
+                memory_skip_reason,
+            }))
+        }
+        .await;
+        record_metrics("list_learning_ledger", started, result.is_ok());
         result
     }
 }
@@ -15739,9 +16361,498 @@ mod tests {
         for statement in [
             "DELETE FROM user_memory_controls WHERE org_id = $1",
             "DELETE FROM agent_skills WHERE org_id = $1",
+            // After the skills: deleting one writes a `deleted` revision.
+            "DELETE FROM skill_revisions WHERE org_id = $1",
         ] {
             sqlx::query(statement).bind(org).execute(pool).await.ok();
         }
+    }
+
+    // -- skill revisions, decide and undo (WS07 S8) --------------------------
+
+    /// The settings the registry and session-core set are the ones the trigger
+    /// reads. A rename on one side would turn every revision it writes into an
+    /// unattributed one, with every test of the other side still green.
+    #[test]
+    fn skill_revision_settings_match_the_migration() {
+        let source = include_str!("grpc.rs");
+        let start = source
+            .find("async fn name_skill_change(")
+            .expect("the helper that names the actor");
+        let end = source[start..]
+            .find("/// The newest revision number")
+            .map(|offset| start + offset)
+            .expect("the helper after it");
+        let helper = &source[start..end];
+        let migration = include_str!("../migrations/0064_skill_revisions.sql");
+        for setting in [
+            "mp.actor_kind",
+            "mp.actor_id",
+            "mp.run_id",
+            "mp.thread_id",
+            "mp.reason",
+            "mp.skill_action",
+        ] {
+            assert!(
+                helper.contains(&format!("set_config('{setting}'")),
+                "name_skill_change must set {setting}"
+            );
+            assert!(
+                migration.contains(&format!("current_setting('{setting}', true)")),
+                "the trigger must read {setting}"
+            );
+        }
+    }
+
+    #[test]
+    fn revision_trigger_covers_every_mutation_and_keeps_fifty() {
+        let migration = include_str!("../migrations/0064_skill_revisions.sql");
+        assert!(migration.contains("AFTER INSERT OR UPDATE OR DELETE ON agent_skills"));
+        assert!(migration.contains("revision <= next_revision - 50"));
+        assert!(migration.contains("UNIQUE (skill_id, revision)"));
+        assert!(
+            include_str!("../migrations/revert/0064_skill_revisions.down.sql")
+                .contains("DROP TRIGGER IF EXISTS agent_skills_revision_trg"),
+            "the revert must drop the trigger before the table"
+        );
+    }
+
+    #[test]
+    fn ledger_cursor_round_trips_and_rejects_garbage() {
+        let at = DateTime::<Utc>::from_timestamp_micros(1_790_000_000_123_456).expect("a timestamp");
+        let cursor = super::encode_ledger_cursor(at, "skr_abc");
+        assert_eq!(
+            super::decode_ledger_cursor(&cursor).expect("decodes"),
+            Some((at, "skr_abc".to_owned()))
+        );
+        assert_eq!(super::decode_ledger_cursor("").expect("empty"), None);
+        let long_id = format!("123:{}", "a".repeat(129));
+        for bad in ["nocolon", "x:skr_a", "123:", long_id.as_str()] {
+            assert_eq!(
+                super::decode_ledger_cursor(bad).expect_err(bad).code(),
+                tonic::Code::InvalidArgument,
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn ledger_kinds_are_closed() {
+        let kinds = |values: &[&str]| {
+            super::ledger_kinds(&values.iter().map(|v| (*v).to_owned()).collect::<Vec<_>>())
+        };
+        assert_eq!(kinds(&[]).expect("both"), (true, true));
+        assert_eq!(kinds(&["skill"]).expect("skills"), (true, false));
+        assert_eq!(kinds(&["memory"]).expect("memories"), (false, true));
+        assert_eq!(
+            kinds(&["skill", "nonsense"]).expect_err("closed").code(),
+            tonic::Code::InvalidArgument
+        );
+    }
+
+    #[test]
+    fn learning_governance_is_the_owners_alone() {
+        use crate::auth::VerifiedIdentity;
+        let user = VerifiedIdentity::user_for_test("org-1", "user-a");
+        assert_eq!(super::learning_owner(&user, "org-1").expect("owner"), "user-a");
+        assert_eq!(
+            super::learning_owner(&user, "org-2").expect_err("other org").code(),
+            tonic::Code::PermissionDenied
+        );
+        let service = VerifiedIdentity::service_for_test("org-1", &["session:skills:write"], false);
+        assert_eq!(
+            super::learning_owner(&service, "org-1")
+                .expect_err("a service has no one to act for")
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+    }
+
+    fn governance(pool: &sqlx::PgPool) -> super::LearningGovernanceGrpc {
+        super::LearningGovernanceGrpc { pool: pool.clone() }
+    }
+
+    /// Run `statement` in a transaction that names `actor` the way
+    /// capability-core's registry does, so the trigger sees a writer that is not
+    /// session-core.
+    async fn as_registry_writer(
+        pool: &sqlx::PgPool,
+        actor: &str,
+        statement: &str,
+        binds: &[&str],
+    ) {
+        let mut tx = pool.begin().await.expect("begin");
+        sqlx::query(
+            "SELECT set_config('mp.actor_kind', 'user', true), set_config('mp.actor_id', $1, true)",
+        )
+        .bind(actor)
+        .execute(&mut *tx)
+        .await
+        .expect("name the actor");
+        let mut query = sqlx::query(statement);
+        for value in binds {
+            query = query.bind(*value);
+        }
+        query.execute(&mut *tx).await.expect("registry statement");
+        tx.commit().await.expect("commit");
+    }
+
+    async fn latest_revision_id(pool: &sqlx::PgPool, skill_id: &str) -> String {
+        sqlx::query_scalar(
+            "SELECT id FROM skill_revisions WHERE skill_id = $1 ORDER BY revision DESC LIMIT 1",
+        )
+        .bind(skill_id)
+        .fetch_one(pool)
+        .await
+        .expect("latest revision")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn trigger_records_every_mutation_even_from_capability_core_sql() {
+        let Some((_svc, pool, org)) = skills_service().await else {
+            return;
+        };
+        let id = format!("sk-{}", mp_ids::new_ulid());
+        as_registry_writer(
+            &pool,
+            "admin-1",
+            "INSERT INTO agent_skills (id, org_id, name, content, scope, owner_user_id, created_at, updated_at)
+             VALUES ($1, $2, 'Runbook', 'v1', 'org', '', now(), now())",
+            &[&id, &org],
+        )
+        .await;
+        as_registry_writer(
+            &pool,
+            "admin-1",
+            "UPDATE agent_skills SET content = 'v2', updated_at = now() WHERE id = $1",
+            &[&id],
+        )
+        .await;
+        as_registry_writer(
+            &pool,
+            "admin-1",
+            "UPDATE agent_skills SET enabled = false, updated_at = now() WHERE id = $1",
+            &[&id],
+        )
+        .await;
+        // A touch that changes nothing a person can see is not a change.
+        as_registry_writer(
+            &pool,
+            "admin-1",
+            "UPDATE agent_skills SET updated_at = now() WHERE id = $1",
+            &[&id],
+        )
+        .await;
+        // A writer that names no one is still logged, as unattributed.
+        sqlx::query("UPDATE agent_skills SET content = 'v3', updated_at = now() WHERE id = $1")
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .expect("unnamed writer");
+        as_registry_writer(&pool, "admin-1", "DELETE FROM agent_skills WHERE id = $1", &[&id]).await;
+
+        let rows: Vec<(i64, String, String, String)> = sqlx::query_as(
+            "SELECT revision, action, actor_kind, actor_id FROM skill_revisions
+             WHERE skill_id = $1 ORDER BY revision",
+        )
+        .bind(&id)
+        .fetch_all(&pool)
+        .await
+        .expect("revisions");
+        let expected: Vec<(i64, String, String, String)> = [
+            (1, "created", "user", "admin-1"),
+            (2, "edited", "user", "admin-1"),
+            (3, "disabled", "user", "admin-1"),
+            (4, "edited", "unattributed", ""),
+            (5, "deleted", "user", "admin-1"),
+        ]
+        .into_iter()
+        .map(|(n, a, k, i)| (n, a.to_owned(), k.to_owned(), i.to_owned()))
+        .collect();
+        assert_eq!(rows, expected);
+
+        let (first_before, last_after): (Option<serde_json::Value>, Option<serde_json::Value>) =
+            sqlx::query_as(
+                "SELECT (SELECT before FROM skill_revisions WHERE skill_id = $1 AND revision = 1),
+                        (SELECT after FROM skill_revisions WHERE skill_id = $1 AND revision = 5)",
+            )
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .expect("snapshots");
+        assert!(first_before.is_none() && last_after.is_none());
+
+        clear_skill_rows(&pool, &org).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn revision_cap_keeps_50() {
+        let Some((_svc, pool, org)) = skills_service().await else {
+            return;
+        };
+        let id = format!("sk-{}", mp_ids::new_ulid());
+        as_registry_writer(
+            &pool,
+            "admin-1",
+            "INSERT INTO agent_skills (id, org_id, name, content, scope, owner_user_id, created_at, updated_at)
+             VALUES ($1, $2, 'Busy', 'v0', 'org', '', now(), now())",
+            &[&id, &org],
+        )
+        .await;
+        for n in 1..=60 {
+            sqlx::query("UPDATE agent_skills SET content = $2, updated_at = now() WHERE id = $1")
+                .bind(&id)
+                .bind(format!("v{n}"))
+                .execute(&pool)
+                .await
+                .expect("update");
+        }
+        let (count, oldest, newest): (i64, i64, i64) = sqlx::query_as(
+            "SELECT COUNT(*), MIN(revision), MAX(revision) FROM skill_revisions WHERE skill_id = $1",
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .expect("counts");
+        assert_eq!((count, oldest, newest), (50, 12, 61));
+
+        clear_skill_rows(&pool, &org).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn undo_restores_before_snapshot() {
+        use mp_contracts::model_plane::v1::session_core_server::SessionCore;
+        use mp_contracts::model_plane::v1::learning_governance_service_server::LearningGovernanceService;
+        let Some((svc, pool, org)) = skills_service().await else {
+            return;
+        };
+        let gov = governance(&pool);
+        let created = svc
+            .upsert_agent_skill(as_user(
+                &org,
+                "user-a",
+                skill_request(&org, "Mine", "v1", "user", "user", ""),
+            ))
+            .await
+            .expect("create")
+            .into_inner();
+        assert_eq!(created.revision, 1, "the response names the revision the write made");
+        let skill_id = created.id;
+        as_registry_writer(
+            &pool,
+            "user-a",
+            "UPDATE agent_skills SET content = 'v2', updated_at = now() WHERE id = $1",
+            &[&skill_id],
+        )
+        .await;
+        let edit = latest_revision_id(&pool, &skill_id).await;
+        let undo = |entry: String| {
+            as_user(
+                &org,
+                "user-a",
+                mp_contracts::model_plane::v1::UndoLearningEntryRequest {
+                    org_id: org.clone(),
+                    entry_id: entry,
+                },
+            )
+        };
+        let content = |pool: sqlx::PgPool, id: String| async move {
+            sqlx::query_scalar::<_, String>("SELECT content FROM agent_skills WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("content")
+        };
+
+        let undone = gov.undo_learning_entry(undo(edit.clone())).await.expect("undo").into_inner();
+        assert_eq!((undone.action.as_str(), undone.revision), ("restored", 3));
+        assert_eq!(content(pool.clone(), skill_id.clone()).await, "v1");
+        let (action, reason): (String, String) = sqlx::query_as(
+            "SELECT action, reason FROM skill_revisions WHERE skill_id = $1 AND revision = 3",
+        )
+        .bind(&skill_id)
+        .fetch_one(&pool)
+        .await
+        .expect("restore revision");
+        assert_eq!((action.as_str(), reason), ("restored", format!("undo:{edit}")));
+        let undone_by: Option<String> =
+            sqlx::query_scalar("SELECT undone_by FROM skill_revisions WHERE id = $1")
+                .bind(&edit)
+                .fetch_one(&pool)
+                .await
+                .expect("undone_by");
+        assert_eq!(undone_by, Some(latest_revision_id(&pool, &skill_id).await));
+
+        // The same entry twice, and an entry that is no longer the newest.
+        let again = gov.undo_learning_entry(undo(edit)).await.expect_err("already undone");
+        assert_eq!(again.code(), tonic::Code::FailedPrecondition);
+        let first: String = sqlx::query_scalar(
+            "SELECT id FROM skill_revisions WHERE skill_id = $1 AND revision = 1",
+        )
+        .bind(&skill_id)
+        .fetch_one(&pool)
+        .await
+        .expect("first revision");
+        let superseded = gov.undo_learning_entry(undo(first)).await.expect_err("superseded");
+        assert_eq!(superseded.message(), "entry_superseded");
+
+        // Undoing the undo is a redo.
+        let restore = latest_revision_id(&pool, &skill_id).await;
+        gov.undo_learning_entry(undo(restore)).await.expect("redo");
+        assert_eq!(content(pool.clone(), skill_id.clone()).await, "v2");
+
+        // An entry that created the skill is undone by removing it.
+        let fresh = svc
+            .upsert_agent_skill(as_user(
+                &org,
+                "user-a",
+                skill_request(&org, "Fresh", "body", "user", "user", ""),
+            ))
+            .await
+            .expect("fresh")
+            .into_inner();
+        let creation = latest_revision_id(&pool, &fresh.id).await;
+        let removed = gov.undo_learning_entry(undo(creation)).await.expect("undo create").into_inner();
+        assert_eq!(removed.action, "deleted");
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_skills WHERE id = $1")
+            .bind(&fresh.id)
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(remaining, 0);
+
+        clear_skill_rows(&pool, &org).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn non_owner_cannot_decide_or_undo() {
+        use mp_contracts::model_plane::v1::session_core_server::SessionCore;
+        use mp_contracts::model_plane::v1::learning_governance_service_server::LearningGovernanceService;
+        use mp_contracts::model_plane::v1::{
+            DecideSkillProposalRequest, ListLearningLedgerRequest, SkillDecision,
+            UndoLearningEntryRequest,
+        };
+        let Some((svc, pool, org)) = skills_service().await else {
+            return;
+        };
+        let gov = governance(&pool);
+        let proposal = svc
+            .upsert_agent_skill(as_service(
+                &org,
+                &["session:skills:write"],
+                skill_request(&org, "Weekly report", "steps", "background_review", "", "user-a"),
+            ))
+            .await
+            .expect("proposal")
+            .into_inner();
+        let entry = latest_revision_id(&pool, &proposal.id).await;
+        let decide = |who: &str, decision: SkillDecision| {
+            as_user(
+                &org,
+                who,
+                DecideSkillProposalRequest {
+                    org_id: org.clone(),
+                    skill_id: proposal.id.clone(),
+                    decision: decision as i32,
+                },
+            )
+        };
+
+        // Another person, and a service credential.
+        let other = gov
+            .decide_skill_proposal(decide("user-b", SkillDecision::Accept))
+            .await
+            .expect_err("B cannot accept A's proposal");
+        assert_eq!(other.code(), tonic::Code::PermissionDenied);
+        let service = gov
+            .decide_skill_proposal(as_service(
+                &org,
+                &["session:skills:write"],
+                DecideSkillProposalRequest {
+                    org_id: org.clone(),
+                    skill_id: proposal.id.clone(),
+                    decision: SkillDecision::Accept as i32,
+                },
+            ))
+            .await
+            .expect_err("a service cannot decide");
+        assert_eq!(service.code(), tonic::Code::PermissionDenied);
+        let undo = gov
+            .undo_learning_entry(as_user(
+                &org,
+                "user-b",
+                UndoLearningEntryRequest { org_id: org.clone(), entry_id: entry.clone() },
+            ))
+            .await
+            .expect_err("B cannot undo A's entry");
+        assert_eq!(undo.code(), tonic::Code::PermissionDenied);
+        let ledger = gov
+            .list_learning_ledger(as_user(
+                &org,
+                "user-b",
+                ListLearningLedgerRequest {
+                    org_id: org.clone(),
+                    user_id: "user-a".to_owned(),
+                    ..Default::default()
+                },
+            ))
+            .await
+            .expect_err("B cannot read A's ledger");
+        assert_eq!(ledger.code(), tonic::Code::PermissionDenied);
+        let state: String =
+            sqlx::query_scalar("SELECT review_state FROM agent_skills WHERE id = $1")
+                .bind(&proposal.id)
+                .fetch_one(&pool)
+                .await
+                .expect("state");
+        assert_eq!(state, "proposed", "nothing changed for any of the refusals");
+
+        // The owner's ledger shows the proposal; accepting it enables it and is
+        // recorded with the owner as the actor.
+        let mine = gov
+            .list_learning_ledger(as_user(
+                &org,
+                "user-a",
+                ListLearningLedgerRequest {
+                    org_id: org.clone(),
+                    user_id: "user-a".to_owned(),
+                    kinds: vec!["skill".to_owned()],
+                    ..Default::default()
+                },
+            ))
+            .await
+            .expect("own ledger")
+            .into_inner();
+        assert_eq!(mine.entries.len(), 1);
+        assert_eq!(
+            (mine.entries[0].action.as_str(), mine.entries[0].actor_kind.as_str(), mine.entries[0].run_id.as_str()),
+            ("proposed", "service", "run-1")
+        );
+        let accepted = gov
+            .decide_skill_proposal(decide("user-a", SkillDecision::Accept))
+            .await
+            .expect("owner accepts")
+            .into_inner();
+        assert_eq!((accepted.review_state.as_str(), accepted.enabled, accepted.revision), ("accepted", true, 2));
+        let (action, actor_kind, actor_id): (String, String, String) = sqlx::query_as(
+            "SELECT action, actor_kind, actor_id FROM skill_revisions WHERE skill_id = $1 AND revision = 2",
+        )
+        .bind(&proposal.id)
+        .fetch_one(&pool)
+        .await
+        .expect("decision revision");
+        assert_eq!((action.as_str(), actor_kind.as_str(), actor_id.as_str()), ("accepted", "user", "user-a"));
+        let twice = gov
+            .decide_skill_proposal(decide("user-a", SkillDecision::Reject))
+            .await
+            .expect_err("already decided");
+        assert_eq!(twice.message(), "not_proposed");
+
+        clear_skill_rows(&pool, &org).await;
     }
 
     #[tokio::test]
