@@ -505,6 +505,9 @@ pub mod profile_snapshot;
 /// WS17.C1: capture v2 (cookies of the whole context, web storage, IndexedDB) over CDP.
 #[cfg(feature = "chromiumoxide")]
 mod profile_capture;
+/// WS17.C2: restore of a saved profile into a fresh context (cookie plan, seeding script,
+/// emulation; pure) and its CDP half (feature `chromiumoxide`).
+pub mod profile_restore;
 pub mod slots;
 pub mod tab_control;
 mod field_probe;

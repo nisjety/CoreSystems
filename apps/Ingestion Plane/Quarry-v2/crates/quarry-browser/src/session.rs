@@ -45,6 +45,11 @@ pub struct SessionSnapshot {
     /// Per-origin web storage and IndexedDB (capture v2). Empty on a legacy snapshot.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub origins: Vec<OriginState>,
+    /// When the capture that produced this snapshot started (WS17.C2). Restore uses it for
+    /// the age of a session cookie and reports it as `snapshot_age_s`. Absent on a snapshot
+    /// written before this field existed: its age is unknown and nothing is skipped for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub captured_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl SessionSnapshot {

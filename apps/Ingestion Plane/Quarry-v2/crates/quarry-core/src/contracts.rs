@@ -127,6 +127,53 @@ pub struct BrowserTelemetry {
     /// means Quarry did not receive an authoritative cost figure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verified_action_cost_micro_usd: Option<u64>,
+    /// WS17.C2: what a persistent profile restored into this session's first tab. Counts
+    /// only. Absent for a session without a saved profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_restore: Option<ProfileRestoreSummary>,
+}
+
+/// WS17.C2: what restoring a saved profile did. Counts and flags only: never a cookie name,
+/// an origin, a URL or a value. It rides on [`BrowserTelemetry`] and on the browser-session
+/// projection.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProfileRestoreSummary {
+    /// Cookies the snapshot held.
+    #[serde(default)]
+    pub cookies_total: u32,
+    /// Cookies Chromium accepted into the context.
+    #[serde(default)]
+    pub cookies_applied: u32,
+    /// Cookies whose expiry had passed.
+    #[serde(default)]
+    pub skipped_expired: u32,
+    /// Session cookies older than `QUARRY_BROWSER_PROFILE_SESSION_COOKIE_MAX_AGE_S`.
+    #[serde(default)]
+    pub skipped_session_stale: u32,
+    /// Cookies Chromium (or the mapping) refused.
+    #[serde(default)]
+    pub cookies_rejected: u32,
+    /// Origins whose web storage and IndexedDB the page seeds on first visit.
+    #[serde(default)]
+    pub origins_seeded: u32,
+    /// IndexedDB databases those origins carry.
+    #[serde(default)]
+    pub idb_databases: u32,
+    /// The browser's user agent differs from the one the profile was captured with. The
+    /// user agent is never overridden.
+    #[serde(default)]
+    pub ua_changed: bool,
+    /// Seconds between the snapshot's capture and this restore; absent for a legacy
+    /// snapshot that does not say when it was captured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_age_s: Option<u64>,
+    /// The snapshot was cut by a cap or lost values at capture.
+    #[serde(default)]
+    pub truncated: bool,
+    /// The restore did not finish; the session runs with what was applied and its release
+    /// does not overwrite the stored profile.
+    #[serde(default)]
+    pub failed: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]

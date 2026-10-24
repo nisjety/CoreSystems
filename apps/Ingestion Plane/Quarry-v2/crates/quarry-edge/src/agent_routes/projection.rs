@@ -61,6 +61,10 @@ pub(super) fn live_browser_session_projection(
                 browser_session_tab(tab, opened_by)
             })
             .collect(),
+        profile_restore: entry
+            .last_observation
+            .as_ref()
+            .and_then(|observation| observation.telemetry.profile_restore.clone()),
         last_observation: entry.last_observation.clone(),
         grant_id: entry.grant_id.clone(),
     }
@@ -92,6 +96,7 @@ pub(super) fn checkpoint_browser_session_projection(
         tabs: Vec::new(),
         last_observation: None,
         grant_id: checkpoint.grant_id,
+        profile_restore: None,
     }
 }
 

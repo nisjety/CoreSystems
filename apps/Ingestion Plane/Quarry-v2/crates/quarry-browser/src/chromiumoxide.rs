@@ -29,7 +29,7 @@ use ::chromiumoxide::cdp::browser_protocol::input::{
 use ::chromiumoxide::cdp::browser_protocol::log::EventEntryAdded;
 use ::chromiumoxide::cdp::browser_protocol::page::{GetLayoutMetricsParams, Viewport as CdpViewport};
 use ::chromiumoxide::cdp::browser_protocol::network::{
-    CookieParam, ErrorReason, EventRequestWillBeSent, EventResponseReceived,
+    ErrorReason, EventRequestWillBeSent, EventResponseReceived,
 };
 use ::chromiumoxide::cdp::browser_protocol::target::TargetId;
 use ::chromiumoxide::cdp::browser_protocol::target::{
@@ -79,6 +79,7 @@ use crate::actions::ScrollTarget;
 use crate::deadlines::{best_effort, deadline, read_with_retry, timeout_error, with_deadline, Op};
 use crate::navigation::{guard_navigation_target, guard_page_request_target};
 use crate::profile_capture;
+use crate::profile_restore::{self, ProfileEmulation, ProfileLoadError, RestorePolicy, RestoreReport};
 use crate::profile_snapshot::{
     capture_v2_enabled, idb_capture_enabled, should_skip_empty_save, OriginJournal, ProfileCaps,
 };
@@ -285,6 +286,16 @@ struct SessionPages {
     /// WS17.C1: the profile loaded at attach held a cookie, storage or an origin. A capture
     /// that then finds none is not saved over it (the empty-capture guard).
     profile_loaded_nonempty: bool,
+    /// WS17.C2: the first tab of this context has restored (or tried to restore) the saved
+    /// profile. Set when that tab is committed, so a first tab that fails and takes its
+    /// context with it leaves the next attempt to restore into the new context. Later tabs
+    /// never load or apply the profile: they share the context's live jar.
+    profile_restored: bool,
+    /// WS17.C2: the saved profile could not be read (corrupt) or the restore did not finish.
+    /// The session runs without it and its release does not save over what is stored.
+    lease_restore_failed: bool,
+    /// WS17.C2: the locale and timezone the restored profile asks every tab to emulate.
+    profile_emulation: Option<ProfileEmulation>,
 }
 
 /// Local Chromium driver backed by chromiumoxide.
@@ -1345,7 +1356,50 @@ impl ChromiumoxideDriver {
             }
         };
 
-        let snapshot = self.load_snapshot(&session.lease).await;
+        // WS17.C2: the profile is loaded and restored once per context, by its first tab. A
+        // later tab shares that context's live jar and must not write the saved copy over it.
+        let (first_tab, stored_emulation) = {
+            let pages = self.pages.lock().await;
+            match pages.get(&session_key) {
+                Some(session_pages) => (
+                    !session_pages.profile_restored,
+                    session_pages.profile_emulation.clone(),
+                ),
+                None => (true, None),
+            }
+        };
+        let snapshot = if first_tab {
+            match self.load_snapshot(&session.lease).await {
+                Ok(snapshot) => snapshot,
+                Err(failure) => {
+                    tracing::warn!(
+                        event = "profile_load_failed",
+                        reason = failure.class(),
+                        "browser profile could not be loaded"
+                    );
+                    match failure {
+                        // The profile exists but cannot be read now: refuse the attach (503)
+                        // instead of starting fresh, which the release would then save over it.
+                        ProfileLoadError::KeyUnavailable(error) => {
+                            return Err(error.with_details(
+                                json!({ "reason": "profile_key_unavailable" }),
+                            ));
+                        }
+                        // Unreadable: start fresh, and do not overwrite it at release.
+                        ProfileLoadError::Corrupt(_) => {
+                            let mut pages = self.pages.lock().await;
+                            pages.entry(session_key.clone()).or_default().lease_restore_failed =
+                                true;
+                            None
+                        }
+                        // Crypto-shredded: gone for good, the same as no profile.
+                        ProfileLoadError::KeyDestroyed => None,
+                    }
+                }
+            }
+        } else {
+            None
+        };
         // WS17.C1: a profile-enabled session under capture v2 keeps an origin journal and
         // installs the pagehide flush on its tabs. Everything else records nothing.
         let profile_journal = if session.lease.persist_profile
@@ -1366,7 +1420,7 @@ impl ChromiumoxideDriver {
         };
         let new_page_params = CreateTargetParamsBuilder::default()
             .url("about:blank")
-            .browser_context_id(context_id)
+            .browser_context_id(context_id.clone())
             .build()
             .map_err(|e| {
                 QuarryError::new(
@@ -1409,6 +1463,19 @@ impl ChromiumoxideDriver {
             ),
         )
         .await?;
+        // WS17.C2: the profile's locale and timezone, on every tab of a restored context.
+        // The user agent is never overridden. Warn-only, and bounded as a whole.
+        let profile_emulation = snapshot
+            .as_ref()
+            .map(ProfileEmulation::from_snapshot)
+            .or(stored_emulation);
+        if let Some(emulation) = profile_emulation.as_ref().filter(|e| !e.is_empty()) {
+            let _ = best_effort(Op::TabAttach, async {
+                profile_restore::apply_profile_emulation(&page, emulation).await;
+                Ok::<(), std::convert::Infallible>(())
+            })
+            .await;
+        }
         // The tab's own policy is in place before the guard below can decide
         // any of its requests (WS8.E). It is removed with the tab or the session.
         if let Some(policy) = egress_policy {
@@ -1447,6 +1514,75 @@ impl ChromiumoxideDriver {
                 journal.record_visit(initial_url);
             }
         }
+        // WS17.C2: restore the saved profile BEFORE the first navigation: the first request
+        // already carries the restored cookies, so nothing reloads. Once per context.
+        let mut restore_failed = false;
+        if let Some(snapshot) = snapshot.as_ref() {
+            let policy = RestorePolicy::from_env();
+            let restored = {
+                let browser_guard = self.browser.read().await;
+                match browser_guard.as_ref() {
+                    Some(browser) => {
+                        with_deadline(Op::TabAttach, async {
+                            Ok(profile_restore::restore_into_context(
+                                browser,
+                                &context_id,
+                                &page,
+                                snapshot,
+                                initial_url,
+                                chrono::Utc::now(),
+                                &policy,
+                            )
+                            .await)
+                        })
+                        .await
+                    }
+                    None => Err(browser_missing()),
+                }
+            };
+            let report = match restored {
+                Ok((report, _emulation)) => report,
+                Err(error) => {
+                    tracing::warn!(
+                        event = "profile_restore_failed",
+                        error_class = error.code.wire_name(),
+                        "browser profile restore did not finish"
+                    );
+                    RestoreReport {
+                        cookies_total: u32::try_from(snapshot.cookies.len()).unwrap_or(u32::MAX),
+                        failed: true,
+                        ..RestoreReport::default()
+                    }
+                }
+            };
+            restore_failed = report.failed;
+            tracing::info!(
+                event = "profile_restored",
+                cookies_total = report.cookies_total,
+                cookies_applied = report.cookies_applied,
+                skipped_expired = report.skipped_expired,
+                skipped_session_stale = report.skipped_session_stale,
+                cookies_rejected = report.cookies_rejected,
+                origins_seeded = report.origins_seeded,
+                idb_databases = report.idb_databases,
+                ua_changed = report.ua_changed,
+                failed = report.failed,
+                "browser profile restored"
+            );
+            // The origins the profile holds stay in the next capture unless a live tab
+            // replaces them: a run that never visits an origin must not lose its storage.
+            if let Some(journal) = profile_journal.as_ref() {
+                if let Ok(mut journal) = journal.lock() {
+                    journal.carry(snapshot.effective_origins(initial_url));
+                }
+            }
+            self.session_telemetry
+                .lock()
+                .await
+                .entry(session_key.clone())
+                .or_default()
+                .profile_restore = Some(report.summary());
+        }
         if initial_url != "about:blank" {
             with_deadline(Op::Navigate, async {
                 page.goto(initial_url).await.map_err(|e| {
@@ -1455,42 +1591,7 @@ impl ChromiumoxideDriver {
                 })
             })
             .await?;
-            if let Some(snapshot) = snapshot.as_ref() {
-                // chromiumoxide's `Page::set_cookies` hard-requires the page to
-                // already be on a real http(s) URL — it validates `page.url()`
-                // itself before ever looking at any per-cookie `url` field, and
-                // errors "Blank page can not have cookie" otherwise. Cookies must
-                // therefore be hydrated AFTER the initial navigation, not before
-                // it (as this previously did): restoring a profile with saved
-                // cookies into a fresh tab/session used to fail outright — every
-                // attach of a persistent, cookie-bearing profile 502'd — because
-                // hydration ran while the page was still `about:blank`.
-                let cookies_restored = !snapshot.cookies.is_empty();
-                if cookies_restored {
-                    hydrate_cookies(&page, snapshot).await?;
-                }
-                let storage_restored = hydrate_storage(&page, snapshot).await?;
-                if cookies_restored || storage_restored {
-                    // Reload so the already-completed initial `goto` request is
-                    // replayed with the freshly restored cookies/storage attached
-                    // (matches the pre-existing storage-only reload behavior).
-                    with_deadline(Op::Navigate, async {
-                        page.reload().await.map_err(|e| {
-                            QuarryError::new(
-                                ErrorCode::DriverFailed,
-                                "chromiumoxide profile reload failed",
-                            )
-                            .with_details(json!({ "error": e.to_string(), "url": initial_url }))
-                        })
-                    })
-                    .await?;
-                }
-            }
         }
-        // A genuinely blank tab (no initial URL — e.g. `new_tab` with no `url`)
-        // has no origin to scope cookies to, and chromiumoxide cannot set cookies
-        // on `about:blank` regardless; cookie/storage hydration is skipped for
-        // that case instead of hard-failing tab creation.
         install_popup_bridge(&page).await?;
 
         let mut pages = self.pages.lock().await;
@@ -1502,6 +1603,10 @@ impl ChromiumoxideDriver {
         if let Some(context_id) = attach.context.take() {
             session_pages.browser_context_id = Some(context_id);
             session_pages.download_dir = attach.download_dir.take();
+            // The context's first tab is committed: the profile is restored, once.
+            session_pages.profile_restored = true;
+            session_pages.profile_emulation = profile_emulation.filter(|e| !e.is_empty());
+            session_pages.lease_restore_failed |= restore_failed;
         }
         session_pages.tabs.push(TabPage {
             tab_id: tab_id.clone(),
@@ -1680,18 +1785,22 @@ impl ChromiumoxideDriver {
         frames.invalidate(&session_key, owner, current, epoch);
     }
 
-    async fn load_snapshot(&self, lease: &BrowserLease) -> Option<SessionSnapshot> {
+    /// The saved profile, or why it cannot be had (WS17.C2): a key that cannot be reached
+    /// is not the same as no profile, and neither is a profile that does not decode.
+    async fn load_snapshot(
+        &self,
+        lease: &BrowserLease,
+    ) -> Result<Option<SessionSnapshot>, ProfileLoadError> {
         if !lease.persist_profile {
-            return None;
+            return Ok(None);
         }
-        self.profiles
-            .as_ref()?
+        let Some(store) = self.profiles.as_ref() else {
+            return Ok(None);
+        };
+        store
             .load(&lease.org_id, &lease.profile_id)
             .await
-            .unwrap_or_else(|err| {
-                tracing::warn!(error_class = err.code.wire_name(), "chromiumoxide profile load failed; starting fresh");
-                None
-            })
+            .map_err(ProfileLoadError::classify)
     }
 
     async fn persist_current_page(&self, session: &BrowserSession) -> QuarryResult<()> {
@@ -1701,6 +1810,21 @@ impl ChromiumoxideDriver {
         let Some(store) = self.profiles.as_ref() else {
             return Ok(());
         };
+        // WS17.C2: a profile that could not be read or restored is not overwritten by what
+        // this session happened to hold.
+        let restore_failed = {
+            let pages = self.pages.lock().await;
+            pages
+                .get(&Self::session_key(session))
+                .is_some_and(|session_pages| session_pages.lease_restore_failed)
+        };
+        if restore_failed {
+            tracing::warn!(
+                event = "profile_save_skipped_restore_failed",
+                "browser profile not saved: it could not be restored at attach"
+            );
+            return Ok(());
+        }
         if capture_v2_enabled() {
             return self.persist_profile_v2(session, store).await;
         }
@@ -1712,6 +1836,7 @@ impl ChromiumoxideDriver {
         let captured_at = chrono::Utc::now();
         let mut snapshot = with_deadline(Op::ProfileCapture, capture_snapshot(&page)).await?;
         snapshot.viewport = session.lease.viewport.map(session_viewport);
+        snapshot.captured_at = Some(captured_at);
         let meta = crate::session::SaveMeta {
             saved_at: captured_at,
             owner: None,
@@ -1783,6 +1908,7 @@ impl ChromiumoxideDriver {
         let mut report = capture.report;
         let mut snapshot = capture.snapshot;
         snapshot.viewport = session.lease.viewport.map(session_viewport);
+        snapshot.captured_at = Some(captured_at);
         if should_skip_empty_save(loaded_nonempty, &snapshot) {
             report.empty_skipped = true;
             tracing::warn!(
@@ -2164,74 +2290,6 @@ fn chromium_launch_dirs_in(root: &Path) -> std::io::Result<ChromiumLaunchDirs> {
         user_data,
         crash_dumps,
     })
-}
-
-fn cookie_param(cookie: &Cookie) -> QuarryResult<CookieParam> {
-    CookieParam::builder()
-        .name(cookie.name.clone())
-        .value(cookie.value.clone())
-        .domain(cookie.domain.clone())
-        .path(cookie.path.clone())
-        .secure(cookie.secure)
-        .http_only(cookie.http_only)
-        .build()
-        .map_err(|e| {
-            QuarryError::new(
-                ErrorCode::DriverFailed,
-                "chromiumoxide cookie restore failed",
-            )
-            .with_details(json!({ "error": e.to_string(), "name": cookie.name }))
-        })
-}
-
-async fn hydrate_cookies(page: &Page, snapshot: &SessionSnapshot) -> QuarryResult<()> {
-    if snapshot.cookies.is_empty() {
-        return Ok(());
-    }
-    let cookies = snapshot
-        .cookies
-        .iter()
-        .map(cookie_param)
-        .collect::<QuarryResult<Vec<_>>>()?;
-    with_deadline(Op::TabAttach, async {
-        page.set_cookies(cookies).await.map_err(|e| {
-            QuarryError::new(
-                ErrorCode::DriverFailed,
-                "chromiumoxide cookie hydrate failed",
-            )
-            .with_details(json!({ "error": e.to_string() }))
-        })
-    })
-    .await?;
-    Ok(())
-}
-
-async fn hydrate_storage(page: &Page, snapshot: &SessionSnapshot) -> QuarryResult<bool> {
-    if snapshot.local_storage.is_empty() && snapshot.session_storage.is_empty() {
-        return Ok(false);
-    }
-    let script = format!(
-        r#"(() => {{
-            const localEntries = {local};
-            const sessionEntries = {session};
-            for (const [key, value] of localEntries) window.localStorage.setItem(key, value);
-            for (const [key, value] of sessionEntries) window.sessionStorage.setItem(key, value);
-            return true;
-        }})()"#,
-        local = serde_json::to_string(&snapshot.local_storage).unwrap_or_else(|_| "[]".into()),
-        session = serde_json::to_string(&snapshot.session_storage).unwrap_or_else(|_| "[]".into()),
-    );
-    with_deadline(Op::Evaluate, async {
-        page.evaluate(script).await.map_err(|e| {
-            QuarryError::new(
-                ErrorCode::DriverFailed,
-                "chromiumoxide storage hydrate failed",
-            )
-            .with_details(json!({ "error": e.to_string() }))
-        })
-    })
-    .await?;
-    Ok(true)
 }
 
 async fn install_popup_bridge(page: &Page) -> QuarryResult<()> {
@@ -8075,6 +8133,8 @@ mod tests {
     include!("screenshot_mask_live.rs");
     // WS17.C1: capture v2 against a real Chromium.
     include!("profile_capture_live.rs");
+    // WS17.C2: restore against a real Chromium.
+    include!("profile_restore_live.rs");
 }
 
 /// WS3.D and WS3.F, the parts that need no browser: every CDP call is bounded, the

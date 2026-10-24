@@ -704,6 +704,10 @@ pub struct OriginJournal {
     enabled: bool,
     visited: BTreeSet<String>,
     flushed: BTreeMap<String, OriginState>,
+    /// WS17.C2: what the loaded profile held for each origin. It stays in the next capture
+    /// for an origin no live tab covers (and keeps its IndexedDB when a page flushed only
+    /// web storage), so a session that never revisits an origin does not lose its state.
+    carried: BTreeMap<String, OriginState>,
     /// Origins refused because the journal was full.
     overflow: u32,
 }
@@ -760,6 +764,31 @@ impl OriginJournal {
         true
     }
 
+    /// WS17.C2: keep what a restored profile held per origin (see `carried`). Bounded by
+    /// [`MAX_ORIGINS`]; an origin over [`MAX_ORIGIN_BYTES`] is not carried.
+    pub fn carry(&mut self, states: impl IntoIterator<Item = OriginState>) {
+        if !self.enabled {
+            return;
+        }
+        for mut state in states {
+            let Some(origin) = normalize_origin(&state.origin) else {
+                continue;
+            };
+            if self.carried.len() >= MAX_ORIGINS && !self.carried.contains_key(&origin) {
+                self.overflow = self.overflow.saturating_add(1);
+                continue;
+            }
+            state.origin = origin.clone();
+            state
+                .local_storage
+                .retain(|(key, _)| key != SEEDED_SENTINEL_KEY);
+            if state.bytes() > MAX_ORIGIN_BYTES {
+                continue;
+            }
+            self.carried.insert(origin, state);
+        }
+    }
+
     pub fn visited(&self) -> impl Iterator<Item = &String> {
         self.visited.iter()
     }
@@ -772,13 +801,27 @@ impl OriginJournal {
         self.overflow
     }
 
-    /// The flushed states of origins that no live tab covers.
+    /// The states of origins that no live tab covers: what their pages flushed on
+    /// `pagehide` (with the IndexedDB the loaded profile held for them), else what the
+    /// loaded profile held.
     pub fn flushed_not_in(&self, live: &BTreeSet<String>) -> Vec<OriginState> {
-        self.flushed
-            .iter()
-            .filter(|(origin, _)| !live.contains(*origin))
-            .map(|(_, state)| state.clone())
-            .collect()
+        let mut out: Vec<OriginState> = Vec::new();
+        for (origin, state) in &self.flushed {
+            if live.contains(origin) {
+                continue;
+            }
+            let mut state = state.clone();
+            if let Some(carried) = self.carried.get(origin) {
+                state.indexed_db = carried.indexed_db.clone();
+            }
+            out.push(state);
+        }
+        for (origin, state) in &self.carried {
+            if !live.contains(origin) && !self.flushed.contains_key(origin) {
+                out.push(state.clone());
+            }
+        }
+        out
     }
 
     pub fn flushed_count(&self) -> usize {
@@ -1126,6 +1169,46 @@ mod tests {
             ProfileCaps::from_max_bytes(Some("lots")).max_bytes,
             DEFAULT_MAX_PLAINTEXT_BYTES
         );
+    }
+
+    #[test]
+    fn journal_carries_loaded_origins_and_keeps_their_indexeddb() {
+        let state = |origin: &str, key: &str| OriginState {
+            origin: origin.to_owned(),
+            local_storage: vec![(key.to_owned(), "v".to_owned())],
+            indexed_db: vec![IdbDatabase {
+                name: "db".to_owned(),
+                version: 1,
+                stores: vec![],
+            }],
+            ..Default::default()
+        };
+        let mut journal = OriginJournal::default();
+        // Disabled journal: nothing is carried.
+        journal.carry([state("https://a.test", "k")]);
+        assert!(journal.flushed_not_in(&BTreeSet::new()).is_empty());
+        journal.enable();
+        journal.carry([
+            state("https://a.test", "k"),
+            state("https://b.test", SEEDED_SENTINEL_KEY),
+            state("about:blank", "x"),
+        ]);
+        // A live tab covers a.test; b.test is carried (without the sentinel); about: is not.
+        let live: BTreeSet<String> = ["https://a.test".to_owned()].into();
+        let rest = journal.flushed_not_in(&live);
+        assert_eq!(rest.len(), 1);
+        assert_eq!(rest[0].origin, "https://b.test");
+        assert!(rest[0].local_storage.is_empty());
+        // A page flushed web storage for b.test: that wins, with the carried IndexedDB.
+        journal.record_flush(OriginState {
+            origin: "https://b.test".to_owned(),
+            local_storage: vec![("fresh".to_owned(), "1".to_owned())],
+            ..Default::default()
+        });
+        let rest = journal.flushed_not_in(&live);
+        assert_eq!(rest.len(), 1);
+        assert_eq!(rest[0].local_storage, vec![("fresh".to_owned(), "1".to_owned())]);
+        assert_eq!(rest[0].indexed_db.len(), 1);
     }
 
     #[test]

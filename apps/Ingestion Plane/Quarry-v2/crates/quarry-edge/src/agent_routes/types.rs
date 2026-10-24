@@ -233,6 +233,12 @@ pub struct BrowserSessionProjectionData {
     /// derive an AI run's grant but never forwards it to the SPA (WS1.B).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grant_id: Option<String>,
+    /// WS17.C2: what restoring the saved profile did when this session's first tab opened
+    /// ("restored 14 cookies, 2 origins, 3 expired skipped" is the UI's copy). Counts only.
+    /// Absent for a run without a saved profile, for a checkpoint projection, and until the
+    /// run's first observation carries the driver's telemetry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile_restore: Option<quarry_core::contracts::ProfileRestoreSummary>,
 }
 
 #[derive(Debug, Serialize)]
