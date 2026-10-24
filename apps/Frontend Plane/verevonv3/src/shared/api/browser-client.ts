@@ -499,6 +499,18 @@ export async function setBrowserControlMode(
   })
 }
 
+/** Extends a person's browser session grant by one broker interval (WS8.D). Returns only the new expiry. */
+export async function keepAliveBrowserSession(
+  orgId: string,
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<{ expiresAt: string | null }> {
+  return requestJson<{ expiresAt: string | null }>(
+    `/api/v1/browser/sessions/${encodeURIComponent(sessionId)}/keepalive`,
+    { method: 'POST', headers: orgHeaders(orgId), signal },
+  )
+}
+
 /** Reads one browser session projection (WS9.I: the refetch after a stale control epoch). */
 export async function getBrowserSession(
   orgId: string,

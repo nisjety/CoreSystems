@@ -36,6 +36,7 @@ import {
 } from '@/shared/icons'
 import {
   createEffect,
+  createMemo,
   createSignal,
   createUniqueId,
   For,
@@ -95,6 +96,11 @@ import { ConsoleFilterBar, emptyConsoleFilter, filterConsoleEntries, type Consol
 import { EgressReceiptsPanel } from '@/features/browser/evidence/EgressReceiptsPanel'
 import { ProcedurePanel } from '@/features/browser/evidence/ProcedurePanel'
 import { BrowserControlStrip } from '@/features/browser/dock/BrowserControlStrip'
+import {
+  sessionHasHumanBrowsing,
+  startSessionKeepAlive,
+  type KeepAliveOutcome,
+} from '@/features/browser/session/session-keepalive'
 
 export const SESSION_STATUS_LABELS: Record<BrowserSessionViewModel['status'], string> = {
   closed: 'Lukket',
@@ -449,6 +455,8 @@ export function BrowserChrome(props: {
   onBrowserAction?: (action: BrowserAction) => void
   onBrowserAutoRun?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
   onBrowserControlMode?: (mode: BrowserSessionViewModel['controlMode'], expectedEpoch?: number | null) => void
+  /** WS8.D: one keep-alive call for an open human session. Absent means no timer runs. */
+  onKeepAlive?: () => Promise<KeepAliveOutcome>
   onBrowserLoopPause?: () => void
   onBrowserLoopResume?: () => void
   onBrowserLoopStop?: () => void
@@ -517,6 +525,23 @@ export function BrowserChrome(props: {
   const isLive = () => session().renderMode === 'chromium'
   // Evidence panels (WS9.D) are shown only when the gateway advertises capability 'evidence'.
   const hasEvidence = () => session().capabilities.includes('evidence')
+  // WS8.D: while a person's session is live and the tab visible, its grant is renewed on a timer.
+  // Keyed on the session id (a memo), so a projection refresh does not restart the timer.
+  const keepAliveSessionId = createMemo(() => {
+    const current = session()
+    return props.onKeepAlive && sessionHasHumanBrowsing(current.capabilities) ? (current.sessionId ?? null) : null
+  })
+  createEffect(() => {
+    const sessionId = keepAliveSessionId()
+    const keepAlive = props.onKeepAlive
+    if (!sessionId || !keepAlive) return
+    const stop = startSessionKeepAlive({
+      isActive: () =>
+        document.visibilityState === 'visible' && session().sessionId === sessionId && session().status === 'live',
+      tick: keepAlive,
+    })
+    onCleanup(stop)
+  })
   const visibleConsoleEntries = () =>
     hasEvidence() ? filterConsoleEntries(liveConsoleEntries(), consoleFilter()) : liveConsoleEntries()
   const controlsDisabled = () => !isLive() || props.browserBusy || wsActionPending() || !session().sessionId

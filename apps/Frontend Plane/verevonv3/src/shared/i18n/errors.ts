@@ -238,6 +238,7 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
     en: 'Too many browser sessions are open. Close one you are not using and try again.',
   },
   browser_grant_unavailable: { no: 'Nettlesertilgang er midlertidig utilgjengelig.', en: 'Browser access is temporarily unavailable.', retryable: true },
+  browser_session_expired: { no: 'Denne nettleserøkten er avsluttet. Åpne den på nytt for å fortsette.', en: 'This browser session has ended. Reopen it to keep browsing.', retryable: false },
   browser_process_lost: {
     no: 'Nettleseren bak denne økten stoppet uventet. Start en ny økt for å fortsette.',
     en: 'The browser behind this session stopped unexpectedly. Start a new session to continue.',
