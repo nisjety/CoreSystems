@@ -4106,6 +4106,54 @@ components:
           type: integer
           minimum: 0
           nullable: true
+        profile_restore:
+          allOf:
+          - $ref: '#/components/schemas/ProfileRestoreSummary'
+          nullable: true
+          description: What restoring the session's saved profile did when its first tab opened. Counts only. Absent for a session without a saved profile.
+    ProfileRestoreSummary:
+      type: object
+      description: What restoring a saved profile into a fresh browser context did. Counts and flags only; never a cookie name, an origin, a URL or a value. The user agent is never overridden; ua_changed only records that it differs from the one the profile was captured with.
+      properties:
+        cookies_total:
+          type: integer
+          minimum: 0
+          description: Cookies the snapshot held.
+        cookies_applied:
+          type: integer
+          minimum: 0
+          description: Cookies Chromium accepted into the context.
+        skipped_expired:
+          type: integer
+          minimum: 0
+        skipped_session_stale:
+          type: integer
+          minimum: 0
+          description: Session cookies older than QUARRY_BROWSER_PROFILE_SESSION_COOKIE_MAX_AGE_S (default 604800).
+        cookies_rejected:
+          type: integer
+          minimum: 0
+          description: Cookies Chromium (or the mapping) refused.
+        origins_seeded:
+          type: integer
+          minimum: 0
+          description: Origins whose web storage and IndexedDB the page seeds on first visit.
+        idb_databases:
+          type: integer
+          minimum: 0
+        ua_changed:
+          type: boolean
+        snapshot_age_s:
+          type: integer
+          minimum: 0
+          nullable: true
+          description: Seconds between the snapshot's capture and the restore; absent for a legacy snapshot.
+        truncated:
+          type: boolean
+          description: The snapshot was cut by a cap or lost values at capture.
+        failed:
+          type: boolean
+          description: The restore did not finish; the release does not overwrite the stored profile.
     RedactionStamp:
       type: object
       description: What the secret-redaction pass did to a record. It carries counts per static rule id and no content and no lengths. Every field has a default, so a stamp written by an older build still reads.
