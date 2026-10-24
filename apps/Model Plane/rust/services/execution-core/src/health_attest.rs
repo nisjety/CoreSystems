@@ -187,6 +187,9 @@ pub const SANDBOX_PYTHON_MODULES: &[&str] = &[
 /// there so a wedged import costs the boot probe seconds, not forever.
 const INTERPRETER_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Ceiling on the LibreOffice version probe, run only when the render layer is on.
+const OFFICE_RENDER_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// What the interpreter probe measured.
 ///
 /// Two different facts, kept apart on purpose: `ran` says the probe completed at
@@ -251,9 +254,58 @@ pub fn probe() -> ProbeOutcome {
              import a library the tool advertises; cap.command.sandbox will not be attested"
         );
     }
+    if render_requested() && !office_render_ready() {
+        tracing::warn!(
+            "CODE_INTERPRETER_OFFICE_VERIFY=render, but LibreOffice did not start: Office \
+             files get render warnings, and cap.command.sandbox is unaffected"
+        );
+    }
     ProbeOutcome {
         sandbox: crate::sandbox::is_supported(),
         interpreter: interpreter.healthy(),
+    }
+}
+
+/// Whether `CODE_INTERPRETER_OFFICE_VERIFY` asks for the render layer. Strict, as
+/// the verifier's own parser is: only the named value counts.
+fn render_requested() -> bool {
+    render_requested_in(
+        std::env::var("CODE_INTERPRETER_OFFICE_VERIFY")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn render_requested_in(raw: Option<&str>) -> bool {
+    raw.is_some_and(|value| value.trim().eq_ignore_ascii_case("render"))
+}
+
+/// Whether the LibreOffice converter starts, measured by its version. This is
+/// logged and nothing else: a broken converter removes the render checks, not
+/// the sandbox, so it must not change what `cap.command.sandbox` attests.
+fn office_render_ready() -> bool {
+    let Ok(mut child) = std::process::Command::new("soffice")
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    let deadline = Instant::now() + OFFICE_RENDER_PROBE_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
     }
 }
 
@@ -2309,5 +2361,25 @@ mod tests {
         assert_eq!(attested, 1);
         let posted = posted_attestations(&capability_core).await;
         assert_eq!(posted[0]["id"], WEB_HTTP_CAPABILITY);
+    }
+
+    /// The render probe is logged, never attested: the sandbox capability is
+    /// attested from the sandbox and interpreter probes alone, and only the
+    /// exact value `render` turns the probe on.
+    #[test]
+    fn office_probe_does_not_change_sandbox_capability_health() {
+        let attested = attestable(ProbeOutcome {
+            sandbox: true,
+            interpreter: true,
+        });
+        let sandbox = attested
+            .iter()
+            .find(|row| row.capability_id == SANDBOX_CAPABILITY)
+            .expect("the sandbox is attested from its own probes");
+        assert_eq!(sandbox.reason_code, "code_runtime_probed");
+        assert!(render_requested_in(Some(" Render ")));
+        assert!(!render_requested_in(Some("true")));
+        assert!(!render_requested_in(Some("structural")));
+        assert!(!render_requested_in(None));
     }
 }

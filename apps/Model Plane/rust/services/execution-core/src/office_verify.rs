@@ -16,13 +16,17 @@
 //! # Switches
 //!
 //! * `CODE_INTERPRETER_OFFICE_VERIFY` — `off` (default, and any unset or unknown
-//!   value), `structural`, or `render`. `render` names the LibreOffice layer,
-//!   which is not in this build yet, so it runs the structural checks too.
+//!   value), `structural`, or `render`. `render` adds the LibreOffice layer: a
+//!   PDF render, page and font facts, a recalculated copy of each workbook and
+//!   up to three page previews. Its failures are warnings, never failures of the
+//!   file.
 //! * `OFFICE_VERIFY_MAX_FILES` — files checked per call, capped at
 //!   [`MAX_FILES`].
 //! * `OFFICE_VERIFY_TIMEOUT_SECS` — per file, default 60.
 //! * `OFFICE_VERIFY_MAX_CONCURRENCY` — checks in flight across all calls,
 //!   default 2.
+//! * `OFFICE_PREVIEW_MAX_BYTES` — the largest PDF preview returned, default 2
+//!   MiB. A PDF over it is dropped, never cut short.
 //!
 //! With the switch off this module returns an empty [`Verification`], so the
 //! `code_interpreter` result is byte-identical to before it existed.
@@ -51,14 +55,24 @@ const WORKSPACE_TAG: &str = "office-verify";
 const DEFAULT_TIMEOUT_SECS: u64 = 60;
 const DEFAULT_CONCURRENCY: usize = 2;
 const MAX_CONCURRENCY: usize = 8;
+const DEFAULT_PREVIEW_MAX_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_PREVIEW_BYTES: u64 = 8 * 1024 * 1024;
+
+/// The argument that asks `check.py` for the render layer.
+const RENDER_ARG: &str = "render";
+/// Where `check.py` leaves its render, relative to the verifier's workspace.
+/// The page caps are fixed here and in `check.py`; the PDF cap is configurable.
+const RENDER_DIR: &str = "render";
+const PREVIEW_PDF: &str = "preview.pdf";
+const MAX_THUMBS: usize = 3;
+const MAX_THUMB_BYTES: u64 = 150 * 1024;
 
 /// Whether verification runs, and how far.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Off,
     Structural,
-    /// Reserved for the LibreOffice render layer. Until that layer exists it
-    /// runs the structural checks, and nothing claims a render happened.
+    /// The structural checks plus the LibreOffice render layer.
     Render,
 }
 
@@ -70,6 +84,25 @@ pub struct Verification {
     /// Office files that were not checked: too large to return, or past
     /// `OFFICE_VERIFY_MAX_FILES`.
     pub unchecked: usize,
+    /// The rendered previews of the checked files that produced any.
+    pub previews: Vec<FilePreview>,
+}
+
+/// The rendered copy of one Office file, base64 for the viewer. Each part is
+/// absent when it was over its cap, so a viewer never gets a cut-short PDF.
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
+pub struct FilePreview {
+    pub name: String,
+    pub pdf_b64: Option<String>,
+    pub thumbs_b64: Vec<String>,
+}
+
+/// The render files `check.py` left in the workspace, read under their caps
+/// before the workspace is removed.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct RenderedFiles {
+    pdf: Option<Vec<u8>>,
+    thumbs: Vec<Vec<u8>>,
 }
 
 /// The strict parser: an unset or unknown value is off, and an unknown one says
@@ -112,6 +145,13 @@ fn parse_concurrency(raw: Option<&str>) -> usize {
         .filter(|&value| value > 0)
         .unwrap_or(DEFAULT_CONCURRENCY)
         .min(MAX_CONCURRENCY)
+}
+
+fn parse_preview_max(raw: Option<&str>) -> u64 {
+    raw.and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|&value| value > 0)
+        .unwrap_or(DEFAULT_PREVIEW_MAX_BYTES)
+        .min(MAX_PREVIEW_BYTES)
 }
 
 fn env(var: &str) -> Option<String> {
@@ -169,7 +209,7 @@ async fn verify_with<F, Fut>(
 ) -> Verification
 where
     F: Fn(OfficeKind, Vec<u8>) -> Fut,
-    Fut: Future<Output = Result<String, String>>,
+    Fut: Future<Output = Result<(String, RenderedFiles), String>>,
 {
     let mut verification = Verification::default();
     for subject in subjects {
@@ -185,11 +225,66 @@ where
             Ok(_permit) => check(subject.kind, bytes).await,
             Err(_) => Err("the Office verifier is shut down".to_owned()),
         };
-        verification
-            .reports
-            .push(report_for(&subject.name, subject.kind, outcome));
+        match outcome {
+            Ok((stdout, rendered)) => {
+                verification
+                    .reports
+                    .push(report_for(&subject.name, subject.kind, Ok(stdout)));
+                if let Some(preview) = preview_for(&subject.name, rendered) {
+                    verification.previews.push(preview);
+                }
+            }
+            Err(reason) => {
+                verification
+                    .reports
+                    .push(report_for(&subject.name, subject.kind, Err(reason)))
+            }
+        }
     }
     verification
+}
+
+fn preview_for(name: &str, rendered: RenderedFiles) -> Option<FilePreview> {
+    if rendered.pdf.is_none() && rendered.thumbs.is_empty() {
+        return None;
+    }
+    Some(FilePreview {
+        name: name.to_owned(),
+        pdf_b64: rendered.pdf.map(|bytes| STANDARD.encode(bytes)),
+        thumbs_b64: rendered
+            .thumbs
+            .iter()
+            .map(|bytes| STANDARD.encode(bytes))
+            .collect(),
+    })
+}
+
+/// The render files under `root`, each read only within its cap. The program
+/// under check can leave anything in its directory, a link included, so a render
+/// directory or file that is not a plain one is ignored: a link would read a file
+/// on the host.
+fn collect_render(root: &std::path::Path, pdf_max_bytes: u64) -> RenderedFiles {
+    let render = root.join(RENDER_DIR);
+    let is_plain_dir = std::fs::symlink_metadata(&render).is_ok_and(|metadata| metadata.is_dir());
+    if !is_plain_dir {
+        return RenderedFiles::default();
+    }
+    RenderedFiles {
+        pdf: read_capped(&render.join(PREVIEW_PDF), pdf_max_bytes),
+        thumbs: (1..=MAX_THUMBS)
+            .filter_map(|index| {
+                read_capped(&render.join(format!("thumb-{index}.png")), MAX_THUMB_BYTES)
+            })
+            .collect(),
+    }
+}
+
+fn read_capped(path: &std::path::Path, cap: u64) -> Option<Vec<u8>> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if !metadata.is_file() || metadata.len() > cap {
+        return None;
+    }
+    std::fs::read(path).ok()
 }
 
 /// Turn one check's outcome into the contract. Anything that stops the check
@@ -224,7 +319,9 @@ async fn run_checker(
     kind: OfficeKind,
     bytes: Vec<u8>,
     timeout: Duration,
-) -> Result<String, String> {
+    mode: Mode,
+    preview_max_bytes: u64,
+) -> Result<(String, RenderedFiles), String> {
     let workspace = Workspace::create(WORKSPACE_TAG, kind.as_str())
         .map_err(|error| format!("the verifier could not create its workspace: {error}"))?;
     let root = workspace.path();
@@ -233,10 +330,14 @@ async fn run_checker(
         writable_roots: vec![root.to_path_buf()],
         network: MpNetworkPolicy::Disabled,
     };
+    let mut args = vec![CHECKER_NAME.to_owned(), subject];
+    if mode == Mode::Render {
+        args.push(RENDER_ARG.to_owned());
+    }
     let outcome = executor::execute_sandboxed_in_dir(
         &policy,
         PYTHON_PROGRAM,
-        &[CHECKER_NAME.to_owned(), subject],
+        &args,
         root,
         &child_env_for(root),
         timeout,
@@ -249,7 +350,13 @@ async fn run_checker(
             outcome.exit_code
         ));
     }
-    Ok(outcome.stdout)
+    // Read before `workspace` is dropped at the end of this function.
+    let rendered = if mode == Mode::Render {
+        collect_render(root, preview_max_bytes)
+    } else {
+        RenderedFiles::default()
+    };
+    Ok((outcome.stdout, rendered))
 }
 
 /// Verify the Office files among `files`. Returns an empty result when the switch
@@ -259,13 +366,11 @@ pub async fn verify_outputs(files: &[OutputFile]) -> Verification {
     if mode == Mode::Off {
         return Verification::default();
     }
-    if mode == Mode::Render {
-        tracing::warn!("CODE_INTERPRETER_OFFICE_VERIFY=render: the render layer is not in this build; running structural checks");
-    }
     let max_files = parse_max_files(env("OFFICE_VERIFY_MAX_FILES").as_deref());
     let timeout = parse_timeout(env("OFFICE_VERIFY_TIMEOUT_SECS").as_deref());
+    let preview_max_bytes = parse_preview_max(env("OFFICE_PREVIEW_MAX_BYTES").as_deref());
     verify_with(subjects(files), max_files, gate(), |kind, bytes| {
-        run_checker(kind, bytes, timeout)
+        run_checker(kind, bytes, timeout, mode, preview_max_bytes)
     })
     .await
 }
@@ -324,10 +429,18 @@ elif spec == "docx-traversal":
         ("word/document.xml", '<w:document xmlns:w="http://w"/>'),
         ("../escape.xml", "<x/>"),
     ])
+elif spec == "docx-missing-font":
+    data = package([
+        ("[Content_Types].xml", CT),
+        ("_rels/.rels", rels("word/document.xml")),
+        ("word/document.xml", '<?xml version="1.0"?><w:document xmlns:w="http://w"><w:body><w:p><w:r><w:rPr><w:rFonts w:ascii="Verevon Missing Font" w:hAnsi="Verevon Missing Font"/></w:rPr><w:t>Hi</w:t></w:r></w:p></w:body></w:document>'),
+    ])
 elif spec == "xlsx-missing-sheet":
     data = xlsx("Nope!A1")
 elif spec == "xlsx-error-cell":
     data = xlsx("1/0", "#DIV/0!")
+elif spec == "xlsx-formula-div0":
+    data = xlsx("1/0")
 else:
     sys.exit(3)
 sys.stdout.buffer.write(data)
@@ -337,14 +450,21 @@ sys.stdout.buffer.write(data)
     /// the checker's own logic: the sandbox wrapper is exercised separately, and
     /// it refuses to run on a host with no bubblewrap. The environment is
     /// inherited because Windows needs SYSTEMROOT to start Python at all.
-    async fn run_checker_on_host(kind: OfficeKind, bytes: &[u8]) -> Result<String, String> {
+    async fn run_checker_on_host(
+        kind: OfficeKind,
+        bytes: &[u8],
+        mode: Mode,
+    ) -> Result<(String, RenderedFiles), String> {
         let workspace = Workspace::create("office-verify-host", kind.as_str())
             .map_err(|error| error.to_string())?;
         let root = workspace.path();
         let subject = stage(root, kind, bytes)?;
-        let output = tokio::process::Command::new(PYTHON_PROGRAM)
-            .arg(CHECKER_NAME)
-            .arg(&subject)
+        let mut command = tokio::process::Command::new(PYTHON_PROGRAM);
+        command.arg(CHECKER_NAME).arg(&subject);
+        if mode == Mode::Render {
+            command.arg(RENDER_ARG);
+        }
+        let output = command
             .current_dir(root)
             .output()
             .await
@@ -352,7 +472,31 @@ sys.stdout.buffer.write(data)
         if !output.status.success() {
             return Err(format!("checker exited with {}", output.status));
         }
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        let rendered = if mode == Mode::Render {
+            collect_render(root, DEFAULT_PREVIEW_MAX_BYTES)
+        } else {
+            RenderedFiles::default()
+        };
+        Ok((
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            rendered,
+        ))
+    }
+
+    fn soffice_available() -> bool {
+        std::env::var_os("PATH").is_some_and(|paths| {
+            std::env::split_paths(&paths)
+                .any(|dir| dir.join("soffice").is_file() || dir.join("soffice.exe").is_file())
+        })
+    }
+
+    fn openpyxl_available() -> bool {
+        std::process::Command::new(PYTHON_PROGRAM)
+            .args(["-c", "import openpyxl"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
     }
 
     fn fixture(spec: &str) -> Vec<u8> {
@@ -376,7 +520,9 @@ sys.stdout.buffer.write(data)
     }
 
     async fn verdict(kind: OfficeKind, spec: &str) -> OfficeVerification {
-        let outcome = run_checker_on_host(kind, &fixture(spec)).await;
+        let outcome = run_checker_on_host(kind, &fixture(spec), Mode::Structural)
+            .await
+            .map(|(stdout, _)| stdout);
         report_for("deliverable", kind, outcome)
     }
 
@@ -471,9 +617,10 @@ sys.stdout.buffer.write(data)
             },
         ];
         let verification = verify_with(subjects, 1, &gate, |_kind, _bytes| async {
-            Ok::<String, String>(
+            Ok::<(String, RenderedFiles), String>((
                 r#"{"kind":"docx","level":"passed","checks":[],"stats":{}}"#.to_owned(),
-            )
+                RenderedFiles::default(),
+            ))
         })
         .await;
         assert_eq!(verification.reports.len(), 1);
@@ -504,9 +651,10 @@ sys.stdout.buffer.write(data)
                         tokio::task::yield_now().await;
                     }
                     in_flight.fetch_sub(1, Ordering::SeqCst);
-                    Ok::<String, String>(
+                    Ok::<(String, RenderedFiles), String>((
                         r#"{"kind":"docx","level":"passed","checks":[],"stats":{}}"#.to_owned(),
-                    )
+                        RenderedFiles::default(),
+                    ))
                 })
                 .await
             }
@@ -539,6 +687,8 @@ sys.stdout.buffer.write(data)
             OfficeKind::Docx,
             b"not a package".to_vec(),
             Duration::from_millis(1),
+            Mode::Structural,
+            DEFAULT_PREVIEW_MAX_BYTES,
         )
         .await;
         assert_eq!(count(), before, "no verifier workspace is left behind");
@@ -610,5 +760,128 @@ sys.stdout.buffer.write(data)
         let report = verdict(OfficeKind::Xlsx, "xlsx-error-cell").await;
         assert_eq!(report.level, VerificationLevel::Failed, "{report:?}");
         assert!(has_check(&report, "error_cells", VerificationLevel::Failed));
+    }
+
+    /// Without LibreOffice the render layer says so as a warning; the file's own
+    /// verdict is untouched, so a clean file is never reported as failed.
+    #[tokio::test]
+    async fn a_missing_soffice_is_a_warning_never_a_failure() {
+        if !python_available() || soffice_available() {
+            return;
+        }
+        let (stdout, _) =
+            run_checker_on_host(OfficeKind::Docx, &fixture("docx-valid"), Mode::Render)
+                .await
+                .expect("the checker runs");
+        let report = report_for("deliverable", OfficeKind::Docx, Ok(stdout));
+        assert_eq!(report.level, VerificationLevel::Warnings, "{report:?}");
+        assert!(has_check(&report, "render", VerificationLevel::Warnings));
+        assert!(!report
+            .checks
+            .iter()
+            .any(|check| check.level == VerificationLevel::Failed));
+    }
+
+    #[tokio::test]
+    async fn libreoffice_converts_a_docx_to_pdf_under_the_bwrap_policy() {
+        if !python_available() || !soffice_available() || !crate::sandbox::is_supported() {
+            return;
+        }
+        let (_stdout, rendered) = run_checker(
+            OfficeKind::Docx,
+            fixture("docx-valid"),
+            Duration::from_secs(60),
+            Mode::Render,
+            DEFAULT_PREVIEW_MAX_BYTES,
+        )
+        .await
+        .expect("the sandboxed render runs");
+        assert!(
+            rendered.pdf.is_some(),
+            "LibreOffice wrote a PDF in the sandbox"
+        );
+        assert!(!rendered.thumbs.is_empty(), "the first page was rendered");
+    }
+
+    #[tokio::test]
+    async fn recalc_reports_div0_in_a_formula_cell() {
+        if !python_available() || !soffice_available() || !openpyxl_available() {
+            return;
+        }
+        let (stdout, _) = run_checker_on_host(
+            OfficeKind::Xlsx,
+            &fixture("xlsx-formula-div0"),
+            Mode::Render,
+        )
+        .await
+        .expect("the checker runs");
+        let report = report_for("deliverable", OfficeKind::Xlsx, Ok(stdout));
+        assert_eq!(report.level, VerificationLevel::Failed, "{report:?}");
+        assert!(has_check(&report, "recalc", VerificationLevel::Failed));
+    }
+
+    /// The document names a family that is not installed. LibreOffice draws an
+    /// installed stand-in instead, and that stand-in is embedded, so only the
+    /// families the file declares can be compared with the ones the render shows.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_missing_font_is_listed_as_substituted() {
+        if !python_available() || !soffice_available() {
+            return;
+        }
+        let (stdout, _) = run_checker_on_host(
+            OfficeKind::Docx,
+            &fixture("docx-missing-font"),
+            Mode::Render,
+        )
+        .await
+        .expect("the checker runs");
+        let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("the report is JSON");
+        assert_eq!(parsed["stats"]["fonts_substituted"], 1, "{parsed}");
+        let report = report_for("deliverable", OfficeKind::Docx, Ok(stdout));
+        assert!(
+            has_check(&report, "fonts", VerificationLevel::Warnings),
+            "{report:?}"
+        );
+    }
+
+    /// A preview over its cap is dropped whole; the cap is checked per part, so a
+    /// large thumbnail does not take the small ones with it.
+    #[test]
+    fn preview_over_cap_is_dropped_not_truncated() {
+        let workspace = Workspace::create("office-verify-render", "preview").expect("workspace");
+        let render = workspace.path().join(RENDER_DIR);
+        std::fs::create_dir_all(&render).expect("render dir");
+        std::fs::write(render.join(PREVIEW_PDF), vec![7u8; 3000]).expect("pdf");
+        std::fs::write(
+            render.join("thumb-1.png"),
+            vec![1u8; MAX_THUMB_BYTES as usize + 1],
+        )
+        .expect("large thumbnail");
+        std::fs::write(render.join("thumb-2.png"), vec![2u8; 1024]).expect("small thumbnail");
+        let small = collect_render(workspace.path(), 2000);
+        assert!(small.pdf.is_none(), "a PDF over its cap is dropped");
+        assert_eq!(
+            small.thumbs,
+            vec![vec![2u8; 1024]],
+            "only the thumbnail under its cap is kept"
+        );
+        let large = collect_render(workspace.path(), 4000);
+        assert_eq!(large.pdf.map(|bytes| bytes.len()), Some(3000));
+    }
+
+    /// The program under check can leave a link in its render directory. The host
+    /// must not follow it to a file outside the workspace.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_in_the_render_is_not_read() {
+        let outside = Workspace::create("office-verify-outside", "secret").expect("workspace");
+        let secret = outside.path().join("host.txt");
+        std::fs::write(&secret, b"host secret").expect("secret");
+        let inside = Workspace::create("office-verify-render", "link").expect("workspace");
+        let render = inside.path().join(RENDER_DIR);
+        std::fs::create_dir_all(&render).expect("render dir");
+        std::os::unix::fs::symlink(&secret, render.join(PREVIEW_PDF)).expect("symlink");
+        assert!(collect_render(inside.path(), u64::MAX).pdf.is_none());
     }
 }
