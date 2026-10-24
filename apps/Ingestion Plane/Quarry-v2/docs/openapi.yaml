@@ -6160,6 +6160,16 @@ components:
           description: >-
             Maximum link depth from the seed. Absent or 0 takes the default (5);
             clamped to the hard ceiling (10). Reported in `limits`.
+        allow_subdomains:
+          type: boolean
+          description: >-
+            WS14.S3. Follow links to subdomains of the seed host. Absent means false.
+            The effective scope is echoed in `effective`.
+        allow_external_links:
+          type: boolean
+          description: >-
+            WS14.S3. Follow links to hosts unrelated to the seed host. Absent means false.
+            The effective scope is echoed in `effective`.
     BatchRequest:
       type: object
       required:
@@ -6433,6 +6443,33 @@ components:
         accepted_at:
           type: string
           format: date-time
+        effective:
+          type: object
+          description: >-
+            WS14.S3. Set by /v1/crawl only: the scope and bounds the crawl runs with.
+            `scope_mode` is observe (count, drop nothing; the default) or enforce; `legacy`
+            is true when the scope switch is off; `warnings` lists the widened switches.
+            Never a URL.
+          properties:
+            scope:
+              type: object
+              description: The crawl scope (allow_subdomains, allow_external_links, crawl_entire_domain, include_paths, exclude_paths, deny_extensions, legacy).
+            scope_mode:
+              type: string
+              enum: [observe, enforce]
+            robots:
+              type: string
+              enum: [respect, ignore]
+            max_pages:
+              type: integer
+            max_depth:
+              type: integer
+            legacy:
+              type: boolean
+            warnings:
+              type: array
+              items:
+                type: string
         limits:
           type: object
           description: >-
