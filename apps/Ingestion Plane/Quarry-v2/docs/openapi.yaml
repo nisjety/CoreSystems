@@ -452,6 +452,17 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Envelope_Error'
+        '403':
+          description: >-
+            The page was refused before it was fetched (WS14.S4). error.code is
+            SECURITY_BLOCKED, error.retryable is false and error.details.denial
+            says why (see RobotsFetchDenial). Only a request whose crawl.robots is
+            respect is checked, and only when QUARRY_EDGE__CRAWL_ROBOTS is enforce;
+            in observe the page is fetched and the would-be refusal is counted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
   /v1/search:
     post:
       operationId: search
@@ -5930,6 +5941,34 @@ components:
             type: array
             items:
               type: string
+    RobotsFetchDenial:
+      type: object
+      description: >-
+        error.details.denial of the 403 SECURITY_BLOCKED a page fetch gets when
+        robots.txt refuses it (WS14.S4). The path never carries the query.
+      required:
+      - code
+      - message
+      properties:
+        code:
+          type: string
+          enum:
+          - robots_disallowed
+          - robots_unreachable
+        message:
+          type: string
+        remedy:
+          type: string
+          nullable: true
+        user_agent:
+          type: string
+          description: The product token whose group disallows the path (robots_disallowed).
+        path:
+          type: string
+          description: The disallowed path, without the query (robots_disallowed).
+        host:
+          type: string
+          description: The host whose robots.txt could not be fetched (robots_unreachable).
     RequestAsk:
       type: object
       description: >-
