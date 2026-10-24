@@ -1146,6 +1146,25 @@ async fn batch_handoff(
     let request_id = crate::request_id::current();
     refuse_durable_job_under_zdr(&claims, req.zdr, &request_id, "batch")?;
     refuse_while_draining(&request_id)?;
+    // WS14.S5: every URL is checked statically before anything is created (no network work).
+    // When none can be crawled the batch is a 400 with `details.rejected`; otherwise the
+    // accepted URLs go on and the refused ones come back in `HandoffAck.rejected`. The policy
+    // gate below sees only the accepted URLs.
+    let mut req = req;
+    let check = crate::batch_check::validate_batch_urls(
+        &req.urls,
+        crate::batch_check::batch_max_urls(),
+    );
+    if check.accepted.is_empty() && !check.rejected.is_empty() {
+        let err = QuarryError::new(ErrorCode::BadRequest, "no URL in the batch can be crawled")
+            .with_details(serde_json::json!({ "rejected": check.rejected }));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(Envelope::<()>::err(&request_id, err)),
+        ));
+    }
+    let rejected = check.rejected;
+    req.urls = check.accepted;
     // WS7.E: every URL of the batch is gated before the handoff. One denied URL refuses
     // the whole batch; the details carry a count, never a URL or a host.
     let decision = crate::web_policy_edge::decide(
@@ -1167,7 +1186,6 @@ async fn batch_handoff(
         .map_err(|error| limits_refusal(&request_id, error))?;
     let urls_bound = crate::limits::clamp_batch_urls(req.urls.len(), org_limits.batch_urls)
         .map_err(|exhausted| limits_refusal(&request_id, exhausted.into_error()))?;
-    let mut req = req;
     req.urls.truncate(urls_bound.accepted);
     let origin = crate::handoff::run_origin_from_request(&claims, &headers);
     let idempotency_key = crate::handoff::idempotency_key_from_request(&headers);
@@ -1178,6 +1196,7 @@ async fn batch_handoff(
         serde_json::json!({
             "kind": "batch",
             "urls": req.urls,
+            "robots": "respect",
             "org_id": claims.org_id,
             "user_id": claims.user_id,
             "ingest": req.ingest,
@@ -1232,6 +1251,7 @@ async fn batch_handoff(
     match ack {
         Ok(mut v) => {
             v.limits = Some(urls_bound.into());
+            v.rejected = rejected;
             Ok(Json(Envelope::ok(request_id, v)))
         }
         Err(err) => Err((
@@ -1260,6 +1280,10 @@ pub struct HandoffAck {
     /// WS14.S3: the scope and bounds a crawl runs with (`crawl` only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective: Option<serde_json::Value>,
+    /// WS14.S5: the URLs of a batch that the static check refused (`/v1/batch`). Absent
+    /// when none was refused. The URLs are the caller's own; no host or reason detail is added.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rejected: Vec<crate::batch_check::BatchRejection>,
 }
 
 /// Internal endpoint called by orchestrator activities.

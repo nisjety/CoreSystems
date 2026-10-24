@@ -51,6 +51,7 @@ mod internal_routes;
 mod job_lifecycle_routes;
 mod job_stream;
 mod crawl_policy;
+mod batch_check;
 mod limits;
 mod map_routes;
 mod metrics;
@@ -212,6 +213,10 @@ async fn run() -> anyhow::Result<()> {
     let crawl_scope = crawl_policy::CrawlScopeSwitch::from_env()
         .map_err(|e| anyhow::anyhow!("crawl scope: {e}"))?;
     tracing::info!(mode = crawl_scope.label(), "crawl scope: boot");
+    // WS14.S5: an unparsable QUARRY_EDGE__CRAWL_BATCH_MAX_URLS fails boot.
+    let batch_cap = quarry_edge::batch_check::check_boot()
+        .map_err(|e| anyhow::anyhow!("crawl batch cap: {e}"))?;
+    tracing::info!(max_urls = batch_cap, "crawl batch cap: boot");
     // WS10.S3: the agent event replay ring bounds (env-only; an unparsable value aborts boot).
     let trace_ring = trace_config::TraceConfig::from_env()
         .map_err(|e| anyhow::anyhow!("trace: {e}"))?

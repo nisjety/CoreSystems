@@ -233,6 +233,7 @@ pub(crate) async fn post_job(
         accepted_at: chrono::Utc::now(),
         limits: None,
         effective: None,
+        rejected: Vec::new(),
     })
 }
 
