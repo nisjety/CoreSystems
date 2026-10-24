@@ -50,6 +50,8 @@ const BUDGET_FIELDS = [
   { name: 'budget_source', type: 'string' },
   { name: 'budget_minted_at_unix', type: 'int64' },
 ];
+// WS8.C (R-6 ledger): 50-59 are the human-browse / attach / renew allocation. 54-59 stay reserved.
+const WS8_RESERVED = [54, 55, 56, 57, 58, 59];
 const BUDGET_MESSAGES = [
   'AcquireGrantRequest',
   'AcquireGrantResponse',
@@ -62,16 +64,16 @@ test('upstream proto: grant messages keep their field numbers and add kind/zdr/o
   const messages = parseProto(read(UPSTREAM_PROTO));
 
   const request = messages.get('AcquireGrantRequest');
-  assert.deepEqual(numbers(request), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, ...BUDGET_NUMBERS]);
+  assert.deepEqual(numbers(request), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, ...BUDGET_NUMBERS, 50]);
   assert.deepEqual(request.get(10), { name: 'zdr', type: 'bool', repeated: false });
 
   const issued = messages.get('AcquireGrantResponse');
-  assert.deepEqual(numbers(issued), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, ...BUDGET_NUMBERS]);
+  assert.deepEqual(numbers(issued), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, ...BUDGET_NUMBERS, 50, 51, 52]);
   assert.deepEqual(issued.get(10), { name: 'kind', type: 'string', repeated: false });
   assert.deepEqual(issued.get(11), { name: 'zdr', type: 'bool', repeated: false });
 
   const validated = messages.get('ValidateGrantResponse');
-  assert.deepEqual(numbers(validated), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, ...BUDGET_NUMBERS]);
+  assert.deepEqual(numbers(validated), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, ...BUDGET_NUMBERS, 50, 51, 52, 53]);
   assert.deepEqual(validated.get(10), { name: 'kind', type: 'string', repeated: false });
   assert.deepEqual(validated.get(11), { name: 'owner_id', type: 'string', repeated: false });
   assert.deepEqual(validated.get(12), { name: 'zdr', type: 'bool', repeated: false });
@@ -102,7 +104,7 @@ test('upstream proto: DeriveRunGrant request and response pin their field number
 
   const request = messages.get('DeriveRunGrantRequest');
   assert.ok(request, 'DeriveRunGrantRequest is missing');
-  assert.deepEqual(numbers(request), [1, 2, 3, 4, 5, 6, ...BUDGET_NUMBERS]);
+  assert.deepEqual(numbers(request), [1, 2, 3, 4, 5, 6, ...BUDGET_NUMBERS, 50]);
   assert.deepEqual(request.get(1), { name: 'parent_grant_id', type: 'string', repeated: false });
   assert.deepEqual(request.get(2), { name: 'session_key', type: 'string', repeated: false });
   assert.deepEqual(request.get(3), { name: 'org_id', type: 'string', repeated: false });
@@ -112,7 +114,7 @@ test('upstream proto: DeriveRunGrant request and response pin their field number
 
   const response = messages.get('DeriveRunGrantResponse');
   assert.ok(response, 'DeriveRunGrantResponse is missing');
-  assert.deepEqual(numbers(response), [1, 2, 3, 4, 5, 6, 7, ...BUDGET_NUMBERS]);
+  assert.deepEqual(numbers(response), [1, 2, 3, 4, 5, 6, 7, ...BUDGET_NUMBERS, 50]);
   assert.deepEqual(response.get(1), { name: 'grant_id', type: 'string', repeated: false });
   assert.deepEqual(response.get(2), { name: 'endpoint', type: 'string', repeated: false });
   assert.deepEqual(response.get(3), { name: 'expires_at', type: 'google.protobuf.Timestamp', repeated: false });
@@ -141,7 +143,7 @@ test('the generated Go code carries the same grant fields as the proto, budget c
       [...match[1].matchAll(/protobuf:"[a-z0-9]+,(\d+),(?:opt|rep),name=(\w+)/g)].map((m) => [Number(m[1]), m[2]]),
     );
   };
-  for (const name of BUDGET_MESSAGES) {
+  for (const name of [...BUDGET_MESSAGES, 'RenewGrantRequest', 'RenewGrantResponse']) {
     const fromProto = new Map([...proto.get(name)].map(([number, field]) => [number, field.name]));
     assert.ok(fromProto.size > 0, `${name} parsed empty from the proto`);
     assert.deepEqual(goFields(name), fromProto, `${name}: browser.pb.go is stale against browser.proto`);
@@ -150,6 +152,63 @@ test('the generated Go code carries the same grant fields as the proto, budget c
     read('apps/Model Plane/go/gen/model_plane/v1/browser_grpc.pb.go'),
     /BrowserBroker_DeriveRunGrant_FullMethodName\s*=\s*"\/model_plane\.v1\.BrowserBroker\/DeriveRunGrant"/,
   );
+  assert.match(
+    read('apps/Model Plane/go/gen/model_plane/v1/browser_grpc.pb.go'),
+    /BrowserBroker_RenewGrant_FullMethodName\s*=\s*"\/model_plane\.v1\.BrowserBroker\/RenewGrant"/,
+    'RenewGrant is not in the generated service: regenerate browser_grpc.pb.go',
+  );
+});
+
+// WS8.C (R-6: 50-59). The numbers and names are the wire contract with Quarry (WS8.B), the model-gateway and the
+// gateway; the 54-59 band is held for follow-ons exactly like 45-49 of the budget claim.
+test('upstream proto: WS8.C pins fields 50-53, RenewGrant, and reserves 54-59', () => {
+  const proto = read(UPSTREAM_PROTO);
+  const messages = parseProto(proto);
+  const string = (name) => ({ name, type: 'string', repeated: false });
+  const timestamp = (name) => ({ name, type: 'google.protobuf.Timestamp', repeated: false });
+
+  assert.deepEqual(messages.get('AcquireGrantRequest').get(50), string('grant_kind'));
+  const issued = messages.get('AcquireGrantResponse');
+  assert.deepEqual(issued.get(50), string('policy_mode'));
+  assert.deepEqual(issued.get(51), { name: 'denied_domains', type: 'string', repeated: true });
+  assert.deepEqual(issued.get(52), timestamp('absolute_expires_at'));
+  const validated = messages.get('ValidateGrantResponse');
+  assert.deepEqual(validated.get(50), string('policy_mode'));
+  assert.deepEqual(validated.get(51), { name: 'denied_domains', type: 'string', repeated: true });
+  assert.deepEqual(validated.get(52), timestamp('absolute_expires_at'));
+  assert.deepEqual(validated.get(53), string('resource_id'));
+  assert.deepEqual(messages.get('DeriveRunGrantRequest').get(50), string('resource_id'));
+  assert.deepEqual(messages.get('DeriveRunGrantResponse').get(50), string('resource_id'));
+
+  const renew = messages.get('RenewGrantRequest');
+  assert.ok(renew, 'RenewGrantRequest is missing');
+  assert.deepEqual(numbers(renew), [1, 2]);
+  assert.deepEqual(renew.get(1), string('grant_id'));
+  assert.deepEqual(renew.get(2), string('org_id'));
+  const renewed = messages.get('RenewGrantResponse');
+  assert.ok(renewed, 'RenewGrantResponse is missing');
+  assert.deepEqual(numbers(renewed), [1, 2]);
+  assert.deepEqual(renewed.get(1), timestamp('expires_at'));
+  assert.deepEqual(renewed.get(2), timestamp('absolute_expires_at'));
+  assert.match(
+    proto.replace(/\/\/.*$/gm, ''),
+    /rpc\s+RenewGrant\s*\(\s*RenewGrantRequest\s*\)\s*returns\s*\(\s*RenewGrantResponse\s*\)/,
+  );
+
+  for (const [name, fields] of messages) {
+    for (const number of WS8_RESERVED) {
+      assert.equal(fields.has(number), false, `${name}: field ${number} is reserved by the ledger`);
+    }
+  }
+});
+
+// Invariant I3: a browser grant belongs to a person and an organization; it never names a Space or a team.
+test('no browser grant message carries a space_id or team_id field', () => {
+  for (const [name, fields] of parseProto(read(UPSTREAM_PROTO))) {
+    for (const [number, field] of fields) {
+      assert.doesNotMatch(field.name, /^(space|team)_?id$/i, `${name}.${field.name} (= ${number}) breaks invariant I3`);
+    }
+  }
 });
 
 test('Quarry vendored proto is a subset of the upstream one (same name, number, type)', () => {
@@ -175,6 +234,22 @@ test('Quarry reads kind, owner_id and zdr from ValidateGrantResponse', () => {
     [10, 11, 12].map((number) => validated.get(number)?.name),
     ['kind', 'owner_id', 'zdr'],
   );
+});
+
+// WS8.B vendors 50-53 into Quarry by hand (there is no sync tool). The subset test above fails if it picks a
+// different number or type; this one only checks that, once vendored, the names are the contract's.
+test('when Quarry vendors the WS8.C fields of ValidateGrantResponse they are the upstream names', () => {
+  const validated = parseProto(read(QUARRY_PROTO)).get('ValidateGrantResponse');
+  const expected = new Map([
+    [50, 'policy_mode'],
+    [51, 'denied_domains'],
+    [52, 'absolute_expires_at'],
+    [53, 'resource_id'],
+  ]);
+  for (const [number, name] of expected) {
+    const field = validated.get(number);
+    if (field) assert.equal(field.name, name, `vendored field ${number} must be ${name}`);
+  }
 });
 
 test('Quarry reads the budget claim from ValidateGrantResponse', () => {
@@ -461,6 +536,55 @@ test('the broker defaults in compose match the Go defaults', () => {
   const brokerCompose = read('apps/Model Plane/deploy/docker-compose.yml');
   assert.match(brokerCompose, /BROWSER_BROKER_MAX_RUN_DOMAINS: \$\{BROWSER_BROKER_MAX_RUN_DOMAINS:-8\}/);
   assert.match(brokerCompose, /BROWSER_BROKER_GRANT_TTL_SECONDS: \$\{BROWSER_BROKER_GRANT_TTL_SECONDS:-900\}/);
+});
+
+// WS8.C: human_browse is a development convenience and a production decision. The broker's own default is off, the
+// dev compose turns it on, the production overlay turns it off again, and the absolute cap in compose is the Go one.
+test('human_browse is off by default in the broker and in the production overlay, on in the dev compose', () => {
+  const config = read('apps/Model Plane/go/services/browser-broker/internal/server/config.go');
+  assert.match(config, /BROWSER_BROKER_HUMAN_BROWSE_ENABLED/);
+  assert.match(config, /BROWSER_BROKER_HUMAN_ABSOLUTE_TTL_SECONDS/);
+  assert.match(config, /BROWSER_BROKER_DENY_SUFFIXES/);
+  assert.match(config, /BROWSER_BROKER_MAX_ATTACH_DOMAINS/);
+  // No HumanBrowseEnabled in DefaultConfig: the zero value is off.
+  const defaults = config.match(/func DefaultConfig\(\) Config \{([\s\S]*?)\n\}/);
+  assert.ok(defaults, 'DefaultConfig not found');
+  assert.doesNotMatch(defaults[1], /HumanBrowseEnabled/);
+  assert.match(read('apps/Model Plane/go/services/browser-broker/internal/grant/humanbrowse.go'), /DefaultHumanAbsoluteTTL = 4 \* time\.Hour/);
+  assert.match(read('apps/Model Plane/go/services/browser-broker/internal/grant/humanbrowse.go'), /DefaultMaxAttachDomains = 8/);
+
+  const dev = composeService(read('apps/Model Plane/deploy/docker-compose.yml'), 'browser-broker');
+  assert.match(dev, /BROWSER_BROKER_HUMAN_BROWSE_ENABLED: \$\{BROWSER_BROKER_HUMAN_BROWSE_ENABLED:-1\}/);
+  assert.match(dev, /BROWSER_BROKER_HUMAN_ABSOLUTE_TTL_SECONDS: \$\{BROWSER_BROKER_HUMAN_ABSOLUTE_TTL_SECONDS:-14400\}/);
+  assert.match(dev, /BROWSER_BROKER_DENY_SUFFIXES: \$\{BROWSER_BROKER_DENY_SUFFIXES:-\}/);
+  assert.match(dev, /BROWSER_BROKER_MAX_ATTACH_DOMAINS: \$\{BROWSER_BROKER_MAX_ATTACH_DOMAINS:-8\}/);
+
+  const production = composeService(read('apps/Model Plane/deploy/docker-compose.production.yml'), 'browser-broker');
+  assert.match(production, /BROWSER_BROKER_HUMAN_BROWSE_ENABLED: \$\{BROWSER_BROKER_HUMAN_BROWSE_ENABLED:-0\}/);
+});
+
+// WS8.C migration 0004 (R-3 override: the design said 0002). It is re-applied on every broker start.
+test('migration 0004 is idempotent, has a down migration, and adds the three policy columns', () => {
+  const dir = 'apps/Model Plane/go/services/browser-broker/migrations';
+  const names = readdirSync(join(ROOT, dir));
+  assert.ok(names.includes('0004_browser_grants_policy.up.sql'), '0004 up is missing');
+  assert.ok(names.includes('0004_browser_grants_policy.down.sql'), '0004 down is missing');
+  const up = read(`${dir}/0004_browser_grants_policy.up.sql`).replace(/--.*$/gm, '');
+  for (const column of ['policy_mode', 'denied_domains', 'resource_id']) {
+    assert.match(up, new RegExp(`ADD COLUMN IF NOT EXISTS ${column}\\b`), `${column} must be added with IF NOT EXISTS`);
+  }
+  assert.doesNotMatch(up, /\bADD COLUMN (?!IF NOT EXISTS)/i, 'a non-idempotent ADD COLUMN');
+  assert.doesNotMatch(up, /\bCREATE (UNIQUE )?INDEX (?!IF NOT EXISTS)/i, 'a non-idempotent CREATE INDEX');
+  // Every ADD CONSTRAINT sits behind an existence check (the DO block), never bare.
+  const bare = up.replace(/DO \$\$[\s\S]*?\$\$;/g, '');
+  assert.doesNotMatch(bare, /ADD CONSTRAINT/i, 'a bare ADD CONSTRAINT would fail on the second start');
+  assert.match(up, /browser_grants_attach_idempotency_idx/);
+  const down = read(`${dir}/0004_browser_grants_policy.down.sql`).replace(/--.*$/gm, '');
+  for (const column of ['policy_mode', 'denied_domains', 'resource_id']) {
+    assert.match(down, new RegExp(`DROP COLUMN IF EXISTS ${column}\\b`));
+  }
+  // The z_ id CHECK of 0001 survives: 0004 neither drops nor replaces it.
+  assert.doesNotMatch(up + down, /browser_grants_no_zdr_id_check/);
 });
 
 test('the gateway reads BROWSER_GRANT_ENFORCEMENT from compose with an empty default, so the code picks the mode per environment', () => {
