@@ -44,6 +44,8 @@ const FORGED_SPACE_AUTHORITY_FIELDS: &[&str] = &[
     "resource_authorization_ref",
     "action_schema_hash",
     "payload_digest",
+    "contract_digest",
+    "contract_expires_at",
 ];
 
 /// Turns an untrusted personal-Space selection into a Control-issued thread
@@ -430,6 +432,7 @@ pub(crate) async fn inject_personal_schedule_create_context(
     input: &mut Value,
     schedule_id: &str,
     idempotency_key: &str,
+    contract_enabled: bool,
 ) -> Result<(), (StatusCode, Json<Value>)> {
     let object = input.as_object_mut().ok_or_else(|| {
         (
@@ -488,7 +491,7 @@ pub(crate) async fn inject_personal_schedule_create_context(
                 )
             })?,
     };
-    let template = object.get("task_template").cloned().ok_or_else(|| {
+    let mut template = object.get("task_template").cloned().ok_or_else(|| {
         (
             StatusCode::BAD_REQUEST,
             Json(error(
@@ -510,6 +513,8 @@ pub(crate) async fn inject_personal_schedule_create_context(
             )),
         ));
     }
+    let contract = split_schedule_contract(&mut template, contract_enabled)?;
+    object.insert("task_template".to_owned(), template.clone());
     // The digest Control commits to is recomputed by Go at create, at fire and
     // in Orchestrator, so the template must be one whose digest survives the
     // Postgres JSONB round trip and must be hashed the way Go hashes it. See
@@ -539,16 +544,25 @@ pub(crate) async fn inject_personal_schedule_create_context(
         "{}/api/v1/internal/spaces/schedule-create-decision",
         state.user_core_url
     );
+    let mut control_request = json!({
+        "space_ref": space_ref,
+        "schedule_id": schedule_id,
+        "template_digest": template_digest,
+        "idempotency_key": idempotency_key,
+    });
+    let expected_schema = match &contract {
+        Some((contract_digest, contract_expires_at)) => {
+            control_request["contract_digest"] = json!(contract_digest);
+            control_request["contract_expires_at"] = json!(contract_expires_at);
+            "sha256:space-cron-create-v2"
+        }
+        None => "sha256:space-cron-create-v1",
+    };
     let (status, Json(response)) = proxy_json(
         state,
         Method::POST,
         &url,
-        Some(json!({
-            "space_ref": space_ref,
-            "schedule_id": schedule_id,
-            "template_digest": template_digest,
-            "idempotency_key": idempotency_key,
-        })),
+        Some(control_request),
         Some(org_id),
         Some(&actor),
         None,
@@ -572,8 +586,7 @@ pub(crate) async fn inject_personal_schedule_create_context(
         || required_decision_string(decision, "subject_id")? != user.user_id
         || required_decision_string(decision, "service_audience")? != "model-plane-capability-core"
         || required_decision_string(decision, "action_id")? != "model.cron.create"
-        || required_decision_string(decision, "action_schema_hash")?
-            != "sha256:space-cron-create-v1"
+        || required_decision_string(decision, "action_schema_hash")? != expected_schema
         || required_decision_string(decision, "idempotency_key")? != idempotency_key
     {
         return Err(invalid_decision());
@@ -593,6 +606,54 @@ pub(crate) async fn inject_personal_schedule_create_context(
         Value::String(idempotency_key.to_owned()),
     );
     Ok(())
+}
+
+/// Splits the `approval_contract` text off a create template (DEC-16). The text
+/// is hashed exactly as stored, the digest capability-core recomputes, and its
+/// expiry is what Control signs. With the switch off the key is dropped, so the
+/// schedule stays draft-only and no contract reaches Control.
+fn split_schedule_contract(
+    template: &mut Value,
+    enabled: bool,
+) -> Result<Option<(String, String)>, (StatusCode, Json<Value>)> {
+    let Some(object) = template.as_object_mut() else {
+        return Ok(None);
+    };
+    let Some(contract) = object.get("approval_contract").cloned() else {
+        return Ok(None);
+    };
+    if !enabled {
+        object.remove("approval_contract");
+        return Ok(None);
+    }
+    let text = contract.as_str().ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_task_template",
+                "The schedule contract must be JSON text.",
+            )),
+        )
+    })?;
+    let expires_at = serde_json::from_str::<Value>(text)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("expires_at")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(error(
+                    "invalid_task_template",
+                    "The schedule contract must name an expiry.",
+                )),
+            )
+        })?;
+    let digest = format!("sha256:{}", hex::encode(Sha256::digest(text.as_bytes())));
+    Ok(Some((digest, expires_at)))
 }
 
 fn unix_nanos() -> u128 {
@@ -5222,6 +5283,7 @@ mod tests {
             &mut outbound,
             "cron-1",
             "create-1",
+            false,
         )
         .await
         .expect("Control schedule create authority should be injected");
@@ -5283,6 +5345,7 @@ mod tests {
             &mut outbound,
             "cron-1",
             "create-1",
+            false,
         )
         .await
         .map_err(|(status, axum::Json(body))| (status, body));
@@ -5337,6 +5400,95 @@ mod tests {
         assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
         assert_eq!(body["error"]["code"], "invalid_task_template");
         assert_eq!(control_requests, 0);
+    }
+
+    /// The stored-consent vector shared with capability-core contract_test.go and
+    /// mp-contracts scheduled_contract.rs. Its digest is pinned in both.
+    const SCHEDULE_CONTRACT_TEXT: &str = r#"{"expires_at":"2026-11-23T10:00:00Z","max_rounds":6,"max_tokens_per_round":2048,"tools":[{"approved_at":"2026-10-24T10:00:00Z","capability":"cap.tool.web_search","class":"read","tool":"web_search"}],"v":1}"#;
+    const SCHEDULE_CONTRACT_GO_DIGEST: &str =
+        "sha256:3d4828c85b976a25447098498e5077de75aa531a0e64aebe2d68bfc8f7953d55";
+
+    #[test]
+    fn schedule_contract_digest_matches_the_cross_plane_vector() {
+        let mut template = json!({"goal": "Summarise", "approval_contract": SCHEDULE_CONTRACT_TEXT});
+
+        let (digest, expires_at) = super::split_schedule_contract(&mut template, true)
+            .expect("the vector is accepted")
+            .expect("a contract is present");
+
+        assert_eq!(digest, SCHEDULE_CONTRACT_GO_DIGEST);
+        assert_eq!(expires_at, "2026-11-23T10:00:00Z");
+        assert_eq!(template["approval_contract"], SCHEDULE_CONTRACT_TEXT);
+    }
+
+    #[test]
+    fn schedule_contract_is_dropped_while_the_switch_is_off() {
+        let mut template = json!({"goal": "Summarise", "approval_contract": SCHEDULE_CONTRACT_TEXT});
+
+        let split = super::split_schedule_contract(&mut template, false).expect("no refusal");
+
+        assert!(split.is_none());
+        assert!(template.get("approval_contract").is_none());
+    }
+
+    async fn contract_create_for(enabled: bool, schema: &str) -> (Value, Value) {
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/schedule-create-decision"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"token": "schedule-create-token", "decision": {
+                    "space_ref": "personal-1", "subject_id": "user-1",
+                    "service_audience": "model-plane-capability-core", "action_id": "model.cron.create",
+                    "action_schema_hash": schema, "idempotency_key": "create-1"
+                }}
+            })))
+            .mount(&user_core)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.user_core_url = user_core.uri();
+        let mut outbound = json!({
+            "space_ref": "personal-1", "name": "Nightly",
+            "task_template": {"goal": "Summarise", "approval_contract": SCHEDULE_CONTRACT_TEXT},
+        });
+        inject_personal_schedule_create_context(
+            &state,
+            &authenticated_user(),
+            "org-1",
+            &mut outbound,
+            "cron-1",
+            "create-1",
+            enabled,
+        )
+        .await
+        .expect("the create is accepted");
+        let received = user_core.received_requests().await.expect("Control requests");
+        let control_body: Value =
+            serde_json::from_slice(&received.first().expect("Control was asked").body).expect("JSON");
+        (outbound, control_body)
+    }
+
+    #[tokio::test]
+    async fn schedule_create_asks_control_to_bind_the_contract_when_enabled() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+
+        let (outbound, control_body) =
+            contract_create_for(true, "sha256:space-cron-create-v2").await;
+
+        assert_eq!(control_body["contract_digest"], SCHEDULE_CONTRACT_GO_DIGEST);
+        assert_eq!(control_body["contract_expires_at"], "2026-11-23T10:00:00Z");
+        assert_eq!(outbound["task_template"]["approval_contract"], SCHEDULE_CONTRACT_TEXT);
+    }
+
+    #[tokio::test]
+    async fn schedule_create_stays_draft_only_when_the_switch_is_off() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+
+        let (outbound, control_body) =
+            contract_create_for(false, "sha256:space-cron-create-v1").await;
+
+        assert!(control_body.get("contract_digest").is_none());
+        assert!(control_body.get("contract_expires_at").is_none());
+        assert!(outbound["task_template"].get("approval_contract").is_none());
     }
 
     #[tokio::test]

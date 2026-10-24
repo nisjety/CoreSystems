@@ -446,6 +446,14 @@ async fn list_cron(
     .await
 }
 
+/// SCHEDULE_CONTRACT_ENABLED (DEC-16). Read strictly: only the literal `true`
+/// lets a create carry a stored-consent contract to Control, so anything else
+/// leaves schedules draft-only.
+// Read per request, not from AppState: the state is not owned by this change.
+fn schedule_contract_enabled() -> bool {
+    std::env::var("SCHEDULE_CONTRACT_ENABLED").is_ok_and(|value| value == "true")
+}
+
 /// Create a cron schedule (`name`, `schedule_expr`, `timezone`, `task_template`,
 /// `enabled`). Proxied to model-gateway `/v1/cron` → capability-core, which
 /// validates the cron expression and seeds next_fire_at.
@@ -503,6 +511,7 @@ async fn create_cron(
         &mut body,
         &schedule_id,
         &idempotency_key,
+        schedule_contract_enabled(),
     )
     .await
     {

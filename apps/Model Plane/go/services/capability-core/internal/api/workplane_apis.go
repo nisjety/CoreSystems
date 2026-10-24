@@ -840,6 +840,9 @@ func writeTaskCancellationMutation(w http.ResponseWriter, r *http.Request, datab
 type CronHandler struct {
 	pool     registryDatabase
 	verifier *cron.ControlDecisionVerifier
+	// scheduleContract is SCHEDULE_CONTRACT_ENABLED. Off, a template that carries
+	// an approval_contract is refused, so a schedule without a contract stays draft-only.
+	scheduleContract bool
 }
 
 // NewCronHandler constructs the handler.
@@ -850,6 +853,79 @@ func NewCronHandler(pool registryDatabase) *CronHandler {
 func (h *CronHandler) WithSpaceDecisionVerifier(verifier *cron.ControlDecisionVerifier) *CronHandler {
 	h.verifier = verifier
 	return h
+}
+
+// WithScheduleContract enables stored-consent contracts on schedule create.
+func (h *CronHandler) WithScheduleContract(enabled bool) *CronHandler {
+	h.scheduleContract = enabled
+	return h
+}
+
+// createIntentFor builds the Control binding for one create. A template without
+// an approval_contract yields the contract-free intent, so Control's v1 decision
+// is still the only one accepted for it. A contract is parsed, window-checked
+// and checked against the registry before its digest is bound.
+func (h *CronHandler) createIntentFor(ctx context.Context, orgID string, template any, intent cron.CreateIntent) (cron.CreateIntent, error) {
+	object, ok := template.(map[string]any)
+	if !ok {
+		return intent, nil
+	}
+	raw, present := object["approval_contract"]
+	if !present {
+		return intent, nil
+	}
+	if !h.scheduleContract {
+		return intent, fmt.Errorf("schedule contracts are not enabled")
+	}
+	text, ok := raw.(string)
+	if !ok {
+		return intent, fmt.Errorf("schedule contract must be a JSON text value")
+	}
+	contract, err := cron.ParseScheduleContract(text)
+	if err != nil {
+		return intent, err
+	}
+	if err := cron.CheckContractWindow(contract, time.Now().UTC()); err != nil {
+		return intent, err
+	}
+	names := make([]string, 0, len(contract.Tools))
+	for _, tool := range contract.Tools {
+		names = append(names, tool.Tool)
+	}
+	declared, err := h.declaredTools(ctx, orgID, names)
+	if err != nil {
+		return intent, err
+	}
+	if err := cron.VerifyContractAgainstRegistry(contract, declared); err != nil {
+		return intent, err
+	}
+	intent.ContractDigest = cron.ContractDigest(text)
+	intent.ContractExpiresAt = contract.ExpiresAt
+	return intent, nil
+}
+
+// declaredTools reads the registry rows for the named tools in the verified org
+// and the process-wide seed. An org override and the global row are both returned
+// so VerifyContractAgainstRegistry can require every match to agree.
+func (h *CronHandler) declaredTools(ctx context.Context, orgID string, names []string) ([]cron.DeclaredTool, error) {
+	rows, err := h.pool.Query(ctx, `
+		SELECT tool_name, capability_id, side_effect_class, approval_floor, COALESCE(call_refinement, '')
+		FROM capability_tools
+		WHERE (org_id = $1 OR org_id = 'global') AND tool_name = ANY($2)
+	`, orgID, names)
+	if err != nil {
+		return nil, fmt.Errorf("read declared tools: %w", err)
+	}
+	defer rows.Close()
+	var declared []cron.DeclaredTool
+	for rows.Next() {
+		var row cron.DeclaredTool
+		if err := rows.Scan(&row.ToolName, &row.CapabilityID, &row.SideEffectClass, &row.ApprovalFloor, &row.CallRefinement); err != nil {
+			return nil, fmt.Errorf("scan declared tool: %w", err)
+		}
+		declared = append(declared, row)
+	}
+	return declared, rows.Err()
 }
 
 // Register mounts routes.
@@ -961,10 +1037,15 @@ func (h *CronHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		templateDigest := fmt.Sprintf("sha256:%x", sha256.Sum256(tplJSON))
-		binding, err := h.verifier.VerifyScheduleCreate(s.SpaceDecisionToken, cron.CreateIntent{
+		intent, err := h.createIntentFor(r.Context(), verifiedOrganizationID(r), s.TaskTemplate, cron.CreateIntent{
 			OrgID: verifiedOrganizationID(r), SpaceRef: s.SpaceRef, SubjectID: s.CreatorID,
 			ScheduleID: s.ID, TemplateDigest: templateDigest, IdempotencyKey: s.IdempotencyKey,
-		}, time.Now().UTC())
+		})
+		if err != nil {
+			jsonErr(w, "Space schedule creation is not authorized", http.StatusForbidden)
+			return
+		}
+		binding, err := h.verifier.VerifyScheduleCreate(s.SpaceDecisionToken, intent, time.Now().UTC())
 		if err != nil {
 			jsonErr(w, "Space schedule creation is not authorized", http.StatusForbidden)
 			return

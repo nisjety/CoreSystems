@@ -4,7 +4,11 @@ import { createMemo, createSignal, For, Show } from 'solid-js'
 import {
   createScheduleFromChat,
   DEFAULT_SCHEDULE_TIMEZONE,
+  DELEGABLE_SCHEDULE_TOOLS,
+  SCHEDULE_CONTRACT_DEFAULT_DAYS,
+  SCHEDULE_CONTRACT_MAX_DAYS,
   SCHEDULE_PRESETS,
+  scheduleContractExpiry,
   type ScheduleFromChatInput,
 } from '@/shared/api/schedule-from-chat'
 import { translateApiError, useI18n } from '@/shared/i18n'
@@ -63,6 +67,8 @@ export function ScheduleDialog(props: ScheduleDialogProps) {
   const [customExpr, setCustomExpr] = createSignal('')
   const [timezoneAdvanced, setTimezoneAdvanced] = createSignal(false)
   const [timezone, setTimezone] = createSignal(DEFAULT_SCHEDULE_TIMEZONE)
+  const [contractToolNames, setContractToolNames] = createSignal<string[]>([])
+  const [contractDays, setContractDays] = createSignal(SCHEDULE_CONTRACT_DEFAULT_DAYS)
   const [submitting, setSubmitting] = createSignal(false)
   const [errorMessage, setErrorMessage] = createSignal<string | undefined>(undefined)
 
@@ -78,6 +84,8 @@ export function ScheduleDialog(props: ScheduleDialogProps) {
     setCustomExpr('')
     setTimezoneAdvanced(false)
     setTimezone(DEFAULT_SCHEDULE_TIMEZONE)
+    setContractToolNames([])
+    setContractDays(SCHEDULE_CONTRACT_DEFAULT_DAYS)
     setErrorMessage(undefined)
   }
 
@@ -102,6 +110,7 @@ export function ScheduleDialog(props: ScheduleDialogProps) {
     setSubmitting(true)
     setErrorMessage(undefined)
     try {
+      const approvedTools = DELEGABLE_SCHEDULE_TOOLS.filter((tool) => contractToolNames().includes(tool.tool))
       const input: ScheduleFromChatInput = {
         orgId: id,
         name: trimmedName,
@@ -109,6 +118,10 @@ export function ScheduleDialog(props: ScheduleDialogProps) {
         timezone: timezone().trim() || DEFAULT_SCHEDULE_TIMEZONE,
         goalText: props.seedGoal,
         threadOriginHint: props.threadOriginHint,
+        contract:
+          approvedTools.length > 0
+            ? { tools: approvedTools, expiresAt: scheduleContractExpiry(contractDays()) }
+            : undefined,
       }
       const { id: scheduleId } = await createScheduleFromChat(input)
       reset()
@@ -227,6 +240,52 @@ export function ScheduleDialog(props: ScheduleDialogProps) {
             </label>
           </div>
         </div>
+
+        <Show
+          when={DELEGABLE_SCHEDULE_TOOLS.length > 0}
+          fallback={
+            <p class="verevon-schedule-dialog__note" data-testid="schedule-consent-empty">
+              {i18n.tr(
+                'Ingen verktøy kan godkjennes for kjøring uten deg ennå, så planen forblir kun utkast.',
+                'No tool can yet be approved for a run without you, so this schedule stays draft only.',
+              )}
+            </p>
+          }
+        >
+          <fieldset class="verevon-schedule-dialog__field" data-testid="schedule-consent-card" disabled={submitting()}>
+            <legend>{i18n.tr('Godkjenning for planlagte kjøringer', 'Approval for scheduled runs')}</legend>
+            <For each={DELEGABLE_SCHEDULE_TOOLS}>
+              {(tool) => (
+                <label class="verevon-schedule-dialog__policy-option">
+                  <input
+                    type="checkbox"
+                    checked={contractToolNames().includes(tool.tool)}
+                    onChange={(event) =>
+                      setContractToolNames((current) =>
+                        event.currentTarget.checked
+                          ? [...current, tool.tool]
+                          : current.filter((name) => name !== tool.tool),
+                      )
+                    }
+                  />
+                  {tool.tool}
+                  <small>{i18n.tr('Kun lesing. Kan ikke endre noe.', 'Read only. Cannot change anything.')}</small>
+                </label>
+              )}
+            </For>
+            <label class="verevon-schedule-dialog__field">
+              <span>{i18n.tr('Godkjenningen gjelder i', 'Approval lasts for')}</span>
+              <select
+                value={String(contractDays())}
+                onChange={(event) => setContractDays(Number(event.currentTarget.value))}
+              >
+                <For each={[30, 60, SCHEDULE_CONTRACT_MAX_DAYS]}>
+                  {(days) => <option value={String(days)}>{i18n.tr(`${days} dager`, `${days} days`)}</option>}
+                </For>
+              </select>
+            </label>
+          </fieldset>
+        </Show>
 
         <p class="verevon-schedule-dialog__note">
           {i18n.tr('Kjører i din personlige arbeidsflate.', 'Runs in your personal workspace.')}
