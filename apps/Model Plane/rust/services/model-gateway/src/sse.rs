@@ -29,6 +29,10 @@ use tracing::info;
 #[path = "cache_telemetry.rs"]
 pub mod cache_telemetry;
 
+// Declared here for the same reason: WS15 S2's counts-only context frames.
+#[path = "lifecycle_events.rs"]
+pub mod lifecycle_events;
+
 use crate::{
     auth::{
         Claims, VerifiedCapabilityBearer, VerifiedCostBearer,
@@ -526,6 +530,22 @@ async fn emit_and_buffer(
             .data(data)))
         .await;
     *seq += 1;
+}
+
+/// Emit a WS15 lifecycle frame, buffered like every other frame, or nothing at all while
+/// `MODEL_GATEWAY_LIFECYCLE_EVENTS` is off: a flag-off stream is the stream it was before.
+async fn emit_lifecycle(
+    tx: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
+    buffers: &crate::stream_buffer::StreamBufferStore,
+    buffer_key: &str,
+    seq: &mut u64,
+    features: &[String],
+    req_id: &str,
+    event: crate::sse_events::ChatEvent,
+) {
+    if mp_contracts::lifecycle_notice::enabled() {
+        emit_and_buffer(tx, buffers, buffer_key, seq, features, req_id, event).await;
+    }
 }
 
 /// Emit the turn's `turn_timing` frame (Q14), once: just before its terminal
@@ -1373,7 +1393,7 @@ pub async fn invoke_stream_sse(
         mp_contracts::model_plane::v1::ManagedRunSource::GatewayDirect
     };
     let admitted_ms = timing.close(crate::turn_timing::Phase::Admission, 0);
-    let session_run = match crate::session_flow::prepare_managed_run_authenticated(
+    let session_run = match crate::session_flow::prepare_managed_run_authenticated_with_receipt(
         &state,
         req.thread_id.as_deref(),
         req.session_key.as_deref(),
@@ -1398,6 +1418,13 @@ pub async fn invoke_stream_sse(
             crate::normalize::RetrievalScope::WebOnly => "web_only",
             crate::normalize::RetrievalScope::Auto => unreachable!("excluded by is_auto() above"),
         }),
+        crate::session_flow::send_receipt_id(
+            crate::queued_input::send_receipts_enabled(),
+            effective_zdr,
+            req.regenerated,
+            req.edited_resubmit,
+            req.idempotency_key.as_deref(),
+        ),
     )
     .await
     {
@@ -1664,6 +1691,12 @@ pub async fn invoke_stream_sse(
     // A summary written this turn, persisted with the answer so later turns
     // send the same bytes instead of summarising the same head again.
     let head_summary = recent_thread.head_summary;
+    // What load-time compaction did, sent once the stream is open.
+    let load_frames: Vec<crate::sse_events::ChatEvent> = recent_thread
+        .compaction
+        .map(lifecycle_events::CompactionFacts::event)
+        .into_iter()
+        .collect();
     let recent_thread_messages = recent_thread.messages;
     // The context block repeats recent history the prompt already carries as
     // messages. With the dedup option those repeats are left out.
@@ -1933,6 +1966,8 @@ pub async fn invoke_stream_sse(
     let SkillContext {
         blocks: skill_context,
         requested_ids: requested_skill_ids,
+        skills_truncated,
+        skills_dropped,
     } = if conversation_only || retrieval_scope == crate::normalize::RetrievalScope::WebOnly { SkillContext::default() } else { fetch_skill_context(
         &state,
         &model_bearer,
@@ -1942,6 +1977,8 @@ pub async fn invoke_stream_sse(
         &req.skill_ids,
     )
     .await };
+    // Counts only: the skill guidance that was cut to its budget, sent after the compaction frame.
+    let skills_frame = lifecycle_events::skills_truncated(skills_truncated, skills_dropped);
     // Remember which skills this turn injected, keyed by the request_id the SPA
     // already has. A thumbs-up has to credit the skills that actually shaped the
     // answer, and the client must not be trusted to name them — so the mapping
@@ -2271,6 +2308,9 @@ pub async fn invoke_stream_sse(
         }
         if client_connected {
             timing.mark(crate::turn_timing::Mark::Connected);
+        }
+        for event in load_frames.into_iter().chain(skills_frame) {
+            emit_lifecycle(&tx, &stream_buffers, &buffer_key, &mut seq, &features, &req_id, event).await;
         }
 
         if let Some(payload) = grounding.clone().filter(|g| !g.is_empty()) {
@@ -3021,6 +3061,7 @@ pub async fn invoke_stream_sse(
             } else {
                 crate::compaction::drop_oldest_group
             };
+            let before_shed = grpc_req.messages.len();
             if length_retries >= MAX_CONTEXT_LENGTH_RETRIES
                 || !shed(
                     &mut grpc_req.messages,
@@ -3072,6 +3113,16 @@ pub async fn invoke_stream_sse(
                 remaining_messages = grpc_req.messages.len(),
                 "provider rejected the prompt as too long; retrying with older history dropped"
             );
+            emit_lifecycle(
+                &tx,
+                &stream_buffers,
+                &buffer_key,
+                &mut seq,
+                &features,
+                &req_id,
+                lifecycle_events::history_shed(before_shed.saturating_sub(grpc_req.messages.len())),
+            )
+            .await;
         }};
 
         let Some(mut grpc_stream) = stream else {
@@ -4704,6 +4755,9 @@ const MAX_REQUESTED_SKILLS: usize = 4;
 struct SkillContext {
     blocks: Vec<String>,
     requested_ids: Vec<String>,
+    /// Blocks shortened, and blocks left out, to fit the context budget.
+    skills_truncated: usize,
+    skills_dropped: usize,
 }
 const DEFAULT_CONTEXT_ASSEMBLY_TOKENS: u32 = 4096;
 const MIN_CONTEXT_ASSEMBLY_TOKENS: u32 = 512;
@@ -5208,6 +5262,8 @@ struct RecentThread {
     /// Set only in token-budget mode, when this turn wrote a new summary; the
     /// answer's persisted metadata carries it so later turns can reuse it.
     head_summary: Option<crate::compaction::NewHeadSummary>,
+    /// What compacting the loaded history did, when it did anything.
+    compaction: Option<lifecycle_events::CompactionFacts>,
 }
 
 /// How much of the about-to-be-discarded head is used as the memory query.
@@ -5519,6 +5575,7 @@ async fn load_recent_thread_messages(
             return RecentThread {
                 messages: Vec::new(),
                 head_summary: None,
+                compaction: None,
             };
         }
     };
@@ -5678,6 +5735,7 @@ async fn load_recent_thread_messages(
     //
     // This also protects native-off and provider-fallback routes. Native
     // compaction separately handles large inputs below the message-count cap.
+    let mut compaction = None;
     if let Some(head) = run_local_compaction
         .then(|| {
             crate::compaction::plan_head_summary(
@@ -5691,12 +5749,19 @@ async fn load_recent_thread_messages(
         let transcript = crate::compaction::render_head_transcript(&messages, head);
         let summary =
             summarize_head(state, org_id, thread_id, 0, &transcript, bearer, summarizer).await;
+        compaction = lifecycle_events::compaction_facts(
+            false,
+            Some(head),
+            messages.len(),
+            summary.as_deref(),
+        );
         messages = crate::compaction::apply_head_summary(messages, head, summary.as_deref());
     }
 
     RecentThread {
         messages,
         head_summary: None,
+        compaction,
     }
 }
 
@@ -5806,11 +5871,15 @@ async fn budget_compacted_thread(
         "token-budget compaction planned"
     );
     let Some(head) = plan.head else {
+        let compaction = lifecycle_events::compaction_facts(plan.reused, None, 0, None);
         return RecentThread {
             messages: plan.messages,
             head_summary: None,
+            compaction,
         };
     };
+    let reused = plan.reused;
+    let total = plan.messages.len();
     let transcript = crate::compaction::render_head_transcript(&plan.messages, head);
     let generation = stored_generation + 1;
     let summary = summarize_head(
@@ -5827,9 +5896,12 @@ async fn budget_compacted_thread(
         .as_deref()
         .and_then(|summary| plan.record(summary))
         .map(|record| crate::compaction::NewHeadSummary { record, generation });
+    let compaction =
+        lifecycle_events::compaction_facts(reused, Some(head), total, summary.as_deref());
     RecentThread {
         messages: crate::compaction::apply_head_summary(plan.messages, head, summary.as_deref()),
         head_summary,
+        compaction,
     }
 }
 
@@ -5947,6 +6019,8 @@ async fn fetch_skill_context(
     SkillContext {
         blocks: fitted.blocks,
         requested_ids,
+        skills_truncated: fitted.truncated,
+        skills_dropped: fitted.dropped,
     }
 }
 
@@ -10742,12 +10816,10 @@ fn agentic_run_stream(
         // this is the reader, so the field is a signal rather than a value
         // nobody consumes.
         //
-        // A log line and nothing user-facing, deliberately. The clearing notice
-        // already tells the MODEL what happened and how to re-fetch, and a
-        // second banner telling the USER their agent ran low on room would be
-        // noise they cannot act on. What operators need is the correlation
-        // between "this run compacted" and "this answer was thin", which is a
-        // log/metrics question.
+        // The client hears it as a counts-only `compaction` frame (WS15-D1, which
+        // reversed the earlier log-only decision): a thin answer built on cleared
+        // tool results is otherwise unexplained. The log line stays for the
+        // correlation between "this run compacted" and "this answer was thin".
         if response.compaction_triggered {
             tracing::info!(
                 %request_id,
@@ -10755,6 +10827,11 @@ fn agentic_run_stream(
                 status = %response.status,
                 "agentic run compacted its prompt to stay within the context window"
             );
+            if mp_contracts::lifecycle_notice::enabled() {
+                let _ = tx
+                    .send(Ok(lifecycle_events::tool_results_cleared().to_sse(&request_id)))
+                    .await;
+            }
         }
 
         match classify_agentic_run_outcome(&response.status) {
@@ -19803,7 +19880,7 @@ mod execute_turn_tests {
             .expect("the agentic credential preflight");
         let gate = invoke.find("execute_refusal(").expect("the execute gate");
         let prepared = invoke
-            .find("prepare_managed_run_authenticated(")
+            .find("prepare_managed_run_authenticated_with_receipt(")
             .expect("the run is prepared");
         assert!(credentials < gate && gate < prepared, "preflight, then the gate, then the run");
         assert_eq!(invoke.matches("execute_refusal(").count(), 1);
@@ -19816,5 +19893,143 @@ mod execute_turn_tests {
             !invoke.contains("env::var"),
             "the handler reads no environment: the switch is the plan store's, read once"
         );
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use crate::compaction::{prepare_budget_compaction, IdentifiedMessage, StoredHeadSummary};
+    use std::collections::BTreeSet;
+
+    fn entry(id: &str, role: &str, content: &str) -> IdentifiedMessage {
+        IdentifiedMessage {
+            id: id.to_owned(),
+            message: ChatMessage {
+                compaction_summary: String::new(),
+                role: role.to_owned(),
+                content: content.to_owned(),
+                name: String::new(),
+            },
+        }
+    }
+
+    fn payload_of(facts: Option<lifecycle_events::CompactionFacts>) -> Value {
+        facts.expect("a compaction was reported").event().payload("req-1")
+    }
+
+    #[tokio::test]
+    async fn history_shed_emits_a_context_change_with_the_dropped_count() {
+        let buffers = crate::stream_buffer::StreamBufferStore::new();
+        let key = crate::stream_buffer::scoped_stream_key("org-1", "user-1", "req-1");
+        let (tx, mut live) = tokio::sync::mpsc::channel::<
+            Result<axum::response::sse::Event, std::convert::Infallible>,
+        >(8);
+        let mut seq = 0_u64;
+        // Past the switch: the env gate is covered by flag_off_stream_is_byte_identical.
+        emit_and_buffer(
+            &tx,
+            &buffers,
+            &key,
+            &mut seq,
+            &[],
+            "req-1",
+            lifecycle_events::history_shed(3),
+        )
+        .await;
+        assert!(live.try_recv().is_ok(), "the shed is announced once");
+        assert!(live.try_recv().is_err(), "and only once");
+        assert_eq!(seq, 1);
+        let replay = buffers.replay_after(&key, None).await;
+        let events: Vec<&str> = replay
+            .deltas
+            .iter()
+            .map(|buffered| buffered.event.as_str())
+            .collect();
+        assert_eq!(events, vec!["context_change"]);
+        let payload = lifecycle_events::history_shed(3).payload("req-1");
+        assert_eq!(payload["change"], "history_shed");
+        assert_eq!(payload["messages_dropped"], 3);
+    }
+
+    #[test]
+    fn a_reused_summary_reports_reused_not_summarized() {
+        let loaded = vec![
+            entry("m1", "user", "first"),
+            entry("m2", "assistant", "second"),
+            entry("m3", "user", "third"),
+            entry("m4", "assistant", "fourth"),
+            entry("", "user", "now"),
+        ];
+        let stored = StoredHeadSummary {
+            summary: "earlier turns".to_owned(),
+            through_id: "m2".to_owned(),
+            pinned_ids: Vec::new(),
+        };
+        let plan = prepare_budget_compaction(loaded, Some(&stored), &[], 1_000_000);
+        assert!(plan.reused, "the stored summary covers m1..m2");
+        assert!(plan.head.is_none(), "nothing new to summarise");
+        let payload = payload_of(lifecycle_events::compaction_facts(
+            plan.reused,
+            plan.head,
+            plan.messages.len(),
+            None,
+        ));
+        assert_eq!(payload["scope"], "history");
+        assert_eq!(payload["outcome"], "reused");
+        assert!(payload.get("messages_compacted").is_none(), "an unmeasured count is omitted");
+    }
+
+    #[test]
+    fn summarizer_outage_reports_truncated() {
+        let head = crate::compaction::HeadSummary { start: 1, end: 3 };
+        let outage = payload_of(lifecycle_events::compaction_facts(false, Some(head), 5, None));
+        assert_eq!(outage["outcome"], "truncated");
+        assert_eq!(outage["messages_compacted"], 2);
+        assert_eq!(outage["messages_kept"], 2);
+        let blank = payload_of(lifecycle_events::compaction_facts(false, Some(head), 5, Some("  ")));
+        assert_eq!(blank["outcome"], "truncated", "an empty summary is no summary");
+        let answered = payload_of(lifecycle_events::compaction_facts(false, Some(head), 5, Some("notes")));
+        assert_eq!(answered["outcome"], "summarized");
+        assert!(
+            lifecycle_events::compaction_facts(false, None, 5, None).is_none(),
+            "no head and no reuse is not a compaction"
+        );
+    }
+
+    #[test]
+    fn skill_truncation_reports_counts_only() {
+        assert!(lifecycle_events::skills_truncated(0, 0).is_none());
+        let event = lifecycle_events::skills_truncated(2, 1).expect("a cut was made");
+        let payload = event.payload("req-1");
+        assert_eq!(payload["change"], "skills_truncated");
+        assert_eq!(payload["skills_truncated"], 2);
+        assert_eq!(payload["skills_dropped"], 1);
+        let allowed: BTreeSet<&str> = mp_contracts::lifecycle_notice::CONTEXT_CHANGE_KEYS
+            .iter()
+            .copied()
+            .chain(std::iter::once("request_id"))
+            .collect();
+        for key in payload.as_object().expect("an object").keys() {
+            assert!(allowed.contains(key.as_str()), "{key} is outside the allowlist");
+        }
+    }
+
+    #[tokio::test]
+    async fn flag_off_stream_is_byte_identical() {
+        let buffers = crate::stream_buffer::StreamBufferStore::new();
+        let key = crate::stream_buffer::scoped_stream_key("org-1", "user-1", "req-1");
+        let (tx, mut live) = tokio::sync::mpsc::channel::<
+            Result<axum::response::sse::Event, std::convert::Infallible>,
+        >(8);
+        let mut seq = 0_u64;
+        // The switch is unset in the test environment, so every lifecycle frame is suppressed.
+        emit_lifecycle(&tx, &buffers, &key, &mut seq, &[], "req-1", lifecycle_events::history_shed(3))
+            .await;
+        emit_lifecycle(&tx, &buffers, &key, &mut seq, &[], "req-1", lifecycle_events::tool_results_cleared())
+            .await;
+        assert!(live.try_recv().is_err(), "no frame reaches a flag-off stream");
+        assert_eq!(seq, 0, "no cursor is consumed");
+        assert!(buffers.replay_after(&key, None).await.deltas.is_empty());
     }
 }
