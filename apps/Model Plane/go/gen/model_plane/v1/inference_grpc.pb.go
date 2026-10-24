@@ -39,6 +39,7 @@ const (
 	InferenceCore_CreateVideoGenerationJob_FullMethodName     = "/model_plane.v1.InferenceCore/CreateVideoGenerationJob"
 	InferenceCore_GetVideoGenerationJob_FullMethodName        = "/model_plane.v1.InferenceCore/GetVideoGenerationJob"
 	InferenceCore_StreamVideoGenerationContent_FullMethodName = "/model_plane.v1.InferenceCore/StreamVideoGenerationContent"
+	InferenceCore_GetModelAccess_FullMethodName               = "/model_plane.v1.InferenceCore/GetModelAccess"
 )
 
 // InferenceCoreClient is the client API for InferenceCore service.
@@ -95,6 +96,13 @@ type InferenceCoreClient interface {
 	GetVideoGenerationJob(ctx context.Context, in *GetVideoGenerationJobRequest, opts ...grpc.CallOption) (*GetVideoGenerationJobResponse, error)
 	// Stream generated video content through the provider credential boundary.
 	StreamVideoGenerationContent(ctx context.Context, in *StreamVideoGenerationContentRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[StreamVideoGenerationContentResponse], error)
+	// What the caller's organisation allows this caller to use (ADR-0005).
+	// inference-core is the only enforcement point and the only service that
+	// reads the policy, so model-gateway asks here instead of keeping a second
+	// cache. The answer is about chat models; every other modality passes
+	// unfiltered. Under MODEL_ENTITLEMENT_MODE=off nothing is resolved and the
+	// answer says it is not enforced.
+	GetModelAccess(ctx context.Context, in *GetModelAccessRequest, opts ...grpc.CallOption) (*GetModelAccessResponse, error)
 }
 
 type inferenceCoreClient struct {
@@ -323,6 +331,16 @@ func (c *inferenceCoreClient) StreamVideoGenerationContent(ctx context.Context, 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type InferenceCore_StreamVideoGenerationContentClient = grpc.ServerStreamingClient[StreamVideoGenerationContentResponse]
 
+func (c *inferenceCoreClient) GetModelAccess(ctx context.Context, in *GetModelAccessRequest, opts ...grpc.CallOption) (*GetModelAccessResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetModelAccessResponse)
+	err := c.cc.Invoke(ctx, InferenceCore_GetModelAccess_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // InferenceCoreServer is the server API for InferenceCore service.
 // All implementations must embed UnimplementedInferenceCoreServer
 // for forward compatibility.
@@ -377,6 +395,13 @@ type InferenceCoreServer interface {
 	GetVideoGenerationJob(context.Context, *GetVideoGenerationJobRequest) (*GetVideoGenerationJobResponse, error)
 	// Stream generated video content through the provider credential boundary.
 	StreamVideoGenerationContent(*StreamVideoGenerationContentRequest, grpc.ServerStreamingServer[StreamVideoGenerationContentResponse]) error
+	// What the caller's organisation allows this caller to use (ADR-0005).
+	// inference-core is the only enforcement point and the only service that
+	// reads the policy, so model-gateway asks here instead of keeping a second
+	// cache. The answer is about chat models; every other modality passes
+	// unfiltered. Under MODEL_ENTITLEMENT_MODE=off nothing is resolved and the
+	// answer says it is not enforced.
+	GetModelAccess(context.Context, *GetModelAccessRequest) (*GetModelAccessResponse, error)
 	mustEmbedUnimplementedInferenceCoreServer()
 }
 
@@ -446,6 +471,9 @@ func (UnimplementedInferenceCoreServer) GetVideoGenerationJob(context.Context, *
 }
 func (UnimplementedInferenceCoreServer) StreamVideoGenerationContent(*StreamVideoGenerationContentRequest, grpc.ServerStreamingServer[StreamVideoGenerationContentResponse]) error {
 	return status.Error(codes.Unimplemented, "method StreamVideoGenerationContent not implemented")
+}
+func (UnimplementedInferenceCoreServer) GetModelAccess(context.Context, *GetModelAccessRequest) (*GetModelAccessResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetModelAccess not implemented")
 }
 func (UnimplementedInferenceCoreServer) mustEmbedUnimplementedInferenceCoreServer() {}
 func (UnimplementedInferenceCoreServer) testEmbeddedByValue()                       {}
@@ -814,6 +842,24 @@ func _InferenceCore_StreamVideoGenerationContent_Handler(srv interface{}, stream
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type InferenceCore_StreamVideoGenerationContentServer = grpc.ServerStreamingServer[StreamVideoGenerationContentResponse]
 
+func _InferenceCore_GetModelAccess_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetModelAccessRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(InferenceCoreServer).GetModelAccess(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: InferenceCore_GetModelAccess_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(InferenceCoreServer).GetModelAccess(ctx, req.(*GetModelAccessRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // InferenceCore_ServiceDesc is the grpc.ServiceDesc for InferenceCore service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -892,6 +938,10 @@ var InferenceCore_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetVideoGenerationJob",
 			Handler:    _InferenceCore_GetVideoGenerationJob_Handler,
+		},
+		{
+			MethodName: "GetModelAccess",
+			Handler:    _InferenceCore_GetModelAccess_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

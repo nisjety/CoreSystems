@@ -13013,6 +13013,13 @@ mod speech_route_tests {
             unused()
         }
 
+        async fn get_model_access(
+            &self,
+            _: tonic::Request<mp_contracts::model_plane::v1::GetModelAccessRequest>,
+        ) -> Result<tonic::Response<mp_contracts::model_plane::v1::GetModelAccessResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("get_model_access not used"))
+        }
+
         async fn list_models(
             &self,
             _request: tonic::Request<pb::ListModelsRequest>,

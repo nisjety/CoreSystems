@@ -3240,6 +3240,16 @@ mod tests {
             }))
         }
 
+        async fn get_model_access(
+            &self,
+            _: tonic::Request<mp_contracts::model_plane::v1::GetModelAccessRequest>,
+        ) -> Result<tonic::Response<mp_contracts::model_plane::v1::GetModelAccessResponse>, tonic::Status> {
+            Ok(tonic::Response::new(mp_contracts::model_plane::v1::GetModelAccessResponse {
+                model_allowed: true,
+                ..Default::default()
+            }))
+        }
+
         async fn list_models(
             &self,
             _: Request<ListModelsRequest>,
@@ -3255,6 +3265,7 @@ mod tests {
                     residency: String::new(),
                     effort_levels: Vec::new(),
                 }],
+                access: None,
             }))
         }
 
@@ -3543,6 +3554,13 @@ mod tests {
             _: Request<CreateEmbeddingRequest>,
         ) -> Result<Response<CreateEmbeddingResponse>, Status> {
             Err(Status::unavailable("down"))
+        }
+
+        async fn get_model_access(
+            &self,
+            _: tonic::Request<mp_contracts::model_plane::v1::GetModelAccessRequest>,
+        ) -> Result<tonic::Response<mp_contracts::model_plane::v1::GetModelAccessResponse>, tonic::Status> {
+            Err(tonic::Status::unavailable("down"))
         }
 
         async fn list_models(

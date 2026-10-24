@@ -73,6 +73,14 @@ service InferenceCore {
 
   // Stream generated video content through the provider credential boundary.
   rpc StreamVideoGenerationContent(StreamVideoGenerationContentRequest) returns (stream StreamVideoGenerationContentResponse);
+
+  // What the caller's organisation allows this caller to use (ADR-0005).
+  // inference-core is the only enforcement point and the only service that
+  // reads the policy, so model-gateway asks here instead of keeping a second
+  // cache. The answer is about chat models; every other modality passes
+  // unfiltered. Under MODEL_ENTITLEMENT_MODE=off nothing is resolved and the
+  // answer says it is not enforced.
+  rpc GetModelAccess(GetModelAccessRequest) returns (GetModelAccessResponse);
 }
 
 // PrivacyTier — programmatic privacy posture of a provider/deployment,
@@ -584,6 +592,177 @@ message ModelInfo {
 message ListModelsResponse {
   // Matching models.
   repeated ModelInfo models = 1;
+
+  // What the caller's organisation policy did to this catalogue. Absent when
+  // entitlement is off (MODEL_ENTITLEMENT_MODE=off) and for a service caller,
+  // so a response without it is byte-identical to one from before the policy
+  // existed.
+  ModelAccessMeta access = 2;
+}
+
+// ModelAccessMeta — the entitlement facts that travel with a model catalogue.
+// Carries model ids' counts and policy defaults only, never content.
+message ModelAccessMeta {
+  // Which layer of the policy answered: "none" (no policy, unrestricted),
+  // "org" (organisation default), "role" (a role override) or
+  // "member_not_found" (the caller is not an active member, so nothing is
+  // allowed).
+  string state = 1;
+
+  // Whether the policy is applied to this caller. False under shadow mode: the
+  // catalogue is then unfiltered and the policy only counted.
+  bool enforced = 2;
+
+  // Revision of the organisation's policy set the answer was read at. Zero
+  // means no policy was ever written.
+  int64 revision = 3;
+
+  // Whether the policy limits anything: a model list, a ceiling or a minimum
+  // privacy tier.
+  bool restricted = 4;
+
+  // How many chat models the policy removed from this catalogue. Zero unless
+  // `enforced`.
+  uint32 hidden_count = 5;
+
+  // The model a chat surface starts with when the caller names none. Empty
+  // when the policy sets none.
+  string default_model = 6;
+
+  // The effort a chat surface starts with, as a canonical effort name. Empty
+  // when the policy sets none.
+  string default_effort = 7;
+
+  // The highest reasoning effort the policy allows, as a canonical effort
+  // name. Empty means no ceiling.
+  string max_effort = 8;
+}
+
+// SurfaceDefault — what one product surface starts with when the caller names
+// nothing. Surfaces are lowercase names such as "chat".
+message SurfaceDefault {
+  // Model id the surface starts with. Empty means the platform default.
+  string model = 1;
+
+  // Canonical effort name the surface starts with. Empty means none.
+  string effort = 2;
+}
+
+// ModelPolicyDoc — a model entitlement policy in the shape org-core stores
+// (ADR-0005). It holds model ids, an effort name, a privacy tier and per-surface
+// defaults, and nothing else, so it carries no content.
+message ModelPolicyDoc {
+  // "all" or "listed". Anything but "all" is read as "listed".
+  string allow_mode = 1;
+
+  // Models allowed in "listed" mode: exact lower-case ids or "provider:<id>"
+  // selectors. There are no patterns.
+  repeated string allow = 2;
+
+  // Models denied in either mode, in the same form. A deny wins over an allow.
+  repeated string deny = 3;
+
+  // Highest reasoning effort allowed, as a canonical effort name. Empty means
+  // no ceiling.
+  string max_effort = 4;
+
+  // Weakest privacy tier a request under this policy may be served at.
+  // UNSPECIFIED imposes no minimum.
+  PrivacyTier min_privacy_tier = 5;
+
+  // Per-surface starting points, keyed by surface name.
+  map<string, SurfaceDefault> defaults = 6;
+}
+
+// GetModelAccessRequest — ask what a caller may use.
+message GetModelAccessRequest {
+  // Client-supplied request identifier for tracing.
+  string request_id = 1;
+
+  // Tenant identifier. Must match the verified credential.
+  string org_id = 2;
+
+  // A model to judge. Empty asks for the policy alone.
+  string model = 3;
+
+  // Provider the model is served by, for "provider:<id>" entries. Empty lets
+  // inference-core look the model up in its catalogue.
+  string provider_hint = 4;
+
+  // Surface whose defaults to return, such as "chat". Empty returns none.
+  string surface = 5;
+
+  // A policy to judge instead of the stored one: the write guard asks what an
+  // admin's draft would leave. Needs a caller that can manage the policy.
+  ModelPolicyDoc draft = 6;
+
+  // Return one verdict per chat model in the catalogue. Needs a caller that can
+  // manage the policy.
+  bool include_catalogue = 7;
+}
+
+// GetModelAccessResponse — what the caller's organisation allows.
+message GetModelAccessResponse {
+  // Echo of the request identifier.
+  string request_id = 1;
+
+  // Which layer of the policy answered; see ModelAccessMeta.state.
+  string state = 2;
+
+  // Whether the policy is applied to this caller: the mode is "enforce" and the
+  // caller is a user, not a service.
+  bool enforced = 3;
+
+  // Revision of the policy set the answer was read at.
+  int64 revision = 4;
+
+  // The caller's role in the organisation. Empty for a service caller or a
+  // non-member.
+  string role = 5;
+
+  // Whether the policy limits anything; see ModelAccessMeta.restricted.
+  bool restricted = 6;
+
+  // Whether `model` is allowed. True when `model` is empty or nothing is
+  // restricted.
+  bool model_allowed = 7;
+
+  // Why `model` is not allowed: a refusal reason name such as
+  // "not_in_allow_list" or "explicitly_denied". Empty when allowed.
+  string reason = 8;
+
+  // The surface's default model, when the policy sets one.
+  string default_model = 9;
+
+  // The surface's default effort, when the policy sets one.
+  string default_effort = 10;
+
+  // Highest reasoning effort allowed. Empty means no ceiling.
+  string max_effort = 11;
+
+  // Weakest privacy tier a request may be served at.
+  PrivacyTier min_privacy_tier = 12;
+
+  // Whether the caller may change the organisation's policy.
+  bool can_manage = 13;
+
+  // One verdict per chat model, when `include_catalogue` was set.
+  repeated ModelAccessEntry catalogue = 14;
+}
+
+// ModelAccessEntry — the verdict on one chat model.
+message ModelAccessEntry {
+  // Model id.
+  string id = 1;
+
+  // Provider that serves it.
+  string provider = 2;
+
+  // Whether the policy allows it.
+  bool entitled = 3;
+
+  // Why not, as a refusal reason name. Empty when entitled.
+  string reason = 4;
 }
 
 // SynthesizeSpeechRequest — text-to-speech request routed to a speech provider.

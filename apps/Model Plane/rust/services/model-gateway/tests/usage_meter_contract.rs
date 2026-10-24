@@ -143,6 +143,13 @@ impl InferenceCore for ScriptedProvider {
     ) -> Result<Response<mpv1::CreateEmbeddingResponse>, Status> {
         unimplemented_rpc("create_embedding")
     }
+    async fn get_model_access(
+        &self,
+        _: tonic::Request<mp_contracts::model_plane::v1::GetModelAccessRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::GetModelAccessResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("get_model_access not used"))
+    }
+
     async fn list_models(
         &self,
         _: TReq<mpv1::ListModelsRequest>,

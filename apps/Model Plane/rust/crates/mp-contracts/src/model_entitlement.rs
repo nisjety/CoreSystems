@@ -21,12 +21,21 @@
 //!   names the reason. Never `FAILED_PRECONDITION`: the gateway's stream path
 //!   treats that status as a ZDR or posture refusal.
 //!
+//! The same module holds the matcher inference-core applies (ADR-0005, WS10-S3):
+//! [`Policy::permits`], [`ResolvedAccess::route`], [`Policy::clamp_effort`] and
+//! the stale-answer bounds. It is pure, so the entitlement matrix
+//! (`api/contracts/model-entitlement-matrix.json`) is evaluated against the same
+//! functions the service calls.
+//!
 //! A refusal is content-free: it names a model id and a reason, never a prompt,
 //! a message, a file name or a policy. The model id is the one thing that comes
 //! from the caller, so it is bounded and restricted to the characters a model id
 //! has ([`wire_model_id`]); anything else is not echoed. The Norwegian and
 //! English text a person reads is the SPA's, keyed by `code`, and checked
 //! against `api/contracts/model-entitlement-refusals.json`.
+
+use std::collections::BTreeMap;
+use std::time::Duration;
 
 use serde_json::{json, Value};
 use tonic::metadata::{MetadataMap, MetadataValue};
@@ -377,6 +386,405 @@ impl Refusal {
     }
 }
 
+/// How inference-core applies the policy. Read once at boot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// Nothing is resolved, counted or refused: behaviour is what it was before
+    /// the policy existed.
+    Off,
+    /// The policy is resolved and a refusal it would cause is counted and
+    /// logged, but nothing is refused or filtered.
+    Shadow,
+    /// The policy is applied, and an answer that cannot be read refuses.
+    Enforce,
+}
+
+impl Mode {
+    /// The mode a setting names. An unset or empty setting is `Off`; a value
+    /// that is none of the three names is `Enforce`, on purpose and unlike the
+    /// repository's other switches: this one guards access, so a typo must not
+    /// open it.
+    #[must_use]
+    pub fn parse(raw: Option<&str>) -> Self {
+        let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
+            return Self::Off;
+        };
+        match raw.to_ascii_lowercase().as_str() {
+            "off" => Self::Off,
+            "shadow" => Self::Shadow,
+            _ => Self::Enforce,
+        }
+    }
+
+    /// The wire and metric name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Shadow => "shadow",
+            Self::Enforce => "enforce",
+        }
+    }
+}
+
+/// How long an answer is served without asking org-core again.
+pub const TTL: Duration = Duration::from_secs(30);
+
+/// How long a failed refresh may keep serving the last answer when that answer
+/// restricted something. Longer on purpose: a revocation must not be undone by
+/// an outage.
+pub const STALE_RESTRICTIVE: Duration = Duration::from_secs(900);
+
+/// The same bound when the last answer restricted nothing. Shorter on purpose:
+/// an open answer must not hide a revocation for long.
+pub const STALE_UNRESTRICTED: Duration = Duration::from_secs(120);
+
+/// The prefix of an entry that selects every model of one provider.
+pub const PROVIDER_PREFIX: &str = "provider:";
+
+/// The reasoning-effort ladder, weakest first. Mirrors inference-core's
+/// `provider::effort::Level` and org-core's `effortRank`; a test in each pins
+/// the lists together.
+pub const EFFORT_LADDER: [&str; 6] = ["minimal", "low", "medium", "high", "xhigh", "max"];
+
+/// What one surface starts with when the caller names nothing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SurfaceDefault {
+    pub model: String,
+    pub effort: String,
+}
+
+/// One complete policy for one scope, as org-core resolved it. Entries are
+/// lower-cased exact ids or `provider:<id>` selectors; there are no patterns.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Policy {
+    /// Whether `allow` is a list to stay inside. Anything but `all` is read as
+    /// listed, so an unknown mode narrows access rather than opening it.
+    pub allow_all: bool,
+    pub allow: Vec<String>,
+    pub deny: Vec<String>,
+    /// A canonical effort name, or empty for no ceiling.
+    pub max_effort: String,
+    /// A privacy tier label (`global`, `eu_resident`, `zdr_contractual`,
+    /// `sovereign`), or empty for no minimum.
+    pub min_privacy_tier: String,
+    pub defaults: BTreeMap<String, SurfaceDefault>,
+}
+
+/// A candidate of a route: a model, the provider that would serve it, and
+/// whether that deployment is attested for zero retention.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate {
+    pub model: String,
+    pub provider: String,
+    pub attested: bool,
+}
+
+/// The candidates a policy leaves, and why none are left when none are.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Route {
+    pub entitled: Vec<String>,
+    pub reason: Option<Reason>,
+}
+
+fn strings(value: Option<&Value>) -> Option<Vec<String>> {
+    match value {
+        None | Some(Value::Null) => Some(Vec::new()),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|item| item.as_str().map(|s| s.trim().to_ascii_lowercase()))
+            .collect(),
+        Some(_) => None,
+    }
+}
+
+fn text(value: Option<&Value>) -> Option<String> {
+    match value {
+        None | Some(Value::Null) => Some(String::new()),
+        Some(Value::String(s)) => Some(s.trim().to_ascii_lowercase()),
+        Some(_) => None,
+    }
+}
+
+impl Policy {
+    /// The policy a JSON object holds, in the shape org-core's machine route
+    /// writes. `None` when a field has the wrong type, so a body this matcher
+    /// cannot read is never read as "no restriction".
+    #[must_use]
+    pub fn from_json(value: &Value) -> Option<Self> {
+        let object = value.as_object()?;
+        let mut defaults = BTreeMap::new();
+        match object.get("defaults") {
+            None | Some(Value::Null) => {}
+            Some(Value::Object(surfaces)) => {
+                for (surface, entry) in surfaces {
+                    defaults.insert(
+                        surface.trim().to_ascii_lowercase(),
+                        SurfaceDefault {
+                            model: text(entry.get("model"))?,
+                            effort: text(entry.get("effort"))?,
+                        },
+                    );
+                }
+            }
+            Some(_) => return None,
+        }
+        Some(Self {
+            allow_all: text(object.get("allow_mode"))? == "all",
+            allow: strings(object.get("allow"))?,
+            deny: strings(object.get("deny"))?,
+            max_effort: text(object.get("max_effort"))?,
+            min_privacy_tier: text(object.get("min_privacy_tier"))?,
+            defaults,
+        })
+    }
+
+    /// Whether the policy lets `model` be used and, when it does not, why.
+    /// `provider` is the provider that serves the model and may be empty, in
+    /// which case a `provider:` entry matches nothing.
+    ///
+    /// Deny wins over allow, matching is exact on the lower-cased id, and in
+    /// `all` mode everything the deny list does not name is permitted.
+    ///
+    /// # Errors
+    /// The [`Reason`] the model is not permitted.
+    pub fn permits(&self, model: &str, provider: &str) -> Result<(), Reason> {
+        let model = model.trim().to_ascii_lowercase();
+        let provider = provider.trim().to_ascii_lowercase();
+        let selector = (!provider.is_empty()).then(|| format!("{PROVIDER_PREFIX}{provider}"));
+        let listed = |entries: &[String]| {
+            entries
+                .iter()
+                .any(|entry| *entry == model || selector.as_ref() == Some(entry))
+        };
+        if listed(&self.deny) {
+            return Err(Reason::ExplicitlyDenied);
+        }
+        if self.allow_all || listed(&self.allow) {
+            return Ok(());
+        }
+        Err(Reason::NotInAllowList)
+    }
+
+    /// Whether the policy limits anything: a model list, a ceiling or a minimum
+    /// privacy tier. Defaults alone limit nothing.
+    #[must_use]
+    pub fn restricts(&self) -> bool {
+        !self.allow_all
+            || !self.deny.is_empty()
+            || !self.max_effort.is_empty()
+            || !self.min_privacy_tier.is_empty()
+    }
+
+    /// `requested` limited to the policy's ceiling. A request that names no
+    /// effort stays empty (the model's own standard); one the ladder does not
+    /// know is brought down to the ceiling, never passed through above it.
+    #[must_use]
+    pub fn clamp_effort(&self, requested: &str) -> String {
+        let requested = requested.trim().to_ascii_lowercase();
+        let rank = |name: &str| EFFORT_LADDER.iter().position(|level| *level == name);
+        let Some(ceiling) = rank(&self.max_effort) else {
+            return requested;
+        };
+        if requested.is_empty() {
+            return requested;
+        }
+        match rank(&requested) {
+            Some(asked) if asked <= ceiling => requested,
+            _ => self.max_effort.clone(),
+        }
+    }
+}
+
+/// Which layer of the policy answered. The wire names are org-core's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum State {
+    /// No policy: unrestricted.
+    None,
+    /// The organisation default.
+    Org,
+    /// A role override.
+    Role,
+    /// The caller is not an active member of an organisation that has a policy:
+    /// nothing is allowed.
+    MemberNotFound,
+}
+
+impl State {
+    /// The wire name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Org => "org",
+            Self::Role => "role",
+            Self::MemberNotFound => "member_not_found",
+        }
+    }
+
+    fn parse(name: &str) -> Option<Self> {
+        [Self::None, Self::Org, Self::Role, Self::MemberNotFound]
+            .into_iter()
+            .find(|state| state.as_str() == name)
+    }
+}
+
+/// What org-core resolved for one caller: the answer inference-core applies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedAccess {
+    pub state: State,
+    pub revision: i64,
+    pub role: String,
+    pub can_manage: bool,
+    pub policy: Option<Policy>,
+}
+
+impl ResolvedAccess {
+    /// The answer of an organisation with no policy.
+    #[must_use]
+    pub fn unrestricted() -> Self {
+        Self {
+            state: State::None,
+            revision: 0,
+            role: String::new(),
+            can_manage: false,
+            policy: None,
+        }
+    }
+
+    /// The answer a machine-route body holds. `None` for a body this matcher
+    /// cannot read: an unknown state, a state that names a layer with no
+    /// policy, or a malformed policy. The caller treats that as unavailable,
+    /// never as unrestricted.
+    #[must_use]
+    pub fn from_body(body: &Value) -> Option<Self> {
+        let state = State::parse(body.get("state")?.as_str()?)?;
+        let policy = match body.get("policy") {
+            None | Some(Value::Null) => None,
+            Some(policy) => Some(Policy::from_json(policy)?),
+        };
+        if state != State::None && policy.is_none() {
+            return None;
+        }
+        Some(Self {
+            state,
+            revision: body.get("revision").and_then(Value::as_i64).unwrap_or(0),
+            role: body
+                .get("role")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            can_manage: body
+                .get("can_manage")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            policy,
+        })
+    }
+
+    /// Whether the answer limits anything. This is what picks the stale bound.
+    #[must_use]
+    pub fn restricted(&self) -> bool {
+        self.state == State::MemberNotFound || self.policy.as_ref().is_some_and(Policy::restricts)
+    }
+
+    /// Whether `model`, served by `provider`, may be used, and why not when it
+    /// may not.
+    ///
+    /// # Errors
+    /// The [`Reason`] the model is not available to this caller.
+    pub fn permits(&self, model: &str, provider: &str) -> Result<(), Reason> {
+        if self.state == State::MemberNotFound {
+            return Err(Reason::MemberNotFound);
+        }
+        match &self.policy {
+            Some(policy) => policy.permits(model, provider),
+            None => Ok(()),
+        }
+    }
+
+    /// The reason `model` is not available, or `None` when it is.
+    #[must_use]
+    pub fn deny_reason(&self, model: &str, provider: &str) -> Option<Reason> {
+        self.permits(model, provider).err()
+    }
+
+    /// `requested` limited to the policy's ceiling; see [`Policy::clamp_effort`].
+    #[must_use]
+    pub fn clamp_effort(&self, requested: &str) -> String {
+        match &self.policy {
+            Some(policy) => policy.clamp_effort(requested),
+            None => requested.trim().to_ascii_lowercase(),
+        }
+    }
+
+    /// The candidates of a route the policy leaves. A candidate is entitled
+    /// when the policy permits it and, for a zero-retention caller, its
+    /// deployment is attested. With none left the reason is the policy's own
+    /// for a pinned model it refuses (entitlement is named before any
+    /// zero-retention refusal) and [`Reason::NoEntitledRoute`] otherwise.
+    #[must_use]
+    pub fn route(&self, candidates: &[Candidate], zdr: bool, pinned: bool) -> Route {
+        let mut entitled = Vec::new();
+        let mut first_denial = None;
+        for candidate in candidates {
+            match self.permits(&candidate.model, &candidate.provider) {
+                Err(reason) => {
+                    first_denial.get_or_insert(reason);
+                }
+                Ok(()) if zdr && !candidate.attested => {}
+                Ok(()) => entitled.push(candidate.model.clone()),
+            }
+        }
+        let reason = if !entitled.is_empty() {
+            None
+        } else if pinned && first_denial.is_some() {
+            first_denial
+        } else {
+            Some(Reason::NoEntitledRoute)
+        };
+        Route { entitled, reason }
+    }
+}
+
+/// The last answer held for a caller when a refresh fails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LastAnswer {
+    pub restricted: bool,
+    pub age: Duration,
+}
+
+/// What to do when the entitlement could not be refreshed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Availability {
+    /// Serve the last answer: it is inside its stale bound.
+    UseLastAnswer,
+    /// Refuse with [`code::ENTITLEMENT_UNAVAILABLE`]: nothing is held, or what
+    /// is held is past its bound.
+    Refuse,
+}
+
+/// The decision after a failed refresh. The bound is [`STALE_RESTRICTIVE`] for
+/// an answer that restricted something and [`STALE_UNRESTRICTED`] for one that
+/// did not; an answer never seen refuses. It does not depend on zero retention:
+/// an unreadable entitlement refuses under ZDR as it does elsewhere.
+#[must_use]
+pub fn after_failed_refresh(last: Option<LastAnswer>) -> Availability {
+    let Some(last) = last else {
+        return Availability::Refuse;
+    };
+    let bound = if last.restricted {
+        STALE_RESTRICTIVE
+    } else {
+        STALE_UNRESTRICTED
+    };
+    if last.age <= bound {
+        Availability::UseLastAnswer
+    } else {
+        Availability::Refuse
+    }
+}
+
 /// The fixture `api/contracts/model-entitlement-refusals.json` is generated
 /// from this value. Clients read it; this function is the only writer.
 #[must_use]
@@ -589,5 +997,17 @@ mod tests {
             assert_eq!(Reason::parse(reason.as_str()), Some(reason));
         }
         assert_eq!(Reason::parse("other"), None);
+    }
+
+    #[test]
+    fn the_mode_is_off_when_unset_and_enforce_when_unreadable() {
+        assert_eq!(Mode::parse(None), Mode::Off);
+        assert_eq!(Mode::parse(Some("  ")), Mode::Off);
+        assert_eq!(Mode::parse(Some("off")), Mode::Off);
+        assert_eq!(Mode::parse(Some(" Shadow ")), Mode::Shadow);
+        assert_eq!(Mode::parse(Some("enforce")), Mode::Enforce);
+        // A typo must not open access.
+        assert_eq!(Mode::parse(Some("shaddow")), Mode::Enforce);
+        assert_eq!(Mode::parse(Some("true")), Mode::Enforce);
     }
 }

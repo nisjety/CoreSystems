@@ -476,6 +476,16 @@ impl InferenceCore for MockOk {
         }))
     }
 
+    async fn get_model_access(
+        &self,
+        _: tonic::Request<mp_contracts::model_plane::v1::GetModelAccessRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::GetModelAccessResponse>, tonic::Status> {
+        Ok(tonic::Response::new(mp_contracts::model_plane::v1::GetModelAccessResponse {
+            model_allowed: true,
+            ..Default::default()
+        }))
+    }
+
     async fn list_models(
         &self,
         _: TReq<ListModelsRequest>,
@@ -491,6 +501,7 @@ impl InferenceCore for MockOk {
                 residency: String::new(),
                 effort_levels: Vec::new(),
             }],
+            access: None,
         }))
     }
 
@@ -778,6 +789,13 @@ impl InferenceCore for MockDown {
         Err(Status::unavailable("down"))
     }
 
+    async fn get_model_access(
+        &self,
+        _: tonic::Request<mp_contracts::model_plane::v1::GetModelAccessRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::GetModelAccessResponse>, tonic::Status> {
+        Err(tonic::Status::unavailable("down"))
+    }
+
     async fn list_models(
         &self,
         _: TReq<ListModelsRequest>,
@@ -942,6 +960,13 @@ impl InferenceCore for MockStreamDown {
         _: TReq<CreateEmbeddingRequest>,
     ) -> Result<Response<CreateEmbeddingResponse>, Status> {
         Err(Status::unavailable("down"))
+    }
+
+    async fn get_model_access(
+        &self,
+        _: tonic::Request<mp_contracts::model_plane::v1::GetModelAccessRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::GetModelAccessResponse>, tonic::Status> {
+        Err(tonic::Status::unavailable("down"))
     }
 
     async fn list_models(

@@ -185,6 +185,12 @@ pub struct InferRequest {
     ///
     /// Typed as [`Bearer`] so the struct's `#[derive(Debug)]` cannot print it.
     pub caller_bearer: Bearer,
+    /// What the caller's organisation allows (ADR-0005), resolved by the
+    /// handler before the chain runs. `None` is the pre-existing behaviour
+    /// byte-for-byte: entitlement off, a service caller, or no answer in shadow
+    /// mode. Carries model ids and a revision only, never content, and lives in
+    /// memory for the call.
+    pub access: Option<std::sync::Arc<crate::entitlement::RequestAccess>>,
 }
 
 /// A function the model may call (chat-parity §2).
@@ -1025,6 +1031,20 @@ pub enum ProviderError {
     /// downgrade is never silent.
     #[error("required privacy tier unavailable: {0}")]
     TierUnavailable(String),
+
+    /// The caller's organisation does not allow the model (or, for an automatic
+    /// request, any model that could serve it). Refused before any provider was
+    /// called. `model` is empty for an automatic request.
+    #[error("model not entitled: {}", .reason.as_str())]
+    ModelNotEntitled {
+        model: String,
+        reason: mp_contracts::model_entitlement::Reason,
+    },
+
+    /// The organisation's entitlement could not be read and no answer is held
+    /// within its bound, so nothing was sent (fail closed, ZDR included).
+    #[error("model entitlement unavailable")]
+    EntitlementUnavailable,
 }
 
 /// Canonical EU Azure regions permitted to serve embeddings under the EU

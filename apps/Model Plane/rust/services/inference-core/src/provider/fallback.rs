@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
+use mp_contracts::model_entitlement::Reason;
 use tokio::sync::mpsc;
 use tracing::{info, warn, Instrument};
 
@@ -18,7 +19,8 @@ use super::{
     Residency,
 };
 use crate::cache::PromptCache;
-use crate::config::InferenceConfig;
+use crate::config::{EntitlementConfig, InferenceConfig};
+use crate::entitlement::{EntitlementGate, RequestAccess};
 
 /// A boxed, type-erased provider.
 type BoxedProvider = Arc<dyn ProviderRouterDyn>;
@@ -103,6 +105,10 @@ pub struct FallbackChain {
     /// could not previously coexist with Azure. Only consulted for providers that
     /// declare `exclusive_catalog`.
     catalogs: std::collections::HashMap<String, Vec<String>>,
+    /// Resolves the caller's model entitlement (ADR-0005). Off unless
+    /// `MODEL_ENTITLEMENT_MODE` says otherwise; the handlers ask it, and the
+    /// chain applies the answer a request carries.
+    entitlement: Arc<EntitlementGate>,
 }
 
 /// The deployment names that gate each model family on this resource.
@@ -233,7 +239,7 @@ impl FallbackChain {
 /// True when the caller didn't pin a model — empty or a "let the gateway pick"
 /// sentinel. Such requests resolve to the per-provider default so "Verevon Auto"
 /// works against whatever provider is actually configured.
-fn is_unspecified_model(model: &str) -> bool {
+pub(crate) fn is_unspecified_model(model: &str) -> bool {
     let m = model.trim().to_ascii_lowercase();
     // Empty / "default", plus any Verevon intent id. The intent layer normally
     // rewrites a `verevon-*` id to a concrete model before the provider loop;
@@ -340,6 +346,11 @@ struct ThrottleState {
     /// everything else. It is deliberately not throttling — `throttled()`
     /// ignores it, so there is no second pass and no wait.
     refused: Option<ProviderError>,
+    /// The first reason the caller's entitlement skipped a candidate. Set only
+    /// under `enforce`; with no attempt made it ends the walk as
+    /// `model_not_entitled`, named before any zero-retention, residency or tier
+    /// refusal.
+    entitlement_denial: Option<Reason>,
 }
 
 impl ThrottleState {
@@ -935,6 +946,7 @@ impl FallbackChain {
             defaults: ProviderDefaults::from_config(cfg),
             deployed,
             catalogs,
+            entitlement: Arc::new(EntitlementGate::new(&EntitlementConfig::from_env())),
         }
     }
 
@@ -977,7 +989,22 @@ impl FallbackChain {
             // No configured catalog, so nothing is known to be undeployed and
             // the ladder is walked as written.
             deployed: DeployedModels::default(),
+            entitlement: Arc::new(EntitlementGate::off()),
         }
+    }
+
+    /// Replace the entitlement gate (test/builder helper).
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn with_entitlement(mut self, gate: EntitlementGate) -> Self {
+        self.entitlement = Arc::new(gate);
+        self
+    }
+
+    /// The gate the handlers resolve a caller's entitlement through.
+    #[must_use]
+    pub fn entitlement(&self) -> &EntitlementGate {
+        &self.entitlement
     }
 
     /// Toggle the Verevon intent layer by flipping `enabled` on the live policy
@@ -1127,7 +1154,17 @@ impl FallbackChain {
     /// `verevon-*` mode. Substituting under a caller who pinned a model would
     /// answer with something they did not ask for; "the model I chose was busy"
     /// is their decision to make, not ours to paper over.
-    fn tool_ladder(&self, resolved: &str) -> Vec<String> {
+    ///
+    /// For a caller whose organisation restricts models, a rung the policy
+    /// refuses is dropped before the step bound is counted, so a denied rung
+    /// never uses up one of the [`MAX_TOOL_LADDER_STEPS`] a permitted one could
+    /// have had.
+    fn tool_ladder(
+        &self,
+        resolved: &str,
+        access: Option<&RequestAccess>,
+        hint: &str,
+    ) -> Vec<String> {
         let policy = self.policy.load();
         let mut ladder: Vec<String> = Vec::new();
         for candidate in &policy.tool_fallback_ladder {
@@ -1139,9 +1176,90 @@ impl FallbackChain {
             if already_queued || !self.is_deployed(candidate) {
                 continue;
             }
+            if access.is_some_and(|access| self.entitlement_refusal(access, candidate, hint).is_some()) {
+                continue;
+            }
             ladder.push(candidate.clone());
         }
         ladder
+    }
+
+    /// Why the caller's entitlement refuses `model` on every provider that could
+    /// serve it, or `None` when some provider may, when no provider matches (the
+    /// walk then ends in its usual way) or when `model` is unspecified (each
+    /// provider's own default is judged where it is chosen).
+    ///
+    /// The provider is part of the question because a policy may name a whole
+    /// provider (`provider:openai`), and a model id alone does not say which
+    /// provider would serve it.
+    fn entitlement_refusal(&self, access: &RequestAccess, model: &str, hint: &str) -> Option<Reason> {
+        if is_unspecified_model(model) {
+            return None;
+        }
+        let mut first = None;
+        for (name, provider) in &self.providers {
+            let caps = provider.capabilities_dyn();
+            if !Self::hint_matches(hint, name, &caps.aliases)
+                || !provider_serves_model(&caps, self.catalog_for(name), model)
+            {
+                continue;
+            }
+            match access.refuses(model, name) {
+                None => return None,
+                Some(reason) => {
+                    first.get_or_insert(reason);
+                }
+            }
+        }
+        first
+    }
+
+    /// The model the caller named, after checking it against their entitlement:
+    /// `None` for an unspecified (automatic) model, `Some` for a pinned one the
+    /// policy allows on some provider.
+    ///
+    /// # Errors
+    /// [`ProviderError::ModelNotEntitled`] when the policy refuses a pinned model
+    /// on every provider that could serve it. Nothing has been sent anywhere.
+    fn pinned_model<'a>(&self, req: &'a InferRequest) -> Result<Option<&'a str>, ProviderError> {
+        if is_unspecified_model(&req.model) {
+            return Ok(None);
+        }
+        if let Some(access) = &req.access {
+            if let Some(reason) = self.entitlement_refusal(access, &req.model, &req.provider_hint) {
+                return Err(access.refusal(&req.model, reason));
+            }
+        }
+        Ok(Some(&req.model))
+    }
+
+    /// Whether a stored response may be served to this caller: it was made by a
+    /// model their organisation still allows. The cache key does not carry the
+    /// policy, so a revocation must be checked here or an old answer outlives it.
+    fn entitled_hit(&self, req: &InferRequest, model_used: &str, provider_used: &str) -> bool {
+        req.access
+            .as_ref()
+            .is_none_or(|access| access.refuses(model_used, provider_used).is_none())
+    }
+
+    /// The error that ends a walk in which no candidate was tried because the
+    /// caller's entitlement skipped each one. `pinned` is the model the caller
+    /// named, if they named one; an automatic request names no model.
+    fn entitlement_exhaustion(
+        req: &InferRequest,
+        throttle: &ThrottleState,
+        total_attempts: u32,
+        pinned: Option<&str>,
+    ) -> Option<ProviderError> {
+        if total_attempts != 0 {
+            return None;
+        }
+        let access = req.access.as_ref()?;
+        let denial = throttle.entitlement_denial?;
+        Some(match pinned {
+            Some(model) => access.refusal(model, denial),
+            None => access.refusal("", Reason::NoEntitledRoute),
+        })
     }
 
     /// Perform unary inference with fallback and caching.
@@ -1161,21 +1279,29 @@ impl FallbackChain {
 
     async fn infer_with_response_cache(&self, req: &InferRequest, cache_response: bool) -> Result<InferResponse, ProviderError> {
         let mut clock = CallClock::start();
+        // A model the caller named is checked against their organisation's
+        // entitlement first of all: before the intent layer spends a budget call
+        // and before the cache can answer with a model they may not use.
+        let pinned = self.pinned_model(req)?;
         // Verevon intent layer: resolve a `verevon-*` mode to a concrete model
         // (complexity + budget) before anything else. A pinned model or a
         // disabled intent layer leaves `req` untouched.
         let intent_req = self.resolve_intent(req).await;
         // The ladder exists only for a model WE chose. `intent_req.is_some()` is
         // exactly that condition — see `attempt_models`.
-        let ladder = intent_req
-            .as_ref()
-            .map_or_else(Vec::new, |resolved| self.tool_ladder(&resolved.model));
+        let ladder = intent_req.as_ref().map_or_else(Vec::new, |resolved| {
+            self.tool_ladder(&resolved.model, resolved.access.as_deref(), &resolved.provider_hint)
+        });
         let req: &InferRequest = intent_req.as_ref().unwrap_or(req);
         validate_min_residency(req)?;
 
         // Check cache first
         if cache_response {
-            if let Some(mut cached) = self.cache.get(req) {
+            if let Some(mut cached) = self
+                .cache
+                .get(req)
+                .filter(|cached| self.entitled_hit(req, &cached.model_used, &cached.provider_used))
+            {
                 info!(request_id = %req.request_id, "cache hit");
                 // The stored copy may carry the timing of the call that filled
                 // the cache; this call reached no provider at all.
@@ -1237,7 +1363,9 @@ impl FallbackChain {
             }
         }
 
-        if req.min_privacy_tier > PrivacyTier::Unspecified && total_attempts == 0 {
+        if let Some(refusal) = Self::entitlement_exhaustion(req, &throttle, total_attempts, pinned) {
+            Err(refusal)
+        } else if req.min_privacy_tier > PrivacyTier::Unspecified && total_attempts == 0 {
             Err(tier_unavailable_error(req.min_privacy_tier))
         } else if req.zdr && total_attempts == 0 {
             Err(ProviderError::ZdrUnavailable(
@@ -1333,6 +1461,16 @@ impl FallbackChain {
                 continue;
             }
             let call_req = self.request_for(req, model, name);
+            // The caller's entitlement, judged on the model this provider would
+            // really serve (its own default for an unspecified one).
+            if let Some(reason) = req
+                .access
+                .as_ref()
+                .and_then(|access| access.refuses(&call_req.model, name))
+            {
+                throttle.entitlement_denial.get_or_insert(reason);
+                continue;
+            }
             for attempt in 1..=self.max_retries {
                 *total_attempts += 1;
                 let span = tracing::info_span!(
@@ -1546,11 +1684,13 @@ impl FallbackChain {
         req: &InferRequest,
     ) -> Result<mpsc::Receiver<InferChunk>, ProviderError> {
         let mut clock = CallClock::start();
+        // Entitlement of a pinned model first, as on the unary path.
+        let pinned = self.pinned_model(req)?;
         // Verevon intent layer — same resolution as the unary path.
         let intent_req = self.resolve_intent(req).await;
-        let ladder = intent_req
-            .as_ref()
-            .map_or_else(Vec::new, |resolved| self.tool_ladder(&resolved.model));
+        let ladder = intent_req.as_ref().map_or_else(Vec::new, |resolved| {
+            self.tool_ladder(&resolved.model, resolved.access.as_deref(), &resolved.provider_hint)
+        });
         let req: &InferRequest = intent_req.as_ref().unwrap_or(req);
         validate_min_residency(req)?;
 
@@ -1601,7 +1741,9 @@ impl FallbackChain {
             }
         }
 
-        if req.min_privacy_tier > PrivacyTier::Unspecified && total_attempts == 0 {
+        if let Some(refusal) = Self::entitlement_exhaustion(req, &throttle, total_attempts, pinned) {
+            Err(refusal)
+        } else if req.min_privacy_tier > PrivacyTier::Unspecified && total_attempts == 0 {
             Err(tier_unavailable_error(req.min_privacy_tier))
         } else if req.zdr && total_attempts == 0 {
             Err(ProviderError::ZdrUnavailable(
@@ -1667,6 +1809,14 @@ impl FallbackChain {
                 continue;
             }
             let call_req = self.request_for(req, model, name);
+            if let Some(reason) = req
+                .access
+                .as_ref()
+                .and_then(|access| access.refuses(&call_req.model, name))
+            {
+                throttle.entitlement_denial.get_or_insert(reason);
+                continue;
+            }
             for attempt in 1..=self.max_retries {
                 *total_attempts += 1;
                 let span = tracing::info_span!(
@@ -4261,7 +4411,7 @@ mod resolution_tests {
         let mut chain = ladder_chain(&asked, vec![], vec![]);
 
         // Unknown catalogs prune nothing, but the step bound still holds.
-        let unpruned = chain.tool_ladder("claude-sonnet-4-6");
+        let unpruned = chain.tool_ladder("claude-sonnet-4-6", None, "");
         assert!(unpruned.len() <= MAX_TOOL_LADDER_STEPS);
         assert!(!unpruned.iter().any(|m| m == "claude-sonnet-4-6"));
 
@@ -4275,7 +4425,7 @@ mod resolution_tests {
             openai: Some(vec!["gpt-4o-mini".to_owned()]),
         };
         assert_eq!(
-            chain.tool_ladder("claude-sonnet-4-6"),
+            chain.tool_ladder("claude-sonnet-4-6", None, ""),
             ["claude-haiku-4-5", "gpt-4o-mini"]
         );
     }

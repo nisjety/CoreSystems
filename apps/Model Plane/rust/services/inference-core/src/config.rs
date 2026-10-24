@@ -2,8 +2,11 @@
 
 use anyhow::{Context, Result};
 
+use mp_contracts::model_entitlement::Mode;
+
 use crate::metrics;
 use crate::provider::zdr::{ZdrAttestation, ZdrResolution};
+use crate::provider::Bearer;
 
 /// Top-level configuration for inference-core.
 // The flags are independent deny-by-default residency/retention opt-ins, not a
@@ -404,6 +407,53 @@ fn resolve_zdr(
 pub fn deployment_type_is_global(declared: &str) -> bool {
     let token = declared.trim().to_ascii_lowercase().replace(['-', '_'], "");
     token.starts_with("global") || token.contains("worldwide")
+}
+
+/// The org-core service id inference-core presents when it pulls an organisation's
+/// model entitlement (ADR-0005). org-core's registry names this principal and
+/// grants it only `org:model-entitlement:read:any`.
+pub const ORG_CORE_SERVICE_ID: &str = "inference-core";
+
+/// How inference-core reads and applies the organisation's model entitlement.
+///
+/// Kept apart from [`InferenceConfig`] because nothing on the provider side
+/// reads it: only the entitlement gate does, and it stays a unit that can be
+/// built without the provider settings.
+#[derive(Debug, Clone)]
+pub struct EntitlementConfig {
+    /// `MODEL_ENTITLEMENT_MODE`: `off` (the default), `shadow` or `enforce`. A
+    /// value that is none of them is `enforce`: see [`Mode::parse`].
+    pub mode: Mode,
+    /// org-core's base URL (from `ORG_CORE_URL`). Without it a `shadow` or
+    /// `enforce` mode has nothing to ask, so every answer is unavailable.
+    pub org_core_url: Option<String>,
+    /// The credential org-core accepts for [`ORG_CORE_SERVICE_ID`] (from
+    /// `INFERENCE_ORG_CORE_SERVICE_TOKEN`). Redacted from `Debug`.
+    pub service_token: Bearer,
+}
+
+impl EntitlementConfig {
+    /// Entitlement off: no settings, no calls.
+    #[must_use]
+    pub fn off() -> Self {
+        Self {
+            mode: Mode::Off,
+            org_core_url: None,
+            service_token: Bearer::default(),
+        }
+    }
+
+    /// Read the settings from the environment.
+    #[must_use]
+    pub fn from_env() -> Self {
+        Self {
+            mode: Mode::parse(std::env::var("MODEL_ENTITLEMENT_MODE").ok().as_deref()),
+            org_core_url: trimmed_env("ORG_CORE_URL"),
+            service_token: Bearer::new(
+                trimmed_env("INFERENCE_ORG_CORE_SERVICE_TOKEN").unwrap_or_default(),
+            ),
+        }
+    }
 }
 
 /// An environment variable trimmed to `None` when unset or blank.

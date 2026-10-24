@@ -10,9 +10,10 @@ use tonic::{Request, Response, Status};
 use tracing::info;
 
 use crate::auth::{AuthenticatedPrincipal, JwtVerifier};
+use crate::entitlement::{tier_from_label, RequestAccess, Resolved};
 use crate::provider;
 use crate::provider::doc_intel::{AnalyzeDocumentRequest, DocIntelChain};
-use crate::provider::fallback::FallbackChain;
+use crate::provider::fallback::{is_unspecified_model, FallbackChain};
 use crate::provider::language::{
     LanguageAnalyticsChain, LanguageAnalyticsRequest, LanguageOperation,
 };
@@ -139,6 +140,7 @@ macro_rules! tenant_requests {
 
 tenant_requests!(
     pb::InferRequest,
+    pb::GetModelAccessRequest,
     pb::CreateEmbeddingRequest,
     pb::SynthesizeSpeechRequest,
     pb::TranscribeSpeechRequest,
@@ -313,7 +315,13 @@ impl InferenceCore for InferenceService {
         let no_store = request.metadata().get("cache-control").is_some_and(|value| value == "no-store");
         let req = request.into_inner();
 
-        let internal_req = to_internal_request(&req, &principal)?;
+        let access = self
+            .chain
+            .entitlement()
+            .access_for(&principal)
+            .await
+            .map_err(provider_error_to_status)?;
+        let internal_req = with_access(to_internal_request(&req, &principal)?, access);
 
         clock.enter_chain();
         let result = if no_store {
@@ -341,7 +349,13 @@ impl InferenceCore for InferenceService {
         let principal = self.authorize(&request).await?;
         let req = request.into_inner();
 
-        let internal_req = to_internal_request(&req, &principal)?;
+        let access = self
+            .chain
+            .entitlement()
+            .access_for(&principal)
+            .await
+            .map_err(provider_error_to_status)?;
+        let internal_req = with_access(to_internal_request(&req, &principal)?, access);
 
         clock.enter_chain();
         let rx = self
@@ -420,7 +434,13 @@ impl InferenceCore for InferenceService {
         &self,
         request: Request<pb::ListModelsRequest>,
     ) -> Result<Response<pb::ListModelsResponse>, Status> {
-        self.authorize(&request).await?;
+        let principal = self.authorize(&request).await?;
+        let resolved = self
+            .chain
+            .entitlement()
+            .resolve(&principal)
+            .await
+            .map_err(provider_error_to_status)?;
         let req = request.into_inner();
         let mut models: Vec<_> = self
             .chain
@@ -486,7 +506,35 @@ impl InferenceCore for InferenceService {
         let mut seen = std::collections::HashSet::new();
         models.retain(|model| seen.insert(model.id.clone()));
 
-        Ok(Response::new(pb::ListModelsResponse { models }))
+        // The caller's organisation policy applies to chat models only; every
+        // other modality passes unfiltered. Without a policy answer to apply
+        // (off, a service caller, an unreadable answer in shadow) the response is
+        // what it was before the policy existed.
+        let access = match resolved {
+            Resolved::Access(access) => Some(catalogue_access(&access, &mut models)),
+            Resolved::Off | Resolved::Exempt | Resolved::Unreadable => None,
+        };
+
+        Ok(Response::new(pb::ListModelsResponse { models, access }))
+    }
+
+    async fn get_model_access(
+        &self,
+        request: Request<pb::GetModelAccessRequest>,
+    ) -> Result<Response<pb::GetModelAccessResponse>, Status> {
+        let principal = self.authorize(&request).await?;
+        let resolved = self
+            .chain
+            .entitlement()
+            .resolve(&principal)
+            .await
+            .map_err(provider_error_to_status)?;
+        model_access_response(
+            &self.chain.list_models("chat", ""),
+            request.into_inner(),
+            resolved,
+        )
+        .map(Response::new)
     }
 
     async fn synthesize_speech(
@@ -1156,6 +1204,177 @@ fn to_internal_request(
         // org/user to the token's claims). Never serialized into provider
         // bodies — see the field's doc comment.
         caller_bearer: crate::provider::Bearer::new(principal.bearer()),
+        access: None,
+    })
+}
+
+/// Attach the caller's entitlement to a provider request. When the policy is
+/// applied, its minimum privacy tier joins the request's own as the stronger of
+/// the two, so the chain's existing tier gate enforces it and nothing new
+/// decides a provider.
+fn with_access(
+    mut request: provider::InferRequest,
+    access: Option<std::sync::Arc<RequestAccess>>,
+) -> provider::InferRequest {
+    if let Some(access) = &access {
+        let floor = access.min_privacy_tier();
+        if floor > request.min_privacy_tier {
+            request.min_privacy_tier = floor;
+        }
+    }
+    request.access = access;
+    request
+}
+
+/// The policy a `GetModelAccess` draft carries, in the matcher's form.
+fn policy_of_draft(doc: &pb::ModelPolicyDoc) -> mp_contracts::model_entitlement::Policy {
+    use mp_contracts::model_entitlement::{Policy, SurfaceDefault};
+    let lower = |values: &[String]| -> Vec<String> {
+        values
+            .iter()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .collect()
+    };
+    let tier = match provider::PrivacyTier::from_wire(doc.min_privacy_tier) {
+        Some(provider::PrivacyTier::Unspecified) => "",
+        Some(tier) => tier.label(),
+        // A tier this build does not know is the strongest, never no minimum.
+        None => provider::PrivacyTier::Sovereign.label(),
+    };
+    Policy {
+        allow_all: doc.allow_mode.trim().eq_ignore_ascii_case("all"),
+        allow: lower(&doc.allow),
+        deny: lower(&doc.deny),
+        max_effort: doc.max_effort.trim().to_ascii_lowercase(),
+        min_privacy_tier: tier.to_owned(),
+        defaults: doc
+            .defaults
+            .iter()
+            .map(|(surface, default)| {
+                (
+                    surface.trim().to_ascii_lowercase(),
+                    SurfaceDefault {
+                        model: default.model.trim().to_ascii_lowercase(),
+                        effort: default.effort.trim().to_ascii_lowercase(),
+                    },
+                )
+            })
+            .collect(),
+    }
+}
+
+/// Filter a catalogue by the caller's policy and describe what was done. Under
+/// shadow nothing is removed: the catalogue stays whole and only says that the
+/// policy is not applied.
+fn catalogue_access(access: &RequestAccess, models: &mut Vec<pb::ModelInfo>) -> pb::ModelAccessMeta {
+    let mut hidden = 0_u32;
+    if access.enforced() {
+        models.retain(|model| {
+            let keep = model.modality != "chat" || access.check(&model.id, &model.provider).is_ok();
+            hidden += u32::from(!keep);
+            keep
+        });
+    }
+    let resolved = access.resolved();
+    let policy = resolved.policy.as_ref();
+    let default = policy.and_then(|policy| policy.defaults.get("chat"));
+    pb::ModelAccessMeta {
+        state: resolved.state.as_str().to_owned(),
+        enforced: access.enforced(),
+        revision: resolved.revision,
+        restricted: resolved.restricted(),
+        hidden_count: hidden,
+        default_model: default.map(|d| d.model.clone()).unwrap_or_default(),
+        default_effort: default.map(|d| d.effort.clone()).unwrap_or_default(),
+        max_effort: policy.map(|p| p.max_effort.clone()).unwrap_or_default(),
+    }
+}
+
+/// The answer to a `GetModelAccess`: what the policy says about the caller, one
+/// model and, for a caller who can manage the policy, a draft and the catalogue.
+///
+/// The verdict is the policy's whether or not it is applied; `enforced` says
+/// whether it is. A draft or a catalogue is the policy manager's: for any other
+/// caller it is refused, and when nothing was resolved (off, an unreadable
+/// answer in shadow) it is unavailable rather than answered from nothing.
+fn model_access_response(
+    chat: &[provider::ModelInfo],
+    req: pb::GetModelAccessRequest,
+    resolved: Resolved,
+) -> Result<pb::GetModelAccessResponse, Status> {
+    use mp_contracts::model_entitlement::{Refusal, ResolvedAccess, State};
+    let manage = req.draft.is_some() || req.include_catalogue;
+    let (mut access, enforced) = match &resolved {
+        Resolved::Access(access) => (access.resolved().clone(), access.enforced()),
+        Resolved::Off | Resolved::Unreadable if manage => {
+            return Err(Refusal::unavailable().grpc_status())
+        }
+        Resolved::Off | Resolved::Unreadable | Resolved::Exempt => {
+            (ResolvedAccess::unrestricted(), false)
+        }
+    };
+    if manage && !access.can_manage {
+        return Err(Status::permission_denied(
+            "the model policy can be read in full only by those who manage it",
+        ));
+    }
+    if let Some(draft) = &req.draft {
+        access.policy = Some(policy_of_draft(draft));
+        if access.state == State::None {
+            access.state = State::Org;
+        }
+    }
+
+    let (model_allowed, reason) = if is_unspecified_model(&req.model) {
+        (true, "")
+    } else {
+        let provider = if req.provider_hint.trim().is_empty() {
+            chat.iter()
+                .find(|known| known.id.eq_ignore_ascii_case(req.model.trim()))
+                .map_or("", |known| known.provider.as_str())
+        } else {
+            req.provider_hint.as_str()
+        };
+        match access.permits(&req.model, provider) {
+            Ok(()) => (true, ""),
+            Err(reason) => (false, reason.as_str()),
+        }
+    };
+    let catalogue = if req.include_catalogue {
+        chat.iter()
+            .map(|known| {
+                let verdict = access.permits(&known.id, &known.provider);
+                pb::ModelAccessEntry {
+                    id: known.id.clone(),
+                    provider: known.provider.clone(),
+                    entitled: verdict.is_ok(),
+                    reason: verdict.err().map_or(String::new(), |r| r.as_str().to_owned()),
+                }
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let policy = access.policy.as_ref();
+    let default = policy.and_then(|policy| policy.defaults.get(req.surface.trim().to_ascii_lowercase().as_str()));
+    Ok(pb::GetModelAccessResponse {
+        request_id: req.request_id,
+        state: access.state.as_str().to_owned(),
+        enforced,
+        revision: access.revision,
+        role: access.role.clone(),
+        restricted: access.restricted(),
+        model_allowed,
+        reason: reason.to_owned(),
+        default_model: default.map(|d| d.model.clone()).unwrap_or_default(),
+        default_effort: default.map(|d| d.effort.clone()).unwrap_or_default(),
+        max_effort: policy.map(|p| p.max_effort.clone()).unwrap_or_default(),
+        min_privacy_tier: policy
+            .map_or(provider::PrivacyTier::Unspecified, |p| tier_from_label(&p.min_privacy_tier))
+            .as_wire_i32(),
+        can_manage: access.can_manage,
+        catalogue,
     })
 }
 
@@ -1549,6 +1768,15 @@ fn provider_error_to_status(error: provider::ProviderError) -> Status {
         provider::ProviderError::ZdrUnavailable(message) => zdr_unavailable_status(message),
         provider::ProviderError::TierUnavailable(message) => {
             posture_refusal_status(PROVIDER_ERROR_TIER_UNAVAILABLE, message)
+        }
+        // The two entitlement refusals. `PERMISSION_DENIED` and `UNAVAILABLE`,
+        // never `FAILED_PRECONDITION`: the gateway reads that status as a
+        // posture or ZDR refusal. The status is the catalogue's own.
+        provider::ProviderError::ModelNotEntitled { model, reason } => {
+            mp_contracts::model_entitlement::Refusal::not_entitled(&model, reason).grpc_status()
+        }
+        provider::ProviderError::EntitlementUnavailable => {
+            mp_contracts::model_entitlement::Refusal::unavailable().grpc_status()
         }
     }
 }
@@ -2071,6 +2299,11 @@ mod tests {
                 "no matching provider deployment meets the residency floor".to_owned(),
             ),
             E::TierUnavailable("no configured provider satisfies privacy tier".to_owned()),
+            E::ModelNotEntitled {
+                model: "gpt-5".to_owned(),
+                reason: mp_contracts::model_entitlement::Reason::ExplicitlyDenied,
+            },
+            E::EntitlementUnavailable,
         ] {
             let source = status_contract_source(&error);
             let id = status_contract_id(source);
@@ -2132,6 +2365,259 @@ mod tests {
         cases
     }
 
+    // -- model entitlement (ADR-0005, WS10-S3) ------------------------------
+
+    fn applied(mode: mp_contracts::model_entitlement::Mode, policy: serde_json::Value) -> RequestAccess {
+        let body = serde_json::json!({
+            "state": "role",
+            "revision": 9,
+            "role": "member",
+            "can_manage": false,
+            "policy": policy,
+            "sources": [{"layer": "role_override", "role": "member"}],
+        });
+        let resolved = mp_contracts::model_entitlement::ResolvedAccess::from_body(&body)
+            .expect("a readable body");
+        RequestAccess::new(std::sync::Arc::new(resolved), mode, "org-1")
+    }
+
+    fn catalogue() -> Vec<pb::ModelInfo> {
+        let model = |id: &str, provider: &str, modality: &str| pb::ModelInfo {
+            id: id.to_owned(),
+            provider: provider.to_owned(),
+            modality: modality.to_owned(),
+            ..Default::default()
+        };
+        vec![
+            model("gpt-5", "openai", "chat"),
+            model("gpt-5-mini", "openai", "chat"),
+            model("claude-sonnet-4-5", "anthropic", "chat"),
+            model("text-embedding-3", "openai", "embedding"),
+        ]
+    }
+
+    fn ids(models: &[pb::ModelInfo]) -> Vec<&str> {
+        models.iter().map(|model| model.id.as_str()).collect()
+    }
+
+    #[test]
+    fn an_enforced_catalogue_loses_denied_chat_models_and_keeps_every_other_modality() {
+        use mp_contracts::model_entitlement::Mode;
+        let policy = serde_json::json!({
+            "allow_mode": "listed", "allow": ["gpt-5-mini"], "deny": [],
+            "max_effort": "medium",
+            "defaults": {"chat": {"model": "gpt-5-mini", "effort": "low"}},
+        });
+        let mut models = catalogue();
+        let meta = catalogue_access(&applied(Mode::Enforce, policy.clone()), &mut models);
+        // The embedding model is not a chat model: the policy does not touch it.
+        assert_eq!(ids(&models), ["gpt-5-mini", "text-embedding-3"]);
+        assert_eq!(meta.hidden_count, 2);
+        assert!(meta.enforced && meta.restricted);
+        assert_eq!(meta.state, "role");
+        assert_eq!(meta.revision, 9);
+        assert_eq!(meta.default_model, "gpt-5-mini");
+        assert_eq!(meta.default_effort, "low");
+        assert_eq!(meta.max_effort, "medium");
+
+        // Shadow reports the policy and removes nothing.
+        let mut models = catalogue();
+        let meta = catalogue_access(&applied(Mode::Shadow, policy), &mut models);
+        assert_eq!(models.len(), 4);
+        assert!(!meta.enforced);
+        assert_eq!(meta.hidden_count, 0);
+    }
+
+    #[test]
+    fn a_provider_selector_filters_the_catalogue_by_the_provider_of_each_model() {
+        use mp_contracts::model_entitlement::Mode;
+        let policy = serde_json::json!({"allow_mode": "all", "allow": [], "deny": ["provider:anthropic"]});
+        let mut models = catalogue();
+        catalogue_access(&applied(Mode::Enforce, policy), &mut models);
+        assert_eq!(ids(&models), ["gpt-5", "gpt-5-mini", "text-embedding-3"]);
+    }
+
+    fn chat_models() -> Vec<provider::ModelInfo> {
+        catalogue()
+            .into_iter()
+            .filter(|model| model.modality == "chat")
+            .map(|model| provider::ModelInfo {
+                id: model.id,
+                provider: model.provider,
+                modality: model.modality,
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    fn access_request(model: &str) -> pb::GetModelAccessRequest {
+        pb::GetModelAccessRequest {
+            request_id: "r1".to_owned(),
+            org_id: "org-1".to_owned(),
+            model: model.to_owned(),
+            surface: "chat".to_owned(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn get_model_access_judges_one_model_and_looks_its_provider_up_in_the_catalogue() {
+        use mp_contracts::model_entitlement::Mode;
+        let policy = serde_json::json!({
+            "allow_mode": "listed", "allow": ["provider:openai"], "deny": ["gpt-5"],
+            "min_privacy_tier": "eu_resident",
+            "defaults": {"chat": {"model": "gpt-5-mini", "effort": "high"}},
+        });
+        let resolved = || Resolved::Access(std::sync::Arc::new(applied(Mode::Enforce, policy.clone())));
+
+        let denied = model_access_response(&chat_models(), access_request("gpt-5"), resolved()).unwrap();
+        assert!(!denied.model_allowed);
+        assert_eq!(denied.reason, "explicitly_denied");
+        assert!(denied.enforced && denied.restricted);
+        assert_eq!(denied.state, "role");
+        assert_eq!(denied.role, "member");
+        assert_eq!(denied.default_model, "gpt-5-mini");
+        assert_eq!(denied.default_effort, "high");
+        assert_eq!(denied.min_privacy_tier, provider::PrivacyTier::EuResident.as_wire_i32());
+        assert!(denied.catalogue.is_empty(), "the catalogue is asked for, not volunteered");
+
+        // Allowed through its provider's selector, which only the catalogue knows.
+        let allowed = model_access_response(&chat_models(), access_request("GPT-5-Mini"), resolved()).unwrap();
+        assert!(allowed.model_allowed);
+        assert_eq!(allowed.reason, "");
+
+        // An automatic request is never judged as a model.
+        for model in ["", "verevon-auto", "default"] {
+            let auto = model_access_response(&chat_models(), access_request(model), resolved()).unwrap();
+            assert!(auto.model_allowed, "{model:?}");
+        }
+    }
+
+    #[test]
+    fn get_model_access_says_it_is_not_enforced_when_nothing_was_resolved() {
+        for resolved in [Resolved::Off, Resolved::Exempt, Resolved::Unreadable] {
+            let answer =
+                model_access_response(&chat_models(), access_request("gpt-5"), resolved).unwrap();
+            assert!(!answer.enforced);
+            assert!(!answer.restricted);
+            assert!(answer.model_allowed);
+            assert_eq!(answer.state, "none");
+        }
+    }
+
+    #[test]
+    fn a_draft_and_the_catalogue_are_the_policy_managers_and_need_a_resolved_answer() {
+        use mp_contracts::model_entitlement::{Mode, ResolvedAccess};
+        let manager = |mode| {
+            let body = serde_json::json!({
+                "state": "org", "revision": 2, "role": "owner", "can_manage": true,
+                "policy": {"allow_mode": "all", "allow": [], "deny": []},
+                "sources": [{"layer": "org_default"}],
+            });
+            Resolved::Access(std::sync::Arc::new(RequestAccess::new(
+                std::sync::Arc::new(ResolvedAccess::from_body(&body).unwrap()),
+                mode,
+                "org-1",
+            )))
+        };
+        let draft = pb::ModelPolicyDoc {
+            allow_mode: "listed".to_owned(),
+            allow: vec!["GPT-5-Mini".to_owned()],
+            ..Default::default()
+        };
+        let request = pb::GetModelAccessRequest {
+            draft: Some(draft),
+            include_catalogue: true,
+            ..access_request("")
+        };
+
+        // The draft is judged in place of the stored policy.
+        let answer = model_access_response(&chat_models(), request.clone(), manager(Mode::Enforce)).unwrap();
+        let entitled: Vec<(&str, bool)> = answer
+            .catalogue
+            .iter()
+            .map(|entry| (entry.id.as_str(), entry.entitled))
+            .collect();
+        assert_eq!(
+            entitled,
+            [("gpt-5", false), ("gpt-5-mini", true), ("claude-sonnet-4-5", false)]
+        );
+        assert_eq!(answer.catalogue[0].reason, "not_in_allow_list");
+        assert!(answer.restricted, "the draft restricts");
+        assert!(answer.can_manage);
+
+        // A member may not ask for either.
+        let member = Resolved::Access(std::sync::Arc::new(applied(
+            Mode::Enforce,
+            serde_json::json!({"allow_mode": "all", "allow": [], "deny": []}),
+        )));
+        let refused = model_access_response(&chat_models(), request.clone(), member).unwrap_err();
+        assert_eq!(refused.code(), tonic::Code::PermissionDenied);
+        let service = model_access_response(&chat_models(), request.clone(), Resolved::Exempt).unwrap_err();
+        assert_eq!(service.code(), tonic::Code::PermissionDenied);
+
+        // With nothing resolved there is nothing to answer from.
+        for resolved in [Resolved::Off, Resolved::Unreadable] {
+            let status = model_access_response(&chat_models(), request.clone(), resolved).unwrap_err();
+            assert_eq!(status.code(), tonic::Code::Unavailable);
+            assert_eq!(
+                trailer(&status, "x-mp-provider-error"),
+                Some("model_entitlement_unavailable")
+            );
+        }
+    }
+
+    #[test]
+    fn the_entitlement_refusals_reach_the_wire_as_permission_denied_and_unavailable() {
+        use provider::ProviderError as E;
+        let denied = provider_error_to_status(E::ModelNotEntitled {
+            model: "gpt-5".to_owned(),
+            reason: mp_contracts::model_entitlement::Reason::NotInAllowList,
+        });
+        assert_eq!(denied.code(), tonic::Code::PermissionDenied);
+        assert_eq!(trailer(&denied, "x-mp-provider-error"), Some("model_not_entitled"));
+        assert_eq!(trailer(&denied, "x-mp-entitlement-reason"), Some("not_in_allow_list"));
+        // The model id is named in the message and never in a trailer.
+        assert!(denied.message().contains("gpt-5"));
+
+        let unavailable = provider_error_to_status(E::EntitlementUnavailable);
+        assert_eq!(unavailable.code(), tonic::Code::Unavailable);
+        assert_eq!(
+            trailer(&unavailable, "x-mp-provider-error"),
+            Some("model_entitlement_unavailable")
+        );
+        // Never the status the gateway reads as a posture or ZDR refusal.
+        for status in [&denied, &unavailable] {
+            assert_ne!(status.code(), tonic::Code::FailedPrecondition);
+        }
+    }
+
+    #[test]
+    fn the_policy_tier_joins_the_requests_own_as_the_stronger_of_the_two() {
+        use mp_contracts::model_entitlement::Mode;
+        let policy = serde_json::json!({
+            "allow_mode": "all", "allow": [], "deny": [], "min_privacy_tier": "eu_resident",
+        });
+        let access = std::sync::Arc::new(applied(Mode::Enforce, policy.clone()));
+        let weaker = with_access(provider::InferRequest::default(), Some(access.clone()));
+        assert_eq!(weaker.min_privacy_tier, provider::PrivacyTier::EuResident);
+        let stronger = with_access(
+            provider::InferRequest {
+                min_privacy_tier: provider::PrivacyTier::Sovereign,
+                ..Default::default()
+            },
+            Some(access),
+        );
+        assert_eq!(stronger.min_privacy_tier, provider::PrivacyTier::Sovereign);
+        // Shadow and no answer leave the request untouched.
+        let shadow = with_access(
+            provider::InferRequest::default(),
+            Some(std::sync::Arc::new(applied(Mode::Shadow, policy))),
+        );
+        assert_eq!(shadow.min_privacy_tier, provider::PrivacyTier::Unspecified);
+        assert!(with_access(provider::InferRequest::default(), None).access.is_none());
+    }
+
     #[test]
     fn an_embedding_posture_refusal_is_typed_and_any_other_failure_stays_internal() {
         use provider::ProviderError as E;
@@ -2188,6 +2674,8 @@ mod tests {
             E::ResidencyViolation(_) => "ProviderError::ResidencyViolation",
             E::ZdrUnavailable(_) => "ProviderError::ZdrUnavailable",
             E::TierUnavailable(_) => "ProviderError::TierUnavailable",
+            E::ModelNotEntitled { .. } => "ProviderError::ModelNotEntitled",
+            E::EntitlementUnavailable => "ProviderError::EntitlementUnavailable",
         }
     }
 
@@ -2206,6 +2694,7 @@ mod tests {
     fn grpc_code_name(code: tonic::Code) -> &'static str {
         match code {
             tonic::Code::InvalidArgument => "INVALID_ARGUMENT",
+            tonic::Code::PermissionDenied => "PERMISSION_DENIED",
             tonic::Code::ResourceExhausted => "RESOURCE_EXHAUSTED",
             tonic::Code::FailedPrecondition => "FAILED_PRECONDITION",
             tonic::Code::Unimplemented => "UNIMPLEMENTED",
