@@ -1857,3 +1857,34 @@ Status: built, dark. Nothing is deployed and the switch is off in every environm
 - **Capabilities.** `human_browsing`, `tab_control` and `attach` are advertised only when Quarry's owner projection says so (`grantKind`, `tabControl`, `attachAvailable`). Until Quarry emits `grantKind`, no session advertises `human_browsing`.
 - **Rollback.** Unset `BROWSER_HUMAN_BROWSE` (or set `0`) and restart the gateway. Sessions opened in the meantime keep their grant until it expires on its own TTL.
 - **Check the switch.** With the switch on, a new session's grant is a `human_browse` grant (`kind` in the broker's grant record), and the keep-alive answer carries no grant id.
+
+## Agent attach: shared browser tabs with a person (WS8.F, dark)
+
+Status: built to scope, dark. `QUARRY_EDGE__ATTACH` is off in every environment. Nothing in production calls the routes: the gateway has no attach path yet (WS8.I). Enabling it needs the WS8.H lane evidence and X-13 (D8-6, D8-7). Tests are written and compile; they have not been run.
+
+Switches:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `QUARRY_EDGE__ATTACH` | `0` | `1` turns the routes on. Unreadable at boot fails the edge (`RunLimits::from_lookup`); unreadable at a request is off. |
+| `QUARRY_EDGE__ATTACH_IDLE_TTL_S` | `180` | An attachment with no activity for this long is released. A value below 1 fails at boot. |
+
+Routes (the owner's token unless the row says otherwise):
+
+- `POST /v1/agent/runs/{run_id}/attach`: a service principal only. Body `{grant_id, start_url?, constraints: {max_steps 1..200 (default 20), max_runtime_s 1..3600 (default 120)}}`. Opens one agent tab in the background, with the attach grant's hosts as its egress policy.
+- `POST /v1/agent/runs/{run_id}/step` (and `interact`) with `grant_id`: a delegate step. A caller that does not own the run is refused with 404 unless it is the live attachment's delegate. The tab gate, the attach grant, the attach budget and the run chain run in that order.
+- `DELETE /v1/agent/runs/{run_id}/attach/{attach_id}?disposition=release|abort`: the delegate ends its own attachment, or the owner stops it. Closes the agent tab. Does not revoke the grant.
+- `POST /v1/agent/runs/{run_id}/tabs/{tab_id}/control` `{holder: human|agent, expected_epoch?}`: the owner's own token only. `holder: agent` needs a live attachment on that tab.
+
+Refusals a delegate or an operator will see (the typed reason is in `error.message`, or in `error.code` for the first six):
+
+- `USER_TOOK_OVER` (409), `details.scope` `tab` or run-level: a person holds the tab or the run. The delegate's next step is refused until the person gives the tab back (`holder: agent`).
+- `RATE_LIMITED` (429), reason `attach_steps` or `attach_runtime`: the attachment's own budget. Only delegate steps are counted.
+- `SECURITY_BLOCKED` (403): the attach grant is no longer usable. The attachment ends as `revoked` (its `agent.detached` carries `disposition: revoked`). The grant is not changed here.
+- `attach_disabled`, `attach_zdr_refused`, `attach_requires_grant`, `attach_grant_invalid`, `attach_requires_service_principal` (403); `attach_driver_unsupported` (UNSUPPORTED); `attach_exists`, `stale_tab_epoch`, `no_attached_agent` (CONFLICT, 409); `pinned_tab_closed` (NOT_FOUND).
+
+Events and timeline: `agent.attached` `{attach_id, tab_id}` and `agent.detached` `{attach_id, disposition}` carry ids and dispositions only, never a URL or a title. The timeline carries `attach` and `tab_control` items. A ZDR run never reaches the attach path and writes nothing for it.
+
+Rollback: set `QUARRY_EDGE__ATTACH=0` and restart the edge. Live attachments end at their next step (404 for the delegate). Receipts already written keep their `tab_id` and `attach_id` (migration `0018_step_receipt_tab_attach.sql` is additive and has no backfill).
+
+Not done (open, see `.plan-work/quarry-w1w2/depth/W2-U67.md`): the list-tabs view for a delegate (filtered to its tab, with holder and openedBy); the projection fields `tabControl`, `attachAvailable` and `attach`; the sweeper's release of an idle or lapsed attachment; the `session_ended` release at `finish_run`; the per-lane step counter (`step_seq`, WS8.H); the enabled-path integration test with a driver double that supports `open_tab`; the ZDR feature-matrix rows for the new routes. A process restart ends every live attachment (the attach state is process-local).

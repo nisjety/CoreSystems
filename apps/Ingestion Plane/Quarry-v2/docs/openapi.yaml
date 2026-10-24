@@ -703,6 +703,156 @@ paths:
             The body does not parse: both spellings of the hint in one body, or a hint
             that is neither `human` nor `agent`. The answer is the HTTP framework's
             plain-text rejection, not an error envelope.
+  /v1/agent/runs/{run_id}/attach:
+    post:
+      operationId: attachAgentRun
+      summary: Attach an agent to a person's live run (dark; service principal only)
+      description: >-
+        WS8.F. Off unless QUARRY_EDGE__ATTACH is on. A service principal holding an attach
+        grant (a child of the run's grant, for this run, owned by the run's owner, one to
+        eight hosts) gets one agent tab, opened in the background: the person's active tab
+        does not change. Refused for ZDR runs. Refusal reasons (in error.message):
+        attach_disabled, attach_requires_service_principal, attach_zdr_refused,
+        attach_requires_grant, attach_grant_invalid, attach_driver_unsupported (UNSUPPORTED),
+        attach_exists (CONFLICT).
+      tags:
+      - agent
+      parameters:
+      - $ref: '#/components/parameters/AgentRunId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - grant_id
+              properties:
+                grant_id:
+                  type: string
+                start_url:
+                  type: string
+                constraints:
+                  type: object
+                  properties:
+                    max_steps:
+                      type: integer
+                      minimum: 1
+                      maximum: 200
+                    max_runtime_s:
+                      type: integer
+                      minimum: 1
+                      maximum: 3600
+                    max_cost_usd:
+                      type: number
+      responses:
+        '200':
+          description: The attachment and its agent tab
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      attach_id:
+                        type: string
+                      tab_id:
+                        type: string
+                      tab_epoch:
+                        type: integer
+                      control_epoch:
+                        type: integer
+                      opened_by:
+                        type: string
+                        enum:
+                        - agent
+                      holder:
+                        type: string
+                        enum:
+                        - agent
+                      allowed_domains:
+                        type: array
+                        items:
+                          type: string
+        '400':
+          description: A constraint is outside its bounds
+        '403':
+          description: Refused (the reason is in error.message)
+        '404':
+          description: Run not found
+        '409':
+          description: An attachment is already live on the run
+  /v1/agent/runs/{run_id}/attach/{attach_id}:
+    delete:
+      operationId: releaseAgentAttach
+      summary: End an agent attachment (the delegate ends its own; the owner stops it)
+      description: >-
+        Closes the agent tab and records the end on the timeline and as agent.detached.
+        Does not revoke the grant.
+      tags:
+      - agent
+      parameters:
+      - $ref: '#/components/parameters/AgentRunId'
+      - name: attach_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: disposition
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - release
+          - abort
+      responses:
+        '200':
+          description: The attachment ended
+        '400':
+          description: Unknown disposition
+        '404':
+          description: Not the owner, not the live attachment's delegate, or no such attachment
+  /v1/agent/runs/{run_id}/tabs/{tab_id}/control:
+    post:
+      operationId: setAgentTabHolder
+      summary: Hand a tab to the agent or take it back (the owner's own token only)
+      description: >-
+        holder agent needs a live attachment on this tab (no_attached_agent, 409). holder
+        human takes the tab back. Compare-and-set on the tab epoch: a stale expected_epoch
+        is stale_tab_epoch (409). A change writes a tab_control timeline item.
+      tags:
+      - agent
+      parameters:
+      - $ref: '#/components/parameters/AgentRunId'
+      - $ref: '#/components/parameters/AgentTabId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - holder
+              properties:
+                holder:
+                  type: string
+                  enum:
+                  - human
+                  - agent
+                expected_epoch:
+                  type: integer
+      responses:
+        '200':
+          description: The tab's holder and epochs
+        '403':
+          description: A service principal or an agent token may not change the holder (control_transition_requires_human)
+        '404':
+          description: Run not found, or the tab is closed (pinned_tab_closed)
+        '409':
+          description: Stale epoch (stale_tab_epoch) or no live attachment (no_attached_agent)
   /v1/agent/runs/{run_id}/tabs/{tab_id}/select:
     post:
       operationId: selectAgentTab
