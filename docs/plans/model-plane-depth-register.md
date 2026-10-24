@@ -628,6 +628,30 @@ Built so far (batches B01 to B07): WS01-S0, WS01-S1 (partial), WS01-S6; WS02-S1,
 | D1-469 | WS04-S6 | live-proof | P1 | Lead shared edits still unapplied: tool_loop.rs round-boundary drain (drain_receipted and emit QueuedInputReceipted when the switch is on) and sse.rs (switch the call to prepare_managed_run_authenticated_with_receipt with send_receipt_id, plus the source-text test at ~19876). Without them the streaming send path names no message to the transcript and the delivery frame carries no ids. I applied these exact edits in a scratch copy: the lib compiles and the 2214 lib tests pass. | open |
 | D1-470 | WS04-S6 | follow-up | P3 | 17 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-13.json | open |
 
+
+### Wave-mode batch W1-14 (2026-10-24)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D1-471 | WS10-S3 | risk | P1 | Under MODEL_ENTITLEMENT_MODE=off GetModelAccess answers 'not enforced' and refuses draft/include_catalogue as model_entitlement_unavailable (nothing is resolved with the switch off), so the WS10-S5 ZDR write guard cannot evaluate a draft until inference-core runs shadow or enforce; S5 must treat that as its documented 503 fail-closed or the lead must decide that admin draft checks may resolve while off. | open |
+| D1-472 | WS10-S3 | live-proof | P1 | Needed before the switch can go on: shadow soak with would_refuse and service_exempt read, proof that the org-core service token and ORG_CORE_URL reach org-core from the inference-core container, a stop-org-core run showing stale service within 900/120 s then 503 model_entitlement_unavailable, and enforce trailers via grpcurl. | open |
+| D1-473 | WS10-S3 | follow-up | P1 | The infer-statuses.json golden changed (two kinds, a PERMISSION_DENIED code, trailer x-mp-entitlement-reason on the model_not_entitled case); the sha pin and the two Data Plane vendored copies must be updated and their status decoders checked for unknown kinds, and trailer_keys in the golden does not yet list x-mp-entitlement-reason. | open |
+| D1-474 | WS10-S3 | risk | P1 | Prompt-cache hits are rechecked against model_used/provider_used, but a provider that is unspecified-default per candidate is judged on the effective model after request_for; a policy that names a Verevon intent id in allow/deny is never matched against it (intent ids pass as unspecified), so org-core validation should reject or ignore verevon-* entries. | open |
+| D1-475 | WS10-S3 | risk | P1 | Entitlement is not applied to inference-core's non-chat RPCs or to CreateEmbedding (chat only per D5); revisit if the policy should cover vision/image models used for chat-like analysis. | open |
+| D1-476 | WS10-S3 | live-proof | P1 | Before the switch goes on: a shadow soak reading would_refuse and service_exempt, a stop-org-core run showing stale service for up to 900 s (restrictive answer) or 120 s (unrestricted) then 503 model_entitlement_unavailable, and enforce trailers (x-mp-provider-error, x-mp-entitlement-reason) captured live. | open |
+| D1-477 | WS10-S3 | risk | P1 | A policy entry naming a verevon-* intent id is never matched, because intent ids pass as unspecified; an Auto request is judged only on the concrete model the intent layer resolves, and resolve_intent does not exclude denied models, so Auto can end in no_entitled_route even when an allowed model exists. This is acceptable for the plan row but needs an explicit live-proof case for flow (d), and org-core should reject verevon-* entries. | open |
+| D1-478 | WS10-S3 | risk | P1 | Mode::parse treats an unknown value as enforce, as the plan row says, which departs from the repository's only-literal-true switch pattern; with enforce and no usable ORG_CORE_URL or token, every user chat call and ListModels refuses. The warn log at boot is the only signal, so the deploy must set both values before enforce. | open |
+| D1-479 | WS10-S3 | follow-up | P3 | 17 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-14.json | open |
+| D1-480 | WS04-S7 | live-proof | P1 | Needs its own live proof before the switch is flipped: duplicate POST with one key to two replicas yields one run in session-core runs and two clients seeing the same frames, with MODEL_GATEWAY_SHARED_IDEMPOTENCY on in the two-replica overlay and REDIS_URL set; also run an ignored live Redis test of RedisClaimStore (SET NX PX, settle) against Dragonfly. | open |
+| D1-481 | WS04-S7 | risk | P1 | The Pending claim lasts 120 s with no heartbeat, as the local registry's PENDING_TTL does. A stream running longer than 120 s lets a duplicate start a second run on another replica; renew the claim on a timer in the owner before the flip. | open |
+| D1-482 | WS04-S7 | risk | P1 | A duplicate arriving before the original has buffered a frame, with the run-control bus off, gets the error that names the original instead of attaching, because resume_stream_for finds no buffer and no live producer. Decide whether to buffer `connected` before the claim returns or to require the bus for the switch. | open |
+| D1-483 | WS04-S7 | risk | P1 | The stream path never commits to the local registry, so today a completed key is free again; with the switch on, the shared claim stays Done for 600 s and a later same-key send (a regenerate that reuses the key) attaches to the old answer instead of running, so confirm the SPA never reuses a key for regenerate or edited resubmit before the flip. | open |
+| D1-484 | WS04-S7 | live-proof | P1 | Needs a two-replica live proof (same key to :8080 and :8081 gives one runs row and identical frames) and an ignored live test of RedisClaimStore (SET NX PX, settle) against Dragonfly; the Redis implementation itself has no test. | open |
+| D1-485 | WS04-S7 | live-proof | P1 | Live two-replica proof with MODEL_GATEWAY_SHARED_IDEMPOTENCY on and REDIS_URL set (needs docker; one runs row, same frames on both streams) | open |
+| D1-486 | WS04-S7 | live-proof | P1 | Live Redis (Dragonfly) test of RedisClaimStore SET NX PX and settle | open |
+| D1-487 | WS04-S7 | live-proof | P1 | The switch is not in the compose env; the lead adds it only if the owner wants it exposed (stays off in S9) | open |
+| D1-488 | WS04-S7 | follow-up | P3 | 9 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-14.json | open |
+
 ## Wave 2 (WS13 to WS27)
 
 Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS27-S0, WS27-S1. Wave 2 is not started as a wave: these came in with Wave 1 batches because they were Wave 1 prerequisites.
@@ -1106,3 +1130,5 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS25-S7 | policy, authority, audit, zdr | W2-10 | no |
 | WS20-S4 | authority, policy, audit, zdr | W2-10 | no |
 | WS21-S3 | policy, audit, data-loss | W2-10 | no |
+| WS10-S3 | authority, policy, auth, zdr | W1-14 | no |
+| WS04-S7 | authority, zdr | W1-14 | no |
