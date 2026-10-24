@@ -16,7 +16,7 @@ use crate::{
     upstream::{proxy_sse_stream_with_data_plane, proxy_sse_stream_with_session},
 };
 
-/// Request body ceiling of the chat stream route, and only that route.
+/// Default request body ceiling of the chat stream route, and only that route.
 ///
 /// Attachments ride the body as base64, so axum's 2 MiB default refused two
 /// images the model-gateway attachment policy admits. This matches
@@ -24,10 +24,39 @@ use crate::{
 /// declares on `/api/v1/models` is the number the client reads, this is only
 /// the transport room for it.
 pub(super) const CHAT_STREAM_BODY_LIMIT_BYTES: usize = 12 * 1024 * 1024;
+/// Room for the conversation around the attachments in one request body.
+const STREAM_BODY_HEADROOM_BYTES: usize = 4 * 1024 * 1024;
+
+/// The body limit of the stream route. The same two variables model-gateway reads
+/// give the same number in both hops: the explicit limit, raised when the
+/// declared attachment total (as base64) plus the conversation would not fit, so
+/// a raised cap never fails as a bare 413 in the wrong hop.
+fn stream_body_limit_bytes() -> usize {
+    stream_body_limit_with(&|key| std::env::var(key).ok())
+}
+
+fn stream_body_limit_with(get: &dyn Fn(&str) -> Option<String>) -> usize {
+    let positive = |key: &str| {
+        get(key)
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|value| *value > 0)
+    };
+    let configured =
+        positive("CHAT_STREAM_BODY_LIMIT_BYTES").unwrap_or(CHAT_STREAM_BODY_LIMIT_BYTES);
+    match positive("CHAT_ATTACHMENT_MAX_TOTAL_BYTES") {
+        Some(total) => configured.max(
+            total
+                .div_ceil(3)
+                .saturating_mul(4)
+                .saturating_add(STREAM_BODY_HEADROOM_BYTES),
+        ),
+        None => configured,
+    }
+}
 
 /// The stream route with its own body limit, so tests drive the same wiring.
 pub(super) fn stream_route() -> MethodRouter<AppState> {
-    post(stream_chat).layer(DefaultBodyLimit::max(CHAT_STREAM_BODY_LIMIT_BYTES))
+    post(stream_chat).layer(DefaultBodyLimit::max(stream_body_limit_bytes()))
 }
 
 async fn stream_chat(
@@ -298,7 +327,7 @@ mod tests {
     };
     use tower::ServiceExt;
 
-    use super::{stream_route, CHAT_STREAM_BODY_LIMIT_BYTES};
+    use super::{stream_body_limit_with, stream_route, CHAT_STREAM_BODY_LIMIT_BYTES};
     use crate::middleware::{AuthenticatedUser, AuthorizedMembership};
 
     fn member() -> AuthenticatedUser {
@@ -352,5 +381,34 @@ mod tests {
     fn the_limit_holds_the_declared_attachment_total_as_base64() {
         // 3 MiB of attachments (the model-gateway default) is 4 MiB of base64.
         assert!(CHAT_STREAM_BODY_LIMIT_BYTES > (3 * 1024 * 1024 / 3) * 4);
+    }
+
+    fn limit(total: Option<&str>, explicit: Option<&str>) -> usize {
+        stream_body_limit_with(&|key| match key {
+            "CHAT_ATTACHMENT_MAX_TOTAL_BYTES" => total.map(str::to_owned),
+            "CHAT_STREAM_BODY_LIMIT_BYTES" => explicit.map(str::to_owned),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn the_default_limit_is_unchanged_when_nothing_is_raised() {
+        assert_eq!(limit(None, None), CHAT_STREAM_BODY_LIMIT_BYTES);
+        // Today's declared total (3 MiB) already fits under the default.
+        assert_eq!(limit(Some("3145728"), None), CHAT_STREAM_BODY_LIMIT_BYTES);
+        assert_eq!(limit(Some("0"), Some("junk")), CHAT_STREAM_BODY_LIMIT_BYTES);
+    }
+
+    #[test]
+    fn a_raised_attachment_total_raises_the_limit_to_hold_it_as_base64() {
+        let total = 24 * 1024 * 1024;
+        let derived = limit(Some(&total.to_string()), None);
+        assert!(derived >= total / 3 * 4 + 4 * 1024 * 1024);
+        assert!(derived > CHAT_STREAM_BODY_LIMIT_BYTES);
+    }
+
+    #[test]
+    fn an_explicit_limit_above_the_derived_one_wins() {
+        assert_eq!(limit(Some("3145728"), Some("33554432")), 32 * 1024 * 1024);
     }
 }

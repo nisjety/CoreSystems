@@ -4,9 +4,20 @@ import { normalizePrivacyTier, type PrivacyTier } from '@/shared/api/privacy-tie
 import { removeClientValue } from '@/shared/session/client-storage'
 
 const pendingLaunchKey = 'verevon.chat.pendingLaunch'
-// Keep normal launches tab-local and bounded. Temporary chats never touch storage.
+// Bounds the text envelope in sessionStorage (message, metadata, extracted
+// text). Attachment bytes are not part of it: they ride the in-memory store and
+// IndexedDB, so their cap is the server's declared policy, not this number.
+// Temporary chats never touch storage.
 export const MAX_PENDING_LAUNCH_CHARS = 2_000_000
+// An attachment's `url` in the stored envelope: its bytes live in IndexedDB
+// under the attachment id. No real attachment URL starts with this.
+const storedAttachmentPrefix = 'idb:'
+const attachmentDbName = 'verevon.chat.pendingLaunch'
+const attachmentStoreName = 'attachments'
 let temporaryLaunch: PendingChatLaunch | null = null
+// Set once attachment bytes were written to IndexedDB, so a consumed launch
+// clears them without opening the database on every plain launch.
+let attachmentDataStored = false
 
 export class PendingChatLaunchError extends Error {
   readonly reason: 'unreadable' | 'too_large' | 'storage'
@@ -85,36 +96,164 @@ export async function writePendingChatLaunch(payload: PendingChatLaunch): Promis
     attachments,
     createdAt: payload.createdAt ?? new Date().toISOString(),
   }
-  const serialized = JSON.stringify(launch)
+  // sessionStorage keeps a reference per attachment; the bytes go to IndexedDB,
+  // which the 2,000,000-char envelope cap does not bound.
+  const serialized = JSON.stringify({
+    ...launch,
+    attachments: attachments.map((attachment) => ({ ...attachment, url: `${storedAttachmentPrefix}${attachment.id}` })),
+  })
   if (serialized.length > MAX_PENDING_LAUNCH_CHARS) throw new PendingChatLaunchError('too_large')
   if (payload.zdr) {
     removeClientValue(pendingLaunchKey)
     temporaryLaunch = launch
     return
   }
+  if (attachments.length > 0) {
+    // Refuse rather than truncate: a browser that blocks IndexedDB (a private
+    // window) keeps the draft instead of losing a file.
+    try {
+      await storeAttachmentData(attachments)
+    } catch {
+      throw new PendingChatLaunchError('storage')
+    }
+    attachmentDataStored = true
+  }
   try {
     // Do not use the best-effort preferences writer: the composer may clear its
     // draft only after this write succeeds. A quota/security error must reject.
     window.sessionStorage.setItem(pendingLaunchKey, serialized)
   } catch {
+    clearAttachmentDataSoon()
     throw new PendingChatLaunchError('storage')
   }
-  temporaryLaunch = null
+  // A same-tab navigation takes the launch from memory; storage only has to
+  // survive a reload before it is consumed.
+  temporaryLaunch = launch
   // Remove content left by versions that persisted launches in localStorage.
   try { window.localStorage.removeItem(pendingLaunchKey) } catch { /* unavailable */ }
 }
 
+/**
+ * Takes the launch {@link writePendingChatLaunch} stored, once. Synchronous, so it
+ * serves what is in memory and a stored launch without attachments; a stored
+ * launch whose attachment bytes sit in IndexedDB (the page was reloaded) is left
+ * for {@link consumePendingChatLaunchAsync}.
+ */
 export function consumePendingChatLaunch(): PendingChatLaunch | null {
-  let launch: PendingChatLaunch | null = temporaryLaunch
-  temporaryLaunch = null
-  if (!launch) {
-    try {
-      const stored: unknown = JSON.parse(window.sessionStorage.getItem(pendingLaunchKey) ?? 'null')
-      if (isPendingChatLaunch(stored)) launch = stored
-    } catch { /* no readable launch */ }
-  }
+  const launch = takeMemoryLaunch()
+  if (launch) return normalizeLaunch(launch)
+  const stored = readStoredLaunch()
+  if (stored && hasStoredAttachmentData(stored)) return null
   removeClientValue(pendingLaunchKey)
-  if (!launch) return null
+  return stored ? normalizeLaunch(stored) : null
+}
+
+/** {@link consumePendingChatLaunch} that also restores attachment bytes from IndexedDB. */
+export async function consumePendingChatLaunchAsync(): Promise<PendingChatLaunch | null> {
+  const launch = takeMemoryLaunch()
+  if (launch) return normalizeLaunch(launch)
+  const stored = readStoredLaunch()
+  removeClientValue(pendingLaunchKey)
+  if (!stored) return null
+  if (!hasStoredAttachmentData(stored)) return normalizeLaunch(stored)
+  try {
+    const attachments = await restoreAttachmentData(normalizePendingAttachments(stored.attachments))
+    return normalizeLaunch({ ...stored, attachments })
+  } catch {
+    // A launch that lost a file is not sent without it.
+    return null
+  } finally {
+    // After a reload this module wrote nothing, but the store still holds the bytes.
+    attachmentDataStored = true
+    clearAttachmentDataSoon()
+  }
+}
+
+function takeMemoryLaunch(): PendingChatLaunch | null {
+  const launch = temporaryLaunch
+  temporaryLaunch = null
+  if (launch) {
+    removeClientValue(pendingLaunchKey)
+    clearAttachmentDataSoon()
+  }
+  return launch
+}
+
+function readStoredLaunch(): PendingChatLaunch | null {
+  try {
+    const stored: unknown = JSON.parse(window.sessionStorage.getItem(pendingLaunchKey) ?? 'null')
+    return isPendingChatLaunch(stored) ? stored : null
+  } catch {
+    return null
+  }
+}
+
+function hasStoredAttachmentData(launch: PendingChatLaunch): boolean {
+  return normalizePendingAttachments(launch.attachments).some((attachment) => attachment.url.startsWith(storedAttachmentPrefix))
+}
+
+function openAttachmentDb(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    if (typeof indexedDB === 'undefined') {
+      reject(new Error('indexedDB unavailable'))
+      return
+    }
+    const request = indexedDB.open(attachmentDbName, 1)
+    request.onupgradeneeded = () => { request.result.createObjectStore(attachmentStoreName) }
+    request.onsuccess = () => resolve(request.result)
+    request.onerror = () => reject(request.error ?? new Error('indexedDB open failed'))
+  })
+}
+
+// One launch is pending at a time, so every write replaces the whole store.
+async function storeAttachmentData(attachments: readonly PendingChatAttachment[]): Promise<void> {
+  const db = await openAttachmentDb()
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(attachmentStoreName, 'readwrite')
+      const store = tx.objectStore(attachmentStoreName)
+      store.clear()
+      for (const attachment of attachments) store.put(attachment.url, attachment.id)
+      tx.oncomplete = () => resolve()
+      tx.onerror = () => reject(tx.error ?? new Error('indexedDB write failed'))
+      tx.onabort = () => reject(tx.error ?? new Error('indexedDB write aborted'))
+    })
+  } finally {
+    db.close()
+  }
+}
+
+async function restoreAttachmentData(attachments: readonly PendingChatAttachment[]): Promise<PendingChatAttachment[]> {
+  const db = await openAttachmentDb()
+  try {
+    return await Promise.all(attachments.map((attachment) => new Promise<PendingChatAttachment>((resolve, reject) => {
+      const request = db.transaction(attachmentStoreName, 'readonly').objectStore(attachmentStoreName).get(attachment.id)
+      request.onsuccess = () => {
+        if (typeof request.result === 'string' && request.result) resolve({ ...attachment, url: request.result })
+        else reject(new Error('attachment data missing'))
+      }
+      request.onerror = () => reject(request.error ?? new Error('indexedDB read failed'))
+    })))
+  } finally {
+    db.close()
+  }
+}
+
+function clearAttachmentDataSoon(): void {
+  if (!attachmentDataStored) return
+  attachmentDataStored = false
+  void openAttachmentDb()
+    .then((db) => {
+      const tx = db.transaction(attachmentStoreName, 'readwrite')
+      tx.objectStore(attachmentStoreName).clear()
+      tx.oncomplete = () => db.close()
+      tx.onerror = () => db.close()
+      tx.onabort = () => db.close()
+    })
+    .catch(() => { /* nothing readable to clear */ })
+}
+
+function normalizeLaunch(launch: PendingChatLaunch): PendingChatLaunch {
   return {
     actions: normalizePendingActions(launch.actions),
     attachments: normalizePendingAttachments(launch.attachments),

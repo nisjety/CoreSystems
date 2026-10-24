@@ -101,6 +101,62 @@ pub async fn serve_on(
     Ok(())
 }
 
+/// Room for the conversation around the attachments in one request body.
+const STREAM_BODY_HEADROOM_BYTES: usize = 4 * 1024 * 1024;
+
+/// The body limit of `/v1/invoke/stream`: the explicit limit, raised when the
+/// declared attachment total as base64 plus the conversation would not fit, so a
+/// raised `CHAT_ATTACHMENT_MAX_TOTAL_BYTES` never fails as a bare 413 in this hop.
+/// With the attachment contract off nothing is declared and nothing is derived.
+fn stream_body_limit_bytes() -> usize {
+    derived_stream_body_limit(
+        crate::attachment_policy::stream_body_limit_bytes(),
+        crate::attachment_policy::AttachmentPolicy::from_env()
+            .declared(false)
+            .map(|policy| policy.max_total_bytes),
+    )
+}
+
+fn derived_stream_body_limit(explicit: usize, declared_total: Option<usize>) -> usize {
+    declared_total.map_or(explicit, |total| {
+        explicit.max(
+            total
+                .div_ceil(3)
+                .saturating_mul(4)
+                .saturating_add(STREAM_BODY_HEADROOM_BYTES),
+        )
+    })
+}
+
+#[cfg(test)]
+mod stream_body_limit_tests {
+    use super::{derived_stream_body_limit, STREAM_BODY_HEADROOM_BYTES};
+    use crate::attachment_policy::DEFAULT_STREAM_BODY_LIMIT_BYTES as DEFAULT;
+
+    #[test]
+    fn todays_declared_total_fits_under_the_default_limit() {
+        assert_eq!(derived_stream_body_limit(DEFAULT, Some(3_145_728)), DEFAULT);
+        assert_eq!(derived_stream_body_limit(DEFAULT, None), DEFAULT);
+    }
+
+    #[test]
+    fn a_raised_total_raises_the_limit_to_hold_it_as_base64() {
+        let total = 24 * 1024 * 1024;
+        let limit = derived_stream_body_limit(DEFAULT, Some(total));
+        assert_eq!(limit, total / 3 * 4 + STREAM_BODY_HEADROOM_BYTES);
+        assert!(limit > DEFAULT);
+    }
+
+    #[test]
+    fn an_explicit_limit_above_the_derived_one_wins() {
+        let explicit = 64 * 1024 * 1024;
+        assert_eq!(
+            derived_stream_body_limit(explicit, Some(3_145_728)),
+            explicit
+        );
+    }
+}
+
 /// Build the axum router without binding a socket. Useful for tests.
 pub fn build_router(state: AppState, prom_handle: Option<PrometheusHandle>) -> Router {
     let grpc_readiness = GrpcReadiness::new();
@@ -141,9 +197,7 @@ pub fn build_router_with_readiness(
         // images the attachment policy admits (a 413 with no typed reason).
         .route(
             "/v1/invoke/stream",
-            post(sse::invoke_stream_sse).layer(DefaultBodyLimit::max(
-                crate::attachment_policy::stream_body_limit_bytes(),
-            )),
+            post(sse::invoke_stream_sse).layer(DefaultBodyLimit::max(stream_body_limit_bytes())),
         )
         .route("/v1/invoke/resume/:request_id", get(sse::invoke_resume_sse))
         // chat-parity §4: cooperative stop/cancel of an in-flight stream.

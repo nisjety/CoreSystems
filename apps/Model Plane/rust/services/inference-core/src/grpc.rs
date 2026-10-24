@@ -44,9 +44,11 @@ const MAX_GENERATED_IMAGES: u32 = 4;
 const MAX_IMAGE_PARTS: usize = 4;
 /// Media types a chat image part may declare; the set both provider bodies accept.
 const IMAGE_PART_MIME_TYPES: &[&str] = &["image/png", "image/jpeg", "image/webp", "image/gif"];
-/// Largest request tonic decodes. The 4 MiB default would refuse a request
-/// carrying even two images long before `MAX_IMAGE_BYTES` could apply.
+/// Floor of the largest request tonic decodes. The 4 MiB default would refuse a
+/// request carrying even two images long before `MAX_IMAGE_BYTES` could apply.
 const MAX_REQUEST_DECODING_BYTES: usize = 16 * 1024 * 1024;
+/// Room for the rest of a request around its attachment bytes.
+const REQUEST_DECODING_HEADROOM_BYTES: usize = 8 * 1024 * 1024;
 const MAX_DOCUMENT_BYTES: usize = 50 * 1024 * 1024;
 const MAX_REALTIME_INSTRUCTIONS_LEN: usize = 8_000;
 const MAX_VIDEO_PROMPT_LEN: usize = 4_000;
@@ -1499,7 +1501,7 @@ pub async fn serve_with_providers_and_readiness(
     };
     // Every RPC is counted by the decorator, so none can ship unmetered.
     let grpc_service = InferenceCoreServer::new(crate::metered::MeteredCore::new(service))
-        .max_decoding_message_size(MAX_REQUEST_DECODING_BYTES);
+        .max_decoding_message_size(request_decoding_limit_bytes());
     let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
     health_reporter
         .set_serving::<InferenceCoreServer<crate::metered::MeteredCore<InferenceService>>>()
@@ -1857,6 +1859,51 @@ fn embedding_error_to_status(error: provider::ProviderError) -> Status {
         | provider::ProviderError::ZdrUnavailable(_)
         | provider::ProviderError::TierUnavailable(_)) => provider_error_to_status(posture),
         other => Status::internal(other.to_string()),
+    }
+}
+
+/// Largest request tonic decodes. A request carrying attachments holds their
+/// bytes raw (gRPC has no base64), so the floor is raised to the declared
+/// attachment total (`CHAT_ATTACHMENT_MAX_TOTAL_BYTES`, the number model-gateway
+/// and the BFF derive their body limits from) plus room for the rest of the
+/// request. Unset, it is the floor: nothing changes until the cap is raised.
+fn request_decoding_limit_bytes() -> usize {
+    decoding_limit_with(&|key| std::env::var(key).ok())
+}
+
+fn decoding_limit_with(get: &dyn Fn(&str) -> Option<String>) -> usize {
+    get("CHAT_ATTACHMENT_MAX_TOTAL_BYTES")
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|total| *total > 0)
+        .map_or(MAX_REQUEST_DECODING_BYTES, |total| {
+            MAX_REQUEST_DECODING_BYTES.max(total.saturating_add(REQUEST_DECODING_HEADROOM_BYTES))
+        })
+}
+
+#[cfg(test)]
+mod decoding_limit_tests {
+    use super::{decoding_limit_with, MAX_REQUEST_DECODING_BYTES, REQUEST_DECODING_HEADROOM_BYTES};
+
+    fn limit(total: Option<&str>) -> usize {
+        decoding_limit_with(&|_| total.map(str::to_owned))
+    }
+
+    #[test]
+    fn unset_or_unreadable_totals_keep_the_floor() {
+        assert_eq!(limit(None), MAX_REQUEST_DECODING_BYTES);
+        assert_eq!(limit(Some("0")), MAX_REQUEST_DECODING_BYTES);
+        assert_eq!(limit(Some("lots")), MAX_REQUEST_DECODING_BYTES);
+        // Today's declared total (3 MiB) fits under the floor.
+        assert_eq!(limit(Some("3145728")), MAX_REQUEST_DECODING_BYTES);
+    }
+
+    #[test]
+    fn a_raised_total_raises_the_limit_to_hold_it() {
+        let total = 64 * 1024 * 1024;
+        assert_eq!(
+            limit(Some(&total.to_string())),
+            total + REQUEST_DECODING_HEADROOM_BYTES
+        );
     }
 }
 

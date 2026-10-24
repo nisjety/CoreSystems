@@ -33,6 +33,12 @@ use crate::session_terminal_auth::{ManagedRunTokenProvider, SessionTerminalToken
 use crate::state::{RunSnapshot, RunStatus, StateStore};
 use crate::workspace_cas::CasClient;
 
+/// Floor of the largest request tonic decodes: the 4 MiB default would refuse
+/// a run request carrying attachment bytes (WS08-S5/S6).
+const MAX_REQUEST_DECODING_BYTES: usize = 16 * 1024 * 1024;
+/// Room for the rest of a request around its attachment bytes.
+const REQUEST_DECODING_HEADROOM_BYTES: usize = 8 * 1024 * 1024;
+
 pub(crate) struct ExecutionService {
     state: StateStore,
     auth: JwtVerifier,
@@ -1826,8 +1832,8 @@ async fn serve_with_listener(
     info!("gRPC listening on :9093");
 
     tonic::transport::Server::builder()
-        .add_service(ExecutionCoreServer::new(
-            ExecutionService::new_with_scheduled_step_runtime(
+        .add_service(
+            ExecutionCoreServer::new(ExecutionService::new_with_scheduled_step_runtime(
                 state,
                 auth,
                 session_channel,
@@ -1842,12 +1848,58 @@ async fn serve_with_listener(
                 cas_client,
                 backend_id,
                 sandbox_tokens,
-            ),
-        ))
+            ))
+            .max_decoding_message_size(request_decoding_limit_bytes()),
+        )
         .serve_with_incoming(TcpListenerStream::new(listener))
         .await?;
 
     Ok(())
+}
+
+/// Largest request tonic decodes. A request carrying attachments holds their
+/// bytes raw (gRPC has no base64), so the floor is raised to the declared
+/// attachment total (`CHAT_ATTACHMENT_MAX_TOTAL_BYTES`, the number model-gateway
+/// and the BFF derive their body limits from) plus room for the rest of the
+/// request. Unset, it is the floor: nothing changes until the cap is raised.
+fn request_decoding_limit_bytes() -> usize {
+    decoding_limit_with(&|key| std::env::var(key).ok())
+}
+
+fn decoding_limit_with(get: &dyn Fn(&str) -> Option<String>) -> usize {
+    get("CHAT_ATTACHMENT_MAX_TOTAL_BYTES")
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|total| *total > 0)
+        .map_or(MAX_REQUEST_DECODING_BYTES, |total| {
+            MAX_REQUEST_DECODING_BYTES.max(total.saturating_add(REQUEST_DECODING_HEADROOM_BYTES))
+        })
+}
+
+#[cfg(test)]
+mod decoding_limit_tests {
+    use super::{decoding_limit_with, MAX_REQUEST_DECODING_BYTES, REQUEST_DECODING_HEADROOM_BYTES};
+
+    fn limit(total: Option<&str>) -> usize {
+        decoding_limit_with(&|_| total.map(str::to_owned))
+    }
+
+    #[test]
+    fn unset_or_unreadable_totals_keep_the_floor() {
+        assert_eq!(limit(None), MAX_REQUEST_DECODING_BYTES);
+        assert_eq!(limit(Some("0")), MAX_REQUEST_DECODING_BYTES);
+        assert_eq!(limit(Some("lots")), MAX_REQUEST_DECODING_BYTES);
+        // Today's declared total (3 MiB) fits under the floor.
+        assert_eq!(limit(Some("3145728")), MAX_REQUEST_DECODING_BYTES);
+    }
+
+    #[test]
+    fn a_raised_total_raises_the_limit_to_hold_it() {
+        let total = 64 * 1024 * 1024;
+        assert_eq!(
+            limit(Some(&total.to_string())),
+            total + REQUEST_DECODING_HEADROOM_BYTES
+        );
+    }
 }
 
 #[cfg(test)]
