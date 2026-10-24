@@ -253,6 +253,7 @@ func TestZDRDurableMutationsAreDeniedBeforeCapabilityCoreHandlers(t *testing.T) 
 	database := &recordingDatabase{}
 	memory := NewMemoryHandler(nil, nil)
 	memory.pool = database
+	memory.controls = &fakeMemoryControls{decision: memoryDecisionOn}
 	mcp := NewMCPHandler(nil)
 	mcp.pool = database
 	mcp.resolver = publicMCPResolver{}

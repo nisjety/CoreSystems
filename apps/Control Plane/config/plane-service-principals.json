@@ -20,6 +20,7 @@
       "orchestration:workflow:start",
       "orchestration:workflow:start:global",
       "sandbox:read",
+      "session:memory-controls:read",
       "session:read",
       "session:schedule-prepare",
       "session:skills:write"
@@ -36,6 +37,7 @@
         "sandbox:read"
       ],
       "session-core": [
+        "session:memory-controls:read",
         "session:read",
         "session:schedule-prepare",
         "session:skills:write"

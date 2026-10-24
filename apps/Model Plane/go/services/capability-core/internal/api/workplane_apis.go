@@ -35,11 +35,152 @@ type MemoryHandler struct {
 	// ownership contract anywhere in Model Plane and stays quarantined
 	// regardless of this client's presence — see authorizeResourceOwner.
 	runs mpv1.RunServiceClient
+	// controls answers Session Core's memory decision (the user's state, the
+	// org policy and zero data retention folded into one verdict). nil means
+	// the decision cannot be asked, and every gated verb fails closed.
+	controls memoryControlsReader
 }
 
 // NewMemoryHandler constructs the handler.
 func NewMemoryHandler(pool *pgxpool.Pool, runs mpv1.RunServiceClient) *MemoryHandler {
 	return &MemoryHandler{pool: pool, runs: runs}
+}
+
+// WithMemoryControls wires Session Core's MemoryService as the memory
+// decision. A nil client leaves the handler failing closed: this proxy writes
+// agent_memory directly, so it must never be the one path around the gate that
+// Session Core applies to every other memory writer and reader.
+func (h *MemoryHandler) WithMemoryControls(client mpv1.MemoryServiceClient) *MemoryHandler {
+	if client != nil {
+		h.controls = sessionCoreMemoryControls{client: client}
+	}
+	return h
+}
+
+// memoryControlsTimeout bounds the decision lookup so a stalled Session Core
+// turns into a refused request instead of a hung one.
+const memoryControlsTimeout = 3 * time.Second
+
+// memoryDecision is Session Core's verdict for one user. Reason is its closed
+// token: on, user_paused, user_off, org_disabled, zdr or policy_unavailable.
+type memoryDecision struct {
+	UseAllowed        bool
+	GenerationAllowed bool
+	Reason            string
+}
+
+type memoryControlsReader interface {
+	Decision(ctx context.Context, orgID, userID string) (memoryDecision, error)
+}
+
+type sessionCoreMemoryControls struct {
+	client mpv1.MemoryServiceClient
+}
+
+func (s sessionCoreMemoryControls) Decision(ctx context.Context, orgID, userID string) (memoryDecision, error) {
+	ctx, cancel := context.WithTimeout(ctx, memoryControlsTimeout)
+	defer cancel()
+	resp, err := s.client.GetMemoryControls(ctx, &mpv1.GetMemoryControlsRequest{OrgId: orgID, UserId: userID})
+	if err != nil {
+		return memoryDecision{}, err
+	}
+	controls := resp.GetControls()
+	if controls == nil {
+		return memoryDecision{}, errors.New("session core returned no memory controls")
+	}
+	return memoryDecision{
+		UseAllowed:        controls.GetUseAllowed(),
+		GenerationAllowed: controls.GetGenerationAllowed(),
+		Reason:            controls.GetReason(),
+	}, nil
+}
+
+type memoryReadAccess int
+
+const (
+	memoryReadNone memoryReadAccess = iota
+	// memoryReadOrgOnly: the user paused or turned memory off, so their own
+	// rows are not used, but what the organization shares stays readable.
+	memoryReadOrgOnly
+	memoryReadFull
+)
+
+// readAccess maps the decision onto what a read may return. Anything that is
+// not a known user choice (org disabled, zero data retention, policy
+// unavailable, an unknown token) suppresses every row.
+func (d memoryDecision) readAccess() memoryReadAccess {
+	switch {
+	case d.UseAllowed:
+		return memoryReadFull
+	case d.Reason == "user_paused" || d.Reason == "user_off":
+		return memoryReadOrgOnly
+	default:
+		return memoryReadNone
+	}
+}
+
+// memoryReadVisibilitySQL narrows memoryVisibilitySQL to the shared scopes
+// when the user's own rows are not in use. With full access it is exactly
+// memoryVisibilitySQL.
+func memoryReadVisibilitySQL(access memoryReadAccess, actorPlaceholder string) string {
+	if access == memoryReadOrgOnly {
+		return memoryVisibilitySQL(actorPlaceholder) + ` AND scope IN ('org','global')`
+	}
+	return memoryVisibilitySQL(actorPlaceholder)
+}
+
+func memoryScopeIsShared(scope string) bool {
+	return scope == "org" || scope == "global"
+}
+
+// memoryDecisionFor asks Session Core once per request. It writes the refusal
+// itself: 503 when the decision cannot be had (never an allow), so a lookup
+// failure is not mistaken for a paused user.
+func (h *MemoryHandler) memoryDecisionFor(w http.ResponseWriter, request *http.Request, orgID, actorID string) (memoryDecision, bool) {
+	if h.controls == nil {
+		jsonErr(w, "memory policy unavailable", http.StatusServiceUnavailable)
+		return memoryDecision{}, false
+	}
+	decision, err := h.controls.Decision(request.Context(), orgID, actorID)
+	if err != nil {
+		jsonErr(w, "memory policy unavailable", http.StatusServiceUnavailable)
+		return memoryDecision{}, false
+	}
+	return decision, true
+}
+
+func memoryNotEnabled(w http.ResponseWriter, decision memoryDecision) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusForbidden)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": "memory_not_enabled", "reason": decision.Reason})
+}
+
+// memoryReadAccessFor resolves the decision and refuses outright when nothing
+// may be read; callers that go on read at most the returned access.
+func (h *MemoryHandler) memoryReadAccessFor(w http.ResponseWriter, request *http.Request, orgID, actorID string) (memoryReadAccess, memoryDecision, bool) {
+	decision, ok := h.memoryDecisionFor(w, request, orgID, actorID)
+	if !ok {
+		return memoryReadNone, decision, false
+	}
+	access := decision.readAccess()
+	if access == memoryReadNone {
+		memoryNotEnabled(w, decision)
+		return memoryReadNone, decision, false
+	}
+	return access, decision, true
+}
+
+// memoryWriteAllowed refuses a write unless Session Core allows generation.
+func (h *MemoryHandler) memoryWriteAllowed(w http.ResponseWriter, request *http.Request, orgID, actorID string) bool {
+	decision, ok := h.memoryDecisionFor(w, request, orgID, actorID)
+	if !ok {
+		return false
+	}
+	if !decision.GenerationAllowed {
+		memoryNotEnabled(w, decision)
+		return false
+	}
+	return true
 }
 
 // memoryScopePrecedence returns the scopes this endpoint can authorize with
@@ -233,6 +374,14 @@ func (h *MemoryHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 		if limit <= 0 || limit > 200 {
 			limit = 50
 		}
+		access, decision, ok := h.memoryReadAccessFor(w, r, orgID, actorID)
+		if !ok {
+			return
+		}
+		if access == memoryReadOrgOnly && scope != "" && validMemoryScope(scope) && !memoryScopeIsShared(scope) {
+			memoryNotEnabled(w, decision)
+			return
+		}
 		var rows interface {
 			Next() bool
 			Scan(...any) error
@@ -246,7 +395,7 @@ func (h *MemoryHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 				       owner, source_links, review_state, classification, expires_at,
 				       created_at, updated_at
 				FROM agent_memory
-				WHERE org_id=$1 AND `+memoryVisibilitySQL("$2")+`
+				WHERE org_id=$1 AND `+memoryReadVisibilitySQL(access, "$2")+`
 				  AND (session_id IS NULL OR session_id=$3)
 				ORDER BY created_at LIMIT $4
 			`, orgID, actorID, sessionID, limit)
@@ -260,7 +409,7 @@ func (h *MemoryHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 				       owner, source_links, review_state, classification, expires_at,
 				       created_at, updated_at
 				FROM agent_memory
-				WHERE org_id=$1 AND `+memoryVisibilitySQL("$2")+` AND scope=$3
+				WHERE org_id=$1 AND `+memoryReadVisibilitySQL(access, "$2")+` AND scope=$3
 				ORDER BY created_at LIMIT $4
 			`, orgID, actorID, scope, limit)
 		} else {
@@ -269,7 +418,7 @@ func (h *MemoryHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 				       owner, source_links, review_state, classification, expires_at,
 				       created_at, updated_at
 				FROM agent_memory
-				WHERE org_id=$1 AND `+memoryVisibilitySQL("$2")+`
+				WHERE org_id=$1 AND `+memoryReadVisibilitySQL(access, "$2")+`
 				ORDER BY created_at LIMIT $3
 			`, orgID, actorID, limit)
 		}
@@ -298,6 +447,9 @@ func (h *MemoryHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 		var e memoryEntry
 		if err := json.NewDecoder(r.Body).Decode(&e); err != nil {
 			jsonErr(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if !h.memoryWriteAllowed(w, r, orgID, actorID) {
 			return
 		}
 		e.OrgID = orgID
@@ -394,13 +546,17 @@ func (h *MemoryHandler) get(w http.ResponseWriter, r *http.Request, id string) {
 	if !ok {
 		return
 	}
+	access, _, ok := h.memoryReadAccessFor(w, r, orgID, actorID)
+	if !ok {
+		return
+	}
 	var e memoryEntry
 	err := h.pool.QueryRow(r.Context(), `
 		SELECT id, org_id, session_id, scope, key, content, kind, confidence,
 		       owner, source_links, review_state, classification, expires_at,
 		       created_at, updated_at
 		FROM agent_memory
-		WHERE id=$1 AND org_id=$2 AND `+memoryVisibilitySQL("$3")+`
+		WHERE id=$1 AND org_id=$2 AND `+memoryReadVisibilitySQL(access, "$3")+`
 	`, id, orgID, actorID).Scan(&e.ID, &e.OrgID, &e.SessionID, &e.Scope, &e.Key, &e.Content,
 		&e.Kind, &e.Confidence, &e.Owner, &e.SourceLinks, &e.ReviewState,
 		&e.Classification, &e.ExpiresAt, &e.CreatedAt, &e.UpdatedAt)
@@ -433,6 +589,9 @@ func (h *MemoryHandler) update(w http.ResponseWriter, r *http.Request, id string
 		jsonErr(w, "no supported fields", http.StatusBadRequest)
 		return
 	}
+	if !h.memoryWriteAllowed(w, r, orgID, actorID) {
+		return
+	}
 	content := ""
 	if update.Content != nil {
 		content = *update.Content
@@ -459,6 +618,9 @@ func (h *MemoryHandler) update(w http.ResponseWriter, r *http.Request, id string
 	writeJSON(w, map[string]any{"id": id, "updated_at": now})
 }
 
+// delete is never gated: erasing a row is the user's right whatever the state,
+// the same rule Session Core's DeleteMemory follows, and pre-pause rows must
+// stay removable while memory is paused, off or disabled by the org.
 func (h *MemoryHandler) delete(w http.ResponseWriter, r *http.Request, id string) {
 	orgID, actorID, ok := verifiedMemoryIdentity(w, r)
 	if !ok {
@@ -491,6 +653,10 @@ func (h *MemoryHandler) resolve(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	access, _, ok := h.memoryReadAccessFor(w, r, orgID, actorID)
+	if !ok {
 		return
 	}
 	q := r.URL.Query()
@@ -544,7 +710,7 @@ func (h *MemoryHandler) resolve(w http.ResponseWriter, r *http.Request) {
 		  AND ($%d='' OR key=$%d)
 		ORDER BY created_at DESC
 		LIMIT $%d
-	`, memoryVisibilitySQL("$2"), strings.Join(clauses, " OR "), keyArg, keyArg, limitArg)
+	`, memoryReadVisibilitySQL(access, "$2"), strings.Join(clauses, " OR "), keyArg, keyArg, limitArg)
 	rows, err := h.pool.Query(r.Context(), query, queryArgs...)
 	if err != nil {
 		jsonErr(w, "database unavailable", http.StatusServiceUnavailable)

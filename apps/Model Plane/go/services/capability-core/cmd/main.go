@@ -188,7 +188,7 @@ func main() {
 	// ListModels, /compact → session CompactNow) and the G7 learning consumer —
 	// one dial site, no duplication. Nil when addrs are unset → both consumers
 	// degrade gracefully.
-	sessionClient, inferenceClient, runClient := dialBackends()
+	sessionClient, inferenceClient, runClient, memoryClient := dialBackendsWithMemory()
 
 	// --- §4.3 reconcile event publisher -------------------------------------
 	// capability-core is the registry system-of-record; on a create/update it
@@ -300,7 +300,7 @@ func main() {
 	}
 	api.NewRoutingHandler(pool).WithPublisher(recPub).Register(protectedMux)
 	api.NewSafetyHandler(pool).WithPublisher(recPub).Register(protectedMux)
-	api.NewMemoryHandler(pool, runClient).Register(protectedMux)
+	api.NewMemoryHandler(pool, runClient).WithMemoryControls(memoryClient).Register(protectedMux)
 	api.NewTasksHandler(pool).Register(protectedMux)
 	// AUTO-2: lets a user register/inspect/cancel a watch on one run. The
 	// consumer that actually fires the notification is wired below,
@@ -823,11 +823,19 @@ func startLearningConsumer(ctx context.Context, nc *nats.Conn, sc mpv1.SessionCo
 // multiplexed server (see grpc.rs's single Server::builder()...add_service
 // chain), so it needs no separate dial, env var, or credential.
 func dialBackends() (mpv1.SessionCoreClient, mpv1.InferenceCoreClient, mpv1.RunServiceClient) {
+	session, inference, runs, _ := dialBackendsWithMemory()
+	return session, inference, runs
+}
+
+// dialBackendsWithMemory is dialBackends plus the MemoryServiceClient the
+// /api/v1/memory proxy asks for Session Core's memory decision, on the same
+// sessConn (MemoryService is served by the same tonic server).
+func dialBackendsWithMemory() (mpv1.SessionCoreClient, mpv1.InferenceCoreClient, mpv1.RunServiceClient, mpv1.MemoryServiceClient) {
 	sessAddr := os.Getenv("SESSION_CORE_ADDR")
 	infAddr := os.Getenv("INFERENCE_CORE_ADDR")
 	if sessAddr == "" || infAddr == "" {
 		slog.Info("backend clients disabled (SESSION_CORE_ADDR/INFERENCE_CORE_ADDR unset)")
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	creds := grpc.WithTransportCredentials(insecure.NewCredentials())
 
@@ -846,7 +854,7 @@ func dialBackends() (mpv1.SessionCoreClient, mpv1.InferenceCoreClient, mpv1.RunS
 		).dialOption())
 	if err != nil {
 		slog.Warn("dial session-core failed", "error", err)
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	infConn, err := grpc.NewClient(infAddr, creds,
 		newBackendCredential(
@@ -858,9 +866,9 @@ func dialBackends() (mpv1.SessionCoreClient, mpv1.InferenceCoreClient, mpv1.RunS
 	if err != nil {
 		slog.Warn("dial inference-core failed", "error", err)
 		_ = sessConn.Close()
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
-	return mpv1.NewSessionCoreClient(sessConn), mpv1.NewInferenceCoreClient(infConn), mpv1.NewRunServiceClient(sessConn)
+	return mpv1.NewSessionCoreClient(sessConn), mpv1.NewInferenceCoreClient(infConn), mpv1.NewRunServiceClient(sessConn), mpv1.NewMemoryServiceClient(sessConn)
 }
 
 // Auth Core service-principal configuration for capability-core's OWN identity.
@@ -887,8 +895,9 @@ const (
 var (
 	// sessionCoreScopes covers the learning review's transcript read
 	// (ListConversation, ListAgentSkills → session:read) and its skill upsert
-	// (UpsertAgentSkill → session:skills:write).
-	sessionCoreScopes = []string{"session:read", "session:skills:write", "session:schedule-prepare"}
+	// (UpsertAgentSkill → session:skills:write) and, narrowly, the memory
+	// proxy's decision lookup (GetMemoryControls → session:memory-controls:read).
+	sessionCoreScopes = []string{"session:memory-controls:read", "session:read", "session:skills:write", "session:schedule-prepare"}
 	// inferenceCoreScopes covers the review's model call (Infer).
 	inferenceCoreScopes = []string{"inference:invoke"}
 )

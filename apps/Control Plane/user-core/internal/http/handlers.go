@@ -1407,7 +1407,6 @@ type AISettings struct {
 	ModelPreference        string `json:"modelPreference"` // "auto"|"gpt-4"|"gpt-4o"|"claude"
 	DataCollectionEnabled  bool   `json:"dataCollectionEnabled"`
 	PersonalizationEnabled bool   `json:"personalizationEnabled"`
-	MemoryEnabled          bool   `json:"memoryEnabled"`
 }
 
 // GET /api/v1/settings/ai
@@ -1418,7 +1417,7 @@ func (s *Server) getAISettings(c *gin.Context) {
 	}
 	defaults := map[string]any{
 		"aiEnabled": true, "modelPreference": "auto",
-		"dataCollectionEnabled": true, "personalizationEnabled": true, "memoryEnabled": false,
+		"dataCollectionEnabled": true, "personalizationEnabled": true,
 	}
 	settings, err := s.userService.GetSettings(c.Request.Context(), userID, "ai", defaults)
 	if err != nil {
