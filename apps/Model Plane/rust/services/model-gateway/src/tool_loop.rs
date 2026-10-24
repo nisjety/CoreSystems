@@ -9581,6 +9581,66 @@ mod tests {
         assert!(inline_tool_allowed("knowledge_search"));
     }
 
+    /// The Ask loop's read arms and the admission contract must name the same reads
+    /// (WS24-S5). A read the loop answers that the contract does not list is an
+    /// unadmitted read; a contract read with no arm is a tool the model is promised
+    /// and cannot reach. `knowledge_search` is the one arm that is not an action: it
+    /// is retrieval, governed by the retrieval scope, so it is exempt by name only.
+    #[test]
+    fn every_ask_read_in_the_admission_contract_has_a_dispatch_arm_and_every_verevon_read_arm_is_in_the_contract() {
+        let contract: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/agent-action-admission.json"))
+                .expect("the vendored admission contract parses");
+        let contract_reads: std::collections::BTreeSet<String> = contract["rows"]
+            .as_array()
+            .expect("the contract has rows")
+            .iter()
+            .filter(|row| row["access"] == "read")
+            .filter_map(|row| row["executor"]["ask"].as_str().map(str::to_owned))
+            .collect();
+        assert!(!contract_reads.is_empty(), "the contract lists no Ask reads");
+
+        // The Ask loop's read arms run from its knowledge search to the artifact result query.
+        // Searched in the whole file: an arm pattern never occurs in test code, and the first
+        // `#[cfg(test)]` sits above the dispatcher.
+        let source = include_str!("tool_loop.rs");
+        let graph = source
+            .find("        \"knowledge_graph_search\" => {")
+            .expect("the knowledge graph arm");
+        let start = source[..graph]
+            .rfind("        \"knowledge_search\" => {")
+            .expect("the Ask loop knowledge search arm");
+        let end = start
+            + source[start..]
+                .find("        \"result_query\" => {")
+                .expect("the result query arm");
+
+        let mut arm_reads = std::collections::BTreeSet::new();
+        for line in source[start..end].lines() {
+            let Some(head) = line.strip_prefix("        \"") else { continue };
+            let Some((patterns, _)) = head.split_once("=>") else { continue };
+            for name in patterns.split('"').map(str::trim) {
+                // Dotted names are the Console's aliases of the same arm; the contract keys on the model's name.
+                if !name.is_empty() && name.chars().all(|c| c.is_ascii_lowercase() || c == '_') {
+                    arm_reads.insert(name.to_owned());
+                }
+            }
+        }
+
+        for name in &contract_reads {
+            assert!(
+                arm_reads.contains(name),
+                "the admission contract lists the read `{name}`, which has no dispatch arm in the Ask loop"
+            );
+        }
+        for name in &arm_reads {
+            assert!(
+                name == "knowledge_search" || contract_reads.contains(name),
+                "the Ask loop answers `{name}`, which the admission contract does not list"
+            );
+        }
+    }
+
     /// THE guard for this whole surface: `dispatch_tool`'s final arm is
     /// `other => err_outcome(call, "unknown tool '{other}'")`, so advertising a
     /// tool in `builtin_tool_defs()` without adding a matching dispatch arm
