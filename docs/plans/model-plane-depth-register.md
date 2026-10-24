@@ -847,6 +847,30 @@ Built so far (batches B01 to B07): WS01-S0, WS01-S1 (partial), WS01-S6; WS02-S1,
 | D1-640 | WS08-S4.code | live-proof | P1 | sse-event-taxonomy.md rows for attachment_do_unsupported were not added. The file is generated from ChatEvent variants and has no error-code section. | open |
 | D1-641 | WS08-S4.code | follow-up | P3 | 20 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-21.json | open |
 
+
+### Wave-mode batch W1-22 (2026-10-24)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D1-642 | WS07-S8 | test-gap | P1 | None of the Rust code of this slice (grpc.rs service, helpers, gdpr.rs, nine tests) has been type-checked or run, because mp-orchestration does not compile in the shared tree (another slice's orchestration.proto change); a first compile may surface errors. | open |
+| D1-643 | WS07-S8 | follow-up | P1 | gdpr.rs only has the org purge, so skill_revisions and the S7 owner-scoped agent_skills rows are erased with the organization but there is no per-user erasure; a user-level erasure path must delete agent_skills, then skill_revisions, by owner_user_id (the revision text is a copy of the skill text). | open |
+| D1-644 | WS07-S8 | follow-up | P1 | A learned memory on the ledger cannot be undone through UndoLearningEntry (it returns memory_undo_via_delete); S9 must route its Undo button for kind=memory to DeleteMemory, and restoring a superseded memory (supersedes_id) is not built. | open |
+| D1-645 | WS07-S8 | risk | P1 | Until capability-core is rebuilt and deployed with this change, registry edits log as actor_kind 'unattributed'; a second writer added later that sets no settings also logs as 'unattributed', so S10's governance script should count unattributed revisions as a failure. | open |
+| D1-646 | WS07-S8 | live-proof | P1 | The trigger SQL, the whole-row RESTORE_SKILL_SQL (jsonb_to_record into agent_skills) and the ledger UNION queries have only been parse-checked and unit-tested; the four plan DB tests must pass before the behaviour is relied on. | open |
+| D1-647 | WS07-S8 | risk | P1 | Until capability-core is redeployed, and for any later writer that sets no mp.* settings, revisions are logged as actor_kind 'unattributed'; S10's governance script should fail on unattributed revisions. | open |
+| D1-648 | WS07-S8 | live-proof | P1 | Run the 4 ignored PG tests (trigger_records_every_mutation_even_from_capability_core_sql, undo_restores_before_snapshot, non_owner_cannot_decide_or_undo, revision_cap_keeps_50) through scripts/tests/session-core-db-tests.sh. Also re-run the S7 skill DB tests and list_agent_skills_scope_enforcement_against_real_pg. The trigger, RESTORE_SKILL_SQL (jsonb_to_record) and the ledger SQL have never run against Postgres. | open |
+| D1-649 | WS07-S8 | live-proof | P1 | Apply migration 0064 on a real database (PG16) and run the revert file once. | open |
+| D1-650 | WS07-S8 | follow-up | P3 | 18 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-22.json | open |
+| D1-651 | WS08-S6 | risk | P1 | Subagent children share the parent's run_id and runtime_loop/mod.rs `run_inputs::global().get(org_id, run_id)` hands them the parent's attached files in code_interpreter; plan requires no inheritance. Needs a shared-edit in mod.rs (pass depth or a root-only flag to the lookup). | open |
+| D1-652 | WS08-S6 | risk | P1 | Do runs that await approval or park return from run_agent, so the RunInputs guard drops and the files are gone on the continuation segment or in-place resume, while the restored messages still hold the sandbox note saying attachments/ exists; plan v1 wants a typed attachments_expired signal instead. Images are likewise not re-sent after a resume. | open |
+| D1-653 | WS08-S6 | risk | P1 | RunInputs TTL is 15 minutes (run_inputs.rs, not owned) and is swept on the next registration, so a Do run longer than 15 minutes can lose its files mid-run; TTL should be refreshed or derived from the run deadline. | open |
+| D1-654 | WS08-S6 | follow-up | P1 | Server-declared gate missing: attachment_policy.rs needs modes.do_attachments (and chat-client.ts parseAttachmentPolicy the field) so the FE can read it from /v1/models instead of the build-time VITE_CHAT_DO_ATTACHMENTS_ENABLED; compose pass-through for CHAT_DO_ATTACHMENTS_ENABLED is also not added (deploy/docker-compose.yml not owned). | open |
+| D1-655 | WS08-S6 | risk | P1 | Subagent children still inherit the attached FILES. A child is built with `req: parent.req` and the parent's run_id, and `runtime_loop/mod.rs:893` calls `run_inputs::global().get(org_id, run_id)` with no depth check, so a child's code_interpreter reads `attachments/`. The plan says children do not inherit attachments. The test `children_do_not_inherit_attachments` covers only images and the note. The fix is a shared edit in mod.rs: pass depth or a root-only flag into the lookup, and add a test where a child code_interpreter step sees no files. Must land before the switch is turned on. | open |
+| D1-656 | WS08-S6 | risk | P1 | A parked, resumed or continuation Do run loses its files, because the RunInputs guard lives only inside the run_agent call. The restored messages still hold the sandbox note saying `attachments/` exists, and images are not re-sent (`image_parts` is empty on the restored and parked paths). The plan wants a typed `attachments_expired` refusal or signal instead of a silent mismatch. | open |
+| D1-657 | WS08-S6 | live-proof | P1 | The live worktree does not compile: browser_events.rs (lines 355 and 436) and model-gateway approvals.rs (line 135) still build DecideApprovalRequest without decision_source and scope. The owning slice must fix them before any in-place `cargo test`. | open |
+| D1-658 | WS08-S6 | live-proof | P1 | Shared edit in runtime_loop/mod.rs near line 893: the code_interpreter lookup of RunInputs must return None for a delegated child. | open |
+| D1-659 | WS08-S6 | follow-up | P3 | 19 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-22.json | open |
+
 ## Wave 2 (WS13 to WS27)
 
 Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS27-S0, WS27-S1. Wave 2 is not started as a wave: these came in with Wave 1 batches because they were Wave 1 prerequisites.
@@ -1572,3 +1596,5 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS24-S2 | data-loss, policy | W2-17 | no |
 | WS24-S6 | authority, policy, zdr | W2-17 | no |
 | WS24-S7 | authority, auth, policy, zdr | W2-18 | no |
+| WS07-S8 | audit, authority, data-loss | W1-22 | no |
+| WS08-S6 | zdr, authority, data-loss | W1-22 | no |
