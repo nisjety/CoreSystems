@@ -801,6 +801,37 @@ mod tests {
         }
     }
 
+    /// WS8.F: the tab and the attach a delegate step ran under are stored and read back; a
+    /// person's receipt keeps both absent (no backfill). Needs DATABASE_URL, so it is ignored by default.
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL and the migrations through 0018"]
+    async fn postgres_receipt_roundtrips_tab_and_attach() {
+        let Some(pool) = fresh_pool().await else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let store = PostgresStepReceiptStore::new(pool.clone());
+        let run_id: RunKind = Id::new();
+        let delegated = ReceiptBuilder::start(run_id.to_string(), 1)
+            .org_id("org_a")
+            .actor_id("user_a")
+            .initiator(BrowserTimelineInitiator::Agent, 0)
+            .tab(Some("tab_2".to_owned()), Some("att_1".to_owned()))
+            .complete(action(), None, 0.0);
+        let person = ReceiptBuilder::start(run_id.to_string(), 2)
+            .org_id("org_a")
+            .actor_id("user_a")
+            .complete(action(), None, 0.0);
+        store.append(delegated).await.unwrap();
+        store.append(person).await.unwrap();
+        let listed = store.list_for_org("org_a", &run_id).await.unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].tab_id.as_deref(), Some("tab_2"));
+        assert_eq!(listed[0].attach_id.as_deref(), Some("att_1"));
+        assert_eq!(listed[1].tab_id, None, "no backfill for a receipt without a tab");
+        assert_eq!(listed[1].attach_id, None);
+    }
+
     /// WS12.S3: the rule version a receipt was masked under is stored and read back.
     #[tokio::test]
     async fn append_persists_redaction_rule_version() {

@@ -74,6 +74,7 @@ async fn step_refuses_raw_script_and_consumes_nothing() {
         Extension(claims),
         Path(run_id.to_string()),
         Json(StepBody {
+            grant_id: None,
             action: AgentAction::Evaluate {
                 script: "document.title = 'pwned'".to_owned(),
             },
@@ -445,6 +446,7 @@ async fn call_step(
         Extension(claims),
         Path(run_id),
         Json(StepBody {
+            grant_id: None,
             action,
             instruction: None,
             extraction_profile: None,
@@ -1990,6 +1992,7 @@ async fn a_step_on_a_released_run_carries_the_hint() {
         Extension(user_in_org("org", "user")),
         Path(run_id.to_string()),
         Json(StepBody {
+            grant_id: None,
             action: AgentAction::Navigate { url: "https://example.com".into() },
             instruction: None,
             extraction_profile: None,

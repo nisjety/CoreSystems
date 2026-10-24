@@ -272,6 +272,9 @@ pub struct StepBody {
     pub instruction: Option<String>,
     #[serde(default)]
     pub extraction_profile: Option<ExtractionProfile>,
+    /// WS8.F: the attach grant, on a delegate step only (the attachment's agent sends it).
+    #[serde(default, alias = "grantId")]
+    pub grant_id: Option<String>,
 }
 
 impl StepBody {

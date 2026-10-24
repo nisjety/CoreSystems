@@ -16,6 +16,11 @@ pub async fn step(
     let Some(handle) = lookup_run(&state, &run_id) else {
         return Err(run_gone_err(&state, &claims, &request_id, &run_id).await);
     };
+    // WS8.F: a caller that does not own the run is refused unless it is the delegate of the
+    // run's live attachment (the lane check); the delegate lane has its own admission.
+    if !handle.live.owned_by(&claims) {
+        return super::attach::delegate_step(&state, &handle, &claims, &request_id, body).await;
+    }
 
     // Counts as in flight from before it waits for the run lock, so the sweeper
     // never releases a run an action is queued on.
