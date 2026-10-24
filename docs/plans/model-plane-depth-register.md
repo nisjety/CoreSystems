@@ -1037,6 +1037,39 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D2-287 | WS21-S3 | live-proof | P1 | Verdict pass is conditional on the lead applying the compose shared-edit; without it the two named contract tests keep org-core ./... red. | open |
 | D2-288 | WS21-S3 | follow-up | P3 | 19 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-10.json | open |
 
+
+### Wave-mode batch W2-11 (2026-10-24)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D2-289 | WS20-S5 | risk | P0 | session-core run_service_grpc.rs fails to compile (E0063 on ResolveScheduledStepAuthorityResponse ~302 and ScheduledStepContext ~623). Shared-edit required before any session-core test runs or deploys. | open |
+| D2-290 | WS20-S5 | risk | P1 | Control HTTP handler does not decode contract fields from the intent yet, so Control issues v1 decisions and orchestrator refuses contract-bound intents. Fail-closed, but the DoD path is not live until the shared Control edit lands. | open |
+| D2-291 | WS20-S5 | test-gap | P1 | No cross-language vector pins the Go step/run digests (user-core, orchestrator-core) to the Rust digests (execution-core, session-core) for the v2 contract fields. Add one shared vector before enabling a contract-bound step. | open |
+| D2-292 | WS20-S5 | test-gap | P1 | No Temporal replay test for the new StartScheduledRunActivity args and ScheduledRunInput fields (pre-S5 histories). GetVersion guard not added; add a replay test before enabling. | open |
+| D2-293 | WS20-S5 | test-gap | P1 | session-core new test module (scheduled_contract_binding_tests) and the StartScheduledRun binding are compiled but not run; they run once the shared literal edit lands. | open |
+| D2-294 | WS20-S5 | risk | P1 | Execution-core still does not recompute the contract digest from the body; session-core re-hashes contract_json but execution-core only checks signed claims. Forged body with genuine claim digest would be caught at session-core, not at the step. | open |
+| D2-295 | WS20-S5 | follow-up | P1 | Digest definition sha256(compact bytes of approval_contract) must match Control S4 signing exactly; agree the canonicalisation with S4 before any Control v2 emission. | open |
+| D2-296 | WS20-S5 | risk | P1 | EXECUTION_CORE_SCHEDULED_CONTRACT_REQUIRED, when set to true, refuses every v1 step decision, not only decisions for contract-created runs as the batch flag description says, so enabling it would break all existing schedules; gate it on run context in grpc.rs before the switch is ever turned on. | open |
+| D2-297 | WS20-S5 | follow-up | P3 | 20 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-11.json | open |
+| D2-298 | WS21-S4 | risk | P1 | PgStore.CreateScopedSensitiveApproval (internal/grant/postgres.go, around line 328-365) has no parent.ReadOnly guard, the same gap the memory store had. It is not reachable with a read-only parent today (no read_only column, non-ZDR read-only refused, ZDR read-only grants are in-memory only), but the guard must be added in the same change that adds the read_only column and migration, or a durable read-only parent could mint a non-read-only approval. | open |
+| D2-299 | WS21-S4 | risk | P1 | space_id is accepted on AcquireGrantRequest (browser.proto tag 11) but never read: grep finds no GetSpaceId use outside tests, grant.go has no SpaceID field (the row lists one), and the proto comment says 'The site policy reads the Space floor from it', which is false in this slice. org-core Service.Resolve takes no space input and does not call ApplySpaceFloor, and the WS21-S8 file list names no broker file, so no slice owns the pass-through. Before any Space run is enforced, the broker must pass space_id into the resolve call or the Space floor is silently bypassed; correct the proto comment now. | open |
+| D2-300 | WS21-S4 | live-proof | P1 | Live proof for the lead (docker and org-core running): grpcurl allowed, blocked and read-only mints with a user bearer, plus the org-core resolve log. Needs quarryv2 merged first for the Quarry-side identity and issuance. | open |
+| D2-301 | WS21-S4 | live-proof | P1 | Lead applies the shared-edit to apps/Model Plane/deploy/docker-compose.yml: BROWSER_BROKER_SITE_POLICY (default off), BROWSER_GRANT_MAX_TTL, ORG_CORE_URL, BROWSER_BROKER_ORG_CORE_TOKEN (empty default). Not applied by this slice. | open |
+| D2-302 | WS21-S4 | live-proof | P1 | Lead provisions the broker's org-core service credential for scope org:browser-site:read:any. Not read or written here. | open |
+| D2-303 | WS21-S4 | live-proof | P1 | Lead records the R-6 allocation (request space_id=11, read_only=12, ttl_seconds=13; response read_only=12, denied_domains=13; validate read_only=13) in apps/Model Plane/docs/decisions/ledger.md and reconciles it with the QRY Grant v2 note. | open |
+| D2-304 | WS21-S4 | live-proof | P1 | Not run: buf breaking against proto/baseline.binpb, cargo check of mp-contracts (its build.rs compiles browser.proto), the e2e harness (build tag e2e, needs docker; only go vet -tags e2e was run), and the -race build (cgo unavailable). Python and TypeScript generated trees are stale by design (ledger). | open |
+| D2-305 | WS21-S4 | live-proof | P1 | git status shows many modified files outside this slice's ownership set (inference-core, model-gateway, mp-contracts, execution-core, org-core resolve.go, user-core, capability-core workflow_dispatcher, inference.proto, runs.proto, sessions.proto and others). They belong to other slices in the worktree and were not evaluated. The WS21-S4 owned set matches exactly, and docker-compose.yml and ledger.md are not modified. | open |
+| D2-306 | WS21-S4 | follow-up | P3 | 10 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-11.json | open |
+| D2-307 | WS21-S8 | risk | P1 | The S8 deliverable 'org-core resolve takes space_id, denies when false' is not met. ApplySpaceFloor has no caller, and the route that would read space_id is outside the owned files. Until the handler is wired, the floor is inert, which is fail-open for the Space gate. | open |
+| D2-308 | WS21-S8 | risk | P1 | The decision-exposure deliverable is not met: no EffectPolicy.BrowserEntitled, no repository read or write, and no decision carries browser_entitled. The browser_entitled column exists in the migration only. | open |
+| D2-309 | WS21-S8 | risk | P1 | The org-core floor bit has no verified source. A caller-supplied boolean would let a caller widen access, so it must come from a Control-signed decision or an internal user-core call before enforcement is switched on. | open |
+| D2-310 | WS21-S8 | test-gap | P1 | No handler test for blank space_id (400) and no org-core space_floor row in the shared matrix. Both need the owned-file expansion above. | open |
+| D2-311 | WS21-S8 | risk | P1 | ApplySpaceFloor and SourceSpaceFloor in org-core resolve.go have no non-test caller, so the floor is dead code and enforces nothing; it must not be switched on until the handler wires it (today this is inert rather than fail-open because no space-scoped resolve path exists). | open |
+| D2-312 | WS21-S8 | cleanup | P1 | decision.go, an S8-owned file, carries uncommitted ContractDigest and ContractExpiresAt edits and a struct realignment from another slice, so any S8 commit would sweep them in; split the hunks before committing. | open |
+| D2-313 | WS21-S8 | live-proof | P1 | Live proof (lead only, needs Docker and a rebuilt stack): Space Do run refused while browser_entitled is false, allowed after the floor is set and org-core allows the host. | open |
+| D2-314 | WS21-S8 | live-proof | P1 | Apply migration 032_space_browser_entitlement.up.sql through the user-core deploy recipe (lead only; not run here). | open |
+| D2-315 | WS21-S8 | follow-up | P3 | 17 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-11.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
@@ -1132,3 +1165,6 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS21-S3 | policy, audit, data-loss | W2-10 | no |
 | WS10-S3 | authority, policy, auth, zdr | W1-14 | no |
 | WS04-S7 | authority, zdr | W1-14 | no |
+| WS20-S5 | authority, auth, zdr | W2-11 | no |
+| WS21-S4 | authority, policy, cross-branch: the Quarry-side grant issuance endpoint and Quarry-to-broker identity are built on local branch quarryv2, not on model-plane; build against the contract with a stub and leave the live proof to the lead after quarryv2 merges | W2-11 | no |
+| WS21-S8 | policy, authority | W2-11 | no |
