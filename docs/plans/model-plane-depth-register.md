@@ -956,6 +956,30 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D2-242 | WS19-S4 | live-proof | P1 | Read the full lib run log (path in notes) and confirm 1295 passed plus the pre-existing provenance failure only; the Windows run does not include the linux-gated test. | open |
 | D2-243 | WS19-S4 | follow-up | P3 | 10 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-08.json | open |
 
+
+### Wave-mode batch W2-09 (2026-10-24)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D2-244 | WS15-S2 | risk | P1 | The shared worktree has an uncommitted sessions.proto change (client_message_id) that breaks the model-gateway lib test build for every slice in this tree until the matching session_flow.rs, browser_run.rs and grpc.rs updates land. | open |
+| D2-245 | WS15-S2 | live-proof | P1 | No docker or live proof was run, by instruction. The plan's evidence for S2 (seed an over-context thread so context_change shows before the first chunk; stop inference-core briefly so compaction reports truncated; one Do run clearing tool results) is still owed by the lead. | open |
+| D2-246 | WS15-S2 | live-proof | P1 | MODEL_GATEWAY_LIFECYCLE_EVENTS compose wiring is still absent from the Model Plane deploy compose file (depth register D2-165/D2-170). The code default is off, so this does not block S2, but the switch is not visible to operators. | open |
+| D2-247 | WS15-S2 | live-proof | P1 | Ratchet check for sse.rs (WS12 S11) was not located in the scripts folder and was not run; the implementer reports about 210 added lines in that file. | open |
+| D2-248 | WS15-S2 | live-proof | P1 | Commit the two files (lifecycle_events.rs new, sse.rs modified). Both are LF. | open |
+| D2-249 | WS15-S2 | live-proof | P1 | Optional shared-edit lib.rs: add `pub mod lifecycle_events;` and remove the #[path] line from sse.rs if preferred. Not required for the tests to pass. | open |
+| D2-250 | WS15-S2 | live-proof | P1 | Check the sse.rs size ratchet (WS12 S11) for the roughly 210-line growth. | open |
+| D2-251 | WS15-S2 | test-gap | P2 | No flag-on stream test: the switch-on path is tested only through emit_and_buffer and the payload builders, not through invoke_stream_sse or agentic_run_stream. | open |
+| D2-252 | WS15-S2 | follow-up | P3 | 6 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-09.json | open |
+| D2-253 | WS25-S5 | risk | P1 | knowledge_search_found_grounding (runtime_loop/agent.rs, near the grounded flag) reads outcome.output, which is the handle envelope once a result is parked, so grounding is lost for parked knowledge results; fix before the switch is turned on. | open |
+| D2-254 | WS25-S5 | risk | P1 | A result_query step's audit data_category is public_non_personal (data_category by name), whatever the parked result was, so the GDPR classification of the step is wrong; the handle must carry the category of the tool that parked it. | open |
+| D2-255 | WS25-S5 | risk | P1 | The read classification is by name (is_risky_call, is_restricted_context_write), not by the declared class in capability_tools; under TOOL_CLASS_GATE=enforce the declared class decides, so WS05-S3/S4 must confirm read parity for every parkable tool. | open |
+| D2-256 | WS25-S5 | risk | P1 | With EXECUTION_RESULT_HANDLES on and cap.result.query unattested (row starts unavailable) and the trusted_capability_id arm not yet landed, a parked result leaves the model only a 200-char head and every result_query call is refused, so content the inline truncation showed (8000 chars) is lost; park only when result_query is usable, or land the capability arm and attestation with the flag. | open |
+| D2-257 | WS25-S5 | risk | P1 | data_category (runtime_loop/agent.rs:316-331) maps result_query to public_non_personal, so a parked customer_private (knowledge_search), personal (provider reads) or unclassified (mcp__) result is re-read under a public category in the step audit; the handle must carry the category of the tool that parked it. | open |
+| D2-258 | WS25-S5 | risk | P1 | knowledge_search_found_grounding (agent.rs:5452, used at 3960) parses outcome.output for status ok, and a parked knowledge_search result's output is the handle envelope with no status key, so grounding is lost for parked knowledge results; fix before the switch is on. | open |
+| D2-259 | WS25-S5 | risk | P1 | is_parkable_tool uses !is_risky_call by name, and permission::is_risky_tool returns true for every mcp__ name, so no MCP read is ever parked; the row's own evidence (a 60k-char MCP/knowledge read through three slices) cannot be produced. Use the declared class (ToolClassView, WS05-S1 built) with the name classifier as fallback, and say so in the ledger. | open |
+| D2-260 | WS25-S5 | live-proof | P1 | Live proof (lead, docker): a Do run with EXECUTION_RESULT_HANDLES on and a read over 8000 chars, read back through three result_query slices, with envelope, slice and run-end release log lines captured; none of these log lines exist in the code yet. | open |
+| D2-261 | WS25-S5 | follow-up | P3 | 30 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-09.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
@@ -1044,3 +1068,5 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS17-S2 | zdr | W2-08 | no |
 | WS19-S4 | authority, data-loss, zdr | W2-08 | no |
 | WS04-S6 | data-loss, zdr, audit | W1-13 | no |
+| WS15-S2 | zdr | W2-09 | no |
+| WS25-S5 | zdr, authority | W2-09 | no |
