@@ -2923,6 +2923,182 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorBody'
+  /v1/profiles:
+    get:
+      operationId: list_profiles
+      summary: Profiles the caller may see (WS17.P0 principal and ZDR guard; WS17.P2 owner filter)
+      description: A service principal is refused on every profile route. Under a ZDR posture the list stays open (wind-down).
+      responses:
+        '200':
+          description: Profile summaries.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProfileList'
+        '403':
+          description: A service principal.
+    post:
+      operationId: save_profile
+      summary: Save a profile snapshot (the import write path). Needs the quarry:profiles:import scope (WS17.P0).
+      description: The request body carries the snapshot (cookie values and storage). The body is never returned. Up to 4 MiB; past it the request answers 413.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [snapshot]
+              properties:
+                profile_id:
+                  type: string
+                snapshot:
+                  type: object
+                  description: SessionSnapshot wire shape. Input only.
+      responses:
+        '200':
+          description: The saved profile id. An ignored save (stale or tombstoned) still answers 200.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  profile_id:
+                    type: string
+        '403':
+          description: A service principal; a token without quarry:profiles:import; or a ZDR organization with QUARRY_EDGE__ZDR_REFUSE_DURABLE_RESOURCES on (error details zdr_refusal.action save).
+        '413':
+          description: The body is over 4 MiB.
+  /v1/profiles/create:
+    post:
+      operationId: create_profile
+      summary: Create a named, scoped profile owned by the caller (WS17.P0 guard)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [scope]
+              properties:
+                name:
+                  type: string
+                scope:
+                  type: string
+                  enum: [user_private, org_shared, run_scoped]
+      responses:
+        '200':
+          description: The created profile summary.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProfileSummary'
+        '400':
+          description: Bad request, or the ephemeral scope.
+        '403':
+          description: A service principal, or a ZDR organization with the flag on (action create).
+  /v1/profiles/{profile_id}:
+    get:
+      operationId: get_profile
+      summary: Redacted view of one profile (WS17.P0). No cookie value, no storage value, no IndexedDB value.
+      parameters:
+        - name: profile_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The redacted profile. Cookie values are null with value_len set.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProfileDetail'
+        '403':
+          description: A service principal, or a ZDR organization with the flag on (action read).
+        '404':
+          description: Not found, or not visible to the caller under enforce.
+    patch:
+      operationId: update_profile
+      summary: Rename and/or rescope a profile. Owner only on an org-shared row (WS17.P2).
+      parameters:
+        - name: profile_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                scope:
+                  type: string
+                  enum: [user_private, org_shared, run_scoped]
+      responses:
+        '200':
+          description: The updated profile summary.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProfileSummary'
+        '400':
+          description: Bad request.
+        '403':
+          description: A service principal, or a ZDR organization with the flag on (action update).
+        '404':
+          description: Not found, or not the owner under enforce.
+    delete:
+      operationId: delete_profile
+      summary: Erase a profile. Never refused on the ZDR side (wind-down).
+      parameters:
+        - name: profile_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Erased.
+        '403':
+          description: A service principal.
+        '404':
+          description: Not found, or not the owner under enforce.
+  /v1/profiles/{profile_id}/restore_probe:
+    post:
+      operationId: restore_probe_profile
+      summary: Whether a profile can be restored at this instant. No browser is started (WS17.P0).
+      parameters:
+        - name: profile_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url:
+                  type: string
+                  format: uri
+      responses:
+        '200':
+          description: The restore summary.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProfileRestoreProbe'
+        '403':
+          description: A service principal, or a ZDR organization with the flag on (action probe).
+        '404':
+          description: Not found, or not visible to the caller under enforce.
 components:
   parameters:
     AgentRunId:
@@ -2967,6 +3143,177 @@ components:
         $ref: '#/components/schemas/AdvisoryIdentifier'
       description: ADVISORY. A short label the caller gave its agent. Recorded, never trusted. `agent_label` is accepted too.
   schemas:
+    ProfileSummary:
+      type: object
+      required: [profile_id, scope, owner_is_caller]
+      properties:
+        profile_id:
+          type: string
+        name:
+          type: [string, 'null']
+        scope:
+          type: string
+          enum: [ephemeral, user_private, org_shared, run_scoped]
+        owner_is_caller:
+          type: boolean
+          description: True when the caller owns the profile (WS17.P2).
+    ProfileList:
+      type: object
+      required: [profiles]
+      properties:
+        profiles:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProfileSummary'
+    ProfileCookieView:
+      type: object
+      description: One cookie with every attribute except its value.
+      required: [name, domain, path, secure, http_only, session, value_len, value]
+      properties:
+        name:
+          type: string
+        domain:
+          type: string
+        path:
+          type: string
+        secure:
+          type: boolean
+        http_only:
+          type: boolean
+        session:
+          type: boolean
+          description: True for a session cookie (no expiry).
+        expires:
+          type: [string, 'null']
+          format: date-time
+        same_site:
+          type: [string, 'null']
+          enum: [strict, lax, none, null]
+          description: SameSite attribute. Null on a snapshot written before capture v2 (WS17.C1).
+        value_len:
+          type: integer
+          minimum: 0
+          description: Length of the stored value in bytes.
+        value:
+          type: 'null'
+          description: Always null. A cookie value is never returned.
+    ProfileOriginView:
+      type: object
+      required: [origin, idb_databases, idb_rows]
+      properties:
+        origin:
+          type: string
+        idb_databases:
+          type: array
+          items:
+            type: string
+        idb_rows:
+          type: integer
+          minimum: 0
+          description: Row count only. No key and no value.
+        local_storage_count:
+          type: integer
+          minimum: 0
+          description: Web storage entries of this origin (capture v2; 0 on a legacy snapshot).
+        session_storage_count:
+          type: integer
+          minimum: 0
+        truncated:
+          type: boolean
+          description: The capture cut this origin short (a size cap or the time budget).
+    ProfileView:
+      type: object
+      description: The redacted snapshot (WS17.P0). Shapes and counts only, never a secret value.
+      required: [cookies, local_storage_count, session_storage_count, origins, has_user_agent, has_viewport, truncated]
+      properties:
+        cookies:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProfileCookieView'
+        local_storage_count:
+          type: integer
+          minimum: 0
+        session_storage_count:
+          type: integer
+          minimum: 0
+        origins:
+          type: array
+          description: One entry per origin with IndexedDB or (capture v2) web storage. A legacy snapshot lists IndexedDB origins only.
+          items:
+            $ref: '#/components/schemas/ProfileOriginView'
+        locale:
+          type: [string, 'null']
+        timezone:
+          type: [string, 'null']
+        has_user_agent:
+          type: boolean
+        has_viewport:
+          type: boolean
+        truncated:
+          type: boolean
+          description: A capture cut at least one origin short (capture v2). False on a legacy snapshot.
+    ProfileDetail:
+      description: The data of GET /v1/profiles/{profile_id}. The ProfileView fields are flattened in beside these.
+      allOf:
+        - $ref: '#/components/schemas/ProfileView'
+        - type: object
+          required: [profile_id, scope, owner_is_caller]
+          properties:
+            profile_id:
+              type: string
+            name:
+              type: [string, 'null']
+            scope:
+              type: string
+            owner_is_caller:
+              type: boolean
+    ProfileRestoreProbe:
+      type: object
+      required: [profile_id, scope, url, restorable, cookies_count, cookies_expired, origins_count, owner_is_caller]
+      properties:
+        profile_id:
+          type: string
+        name:
+          type: [string, 'null']
+        scope:
+          type: string
+        url:
+          type: string
+        restorable:
+          type: boolean
+          description: True when a cookie has not expired (a session cookie counts) or any storage is present.
+        cookies_count:
+          type: integer
+          minimum: 0
+        local_storage_count:
+          type: integer
+          minimum: 0
+        session_storage_count:
+          type: integer
+          minimum: 0
+        indexed_db_count:
+          type: integer
+          minimum: 0
+        earliest_expiry:
+          type: [string, 'null']
+          format: date-time
+          description: The nearest expiry among cookies that have not expired yet.
+        cookies_expired:
+          type: integer
+          minimum: 0
+        origins_count:
+          type: integer
+          minimum: 0
+        has_user_agent:
+          type: boolean
+        has_viewport:
+          type: boolean
+        locale:
+          type: [string, 'null']
+        timezone:
+          type: [string, 'null']
+        owner_is_caller:
+          type: boolean
     ResponseMeta:
       type: object
       required:
