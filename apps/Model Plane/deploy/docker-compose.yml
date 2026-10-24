@@ -944,6 +944,11 @@ services:
       # Azure deployment name to its base model (e.g. prod-chat=gpt-5-mini).
       INFERENCE_CORE_OPENAI_REASONING_EFFORT: ${INFERENCE_CORE_OPENAI_REASONING_EFFORT:-false}
       INFERENCE_CORE_ANTHROPIC_ADAPTIVE_THINKING: ${INFERENCE_CORE_ANTHROPIC_ADAPTIVE_THINKING:-false}
+      # WS10-S3: model entitlement PEP. off | shadow | enforce; unset or empty means off, an unknown value means
+      # enforce (this switch guards access). Needs the org-core address and the inference-core service token.
+      MODEL_ENTITLEMENT_MODE: ${MODEL_ENTITLEMENT_MODE:-off}
+      ORG_CORE_URL: ${ORG_CORE_URL:-http://org-core:8080}
+      INFERENCE_ORG_CORE_SERVICE_TOKEN: ${INFERENCE_ORG_CORE_SERVICE_TOKEN:-}
       # WS02-S9: tiered Anthropic system blocks (Stable, Context, per-turn). Only the
       # literal true enables it; ZDR requests never take the tiered form.
       INFERENCE_ANTHROPIC_TIERED_SYSTEM: ${INFERENCE_ANTHROPIC_TIERED_SYSTEM:-false}
