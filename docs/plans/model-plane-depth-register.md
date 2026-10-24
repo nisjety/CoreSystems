@@ -832,6 +832,21 @@ Built so far (batches B01 to B07): WS01-S0, WS01-S1 (partial), WS01-S6; WS02-S1,
 | D1-631 | WS07-S3 | live-proof | P1 | Full pnpm lint failing set diffed against HEAD was not run; only the touched files were linted, and they are clean. | open |
 | D1-632 | WS07-S3 | follow-up | P3 | 13 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-20.json | open |
 
+
+### Wave-mode batch W1-21 (2026-10-24)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D1-633 | WS08-S4.code | live-proof | P1 | Needed before switch-on: the 2-image Ask turn through the real inference-core vision adapters (Azure/OpenAI and Anthropic) is unproven. The chain test only checks the InferRequest the gateway sends to a scripted provider. | open |
+| D1-634 | WS08-S4.code | risk | P1 | The client gate is a build-time VITE switch that mirrors the server switch. If the two drift, either images are blocked that the diversion would serve, or images reach a server that falls back to AnalyzeImage. A server-declared attachment_policy.modes.vision_as_parts in /v1/models (http_routes.rs, WS10 shares it) would remove the drift. | open |
+| D1-635 | WS08-S4.code | risk | P1 | The vision route check uses the unfiltered inference-core ListModels. It does not apply the org's model-access policy or the user's picked provider, so a vision model the org cannot use can make a Verevon mode look image-capable. inference-core's server-side vision_unsupported refusal is the safety net. | open |
+| D1-636 | WS08-S4.code | risk | P1 | route_reads_images uses the unfiltered inference-core ListModels. It ignores org model-access policy and the user's provider pick, so a Verevon mode can look image-capable when the org cannot use any vision model. inference-core's vision_unsupported refusal is the only safety net and would fail the turn instead of falling back to the diversion. | open |
+| D1-637 | WS08-S4.code | live-proof | P1 | Live proof not done (docker, lead only): rebuild model-gateway, inference-core and the BFF with CHAT_VISION_AS_PARTS_ENABLED=true and VITE_CHAT_VISION_AS_PARTS_ENABLED=true. Run a 2-image Ask turn on verevon-balance and on an explicit Anthropic model with a tool follow-up. Confirm SSE chunk/usage/done, a text-only persisted user message, and a non-ZDR session-core run row. Confirm a Do turn with an image gets attachment_do_unsupported, and a Temporary chat (ZDR) gets the typed refusal. Then flip the compose default. | open |
+| D1-638 | WS08-S4.code | live-proof | P1 | Shared-file edits left to the lead: CHAT_VISION_AS_PARTS_ENABLED pass-through in Model Plane deploy/docker-compose.yml (default unset). Frontend docker-compose.yml, .env.example and vite-env.d.ts need VITE_CHAT_VISION_AS_PARTS_ENABLED. Optionally replace the #[path] module declaration in vision.rs with pub mod vision_parts; in lib.rs. | open |
+| D1-639 | WS08-S4.code | live-proof | P1 | Plan's golden rows (Ask, image, ZDR/waived/persistent) in zdr_posture_matrix.rs and zdr-posture-matrix.json were not added. The implementer argues the matrix enumerates postures, not features, and zdr_feature_table.rs already pins image/ZDR refusal. The lead should accept or reject that. | open |
+| D1-640 | WS08-S4.code | live-proof | P1 | sse-event-taxonomy.md rows for attachment_do_unsupported were not added. The file is generated from ChatEvent variants and has no error-code section. | open |
+| D1-641 | WS08-S4.code | follow-up | P3 | 20 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-21.json | open |
+
 ## Wave 2 (WS13 to WS27)
 
 Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS27-S0, WS27-S1. Wave 2 is not started as a wave: these came in with Wave 1 batches because they were Wave 1 prerequisites.
@@ -1505,3 +1520,4 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS24-S1 | data-loss, zdr | W2-16 | no |
 | WS19-S6 | authority, auth, audit, zdr | W2-16 | no |
 | WS24-S1 | data-loss, zdr | W2-16 | no |
+| WS08-S4.code | zdr, policy | W1-21 | no |
