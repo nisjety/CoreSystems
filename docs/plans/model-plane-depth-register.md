@@ -1247,6 +1247,21 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D2-341 | WS24-S0 | test-gap | P2 | The golden's parser reads only `name: ` literal lines inside the three offer functions, so a tool added through a helper or a non-literal expression not in resolve_constant escapes detection, although the header says a new offered tool fails the test; add a runtime count check against the assembled offer lists or document the gap. | open |
 | D2-342 | WS24-S0 | follow-up | P3 | 2 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-13.json | open |
 
+
+### Wave-mode batch W2-14 (2026-10-24)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D2-343 | WS24-S5 | decision | P1 | org.mark_exported and org.acknowledge_deletion are still eligible for agents today (carried over from the existing allowlist) and need the Control-owner review DEC-25 requires before any agent calls them. | open |
+| D2-344 | WS24-S5 | decision | P1 | org.mark_exported and org.acknowledge_deletion stay eligible (eligible: true) with executor {} per the plan's D5 rule, so the Control-owner review DEC-25 requires is still open before any agent path is wired. | open |
+| D2-345 | WS24-S5 | live-proof | P1 | The plan's CI-only evidence for the model-gateway every_ask_read test (a failing-then-passing mutation with a dummy id and a dummy Ask arm) has not been run; the lead or CI must close it. | open |
+| D2-346 | WS24-S5 | live-proof | P1 | pnpm build for the Frontend Plane was not run; the implementer left it to the lead. | open |
+| D2-347 | WS24-S5 | live-proof | P1 | Full pnpm lint exits 1 with 39 errors, all in files outside this slice (the Norwegian-text and bare-label rules); no lint message names a changed file, but a HEAD-vs-worktree diff of the failing set was not done. | open |
+| D2-348 | WS24-S5 | live-proof | P1 | The Control-owner review of org.mark_exported and org.acknowledge_deletion (DEC-25) is a human decision that only the lead or the owner can close. | open |
+| D2-349 | WS24-S5 | live-proof | P1 | bash scripts/tests/zdr-contract-sync.test.sh exits 1 with 22 failures in goldens this slice does not touch; they are pre-existing, but the lead should record the failing set against the main checkout. | open |
+| D2-350 | WS24-S5 | live-proof | P1 | Confirm the frontend build (pnpm build) before shipping; it was not run here. | open |
+| D2-351 | WS24-S5 | follow-up | P3 | 13 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-14.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
@@ -1366,3 +1381,4 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS07-S6 | policy, authority | W1-18 | no |
 | WS08-S7 | zdr, data-loss | W1-18 | no |
 | WS10-S7.code | policy, authority, audit, zdr | W1-18 | no |
+| WS24-S5 | authority, policy | W2-14 | no |
