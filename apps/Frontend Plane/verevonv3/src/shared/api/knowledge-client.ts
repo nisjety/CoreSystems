@@ -113,6 +113,27 @@ export interface CrawlRequest {
   maxPages?: number
   /** Phase 6 selective ingest: true = persist+embed; omitted = working-set only (default never). */
   ingest?: boolean
+  /** WS14.S6: link depth from the seed (the gateway caps it at 10). */
+  maxDepth?: number
+  /** WS14.S6: patterns a link must match (glob, or `re:` regular expression). */
+  includePaths?: string[]
+  /** WS14.S6: patterns that deny a link; they beat `includePaths`. */
+  excludePaths?: string[]
+  /** WS14.S3: follow links to subdomains of the seed host. Omitted = false. */
+  allowSubdomains?: boolean
+  /** WS14.S3: follow links to unrelated hosts. UI only; the gateway drops it for a Model proposal. */
+  allowExternalLinks?: boolean
+}
+
+/** WS14.S6: the scope a crawl runs with, echoed by the handoff (`effective`). */
+export interface CrawlEffectiveScope {
+  scopeMode: string
+  robots: string
+  maxPages: number
+  maxDepth: number
+  legacy: boolean
+  warnings: string[]
+  requestWarnings: { code: string; field: string }[]
 }
 
 /** A single page surfaced by `/crawl/discover` (quarry `/v1/map`). */
@@ -542,6 +563,12 @@ export async function startCrawl(
       // Phase 6 selective ingest: forward the resolved decision so the gateway
       // gates persistence (omitted → quarry default NEVER = working-set only).
       ...(body.ingest === undefined ? {} : { ingest: body.ingest }),
+      // WS14.S6: the scope options, sent only when the caller set them.
+      ...(body.maxDepth ? { maxDepth: body.maxDepth } : {}),
+      ...(body.includePaths?.length ? { includePaths: body.includePaths } : {}),
+      ...(body.excludePaths?.length ? { excludePaths: body.excludePaths } : {}),
+      ...(body.allowSubdomains === undefined ? {} : { allowSubdomains: body.allowSubdomains }),
+      ...(body.allowExternalLinks === undefined ? {} : { allowExternalLinks: body.allowExternalLinks }),
     }),
     headers: orgHeaders(orgId),
     signal,

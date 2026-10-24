@@ -580,6 +580,12 @@ const scrapeUrlInput = z.object({
 const crawlSiteInput = z.object({
   url: z.string().min(1),
   maxPages: z.number().int().positive().optional(),
+  // WS14.S6: the Model-visible scope subset. No external-links or robots key exists here
+  // (a test in the shared actions folder asserts it); the gateway drops them too.
+  maxDepth: z.number().int().positive().max(10).optional(),
+  includePaths: z.array(z.string().min(1).max(512)).max(100).optional(),
+  excludePaths: z.array(z.string().min(1).max(512)).max(100).optional(),
+  allowSubdomains: z.boolean().optional(),
 })
 
 const importSourceInput = z.object({

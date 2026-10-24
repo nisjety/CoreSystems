@@ -327,7 +327,10 @@ pub(super) async fn dispatch_crawl_site(
     // WS14.S3: the body goes through the knowledge route's normaliser, so the URL is checked
     // (SSRF) and the page bound clamped. The org id is not sent: the edge takes it from the
     // verified token. Ingest and the scope switches are forwarded when present.
-    let crawl_body = match crate::domains::knowledge::quarry::normalize_crawl_body(input) {
+    let crawl_body = match crate::domains::knowledge::quarry::normalize_crawl_body_for(
+        input,
+        crate::domains::knowledge::quarry::Surface::Model,
+    ) {
         Ok(body) => body,
         Err(message) => {
             return (

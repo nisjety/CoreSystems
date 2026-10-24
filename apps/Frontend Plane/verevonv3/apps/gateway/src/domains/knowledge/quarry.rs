@@ -698,7 +698,27 @@ fn invalid_crawl(message: String) -> Response {
         .into_response()
 }
 
+/// Who proposed a crawl. The UI may set every scope switch the page offers. A Model
+/// proposal (the `knowledge.crawl_site` action) may not set `allowExternalLinks`, and
+/// no robots key is forwarded from either surface (WS14.S6; the robots override is WS14.S7).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Surface {
+    Ui,
+    Model,
+}
+
+/// The caps the edge enforces again (CRAWL_SCOPE_ROBOTS.md section 12). Gateway and edge
+/// share these numbers; a test in each tree pins them.
+pub(crate) const CRAWL_MAX_DEPTH: u64 = 10;
+pub(crate) const CRAWL_MAX_PATTERNS: usize = 100;
+pub(crate) const CRAWL_MAX_PATTERN_CHARS: usize = 512;
+pub(crate) const CRAWL_MAX_PATTERN_TOTAL_CHARS: usize = 8_192;
+
 pub(crate) fn normalize_crawl_body(input: &Value) -> Result<Value, String> {
+    normalize_crawl_body_for(input, Surface::Ui)
+}
+
+pub(crate) fn normalize_crawl_body_for(input: &Value, surface: Surface) -> Result<Value, String> {
     let raw_url = input
         .get("url")
         .and_then(Value::as_str)
@@ -729,8 +749,37 @@ pub(crate) fn normalize_crawl_body(input: &Value) -> Result<Value, String> {
     if let Some(allow) = input.get("allowSubdomains").or_else(|| input.get("allow_subdomains")).and_then(Value::as_bool) {
         body["allow_subdomains"] = json!(allow);
     }
-    if let Some(allow) = input.get("allowExternalLinks").or_else(|| input.get("allow_external_links")).and_then(Value::as_bool) {
-        body["allow_external_links"] = json!(allow);
+    // The external-links switch is UI-only: a Model proposal never carries it.
+    if surface == Surface::Ui {
+        if let Some(allow) = input.get("allowExternalLinks").or_else(|| input.get("allow_external_links")).and_then(Value::as_bool) {
+            body["allow_external_links"] = json!(allow);
+        }
+    }
+    // WS14.S6: the depth bound (zero takes the default; the ceiling is 10) and the pattern
+    // lists, capped as the edge caps them.
+    if let Some(depth) = input.get("maxDepth").or_else(|| input.get("max_depth")).and_then(Value::as_u64) {
+        if depth > 0 {
+            body["max_depth"] = json!(depth.min(CRAWL_MAX_DEPTH));
+        }
+    }
+    let include = pattern_list(input, "includePaths", "include_paths")?;
+    let exclude = pattern_list(input, "excludePaths", "exclude_paths")?;
+    if include.len() + exclude.len() > CRAWL_MAX_PATTERNS {
+        return Err(format!(
+            "include and exclude patterns together are limited to {CRAWL_MAX_PATTERNS}."
+        ));
+    }
+    let total: usize = include.iter().chain(exclude.iter()).map(|p| p.chars().count()).sum();
+    if total > CRAWL_MAX_PATTERN_TOTAL_CHARS {
+        return Err(format!(
+            "patterns are limited to {CRAWL_MAX_PATTERN_TOTAL_CHARS} characters in total."
+        ));
+    }
+    if !include.is_empty() {
+        body["include_paths"] = json!(include);
+    }
+    if !exclude.is_empty() {
+        body["exclude_paths"] = json!(exclude);
     }
 
     Ok(body)
@@ -742,6 +791,36 @@ pub(crate) fn normalize_crawl_body(input: &Value) -> Result<Value, String> {
 /// entries are dropped, duplicates collapse, and the set is capped so one batch
 /// stays within quarry's body budget (it documents "a few hundred URLs"). Errors
 /// when nothing valid remains — we never hand quarry an empty batch.
+/// A list of crawl patterns from either spelling. Each entry is kept as sent, but may
+/// not be blank or longer than the per-pattern cap.
+fn pattern_list(input: &Value, camel: &str, snake: &str) -> Result<Vec<String>, String> {
+    let Some(raw) = input.get(camel).or_else(|| input.get(snake)) else {
+        return Ok(Vec::new());
+    };
+    if raw.is_null() {
+        return Ok(Vec::new());
+    }
+    let items = raw
+        .as_array()
+        .ok_or_else(|| format!("{snake} must be a list of patterns."))?;
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let text = item
+            .as_str()
+            .ok_or_else(|| format!("{snake} entries must be strings."))?;
+        if text.trim().is_empty() {
+            return Err(format!("{snake} entries must not be empty."));
+        }
+        if text.chars().count() > CRAWL_MAX_PATTERN_CHARS {
+            return Err(format!(
+                "{snake} entries are limited to {CRAWL_MAX_PATTERN_CHARS} characters."
+            ));
+        }
+        out.push(text.to_owned());
+    }
+    Ok(out)
+}
+
 fn normalize_batch_body(input: &Value) -> Result<Value, String> {
     const MAX_BATCH_URLS: usize = 200;
     let raw = input
@@ -1112,6 +1191,73 @@ mod tests {
         .unwrap();
         assert_eq!(snake["allow_subdomains"], json!(false));
         assert!(snake.get("allow_external_links").is_none());
+    }
+
+    /// WS14.S6: a Model proposal carries neither the external-links switch nor any robots key.
+    #[test]
+    fn model_surface_drops_external_and_robots_keys() {
+        let body = normalize_crawl_body_for(
+            &json!({
+                "url": "https://example.com/",
+                "allowExternalLinks": true,
+                "allow_external_links": true,
+                "ignoreRobots": true,
+                "ignore_robots_txt": true,
+                "robots_mode": "ignore",
+                "allowSubdomains": true,
+            }),
+            Surface::Model,
+        )
+        .unwrap();
+        assert!(body.get("allow_external_links").is_none());
+        assert!(body.as_object().unwrap().keys().all(|key| !key.contains("robot")));
+        assert_eq!(body["allow_subdomains"], json!(true));
+    }
+
+    #[test]
+    fn ui_surface_forwards_scope_fields() {
+        let body = normalize_crawl_body_for(
+            &json!({
+                "url": "https://example.com/",
+                "maxDepth": 99,
+                "includePaths": ["/docs/*"],
+                "excludePaths": ["re:^/blog/"],
+                "allowExternalLinks": true,
+            }),
+            Surface::Ui,
+        )
+        .unwrap();
+        assert_eq!(body["max_depth"], json!(CRAWL_MAX_DEPTH));
+        assert_eq!(body["include_paths"], json!(["/docs/*"]));
+        assert_eq!(body["exclude_paths"], json!(["re:^/blog/"]));
+        assert_eq!(body["allow_external_links"], json!(true));
+    }
+
+    /// The action path keeps the SSRF guard: a private-address seed is refused before the call.
+    #[test]
+    fn crawl_site_action_goes_through_the_ssrf_normalizer() {
+        assert!(normalize_crawl_body_for(&json!({ "url": "http://127.0.0.1/" }), Surface::Model).is_err());
+        assert!(normalize_crawl_body_for(&json!({ "url": "http://localhost/" }), Surface::Model).is_err());
+    }
+
+    #[test]
+    fn max_pages_is_clamped_on_the_action_path() {
+        let body = normalize_crawl_body_for(
+            &json!({ "url": "https://example.com/", "maxPages": 999_999 }),
+            Surface::Model,
+        )
+        .unwrap();
+        assert_eq!(body["max_pages"], json!(5_000));
+    }
+
+    #[test]
+    fn pattern_caps_match_the_edge_boundaries() {
+        let at_cap: Vec<String> = (0..CRAWL_MAX_PATTERNS).map(|i| format!("/p{i}")).collect();
+        assert!(normalize_crawl_body_for(&json!({ "url": "https://example.com/", "includePaths": at_cap }), Surface::Ui).is_ok());
+        let over: Vec<String> = (0..=CRAWL_MAX_PATTERNS).map(|i| format!("/p{i}")).collect();
+        assert!(normalize_crawl_body_for(&json!({ "url": "https://example.com/", "includePaths": over }), Surface::Ui).is_err());
+        let long = "a".repeat(CRAWL_MAX_PATTERN_CHARS + 1);
+        assert!(normalize_crawl_body_for(&json!({ "url": "https://example.com/", "includePaths": [long] }), Surface::Ui).is_err());
     }
 
     #[tokio::test]
