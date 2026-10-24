@@ -1299,7 +1299,7 @@ fn append_untrusted_tool_defs(
 ) {
     for tool in untrusted_tools {
         if tool.name.trim().is_empty()
-            || is_server_resolved_tool_name(&tool.name)
+            || crate::owner_actions::is_reserved(&tool.name)
             || is_browser_tool_name(&tool.name)
         {
             continue;
@@ -1312,33 +1312,25 @@ fn append_untrusted_tool_defs(
 
 // The only source permitted to add a reserved owner action is Capability
 // Core's run-bound resolver. Its client validates the signed Control view and
-// fixed schema before this helper sees a definition; this final exact-name
-// allowlist prevents a compromised catalog response from becoming a general
-// tool injection channel. A park resume (WS03 S8-6) derives its set through it too.
+// fixed schema before this helper sees a definition; this final pin check admits
+// only an action this build pins by exact name and parameters, so a compromised
+// catalog response cannot become a general tool injection channel. A park resume
+// (WS03 S8-6) derives its set through it too.
 pub(super) fn append_server_resolved_tool_defs(
     tools: &mut Vec<pb::ToolDefinition>,
     resolved_tools: &[pb::ToolDefinition],
 ) {
     for tool in resolved_tools {
-        if tool.name != crate::ticket_tools::TOOL_NAME
-            || tool.description.trim().is_empty()
-            || serde_json::from_str::<serde_json::Value>(&tool.parameters_json).is_err()
-        {
+        let Some(action) = crate::owner_actions::ServerResolvedAction::pinned(&tool.name) else {
+            continue;
+        };
+        if !action.admits(tool) {
             continue;
         }
         if !tools.iter().any(|existing| existing.name == tool.name) {
             tools.push(tool.clone());
         }
     }
-}
-
-// A Model-facing action that crosses an owner-plane boundary must not be
-// advertised merely because a caller can name it. `tickets.create` remains
-// absent until Capability Core, Control, and Conversation Core resolve a fresh
-// run-bound view. This is intentionally an exact identifier check: aliases and
-// near-matches have no executor binding and fail closed in capability policy.
-fn is_server_resolved_tool_name(name: &str) -> bool {
-    name.trim() == crate::ticket_tools::TOOL_NAME
 }
 
 /// Run-level driver for `req` with an explicit tool allowlist: plan transition →
@@ -8031,7 +8023,8 @@ mod tests {
             &[pb::ToolDefinition {
                 name: crate::ticket_tools::TOOL_NAME.to_owned(),
                 description: "Control-resolved ticket action".to_owned(),
-                parameters_json: r#"{"type":"object","required":["conversation_id"]}"#.to_owned(),
+                parameters_json: crate::ticket_tools::TICKET_CREATE_MODEL_PARAMETERS_JSON
+                    .to_owned(),
             }],
         );
         assert!(tools

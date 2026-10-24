@@ -81,7 +81,7 @@ pub fn evaluate_call(
 /// executor binding and fail closed separately.
 #[must_use]
 pub fn requires_durable_owner_approval(tool_name: &str) -> bool {
-    tool_name.trim() == crate::ticket_tools::TOOL_NAME
+    crate::owner_actions::requires_durable_approval(tool_name)
 }
 
 /// The autonomy rung a specific call requires.
