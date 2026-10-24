@@ -6,9 +6,9 @@
 //! The cancel registry, the queued-input registry and the stream/turn records are per process:
 //! the SSE connection pins a run to one replica, so a Stop or a queued message that lands on the
 //! other replica answers 404 and the producer runs to the end. The fix is to ask the owner. This
-//! module is only the seam: it carries a small message to whichever replica subscribed for a
-//! request id or a run id and brings the answer back. What the owner does with it (cancel, queue,
-//! probe) belongs to the slices that register the listeners.
+//! module is the seam (a small message to whichever replica subscribed for a request id or a run
+//! id, and the answer back) and the three things an owner does with it: stop the stream, take a
+//! queued message into its [`QueuedInputRegistry`], and say whether it is still producing.
 //!
 //! # Contract
 //!
@@ -42,6 +42,7 @@ use tracing::{info, warn};
 
 use crate::cancel_registry::CancelRegistry;
 use crate::gateway_metrics::{self, RunControlOutcome};
+use crate::queued_input::{EnqueueOutcome, QueuedInputRegistry};
 
 /// The switch that turns the bus on. Default off; only `true` enables it.
 pub const BUS_ENV: &str = "MODEL_GATEWAY_RUN_CONTROL_BUS";
@@ -719,6 +720,83 @@ impl RunControl {
 /// slow broker costs a Stop from the other replica, never the user's turn.
 const ATTACH_BUDGET: Duration = Duration::from_millis(250);
 
+/// Where a queued message found the stream it was aimed at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueueRoute {
+    /// This replica decided it (it owns the stream, or the message failed a bound that needs no
+    /// owner).
+    Local(EnqueueOutcome),
+    /// Another replica owns the stream and decided it.
+    Peer(EnqueueOutcome),
+    /// No stream of this caller is live anywhere: the same answer for ended, never ran and
+    /// somebody else's.
+    NoOwner,
+    /// The bus could not tell. The message may or may not have been queued, so the caller says
+    /// so (a retryable 503) and persists nothing.
+    Unavailable,
+}
+
+/// How long a probe answer is reused. The resume tail asks every 300 ms; a producer's liveness
+/// does not need to be fresher than this to decide whether silence is a dead stream.
+const PROBE_CACHE: Duration = Duration::from_secs(2);
+
+/// Whether the producer of a stream is still running, for the resume tail: on this replica, or
+/// (bus on) on another one, through a probe cached for [`PROBE_CACHE`]. Bound to the caller like
+/// everything else here.
+pub struct ProducerLiveness {
+    cancels: CancelRegistry,
+    control: RunControl,
+    request_id: String,
+    org_id: String,
+    user_id: String,
+    probed: Option<(tokio::time::Instant, bool)>,
+}
+
+impl ProducerLiveness {
+    #[must_use]
+    pub fn new(
+        cancels: CancelRegistry,
+        control: RunControl,
+        request_id: &str,
+        org_id: &str,
+        user_id: &str,
+    ) -> Self {
+        Self {
+            cancels,
+            control,
+            request_id: request_id.to_owned(),
+            org_id: org_id.to_owned(),
+            user_id: user_id.to_owned(),
+            probed: None,
+        }
+    }
+
+    /// The local registry answers first and costs nothing; only a stream that is not here is
+    /// probed, and a probe answer (live or not) is reused for [`PROBE_CACHE`].
+    pub async fn is_live(&mut self) -> bool {
+        if self
+            .cancels
+            .is_live_for(&self.request_id, &self.org_id, &self.user_id)
+        {
+            return true;
+        }
+        if !self.control.enabled() {
+            return false;
+        }
+        if let Some((at, live)) = self.probed {
+            if at.elapsed() < PROBE_CACHE {
+                return live;
+            }
+        }
+        let live = self
+            .control
+            .probe(&self.request_id, &self.org_id, &self.user_id)
+            .await;
+        self.probed = Some((tokio::time::Instant::now(), live));
+        live
+    }
+}
+
 /// Where a Stop found the stream it was aimed at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CancelRoute {
@@ -734,44 +812,86 @@ pub enum CancelRoute {
     Unavailable,
 }
 
-/// What the replica owning a stream does with a cancel: the stream's own flag by request id, or
-/// the flag of whichever of its streams produces the run. Every other op, and every id that is
-/// not this stream's, is "not here"; the registry itself checks the caller's org and user.
-fn cancel_owner(
+/// What the replica owning a stream does with a request: stop the stream by its request id or by
+/// the id of the run it produces, take a queued message for it, or say it is still producing.
+/// Every id that is not this stream's is "not here"; the registries themselves check the caller's
+/// org and user, so a stranger gets the answer a missing stream gets.
+fn stream_owner(
     cancels: CancelRegistry,
+    queued_inputs: QueuedInputRegistry,
     request_id: String,
     run_id: String,
 ) -> impl Fn(RunControlMsg) -> RunControlReply + Send + Sync + 'static {
-    move |msg| {
-        let stopped = match msg.op {
-            RunControlOp::Cancel if !msg.request_id.is_empty() => {
+    move |msg| match msg.op {
+        RunControlOp::Cancel => {
+            let stopped = if !msg.request_id.is_empty() {
                 msg.request_id == request_id
                     && cancels.cancel_for(&request_id, &msg.org_id, &msg.user_id)
-            }
-            RunControlOp::Cancel if !msg.run_id.is_empty() => {
+            } else if !msg.run_id.is_empty() {
                 msg.run_id == run_id && cancels.cancel_run_for(&run_id, &msg.org_id, &msg.user_id)
+            } else {
+                false
+            };
+            if stopped {
+                RunControlReply::found()
+            } else {
+                RunControlReply::not_found()
             }
-            _ => false,
-        };
-        if stopped {
-            RunControlReply::found()
-        } else {
-            RunControlReply::not_found()
         }
+        RunControlOp::Queue if msg.request_id == request_id => {
+            let outcome = queued_inputs.enqueue_checked(
+                &request_id,
+                &msg.org_id,
+                &msg.user_id,
+                msg.text.as_deref().unwrap_or_default(),
+                msg.claimed_thread_id.as_deref(),
+                &msg.op_id,
+            );
+            queue_reply(&outcome)
+        }
+        RunControlOp::Probe
+            if msg.request_id == request_id
+                && cancels.is_live_for(&request_id, &msg.org_id, &msg.user_id) =>
+        {
+            RunControlReply {
+                thread_id: queued_inputs.thread_for(&request_id, &msg.org_id, &msg.user_id),
+                ..RunControlReply::found()
+            }
+        }
+        _ => RunControlReply::not_found(),
+    }
+}
+
+/// The reply to a queue request: the outcome as the caller reads it back. `found` is false only
+/// when this caller has no stream here, which is what the caller turns into the 404.
+fn queue_reply(outcome: &EnqueueOutcome) -> RunControlReply {
+    match outcome {
+        EnqueueOutcome::NoActiveStream => RunControlReply::not_found(),
+        outcome => RunControlReply {
+            outcome: serde_json::to_string(outcome).ok(),
+            ..RunControlReply::found()
+        },
     }
 }
 
 impl RunControl {
     /// Make the stream `request_id` (producing `run_id`, when it has one) reachable from the other
-    /// replicas: subscribe to its request subjects and its run's cancel subject, and hand the
-    /// listener to its entry in `cancels`, so [`CancelRegistry::finish`] ends the subscription.
+    /// replicas: subscribe to its request subjects (cancel, queue, probe) and its run's cancel
+    /// subject, and hand the listener to its entry in `cancels`, so [`CancelRegistry::finish`]
+    /// ends the subscription.
     /// Call it right after the stream registers and before the client hears `connected`; a Stop
     /// can then never arrive at a stream nobody is listening for.
     ///
     /// Bounded by 250 ms and best effort: on a failure the stream runs as it did before, local
     /// only. Returns whether the stream is now reachable. With the bus off it does nothing, and
     /// a ZDR turn never gets here (it leaves for its direct stream before it registers).
-    pub async fn attach(&self, cancels: &CancelRegistry, request_id: &str, run_id: &str) -> bool {
+    pub async fn attach(
+        &self,
+        cancels: &CancelRegistry,
+        queued_inputs: &QueuedInputRegistry,
+        request_id: &str,
+        run_id: &str,
+    ) -> bool {
         if !self.enabled() {
             return false;
         }
@@ -786,7 +906,12 @@ impl RunControl {
                 subjects.push(subject);
             }
         }
-        let handler = cancel_owner(cancels.clone(), request_id.to_owned(), run_id.to_owned());
+        let handler = stream_owner(
+            cancels.clone(),
+            queued_inputs.clone(),
+            request_id.to_owned(),
+            run_id.to_owned(),
+        );
         match tokio::time::timeout(ATTACH_BUDGET, self.listen(&subjects, handler)).await {
             Ok(Ok(listener)) => cancels.attach_remote(request_id, listener),
             Ok(Err(error)) => {
@@ -865,6 +990,74 @@ impl RunControl {
         }
     }
 
+    /// Queue the message `msg` (built by [`crate::queued_input::bus_message`], which is the ZDR
+    /// and waived gate) for this caller's stream `msg.request_id`: here when this replica owns
+    /// it, otherwise ask the replica that does. The local registry wins, so a message queued on
+    /// the owner never touches the bus, and the text goes on the bus only for a stream that is not
+    /// here.
+    ///
+    /// One request that timed out is repeated once with the same `op_id`: the owner either never
+    /// got it or got it and lost the reply, and in both cases it queues the message exactly once.
+    pub async fn queue_input(
+        &self,
+        queued_inputs: &QueuedInputRegistry,
+        msg: &RunControlMsg,
+    ) -> QueueRoute {
+        let local = queued_inputs.enqueue_checked(
+            &msg.request_id,
+            &msg.org_id,
+            &msg.user_id,
+            msg.text.as_deref().unwrap_or_default(),
+            msg.claimed_thread_id.as_deref(),
+            &msg.op_id,
+        );
+        if local != EnqueueOutcome::NoActiveStream {
+            self.count_local(RunControlOp::Queue);
+            return QueueRoute::Local(local);
+        }
+        let Ok(subject) = RunControlSubject::request(&msg.request_id, RunControlOp::Queue) else {
+            return QueueRoute::NoOwner;
+        };
+        let mut result = self.request(&subject, msg).await;
+        if result == Err(RunControlError::Timeout) && !msg.op_id.is_empty() {
+            result = self.request(&subject, msg).await;
+        }
+        match result {
+            Ok(reply) if !reply.found => QueueRoute::NoOwner,
+            Ok(reply) => reply
+                .outcome
+                .and_then(|outcome| serde_json::from_str(&outcome).ok())
+                .map_or(QueueRoute::Unavailable, QueueRoute::Peer),
+            Err(
+                RunControlError::NoOwner
+                | RunControlError::Disabled
+                | RunControlError::InvalidSubject,
+            ) => QueueRoute::NoOwner,
+            // The message may be too long to put on the bus even though it passed the local
+            // bounds (the bounds count characters, the bus counts bytes).
+            Err(RunControlError::PayloadTooLarge) => QueueRoute::Local(EnqueueOutcome::TooLong {
+                chars: msg.text.as_deref().map_or(0, |text| text.trim().chars().count()),
+            }),
+            Err(
+                RunControlError::Timeout
+                | RunControlError::BadReply
+                | RunControlError::Unavailable(_),
+            ) => QueueRoute::Unavailable,
+        }
+    }
+
+    /// Whether the stream `request_id` of this caller is being produced on some other replica.
+    /// Any failure to learn that is "no": the resume tail then falls back to its inactivity
+    /// window, as it did before the bus existed.
+    async fn probe(&self, request_id: &str, org_id: &str, user_id: &str) -> bool {
+        let Ok(subject) = RunControlSubject::request(request_id, RunControlOp::Probe) else {
+            return false;
+        };
+        let mut msg = RunControlMsg::new(RunControlOp::Probe, org_id, user_id);
+        request_id.clone_into(&mut msg.request_id);
+        matches!(self.request(&subject, &msg).await, Ok(reply) if reply.found)
+    }
+
     /// Count a request this replica answered itself, so `run_control_requests_total` shows the
     /// local share next to the peer one. Counted only with the bus on: off must leave no trace.
     fn count_local(&self, op: RunControlOp) {
@@ -903,6 +1096,7 @@ async fn serve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::normalize::RetrievalScope;
 
     fn rc(hub: &LoopbackHub) -> RunControl {
         RunControl::loopback(hub.clone(), Duration::from_millis(200))
@@ -1286,7 +1480,7 @@ mod tests {
         let (owner, peer) = (rc(&hub), rc(&hub));
         let (owner_cancels, peer_cancels) = (CancelRegistry::new(), CancelRegistry::new());
         let flag = owner_cancels.register_run("req-1", "org-a", "user-a", "run-1");
-        assert!(owner.attach(&owner_cancels, "req-1", "run-1").await);
+        assert!(owner.attach(&owner_cancels, &QueuedInputRegistry::new(), "req-1", "run-1").await);
         assert_eq!(hub.lock().listeners.len(), 1);
 
         assert_eq!(
@@ -1312,14 +1506,14 @@ mod tests {
     async fn attach_with_the_bus_off_or_an_unsafe_id_subscribes_nothing() {
         let cancels = CancelRegistry::new();
         let _flag = cancels.register_run("req-1", "org-a", "user-a", "run-1");
-        assert!(!RunControl::off().attach(&cancels, "req-1", "run-1").await);
+        assert!(!RunControl::off().attach(&cancels, &QueuedInputRegistry::new(), "req-1", "run-1").await);
 
         let hub = LoopbackHub::new();
         let control = rc(&hub);
         let _flag = cancels.register("a.b", "org-a", "user-a");
-        assert!(!control.attach(&cancels, "a.b", "").await);
+        assert!(!control.attach(&cancels, &QueuedInputRegistry::new(), "a.b", "").await);
         // A run id that is no subject token costs only the run-keyed Stop.
-        assert!(control.attach(&cancels, "req-1", "run.1").await);
+        assert!(control.attach(&cancels, &QueuedInputRegistry::new(), "req-1", "run.1").await);
         assert_eq!(
             control
                 .cancel_run(&CancelRegistry::new(), "run.1", "org-a", "user-a")
@@ -1329,25 +1523,86 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_owner_answers_only_cancel_ops_for_its_own_ids() {
+    async fn the_owner_answers_only_for_its_own_ids() {
         let hub = LoopbackHub::new();
         let control = rc(&hub);
-        let cancels = CancelRegistry::new();
+        let (cancels, queued_inputs) = (CancelRegistry::new(), QueuedInputRegistry::new());
         let flag = cancels.register_run("req-1", "org-a", "user-a", "run-1");
-        assert!(control.attach(&cancels, "req-1", "run-1").await);
+        queued_inputs.register("req-1", "org-a", "user-a", "thread-1", false, RetrievalScope::Auto);
+        assert!(control.attach(&cancels, &queued_inputs, "req-1", "run-1").await);
 
-        // Queue and probe belong to later slices: this owner says "not here" to them.
-        for op in [RunControlOp::Queue, RunControlOp::Probe] {
+        // A message whose ids are not the stream's it was delivered for is not honoured, for any op.
+        for op in [RunControlOp::Cancel, RunControlOp::Queue, RunControlOp::Probe] {
             let mut msg = RunControlMsg::new(op, "org-a", "user-a");
-            msg.request_id = "req-1".into();
+            msg.request_id = "req-2".into();
+            msg.run_id = "run-2".into();
+            msg.text = Some("hello".into());
             let subject = RunControlSubject::request("req-1", op).expect("subject");
-            assert!(!control.request(&subject, &msg).await.expect("answered").found);
+            assert!(!control.request(&subject, &msg).await.expect("answered").found, "{op:?}");
         }
-        // A message whose ids are not the stream's it was delivered for is not honoured.
-        let mut msg = cancel_msg("req-2");
-        msg.run_id = "run-2".into();
-        let subject = RunControlSubject::request("req-1", RunControlOp::Cancel).expect("subject");
-        assert!(!control.request(&subject, &msg).await.expect("answered").found);
         assert!(!flag.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(queued_inputs.drain("req-1").is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_queued_message_reaches_the_owner_and_comes_back_as_its_outcome() {
+        let hub = LoopbackHub::new();
+        let (owner, peer) = (rc(&hub), rc(&hub));
+        let (owner_cancels, owner_queue) = (CancelRegistry::new(), QueuedInputRegistry::new());
+        let peer_queue = QueuedInputRegistry::new();
+        let _flag = owner_cancels.register_run("req-1", "org-a", "user-a", "run-1");
+        owner_queue.register("req-1", "org-a", "user-a", "thread-1", true, RetrievalScope::WebOnly);
+        assert!(owner.attach(&owner_cancels, &owner_queue, "req-1", "run-1").await);
+
+        let mut msg = RunControlMsg::new(RunControlOp::Queue, "org-a", "user-a");
+        msg.request_id = "req-1".into();
+        msg.op_id = "op-1".into();
+        msg.text = Some("  use EUR ".into());
+        let route = peer.queue_input(&peer_queue, &msg).await;
+        assert_eq!(
+            route,
+            QueueRoute::Peer(EnqueueOutcome::Queued {
+                pending: 1,
+                thread_id: "thread-1".into(),
+                conversation_only: true,
+                retrieval_scope: RetrievalScope::WebOnly,
+            })
+        );
+        assert_eq!(owner_queue.drain("req-1"), ["use EUR"]);
+        assert!(peer_queue.drain("req-1").is_empty(), "nothing is queued on the replica that asked");
+
+        // A stranger is told what a missing stream is told.
+        let mut stranger = msg.clone();
+        stranger.user_id = "user-b".into();
+        assert_eq!(peer.queue_input(&peer_queue, &stranger).await, QueueRoute::NoOwner);
+        assert!(owner_queue.drain("req-1").is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_probe_is_cached_and_asks_the_owner_only_when_the_stream_is_not_local() {
+        let hub = LoopbackHub::new();
+        let (owner, peer) = (rc(&hub), rc(&hub));
+        let (owner_cancels, owner_queue) = (CancelRegistry::new(), QueuedInputRegistry::new());
+        let peer_cancels = CancelRegistry::new();
+        let _flag = owner_cancels.register_run("req-1", "org-a", "user-a", "run-1");
+        owner_queue.register("req-1", "org-a", "user-a", "thread-1", false, RetrievalScope::Auto);
+        assert!(owner.attach(&owner_cancels, &owner_queue, "req-1", "run-1").await);
+
+        let mut stranger =
+            ProducerLiveness::new(peer_cancels.clone(), peer.clone(), "req-1", "org-b", "user-a");
+        assert!(!stranger.is_live().await, "another tenant's probe is the answer for no stream");
+
+        let mut remote = ProducerLiveness::new(peer_cancels, peer, "req-1", "org-a", "user-a");
+        assert!(remote.is_live().await);
+        // The owner finishes: the cached answer holds for two seconds, then the probe asks again.
+        owner_cancels.finish("req-1");
+        assert!(remote.is_live().await, "inside the cache window the answer is reused");
+        tokio::time::advance(PROBE_CACHE + Duration::from_millis(1)).await;
+        assert!(!remote.is_live().await);
+
+        // On the owner the local registry answers and nothing is probed.
+        let _flag = owner_cancels.register_run("req-1", "org-a", "user-a", "run-1");
+        let mut local = ProducerLiveness::new(owner_cancels, RunControl::off(), "req-1", "org-a", "user-a");
+        assert!(local.is_live().await);
     }
 }

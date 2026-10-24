@@ -54,7 +54,7 @@ use crate::{
     },
     gateway_metrics, normalize, rate_limit,
     readiness::GrpcReadiness,
-    run_control::{CancelRoute, RunControlStatus},
+    run_control::{CancelRoute, QueueRoute, RunControlStatus},
     session_flow, sse,
     state::AppState,
 };
@@ -8222,23 +8222,25 @@ struct QueueInputRequest {
 
 /// Deliver a message the user typed WHILE a run was streaming.
 ///
-/// Two things happen, in this order and for different reasons:
+/// Two things happen, in this order:
 ///
-/// 1. The message is persisted to the thread the *stream* is on. It exists
-///    because the user sent it, whether or not the run lives long enough to read
-///    it — and a reply to a message the transcript does not contain is a
-///    transcript that lies.
-/// 2. It is queued for the run's next tool-round boundary, where it arrives with
-///    the classify-and-continue pause (`queued_input`).
+/// 1. The message is queued for the run's next tool-round boundary, where it arrives with the
+///    classify-and-continue pause (`queued_input`). With the run-control bus on, a run that is
+///    streaming on another replica is asked to queue it, so the message lands wherever the user
+///    reached the gateway.
+/// 2. It is persisted to the thread the *stream* is on, so the transcript holds what the user
+///    said whether or not the run lives long enough to read it.
 ///
-/// Queueing first would risk the model answering a message that then failed to
-/// persist. Persisting first, at worst, records a message the run never saw —
-/// and the response says exactly that, so the client can resend it as an
-/// ordinary turn.
+/// The ledger (2026-08-24) says persist first; this handler has always queued first, and the
+/// reorder is the send-receipts slice (WS04-S6, decision D3). Until then a message that is
+/// queued and then fails to persist says so (`persisted: false`).
 ///
-/// The thread id comes from the stream's own registration, never from the
-/// request: a client that could name the thread could aim a message at a
-/// conversation it is not streaming.
+/// The thread id comes from the stream's own registration, never from the request: a client that
+/// could name the thread could aim a message at a conversation it is not streaming. A thread the
+/// client does claim is only compared with it, and refused before anything is queued.
+///
+/// Nothing leaves this replica before the ZDR and waived gate: `bus_message` is the only way the
+/// text reaches the bus, and it refuses those tokens again.
 async fn invoke_queue_input(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -8253,23 +8255,54 @@ async fn invoke_queue_input(
         return rejection.into_response();
     }
 
-    // A mismatched claim is refused BEFORE the enqueue. Refusing afterwards
-    // would leave a message that failed its authority check queued for delivery
-    // anyway — the model would read it and the ledger would not have it.
-    if let (Some(claimed), Some(streaming)) = (
-        body.thread_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|claimed| !claimed.is_empty()),
-        state
-            .queued_inputs
-            .thread_for(&request_id, &claims.org_id, &claims.user_id),
+    // One id for this attempt: a request repeated because its reply was lost is recognised by
+    // the owner and queues nothing twice.
+    let op_id = format!("{:016x}", rand::random::<u64>());
+    let msg = match crate::queued_input::bus_message(
+        &claims,
+        &request_id,
+        &body.content,
+        body.thread_id.as_deref(),
+        &op_id,
     ) {
-        if claimed != streaming {
+        Ok(msg) => msg,
+        Err(refusal) => return crate::zdr_posture::http(&refusal).into_response(),
+    };
+
+    // Ownership, the thread claim and the bounds are all decided before anything is written, so
+    // a refused message leaves no trace and a mismatched owner learns nothing about which runs
+    // exist (same 404 as an inactive stream — see `enqueue_checked`).
+    let outcome = match state.run_control.queue_input(&state.queued_inputs, &msg).await {
+        QueueRoute::Local(outcome) | QueueRoute::Peer(outcome) => outcome,
+        QueueRoute::NoOwner => EnqueueOutcome::NoActiveStream,
+        // Neither queued nor refused is known, so say so and persist nothing: the client retries.
+        QueueRoute::Unavailable => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "request_id": request_id,
+                    "queued": false,
+                    "error": "run_control_unavailable",
+                    "retryable": true,
+                })),
+            )
+                .into_response();
+        }
+    };
+    // `retrieval_scope` rides on `EnqueueOutcome::Queued` for parity with
+    // `conversation_only` (chat-wave2 scope spec §2.3's queued_input.rs
+    // note), but is not threaded into `append_queued_user_message` here: the
+    // in-flight stream already enforces it from its OWN `retrieval_scope`
+    // (computed once at stream start, see `sse.rs`), and a queued message's
+    // durable metadata is not part of this item's "shown in the receipt /
+    // reflected in citations" surface the way the turn's own persistence is.
+    let (pending, thread_id, conversation_only) = match outcome {
+        EnqueueOutcome::Queued { pending, thread_id, conversation_only, .. } => (pending, thread_id, conversation_only),
+        EnqueueOutcome::ThreadMismatch { streaming_thread_id } => {
             tracing::warn!(
                 %request_id,
-                %streaming,
-                %claimed,
+                streaming = %streaming_thread_id,
+                claimed = body.thread_id.as_deref().unwrap_or_default(),
                 "queued message named a thread other than the stream's; refusing"
             );
             return (
@@ -8282,26 +8315,6 @@ async fn invoke_queue_input(
             )
                 .into_response();
         }
-    }
-
-    // Ownership and bounds are decided before anything is written, so a refused
-    // message leaves no trace and a mismatched owner learns nothing about which
-    // runs exist (same 404 as an inactive stream — see `enqueue_for`).
-    let outcome = state.queued_inputs.enqueue_for(
-        &request_id,
-        &claims.org_id,
-        &claims.user_id,
-        &body.content,
-    );
-    // `retrieval_scope` rides on `EnqueueOutcome::Queued` for parity with
-    // `conversation_only` (chat-wave2 scope spec §2.3's queued_input.rs
-    // note), but is not threaded into `append_queued_user_message` here: the
-    // in-flight stream already enforces it from its OWN `retrieval_scope`
-    // (computed once at stream start, see `sse.rs`), and a queued message's
-    // durable metadata is not part of this item's "shown in the receipt /
-    // reflected in citations" surface the way the turn's own persistence is.
-    let (pending, thread_id, conversation_only) = match outcome {
-        EnqueueOutcome::Queued { pending, thread_id, conversation_only, .. } => (pending, thread_id, conversation_only),
         EnqueueOutcome::NoActiveStream => {
             return (
                 StatusCode::NOT_FOUND,
@@ -11905,7 +11918,7 @@ mod run_owner_publish_tests {
             .register_run("req-owned", "org-owner", "user-owner", "run-owned");
         owner
             .run_control
-            .attach(&owner.cancels, "req-owned", "run-owned")
+            .attach(&owner.cancels, &owner.queued_inputs, "req-owned", "run-owned")
             .await;
 
         let lines = CancelLines::default();

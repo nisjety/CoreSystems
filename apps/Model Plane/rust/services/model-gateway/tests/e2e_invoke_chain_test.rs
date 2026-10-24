@@ -7136,11 +7136,13 @@ async fn run_note_thread_turn_capturing(
             }
             // `{stream ULID}-{call id}-source-review-{hash}`.
             let request_id = review_id.split('-').next().expect("a review request id");
-            *enqueued = Some(queue.get().expect("the state exists").enqueue_for(
+            *enqueued = Some(queue.get().expect("the state exists").enqueue_checked(
                 request_id,
                 "org_placeholder",
                 "user_placeholder",
                 &text,
+                None,
+                "",
             ));
         }) as SourceReviewHook
     });

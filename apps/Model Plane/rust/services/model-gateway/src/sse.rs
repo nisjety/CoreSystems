@@ -59,13 +59,25 @@ pub struct SseChunk {
 /// meant the eleventh exit path would leak whichever one its author forgot, and
 /// a leaked queue entry accepts a message no loop will ever drain: the user is
 /// told their message was delivered and it never arrives.
+///
+/// A message that was accepted but never taken by the loop (the run ended between two
+/// round boundaries) is the same lie told once, so it is counted and logged here, by count
+/// only: the text is the user's.
 fn finish_stream_registrations(
     cancels: &crate::cancel_registry::CancelRegistry,
     queued_inputs: &crate::queued_input::QueuedInputRegistry,
     request_id: &str,
 ) {
     cancels.finish(request_id);
-    queued_inputs.finish(request_id);
+    let undelivered = queued_inputs.finish(request_id);
+    if undelivered > 0 {
+        metrics::counter!("queued_input_undelivered_total").increment(undelivered as u64);
+        tracing::warn!(
+            %request_id,
+            undelivered,
+            "the run ended with queued messages the loop never took"
+        );
+    }
 }
 
 #[allow(clippy::result_large_err)]
@@ -2144,10 +2156,10 @@ pub async fn invoke_stream_sse(
     let cancel_flag = cancels.register_run(&request_id, &org_id, &user_id, &session_run.run_id);
     // A Stop that lands on another replica reaches this stream over the run-control bus; the
     // subscription is in place before `connected`. Nothing happens with the bus off.
-    state.run_control.attach(&cancels, &request_id, &session_run.run_id).await;
+    state.run_control.attach(&cancels, &state.queued_inputs, &request_id, &session_run.run_id).await;
     // Accept mid-run input for this stream. The thread id is recorded HERE, from
     // the prepared run, so the enqueue endpoint never has to trust a
-    // client-supplied thread — see `queued_input::enqueue_for`.
+    // client-supplied thread — see `queued_input::enqueue_checked`.
     let queued_inputs = state.queued_inputs.clone();
     queued_inputs.register(&request_id, &org_id, &user_id, &session_run.thread_id, conversation_only, retrieval_scope);
 
@@ -7505,17 +7517,20 @@ pub async fn invoke_resume_sse(
         .stream_buffers
         .replay_after(&buffer_key, after_seq)
         .await;
-    // Whether the ORIGINAL producer is still running in this process, bound to
-    // the same verified caller as the buffer key. A stream that has buffered
-    // nothing yet — a first tool call, source review or repair can run for a
+    // Whether the ORIGINAL producer is still running, in this process or (run-control bus on)
+    // on another replica, bound to the same verified caller as the buffer key. A stream that
+    // has buffered nothing yet — a first tool call, source review or repair can run for a
     // long time before its first progress frame — is still resumable while its
     // producer runs. Answering 404 there told a reloaded browser its answer was
     // gone while the server went on to publish it.
-    let cancels = state.cancels.clone();
-    let (live_org, live_user) = (claims.org_id.clone(), claims.user_id.clone());
-    let live_request = request_id.clone();
-    let producer_live = move || cancels.is_live_for(&live_request, &live_org, &live_user);
-    if !replay.found && !producer_live() {
+    let mut producer_live = crate::run_control::ProducerLiveness::new(
+        state.cancels.clone(),
+        state.run_control.clone(),
+        &request_id,
+        &claims.org_id,
+        &claims.user_id,
+    );
+    if !replay.found && !producer_live.is_live().await {
         return Err((
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "stream not resumable; restart the request" })),
@@ -7580,14 +7595,15 @@ pub async fn invoke_resume_sse(
         let is_terminal = |frame: &crate::stream_buffer::BufferedEvent| {
             matches!(frame.event.as_str(), "error" | "stopped")
         };
-        let mut terminal_at: Option<std::time::Instant> = None;
+        // Tokio's clock, so the windows below can be run on a paused one in tests.
+        let mut terminal_at: Option<tokio::time::Instant> = None;
 
         // Highest seq forwarded so far — the cursor for the tail below.
         let mut cursor = after_seq;
         for frame in replay.deltas {
             cursor = Some(cursor.map_or(frame.seq, |c| c.max(frame.seq)));
             if is_terminal(&frame) {
-                terminal_at.get_or_insert_with(std::time::Instant::now);
+                terminal_at.get_or_insert_with(tokio::time::Instant::now);
             }
             if send_frame(frame).await.is_err() {
                 return;
@@ -7622,8 +7638,8 @@ pub async fn invoke_resume_sse(
         const TAIL_INACTIVITY_LIMIT: std::time::Duration = std::time::Duration::from_secs(120);
         const TAIL_MAX: std::time::Duration = std::time::Duration::from_secs(15 * 60);
         const TERMINAL_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
-        let tail_started = std::time::Instant::now();
-        let mut last_progress = std::time::Instant::now();
+        let tail_started = tokio::time::Instant::now();
+        let mut last_progress = tokio::time::Instant::now();
         loop {
             tokio::time::sleep(TAIL_POLL).await;
             if tx.is_closed() {
@@ -7631,13 +7647,13 @@ pub async fn invoke_resume_sse(
             }
             // Sampled BEFORE the read: a producer seen finished here wrote its
             // last frame before it unregistered, so the read below has it.
-            let live = producer_live();
+            let live = producer_live.is_live().await;
             let tail = buffers.replay_after(&tail_key, cursor).await;
             for frame in tail.deltas {
                 cursor = Some(cursor.map_or(frame.seq, |c| c.max(frame.seq)));
-                last_progress = std::time::Instant::now();
+                last_progress = tokio::time::Instant::now();
                 if is_terminal(&frame) {
-                    terminal_at.get_or_insert_with(std::time::Instant::now);
+                    terminal_at.get_or_insert_with(tokio::time::Instant::now);
                 }
                 if send_frame(frame).await.is_err() {
                     return;
