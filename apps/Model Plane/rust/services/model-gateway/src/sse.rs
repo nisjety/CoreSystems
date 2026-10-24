@@ -6051,11 +6051,12 @@ async fn fetch_skill_context(
     // §G7 read path: pull this org's LEARNED skills (session-core agent_skills)
     // into the match cache, re-pulling once the cached copy goes stale so an
     // operator's edit or deletion lands without a gateway restart.
-    if !state.skills.is_org_loaded(org_id) {
+    if !state.skills.is_loaded(org_id, user_id) {
         if let Ok(request) = authenticated_session_request(
             ListAgentSkillsRequest {
                 org_id: org_id.to_owned(),
                 enabled_only: true,
+                for_user_id: String::new(),
             },
             bearer,
         ) {
@@ -6065,26 +6066,17 @@ async fn fetch_skill_context(
                 .list_agent_skills(request)
                 .await
             {
-                Ok(resp) => {
-                    let pulled = resp.into_inner().skills;
-                    // Ownership (SKILL-1) rides alongside the match cache: computed
-                    // from the same pull, before `pulled` is consumed below.
-                    state.ownership.replace_org_kind(
-                        org_id,
-                        crate::ownership::KIND_SKILL,
-                        crate::skills::skill_ownership_entries(&pulled),
-                    );
-                    // replace_learned, not a bare upsert loop: on a re-pull the
-                    // cache must also FORGET skills the operator deleted, or a
-                    // removed skill keeps steering answers indefinitely.
-                    state.skills.replace_learned(
-                        org_id,
-                        pulled
-                            .into_iter()
-                            .map(crate::skills::agent_skill_to_skill)
-                            .collect(),
-                    );
-                }
+                // refresh_learned, not a bare upsert loop: on a re-pull the
+                // cache must also FORGET skills the operator deleted, or a
+                // removed skill keeps steering answers indefinitely. The pull is
+                // this caller's, so it replaces only this caller's share, and
+                // ownership (SKILL-1) is recorded from the same pull.
+                Ok(resp) => state.skills.refresh_learned(
+                    &state.ownership,
+                    org_id,
+                    user_id,
+                    resp.into_inner().skills,
+                ),
                 Err(error) => {
                     tracing::warn!(%error, %org_id, "list_agent_skills failed; matching disk-loaded skills only");
                 }

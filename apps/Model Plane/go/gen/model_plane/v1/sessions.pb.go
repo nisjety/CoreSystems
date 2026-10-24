@@ -3299,9 +3299,23 @@ type UpsertAgentSkillRequest struct {
 	Enabled             bool                   `protobuf:"varint,8,opt,name=enabled,proto3" json:"enabled,omitempty"`
 	// Provenance: "user" or "background_review". A background_review upsert
 	// must never overwrite a user-authored skill (enforced server-side).
-	Origin        string `protobuf:"bytes,9,opt,name=origin,proto3" json:"origin,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Origin string `protobuf:"bytes,9,opt,name=origin,proto3" json:"origin,omitempty"`
+	// Ownership and review (WS07 S7). For origin "background_review" session-core
+	// ignores `scope`, `owner_user_id`, `review_state` and `enabled` and writes a
+	// disabled, user-scoped, "proposed" row owned by the caller's `owner_user_id`
+	// (required: a learned skill without an owner is refused). For origin "user"
+	// an empty `scope` is "org" and `review_state` is ignored (a human write is
+	// "accepted").
+	Scope       string `protobuf:"bytes,10,opt,name=scope,proto3" json:"scope,omitempty"`
+	OwnerUserId string `protobuf:"bytes,11,opt,name=owner_user_id,json=ownerUserId,proto3" json:"owner_user_id,omitempty"`
+	ReviewState string `protobuf:"bytes,12,opt,name=review_state,json=reviewState,proto3" json:"review_state,omitempty"`
+	// The run and thread the proposal was distilled from, and the reviewer's
+	// reason for proposing it (at most 300 characters). Provenance only.
+	SourceRunId    string `protobuf:"bytes,13,opt,name=source_run_id,json=sourceRunId,proto3" json:"source_run_id,omitempty"`
+	SourceThreadId string `protobuf:"bytes,14,opt,name=source_thread_id,json=sourceThreadId,proto3" json:"source_thread_id,omitempty"`
+	ProposalReason string `protobuf:"bytes,15,opt,name=proposal_reason,json=proposalReason,proto3" json:"proposal_reason,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *UpsertAgentSkillRequest) Reset() {
@@ -3397,6 +3411,48 @@ func (x *UpsertAgentSkillRequest) GetOrigin() string {
 	return ""
 }
 
+func (x *UpsertAgentSkillRequest) GetScope() string {
+	if x != nil {
+		return x.Scope
+	}
+	return ""
+}
+
+func (x *UpsertAgentSkillRequest) GetOwnerUserId() string {
+	if x != nil {
+		return x.OwnerUserId
+	}
+	return ""
+}
+
+func (x *UpsertAgentSkillRequest) GetReviewState() string {
+	if x != nil {
+		return x.ReviewState
+	}
+	return ""
+}
+
+func (x *UpsertAgentSkillRequest) GetSourceRunId() string {
+	if x != nil {
+		return x.SourceRunId
+	}
+	return ""
+}
+
+func (x *UpsertAgentSkillRequest) GetSourceThreadId() string {
+	if x != nil {
+		return x.SourceThreadId
+	}
+	return ""
+}
+
+func (x *UpsertAgentSkillRequest) GetProposalReason() string {
+	if x != nil {
+		return x.ProposalReason
+	}
+	return ""
+}
+
 type UpsertAgentSkillResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The skill row id (ULID for inserts; existing id on update).
@@ -3406,8 +3462,15 @@ type UpsertAgentSkillResponse struct {
 	// True if the write was suppressed because the target is a protected
 	// user-authored skill (no error — the loop simply yields to the human).
 	SkippedProtected bool `protobuf:"varint,3,opt,name=skipped_protected,json=skippedProtected,proto3" json:"skipped_protected,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// Why nothing was written, as a closed token: "memory_state",
+	// "org_policy", "zdr", "protected", "accepted_exists", "rejected_exists",
+	// "owner_required". Empty when the write happened.
+	SkipReason string `protobuf:"bytes,4,opt,name=skip_reason,json=skipReason,proto3" json:"skip_reason,omitempty"`
+	// The row's revision after the write. Reserved for the revision ledger (S8);
+	// 0 until then.
+	Revision      int64 `protobuf:"varint,5,opt,name=revision,proto3" json:"revision,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *UpsertAgentSkillResponse) Reset() {
@@ -3461,13 +3524,31 @@ func (x *UpsertAgentSkillResponse) GetSkippedProtected() bool {
 	return false
 }
 
+func (x *UpsertAgentSkillResponse) GetSkipReason() string {
+	if x != nil {
+		return x.SkipReason
+	}
+	return ""
+}
+
+func (x *UpsertAgentSkillResponse) GetRevision() int64 {
+	if x != nil {
+		return x.Revision
+	}
+	return 0
+}
+
 type ListAgentSkillsRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Required. Only this org's skills are returned (per-org isolation).
 	OrgId string `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
 	// When true, only enabled skills are returned (the gateway match-cache wants
 	// active skills only); when false, all of the org's skills are returned.
-	EnabledOnly   bool `protobuf:"varint,2,opt,name=enabled_only,json=enabledOnly,proto3" json:"enabled_only,omitempty"`
+	EnabledOnly bool `protobuf:"varint,2,opt,name=enabled_only,json=enabledOnly,proto3" json:"enabled_only,omitempty"`
+	// List as this user instead of as the caller. Honoured only for a service
+	// caller (a user caller is always listed as itself), so the learning review
+	// can see the existing skills of the user whose run it is reviewing.
+	ForUserId     string `protobuf:"bytes,3,opt,name=for_user_id,json=forUserId,proto3" json:"for_user_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3516,6 +3597,13 @@ func (x *ListAgentSkillsRequest) GetEnabledOnly() bool {
 	return false
 }
 
+func (x *ListAgentSkillsRequest) GetForUserId() string {
+	if x != nil {
+		return x.ForUserId
+	}
+	return ""
+}
+
 type AgentSkill struct {
 	state               protoimpl.MessageState `protogen:"open.v1"`
 	Id                  string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
@@ -3531,9 +3619,20 @@ type AgentSkill struct {
 	// Ownership/sharing (SKILL-1): mirrors mcp_servers' scope + owner +
 	// explicit-share shape. "org" (default) or "user"; owner_user_id and
 	// shared_with are meaningful only when scope == "user".
-	Scope         string   `protobuf:"bytes,10,opt,name=scope,proto3" json:"scope,omitempty"`
-	OwnerUserId   string   `protobuf:"bytes,11,opt,name=owner_user_id,json=ownerUserId,proto3" json:"owner_user_id,omitempty"`
-	SharedWith    []string `protobuf:"bytes,12,rep,name=shared_with,json=sharedWith,proto3" json:"shared_with,omitempty"`
+	Scope       string   `protobuf:"bytes,10,opt,name=scope,proto3" json:"scope,omitempty"`
+	OwnerUserId string   `protobuf:"bytes,11,opt,name=owner_user_id,json=ownerUserId,proto3" json:"owner_user_id,omitempty"`
+	SharedWith  []string `protobuf:"bytes,12,rep,name=shared_with,json=sharedWith,proto3" json:"shared_with,omitempty"`
+	// Review (WS07 S7): "proposed" (a learned skill awaiting its owner's
+	// decision), "accepted" or "rejected". Only an accepted skill is ever
+	// injected or matched.
+	ReviewState    string `protobuf:"bytes,13,opt,name=review_state,json=reviewState,proto3" json:"review_state,omitempty"`
+	SourceRunId    string `protobuf:"bytes,14,opt,name=source_run_id,json=sourceRunId,proto3" json:"source_run_id,omitempty"`
+	SourceThreadId string `protobuf:"bytes,15,opt,name=source_thread_id,json=sourceThreadId,proto3" json:"source_thread_id,omitempty"`
+	ProposalReason string `protobuf:"bytes,16,opt,name=proposal_reason,json=proposalReason,proto3" json:"proposal_reason,omitempty"`
+	// RFC 3339, UTC.
+	UpdatedAt string `protobuf:"bytes,17,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
+	// Reserved for the revision ledger (S8); 0 until then.
+	Revision      int64 `protobuf:"varint,18,opt,name=revision,proto3" json:"revision,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3650,6 +3749,48 @@ func (x *AgentSkill) GetSharedWith() []string {
 		return x.SharedWith
 	}
 	return nil
+}
+
+func (x *AgentSkill) GetReviewState() string {
+	if x != nil {
+		return x.ReviewState
+	}
+	return ""
+}
+
+func (x *AgentSkill) GetSourceRunId() string {
+	if x != nil {
+		return x.SourceRunId
+	}
+	return ""
+}
+
+func (x *AgentSkill) GetSourceThreadId() string {
+	if x != nil {
+		return x.SourceThreadId
+	}
+	return ""
+}
+
+func (x *AgentSkill) GetProposalReason() string {
+	if x != nil {
+		return x.ProposalReason
+	}
+	return ""
+}
+
+func (x *AgentSkill) GetUpdatedAt() string {
+	if x != nil {
+		return x.UpdatedAt
+	}
+	return ""
+}
+
+func (x *AgentSkill) GetRevision() int64 {
+	if x != nil {
+		return x.Revision
+	}
+	return 0
 }
 
 type ListAgentSkillsResponse struct {
@@ -7039,7 +7180,7 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\x06reason\x18\x04 \x01(\tR\x06reason\"R\n" +
 	"\x1cSetAgentSkillEnabledResponse\x12\x18\n" +
 	"\aupdated\x18\x01 \x01(\bR\aupdated\x12\x18\n" +
-	"\aenabled\x18\x02 \x01(\bR\aenabled\"\xbe\x02\n" +
+	"\aenabled\x18\x02 \x01(\bR\aenabled\"\x92\x04\n" +
 	"\x17UpsertAgentSkillRequest\x12\x15\n" +
 	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12 \n" +
@@ -7049,14 +7190,25 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\x15trigger_file_patterns\x18\x06 \x03(\tR\x13triggerFilePatterns\x12+\n" +
 	"\x11tool_restrictions\x18\a \x03(\tR\x10toolRestrictions\x12\x18\n" +
 	"\aenabled\x18\b \x01(\bR\aenabled\x12\x16\n" +
-	"\x06origin\x18\t \x01(\tR\x06origin\"q\n" +
+	"\x06origin\x18\t \x01(\tR\x06origin\x12\x14\n" +
+	"\x05scope\x18\n" +
+	" \x01(\tR\x05scope\x12\"\n" +
+	"\rowner_user_id\x18\v \x01(\tR\vownerUserId\x12!\n" +
+	"\freview_state\x18\f \x01(\tR\vreviewState\x12\"\n" +
+	"\rsource_run_id\x18\r \x01(\tR\vsourceRunId\x12(\n" +
+	"\x10source_thread_id\x18\x0e \x01(\tR\x0esourceThreadId\x12'\n" +
+	"\x0fproposal_reason\x18\x0f \x01(\tR\x0eproposalReason\"\xae\x01\n" +
 	"\x18UpsertAgentSkillResponse\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x18\n" +
 	"\acreated\x18\x02 \x01(\bR\acreated\x12+\n" +
-	"\x11skipped_protected\x18\x03 \x01(\bR\x10skippedProtected\"R\n" +
+	"\x11skipped_protected\x18\x03 \x01(\bR\x10skippedProtected\x12\x1f\n" +
+	"\vskip_reason\x18\x04 \x01(\tR\n" +
+	"skipReason\x12\x1a\n" +
+	"\brevision\x18\x05 \x01(\x03R\brevision\"r\n" +
 	"\x16ListAgentSkillsRequest\x12\x15\n" +
 	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12!\n" +
-	"\fenabled_only\x18\x02 \x01(\bR\venabledOnly\"\x85\x03\n" +
+	"\fenabled_only\x18\x02 \x01(\bR\venabledOnly\x12\x1e\n" +
+	"\vfor_user_id\x18\x03 \x01(\tR\tforUserId\"\xda\x04\n" +
 	"\n" +
 	"AgentSkill\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
@@ -7072,7 +7224,14 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	" \x01(\tR\x05scope\x12\"\n" +
 	"\rowner_user_id\x18\v \x01(\tR\vownerUserId\x12\x1f\n" +
 	"\vshared_with\x18\f \x03(\tR\n" +
-	"sharedWith\"M\n" +
+	"sharedWith\x12!\n" +
+	"\freview_state\x18\r \x01(\tR\vreviewState\x12\"\n" +
+	"\rsource_run_id\x18\x0e \x01(\tR\vsourceRunId\x12(\n" +
+	"\x10source_thread_id\x18\x0f \x01(\tR\x0esourceThreadId\x12'\n" +
+	"\x0fproposal_reason\x18\x10 \x01(\tR\x0eproposalReason\x12\x1d\n" +
+	"\n" +
+	"updated_at\x18\x11 \x01(\tR\tupdatedAt\x12\x1a\n" +
+	"\brevision\x18\x12 \x01(\x03R\brevision\"M\n" +
 	"\x17ListAgentSkillsResponse\x122\n" +
 	"\x06skills\x18\x01 \x03(\v2\x1a.model_plane.v1.AgentSkillR\x06skills\"\xda\x01\n" +
 	"\x17ListConversationRequest\x12\x15\n" +

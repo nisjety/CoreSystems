@@ -3467,6 +3467,7 @@ async fn dispatch_tool_with_cost(
                     // reported as disabled rather than as missing, and that
                     // distinction is only available if it comes back.
                     enabled_only: false,
+                    for_user_id: String::new(),
                 },
                 session_bearer,
             );
@@ -3476,7 +3477,15 @@ async fn dispatch_tool_with_cost(
                 .list_agent_skills(request)
                 .await
             {
-                Ok(response) => response.into_inner().skills,
+                // A proposal is not a skill yet: the caller's own undecided
+                // ones are listed too (everything was asked for), and must read
+                // as absent rather than as "disabled".
+                Ok(response) => response
+                    .into_inner()
+                    .skills
+                    .into_iter()
+                    .filter(crate::skills::owner_accepted)
+                    .collect::<Vec<_>>(),
                 Err(error) => {
                     tracing::warn!(%error, %org_id, "reattach_skill: skill read failed");
                     return err_outcome(

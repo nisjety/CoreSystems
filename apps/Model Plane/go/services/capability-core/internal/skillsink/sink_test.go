@@ -13,7 +13,9 @@ import (
 type fakeUpserter struct {
 	reqs    []*mpv1.UpsertAgentSkillRequest
 	skipped bool
-	err     error
+	// skipReasons answers the calls in order; a call past the end is written.
+	skipReasons []string
+	err         error
 }
 
 func (f *fakeUpserter) UpsertAgentSkill(
@@ -25,16 +27,21 @@ func (f *fakeUpserter) UpsertAgentSkill(
 		return nil, f.err
 	}
 	f.reqs = append(f.reqs, in)
+	reason := ""
+	if len(f.reqs) <= len(f.skipReasons) {
+		reason = f.skipReasons[len(f.reqs)-1]
+	}
 	return &mpv1.UpsertAgentSkillResponse{
 		Id:               "id-" + in.GetName(),
-		Created:          true,
+		Created:          reason == "",
 		SkippedProtected: f.skipped,
+		SkipReason:       reason,
 	}, nil
 }
 
 func TestPersist_MapsFieldsAndCountsWritten(t *testing.T) {
 	f := &fakeUpserter{}
-	sink := NewSessionCoreSink(f, "org1")
+	sink := NewSessionCoreSink(f, "org1", "user-1", "run-1", "thread-1")
 	n, err := sink.Persist(context.Background(), []learning.SkillCandidate{
 		{
 			Name:            "Cache Tips",
@@ -51,7 +58,7 @@ func TestPersist_MapsFieldsAndCountsWritten(t *testing.T) {
 		t.Fatalf("expected 1 RPC, got %d", len(f.reqs))
 	}
 	r := f.reqs[0]
-	if r.GetOrgId() != "org1" || r.GetName() != "Cache Tips" || !r.GetEnabled() {
+	if r.GetOrgId() != "org1" || r.GetName() != "Cache Tips" {
 		t.Fatalf("bad mapping: %+v", r)
 	}
 	if r.GetOrigin() != "background_review" {
@@ -62,9 +69,51 @@ func TestPersist_MapsFieldsAndCountsWritten(t *testing.T) {
 	}
 }
 
+// A learned skill is asked for as a disabled proposal owned by the run's user,
+// with the run and thread it came from and the reviewer's reason. Session-core
+// enforces the shape; the sink must never ask for anything wider.
+func TestPersist_WritesDisabledUserScopedProposal(t *testing.T) {
+	f := &fakeUpserter{}
+	sink := NewSessionCoreSink(f, "org1", "user-1", "run-9", "thread-9")
+	n, err := sink.Persist(context.Background(), []learning.SkillCandidate{
+		{Name: "Weekly report", Content: "steps", Reason: "asked for three weeks running", Origin: learning.OriginBackgroundReview},
+	})
+	if err != nil || n != 1 {
+		t.Fatalf("n=%d err=%v", n, err)
+	}
+	r := f.reqs[0]
+	if r.GetEnabled() || r.GetScope() != "user" || r.GetOwnerUserId() != "user-1" || r.GetReviewState() != "proposed" {
+		t.Fatalf("not a disabled user-scoped proposal: %+v", r)
+	}
+	if r.GetSourceRunId() != "run-9" || r.GetSourceThreadId() != "thread-9" || r.GetProposalReason() != "asked for three weeks running" {
+		t.Fatalf("provenance not carried: %+v", r)
+	}
+}
+
+// A candidate the server did not write is not counted and is not an error; a
+// refusal about the owner or the organization ends the batch, since every later
+// candidate would meet the same one.
+func TestPersist_SkipReasonsAreNotCountedAndPolicyEndsTheBatch(t *testing.T) {
+	candidates := []learning.SkillCandidate{{Name: "a", Content: "c"}, {Name: "b", Content: "c"}, {Name: "c", Content: "c"}}
+
+	f := &fakeUpserter{skipReasons: []string{"accepted_exists", "", ""}}
+	n, err := NewSessionCoreSink(f, "org1", "user-1", "run-1", "thread-1").Persist(context.Background(), candidates)
+	if err != nil || n != 2 || len(f.reqs) != 3 {
+		t.Fatalf("a candidate that already exists must be skipped and the rest written: n=%d calls=%d err=%v", n, len(f.reqs), err)
+	}
+
+	for _, reason := range []string{"memory_state", "org_policy", "zdr", "owner_required"} {
+		f := &fakeUpserter{skipReasons: []string{"", reason}}
+		n, err := NewSessionCoreSink(f, "org1", "user-1", "run-1", "thread-1").Persist(context.Background(), candidates)
+		if err != nil || n != 1 || len(f.reqs) != 2 {
+			t.Fatalf("%s must end the batch after the refusal: n=%d calls=%d err=%v", reason, n, len(f.reqs), err)
+		}
+	}
+}
+
 func TestPersist_SkippedProtectedNotCounted(t *testing.T) {
 	f := &fakeUpserter{skipped: true}
-	sink := NewSessionCoreSink(f, "org1")
+	sink := NewSessionCoreSink(f, "org1", "user-1", "run-1", "thread-1")
 	n, err := sink.Persist(context.Background(), []learning.SkillCandidate{
 		{Name: "x", Content: "c"},
 	})
@@ -75,7 +124,7 @@ func TestPersist_SkippedProtectedNotCounted(t *testing.T) {
 
 func TestPersist_RpcErrorPropagates(t *testing.T) {
 	f := &fakeUpserter{err: errors.New("rpc down")}
-	sink := NewSessionCoreSink(f, "org1")
+	sink := NewSessionCoreSink(f, "org1", "user-1", "run-1", "thread-1")
 	if _, err := sink.Persist(context.Background(), []learning.SkillCandidate{{Name: "x", Content: "c"}}); err == nil {
 		t.Fatal("rpc error must propagate")
 	}

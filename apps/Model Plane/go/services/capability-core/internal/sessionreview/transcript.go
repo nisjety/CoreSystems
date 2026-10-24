@@ -56,9 +56,12 @@ func (s *SessionCoreTranscriptSource) Fetch(
 	if transcript == "" {
 		return Transcript{Skip: learning.SkipEmptyTranscript}, nil
 	}
+	// As the run's owner: the baseline is the skills that person can already
+	// see, their own proposals included, and no one else's private skills.
 	skills, err := s.client.ListAgentSkills(ctx, &mpv1.ListAgentSkillsRequest{
 		OrgId:       ref.OrgID,
 		EnabledOnly: false,
+		ForUserId:   ref.UserID,
 	})
 	if err != nil {
 		return Transcript{}, fmt.Errorf("sessionreview: list agent skills for org %s: %w", ref.OrgID, err)

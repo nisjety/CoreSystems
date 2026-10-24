@@ -1891,37 +1891,29 @@ impl ModelGateway for GatewayService {
         // surface in matching, not just disk-loaded ones. Best-effort: a fetch
         // failure leaves the disk-loaded skills intact and is retried next call
         // (the org is only marked loaded on success).
-        if !req.org_id.is_empty() && !self.state.skills.is_org_loaded(&req.org_id) {
+        if !req.org_id.is_empty() && !self.state.skills.is_loaded(&req.org_id, &caller_user_id) {
             let mut client = self.state.session_client.clone();
             match client
                 .list_agent_skills(identity.session_request(
                     mp_contracts::model_plane::v1::ListAgentSkillsRequest {
                         org_id: req.org_id.clone(),
                         enabled_only: true,
+                        for_user_id: String::new(),
                     },
                 )?)
                 .await
             {
-                Ok(resp) => {
-                    let pulled = resp.into_inner().skills;
-                    // Ownership (SKILL-1) rides alongside the match cache: computed
-                    // from the same pull, before `pulled` is consumed below.
-                    self.state.ownership.replace_org_kind(
-                        &req.org_id,
-                        crate::ownership::KIND_SKILL,
-                        skills::skill_ownership_entries(&pulled),
-                    );
-                    // Reconcile, don't merely append: a disabled/deleted
-                    // learned skill must stop steering MatchSkills results on
-                    // the gRPC path just as it does on the SSE path.
-                    self.state.skills.replace_learned(
-                        &req.org_id,
-                        pulled
-                            .into_iter()
-                            .map(skills::agent_skill_to_skill)
-                            .collect(),
-                    );
-                }
+                // Reconcile, don't merely append: a disabled/deleted learned
+                // skill must stop steering MatchSkills results on the gRPC path
+                // just as it does on the SSE path. The pull is this caller's, so
+                // it replaces only this caller's share of the cache, and
+                // ownership is recorded from the same pull.
+                Ok(resp) => self.state.skills.refresh_learned(
+                    &self.state.ownership,
+                    &req.org_id,
+                    &caller_user_id,
+                    resp.into_inner().skills,
+                ),
                 Err(e) => {
                     tracing::warn!(error = %e, org_id = %req.org_id, "lazy-load learned skills failed (best-effort)");
                 }

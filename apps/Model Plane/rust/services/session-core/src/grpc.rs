@@ -1903,6 +1903,53 @@ async fn append_scheduled_result_in_tx(
     Ok(msg_id)
 }
 
+/// The longest reason a learned-skill proposal keeps. The reviewer is asked for
+/// at most this; the bound is enforced here because the reviewer's output is
+/// untrusted and the reason is shown to the owner.
+const MAX_PROPOSAL_REASON_CHARS: usize = 300;
+
+/// Run and thread ids are provenance, not content: cap them so a hostile caller
+/// cannot park arbitrary text in the row.
+fn bounded_provenance(value: &str) -> String {
+    value.trim().chars().take(128).collect()
+}
+
+/// A learned-skill write that did not happen, with the closed token that says
+/// why. `skipped_protected` stays true for a human's row, as it was before the
+/// token existed.
+fn skill_write_skipped(reason: &str) -> pb::UpsertAgentSkillResponse {
+    pb::UpsertAgentSkillResponse {
+        id: String::new(),
+        created: false,
+        skipped_protected: reason == "protected",
+        skip_reason: reason.to_owned(),
+        revision: 0,
+    }
+}
+
+/// Why a learned skill may not be written for this owner, or `None`. Their own
+/// state (paused, off) and the organization's policy (memory disabled, learning
+/// review not opted in, policy unreadable) both end it, with different tokens so
+/// the producer can tell a person's choice from an organization's.
+fn learned_skill_withheld(
+    decision: &crate::memory_control::MemoryDecision,
+) -> Option<&'static str> {
+    use crate::memory_control::MemoryReason;
+    if decision.learning_allowed {
+        return None;
+    }
+    Some(match decision.reason {
+        MemoryReason::UserPaused | MemoryReason::UserOff | MemoryReason::ThreadOff => {
+            "memory_state"
+        }
+        MemoryReason::Zdr => "zdr",
+        // `On` with learning refused is the organization not having opted in.
+        MemoryReason::On | MemoryReason::OrgDisabled | MemoryReason::PolicyUnavailable => {
+            "org_policy"
+        }
+    })
+}
+
 /// Bind the non-secret schedule identity to the deterministic run row. This
 /// is separate from `StartRunRequest` so generic user runs cannot populate the
 /// schedule namespace. A retry may observe the exact same binding, but a
@@ -6517,9 +6564,14 @@ impl SessionCore for SessionService {
             // org_id in the predicate as well as the id: a skill id is a ULID and
             // therefore unguessable, but tenant scoping must never rest on
             // unguessability.
+            //
+            // Only an accepted skill can be switched on: a proposal becomes active
+            // by its owner's decision, never by a flag flip. Switching off is
+            // always allowed, so a quarantine sweep is never refused.
             let updated: Option<(bool,)> = sqlx::query_as(
                 "UPDATE agent_skills SET enabled = $1, updated_at = now() \
-                 WHERE id = $2 AND org_id = $3 RETURNING enabled",
+                 WHERE id = $2 AND org_id = $3 AND (NOT $1 OR review_state = 'accepted') \
+                 RETURNING enabled",
             )
             .bind(req.enabled)
             .bind(&req.skill_id)
@@ -6529,6 +6581,20 @@ impl SessionCore for SessionService {
             .map_err(|error| Status::internal(error.to_string()))?;
 
             let Some((enabled,)) = updated else {
+                if req.enabled {
+                    let undecided: bool = sqlx::query_scalar(
+                        "SELECT EXISTS (SELECT 1 FROM agent_skills \
+                         WHERE id = $1 AND org_id = $2 AND review_state <> 'accepted')",
+                    )
+                    .bind(&req.skill_id)
+                    .bind(&req.org_id)
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(|error| Status::internal(error.to_string()))?;
+                    if undecided {
+                        return Err(Status::failed_precondition("proposal_requires_decision"));
+                    }
+                }
                 // Not found is reported, not raised: a sweep acts on candidates
                 // computed a moment earlier, and a skill deleted in between is a
                 // race to report rather than a failure to retry.
@@ -6575,27 +6641,109 @@ impl SessionCore for SessionService {
                     return Err(Status::invalid_argument(format!("invalid origin: {other}")));
                 }
             };
+            // A learned skill is a disabled proposal owned by one user, whatever
+            // the caller asked for; a human write is accepted as it always was.
+            let (scope, owner, review_state, enabled) = if origin == "background_review" {
+                let owner = req.owner_user_id.trim();
+                if owner.is_empty() {
+                    return Ok(Response::new(skill_write_skipped("owner_required")));
+                }
+                // A user credential may only write for itself; a service
+                // (the learning review) names the owner of the run it reviewed.
+                if caller.user_id().is_some() {
+                    caller.authorize_user(owner)?;
+                }
+                ("user", owner.to_owned(), "proposed", false)
+            } else {
+                match req.scope.as_str() {
+                    "" | "org" => ("org", String::new(), "accepted", req.enabled),
+                    "user" => {
+                        let owner = match caller.user_id() {
+                            Some(verified) => {
+                                if !req.owner_user_id.is_empty() {
+                                    caller.authorize_user(&req.owner_user_id)?;
+                                }
+                                verified.to_owned()
+                            }
+                            None => req.owner_user_id.trim().to_owned(),
+                        };
+                        if owner.is_empty() {
+                            return Err(Status::invalid_argument(
+                                "owner_user_id is required for a user-scoped skill",
+                            ));
+                        }
+                        ("user", owner, "accepted", req.enabled)
+                    }
+                    other => {
+                        return Err(Status::invalid_argument(format!("invalid scope: {other}")));
+                    }
+                }
+            };
             let id = new_ulid();
-            // None ⟺ the conflict guard rejected the write (target is a
-            // protected user skill); a fresh insert or permitted update always
-            // returns a row.
-            let row: Option<(String, bool)> = sqlx::query_as(
-                "INSERT INTO agent_skills
-                    (id, org_id, name, description, content, trigger_keywords,
-                     trigger_file_patterns, tool_restrictions, enabled, origin,
-                     created_at, updated_at)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now(), now())
-                 ON CONFLICT (org_id, name) DO UPDATE SET
-                     description = EXCLUDED.description,
-                     content = EXCLUDED.content,
-                     trigger_keywords = EXCLUDED.trigger_keywords,
-                     trigger_file_patterns = EXCLUDED.trigger_file_patterns,
-                     tool_restrictions = EXCLUDED.tool_restrictions,
-                     enabled = EXCLUDED.enabled,
-                     updated_at = now()
-                 WHERE agent_skills.origin <> 'user' OR EXCLUDED.origin = 'user'
-                 RETURNING id, (xmax = 0) AS created",
-            )
+            let mut tx = self
+                .pool
+                .begin()
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+            if origin == "background_review" {
+                // Under the owner's row lock, so a pause that commits first is
+                // seen here and one that waits lands after this write. The
+                // announcement of the run was gated too; this is the gate where
+                // the review's output is written.
+                let decision =
+                    crate::memory_control::resolve_in_tx(&mut tx, caller.zdr(), &req.org_id, &owner)
+                        .await
+                        .map_err(|e| Status::internal(e.to_string()))?;
+                if let Some(reason) = learned_skill_withheld(&decision) {
+                    return Ok(Response::new(skill_write_skipped(reason)));
+                }
+            }
+            // The conflict key is (org, scope, owner, name). A learned skill
+            // refreshes only a proposal it wrote itself and never touches
+            // enabled, scope, owner or review_state; a human write keeps setting
+            // `enabled` but cannot switch on a proposal nobody accepted.
+            // None ⟺ the conflict guard rejected the write.
+            let row: Option<(String, bool)> = if origin == "background_review" {
+                sqlx::query_as(
+                    "INSERT INTO agent_skills
+                        (id, org_id, name, description, content, trigger_keywords,
+                         trigger_file_patterns, tool_restrictions, enabled, origin,
+                         scope, owner_user_id, review_state, source_run_id,
+                         source_thread_id, proposal_reason, created_at, updated_at)
+                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16, now(), now())
+                     ON CONFLICT (org_id, scope, owner_user_id, name) DO UPDATE SET
+                         description = EXCLUDED.description,
+                         content = EXCLUDED.content,
+                         trigger_keywords = EXCLUDED.trigger_keywords,
+                         trigger_file_patterns = EXCLUDED.trigger_file_patterns,
+                         tool_restrictions = EXCLUDED.tool_restrictions,
+                         source_run_id = EXCLUDED.source_run_id,
+                         source_thread_id = EXCLUDED.source_thread_id,
+                         proposal_reason = EXCLUDED.proposal_reason,
+                         updated_at = now()
+                     WHERE agent_skills.origin = 'background_review'
+                       AND agent_skills.review_state = 'proposed'
+                     RETURNING id, (xmax = 0) AS created",
+                )
+            } else {
+                sqlx::query_as(
+                    "INSERT INTO agent_skills
+                        (id, org_id, name, description, content, trigger_keywords,
+                         trigger_file_patterns, tool_restrictions, enabled, origin,
+                         scope, owner_user_id, review_state, source_run_id,
+                         source_thread_id, proposal_reason, created_at, updated_at)
+                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16, now(), now())
+                     ON CONFLICT (org_id, scope, owner_user_id, name) DO UPDATE SET
+                         description = EXCLUDED.description,
+                         content = EXCLUDED.content,
+                         trigger_keywords = EXCLUDED.trigger_keywords,
+                         trigger_file_patterns = EXCLUDED.trigger_file_patterns,
+                         tool_restrictions = EXCLUDED.tool_restrictions,
+                         enabled = EXCLUDED.enabled AND agent_skills.review_state = 'accepted',
+                         updated_at = now()
+                     RETURNING id, (xmax = 0) AS created",
+                )
+            }
             .bind(&id)
             .bind(&req.org_id)
             .bind(&req.name)
@@ -6604,9 +6752,21 @@ impl SessionCore for SessionService {
             .bind(serde_json::json!(req.trigger_keywords))
             .bind(serde_json::json!(req.trigger_file_patterns))
             .bind(serde_json::json!(req.tool_restrictions))
-            .bind(req.enabled)
+            .bind(enabled)
             .bind(origin)
-            .fetch_optional(&self.pool)
+            .bind(scope)
+            .bind(&owner)
+            .bind(review_state)
+            .bind(bounded_provenance(&req.source_run_id))
+            .bind(bounded_provenance(&req.source_thread_id))
+            .bind(
+                req.proposal_reason
+                    .trim()
+                    .chars()
+                    .take(MAX_PROPOSAL_REASON_CHARS)
+                    .collect::<String>(),
+            )
+            .fetch_optional(&mut *tx)
             .await
             .map_err(|e| {
                 warn!(error = %e, "upsert_agent_skill failed");
@@ -6618,13 +6778,35 @@ impl SessionCore for SessionService {
                     id,
                     created,
                     skipped_protected: false,
+                    skip_reason: String::new(),
+                    revision: 0,
                 },
-                None => pb::UpsertAgentSkillResponse {
-                    id: String::new(),
-                    created: false,
-                    skipped_protected: true,
-                },
+                None => {
+                    // Only a learned write can lose a conflict. Say why: the row
+                    // is a human's, or its owner already decided on it.
+                    let existing: Option<(String, String)> = sqlx::query_as(
+                        "SELECT origin, review_state FROM agent_skills
+                         WHERE org_id = $1 AND scope = $2 AND owner_user_id = $3 AND name = $4",
+                    )
+                    .bind(&req.org_id)
+                    .bind(scope)
+                    .bind(&owner)
+                    .bind(&req.name)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?;
+                    let reason = match existing {
+                        Some((origin, _)) if origin == "user" => "protected",
+                        Some((_, state)) if state == "rejected" => "rejected_exists",
+                        Some((_, state)) if state == "accepted" => "accepted_exists",
+                        _ => "protected",
+                    };
+                    skill_write_skipped(reason)
+                }
             };
+            tx.commit()
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
             Ok(Response::new(resp))
         }
         .await;
@@ -6883,20 +7065,26 @@ impl SessionCore for SessionService {
         &self,
         request: Request<pb::ListAgentSkillsRequest>,
     ) -> Result<Response<pb::ListAgentSkillsResponse>, Status> {
-        type Row = (
-            String,
-            String,
-            String,
-            String,
-            sqlx::types::Json<Vec<String>>,
-            sqlx::types::Json<Vec<String>>,
-            sqlx::types::Json<Vec<String>>,
-            bool,
-            String,
-            String,
-            String,
-            sqlx::types::Json<Vec<String>>,
-        );
+        #[derive(sqlx::FromRow)]
+        struct SkillRow {
+            id: String,
+            name: String,
+            description: String,
+            content: String,
+            trigger_keywords: sqlx::types::Json<Vec<String>>,
+            trigger_file_patterns: sqlx::types::Json<Vec<String>>,
+            tool_restrictions: sqlx::types::Json<Vec<String>>,
+            enabled: bool,
+            origin: String,
+            scope: String,
+            owner_user_id: String,
+            shared_with: sqlx::types::Json<Vec<String>>,
+            review_state: String,
+            source_run_id: String,
+            source_thread_id: String,
+            proposal_reason: String,
+            updated_at: DateTime<Utc>,
+        }
 
         let started = Instant::now();
         let result: Result<Response<pb::ListAgentSkillsResponse>, Status> = async {
@@ -6918,15 +7106,29 @@ impl SessionCore for SessionService {
             // here: this crate's VerifiedIdentity carries no org-role claim,
             // and omitting it only narrows admin visibility, never widens
             // anyone's.
-            let caller_user_id = caller.user_id().unwrap_or_default().to_owned();
-            let rows: Vec<Row> = sqlx::query_as(
+            //
+            // A service caller (the learning review) lists as the user whose run
+            // it is reviewing; a user caller is always listed as itself, so
+            // `for_user_id` can never be used to read another person's skills.
+            let caller_user_id = if caller.is_service() && !req.for_user_id.trim().is_empty() {
+                req.for_user_id.trim().to_owned()
+            } else {
+                caller.user_id().unwrap_or_default().to_owned()
+            };
+            // A grantee sees only a skill its owner has accepted: a proposal is
+            // private to its owner even if a share was written onto the row.
+            // `scope DESC` puts a user's own skill before an org skill of the
+            // same name.
+            let rows: Vec<SkillRow> = sqlx::query_as(
                 "SELECT id, name, description, content, trigger_keywords,
                         trigger_file_patterns, tool_restrictions, enabled, origin,
-                        scope, owner_user_id, shared_with
+                        scope, owner_user_id, shared_with, review_state,
+                        source_run_id, source_thread_id, proposal_reason, updated_at
                  FROM agent_skills
                  WHERE org_id = $1 AND (NOT $2 OR enabled)
-                   AND (scope = 'org' OR owner_user_id = $3 OR shared_with ? $3)
-                 ORDER BY name",
+                   AND (scope = 'org' OR owner_user_id = $3
+                        OR (shared_with ? $3 AND review_state = 'accepted'))
+                 ORDER BY name, scope DESC",
             )
             .bind(&req.org_id)
             .bind(req.enabled_only)
@@ -6939,37 +7141,26 @@ impl SessionCore for SessionService {
             })?;
             let skills = rows
                 .into_iter()
-                .map(
-                    |(
-                        id,
-                        name,
-                        description,
-                        content,
-                        kw,
-                        fp,
-                        tr,
-                        enabled,
-                        origin,
-                        scope,
-                        owner_user_id,
-                        shared_with,
-                    )| {
-                        pb::AgentSkill {
-                            id,
-                            name,
-                            description,
-                            content,
-                            trigger_keywords: kw.0,
-                            trigger_file_patterns: fp.0,
-                            tool_restrictions: tr.0,
-                            enabled,
-                            origin,
-                            scope,
-                            owner_user_id,
-                            shared_with: shared_with.0,
-                        }
-                    },
-                )
+                .map(|row| pb::AgentSkill {
+                    id: row.id,
+                    name: row.name,
+                    description: row.description,
+                    content: row.content,
+                    trigger_keywords: row.trigger_keywords.0,
+                    trigger_file_patterns: row.trigger_file_patterns.0,
+                    tool_restrictions: row.tool_restrictions.0,
+                    enabled: row.enabled,
+                    origin: row.origin,
+                    scope: row.scope,
+                    owner_user_id: row.owner_user_id,
+                    shared_with: row.shared_with.0,
+                    review_state: row.review_state,
+                    source_run_id: row.source_run_id,
+                    source_thread_id: row.source_thread_id,
+                    proposal_reason: row.proposal_reason,
+                    updated_at: row.updated_at.to_rfc3339(),
+                    revision: 0,
+                })
                 .collect();
             Ok(Response::new(pb::ListAgentSkillsResponse { skills }))
         }
@@ -12129,6 +12320,19 @@ mod tests {
         request
     }
 
+    fn as_service<T>(org_id: &str, scopes: &[&str], message: T) -> Request<T> {
+        let mut request = Request::new(message);
+        request
+            .extensions_mut()
+            .insert(VerifiedIdentity::service_for_test_as(
+                org_id,
+                "service:capability-core",
+                scopes,
+                false,
+            ));
+        request
+    }
+
     // P3 SetRunMode — durable run.mode, invalid-mode rejection, and per-org
     // isolation (a foreign org's caller is refused by the tenant check before
     // any UPDATE runs → permission_denied, no mutation).
@@ -12737,13 +12941,15 @@ mod tests {
         assert_eq!(plan.as_deref(), Some(""), "and the refused ones left no plan id behind");
     }
 
-    // G7 — fresh background_review insert succeeds; a background_review overwrite
-    // of an existing user skill must be skipped (protected).
-    async fn assert_upsert_skill_guards(svc: &super::SessionService, org: &str) {
-        use mp_contracts::model_plane::v1 as pb;
-        use mp_contracts::model_plane::v1::session_core_server::SessionCore;
-
-        let skill = |name: &str, content: &str, origin: &str| pb::UpsertAgentSkillRequest {
+    fn skill_request(
+        org: &str,
+        name: &str,
+        content: &str,
+        origin: &str,
+        scope: &str,
+        owner: &str,
+    ) -> mp_contracts::model_plane::v1::UpsertAgentSkillRequest {
+        mp_contracts::model_plane::v1::UpsertAgentSkillRequest {
             org_id: org.to_owned(),
             name: name.into(),
             description: "d".into(),
@@ -12751,33 +12957,102 @@ mod tests {
             trigger_keywords: vec![],
             trigger_file_patterns: vec![],
             tool_restrictions: vec![],
+            // A hostile or confused producer asks for an enabled skill; a
+            // learned one must come out disabled anyway.
             enabled: true,
             origin: origin.into(),
-        };
+            scope: scope.into(),
+            owner_user_id: owner.into(),
+            review_state: if origin == "background_review" {
+                "accepted".into()
+            } else {
+                String::new()
+            },
+            source_run_id: "run-1".into(),
+            source_thread_id: "thread-1".into(),
+            proposal_reason: "why".into(),
+        }
+    }
+
+    async fn skill_row_state(
+        pool: &sqlx::PgPool,
+        org: &str,
+        name: &str,
+        scope: &str,
+        owner: &str,
+    ) -> Option<(bool, String, String, String)> {
+        sqlx::query_as(
+            "SELECT enabled, scope, owner_user_id, review_state FROM agent_skills              WHERE org_id = $1 AND name = $2 AND scope = $3 AND owner_user_id = $4",
+        )
+        .bind(org)
+        .bind(name)
+        .bind(scope)
+        .bind(owner)
+        .fetch_optional(pool)
+        .await
+        .expect("read skill row")
+    }
+
+    // G7 / WS07 S7 — a learned skill is written disabled, user-scoped and
+    // proposed whatever the request says, a background write never overwrites a
+    // human's skill, and a user cannot write a proposal for someone else.
+    async fn assert_upsert_skill_guards(
+        svc: &super::SessionService,
+        pool: &sqlx::PgPool,
+        org: &str,
+    ) {
+        use mp_contracts::model_plane::v1::session_core_server::SessionCore;
+
+        // The caller is the learning review (a service) naming the run's owner.
+        let as_review = |req| as_service(org, &["session:skills:write"], req);
 
         let r = svc
-            .upsert_agent_skill(as_user(org, "u1", skill("Cache", "c1", "background_review")))
+            .upsert_agent_skill(as_review(skill_request(
+                org, "Cache", "c1", "background_review", "org", "u1",
+            )))
             .await
             .expect("upsert")
             .into_inner();
-        assert!(r.created && !r.skipped_protected);
+        assert!(r.created && !r.skipped_protected && r.skip_reason.is_empty());
+        assert_eq!(
+            skill_row_state(pool, org, "Cache", "user", "u1").await,
+            Some((false, "user".into(), "u1".into(), "proposed".into())),
+            "forced to a disabled user-scoped proposal; the request's scope, enabled and review_state are ignored"
+        );
+        assert!(
+            skill_row_state(pool, org, "Cache", "org", "").await.is_none(),
+            "no org-scoped copy"
+        );
 
-        svc.upsert_agent_skill(as_user(org, "u1", skill("Runbook", "human", "user")))
-            .await
-            .expect("user skill");
+        // A human skill of the same name under the same owner is protected.
+        svc.upsert_agent_skill(as_user(
+            org,
+            "u1",
+            skill_request(org, "Runbook", "human", "user", "user", ""),
+        ))
+        .await
+        .expect("user skill");
         let blocked = svc
-            .upsert_agent_skill(as_user(
-                org,
-                "u1",
-                skill("Runbook", "MACHINE", "background_review"),
-            ))
+            .upsert_agent_skill(as_review(skill_request(
+                org, "Runbook", "MACHINE", "background_review", "", "u1",
+            )))
             .await
             .expect("guarded upsert")
             .into_inner();
         assert!(
-            blocked.skipped_protected,
+            blocked.skipped_protected && blocked.skip_reason == "protected",
             "background_review must not overwrite a user skill"
         );
+
+        // A write with no owner is skipped, not an error and not an org skill.
+        let ownerless = svc
+            .upsert_agent_skill(as_review(skill_request(
+                org, "Ownerless", "x", "background_review", "", "",
+            )))
+            .await
+            .expect("ownerless")
+            .into_inner();
+        assert_eq!(ownerless.skip_reason, "owner_required");
     }
 
     // Handler-level integration test against a REAL Postgres. Exercises the
@@ -12833,10 +13108,12 @@ mod tests {
         };
 
         assert_set_run_mode_isolation(&svc, &pool, &run_id, &org, sfx).await;
-        assert_upsert_skill_guards(&svc, &org).await;
+        assert_upsert_skill_guards(&svc, &pool, &org).await;
 
-        // G7 read path: list_agent_skills returns this org's skills (Cache +
-        // Runbook), proving the learned-skill last mile is readable.
+        // G7 read path: list_agent_skills returns this org's usable skills
+        // (Runbook), proving the learned-skill last mile is readable. The
+        // learned Cache skill is a disabled proposal: it is listed to its owner
+        // when disabled rows are asked for, and to nobody else.
         let listed = svc
             .list_agent_skills(as_user(
                 &org,
@@ -12844,6 +13121,7 @@ mod tests {
                 pb::ListAgentSkillsRequest {
                     org_id: org.clone(),
                     enabled_only: true,
+                    for_user_id: String::new(),
                 },
             ))
             .await
@@ -12852,8 +13130,30 @@ mod tests {
         let names: std::collections::BTreeSet<&str> =
             listed.skills.iter().map(|s| s.name.as_str()).collect();
         assert!(
-            names.contains("Cache") && names.contains("Runbook"),
-            "list must return the upserted skills, got {names:?}"
+            names.contains("Runbook") && !names.contains("Cache"),
+            "list must return the accepted skill and not the proposal, got {names:?}"
+        );
+        let all = svc
+            .list_agent_skills(as_user(
+                &org,
+                "u1",
+                pb::ListAgentSkillsRequest {
+                    org_id: org.clone(),
+                    enabled_only: false,
+                    for_user_id: String::new(),
+                },
+            ))
+            .await
+            .expect("list_agent_skills all")
+            .into_inner();
+        let proposal = all
+            .skills
+            .iter()
+            .find(|s| s.name == "Cache")
+            .expect("the owner lists their proposal");
+        assert_eq!(
+            (proposal.review_state.as_str(), proposal.source_run_id.as_str(), proposal.proposal_reason.as_str()),
+            ("proposed", "run-1", "why")
         );
         // Per-org isolation: another org sees none of them.
         let other_org = format!("other-{sfx}");
@@ -12864,6 +13164,7 @@ mod tests {
                 pb::ListAgentSkillsRequest {
                     org_id: other_org.clone(),
                     enabled_only: true,
+                    for_user_id: String::new(),
                 },
             ))
             .await
@@ -15302,6 +15603,373 @@ mod tests {
         );
     }
 
+    // -- learned skills as owner-scoped proposals (WS07 S7) ------------------
+
+    #[test]
+    fn upsert_agent_skill_withheld_reason_table() {
+        use crate::memory_control::{decide, MemoryState, OrgMemoryPolicy};
+
+        let reason = |zdr, org, user| super::learned_skill_withheld(&decide(zdr, org, user));
+        assert_eq!(reason(false, OrgMemoryPolicy::Allow, MemoryState::On), None);
+        assert_eq!(
+            reason(false, OrgMemoryPolicy::Allow, MemoryState::Paused),
+            Some("memory_state")
+        );
+        assert_eq!(
+            reason(false, OrgMemoryPolicy::Allow, MemoryState::Off),
+            Some("memory_state")
+        );
+        assert_eq!(
+            reason(false, OrgMemoryPolicy::Disabled, MemoryState::On),
+            Some("org_policy")
+        );
+        assert_eq!(
+            reason(false, OrgMemoryPolicy::Unavailable, MemoryState::On),
+            Some("org_policy"),
+            "an unreadable policy is not consent"
+        );
+        assert_eq!(reason(true, OrgMemoryPolicy::Allow, MemoryState::On), Some("zdr"));
+        // The organization has not opted in to learning review: memory is allowed
+        // and the user is on, but learning is not.
+        let mut not_opted_in = decide(false, OrgMemoryPolicy::Allow, MemoryState::On);
+        not_opted_in.learning_allowed = false;
+        assert_eq!(super::learned_skill_withheld(&not_opted_in), Some("org_policy"));
+    }
+
+    #[test]
+    fn upsert_agent_skill_skip_tokens_are_closed() {
+        for token in [
+            "memory_state",
+            "org_policy",
+            "zdr",
+            "accepted_exists",
+            "rejected_exists",
+            "owner_required",
+        ] {
+            let response = super::skill_write_skipped(token);
+            assert!(!response.skipped_protected && response.id.is_empty() && !response.created);
+            assert_eq!(response.skip_reason, token);
+        }
+        let protected = super::skill_write_skipped("protected");
+        assert!(protected.skipped_protected, "a human's row keeps the old flag");
+    }
+
+    /// The learned arm of the conflict update changes content and provenance
+    /// only. Reading `enabled`, `scope`, `owner_user_id` or `review_state` into
+    /// that SET list is how an admin-disabled or owner-decided row got
+    /// re-enabled by the next review of a similar conversation.
+    #[test]
+    fn upsert_agent_skill_conflict_arm_never_touches_state_columns() {
+        let source = include_str!("grpc.rs");
+        let guard = source
+            .find("WHERE agent_skills.origin = 'background_review'")
+            .expect("the learned conflict guard");
+        let set = source[..guard]
+            .rfind("DO UPDATE SET")
+            .expect("the learned conflict arm");
+        let arm = &source[set..guard];
+        for column in ["enabled", "scope", "owner_user_id", "review_state", "origin"] {
+            assert!(
+                !arm.contains(&format!("{column} =")),
+                "the learned conflict arm must not assign {column}"
+            );
+        }
+        assert!(
+            source.contains("ON CONFLICT (org_id, scope, owner_user_id, name)"),
+            "the conflict key carries the owner"
+        );
+    }
+
+    async fn skills_service() -> Option<(super::SessionService, sqlx::PgPool, String)> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return None;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+        let svc = super::SessionService {
+            pool: pool.clone(),
+            retrieval_client: None,
+            graph_client: None,
+            knowledge_client: None,
+            letta_memory: None,
+            audit_publisher: None,
+            auth: None,
+            grant_columns: crate::grpc::ThreadGrantColumns::present(),
+        };
+        Some((svc, pool, format!("skp-{}", mp_ids::new_ulid())))
+    }
+
+    async fn learned_skill_content(
+        pool: &sqlx::PgPool,
+        org: &str,
+        owner: &str,
+        name: &str,
+    ) -> String {
+        sqlx::query_scalar(
+            "SELECT content FROM agent_skills WHERE org_id = $1 AND scope = 'user' AND owner_user_id = $2 AND name = $3",
+        )
+        .bind(org)
+        .bind(owner)
+        .bind(name)
+        .fetch_one(pool)
+        .await
+        .expect("read learned skill")
+    }
+
+    async fn clear_skill_rows(pool: &sqlx::PgPool, org: &str) {
+        for statement in [
+            "DELETE FROM user_memory_controls WHERE org_id = $1",
+            "DELETE FROM agent_skills WHERE org_id = $1",
+        ] {
+            sqlx::query(statement).bind(org).execute(pool).await.ok();
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn background_review_is_forced_to_disabled_user_scope() {
+        use mp_contracts::model_plane::v1::session_core_server::SessionCore;
+        let Some((svc, pool, org)) = skills_service().await else {
+            return;
+        };
+        // The producer asks for an enabled, org-wide, accepted skill.
+        let written = svc
+            .upsert_agent_skill(as_service(
+                &org,
+                &["session:skills:write"],
+                skill_request(&org, "Weekly report", "steps", "background_review", "org", "owner-a"),
+            ))
+            .await
+            .expect("upsert")
+            .into_inner();
+        assert!(written.created && written.skip_reason.is_empty());
+        assert_eq!(
+            skill_row_state(&pool, &org, "Weekly report", "user", "owner-a").await,
+            Some((false, "user".into(), "owner-a".into(), "proposed".into()))
+        );
+        let provenance: (String, String, String) = sqlx::query_as(
+            "SELECT source_run_id, source_thread_id, proposal_reason FROM agent_skills WHERE id = $1",
+        )
+        .bind(&written.id)
+        .fetch_one(&pool)
+        .await
+        .expect("provenance");
+        assert_eq!(provenance, ("run-1".into(), "thread-1".into(), "why".into()));
+
+        // Switching a proposal on is the owner's decision, not a flag flip.
+        let refused = svc
+            .set_agent_skill_enabled(as_service(
+                &org,
+                &["session:skills:write"],
+                mp_contracts::model_plane::v1::SetAgentSkillEnabledRequest {
+                    org_id: org.clone(),
+                    skill_id: written.id.clone(),
+                    enabled: true,
+                    reason: "sweep".into(),
+                },
+            ))
+            .await
+            .expect_err("a proposal cannot be enabled");
+        assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(refused.message(), "proposal_requires_decision");
+
+        // A paused owner gets no proposal at all.
+        sqlx::query(
+            "INSERT INTO user_memory_controls (org_id, user_id, memory_state) VALUES ($1, 'owner-p', 'paused')",
+        )
+        .bind(&org)
+        .execute(&pool)
+        .await
+        .expect("pause");
+        let paused = svc
+            .upsert_agent_skill(as_service(
+                &org,
+                &["session:skills:write"],
+                skill_request(&org, "Never", "x", "background_review", "", "owner-p"),
+            ))
+            .await
+            .expect("paused upsert")
+            .into_inner();
+        assert_eq!(paused.skip_reason, "memory_state");
+        assert!(skill_row_state(&pool, &org, "Never", "user", "owner-p")
+            .await
+            .is_none());
+
+        clear_skill_rows(&pool, &org).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn user_b_cannot_overwrite_user_a_learned_skill() {
+        use mp_contracts::model_plane::v1::session_core_server::SessionCore;
+        let Some((svc, pool, org)) = skills_service().await else {
+            return;
+        };
+        let review = |owner: &str, content: &str| {
+            as_service(
+                &org,
+                &["session:skills:write"],
+                skill_request(&org, "Same name", content, "background_review", "", owner),
+            )
+        };
+        svc.upsert_agent_skill(review("user-a", "A's steps"))
+            .await
+            .expect("a");
+        let b = svc
+            .upsert_agent_skill(review("user-b", "B's steps"))
+            .await
+            .expect("b")
+            .into_inner();
+        assert!(b.created, "B gets a row of their own, not A's");
+        assert_eq!(
+            learned_skill_content(&pool, &org, "user-a", "Same name").await,
+            "A's steps"
+        );
+        assert_eq!(
+            learned_skill_content(&pool, &org, "user-b", "Same name").await,
+            "B's steps"
+        );
+
+        // A user credential can only write for itself.
+        let forged = svc
+            .upsert_agent_skill(as_user(
+                &org,
+                "user-b",
+                skill_request(&org, "Same name", "forged", "background_review", "", "user-a"),
+            ))
+            .await
+            .expect_err("B may not write A's proposal");
+        assert_eq!(forged.code(), tonic::Code::PermissionDenied);
+        assert_eq!(
+            learned_skill_content(&pool, &org, "user-a", "Same name").await,
+            "A's steps"
+        );
+
+        clear_skill_rows(&pool, &org).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn conflict_never_reenables_an_admin_disabled_row() {
+        use mp_contracts::model_plane::v1::session_core_server::SessionCore;
+        let Some((svc, pool, org)) = skills_service().await else {
+            return;
+        };
+        // An accepted learned skill that an admin switched off.
+        sqlx::query(
+            "INSERT INTO agent_skills
+                (id, org_id, name, description, content, enabled, origin, scope, owner_user_id, review_state)
+             VALUES ('sk-off', $1, 'Disabled', 'd', 'original', false, 'background_review', 'user', 'owner-a', 'accepted')",
+        )
+        .bind(&org)
+        .execute(&pool)
+        .await
+        .expect("seed");
+        let again = svc
+            .upsert_agent_skill(as_service(
+                &org,
+                &["session:skills:write"],
+                skill_request(&org, "Disabled", "rewritten", "background_review", "", "owner-a"),
+            ))
+            .await
+            .expect("upsert")
+            .into_inner();
+        assert_eq!(again.skip_reason, "accepted_exists");
+        assert_eq!(
+            skill_row_state(&pool, &org, "Disabled", "user", "owner-a").await,
+            Some((false, "user".into(), "owner-a".into(), "accepted".into())),
+            "the row stays disabled and keeps its state"
+        );
+
+        // A proposal refreshed by a later review is still a disabled proposal.
+        for content in ["first", "second"] {
+            svc.upsert_agent_skill(as_service(
+                &org,
+                &["session:skills:write"],
+                skill_request(&org, "Waiting", content, "background_review", "", "owner-a"),
+            ))
+            .await
+            .expect("propose");
+        }
+        assert_eq!(
+            skill_row_state(&pool, &org, "Waiting", "user", "owner-a").await,
+            Some((false, "user".into(), "owner-a".into(), "proposed".into()))
+        );
+        assert_eq!(
+            learned_skill_content(&pool, &org, "owner-a", "Waiting").await,
+            "second"
+        );
+
+        // A human write onto the proposal asks for `enabled` and does not get it.
+        svc.upsert_agent_skill(as_user(
+            &org,
+            "owner-a",
+            skill_request(&org, "Waiting", "edited", "user", "user", ""),
+        ))
+        .await
+        .expect("human write");
+        assert_eq!(
+            skill_row_state(&pool, &org, "Waiting", "user", "owner-a").await,
+            Some((false, "user".into(), "owner-a".into(), "proposed".into())),
+            "an undecided proposal is not switched on by a write"
+        );
+
+        clear_skill_rows(&pool, &org).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn accepted_row_is_not_rewritten() {
+        use mp_contracts::model_plane::v1::session_core_server::SessionCore;
+        let Some((svc, pool, org)) = skills_service().await else {
+            return;
+        };
+        for (id, name, state) in [
+            ("sk-acc", "Accepted", "accepted"),
+            ("sk-rej", "Rejected", "rejected"),
+        ] {
+            sqlx::query(
+                "INSERT INTO agent_skills
+                    (id, org_id, name, description, content, enabled, origin, scope, owner_user_id, review_state)
+                 VALUES ($1, $2, $3, 'd', 'original', $4, 'background_review', 'user', 'owner-a', $5)",
+            )
+            .bind(id)
+            .bind(&org)
+            .bind(name)
+            .bind(state == "accepted")
+            .bind(state)
+            .execute(&pool)
+            .await
+            .expect("seed");
+        }
+        for (name, expected) in [
+            ("Accepted", "accepted_exists"),
+            ("Rejected", "rejected_exists"),
+        ] {
+            let response = svc
+                .upsert_agent_skill(as_service(
+                    &org,
+                    &["session:skills:write"],
+                    skill_request(&org, name, "rewritten", "background_review", "", "owner-a"),
+                ))
+                .await
+                .expect("upsert")
+                .into_inner();
+            assert_eq!(response.skip_reason, expected);
+            assert!(!response.created);
+            assert_eq!(
+                learned_skill_content(&pool, &org, "owner-a", name).await,
+                "original"
+            );
+        }
+
+        clear_skill_rows(&pool, &org).await;
+    }
+
     // -- list_agent_skills scope enforcement (real Postgres) -----------------
     //
     // SKILL-1 (0031_agent_skills_ownership.sql) added scope/owner_user_id/
@@ -15311,7 +15979,10 @@ mod tests {
     // skill was returned to every org member. Rows are seeded directly via
     // SQL (not upsert_agent_skill, which only ever writes scope='org' for
     // its background-review origin) to exercise every scope/owner/share
-    // combination precisely.
+    // combination precisely. WS07 S7 adds the learned-skill proposal: a
+    // disabled, owner-scoped row that no one but its owner may list, even when
+    // a share was written onto it, and a name an org skill and a user's own
+    // skill both hold.
     //
     // #[ignore]d so plain `cargo test` (no DB) skips it; run with a DB:
     //   DATABASE_URL=… cargo test --bin session-core -- --ignored list_agent_skills_scope
@@ -15355,7 +16026,7 @@ mod tests {
                      trigger_file_patterns, tool_restrictions, enabled, origin,
                      scope, owner_user_id, shared_with, created_at, updated_at)
                  VALUES ($1,$2,$3,'d','c','[]','[]','[]',true,'user',$4,$5,$6::jsonb,now(),now())
-                 ON CONFLICT (org_id, name) DO NOTHING",
+                 ON CONFLICT DO NOTHING",
             )
             .bind(format!("{name}-{sfx}"))
             .bind(&org_id)
@@ -15366,6 +16037,40 @@ mod tests {
             .execute(&pool)
             .await
             .expect("seed skill");
+        }
+        // A proposal shared (by a hand-written row) with the sharee, and a name
+        // the org and the owner both hold.
+        for (name, scope, owner_user_id, shared_with, enabled, review_state) in [
+            (
+                "proposal-skill",
+                "user",
+                owner.as_str(),
+                &format!("[\"{sharee}\"]"),
+                false,
+                "proposed",
+            ),
+            ("dup-skill", "org", "", &"[]".to_owned(), true, "accepted"),
+            ("dup-skill", "user", owner.as_str(), &"[]".to_owned(), true, "accepted"),
+        ] {
+            sqlx::query(
+                "INSERT INTO agent_skills
+                    (id, org_id, name, description, content, trigger_keywords,
+                     trigger_file_patterns, tool_restrictions, enabled, origin,
+                     scope, owner_user_id, shared_with, review_state, created_at, updated_at)
+                 VALUES ($1,$2,$3,'d','c','[]','[]','[]',$7,'background_review',$4,$5,$6::jsonb,$8,now(),now())
+                 ON CONFLICT DO NOTHING",
+            )
+            .bind(format!("{name}-{scope}-{sfx}"))
+            .bind(&org_id)
+            .bind(name)
+            .bind(scope)
+            .bind(owner_user_id)
+            .bind(shared_with)
+            .bind(enabled)
+            .bind(review_state)
+            .execute(&pool)
+            .await
+            .expect("seed proposal");
         }
 
         let svc = SessionService {
@@ -15386,6 +16091,7 @@ mod tests {
                 let mut request = Request::new(pb::ListAgentSkillsRequest {
                     org_id: org_id.clone(),
                     enabled_only: false,
+                    for_user_id: String::new(),
                 });
                 request
                     .extensions_mut()
@@ -15428,6 +16134,65 @@ mod tests {
             !stranger_view.contains("private-skill") && !stranger_view.contains("shared-skill"),
             "a stranger must see neither the owner's private skill nor a skill shared with someone else: {stranger_view:?}"
         );
+
+        // A proposal is the owner's alone: a share written onto it does not
+        // reach the sharee until the owner has accepted it.
+        assert!(
+            owner_view.contains("proposal-skill"),
+            "the owner lists their proposal: {owner_view:?}"
+        );
+        assert!(
+            !sharee_view.contains("proposal-skill") && !stranger_view.contains("proposal-skill"),
+            "no one else lists a proposal: {sharee_view:?} {stranger_view:?}"
+        );
+
+        // `for_user_id` is honoured for a service caller and ignored for a user
+        // caller, who can never list as someone else.
+        let list_with = |identity: VerifiedIdentity, for_user_id: String| {
+            let org_id = org_id.clone();
+            let svc = &svc;
+            async move {
+                let mut request = Request::new(pb::ListAgentSkillsRequest {
+                    org_id,
+                    enabled_only: false,
+                    for_user_id,
+                });
+                request.extensions_mut().insert(identity);
+                svc.list_agent_skills(request)
+                    .await
+                    .expect("list_agent_skills")
+                    .into_inner()
+                    .skills
+            }
+        };
+        let as_review = list_with(
+            VerifiedIdentity::service_for_test_as(
+                &org_id,
+                "service:capability-core",
+                &["session:read"],
+                false,
+            ),
+            owner.clone(),
+        )
+        .await;
+        assert!(
+            as_review.iter().any(|s| s.name == "proposal-skill"),
+            "the review lists the existing skills of the run's owner"
+        );
+        let spoof = list_with(VerifiedIdentity::user_for_test(&org_id, &stranger), owner.clone()).await;
+        assert!(
+            spoof.iter().all(|s| s.name != "private-skill" && s.name != "proposal-skill"),
+            "a user caller cannot list as someone else"
+        );
+
+        // The owner's own skill sorts before the org skill of the same name.
+        let owner_skills = list_with(VerifiedIdentity::user_for_test(&org_id, &owner), String::new()).await;
+        let dups: Vec<&str> = owner_skills
+            .iter()
+            .filter(|s| s.name == "dup-skill")
+            .map(|s| s.scope.as_str())
+            .collect();
+        assert_eq!(dups, vec!["user", "org"]);
     }
 }
 

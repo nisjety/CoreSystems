@@ -645,6 +645,35 @@ mod tests {
         );
     }
 
+    /// A paused, off or org-disabled owner and any thread that is not a person's
+    /// own chat are never announced, and both refusals are counted by reason. The
+    /// proposals the review writes belong to the user in the envelope, so the
+    /// announcement is the first place their choice is honoured.
+    #[test]
+    fn memory_paused_and_non_chat_origin_are_never_announced() {
+        let source = include_str!("learning_events.rs");
+        let gate = source
+            .find("if crate::memory_control::controls_enabled() {")
+            .expect("the memory and origin gates sit behind the gate's kill switch");
+        let insert = source
+            .find("INSERT INTO session_audit_outbox")
+            .expect("enqueue must insert an outbox row");
+        let gated = &source[gate..insert];
+        assert!(
+            gated.contains("identity.thread_origin.as_deref() != Some(\"chat\")")
+                && gated.contains("return Ok(Enqueued::SkippedOrigin)"),
+            "only a chat thread is announced"
+        );
+        assert!(
+            gated.contains("!decision.learning_allowed")
+                && gated.contains("return Ok(Enqueued::SkippedMemoryState)"),
+            "a learning-denied decision withholds the announcement"
+        );
+        for reason in ["\"reason\" => \"memory_state\"", "\"reason\" => \"origin\""] {
+            assert!(source.contains(reason), "the skip is counted: {reason}");
+        }
+    }
+
     /// Both terminal paths must emit, or the high-volume surface goes unlearned:
     /// a plain chat turn terminalizes through the MANAGED path
     /// (`terminalization::apply_managed_terminal_outcome`, reached from

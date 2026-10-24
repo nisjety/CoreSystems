@@ -944,6 +944,20 @@ message UpsertAgentSkillRequest {
   // Provenance: "user" or "background_review". A background_review upsert
   // must never overwrite a user-authored skill (enforced server-side).
   string origin = 9;
+  // Ownership and review (WS07 S7). For origin "background_review" session-core
+  // ignores `scope`, `owner_user_id`, `review_state` and `enabled` and writes a
+  // disabled, user-scoped, "proposed" row owned by the caller's `owner_user_id`
+  // (required: a learned skill without an owner is refused). For origin "user"
+  // an empty `scope` is "org" and `review_state` is ignored (a human write is
+  // "accepted").
+  string scope = 10;
+  string owner_user_id = 11;
+  string review_state = 12;
+  // The run and thread the proposal was distilled from, and the reviewer's
+  // reason for proposing it (at most 300 characters). Provenance only.
+  string source_run_id = 13;
+  string source_thread_id = 14;
+  string proposal_reason = 15;
 }
 
 message UpsertAgentSkillResponse {
@@ -954,6 +968,13 @@ message UpsertAgentSkillResponse {
   // True if the write was suppressed because the target is a protected
   // user-authored skill (no error — the loop simply yields to the human).
   bool skipped_protected = 3;
+  // Why nothing was written, as a closed token: "memory_state",
+  // "org_policy", "zdr", "protected", "accepted_exists", "rejected_exists",
+  // "owner_required". Empty when the write happened.
+  string skip_reason = 4;
+  // The row's revision after the write. Reserved for the revision ledger (S8);
+  // 0 until then.
+  int64 revision = 5;
 }
 
 // --- ListAgentSkills (G7 read path: learned skills -> gateway MatchSkills) ---
@@ -964,6 +985,10 @@ message ListAgentSkillsRequest {
   // When true, only enabled skills are returned (the gateway match-cache wants
   // active skills only); when false, all of the org's skills are returned.
   bool enabled_only = 2;
+  // List as this user instead of as the caller. Honoured only for a service
+  // caller (a user caller is always listed as itself), so the learning review
+  // can see the existing skills of the user whose run it is reviewing.
+  string for_user_id = 3;
 }
 
 message AgentSkill {
@@ -983,6 +1008,17 @@ message AgentSkill {
   string scope = 10;
   string owner_user_id = 11;
   repeated string shared_with = 12;
+  // Review (WS07 S7): "proposed" (a learned skill awaiting its owner's
+  // decision), "accepted" or "rejected". Only an accepted skill is ever
+  // injected or matched.
+  string review_state = 13;
+  string source_run_id = 14;
+  string source_thread_id = 15;
+  string proposal_reason = 16;
+  // RFC 3339, UTC.
+  string updated_at = 17;
+  // Reserved for the revision ledger (S8); 0 until then.
+  int64 revision = 18;
 }
 
 message ListAgentSkillsResponse {

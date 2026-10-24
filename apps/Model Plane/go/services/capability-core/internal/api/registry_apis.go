@@ -91,11 +91,19 @@ type skillRow struct {
 	// Ownership/sharing (SKILL-1): "org" (default, visible to the whole org)
 	// or "user" (private to OwnerUserID until explicitly shared). Mirrors
 	// mcp_servers' scope + owner + explicit-share shape.
-	Scope       string    `json:"scope"`
-	OwnerUserID string    `json:"owner_user_id,omitempty"`
-	SharedWith  []string  `json:"shared_with,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	Scope       string   `json:"scope"`
+	OwnerUserID string   `json:"owner_user_id,omitempty"`
+	SharedWith  []string `json:"shared_with,omitempty"`
+	// Provenance and review (WS07 S7): who wrote the skill ("user" or
+	// "background_review"), whether its owner has decided on it ("proposed",
+	// "accepted" or "rejected"), and what a proposal was distilled from. Read
+	// only: a create ignores whatever a client sends for them.
+	Origin         string    `json:"origin"`
+	ReviewState    string    `json:"review_state"`
+	SourceRunID    string    `json:"source_run_id,omitempty"`
+	ProposalReason string    `json:"proposal_reason,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 func validSkillScope(value string) bool {
@@ -139,15 +147,19 @@ func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 		isAdmin := verifiedIsAdmin(r)
 		// Visibility (SKILL-1): org-scoped skills, the caller's own, ones
 		// explicitly shared with the caller, and — for governance — any
-		// shared (never private) skill an admin didn't create themselves.
+		// shared (never private) skill an admin didn't create themselves. A
+		// proposal is its owner's alone until it is accepted: a share written
+		// onto it shows it to no one else.
 		rows, err := h.pool.Query(r.Context(), `
 			SELECT id, org_id, name, description, content,
 			       trigger_keywords, trigger_file_patterns, tool_restrictions,
-			       enabled, scope, owner_user_id, shared_with, created_at, updated_at
+			       enabled, scope, owner_user_id, shared_with,
+			       origin, review_state, source_run_id, proposal_reason, created_at, updated_at
 			FROM agent_skills
 			WHERE org_id = $1
-			  AND (scope = 'org' OR owner_user_id = $2 OR shared_with ? $2
-			       OR ($3 AND jsonb_array_length(shared_with) > 0))
+			  AND (scope = 'org' OR owner_user_id = $2
+			       OR (review_state = 'accepted' AND (shared_with ? $2
+			           OR ($3 AND jsonb_array_length(shared_with) > 0))))
 			ORDER BY name
 		`, orgID, callerID, isAdmin)
 		if err != nil {
@@ -162,6 +174,7 @@ func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 			if err := rows.Scan(&s.ID, &s.OrgID, &s.Name, &s.Description, &s.Content,
 				&s.TriggerKeywords, &s.TriggerFilePatterns, &s.ToolRestrictions,
 				&s.Enabled, &s.Scope, &s.OwnerUserID, &s.SharedWith,
+				&s.Origin, &s.ReviewState, &s.SourceRunID, &s.ProposalReason,
 				&s.CreatedAt, &s.UpdatedAt); err != nil {
 				jsonErr(w, err.Error(), http.StatusInternalServerError)
 				return
@@ -240,14 +253,17 @@ func (h *SkillsHandler) get(w http.ResponseWriter, r *http.Request, id string) {
 	err := h.pool.QueryRow(r.Context(), `
 		SELECT id, org_id, name, description, content,
 		       trigger_keywords, trigger_file_patterns, tool_restrictions,
-		       enabled, scope, owner_user_id, shared_with, created_at, updated_at
+		       enabled, scope, owner_user_id, shared_with,
+		       origin, review_state, source_run_id, proposal_reason, created_at, updated_at
 		FROM agent_skills
 		WHERE id = $1 AND org_id = $2
-		  AND (scope = 'org' OR owner_user_id = $3 OR shared_with ? $3
-		       OR ($4 AND jsonb_array_length(shared_with) > 0))
+		  AND (scope = 'org' OR owner_user_id = $3
+		       OR (review_state = 'accepted' AND (shared_with ? $3
+		           OR ($4 AND jsonb_array_length(shared_with) > 0))))
 	`, id, verifiedOrganizationID(r), callerID, isAdmin).Scan(&s.ID, &s.OrgID, &s.Name, &s.Description, &s.Content,
 		&s.TriggerKeywords, &s.TriggerFilePatterns, &s.ToolRestrictions,
-		&s.Enabled, &s.Scope, &s.OwnerUserID, &s.SharedWith, &s.CreatedAt, &s.UpdatedAt)
+		&s.Enabled, &s.Scope, &s.OwnerUserID, &s.SharedWith,
+		&s.Origin, &s.ReviewState, &s.SourceRunID, &s.ProposalReason, &s.CreatedAt, &s.UpdatedAt)
 	if err != nil {
 		jsonErr(w, "not found", http.StatusNotFound)
 		return
@@ -312,13 +328,25 @@ func (h *SkillsHandler) update(w http.ResponseWriter, r *http.Request, id string
 	if update.Enabled != nil {
 		enabled = *update.Enabled
 	}
+	// A learned skill becomes active by its owner's decision, never by a switch:
+	// enabling is refused for anything not accepted, in the statement itself so
+	// no write can race the check.
 	result, err := h.pool.Exec(r.Context(), `
 		UPDATE agent_skills
 		SET enabled=COALESCE($1, enabled), description=COALESCE(NULLIF($2, ''), description),
 			content=COALESCE(NULLIF($3, ''), content), shared_with=COALESCE($4, shared_with),
 			updated_at=$5
-		WHERE id=$6 AND org_id=$7
+		WHERE id=$6 AND org_id=$7 AND ($1::boolean IS NOT TRUE OR review_state = 'accepted')
 	`, enabled, update.Description, update.Content, sharedJSON, now, id, orgID)
+	if err == nil && result.RowsAffected() == 0 && update.Enabled != nil && *update.Enabled {
+		var reviewState string
+		if h.pool.QueryRow(r.Context(), `
+			SELECT review_state FROM agent_skills WHERE id=$1 AND org_id=$2
+		`, id, orgID).Scan(&reviewState) == nil && reviewState != "accepted" {
+			jsonErr(w, "proposal_requires_decision", http.StatusConflict)
+			return
+		}
+	}
 	if !writeSingleScopedMutation(w, "agent skill", result, err) {
 		return
 	}

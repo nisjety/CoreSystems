@@ -4,7 +4,9 @@
 # Postgres (not a mock). Proves the custom/risky SQL behaves correctly:
 #   - G7  UpsertAgentSkill: ON CONFLICT upsert + xmax created-detection +
 #         provenance guard (a background_review write must NOT overwrite a
-#         user-authored skill).
+#         user-authored skill) + owner-scoped proposals (WS07 S7: the conflict
+#         key is (org, scope, owner, name); a learned write refreshes only a
+#         proposal and never touches enabled/scope/owner/review_state).
 #   - P3  SetRunMode: UPDATE runs.mode, and a missing run affects 0 rows (404).
 #   - G8  approval id-alignment: create with a client-supplied id, then
 #         DecideApproval targets the SAME id (no divergent/orphaned record).
@@ -48,29 +50,53 @@ fi
 echo "==> applying migrations"
 for f in "$MIG"/[0-9]*.sql; do docker exec -i "$CTR" psql -U postgres -d session_core -v ON_ERROR_STOP=1 -q < "$f"; done
 
-UPSERT_TAIL="ON CONFLICT (org_id,name) DO UPDATE SET content=EXCLUDED.content, updated_at=now() WHERE agent_skills.origin <> 'user' OR EXCLUDED.origin='user' RETURNING (xmax=0);"
-COLS="(id,org_id,name,description,content,trigger_keywords,trigger_file_patterns,tool_restrictions,enabled,origin,created_at,updated_at)"
+# WS07 S7: the conflict key carries the owner, a learned write is a disabled proposal and
+# refreshes only a proposal (never enabled, scope, owner or review_state), and a learned skill
+# never overwrites a human's.
+UPSERT_TAIL="ON CONFLICT (org_id,scope,owner_user_id,name) DO UPDATE SET content=EXCLUDED.content, updated_at=now() WHERE agent_skills.origin = 'background_review' AND agent_skills.review_state = 'proposed' RETURNING (xmax=0);"
+COLS="(id,org_id,name,description,content,trigger_keywords,trigger_file_patterns,tool_restrictions,enabled,origin,scope,owner_user_id,review_state,created_at,updated_at)"
+LEARNED="false,'background_review','user'"
 
-echo "==> G7 UpsertAgentSkill provenance guard"
+echo "==> G7 UpsertAgentSkill provenance guard and owner-scoped proposals (0058)"
 r=$(q <<SQL
-INSERT INTO agent_skills $COLS VALUES ('s1','org1','Cache','d','c1','[]'::jsonb,'[]'::jsonb,'[]'::jsonb,true,'background_review',now(),now()) $UPSERT_TAIL
+INSERT INTO agent_skills $COLS VALUES ('s1','org1','Cache','d','c1','[]'::jsonb,'[]'::jsonb,'[]'::jsonb,$LEARNED,'u1','proposed',now(),now()) $UPSERT_TAIL
 SQL
 )
 expect "$r" "t" "fresh insert => created"
 r=$(q <<SQL
-INSERT INTO agent_skills $COLS VALUES ('s1b','org1','Cache','d','c2','[]'::jsonb,'[]'::jsonb,'[]'::jsonb,true,'background_review',now(),now()) $UPSERT_TAIL
+INSERT INTO agent_skills $COLS VALUES ('s1b','org1','Cache','d','c2','[]'::jsonb,'[]'::jsonb,'[]'::jsonb,$LEARNED,'u1','proposed',now(),now()) $UPSERT_TAIL
 SQL
 )
-expect "$r" "f" "re-upsert => updated (not created)"
+expect "$r" "f" "re-upsert of a proposal => updated (not created)"
+r=$(q <<SQL
+INSERT INTO agent_skills $COLS VALUES ('s1c','org1','Cache','d','B-content','[]'::jsonb,'[]'::jsonb,'[]'::jsonb,$LEARNED,'u2','proposed',now(),now()) $UPSERT_TAIL
+SQL
+)
+expect "$r" "t" "a second user's skill of the same name is a row of their own"
+expect "$(q <<<"SELECT content FROM agent_skills WHERE org_id='org1' AND name='Cache' AND owner_user_id='u1';")" "c2" "the first user's skill is untouched by the second user's write"
+expect "$(q <<<"SELECT enabled::text || '/' || review_state FROM agent_skills WHERE id='s1';")" "false/proposed" "the refresh left the row a disabled proposal"
 q >/dev/null <<SQL
-INSERT INTO agent_skills $COLS VALUES ('s2','org1','Runbook','d','human','[]'::jsonb,'[]'::jsonb,'[]'::jsonb,true,'user',now(),now());
+INSERT INTO agent_skills $COLS VALUES ('s2','org1','Runbook','d','human','[]'::jsonb,'[]'::jsonb,'[]'::jsonb,true,'user','user','u1','accepted',now(),now());
 SQL
 r=$(q <<SQL
-INSERT INTO agent_skills $COLS VALUES ('s3','org1','Runbook','d','MACHINE','[]'::jsonb,'[]'::jsonb,'[]'::jsonb,true,'background_review',now(),now()) $UPSERT_TAIL
+INSERT INTO agent_skills $COLS VALUES ('s3','org1','Runbook','d','MACHINE','[]'::jsonb,'[]'::jsonb,'[]'::jsonb,$LEARNED,'u1','proposed',now(),now()) $UPSERT_TAIL
 SQL
 )
 expect "${r:-EMPTY}" "EMPTY" "background_review cannot overwrite user skill (0 rows)"
 expect "$(q <<<"SELECT content FROM agent_skills WHERE org_id='org1' AND name='Runbook';")" "human" "user skill body preserved"
+q >/dev/null <<SQL
+INSERT INTO agent_skills $COLS VALUES ('s4','org1','Decided','d','original','[]'::jsonb,'[]'::jsonb,'[]'::jsonb,false,'background_review','user','u1','accepted',now(),now());
+SQL
+r=$(q <<SQL
+INSERT INTO agent_skills $COLS VALUES ('s5','org1','Decided','d','rewritten','[]'::jsonb,'[]'::jsonb,'[]'::jsonb,$LEARNED,'u1','proposed',now(),now()) $UPSERT_TAIL
+SQL
+)
+expect "${r:-EMPTY}" "EMPTY" "an accepted (here admin-disabled) row is neither rewritten nor re-enabled (0 rows)"
+expect "$(q <<<"SELECT content || '/' || enabled::text FROM agent_skills WHERE org_id='org1' AND name='Decided';")" "original/false" "the decided row keeps its body and stays disabled"
+if q >/dev/null 2>&1 <<<"INSERT INTO agent_skills (id,org_id,name,review_state) VALUES ('bad','org1','Bad','pending');"; then
+  echo "FAIL: a review_state outside the closed set was accepted"; exit 1
+fi
+echo "  ok: the CHECK refuses a review_state outside the closed set"
 
 echo "==> P3 SetRunMode"
 q >/dev/null <<SQL

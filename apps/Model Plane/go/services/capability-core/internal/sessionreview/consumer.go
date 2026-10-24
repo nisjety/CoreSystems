@@ -51,6 +51,28 @@ type reviewInferenceClient interface {
 	Infer(ctx context.Context, in *mpv1.InferRequest, opts ...grpc.CallOption) (*mpv1.InferResponse, error)
 }
 
+// memoryControlsReader is the MemoryService question the review asks before it
+// reads a conversation: may this user's runs be learned from? The generated
+// *mpv1.MemoryServiceClient satisfies it; tests inject a fake.
+type memoryControlsReader interface {
+	GetMemoryControls(ctx context.Context, in *mpv1.GetMemoryControlsRequest, opts ...grpc.CallOption) (*mpv1.GetMemoryControlsResponse, error)
+}
+
+// Option configures a review consumer.
+type Option func(*reviewOptions)
+
+type reviewOptions struct {
+	controls memoryControlsReader
+}
+
+// WithMemoryControls makes the review ask Session Core whether the run's owner
+// allows learning before it reads their conversation. Without it the review
+// relies on Session Core's own gates (the run is not announced, and the skill
+// write is refused) and still pays for a review that write will refuse.
+func WithMemoryControls(client memoryControlsReader) Option {
+	return func(o *reviewOptions) { o.controls = client }
+}
+
 // HandleRunCompleted decodes a run-lifecycle envelope and, if it is a
 // RUN_COMPLETED, runs one learning review end-to-end: fetch the transcript +
 // existing skills (session-core), review (inference-core), and persist the
@@ -77,8 +99,9 @@ func HandleRunCompleted(
 	sc reviewSessionClient,
 	ic reviewInferenceClient,
 	model string,
+	opts ...Option,
 ) (int, error) {
-	outcome, err := handleRunCompleted(ctx, data, sc, ic, model)
+	outcome, err := handleRunCompleted(ctx, data, sc, ic, model, opts...)
 	return outcome.Persisted, err
 }
 
@@ -87,7 +110,42 @@ const (
 	skipNotRunCompleted  learning.SkipReason = "not_run_completed"
 	skipRetentionPosture learning.SkipReason = "retention_posture"
 	skipProviderRefusal  learning.SkipReason = "provider_refusal"
+	// The owner's own memory state: paused or off.
+	skipMemoryState learning.SkipReason = "memory_state"
+	// The organization's policy: memory disabled, the learning review not
+	// opted in, or the policy unreadable.
+	skipOrgPolicy learning.SkipReason = "org_policy"
+	// The envelope names no owner, so a proposal would belong to no one.
+	skipOwnerUnknown learning.SkipReason = "owner_unknown"
 )
+
+// learningSkip asks Session Core whether the run's owner allows learning, and
+// returns why not as a skip reason ("" when it does). An answer that cannot be
+// had is an error, not a yes: the delivery is retried.
+func learningSkip(ctx context.Context, controls memoryControlsReader, ref SessionRef) (learning.SkipReason, error) {
+	resp, err := controls.GetMemoryControls(ctx, &mpv1.GetMemoryControlsRequest{OrgId: ref.OrgID, UserId: ref.UserID})
+	if err != nil {
+		return "", fmt.Errorf("sessionreview: memory controls for run %s: %w", ref.RunID, err)
+	}
+	decision := resp.GetControls()
+	if decision == nil {
+		return "", fmt.Errorf("sessionreview: memory controls for run %s: empty response", ref.RunID)
+	}
+	if decision.GetLearningAllowed() {
+		return "", nil
+	}
+	switch decision.GetReason() {
+	case "user_paused", "user_off", "thread_off":
+		return skipMemoryState, nil
+	case "zdr":
+		return skipRetentionPosture, nil
+	default:
+		// org_disabled, policy_unavailable, and "on" with learning refused: the
+		// organization has not opted in. A reason this build does not know is
+		// refused as the organization's, the stricter of the two.
+		return skipOrgPolicy, nil
+	}
+}
 
 // handleRunCompleted is [HandleRunCompleted] returning the full outcome.
 func handleRunCompleted(
@@ -96,7 +154,12 @@ func handleRunCompleted(
 	sc reviewSessionClient,
 	ic reviewInferenceClient,
 	model string,
+	opts ...Option,
 ) (learning.ReviewOutcome, error) {
+	var options reviewOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
 	var env envelope.Envelope
 	if err := json.Unmarshal(data, &env); err != nil {
 		return learning.ReviewOutcome{}, fmt.Errorf("sessionreview: decode envelope: %w", err)
@@ -113,8 +176,25 @@ func handleRunCompleted(
 			"reason", skipRetentionPosture, "posture", posture.String())
 		return learning.ReviewOutcome{Skipped: skipRetentionPosture}, nil
 	}
+	// Owner gate, also ahead of every read. A proposal belongs to the person
+	// whose conversation it came from, so a run with no owner is not reviewed,
+	// and neither is one whose owner (or organization) does not allow learning.
+	if ref.UserID == "" {
+		slog.Info("learning review skipped", "run_id", ref.RunID, "reason", skipOwnerUnknown)
+		return learning.ReviewOutcome{Skipped: skipOwnerUnknown}, nil
+	}
+	if options.controls != nil {
+		skip, err := learningSkip(ctx, options.controls, ref)
+		if err != nil {
+			return learning.ReviewOutcome{}, err
+		}
+		if skip != "" {
+			slog.Info("learning review skipped", "run_id", ref.RunID, "reason", skip)
+			return learning.ReviewOutcome{Skipped: skip}, nil
+		}
+	}
 	reviewer := llmreviewer.NewReviewer(ic, model, ref.OrgID)
-	sink := skillsink.NewSessionCoreSink(sc, ref.OrgID)
+	sink := skillsink.NewSessionCoreSink(sc, ref.OrgID, ref.UserID, ref.RunID, ref.ThreadID)
 	src := NewSessionCoreTranscriptSource(sc)
 	outcome, err := OnRunCompleted(ctx, ref, src, reviewer, sink)
 	var responseError *llmreviewer.ResponseError
@@ -317,6 +397,7 @@ func RunConsumer(
 	sc reviewSessionClient,
 	ic reviewInferenceClient,
 	model string,
+	opts ...Option,
 ) error {
 	// Read before binding so the very first delivery is already settled
 	// against the server's limits. The bind below performs this same lookup,
@@ -331,7 +412,7 @@ func RunConsumer(
 	}
 	sub, err := js.QueueSubscribe(RunCompletedSubject, SkillReviewDurable, func(msg *nats.Msg) {
 		settleReview(ctx, msg, msg.Subject, limits, func(reviewCtx context.Context) (learning.ReviewOutcome, error) {
-			return handleRunCompleted(reviewCtx, msg.Data, sc, ic, model)
+			return handleRunCompleted(reviewCtx, msg.Data, sc, ic, model, opts...)
 		})
 	}, nats.Bind(RunEventsStream, SkillReviewDurable), nats.ManualAck())
 	if err != nil {

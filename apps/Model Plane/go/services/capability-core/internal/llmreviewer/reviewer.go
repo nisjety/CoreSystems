@@ -35,7 +35,10 @@ const DefaultModel = "claude-sonnet-4-20250514"
 const reviewMaxTokens = 4096
 
 const reviewTool = "submit_skill_review"
-const reviewSchema = `{"type":"object","properties":{"skills":{"type":"array","maxItems":8,"items":{"type":"object","properties":{"name":{"type":"string","minLength":1,"maxLength":160},"description":{"type":"string","maxLength":1000},"content":{"type":"string","minLength":1,"maxLength":8000},"trigger_keywords":{"type":"array","maxItems":12,"items":{"type":"string","maxLength":120}},"confidence":{"type":"number","minimum":0,"maximum":1}},"required":["name","description","content","trigger_keywords","confidence"],"additionalProperties":false}}},"required":["skills"],"additionalProperties":false}`
+
+// reason is in the schema but not in `required`: a reply without one is a valid
+// review whose proposal simply carries no reason.
+const reviewSchema = `{"type":"object","properties":{"skills":{"type":"array","maxItems":8,"items":{"type":"object","properties":{"name":{"type":"string","minLength":1,"maxLength":160},"description":{"type":"string","maxLength":1000},"content":{"type":"string","minLength":1,"maxLength":8000},"trigger_keywords":{"type":"array","maxItems":12,"items":{"type":"string","maxLength":120}},"confidence":{"type":"number","minimum":0,"maximum":1},"reason":{"type":"string","maxLength":300}},"required":["name","description","content","trigger_keywords","confidence"],"additionalProperties":false}}},"required":["skills"],"additionalProperties":false}`
 
 // ResponseError exposes bounded, content-free diagnostics and retry policy.
 // Never log a transcript, generated skill, provider message or raw response.
