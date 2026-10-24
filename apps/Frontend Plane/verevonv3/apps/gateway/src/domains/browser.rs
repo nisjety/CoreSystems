@@ -286,8 +286,23 @@ impl BrowserControlMode {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ControlBody {
     pub(crate) mode: BrowserControlMode,
+    /// WS9.I: the control epoch the person saw. Quarry refuses the change with 409 when the
+    /// run has moved on, so a stale Take over or Give back cannot flip control.
+    #[serde(default)]
+    pub(crate) expected_epoch: Option<u64>,
+}
+
+/// The body the gateway sends Quarry for a control change (WS9.I). `expected_epoch` is
+/// forwarded only when the caller sent one; without it the change is unconditional, as before.
+fn control_quarry_body(mode: BrowserControlMode, expected_epoch: Option<u64>) -> Value {
+    let mut body = json!({ "mode": mode.as_str() });
+    if let Some(expected) = expected_epoch {
+        body["expected_epoch"] = json!(expected);
+    }
+    body
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -855,6 +870,7 @@ pub(crate) async fn set_control_mode(
     // Control authority lives in Quarry. A BFF cache must neither authorize a
     // hand-off nor decide whether an owner session exists after a restart.
     let mode = body.mode;
+    let expected_epoch = body.expected_epoch;
     let cookie = cookie_header(&headers);
     let token = quarry_token(&state, &user, &cookie).await;
     let (status, body) = quarry_call(
@@ -864,7 +880,7 @@ pub(crate) async fn set_control_mode(
             "/v1/agent/runs/{}/browser-session/control",
             urlencoding::encode(&session_id),
         ),
-        Some(json!({ "mode": mode.as_str() })),
+        Some(control_quarry_body(mode, expected_epoch)),
         token.as_deref(),
         &user.user_id,
     )
@@ -3055,7 +3071,8 @@ fn browser_response_from_owner_projection(projection: &Value, observation: Optio
                 "storage": if projection.get("profileStorage").and_then(Value::as_str) == Some("persistent") { "persistent" } else { "isolated" }
             },
             "control": {
-                "mode": projection.get("controlMode").cloned().unwrap_or_else(|| Value::String("agent_control".to_owned()))
+                "mode": projection.get("controlMode").cloned().unwrap_or_else(|| Value::String("agent_control".to_owned())),
+                "epoch": projection.get("controlEpoch").cloned().unwrap_or(Value::Null)
             },
             "frame": frame,
             "liveFrameUrl": live.then(|| live_frame_url(run_id)),
@@ -4809,6 +4826,21 @@ pub(super) fn forward_quarry_failure(status: StatusCode, body: Value) -> Respons
         }
         return (StatusCode::CONFLICT, Json(response)).into_response();
     }
+    // WS9.I: a control change refused because the epoch moved on. Quarry answers CONFLICT with
+    // the epochs in its details; only that shape maps, any other 409 passes through.
+    if status == StatusCode::CONFLICT
+        && body.pointer("/error/code").and_then(Value::as_str) == Some("CONFLICT")
+        && body.pointer("/error/details/control_epoch").is_some()
+    {
+        let mut response = error(
+            "browser_control_epoch_stale",
+            "Browser control changed elsewhere. Refresh and try again.",
+        );
+        if let Some(details) = body.pointer("/error/details") {
+            response["error"]["details"] = details.clone();
+        }
+        return (StatusCode::CONFLICT, Json(response)).into_response();
+    }
     // A navigation outside the run's allowed domains (Quarry's 403 for a
     // cross-host click). WS8 will emit a typed code; until then the match is
     // on Quarry's message, and the SPA gets the typed code its copy is keyed on.
@@ -5404,6 +5436,55 @@ pub(crate) mod tests {
         for reason in ["org_plan_cap", "org_render_cap"] {
             assert_capacity_reason_maps(reason).await;
         }
+    }
+
+    /// WS9.I: the epoch the person saw travels to Quarry as a compare-and-set; a legacy body
+    /// without it stays unconditional.
+    #[test]
+    fn control_body_forwards_expected_epoch() {
+        let body: ControlBody = serde_json::from_value(json!({
+            "mode": "human_takeover",
+            "expectedEpoch": 2
+        }))
+        .expect("control body with an epoch");
+        assert_eq!(body.expected_epoch, Some(2));
+        let forwarded = control_quarry_body(body.mode, body.expected_epoch);
+        assert_eq!(forwarded["mode"], "human_takeover");
+        assert_eq!(forwarded["expected_epoch"], 2);
+
+        let legacy: ControlBody =
+            serde_json::from_value(json!({ "mode": "agent_control" })).expect("legacy body");
+        assert_eq!(legacy.expected_epoch, None);
+        assert!(control_quarry_body(legacy.mode, legacy.expected_epoch)
+            .get("expected_epoch")
+            .is_none());
+    }
+
+    /// WS9.I: Quarry's CONFLICT with the epochs in its details becomes the typed stale-epoch
+    /// error; a CONFLICT without them is not reclassified.
+    #[tokio::test]
+    async fn stale_epoch_maps_to_typed_conflict() {
+        let quarry = json!({ "error": {
+            "code": "CONFLICT",
+            "message": "the browser's control epoch has moved on",
+            "details": { "control_epoch": 3, "expected_epoch": 2 }
+        }});
+        let response = forward_quarry_failure(StatusCode::CONFLICT, quarry);
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], "browser_control_epoch_stale");
+        assert_eq!(body["error"]["details"]["control_epoch"], 3);
+
+        let other = json!({ "error": { "code": "CONFLICT", "message": "tab is busy" } });
+        let response = forward_quarry_failure(StatusCode::CONFLICT, other);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_ne!(body["error"]["code"], "browser_control_epoch_stale");
     }
 
     async fn assert_capacity_reason_maps(reason: &str) {
@@ -6630,6 +6711,7 @@ pub(crate) mod tests {
                 Path("run-owned".to_owned()),
                 Json(ControlBody {
                     mode: BrowserControlMode::HumanTakeover,
+                    expected_epoch: None,
                 }),
             )
             .await,

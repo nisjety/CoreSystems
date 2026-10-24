@@ -5391,12 +5391,24 @@ pub(super) async fn dispatch_browser_set_control_mode(
     } else {
         crate::domains::browser::BrowserControlMode::AgentControl
     };
+    // WS9.I: the epoch the person saw, as a compare-and-set. Anything but a whole number is refused.
+    let expected_epoch = match input.get("expectedEpoch") {
+        None | Some(Value::Null) => None,
+        Some(value) => match value.as_u64() {
+            Some(epoch) => Some(epoch),
+            None => {
+                return ticket_bad_request(
+                    "browser_action.set_control_mode expectedEpoch must be a non-negative integer",
+                )
+            }
+        },
+    };
     let response = set_browser_control_mode(
         StateExtractor(state.clone()),
         ExtensionExtractor(user.clone()),
         headers.clone(),
         PathExtractor(session_id.to_owned()),
-        Json(BrowserControlBody { mode }),
+        Json(BrowserControlBody { mode, expected_epoch }),
     )
     .await;
     let (status, payload) = response_to_status_and_json(response).await;
