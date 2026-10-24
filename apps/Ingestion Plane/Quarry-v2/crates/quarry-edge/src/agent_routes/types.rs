@@ -349,6 +349,23 @@ pub enum BrowserTimelineItemDetail {
         event_count: u32,
         last_sequence: u64,
     },
+    /// WS8.F: a tab changed hands. `holder` is `human` or `agent`.
+    TabControl {
+        tab_id: String,
+        holder: BrowserTabHolder,
+        #[serde(rename = "initiatedBy")]
+        initiated_by: BrowserTimelineInitiator,
+        #[serde(rename = "tabEpoch")]
+        tab_epoch: u64,
+    },
+    /// WS8.F: an agent attached to the run or its attachment ended.
+    Attach {
+        state: BrowserAttachState,
+        #[serde(rename = "attachId")]
+        attach_id: String,
+        #[serde(rename = "tabId", skip_serializing_if = "Option::is_none")]
+        tab_id: Option<String>,
+    },
     Lifecycle {
         state: BrowserTimelineLifecycle,
         #[serde(rename = "initiatedBy", skip_serializing_if = "Option::is_none")]

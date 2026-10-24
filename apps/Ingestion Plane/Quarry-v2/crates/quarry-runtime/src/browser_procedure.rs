@@ -265,6 +265,8 @@ mod tests {
             outcome: StepOutcome::Completed { latency_ms: 1 },
             cost_source: None,
             redaction_rule_version: None,
+            tab_id: None,
+            attach_id: None,
             observation: Some(BrowserObservation {
                 run_id: Id::new(),
                 step: 0,

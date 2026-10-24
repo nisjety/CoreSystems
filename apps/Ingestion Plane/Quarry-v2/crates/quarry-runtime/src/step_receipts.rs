@@ -224,6 +224,21 @@ pub enum BrowserTimelineEventKind {
         event_count: u32,
         last_sequence: u64,
     },
+    /// WS8.F: who holds a tab after a change. `tab_epoch` is the tab's epoch after it.
+    TabControl {
+        tab_id: String,
+        holder: BrowserTabHolder,
+        initiated_by: BrowserTimelineInitiator,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        tab_epoch: u64,
+    },
+    /// WS8.F: an agent attachment began or ended.
+    Attach {
+        state: BrowserAttachState,
+        attach_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab_id: Option<String>,
+    },
     Lifecycle {
         state: BrowserTimelineLifecycle,
         /// Who ended the run when its owner did not: `system` for the sweeper's
@@ -324,6 +339,26 @@ pub enum BrowserTabOperation {
     Closed,
 }
 
+/// Who holds a browser tab (WS8.F). The wire values are `human` and `agent`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserTabHolder {
+    Human,
+    Agent,
+}
+
+/// Where an agent attachment stands (WS8.F). `attached` is the only live state.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserAttachState {
+    Attached,
+    Released,
+    Aborted,
+    Revoked,
+    IdleReleased,
+    SessionEnded,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum BrowserTimelineLifecycle {
@@ -382,6 +417,13 @@ pub struct StepReceipt {
     /// one written while masking was not enforcing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redaction_rule_version: Option<String>,
+    /// The browser tab a step addressed, when the step ran on an attached run or was a
+    /// tab operation (WS8.F). Absent for a run that has only its first tab.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<String>,
+    /// The attach a delegate step ran under (WS8.F). Absent for a person's step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach_id: Option<String>,
 }
 
 impl StepReceipt {
@@ -698,6 +740,8 @@ pub struct ReceiptBuilder {
     control_epoch: Option<u64>,
     agent: Option<AgentIdentity>,
     cost_source: Option<CostSource>,
+    tab_id: Option<String>,
+    attach_id: Option<String>,
     /// The flat cost of a failed attempt (the budget charges it; WS6.B).
     failed_cost_micro_usd: u64,
     /// The kind of the control a typing action went to, read from the snapshot
@@ -720,6 +764,8 @@ impl ReceiptBuilder {
             control_epoch: None,
             agent: None,
             cost_source: None,
+            tab_id: None,
+            attach_id: None,
             failed_cost_micro_usd: 0,
             typed_field: None,
             record_policy: process_record_policy(),
@@ -781,6 +827,13 @@ impl ReceiptBuilder {
     /// Record which agent drove the step (call after `initiator`).
     pub fn agent(mut self, agent: Option<AgentIdentity>) -> Self {
         self.agent = agent;
+        self
+    }
+
+    /// Record the tab a step addressed and the attach it ran under (WS8.F).
+    pub fn tab(mut self, tab_id: Option<String>, attach_id: Option<String>) -> Self {
+        self.tab_id = tab_id;
+        self.attach_id = attach_id;
         self
     }
 
@@ -851,6 +904,8 @@ impl ReceiptBuilder {
             control_epoch: self.control_epoch,
             agent: self.agent,
             redaction_rule_version,
+            tab_id: self.tab_id,
+            attach_id: self.attach_id,
         }
     }
 
@@ -946,6 +1001,8 @@ impl ReceiptBuilder {
             control_epoch: self.control_epoch,
             agent: self.agent,
             redaction_rule_version,
+            tab_id: self.tab_id,
+            attach_id: self.attach_id,
         }
     }
 
@@ -974,6 +1031,8 @@ impl ReceiptBuilder {
             control_epoch: self.control_epoch,
             agent: self.agent,
             redaction_rule_version,
+            tab_id: self.tab_id,
+            attach_id: self.attach_id,
         }
     }
 }

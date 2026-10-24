@@ -179,7 +179,8 @@ use quarry_runtime::observation::{ObservationContext, ObservationRunner, Observa
 use quarry_runtime::step_receipts::{
     AgentIdentity, AgentIdentityBasis, AgentRunCheckpoint, AgentRunStatus, BrowserControlMode,
     BrowserProfileScope,
-    BrowserTabOperation, BrowserTimelineEvent, BrowserTimelineEventKind,
+    BrowserAttachState, BrowserTabHolder, BrowserTabOperation, BrowserTimelineEvent,
+    BrowserTimelineEventKind,
     BrowserTimelineInitiator, BrowserTimelineLifecycle, ReceiptBuilder, StepOutcome,
     StepReceipt,
 };

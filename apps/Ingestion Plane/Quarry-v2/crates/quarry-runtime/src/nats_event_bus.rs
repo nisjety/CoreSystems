@@ -435,6 +435,8 @@ fn event_type_token(t: &EventType) -> &'static str {
         EventType::ControlRequested => "control_requested",
         EventType::RunTimedOut => "run_timed_out",
         EventType::ScheduleSkipped => "schedule_skipped",
+        EventType::AgentAttached => "agent_attached",
+        EventType::AgentDetached => "agent_detached",
     }
 }
 

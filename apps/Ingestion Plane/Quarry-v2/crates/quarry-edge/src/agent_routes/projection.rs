@@ -153,6 +153,26 @@ pub(super) fn browser_timeline_event(event: BrowserTimelineEvent) -> BrowserTime
             event_count,
             last_sequence,
         },
+        BrowserTimelineEventKind::TabControl {
+            tab_id,
+            holder,
+            initiated_by,
+            tab_epoch,
+        } => BrowserTimelineItemDetail::TabControl {
+            tab_id,
+            holder,
+            initiated_by,
+            tab_epoch,
+        },
+        BrowserTimelineEventKind::Attach {
+            state,
+            attach_id,
+            tab_id,
+        } => BrowserTimelineItemDetail::Attach {
+            state,
+            attach_id,
+            tab_id,
+        },
         BrowserTimelineEventKind::Lifecycle { state, initiated_by } => {
             BrowserTimelineItemDetail::Lifecycle { state, initiated_by }
         }

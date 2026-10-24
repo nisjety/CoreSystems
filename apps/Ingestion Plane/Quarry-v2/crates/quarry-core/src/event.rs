@@ -96,6 +96,12 @@ pub enum EventType {
     RunTimedOut,
     /// WS15.S4 mirror: a scheduled fire that did not start a job. Payload: `reason`.
     ScheduleSkipped,
+    /// WS8.F: an agent attached to a live run and was given a tab. Payload: `attach_id`,
+    /// `tab_id`. No URL and no title.
+    AgentAttached,
+    /// WS8.F: an agent attachment ended (released, aborted, revoked, idle or session ended).
+    /// Payload: `attach_id`, `disposition`. No URL and no title.
+    AgentDetached,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

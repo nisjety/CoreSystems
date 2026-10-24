@@ -42,6 +42,12 @@ impl PostgresStepReceiptStore {
             .try_get("observation")
             .map_err(|error| db_err("decode observation", error))?;
         Ok(StepReceipt {
+            tab_id: row
+                .try_get::<Option<String>, _>("tab_id")
+                .map_err(|error| db_err("decode tab_id", error))?,
+            attach_id: row
+                .try_get::<Option<String>, _>("attach_id")
+                .map_err(|error| db_err("decode attach_id", error))?,
             redaction_rule_version: row
                 .try_get::<Option<String>, _>("redaction_rule_version")
                 .map_err(|error| db_err("decode redaction_rule_version", error))?,
@@ -181,8 +187,8 @@ impl StepReceiptStore for PostgresStepReceiptStore {
             "INSERT INTO quarry_step_receipts
              (receipt_id, run_id, org_id, actor_id, step, started_at, finished_at, action,
               outcome, observation, correction_of, cost_micro_usd, initiated_by, control_epoch,
-              initiated_agent, cost_source, redaction_rule_version)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+              initiated_agent, cost_source, redaction_rule_version, tab_id, attach_id)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
              ON CONFLICT (receipt_id) DO NOTHING",
         )
         .bind(&receipt.receipt_id)
@@ -211,6 +217,8 @@ impl StepReceiptStore for PostgresStepReceiptStore {
                 .and_then(|value| value.as_str().map(str::to_owned))
         }))
         .bind(&receipt.redaction_rule_version)
+        .bind(&receipt.tab_id)
+        .bind(&receipt.attach_id)
         .execute(&self.pool)
         .await
         .map_err(|error| db_err("append receipt", error))?;
@@ -232,7 +240,7 @@ impl StepReceiptStore for PostgresStepReceiptStore {
             "SELECT receipt_id, run_id, org_id, actor_id, step, started_at, finished_at,
                     action, outcome, observation, correction_of, cost_micro_usd,
                     initiated_by, control_epoch, initiated_agent, cost_source,
-                    redaction_rule_version
+                    redaction_rule_version, tab_id, attach_id
              FROM quarry_step_receipts
              WHERE org_id = $1 AND run_id = $2
              ORDER BY step ASC, finished_at ASC",
@@ -261,7 +269,7 @@ impl StepReceiptStore for PostgresStepReceiptStore {
             "SELECT receipt_id, run_id, org_id, actor_id, step, started_at, finished_at,
                     action, outcome, observation, correction_of, cost_micro_usd,
                     initiated_by, control_epoch, initiated_agent, cost_source,
-                    redaction_rule_version
+                    redaction_rule_version, tab_id, attach_id
              FROM quarry_step_receipts
              WHERE org_id = $1 AND actor_id = $2 AND run_id = $3
              ORDER BY step ASC, finished_at ASC",
@@ -280,7 +288,7 @@ impl StepReceiptStore for PostgresStepReceiptStore {
             "SELECT receipt_id, run_id, org_id, actor_id, step, started_at, finished_at,
                     action, outcome, observation, correction_of, cost_micro_usd,
                     initiated_by, control_epoch, initiated_agent, cost_source,
-                    redaction_rule_version
+                    redaction_rule_version, tab_id, attach_id
              FROM quarry_step_receipts WHERE receipt_id = $1",
         )
         .bind(receipt_id)
