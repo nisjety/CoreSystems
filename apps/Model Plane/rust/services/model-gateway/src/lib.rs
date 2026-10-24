@@ -94,6 +94,7 @@ pub mod tool_loop;
 pub mod tool_result_handles;
 pub mod tool_retry;
 pub mod tools;
+pub mod turn_attachments;
 pub mod trajectory;
 pub mod turn_timing;
 pub mod url_domain;

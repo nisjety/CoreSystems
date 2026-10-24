@@ -1,5 +1,6 @@
 pub mod agentic_subscription;
 pub mod approval_cause;
+pub mod attachments;
 pub mod autonomy;
 pub mod dataplane_posture;
 pub mod durable_gate;

@@ -89,22 +89,35 @@ fn the_recovery_tool_is_handed_the_real_prompt() {
 #[test]
 fn the_prompt_snapshot_follows_the_round_not_the_turn() {
     let text = source("src/tool_loop.rs");
-    // `run_tool_rounds` is a thin entry point now; the rounds, and the snapshot,
-    // live in the function it delegates to. Pin the delegation too, so its
-    // callers stay covered by what is asserted below.
+    // `run_tool_rounds` and `run_tool_rounds_for_model` are thin entry points
+    // now; the rounds, and the snapshot, live in the function the chain ends
+    // in. Pin each delegation too, so every caller stays covered by what is
+    // asserted below.
     let entry = function_body(&text, "pub async fn run_tool_rounds(");
     assert!(
         entry.contains("run_tool_rounds_for_model("),
         "run_tool_rounds no longer delegates to run_tool_rounds_for_model; re-point this test"
     );
-    let rounds = function_body(&text, "pub async fn run_tool_rounds_for_model(");
+    let model_entry = function_body(&text, "pub async fn run_tool_rounds_for_model(");
+    assert!(
+        model_entry.contains("run_tool_rounds_for_model_with_attachments("),
+        "run_tool_rounds_for_model no longer delegates to \
+         run_tool_rounds_for_model_with_attachments; re-point this test"
+    );
+    let rounds = function_body(
+        &text,
+        "pub async fn run_tool_rounds_for_model_with_attachments(",
+    );
     // The snapshot must be taken inside the round loop, so each round sees the
     // tool results the previous one appended.
     let round_loop = function_body(&rounds, "for _round in ");
     let snapshot = round_loop
         .split("let prompt_contents: Vec<String> =")
         .nth(1)
-        .expect("run_tool_rounds_for_model no longer snapshots the prompt inside its round loop")
+        .expect(
+            "run_tool_rounds_for_model_with_attachments no longer snapshots the prompt inside \
+             its round loop",
+        )
         .split(';')
         .next()
         .expect("a let binding ends in a semicolon");

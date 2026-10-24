@@ -8,6 +8,7 @@ import {
 import {
   type ChatAction,
   type ChatMessage,
+  getAttachmentPolicy,
   type RecalledMemory,
 } from '@/shared/api/chat-client'
 import {
@@ -1332,13 +1333,23 @@ export function contentWithPreparedSources(text: string, attachments: ComposerAt
   return sources.length ? appendInlinedAttachments(text, sources) : text
 }
 
+/** The document kinds a program can usefully read as bytes (the spreadsheet or PDF behind the inlined text). */
+const SANDBOX_FILE_EXTENSIONS = /\.(xlsx|csv|pdf|json|docx|pptx)$/i
+
 export async function toStreamAttachments(
   attachments: DashboardComposerSubmitPayload['attachments'],
 ): Promise<StreamAttachment[]> {
   const out: StreamAttachment[] = []
   for (const attachment of attachments) {
-    // Documents are included by inlineTextAttachments before inference.
-    if (!attachment.type.startsWith('image/')) continue
+    if (!attachment.type.startsWith('image/')) {
+      // Documents are included as text by inlineTextAttachments before inference.
+      // Their bytes ride along only where the server says it will stage them for
+      // the code sandbox, so a server without that switch gets what it always got.
+      if (SANDBOX_FILE_EXTENSIONS.test(attachment.name) && getAttachmentPolicy()?.modes.sandboxFiles) {
+        out.push(await toStreamFile(attachment))
+      }
+      continue
+    }
     try {
       if (!attachment.url) throw new Error('missing image')
       let dataUrl = attachment.url
@@ -1355,6 +1366,30 @@ export async function toStreamAttachments(
     }
   }
   return out
+}
+
+async function toStreamFile(
+  attachment: DashboardComposerSubmitPayload['attachments'][number],
+): Promise<StreamAttachment> {
+  try {
+    if (!attachment.url) throw new Error('missing file')
+    let dataUrl = attachment.url
+    if (!dataUrl.startsWith('data:')) {
+      const response = await fetch(dataUrl)
+      if (!response.ok) throw new Error('unreadable file')
+      dataUrl = await blobToDataUrl(await response.blob())
+    }
+    const parsed = parseDataUrl(dataUrl)
+    if (!parsed || !parsed.base64) throw new Error('invalid file encoding')
+    return {
+      kind: 'file',
+      name: attachment.name,
+      data_base64: parsed.base64,
+      mime_type: attachment.type || parsed.mime || 'application/octet-stream',
+    }
+  } catch {
+    throw new Error(`Kunne ikke lese «${attachment.name}». Prøv igjen eller fjern filen.`)
+  }
 }
 
 export function createId(prefix: string) {

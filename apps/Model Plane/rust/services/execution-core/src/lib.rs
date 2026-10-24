@@ -34,6 +34,7 @@ pub mod provenance;
 pub mod quarry_agent;
 mod quarry_auth;
 pub(crate) mod run_budget;
+pub mod run_inputs;
 pub mod runtime_loop;
 pub mod sandbox;
 pub mod sandbox_lease;

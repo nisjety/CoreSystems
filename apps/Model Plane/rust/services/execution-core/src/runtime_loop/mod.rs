@@ -818,7 +818,18 @@ async fn execute_step_inner(
         } else {
             None
         };
-        execute_code_interpreter(tool_input, run_id, step_id, workspace_root.as_deref()).await
+        // The files the request carrying this step attached, registered under the
+        // run for the length of the call (`ExecuteStep`). Read here, not passed
+        // down, so the model's own tool input cannot name or replace them.
+        let ro_inputs = crate::run_inputs::global().get(org_id, run_id);
+        execute_code_interpreter(
+            tool_input,
+            run_id,
+            step_id,
+            workspace_root.as_deref(),
+            ro_inputs,
+        )
+        .await
     } else if crate::process_tools::is_process_tool(tool_name) {
         execute_process_tool(
             tool_name, tool_input, org_id, user_id, run_id, step_id, state, sandbox,
@@ -1114,8 +1125,11 @@ async fn execute_code_interpreter(
     run_id: &str,
     step_id: &str,
     workspace_root: Option<&Path>,
+    ro_inputs: Option<std::sync::Arc<crate::run_inputs::InputSet>>,
 ) -> tool_bridge::ToolExecution {
-    match crate::code_interpreter::run(tool_input, run_id, step_id, workspace_root).await {
+    match crate::code_interpreter::run(tool_input, run_id, step_id, workspace_root, ro_inputs)
+        .await
+    {
         Ok(output) => tool_bridge::ToolExecution {
             output,
             error: None,

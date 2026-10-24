@@ -533,11 +533,24 @@ export type ChatState = {
   queuedInputs: QueuedInput[]
 }
 
-export type StreamAttachment = {
-  data_base64: string
-  kind: 'image'
-  mime_type: string
-}
+export type StreamAttachment =
+  | {
+      data_base64: string
+      kind: 'image'
+      mime_type: string
+    }
+  /**
+   * A document's own bytes, for the code sandbox to read (read-only, under
+   * `attachments/`). Sent only when the server declares `modes.sandbox_files`;
+   * the document's text is inlined into the turn as before, so a server that
+   * stages nothing loses nothing.
+   */
+  | {
+      data_base64: string
+      kind: 'file'
+      mime_type: string
+      name: string
+    }
 
 /**
  * The client's pointer to the plan grant the Model Plane holds for a thread

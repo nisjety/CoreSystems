@@ -170,6 +170,11 @@ fn rendered_tool_output_cap_matches_inline_chat() {
 const SESSION_CHECKPOINT: &str = "../session-core/src/loop_checkpoint.rs";
 const EXECUTOR_PARK: &str = "src/runtime_loop/park.rs";
 const LOOP_FOLD: &str = "../../crates/mp-contracts/src/loop_fold.rs";
+const GATEWAY_TOOLS: &str = "../model-gateway/src/tools.rs";
+const GATEWAY_TURN_ATTACHMENTS: &str = "../model-gateway/src/turn_attachments.rs";
+const EXECUTOR_GRPC: &str = "src/grpc.rs";
+const EXECUTOR_LOOP: &str = "src/runtime_loop/mod.rs";
+const EXECUTOR_CODE: &str = "src/code_interpreter.rs";
 
 /// The lines of `source` that are production code: not line comments, and nothing from the
 /// file's first `#[cfg(test)] mod tests {` on (each pinned file keeps its tests there, and a test
@@ -411,5 +416,155 @@ fn the_park_pins_go_red_when_either_side_drifts() {
             &loop_fold,
         ),
         "the executor builds a park reference itself",
+    );
+}
+
+/// The code of `source` that mentions `needle`.
+fn has_code(source: &str, needle: &str) -> bool {
+    code_lines(source).iter().any(|line| line.contains(needle))
+}
+
+/// Attached files reach `code_interpreter` through the one shared contract
+/// (`mp_contracts::attachments`) on both sides, and only through the typed
+/// request field: the gateway builds the list from the request and sends it on the
+/// step, the executor judges the same list on arrival and reads it back by run
+/// rather than from anything the model wrote. Two services, no build dependency,
+/// so the coupling is pinned on the source of record, as the other pins here are.
+fn attachment_staging_violations(
+    tools: &str,
+    turn: &str,
+    grpc: &str,
+    loop_mod: &str,
+    code: &str,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut require = |ok: bool, what: &str| {
+        if !ok {
+            violations.push(what.to_owned());
+        }
+    };
+    require(
+        has_code(tools, "attachments: attachments.to_vec(),"),
+        "the gateway no longer sends the validated list on ExecuteStepRequest.attachments",
+    );
+    require(
+        has_code(turn, "attachments::validate(&files, zdr)"),
+        "the gateway no longer judges its list with the shared contract",
+    );
+    require(
+        !has_code(turn, "fn validate_name"),
+        "the gateway keeps its own name validator beside the shared one",
+    );
+    require(
+        has_code(grpc, "mp_contracts::attachments::validate(&req.attachments"),
+        "ExecuteStep no longer judges the list with the shared contract",
+    );
+    require(
+        has_code(loop_mod, "run_inputs::global().get(org_id, run_id)"),
+        "the code_interpreter arm no longer reads its files from the run registry",
+    );
+    require(
+        has_code(code, "validate_name(&file.name)"),
+        "staging no longer judges each name with the shared contract",
+    );
+    require(
+        !has_code(code, "fn validate_name"),
+        "the executor keeps its own attachment name validator beside the shared one",
+    );
+    require(
+        has_code(code, "eq_ignore_ascii_case(ATTACHMENTS_DIR)"),
+        "files_in may use the reserved attachments name",
+    );
+    violations
+}
+
+#[test]
+fn both_loops_stage_attachments_through_the_one_shared_contract() {
+    let violations = attachment_staging_violations(
+        &read(GATEWAY_TOOLS),
+        &read(GATEWAY_TURN_ATTACHMENTS),
+        &read(EXECUTOR_GRPC),
+        &read(EXECUTOR_LOOP),
+        &read(EXECUTOR_CODE),
+    );
+    assert!(violations.is_empty(), "{violations:#?}");
+}
+
+#[test]
+fn the_attachment_pins_go_red_when_either_side_drifts() {
+    let tools = read(GATEWAY_TOOLS);
+    let turn = read(GATEWAY_TURN_ATTACHMENTS);
+    let grpc = read(EXECUTOR_GRPC);
+    let loop_mod = read(EXECUTOR_LOOP);
+    let code = read(EXECUTOR_CODE);
+    let flagged = |violations: Vec<String>, containing: &str| {
+        assert!(
+            violations.iter().any(|violation| violation.contains(containing)),
+            "expected a violation containing {containing:?}, got {violations:?}"
+        );
+    };
+    flagged(
+        attachment_staging_violations(
+            &mutate(&tools, "attachments: attachments.to_vec(),", "attachments: Vec::new(),"),
+            &turn,
+            &grpc,
+            &loop_mod,
+            &code,
+        ),
+        "no longer sends the validated list",
+    );
+    flagged(
+        attachment_staging_violations(
+            &tools,
+            &mutate(&turn, "attachments::validate(&files, zdr)", "Ok::<(), ()>(())"),
+            &grpc,
+            &loop_mod,
+            &code,
+        ),
+        "no longer judges its list",
+    );
+    flagged(
+        attachment_staging_violations(
+            &tools,
+            &turn,
+            &mutate(
+                &grpc,
+                "mp_contracts::attachments::validate(&req.attachments",
+                "mp_contracts::attachments::sha256_hex(&req.attachments",
+            ),
+            &loop_mod,
+            &code,
+        ),
+        "ExecuteStep no longer judges",
+    );
+    flagged(
+        attachment_staging_violations(
+            &tools,
+            &turn,
+            &grpc,
+            &mutate(&loop_mod, "run_inputs::global().get(org_id, run_id)", "None"),
+            &code,
+        ),
+        "no longer reads its files from the run registry",
+    );
+    flagged(
+        attachment_staging_violations(
+            &tools,
+            &turn,
+            &grpc,
+            &loop_mod,
+            &mutate(&code, "validate_name(&file.name)", "!file.name.is_empty()"),
+        ),
+        "staging no longer judges each name",
+    );
+    flagged(
+        attachment_staging_violations(
+            &tools,
+            &turn,
+            &grpc,
+            &loop_mod,
+            &mutate(&code, "eq_ignore_ascii_case(ATTACHMENTS_DIR)", "is_empty()"),
+        ),
+        "reserved attachments name",
     );
 }

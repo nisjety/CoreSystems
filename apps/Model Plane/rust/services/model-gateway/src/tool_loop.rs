@@ -2606,7 +2606,7 @@ pub async fn dispatch_tool(
         conversation, data_plane_bearer, execution_bearer, inference_bearer,
         session_bearer, capability_bearer, zdr, sovereign_required,
         allow_paid_providers, call, ingestion_bearer, sandbox_bearer, None,
-        data_plane_mode,
+        data_plane_mode, &crate::turn_attachments::ValidatedAttachments::none(),
     ).await
 }
 
@@ -2633,6 +2633,8 @@ async fn dispatch_tool_with_cost(
     sandbox_bearer: Option<&VerifiedSandboxBearer>,
     cost_bearer: Option<&str>,
     data_plane_mode: Option<String>,
+    // The turn's validated attached files; read by `code_interpreter` only.
+    attachments: &crate::turn_attachments::ValidatedAttachments,
 ) -> ToolOutcome {
     if !inline_tool_allowed(&call.name) {
         return err_outcome(
@@ -2715,6 +2717,7 @@ async fn dispatch_tool_with_cost(
                 &language,
                 &code,
                 files_in.as_ref(),
+                attachments.run_attachments(),
             )
             .await
             {
@@ -4249,6 +4252,7 @@ async fn dispatch_audited_tool(
     // read in a source-bound phase gets one; see `stops_at_validation_deadline`.
     read_deadline: Option<tokio::time::Instant>,
     data_plane_mode: Option<String>,
+    attachments: &crate::turn_attachments::ValidatedAttachments,
 ) -> Result<ToolOutcome, &'static str> {
     if session_bearer.is_empty() {
         return Err("tool audit credential unavailable");
@@ -4315,6 +4319,7 @@ async fn dispatch_audited_tool(
                 sandbox_bearer,
                 cost_bearer,
                 data_plane_mode.clone(),
+                attachments,
             )
             .await;
             let should_retry = attempt < crate::tool_retry::MAX_TOOL_ATTEMPTS
@@ -4456,6 +4461,9 @@ pub(crate) async fn dispatch_web_tool_audited(
         // Its callers are persistent or ZDR (deep research is refused on a waived turn at the stream entry),
         // so the mode is the ZDR one or none, and the derived content-safety pass follows `zdr`.
         crate::retrieval::data_plane_zdr_mode(zdr, false),
+        // Web tools only: code_interpreter, the sole reader of attached files, is
+        // unreachable from this path.
+        &crate::turn_attachments::ValidatedAttachments::none(),
     )
     .await
 }
@@ -5589,6 +5597,8 @@ pub async fn run_forced_web_search_for_model(
         // The turn's own retention mode: a waived turn's derived pass is skipped (`reject`), a ZDR turn's
         // too (`ephemeral`), and a persistent turn runs it as it always did (none).
         data_plane_mode,
+        // A forced `web_search` only: no sandbox call is reachable from here.
+        &crate::turn_attachments::ValidatedAttachments::none(),
     )
     .await?;
     // Gate BEFORE anything is emitted: the citations are built from the surviving
@@ -6757,10 +6767,95 @@ pub async fn run_tool_rounds_for_model(
     sandbox_bearer: Option<&VerifiedSandboxBearer>,
     sink: Option<&crate::sse_events::RichEventSink>,
 ) -> Result<ToolRounds, &'static str> {
+    run_tool_rounds_for_model_with_attachments(
+        state,
+        request_id,
+        run_id,
+        org_id,
+        user_id,
+        thread_id,
+        space_id,
+        data_plane_bearer,
+        execution_bearer,
+        inference_bearer,
+        session_bearer,
+        capability_bearer,
+        cost_bearer,
+        zdr,
+        data_plane_mode,
+        sovereign_required,
+        min_privacy_tier,
+        model,
+        requested_model,
+        provider_hint,
+        subscription_connection_id,
+        base_messages,
+        tools,
+        tool_choice,
+        ingestion_bearer,
+        sandbox_bearer,
+        sink,
+        &crate::turn_attachments::ValidatedAttachments::none(),
+    )
+    .await
+}
+
+/// [`run_tool_rounds_for_model`] for a turn whose attached files are staged into
+/// `code_interpreter` (WS08-S5). The files are validated request state: the model
+/// is told what `attachments/` holds, and every `code_interpreter` call carries
+/// them to Execution Core read-only, whatever its own arguments say.
+///
+/// # Errors
+///
+/// As [`run_tool_rounds_for_model`].
+#[allow(clippy::too_many_arguments)] // cohesive loop entry — all are request context
+pub async fn run_tool_rounds_for_model_with_attachments(
+    state: &AppState,
+    request_id: &str,
+    run_id: &str,
+    org_id: &str,
+    user_id: &str,
+    thread_id: &str,
+    space_id: &str,
+    data_plane_bearer: Option<&VerifiedBearer>,
+    execution_bearer: Option<&VerifiedExecutionBearer>,
+    inference_bearer: &str,
+    session_bearer: &str,
+    capability_bearer: Option<&str>,
+    cost_bearer: Option<&str>,
+    zdr: bool,
+    data_plane_mode: Option<String>,
+    sovereign_required: bool,
+    min_privacy_tier: i32,
+    // The model the tool-DECISION rounds run on, substitutions included.
+    model: &str,
+    // The model the USER selected, for the paid-provider entitlement only.
+    requested_model: &str,
+    provider_hint: &str,
+    subscription_connection_id: &str,
+    base_messages: Vec<ChatMessage>,
+    tools: Vec<ToolDefinition>,
+    tool_choice: String,
+    ingestion_bearer: Option<&VerifiedIngestionBearer>,
+    sandbox_bearer: Option<&VerifiedSandboxBearer>,
+    sink: Option<&crate::sse_events::RichEventSink>,
+    attachments: &crate::turn_attachments::ValidatedAttachments,
+) -> Result<ToolRounds, &'static str> {
     // Resolved ONCE for the whole turn rather than per call: the entitlement is a
     // property of the turn, and a value re-derived per round is a value that can
     // disagree with itself mid-turn.
     let allow_paid_providers = paid_providers_allowed(requested_model, zdr);
+    // A turn with attached files tells the model, in the tool's own description,
+    // where `code_interpreter` finds them. Only that tool, only on such a turn:
+    // every other turn offers the unchanged definition.
+    let mut tools = tools;
+    if !attachments.is_empty() {
+        for tool in tools.iter_mut().filter(|tool| tool.name == "code_interpreter") {
+            tool.description.push_str(crate::turn_attachments::TOOL_DESCRIPTION_LINE);
+        }
+        let (files, bytes) = attachments.summary();
+        tracing::info!(%request_id, files, bytes, "attached files staged for code_interpreter");
+    }
     // The turn's clock rides on the live sink; a caller without one (tests,
     // other routes) times nothing.
     let timing = sink.and_then(crate::sse_events::RichEventSink::timing);
@@ -6807,6 +6902,10 @@ pub async fn run_tool_rounds_for_model(
     // Keep genuine conversation requests separate from runtime tool context,
     // which the legacy inference envelope also represents as user messages.
     let mut review_messages = messages.clone();
+    // After the review copy: the note is runtime context, not something the user wrote.
+    if !attachments.is_empty() {
+        messages.push(ChatMessage { role: "system".into(), content: attachments.sandbox_note(), ..Default::default() });
+    }
     if let Some(context) = &source_context {
         messages.push(ChatMessage { role: "system".into(), content: crate::source_facts::SCOPE_RULES.into(), ..Default::default() });
         messages.push(ChatMessage { role: "system".into(), content: "Preserve the scope of source decisions and conditions. In a plan, treat EVERY table cell as a factual assertion: copy the named work owner and completion criterion from the source; put only explicitly stated predecessors in the dependency column. A completion criterion is not automatically a prerequisite for starting that task. Do not add an approval step, approver, sign-off, authority to confirm a gate, current approval status or deadline for a decision unless stated. If a dependency, approver or decision date is missing, mark it unspecified or clearly propose an option. A target date for an outcome is not a date on which its decision has been taken or must be taken. A role responsible for doing work is not automatically authorized to approve it. Unknown approval status means not documented, not that approval has not happened. A requirement covering all technical errors must not silently become only blocking errors. Use concise task rows and short assumptions/risks; do not repeat the table as a separate gate list that introduces new authorities or dependencies. Include every requested detail without adding unsupported facts.".into(), ..Default::default() });
@@ -7558,6 +7657,7 @@ pub async fn run_tool_rounds_for_model(
                     cost_bearer,
                     validation_deadline.filter(|_| stops_at_validation_deadline(&call.name)),
                     data_plane_mode_ref.clone(),
+                    attachments,
                 )
                 .await
             },

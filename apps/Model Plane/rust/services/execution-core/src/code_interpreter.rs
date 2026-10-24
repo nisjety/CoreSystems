@@ -28,6 +28,10 @@
 //! `{"language":"python"|"sh","code":"…","files_in":[{"name":"data.csv","content_b64":"…"}]}`
 //! (`files_in` optional, `language` defaults to `python`).
 //!
+//! Files the person attached to the turn are NOT part of this input: the model
+//! cannot add or change them. They arrive from the request that carries the step
+//! ([`crate::run_inputs`]) and appear read-only under `attachments/`.
+//!
 //! Output JSON:
 //! `{"stdout":"…","stderr":"…","exit_code":0,"files":[{"name","mime","bytes","content_b64"}]}`
 //! where an over-cap file is still listed, with `"truncated":true` and an empty
@@ -36,16 +40,19 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::alphabet;
 use base64::engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig, STANDARD};
 use base64::engine::DecodePaddingMode;
 use base64::Engine;
+use mp_contracts::attachments::{validate_name, ATTACHMENTS_DIR};
 use sha2::{Digest, Sha256};
 
 use crate::executor;
 use crate::policy::{MpNetworkPolicy, MpSandboxPolicy};
+use crate::run_inputs::InputSet;
 
 /// Structural checks of the Office files this module returns. Its own file so the
 /// verifier's sandboxed second workspace stays separate from the program's.
@@ -148,6 +155,9 @@ pub struct CodeRequest {
     pub language: Language,
     pub code: String,
     pub files_in: Vec<InputFile>,
+    /// The turn's attached files, staged read-only under `attachments/`. Never
+    /// parsed from the tool input: the caller sets it from the request.
+    pub ro_inputs: Option<Arc<InputSet>>,
 }
 
 /// One file produced by the program, as returned to the model.
@@ -233,6 +243,7 @@ pub fn parse_request(tool_input: &str) -> Result<CodeRequest, String> {
         language,
         code: raw.code,
         files_in,
+        ro_inputs: None,
     })
 }
 
@@ -271,7 +282,11 @@ fn validate_input_name(raw: &str, language: Language) -> Result<String, String> 
     // The generated program and the runtime's scratch directories already occupy
     // these names; staging over them would fail with a confusing IO error, so say
     // what is wrong instead.
-    if name == language.program_file() || name == TEMP_SUBDIR || name == MPL_CONFIG_SUBDIR {
+    if name == language.program_file()
+        || name == TEMP_SUBDIR
+        || name == MPL_CONFIG_SUBDIR
+        || name.eq_ignore_ascii_case(ATTACHMENTS_DIR)
+    {
         return Err(format!(
             "files_in name '{name}' is reserved by the sandbox workspace; rename the input file"
         ));
@@ -501,12 +516,14 @@ pub async fn run(
     run_id: &str,
     step_id: &str,
     workspace_root: Option<&Path>,
+    ro_inputs: Option<Arc<InputSet>>,
 ) -> Result<String, String> {
-    run_with_timeout(
+    run_staged(
         tool_input,
         run_id,
         step_id,
         workspace_root,
+        ro_inputs,
         executor::code_exec_timeout(),
     )
     .await
@@ -514,6 +531,7 @@ pub async fn run(
 
 /// [`run`] with an injected deadline — the testable seam (env mutation is
 /// forbidden in this crate, so tests pass the timeout instead of setting it).
+#[cfg(test)]
 async fn run_with_timeout(
     tool_input: &str,
     run_id: &str,
@@ -521,7 +539,20 @@ async fn run_with_timeout(
     workspace_root: Option<&Path>,
     timeout: Duration,
 ) -> Result<String, String> {
-    let request = parse_request(tool_input)?;
+    run_staged(tool_input, run_id, step_id, workspace_root, None, timeout).await
+}
+
+/// [`run_with_timeout`] with the turn's attached files.
+async fn run_staged(
+    tool_input: &str,
+    run_id: &str,
+    step_id: &str,
+    workspace_root: Option<&Path>,
+    ro_inputs: Option<Arc<InputSet>>,
+    timeout: Duration,
+) -> Result<String, String> {
+    let mut request = parse_request(tool_input)?;
+    request.ro_inputs = ro_inputs;
 
     if let Some(root) = workspace_root {
         return run_in_root(&request, root, timeout, true).await;
@@ -588,20 +619,35 @@ async fn run_in_root(
         })?;
     }
 
-    // WorkspaceWrite over exactly one root, network off. The writable bind is
-    // the LAST filesystem op in the bwrap argv, so it wins over the read-only
-    // rootfs bound underneath it — which is what makes `open("out.xlsx","wb")`
-    // work while the rest of the container stays untouchable.
+    // The attached files, as a read-only directory inside the writable root. It
+    // lives until this function returns, so the output collection below still
+    // sees a workspace the program could not have changed them in.
+    let staged_inputs = match &request.ro_inputs {
+        Some(set) => StagedInputs::stage(root, set)?,
+        None => None,
+    };
+    let ro_binds: Vec<(PathBuf, PathBuf)> = staged_inputs
+        .iter()
+        .map(|inputs| (inputs.dir.clone(), inputs.dir.clone()))
+        .collect();
+
+    // WorkspaceWrite over exactly one root, network off. The writable bind comes
+    // before the read-only binds in the bwrap argv and after the read-only
+    // rootfs, so it wins over the rootfs — which is what makes
+    // `open("out.xlsx","wb")` work while the rest of the container stays
+    // untouchable — and the `attachments/` bind then makes that one directory
+    // read-only again.
     let policy = MpSandboxPolicy::WorkspaceWrite {
         writable_roots: vec![root.to_path_buf()],
         network: MpNetworkPolicy::Disabled,
     };
-    let outcome = executor::execute_sandboxed_in_dir(
+    let outcome = executor::execute_sandboxed_in_dir_with_ro_binds(
         &policy,
         request.language.program(),
         &[program_file.to_owned()],
         root,
         &child_env(root),
+        &ro_binds,
         timeout,
     )
     .await
@@ -622,6 +668,93 @@ async fn run_in_root(
         verification_unchecked: office.unchecked,
     })
     .map_err(|error| format!("code_interpreter could not encode its result: {error}"))
+}
+
+/// The turn's attached files, written into `<root>/attachments/` as read-only
+/// files in a read-only directory. The directory is bind-mounted read-only by the
+/// sandbox too, so the permission bits are the second lock, not the only one.
+///
+/// `Drop` makes the directory writable again and removes it. That has to happen
+/// before the workspace itself is removed, or `remove_dir_all` fails on a
+/// directory it may not write to and the customer's files outlive the call.
+struct StagedInputs {
+    dir: PathBuf,
+}
+
+impl StagedInputs {
+    /// `None` when the set holds no files (nothing is created).
+    fn stage(root: &Path, set: &InputSet) -> Result<Option<Self>, String> {
+        if set.with_files(<[_]>::is_empty) {
+            return Ok(None);
+        }
+        // The registry is not trusted with a path: every name is judged again
+        // here, and refused, never sanitized, before anything is written.
+        if !set.with_files(|files| files.iter().all(|file| validate_name(&file.name))) {
+            return Err("an attached file has an unsafe name and was not staged".to_owned());
+        }
+        // The files could not be kept read-only on a host that runs the program
+        // as a plain process, so they are not even written there.
+        if !crate::sandbox::is_supported() {
+            return Err(
+                "attached files need the OS sandbox, which is unavailable; refusing to stage them"
+                    .to_owned(),
+            );
+        }
+        let dir = root.join(ATTACHMENTS_DIR);
+        // A directory left by a call that was killed mid-way; it is ours (the
+        // name is reserved), and a stale one would fail the create below.
+        remove_staged_dir(&dir);
+        std::fs::create_dir(&dir)
+            .map_err(|error| format!("code_interpreter could not stage attached files: {error}"))?;
+        // Created before the files are written so a failure part-way still cleans up.
+        let staged = Self { dir };
+        set.with_files(|files| {
+            for file in files {
+                let path = staged.dir.join(&file.name);
+                std::fs::write(&path, &file.bytes)
+                    .and_then(|()| set_mode(&path, 0o444))
+                    .map_err(|error| {
+                        format!("code_interpreter could not stage attached files: {error}")
+                    })?;
+            }
+            Ok::<(), String>(())
+        })?;
+        set_mode(&staged.dir, 0o555)
+            .map_err(|error| format!("code_interpreter could not stage attached files: {error}"))?;
+        Ok(Some(staged))
+    }
+}
+
+impl Drop for StagedInputs {
+    fn drop(&mut self) {
+        remove_staged_dir(&self.dir);
+    }
+}
+
+/// Removes a staged directory whatever mode it was left in. A missing directory
+/// is the normal case and is not an error.
+fn remove_staged_dir(dir: &Path) {
+    // Best effort: the directory may not exist, and a chmod failure surfaces as
+    // the removal failure that follows.
+    let _ = set_mode(dir, 0o755);
+    if let Err(error) = std::fs::remove_dir_all(dir) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(%error, dir = %dir.display(), "attached files cleanup failed");
+        }
+    }
+}
+
+#[cfg(unix)]
+fn set_mode(path: &Path, mode: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+}
+
+/// There are no unix permission bits to set; staging is refused on such a host
+/// before anything is written (see [`StagedInputs::stage`]).
+#[cfg(not(unix))]
+fn set_mode(_path: &Path, _mode: u32) -> std::io::Result<()> {
+    Ok(())
 }
 
 fn content_hash(bytes: &[u8]) -> String {
@@ -1364,5 +1497,169 @@ mod tests {
             "a genuinely changed file must be reported: {files:?}"
         );
         assert_eq!(files[0]["name"], "out.csv");
+    }
+
+    /// The attachments a turn carries, registered the way the gRPC handler does.
+    /// The guard keeps the registration alive for the test.
+    fn registered(
+        files: &[(&str, &[u8])],
+    ) -> (crate::run_inputs::RunInputsGuard, Arc<InputSet>) {
+        use mp_contracts::attachments::sha256_hex;
+        use mp_contracts::model_plane::v1::{RunAttachment, RunAttachmentKind};
+        let attachments: Vec<RunAttachment> = files
+            .iter()
+            .map(|(name, content)| RunAttachment {
+                id: (*name).to_owned(),
+                name: (*name).to_owned(),
+                mime: "application/octet-stream".to_owned(),
+                size_bytes: content.len() as u64,
+                sha256: sha256_hex(content),
+                content: content.to_vec(),
+                kind: RunAttachmentKind::File as i32,
+            })
+            .collect();
+        let registry = crate::run_inputs::RunInputs::with_limits(4, 1 << 20, Duration::from_secs(60));
+        let guard = registry
+            .register("org", "run", &attachments)
+            .expect("registers")
+            .expect("guard");
+        let set = registry.get("org", "run").expect("registered");
+        (guard, set)
+    }
+
+    fn workspaces_of(run_id: &str) -> Vec<String> {
+        let prefix = format!("{WORKSPACE_PREFIX}-{}-", path_slug(run_id));
+        std::fs::read_dir(std::env::temp_dir())
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter_map(|entry| entry.file_name().into_string().ok())
+                    .filter(|name| name.starts_with(&prefix))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn an_attachment_is_readable_by_the_code() {
+        if !python3_available() {
+            eprintln!("skipping: python3 or the OS sandbox is unavailable");
+            return;
+        }
+        let (_guard, set) = registered(&[("data.csv", b"month,revenue\njan,10\n")]);
+        let output = run_staged(
+            &serde_json::json!({"code": "print(open('attachments/data.csv').read())"}).to_string(),
+            "run-attach-read",
+            "step-1",
+            None,
+            Some(set),
+            Duration::from_secs(60),
+        )
+        .await
+        .expect("code_interpreter call");
+        let result: serde_json::Value = serde_json::from_str(&output).expect("result is JSON");
+        assert!(
+            result["stdout"].as_str().unwrap_or_default().contains("jan,10"),
+            "the program must read the attached file: {result}"
+        );
+        // The attachment is an input, not an output of the program.
+        assert_eq!(result["files"].as_array().map(Vec::len), Some(0), "{result}");
+    }
+
+    #[tokio::test]
+    async fn writing_into_the_attachments_directory_fails_read_only() {
+        if !python3_available() {
+            eprintln!("skipping: python3 or the OS sandbox is unavailable");
+            return;
+        }
+        let (_guard, set) = registered(&[("data.csv", b"a,b\n")]);
+        let code = [
+            "import errno",
+            "for target in ('attachments/data.csv', 'attachments/new.txt'):",
+            "    try:",
+            "        open(target, 'w').write('x')",
+            "        print('WROTE', target)",
+            "    except OSError as error:",
+            "        print('ERRNO', error.errno == errno.EROFS, target)",
+        ]
+        .join("
+");
+        let output = run_staged(
+            &serde_json::json!({"code": code}).to_string(),
+            "run-attach-write",
+            "step-1",
+            None,
+            Some(set),
+            Duration::from_secs(60),
+        )
+        .await
+        .expect("code_interpreter call");
+        let result: serde_json::Value = serde_json::from_str(&output).expect("result is JSON");
+        let stdout = result["stdout"].as_str().unwrap_or_default();
+        assert!(!stdout.contains("WROTE"), "a write got through: {stdout}");
+        assert_eq!(stdout.matches("ERRNO True").count(), 2, "EROFS for both: {stdout}");
+    }
+
+    #[test]
+    fn attachments_name_is_reserved_for_files_in() {
+        for name in ["attachments", "Attachments"] {
+            let input = serde_json::json!({
+                "code": "print(1)",
+                "files_in": [{ "name": name, "content_b64": "" }],
+            })
+            .to_string();
+            let error = parse_request(&input).expect_err("the directory name is reserved");
+            assert!(error.contains("reserved"), "error: {error}");
+        }
+        // The model cannot add staged files through its own input.
+        let request = parse_request(
+            r#"{"code":"print(1)","attachments":[{"name":"x","content":"eA=="}],"ro_inputs":[]}"#,
+        )
+        .expect("unknown keys are ignored");
+        assert!(request.ro_inputs.is_none());
+    }
+
+    #[tokio::test]
+    async fn unsafe_attachment_names_are_rejected_never_sanitized() {
+        let escape = std::env::temp_dir().join("escape-from-attachments.csv");
+        let _ = std::fs::remove_file(&escape);
+        for name in ["../escape-from-attachments.csv", "/etc/passwd", "a/b.csv", ".hidden"] {
+            let (_guard, set) = registered(&[(name, b"x")]);
+            let error = run_staged(
+                &serde_json::json!({"code": "print(1)"}).to_string(),
+                "run-attach-unsafe",
+                "step-1",
+                None,
+                Some(set),
+                Duration::from_secs(30),
+            )
+            .await
+            .expect_err("an unsafe name must refuse the call");
+            assert!(error.contains("unsafe name"), "'{name}': {error}");
+        }
+        assert!(!escape.exists(), "a traversal name must never be written");
+        assert!(workspaces_of("run-attach-unsafe").is_empty());
+    }
+
+    #[tokio::test]
+    async fn workspace_is_removed_after_the_call() {
+        // Passes on every host: where the sandbox is unavailable the call is
+        // refused, and the workspace and the read-only directory must be gone
+        // all the same.
+        let (_guard, set) = registered(&[("data.csv", b"a,b\n")]);
+        let _ = run_staged(
+            &serde_json::json!({"code": "print(open('attachments/data.csv').read())"}).to_string(),
+            "run-attach-cleanup",
+            "step-1",
+            None,
+            Some(set),
+            Duration::from_secs(60),
+        )
+        .await;
+        assert_eq!(
+            workspaces_of("run-attach-cleanup"),
+            Vec::<String>::new(),
+            "no verevon-code workspace may remain after the call"
+        );
     }
 }

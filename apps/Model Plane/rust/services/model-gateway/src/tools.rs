@@ -21,8 +21,8 @@ use tonic::Status;
 use tracing::warn;
 
 use mp_contracts::model_plane::v1::{
-    ExecuteStepRequest, RemoteTriggerRequest, RemoteTriggerResponse, SendMessageRequest,
-    SendMessageResponse, SleepRequest, SleepResponse, SyntheticOutputRequest,
+    ExecuteStepRequest, RemoteTriggerRequest, RemoteTriggerResponse, RunAttachment,
+    SendMessageRequest, SendMessageResponse, SleepRequest, SleepResponse, SyntheticOutputRequest,
     SyntheticOutputResponse, WebSearchRequest, WebSearchResponse, WebSearchResult,
 };
 
@@ -178,9 +178,19 @@ pub async fn handle_code_interpreter(
     language: &str,
     code: &str,
     files_in: Option<&serde_json::Value>,
+    // The turn's validated attached files, staged read-only by execution-core.
+    // They come from the request, never from the model's arguments, so there is
+    // deliberately no way to name one in `files_in` or anywhere else the model
+    // writes. Empty on every turn without files.
+    attachments: &[RunAttachment],
 ) -> Result<String, String> {
     if code.trim().is_empty() {
         return Err("code_interpreter requires non-empty 'code'".to_owned());
+    }
+    // The bytes are never sent on a zero-retention step; execution-core refuses
+    // them too, this stops them leaving the gateway at all.
+    if zdr && !attachments.is_empty() {
+        return Err("attached files cannot be given to the sandbox on a zero-retention turn".to_owned());
     }
     let language = normalize_code_language(language)?;
     let mut tool_input = serde_json::json!({ "language": language, "code": code });
@@ -216,6 +226,7 @@ pub async fn handle_code_interpreter(
         // sovereignty derivation for this field to feed.
         min_privacy_tier: mp_contracts::model_plane::v1::PrivacyTier::Unspecified as i32,
         space_id: space_id.to_owned(),
+        attachments: attachments.to_vec(),
     });
     request.metadata_mut().insert(
         "authorization",
@@ -1870,5 +1881,203 @@ mod tests {
         };
         let summary = format_weather_summary(&payload);
         assert!(!summary.contains("Forecast"));
+    }
+
+    mod staged_attachments {
+        use std::sync::{Arc, Mutex};
+
+        use mp_contracts::model_plane::v1::{
+            execution_core_client::ExecutionCoreClient,
+            execution_core_server::{ExecutionCore, ExecutionCoreServer},
+            CancelRunRequest, CancelRunResponse, ExecuteStepResponse, PauseRunRequest,
+            PauseRunResponse, ResumeRunRequest, ResumeRunResponse, RunAgentRequest,
+            RunAgentResponse,
+        };
+        use tonic::{Response, Status};
+
+        use super::super::*;
+        use crate::turn_attachments::ValidatedAttachments;
+        use crate::vision::InvokeAttachment;
+
+        /// Keeps every step request that reaches Execution Core and completes it.
+        #[derive(Clone, Default)]
+        struct RecordingExecution {
+            steps: Arc<Mutex<Vec<ExecuteStepRequest>>>,
+        }
+
+        #[tonic::async_trait]
+        impl ExecutionCore for RecordingExecution {
+            async fn execute_step(
+                &self,
+                request: tonic::Request<ExecuteStepRequest>,
+            ) -> Result<Response<ExecuteStepResponse>, Status> {
+                self.steps.lock().expect("steps").push(request.into_inner());
+                Ok(Response::new(ExecuteStepResponse {
+                    status: "completed".to_owned(),
+                    output: "{}".to_owned(),
+                    ..ExecuteStepResponse::default()
+                }))
+            }
+
+            async fn execute_scheduled_step(
+                &self,
+                _: tonic::Request<mp_contracts::model_plane::v1::ExecuteScheduledStepRequest>,
+            ) -> Result<
+                Response<mp_contracts::model_plane::v1::ExecuteScheduledStepResponse>,
+                Status,
+            > {
+                Err(Status::unimplemented("not used"))
+            }
+
+            async fn resume_run(
+                &self,
+                _: tonic::Request<ResumeRunRequest>,
+            ) -> Result<Response<ResumeRunResponse>, Status> {
+                Err(Status::unimplemented("not used"))
+            }
+
+            async fn cancel_run(
+                &self,
+                _: tonic::Request<CancelRunRequest>,
+            ) -> Result<Response<CancelRunResponse>, Status> {
+                Err(Status::unimplemented("not used"))
+            }
+
+            async fn pause_run(
+                &self,
+                _: tonic::Request<PauseRunRequest>,
+            ) -> Result<Response<PauseRunResponse>, Status> {
+                Err(Status::unimplemented("not used"))
+            }
+
+            async fn run_agent(
+                &self,
+                _: tonic::Request<RunAgentRequest>,
+            ) -> Result<Response<RunAgentResponse>, Status> {
+                Err(Status::unimplemented("not used"))
+            }
+        }
+
+        async fn state_with(
+            execution: RecordingExecution,
+        ) -> (AppState, tokio::task::JoinHandle<()>) {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind fake execution core");
+            let address = listener.local_addr().expect("fake execution core address");
+            let server = tokio::spawn(async move {
+                let _ = tonic::transport::Server::builder()
+                    .add_service(ExecutionCoreServer::new(execution))
+                    .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                    .await;
+            });
+            let channel = tonic::transport::Endpoint::from_shared(format!("http://{address}"))
+                .expect("fake endpoint")
+                .connect_lazy();
+            let mut state = AppState::new();
+            state.execution_client = ExecutionCoreClient::new(channel);
+            (state, server)
+        }
+
+        fn attached(name: &str, bytes: &[u8]) -> ValidatedAttachments {
+            use base64::Engine as _;
+            ValidatedAttachments::from_invoke(
+                &[InvokeAttachment {
+                    kind: Some("file".to_owned()),
+                    name: Some(name.to_owned()),
+                    data_base64: Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
+                    mime_type: Some("text/csv".to_owned()),
+                    ..InvokeAttachment::default()
+                }],
+                true,
+                false,
+            )
+            .expect("a valid attachment")
+        }
+
+        async fn call(
+            state: &AppState,
+            zdr: bool,
+            files_in: Option<&serde_json::Value>,
+            attachments: &ValidatedAttachments,
+        ) -> Result<String, String> {
+            handle_code_interpreter(
+                state,
+                &crate::auth::VerifiedExecutionBearer::for_test("execution"),
+                &crate::auth::VerifiedDataPlaneBearer::for_test("data-plane"),
+                None,
+                "inference",
+                "session",
+                "run-1",
+                "org-1",
+                "user-1",
+                "",
+                zdr,
+                "python",
+                "print(open('attachments/data.csv').read())",
+                files_in,
+                attachments.run_attachments(),
+            )
+            .await
+        }
+
+        #[tokio::test]
+        async fn attachments_reach_execute_step_and_model_cannot_override() {
+            let execution = RecordingExecution::default();
+            let (state, _server) = state_with(execution.clone()).await;
+            let staged = attached("data.csv", b"month,revenue\njan,10\n");
+
+            // The model's own arguments try to name a file in the same place and
+            // to smuggle an `attachments` list in through `files_in`.
+            let hostile = serde_json::json!([
+                { "name": "attachments", "content_b64": "aGFjaw==" },
+                { "attachments": [{ "name": "../evil", "content": "x" }] },
+            ]);
+            call(&state, false, Some(&hostile), &staged)
+                .await
+                .expect("the step completes");
+
+            let steps = execution.steps.lock().expect("steps");
+            let [step] = steps.as_slice() else {
+                panic!("exactly one step reaches Execution Core");
+            };
+            assert_eq!(step.tool_name, "code_interpreter");
+            // The wire list is exactly the validated one: same name, bytes and hash.
+            let [sent] = step.attachments.as_slice() else {
+                panic!("one attachment is carried");
+            };
+            let [expected] = staged.run_attachments() else {
+                panic!("one attachment is staged");
+            };
+            assert_eq!(sent, expected);
+            assert_eq!(sent.name, "data.csv");
+            // The model's `files_in` rides inside the tool input as before; it
+            // cannot reach the typed field.
+            assert!(step.tool_input.contains("files_in"));
+            assert!(!step.attachments.iter().any(|a| a.name == "attachments" || a.name == "../evil"));
+        }
+
+        #[tokio::test]
+        async fn a_turn_without_files_sends_no_attachments() {
+            let execution = RecordingExecution::default();
+            let (state, _server) = state_with(execution.clone()).await;
+            call(&state, false, None, &ValidatedAttachments::none())
+                .await
+                .expect("the step completes");
+            let steps = execution.steps.lock().expect("steps");
+            assert!(steps[0].attachments.is_empty());
+        }
+
+        #[tokio::test]
+        async fn a_zero_retention_turn_never_sends_the_bytes() {
+            let execution = RecordingExecution::default();
+            let (state, _server) = state_with(execution.clone()).await;
+            let staged = attached("data.csv", b"a,b\n");
+            let error = call(&state, true, None, &staged)
+                .await
+                .expect_err("ZDR must refuse before the call");
+            assert!(error.contains("zero-retention"), "{error}");
+            assert!(execution.steps.lock().expect("steps").is_empty());
+        }
     }
 }

@@ -450,6 +450,43 @@ message ExecuteStepRequest {
   // apps/Frontend Plane/verevonv3/docs/S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md
   // §3.5 phase B for the signed decision that actually does.
   string space_id = 11;
+
+  // Files the person attached to this turn, staged read-only for the step's
+  // `code_interpreter` call (WS08-S5). The caller (model-gateway) validates and
+  // hashes them from the request body; the model's tool input can neither add
+  // nor alter an entry. Empty = nothing staged, which is today's behaviour. A
+  // zero-retention step refuses a non-empty list at the boundary.
+  repeated RunAttachment attachments = 12;
+}
+
+// RunAttachmentKind — what a staged run input is.
+enum RunAttachmentKind {
+  RUN_ATTACHMENT_KIND_UNSPECIFIED = 0;
+  // A document or data file the sandbox program reads (xlsx, csv, pdf, ...).
+  RUN_ATTACHMENT_KIND_FILE = 1;
+  // An image. Reserved for the vision path (WS08-S4/S6); the sandbox refuses it.
+  RUN_ATTACHMENT_KIND_IMAGE = 2;
+}
+
+// RunAttachment — one attached input, carried by value for one call. The bytes
+// live in request memory only: never in session-core, events, checkpoints or
+// the audit outbox, and never in a log (sha256, size and count only).
+message RunAttachment {
+  // Opaque id of this attachment within the turn (not a path).
+  string id = 1;
+  // Bare file name the sandbox sees under `attachments/`. Validated, never
+  // sanitized: an unsafe name refuses the whole list.
+  string name = 2;
+  // MIME type the client declared.
+  string mime = 3;
+  // Exact length of `content`.
+  uint64 size_bytes = 4;
+  // Lowercase hex SHA-256 of `content`; the receiver recomputes and refuses a
+  // mismatch. The scanner extension point of WS26.
+  string sha256 = 5;
+  // The file bytes.
+  bytes content = 6;
+  RunAttachmentKind kind = 7;
 }
 
 // ExecuteStepResponse — result of a single step execution.

@@ -1023,6 +1023,41 @@ fn enforce_resume(req: &pb::RunAgentRequest, enabled: bool) -> Result<(), Status
     Ok(())
 }
 
+/// Judges the attachments of an `ExecuteStep` request and holds them for the
+/// call. `None` when the request carries none, which is every request today.
+///
+/// Only `code_interpreter` reads them, so a list on any other tool is refused
+/// instead of being held for nothing. A zero-retention or waived caller never
+/// carries one.
+#[allow(clippy::result_large_err)]
+fn register_step_attachments(
+    req: &pb::ExecuteStepRequest,
+    zdr_or_waived: bool,
+) -> Result<Option<crate::run_inputs::RunInputsGuard>, Status> {
+    if req.attachments.is_empty() {
+        return Ok(None);
+    }
+    if req.tool_name != "code_interpreter" {
+        return Err(Status::invalid_argument("attachments_unsupported_tool"));
+    }
+    mp_contracts::attachments::validate(&req.attachments, zdr_or_waived).map_err(|refusal| {
+        if refusal == mp_contracts::attachments::AttachmentRefusal::Zdr {
+            mp_contracts::zdr_refusal::Refusal::feature_not_supported("attachments")
+                .grpc_status(tonic::Code::FailedPrecondition)
+        } else {
+            Status::invalid_argument(refusal.token())
+        }
+    })?;
+    crate::run_inputs::global()
+        .register(&req.org_id, &req.run_id, &req.attachments)
+        .map_err(|refusal| {
+            Status::resource_exhausted(match refusal {
+                crate::run_inputs::RegisterError::EntryCap => "run_inputs_entry_cap",
+                crate::run_inputs::RegisterError::ByteCap => "run_inputs_byte_cap",
+            })
+        })
+}
+
 fn enforce_persistence_free_execution(
     caller: &AuthenticatedUser,
     request_zdr: bool,
@@ -1259,6 +1294,13 @@ impl ExecutionCore for ExecutionService {
         reject_direct_owner_action(&req.tool_name)?;
         validate_direct_permission_mode(&req.permission_mode)?;
         enforce_persistence_free_execution(&caller, req.zdr, "tool_execution")?;
+        // The attached files are judged after the caller and the run owner are
+        // authorized and held only for this call: the guard drops, and zeroes the
+        // bytes, when the handler returns on any path.
+        let _run_inputs = register_step_attachments(
+            &req,
+            req.zdr || caller.zdr || caller.zdr_waiver.is_some(),
+        )?;
         // Resolve the opaque JSON grant id with BrowserBroker only after the
         // signed caller and durable run owner are authorized. The resulting
         // immutable policy is passed to the runtime; raw tool JSON cannot
@@ -2703,5 +2745,104 @@ mod run_context_boundary_tests {
         assert!(enforce_run_context(&request_with(Some(history()), false)).is_ok());
         assert!(enforce_run_context(&request_with(None, true)).is_ok());
         assert!(enforce_run_context(&request_with(None, false)).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod step_attachment_tests {
+    use super::*;
+    use mp_contracts::attachments::sha256_hex;
+
+    // The registry behind register_step_attachments is process-global and the
+    // tests run in parallel, so each test owns a run id: sharing one key makes
+    // the "nothing held" assertions race the test that holds a list.
+    const ORG: &str = "org-attachment-test";
+
+    fn step(
+        tool: &str,
+        run: &str,
+        attachments: Vec<pb::RunAttachment>,
+    ) -> pb::ExecuteStepRequest {
+        pb::ExecuteStepRequest {
+            run_id: run.to_owned(),
+            org_id: ORG.to_owned(),
+            tool_name: tool.to_owned(),
+            attachments,
+            ..Default::default()
+        }
+    }
+
+    fn file(name: &str, content: &[u8]) -> pb::RunAttachment {
+        pb::RunAttachment {
+            id: name.to_owned(),
+            name: name.to_owned(),
+            mime: "text/csv".to_owned(),
+            size_bytes: content.len() as u64,
+            sha256: sha256_hex(content),
+            content: content.to_vec(),
+            kind: pb::RunAttachmentKind::File as i32,
+        }
+    }
+
+    #[test]
+    fn a_step_without_attachments_registers_nothing() {
+        for zdr in [false, true] {
+            let held = register_step_attachments(&step("code_interpreter", "run-none", Vec::new()), zdr)
+                .expect("no list, no refusal");
+            assert!(held.is_none());
+        }
+    }
+
+    #[test]
+    fn a_zero_retention_or_waived_step_refuses_the_files_at_the_boundary() {
+        let request = step("code_interpreter", "run-refused", vec![file("a.csv", b"1,2")]);
+        let refused = register_step_attachments(&request, true).expect_err("ZDR refuses");
+        assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+        assert!(
+            crate::run_inputs::global()
+                .get(ORG, "run-refused")
+                .is_none(),
+            "nothing may be held after a refusal"
+        );
+    }
+
+    #[test]
+    fn only_code_interpreter_takes_files() {
+        let request = step("web_search", "run-wrong-tool", vec![file("a.csv", b"1,2")]);
+        let refused = register_step_attachments(&request, false).expect_err("wrong tool");
+        assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+        assert_eq!(refused.message(), "attachments_unsupported_tool");
+    }
+
+    #[test]
+    fn a_list_the_contract_refuses_is_never_held() {
+        let mut tampered = file("a.csv", b"1,2");
+        tampered.content = b"9,9".to_vec();
+        let refused = register_step_attachments(
+            &step("code_interpreter", "run-tampered", vec![tampered]),
+            false,
+        )
+        .expect_err("a hash mismatch");
+        assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+        assert_eq!(refused.message(), "attachments_hash_mismatch");
+        let unsafe_name = file("../a.csv", b"1,2");
+        let refused =
+            register_step_attachments(
+                &step("code_interpreter", "run-unsafe-name", vec![unsafe_name]),
+                false,
+            )
+            .expect_err("an unsafe name");
+        assert_eq!(refused.message(), "attachments_name_invalid");
+    }
+
+    #[test]
+    fn a_valid_list_is_held_for_the_call_and_released_with_the_guard() {
+        let request = step("code_interpreter", "run-held", vec![file("a.csv", b"1,2")]);
+        let held = register_step_attachments(&request, false)
+            .expect("registers")
+            .expect("a guard");
+        assert!(crate::run_inputs::global().get(ORG, "run-held").is_some());
+        drop(held);
+        assert!(crate::run_inputs::global().get(ORG, "run-held").is_none());
     }
 }
