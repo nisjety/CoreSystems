@@ -112,6 +112,12 @@ struct HostSlot {
     last_failure_at: Option<Instant>,
     /// Wall-clock of last activity (any event). Drives retire.
     last_activity_at: Instant,
+    /// Least time between two request starts on this host (WS14.S4: the host's
+    /// `Crawl-delay`). Zero, the default, is the unchanged fast path.
+    min_interval: Duration,
+    /// The earliest start the next request may be given. `None` until a request
+    /// has been given a start time under a non-zero `min_interval`.
+    next_start: Option<tokio::time::Instant>,
 }
 
 impl HostSlot {
@@ -124,6 +130,8 @@ impl HostSlot {
             consecutive_good: 0,
             last_failure_at: None,
             last_activity_at: Instant::now(),
+            min_interval: Duration::ZERO,
+            next_start: None,
         }
     }
 }
@@ -152,7 +160,7 @@ impl HostScheduler {
     /// drops below the per-host limit. The returned [`SlotPermit`]
     /// releases the slot on drop — including on panic.
     pub async fn acquire(&self, host: &str) -> SlotPermit {
-        let semaphore = {
+        let (semaphore, start_at) = {
             // Take the lock just long enough to look up / install the
             // host slot + clone its semaphore Arc. The actual acquire
             // happens OUTSIDE the lock so one slow host can't block
@@ -162,13 +170,29 @@ impl HostScheduler {
                 .entry(host.to_string())
                 .or_insert_with(|| HostSlot::new(self.config.initial_target));
             slot.last_activity_at = Instant::now();
-            slot.semaphore.clone()
+            // A host with a minimum interval hands out start times under the
+            // lock, one interval apart; the wait itself happens below, outside
+            // the lock. A zero interval takes no start time at all.
+            let start_at = if slot.min_interval.is_zero() {
+                None
+            } else {
+                let now = tokio::time::Instant::now();
+                let start = slot.next_start.map_or(now, |next| next.max(now));
+                slot.next_start = Some(start + slot.min_interval);
+                Some(start)
+            };
+            (slot.semaphore.clone(), start_at)
         };
 
         let permit = semaphore
             .acquire_owned()
             .await
             .expect("semaphore is never closed by the scheduler");
+        // The permit is held while waiting for the start time: the request owns
+        // its slot, and the interval is counted from start to start.
+        if let Some(start) = start_at {
+            tokio::time::sleep_until(start).await;
+        }
 
         SlotPermit {
             permit: Some(permit),
@@ -176,6 +200,37 @@ impl HostScheduler {
             scheduler: Some(self.clone()),
             acquired_at: Instant::now(),
         }
+    }
+
+    /// Set the least time between two request starts on `host` (WS14.S4: the
+    /// host's `Crawl-delay`, already clamped by the caller). The next
+    /// `acquire` is the first to see it. A zero interval switches the spacing
+    /// off and forgets the reserved start times. The host's concurrency target
+    /// and AIMD state are untouched.
+    pub async fn set_min_interval(&self, host: &str, interval: Duration) {
+        let mut hosts = self.hosts.lock().await;
+        if interval.is_zero() && !hosts.contains_key(host) {
+            return;
+        }
+        let slot = hosts
+            .entry(host.to_string())
+            .or_insert_with(|| HostSlot::new(self.config.initial_target));
+        slot.last_activity_at = Instant::now();
+        if slot.min_interval != interval {
+            slot.min_interval = interval;
+            if interval.is_zero() {
+                slot.next_start = None;
+            }
+        }
+    }
+
+    /// The minimum start-to-start interval set for `host`, zero when none.
+    pub async fn min_interval(&self, host: &str) -> Duration {
+        self.hosts
+            .lock()
+            .await
+            .get(host)
+            .map_or(Duration::ZERO, |slot| slot.min_interval)
     }
 
     /// Apply the AIMD-good branch: nudge target concurrency up if
@@ -378,6 +433,68 @@ mod tests {
             ewma_alpha: 0.3,
             retire_after: Duration::from_millis(50),
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn min_interval_spaces_three_concurrent_starts_two_seconds_apart() {
+        let s = HostScheduler::new(test_config());
+        s.set_min_interval("a.com", Duration::from_secs(2)).await;
+        let t0 = tokio::time::Instant::now();
+        let mut handles = Vec::new();
+        for _ in 0..3 {
+            let s = s.clone();
+            handles.push(tokio::spawn(async move {
+                let permit = s.acquire("a.com").await;
+                let at = tokio::time::Instant::now() - t0;
+                drop(permit);
+                at
+            }));
+        }
+        let mut starts = Vec::new();
+        for h in handles {
+            starts.push(h.await.unwrap());
+        }
+        starts.sort();
+        assert_eq!(starts[0], Duration::ZERO);
+        assert_eq!(starts[1], Duration::from_secs(2));
+        assert_eq!(starts[2], Duration::from_secs(4));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn min_interval_leaves_other_hosts_alone() {
+        let s = HostScheduler::new(test_config());
+        s.set_min_interval("slow.com", Duration::from_secs(2)).await;
+        let t0 = tokio::time::Instant::now();
+        let _first = s.acquire("slow.com").await;
+        let _other_a = s.acquire("fast.com").await;
+        let _other_b = s.acquire("fast.com").await;
+        assert_eq!(tokio::time::Instant::now() - t0, Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn zero_interval_is_the_unchanged_fast_path() {
+        let s = HostScheduler::new(test_config());
+        let t0 = tokio::time::Instant::now();
+        let _a = s.acquire("a.com").await;
+        let _b = s.acquire("a.com").await;
+        let _c = s.acquire("a.com").await;
+        assert_eq!(tokio::time::Instant::now() - t0, Duration::ZERO);
+        // Setting zero on a host that was never seen creates no slot.
+        s.set_min_interval("never.com", Duration::ZERO).await;
+        assert!(s.stats("never.com").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn set_min_interval_keeps_the_aimd_state() {
+        let s = HostScheduler::new(test_config());
+        let _p = s.acquire("a.com").await;
+        s.record_bad("a.com", BadKind::RateLimited).await;
+        let before = s.stats("a.com").await.unwrap().target_concurrency;
+        s.set_min_interval("a.com", Duration::from_secs(1)).await;
+        assert_eq!(s.stats("a.com").await.unwrap().target_concurrency, before);
+        assert_eq!(s.min_interval("a.com").await, Duration::from_secs(1));
+        s.set_min_interval("a.com", Duration::ZERO).await;
+        assert_eq!(s.min_interval("a.com").await, Duration::ZERO);
     }
 
     #[tokio::test]

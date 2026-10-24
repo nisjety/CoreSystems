@@ -31,6 +31,8 @@ use crate::host_scheduler::{BadKind, HostScheduler};
 use crate::ingest_client::DataPlaneIngest;
 use crate::local_index::{LocalDocument, TantivyLocalIndex};
 use crate::policy::RunPolicy;
+use crate::robots_cache::origin_key;
+use crate::robots_gate::{RobotsEnforceMode, RobotsEnforcement};
 use crate::source_registrar::SourceRegistrar;
 
 /// What a run returns besides its [`NormalizedOutput`]: the parts that cannot
@@ -255,6 +257,12 @@ pub struct PageRunner {
     /// Content-kind routing mode; see [`DocRouting`]. Edge wires
     /// [`DocRouting::cached`].
     pub doc_routing: DocRouting,
+    /// WS14.S4: the robots.txt gate and the mode this run applies it under. `None`
+    /// (every ad-hoc scrape, every test harness, a crawl that ignores robots)
+    /// checks nothing. `Observe` evaluates and counts without blocking or slowing
+    /// a fetch; `Enforce` refuses a disallowed or unreachable URL with a 403
+    /// `SECURITY_BLOCKED` `details.denial` and applies `Crawl-delay`.
+    pub robots: Option<RobotsEnforcement>,
 }
 
 /// The challenge settings the scrape path runs under (`QUARRY_CHALLENGE_*`),
@@ -447,6 +455,65 @@ impl PageRunner {
         LocalIndexWriteback::new(self.local_index.clone(), self.zdr)
     }
 
+    /// WS14.S4: check `url` against robots.txt when this run has a gate. `stage` is
+    /// `"request"` (before anything is fetched) or `"final_url"` (after a redirect
+    /// to another origin). `Observe` counts and logs a count, and changes nothing.
+    /// `Enforce` refuses a denial with `PageBlocked` and a typed error, and returns
+    /// the host's `Crawl-delay` (zero when it sets none) for an allowed URL.
+    /// `None` when there is no gate, the mode is `Off`, or the run only observes.
+    async fn robots_check(
+        &self,
+        run_id: &RunKind,
+        url: &Url,
+        stage: &'static str,
+    ) -> QuarryResult<Option<std::time::Duration>> {
+        let Some(robots) = self
+            .robots
+            .as_ref()
+            .filter(|r| r.mode != RobotsEnforceMode::Off)
+        else {
+            return Ok(None);
+        };
+        let decision = robots
+            .gate
+            .check(
+                url,
+                self.org_id.as_deref().unwrap_or_default(),
+                self.zdr.is_active(),
+            )
+            .await;
+        robots.gate.record(robots.mode, &decision);
+        if !decision.is_denial() {
+            return Ok(match (&decision, robots.mode) {
+                (crate::robots_gate::RobotsDecision::Allowed { crawl_delay }, RobotsEnforceMode::Enforce) => {
+                    Some(crawl_delay.unwrap_or_default())
+                }
+                _ => None,
+            });
+        }
+        if robots.mode == RobotsEnforceMode::Observe {
+            tracing::info!(stage, "robots.txt would deny this fetch (observe mode)");
+            return Ok(None);
+        }
+        let denial = decision.denial_json().unwrap_or_else(|| json!({}));
+        let code = denial["code"].as_str().unwrap_or("robots_disallowed").to_string();
+        let message = denial["message"].as_str().unwrap_or("robots.txt refused").to_string();
+        let mut payload = denial.clone();
+        payload["url"] = json!(url.to_string());
+        payload["reason"] = json!(code);
+        payload["source"] = json!("fetch");
+        payload["stage"] = json!(stage);
+        self.emit_page_event(
+            run_id.clone(),
+            EventType::PageBlocked,
+            payload,
+            format!("{}:{}:robots_blocked", run_id, url),
+        )
+        .await;
+        Err(QuarryError::new(ErrorCode::SecurityBlocked, message)
+            .with_details(json!({ "denial": denial })))
+    }
+
     async fn emit_page_event(
         &self,
         run_id: RunKind,
@@ -501,6 +568,7 @@ impl PageRunner {
             .await
         {
             Ok(parts) => Ok(parts),
+            Err(e) if is_robots_denial(&e) => Err(e),
             Err(e) => {
                 self.emit_page_event(
                     run_id.clone(),
@@ -687,6 +755,16 @@ impl PageRunner {
             ));
         }
 
+        // WS14.S4: robots.txt, after the preflight and before DNS resolution and the
+        // scheduler slot, so a denial never reaches `record_bad` (which reads an
+        // unknown error as a server error and halves the host's concurrency).
+        if let Some(delay) = self.robots_check(run_id, requested_url, "request").await? {
+            if let Some(s) = self.scheduler.as_ref() {
+                s.set_min_interval(requested_url.host_str().unwrap_or("unknown"), delay)
+                    .await;
+            }
+        }
+
         // Resolve and inspect the target before we hand it to a driver. Static
         // fetch receives this exact address set through FetchHints and pins its
         // transport resolver to it, so the connection cannot perform a second
@@ -801,6 +879,14 @@ impl PageRunner {
                     verdict.reasons.join("; "),
                 ));
             }
+        }
+
+        // WS14.S4: a redirect to another origin is checked against that origin's
+        // robots.txt before anything is parsed, stored, cached or ingested.
+        if resp.final_url != *requested_url
+            && origin_key(&resp.final_url) != origin_key(requested_url)
+        {
+            self.robots_check(run_id, &resp.final_url, "final_url").await?;
         }
 
         // Defensive body-size cap. `scraper::Html::parse_document`
@@ -1791,6 +1877,18 @@ impl PageRunner {
     }
 }
 
+/// WS14.S4: an error that is a robots.txt refusal. Its `PageBlocked` event is
+/// already out, so the caller does not add a `PageFailed`.
+fn is_robots_denial(e: &QuarryError) -> bool {
+    e.code == ErrorCode::SecurityBlocked
+        && e.details
+            .as_ref()
+            .and_then(|d| d.get("denial"))
+            .and_then(|d| d.get("code"))
+            .and_then(|c| c.as_str())
+            .is_some_and(|c| c.starts_with("robots_"))
+}
+
 /// "the page is an image file ...", "a PDF file ..." - the article follows the label.
 fn unsupported_media_message(label: &str) -> String {
     let article = if label.starts_with(['a', 'e', 'i', 'o', 'u']) {
@@ -1881,6 +1979,7 @@ mod page_extracted_tests {
             source_registrar: None,
             title_enricher: None,
             doc_routing: DocRouting::Off,
+            robots: None,
         }
     }
 
@@ -2024,6 +2123,7 @@ mod local_index_writeback_tests {
             source_registrar: None,
             title_enricher: None,
             doc_routing: DocRouting::Off,
+            robots: None,
         }
     }
 
@@ -2264,6 +2364,7 @@ mod content_routing_tests {
             source_registrar: None,
             title_enricher: None,
             doc_routing: mode,
+            robots: None,
         };
         (runner, rx)
     }
@@ -2899,6 +3000,7 @@ mod scrape_challenge_tests {
             source_registrar: None,
             title_enricher: None,
             doc_routing: DocRouting::Off,
+            robots: None,
         };
         (runner, rx, artifacts)
     }
@@ -3263,6 +3365,7 @@ mod capture_pipeline_tests {
             source_registrar: None,
             title_enricher: None,
             doc_routing: DocRouting::Off,
+            robots: None,
         }
     }
 
@@ -3455,6 +3558,7 @@ mod final_url_recheck_tests {
             source_registrar: None,
             title_enricher: None,
             doc_routing: DocRouting::Off,
+            robots: None,
         }
     }
 
@@ -3555,5 +3659,292 @@ mod final_url_recheck_tests {
         let url: Url = "https://start.example/page".parse().unwrap();
         runner.run(&run_id, &url, None).await.expect("runs as before");
         assert_eq!(inner.preflights.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[cfg(test)]
+mod robots_gate_tests {
+    //! WS14.S4: the robots.txt gate inside `PageRunner::run_inner`.
+    use super::*;
+    use crate::artifact_store::InMemoryStore;
+    use crate::fetch::FetchResponse;
+    use crate::robots_cache::{RobotsFetch, RobotsFetcher};
+    use crate::robots_gate::{RobotsGate, RobotsGateConfig};
+    use async_trait::async_trait;
+    use quarry_core::output::DriverKind;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::mpsc;
+
+    const PAGE: &str = "<html><head><title>Docs</title></head><body><main><h1>Docs</h1><p>Some readable body text for the page, long enough to extract.</p></main></body></html>";
+
+    /// Serves one canned page and counts how often it was asked. `redirect_to`
+    /// makes the answer come from another URL, as after a redirect.
+    struct PageDriver {
+        calls: Arc<AtomicUsize>,
+        redirect_to: Option<Url>,
+    }
+
+    #[async_trait]
+    impl Driver for PageDriver {
+        fn kind(&self) -> quarry_core::output::DriverKind {
+            DriverKind::Static
+        }
+        async fn fetch(&self, url: &Url) -> QuarryResult<crate::fetch::FetchResponse> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(FetchResponse::new(
+                200,
+                self.redirect_to.clone().unwrap_or_else(|| url.clone()),
+                vec![("content-type".into(), "text/html; charset=utf-8".into())],
+                PAGE.as_bytes().to_vec(),
+                2,
+                DriverKind::Static,
+            ))
+        }
+    }
+
+    /// Answers robots.txt from a map keyed by origin key; an origin not in the
+    /// map has no robots.txt.
+    struct MapFetcher(HashMap<String, RobotsFetch>);
+
+    #[async_trait]
+    impl RobotsFetcher for MapFetcher {
+        async fn fetch(&self, origin: &str, _org_id: &str) -> RobotsFetch {
+            self.0.get(origin).cloned().unwrap_or(RobotsFetch::Absent)
+        }
+    }
+
+    fn gate(rules: &[(&str, &str)]) -> Arc<RobotsGate> {
+        let map = rules
+            .iter()
+            .map(|(origin, body)| ((*origin).to_string(), RobotsFetch::Found((*body).to_string())))
+            .collect();
+        Arc::new(RobotsGate::with_fetcher(
+            Arc::new(MapFetcher(map)),
+            RobotsGateConfig::default(),
+        ))
+    }
+
+    struct Harness {
+        runner: PageRunner,
+        rx: mpsc::Receiver<quarry_core::event::Event>,
+        calls: Arc<AtomicUsize>,
+        gate: Arc<RobotsGate>,
+    }
+
+    fn harness(
+        gate: Arc<RobotsGate>,
+        mode: Option<RobotsEnforceMode>,
+        scheduler: Option<Arc<HostScheduler>>,
+        redirect_to: Option<&str>,
+    ) -> Harness {
+        let (tx, rx) = mpsc::channel(64);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let runner = PageRunner {
+            driver: Arc::new(PageDriver {
+                calls: calls.clone(),
+                redirect_to: redirect_to.map(|u| u.parse().unwrap()),
+            }),
+            security: Arc::new(
+                quarry_security::preflight::DefaultEngine::new().with_allow_private_hosts(true),
+            ),
+            artifacts: Arc::new(InMemoryStore::new()),
+            event_sink: EventSink::new(tx),
+            zdr: ZdrMode::Off,
+            ingest: None,
+            org_id: Some("org_test".into()),
+            user_id: None,
+            privacy: PrivacyPolicy::default(),
+            cancel_token: None,
+            local_index: None,
+            policy: RunPolicy::default(),
+            scheduler,
+            autoscale: None,
+            render: RenderHints::default(),
+            page_renderer: None,
+            source_registrar: None,
+            title_enricher: None,
+            doc_routing: DocRouting::Off,
+            robots: mode.map(|mode| RobotsEnforcement::new(gate.clone(), mode)),
+        };
+        Harness {
+            runner,
+            rx,
+            calls,
+            gate,
+        }
+    }
+
+    fn drain(rx: &mut mpsc::Receiver<quarry_core::event::Event>) -> Vec<quarry_core::event::Event> {
+        let mut out = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            out.push(event);
+        }
+        out
+    }
+
+    fn count(events: &[quarry_core::event::Event], kind: EventType) -> usize {
+        events.iter().filter(|e| e.event_type == kind).count()
+    }
+
+    const PRIVATE: &str = "User-agent: *\nDisallow: /private/\nCrawl-delay: 3\n";
+    const ORIGIN: &str = "https://example.test:443";
+
+    #[tokio::test]
+    async fn a_disallowed_url_never_reaches_the_driver_and_emits_one_page_blocked() {
+        let mut h = harness(gate(&[(ORIGIN, PRIVATE)]), Some(RobotsEnforceMode::Enforce), None, None);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://example.test/private/secret".parse().unwrap();
+        let err = h.runner.run(&run_id, &url, None).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::SecurityBlocked);
+        let denial = &err.details.as_ref().unwrap()["denial"];
+        assert_eq!(denial["code"], "robots_disallowed");
+        assert_eq!(denial["path"], "/private/secret");
+        assert!(denial["user_agent"].is_string());
+        assert_eq!(h.calls.load(Ordering::SeqCst), 0, "the page driver was never called");
+        let events = drain(&mut h.rx);
+        assert_eq!(count(&events, EventType::PageBlocked), 1, "exactly one PageBlocked");
+        assert_eq!(count(&events, EventType::PageFailed), 0, "no PageFailed on top of it");
+        let blocked = events.iter().find(|e| e.event_type == EventType::PageBlocked).unwrap();
+        assert_eq!(blocked.payload["code"], "robots_disallowed");
+        assert_eq!(blocked.payload["path"], "/private/secret");
+        assert_eq!(blocked.payload["source"], "fetch");
+    }
+
+    #[tokio::test]
+    async fn a_robots_denial_does_not_shrink_the_hosts_concurrency() {
+        let scheduler = Arc::new(HostScheduler::with_defaults());
+        drop(scheduler.acquire("example.test").await);
+        let before = scheduler.stats("example.test").await.unwrap().target_concurrency;
+        let h = harness(
+            gate(&[(ORIGIN, PRIVATE)]),
+            Some(RobotsEnforceMode::Enforce),
+            Some(scheduler.clone()),
+            None,
+        );
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://example.test/private/secret".parse().unwrap();
+        h.runner.run(&run_id, &url, None).await.unwrap_err();
+        let stats = scheduler.stats("example.test").await.unwrap();
+        assert_eq!(stats.target_concurrency, before);
+        assert!(stats.last_failure_at.is_none(), "record_bad was not called");
+    }
+
+    #[tokio::test]
+    async fn observe_fetches_and_counts_would_deny() {
+        let mut h = harness(gate(&[(ORIGIN, PRIVATE)]), Some(RobotsEnforceMode::Observe), None, None);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://example.test/private/secret".parse().unwrap();
+        h.runner.run(&run_id, &url, None).await.expect("observe never blocks");
+        assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(h.gate.stats().would_deny, 1);
+        let events = drain(&mut h.rx);
+        assert_eq!(count(&events, EventType::PageBlocked), 0);
+    }
+
+    #[tokio::test]
+    async fn a_run_without_a_gate_fetches() {
+        let h = harness(gate(&[(ORIGIN, PRIVATE)]), None, None, None);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://example.test/private/secret".parse().unwrap();
+        h.runner.run(&run_id, &url, None).await.expect("no gate, no check");
+        assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+        assert!(h.gate.is_empty(), "robots.txt was not even fetched");
+    }
+
+    #[tokio::test]
+    async fn off_does_not_evaluate() {
+        let h = harness(gate(&[(ORIGIN, PRIVATE)]), Some(RobotsEnforceMode::Off), None, None);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://example.test/private/secret".parse().unwrap();
+        h.runner.run(&run_id, &url, None).await.expect("off fetches");
+        assert!(h.gate.is_empty());
+    }
+
+    #[tokio::test]
+    async fn enforce_feeds_crawl_delay_to_the_scheduler_and_observe_does_not() {
+        let url: Url = "https://example.test/docs/a".parse().unwrap();
+        let run_id: RunKind = quarry_core::ids::Id::new();
+
+        let scheduler = Arc::new(HostScheduler::with_defaults());
+        let h = harness(
+            gate(&[(ORIGIN, PRIVATE)]),
+            Some(RobotsEnforceMode::Enforce),
+            Some(scheduler.clone()),
+            None,
+        );
+        h.runner.run(&run_id, &url, None).await.expect("allowed path fetches");
+        assert_eq!(
+            scheduler.min_interval("example.test").await,
+            std::time::Duration::from_secs(3)
+        );
+
+        let scheduler = Arc::new(HostScheduler::with_defaults());
+        let h = harness(
+            gate(&[(ORIGIN, PRIVATE)]),
+            Some(RobotsEnforceMode::Observe),
+            Some(scheduler.clone()),
+            None,
+        );
+        h.runner.run(&run_id, &url, None).await.expect("observe fetches");
+        assert_eq!(
+            scheduler.min_interval("example.test").await,
+            std::time::Duration::ZERO,
+            "observe changes no timing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_redirect_to_a_disallowed_origin_persists_nothing() {
+        let rules = [("https://other.test:443", "User-agent: *\nDisallow: /\n")];
+        let mut h = harness(
+            gate(&rules),
+            Some(RobotsEnforceMode::Enforce),
+            None,
+            Some("https://other.test/landing"),
+        );
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://example.test/start".parse().unwrap();
+        let err = h.runner.run(&run_id, &url, None).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::SecurityBlocked);
+        assert_eq!(h.calls.load(Ordering::SeqCst), 1, "the page was fetched once");
+        let events = drain(&mut h.rx);
+        assert_eq!(count(&events, EventType::PageBlocked), 1);
+        assert_eq!(count(&events, EventType::PageFetched), 0);
+        assert_eq!(count(&events, EventType::ArtifactWritten), 0);
+        assert_eq!(count(&events, EventType::PageFailed), 0);
+        let blocked = events.iter().find(|e| e.event_type == EventType::PageBlocked).unwrap();
+        assert_eq!(blocked.payload["stage"], "final_url");
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_robots_txt_blocks_in_enforce_and_names_the_host() {
+        let unreachable: HashMap<String, RobotsFetch> =
+            [(ORIGIN.to_string(), RobotsFetch::Unreachable("status_5xx".into()))].into();
+        let gate = Arc::new(RobotsGate::with_fetcher(
+            Arc::new(MapFetcher(unreachable)),
+            RobotsGateConfig::default(),
+        ));
+        let h = harness(gate, Some(RobotsEnforceMode::Enforce), None, None);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://example.test/docs/a".parse().unwrap();
+        let err = h.runner.run(&run_id, &url, None).await.unwrap_err();
+        let denial = &err.details.as_ref().unwrap()["denial"];
+        assert_eq!(denial["code"], "robots_unreachable");
+        assert_eq!(denial["host"], "example.test");
+        assert_eq!(h.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn an_enforcing_run_under_zdr_leaves_no_cache_entry() {
+        let (tx, _rx) = mpsc::channel(64);
+        let gate = gate(&[(ORIGIN, PRIVATE)]);
+        let mut h = harness(gate.clone(), Some(RobotsEnforceMode::Enforce), None, None);
+        h.runner.zdr = ZdrMode::On;
+        h.runner.event_sink = EventSink::new(tx);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://example.test/private/secret".parse().unwrap();
+        h.runner.run(&run_id, &url, None).await.unwrap_err();
+        assert!(gate.is_empty(), "ZDR reads and fills no robots cache");
     }
 }

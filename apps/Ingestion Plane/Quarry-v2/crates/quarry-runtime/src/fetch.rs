@@ -434,10 +434,14 @@ impl StaticDriver {
         let body = if status == 304 {
             Vec::new()
         } else {
-            resp.bytes()
-                .await
-                .map_err(|e| QuarryError::new(ErrorCode::DriverFailed, format!("read body: {}", e.without_url())))?
-                .to_vec()
+            match hints.max_body_bytes {
+                None => resp
+                    .bytes()
+                    .await
+                    .map_err(|e| QuarryError::new(ErrorCode::DriverFailed, format!("read body: {}", e.without_url())))?
+                    .to_vec(),
+                Some(cap) => read_capped(resp, cap, hints.truncate_at_cap).await?,
+            }
         };
         Ok(SendOutcome::Response(FetchResponse {
             status,
@@ -448,6 +452,40 @@ impl StaticDriver {
             served_by: DriverKind::Static,
             captures: None,
         }))
+    }
+}
+
+/// Read a response body up to `cap` bytes, one chunk at a time, and stop there:
+/// a body longer than the cap is never held whole. Past the cap the result is
+/// the bytes read so far when `truncate`, otherwise a `DriverFailed` error.
+async fn read_capped(
+    mut resp: reqwest::Response,
+    cap: usize,
+    truncate: bool,
+) -> QuarryResult<Vec<u8>> {
+    let mut body: Vec<u8> = Vec::new();
+    loop {
+        let chunk = resp.chunk().await.map_err(|e| {
+            QuarryError::new(
+                ErrorCode::DriverFailed,
+                format!("read body: {}", e.without_url()),
+            )
+        })?;
+        let Some(chunk) = chunk else {
+            return Ok(body);
+        };
+        let room = cap.saturating_sub(body.len());
+        if chunk.len() > room {
+            if truncate {
+                body.extend_from_slice(&chunk[..room]);
+                return Ok(body);
+            }
+            return Err(QuarryError::new(
+                ErrorCode::DriverFailed,
+                format!("response body is longer than the {cap} byte cap"),
+            ));
+        }
+        body.extend_from_slice(&chunk);
     }
 }
 

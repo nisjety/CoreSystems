@@ -95,6 +95,7 @@ pub mod request_queue;
 pub mod rerank;
 pub mod retry;
 pub mod robots_cache;
+pub mod robots_gate;
 pub mod s3_profile_store;
 pub mod serp;
 pub mod service_tokens;
@@ -177,7 +178,11 @@ pub use quarry_tls::TlsProfile;
 pub use request_queue::{InMemoryRequestQueue, Priority, QueueStats, QueuedRequest, RequestQueue};
 pub use rerank::{ModelPlaneSearchReranker, RerankingSearchProvider, SearchReranker};
 pub use retry::{backoff_delay, classify, execute_with_retry, wait, IdempotencyKey, RetryClass};
-pub use robots_cache::{ReqwestRobotsFetcher, RobotsCache, RobotsFetcher};
+pub use robots_cache::{origin_key, RobotsCache, RobotsFetch, RobotsFetcher, RobotsState};
+pub use robots_gate::{
+    RobotsDecision, RobotsEnforceMode, RobotsEnforcement, RobotsGate, RobotsGateConfig,
+    RobotsStats, UnreachablePolicy, ROBOTS_PRODUCT_TOKENS,
+};
 pub use s3_profile_store::S3ProfileStore;
 pub use serp::{
     BraveSearch, FallbackSearchProvider, SearXNGSearch, SearchOptions, SearchProvider,

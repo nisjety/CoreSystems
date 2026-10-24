@@ -46,6 +46,10 @@ impl RobotsTxt {
                         after_agents = false;
                     }
                     current_agents.push(value.to_ascii_lowercase());
+                    // A named group exists even with no rule under it.
+                    out.groups
+                        .entry(value.to_ascii_lowercase())
+                        .or_default();
                 }
                 "allow" => {
                     if !value.is_empty() {
@@ -111,6 +115,46 @@ impl RobotsTxt {
     }
 }
 
+impl RobotsTxt {
+    /// Check `path_and_query` against every product token and allow it only when
+    /// every token allows it: the most restrictive answer wins. `path_and_query`
+    /// is the URL's path followed by `?query` when there is one (RFC 9309 2.2.2
+    /// matches the rule against both). A token with no group of its own falls
+    /// back to `*`, so a file that names only `*` is read once per token and
+    /// gives the same answer.
+    pub fn is_allowed_any(&self, tokens: &[&str], path_and_query: &str) -> bool {
+        self.denying_token(tokens, path_and_query).is_none()
+    }
+
+    /// The first token (in the order given) whose rules deny `path_and_query`,
+    /// or `None` when every token allows it.
+    pub fn denying_token<'t>(&self, tokens: &[&'t str], path_and_query: &str) -> Option<&'t str> {
+        tokens
+            .iter()
+            .copied()
+            .find(|token| !self.is_allowed(token, path_and_query))
+    }
+
+    /// The longest `Crawl-delay` any of the tokens' groups asks for, in seconds.
+    /// Negative, NaN and infinite values read as no delay.
+    pub fn crawl_delay_any(&self, tokens: &[&str]) -> Option<f64> {
+        tokens
+            .iter()
+            .filter_map(|token| self.rules_for(token).and_then(|r| r.crawl_delay_s))
+            .filter(|d| d.is_finite() && *d > 0.0)
+            .fold(None, |best: Option<f64>, d| Some(best.map_or(d, |b| b.max(d))))
+    }
+}
+
+/// The path of `url` followed by `?query` when it has one: the string a robots
+/// rule is matched against.
+pub fn path_and_query(url: &url::Url) -> String {
+    match url.query() {
+        Some(q) => format!("{}?{}", url.path(), q),
+        None => url.path().to_string(),
+    }
+}
+
 fn strip_comment(line: &str) -> &str {
     match line.find('#') {
         Some(i) => &line[..i],
@@ -158,7 +202,7 @@ fn wildcard_match(pattern: &str, path: &str) -> bool {
     let s = path.as_bytes();
 
     while path_idx < s.len() {
-        if p_idx < p.len() && (p[p_idx] == s[path_idx] || p[p_idx] == b'?') {
+        if p_idx < p.len() && p[p_idx] == s[path_idx] {
             p_idx += 1;
             path_idx += 1;
         } else if p_idx < p.len() && p[p_idx] == b'*' {
@@ -250,6 +294,97 @@ mod tests {
         // path_matches handles `$` anchoring; wildcard_match itself does not.
         assert!(path_matches("/*.pdf$", "/foo.pdf"));
         assert!(!path_matches("/*.pdf$", "/foo.pdf.html"));
+    }
+
+    #[test]
+    fn question_mark_is_a_literal_not_a_wildcard() {
+        assert!(!wildcard_match("/a?c*", "/abc"));
+        assert!(wildcard_match("/a?c*", "/a?cd"));
+    }
+
+    #[test]
+    fn query_aware_rules_match_path_and_query() {
+        let r = RobotsTxt::parse("User-agent: *\nDisallow: /*?session=\nDisallow: /search$\n");
+        assert!(!r.is_allowed("quarry", "/page?session=1"));
+        assert!(!r.is_allowed("quarry", "/a/b?x=1&session=2"));
+        assert!(r.is_allowed("quarry", "/page?id=1"));
+        // `$` anchors the end of path and query together.
+        assert!(!r.is_allowed("quarry", "/search"));
+        assert!(r.is_allowed("quarry", "/search?q=x"));
+    }
+
+    #[test]
+    fn is_allowed_any_takes_the_most_restrictive_token() {
+        let r = RobotsTxt::parse(
+            "User-agent: quarrybot\nDisallow: /a\n\nUser-agent: quarry\nDisallow: /b\n\nUser-agent: *\nDisallow: /c\n",
+        );
+        let tokens = ["quarrybot", "quarry"];
+        assert!(!r.is_allowed_any(&tokens, "/a"));
+        assert!(!r.is_allowed_any(&tokens, "/b"));
+        // Each token has its own group, so `*` does not apply to either.
+        assert!(r.is_allowed_any(&tokens, "/c"));
+        assert_eq!(r.denying_token(&tokens, "/b"), Some("quarry"));
+        assert_eq!(r.denying_token(&tokens, "/a"), Some("quarrybot"));
+        assert_eq!(r.denying_token(&tokens, "/z"), None);
+    }
+
+    #[test]
+    fn star_group_applies_to_every_token_without_its_own_group() {
+        let r = RobotsTxt::parse("User-agent: *\nDisallow: /private\n");
+        assert!(!r.is_allowed_any(&["quarrybot", "quarry"], "/private/x"));
+        assert!(r.is_allowed_any(&["quarrybot", "quarry"], "/public"));
+    }
+
+    #[test]
+    fn a_named_group_with_no_rules_allows_everything() {
+        let r = RobotsTxt::parse("User-agent: quarrybot\n\nUser-agent: *\nDisallow: /\n");
+        assert!(r.is_allowed("quarrybot", "/anything"));
+        assert!(!r.is_allowed("other", "/anything"));
+    }
+
+    #[test]
+    fn crawl_delay_any_takes_the_longest_and_ignores_garbage() {
+        let r = RobotsTxt::parse(
+            "User-agent: quarrybot\nCrawl-delay: 2\n\nUser-agent: quarry\nCrawl-delay: 5\n",
+        );
+        assert_eq!(r.crawl_delay_any(&["quarrybot", "quarry"]), Some(5.0));
+        let neg = RobotsTxt::parse("User-agent: *\nCrawl-delay: -3\n");
+        assert_eq!(neg.crawl_delay_any(&["quarry"]), None);
+        let none = RobotsTxt::parse("User-agent: *\nDisallow: /x\n");
+        assert_eq!(none.crawl_delay_any(&["quarry"]), None);
+    }
+
+    #[test]
+    fn longest_match_and_allow_wins_a_tie() {
+        let r = RobotsTxt::parse("User-agent: *\nDisallow: /p\nAllow: /p\n");
+        assert!(r.is_allowed("quarry", "/p/x"));
+        let r = RobotsTxt::parse("User-agent: *\nDisallow: /p/secret\nAllow: /p\n");
+        assert!(!r.is_allowed("quarry", "/p/secret/a"));
+        assert!(r.is_allowed("quarry", "/p/open"));
+    }
+
+    #[test]
+    fn rules_before_any_user_agent_line_are_ignored() {
+        let r = RobotsTxt::parse("Disallow: /x\nUser-agent: *\nDisallow: /y\n");
+        assert!(r.is_allowed("quarry", "/x"));
+        assert!(!r.is_allowed("quarry", "/y"));
+    }
+
+    #[test]
+    fn groups_for_the_same_agent_merge() {
+        let r = RobotsTxt::parse(
+            "User-agent: quarry\nDisallow: /a\n\nUser-agent: other\nDisallow: /o\n\nUser-agent: quarry\nDisallow: /b\n",
+        );
+        assert!(!r.is_allowed("quarry", "/a"));
+        assert!(!r.is_allowed("quarry", "/b"));
+    }
+
+    #[test]
+    fn path_and_query_joins_query_when_present() {
+        let u = url::Url::parse("https://example.test/a/b?x=1&y=2#frag").unwrap();
+        assert_eq!(path_and_query(&u), "/a/b?x=1&y=2");
+        let u = url::Url::parse("https://example.test/a/b").unwrap();
+        assert_eq!(path_and_query(&u), "/a/b");
     }
 
     #[test]

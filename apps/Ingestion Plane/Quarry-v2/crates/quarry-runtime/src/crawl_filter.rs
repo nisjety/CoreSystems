@@ -245,6 +245,12 @@ impl CompiledScope {
         })
     }
 
+    /// Whether this crawl consults robots.txt (`crawl.robots == respect`). The
+    /// edge gates a page's fetch on it (WS14.S4).
+    pub fn respects_robots(&self) -> bool {
+        self.robots == RobotsMode::Respect
+    }
+
     /// Decide every href of one fetched page. `page_url` is the final URL after
     /// redirects. `robots` is `None` when no cached rules are available.
     pub fn evaluate(

@@ -87,6 +87,8 @@ http3 = ["reqwest/http3"]
 tonic-build = { workspace = true, optional = false }
 
 [dev-dependencies]
+# WS14.S4: tokio::time::pause for the robots cache TTL and Crawl-delay tests.
+tokio = { workspace = true, features = ["test-util"] }
 # A deflate stream of a gigabyte of zeros, for the decompression-bomb test.
 flate2 = "1"
 # Builds real DOCX/XLSX fixtures for the content-routing tests.

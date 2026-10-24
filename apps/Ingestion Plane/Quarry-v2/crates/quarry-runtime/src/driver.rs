@@ -66,6 +66,15 @@ pub struct FetchHints {
     /// Privacy policy for this fetch. Drivers consult this before using any
     /// third-party proxy, browser, unblocker, or managed provider.
     pub privacy: PrivacyPolicy,
+    /// Upper bound on the body bytes the static driver reads. `None` (default):
+    /// the body is read whole, as before. The read stops at the cap, it does not
+    /// read the whole body and then cut it. WS14.S4 (`robots.txt`: 512 KiB); WS5
+    /// slice 1 uses the same field.
+    pub max_body_bytes: Option<usize>,
+    /// What happens when the body is longer than `max_body_bytes`: `true` returns
+    /// the bytes read so far (a cut body, the status unchanged); `false`
+    /// (default) refuses the response with `ErrorCode::DriverFailed`.
+    pub truncate_at_cap: bool,
 }
 
 /// Browser-only render hints. Static fetch drivers ignore these.
