@@ -940,6 +940,9 @@ services:
       # Azure deployment name to its base model (e.g. prod-chat=gpt-5-mini).
       INFERENCE_CORE_OPENAI_REASONING_EFFORT: ${INFERENCE_CORE_OPENAI_REASONING_EFFORT:-false}
       INFERENCE_CORE_ANTHROPIC_ADAPTIVE_THINKING: ${INFERENCE_CORE_ANTHROPIC_ADAPTIVE_THINKING:-false}
+      # WS02-S9: tiered Anthropic system blocks (Stable, Context, per-turn). Only the
+      # literal true enables it; ZDR requests never take the tiered form.
+      INFERENCE_ANTHROPIC_TIERED_SYSTEM: ${INFERENCE_ANTHROPIC_TIERED_SYSTEM:-false}
       INFERENCE_CORE_EFFORT_MODEL_ALIASES: ${INFERENCE_CORE_EFFORT_MODEL_ALIASES:-}
       # Optional ChatGPT subscription route. Add openai-codex-subscription to
       # INFERENCE_PROVIDER_ORDER only after setting all three variables. This

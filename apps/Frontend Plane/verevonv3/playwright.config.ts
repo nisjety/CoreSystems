@@ -55,7 +55,7 @@ const BROWSER_WORKSPACE_SPECS = /browser-workspace-.*\.spec\.ts/
  * project — the specs themselves are stack-agnostic. `chat-voice-mode` runs
  * with every speech and model call mocked (`page.route` plus voice-fakes.ts).
  */
-const CHAT_WORKSPACE_SPECS = /chat-(?:workspace|voice-mode|transcript-performance)\.spec\.ts/
+const CHAT_WORKSPACE_SPECS = /chat-(?:workspace|voice-mode|transcript-performance|attachment-gates)\.spec\.ts/
 const PRODUCT_READINESS_SPECS = /(?:product-(?:readiness|scenarios|memory|connected|experience|latency|durability|recovery|journeys-viewport|office-outputs|code-interpreter|chat-charts)|agentic-subscription)\.spec\.ts/
 const PRODUCT_RECORDING_SPEC = /product-recording\.spec\.ts/
 /**

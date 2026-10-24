@@ -35,6 +35,25 @@ export type ChatEventPayloads = {
     title: string
     url: string
   }
+  /** Rust variants: Compaction. */
+  compaction: {
+    messages_compacted?: number
+    messages_kept?: number
+    outcome: string
+    pinned_kept?: number
+    request_id: string
+    scope: string
+  }
+  /** Rust variants: ContextChange. */
+  context_change: {
+    change: string
+    layer?: string
+    messages_dropped?: number
+    request_id: string
+    skills_dropped?: number
+    skills_truncated?: number
+    state?: string
+  }
   /** Rust variants: Error, SubscriptionError, ZdrError. */
   error: {
     action?: string
@@ -100,6 +119,16 @@ export type ChatEventPayloads = {
     code: string
     request_id: string
     wording_key: string
+  }
+  /** Rust variants: RetryScheduled. */
+  retry_scheduled: {
+    attempt: number
+    max_attempts: number
+    reason: string
+    request_id: string
+    scope: string
+    tool: string
+    wait_ms: number
   }
   /** Rust variants: SourceScopeApplied. */
   source_scope_applied: {
