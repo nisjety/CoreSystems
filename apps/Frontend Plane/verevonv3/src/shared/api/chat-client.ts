@@ -2572,6 +2572,82 @@ async function postChatThreadArchiveState(
   return normalizeChatThreadSession(objectValue(raw)?.session)
 }
 
+/** One conversation search hit. The snippet carries match markers, never markup. */
+export type ChatSearchHit = {
+  threadId: string
+  messageId: string
+  role: string
+  /**
+   * The matched text, with each matched word between U+E000 and U+E001. The
+   * page splits on those markers into text nodes; it never parses this as HTML.
+   */
+  snippet: string
+  createdAt: string
+  threadTitle: string
+  archived: boolean
+}
+
+export type ChatSearchResult =
+  | { status: 'ok'; hits: ChatSearchHit[] }
+  /**
+   * Search is off on this deployment, or it ran past its time budget. Not an
+   * error: the sidebar keeps its local filter and says so.
+   */
+  | { status: 'unavailable'; reason: 'disabled' | 'timeout' }
+
+/**
+ * Search the owner's chat threads, first page only. Rejects on any failure other
+ * than the two typed unavailable answers, so the caller decides what a broken
+ * request means for its view.
+ */
+export async function searchChatThreads(
+  query: string,
+  options: { limit?: number } = {},
+): Promise<ChatSearchResult> {
+  // The contract refuses an empty or oversized query before anything is sent.
+  parseChatHistoryAction({ type: 'thread.search', query })
+  const params = new URLSearchParams({ q: query.trim() })
+  if (options.limit != null && Number.isFinite(options.limit) && options.limit > 0) {
+    params.set('limit', String(Math.floor(options.limit)))
+  }
+  let raw: unknown
+  try {
+    raw = await requestJson<unknown>(`/api/v1/chat/threads/search?${params.toString()}`)
+  } catch (error) {
+    const reason = searchUnavailableReason(error)
+    if (reason) return { status: 'unavailable', reason }
+    throw error
+  }
+  return { status: 'ok', hits: normalizeChatSearchHits(raw) }
+}
+
+function searchUnavailableReason(error: unknown): 'disabled' | 'timeout' | null {
+  if (!(error instanceof ApiError) || error.status !== 503) return null
+  if (error.code === 'history_search_disabled') return 'disabled'
+  if (error.code === 'history_search_timeout') return 'timeout'
+  return null
+}
+
+function normalizeChatSearchHits(raw: unknown): ChatSearchHit[] {
+  const source = objectValue(raw)?.hits
+  if (!Array.isArray(source)) return []
+  return source.flatMap((item): ChatSearchHit[] => {
+    const record = objectValue(item)
+    const threadId = str(record?.threadId)
+    const messageId = str(record?.messageId)
+    if (!threadId || !messageId) return []
+    return [{
+      threadId,
+      messageId,
+      role: str(record?.role) ?? '',
+      snippet: str(record?.snippet) ?? '',
+      createdAt: str(record?.createdAt) ?? '',
+      threadTitle: str(record?.threadTitle) ?? '',
+      archived: record?.archived === true,
+    }]
+  })
+}
+
 export async function saveChatThreadSnapshot(
   threadId: string,
   snapshot: SaveChatThreadSnapshotRequest,

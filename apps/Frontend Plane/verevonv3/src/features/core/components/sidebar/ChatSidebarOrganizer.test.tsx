@@ -3,7 +3,11 @@ import { flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ChatSidebarOrganizer } from './ChatSidebarOrganizer'
 import { chatOrganizationStorageKey, emptyChatOrganization, readChatOrganization, saveChatOrganization } from '@/features/chat/lib/chat-organization'
+import type { ChatSearchHit } from '@/shared/api/chat-client'
+import { SEARCH_DEBOUNCE_MS } from './ChatSearchResults'
 
+const { searchChatThreads } = vi.hoisted(() => ({ searchChatThreads: vi.fn() }))
+vi.mock('@/shared/api/chat-client', () => ({ searchChatThreads }))
 vi.mock('@/shared/i18n', () => ({ useI18n: () => ({ tr: (_no: string, en: string) => en }) }))
 vi.mock('@/shared/session/session-store', () => ({ getSession: () => ({ user: { id: 'user-test' }, activeOrg: { id: 'org-test' } }) }))
 
@@ -172,5 +176,92 @@ describe('chat organizer interactions', () => {
     mount()
     flush()
     expect(screen.queryByRole('button', { name: 'Load more chats' })).toBeNull()
+  })
+})
+
+describe('chat organizer server search', () => {
+  const hit: ChatSearchHit = {
+    threadId: 'thread-old',
+    messageId: 'message-1',
+    role: 'assistant',
+    snippet: 'the receipt is filed',
+    createdAt: '2026-08-02T09:00:00Z',
+    threadTitle: 'Old receipt chat',
+    archived: false,
+  }
+  const second: ChatSearchHit = { ...hit, threadId: 'thread-two', messageId: 'message-2', threadTitle: 'Second receipt chat' }
+
+  function renderSidebar(onOpenSearchHit = vi.fn()) {
+    render(() => (
+      <ChatSidebarOrganizer
+        sessions={[thread]}
+        loading={false}
+        onNewChat={() => {}}
+        onOpenSearchHit={onOpenSearchHit}
+        renderRow={(item) => <span>{item.title}</span>}
+      />
+    ))
+    flush()
+    fireEvent.click(screen.getByRole('button', { name: 'Search chats' }))
+    flush()
+    return onOpenSearchHit
+  }
+  function typeQuery(value: string) {
+    const input = screen.getByRole('combobox', { name: 'Search chats' })
+    fireEvent.input(input, { target: { value } })
+    flush()
+    return input
+  }
+
+  beforeEach(() => {
+    searchChatThreads.mockReset()
+  })
+
+  it('asks the server once after the typing pauses, and shows its hits as options', async () => {
+    searchChatThreads.mockResolvedValue({ status: 'ok', hits: [hit] })
+    const onOpenSearchHit = renderSidebar()
+
+    typeQuery('rec')
+    typeQuery('receipt')
+    expect(searchChatThreads).not.toHaveBeenCalled()
+
+    await waitFor(() => expect(searchChatThreads).toHaveBeenCalledTimes(1))
+    expect(searchChatThreads).toHaveBeenCalledWith('receipt')
+    fireEvent.click(await screen.findByRole('option', { name: /Old receipt chat/ }))
+    expect(onOpenSearchHit).toHaveBeenCalledWith('thread-old')
+  })
+
+  it('moves the selection with the arrow keys and opens the selected hit with Enter', async () => {
+    searchChatThreads.mockResolvedValue({ status: 'ok', hits: [hit, second] })
+    const onOpenSearchHit = renderSidebar()
+
+    const input = typeQuery('receipt')
+    await screen.findByRole('option', { name: /Second receipt chat/ })
+    fireEvent.keyDown(input, { key: 'ArrowDown' })
+    flush()
+    fireEvent.keyDown(input, { key: 'ArrowDown' })
+    flush()
+    expect(input.getAttribute('aria-activedescendant')).toBe('chat-organizer-search-option-1')
+    expect(screen.getByRole('option', { name: /Second receipt chat/ }).getAttribute('aria-selected')).toBe('true')
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(onOpenSearchHit).toHaveBeenCalledWith('thread-two')
+  })
+
+  it('keeps the local filter working and says so when search is unavailable', async () => {
+    searchChatThreads.mockResolvedValue({ status: 'unavailable', reason: 'disabled' })
+    renderSidebar()
+
+    typeQuery('Planning')
+    expect(await screen.findByText(/Search is unavailable/)).toBeTruthy()
+    expect(screen.queryByRole('listbox')).toBeNull()
+    expect(screen.getByText('Planning')).toBeTruthy()
+  })
+
+  it('does not ask the server for a single character', async () => {
+    renderSidebar()
+
+    typeQuery('r')
+    await new Promise((resolve) => setTimeout(resolve, SEARCH_DEBOUNCE_MS))
+    expect(searchChatThreads).not.toHaveBeenCalled()
   })
 })

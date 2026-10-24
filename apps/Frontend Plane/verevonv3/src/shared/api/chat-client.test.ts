@@ -19,6 +19,7 @@ import {
   queueInvocationInput,
   resumeStream,
   saveChatThreadSnapshot,
+  searchChatThreads,
   streamChat,
   subscriptionModelDisplayName,
   submitFeedback,
@@ -2364,5 +2365,88 @@ describe('paged thread listing', () => {
 
     await listChatThreads()
     expect(readChatThreadHistory().map((item) => item.threadId)).not.toContain('thread_beyond_page')
+  })
+})
+
+describe('chat-client thread search (WS17 S4)', () => {
+  const json = { headers: { 'Content-Type': 'application/json' }, status: 200 }
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('sends the trimmed query and a limit, and maps each hit with its match markers intact', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: {
+        hits: [{
+          threadId: 'thread_old',
+          messageId: 'message_4',
+          role: 'assistant',
+          snippet: 'the receipt is filed',
+          createdAt: '2026-08-02T09:00:00.000Z',
+          threadTitle: 'Billing',
+          archived: true,
+        }],
+      },
+      meta: { next_cursor: null },
+    }), json))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(searchChatThreads('  receipt  ', { limit: 20.7 })).resolves.toEqual({
+      status: 'ok',
+      hits: [{
+        threadId: 'thread_old',
+        messageId: 'message_4',
+        role: 'assistant',
+        snippet: 'the receipt is filed',
+        createdAt: '2026-08-02T09:00:00.000Z',
+        threadTitle: 'Billing',
+        archived: true,
+      }],
+    })
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain('/api/v1/chat/threads/search?q=receipt&limit=20')
+  })
+
+  it('encodes the query so nothing in it can add a parameter', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ data: { hits: [] } }), json))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await searchChatThreads('a&threadId=other')
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain('q=a%26threadId%3Dother')
+    expect(String(fetchMock.mock.calls[0]?.[0])).not.toContain('&threadId=')
+  })
+
+  it('reads the typed unavailable answers as a result, not an error', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({
+      error: { code: 'history_search_disabled', message: 'off' },
+    }), { headers: { 'Content-Type': 'application/json' }, status: 503 })))
+    await expect(searchChatThreads('receipt')).resolves.toEqual({ status: 'unavailable', reason: 'disabled' })
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({
+      error: { code: 'history_search_timeout', message: 'slow' },
+    }), { headers: { 'Content-Type': 'application/json' }, status: 503 })))
+    await expect(searchChatThreads('receipt')).resolves.toEqual({ status: 'unavailable', reason: 'timeout' })
+  })
+
+  it('rejects other failures so the caller can tell a broken request from a disabled search', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      error: { code: 'upstream_unavailable', message: 'down' },
+    }), { headers: { 'Content-Type': 'application/json' }, status: 502 })))
+
+    await expect(searchChatThreads('receipt')).rejects.toBeInstanceOf(ApiError)
+  })
+
+  it('drops a hit without a thread or message id, and never sends a request for an empty query', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: { hits: [{ threadId: 'thread_only' }, { threadId: 'thread_ok', messageId: 'message_ok' }] },
+    }), json))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await searchChatThreads('receipt')
+    expect(result.status === 'ok' ? result.hits.map((hit) => hit.threadId) : []).toEqual(['thread_ok'])
+
+    await expect(searchChatThreads('   ')).rejects.toThrow()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 })

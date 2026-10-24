@@ -1,12 +1,16 @@
-import { createEffect, createMemo, createSignal, For, Show } from 'solid-js'
+import { createEffect, createMemo, createSignal, For, onCleanup, Show } from 'solid-js'
 import type { JSX } from '@solidjs/web'
 import { Folder, FolderPlus, MessageSquarePlus, MoreHorizontal, Pin, Search, SlidersHorizontal, X } from '@/shared/icons'
 import { useI18n } from '@/shared/i18n'
 import { getSession } from '@/shared/session/session-store'
 import type { ChatOrganizationAction } from '@/shared/actions/chat-organization'
+import { searchChatThreads, type ChatSearchHit } from '@/shared/api/chat-client'
 import { applyChatOrganizationAction, chatDateGroup, chatOrganizationStorageKey, emptyChatOrganization, readChatOrganization, saveChatOrganization, selectOrganizedChats } from '@/features/chat/lib/chat-organization'
 import type { ChatThreadHistoryItem } from '@/features/chat/lib/chat-thread-history'
+import { ChatSearchResults, nextSearchIndex, SEARCH_DEBOUNCE_MS, SEARCH_MIN_CHARS, searchListboxId, searchOptionId, type ChatSearchStatus } from './ChatSearchResults'
 import './chat-sidebar-organizer.css'
+
+const SEARCH_ID_PREFIX = 'chat-organizer-search'
 
 type DialogMode = { kind: 'create' } | { kind: 'project'; id: string } | { kind: 'move'; thread: ChatThreadHistoryItem }
 type ChatGroup = { id: string; label: string; project: boolean; pinned?: boolean; items: ChatThreadHistoryItem[] }
@@ -20,6 +24,8 @@ export function ChatSidebarOrganizer(props: {
   /** More chats can be shown; the caller reveals the next page when asked. */
   hasMore?: boolean
   onLoadMore?: () => void
+  /** Opens a server search hit's thread, which may sit beyond the loaded page. */
+  onOpenSearchHit?: (threadId: string) => void
 }) {
   const i18n = useI18n()
   const session = getSession()
@@ -27,6 +33,9 @@ export function ChatSidebarOrganizer(props: {
   const [organization, setOrganization] = createSignal(emptyChatOrganization())
   const [query, setQuery] = createSignal('')
   const [searchOpen, setSearchOpen] = createSignal(false)
+  const [serverHits, setServerHits] = createSignal<ChatSearchHit[]>([])
+  const [serverStatus, setServerStatus] = createSignal<ChatSearchStatus>('idle')
+  const [activeHit, setActiveHit] = createSignal(-1)
   const [mode, setMode] = createSignal<DialogMode | null>(null)
   const [draftName, setDraftName] = createSignal('')
   const [destination, setDestination] = createSignal('')
@@ -41,6 +50,61 @@ export function ChatSidebarOrganizer(props: {
   let nameInput: HTMLInputElement | undefined
   let searchInput: HTMLInputElement | undefined
   let viewMenu: HTMLDetailsElement | undefined
+  // The server search is debounced, and every answer carries the generation of
+  // the query that asked for it, so a slow answer for an old query cannot
+  // replace a newer one. The local filter runs on every keystroke regardless.
+  let searchTimer: ReturnType<typeof setTimeout> | undefined
+  let searchGeneration = 0
+  const cancelSearch = () => {
+    clearTimeout(searchTimer)
+    searchTimer = undefined
+    searchGeneration += 1
+  }
+  onCleanup(cancelSearch)
+  const setSearchText = (text: string) => {
+    setQuery(text)
+    cancelSearch()
+    const term = text.trim()
+    if (term.length < SEARCH_MIN_CHARS) {
+      setServerStatus('idle')
+      setServerHits([])
+      setActiveHit(-1)
+      return
+    }
+    setServerStatus('loading')
+    const generation = searchGeneration
+    searchTimer = setTimeout(() => {
+      searchTimer = undefined
+      void searchChatThreads(term).then(
+        (result) => {
+          if (generation !== searchGeneration) return
+          setServerHits(result.status === 'ok' ? result.hits : [])
+          setServerStatus(result.status === 'ok' ? 'ready' : 'unavailable')
+          setActiveHit(-1)
+        },
+        () => {
+          if (generation !== searchGeneration) return
+          setServerHits([])
+          setServerStatus('unavailable')
+          setActiveHit(-1)
+        },
+      )
+    }, SEARCH_DEBOUNCE_MS)
+  }
+  const openSearchHit = (hit: ChatSearchHit) => props.onOpenSearchHit?.(hit.threadId)
+  const onSearchKeyDown = (event: KeyboardEvent) => {
+    const next = nextSearchIndex(activeHit(), event.key, serverHits().length)
+    if (next !== null) {
+      event.preventDefault()
+      setActiveHit(next)
+      return
+    }
+    const hit = serverHits()[activeHit()]
+    if (event.key === 'Enter' && hit) {
+      event.preventDefault()
+      openSearchHit(hit)
+    }
+  }
 
   createEffect(scope, (key) => {
     activeDrag = null
@@ -186,7 +250,7 @@ export function ChatSidebarOrganizer(props: {
           { type: 'project.create', id: crypto.randomUUID(), name: draftName() },
           { type: 'view.update', view: { ...organization().view, group: 'project', filter: 'all' } },
         )
-        setQuery('')
+        setSearchText('')
       }
       setMode(null)
     } catch (reason) { setError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke lagre.', 'Could not save.')) }
@@ -208,10 +272,13 @@ export function ChatSidebarOrganizer(props: {
         <button type="button" aria-label={i18n.tr('Nytt prosjekt', 'New project')} title={i18n.tr('Nytt prosjekt', 'New project')} disabled={!scope()} onClick={() => beginProject()}><FolderPlus size={18} /></button>
       </div>
       <Show when={searchOpen()}>
-        <div class="chat-organizer__search"><Search size={15} /><input ref={searchInput} type="search" aria-label={i18n.tr('Søk i samtaler', 'Search chats')} placeholder={i18n.tr('Søk i samtaler …', 'Search chats…')} value={query()} onInput={(event) => setQuery(event.currentTarget.value)} /><button type="button" aria-label={i18n.tr('Lukk samtalesøk', 'Close chat search')} onClick={() => { setQuery(''); setSearchOpen(false) }}><X size={14} /></button></div>
+        <div class="chat-organizer__search"><Search size={15} /><input ref={searchInput} type="search" role="combobox" maxlength="200" aria-expanded={serverHits().length ? 'true' : 'false'} aria-autocomplete="list" aria-controls={serverHits().length ? searchListboxId(SEARCH_ID_PREFIX) : undefined} aria-activedescendant={serverHits().length && activeHit() >= 0 ? searchOptionId(SEARCH_ID_PREFIX, activeHit()) : undefined} aria-label={i18n.tr('Søk i samtaler', 'Search chats')} placeholder={i18n.tr('Søk i samtaler …', 'Search chats…')} value={query()} onInput={(event) => setSearchText(event.currentTarget.value)} onKeyDown={onSearchKeyDown} /><button type="button" aria-label={i18n.tr('Lukk samtalesøk', 'Close chat search')} onClick={() => { setSearchText(''); setSearchOpen(false) }}><X size={14} /></button></div>
       </Show>
       <a href="/chat" link class="core-chat-sidebar__new" onClick={() => props.onNewChat()}><MessageSquarePlus size={17} />{i18n.tr('Ny samtale', 'New chat')}</a>
-      <Show when={organization().view.filter !== 'all' || query().trim()}><button type="button" class="chat-organizer__clear-filter" onClick={() => { setQuery(''); updateView({ filter: 'all' }) }}>{i18n.tr('Fjern filtre', 'Clear filters')} · {matches().length}<X size={12} /></button></Show>
+      <Show when={organization().view.filter !== 'all' || query().trim()}><button type="button" class="chat-organizer__clear-filter" onClick={() => { setSearchText(''); updateView({ filter: 'all' }) }}>{i18n.tr('Fjern filtre', 'Clear filters')} · {matches().length}<X size={12} /></button></Show>
+      <Show when={searchOpen() && query().trim().length >= SEARCH_MIN_CHARS}>
+        <ChatSearchResults idPrefix={SEARCH_ID_PREFIX} hits={serverHits()} status={serverStatus()} activeIndex={activeHit()} onOpen={openSearchHit} onActiveChange={(index) => setActiveHit(index)} />
+      </Show>
       <nav class="chat-organizer__list core-chat-sidebar__sessions" aria-label={i18n.tr('Chat-samtaler', 'Chat conversations')}>
         <Show when={!props.loading} fallback={<p class="chat-organizer__empty">{i18n.tr('Laster samtaler …', 'Loading chats…')}</p>}>
           <Show when={groups().length} fallback={<p class="chat-organizer__empty">{i18n.tr('Ingen samtaler passer dette utvalget.', 'No chats match this view.')}</p>}>

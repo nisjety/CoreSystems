@@ -10,6 +10,14 @@ describe('chat history action contract', () => {
     expect(parseChatHistoryAction({ type: 'thread.unarchive', threadId: 'thread-1' }).type).toBe('thread.unarchive')
   })
 
+  it('accepts a search for a trimmed, non-empty query, and refuses an empty one', () => {
+    expect(parseChatHistoryAction({ type: 'thread.search', query: '  receipt ' })).toEqual({
+      type: 'thread.search',
+      query: 'receipt',
+    })
+    expect(() => parseChatHistoryAction({ type: 'thread.search', query: '   ' })).toThrow()
+  })
+
   it('refuses an unknown action type and an empty thread id', () => {
     expect(() => parseChatHistoryAction({ type: 'thread.delete', threadId: 'thread-1' })).toThrow()
     expect(() => parseChatHistoryAction({ type: 'thread.archive', threadId: '   ' })).toThrow()

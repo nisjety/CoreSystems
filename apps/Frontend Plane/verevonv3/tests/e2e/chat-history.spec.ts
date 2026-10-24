@@ -13,6 +13,7 @@ const CHAT = '/chat'
 // A RegExp, not a glob: Playwright anchors a glob at the end, which would skip
 // the archived listing's `?archived=` query string.
 const THREADS = /\/api\/v1\/chat\/threads(\?.*)?$/
+const SEARCH = /\/api\/v1\/chat\/threads\/search(\?.*)?$/
 const archiveRoute = (threadId: string, verb: 'archive' | 'unarchive') =>
   `**/api/v1/chat/threads/${threadId}/${verb}`
 
@@ -66,5 +67,36 @@ test.describe('chat history archive surface', () => {
     await page.getByRole('button', { name: `Restore ${ARCHIVE.title}` }).click()
     await page.getByRole('button', { name: 'Show active chats' }).click()
     await expect(rowFor(page, ARCHIVE.title)).toBeVisible()
+  })
+
+  test('search finds a chat beyond the loaded page by a word in its body', async ({ page }) => {
+    // Not in the first page of the list, so only the server search can find it.
+    const OLD: Thread = { threadId: 'thread-old', title: 'Quarterly billing', updatedAt: '2025-01-03T10:00:00Z' }
+    const state = { active: [KEEP], archived: [] as Thread[] }
+    await serveHistory(page, state)
+    const searched: string[] = []
+    await page.route(SEARCH, async (route) => {
+      searched.push(new URL(route.request().url()).searchParams.get('q') ?? '')
+      await json(route, {
+        hits: [{
+          threadId: OLD.threadId,
+          messageId: 'message-4',
+          role: 'assistant',
+          snippet: 'the kvittering was sent',
+          createdAt: OLD.updatedAt,
+          threadTitle: OLD.title,
+          archived: false,
+        }],
+      })
+    })
+    await page.goto(CHAT)
+
+    await page.getByRole('button', { name: 'Search chats' }).click()
+    await page.getByRole('combobox', { name: 'Search chats' }).fill('kvittering')
+
+    const option = page.getByRole('option', { name: /Quarterly billing/ })
+    await expect(option).toBeVisible({ timeout: 1000 })
+    await expect(option.locator('mark')).toHaveText('kvittering')
+    expect(searched).toEqual(['kvittering'])
   })
 })
