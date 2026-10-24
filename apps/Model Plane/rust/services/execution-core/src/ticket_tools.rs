@@ -54,6 +54,9 @@ pub struct AgentTicketActionClient {
     control_base_url: Url,
     control_service_token: String,
     control_model_action_view_token: Option<String>,
+    // Mirrors Capability Core's MODEL_ACTION_ADMISSION=table. Off keeps the
+    // tickets.create-only view request, matching Capability Core's v1 path.
+    model_action_admission_table: bool,
     application_base_url: Url,
     application_delegation_secret: String,
     http: Client,
@@ -125,6 +128,24 @@ struct ControlDecisionRequest<'a> {
 struct ControlModelActionViewRequest<'a> {
     run_id: &'a str,
     org_id: &'a str,
+    // Absent with the admission table off, so the request stays byte-identical
+    // to the tickets.create-only request Control already accepts.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    action_ids: Vec<&'static str>,
+}
+
+// The owner actions this build pins are the only ones it asks Control to name.
+// Control still intersects them with its own target table, so an id this build
+// pins but Control does not admit is dropped, never offered.
+fn requested_model_action_ids(admission_table: bool) -> Vec<&'static str> {
+    if admission_table {
+        crate::owner_actions::OWNER_ACTION_PINS
+            .iter()
+            .map(|pin| pin.name)
+            .collect()
+    } else {
+        Vec::new()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -224,6 +245,9 @@ impl AgentTicketActionClient {
                 "Control model-action-view service token",
             )?);
         }
+        // Strict like Capability Core: only the literal "table" asks for named actions.
+        client.model_action_admission_table =
+            env_value("MODEL_ACTION_ADMISSION").as_deref() == Some("table");
         Ok(Some(client))
     }
 
@@ -305,6 +329,7 @@ impl AgentTicketActionClient {
             control_base_url,
             control_service_token,
             control_model_action_view_token: None,
+            model_action_admission_table: false,
             application_base_url,
             application_delegation_secret,
             http,
@@ -411,6 +436,7 @@ impl AgentTicketActionClient {
             .json(&ControlModelActionViewRequest {
                 run_id: &run_id,
                 org_id: &org_id,
+                action_ids: requested_model_action_ids(self.model_action_admission_table),
             })
             .send()
             .await
@@ -874,6 +900,31 @@ mod tests {
             .await
             .expect_err("effect scope must not double as a model view scope");
         assert!(error.contains("model action view is not configured"));
+    }
+
+    #[test]
+    fn model_action_view_request_names_pinned_actions_only_with_the_table() {
+        let off = serde_json::to_value(ControlModelActionViewRequest {
+            run_id: "run-1",
+            org_id: "org-1",
+            action_ids: requested_model_action_ids(false),
+        })
+        .expect("serialize");
+        assert_eq!(
+            off,
+            serde_json::json!({"run_id": "run-1", "org_id": "org-1"})
+        );
+
+        let on = serde_json::to_value(ControlModelActionViewRequest {
+            run_id: "run-1",
+            org_id: "org-1",
+            action_ids: requested_model_action_ids(true),
+        })
+        .expect("serialize");
+        assert_eq!(
+            on,
+            serde_json::json!({"run_id": "run-1", "org_id": "org-1", "action_ids": ["tickets.create"]})
+        );
     }
 
     #[test]
