@@ -13,7 +13,7 @@ use super::browser_omnibox::{dispatch_browser_omnibox_search, dispatch_browser_o
 
 use super::dispatchers::{
     dispatch_audio_dictate, dispatch_audio_transcribe, dispatch_browser_blocked_try_other_source,
-    dispatch_browser_close_session,
+    dispatch_browser_close_session, dispatch_browser_keepalive_session,
     dispatch_browser_close_tab, dispatch_browser_create_profile, dispatch_browser_create_session,
     dispatch_browser_create_tab, dispatch_browser_delete_profile,
     dispatch_browser_probe_profile_restore, dispatch_browser_rename_profile,
@@ -377,6 +377,9 @@ pub(super) async fn execute_action(
         }
         "browser_session.close" => {
             dispatch_browser_close_session(&state, &user, &headers, &body.input).await
+        }
+        "browser_session.keepalive" => {
+            dispatch_browser_keepalive_session(&state, &user, &headers, &body.input).await
         }
         "browser_tab.create" => {
             dispatch_browser_create_tab(&state, &user, &headers, &body.input).await

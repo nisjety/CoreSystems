@@ -1167,6 +1167,10 @@ const browserCloseSessionInput = z.object({
   sessionId: z.string().min(1),
 })
 
+const browserKeepAliveSessionInput = z.object({
+  sessionId: z.string().min(1),
+})
+
 // `actor` is who is asking, as on `browser_action.run`: `agent` marks a tab call the
 // model proposed, which the owner refuses while the person holds the browser. Absent
 // is the person; it can only tighten.
@@ -3106,6 +3110,17 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: false,
     inputSchema: browserCloseSessionInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'browser_session.keepalive',
+    label: 'Keep browser session alive',
+    description: 'Extend a person\'s open browser session grant by one broker interval while the session is still in use. Returns only the new expiry time. Starts no run and changes no page.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: browserKeepAliveSessionInput,
     outputSchema: envelopeStatusOutput,
   },
   {

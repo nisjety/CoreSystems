@@ -16,6 +16,7 @@ use crate::domains::ai::{proxy_dictate, proxy_speech};
 use crate::domains::browser::{
     close_session as close_browser_session, close_tab as close_browser_tab, control_ai_run,
     create_browser_profile, create_session as create_browser_session,
+    keepalive_session as keepalive_browser_session,
     delete_profile as delete_browser_profile, new_tab as new_browser_tab, rename_browser_profile,
     restore_profile_probe as restore_browser_profile_probe, run_action as run_browser_action,
     select_tab as select_browser_tab, set_control_mode as set_browser_control_mode,
@@ -5207,6 +5208,27 @@ pub(super) async fn dispatch_browser_create_session(
     .await;
     let (status, payload) = response_to_status_and_json(response).await;
     owner_json_response_to_envelope("browser_session.create", user, status, payload)
+}
+
+pub(super) async fn dispatch_browser_keepalive_session(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let session_id = ticket_string(input, "sessionId");
+    if session_id.is_empty() {
+        return ticket_bad_request("browser_session.keepalive requires a non-empty 'sessionId'");
+    }
+    let response = keepalive_browser_session(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        PathExtractor(session_id.to_owned()),
+    )
+    .await;
+    let (status, payload) = response_to_status_and_json(response).await;
+    owner_json_response_to_envelope("browser_session.keepalive", user, status, payload)
 }
 
 pub(super) async fn dispatch_browser_close_session(
