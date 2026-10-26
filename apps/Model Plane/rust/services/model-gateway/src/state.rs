@@ -12,6 +12,7 @@ use mp_contracts::model_plane::v1::{
     browser_broker_client::BrowserBrokerClient, capability_core_client::CapabilityCoreClient,
     execution_core_client::ExecutionCoreClient, finetune_jobs_client::FinetuneJobsClient,
     inference_core_client::InferenceCoreClient,
+    learning_governance_service_client::LearningGovernanceServiceClient,
     managed_run_lifecycle_client::ManagedRunLifecycleClient,
     message_search_client::MessageSearchClient,
     memory_service_client::MemoryServiceClient,
@@ -102,6 +103,8 @@ pub struct AppState {
     pub session_client: SessionCoreClient<Channel>,
     /// Session Core's MessageSearch service, on the same endpoint as `session_client` (WS17-S3).
     pub message_search_client: MessageSearchClient<Channel>,
+    /// Session Core's LearningGovernance service on the same endpoint as `session_client` (WS07-S9).
+    pub learning_client: LearningGovernanceServiceClient<Channel>,
     /// Additive managed-run terminalization service hosted by Session Core on
     /// the same gRPC endpoint. It deliberately remains separate from the
     /// legacy `SessionCore` client so existing callers retain their contracts.
@@ -414,6 +417,7 @@ impl AppState {
             rate_limiter: RateLimiter::from_env(),
             inference_client: InferenceCoreClient::new(inference_channel),
             message_search_client: MessageSearchClient::new(session_channel.clone()),
+            learning_client: LearningGovernanceServiceClient::new(session_channel.clone()),
             session_client: SessionCoreClient::new(session_channel),
             managed_run_client: ManagedRunLifecycleClient::new(managed_run_channel),
             session_terminal_tokens: None,
@@ -571,6 +575,11 @@ impl AppState {
             "http://localhost:9091",
         )?);
         let message_search_client = MessageSearchClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
+        let learning_client = LearningGovernanceServiceClient::new(Self::lazy_channel(
             "SESSION_CORE_URL",
             "SESSION_CORE_ADDR",
             "http://localhost:9091",
@@ -775,6 +784,7 @@ impl AppState {
             state.inference_client = inference_client;
             state.session_client = session_client;
             state.message_search_client = message_search_client;
+            state.learning_client = learning_client;
             state.managed_run_client = managed_run_client;
             state.session_terminal_tokens = Some(session_terminal_tokens);
             state.mail_task_bridge_tokens = mail_task_bridge_tokens.clone();
@@ -827,6 +837,7 @@ impl AppState {
             state.inference_client = inference_client;
             state.session_client = session_client;
             state.message_search_client = message_search_client;
+            state.learning_client = learning_client;
             state.managed_run_client = managed_run_client;
             state.session_terminal_tokens = Some(session_terminal_tokens);
             state.mail_task_bridge_tokens = mail_task_bridge_tokens;

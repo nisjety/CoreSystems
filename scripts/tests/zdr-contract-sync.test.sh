@@ -154,7 +154,7 @@ GOLDENS=(
   # (VEREVON_UPDATE_GOLDEN=1 pnpm vitest run src/shared/actions/admission-contract.test.ts) from the typed
   # side map (model-access.ts) and the registry, never written by hand. Each plane that admits an agent
   # action vendors it, with the pin beside it, in the VENDORED rows below.
-  "apps/Model Plane/api/contracts/agent-action-admission.json|919b31f827e5d3cc03f6a6f34e2b6a1c83622504873196910fea1248c12d20cc"
+  "apps/Model Plane/api/contracts/agent-action-admission.json|8eb89148f5bdfb9e914bc7d9ad7f307659b033009c94df617dae2123d277335f"
 )
 
 # "<repo-relative copy>|<repo-relative golden>"

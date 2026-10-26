@@ -1178,6 +1178,45 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "learning.accept_skill",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:4b029850c97f81dad6bc202a9572072d4b94a31997a678027c520a613dc771c0",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "learning.reject_skill",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:15b5f38d974dfed93117c006fdc3901ab4a9919ea1b069a38436c1c42487ee59",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "learning.undo",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "destructive",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:12d87e58a9a130a7171e208cb5fc7385ac92f8ae3387ad3e88dbc8fb6cdee988",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "mcp.approve_tool",
       "registry": true,
       "access": "none",
