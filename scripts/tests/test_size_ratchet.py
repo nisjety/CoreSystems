@@ -49,6 +49,10 @@ class Repo:
     def remove(self, rel):
         self.git('rm', '-q', rel)
 
+    def move(self, old, new):
+        (self.root / new).parent.mkdir(parents=True, exist_ok=True)
+        self.git('mv', old, new)
+
     def commit(self):
         self.git('add', '-A')
         self.git('commit', '-q', '--allow-empty', '-m', 'change')
@@ -212,6 +216,101 @@ class RatchetTest(unittest.TestCase):
             code, out = repo.run('--check', '--base-ref', base)
         self.assertEqual(code, 1)
         self.assertIn('EXCLUDED_DIRS gains an entry', out)
+
+    def test_a_baselined_file_git_mv_ed_into_gen_fails_against_the_base(self):
+        repo = Repo(self)
+        repo.install_gate()
+        repo.write('src/a.rs', source(3100))
+        repo.commit()
+        repo.run('--init')
+        base = repo.commit()
+        repo.move('src/a.rs', 'apps/x/gen/a.rs')
+        repo.write(gate.BASELINE_REL, '{}\n')
+        repo.commit()
+        code, out = repo.run('--check', '--base-ref', base)
+        self.assertEqual(code, 1)
+        self.assertIn('src/a.rs: renamed to apps/x/gen/a.rs, which is not counted', out)
+
+    def test_a_baselined_file_renamed_to_an_uncounted_suffix_fails_against_the_base(self):
+        repo = Repo(self)
+        repo.install_gate()
+        repo.write('src/a.rs', source(3100))
+        repo.commit()
+        repo.run('--init')
+        base = repo.commit()
+        repo.move('src/a.rs', 'src/a.txt')
+        repo.write(gate.BASELINE_REL, '{}\n')
+        repo.commit()
+        code, out = repo.run('--check', '--base-ref', base)
+        self.assertEqual(code, 1)
+        self.assertIn('src/a.rs: renamed to src/a.txt, which is not counted', out)
+
+    def test_a_baselined_file_renamed_to_a_generated_file_fails_against_the_base(self):
+        repo = Repo(self)
+        repo.install_gate()
+        repo.write('src/a.rs', source(3100))
+        repo.commit()
+        repo.run('--init')
+        base = repo.commit()
+        repo.move('src/a.rs', 'src/b.rs')
+        repo.write('src/b.rs', source(3100, header='// DO NOT EDIT\n'))
+        repo.write(gate.BASELINE_REL, '{}\n')
+        repo.commit()
+        code, out = repo.run('--check', '--base-ref', base)
+        self.assertEqual(code, 1)
+        self.assertIn('src/a.rs: renamed to src/b.rs, which is not counted', out)
+
+    def test_a_baselined_file_renamed_to_a_counted_path_keeps_its_ceiling(self):
+        repo = Repo(self)
+        repo.install_gate()
+        repo.write('src/a.rs', source(3100))
+        repo.commit()
+        repo.run('--init')
+        base = repo.commit()
+        repo.move('src/a.rs', 'src/b.rs')
+        repo.write(gate.BASELINE_REL, '{"src/b.rs": 3100}\n')
+        repo.commit()
+        self.assertEqual(repo.run('--check', '--base-ref', base)[0], 0)
+
+    def test_a_rename_may_not_raise_the_ceiling_it_carries(self):
+        repo = Repo(self)
+        repo.install_gate()
+        repo.write('src/a.rs', source(3100))
+        repo.commit()
+        repo.run('--init')
+        base = repo.commit()
+        repo.move('src/a.rs', 'src/b.rs')
+        repo.write(gate.BASELINE_REL, '{"src/b.rs": 3150}\n')
+        repo.commit()
+        code, out = repo.run('--check', '--base-ref', base)
+        self.assertEqual(code, 1)
+        self.assertIn('src/b.rs: allowance raised from 3100 to 3150', out)
+
+    def test_a_baselined_file_deleted_outright_passes_against_the_base(self):
+        repo = Repo(self)
+        repo.install_gate()
+        repo.write('src/a.rs', source(3100))
+        repo.commit()
+        repo.run('--init')
+        base = repo.commit()
+        repo.remove('src/a.rs')
+        repo.write(gate.BASELINE_REL, '{}\n')
+        repo.commit()
+        self.assertEqual(repo.run('--check', '--base-ref', base)[0], 0)
+
+    def test_a_rename_is_found_when_the_tree_is_read_from_a_ref(self):
+        repo = Repo(self)
+        repo.install_gate()
+        repo.write('src/a.rs', source(3100))
+        repo.commit()
+        repo.run('--init')
+        base = repo.commit()
+        repo.move('src/a.rs', 'apps/x/gen/a.rs')
+        repo.write(gate.BASELINE_REL, '{}\n')
+        head = repo.commit()
+        code, out = repo.run('--check', '--ref', head, '--base-ref', base)
+        self.assertEqual(code, 1)
+        self.assertIn('src/a.rs: renamed to apps/x/gen/a.rs, which is not counted', out)
 
     def test_a_base_without_a_baseline_is_not_compared(self):
         repo = Repo(self)

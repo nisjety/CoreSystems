@@ -14,9 +14,11 @@ generated names and markers, excluded directories) from the base branch and fail
 if the change grants more than the base did: a higher cap or ceiling, a suffix no
 longer counted, a new exclusion, or a new entry for a file that was under the cap.
 A file tracked at the base that the change takes out of the count (for example by
-adding a generated marker) fails too. A base branch with no baseline yet, the change
-that introduces the ratchet, is not compared. A rename that moves a file out of the
-count is not detected by this comparison; review covers it.
+adding a generated marker) fails too. So does a baselined file that git reports as
+renamed out of the count: a rename into a generated, excluded or uncounted path is
+refused, and a rename to a counted path keeps the old ceiling, which the new path may
+not raise. A plain deletion is allowed. A base branch with no baseline yet, the change
+that introduces the ratchet, is not compared.
 
 Counted: tracked files with a source suffix, minus generated code (`*.pb.go`,
 `*_pb.ts`, anything under a `gen` directory, and a file whose first 40 lines carry
@@ -176,21 +178,40 @@ def loosenings(base, head):
     return notes
 
 
-def relaxations(base_policy, base, head_policy, head, counts):
-    """What the change grants beyond the base: looser rules, a higher ceiling, or a tracked file taken out of the count."""
+def relaxations(base_policy, base, head_policy, head, counts, moved):
+    """What the change grants beyond the base: looser rules, a higher ceiling, a tracked file taken out of the count, or a baselined file moved out of it."""
     notes = loosenings(base_policy, head_policy)
+    came_from = {new: old for old, new in moved.items()}
     for path in sorted(set(base) | set(head)):
         before = base.get(path, base_policy['CAP'])
+        if path not in base and path in came_from:
+            # A renamed file keeps its ceiling: the new path may carry the old allowance but not raise it.
+            before = base.get(came_from[path], before)
         after = head.get(path, head_policy['CAP'])
         if after > before:
             notes.append(f'{path}: allowance raised from {before} to {after}')
+    for old, new in sorted(moved.items()):
+        if counts.get(new) is None:
+            notes.append(f'{old}: renamed to {new}, which is not counted; a baselined file cannot leave the count by moving')
     for path in sorted(base):
         if path in counts and counts[path] is None:
             notes.append(f'{path}: tracked at the base, now excluded from the count as generated')
     return notes
 
 
-def compare_with_base(root, base_ref, baseline, counts):
+def renamed_out_of_count(root, base_ref, ref, base, counts):
+    """Baselined files that git reports as renamed and that the count no longer holds, as {old: new}."""
+    gone = [path for path in base if counts.get(path) is None]
+    if not gone:
+        return {}
+    # -M pairs a removed path with an added one; R keeps only those pairs, each three NUL-separated fields.
+    args = ['diff', '--name-status', '-z', '-M', '--diff-filter=R', base_ref, *([ref] if ref else []), '--']
+    fields = git(root, *args).decode('utf-8').split('\0')
+    renamed = {fields[i + 1]: fields[i + 2] for i in range(0, len(fields) - 2, 3)}
+    return {old: renamed[old] for old in gone if old in renamed}
+
+
+def compare_with_base(root, base_ref, baseline, counts, ref=None):
     git(root, 'rev-parse', '--verify', '--quiet', f'{base_ref}^{{commit}}')
     present = subprocess.run(['git', '-C', str(root), 'cat-file', '-e', f'{base_ref}:{BASELINE_REL}'],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
@@ -199,7 +220,8 @@ def compare_with_base(root, base_ref, baseline, counts):
         return []
     base = parse_baseline(git(root, 'show', f'{base_ref}:{BASELINE_REL}').decode('utf-8'))
     head_policy = {name: globals()[name] for name in POLICY_NAMES}
-    return relaxations(policy_at(root, base_ref), base, head_policy, baseline, counts)
+    moved = renamed_out_of_count(root, base_ref, ref, base, counts)
+    return relaxations(policy_at(root, base_ref), base, head_policy, baseline, counts, moved)
 
 
 def main(argv=None):
@@ -237,7 +259,7 @@ def main(argv=None):
             return 0
 
         over, stale = violations(counts, baseline)
-        relaxed = compare_with_base(root, args.base_ref, baseline, counts) if args.base_ref else []
+        relaxed = compare_with_base(root, args.base_ref, baseline, counts, args.ref) if args.base_ref else []
     except (OSError, ValueError, subprocess.CalledProcessError) as exc:
         print(f'::error::size ratchet cannot run: {exc}')
         return 2
