@@ -88,6 +88,10 @@ func TestValidateEntries(t *testing.T) {
 		{"gpt-?", CodeGlobNotAllowed},
 		{"gpt-[45]", CodeGlobNotAllowed},
 		{"provider:*", CodeGlobNotAllowed},
+		{"verevon-genius", CodeIntentIDNotAllowed},
+		{"VEREVON-Budget ", CodeIntentIDNotAllowed},
+		{"acme-verevon-genius", ""},
+		{"provider:verevon-core", ""},
 		{"gpt 5", CodeInvalidEntry},
 		{"-gpt", CodeInvalidEntry},
 		{"gpt\n5", CodeInvalidEntry},
@@ -107,6 +111,62 @@ func TestValidateEntries(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("entry %q: code %q; want %q", tc.entry, got, tc.want)
 		}
+	}
+}
+
+// An intent mode is judged on the model it resolves to, so a deny entry naming
+// one is refused just as an allow entry is, and a role's list follows the same
+// rule. A surface default may still name an intent, because no list can name one
+// and the model it resolves to is judged at admission.
+func TestValidateRefusesIntentIDsOnDenyAndRoleLists(t *testing.T) {
+	cases := []struct {
+		name string
+		req  PutRequest
+		want []string // nil is accepted
+	}{
+		{
+			"intent in deny",
+			PutRequest{ExpectedRevision: revision(0), OrgDefault: &Policy{AllowMode: AllowModeAll, Deny: []string{"verevon-genius"}}},
+			[]string{"org_default.deny[0]=" + CodeIntentIDNotAllowed},
+		},
+		{
+			"intent in a role's allow list",
+			PutRequest{ExpectedRevision: revision(0), Roles: map[string]Policy{"X": {AllowMode: AllowModeListed, Allow: []string{"gpt-5-mini", "verevon-genius"}}}},
+			[]string{"roles.x.allow[1]=" + CodeIntentIDNotAllowed},
+		},
+		{
+			"a listed intent is refused, and its default is not refused on top",
+			PutRequest{ExpectedRevision: revision(0), OrgDefault: &Policy{AllowMode: AllowModeListed, Allow: []string{"verevon-balance"}, Defaults: map[string]SurfaceDefault{"chat": {Model: "verevon-balance"}}}},
+			[]string{"org_default.allow[0]=" + CodeIntentIDNotAllowed},
+		},
+		{
+			"an intent default is accepted where the policy cannot list one",
+			PutRequest{ExpectedRevision: revision(0), OrgDefault: &Policy{AllowMode: AllowModeListed, Allow: []string{"gpt-5-mini"}, Defaults: map[string]SurfaceDefault{"chat": {Model: "verevon-balance"}}}},
+			nil,
+		},
+		{
+			"an intent is a legitimate surface default in all mode",
+			PutRequest{ExpectedRevision: revision(0), OrgDefault: &Policy{AllowMode: AllowModeAll, Defaults: map[string]SurfaceDefault{"chat": {Model: "verevon-balance"}}}},
+			nil,
+		},
+	}
+	for _, tc := range cases {
+		_, err := ValidatePut(tc.req)
+		if tc.want == nil {
+			if err != nil {
+				t.Errorf("%s: %v", tc.name, err)
+			}
+			continue
+		}
+		if !reflect.DeepEqual(validationCodes(t, err), tc.want) {
+			t.Errorf("%s: got %v; want %v", tc.name, err, tc.want)
+		}
+	}
+
+	_, err := ValidatePut(PutRequest{ExpectedRevision: revision(0), OrgDefault: &Policy{AllowMode: AllowModeListed, Allow: []string{"verevon-genius"}}})
+	var invalid *ValidationError
+	if !errors.As(err, &invalid) || len(invalid.Errors) != 1 || !strings.Contains(invalid.Errors[0].Message, "not a model") {
+		t.Fatalf("the refusal must say that an intent mode is not a model, got %v", err)
 	}
 }
 

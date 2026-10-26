@@ -27,6 +27,7 @@ const (
 	CodeEntryTooLong             = "entry_too_long"
 	CodeGlobNotAllowed           = "glob_not_allowed"
 	CodeInvalidEntry             = "invalid_entry"
+	CodeIntentIDNotAllowed       = "intent_id_not_allowed"
 	CodeTooManyEntries           = "too_many_entries"
 	CodeUnknownEffort            = "unknown_effort"
 	CodeUnknownPrivacyTier       = "unknown_privacy_tier"
@@ -40,6 +41,12 @@ const (
 	CodeDuplicateRole            = "duplicate_role"
 	CodeTooManyRoles             = "too_many_roles"
 )
+
+// intentIDPrefix marks a Verevon intent mode (verevon-budget, verevon-balance,
+// verevon-genius). An intent is not a model id: inference-core resolves it to a
+// concrete model at admission, so an allow or deny entry naming one would
+// silently never match.
+const intentIDPrefix = "verevon-"
 
 // effortRank is the reasoning-effort ladder, weakest first. It mirrors
 // inference-core's provider/effort.rs Level::ALL (WS11); the test
@@ -180,7 +187,10 @@ func (v *validator) policy(path string, in Policy) Policy {
 }
 
 // entries lower-cases, de-duplicates and sorts a list, and reports every entry
-// that is not an exact model id or a provider selector.
+// that is not an exact model id or a provider selector. It also refuses an intent
+// mode: the policy judges the concrete model an intent resolves to, so an entry
+// naming the intent would never match. defaults are checked separately, so a
+// surface may still name an intent.
 func (v *validator) entries(path string, in []string) []string {
 	if len(in) > MaxEntries {
 		v.add(path, CodeTooManyEntries, fmt.Sprintf("at most %d entries are allowed", MaxEntries))
@@ -190,6 +200,10 @@ func (v *validator) entries(path string, in []string) []string {
 	out := make([]string, 0, len(in))
 	for index, raw := range in {
 		entry, code, message := normalizeEntry(raw)
+		if code == "" && strings.HasPrefix(entry, intentIDPrefix) {
+			code = CodeIntentIDNotAllowed
+			message = "an intent mode is not a model: the policy judges the concrete model it resolves to, so list or deny that model instead"
+		}
 		if code != "" {
 			v.add(fmt.Sprintf("%s[%d]", path, index), code, message)
 			continue
@@ -298,12 +312,17 @@ func (v *validator) defaults(path string, in map[string]SurfaceDefault, policy P
 // one its own policy refuses. org-core does not know which provider serves a
 // model, so a provider selector cannot be evaluated here: when the policy lists
 // only by selector the default is accepted, and inference-core re-checks it at
-// admission, where the catalogue is known.
+// admission, where the catalogue is known. An intent mode is the same case: no
+// list can name one (entries refuses it), and the model it resolves to is only
+// known at admission, so a default that names one is not refused here.
 func defaultModelPermitted(policy Policy, model string) bool {
 	if containsExact(policy.Deny, model) {
 		return false
 	}
 	if policy.AllowMode == AllowModeAll {
+		return true
+	}
+	if strings.HasPrefix(model, intentIDPrefix) {
 		return true
 	}
 	if containsExact(policy.Allow, model) {
