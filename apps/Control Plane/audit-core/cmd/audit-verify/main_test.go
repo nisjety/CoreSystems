@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/triodelab/controlplane/audit-core/internal/chain"
+	"github.com/triodelab/controlplane/audit-core/internal/store"
 	"github.com/triodelab/controlplane/audit-core/internal/verifier"
 )
 
@@ -397,6 +398,278 @@ func TestManifestOfAnotherOrgIsRefused(t *testing.T) {
 	e.manifest.OrgID = "someone-else"
 	if code, _, errOut := e.run(t); code != exitUnverifiable || !strings.Contains(errOut, "different org") {
 		t.Fatalf("exit = %d stderr = %q", code, errOut)
+	}
+}
+
+// manifestOf reads the manifest part of a JSON report.
+func manifestOf(t *testing.T, stdout string) manifestStatus {
+	t.Helper()
+	var j jsonReport
+	if err := json.Unmarshal([]byte(stdout), &j); err != nil {
+		t.Fatalf("report is not JSON: %v\n%s", err, stdout)
+	}
+	return j.Manifest
+}
+
+// signManifest makes the export's manifest the one the server writes for the
+// rows it holds: their range, and the chain head of the whole chain (head).
+// store.SignManifest signs it as the server does, with key b under keyID.
+func (e *export) signManifest(t *testing.T, head exportRow, keyID string, b byte, count int64) {
+	t.Helper()
+	first, last := e.rows[0], e.rows[len(e.rows)-1]
+	m := store.ComplianceManifest{
+		OrgID:               head.OrgID,
+		GeneratedAt:         time.Date(2026, 10, 2, 10, 0, 0, 654321000, time.UTC),
+		FirstSeq:            first.ChainSeq,
+		LastSeq:             last.ChainSeq,
+		Count:               count,
+		FirstPrevHash:       first.PrevHash,
+		LastRowHash:         last.RowHash,
+		HeadSeq:             head.ChainSeq,
+		HeadHash:            head.RowHash,
+		LegacyUnchainedRows: e.manifest.LegacyUnchainedRows,
+		Checkpoint:          e.manifest.Checkpoint,
+		Attestation:         e.manifest.Attestation,
+	}
+	if err := store.SignManifest(&m, ring(t, keyID, b)); err != nil {
+		t.Fatal(err)
+	}
+	e.manifest = manifest{
+		OrgID:               m.OrgID,
+		GeneratedAt:         m.GeneratedAt,
+		FirstSeq:            m.FirstSeq,
+		LastSeq:             m.LastSeq,
+		Count:               m.Count,
+		FirstPrevHash:       m.FirstPrevHash,
+		LastRowHash:         m.LastRowHash,
+		HeadSeq:             m.HeadSeq,
+		HeadHash:            m.HeadHash,
+		LegacyUnchainedRows: m.LegacyUnchainedRows,
+		Checkpoint:          m.Checkpoint,
+		Attestation:         m.Attestation,
+		KeyID:               m.KeyID,
+		Signature:           m.Signature,
+	}
+}
+
+// subRangeExport exports rows [from, to) of the golden chain, whose head is its
+// last row, with the manifest the server signs for that range.
+func subRangeExport(t *testing.T, from, to int) *export {
+	t.Helper()
+	e := newExport(t)
+	head := e.rows[len(e.rows)-1]
+	e.rows = e.rows[from:to]
+	e.signManifest(t, head, "audit-key", 1, int64(to-from))
+	return e
+}
+
+func TestSignedManifestOfTheWholeChainVerifies(t *testing.T) {
+	e := newExport(t)
+	e.signManifest(t, e.rows[len(e.rows)-1], "audit-key", 1, 3)
+	code, out, errOut := e.run(t, "-json")
+	if code != exitVerified {
+		t.Fatalf("exit = %d\nstdout: %s\nstderr: %s", code, out, errOut)
+	}
+	if m := manifestOf(t, out); !m.Signed || m.KeyID != "audit-key" || m.SubRange {
+		t.Fatalf("manifest = %+v", m)
+	}
+	if r := reportOf(t, out); r.Status != verifier.StatusVerified || r.Head == nil || r.Head.Seq != 3 {
+		t.Fatalf("report = %+v", r)
+	}
+	_, text, _ := e.run(t)
+	if !strings.Contains(text, "manifest: signed, key audit-key, signature valid: true") {
+		t.Fatalf("output lacks the signature line:\n%s", text)
+	}
+}
+
+func TestUnsignedManifestIsSaidToBeUnsigned(t *testing.T) {
+	code, out, errOut := newExport(t).run(t, "-json")
+	if code != exitVerified {
+		t.Fatalf("exit = %d\nstderr: %s", code, errOut)
+	}
+	if m := manifestOf(t, out); !m.Supplied || m.Signed || m.SubRange {
+		t.Fatalf("manifest = %+v", m)
+	}
+	if _, text, _ := newExport(t).run(t); !strings.Contains(text, "manifest: unsigned") {
+		t.Fatalf("output lacks manifest: unsigned:\n%s", text)
+	}
+}
+
+func TestTamperingWithASignedManifestIsBroken(t *testing.T) {
+	tampers := map[string]func(e *export){
+		"last_seq":        func(e *export) { e.manifest.LastSeq = 2 },
+		"legacy count":    func(e *export) { e.manifest.LegacyUnchainedRows = 4 },
+		"count":           func(e *export) { e.manifest.Count = 2 },
+		"generated_at":    func(e *export) { e.manifest.GeneratedAt = e.manifest.GeneratedAt.Add(time.Second) },
+		"first_seq":       func(e *export) { e.manifest.FirstSeq = 2 },
+		"first_prev_hash": func(e *export) { e.manifest.FirstPrevHash = bytes.Repeat([]byte{0xAA}, chain.HashSize) },
+		"head_seq":        func(e *export) { e.manifest.HeadSeq = 4 },
+		"head_hash":       func(e *export) { e.manifest.HeadHash = bytes.Repeat([]byte{0xBB}, chain.HashSize) },
+	}
+	for name, tamper := range tampers {
+		t.Run(name, func(t *testing.T) {
+			e := newExport(t)
+			e.signManifest(t, e.rows[len(e.rows)-1], "audit-key", 1, 3)
+			tamper(e)
+			code, out, errOut := e.run(t)
+			if code != exitBroken || !strings.Contains(errOut, "signature does not verify") {
+				t.Fatalf("exit = %d, want 2 with a signature complaint\nstdout: %s\nstderr: %s", code, out, errOut)
+			}
+		})
+	}
+}
+
+func TestSignedManifestUnderAKeyTheVerifierLacksIsUnverifiable(t *testing.T) {
+	e := newExport(t)
+	e.signManifest(t, e.rows[len(e.rows)-1], "audit-key", 1, 3)
+	e.manifest.KeyID = "retired-key"
+	code, out, errOut := e.run(t)
+	if code != exitUnverifiable || !strings.Contains(errOut, `"retired-key"`) {
+		t.Fatalf("exit = %d, want 3 naming the key\nstdout: %s\nstderr: %s", code, out, errOut)
+	}
+}
+
+func TestManifestSignedByAnotherKeyUnderTheSameIDIsBroken(t *testing.T) {
+	e := newExport(t)
+	e.signManifest(t, e.rows[len(e.rows)-1], "audit-key", 9, 3)
+	if code, out, errOut := e.run(t); code != exitBroken {
+		t.Fatalf("exit = %d, want 2\nstdout: %s\nstderr: %s", code, out, errOut)
+	}
+}
+
+func TestSignedSubRangeVerifiesWhereTheFullRangeRulesReportedItBroken(t *testing.T) {
+	// The chain head is seq 3 and the export stops at seq 2. The attestation at
+	// seq 3 lies above the range, and passing it reported a truncation that is
+	// not there.
+	e := subRangeExport(t, 0, 2)
+	code, out, errOut := e.run(t, "-json")
+	if code != exitVerified {
+		t.Fatalf("exit = %d\nstdout: %s\nstderr: %s", code, out, errOut)
+	}
+	if r := reportOf(t, out); r.Status != verifier.StatusVerified || r.FromSeq != 1 || r.ThroughSeq != 2 || r.RowsVerified != 2 || r.Attested != nil {
+		t.Fatalf("report = %+v", r)
+	}
+	if m := manifestOf(t, out); !m.Signed || !m.SubRange || m.ChainHeadSeq != 3 {
+		t.Fatalf("manifest = %+v", m)
+	}
+	if _, text, _ := e.run(t); !strings.Contains(text, "range anchored by the signed manifest rather than by an attestation") {
+		t.Fatalf("output does not name the anchor:\n%s", text)
+	}
+}
+
+func TestSignedSubRangeIsAnchoredAtItsSignedFirstLink(t *testing.T) {
+	// Only seq 2 is exported. Its start is anchored by the signed first_prev_hash,
+	// the hash of seq 1, which the export does not carry as a row.
+	e := subRangeExport(t, 1, 2)
+	code, out, errOut := e.run(t, "-json")
+	if code != exitVerified {
+		t.Fatalf("exit = %d\nstdout: %s\nstderr: %s", code, out, errOut)
+	}
+	if r := reportOf(t, out); r.Status != verifier.StatusVerified || r.FromSeq != 2 || r.RowsVerified != 1 {
+		t.Fatalf("report = %+v", r)
+	}
+}
+
+func TestSubRangeWhoseFirstRowIsRelinkedIsBroken(t *testing.T) {
+	e := subRangeExport(t, 1, 2)
+	// The row is rewritten to follow another prev and re-hashed. It is consistent
+	// with itself but not with the signed first link.
+	prev := bytes.Repeat([]byte{0xAA}, chain.HashSize)
+	hash, err := chain.RowHash(prev, e.rows[0].stored().Row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.rows[0].PrevHash, e.rows[0].RowHash = prev, hash
+	code, out, _ := e.run(t, "-json")
+	if r := reportOf(t, out); code != exitBroken || r.Reason != verifier.ReasonResumeAnchor || r.FirstBrokenSeq != 2 {
+		t.Fatalf("exit = %d report = %+v", code, r)
+	}
+}
+
+func TestUnsignedSubRangeIsUnverifiable(t *testing.T) {
+	e := subRangeExport(t, 0, 2)
+	e.manifest.KeyID, e.manifest.Signature = "", nil
+	code, out, errOut := e.run(t)
+	if code != exitUnverifiable || !strings.Contains(errOut, "sub-range") {
+		t.Fatalf("exit = %d, want 3\nstdout: %s\nstderr: %s", code, out, errOut)
+	}
+}
+
+func TestSubRangeWhoseSignedCountDisagreesIsBroken(t *testing.T) {
+	e := newExport(t)
+	head := e.rows[len(e.rows)-1]
+	e.rows = e.rows[:2]
+	e.signManifest(t, head, "audit-key", 1, 3) // the range holds two rows
+	code, out, errOut := e.run(t)
+	if code != exitBroken || !strings.Contains(errOut, "counts 3 rows") {
+		t.Fatalf("exit = %d, want 2\nstdout: %s\nstderr: %s", code, out, errOut)
+	}
+}
+
+func TestSubRangeIsAlsoCheckedAgainstAnAttestationInsideIt(t *testing.T) {
+	e := newExport(t)
+	head := e.rows[len(e.rows)-1]
+	e.rows = e.rows[:2]
+	inside := e.rows[1]
+	signedAt := time.Date(2026, 10, 2, 9, 30, 0, 0, time.UTC)
+	keyID, sig, err := ring(t, "audit-key", 1).SignAttestation(inside.OrgID, inside.ChainSeq, inside.RowHash, signedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.manifest.Attestation = &verifier.Attestation{Seq: inside.ChainSeq, Hash: inside.RowHash, KeyID: keyID, Signature: sig, SignedAt: signedAt}
+	e.signManifest(t, head, "audit-key", 1, 2)
+	code, out, errOut := e.run(t, "-json")
+	if code != exitVerified {
+		t.Fatalf("exit = %d\nstdout: %s\nstderr: %s", code, out, errOut)
+	}
+	if r := reportOf(t, out); r.Attested == nil || r.Attested.Seq != 2 || !r.Attested.Verified {
+		t.Fatalf("report = %+v", r)
+	}
+	if _, text, _ := e.run(t); !strings.Contains(text, "range anchored by the signed manifest, and by the attestation at seq 2") {
+		t.Fatalf("output does not name both anchors:\n%s", text)
+	}
+}
+
+// checkpointAt gives the export a checkpoint signed over row, as a chain pruned
+// through that row would carry.
+func (e *export) checkpointAt(t *testing.T, row exportRow) {
+	t.Helper()
+	createdAt := time.Date(2026, 10, 2, 8, 0, 0, 1000, time.UTC)
+	keyID, sig, err := ring(t, "audit-key", 1).SignCheckpoint(row.OrgID, row.ChainSeq, row.RowHash, 1, createdAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.manifest.Checkpoint = &verifier.Checkpoint{Seq: row.ChainSeq, Hash: row.RowHash, PrunedTotal: 1, KeyID: keyID, Signature: sig, CreatedAt: createdAt}
+}
+
+func TestSubRangeAfterACheckpointStartsAtTheCheckpoint(t *testing.T) {
+	// Seq 1 was pruned under a signed checkpoint. The export holds seq 2, which
+	// starts right after the checkpoint and is anchored by it.
+	e := newExport(t)
+	head := e.rows[len(e.rows)-1]
+	e.checkpointAt(t, e.rows[0])
+	e.rows = e.rows[1:2]
+	e.signManifest(t, head, "audit-key", 1, 1)
+	code, out, errOut := e.run(t, "-json")
+	if code != exitVerified {
+		t.Fatalf("exit = %d\nstdout: %s\nstderr: %s", code, out, errOut)
+	}
+	if r := reportOf(t, out); r.FromSeq != 2 || r.RowsVerified != 1 || r.Checkpoint == nil || !r.Checkpoint.Verified {
+		t.Fatalf("report = %+v", r)
+	}
+}
+
+func TestSubRangeWhoseCheckpointCoversItsStartIsUnverifiable(t *testing.T) {
+	// The checkpoint at seq 1 covers the first row of the signed range, so the
+	// start of the range cannot be anchored by the manifest.
+	e := newExport(t)
+	head := e.rows[len(e.rows)-1]
+	e.checkpointAt(t, e.rows[0])
+	e.rows = e.rows[:2]
+	e.signManifest(t, head, "audit-key", 1, 2)
+	code, out, errOut := e.run(t)
+	if code != exitUnverifiable || !strings.Contains(errOut, "covers the start") {
+		t.Fatalf("exit = %d, want 3\nstdout: %s\nstderr: %s", code, out, errOut)
 	}
 }
 
