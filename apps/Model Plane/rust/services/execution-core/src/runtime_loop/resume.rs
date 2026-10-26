@@ -25,6 +25,7 @@ use tonic::transport::Channel;
 
 use super::closers::{decide, CloseDecision, DanglingCall};
 use super::{effect, fold};
+use crate::permission::RunGate;
 
 #[cfg(test)]
 thread_local! {
@@ -115,16 +116,18 @@ pub(crate) enum ReleaseRefusal {
 ///
 /// * `browser_agent`: a browser run is gated by the broker grant and Quarry, not
 ///   by an approval click (Model proposes, Quarry executes).
-/// * tools that require a durable owner approval (`tickets.create`): the owner
-///   plane verifies its own single-use receipt; a loop release never stands in.
+/// * tools that require a durable owner approval (`tickets.create`, or a tool the run
+///   declares `durable_owner` under `TOOL_CLASS_GATE`): the owner plane verifies its
+///   own single-use receipt; a loop release never stands in.
 /// * `subagent.*`: delegation spawns a nested loop with its own authority.
-pub(crate) fn releasable(tool_name: &str) -> bool {
+pub(crate) fn releasable(gate: RunGate<'_>, tool_name: &str) -> bool {
     let tool = tool_name.trim();
     // `book_shipment` stays on the cold delivery path: its retained descriptor is
     // enriched with run-derived fields a resume cannot reproduce.
     tool != super::BROWSER_AGENT_TOOL
         && tool != "book_shipment"
         && !crate::permission::requires_durable_owner_approval(tool)
+        && !gate.requires_durable_owner_approval(tool)
         && !tool.starts_with("subagent.")
 }
 
@@ -152,6 +155,7 @@ impl ApprovedRelease {
     /// not JSON (there is no digest to bind), [`ReleaseRefusal::NotReleasable`] for a tool an
     /// approval never releases.
     pub(crate) fn new(
+        gate: RunGate<'_>,
         step_id: &str,
         tool_name: &str,
         tool_input: &str,
@@ -159,7 +163,7 @@ impl ApprovedRelease {
         if step_id.trim().is_empty() || tool_name.trim().is_empty() {
             return Err(ReleaseRefusal::Incomplete);
         }
-        if !releasable(tool_name) {
+        if !releasable(gate, tool_name) {
             return Err(ReleaseRefusal::NotReleasable);
         }
         let tool_name = tool_name.trim();
@@ -496,8 +500,12 @@ pub(crate) fn resumed_step_id(segment_no: u32, original_step_id: &str) -> String
 /// (`not_releasable`) must be cold: a loop approval for it would be consumed, the
 /// click spent, and then refused, stranding the run. Empty is the cold delivery
 /// worker, exactly as before.
-pub(crate) fn pause_continuation_mode(persistent: bool, tool_name: &str) -> &'static str {
-    if releasable(tool_name) {
+pub(crate) fn pause_continuation_mode(
+    gate: RunGate<'_>,
+    persistent: bool,
+    tool_name: &str,
+) -> &'static str {
+    if releasable(gate, tool_name) {
         mp_contracts::durable_gate::loop_mode_for_persistent(persistent, continue_enabled())
     } else {
         ""
@@ -513,7 +521,8 @@ pub(crate) fn pause_continuation_mode(persistent: bool, tool_name: &str) -> &'st
 /// approval for a Space or pinned run would therefore be consumed, refused, and
 /// leave the run stranded with its click spent. Such a run keeps the cold approval
 /// until the route and Space are re-pinned from the fold (WS03 S8).
-pub(crate) fn run_pause_mode(
+pub(crate) fn run_pause_mode_with(
+    gate: RunGate<'_>,
     persistent: bool,
     space_id: &str,
     provider_hint: &str,
@@ -523,7 +532,25 @@ pub(crate) fn run_pause_mode(
     if !space_id.is_empty() || !provider_hint.is_empty() {
         return "";
     }
-    pause_continuation_mode(persistent, tool_name)
+    pause_continuation_mode(gate, persistent, tool_name)
+}
+
+/// [`run_pause_mode_with`] with the gate off: the name-only answer, for a fixture that
+/// has no run to read a view from.
+#[cfg(test)]
+pub(crate) fn run_pause_mode(
+    persistent: bool,
+    space_id: &str,
+    provider_hint: &str,
+    tool_name: &str,
+) -> &'static str {
+    run_pause_mode_with(
+        RunGate::with_gate(crate::capability_policy::ToolClassGate::Off, "", ""),
+        persistent,
+        space_id,
+        provider_hint,
+        tool_name,
+    )
 }
 
 /// Frame a brief of recorded results for the seed message of a continuation
@@ -1663,11 +1690,24 @@ pub(crate) async fn restore_in_place(
 mod tests {
     use super::*;
 
+    /// The gate a release test runs under: off, so the answer is the name's.
+    fn gate_off() -> RunGate<'static> {
+        RunGate::with_gate(
+            crate::capability_policy::ToolClassGate::Off,
+            "org-release",
+            "run-release",
+        )
+    }
+
     #[test]
     fn a_release_covers_exactly_its_own_call() {
-        let release =
-            ApprovedRelease::new("s1.step-3", "shell", r#"{"command":"echo hi","cwd":"/w"}"#)
-                .unwrap();
+        let release = ApprovedRelease::new(
+            gate_off(),
+            "s1.step-3",
+            "shell",
+            r#"{"command":"echo hi","cwd":"/w"}"#,
+        )
+        .unwrap();
         // Same call, different key order and whitespace.
         assert!(release.covers(
             "s1.step-3",
@@ -1687,25 +1727,67 @@ mod tests {
     #[test]
     fn some_tools_are_never_releasable_by_an_approval() {
         assert_eq!(
-            ApprovedRelease::new("s", super::super::BROWSER_AGENT_TOOL, "{}"),
+            ApprovedRelease::new(gate_off(), "s", super::super::BROWSER_AGENT_TOOL, "{}"),
             Err(ReleaseRefusal::NotReleasable)
         );
         assert_eq!(
-            ApprovedRelease::new("s", crate::ticket_tools::TOOL_NAME, "{}"),
+            ApprovedRelease::new(gate_off(), "s", crate::ticket_tools::TOOL_NAME, "{}"),
             Err(ReleaseRefusal::NotReleasable)
         );
         assert_eq!(
-            ApprovedRelease::new("s", "subagent.task", "{}"),
+            ApprovedRelease::new(gate_off(), "s", "subagent.task", "{}"),
             Err(ReleaseRefusal::NotReleasable)
         );
         assert_eq!(
-            ApprovedRelease::new("", "shell", "{}"),
+            ApprovedRelease::new(gate_off(), "", "shell", "{}"),
             Err(ReleaseRefusal::Incomplete)
         );
         assert_eq!(
-            ApprovedRelease::new("s", " ", "{}"),
+            ApprovedRelease::new(gate_off(), "s", " ", "{}"),
             Err(ReleaseRefusal::Incomplete)
         );
+    }
+
+    /// The release answer follows the run's declared owner marker: under `enforce` a tool
+    /// the run declares `durable_owner` is never releasable, so it never pauses as a loop;
+    /// a reserved name is not releasable whatever the view says; and the gate off keeps the
+    /// name-only answer.
+    #[test]
+    fn a_declared_durable_owner_floor_is_never_releasable_under_enforce() {
+        use crate::capability_policy::ToolClassGate;
+        use crate::permission::{record_run_views, ToolClassView};
+        let _on = ContinueSwitch::set(true);
+        let (org, run) = ("org-release-owner", "run-release-owner");
+        record_run_views(
+            org,
+            run,
+            [
+                (
+                    "mcp__srv__pay".to_owned(),
+                    ToolClassView::from_registry(
+                        "mcp__srv__pay",
+                        "external_write",
+                        "durable_owner",
+                        "d",
+                    ),
+                ),
+                (
+                    "tickets.create".to_owned(),
+                    ToolClassView::from_registry("tickets.create", "read", "none", "d"),
+                ),
+            ],
+        );
+        let enforce = RunGate::with_gate(ToolClassGate::Enforce, org, run);
+        let off = RunGate::with_gate(ToolClassGate::Off, org, run);
+        assert!(!releasable(enforce, "mcp__srv__pay"));
+        assert!(releasable(off, "mcp__srv__pay"));
+        assert!(!releasable(enforce, "tickets.create"));
+        assert_eq!(
+            ApprovedRelease::new(enforce, "s", "mcp__srv__pay", "{}"),
+            Err(ReleaseRefusal::NotReleasable)
+        );
+        assert_eq!(pause_continuation_mode(enforce, true, "mcp__srv__pay"), "");
+        assert_eq!(pause_continuation_mode(off, true, "mcp__srv__pay"), "loop");
     }
 
     #[test]
@@ -2003,18 +2085,28 @@ mod tests {
     #[test]
     fn a_pause_is_loop_owned_only_for_a_persistent_run_a_releasable_tool_and_the_switch() {
         let _on = ContinueSwitch::set(true);
-        assert_eq!(pause_continuation_mode(true, "delete_records"), "loop");
         assert_eq!(
-            pause_continuation_mode(false, "delete_records"),
+            pause_continuation_mode(gate_off(), true, "delete_records"),
+            "loop"
+        );
+        assert_eq!(
+            pause_continuation_mode(gate_off(), false, "delete_records"),
             "",
             "a zdr or waived run is cold"
         );
         for tool in [super::super::BROWSER_AGENT_TOOL, "book_shipment", "subagent.task", crate::ticket_tools::TOOL_NAME] {
-            assert_eq!(pause_continuation_mode(true, tool), "", "{tool} is not releasable");
+            assert_eq!(
+                pause_continuation_mode(gate_off(), true, tool),
+                "",
+                "{tool} is not releasable"
+            );
         }
         drop(_on);
         let _off = ContinueSwitch::set(false);
-        assert_eq!(pause_continuation_mode(true, "delete_records"), "");
+        assert_eq!(
+            pause_continuation_mode(gate_off(), true, "delete_records"),
+            ""
+        );
     }
 
     /// The gateway's `/continue` carries no Space and no route, and stage 1 refuses
@@ -2096,7 +2188,7 @@ mod tests {
             run_step(CapabilityDecision::Ask, "s2.step-1", input, None).await,
             "awaiting_approval"
         );
-        let release = ApprovedRelease::new("s2.step-1", "shell", input).unwrap();
+        let release = ApprovedRelease::new(gate_off(), "s2.step-1", "shell", input).unwrap();
         // Another step, and the same step with changed arguments: still gated.
         assert_eq!(
             run_step(CapabilityDecision::Ask, "s2.step-2", input, Some(&release)).await,
@@ -2117,7 +2209,7 @@ mod tests {
     #[tokio::test]
     async fn a_release_lifts_the_ask_gates_for_exactly_its_call() {
         let input = r#"{"command":"echo approved"}"#;
-        let release = ApprovedRelease::new("s2.step-1", "shell", input).unwrap();
+        let release = ApprovedRelease::new(gate_off(), "s2.step-1", "shell", input).unwrap();
         let status = run_step(CapabilityDecision::Ask, "s2.step-1", input, Some(&release)).await;
         // The capability ask and the `ask`-posture permission gate are both satisfied
         // by the approved release, so the call went on to execute (whatever it then
@@ -2132,7 +2224,7 @@ mod tests {
     #[tokio::test]
     async fn a_release_never_lifts_a_deny() {
         let input = r#"{"command":"echo approved"}"#;
-        let release = ApprovedRelease::new("s2.step-1", "shell", input).unwrap();
+        let release = ApprovedRelease::new(gate_off(), "s2.step-1", "shell", input).unwrap();
         assert_eq!(
             run_step(CapabilityDecision::Deny, "s2.step-1", input, Some(&release)).await,
             "permission_denied",
@@ -2344,7 +2436,8 @@ mod tests {
     #[test]
     fn one_digest_for_every_pending_call_check() {
         // The release's digest, the ledger's digest and the fold check all come from one function.
-        let release = ApprovedRelease::new(RELEASE_ID, "delete_records", PAUSED_INPUT).unwrap();
+        let release =
+            ApprovedRelease::new(gate_off(), RELEASE_ID, "delete_records", PAUSED_INPUT).unwrap();
         assert_eq!(release.args_digest(), effect::args_digest_of(PAUSED_INPUT).as_deref());
         assert_eq!(release.args_digest(), effect::args_digest_of(FOLD_INPUT).as_deref());
         assert_eq!(
@@ -2362,7 +2455,7 @@ mod tests {
     fn a_release_digest_matches_the_ledger_digest_for_any_key_order() {
         let a = r#"{"b":[1,{"y":2,"x":1}],"a":"é"}"#;
         let b = r#"{ "a": "é", "b": [1, {"x":1, "y":2}] }"#;
-        let release = ApprovedRelease::new("s2.tool_1_approved", "shell", a).unwrap();
+        let release = ApprovedRelease::new(gate_off(), "s2.tool_1_approved", "shell", a).unwrap();
         assert_eq!(release.args_digest(), effect::args_digest_of(b).as_deref());
         assert!(release.covers("s2.tool_1_approved", "shell", b));
         // Arrays are ordered: a reordered array is another call.
@@ -2373,25 +2466,34 @@ mod tests {
 
     #[test]
     fn the_release_carries_its_class_and_action_id() {
-        let read = ApprovedRelease::new(RELEASE_ID, "knowledge_search", r#"{"query":"x"}"#).unwrap();
+        let read = ApprovedRelease::new(
+            gate_off(),
+            RELEASE_ID,
+            "knowledge_search",
+            r#"{"query":"x"}"#,
+        )
+        .unwrap();
         assert_eq!(read.class(), EffectClass::Read);
         assert_eq!(read.step_id(), RELEASE_ID);
         assert_eq!(read.tool_name(), "knowledge_search");
         assert_eq!(read.action_id(), effect::action_id_for(RELEASE_ID));
-        let effect_release = ApprovedRelease::new(RELEASE_ID, " delete_records ", "{}").unwrap();
+        let effect_release =
+            ApprovedRelease::new(gate_off(), RELEASE_ID, " delete_records ", "{}").unwrap();
         assert_eq!(effect_release.class(), EffectClass::External);
         assert_eq!(effect_release.tool_name(), "delete_records", "the name is trimmed");
-        let write = ApprovedRelease::new(RELEASE_ID, "save_memory", "{}").unwrap();
+        let write = ApprovedRelease::new(gate_off(), RELEASE_ID, "save_memory", "{}").unwrap();
         assert_eq!(write.class(), EffectClass::Write);
         // A step id the ledger would refuse is digested the same way the reserve digests it.
         let long = "s2.".to_owned() + &"x".repeat(200);
         assert_eq!(
-            ApprovedRelease::new(&long, "knowledge_search", "{}").unwrap().action_id(),
+            ApprovedRelease::new(gate_off(), &long, "knowledge_search", "{}")
+                .unwrap()
+                .action_id(),
             effect::action_id_for(&long)
         );
         // A call whose arguments are not JSON has no digest, so there is nothing to bind a release to.
         assert_eq!(
-            ApprovedRelease::new(RELEASE_ID, "delete_records", "not json"),
+            ApprovedRelease::new(gate_off(), RELEASE_ID, "delete_records", "not json"),
             Err(ReleaseRefusal::Incomplete)
         );
     }
@@ -2405,7 +2507,7 @@ mod tests {
             ("knowledge_search", r#"{"query":"x"}"#, "customer_private", false),
             ("send_email", r#"{"to":"a"}"#, "public_non_personal", true),
         ] {
-            let release = ApprovedRelease::new(RELEASE_ID, tool, input).unwrap();
+            let release = ApprovedRelease::new(gate_off(), RELEASE_ID, tool, input).unwrap();
             let from_release = release.ledger_entry(RUN, category, zdr);
             let from_dispatch = effect::entry_for_call(RUN, RELEASE_ID, tool, input, category, zdr);
             assert_eq!(from_release, from_dispatch, "{tool}");

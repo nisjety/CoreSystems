@@ -1192,9 +1192,18 @@ fn resume_durable_approval_continuation(
 /// after a run-bound server-resolved catalog decision, and a future delivery
 /// worker will need a distinct, durable continuation capability to execute an
 /// approved descriptor. Keeping them out of this RPC prevents a caller from
-/// naming a tool directly to bypass either control.
-fn reject_direct_owner_action(tool_name: &str) -> Result<(), Status> {
-    if crate::permission::requires_durable_owner_approval(tool_name) {
+/// naming a tool directly to bypass either control. A tool the run declares
+/// `durable_owner` is held the same way under `TOOL_CLASS_GATE`.
+fn reject_direct_owner_action(
+    gate: crate::permission::RunGate<'_>,
+    tool_name: &str,
+) -> Result<(), Status> {
+    // OR-ed with the name, never substituted for it: this site only refuses, so a
+    // declared view may add the marker but cannot lift one the name reserves. The view
+    // is read by the trimmed name, as the name predicate trims at every ingress.
+    if crate::permission::requires_durable_owner_approval(tool_name)
+        || gate.requires_durable_owner_approval(tool_name.trim())
+    {
         return Err(Status::permission_denied(
             "reserved owner actions cannot be invoked through ExecuteStep",
         ));
@@ -1369,7 +1378,10 @@ impl ExecutionCore for ExecutionService {
         caller.authorize(&req.org_id, Some(&req.user_id))?;
         self.authorize_run(&caller, &req.run_id, &session_bearer)
             .await?;
-        reject_direct_owner_action(&req.tool_name)?;
+        reject_direct_owner_action(
+            crate::permission::RunGate::for_run(&req.org_id, &req.run_id),
+            &req.tool_name,
+        )?;
         validate_direct_permission_mode(&req.permission_mode)?;
         enforce_persistence_free_execution(&caller, req.zdr, "tool_execution")?;
         // The attached files are judged after the caller and the run owner are
@@ -2247,16 +2259,17 @@ mod auth_tests {
 
     #[test]
     fn direct_execute_step_refuses_reserved_owner_actions_and_ambiguous_modes() {
-        let error = reject_direct_owner_action(crate::ticket_tools::TOOL_NAME)
+        let gate = crate::permission::RunGate::for_run("org-direct", "run-direct");
+        let error = reject_direct_owner_action(gate, crate::ticket_tools::TOOL_NAME)
             .expect_err("a public direct-step RPC cannot execute an owner action");
         assert_eq!(error.code(), tonic::Code::PermissionDenied);
         assert_eq!(
-            reject_direct_owner_action("  tickets.create  ")
+            reject_direct_owner_action(gate, "  tickets.create  ")
                 .expect_err("whitespace does not turn a reserved action into a direct tool")
                 .code(),
             tonic::Code::PermissionDenied
         );
-        reject_direct_owner_action("shell").expect("ordinary tools keep the direct API");
+        reject_direct_owner_action(gate, "shell").expect("ordinary tools keep the direct API");
 
         for mode in ["", "execute", "unknown"] {
             assert_eq!(
@@ -2269,6 +2282,51 @@ mod auth_tests {
         for mode in ["auto", "ask", "deny"] {
             validate_direct_permission_mode(mode).expect("recognized permission mode");
         }
+    }
+
+    /// Under `enforce` the run's declared `durable_owner` floor makes a tool an owner
+    /// action here though its name is not reserved. The gate off reads no view, and a
+    /// reserved name stays refused whatever the view says.
+    #[test]
+    fn direct_execute_step_refuses_a_tool_the_run_declares_durable_owner_under_enforce() {
+        use crate::capability_policy::ToolClassGate;
+        use crate::permission::{record_run_views, RunGate, ToolClassView};
+        let (org, run) = ("org-direct-owner", "run-direct-owner");
+        record_run_views(
+            org,
+            run,
+            [
+                (
+                    "mcp__srv__pay".to_owned(),
+                    ToolClassView::from_registry(
+                        "mcp__srv__pay",
+                        "external_write",
+                        "durable_owner",
+                        "d",
+                    ),
+                ),
+                (
+                    "tickets.create".to_owned(),
+                    ToolClassView::from_registry("tickets.create", "read", "none", "d"),
+                ),
+            ],
+        );
+        let enforce = RunGate::with_gate(ToolClassGate::Enforce, org, run);
+        let off = RunGate::with_gate(ToolClassGate::Off, org, run);
+        assert_eq!(
+            reject_direct_owner_action(enforce, "mcp__srv__pay")
+                .expect_err("a declared durable_owner tool is not a direct tool")
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        reject_direct_owner_action(off, "mcp__srv__pay")
+            .expect("with the gate off the declared floor is never read");
+        assert_eq!(
+            reject_direct_owner_action(enforce, "tickets.create")
+                .expect_err("a reserved name is refused whatever the view says")
+                .code(),
+            tonic::Code::PermissionDenied
+        );
     }
 
     #[test]

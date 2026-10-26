@@ -360,8 +360,14 @@ mod connector_taint_tests {
 /// tool (a durable approval on every posture), a disclosure read (the same), or a
 /// risky call under `ask`. A provider write is the risky call that has its own
 /// code, because its approval record also binds the write to the provider.
-fn permission_pause_cause(tool_name: &str) -> CauseCode {
-    if permission::requires_durable_owner_approval(tool_name) {
+fn permission_pause_cause(gate: permission::RunGate<'_>, tool_name: &str) -> CauseCode {
+    // OR-ed with the run's declared floor, as at the direct-call refusal: under
+    // `enforce` a `durable_owner` tool pauses as an owner effect though its name is not
+    // reserved, and a reserved name keeps this answer whatever the view says. The
+    // consent branch below stays on the name.
+    if permission::requires_durable_owner_approval(tool_name)
+        || gate.requires_durable_owner_approval(tool_name.trim())
+    {
         CauseCode::OwnerEffectReserved
     } else if permission::requires_consent_to_disclose(tool_name) {
         CauseCode::ConsentToDisclose
@@ -758,7 +764,7 @@ async fn execute_step_inner(
                 // permission gate below raises, so it is shown under that gate's
                 // cause rather than as a high-risk capability.
                 let cause = if evaluation.policy_source == "approval_floor" {
-                    permission_pause_cause(tool_name)
+                    permission_pause_cause(permission::RunGate::for_run(org_id, run_id), tool_name)
                 } else {
                     CauseCode::CapabilityHighRisk
                 };
@@ -822,7 +828,10 @@ async fn execute_step_inner(
     match permission::RunGate::for_run(org_id, run_id).evaluate_call(mode, tool_name, tool_input) {
         PermissionDecision::Deny => return StepOutcome::permission_denied(),
         PermissionDecision::AwaitApproval if !released => {
-            return StepOutcome::awaiting_approval(permission_pause_cause(tool_name));
+            return StepOutcome::awaiting_approval(permission_pause_cause(
+                permission::RunGate::for_run(org_id, run_id),
+                tool_name,
+            ));
         }
         PermissionDecision::AwaitApproval | PermissionDecision::Allow => {}
     }
@@ -3792,6 +3801,51 @@ mod tests {
                 tool.to_owned(),
                 permission::ToolClassView::from_registry(tool, class, "none", digest),
             )],
+        );
+    }
+
+    /// The pause cause follows the owner marker the run declares, as the direct-call
+    /// refusal does: under `enforce` a `durable_owner` tool pauses as an owner effect
+    /// though its name is not reserved, a reserved name does whatever the view says, and
+    /// the gate off keeps the cause the name gives.
+    #[test]
+    fn a_declared_durable_owner_tool_pauses_as_an_owner_effect_under_enforce() {
+        use crate::capability_policy::ToolClassGate;
+        use crate::permission::{record_run_views, RunGate, ToolClassView};
+        let (org, run) = ("org-pause-owner", "run-pause-owner");
+        record_run_views(
+            org,
+            run,
+            [
+                (
+                    "mcp__srv__pay".to_owned(),
+                    ToolClassView::from_registry(
+                        "mcp__srv__pay",
+                        "external_write",
+                        "durable_owner",
+                        "d",
+                    ),
+                ),
+                (
+                    "tickets.create".to_owned(),
+                    ToolClassView::from_registry("tickets.create", "read", "none", "d"),
+                ),
+            ],
+        );
+        let enforce = RunGate::with_gate(ToolClassGate::Enforce, org, run);
+        let off = RunGate::with_gate(ToolClassGate::Off, org, run);
+        assert_eq!(
+            permission_pause_cause(enforce, "mcp__srv__pay"),
+            CauseCode::OwnerEffectReserved
+        );
+        assert_eq!(
+            permission_pause_cause(off, "mcp__srv__pay"),
+            CauseCode::RiskyEffectUnderAsk,
+            "the gate off reads no view"
+        );
+        assert_eq!(
+            permission_pause_cause(enforce, "tickets.create"),
+            CauseCode::OwnerEffectReserved
         );
     }
 

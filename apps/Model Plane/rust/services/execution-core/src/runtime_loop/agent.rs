@@ -4291,7 +4291,8 @@ async fn run_rounds(
             // and no pinned route (a `/continue` states neither). Anything else is
             // cold. This is the one place the mode is decided; `pause_for_approval`
             // sends `loop` exactly when it is handed the snapshot this builds.
-            let offered = if super::resume::run_pause_mode(
+            let offered = if super::resume::run_pause_mode_with(
+                crate::permission::RunGate::for_run(&req.org_id, &req.run_id),
                 !req.zdr && !ctx.route.is_waived(),
                 &req.space_id,
                 &req.provider_hint,
@@ -6994,8 +6995,15 @@ async fn pause_for_approval(
     // approval; closed again if the approval cannot be created.
     mut pause_fold: Option<runtime_loop::fold::PauseFold<'_, '_>>,
 ) -> Result<pb::RunAgentResponse, tonic::Status> {
-    let mut continuation_descriptor_json =
-        continuation_descriptor(req, step_id, tool_name, tool_input, permission_mode).await?;
+    let mut continuation_descriptor_json = continuation_descriptor(
+        crate::permission::RunGate::for_run(&req.org_id, &req.run_id),
+        req,
+        step_id,
+        tool_name,
+        tool_input,
+        permission_mode,
+    )
+    .await?;
     // A loop-owned pause also retains the offered tools and authority it was
     // raised under; the fingerprint covers only the call, so it is unchanged.
     if let Some(offered) = offered {
@@ -7126,6 +7134,7 @@ async fn pause_for_approval(
 /// delivery worker must still obtain its own narrowly scoped one-time
 /// continuation capability before it may execute it.
 async fn continuation_descriptor(
+    gate: crate::permission::RunGate<'_>,
     req: &pb::RunAgentRequest,
     step_id: &str,
     tool_name: &str,
@@ -7141,8 +7150,11 @@ async fn continuation_descriptor(
     // A server-resolved owner action is approval-only even when the outer run
     // was requested with `auto`. Preserve that stricter semantic in the
     // descriptor/fingerprint so a future continuation worker cannot mistake
-    // the retained request for an auto-approved generic tool call.
-    let permission_mode = if crate::permission::requires_durable_owner_approval(tool_name) {
+    // the retained request for an auto-approved generic tool call. A tool the run
+    // declares `durable_owner` under `TOOL_CLASS_GATE` is the same owner action.
+    let permission_mode = if crate::permission::requires_durable_owner_approval(tool_name)
+        || gate.requires_durable_owner_approval(tool_name.trim())
+    {
         "ask"
     } else {
         permission_mode
@@ -7639,6 +7651,7 @@ async fn consume_for_resume(
 /// `not_releasable` when the tool or its arguments are not ones an approval can release.
 #[allow(clippy::result_large_err)]
 fn released_call(
+    gate: crate::permission::RunGate<'_>,
     consumed: &super::resume::Consumed,
 ) -> Result<(pb::ToolCall, String, super::resume::ApprovedRelease), tonic::Status> {
     let call = pb::ToolCall {
@@ -7647,8 +7660,9 @@ fn released_call(
         arguments_json: consumed.tool_input_json.clone(),
     };
     let step_id = tool_step_id(&format!("s{}.", consumed.segment), 1, &call);
-    let release = super::resume::ApprovedRelease::new(&step_id, &call.name, &call.arguments_json)
-        .map_err(|_| tonic::Status::failed_precondition("not_releasable"))?;
+    let release =
+        super::resume::ApprovedRelease::new(gate, &step_id, &call.name, &call.arguments_json)
+            .map_err(|_| tonic::Status::failed_precondition("not_releasable"))?;
     Ok((call, step_id, release))
 }
 
@@ -7663,7 +7677,10 @@ fn build_segment(
     req: &pb::RunAgentRequest,
     resume: &pb::AgentResume,
 ) -> Result<Continuation, tonic::Status> {
-    let (call, _release_step_id, release) = released_call(&consumed)?;
+    let (call, _release_step_id, release) = released_call(
+        crate::permission::RunGate::for_run(&req.org_id, &req.run_id),
+        &consumed,
+    )?;
     let step_prefix = format!("s{}.", consumed.segment);
     let goal = if resume.brief.trim().is_empty() {
         req.goal.clone()
@@ -7712,7 +7729,10 @@ async fn restore_continuation(
         Err(RestoreOrRefuse::Fallback(failure)) => return Ok(Err(failure)),
         Err(RestoreOrRefuse::Refuse(refusal)) => return Err(refusal.status()),
     }
-    let (_call, release_step_id, release) = released_call(consumed)?;
+    let (_call, release_step_id, release) = released_call(
+        crate::permission::RunGate::for_run(&req.org_id, &req.run_id),
+        consumed,
+    )?;
     // What the loop's own writer will compute at its first save: the system prompt and tool
     // definitions the snapshot offers. A fold written under another one is not restored.
     let names: BTreeSet<String> = consumed.tools.iter().map(|tool| tool.name.clone()).collect();
@@ -7990,6 +8010,7 @@ mod tests {
             ..Default::default()
         };
         let raw = continuation_descriptor(
+            crate::permission::RunGate::for_run(&request.org_id, &request.run_id),
             &request,
             "step-1",
             "execute_provider_action",
@@ -8014,10 +8035,17 @@ mod tests {
             ..request
         };
         assert_eq!(
-            continuation_descriptor(&zdr, "step-1", "tool", "{}", "ask")
-                .await
-                .expect_err("ZDR cannot persist a continuation")
-                .code(),
+            continuation_descriptor(
+                crate::permission::RunGate::for_run(&zdr.org_id, &zdr.run_id),
+                &zdr,
+                "step-1",
+                "tool",
+                "{}",
+                "ask",
+            )
+            .await
+            .expect_err("ZDR cannot persist a continuation")
+            .code(),
             tonic::Code::FailedPrecondition
         );
     }
@@ -8039,6 +8067,7 @@ mod tests {
             ..Default::default()
         };
         let raw = continuation_descriptor(
+            crate::permission::RunGate::for_run(&request.org_id, &request.run_id),
             &request,
             "step-1",
             crate::ticket_tools::TOOL_NAME,
@@ -8051,6 +8080,84 @@ mod tests {
         assert_eq!(
             descriptor["permission_mode"], "ask",
             "a later continuation must retain the owner-required approval posture"
+        );
+    }
+
+    /// The retained posture follows the owner marker the run declares, as the direct-call
+    /// and release refusals do: under `enforce` a `durable_owner` tool is retained as `ask`
+    /// even when the run asked for `auto`, a reserved name is `ask` whatever the view says,
+    /// and the gate off keeps the request's own posture.
+    #[tokio::test]
+    async fn a_declared_durable_owner_floor_forces_the_descriptor_to_ask_under_enforce() {
+        use crate::capability_policy::ToolClassGate;
+        use crate::permission::{record_run_views, RunGate, ToolClassView};
+        let (org, run) = ("org-descriptor-owner", "run-descriptor-owner");
+        record_run_views(
+            org,
+            run,
+            [
+                (
+                    "mcp__srv__pay".to_owned(),
+                    ToolClassView::from_registry(
+                        "mcp__srv__pay",
+                        "external_write",
+                        "durable_owner",
+                        "d",
+                    ),
+                ),
+                (
+                    crate::ticket_tools::TOOL_NAME.to_owned(),
+                    ToolClassView::from_registry(
+                        crate::ticket_tools::TOOL_NAME,
+                        "read",
+                        "none",
+                        "d",
+                    ),
+                ),
+            ],
+        );
+        let request = pb::RunAgentRequest {
+            run_id: run.to_owned(),
+            org_id: org.to_owned(),
+            user_id: "user-1".to_owned(),
+            ..Default::default()
+        };
+        let enforce = RunGate::with_gate(ToolClassGate::Enforce, org, run);
+        let off = RunGate::with_gate(ToolClassGate::Off, org, run);
+        let mode_of = |raw: &str| -> String {
+            let descriptor: serde_json::Value = serde_json::from_str(raw).expect("descriptor json");
+            descriptor["permission_mode"]
+                .as_str()
+                .expect("permission mode")
+                .to_owned()
+        };
+        let pay =
+            continuation_descriptor(enforce, &request, "step-1", "mcp__srv__pay", "{}", "auto")
+                .await
+                .expect("retained declared owner action");
+        assert_eq!(mode_of(pay.as_str()), "ask");
+        let ticket = continuation_descriptor(
+            enforce,
+            &request,
+            "step-2",
+            crate::ticket_tools::TOOL_NAME,
+            r#"{"conversation_id":"conv_1"}"#,
+            "auto",
+        )
+        .await
+        .expect("retained owner-action descriptor");
+        assert_eq!(
+            mode_of(ticket.as_str()),
+            "ask",
+            "a reserved name is ask whatever the view says"
+        );
+        let plain = continuation_descriptor(off, &request, "step-3", "mcp__srv__pay", "{}", "auto")
+            .await
+            .expect("retained descriptor");
+        assert_eq!(
+            mode_of(plain.as_str()),
+            "auto",
+            "the gate off keeps the request's posture"
         );
     }
 
@@ -8072,6 +8179,7 @@ mod tests {
             ..Default::default()
         };
         let raw = continuation_descriptor(
+            crate::permission::RunGate::for_run(&request.org_id, &request.run_id),
             &request,
             "step-1",
             "book_shipment",
@@ -8093,6 +8201,7 @@ mod tests {
             ..Default::default()
         };
         let raw = continuation_descriptor(
+            crate::permission::RunGate::for_run(&request.org_id, &request.run_id),
             &request,
             "step-1",
             "book_shipment",
@@ -13961,13 +14070,14 @@ mod tests {
     /// approval: consuming it would spend the click and then strand the run.
     #[tokio::test]
     async fn a_non_releasable_tool_pause_is_cold() {
+        let gate = crate::permission::RunGate::for_run("org-cold", "run-cold");
         for (tool, arguments) in [
             ("book_shipment", "{}"),
             // The owner action needs well-formed arguments just to be paused.
             (crate::ticket_tools::TOOL_NAME, r#"{"conversation_id":"conv_1"}"#),
         ] {
             assert!(
-                !runtime_loop::resume::releasable(tool),
+                !runtime_loop::resume::releasable(gate, tool),
                 "{tool} is meant to be a non-releasable tool"
             );
             let (approvals, modes) = pause_modes_for(tool, arguments, true).await;
@@ -21758,7 +21868,11 @@ mod tests {
             snapshot_authority: snapshot.clone(),
             effective: snapshot,
         };
-        let (_, release_step_id, _) = released_call(&consumed).expect("a releasable call");
+        let (_, release_step_id, _) = released_call(
+            crate::permission::RunGate::for_run("org-release", "run-release"),
+            &consumed,
+        )
+        .expect("a releasable call");
         assert_eq!(release_step_id, "s2.tool_1_approved");
 
         // What the resume recomputes of the prompt, from the snapshot's tools alone.
