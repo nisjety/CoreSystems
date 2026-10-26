@@ -1233,20 +1233,38 @@ export function InlineCitationMarker(props: {
             <div class="verevon-chat-citation-chip__group">
               <p class="verevon-chat-citation-chip__group-label">{group.label}</p>
               <For each={group.items}>
-                {(entry) => (
-                  <a
-                    href={entry.citation.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    class="verevon-chat-citation-chip__source"
-                  >
-                    <span class="verevon-chat-citation-chip__index">{entry.index}</span>
-                    <span class="verevon-chat-citation-chip__body">
-                      <strong>{entry.citation.title || hostname(entry.citation.url)}</strong>
-                      {entry.citation.snippet ? <span>{entry.citation.snippet}</span> : null}
-                    </span>
-                  </a>
-                )}
+                {(entry) => {
+                  // The URL is model- or search-supplied: an unsafe one keeps the chip's text
+                  // but is not a link, the same rule the source cards and markdown links follow.
+                  const content = (
+                    <>
+                      <span class="verevon-chat-citation-chip__index">{entry.index}</span>
+                      <span class="verevon-chat-citation-chip__body">
+                        <strong>{entry.citation.title || hostname(entry.citation.url)}</strong>
+                        {entry.citation.snippet ? <span>{entry.citation.snippet}</span> : null}
+                      </span>
+                    </>
+                  )
+                  return isSafeLinkHref(entry.citation.url)
+                    ? (
+                      <a
+                        href={entry.citation.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        class="verevon-chat-citation-chip__source"
+                      >
+                        {content}
+                      </a>
+                    )
+                    : (
+                      <span
+                        class="verevon-chat-citation-chip__source verevon-chat-link-blocked"
+                        title={i18n.tr('Lenke blokkert: ukjent adresse', 'Link blocked: unsupported address')}
+                      >
+                        {content}
+                      </span>
+                    )
+                }}
               </For>
             </div>
           )}
