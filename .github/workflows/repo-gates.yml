@@ -76,7 +76,11 @@ jobs:
   plane-boundary:
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth 0 keeps the base commits, so --base-ref can read the policy
+      # and the rules the change is compared against.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -86,4 +90,19 @@ jobs:
       # set, then drop continue-on-error so the gate blocks.
       - name: plane boundary gate
         continue-on-error: true
-        run: python3 scripts/gates/plane-boundary.py --check
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            # The script fails closed when the base does not resolve.
+            python3 scripts/gates/plane-boundary.py --check --base-ref "origin/$BASE_REF"
+          elif git rev-parse --verify --quiet "$BEFORE_SHA^{commit}" > /dev/null; then
+            python3 scripts/gates/plane-boundary.py --check --base-ref "$BEFORE_SHA"
+          else
+            echo "::notice::no previous commit to compare with (new branch); checking the boundary only"
+            python3 scripts/gates/plane-boundary.py --check
+          fi

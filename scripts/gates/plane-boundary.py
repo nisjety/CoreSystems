@@ -18,11 +18,19 @@ target and carries a reason. One that covers nothing fails the gate, so it is
 removed in the change that removes the reference. A plane missing from the file
 owns no database host.
 
+`--base-ref REF` also fails a change that grants more than the base did, read from
+REF: a database or manifest exception that is new, a host added to a plane's
+db_hosts, a plane newly listed, a new shared or local host, or a rule loosened (a
+source suffix dropped, a test directory added, a cross-database pattern removed).
+Removals and reason-text edits are not compared. A base with no policy file yet, the
+change that introduces the gate, is not compared.
+
 Usage, from the repository root:
-    python3 scripts/gates/plane-boundary.py --check
+    python3 scripts/gates/plane-boundary.py --check [--base-ref origin/<branch>]
     python3 scripts/gates/plane-boundary.py --self-test
-Exit codes: 0 ok, 1 a boundary violation or a stale exception, 2 the gate cannot run.
+Exit codes: 0 ok, 1 a boundary violation, a stale exception or a relaxation, 2 the gate cannot run.
 """
+import ast
 import argparse
 import json
 import posixpath
@@ -35,6 +43,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_REL = 'scripts/gates/plane-boundary.json'
+SCRIPT_REL = 'scripts/gates/plane-boundary.py'
 FIXTURES_REL = 'scripts/tests/fixtures/plane-boundary'
 PLANES_DIR = 'apps'
 POLICY_KEYS = {'local_hosts', 'planes', 'shared_hosts', 'db_exceptions', 'manifest_exceptions'}
@@ -59,6 +68,8 @@ MANIFEST_TARGETS = {
     'go.mod': re.compile(r'=>\s*"?(\.\.?/[^"\r\n]*?)"?(?=\s*(?://|$))', re.MULTILINE),
     'package.json': re.compile(r'"(?:file|link):([^"]+)"'),
 }
+# The rule constants a change may loosen, read from the base branch by --base-ref.
+RULE_NAMES = ('SOURCE_SUFFIXES', 'TEST_DIRS', 'CROSS_DB_LINKS')
 
 
 def git(root, *args):
@@ -250,6 +261,98 @@ def check(root):
     return problems, counts, len(used_db), len(used_manifest)
 
 
+def policy_at(root, ref):
+    """The policy file as it stands at a git ref, through the same validator as the working tree."""
+    return Policy(json.loads(git(root, 'show', f'{ref}:{CONFIG_REL}').decode('utf-8')))
+
+
+def cross_db_links(node):
+    """The (label, pattern) pairs of a CROSS_DB_LINKS assignment, read from its AST without running the script."""
+    if not isinstance(node, ast.Tuple):
+        raise ValueError(f'{SCRIPT_REL} must set CROSS_DB_LINKS as a tuple of (label, re.compile(pattern)) pairs')
+    links = set()
+    for entry in node.elts:
+        well_formed = (isinstance(entry, ast.Tuple) and len(entry.elts) == 2 and isinstance(entry.elts[1], ast.Call)
+                       and isinstance(entry.elts[1].func, ast.Attribute) and entry.elts[1].func.attr == 'compile'
+                       and len(entry.elts[1].args) == 1 and not entry.elts[1].keywords)
+        if not well_formed:
+            raise ValueError(f'{SCRIPT_REL} must set each CROSS_DB_LINKS entry as (label, re.compile(pattern))')
+        label, call = entry.elts
+        links.add((ast.literal_eval(label), ast.literal_eval(call.args[0])))
+    return links
+
+
+def rules_at(root, ref):
+    """The rule constants the gate script sets at a git ref, read without running that script."""
+    found = {}
+    for node in ast.parse(git(root, 'show', f'{ref}:{SCRIPT_REL}').decode('utf-8')).body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            if node.targets[0].id in RULE_NAMES:
+                found[node.targets[0].id] = node.value
+    if set(found) != set(RULE_NAMES):
+        raise ValueError(f'{SCRIPT_REL} at {ref} must set {", ".join(RULE_NAMES)}')
+    return {
+        'SOURCE_SUFFIXES': set(ast.literal_eval(found['SOURCE_SUFFIXES'])),
+        'TEST_DIRS': set(ast.literal_eval(found['TEST_DIRS'])),
+        'CROSS_DB_LINKS': cross_db_links(found['CROSS_DB_LINKS']),
+    }
+
+
+def current_rules():
+    """The rule constants as this script stands, in the shape rules_at returns."""
+    return {
+        'SOURCE_SUFFIXES': set(SOURCE_SUFFIXES),
+        'TEST_DIRS': set(TEST_DIRS),
+        'CROSS_DB_LINKS': {(label, pattern.pattern) for label, pattern in CROSS_DB_LINKS},
+    }
+
+
+def loosened_rules(base, head):
+    """Rule changes that let more source through than the base did."""
+    notes = []
+    for suffix in sorted(base['SOURCE_SUFFIXES'] - head['SOURCE_SUFFIXES']):
+        notes.append(f'SOURCE_SUFFIXES no longer counts {suffix!r}')
+    for name in sorted(head['TEST_DIRS'] - base['TEST_DIRS']):
+        notes.append(f'TEST_DIRS gains {name!r}')
+    for label, pattern in sorted(base['CROSS_DB_LINKS'] - head['CROSS_DB_LINKS']):
+        notes.append(f'CROSS_DB_LINKS loses the {label} pattern {pattern!r}')
+    return notes
+
+
+def relaxations(base, head, base_ref):
+    """The policy additions the change makes that the policy at base_ref does not already grant."""
+    grant = f'a relaxation of the policy at {base_ref}'
+    notes = []
+    for rel, host in sorted(set(head.db_exceptions) - set(base.db_exceptions)):
+        notes.append(f'{CONFIG_REL}: adds database exception {host!r} for {rel}, {grant}')
+    for rel, target in sorted(set(head.manifest_exceptions) - set(base.manifest_exceptions)):
+        notes.append(f'{CONFIG_REL}: adds manifest exception {target} for {rel}, {grant}')
+    for name in sorted(set(head.planes) - set(base.planes)):
+        notes.append(f'{CONFIG_REL}: lists plane {name!r}, {grant}')
+    for name in sorted(head.planes):
+        for host in sorted(head.planes[name] - base.planes.get(name, set())):
+            notes.append(f'{CONFIG_REL}: adds {host!r} to planes[{name!r}].db_hosts, {grant}')
+    for host in sorted(set(head.shared) - set(base.shared)):
+        notes.append(f'{CONFIG_REL}: adds shared host {host!r}, {grant}')
+    for host in sorted(head.local - base.local):
+        notes.append(f'{CONFIG_REL}: adds local host {host!r}, {grant}')
+    return notes
+
+
+def compare_with_base(root, base_ref):
+    """What the change grants beyond the policy and rules at base_ref; a base with no policy file is not compared."""
+    git(root, 'rev-parse', '--verify', '--quiet', f'{base_ref}^{{commit}}')
+    present = subprocess.run(['git', '-C', str(root), 'cat-file', '-e', f'{base_ref}:{CONFIG_REL}'],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+    if not present:
+        print(f'note: {base_ref} has no {CONFIG_REL} yet, so this change is not compared with it')
+        return []
+    notes = relaxations(policy_at(root, base_ref), load_policy(root), base_ref)
+    for note in loosened_rules(rules_at(root, base_ref), current_rules()):
+        notes.append(f'{SCRIPT_REL}: {note}, a relaxation of the rules at {base_ref}')
+    return notes
+
+
 def self_test(root):
     """Each fixture runs as a throwaway repository and must match its expect.json; returns the mismatches."""
     failures = []
@@ -277,6 +380,7 @@ def main(argv=None):
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument('--check', action='store_true', help='fail on a boundary violation or a stale exception (default)')
     mode.add_argument('--self-test', action='store_true', help='run the fixtures under scripts/tests/fixtures/plane-boundary')
+    ap.add_argument('--base-ref', help='also fail if this change grants more than the policy and rules at this git ref')
     ap.add_argument('--root', type=Path, default=REPO_ROOT, help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
 
@@ -290,6 +394,8 @@ def main(argv=None):
             print('plane boundary self-test ok: every fixture matches its expect.json')
             return 0
         problems, counts, db_used, manifest_used = check(args.root)
+        if args.base_ref is not None:
+            problems += compare_with_base(args.root, args.base_ref)
     except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.CalledProcessError) as exc:
         print(f'::error::plane boundary cannot run: {exc}')
         return 2
