@@ -1250,11 +1250,19 @@ mod tests {
         let control_org = format!("pause-test-{}", mp_ids::new_ulid());
         let control_thread = seed_thread(&pool, &control_org, "user-a").await;
         append_user_message(&pool, &control_thread, "user-a", FACT).await;
+        // FACT yields two memories under two keys: the name ("jeg heter") and the explicit
+        // instruction ("husk at"). The inline path writes each once, so two rows appear. One
+        // key written twice would upsert into a single row, so this is not a double write.
+        let control_rows = memory_rows(&pool, &control_org).await;
         assert_eq!(
-            memory_rows(&pool, &control_org).await.len(),
-            1,
-            "the inline row appears while on"
+            control_rows.len(),
+            2,
+            "the inline rows appear while on: {control_rows:?}"
         );
+        assert!(control_rows.iter().any(|row| row.starts_with("User's name is Ima")));
+        assert!(control_rows
+            .iter()
+            .any(|row| row.starts_with("User asked Verevon to remember")));
 
         let org = format!("pause-test-{}", mp_ids::new_ulid());
         let thread = seed_thread(&pool, &org, "user-a").await;
@@ -1276,11 +1284,11 @@ mod tests {
         assert_eq!(runs, 0, "a paused user's messages are not even read");
 
         append_user_message(&pool, &other_thread, "user-b", "Husk at jeg heter Kari.").await;
-        assert_eq!(
-            memory_rows(&pool, &org).await.len(),
-            1,
-            "another user's memory is untouched"
-        );
+        // user-b's own message yields its two memories, as the control message did. Nothing
+        // from the paused user-a is written, so every row is user-b's Kari memory.
+        let rows = memory_rows(&pool, &org).await;
+        assert_eq!(rows.len(), 2, "another user's memory is untouched: {rows:?}");
+        assert!(rows.iter().all(|row| row.contains("Kari")), "{rows:?}");
     }
 
     /// What is said while paused is never mined after the resume: the

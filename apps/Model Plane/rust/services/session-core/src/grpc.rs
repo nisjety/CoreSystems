@@ -10527,10 +10527,14 @@ mod tests {
     }
 
     /// Seed a service-owned scheduled thread and run, then claim its one step.
+    /// The run is written with `retention_class`: a receipt is immutable once
+    /// written (`runs_retention_receipt_immutable`), so a ZDR run is made by
+    /// creating it that way, never by updating a persistent one.
     /// Returns (run_id, thread_id, org_id, step_id, idempotency_key, receipt_id).
     async fn seeded_claimed_scheduled_step(
         pool: &sqlx::PgPool,
         suffix: &str,
+        retention_class: &str,
     ) -> (String, String, String, String, String, String) {
         let run_id = format!("scheduled-run-{suffix}");
         let thread_id = format!("scheduled-thread-{suffix}");
@@ -10575,9 +10579,10 @@ mod tests {
              (id, thread_id, goal, org_id, user_id, status, metadata,
               space_id, space_decision_ref, recipient_audience_ref,
               recipient_audience_revision, recipient_audience_hash,
-              privacy_policy_ref, resource_authorization_ref, authority_revision)
+              privacy_policy_ref, resource_authorization_ref, authority_revision,
+              retention_class)
              VALUES ($1,$2,'scheduled proof goal',$3,'service:orchestrator-core',
-                     'queued',$4,$5,$6,$7,1,$8,$9,$10,1)",
+                     'queued',$4,$5,$6,$7,1,$8,$9,$10,1,$11)",
         )
         .bind(&run_id)
         .bind(&thread_id)
@@ -10589,6 +10594,7 @@ mod tests {
         .bind(&audience_hash)
         .bind(format!("privacy-{suffix}"))
         .bind(format!("resource-{suffix}"))
+        .bind(retention_class)
         .execute(pool)
         .await
         .expect("seed scheduled run");
@@ -10872,7 +10878,7 @@ mod tests {
             .expect("migrate");
         let suffix = mp_ids::new_ulid();
         let (run_id, thread_id, org_id, step_id, idempotency_key, receipt_id) =
-            seeded_claimed_scheduled_step(&pool, &suffix).await;
+            seeded_claimed_scheduled_step(&pool, &suffix, "persistent").await;
         seed_scheduled_fire(&pool, &suffix).await;
         let request = pb::RecordScheduledRunResultRequest {
             run_id: run_id.clone(),
@@ -10974,7 +10980,7 @@ mod tests {
         ] {
             let suffix = mp_ids::new_ulid();
             let (run_id, thread_id, org_id, step_id, idempotency_key, receipt_id) =
-                seeded_claimed_scheduled_step(&pool, &suffix).await;
+                seeded_claimed_scheduled_step(&pool, &suffix, "persistent").await;
             seed_scheduled_fire(&pool, &suffix).await;
             record_scheduled_step_receipt_inner(
                 &pool,
@@ -11026,13 +11032,10 @@ mod tests {
             .await
             .expect("migrate");
         let suffix = mp_ids::new_ulid();
+        // Created zero-retention: the receipt is immutable once written, so the run
+        // is not marked after its claim.
         let (run_id, thread_id, org_id, step_id, idempotency_key, receipt_id) =
-            seeded_claimed_scheduled_step(&pool, &suffix).await;
-        sqlx::query("UPDATE runs SET retention_class = 'zdr' WHERE id = $1")
-            .bind(&run_id)
-            .execute(&pool)
-            .await
-            .expect("mark run zero-retention");
+            seeded_claimed_scheduled_step(&pool, &suffix, "zdr").await;
 
         let refused = record_scheduled_run_result_inner(
             &pool,
