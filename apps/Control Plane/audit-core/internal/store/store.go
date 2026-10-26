@@ -99,13 +99,15 @@ func (s *Store) InsertAuditFromStream(ctx context.Context, ev *events.AuditEvent
 
 // insertAuditSQL is the one audit INSERT, shared by the unchained path
 // (RETURNING id) and the chained path (RETURNING the hashed columns).
+// The ::bigint cast matters: NULLIF($18, 0) alone types the parameter from
+// the literal as int4, so a stream sequence above 2^31 failed to encode.
 const insertAuditSQL = `
 		INSERT INTO audit_events (
 			occurred_at, org_id, user_id, actor_role, plane, event, subject,
 			resource_id, outcome, details, event_id, request_id, ip_address, user_agent,
 			source_bus, source_subject, source_producer, source_stream_sequence, payload_hash
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NULLIF($13, '')::inet, $14,
-			NULLIF($15, ''), NULLIF($16, ''), NULLIF($17, ''), NULLIF($18, 0), $19)
+			NULLIF($15, ''), NULLIF($16, ''), NULLIF($17, ''), NULLIF($18::bigint, 0), $19)
 		ON CONFLICT DO NOTHING`
 
 func (s *Store) insertAudit(ctx context.Context, ev *events.AuditEvent, sourceBus, sourceSubject string, streamSequence int64) (int64, bool, error) {
@@ -219,13 +221,15 @@ func (s *Store) insertUsage(ctx context.Context, ev *events.UsageEvent, sourceBu
 	}
 	payloadHash := sha256.Sum256(payloadBytes)
 	var id int64
+	// ::bigint for the same reason as insertAuditSQL: a bare NULLIF($17, 0)
+	// types the stream sequence as int4.
 	err = s.pool.QueryRow(ctx, `
 		INSERT INTO usage_events (
 			event_id, occurred_at, org_id, user_id, plane, op, tokens_in, tokens_out,
 			bytes_in, bytes_out, cost_cents, request_id, metadata,
 			source_bus, source_subject, source_producer, source_stream_sequence, payload_hash
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-			NULLIF($14, ''), NULLIF($15, ''), NULLIF($16, ''), NULLIF($17, 0), $18)
+			NULLIF($14, ''), NULLIF($15, ''), NULLIF($16, ''), NULLIF($17::bigint, 0), $18)
 		ON CONFLICT DO NOTHING
 		RETURNING id
 	`, nilIfEmpty(ev.EventID), ev.OccurredAt, ev.OrgID, nilIfEmpty(ev.UserID), ev.Plane, ev.Op,

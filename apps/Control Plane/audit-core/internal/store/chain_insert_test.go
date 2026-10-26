@@ -539,7 +539,10 @@ func TestPurgeSkipsChainedRowsAndStillRemovesExpiredUnchainedRows(t *testing.T) 
 	if _, err := off.InsertAudit(ctx, chainEvent(org, 2)); err != nil {
 		t.Fatal(err)
 	}
-	if err := execMaintenance(ctx, pool, `UPDATE audit_events SET ingested_at = NOW() - INTERVAL '400 days' WHERE org_id = $1`, org); err != nil {
+	// ingested_at is part of the row hash, so the chained row is aged with
+	// backdateAndRechain; a plain UPDATE would break the chain checked below.
+	backdateAndRechain(t, ctx, pool, org, 1)
+	if err := execMaintenance(ctx, pool, `UPDATE audit_events SET ingested_at = NOW() - INTERVAL '400 days' WHERE org_id = $1 AND chain_seq IS NULL`, org); err != nil {
 		t.Fatal(err)
 	}
 
