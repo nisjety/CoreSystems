@@ -147,11 +147,17 @@ workflow (`ExecuteWorkflow|StartWorkflow` outside tests = zero).
 Reuse the existing `audit_publisher.rs` NATS connection pattern; publish **after** the DB commit and
 treat failure as non-fatal (the run is already durable — a lost review must never fail a user's turn).
 
-**⚠ Decision required (cost).** This fires an LLM transcript review on *every* completed chat turn.
-At current volume that is an extra inference call per turn. Ship it **gated**:
-`LEARNING_REVIEW_ENABLED` (default on) plus a sampling/eligibility rule — recommend reviewing only
-turns that (a) used at least one tool, or (b) exceed N messages. Rationale: a one-line "hei" turn has
-no skill to extract, and reviewing it is pure cost.
+**Decision (cost), as built.** A review is a model call over a whole conversation, so it no longer runs
+on every completed chat turn by default. The gates run in this order, and each one skips the review
+before any later gate reads more: the owner's memory state and the organization's `learningReview`
+opt-in (WS07-S1 and S4; an organization is opted out unless it turns the review on); the cost controls,
+off unless `LEARNING_REVIEW_COST_CONTROLS` is exactly `true`, which then apply a minimum of
+`LEARNING_REVIEW_MIN_USER_TURNS` user turns (default 3), a `LEARNING_REVIEW_MAX_TRANSCRIPT_CHARS` bound
+(default 60000) and per-owner and per-organization daily caps; and the operator kill switch
+`LEARNING_REVIEW_ENABLED`. The tool-use and message-count rule recommended here was replaced by the
+minimum turn count, so a one-line "hei" turn is never sent to a model while the controls are on. The
+caps need a counter store, and none is wired in this build: with the controls on, every review is
+skipped as `budget_unavailable` until one is installed.
 
 **Verify.** Deploy; send one tool-using chat turn; confirm in capability-core logs
 `learning review persisted skills` with a non-zero count, then confirm the skill appears in
