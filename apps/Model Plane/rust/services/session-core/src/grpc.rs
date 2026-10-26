@@ -77,6 +77,9 @@ const CONTEXT_MESSAGE_LIMIT: i64 = 20;
 const CONTEXT_MEMORY_LIMIT: i64 = 64;
 const DEFAULT_THREAD_LIST_LIMIT: i64 = 80;
 const MAX_THREAD_LIST_LIMIT: i64 = 200;
+/// The largest tail page a paged ListConversation read returns, whatever the
+/// caller asks for. The gateway may serve less, never more.
+const MAX_CONVERSATION_PAGE_LIMIT: i64 = 200;
 pub(crate) const THREAD_TITLE_MAX_CHARS: usize = 96;
 const THREAD_PREVIEW_MAX_CHARS: usize = 180;
 
@@ -165,6 +168,161 @@ fn clamp_thread_limit(limit: u32) -> i64 {
         return DEFAULT_THREAD_LIST_LIMIT;
     }
     i64::from(limit).clamp(1, MAX_THREAD_LIST_LIMIT)
+}
+
+/// The page a positive ListConversation `limit` asks for, clamped to
+/// 1..=MAX_CONVERSATION_PAGE_LIMIT. Zero is the unpaged read and never gets here.
+fn clamp_conversation_page_limit(limit: u32) -> i64 {
+    i64::from(limit).clamp(1, MAX_CONVERSATION_PAGE_LIMIT)
+}
+
+/// One stored turn as the transcript reads it: id, role, content, persona,
+/// metadata and author.
+type ConversationRow = (
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<serde_json::Value>,
+    Option<String>,
+);
+
+fn session_message_from_row(
+    (message_id, role, content, agent_name, metadata, author_subject_id): ConversationRow,
+) -> pb::SessionMessage {
+    pb::SessionMessage {
+        message_id,
+        role,
+        content,
+        agent_name: agent_name.unwrap_or_default(),
+        author_subject_id: author_subject_id.unwrap_or_default(),
+        // `{}` is the column default for every turn written before
+        // metadata was persisted; send None rather than an empty
+        // Struct so the caller can tell "no evidence recorded" from
+        // "evidence recorded and empty".
+        metadata: metadata
+            .filter(|value| !matches!(value, serde_json::Value::Null))
+            .filter(|value| value.as_object().is_none_or(|map| !map.is_empty()))
+            .as_ref()
+            .and_then(json_to_struct),
+    }
+}
+
+/// The newest-first rows of a page read, turned back into the page in
+/// conversation order, and whether older turns exist. The read fetches one row
+/// more than the page, so that extra row answers `has_more` without a count.
+fn conversation_tail_page<T>(newest_first: Vec<T>, page_size: usize) -> (Vec<T>, bool) {
+    let has_more = newest_first.len() > page_size;
+    let mut page: Vec<T> = newest_first.into_iter().take(page_size).collect();
+    page.reverse();
+    (page, has_more)
+}
+
+/// The sequence of the turn a `before_message_id` cursor names. It is resolved
+/// inside the thread's org join and under the same audience ceiling as the page,
+/// so a foreign, hidden and unknown id are refused in the same way.
+async fn conversation_cursor_sequence(
+    pool: &PgPool,
+    org_id: &str,
+    thread_id: &str,
+    audience_ceiling: Option<i64>,
+    message_id: &str,
+) -> Result<i64, Status> {
+    let row: Option<(i64,)> = sqlx::query_as(
+        "SELECT m.sequence
+         FROM messages m
+         JOIN threads t ON t.id = m.thread_id
+         WHERE m.id = $1 AND m.thread_id = $2 AND t.org_id = $3
+           AND ($4::BIGINT IS NULL
+                OR m.recipient_audience_revision IS NULL
+                OR m.recipient_audience_revision <= $4)",
+    )
+    .bind(message_id)
+    .bind(thread_id)
+    .bind(org_id)
+    .bind(audience_ceiling)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| Status::internal(error.to_string()))?;
+    row.map(|(sequence,)| sequence).ok_or_else(|| {
+        Status::invalid_argument("before_message_id does not name a message in this thread")
+    })
+}
+
+/// The newest `fetch` turns of a thread strictly before `before_sequence` (all
+/// of them when `None`), newest first. The org join and the audience ceiling sit
+/// in the same WHERE as the unpaged read, so a page never shows a turn that read
+/// would hide.
+async fn conversation_page_rows(
+    pool: &PgPool,
+    org_id: &str,
+    thread_id: &str,
+    audience_ceiling: Option<i64>,
+    before_sequence: Option<i64>,
+    fetch: i64,
+) -> Result<Vec<ConversationRow>, Status> {
+    sqlx::query_as::<_, ConversationRow>(
+        "SELECT m.id::text, m.role, m.content, m.agent_name, m.metadata, m.author_subject_id
+         FROM messages m
+         JOIN threads t ON t.id = m.thread_id
+         WHERE m.thread_id = $1 AND t.org_id = $2
+           AND ($3::BIGINT IS NULL
+                OR m.recipient_audience_revision IS NULL
+                OR m.recipient_audience_revision <= $3)
+           AND ($4::BIGINT IS NULL OR m.sequence < $4)
+         ORDER BY m.sequence DESC
+         LIMIT $5",
+    )
+    .bind(thread_id)
+    .bind(org_id)
+    .bind(audience_ceiling)
+    .bind(before_sequence)
+    .bind(fetch)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| {
+        warn!(error = %error, "list_conversation page failed");
+        Status::internal(error.to_string())
+    })
+}
+
+/// The paged transcript read (WS09 S8): the newest `limit` turns before the
+/// cursor, in conversation order, and whether older turns exist.
+async fn conversation_page_response(
+    pool: &PgPool,
+    req: &pb::ListConversationRequest,
+    audience_ceiling: Option<i64>,
+) -> Result<Response<pb::ListConversationResponse>, Status> {
+    let limit = clamp_conversation_page_limit(req.limit);
+    let before_sequence = if req.before_message_id.is_empty() {
+        None
+    } else {
+        Some(
+            conversation_cursor_sequence(
+                pool,
+                &req.org_id,
+                &req.thread_id,
+                audience_ceiling,
+                &req.before_message_id,
+            )
+            .await?,
+        )
+    };
+    let rows = conversation_page_rows(
+        pool,
+        &req.org_id,
+        &req.thread_id,
+        audience_ceiling,
+        before_sequence,
+        limit + 1,
+    )
+    .await?;
+    let page_size = usize::try_from(limit).unwrap_or(usize::MAX);
+    let (page, has_more) = conversation_tail_page(rows, page_size);
+    Ok(Response::new(pb::ListConversationResponse {
+        messages: page.into_iter().map(session_message_from_row).collect(),
+        has_more,
+    }))
 }
 
 /// The sort position a ListThreads page ended on. The list sorts pinned threads
@@ -7418,6 +7576,11 @@ impl SessionCore for SessionService {
                     "org_id and thread_id are required",
                 ));
             }
+            if req.limit == 0 && !req.before_message_id.is_empty() {
+                return Err(Status::invalid_argument(
+                    "before_message_id needs a positive limit",
+                ));
+            }
             caller.authorize_org(&req.org_id)?;
             // Two ways to be allowed to read a conversation, and only two.
             // Without a Control decision this stays exactly as it was: you must
@@ -7461,14 +7624,10 @@ impl SessionCore for SessionService {
             // A NULL revision predates audience snapshots entirely and is
             // covered by the thread-level Space check above.
             let audience_ceiling = space_read.map(|read| read.recipient_audience_revision);
-            let rows: Vec<(
-                String,
-                String,
-                String,
-                Option<String>,
-                Option<serde_json::Value>,
-                Option<String>,
-            )> = sqlx::query_as(
+            if req.limit > 0 {
+                return conversation_page_response(&self.pool, &req, audience_ceiling).await;
+            }
+            let rows: Vec<ConversationRow> = sqlx::query_as(
                 // `m.id` is selected so a caller can name one earlier turn
                 // durably (message pinning). It was always in the table; this
                 // read simply never returned it.
@@ -7490,30 +7649,11 @@ impl SessionCore for SessionService {
                     warn!(error = %e, "list_thread_messages failed");
                     Status::internal(e.to_string())
                 })?;
-            let messages = rows
-                .into_iter()
-                .map(
-                    |(message_id, role, content, agent_name, metadata, author_subject_id)| {
-                        pb::SessionMessage {
-                            message_id,
-                            role,
-                            content,
-                            agent_name: agent_name.unwrap_or_default(),
-                            author_subject_id: author_subject_id.unwrap_or_default(),
-                            // `{}` is the column default for every turn written before
-                            // metadata was persisted; send None rather than an empty
-                            // Struct so the caller can tell "no evidence recorded" from
-                            // "evidence recorded and empty".
-                            metadata: metadata
-                                .filter(|value| !matches!(value, serde_json::Value::Null))
-                                .filter(|value| value.as_object().is_none_or(|map| !map.is_empty()))
-                                .as_ref()
-                                .and_then(json_to_struct),
-                        }
-                    },
-                )
-                .collect();
-            Ok(Response::new(pb::ListConversationResponse { messages }))
+            let messages = rows.into_iter().map(session_message_from_row).collect();
+            Ok(Response::new(pb::ListConversationResponse {
+                messages,
+                has_more: false,
+            }))
         }
         .await;
         record_metrics("list_conversation", started, result.is_ok());
@@ -13967,6 +14107,7 @@ mod tests {
                     space_id: String::new(),
                     space_read_decision_ref: String::new(),
                     space_read_decision_token: String::new(),
+                    ..Default::default()
                 },
             ))
             .await
@@ -13988,6 +14129,7 @@ mod tests {
                     space_id: String::new(),
                     space_read_decision_ref: String::new(),
                     space_read_decision_token: String::new(),
+                    ..Default::default()
                 },
             ))
             .await;
@@ -14799,6 +14941,7 @@ mod tests {
                 } else {
                     String::new()
                 },
+                ..Default::default()
             };
             svc.list_conversation(as_user(org, user, request))
         };
@@ -19118,5 +19261,311 @@ mod thread_list_db_tests {
         )
         .await;
         assert!(other.threads.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod conversation_page_tests {
+    use super::{clamp_conversation_page_limit, conversation_tail_page};
+
+    #[test]
+    fn a_positive_page_limit_is_clamped_to_the_page_bounds() {
+        assert_eq!(clamp_conversation_page_limit(1), 1);
+        assert_eq!(clamp_conversation_page_limit(6), 6);
+        assert_eq!(clamp_conversation_page_limit(200), 200);
+        assert_eq!(clamp_conversation_page_limit(201), 200);
+        assert_eq!(clamp_conversation_page_limit(u32::MAX), 200);
+    }
+
+    #[test]
+    fn a_page_is_the_newest_rows_in_conversation_order_and_one_probe_row_says_more() {
+        // The read returns newest first and fetches one row past the page.
+        let (page, has_more) = conversation_tail_page(vec![5, 4, 3], 2);
+        assert_eq!(page, vec![4, 5]);
+        assert!(has_more);
+    }
+
+    #[test]
+    fn a_page_with_no_older_rows_reports_no_more_and_an_empty_thread_is_empty() {
+        let (page, has_more) = conversation_tail_page(vec![5, 4], 2);
+        assert_eq!(page, vec![4, 5]);
+        assert!(!has_more);
+        let (empty, none_older) = conversation_tail_page(Vec::<u8>::new(), 2);
+        assert!(empty.is_empty());
+        assert!(!none_older);
+    }
+}
+
+#[cfg(test)]
+mod conversation_page_db_tests {
+    use super::*;
+    use mp_contracts::model_plane::v1::session_core_server::SessionCore;
+
+    fn service(pool: PgPool) -> SessionService {
+        SessionService {
+            pool,
+            retrieval_client: None,
+            graph_client: None,
+            knowledge_client: None,
+            letta_memory: None,
+            audit_publisher: None,
+            auth: None,
+            grant_columns: crate::grpc::ThreadGrantColumns::present(),
+        }
+    }
+
+    async fn connect() -> PgPool {
+        let pool =
+            PgPool::connect(&std::env::var("DATABASE_URL").expect("disposable database required"))
+                .await
+                .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        pool
+    }
+
+    /// One owned thread holding `count` turns, oldest first, each with the
+    /// content "turn N". Returns the message ids in the same order.
+    async fn seed_turns(
+        pool: &PgPool,
+        org: &str,
+        user: &str,
+        thread: &str,
+        count: usize,
+    ) -> Vec<String> {
+        sqlx::query(
+            "INSERT INTO threads (id, session_key, org_id, user_id) VALUES ($1, $1, $2, $3)",
+        )
+        .bind(thread)
+        .bind(org)
+        .bind(user)
+        .execute(pool)
+        .await
+        .unwrap();
+        let mut ids = Vec::with_capacity(count);
+        for turn in 0..count {
+            let id = format!("{thread}-turn-{turn}");
+            sqlx::query(
+                "INSERT INTO messages (id, thread_id, role, content) VALUES ($1, $2, 'user', $3)",
+            )
+            .bind(&id)
+            .bind(thread)
+            .bind(format!("turn {turn}"))
+            .execute(pool)
+            .await
+            .unwrap();
+            ids.push(id);
+        }
+        ids
+    }
+
+    /// A turn written under a Space audience snapshot. `None` is a turn that
+    /// predates audience snapshots and carries no Space context at all.
+    async fn seed_audience_turn(pool: &PgPool, thread: &str, id: &str, revision: Option<i64>) {
+        let space = revision.map(|_| "space-room");
+        sqlx::query(
+            "INSERT INTO messages (id, thread_id, role, content, space_id, recipient_audience_ref,
+                recipient_audience_revision, recipient_audience_hash, authority_revision,
+                resource_authorization_ref)
+             VALUES ($1, $2, 'user', $1, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(id)
+        .bind(thread)
+        .bind(space)
+        .bind(space.map(|_| "audience-room"))
+        .bind(revision)
+        .bind(space.map(|_| "hash-room"))
+        .bind(space.map(|_| 1_i64))
+        .bind(space.map(|_| "authz-room"))
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn read(
+        svc: &SessionService,
+        org: &str,
+        user: &str,
+        thread: &str,
+        limit: u32,
+        before: &str,
+    ) -> Result<pb::ListConversationResponse, Status> {
+        let mut request = Request::new(pb::ListConversationRequest {
+            org_id: org.to_owned(),
+            thread_id: thread.to_owned(),
+            limit,
+            before_message_id: before.to_owned(),
+            ..Default::default()
+        });
+        request
+            .extensions_mut()
+            .insert(VerifiedIdentity::user_for_test(org, user));
+        svc.list_conversation(request)
+            .await
+            .map(Response::into_inner)
+    }
+
+    fn contents(response: &pb::ListConversationResponse) -> Vec<&str> {
+        response
+            .messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect()
+    }
+
+    async fn cleanup(pool: &PgPool, threads: &[&str]) {
+        for thread in threads {
+            sqlx::query("DELETE FROM messages WHERE thread_id = $1")
+                .bind(*thread)
+                .execute(pool)
+                .await
+                .ok();
+            sqlx::query("DELETE FROM threads WHERE id = $1")
+                .bind(*thread)
+                .execute(pool)
+                .await
+                .ok();
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn list_conversation_pages_tail_first_against_real_pg() {
+        let pool = connect().await;
+        let suffix = new_ulid();
+        let org = format!("conv-page-{suffix}");
+        let thread = format!("conv-page-thread-{suffix}");
+        let ids = seed_turns(&pool, &org, "pager", &thread, 7).await;
+        let svc = service(pool.clone());
+
+        let newest = read(&svc, &org, "pager", &thread, 3, "")
+            .await
+            .expect("tail page");
+        assert_eq!(contents(&newest), ["turn 4", "turn 5", "turn 6"]);
+        assert!(newest.has_more);
+
+        let older = read(&svc, &org, "pager", &thread, 3, &ids[4])
+            .await
+            .expect("page before turn 4");
+        assert_eq!(contents(&older), ["turn 1", "turn 2", "turn 3"]);
+        assert!(older.has_more);
+
+        let oldest = read(&svc, &org, "pager", &thread, 3, &ids[1])
+            .await
+            .expect("page before turn 1");
+        assert_eq!(contents(&oldest), ["turn 0"]);
+        assert!(!oldest.has_more);
+
+        // Zero keeps the unpaged read: every turn, oldest first, nothing else.
+        let unpaged = read(&svc, &org, "pager", &thread, 0, "")
+            .await
+            .expect("unpaged read");
+        assert_eq!(unpaged.messages.len(), 7);
+        assert_eq!(contents(&unpaged)[0], "turn 0");
+        assert!(!unpaged.has_more);
+
+        // A limit above the ceiling is served at the ceiling, which this thread fits in.
+        let clamped = read(&svc, &org, "pager", &thread, 500, "")
+            .await
+            .expect("clamped page");
+        assert_eq!(clamped.messages.len(), 7);
+        assert!(!clamped.has_more);
+
+        cleanup(&pool, &[thread.as_str()]).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn list_conversation_pages_refuses_a_cursor_outside_the_thread_against_real_pg() {
+        let pool = connect().await;
+        let suffix = new_ulid();
+        let org = format!("conv-cursor-{suffix}");
+        let other_org = format!("conv-cursor-other-{suffix}");
+        let thread = format!("conv-cursor-thread-{suffix}");
+        let sibling = format!("conv-cursor-sibling-{suffix}");
+        let foreign = format!("conv-cursor-foreign-{suffix}");
+        let turns = seed_turns(&pool, &org, "pager", &thread, 3).await;
+        let sibling_turns = seed_turns(&pool, &org, "pager", &sibling, 1).await;
+        let foreign_turns = seed_turns(&pool, &other_org, "pager", &foreign, 1).await;
+        let svc = service(pool.clone());
+
+        // A turn of a sibling thread, a turn of another org and an unknown id are
+        // refused the same way: none of them names a turn this thread holds.
+        for cursor in [
+            sibling_turns[0].as_str(),
+            foreign_turns[0].as_str(),
+            "no-such-message",
+        ] {
+            let refused = read(&svc, &org, "pager", &thread, 2, cursor)
+                .await
+                .expect_err("a cursor outside the thread is refused");
+            assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+        }
+
+        // A cursor names a turn only together with a positive limit.
+        let needs_limit = read(&svc, &org, "pager", &thread, 0, &turns[1])
+            .await
+            .expect_err("a cursor without a limit is refused");
+        assert_eq!(needs_limit.code(), tonic::Code::InvalidArgument);
+
+        let inside = read(&svc, &org, "pager", &thread, 2, &turns[2])
+            .await
+            .expect("a cursor inside the thread pages");
+        assert_eq!(contents(&inside), ["turn 0", "turn 1"]);
+
+        cleanup(
+            &pool,
+            &[thread.as_str(), sibling.as_str(), foreign.as_str()],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn list_conversation_pages_keep_the_audience_ceiling_against_real_pg() {
+        let pool = connect().await;
+        let suffix = new_ulid();
+        let org = format!("conv-audience-{suffix}");
+        let thread = format!("conv-audience-thread-{suffix}");
+        sqlx::query(
+            "INSERT INTO threads (id, session_key, org_id, user_id) VALUES ($1, $1, $2, 'owner')",
+        )
+        .bind(&thread)
+        .bind(&org)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let early = format!("{thread}-r1");
+        let mid = format!("{thread}-r2");
+        let late = format!("{thread}-r3");
+        let legacy = format!("{thread}-legacy");
+        seed_audience_turn(&pool, &thread, &early, Some(1)).await;
+        seed_audience_turn(&pool, &thread, &mid, Some(2)).await;
+        seed_audience_turn(&pool, &thread, &late, Some(3)).await;
+        seed_audience_turn(&pool, &thread, &legacy, None).await;
+
+        // A reader whose decision was issued at revision 2 never sees revision 3,
+        // and a turn with no snapshot is visible as it always was.
+        let page = conversation_page_rows(&pool, &org, &thread, Some(2), None, 10)
+            .await
+            .expect("ceiling page");
+        let seen: Vec<&str> = page.iter().map(|row| row.0.as_str()).collect();
+        assert_eq!(seen, [legacy.as_str(), mid.as_str(), early.as_str()]);
+
+        // A hidden turn is no cursor for that reader, exactly as an unknown id is not.
+        let hidden = conversation_cursor_sequence(&pool, &org, &thread, Some(2), &late)
+            .await
+            .expect_err("a hidden turn is refused as a cursor");
+        assert_eq!(hidden.code(), tonic::Code::InvalidArgument);
+        conversation_cursor_sequence(&pool, &org, &thread, Some(2), &mid)
+            .await
+            .expect("a visible turn is a cursor");
+
+        // The owner's unfiltered read sees all four turns.
+        let owner = conversation_page_rows(&pool, &org, &thread, None, None, 10)
+            .await
+            .expect("owner page");
+        assert_eq!(owner.len(), 4);
+
+        cleanup(&pool, &[thread.as_str()]).await;
     }
 }

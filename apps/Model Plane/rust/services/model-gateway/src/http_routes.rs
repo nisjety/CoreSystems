@@ -9186,6 +9186,10 @@ struct ThreadMessage {
 struct ListThreadMessagesResponse {
     thread_id: String,
     messages: Vec<ThreadMessage>,
+    /// Set only on a paged read (WS09 S8): whether older turns exist before this
+    /// page. Absent on the unpaged read, which stays byte-identical.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    has_more: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -9943,6 +9947,35 @@ struct ThreadMessagesQuery {
     space_read_decision_ref: Option<String>,
     #[serde(default)]
     space_read_decision_token: Option<String>,
+    /// Tail-first page size (WS09 S8). Absent or zero is the unpaged read every
+    /// caller has always had; a positive value is capped at this gateway's ceiling.
+    #[serde(default)]
+    limit: Option<u32>,
+    /// The id of the oldest turn the caller holds. The page is the turns strictly
+    /// before it, so it is read only together with a positive `limit`.
+    #[serde(default)]
+    before: Option<String>,
+}
+
+/// Caps the tail page `GET /v1/threads/{id}/messages` serves. Operators set
+/// `MODEL_GATEWAY_THREAD_MESSAGES_MAX_LIMIT`; anything that is not a whole number
+/// from 1 to 200 keeps the default, so a typo never changes the page size.
+const THREAD_MESSAGES_MAX_LIMIT_ENV: &str = "MODEL_GATEWAY_THREAD_MESSAGES_MAX_LIMIT";
+const THREAD_MESSAGES_DEFAULT_MAX_LIMIT: u32 = 200;
+
+fn thread_messages_page_ceiling(raw: Option<&str>) -> u32 {
+    raw.and_then(|value| value.trim().parse::<u32>().ok())
+        .filter(|value| (1..=THREAD_MESSAGES_DEFAULT_MAX_LIMIT).contains(value))
+        .unwrap_or(THREAD_MESSAGES_DEFAULT_MAX_LIMIT)
+}
+
+/// Whether `raw` can name a turn to page before: the id shape session-core
+/// writes, bounded so that nothing else can ride in on the query string.
+fn is_thread_message_cursor(raw: &str) -> bool {
+    (1..=128).contains(&raw.len())
+        && raw
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
 async fn list_thread_messages(
@@ -9962,6 +9995,22 @@ async fn list_thread_messages(
         ));
     }
 
+    let before = query.before.unwrap_or_default().trim().to_owned();
+    if !before.is_empty() && !is_thread_message_cursor(&before) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": {
+                    "code": "invalid_thread_request",
+                    "message": "before must be a message id",
+                }
+            })),
+        ));
+    }
+    let limit = query.limit.unwrap_or(0).min(thread_messages_page_ceiling(
+        std::env::var(THREAD_MESSAGES_MAX_LIMIT_ENV).ok().as_deref(),
+    ));
+
     let response = state
         .session_client
         .clone()
@@ -9972,6 +10021,8 @@ async fn list_thread_messages(
                 space_id: query.space_id.unwrap_or_default(),
                 space_read_decision_ref: query.space_read_decision_ref.unwrap_or_default(),
                 space_read_decision_token: query.space_read_decision_token.unwrap_or_default(),
+                limit,
+                before_message_id: before,
             },
             &bearer,
         )?)
@@ -9979,6 +10030,9 @@ async fn list_thread_messages(
         .map_err(|e| session_thread_error("session-core list_conversation failed", &e))?
         .into_inner();
 
+    // Only a paged read says whether more exists, so an unpaged body keeps the
+    // exact shape every caller already parses.
+    let has_more = (limit > 0).then_some(response.has_more);
     let messages =
         response
             .messages
@@ -10001,6 +10055,7 @@ async fn list_thread_messages(
     Ok(Json(ListThreadMessagesResponse {
         thread_id: trimmed.to_owned(),
         messages,
+        has_more,
     }))
 }
 
@@ -15120,5 +15175,58 @@ mod model_access_route_tests {
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         assert_eq!(body["error"]["code"], "model_access_unavailable");
         assert!(!body.to_string().contains("node-3"));
+    }
+}
+
+#[cfg(test)]
+mod thread_messages_page_tests {
+    use super::*;
+
+    #[test]
+    fn the_page_ceiling_is_a_whole_number_from_one_to_two_hundred() {
+        assert_eq!(thread_messages_page_ceiling(None), 200);
+        assert_eq!(thread_messages_page_ceiling(Some("50")), 50);
+        assert_eq!(thread_messages_page_ceiling(Some(" 1 ")), 1);
+        assert_eq!(thread_messages_page_ceiling(Some("200")), 200);
+        assert_eq!(thread_messages_page_ceiling(Some("0")), 200);
+        assert_eq!(thread_messages_page_ceiling(Some("201")), 200);
+        assert_eq!(thread_messages_page_ceiling(Some("fifty")), 200);
+        assert_eq!(thread_messages_page_ceiling(Some("")), 200);
+    }
+
+    #[test]
+    fn a_cursor_is_a_bounded_message_id_and_nothing_else() {
+        assert!(is_thread_message_cursor("01JABCDEFGHJKMNPQRSTVWXYZ0"));
+        assert!(is_thread_message_cursor("msg_01-X"));
+        assert!(!is_thread_message_cursor(""));
+        assert!(!is_thread_message_cursor(&"a".repeat(129)));
+        assert!(!is_thread_message_cursor("abc def"));
+        assert!(!is_thread_message_cursor("a&limit=1"));
+        assert!(!is_thread_message_cursor("../etc"));
+    }
+
+    #[test]
+    fn an_unpaged_body_has_no_has_more_key() {
+        let body = serde_json::to_value(ListThreadMessagesResponse {
+            thread_id: "thread-1".to_owned(),
+            messages: Vec::new(),
+            has_more: None,
+        })
+        .expect("the response serialises");
+        assert_eq!(
+            body,
+            serde_json::json!({"thread_id": "thread-1", "messages": []})
+        );
+    }
+
+    #[test]
+    fn a_paged_body_always_says_whether_older_turns_exist() {
+        let body = serde_json::to_value(ListThreadMessagesResponse {
+            thread_id: "thread-1".to_owned(),
+            messages: Vec::new(),
+            has_more: Some(false),
+        })
+        .expect("the response serialises");
+        assert_eq!(body["has_more"], serde_json::json!(false));
     }
 }

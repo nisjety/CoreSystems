@@ -1075,6 +1075,17 @@ message ListConversationRequest {
   string space_id = 3;
   string space_read_decision_ref = 4;
   string space_read_decision_token = 5;
+
+  // Tail-first paging. Zero keeps the unpaged read that every existing caller
+  // gets: all messages in sequence order, nothing else changes. A positive
+  // value returns the newest `limit` messages, clamped to 1..=200 and still in
+  // sequence order.
+  uint32 limit = 6;
+  // Message id of the oldest message the caller already holds. Only read when
+  // `limit` is positive: the page is the messages strictly older than it. It
+  // must name a message in this thread that the caller may read; a foreign,
+  // hidden or unknown id is refused the same way.
+  string before_message_id = 7;
 }
 
 // One conversation turn. Named SessionMessage (not ThreadMessage, which the
@@ -1111,6 +1122,9 @@ message SessionMessage {
 message ListConversationResponse {
   // Messages in conversation order (by sequence).
   repeated SessionMessage messages = 1;
+  // True when messages older than this page exist. Always false for an
+  // unpaged read.
+  bool has_more = 2;
 }
 
 // --- ListThreads (durable cross-device chat history) ---

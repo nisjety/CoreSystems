@@ -3957,8 +3957,18 @@ type ListConversationRequest struct {
 	SpaceId                string `protobuf:"bytes,3,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
 	SpaceReadDecisionRef   string `protobuf:"bytes,4,opt,name=space_read_decision_ref,json=spaceReadDecisionRef,proto3" json:"space_read_decision_ref,omitempty"`
 	SpaceReadDecisionToken string `protobuf:"bytes,5,opt,name=space_read_decision_token,json=spaceReadDecisionToken,proto3" json:"space_read_decision_token,omitempty"`
-	unknownFields          protoimpl.UnknownFields
-	sizeCache              protoimpl.SizeCache
+	// Tail-first paging. Zero keeps the unpaged read that every existing caller
+	// gets: all messages in sequence order, nothing else changes. A positive
+	// value returns the newest `limit` messages, clamped to 1..=200 and still in
+	// sequence order.
+	Limit uint32 `protobuf:"varint,6,opt,name=limit,proto3" json:"limit,omitempty"`
+	// Message id of the oldest message the caller already holds. Only read when
+	// `limit` is positive: the page is the messages strictly older than it. It
+	// must name a message in this thread that the caller may read; a foreign,
+	// hidden or unknown id is refused the same way.
+	BeforeMessageId string `protobuf:"bytes,7,opt,name=before_message_id,json=beforeMessageId,proto3" json:"before_message_id,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *ListConversationRequest) Reset() {
@@ -4022,6 +4032,20 @@ func (x *ListConversationRequest) GetSpaceReadDecisionRef() string {
 func (x *ListConversationRequest) GetSpaceReadDecisionToken() string {
 	if x != nil {
 		return x.SpaceReadDecisionToken
+	}
+	return ""
+}
+
+func (x *ListConversationRequest) GetLimit() uint32 {
+	if x != nil {
+		return x.Limit
+	}
+	return 0
+}
+
+func (x *ListConversationRequest) GetBeforeMessageId() string {
+	if x != nil {
+		return x.BeforeMessageId
 	}
 	return ""
 }
@@ -4135,7 +4159,10 @@ func (x *SessionMessage) GetAuthorSubjectId() string {
 type ListConversationResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Messages in conversation order (by sequence).
-	Messages      []*SessionMessage `protobuf:"bytes,1,rep,name=messages,proto3" json:"messages,omitempty"`
+	Messages []*SessionMessage `protobuf:"bytes,1,rep,name=messages,proto3" json:"messages,omitempty"`
+	// True when messages older than this page exist. Always false for an
+	// unpaged read.
+	HasMore       bool `protobuf:"varint,2,opt,name=has_more,json=hasMore,proto3" json:"has_more,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4175,6 +4202,13 @@ func (x *ListConversationResponse) GetMessages() []*SessionMessage {
 		return x.Messages
 	}
 	return nil
+}
+
+func (x *ListConversationResponse) GetHasMore() bool {
+	if x != nil {
+		return x.HasMore
+	}
+	return false
 }
 
 type ListThreadsRequest struct {
@@ -8228,13 +8262,15 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"updated_at\x18\x11 \x01(\tR\tupdatedAt\x12\x1a\n" +
 	"\brevision\x18\x12 \x01(\x03R\brevision\"M\n" +
 	"\x17ListAgentSkillsResponse\x122\n" +
-	"\x06skills\x18\x01 \x03(\v2\x1a.model_plane.v1.AgentSkillR\x06skills\"\xda\x01\n" +
+	"\x06skills\x18\x01 \x03(\v2\x1a.model_plane.v1.AgentSkillR\x06skills\"\x9c\x02\n" +
 	"\x17ListConversationRequest\x12\x15\n" +
 	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x1b\n" +
 	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\x19\n" +
 	"\bspace_id\x18\x03 \x01(\tR\aspaceId\x125\n" +
 	"\x17space_read_decision_ref\x18\x04 \x01(\tR\x14spaceReadDecisionRef\x129\n" +
-	"\x19space_read_decision_token\x18\x05 \x01(\tR\x16spaceReadDecisionToken\"\xdd\x01\n" +
+	"\x19space_read_decision_token\x18\x05 \x01(\tR\x16spaceReadDecisionToken\x12\x14\n" +
+	"\x05limit\x18\x06 \x01(\rR\x05limit\x12*\n" +
+	"\x11before_message_id\x18\a \x01(\tR\x0fbeforeMessageId\"\xdd\x01\n" +
 	"\x0eSessionMessage\x12\x12\n" +
 	"\x04role\x18\x01 \x01(\tR\x04role\x12\x18\n" +
 	"\acontent\x18\x02 \x01(\tR\acontent\x12\x1d\n" +
@@ -8243,9 +8279,10 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\bmetadata\x18\x04 \x01(\v2\x17.google.protobuf.StructR\bmetadata\x12\x1d\n" +
 	"\n" +
 	"message_id\x18\x05 \x01(\tR\tmessageId\x12*\n" +
-	"\x11author_subject_id\x18\x06 \x01(\tR\x0fauthorSubjectId\"V\n" +
+	"\x11author_subject_id\x18\x06 \x01(\tR\x0fauthorSubjectId\"q\n" +
 	"\x18ListConversationResponse\x12:\n" +
-	"\bmessages\x18\x01 \x03(\v2\x1e.model_plane.v1.SessionMessageR\bmessages\"\xef\x02\n" +
+	"\bmessages\x18\x01 \x03(\v2\x1e.model_plane.v1.SessionMessageR\bmessages\x12\x19\n" +
+	"\bhas_more\x18\x02 \x01(\bR\ahasMore\"\xef\x02\n" +
 	"\x12ListThreadsRequest\x12\x15\n" +
 	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x17\n" +
 	"\auser_id\x18\x02 \x01(\tR\x06userId\x12\x14\n" +

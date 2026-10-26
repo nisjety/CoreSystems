@@ -1,14 +1,21 @@
 use axum::{
     extract::{Extension, Path, Query, State},
     http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     Json,
 };
 use reqwest::Method;
 use serde_json::{json, Value};
 use std::time::Duration;
 
-use crate::{config::AppState, domains::chat::shared, middleware::AuthenticatedUser};
+use crate::{
+    config::AppState,
+    domains::chat::{
+        history::{bad_request, thread_messages_url, ThreadMessagesPageQuery},
+        shared,
+    },
+    middleware::AuthenticatedUser,
+};
 
 // Integration Core permits subscription-backed Codex requests to run for up
 // to 90 seconds. Leave a small proxy/response margin so a successful provider
@@ -241,14 +248,15 @@ pub(super) async fn get_thread_messages(
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Path(thread_id): Path<String>,
-) -> impl IntoResponse {
+    Query(query): Query<ThreadMessagesPageQuery>,
+) -> Response {
+    let page = match query.page() {
+        Ok(page) => page,
+        Err(message) => return bad_request(message),
+    };
     let token = shared::model_token(&state, &user, &headers).await;
     let session_token = shared::session_token(&state, &user, &headers).await;
-    let url = format!(
-        "{}/v1/threads/{}/messages",
-        state.model_gateway_url,
-        urlencoding::encode(&thread_id),
-    );
+    let url = thread_messages_url(&state.model_gateway_url, &thread_id, page.as_ref());
     shared::proxy_model_json_with_session(
         &state,
         Method::GET,
@@ -259,6 +267,7 @@ pub(super) async fn get_thread_messages(
         &user,
     )
     .await
+    .into_response()
 }
 
 /// Read-only proxy for the canonical Session Core event replay. The BFF does

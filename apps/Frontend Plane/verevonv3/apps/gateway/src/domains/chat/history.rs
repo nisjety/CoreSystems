@@ -150,6 +150,10 @@ struct ThreadResponse {
 #[serde(rename_all = "camelCase")]
 struct TranscriptResponse {
     transcript: Option<ChatThreadTranscript>,
+    /// Set only when the caller asked for a page: whether older turns exist
+    /// before it, so a partial transcript cannot pass for a complete one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    has_more: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -287,6 +291,7 @@ pub(super) async fn get_thread_transcript(
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Path(thread_id): Path<String>,
+    Query(query): Query<ThreadMessagesPageQuery>,
 ) -> Response {
     if let Err(response) = scope_for(&state, &user).await {
         return response;
@@ -295,19 +300,31 @@ pub(super) async fn get_thread_transcript(
     if thread_id.is_empty() {
         return bad_request("thread_id is required.");
     }
+    let page = match query.page() {
+        Ok(page) => page,
+        Err(message) => return bad_request(message),
+    };
     let session = match read_durable_thread(&state, &user, &headers, &thread_id).await {
         Ok(Some(session)) => session,
         Ok(None) => return thread_not_found(),
         Err(response) => return response,
     };
-    let transcript = match read_canonical_transcript(&state, &user, &headers, &thread_id).await {
-        Ok(transcript) => transcript.map(|mut transcript| {
-            transcript.updated_at = session.updated_at.clone();
-            transcript
-        }),
-        Err(response) => return response,
-    };
-    Json(ok(TranscriptResponse { transcript })).into_response()
+    let (transcript, has_more) =
+        match read_canonical_transcript(&state, &user, &headers, &thread_id, page.as_ref()).await {
+            Ok((transcript, has_more)) => (
+                transcript.map(|mut transcript| {
+                    transcript.updated_at = session.updated_at.clone();
+                    transcript
+                }),
+                has_more,
+            ),
+            Err(response) => return response,
+        };
+    Json(ok(TranscriptResponse {
+        transcript,
+        has_more: page.is_some().then_some(has_more),
+    }))
+    .into_response()
 }
 
 pub(crate) async fn save_thread(
@@ -758,6 +775,9 @@ fn thread_not_found() -> Response {
 struct CanonicalMessagesResponse {
     #[serde(default)]
     messages: Vec<CanonicalMessage>,
+    /// Set by Model Gateway on a paged read: whether older turns exist before it.
+    #[serde(default)]
+    has_more: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -814,16 +834,13 @@ async fn read_canonical_transcript(
     user: &AuthenticatedUser,
     headers: &HeaderMap,
     thread_id: &str,
-) -> Result<Option<ChatThreadTranscript>, Response> {
+    page: Option<&ThreadMessagesPage>,
+) -> Result<(Option<ChatThreadTranscript>, bool), Response> {
     let token = shared::model_token(state, user, headers).await;
     let session_token = shared::required_session_token(state, user, headers)
         .await
         .map_err(|error| shared::delegated_auth_unavailable(error).into_response())?;
-    let url = format!(
-        "{}/v1/threads/{}/messages",
-        state.model_gateway_url,
-        urlencoding::encode(thread_id),
-    );
+    let url = thread_messages_url(&state.model_gateway_url, thread_id, page);
     let (status, Json(payload)) = shared::proxy_model_json_with_session(
         state,
         Method::GET,
@@ -835,7 +852,7 @@ async fn read_canonical_transcript(
     )
     .await;
     if status == StatusCode::NOT_FOUND {
-        return Ok(None);
+        return Ok((None, false));
     }
     if !status.is_success() {
         return Err((status, Json(payload)).into_response());
@@ -850,9 +867,10 @@ async fn read_canonical_transcript(
         )
             .into_response()
     })?;
-    Ok(canonical_messages_to_transcript(
-        thread_id,
-        payload.messages,
+    let has_more = payload.has_more;
+    Ok((
+        canonical_messages_to_transcript(thread_id, payload.messages),
+        has_more,
     ))
 }
 
@@ -1003,12 +1021,151 @@ fn now_iso() -> String {
     Utc::now().to_rfc3339()
 }
 
-fn bad_request(message: &'static str) -> Response {
+pub(super) fn bad_request(message: &'static str) -> Response {
     (
         StatusCode::BAD_REQUEST,
         Json(error("invalid_request", message)),
     )
         .into_response()
+}
+
+/// The most turns one page of a thread's messages may carry. Model Gateway caps
+/// its own page at the same size, so a larger request is refused here rather
+/// than quietly shortened.
+const MAX_THREAD_MESSAGES_PAGE: u32 = 200;
+
+/// The tail-page parameters a thread's messages read may carry (WS09 S8). Both
+/// are optional: with neither, the read is the unpaged one it has always been.
+#[derive(Debug, Deserialize)]
+pub(super) struct ThreadMessagesPageQuery {
+    limit: Option<String>,
+    before: Option<String>,
+}
+
+/// A page request that has passed validation and may be forwarded.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct ThreadMessagesPage {
+    limit: u32,
+    before: Option<String>,
+}
+
+impl ThreadMessagesPageQuery {
+    /// The page asked for, or `None` for the unpaged read. Nothing that fails
+    /// here is forwarded: a limit outside 1 to 200, a `before` without a limit,
+    /// and a `before` that is not a message id are all refused.
+    pub(super) fn page(&self) -> Result<Option<ThreadMessagesPage>, &'static str> {
+        let before = self
+            .before
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let Some(raw_limit) = self.limit.as_deref() else {
+            return match before {
+                Some(_) => Err("before needs a limit."),
+                None => Ok(None),
+            };
+        };
+        let limit = raw_limit
+            .trim()
+            .parse::<u32>()
+            .ok()
+            .filter(|value| (1..=MAX_THREAD_MESSAGES_PAGE).contains(value))
+            .ok_or("limit must be a whole number from 1 to 200.")?;
+        if before.is_some_and(|value| !is_message_id(value)) {
+            return Err("before must be a message id.");
+        }
+        Ok(Some(ThreadMessagesPage {
+            limit,
+            before: before.map(str::to_owned),
+        }))
+    }
+}
+
+/// The shape of a message id as Model Gateway accepts it in a cursor: ASCII
+/// letters, digits, `-` and `_`, at most 128 bytes.
+fn is_message_id(value: &str) -> bool {
+    (1..=128).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
+/// Model Gateway's messages route for one thread. Without a page it is the URL
+/// every caller has always used.
+pub(super) fn thread_messages_url(
+    base: &str,
+    thread_id: &str,
+    page: Option<&ThreadMessagesPage>,
+) -> String {
+    let url = format!(
+        "{base}/v1/threads/{}/messages",
+        urlencoding::encode(thread_id)
+    );
+    match page {
+        None => url,
+        Some(ThreadMessagesPage {
+            limit,
+            before: None,
+        }) => format!("{url}?limit={limit}"),
+        Some(ThreadMessagesPage {
+            limit,
+            before: Some(before),
+        }) => format!("{url}?limit={limit}&before={}", urlencoding::encode(before)),
+    }
+}
+
+#[cfg(test)]
+mod thread_messages_url_tests {
+    use super::{thread_messages_url, ThreadMessagesPage, ThreadMessagesPageQuery};
+
+    fn query(limit: Option<&str>, before: Option<&str>) -> ThreadMessagesPageQuery {
+        ThreadMessagesPageQuery {
+            limit: limit.map(str::to_owned),
+            before: before.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn thread_messages_url_is_unchanged_without_a_page() {
+        assert_eq!(
+            thread_messages_url("http://mg", "thread-1", None),
+            "http://mg/v1/threads/thread-1/messages"
+        );
+        assert_eq!(query(None, None).page(), Ok(None));
+    }
+
+    #[test]
+    fn thread_messages_url_forwards_only_a_validated_page() {
+        let page = query(Some(" 100 "), Some("01JABC-x_9"))
+            .page()
+            .expect("a valid page");
+        assert_eq!(
+            page,
+            Some(ThreadMessagesPage {
+                limit: 100,
+                before: Some("01JABC-x_9".to_owned()),
+            })
+        );
+        assert_eq!(
+            thread_messages_url("http://mg", "thread-1", page.as_ref()),
+            "http://mg/v1/threads/thread-1/messages?limit=100&before=01JABC-x_9"
+        );
+        let tail = query(Some("4"), None).page().expect("a tail page");
+        assert_eq!(
+            thread_messages_url("http://mg", "thread-1", tail.as_ref()),
+            "http://mg/v1/threads/thread-1/messages?limit=4"
+        );
+    }
+
+    #[test]
+    fn thread_messages_page_refuses_what_model_gateway_would_not_serve() {
+        assert!(query(Some("0"), None).page().is_err());
+        assert!(query(Some("201"), None).page().is_err());
+        assert!(query(Some("fifty"), None).page().is_err());
+        assert!(query(None, Some("01JABC")).page().is_err());
+        assert!(query(Some("10"), Some("a&limit=1")).page().is_err());
+        assert!(query(Some("10"), Some("../etc")).page().is_err());
+    }
 }
 
 #[cfg(test)]
