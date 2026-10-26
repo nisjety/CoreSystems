@@ -317,6 +317,9 @@ services:
       # WS08-S4: images ride to the model as parts instead of the vision diversion. Unset is off; flip it together
       # with the client's VITE_CHAT_VISION_AS_PARTS_ENABLED.
       CHAT_VISION_AS_PARTS_ENABLED: ${CHAT_VISION_AS_PARTS_ENABLED:-}
+      # WS08-S6: a Do run carries the turn's attachments. Unset is off; flip it together with the client's
+      # VITE_CHAT_DO_ATTACHMENTS_ENABLED. The server declares it on /v1/models as modes.do_attachments.
+      CHAT_DO_ATTACHMENTS_ENABLED: ${CHAT_DO_ATTACHMENTS_ENABLED:-}
       # WS11-S5: derive the reasoning level once in the gateway and send it to inference-core. Off by default; only the
       # literal `true` turns it on. Roll out in this order: inference-core adapter flags on first, then this switch. With
       # this on and the adapter flags off, a deep request sends budget 0 and a level nothing renders (no thinking).

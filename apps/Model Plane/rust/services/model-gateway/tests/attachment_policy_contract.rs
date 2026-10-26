@@ -129,6 +129,10 @@ fn models_declares_the_policy_beside_the_catalogue() {
     ] {
         assert!(json.get(key).is_some(), "{key} is declared");
     }
+    // The client gates images as parts and Do attachments on these declared modes.
+    for mode in ["vision", "sandbox_files", "vision_as_parts", "do_attachments"] {
+        assert!(json["modes"].get(mode).is_some(), "modes.{mode} is declared");
+    }
 }
 
 #[test]

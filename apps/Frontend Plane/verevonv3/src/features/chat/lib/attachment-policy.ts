@@ -1,3 +1,4 @@
+import { getAttachmentPolicy, type AttachmentPolicy } from '@/shared/api/chat-client'
 import { en } from '@/shared/i18n/en'
 import { no } from '@/shared/i18n/no'
 
@@ -34,21 +35,30 @@ export const ATTACHMENT_MAX_TOTAL_BYTES = 3_145_728
 
 /**
  * Whether images are read by the picked model instead of the vision-only diversion
- * (the server's `CHAT_VISION_AS_PARTS_ENABLED`). Flipped together with that switch,
- * like `VITE_PLAN_EXECUTE_ENABLED`; off, the diversion serves any model and none of
- * the model-vision gates below apply.
+ * (the server's `CHAT_VISION_AS_PARTS_ENABLED`). The server's declared
+ * `modes.visionAsParts` decides once a policy is loaded, so the client follows the
+ * server it talks to; with no policy loaded, the build flag
+ * `VITE_CHAT_VISION_AS_PARTS_ENABLED` decides. Off, the diversion serves any model and
+ * none of the model-vision gates below apply.
  */
-export function visionAsPartsEnabled(): boolean {
+export function visionAsPartsEnabled(
+  policy: Pick<AttachmentPolicy, 'modes'> | undefined = getAttachmentPolicy(),
+): boolean {
+  if (policy) return policy.modes.visionAsParts === true
   return import.meta.env.VITE_CHAT_VISION_AS_PARTS_ENABLED === 'true'
 }
 
 /**
  * Whether the server carries a turn's attachments through a Do run (its
- * `CHAT_DO_ATTACHMENTS_ENABLED`). Flipped together with that switch, like
- * `visionAsPartsEnabled`; off, a Do turn refuses images as it always did. A Do
- * run reads an image with the picked model, so the same model-vision gates apply.
+ * `CHAT_DO_ATTACHMENTS_ENABLED`). The declared `modes.doAttachments` decides once a
+ * policy is loaded, and the build flag `VITE_CHAT_DO_ATTACHMENTS_ENABLED` otherwise.
+ * Off, a Do turn refuses images as it always did. A Do run reads an image with the
+ * picked model, so the same model-vision gates apply.
  */
-export function doAttachmentsEnabled(): boolean {
+export function doAttachmentsEnabled(
+  policy: Pick<AttachmentPolicy, 'modes'> | undefined = getAttachmentPolicy(),
+): boolean {
+  if (policy) return policy.modes.doAttachments === true
   return import.meta.env.VITE_CHAT_DO_ATTACHMENTS_ENABLED === 'true'
 }
 

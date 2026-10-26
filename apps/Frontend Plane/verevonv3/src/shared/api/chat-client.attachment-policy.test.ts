@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { doAttachmentsEnabled, visionAsPartsEnabled } from '@/features/chat/lib/attachment-policy'
 import { getAttachmentPolicy, listModels, parseAttachmentPolicy } from './chat-client'
 
 // The server declares what a chat turn may attach beside the model catalogue
@@ -12,7 +13,7 @@ const DECLARED = {
   max_files: 3,
   max_file_bytes: 1_000_000,
   max_total_bytes: 3_145_728,
-  modes: { vision: true, sandbox_files: false },
+  modes: { vision: true, sandbox_files: false, vision_as_parts: false, do_attachments: false },
 }
 
 function catalogue(body: unknown) {
@@ -36,7 +37,7 @@ describe('the declared attachment policy', () => {
       maxFiles: 3,
       maxFileBytes: 1_000_000,
       maxTotalBytes: 3_145_728,
-      modes: { vision: true, sandboxFiles: false },
+      modes: { vision: true, sandboxFiles: false, visionAsParts: false, doAttachments: false },
     })
   })
 
@@ -60,7 +61,59 @@ describe('the declared attachment policy', () => {
     expect(parseAttachmentPolicy({ ...DECLARED, image_mimes: ['image/png', 7] })).toBeUndefined()
     expect(parseAttachmentPolicy({ ...DECLARED, modes: { vision: true } })).toBeUndefined()
     expect(parseAttachmentPolicy({ ...DECLARED, modes: undefined })).toBeUndefined()
+    const stringSwitch = { ...DECLARED.modes, vision_as_parts: 'true' }
+    expect(parseAttachmentPolicy({ ...DECLARED, modes: stringSwitch })).toBeUndefined()
+    expect(parseAttachmentPolicy({ ...DECLARED, modes: { ...DECLARED.modes, do_attachments: 1 } })).toBeUndefined()
     expect(parseAttachmentPolicy(null)).toBeUndefined()
     expect(parseAttachmentPolicy('policy')).toBeUndefined()
+  })
+
+  it('reads the switches for images as parts and Do attachments, and an older server as off', () => {
+    const declared = parseAttachmentPolicy({
+      ...DECLARED,
+      modes: { vision: true, sandbox_files: false, vision_as_parts: true, do_attachments: true },
+    })
+    expect(declared?.modes).toEqual({ vision: true, sandboxFiles: false, visionAsParts: true, doAttachments: true })
+    const older = parseAttachmentPolicy({ ...DECLARED, modes: { vision: true, sandbox_files: false } })
+    expect(older?.modes).toEqual({ vision: true, sandboxFiles: false, visionAsParts: false, doAttachments: false })
+  })
+})
+
+describe('the gates follow the declared policy before the build flag', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.unstubAllEnvs()
+  })
+
+  it('uses the server declaration once a policy is loaded, whatever the build flag says', async () => {
+    vi.stubEnv('VITE_CHAT_VISION_AS_PARTS_ENABLED', 'true')
+    vi.stubEnv('VITE_CHAT_DO_ATTACHMENTS_ENABLED', 'true')
+    catalogue({ models: [{ id: 'm1' }], attachment_policy: DECLARED })
+    await listModels()
+    expect(visionAsPartsEnabled()).toBe(false)
+    expect(doAttachmentsEnabled()).toBe(false)
+
+    vi.stubEnv('VITE_CHAT_VISION_AS_PARTS_ENABLED', 'false')
+    vi.stubEnv('VITE_CHAT_DO_ATTACHMENTS_ENABLED', 'false')
+    catalogue({
+      models: [{ id: 'm1' }],
+      attachment_policy: {
+        ...DECLARED,
+        modes: { vision: true, sandbox_files: false, vision_as_parts: true, do_attachments: true },
+      },
+    })
+    await listModels()
+    expect(visionAsPartsEnabled()).toBe(true)
+    expect(doAttachmentsEnabled()).toBe(true)
+  })
+
+  it('falls back to the build flag when no policy is loaded', async () => {
+    catalogue({ models: [{ id: 'm1' }] })
+    await listModels()
+    expect(getAttachmentPolicy()).toBeUndefined()
+    vi.stubEnv('VITE_CHAT_VISION_AS_PARTS_ENABLED', 'true')
+    vi.stubEnv('VITE_CHAT_DO_ATTACHMENTS_ENABLED', '')
+    expect(visionAsPartsEnabled()).toBe(true)
+    expect(doAttachmentsEnabled()).toBe(false)
   })
 })

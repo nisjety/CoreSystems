@@ -3002,11 +3002,30 @@ export interface AttachmentPolicy {
   readonly maxFiles: number
   readonly maxFileBytes: number
   readonly maxTotalBytes: number
-  readonly modes: { readonly vision: boolean; readonly sandboxFiles: boolean }
+  readonly modes: {
+    readonly vision: boolean
+    readonly sandboxFiles: boolean
+    /**
+     * Images ride as parts of a chat turn on the server (`CHAT_VISION_AS_PARTS_ENABLED`). Optional in the type so
+     * a literal written before this mode existed still type-checks; {@link parseAttachmentPolicy} always sets it.
+     */
+    readonly visionAsParts?: boolean
+    /** A Do run carries the turn's attachments on the server (`CHAT_DO_ATTACHMENTS_ENABLED`). Optional, as above. */
+    readonly doAttachments?: boolean
+  }
 }
 
 function positiveInteger(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : undefined
+}
+
+/**
+ * A switch the server declares beside `modes`. Absent means off: a server that predates the switch does not
+ * declare it. Present but not a boolean is malformed, so the whole policy is dropped like any other bad field.
+ */
+function declaredSwitch(value: unknown): boolean | undefined {
+  if (value === undefined) return false
+  return typeof value === 'boolean' ? value : undefined
 }
 
 /**
@@ -3026,11 +3045,14 @@ export function parseAttachmentPolicy(value: unknown): AttachmentPolicy | undefi
   const maxFiles = positiveInteger(raw.max_files)
   const maxFileBytes = positiveInteger(raw.max_file_bytes)
   const maxTotalBytes = positiveInteger(raw.max_total_bytes)
+  const visionAsParts = declaredSwitch(modes?.vision_as_parts)
+  const doAttachments = declaredSwitch(modes?.do_attachments)
   if (
     !imageMimes || imageMimes.length !== (raw.image_mimes as unknown[]).length
     || maxImages === undefined || maxImageBytes === undefined
     || maxFiles === undefined || maxFileBytes === undefined || maxTotalBytes === undefined
     || !modes || typeof modes.vision !== 'boolean' || typeof modes.sandbox_files !== 'boolean'
+    || visionAsParts === undefined || doAttachments === undefined
   ) {
     return undefined
   }
@@ -3041,7 +3063,7 @@ export function parseAttachmentPolicy(value: unknown): AttachmentPolicy | undefi
     maxFiles,
     maxFileBytes,
     maxTotalBytes,
-    modes: { vision: modes.vision, sandboxFiles: modes.sandbox_files },
+    modes: { vision: modes.vision, sandboxFiles: modes.sandbox_files, visionAsParts, doAttachments },
   }
 }
 

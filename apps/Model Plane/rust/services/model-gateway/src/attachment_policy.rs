@@ -16,7 +16,7 @@
 use base64::Engine as _;
 use serde::Serialize;
 
-use crate::vision::InvokeAttachment;
+use crate::vision::{parts::ENABLED_VAR as VISION_AS_PARTS_VAR, InvokeAttachment};
 
 /// Opt-out switch. On unless the operator writes `0` or `false`: a typo keeps the
 /// contract enforced, and rolling the contract back is a deliberate act.
@@ -24,6 +24,10 @@ pub const ENABLED_VAR: &str = "CHAT_ATTACHMENT_POLICY_ENABLED";
 /// Opt-in switch of the sandbox staging of attached files (WS08-S5). Declared
 /// here so the policy publishes what the server can really do with a file.
 pub const SANDBOX_FILES_VAR: &str = "CHAT_SANDBOX_ATTACHMENTS_ENABLED";
+/// Opt-in switch that lets a Do turn carry its attachments (WS08-S6), declared as
+/// `modes.do_attachments`. `sse.rs` reads the same variable under its private
+/// `DO_ATTACHMENTS_VAR`, which must equal this value; a test below pins that.
+pub const DO_ATTACHMENTS_VAR: &str = "CHAT_DO_ATTACHMENTS_ENABLED";
 const MAX_IMAGES_VAR: &str = "CHAT_ATTACHMENT_MAX_IMAGES";
 const MAX_IMAGE_BYTES_VAR: &str = "CHAT_ATTACHMENT_MAX_IMAGE_BYTES";
 const MAX_FILES_VAR: &str = "CHAT_ATTACHMENT_MAX_FILES";
@@ -142,6 +146,8 @@ pub struct AttachmentPolicy {
     max_file_bytes: usize,
     max_total_bytes: usize,
     sandbox_files: bool,
+    vision_as_parts: bool,
+    do_attachments: bool,
 }
 
 impl Default for AttachmentPolicy {
@@ -172,6 +178,8 @@ impl AttachmentPolicy {
             max_file_bytes: positive(get, MAX_FILE_BYTES_VAR, DEFAULT_MAX_FILE_BYTES),
             max_total_bytes: positive(get, MAX_TOTAL_BYTES_VAR, DEFAULT_MAX_TOTAL_BYTES),
             sandbox_files: get(SANDBOX_FILES_VAR).is_some_and(|value| value.trim() == "true"),
+            vision_as_parts: get(VISION_AS_PARTS_VAR).is_some_and(|value| value.trim() == "true"),
+            do_attachments: get(DO_ATTACHMENTS_VAR).is_some_and(|value| value.trim() == "true"),
         }
     }
 
@@ -262,6 +270,8 @@ impl AttachmentPolicy {
             modes: AttachmentModes {
                 vision,
                 sandbox_files: self.sandbox_files,
+                vision_as_parts: self.vision_as_parts,
+                do_attachments: self.do_attachments,
             },
         })
     }
@@ -449,6 +459,13 @@ pub struct AttachmentModes {
     pub vision: bool,
     /// An attached file is staged read-only into the code sandbox (WS08-S5).
     pub sandbox_files: bool,
+    /// Images ride to the model as parts of an Ask turn (WS08-S4, `CHAT_VISION_AS_PARTS_ENABLED`)
+    /// instead of the vision diversion. While a policy is declared the client gates images on this
+    /// value rather than on its own build flag, so the two cannot drift apart.
+    pub vision_as_parts: bool,
+    /// A Do run carries the turn's attachments (`CHAT_DO_ATTACHMENTS_ENABLED`). While a policy is
+    /// declared, the client gates images on a Do turn on this value.
+    pub do_attachments: bool,
 }
 
 #[cfg(test)]
@@ -786,10 +803,57 @@ mod tests {
                 "max_files": 3,
                 "max_file_bytes": 1_000_000,
                 "max_total_bytes": 3_145_728,
-                "modes": {"vision": true, "sandbox_files": false},
+                "modes": {
+                    "vision": true,
+                    "sandbox_files": false,
+                    "vision_as_parts": false,
+                    "do_attachments": false,
+                },
             })
         );
         assert!(!AttachmentPolicy::default().declared(false).expect("declared").modes.vision);
+    }
+
+    #[test]
+    fn the_declared_modes_follow_each_switch_and_only_the_literal_true_enables_it() {
+        let modes = |vars: &[(&str, &str)]| policy(vars).declared(true).expect("declared").modes;
+        let none = modes(&[]);
+        assert!(!none.vision_as_parts && !none.do_attachments);
+        let parts = modes(&[(VISION_AS_PARTS_VAR, "true")]);
+        assert!(parts.vision_as_parts && !parts.do_attachments);
+        let do_run = modes(&[(DO_ATTACHMENTS_VAR, "true")]);
+        assert!(do_run.do_attachments && !do_run.vision_as_parts);
+        assert!(
+            modes(&[(DO_ATTACHMENTS_VAR, " true ")]).do_attachments,
+            "the value is trimmed"
+        );
+        for value in ["1", "yes", "on", "TRUE", ""] {
+            assert!(
+                !modes(&[(VISION_AS_PARTS_VAR, value)]).vision_as_parts,
+                "{value:?}"
+            );
+            assert!(
+                !modes(&[(DO_ATTACHMENTS_VAR, value)]).do_attachments,
+                "{value:?}"
+            );
+        }
+        let sandbox = modes(&[(SANDBOX_FILES_VAR, "true")]);
+        assert!(sandbox.sandbox_files && !sandbox.vision_as_parts && !sandbox.do_attachments);
+    }
+
+    #[test]
+    fn the_switch_names_are_the_ones_the_operator_sets_and_sse_reads() {
+        assert_eq!(VISION_AS_PARTS_VAR, "CHAT_VISION_AS_PARTS_ENABLED");
+        assert_eq!(DO_ATTACHMENTS_VAR, "CHAT_DO_ATTACHMENTS_ENABLED");
+        // `sse.rs` keeps a private copy of the Do name. A declared `do_attachments` that
+        // disagreed with it would promise attachments the stream never carries.
+        let sse = include_str!("sse.rs");
+        assert!(
+            sse.contains(&format!(
+                "const DO_ATTACHMENTS_VAR: &str = \"{DO_ATTACHMENTS_VAR}\";"
+            )),
+            "sse.rs must read the Do switch under {DO_ATTACHMENTS_VAR}"
+        );
     }
 
     #[test]
