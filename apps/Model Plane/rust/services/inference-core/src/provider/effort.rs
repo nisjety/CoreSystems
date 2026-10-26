@@ -155,8 +155,12 @@ const ADAPTIVE_LEVELS: &[Level] = &[
     Level::XHigh,
     Level::Max,
 ];
-// The subscription broker accepts only these two values today.
+// The subscription broker accepts only these two values while its wide switch
+// is off; with it on, `CODEX_WIDE_LEVELS` applies.
 const CODEX_LEVELS: &[Level] = &[Level::Low, Level::High];
+// Served only while this process's wide switch is on, which goes on after the
+// broker's own: the broker rejects these values until it has been widened.
+const CODEX_WIDE_LEVELS: &[Level] = &[Level::Low, Level::Medium, Level::High, Level::XHigh];
 
 struct Row {
     family: Family,
@@ -246,6 +250,17 @@ const ROWS: &[Row] = &[
         },
     },
     // Subscription-backed Codex: the broker, not the model, bounds the levels.
+    // The wide row precedes the broker pair and matches only while its switch
+    // is on, so every other configuration keeps the pair.
+    Row {
+        family: Family::Codex,
+        matches: |_| codex_wide_enabled(),
+        support: Support {
+            wire: Wire::CodexEffort,
+            levels: CODEX_WIDE_LEVELS,
+            verified_on: None,
+        },
+    },
     Row {
         family: Family::Codex,
         matches: |_| true,
@@ -383,6 +398,17 @@ pub fn budget_clamp_enabled() -> bool {
     *ENABLED.get_or_init(|| parse_enabled(std::env::var(BUDGET_CLAMP_ENV).ok().as_deref()))
 }
 
+/// Switch that lets the Codex ladder use Medium and XHigh. The subscription
+/// broker must accept those values first, so this goes on only after the
+/// broker's own switch. Off unless the literal `true`, read once at startup.
+const CODEX_WIDE_ENV: &str = "INFERENCE_CORE_CODEX_WIDE_EFFORT";
+
+/// Whether the Codex ladder is widened for this process.
+fn codex_wide_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| parse_enabled(std::env::var(CODEX_WIDE_ENV).ok().as_deref()))
+}
+
 /// Bound a level by a cap: clamps down, never up. `None` is no cap, which is
 /// every caller's answer until the per-role cap (owned by Control, delivered by
 /// WS10) exists; the seam is here so that source plugs in without touching the
@@ -390,6 +416,18 @@ pub fn budget_clamp_enabled() -> bool {
 #[must_use]
 pub fn clamp_to_cap(level: Level, cap: Option<Level>) -> Level {
     cap.map_or(level, |cap| level.min(cap))
+}
+
+/// Bound a legacy thinking budget by a level's allowance, as [`clamp_to_cap`]
+/// bounds a level. The budget only ever goes down: one already under the
+/// allowance passes through, as does every budget when there is no cap, and a
+/// budget of zero or less asks for no thinking, so there is nothing to bound.
+#[must_use]
+pub fn cap_legacy_budget(budget: i32, cap: Option<Level>) -> i32 {
+    match cap {
+        Some(cap) if budget > 0 => budget.min(allowance(cap)),
+        _ => budget,
+    }
 }
 
 /// Deployment-name to base-model aliases, from [`MODEL_ALIASES_ENV`].
@@ -478,7 +516,13 @@ mod tests {
 
     #[test]
     fn clamp_picks_nearest_weaker() {
-        let codex = support(Family::Codex, "gpt-5.5");
+        // The broker pair whatever the wide switch says: this pins the clamp,
+        // and the switch has tests of its own below.
+        let codex = Support {
+            wire: Wire::CodexEffort,
+            levels: CODEX_LEVELS,
+            verified_on: None,
+        };
         let applied = |requested| resolve(Some(requested), codex).map(|r| r.applied);
         assert_eq!(applied(Level::Medium), Some(Level::Low));
         assert_eq!(applied(Level::XHigh), Some(Level::High));
@@ -534,6 +578,28 @@ mod tests {
         // No cap leaves every level alone.
         for level in Level::ALL {
             assert_eq!(clamp_to_cap(level, None), level);
+        }
+    }
+
+    #[test]
+    fn a_legacy_budget_is_bounded_by_the_allowance_and_never_raised() {
+        assert_eq!(cap_legacy_budget(4096, Some(Level::Low)), 1024);
+        assert_eq!(cap_legacy_budget(4096, Some(Level::Medium)), 2048);
+        // At or under the allowance the budget is left as it is.
+        assert_eq!(cap_legacy_budget(1024, Some(Level::Low)), 1024);
+        assert_eq!(cap_legacy_budget(512, Some(Level::Low)), 512);
+        // No thinking asked for, or no cap: nothing to bound.
+        assert_eq!(cap_legacy_budget(0, Some(Level::Low)), 0);
+        assert_eq!(cap_legacy_budget(-1, Some(Level::Low)), -1);
+        assert_eq!(cap_legacy_budget(4096, None), 4096);
+        assert_eq!(cap_legacy_budget(i32::MAX, Some(Level::Max)), 16_384);
+        for level in Level::ALL {
+            for budget in [-1, 0, 1, 1024, 4096, i32::MAX] {
+                assert!(
+                    cap_legacy_budget(budget, Some(level)) <= budget,
+                    "{level:?} must never raise a budget of {budget}"
+                );
+            }
         }
     }
 
@@ -637,10 +703,57 @@ mod tests {
     }
 
     #[test]
-    fn every_codex_model_is_the_broker_pair() {
+    fn every_codex_model_is_the_broker_ladder() {
         let support = support(Family::Codex, "anything-the-operator-enables");
         assert_eq!(support.wire, Wire::CodexEffort);
-        assert_eq!(support.levels, &[Level::Low, Level::High]);
+        let ladder = if codex_wide_enabled() {
+            CODEX_WIDE_LEVELS
+        } else {
+            CODEX_LEVELS
+        };
+        assert_eq!(support.levels, ladder);
+    }
+
+    #[test]
+    fn wide_codex_ladder_extends_the_broker_pair() {
+        assert!(CODEX_WIDE_LEVELS.windows(2).all(|pair| pair[0] < pair[1]));
+        for level in CODEX_LEVELS {
+            assert!(CODEX_WIDE_LEVELS.contains(level));
+        }
+        assert_eq!(
+            CODEX_WIDE_LEVELS,
+            &[Level::Low, Level::Medium, Level::High, Level::XHigh]
+        );
+    }
+
+    #[test]
+    fn wide_codex_clamp_keeps_medium_and_xhigh() {
+        let wide = Support {
+            wire: Wire::CodexEffort,
+            levels: CODEX_WIDE_LEVELS,
+            verified_on: None,
+        };
+        let applied = |requested| resolve(Some(requested), wide).map(|r| r.applied);
+        assert_eq!(applied(Level::Minimal), Some(Level::Low));
+        assert_eq!(applied(Level::Medium), Some(Level::Medium));
+        assert_eq!(applied(Level::XHigh), Some(Level::XHigh));
+        assert_eq!(applied(Level::Max), Some(Level::XHigh));
+        assert!(!resolve(Some(Level::XHigh), wide).unwrap().clamped());
+    }
+
+    #[test]
+    fn the_wide_codex_row_applies_only_while_its_switch_is_on() {
+        let codex: Vec<&Row> = ROWS
+            .iter()
+            .filter(|row| row.family == Family::Codex)
+            .collect();
+        let [wide, pair] = codex.as_slice() else {
+            panic!("the Codex family has the wide row, then the broker pair");
+        };
+        assert_eq!(wide.support.levels, CODEX_WIDE_LEVELS);
+        assert_eq!(pair.support.levels, CODEX_LEVELS);
+        assert_eq!((wide.matches)("gpt-5.5"), codex_wide_enabled());
+        assert!((pair.matches)("gpt-5.5"));
     }
 
     #[test]

@@ -301,6 +301,35 @@ func TestDirectEffortMapping(t *testing.T) {
 	}
 }
 
+func TestDirectWideEffortReachesTheUpstreamOnlyWhenOn(t *testing.T) {
+	h := newDirectHarness(t, nil)
+	freshAuth(t, h.home, h.now)
+	for _, wide := range []bool{false, true} {
+		manager, err := NewManager(Config{Enabled: true, Home: filepath.Dir(h.home), WideReasoningEffort: wide}, NewRunnerWithTransport(nil, h.transport, h.store))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, effort := range []string{"medium", "xhigh"} {
+			before := h.upstream.count()
+			request := testRequest()
+			request.ReasoningEffort = effort
+			_, err := manager.Invoke(t.Context(), request)
+			if !wide {
+				if !errors.Is(err, ErrInvalidRequest) || h.upstream.count() != before {
+					t.Fatalf("effort %q with the switch off: error %v, upstream calls %d, want %d", effort, err, h.upstream.count(), before)
+				}
+				continue
+			}
+			if err != nil {
+				t.Fatalf("effort %q with the switch on: %v", effort, err)
+			}
+			if got := h.upstream.lastBody(t)["reasoning"].(map[string]any)["effort"]; got != effort {
+				t.Fatalf("effort %q sent %v", effort, got)
+			}
+		}
+	}
+}
+
 func TestDirectServiceTier(t *testing.T) {
 	for model := range directModelProfiles {
 		h := newDirectHarness(t, []fakeTurn{{frames: successFrames(model, "ok")}})
