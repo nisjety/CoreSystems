@@ -7952,6 +7952,14 @@ h3 {
   opacity: 0.46;
 }
 
+/* The policy notice beside the trigger: a quiet line, styled here rather than inline. */
+.verevon-ai-model-picker__notice {
+  margin: 4px 0 0;
+  font-size: 11.5px;
+  line-height: 1.4;
+  opacity: 0.8;
+}
+
 .verevon-support-verevon-composer__model-picker,
 .verevon-inbox-verevon-panel__model-picker {
   justify-self: start;

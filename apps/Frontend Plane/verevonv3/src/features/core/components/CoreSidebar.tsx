@@ -78,9 +78,11 @@ import {
   unarchiveChatThread,
   type ChatThreadSession,
 } from '@/shared/api/chat-client'
+import { getModelEntitlement } from '@/shared/api/model-entitlement-client'
 import { useI18n } from '@/shared/i18n'
+import { createResource } from '@/shared/lib/create-resource-compat'
 import { cn } from '@/shared/lib/cn'
-import { shouldShowWorkspaceAdminNavigation } from '@/shared/session/access'
+import { hasWorkspaceAdminAccess, shouldShowWorkspaceAdminNavigation } from '@/shared/session/access'
 import { getSession } from '@/shared/session/session-store'
 import { chatAppearanceActive } from '@/features/chat/lib/chat-appearance-preview'
 import { FilledRailIcon } from './FilledRailIcon'
@@ -104,7 +106,20 @@ export function CoreSidebar(props: {
   const i18n = useI18n()
   const location = useLocation()
   const session = getSession()
-  const visibleSections = () => applyDemoModeNavGate(sidebarSections)
+  // The Model access tab follows the gateway's admin switch, read once for the whole sidebar. Only an
+  // organisation admin is asked (members get 403 from the BFF once the switch is on). The answer is kept
+  // with the organisation it was asked for, so an earlier answer cannot outlive a change of organisation,
+  // a cleared organisation, or the person ceasing to be an admin. An error or any mismatch means off.
+  const modelAccessOrgId = () => (hasWorkspaceAdminAccess(session) && session.activeOrg?.id ? session.activeOrg.id : undefined)
+  const [modelAccess] = createResource(
+    modelAccessOrgId,
+    async (orgId) => ({ orgId, state: await getModelEntitlement(orgId) }),
+  )
+  const modelAccessEnabled = () => {
+    const answer = modelAccess()
+    return !modelAccess.error && answer !== undefined && answer.orgId === modelAccessOrgId() && answer.state.enabled === true
+  }
+  const visibleSections = () => applyDemoModeNavGate(sidebarSections, { modelAccessEnabled: modelAccessEnabled() })
     .filter((section) => section.id !== 'settings' || shouldShowWorkspaceAdminNavigation(session))
     .map((section) => localizeSidebarSection(section, i18n))
   const activeSection = () => getSidebarSectionForPath(location.pathname, props.activeRoute, visibleSections())
@@ -181,6 +196,7 @@ export function CoreSidebar(props: {
               <div aria-hidden="true" class="core-sidebar__splitter" />
               <ExpandedSidebarPanel
                 activeSection={section}
+                modelAccessEnabled={modelAccessEnabled()}
                 pathname={`${location.pathname}${location.search}`}
                 onCollapse={() => props.onExpandedChange(false)}
               />
@@ -194,6 +210,7 @@ export function CoreSidebar(props: {
 
 function ExpandedSidebarPanel(props: {
   activeSection: SidebarSection
+  modelAccessEnabled: boolean
   pathname: string
   onCollapse: () => void
 }) {
@@ -258,7 +275,7 @@ function ExpandedSidebarPanel(props: {
         <AccountExpandedSidebarPanel onCollapse={props.onCollapse} />
       </Match>
       <Match when={panelKind() === 'settings'}>
-        <SettingsExpandedSidebarPanel onCollapse={props.onCollapse} />
+        <SettingsExpandedSidebarPanel onCollapse={props.onCollapse} modelAccessEnabled={props.modelAccessEnabled} />
       </Match>
     </Switch>
   )

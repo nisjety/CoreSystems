@@ -1,5 +1,4 @@
 import { createEffect, createMemo, createSignal, For, Show, untrack } from 'solid-js'
-import type { JSX } from '@solidjs/web'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import {
   getModelEntitlementMeta,
@@ -27,14 +26,6 @@ import {
 } from '@/shared/ai/model-selection'
 import { rememberedPrivacyTier } from '@/features/dashboard/home/submit-privacy-tier'
 import { cn } from '@/shared/lib/cn'
-
-// Beside the trigger, so it has no class rule of its own yet: a quiet line.
-const POLICY_NOTICE_STYLE: JSX.CSSProperties = {
-  margin: '4px 0 0',
-  'font-size': '11.5px',
-  'line-height': '1.4',
-  opacity: '0.8',
-}
 
 export function AiModelPicker(props: {
   orgId: string
@@ -180,7 +171,7 @@ export function AiModelPicker(props: {
       </button>
       <Show when={policyResetModel()}>
         {(modelName) => (
-          <p class="verevon-ai-model-picker__notice" role="status" style={POLICY_NOTICE_STYLE}>
+          <p class="verevon-ai-model-picker__notice" role="status">
             {i18n.tr(
               `Organisasjonen din tillater ikke lenger ${modelName()}. Modellen er byttet.`,
               `Your organisation no longer allows ${modelName()}. The model was changed.`,
