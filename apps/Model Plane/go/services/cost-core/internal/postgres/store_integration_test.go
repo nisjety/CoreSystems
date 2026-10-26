@@ -454,11 +454,15 @@ func TestPostgresLedger_CacheMissReasonRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
+	// The store writes each idempotency key org-scoped and hashed
+	// (scopedIdempotencyKey), so look the rows up by the key it wrote.
 	reasons := map[string]string{}
 	for _, e := range entries {
 		reasons[e.IdempotencyKey] = e.CacheMissReason
 	}
-	if reasons["hit"] != "" || reasons["miss1"] != ledger.CacheMissTTLExpired {
+	if len(reasons) != 4 || reasons[scopedIdempotencyKey(org, "hit")] != "" ||
+		reasons[scopedIdempotencyKey(org, "miss1")] != ledger.CacheMissTTLExpired ||
+		reasons[scopedIdempotencyKey(org, "sub")] != ledger.CacheMissNoBaseline {
 		t.Fatalf("reasons did not round trip: %v", reasons)
 	}
 
