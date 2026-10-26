@@ -7192,6 +7192,9 @@ pub async fn run_tool_rounds_for_model_with_attachments(
             // Named only while the messages it counts are still the composed head (`plan_for`).
             let decision_tiers =
                 crate::prompt_context::plan_for(prompt_tiers.as_ref(), &composed_head, &decision_messages);
+            // The thread's prompt-cache routing key, from its ids alone. Empty without a thread.
+            let cache_scope_key =
+                mp_contracts::prompt_tier::cache_scope_key(org_id, thread_id).unwrap_or_default();
             let mut decision = with_authorization(
                 InferRequest {
                     // A source-bound plan has many authority/dependency distinctions.
@@ -7222,6 +7225,7 @@ pub async fn run_tool_rounds_for_model_with_attachments(
                     // The composer's plan of the standing blocks, named only while it still describes
                     // this request's head (`plan_for`); none for a legacy-order or ZDR prompt.
                     prompt_tiers: decision_tiers,
+                    cache_scope_key,
                     image_parts: Vec::new(),
                 },
                 inference_bearer,

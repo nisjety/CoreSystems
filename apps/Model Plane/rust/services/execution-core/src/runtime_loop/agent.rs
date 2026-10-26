@@ -2454,6 +2454,22 @@ fn prompt_tier_plan(
     })
 }
 
+/// The provider prompt-cache routing key the rounds of this loop send: the thread's
+/// scope (see `mp_contracts::prompt_tier::cache_scope_key`), with the subagent suffix
+/// on a delegated child so its rounds never share the parent's cache entry. A run
+/// with no thread names none.
+fn round_cache_scope_key(req: &pb::RunAgentRequest, depth: u32) -> String {
+    let Some(scope) = mp_contracts::prompt_tier::cache_scope_key(&req.org_id, &req.thread_id)
+    else {
+        return String::new();
+    };
+    if depth == 0 {
+        scope
+    } else {
+        format!("{scope}{}", mp_contracts::prompt_tier::SUBAGENT_SCOPE_SUFFIX)
+    }
+}
+
 /// The history a fresh loop starts from: the system prompt, the run context the gateway
 /// composed (see [`seed_order`]), the matched skills and this loop's goal. Not read by an
 /// in-place resume, which continues the paused conversation.
@@ -2953,6 +2969,8 @@ async fn run_rounds(
             // Which leading messages a provider may cache across rounds and runs.
             // Counts only; inference-core reads it behind its own switch.
             prompt_tiers: prompt_tier_plan(req.run_context.as_ref(), &messages),
+            // The thread's prompt-cache routing key; see `round_cache_scope_key`.
+            cache_scope_key: round_cache_scope_key(req, ctx.depth),
             // The run's images, on every round beside the goal they were attached to.
             image_parts: image_parts.clone(),
         });
@@ -16956,6 +16974,17 @@ mod tests {
         // A prompt that does not open with a system message names nothing.
         assert_eq!(plan(&[seed_message("user", "GOAL".to_owned())], None), None);
         assert_eq!(plan(&[], None), None);
+    }
+
+    #[test]
+    fn a_round_names_its_thread_scope_and_a_subagent_its_own() {
+        let mut req = pb::RunAgentRequest::default();
+        assert_eq!(round_cache_scope_key(&req, 0), "");
+        req.org_id = "org_test".to_owned();
+        req.thread_id = "thread_test".to_owned();
+        let parent = round_cache_scope_key(&req, 0);
+        assert_eq!(parent.len(), 32);
+        assert_eq!(round_cache_scope_key(&req, 1), format!("{parent}:sub"));
     }
 
     /// The first `InferRequest` a run sent, read through the real loop.

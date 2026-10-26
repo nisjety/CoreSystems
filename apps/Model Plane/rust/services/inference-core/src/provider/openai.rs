@@ -26,6 +26,14 @@ fn parse_enabled(raw: Option<&str>) -> bool {
     raw.map(str::trim) == Some("true")
 }
 
+/// Switch for sending `prompt_cache_key` to the first-party `OpenAI` endpoint.
+/// Off unless the literal `true`, read once at startup.
+const PROMPT_CACHE_KEY_ENV: &str = "INFERENCE_OPENAI_PROMPT_CACHE_KEY";
+
+fn prompt_cache_key_from_env() -> bool {
+    parse_enabled(std::env::var(PROMPT_CACHE_KEY_ENV).ok().as_deref())
+}
+
 /// The reasoning-effort switch and the deployment aliases that tell an
 /// operator-named Azure deployment which model it really is.
 #[derive(Clone, Default)]
@@ -120,6 +128,8 @@ pub struct OpenAiProvider {
     exclusive_catalog: bool,
     /// Reasoning-effort switch and deployment aliases.
     effort: EffortSettings,
+    /// Prompt-cache routing key switch; see `sends_prompt_cache_key`.
+    prompt_cache_key: bool,
 }
 
 impl OpenAiProvider {
@@ -157,6 +167,7 @@ impl OpenAiProvider {
             residency: super::Residency::Global,
             exclusive_catalog: false,
             effort: EffortSettings::from_env(),
+            prompt_cache_key: prompt_cache_key_from_env(),
         })
     }
 
@@ -208,6 +219,7 @@ impl OpenAiProvider {
             residency: super::Residency::Global,
             exclusive_catalog: false,
             effort: EffortSettings::from_env(),
+            prompt_cache_key: prompt_cache_key_from_env(),
         })
     }
 
@@ -260,6 +272,7 @@ impl OpenAiProvider {
             residency: super::Residency::Global,
             exclusive_catalog: false,
             effort: EffortSettings::from_env(),
+            prompt_cache_key: prompt_cache_key_from_env(),
         })
     }
 
@@ -437,6 +450,41 @@ impl OpenAiProvider {
         }
     }
 
+    /// The body for one attempt. The routing key is added only when
+    /// [`Self::sends_prompt_cache_key`] allows it, so every other request gets
+    /// exactly what [`build_request_body`] returns.
+    fn request_body(
+        &self,
+        req: &InferRequest,
+        stream: bool,
+        request_logprobs: bool,
+        plan: ReasoningPlan,
+    ) -> serde_json::Value {
+        let mut body = build_request_body(req, stream, request_logprobs, plan);
+        if self.sends_prompt_cache_key(req) {
+            body["prompt_cache_key"] = serde_json::json!(req.cache_scope_key);
+        }
+        body
+    }
+
+    /// Whether this request may carry the prompt-cache routing key. Azure's
+    /// acceptance of the key is not yet verified, so only the first-party
+    /// endpoint gets it. A ZDR request never does, the same rule the Anthropic
+    /// adapter applies to `cache_control`.
+    fn sends_prompt_cache_key(&self, req: &InferRequest) -> bool {
+        let first_party = match &self.flavor {
+            OpenAiFlavor::OpenAi { api_base } => {
+                api_base.trim_end_matches('/') == DEFAULT_OPENAI_BASE
+            }
+            OpenAiFlavor::Azure { .. } | OpenAiFlavor::UnifiedAzureAi { .. } => false,
+        };
+        self.prompt_cache_key
+            && first_party
+            && self.provider_id.is_none()
+            && !req.zdr
+            && !req.cache_scope_key.is_empty()
+    }
+
     /// POST the chat completion and return the successful response.
     ///
     /// A 400 that names `reasoning_effort` means this deployment (an Azure
@@ -464,7 +512,7 @@ impl OpenAiProvider {
         }
 
         loop {
-            let body = build_request_body(req, stream, request_logprobs, plan);
+            let body = self.request_body(req, stream, request_logprobs, plan);
             let response = self
                 .apply_auth(self.client.post(&url))
                 .json(&body)
@@ -1761,6 +1809,89 @@ mod tests {
         let azure_body = build_embedding_request_body(&req, false);
         assert!(azure_body.get("model").is_none());
         assert_eq!(azure_body["input"], "hello");
+    }
+
+    /// A request the gateway has scoped: the key is the hash it derives from ids.
+    fn scoped_request(zdr: bool) -> InferRequest {
+        InferRequest {
+            zdr,
+            cache_scope_key: "0123456789abcdef0123456789abcdef".to_owned(),
+            ..make_request("gpt-4o-mini")
+        }
+    }
+
+    /// The body `post_chat` sends for `req` on this provider.
+    fn sent_body(provider: &OpenAiProvider, req: &InferRequest, stream: bool) -> serde_json::Value {
+        provider.request_body(req, stream, false, provider.reasoning_plan(req))
+    }
+
+    #[test]
+    fn prompt_cache_key_sent_only_when_enabled_and_not_zdr() {
+        let req = scoped_request(false);
+        let mut provider = OpenAiProvider::new("key", None).expect("provider");
+
+        // Off is the body from before the key existed, whatever the request carries.
+        assert_eq!(
+            sent_body(&provider, &req, false).to_string(),
+            legacy_body(&req, false, false).to_string()
+        );
+
+        provider.prompt_cache_key = true;
+        assert_eq!(
+            sent_body(&provider, &req, false)["prompt_cache_key"],
+            req.cache_scope_key.as_str()
+        );
+
+        let keyless = InferRequest {
+            cache_scope_key: String::new(),
+            ..scoped_request(false)
+        };
+        assert!(sent_body(&provider, &keyless, false).get("prompt_cache_key").is_none());
+
+        // A trailing slash names the same endpoint; any other endpoint does not get the key.
+        let trailing_slash = format!("{DEFAULT_OPENAI_BASE}/");
+        let mut slash = OpenAiProvider::new("key", Some(trailing_slash)).expect("provider");
+        slash.prompt_cache_key = true;
+        assert!(sent_body(&slash, &req, false).get("prompt_cache_key").is_some());
+
+        let mut elsewhere = [
+            OpenAiProvider::new("key", Some("https://gateway.example.test/v1".to_owned()))
+                .expect("provider"),
+            OpenAiProvider::new_azure("key", "https://verevon.openai.azure.com", "")
+                .expect("provider"),
+            OpenAiProvider::new_azure_ai_unified("key", "https://verevon.example.test", "")
+                .expect("provider"),
+            OpenAiProvider::new("key", None)
+                .expect("provider")
+                .with_identity("sovereign", crate::provider::Residency::Global, false),
+        ];
+        for other in &mut elsewhere {
+            other.prompt_cache_key = true;
+            assert!(
+                sent_body(other, &req, false).get("prompt_cache_key").is_none(),
+                "only the first-party endpoint takes the key"
+            );
+        }
+    }
+
+    #[test]
+    fn openai_zdr_body_has_no_prompt_cache_key() {
+        let mut provider = OpenAiProvider::new("key", None).expect("provider");
+        provider.prompt_cache_key = true;
+
+        // Both the answer and the stream go through `post_chat`.
+        for stream in [false, true] {
+            let open = scoped_request(false);
+            assert!(
+                sent_body(&provider, &open, stream).get("prompt_cache_key").is_some(),
+                "the same request without ZDR carries the key"
+            );
+
+            let req = scoped_request(true);
+            let body = sent_body(&provider, &req, stream);
+            assert!(body.get("prompt_cache_key").is_none());
+            assert_eq!(body.to_string(), legacy_body(&req, stream, false).to_string());
+        }
     }
 
     mod reasoning_effort {

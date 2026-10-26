@@ -226,6 +226,15 @@ message InferRequest {
   // it is a hint about layout, not an instruction. It carries counts only.
   PromptTierPlan prompt_tiers = 18;
 
+  // Provider prompt-cache routing key for this conversation: the first 32 hex
+  // characters of blake3 over the org and thread ids (mp-contracts
+  // `prompt_tier::cache_scope_key`), with `:sub` appended for a delegated
+  // subagent. Empty (default) names no scope and is sent exactly as before. It is
+  // derived from identifiers only, never from message content: inference-core
+  // sends it to a provider only behind INFERENCE_OPENAI_PROMPT_CACHE_KEY, and
+  // never on a Zero Data Retention request.
+  string cache_scope_key = 19;
+
   // Images that ride with the messages, by index into `messages` as sent (the
   // original list, system messages included). Empty (default) is a text-only
   // request and is sent to the provider exactly as before.
@@ -237,7 +246,6 @@ message InferRequest {
   // `FAILED_PRECONDITION` and the kind `vision_unsupported`, never by dropping
   // the images. The bytes are request-scope memory only: never cached, never
   // logged, and a field of the internal request that the Debug output redacts.
-  // Tag 19 is reserved by WS02 (`cache_scope_key`).
   repeated InferImagePart image_parts = 20;
 }
 

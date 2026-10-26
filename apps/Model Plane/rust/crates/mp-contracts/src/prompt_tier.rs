@@ -103,6 +103,40 @@ pub fn blocks_of(plan: PromptTierPlan) -> Vec<(PromptTier, Range<usize>)> {
     .collect()
 }
 
+/// Domain of the provider prompt-cache key. Versioned, so a change to how the key
+/// is derived cannot land on keys already routed under the old derivation.
+const CACHE_SCOPE_DOMAIN: &str = "verevon.prompt-cache.v1";
+
+/// What a delegated subagent's loop appends to its thread's scope key. A child's
+/// prompt opens with different standing text, so its rounds must not share the
+/// parent's provider cache entry.
+pub const SUBAGENT_SCOPE_SUFFIX: &str = ":sub";
+
+/// The provider prompt-cache routing key for one thread of one org, or `None`
+/// when either identifier is missing.
+///
+/// It is a hash of the two identifiers and nothing else: no message text goes in,
+/// so the key can reach a provider without carrying content. Each identifier is
+/// length-prefixed, so moving the boundary between them cannot make two different
+/// pairs hash the same bytes.
+#[must_use]
+pub fn cache_scope_key(org_id: &str, thread_id: &str) -> Option<String> {
+    if org_id.is_empty() || thread_id.is_empty() {
+        return None;
+    }
+    Some(derive_scope_key(CACHE_SCOPE_DOMAIN, org_id, thread_id))
+}
+
+fn derive_scope_key(domain: &str, org_id: &str, thread_id: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(domain.as_bytes());
+    for id in [org_id, thread_id] {
+        hasher.update(&(id.len() as u64).to_le_bytes());
+        hasher.update(id.as_bytes());
+    }
+    hasher.finalize().to_hex()[..32].to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,5 +255,40 @@ mod tests {
         for (tier, range) in blocks_of(plan) {
             assert!(tiers[range].iter().all(|found| *found == tier));
         }
+    }
+
+    #[test]
+    fn cache_scope_key_is_32_lowercase_hex_and_deterministic() {
+        let key = cache_scope_key("org_1", "thread_1").expect("both identifiers are present");
+        assert_eq!(key.len(), 32);
+        assert!(key
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+        assert_eq!(cache_scope_key("org_1", "thread_1"), Some(key));
+    }
+
+    #[test]
+    fn cache_scope_key_needs_both_identifiers() {
+        assert_eq!(cache_scope_key("", "thread_1"), None);
+        assert_eq!(cache_scope_key("org_1", ""), None);
+    }
+
+    #[test]
+    fn cache_scope_key_separates_org_from_thread_and_pairs_from_each_other() {
+        let base = cache_scope_key("org_1", "thread_1");
+        assert_ne!(base, cache_scope_key("thread_1", "org_1"));
+        assert_ne!(base, cache_scope_key("org_1", "thread_2"));
+        assert_ne!(base, cache_scope_key("org_2", "thread_1"));
+        // The length prefix keeps the boundary between the two ids part of the input.
+        assert_ne!(cache_scope_key("ab", "c"), cache_scope_key("a", "bc"));
+    }
+
+    #[test]
+    fn cache_scope_key_is_bound_to_its_versioned_domain() {
+        let base = cache_scope_key("org_1", "thread_1").expect("both identifiers are present");
+        assert_ne!(
+            derive_scope_key("verevon.prompt-cache.v0", "org_1", "thread_1"),
+            base
+        );
     }
 }

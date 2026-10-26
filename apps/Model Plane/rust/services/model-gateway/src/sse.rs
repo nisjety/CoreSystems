@@ -3168,6 +3168,10 @@ pub async fn invoke_stream_sse(
         // The answer sends the plan only while the messages it sends still lead with the composed head.
         let answer_tiers =
             crate::prompt_context::plan_for(prompt_tiers.as_ref(), &composed_head, &messages);
+        // The thread's prompt-cache routing key, from its ids alone. Empty without a thread.
+        let cache_scope_key =
+            mp_contracts::prompt_tier::cache_scope_key(&org_clone, &session_thread_id)
+                .unwrap_or_default();
         let mut grpc_req = InferRequest {
             request_id: req_id.clone(),
             org_id: org_clone.clone(),
@@ -3187,6 +3191,7 @@ pub async fn invoke_stream_sse(
             thinking_budget_tokens: thinking_plan.budget_tokens,
             reasoning_effort: thinking_plan.effort_wire(),
             prompt_tiers: answer_tiers,
+            cache_scope_key,
             ..Default::default()
         };
         crate::vision::parts::attach(&mut grpc_req, &image_parts);
