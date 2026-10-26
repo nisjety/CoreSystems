@@ -279,6 +279,9 @@ pub fn build_router_with_readiness(
         )
         // chat-parity §2: list models + per-model feature families for the picker.
         .route("/v1/models", get(list_models))
+        // The Frontend BFF's zero-retention write guard asks what a draft model policy
+        // would leave the caller's organisation (see `post_model_access`).
+        .route("/v1/models/access", post(post_model_access))
         // chat-parity §2: upload a document into Data Plane (→ retrievable via RAG).
         // Chat-namespaced to avoid colliding with the Data Plane document CRUD
         // route (`POST /v1/documents` in `dataplane_routes`).
@@ -8928,7 +8931,7 @@ struct ModelDescriptor {
 /// Wire-numeric → tier label. Mirrors inference-core's `PrivacyTier::label`;
 /// unknown numerics degrade to "unspecified" here because ListModels is pure
 /// disclosure — inference-core remains the fail-closed enforcement point.
-fn privacy_tier_label(value: i32) -> &'static str {
+pub(crate) fn privacy_tier_label(value: i32) -> &'static str {
     match mp_contracts::model_plane::v1::PrivacyTier::try_from(value) {
         Ok(mp_contracts::model_plane::v1::PrivacyTier::Unspecified) => "unspecified",
         Ok(mp_contracts::model_plane::v1::PrivacyTier::Global) => "global",
@@ -9037,6 +9040,28 @@ async fn list_models(
         entitlement,
         attachment_policy,
     }))
+}
+
+/// `POST /v1/models/access`: what the caller's organisation allows, for the Frontend
+/// BFF's zero-retention write guard. The body asks about a draft policy and, with
+/// `include_catalogue`, one verdict per chat model. The organisation is the verified
+/// caller's, never the body's. inference-core decides; this route only maps the
+/// question from JSON and the answer back to it.
+async fn post_model_access(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    inference_bearer: VerifiedInferenceBearer,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let question = crate::model_access::question_from_json(&body, &claims.org_id)?;
+    let answer = state
+        .inference_client
+        .clone()
+        .get_model_access(authenticated_inference_request(question, &inference_bearer))
+        .await
+        .map_err(|status| crate::model_access::route_error(&status))?
+        .into_inner();
+    Ok(Json(crate::model_access::answer_json(&answer)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -14606,5 +14631,398 @@ mod memory_controls_route_tests {
         assert_eq!(refused.0, StatusCode::CONFLICT);
         assert_eq!(refused.1 .0["error"]["code"], "memory_not_enabled");
         assert_eq!(refused.1 .0["error"]["details"]["reason"], "user_paused");
+    }
+}
+
+#[cfg(test)]
+mod model_access_route_tests {
+    //! `POST /v1/models/access`: the question reaches inference-core with the verified
+    //! caller's organisation and the draft as the BFF sent it, the verdicts carry their
+    //! attestation, and an inference-core refusal keeps a typed status.
+    use super::*;
+    use crate::auth::VerifiedInferenceBearer;
+    use mp_contracts::model_entitlement::Refusal;
+    use mp_contracts::model_plane::v1 as pb;
+    use std::{
+        pin::Pin,
+        sync::{Arc, Mutex},
+    };
+    use tokio::net::TcpListener;
+    use tokio_stream::wrappers::TcpListenerStream;
+
+    type InferStream =
+        Pin<Box<dyn futures::Stream<Item = Result<pb::InferChunk, tonic::Status>> + Send>>;
+    type VideoStream = Pin<
+        Box<
+            dyn futures::Stream<
+                    Item = Result<pb::StreamVideoGenerationContentResponse, tonic::Status>,
+                > + Send,
+        >,
+    >;
+
+    /// Inference-core stand-in for the access question. It records every question
+    /// and answers with `refusal` when one is set. Otherwise it answers with one
+    /// attested chat model that the draft refuses.
+    #[derive(Clone, Default)]
+    struct AccessInference {
+        asked: Arc<Mutex<Vec<pb::GetModelAccessRequest>>>,
+        refusal: Arc<Mutex<Option<tonic::Status>>>,
+    }
+
+    impl AccessInference {
+        fn questions(&self) -> Vec<pb::GetModelAccessRequest> {
+            self.asked.lock().expect("question capture").clone()
+        }
+
+        fn refuse_with(&self, status: tonic::Status) {
+            *self.refusal.lock().expect("refusal setting") = Some(status);
+        }
+    }
+
+    fn unused<T>() -> Result<tonic::Response<T>, tonic::Status> {
+        Err(tonic::Status::unimplemented(
+            "not used by the model access route tests",
+        ))
+    }
+
+    #[tonic::async_trait]
+    impl pb::inference_core_server::InferenceCore for AccessInference {
+        type InferStreamStream = InferStream;
+        type StreamVideoGenerationContentStream = VideoStream;
+
+        async fn infer(
+            &self,
+            _request: tonic::Request<pb::InferRequest>,
+        ) -> Result<tonic::Response<pb::InferResponse>, tonic::Status> {
+            unused()
+        }
+
+        async fn infer_stream(
+            &self,
+            _request: tonic::Request<pb::InferRequest>,
+        ) -> Result<tonic::Response<Self::InferStreamStream>, tonic::Status> {
+            unused()
+        }
+
+        async fn create_embedding(
+            &self,
+            _request: tonic::Request<pb::CreateEmbeddingRequest>,
+        ) -> Result<tonic::Response<pb::CreateEmbeddingResponse>, tonic::Status> {
+            unused()
+        }
+
+        async fn get_model_access(
+            &self,
+            request: tonic::Request<pb::GetModelAccessRequest>,
+        ) -> Result<tonic::Response<pb::GetModelAccessResponse>, tonic::Status> {
+            self.asked
+                .lock()
+                .expect("question capture")
+                .push(request.into_inner());
+            if let Some(status) = self.refusal.lock().expect("refusal setting").clone() {
+                return Err(status);
+            }
+            Ok(tonic::Response::new(pb::GetModelAccessResponse {
+                state: "role".to_owned(),
+                enforced: true,
+                revision: 7,
+                role: "member".to_owned(),
+                restricted: true,
+                model_allowed: false,
+                reason: "not_in_allow_list".to_owned(),
+                min_privacy_tier: pb::PrivacyTier::Sovereign as i32,
+                can_manage: true,
+                catalogue: vec![pb::ModelAccessEntry {
+                    id: "gpt-attested".to_owned(),
+                    provider: "azure".to_owned(),
+                    entitled: false,
+                    reason: "not_in_allow_list".to_owned(),
+                    zdr_attested: true,
+                }],
+                ..Default::default()
+            }))
+        }
+
+        async fn list_models(
+            &self,
+            _request: tonic::Request<pb::ListModelsRequest>,
+        ) -> Result<tonic::Response<pb::ListModelsResponse>, tonic::Status> {
+            unused()
+        }
+
+        async fn synthesize_speech(
+            &self,
+            _request: tonic::Request<pb::SynthesizeSpeechRequest>,
+        ) -> Result<tonic::Response<pb::SynthesizeSpeechResponse>, tonic::Status> {
+            unused()
+        }
+
+        async fn transcribe_speech(
+            &self,
+            _request: tonic::Request<pb::TranscribeSpeechRequest>,
+        ) -> Result<tonic::Response<pb::TranscribeSpeechResponse>, tonic::Status> {
+            unused()
+        }
+
+        async fn list_speech_voices(
+            &self,
+            _request: tonic::Request<pb::ListSpeechVoicesRequest>,
+        ) -> Result<tonic::Response<pb::ListSpeechVoicesResponse>, tonic::Status> {
+            unused()
+        }
+
+        async fn translate_text(
+            &self,
+            _request: tonic::Request<pb::TranslateTextRequest>,
+        ) -> Result<tonic::Response<pb::TranslateTextResponse>, tonic::Status> {
+            unused()
+        }
+
+        async fn batch_translate_text(
+            &self,
+            _request: tonic::Request<pb::BatchTranslateTextRequest>,
+        ) -> Result<tonic::Response<pb::BatchTranslateTextResponse>, tonic::Status> {
+            unused()
+        }
+
+        async fn detect_text_language(
+            &self,
+            _request: tonic::Request<pb::DetectTextLanguageRequest>,
+        ) -> Result<tonic::Response<pb::DetectTextLanguageResponse>, tonic::Status> {
+            unused()
+        }
+
+        async fn list_translation_languages(
+            &self,
+            _request: tonic::Request<pb::ListTranslationLanguagesRequest>,
+        ) -> Result<tonic::Response<pb::ListTranslationLanguagesResponse>, tonic::Status> {
+            unused()
+        }
+
+        async fn generate_image(
+            &self,
+            _request: tonic::Request<pb::GenerateImageRequest>,
+        ) -> Result<tonic::Response<pb::GenerateImageResponse>, tonic::Status> {
+            unused()
+        }
+
+        async fn analyze_image(
+            &self,
+            _request: tonic::Request<pb::AnalyzeImageRequest>,
+        ) -> Result<tonic::Response<pb::AnalyzeImageResponse>, tonic::Status> {
+            unused()
+        }
+
+        async fn extract_image_text(
+            &self,
+            _request: tonic::Request<pb::ExtractImageTextRequest>,
+        ) -> Result<tonic::Response<pb::ExtractImageTextResponse>, tonic::Status> {
+            unused()
+        }
+
+        async fn analyze_document(
+            &self,
+            _request: tonic::Request<pb::AnalyzeDocumentRequest>,
+        ) -> Result<tonic::Response<pb::AnalyzeDocumentResponse>, tonic::Status> {
+            unused()
+        }
+
+        async fn analyze_language(
+            &self,
+            _request: tonic::Request<pb::AnalyzeLanguageRequest>,
+        ) -> Result<tonic::Response<pb::AnalyzeLanguageResponse>, tonic::Status> {
+            unused()
+        }
+
+        async fn create_realtime_session(
+            &self,
+            _request: tonic::Request<pb::CreateRealtimeSessionRequest>,
+        ) -> Result<tonic::Response<pb::CreateRealtimeSessionResponse>, tonic::Status> {
+            unused()
+        }
+
+        async fn create_video_generation_job(
+            &self,
+            _request: tonic::Request<pb::CreateVideoGenerationJobRequest>,
+        ) -> Result<tonic::Response<pb::CreateVideoGenerationJobResponse>, tonic::Status> {
+            unused()
+        }
+
+        async fn get_video_generation_job(
+            &self,
+            _request: tonic::Request<pb::GetVideoGenerationJobRequest>,
+        ) -> Result<tonic::Response<pb::GetVideoGenerationJobResponse>, tonic::Status> {
+            unused()
+        }
+
+        async fn stream_video_generation_content(
+            &self,
+            _request: tonic::Request<pb::StreamVideoGenerationContentRequest>,
+        ) -> Result<tonic::Response<Self::StreamVideoGenerationContentStream>, tonic::Status>
+        {
+            unused()
+        }
+    }
+
+    /// An `AppState` whose inference client talks to `inference`.
+    async fn state_with(inference: AccessInference) -> AppState {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind inference stand-in");
+        let address = listener.local_addr().expect("inference stand-in address");
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(pb::inference_core_server::InferenceCoreServer::new(
+                    inference,
+                ))
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await
+                .ok();
+        });
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{address}"))
+            .expect("inference stand-in endpoint")
+            .connect()
+            .await
+            .expect("connect inference stand-in");
+        let mut state = AppState::new();
+        state.inference_client = pb::inference_core_client::InferenceCoreClient::new(channel);
+        state
+    }
+
+    fn claims(org_id: &str) -> Claims {
+        Claims {
+            sub: "user-a".to_owned(),
+            iss: "test-issuer".to_owned(),
+            exp: i64::MAX,
+            org_id: org_id.to_owned(),
+            user_id: "user-a".to_owned(),
+            nbf: None,
+            aud: Some("model-gateway".to_owned()),
+            scopes: Vec::new(),
+            zdr: false,
+            sovereign: None,
+            org_zdr: None,
+            zdr_waiver: None,
+            principal_type: Some("user".to_owned()),
+            service_id: None,
+            reason: None,
+        }
+    }
+
+    fn bearer() -> VerifiedInferenceBearer {
+        VerifiedInferenceBearer::for_test("inference-test-bearer")
+    }
+
+    /// The body the Frontend BFF sends: a draft that allows one open model, with
+    /// the catalogue asked for.
+    fn bff_question() -> Value {
+        json!({
+            "draft": {
+                "allow_mode": "listed",
+                "allow": ["gpt-open"],
+                "min_privacy_tier": "sovereign",
+                "defaults": {"chat": {"model": "gpt-open", "effort": "low"}},
+            },
+            "include_catalogue": true,
+        })
+    }
+
+    #[tokio::test]
+    async fn the_question_reaches_inference_core_with_the_callers_org_and_the_draft_as_sent() {
+        let access = AccessInference::default();
+        let state = state_with(access.clone()).await;
+
+        let Json(answer) = post_model_access(
+            State(state),
+            Extension(claims("org-a")),
+            bearer(),
+            Json(bff_question()),
+        )
+        .await
+        .expect("the answer");
+
+        let asked = access.questions();
+        assert_eq!(asked.len(), 1);
+        assert_eq!(asked[0].org_id, "org-a");
+        assert!(asked[0].include_catalogue);
+        let draft = asked[0].draft.as_ref().expect("the draft");
+        assert_eq!(draft.allow, ["gpt-open"]);
+        assert_eq!(draft.min_privacy_tier, pb::PrivacyTier::Sovereign as i32);
+        assert_eq!(draft.defaults["chat"].model, "gpt-open");
+
+        assert_eq!(answer["model_allowed"], false);
+        assert_eq!(answer["min_privacy_tier"], "sovereign");
+        assert_eq!(answer["catalogue"][0]["id"], "gpt-attested");
+        assert_eq!(answer["catalogue"][0]["entitled"], false);
+        assert_eq!(answer["catalogue"][0]["zdr_attested"], true);
+    }
+
+    #[tokio::test]
+    async fn a_body_that_names_an_organisation_never_reaches_inference_core() {
+        let access = AccessInference::default();
+        let state = state_with(access.clone()).await;
+
+        let (status, Json(body)) = post_model_access(
+            State(state),
+            Extension(claims("org-a")),
+            bearer(),
+            Json(json!({"org_id": "org-b", "include_catalogue": true})),
+        )
+        .await
+        .expect_err("a body that names an organisation is refused");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "invalid_model_access_request");
+        assert!(access.questions().is_empty());
+    }
+
+    #[tokio::test]
+    async fn inference_core_refusals_keep_their_typed_status_and_echo_no_upstream_detail() {
+        let access = AccessInference::default();
+        let state = state_with(access.clone()).await;
+
+        // The policy cannot be read: the catalogue's 503, typed.
+        access.refuse_with(Refusal::unavailable().grpc_status());
+        let (status, Json(body)) = post_model_access(
+            State(state.clone()),
+            Extension(claims("org-a")),
+            bearer(),
+            Json(bff_question()),
+        )
+        .await
+        .expect_err("an unreadable policy is refused");
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "model_entitlement_unavailable");
+
+        // A caller who may not manage the policy asked for the draft: a typed 403.
+        access.refuse_with(tonic::Status::permission_denied(
+            "the model policy can be read in full only by those who manage it",
+        ));
+        let (status, Json(body)) = post_model_access(
+            State(state.clone()),
+            Extension(claims("org-a")),
+            bearer(),
+            Json(bff_question()),
+        )
+        .await
+        .expect_err("a member may not ask for a draft");
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "model_access_forbidden");
+        assert!(!body.to_string().contains("only by those who manage"));
+
+        // Anything else is a typed 502 that names no upstream detail.
+        access.refuse_with(tonic::Status::unavailable(
+            "inference-core restarting at node-3",
+        ));
+        let (status, Json(body)) = post_model_access(
+            State(state),
+            Extension(claims("org-a")),
+            bearer(),
+            Json(bff_question()),
+        )
+        .await
+        .expect_err("an unanswered question is refused");
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(body["error"]["code"], "model_access_unavailable");
+        assert!(!body.to_string().contains("node-3"));
     }
 }

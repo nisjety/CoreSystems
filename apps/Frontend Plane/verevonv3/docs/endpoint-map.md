@@ -524,7 +524,7 @@ JWT Bearer via JWKS from auth-core on all non-health routes; rate-limited; dev b
 | POST | `/v1/invoke/:request_id/cancel` | Cooperative stop | JWT | HTTP | core |
 | GET | `/v1/threads/:thread_id/messages` | Reload thread history | JWT | HTTP | core |
 | GET | `/v1/models` | Model picker list + feature families | JWT | HTTP | core |
-| POST | `/v1/models/access` | Verdict of a draft model policy per catalogue model (`GetModelAccess` with `draft` + `include_catalogue`): the gateway's ZDR write guard for `PUT /api/v1/orgs/:id/model-entitlement`. Served by WS10-S4; until then the guard fails closed (503) for ZDR orgs | JWT | HTTP | none |
+| POST | `/v1/models/access` | What a draft model policy would leave the caller's organisation, one verdict per chat model (`GetModelAccess` with `draft` + `include_catalogue`; the organisation comes from the token, never the body). Each verdict carries `zdr_attested`, which the ZDR write guard for `PUT /api/v1/orgs/:id/model-entitlement` reads; an answer that cannot be read fails the guard closed (503) | JWT | HTTP | none |
 | POST | `/v1/chat/documents` | Upload doc from chat into Data Plane for RAG | JWT | HTTP | core |
 | POST | `/v1/feedback` | Operator feedback (skill-promotion signal) | JWT | HTTP | core |
 | GET | `/v1/runs/:run_id/events` | Run/orchestration event stream (live agent-run UI; backs v3 action runs) | JWT | SSE | core |

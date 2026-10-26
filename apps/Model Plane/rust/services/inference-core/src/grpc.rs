@@ -1348,6 +1348,19 @@ fn catalogue_access(access: &RequestAccess, models: &mut Vec<pb::ModelInfo>) -> 
     }
 }
 
+/// Whether a chat model's deployment carries a zero-retention attestation: the
+/// `zdr` feature family `ProviderCapabilities::feature_flags` derives from
+/// `supports_zdr`, or a tier that only a verified ZDR contract reaches
+/// (`PrivacyTier::classify`). It is a fact about the deployment, so the policy
+/// never changes it; the Frontend BFF reads the same rule off `/v1/models`.
+fn attests_zdr(model: &provider::ModelInfo) -> bool {
+    model.features.iter().any(|feature| feature == "zdr")
+        || matches!(
+            model.privacy_tier,
+            provider::PrivacyTier::ZdrContractual | provider::PrivacyTier::Sovereign
+        )
+}
+
 /// The answer to a `GetModelAccess`: what the policy says about the caller, one
 /// model and, for a caller who can manage the policy, a draft and the catalogue.
 ///
@@ -1407,6 +1420,8 @@ fn model_access_response(
                     provider: known.provider.clone(),
                     entitled: verdict.is_ok(),
                     reason: verdict.err().map_or(String::new(), |r| r.as_str().to_owned()),
+                    // From the unfiltered chat list, whatever the draft refuses.
+                    zdr_attested: attests_zdr(known),
                 }
             })
             .collect()
@@ -2677,6 +2692,75 @@ mod tests {
                 Some("model_entitlement_unavailable")
             );
         }
+    }
+
+    #[test]
+    fn the_verdicts_say_which_chat_models_are_zdr_attested_whatever_the_draft_refuses() {
+        use mp_contracts::model_entitlement::{Mode, ResolvedAccess};
+        let manager = Resolved::Access(std::sync::Arc::new(RequestAccess::new(
+            std::sync::Arc::new(
+                ResolvedAccess::from_body(&serde_json::json!({
+                    "state": "org", "revision": 2, "role": "owner", "can_manage": true,
+                    "policy": {"allow_mode": "all", "allow": [], "deny": []},
+                    "sources": [{"layer": "org_default"}],
+                }))
+                .unwrap(),
+            ),
+            Mode::Enforce,
+            "org-1",
+        )));
+        let chat = |id: &str, features: &[&str], tier: provider::PrivacyTier| provider::ModelInfo {
+            id: id.to_owned(),
+            provider: "openai".to_owned(),
+            modality: "chat".to_owned(),
+            features: features
+                .iter()
+                .map(|feature| (*feature).to_owned())
+                .collect(),
+            privacy_tier: tier,
+            ..Default::default()
+        };
+        let models = vec![
+            // Attested by the feature the provider advertises.
+            chat(
+                "gpt-by-feature",
+                &["zdr"],
+                provider::PrivacyTier::Unspecified,
+            ),
+            // Attested by a tier only a verified ZDR contract reaches.
+            chat("gpt-by-tier", &[], provider::PrivacyTier::ZdrContractual),
+            chat("claude-sovereign", &[], provider::PrivacyTier::Sovereign),
+            // EU residency alone is not a zero-retention attestation.
+            chat("gpt-eu", &["tools"], provider::PrivacyTier::EuResident),
+            chat("gpt-open", &[], provider::PrivacyTier::Global),
+        ];
+        // The draft allows only the open model, so the attested ones are refused.
+        let request = pb::GetModelAccessRequest {
+            draft: Some(pb::ModelPolicyDoc {
+                allow_mode: "listed".to_owned(),
+                allow: vec!["gpt-open".to_owned()],
+                ..Default::default()
+            }),
+            include_catalogue: true,
+            ..access_request("")
+        };
+
+        let answer = model_access_response(&models, request, manager).unwrap();
+        let verdicts: Vec<(&str, bool, bool)> = answer
+            .catalogue
+            .iter()
+            .map(|entry| (entry.id.as_str(), entry.entitled, entry.zdr_attested))
+            .collect();
+        assert_eq!(
+            verdicts,
+            [
+                ("gpt-by-feature", false, true),
+                ("gpt-by-tier", false, true),
+                ("claude-sovereign", false, true),
+                ("gpt-eu", false, false),
+                ("gpt-open", true, false),
+            ]
+        );
     }
 
     #[test]

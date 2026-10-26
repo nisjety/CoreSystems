@@ -27,15 +27,17 @@
 //! Everything here is content-free: the question carries an organisation id, a
 //! model id and a provider hint, and a refusal names a model id and a reason.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use axum::{http::StatusCode, Json};
 use mp_contracts::model_entitlement::{Policy, Reason, Refusal};
 use mp_contracts::model_plane::v1::{
     inference_core_client::InferenceCoreClient, GetModelAccessRequest, GetModelAccessResponse,
-    ReasoningEffort,
+    ModelPolicyDoc, PrivacyTier, ReasoningEffort, SurfaceDefault,
 };
-use tonic::{metadata::MetadataMap, transport::Channel};
+use serde_json::{json, Map, Value};
+use tonic::{metadata::MetadataMap, transport::Channel, Status};
 
 /// The product surface whose defaults the gateway asks for.
 pub const CHAT_SURFACE: &str = "chat";
@@ -280,6 +282,255 @@ pub async fn allowed_models(
     )
 }
 
+/// The fields a `POST /v1/models/access` body may carry. Any other is refused
+/// before inference-core is asked: a misspelt field would leave a draft unjudged,
+/// and the organisation is the verified caller's, never one the body names.
+const QUESTION_FIELDS: [&str; 4] = ["draft", "include_catalogue", "model", "surface"];
+
+/// The fields of a draft policy, in the shape org-core stores (ADR-0005).
+const DRAFT_FIELDS: [&str; 6] = [
+    "allow_mode",
+    "allow",
+    "deny",
+    "max_effort",
+    "min_privacy_tier",
+    "defaults",
+];
+
+/// The fields of one surface's default.
+const DEFAULT_FIELDS: [&str; 2] = ["model", "effort"];
+
+/// A typed refusal of the access route, `{error: {code, message, details?}}`.
+/// `details` names the field that failed, never the caller's value.
+fn typed_error(
+    status: StatusCode,
+    code: &str,
+    message: &str,
+    details: Option<Value>,
+) -> (StatusCode, Json<Value>) {
+    let mut error = json!({ "code": code, "message": message });
+    if let Some(details) = details {
+        error["details"] = details;
+    }
+    (status, Json(json!({ "error": error })))
+}
+
+/// A question the route cannot read: a 400 that names the field, not its value.
+fn malformed(message: &str, field: Option<&str>) -> (StatusCode, Json<Value>) {
+    typed_error(
+        StatusCode::BAD_REQUEST,
+        "invalid_model_access_request",
+        message,
+        field.map(|field| json!({ "field": field })),
+    )
+}
+
+/// `value` as an object, refused when it is not one or carries a key outside
+/// `allowed`. `what` names the object in the message.
+fn object_with_fields<'a>(
+    value: &'a Value,
+    allowed: &[&str],
+    what: &str,
+) -> Result<&'a Map<String, Value>, (StatusCode, Json<Value>)> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| malformed(&format!("{what} must be a JSON object"), None))?;
+    match object.keys().find(|key| !allowed.contains(&key.as_str())) {
+        Some(field) => Err(malformed(
+            "the route does not take this field",
+            Some(field.as_str()),
+        )),
+        None => Ok(object),
+    }
+}
+
+/// The text of an optional field, trimmed: absent or null is empty, and anything
+/// that is not a string is refused.
+fn text_of(object: &Map<String, Value>, field: &str) -> Result<String, (StatusCode, Json<Value>)> {
+    match object.get(field) {
+        None | Some(Value::Null) => Ok(String::new()),
+        Some(Value::String(text)) => Ok(text.trim().to_owned()),
+        Some(_) => Err(malformed("a field has the wrong type", Some(field))),
+    }
+}
+
+/// The list of text an optional field holds: absent or null is empty.
+fn list_of(
+    object: &Map<String, Value>,
+    field: &str,
+) -> Result<Vec<String>, (StatusCode, Json<Value>)> {
+    match object.get(field) {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|item| match item {
+                Value::String(text) => Ok(text.clone()),
+                _ => Err(malformed("a field has the wrong type", Some(field))),
+            })
+            .collect(),
+        Some(_) => Err(malformed("a field has the wrong type", Some(field))),
+    }
+}
+
+/// The privacy tier a label names. Org-core stores the lower-case labels that
+/// `privacy_tier_label` writes back; empty (and `unspecified`) is no minimum. Any
+/// other label is `None`: a typo is refused, never read as no minimum.
+#[must_use]
+pub fn privacy_tier_from_label(label: &str) -> Option<PrivacyTier> {
+    match label.trim().to_ascii_lowercase().as_str() {
+        "" | "unspecified" => Some(PrivacyTier::Unspecified),
+        "global" => Some(PrivacyTier::Global),
+        "eu_resident" => Some(PrivacyTier::EuResident),
+        "zdr_contractual" => Some(PrivacyTier::ZdrContractual),
+        "sovereign" => Some(PrivacyTier::Sovereign),
+        _ => None,
+    }
+}
+
+/// One surface's default, as the policy document carries it.
+fn surface_default_of(entry: &Value) -> Result<SurfaceDefault, (StatusCode, Json<Value>)> {
+    let entry = object_with_fields(entry, &DEFAULT_FIELDS, "a surface default")?;
+    Ok(SurfaceDefault {
+        model: text_of(entry, "model")?,
+        effort: text_of(entry, "effort")?,
+    })
+}
+
+/// A draft policy as the `ModelPolicyDoc` that inference-core judges in place of
+/// the stored one. An absent field is the empty one: no restriction, no minimum.
+///
+/// # Errors
+/// A typed 400 for a key that is not a draft field, a value of the wrong type, or
+/// a privacy tier label this build does not know.
+pub fn draft_from_json(value: &Value) -> Result<ModelPolicyDoc, (StatusCode, Json<Value>)> {
+    let draft = object_with_fields(value, &DRAFT_FIELDS, "the draft")?;
+    let tier_label = text_of(draft, "min_privacy_tier")?;
+    let min_privacy_tier = privacy_tier_from_label(&tier_label).ok_or_else(|| {
+        typed_error(
+            StatusCode::BAD_REQUEST,
+            "unknown_privacy_tier",
+            "the draft names a privacy tier this build does not know",
+            Some(json!({ "field": "min_privacy_tier" })),
+        )
+    })?;
+    let defaults = match draft.get("defaults") {
+        None | Some(Value::Null) => HashMap::new(),
+        Some(Value::Object(surfaces)) => surfaces
+            .iter()
+            .map(|(surface, entry)| {
+                surface_default_of(entry).map(|default| (surface.clone(), default))
+            })
+            .collect::<Result<HashMap<_, _>, _>>()?,
+        Some(_) => return Err(malformed("a field has the wrong type", Some("defaults"))),
+    };
+    Ok(ModelPolicyDoc {
+        allow_mode: text_of(draft, "allow_mode")?,
+        allow: list_of(draft, "allow")?,
+        deny: list_of(draft, "deny")?,
+        max_effort: text_of(draft, "max_effort")?,
+        min_privacy_tier: min_privacy_tier as i32,
+        defaults,
+    })
+}
+
+/// The question a `POST /v1/models/access` body asks, for the organisation the
+/// verified caller belongs to. The body names the model, the surface, whether to
+/// answer per chat model, and the draft, and nothing else.
+///
+/// # Errors
+/// A typed 400 for a key the route does not take or a value of the wrong type.
+pub fn question_from_json(
+    body: &Value,
+    org_id: &str,
+) -> Result<GetModelAccessRequest, (StatusCode, Json<Value>)> {
+    let question = object_with_fields(body, &QUESTION_FIELDS, "the request body")?;
+    let include_catalogue = match question.get("include_catalogue") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(flag)) => *flag,
+        Some(_) => {
+            return Err(malformed(
+                "a field has the wrong type",
+                Some("include_catalogue"),
+            ))
+        }
+    };
+    let draft = match question.get("draft") {
+        None | Some(Value::Null) => None,
+        Some(draft) => Some(draft_from_json(draft)?),
+    };
+    Ok(GetModelAccessRequest {
+        org_id: org_id.to_owned(),
+        model: text_of(question, "model")?,
+        surface: text_of(question, "surface")?,
+        include_catalogue,
+        draft,
+        ..GetModelAccessRequest::default()
+    })
+}
+
+/// The answer as the route's JSON: the verdict, the facts of the policy and, when
+/// they were asked for, one verdict per chat model with its attestation. It
+/// carries no content.
+#[must_use]
+pub fn answer_json(answer: &GetModelAccessResponse) -> Value {
+    json!({
+        "state": answer.state,
+        "enforced": answer.enforced,
+        "revision": answer.revision,
+        "role": answer.role,
+        "restricted": answer.restricted,
+        "model_allowed": answer.model_allowed,
+        "reason": answer.reason,
+        "default_model": answer.default_model,
+        "default_effort": answer.default_effort,
+        "max_effort": answer.max_effort,
+        "min_privacy_tier": crate::http_routes::privacy_tier_label(answer.min_privacy_tier),
+        "can_manage": answer.can_manage,
+        "catalogue": answer
+            .catalogue
+            .iter()
+            .map(|entry| {
+                json!({
+                    "id": entry.id,
+                    "provider": entry.provider,
+                    "entitled": entry.entitled,
+                    "reason": entry.reason,
+                    "zdr_attested": entry.zdr_attested,
+                })
+            })
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// The failure of the question as the route's answer. A typed entitlement refusal
+/// keeps its catalogue status (403, or 503 for an unreadable policy); PERMISSION_DENIED
+/// is a typed 403 for a caller who may not manage the policy; anything else is a typed
+/// 502. The upstream message is never echoed: only its code is logged.
+#[must_use]
+pub fn route_error(status: &Status) -> (StatusCode, Json<Value>) {
+    if let Some(refusal) = Refusal::from_status(status) {
+        return http(&refusal);
+    }
+    if status.code() == tonic::Code::PermissionDenied {
+        return typed_error(
+            StatusCode::FORBIDDEN,
+            "model_access_forbidden",
+            "Only those who manage the organisation's model policy can ask for a draft or for the whole catalogue.",
+            None,
+        );
+    }
+    tracing::warn!(
+        grpc_code = ?status.code(),
+        "model access: inference-core could not answer the question"
+    );
+    typed_error(
+        StatusCode::BAD_GATEWAY,
+        "model_access_unavailable",
+        "The model policy could not be read right now. Try again shortly.",
+        None,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,5 +660,216 @@ mod tests {
         let mut open = Some("max".to_owned());
         Admitted::default().clamp_effort(&mut open, true);
         assert_eq!(open.as_deref(), Some("max"), "no ceiling, no change");
+    }
+
+    #[test]
+    fn each_privacy_tier_label_names_its_enum_and_an_unknown_one_names_none() {
+        let cases = [
+            ("", PrivacyTier::Unspecified),
+            ("unspecified", PrivacyTier::Unspecified),
+            ("global", PrivacyTier::Global),
+            ("eu_resident", PrivacyTier::EuResident),
+            ("zdr_contractual", PrivacyTier::ZdrContractual),
+            ("sovereign", PrivacyTier::Sovereign),
+            ("  Sovereign ", PrivacyTier::Sovereign),
+        ];
+        for (label, tier) in cases {
+            assert_eq!(privacy_tier_from_label(label), Some(tier), "{label:?}");
+        }
+        for label in ["gold", "zdr", "eu-resident", "norway"] {
+            assert_eq!(privacy_tier_from_label(label), None, "{label:?}");
+        }
+    }
+
+    #[test]
+    fn a_draft_maps_every_field_and_each_surface_default_onto_the_policy_document() {
+        let draft = draft_from_json(&json!({
+            "allow_mode": "listed",
+            "allow": ["gpt-open", "provider:openai"],
+            "deny": ["gpt-blocked"],
+            "max_effort": "medium",
+            "min_privacy_tier": "zdr_contractual",
+            "defaults": {"chat": {"model": "gpt-open", "effort": "low"}},
+        }))
+        .expect("a well-formed draft");
+        assert_eq!(draft.allow_mode, "listed");
+        assert_eq!(draft.allow, ["gpt-open", "provider:openai"]);
+        assert_eq!(draft.deny, ["gpt-blocked"]);
+        assert_eq!(draft.max_effort, "medium");
+        assert_eq!(draft.min_privacy_tier, PrivacyTier::ZdrContractual as i32);
+        assert_eq!(draft.defaults.len(), 1);
+        assert_eq!(
+            draft.defaults["chat"],
+            SurfaceDefault {
+                model: "gpt-open".to_owned(),
+                effort: "low".to_owned(),
+            }
+        );
+
+        // An empty draft is the unrestricted policy: nothing listed, no minimum.
+        assert_eq!(
+            draft_from_json(&json!({})).expect("an empty draft"),
+            ModelPolicyDoc::default()
+        );
+    }
+
+    #[test]
+    fn an_unknown_privacy_tier_label_is_a_typed_400_and_never_no_minimum() {
+        let (status, Json(body)) =
+            draft_from_json(&json!({"min_privacy_tier": "gold"})).unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "unknown_privacy_tier");
+        assert_eq!(body["error"]["details"]["field"], "min_privacy_tier");
+    }
+
+    #[test]
+    fn a_key_the_route_does_not_take_is_refused_before_inference_core_is_asked() {
+        // The organisation is the caller's, and a misspelt key would leave a draft
+        // unjudged: both are refused at the top level and inside the draft.
+        for body in [
+            json!({"org_id": "org-other"}),
+            json!({"provider_hint": "openai"}),
+            json!({"include_catalogue": true, "catalogue": true}),
+        ] {
+            let (status, Json(error)) = question_from_json(&body, "org-claims").unwrap_err();
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(
+                error["error"]["code"], "invalid_model_access_request",
+                "{body}"
+            );
+        }
+        let (_, Json(error)) = question_from_json(
+            &json!({"draft": {"allow_mode": "all", "allowed": ["gpt-x"]}}),
+            "org-claims",
+        )
+        .unwrap_err();
+        assert_eq!(error["error"]["details"]["field"], "allowed");
+        assert!(question_from_json(&json!({"draft": "all"}), "org-claims").is_err());
+        assert!(question_from_json(&json!([]), "org-claims").is_err());
+    }
+
+    #[test]
+    fn the_organisation_is_the_callers_and_the_body_names_the_rest() {
+        let question = question_from_json(
+            &json!({
+                "model": "  gpt-open ",
+                "surface": "chat",
+                "include_catalogue": true,
+                "draft": {"allow_mode": "all"},
+            }),
+            "org-from-claims",
+        )
+        .expect("a question");
+        assert_eq!(question.org_id, "org-from-claims");
+        assert_eq!(question.model, "gpt-open");
+        assert_eq!(question.surface, "chat");
+        assert!(question.include_catalogue);
+        assert_eq!(question.draft.expect("the draft").allow_mode, "all");
+
+        // An empty body asks about the caller alone: no draft, no catalogue.
+        assert_eq!(
+            question_from_json(&json!({}), "org-from-claims").expect("an empty question"),
+            GetModelAccessRequest {
+                org_id: "org-from-claims".to_owned(),
+                ..GetModelAccessRequest::default()
+            }
+        );
+    }
+
+    #[test]
+    fn a_mistyped_field_is_a_typed_400() {
+        for body in [
+            json!({"include_catalogue": "yes"}),
+            json!({"model": 7}),
+            json!({"draft": {"allow": "gpt-open"}}),
+            json!({"draft": {"allow": [1]}}),
+            json!({"draft": {"defaults": "chat"}}),
+            json!({"draft": {"defaults": {"chat": {"model": true}}}}),
+        ] {
+            let (status, Json(error)) = question_from_json(&body, "org-1").unwrap_err();
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(
+                error["error"]["code"], "invalid_model_access_request",
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_answer_names_each_fact_and_each_verdict_with_its_attestation() {
+        use mp_contracts::model_plane::v1::ModelAccessEntry;
+        let answer = GetModelAccessResponse {
+            state: "role".to_owned(),
+            enforced: true,
+            revision: 7,
+            role: "member".to_owned(),
+            restricted: true,
+            model_allowed: false,
+            reason: "not_in_allow_list".to_owned(),
+            default_model: "gpt-open".to_owned(),
+            default_effort: "low".to_owned(),
+            max_effort: "medium".to_owned(),
+            min_privacy_tier: PrivacyTier::Sovereign as i32,
+            can_manage: true,
+            catalogue: vec![ModelAccessEntry {
+                id: "gpt-attested".to_owned(),
+                provider: "azure".to_owned(),
+                entitled: false,
+                reason: "not_in_allow_list".to_owned(),
+                zdr_attested: true,
+            }],
+            ..GetModelAccessResponse::default()
+        };
+        assert_eq!(
+            answer_json(&answer),
+            json!({
+                "state": "role",
+                "enforced": true,
+                "revision": 7,
+                "role": "member",
+                "restricted": true,
+                "model_allowed": false,
+                "reason": "not_in_allow_list",
+                "default_model": "gpt-open",
+                "default_effort": "low",
+                "max_effort": "medium",
+                "min_privacy_tier": "sovereign",
+                "can_manage": true,
+                "catalogue": [{
+                    "id": "gpt-attested",
+                    "provider": "azure",
+                    "entitled": false,
+                    "reason": "not_in_allow_list",
+                    "zdr_attested": true,
+                }],
+            })
+        );
+    }
+
+    #[test]
+    fn a_refusal_keeps_its_catalogue_status_and_no_upstream_detail_is_echoed() {
+        // The policy cannot be read: the catalogue's 503 and its typed body.
+        let (status, Json(body)) = route_error(&Refusal::unavailable().grpc_status());
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "model_entitlement_unavailable");
+
+        // An entitlement refusal keeps its own status and code.
+        let refused = Refusal::not_entitled("gpt-x", Reason::ExplicitlyDenied);
+        let (status, Json(body)) = route_error(&refused.grpc_status());
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "model_not_entitled");
+
+        // Refused as not a manager: a typed 403, never the upstream's words.
+        let (status, Json(body)) =
+            route_error(&Status::permission_denied("secret upstream detail"));
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "model_access_forbidden");
+        assert!(!body.to_string().contains("secret upstream detail"));
+
+        // Anything else is a typed 502 that names no upstream detail either.
+        let (status, Json(body)) = route_error(&Status::internal("pool exhausted at db-7"));
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(body["error"]["code"], "model_access_unavailable");
+        assert!(!body.to_string().contains("db-7"));
     }
 }

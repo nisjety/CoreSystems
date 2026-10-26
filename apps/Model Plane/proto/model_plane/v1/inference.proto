@@ -789,6 +789,12 @@ message ModelAccessEntry {
 
   // Why not, as a refusal reason name. Empty when entitled.
   string reason = 4;
+
+  // Whether the model's deployment carries a zero-retention attestation for
+  // chat. It is a fact about the deployment, not the policy: the policy decides
+  // whether the caller may use the model, this says whether the model could
+  // serve a zero-retention turn at all.
+  bool zdr_attested = 5;
 }
 
 // SynthesizeSpeechRequest — text-to-speech request routed to a speech provider.

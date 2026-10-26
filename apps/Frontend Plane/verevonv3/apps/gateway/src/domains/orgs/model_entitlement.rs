@@ -464,15 +464,34 @@ fn draft_keeps_an_attested_model(access: &Value, attested: &BTreeSet<String>) ->
     }))
 }
 
+/// The ids of the chat models a verdict list marks as attested, read from each
+/// verdict's `zdr_attested`. `None` unless every verdict carries the field, which
+/// an answer from a model-gateway that predates it does not, so the guard falls
+/// back to the catalogue. The flag is the deployment's, so it does not depend on
+/// which policy the verdict was judged under.
+fn attested_from_verdicts(access: &Value) -> Option<BTreeSet<String>> {
+    let verdicts = access.get("catalogue")?.as_array()?;
+    let mut attested = BTreeSet::new();
+    for entry in verdicts {
+        let flagged = entry.get("zdr_attested")?.as_bool()?;
+        if let Some(id) = entry.get("id").and_then(Value::as_str).filter(|_| flagged) {
+            attested.insert(id.to_owned());
+        }
+    }
+    Some(attested)
+}
+
 /// D10: the refusal to answer with when this PUT would leave an org whose ZDR
 /// is on with no attested model, or `None` when the write may go on.
 ///
 /// Each restricting layer is judged on its own (a role override replaces the
 /// org default, it never merges), by asking model-gateway what the draft would
-/// leave the acting admin. Attestation comes from the catalogue, entitlement
-/// from the verdicts. Fails closed: a catalogue, a verdict or the org that
-/// cannot be read is a 503, never a pass. A body that restricts nothing needs
-/// no answer and reads nothing.
+/// leave the acting admin. Attestation and entitlement both come from the
+/// verdicts, which model-gateway answers from the whole catalogue, so a model the
+/// admin cannot see still counts. Only an answer that predates `zdr_attested`
+/// falls back to the admin's own catalogue, read once. Fails closed: a verdict,
+/// the catalogue fallback or the org that cannot be read is a 503, never a pass.
+/// A body that restricts nothing needs no answer and reads nothing.
 async fn zdr_write_refusal(
     state: &AppState,
     user: &AuthenticatedUser,
@@ -494,14 +513,8 @@ async fn zdr_write_refusal(
     else {
         return Some(guard_unavailable());
     };
-    let Some(attested) = read_model_catalogue(state, user, &model_token, &inference_token)
-        .await
-        .as_ref()
-        .and_then(attested_chat_model_ids)
-    else {
-        return Some(guard_unavailable());
-    };
     let url = format!("{}/v1/models/access", state.model_gateway_url);
+    let mut from_catalogue: Option<BTreeSet<String>> = None;
     for (name, draft) in layers {
         let (status, Json(access)) = model_plane::proxy_model_json_with_inference(
             state,
@@ -513,10 +526,27 @@ async fn zdr_write_refusal(
             user,
         )
         .await;
-        let verdict = status
-            .is_success()
-            .then(|| draft_keeps_an_attested_model(&access, &attested))
-            .flatten();
+        let attested = if status.is_success() {
+            match attested_from_verdicts(&access) {
+                Some(attested) => Some(attested),
+                // An answer that predates `zdr_attested`: the catalogue is read only
+                // then, and only once for the whole write.
+                None => {
+                    if from_catalogue.is_none() {
+                        from_catalogue =
+                            read_model_catalogue(state, user, &model_token, &inference_token)
+                                .await
+                                .as_ref()
+                                .and_then(attested_chat_model_ids);
+                    }
+                    from_catalogue.clone()
+                }
+            }
+        } else {
+            None
+        };
+        let verdict =
+            attested.and_then(|attested| draft_keeps_an_attested_model(&access, &attested));
         match verdict {
             Some(true) => {}
             Some(false) => {
@@ -560,8 +590,8 @@ mod tests {
     use crate::config::AppState;
 
     use super::{
-        attested_chat_model_ids, draft_keeps_an_attested_model, restricting_layers,
-        validate_put_body,
+        attested_chat_model_ids, attested_from_verdicts, draft_keeps_an_attested_model,
+        restricting_layers, validate_put_body,
     };
 
     const COOKIE: &str = "better-auth.session_token=session-1";
@@ -1048,6 +1078,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_attestation_comes_from_the_verdicts_when_they_carry_it() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let up = Upstreams::start("owner").await;
+        up.org_core_organization(zdr_organization(true)).await;
+        // The admin's own catalogue, filtered by the stored policy, shows no attested model.
+        up.catalogue(ResponseTemplate::new(200).set_body_json(json!({"models": [
+            {"id": "gpt-open", "modality": "chat", "features": []}
+        ]})))
+        .await;
+        // The verdicts answer from the whole catalogue: the attested model is entitled.
+        up.access_for_allow(
+            json!(["gpt-attested"]),
+            verdicts(json!([
+                {"id": "gpt-attested", "provider": "azure", "entitled": true, "zdr_attested": true},
+                {"id": "gpt-open", "provider": "openai", "entitled": false,
+                 "reason": "not_in_allow_list", "zdr_attested": false}
+            ])),
+        )
+        .await;
+        up.org_core_policy("PUT", None, ok_set(4)).await;
+
+        let policy = json!({
+            "expected_revision": 3,
+            "roles": {"member": {"allow_mode": "listed", "allow": ["gpt-attested"]}}
+        });
+        let (status, body) = send(up.state(true), "PUT", ROUTE, Some(policy)).await;
+        assert_eq!(status, 200, "{body}");
+        // Only the question was asked: the admin's own catalogue was never read.
+        assert_eq!(up.model_gateway_requests().await, 1);
+    }
+
+    #[tokio::test]
+    async fn a_verdict_that_does_not_attest_refuses_whatever_the_admins_catalogue_shows() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let up = Upstreams::start("owner").await;
+        up.org_core_organization(zdr_organization(true)).await;
+        // The admin's catalogue lists the model as attested, but the verdict, which
+        // is the deployment's own answer, does not.
+        up.catalogue(two_model_catalogue()).await;
+        up.access_for_allow(
+            json!(["gpt-attested"]),
+            verdicts(json!([
+                {"id": "gpt-attested", "provider": "azure", "entitled": true, "zdr_attested": false}
+            ])),
+        )
+        .await;
+        up.org_core_policy("PUT", None, ok_set(4)).await;
+
+        let policy = json!({
+            "expected_revision": 3,
+            "roles": {"member": {"allow_mode": "listed", "allow": ["gpt-attested"]}}
+        });
+        let (status, body) = send(up.state(true), "PUT", ROUTE, Some(policy)).await;
+        assert_eq!(status, 409, "{body}");
+        assert_eq!(body["error"]["code"], "model_policy_leaves_no_zdr_model");
+    }
+
+    #[tokio::test]
     async fn every_restricting_layer_is_judged_and_one_bad_role_refuses_the_write() {
         let _env = crate::config::TEST_ENV_LOCK.lock().await;
         let up = Upstreams::start("owner").await;
@@ -1111,10 +1199,16 @@ mod tests {
         let (status, _) = send(up.state(true), "PUT", ROUTE, Some(member_only_put())).await;
         assert_eq!(status, 503);
 
-        // The catalogue cannot be read.
+        // The catalogue cannot be read. Only a verdict list that predates `zdr_attested`
+        // needs the catalogue, so this answer carries no such field.
         let up = Upstreams::start("owner").await;
         up.org_core_organization(zdr_organization(true)).await;
         up.catalogue(ResponseTemplate::new(502)).await;
+        up.access_for_allow(
+            json!(["gpt-open"]),
+            verdicts(json!([{"id": "gpt-open", "provider": "openai", "entitled": true}])),
+        )
+        .await;
         let (status, _) = send(up.state(true), "PUT", ROUTE, Some(member_only_put())).await;
         assert_eq!(status, 503);
 
@@ -1243,5 +1337,25 @@ mod tests {
         );
         assert_eq!(keeps(json!([])), Some(false));
         assert_eq!(draft_keeps_an_attested_model(&json!({}), &attested), None);
+    }
+
+    #[test]
+    fn a_verdict_list_carries_its_own_attestation_or_the_guard_falls_back() {
+        use std::collections::BTreeSet;
+        let flagged = json!({"catalogue": [
+            {"id": "a", "entitled": false, "zdr_attested": true},
+            {"id": "b", "entitled": true, "zdr_attested": false},
+        ]});
+        assert_eq!(
+            attested_from_verdicts(&flagged),
+            Some(BTreeSet::from(["a".to_owned()]))
+        );
+        // One verdict without the field is an answer that predates it.
+        assert_eq!(
+            attested_from_verdicts(&json!({"catalogue": [{"id": "a", "entitled": true}]})),
+            None
+        );
+        // No verdict list at all is no answer, which is not "nothing is attested".
+        assert_eq!(attested_from_verdicts(&json!({"state": "role"})), None);
     }
 }

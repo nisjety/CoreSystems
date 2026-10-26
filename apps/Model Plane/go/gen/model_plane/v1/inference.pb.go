@@ -2348,7 +2348,12 @@ type ModelAccessEntry struct {
 	// Whether the policy allows it.
 	Entitled bool `protobuf:"varint,3,opt,name=entitled,proto3" json:"entitled,omitempty"`
 	// Why not, as a refusal reason name. Empty when entitled.
-	Reason        string `protobuf:"bytes,4,opt,name=reason,proto3" json:"reason,omitempty"`
+	Reason string `protobuf:"bytes,4,opt,name=reason,proto3" json:"reason,omitempty"`
+	// Whether the model's deployment carries a zero-retention attestation for
+	// chat. It is a fact about the deployment, not the policy: the policy decides
+	// whether the caller may use the model, this says whether the model could
+	// serve a zero-retention turn at all.
+	ZdrAttested   bool `protobuf:"varint,5,opt,name=zdr_attested,json=zdrAttested,proto3" json:"zdr_attested,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2409,6 +2414,13 @@ func (x *ModelAccessEntry) GetReason() string {
 		return x.Reason
 	}
 	return ""
+}
+
+func (x *ModelAccessEntry) GetZdrAttested() bool {
+	if x != nil {
+		return x.ZdrAttested
+	}
+	return false
 }
 
 // SynthesizeSpeechRequest — text-to-speech request routed to a speech provider.
@@ -6164,12 +6176,13 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\x10min_privacy_tier\x18\f \x01(\x0e2\x1b.model_plane.v1.PrivacyTierR\x0eminPrivacyTier\x12\x1d\n" +
 	"\n" +
 	"can_manage\x18\r \x01(\bR\tcanManage\x12>\n" +
-	"\tcatalogue\x18\x0e \x03(\v2 .model_plane.v1.ModelAccessEntryR\tcatalogue\"r\n" +
+	"\tcatalogue\x18\x0e \x03(\v2 .model_plane.v1.ModelAccessEntryR\tcatalogue\"\x95\x01\n" +
 	"\x10ModelAccessEntry\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1a\n" +
 	"\bprovider\x18\x02 \x01(\tR\bprovider\x12\x1a\n" +
 	"\bentitled\x18\x03 \x01(\bR\bentitled\x12\x16\n" +
-	"\x06reason\x18\x04 \x01(\tR\x06reason\"\xfa\x01\n" +
+	"\x06reason\x18\x04 \x01(\tR\x06reason\x12!\n" +
+	"\fzdr_attested\x18\x05 \x01(\bR\vzdrAttested\"\xfa\x01\n" +
 	"\x17SynthesizeSpeechRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x15\n" +
