@@ -86,6 +86,8 @@ export default defineConfig({
       // This gateway coverage gate intentionally uses Node's native test runner
       // and is executed explicitly by `pnpm test` before the Vitest suite.
       'apps/gateway/scripts/**/*.test.mjs',
+      // Bundle-budget gate: a node:test file run by `node --test` in CI, not Vitest.
+      'scripts/**/*.test.mjs',
       // `.claude/worktrees/**` holds nested full-repo checkouts (git worktrees for
       // other sessions), e.g. a copy of verevonv2 (React) — never collect their
       // tests against this SolidJS-oriented config, regardless of what
