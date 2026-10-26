@@ -35,6 +35,10 @@ func main() {
 	}
 	log.Printf("[org-core startup] scoped service credential registry OK")
 
+	if err := httpserver.ValidateSIEMDestinationsConfig(os.Getenv); err != nil {
+		log.Fatalf("[org-core startup] SIEM destinations validation failed: %v", err)
+	}
+
 	// pprof debug server — enable with PPROF_ENABLED=true; default addr :6061
 	if os.Getenv("PPROF_ENABLED") == "true" {
 		pprofAddr := os.Getenv("PPROF_ADDR")

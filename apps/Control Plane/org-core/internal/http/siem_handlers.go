@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -23,6 +24,21 @@ func siemDestinationsEnabled(getenv func(string) string) bool {
 		return true
 	}
 	return false
+}
+
+// ValidateSIEMDestinationsConfig is the boot check for the SIEM switch. With the
+// switch off it reads nothing else and returns nil. With it on, an unusable seal
+// key is a startup error: NewServer would otherwise mount the routes and answer
+// 503 for as long as the process runs. The error names the variables, never
+// their values.
+func ValidateSIEMDestinationsConfig(getenv func(string) string) error {
+	if !siemDestinationsEnabled(getenv) {
+		return nil
+	}
+	if _, err := orgcore.NewSIEMSealerFromEnv(getenv); err != nil {
+		return fmt.Errorf("%s is on but the SIEM seal is not usable: %w", siemDestinationsFlagEnv, err)
+	}
+	return nil
 }
 
 // siemDestinationService is the seam the SIEM routes depend on. *org.Service

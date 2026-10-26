@@ -3,6 +3,7 @@ package http
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"log"
 	"net/http"
@@ -184,6 +185,81 @@ func TestSIEMDestinationsFlagIsStrict(t *testing.T) {
 		got := siemDestinationsEnabled(func(string) string { return value })
 		if got != want {
 			t.Errorf("flag %q = %v, want %v", value, got, want)
+		}
+	}
+}
+
+// siemSealTestKey is a standard-base64 key of the given byte length for the boot
+// check. It is a test fixture, never a deployment key.
+func siemSealTestKey(size int) string {
+	return base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x5a}, size))
+}
+
+// TestValidateSIEMDestinationsConfigReadsNothingWhileTheFlagIsOff keeps the default
+// boot unchanged: with the switch off only the flag is read, so a deployment that
+// never enables SIEM needs no seal key.
+func TestValidateSIEMDestinationsConfigReadsNothingWhileTheFlagIsOff(t *testing.T) {
+	for _, flag := range []string{"", "0", "false", "TRUE", "yes", "on"} {
+		var read []string
+		err := ValidateSIEMDestinationsConfig(func(key string) string {
+			read = append(read, key)
+			if key == siemDestinationsFlagEnv {
+				return flag
+			}
+			return ""
+		})
+		if err != nil {
+			t.Fatalf("flag %q with no seal key refused boot: %v", flag, err)
+		}
+		if len(read) != 1 || read[0] != siemDestinationsFlagEnv {
+			t.Fatalf("flag %q read %v, want only %s", flag, read, siemDestinationsFlagEnv)
+		}
+	}
+}
+
+// TestValidateSIEMDestinationsConfigRefusesAnUnusableSealWhenOn stops org-core from
+// booting with the switch on and a seal it cannot use, which would otherwise mount
+// routes that answer 503 for the life of the process. The error names the flag and
+// never echoes the key.
+func TestValidateSIEMDestinationsConfigRefusesAnUnusableSealWhenOn(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+	}{
+		{"flag 1 without a key", map[string]string{siemDestinationsFlagEnv: "1"}},
+		{"flag true without a key", map[string]string{siemDestinationsFlagEnv: "true"}},
+		{"key that is not base64", map[string]string{siemDestinationsFlagEnv: "1", orgcore.SIEMSealKeyEnv: "!!!not-base64!!!"}},
+		{"16-byte key", map[string]string{siemDestinationsFlagEnv: "1", orgcore.SIEMSealKeyEnv: siemSealTestKey(16)}},
+		{"33-byte key", map[string]string{siemDestinationsFlagEnv: "1", orgcore.SIEMSealKeyEnv: siemSealTestKey(33)}},
+		{"32-byte key with a bad key id", map[string]string{siemDestinationsFlagEnv: "1", orgcore.SIEMSealKeyEnv: siemSealTestKey(32), orgcore.SIEMSealKeyIDEnv: "has space"}},
+	}
+	for _, tc := range cases {
+		err := ValidateSIEMDestinationsConfig(func(key string) string { return tc.env[key] })
+		if err == nil {
+			t.Fatalf("%s: boot accepted an unusable SIEM seal", tc.name)
+		}
+		if !strings.Contains(err.Error(), siemDestinationsFlagEnv) {
+			t.Fatalf("%s: the error does not name the flag: %v", tc.name, err)
+		}
+		if key := tc.env[orgcore.SIEMSealKeyEnv]; key != "" && strings.Contains(err.Error(), key) {
+			t.Fatalf("%s: the error echoes the seal key: %v", tc.name, err)
+		}
+	}
+}
+
+// TestValidateSIEMDestinationsConfigAcceptsAUsableSealWhenOn is the other half of
+// the boot check: a switched-on org-core with a good 32-byte key starts.
+func TestValidateSIEMDestinationsConfigAcceptsAUsableSealWhenOn(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+	}{
+		{"flag 1 with the default key id", map[string]string{siemDestinationsFlagEnv: "1", orgcore.SIEMSealKeyEnv: siemSealTestKey(32)}},
+		{"flag true with a named key id", map[string]string{siemDestinationsFlagEnv: "true", orgcore.SIEMSealKeyEnv: siemSealTestKey(32), orgcore.SIEMSealKeyIDEnv: "k-2026"}},
+	}
+	for _, tc := range cases {
+		if err := ValidateSIEMDestinationsConfig(func(key string) string { return tc.env[key] }); err != nil {
+			t.Fatalf("%s: a usable seal refused boot: %v", tc.name, err)
 		}
 	}
 }
