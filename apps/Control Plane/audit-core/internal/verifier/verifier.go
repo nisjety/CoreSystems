@@ -597,6 +597,23 @@ func verifyOrg(ctx context.Context, src Source, cfg Config, org string) error {
 	if err != nil {
 		return err
 	}
+	// A restore from an older copy can leave the saved cursor above the head of the
+	// restored chain. The resumed run then reads no rows and reports a break that no
+	// row causes (head behind the chain, or a head hash mismatch one past the head),
+	// and the cursor would repeat it on every pass. Only a run from the trust base
+	// can tell the two apart, so it runs again from there. A resumed run that read
+	// rows has seen the chain disagree with the head and keeps its verdict: a re-run
+	// capped at MaxRows could finish without reaching those rows and hide it.
+	stale := rep.Status == StatusBroken && rep.RowsVerified == 0 && rep.Head != nil && opts.FromSeq > rep.Head.Seq
+	if stale {
+		log.Warn().Str("org_id", org).Int64("cursor_seq", opts.FromSeq).Int64("head_seq", rep.Head.Seq).
+			Msg("saved verifier cursor is above the chain head; verifying again from the trust base")
+		opts = Options{MaxRows: opts.MaxRows}
+		rep, err = src.VerifyOrg(ctx, org, opts)
+		if err != nil {
+			return err
+		}
+	}
 
 	next := st
 	next.Status, next.Reason, next.FirstBrokenSeq = rep.Status, rep.Reason, rep.FirstBrokenSeq
@@ -617,7 +634,12 @@ func verifyOrg(ctx context.Context, src Source, cfg Config, org string) error {
 			} else {
 				next.FullCursorSeq, next.FullCursorHash = 0, nil
 			}
-			if rep.ThroughSeq > st.ThroughSeq {
+			// The cursor only moves up, so a resumed run never moves it back. A run from
+			// the trust base replaces it when that run completed, and when it replaced a
+			// cursor the restore left above the head: its progress is verified from the
+			// trust base, so it is the right place to resume from.
+			fromBase := opts.FromSeq == 0
+			if rep.ThroughSeq > st.ThroughSeq || (fromBase && (rep.Complete || stale)) {
 				next.ThroughSeq, next.ThroughHash = rep.ThroughSeq, rep.ThroughHash
 			}
 		}

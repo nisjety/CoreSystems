@@ -744,6 +744,111 @@ func TestLoopErrorLeavesTheLastVerifyTimestampAlone(t *testing.T) {
 	}
 }
 
+// A restore from an older copy can leave the saved cursor above the head. The
+// chain is intact, so the pass resets the cursor to the head: no break, no failure.
+func TestLoopResetsACursorAboveTheHeadAfterARestore(t *testing.T) {
+	for _, cursor := range []int64{11, 14, 25} {
+		t.Run(fmt.Sprintf("cursor_%d", cursor), func(t *testing.T) {
+			f := newFixture(t, 10, 10)
+			src := &fakeSource{t: t, fix: f}
+			src.state = State{
+				Status:      StatusVerified,
+				ThroughSeq:  cursor,
+				ThroughHash: bytes.Repeat([]byte{0xab}, chain.HashSize),
+				LastFullAt:  epoch,
+			}
+			cfg := Config{Interval: time.Hour, Now: func() time.Time { return epoch.Add(time.Minute) }}
+			before := metricValue(t, "audit_core_chain_verify_failures_total")
+			if err := Pass(context.Background(), src, cfg); err != nil {
+				t.Fatal(err)
+			}
+			if got := src.state; got.Status != StatusVerified || got.ThroughSeq != 10 || !bytes.Equal(got.ThroughHash, f.head.Hash) {
+				t.Fatalf("state = %+v, want verified with the cursor reset to the head at 10", got)
+			}
+			if after := metricValue(t, "audit_core_chain_verify_failures_total"); after != before {
+				t.Fatalf("failures counter %v -> %v, want no failure for an intact chain", before, after)
+			}
+			if len(src.opts) != 2 || src.opts[0].FromSeq != cursor || src.opts[1].FromSeq != 0 {
+				t.Fatalf("runs = %+v, want the resumed run and then one from the trust base", src.opts)
+			}
+		})
+	}
+}
+
+// Rows that really run past the claimed head are a defect. A resumed run that
+// reads them keeps its verdict; a cursor above them is checked from the trust
+// base, which finds the same rows. Either way the break is counted once.
+func TestLoopKeepsARowPastTheHeadBrokenAndCountsOnce(t *testing.T) {
+	cfg := Config{Interval: time.Hour, Now: func() time.Time { return epoch.Add(time.Minute) }}
+	t.Run("resumed run reads the row", func(t *testing.T) {
+		f := newFixture(t, 14, 14)
+		f.head = Head{Seq: 10, Hash: f.rows[9].RowHash}
+		src := &fakeSource{t: t, fix: f}
+		src.state = State{Status: StatusVerified, ThroughSeq: 12, ThroughHash: f.rows[11].RowHash, LastFullAt: epoch}
+		before := metricValue(t, "audit_core_chain_verify_failures_total")
+		if err := Pass(context.Background(), src, cfg); err != nil {
+			t.Fatal(err)
+		}
+		assertBrokenPastHead(t, src, before, 12, 1)
+	})
+	t.Run("trust base run finds the row", func(t *testing.T) {
+		f := newFixture(t, 14, 14)
+		f.head = Head{Seq: 10, Hash: f.rows[9].RowHash}
+		src := &fakeSource{t: t, fix: f}
+		src.state = State{Status: StatusVerified, ThroughSeq: 16, ThroughHash: bytes.Repeat([]byte{0xab}, chain.HashSize), LastFullAt: epoch}
+		before := metricValue(t, "audit_core_chain_verify_failures_total")
+		if err := Pass(context.Background(), src, cfg); err != nil {
+			t.Fatal(err)
+		}
+		assertBrokenPastHead(t, src, before, 16, 2)
+	})
+}
+
+// assertBrokenPastHead checks a pass that ended broken at the first row past the
+// head, kept the cursor it started from, counted one failure and ran runs times.
+func assertBrokenPastHead(t *testing.T, src *fakeSource, before float64, cursor int64, runs int) {
+	t.Helper()
+	if got := src.state; got.Status != StatusBroken || got.Reason != ReasonHeadBehindChain || got.FirstBrokenSeq != 11 || got.ThroughSeq != cursor {
+		t.Fatalf("state = %+v, want broken at 11 for head_behind_chain with the cursor kept at %d", got, cursor)
+	}
+	if after := metricValue(t, "audit_core_chain_verify_failures_total"); after != before+1 {
+		t.Fatalf("failures counter %v -> %v, want +1", before, after)
+	}
+	if len(src.opts) != runs {
+		t.Fatalf("runs = %d, want %d", len(src.opts), runs)
+	}
+}
+
+// On a chain larger than the row cap, the run from the trust base cannot reach
+// the head in one pass. Its progress still replaces the cursor above the head, so
+// the following passes resume from it and verify the chain instead of repeating
+// the false break.
+func TestLoopHealsACursorAboveTheHeadOnAChainLargerThanTheRowCap(t *testing.T) {
+	f := newFixture(t, 10, 10)
+	src := &fakeSource{t: t, fix: f}
+	src.state = State{Status: StatusVerified, ThroughSeq: 14, ThroughHash: bytes.Repeat([]byte{0xab}, chain.HashSize), LastFullAt: epoch}
+	cfg := Config{Interval: time.Hour, MaxRows: 4, Now: func() time.Time { return epoch.Add(time.Minute) }}
+	before := metricValue(t, "audit_core_chain_verify_failures_total")
+
+	if err := Pass(context.Background(), src, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got := src.state; got.Status != StatusPartial || got.ThroughSeq != 4 {
+		t.Fatalf("first pass state = %+v, want partial with the cursor replaced by the progress at 4", got)
+	}
+	for i := 0; i < 3 && src.state.Status != StatusVerified; i++ {
+		if err := Pass(context.Background(), src, cfg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := src.state; got.Status != StatusVerified || got.ThroughSeq != 10 {
+		t.Fatalf("state = %+v after the following passes, want verified through 10", got)
+	}
+	if after := metricValue(t, "audit_core_chain_verify_failures_total"); after != before {
+		t.Fatalf("failures counter %v -> %v, want no failure", before, after)
+	}
+}
+
 // metricValue reads an unlabelled counter or gauge from the default registry.
 func metricValue(t *testing.T, name string) float64 {
 	t.Helper()
