@@ -149,6 +149,29 @@ pub(crate) fn view_from_row(
     }
 }
 
+/// The org's learning-review policy in one word, for the memory controls an owner
+/// reads. Empty when this module does not govern the gate, so there is nothing to
+/// report; `unavailable` when the fail-closed rule refuses the org; otherwise
+/// `proposals` or `disabled`, as the gate itself decides them.
+pub(crate) fn learning_policy_label(
+    row: Option<&MirrorRow>,
+    now: DateTime<Utc>,
+    settings: &GateSettings,
+) -> &'static str {
+    if !settings.governed {
+        return "";
+    }
+    let view = view_from_row(row, now, settings);
+    if view.memory == OrgMemoryPolicy::Unavailable {
+        return "unavailable";
+    }
+    if view.learning_review {
+        "proposals"
+    } else {
+        "disabled"
+    }
+}
+
 /// The mirror row of one org, `None` when it was never fetched.
 pub(crate) async fn mirror_row<'e, E>(executor: E, org_id: &str) -> Result<Option<MirrorRow>, sqlx::Error>
 where
@@ -593,6 +616,44 @@ mod tests {
         assert!(!migration.to_uppercase().contains("DROP "));
         let revert = include_str!("../migrations/revert/0057_org_learning_policy_mirror.down.sql");
         assert!(revert.contains("DROP TABLE IF EXISTS org_learning_policy_mirror"));
+    }
+
+    #[test]
+    fn the_learning_policy_label_says_what_the_org_allows() {
+        let now = Utc::now();
+        let ungoverned = GateSettings::from_lookup(env(&[]));
+        assert_eq!(
+            learning_policy_label(Some(&row(true, "proposals", 1)), now, &ungoverned),
+            "",
+            "an ungoverned gate reports nothing"
+        );
+        assert_eq!(
+            learning_policy_label(None, now, &governed(true)),
+            "unavailable",
+            "a missing mirror fails closed"
+        );
+        assert_eq!(
+            learning_policy_label(Some(&row(true, "proposals", 1_000)), now, &governed(true)),
+            "unavailable",
+            "a stale mirror fails closed"
+        );
+        assert_eq!(
+            learning_policy_label(Some(&row(false, "proposals", 1)), now, &governed(true)),
+            "disabled"
+        );
+        assert_eq!(
+            learning_policy_label(Some(&row(true, "disabled", 1)), now, &governed(true)),
+            "disabled"
+        );
+        assert_eq!(
+            learning_policy_label(Some(&row(true, "proposals", 1)), now, &governed(true)),
+            "proposals"
+        );
+        assert_eq!(
+            learning_policy_label(None, now, &governed(false)),
+            "disabled",
+            "configured but never fetched, without the fail-closed rule, is the default"
+        );
     }
 
     fn poller(server: &MockServer) -> Poller {

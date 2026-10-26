@@ -378,13 +378,15 @@ impl MemoryService for MemoryGrpc {
         });
 
         // The one memory gate. A user who paused or switched memory off (or an
-        // org that disabled it) gets no recall of their own rows: the reason is
-        // returned so a caller can say "memory is off" instead of "nothing found".
-        let decision = crate::memory_control::resolve(
+        // org that disabled it) gets no recall of their own rows, and a thread set
+        // off gets none of its own: the reason is returned so a caller can say
+        // "memory is off" instead of "nothing found".
+        let decision = crate::memory_control::resolve_for_thread(
             &self.pool,
             false,
             req.org_id.trim(),
             &owner_user_id,
+            req.thread_id.trim(),
         )
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
@@ -497,10 +499,10 @@ impl MemoryService for MemoryGrpc {
         if conversation_only {
             return Err(Status::failed_precondition("Conversation-only tasks cannot create long-term memories."));
         }
-        // A paused or off user, or an org that disabled memory, saves nothing,
-        // whoever asks (the tool loop, a service, the user): the caller is told
-        // why rather than that nothing happened.
-        let gate = crate::memory_control::resolve(&self.pool, false, req.org_id.trim(), &owner_user_id)
+        // A paused or off user, an org that disabled memory, or a thread set off
+        // saves nothing, whoever asks (the tool loop, a service, the user): the
+        // caller is told why rather than that nothing happened.
+        let gate = crate::memory_control::resolve_for_thread(&self.pool, false, req.org_id.trim(), &owner_user_id, req.thread_id.trim())
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
         if !gate.generation_allowed {
@@ -521,7 +523,7 @@ impl MemoryService for MemoryGrpc {
             // `authorize_thread` already proved the thread is the caller's, so an
             // empty id is most likely the gate refusing under the row lock (a
             // pause that committed after the check above). Ask again to say so.
-            let gate = crate::memory_control::resolve(&self.pool, false, req.org_id.trim(), &owner_user_id)
+            let gate = crate::memory_control::resolve_for_thread(&self.pool, false, req.org_id.trim(), &owner_user_id, req.thread_id.trim())
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
             if !gate.generation_allowed {
@@ -899,13 +901,52 @@ impl MemoryService for MemoryGrpc {
         .map_err(|e| Status::internal(e.to_string()))?;
         // The semantic copy was tagged with the user id, whatever the durable
         // row's `owner` column holds for a thread-bound row.
-        let erased_rows: Vec<crate::memory_erasure::ErasedMemory> = erased
+        let mut erased_rows: Vec<crate::memory_erasure::ErasedMemory> = erased
             .iter()
             .map(|memory_id| crate::memory_erasure::ErasedMemory {
                 memory_id: memory_id.clone(),
                 owner: user_id.to_owned(),
             })
             .collect();
+        // ListMemory also shows semantic entries that no durable row names (a copy
+        // whose durable delete degraded earlier, or one the durable index never
+        // had). A reset that stopped at the durable rows would leave those behind,
+        // so they are erased too. A listing that cannot be read, or that reaches
+        // the erasure ceiling and so may hide more, is reported: it is never taken
+        // as empty.
+        let mut listing_degradation: Option<&'static str> = None;
+        if let Some(letta) = self.letta.as_ref() {
+            let listed = letta
+                .list_detailed(org_id, user_id, crate::memory_erasure::MAX_SEMANTIC_DELETES as u32)
+                .await;
+            listing_degradation = listed.degradation_reason.or_else(|| {
+                (listed.entries.len() >= crate::memory_erasure::MAX_SEMANTIC_DELETES)
+                    .then_some(crate::memory_erasure::SEMANTIC_ERASURE_TRUNCATED)
+            });
+            let semantic_only = semantic_only_ids(&erased, &listed.entries);
+            if !semantic_only.is_empty() {
+                // Recall is suppressed before any semantic delete is attempted, so an
+                // entry whose delete degrades is still filtered from every read. The
+                // user's control row exists here: reset_user_memory locked it.
+                sqlx::query(
+                    "INSERT INTO forgotten_memory_ids (org_id, user_id, memory_id) \
+                     SELECT $1, $2, id FROM unnest($3::text[]) AS listed(id) \
+                     ON CONFLICT DO NOTHING",
+                )
+                .bind(org_id)
+                .bind(user_id)
+                .bind(&semantic_only)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+                erased_rows.extend(semantic_only.into_iter().map(|memory_id| {
+                    crate::memory_erasure::ErasedMemory {
+                        memory_id,
+                        owner: user_id.to_owned(),
+                    }
+                }));
+            }
+        }
         let semantic =
             crate::memory_erasure::erase_semantic_copies(self.letta.as_ref(), org_id, &erased_rows)
                 .await;
@@ -916,23 +957,53 @@ impl MemoryService for MemoryGrpc {
                 "memory reset left semantic copies unconfirmed; recall stays suppressed"
             );
         }
-        Ok(Response::new(reset_response(erased.len(), &semantic)))
+        if let Some(reason) = listing_degradation {
+            tracing::warn!(
+                reason,
+                "memory reset could not confirm the semantic listing; reset not reported complete"
+            );
+        }
+        Ok(Response::new(reset_response(
+            erased.len(),
+            &semantic,
+            listing_degradation,
+        )))
     }
 }
 
+/// `listing` is the semantic tier's own listing of the user, when that could not be
+/// read or was capped: a reset that did not see every semantic entry is not
+/// complete, whatever the erasure of the entries it did see reports.
 fn reset_response(
     durable_deleted: usize,
     semantic: &crate::memory_erasure::SemanticErasure,
+    listing: Option<&'static str>,
 ) -> ResetMemoryResponse {
     ResetMemoryResponse {
         durable_deleted: u32::try_from(durable_deleted).unwrap_or(u32::MAX),
         semantic_unconfirmed: u32::try_from(semantic.unconfirmed).unwrap_or(u32::MAX),
-        degraded: !semantic.is_complete(),
-        degradation_reason: semantic
-            .degradation_reason
+        degraded: listing.is_some() || !semantic.is_complete(),
+        // The listing comes first, so its reason is the first one observed.
+        degradation_reason: listing
+            .or(semantic.degradation_reason)
             .unwrap_or_default()
             .to_owned(),
     }
+}
+
+/// The semantic entries a reset still has to erase: the ones the user's listing shows
+/// that the durable reset did not already cover. An empty id cannot be addressed, and
+/// a repeated id names one memory, so neither is kept.
+fn semantic_only_ids(erased: &[String], listed: &[MemoryEntry]) -> Vec<String> {
+    let mut seen: std::collections::HashSet<&str> = erased.iter().map(String::as_str).collect();
+    let mut ids = Vec::new();
+    for entry in listed {
+        if entry.memory_id.trim().is_empty() || !seen.insert(entry.memory_id.as_str()) {
+            continue;
+        }
+        ids.push(entry.memory_id.clone());
+    }
+    ids
 }
 
 /// The state and the decision it produces, as the wire message. Content-free.
@@ -974,10 +1045,29 @@ async fn memory_controls_view(
         crate::memory_control::MemoryReason::PolicyUnavailable => OrgMemoryPolicy::Unavailable,
         _ => OrgMemoryPolicy::Allow,
     };
+    // The org's learning-review policy as the mirror holds it. Blank for a ZDR
+    // caller (its controls are not read), for an ungoverned gate (there is no
+    // policy to report) and with the kill switch off (the policy is not applied).
+    let org_learning_policy = if zdr
+        || !crate::memory_control::controls_enabled()
+        || !crate::org_policy::settings().governed
+    {
+        String::new()
+    } else {
+        let mirror = crate::org_policy::mirror_row(pool, org_id)
+            .await
+            .map_err(internal)?;
+        crate::org_policy::learning_policy_label(
+            mirror.as_ref(),
+            Utc::now(),
+            crate::org_policy::settings(),
+        )
+        .to_owned()
+    };
     Ok(MemoryControls {
         state: state as i32,
         org_memory_policy: org_policy.as_str().to_owned(),
-        org_learning_policy: String::new(),
+        org_learning_policy,
         use_allowed: decision.access == MemoryAccess::Full,
         generation_allowed: decision.generation_allowed,
         learning_allowed: decision.learning_allowed,
@@ -1367,6 +1457,129 @@ mod tests {
             exists(foreign_memory.clone()).await,
             "a refused delete leaves the row alone"
         );
+    }
+
+    fn listed_memory(memory_id: &str) -> MemoryEntry {
+        MemoryEntry {
+            memory_id: memory_id.to_owned(),
+            content: "remembered".to_owned(),
+            ..MemoryEntry::default()
+        }
+    }
+
+    #[test]
+    fn semantic_only_ids_keeps_what_the_durable_reset_did_not_cover() {
+        let erased = vec!["mem-1".to_owned(), "mem-2".to_owned()];
+        let listed = [
+            listed_memory("mem-1"),
+            listed_memory(""),
+            listed_memory("mem-3"),
+            listed_memory("mem-3"),
+            listed_memory("mem-2"),
+            listed_memory("mem-4"),
+        ];
+        assert_eq!(
+            semantic_only_ids(&erased, &listed),
+            vec!["mem-3".to_owned(), "mem-4".to_owned()]
+        );
+        assert!(semantic_only_ids(&[], &[]).is_empty());
+    }
+
+    #[test]
+    fn a_reset_whose_listing_degraded_does_not_claim_completeness() {
+        let complete = crate::memory_erasure::SemanticErasure::default();
+        let clean = reset_response(3, &complete, None);
+        assert_eq!(clean.durable_deleted, 3);
+        assert!(!clean.degraded);
+        assert!(clean.degradation_reason.is_empty());
+
+        let listing = reset_response(3, &complete, Some("DEGRADED_LETTA_TIMEOUT"));
+        assert_eq!(listing.durable_deleted, 3);
+        assert!(listing.degraded);
+        assert_eq!(listing.degradation_reason, "DEGRADED_LETTA_TIMEOUT");
+    }
+
+    /// A thread set off must reach both the reader and the writer: each asks the
+    /// thread's gate, not the user's alone. Asserted at source level, as the other
+    /// gate contracts are.
+    #[test]
+    fn search_and_index_ask_the_thread_gate() {
+        let source = include_str!("memory_grpc.rs");
+        let at = |needle: &str| {
+            source
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle} must exist"))
+        };
+        let search = &source[at("async fn search_memory(")..at("async fn index_memory(")];
+        let index = &source[at("async fn index_memory(")..at("async fn list_memory(")];
+        for (name, body) in [("search_memory", search), ("index_memory", index)] {
+            assert!(
+                body.contains("memory_control::resolve_for_thread("),
+                "{name} must ask the thread's gate"
+            );
+            assert!(
+                !body.contains("memory_control::resolve("),
+                "{name} must not ask the user's gate alone"
+            );
+        }
+    }
+
+    /// A thread set off reads nothing and saves nothing, whatever the user's own
+    /// state, while the user's other threads are untouched.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres whose name contains \"test\""]
+    async fn thread_off_blocks_search_and_index_for_that_thread_only() {
+        let pool = scratch_pool().await;
+        let org = format!("thread-gate-{}", mp_ids::new_ulid());
+        let off = seed_reset_thread(&pool, &org, "user-a").await;
+        let open = seed_reset_thread(&pool, &org, "user-a").await;
+        sqlx::query("UPDATE threads SET memory_mode = 'off' WHERE id = $1")
+            .bind(&off)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let service = MemoryGrpc::new(pool.clone(), None);
+        let user = || VerifiedIdentity::user_for_test(&org, "user-a");
+
+        let searched = service
+            .search_memory(request(
+                SearchMemoryRequest {
+                    thread_id: off.clone(),
+                    ..search_request(&org)
+                },
+                user(),
+            ))
+            .await
+            .expect("a search on a thread set off is answered, empty")
+            .into_inner();
+        assert!(searched.entries.is_empty());
+        assert_eq!(searched.skip_reason, "thread_off");
+
+        let refused = service
+            .index_memory(request(
+                IndexMemoryRequest {
+                    thread_id: off.clone(),
+                    ..index_request(&org)
+                },
+                user(),
+            ))
+            .await
+            .expect_err("a write on a thread set off is refused");
+        assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(refused.message(), "memory_not_enabled:thread_off");
+
+        let open_search = service
+            .search_memory(request(
+                SearchMemoryRequest {
+                    thread_id: open.clone(),
+                    ..search_request(&org)
+                },
+                user(),
+            ))
+            .await
+            .expect("the user's other thread is still answered")
+            .into_inner();
+        assert_eq!(open_search.skip_reason, "");
     }
 
     fn reset_request(org_id: &str, user_id: &str, confirm: bool) -> ResetMemoryRequest {

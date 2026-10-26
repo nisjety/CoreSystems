@@ -331,13 +331,31 @@ async fn enqueue_row(
         if identity.thread_origin.as_deref() != Some("chat") {
             return Ok(Enqueued::SkippedOrigin);
         }
-        let decision = crate::memory_control::resolve(
+        let mut decision = crate::memory_control::resolve(
             &mut **savepoint,
             false,
             &identity.org_id,
             &identity.user_id,
         )
         .await?;
+        // The run's own thread can narrow the owner's state, never widen it: a thread
+        // set off is not learned from even where the owner allows it. The mode is read
+        // on the same savepoint, without a lock, as the owner's state is.
+        if let Some(thread_id) = identity.thread_id.as_deref() {
+            let mode: Option<String> =
+                sqlx::query_scalar("SELECT memory_mode FROM threads WHERE id = $1 AND org_id = $2")
+                    .bind(thread_id)
+                    .bind(&identity.org_id)
+                    .fetch_optional(&mut **savepoint)
+                    .await?;
+            // The CHECK constraint closes the set; an unknown value is treated as the
+            // most protective one, as memory_control's own thread lookup does.
+            let mode = mode.map_or(crate::memory_control::ThreadMemoryMode::Inherit, |value| {
+                crate::memory_control::ThreadMemoryMode::from_wire(&value)
+                    .unwrap_or(crate::memory_control::ThreadMemoryMode::Off)
+            });
+            decision = crate::memory_control::apply_thread_mode(decision, mode);
+        }
         if !decision.learning_allowed {
             return Ok(Enqueued::SkippedMemoryState);
         }
@@ -672,6 +690,34 @@ mod tests {
         for reason in ["\"reason\" => \"memory_state\"", "\"reason\" => \"origin\""] {
             assert!(source.contains(reason), "the skip is counted: {reason}");
         }
+    }
+
+    /// A thread set off is never announced, even when the owner allows learning: the
+    /// thread's own mode is folded into the owner's decision before the withholding
+    /// check, on the same savepoint and inside the kill switch.
+    #[test]
+    fn a_thread_set_off_is_never_announced() {
+        let source = include_str!("learning_events.rs");
+        let gate = source
+            .find("if crate::memory_control::controls_enabled() {")
+            .expect("the memory and origin gates sit behind the gate's kill switch");
+        let insert = source
+            .find("INSERT INTO session_audit_outbox")
+            .expect("enqueue must insert an outbox row");
+        let gated = &source[gate..insert];
+        let read = gated
+            .find("SELECT memory_mode FROM threads WHERE id = $1 AND org_id = $2")
+            .expect("the run's thread mode is read");
+        let fold = gated
+            .find("decision = crate::memory_control::apply_thread_mode(decision, mode);")
+            .expect("the thread's mode narrows the owner's decision");
+        let withheld = gated
+            .find("if !decision.learning_allowed {")
+            .expect("a denied decision withholds the announcement");
+        assert!(
+            read < fold && fold < withheld,
+            "read the thread's mode, fold it in, then withhold the announcement"
+        );
     }
 
     /// Both terminal paths must emit, or the high-volume surface goes unlearned:
