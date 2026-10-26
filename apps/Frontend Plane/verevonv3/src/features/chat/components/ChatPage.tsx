@@ -1055,6 +1055,7 @@ export default function ChatPage() {
               </div>
               <div
                 class="verevon-chat-thread"
+                data-chat-containment={import.meta.env.VITE_CHAT_CONTENT_CONTAINMENT === 'true' ? 'on' : undefined}
                 role={virtualizeTranscript ? 'feed' : undefined}
                 ref={(element) => {
                   threadElement = element
