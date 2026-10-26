@@ -701,8 +701,9 @@ impl StagedInputs {
             );
         }
         let dir = root.join(ATTACHMENTS_DIR);
-        // A directory left by a call that was killed mid-way; it is ours (the
-        // name is reserved), and a stale one would fail the create below.
+        // Whatever a call killed mid-way, or a program in a persistent root, left at
+        // the reserved name goes first: a stale entry would fail the create below.
+        // A link there is unlinked, not followed (see `remove_staged_dir`).
         remove_staged_dir(&dir);
         std::fs::create_dir(&dir)
             .map_err(|error| format!("code_interpreter could not stage attached files: {error}"))?;
@@ -731,13 +732,31 @@ impl Drop for StagedInputs {
     }
 }
 
-/// Removes a staged directory whatever mode it was left in. A missing directory
-/// is the normal case and is not an error.
+/// Removes whatever sits at a staged-directory name, in whatever mode it was left
+/// in. A missing entry is the normal case and is not an error.
+///
+/// The entry is looked at WITHOUT following links first. In a persistent Space
+/// root, a program from an earlier call of the same run can plant `attachments`
+/// as a symlink to a host directory, and `set_mode` is a chmod, which follows
+/// links: chmod-ing by path would change the mode of that host directory as the
+/// execution-core user. A link, or a file planted at the name, is unlinked and its
+/// target is never touched. This is not race-free: a process running in the same
+/// root can still swap the entry between the two calls below. Closing that needs
+/// the directory opened with O_NOFOLLOW and chmod-ed through that handle, which
+/// this crate does not do yet.
 fn remove_staged_dir(dir: &Path) {
-    // Best effort: the directory may not exist, and a chmod failure surfaces as
-    // the removal failure that follows.
-    let _ = set_mode(dir, 0o755);
-    if let Err(error) = std::fs::remove_dir_all(dir) {
+    let result = match std::fs::symlink_metadata(dir) {
+        Err(error) => Err(error),
+        Ok(metadata) if !metadata.is_dir() => std::fs::remove_file(dir),
+        Ok(_) => {
+            // A real directory this module staged: its entries are read-only, so the
+            // directory itself must be writable before they can be removed. Best
+            // effort: a chmod failure surfaces as the removal failure that follows.
+            let _ = set_mode(dir, 0o755);
+            std::fs::remove_dir_all(dir)
+        }
+    };
+    if let Err(error) = result {
         if error.kind() != std::io::ErrorKind::NotFound {
             tracing::warn!(%error, dir = %dir.display(), "attached files cleanup failed");
         }
@@ -1660,6 +1679,179 @@ mod tests {
             workspaces_of("run-attach-cleanup"),
             Vec::<String>::new(),
             "no verevon-code workspace may remain after the call"
+        );
+    }
+
+    /// Puts owner write access back on a directory a test locked down, so the
+    /// tempdir cleanup still works when an assertion fails part-way.
+    #[cfg(unix)]
+    struct OwnerWritable(PathBuf);
+
+    #[cfg(unix)]
+    impl Drop for OwnerWritable {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    /// A host directory a program must not reach through the persistent root:
+    /// read-only, holding one file that has to survive.
+    #[cfg(unix)]
+    fn locked_host_dir(label: &str) -> PersistentTestDir {
+        use std::os::unix::fs::PermissionsExt;
+        let host = PersistentTestDir::new(&format!("{label}-{}", std::process::id()));
+        std::fs::write(host.0.join("keep.txt"), b"host data").expect("host file");
+        std::fs::set_permissions(&host.0, std::fs::Permissions::from_mode(0o500))
+            .expect("lock the host directory");
+        host
+    }
+
+    /// True only when nothing at all, not even a dangling link, sits at `path`.
+    #[cfg(unix)]
+    fn is_absent(path: &Path) -> bool {
+        matches!(
+            std::fs::symlink_metadata(path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        )
+    }
+
+    /// A symlink planted at the reserved name is unlinked. The directory it points
+    /// at keeps its mode and its contents: the chmod that used to run first
+    /// followed the link and changed the host directory's mode.
+    #[cfg(unix)]
+    #[test]
+    fn a_planted_symlink_is_unlinked_and_its_target_is_never_chmodded() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = PersistentTestDir::new(&format!("planted-link-{}", std::process::id()));
+        let host = locked_host_dir("planted-link-host");
+        let _restore = OwnerWritable(host.0.clone());
+        let link = root.0.join(ATTACHMENTS_DIR);
+        std::os::unix::fs::symlink(&host.0, &link).expect("plant the link");
+
+        remove_staged_dir(&link);
+
+        assert!(is_absent(&link), "the planted link must be removed");
+        let metadata = std::fs::metadata(&host.0).expect("host directory");
+        let mode = metadata.permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o500,
+            "the link target's mode must not change"
+        );
+        assert!(
+            host.0.join("keep.txt").is_file(),
+            "the link target's contents must survive"
+        );
+    }
+
+    /// A regular file at the reserved name is not a staged directory. Left in
+    /// place it would make every later staging fail with a create error.
+    #[cfg(unix)]
+    #[test]
+    fn a_regular_file_planted_at_the_reserved_name_is_removed() {
+        let root = PersistentTestDir::new(&format!("planted-file-{}", std::process::id()));
+        let planted = root.0.join(ATTACHMENTS_DIR);
+        std::fs::write(&planted, b"not a directory").expect("plant the file");
+
+        remove_staged_dir(&planted);
+
+        assert!(is_absent(&planted), "a planted file must be removed");
+    }
+
+    /// A staged directory is read-only and so is the file in it. Removing the
+    /// pair has to make the directory writable first, as it always has.
+    #[cfg(unix)]
+    #[test]
+    fn a_staged_read_only_directory_is_removed() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = PersistentTestDir::new(&format!("staged-ro-{}", std::process::id()));
+        let staged = root.0.join(ATTACHMENTS_DIR);
+        std::fs::create_dir(&staged).expect("staged directory");
+        let file = staged.join("data.csv");
+        std::fs::write(&file, b"a,b\n").expect("staged file");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o444)).expect("file mode");
+        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o555))
+            .expect("directory mode");
+        let _restore = OwnerWritable(staged.clone());
+
+        remove_staged_dir(&staged);
+
+        assert!(
+            is_absent(&staged),
+            "a staged read-only directory must be removed"
+        );
+    }
+
+    /// A persistent root keeps its directory when a call is killed mid-way, so the
+    /// next call finds it there and must restage over it.
+    #[cfg(unix)]
+    #[test]
+    fn a_persistent_root_restages_over_a_leftover_attachments_directory() {
+        if !crate::sandbox::is_supported() {
+            eprintln!("skipping: the OS sandbox is unavailable");
+            return;
+        }
+        let root = PersistentTestDir::new(&format!("restage-{}", std::process::id()));
+        let (_first_guard, first) = registered(&[("data.csv", b"first call")]);
+        let leftover = StagedInputs::stage(&root.0, &first)
+            .expect("first staging")
+            .expect("the first call has a file");
+        // A killed call never runs Drop, so its directory stays behind.
+        std::mem::forget(leftover);
+
+        let (_second_guard, second) = registered(&[("data.csv", b"second call")]);
+        let restaged = StagedInputs::stage(&root.0, &second)
+            .expect("the second staging must not fail over the leftover")
+            .expect("the second call has a file");
+        assert_eq!(
+            std::fs::read(root.0.join(ATTACHMENTS_DIR).join("data.csv")).expect("restaged file"),
+            b"second call",
+            "this call's files must replace the leftover"
+        );
+        drop(restaged);
+        assert!(
+            is_absent(&root.0.join(ATTACHMENTS_DIR)),
+            "the restaged directory is removed on drop"
+        );
+    }
+
+    /// The attack a persistent root allows: an earlier call plants `attachments` as
+    /// a symlink to a host directory. Staging must replace the link with its own
+    /// directory and leave the host directory exactly as it was.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_planted_in_a_persistent_root_is_replaced_and_never_followed() {
+        use std::os::unix::fs::PermissionsExt;
+        if !crate::sandbox::is_supported() {
+            eprintln!("skipping: the OS sandbox is unavailable");
+            return;
+        }
+        let root = PersistentTestDir::new(&format!("planted-stage-{}", std::process::id()));
+        let host = locked_host_dir("planted-stage-host");
+        let _restore = OwnerWritable(host.0.clone());
+        std::os::unix::fs::symlink(&host.0, root.0.join(ATTACHMENTS_DIR)).expect("plant the link");
+        let (_guard, set) = registered(&[("data.csv", b"fresh")]);
+
+        let _staged = StagedInputs::stage(&root.0, &set)
+            .expect("staging must replace the planted link")
+            .expect("the call has a file");
+
+        let metadata = std::fs::metadata(&host.0).expect("host directory");
+        let mode = metadata.permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o500,
+            "the host directory's mode must not change"
+        );
+        assert!(
+            host.0.join("keep.txt").is_file(),
+            "the host directory's contents must survive"
+        );
+        let entry = std::fs::symlink_metadata(root.0.join(ATTACHMENTS_DIR)).expect("staged entry");
+        assert!(
+            entry.is_dir() && !entry.file_type().is_symlink(),
+            "staging must leave a real directory in the root"
         );
     }
 }
