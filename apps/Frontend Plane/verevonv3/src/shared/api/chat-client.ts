@@ -2528,7 +2528,31 @@ export async function listChatThreadsPage(
   }
 }
 
+/**
+ * WS09 S6. With `VITE_CHAT_PARALLEL_THREAD_LOAD` set to exactly `true`, a call
+ * that arrives while a listing walk is running takes that walk's result instead
+ * of paging the whole listing again. Off, every call walks, as it always did.
+ * Read at call time so a test can stub it.
+ */
+export function parallelThreadLoadEnabled(): boolean {
+  return import.meta.env.VITE_CHAT_PARALLEL_THREAD_LOAD === 'true'
+}
+
+let listChatThreadsInFlight: Promise<ChatThreadSession[]> | null = null
+
 export async function listChatThreads(): Promise<ChatThreadSession[]> {
+  if (!parallelThreadLoadEnabled()) return listAllChatThreadPages()
+  // The sidebar, the dashboard and the retention check all list at mount. Each
+  // caller gets its own array, so one that sorts its copy cannot reorder another's.
+  if (!listChatThreadsInFlight) {
+    listChatThreadsInFlight = listAllChatThreadPages().finally(() => {
+      listChatThreadsInFlight = null
+    })
+  }
+  return [...(await listChatThreadsInFlight)]
+}
+
+async function listAllChatThreadPages(): Promise<ChatThreadSession[]> {
   // Walk every page before reconciling: a thread on page two is still listed,
   // and reconciling against page one alone would erase its local copy. A cursor
   // the walk has already requested ends it, so a server that stops advancing

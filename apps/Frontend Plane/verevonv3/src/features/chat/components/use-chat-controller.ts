@@ -75,6 +75,7 @@ import {
   listChatThreadEvents,
   getThreadMessages,
   getChatThread,
+  parallelThreadLoadEnabled,
   approvePlan,
   rejectPlan,
   listModels,
@@ -1198,6 +1199,20 @@ export function useChatController() {
         ? storedTitle.title.trim()
         : null,
     )
+    // WS09 S6. With VITE_CHAT_PARALLEL_THREAD_LOAD=true the reads go out together.
+    // The messages read is awaited further down; `void ...catch` keeps it from
+    // rejecting unhandled when a thread switch leaves it unawaited. The transcript
+    // is read only when the local snapshot has no turns, since only the transcript
+    // carries grounding, citations and artifacts (the messages read drops them), and
+    // the session already carries the updatedAt the transcript would add.
+    const parallelLoad = parallelThreadLoadEnabled()
+    const localCached = readChatThreadTranscript(threadId)
+    const localHasTurns = (localCached?.turns.length ?? 0) > 0
+    const messagesRequest = parallelLoad ? getThreadMessages(threadId) : undefined
+    void messagesRequest?.catch(() => undefined)
+    const transcriptRequest = parallelLoad && !localHasTurns
+      ? getChatThreadTranscript(threadId).catch(() => null)
+      : undefined
     // Recover the non-secret routing hint from the server-owned listing so a
     // scoped thread remains appendable after a page reload. No authority is
     // cached: the BFF obtains a new Control decision for the actual content.
@@ -1206,8 +1221,10 @@ export function useChatController() {
     const session = await getChatThread(threadId).catch(() => null)
     const scoped = session?.spaceRef?.trim()
     if (scoped) scopedThreadRefs.set(threadId, scoped)
-    const localCached = readChatThreadTranscript(threadId)
-    const serverCached = await getChatThreadTranscript(threadId).catch(() => null)
+    const transcriptSkipped = parallelLoad && session !== null && localHasTurns
+    const serverCached = transcriptSkipped
+      ? null
+      : await (transcriptRequest ?? getChatThreadTranscript(threadId).catch(() => null))
     if (seq !== threadLoadSequence) return
     // Session Core's transcript is authoritative for message text, but it is
     // intentionally envelope-only: it does not store the browser's rich
@@ -1225,10 +1242,14 @@ export function useChatController() {
       localCached?.taskSteps ?? serverCached?.taskSteps
     ) as ChatThreadTranscriptStep[] | undefined
     const cachedTaskSteps = cachedTaskStepValues?.map(transcriptStepToTaskStep) ?? []
-    const cachedUpdatedAt = serverCached?.updatedAt ?? localCached?.updatedAt
     try {
-      const history = await getThreadMessages(threadId)
+      const history = await (messagesRequest ?? getThreadMessages(threadId))
       if (seq !== threadLoadSequence) return
+      // A skipped transcript would have stamped the session's updatedAt, and it
+      // exists only for a thread that has messages to return.
+      const cachedUpdatedAt = serverCached?.updatedAt
+        ?? (transcriptSkipped && history.length > 0 ? session?.updatedAt : undefined)
+        ?? localCached?.updatedAt
       const serverTurns = dedupeChatTurns(history.map(messageToTurn))
       const mergedTurns = carryInFlightAssistantTurn(
         serverTurns.length > 0

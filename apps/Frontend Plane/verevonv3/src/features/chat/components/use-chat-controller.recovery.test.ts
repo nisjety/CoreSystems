@@ -82,7 +82,13 @@ vi.mock('@/shared/api/orchestration-client', async (importOriginal) => {
   }
 })
 
-import { CHAT_THREAD_TRANSCRIPTS_KEY, setActiveChatThreadId } from '@/features/chat/lib/chat-thread-history'
+import {
+  CHAT_THREAD_TRANSCRIPTS_KEY,
+  readActiveChatThreadId,
+  readChatThreadHistory,
+  setActiveChatThreadId,
+  upsertChatThreadHistory,
+} from '@/features/chat/lib/chat-thread-history'
 import { useChatController } from './use-chat-controller'
 
 const RUN_ID = '01M2ZNAZ0W48WCREHFTGPKPNV2'
@@ -534,5 +540,91 @@ describe('a ChatGPT-subscription refusal is never retried by the chat', () => {
       expect(mocks.streamChat).toHaveBeenCalledTimes(1)
       expect(mocks.resumeStream).not.toHaveBeenCalled()
     })
+  })
+})
+
+/**
+ * WS09 S6: with `VITE_CHAT_PARALLEL_THREAD_LOAD=true` the cold open reads the
+ * messages beside the session, and the transcript only when the local snapshot
+ * cannot supply the turns. A thread opens to the same turns either way, and a
+ * thread the server no longer has is still evicted.
+ */
+describe('WS09 S6 cold open reads', () => {
+  const THREAD = 'thread-cold-open'
+  const STAMP = '2026-10-20T10:00:00.000Z'
+  const QUESTION = { id: 'msg-q', role: 'user' as const, content: 'Where is the report?', createdAt: '' }
+  const ANSWER = { id: 'msg-a', role: 'assistant' as const, content: 'In the shared folder.', createdAt: '' }
+  const SOURCE = { id: 'src-1', title: 'Rapport', url: 'https://example.test/rapport', snippet: 'Shared folder' }
+
+  beforeEach(() => {
+    mocks.listChatThreads.mockResolvedValue([{
+      threadId: THREAD, title: 'Cold open', preview: 'Cold open', updatedAt: STAMP, pinned: false,
+    }])
+    mocks.getThreadMessages.mockResolvedValue([QUESTION, ANSWER])
+    // The transcript holds the same turns plus the citation the messages read drops.
+    mocks.getChatThreadTranscript.mockResolvedValue({
+      threadId: THREAD,
+      updatedAt: STAMP,
+      turns: [
+        { id: QUESTION.id, role: 'user', content: QUESTION.content },
+        { id: ANSWER.id, role: 'assistant', content: ANSWER.content, citations: [SOURCE] },
+      ],
+    })
+  })
+
+  afterEach(() => {
+    vi.unstubAllEnvs()
+    forgetStoredThreads()
+  })
+
+  // Client storage reads fall back to sessionStorage, so clearing only
+  // localStorage would leave a snapshot behind and turn a cold open warm.
+  function forgetStoredThreads() {
+    window.localStorage.clear()
+    window.sessionStorage.clear()
+  }
+
+  /** Open the thread twice, so the second open finds the snapshot the first left. */
+  async function openTwice(): Promise<unknown[]> {
+    const opens: unknown[] = []
+    for (let open = 0; open < 2; open += 1) {
+      setActiveChatThreadId(THREAD)
+      await withController(async (controller) => {
+        await tick(30)
+        opens.push(JSON.parse(JSON.stringify(controller.state.turns)))
+      })
+    }
+    return opens
+  }
+
+  it('opens to the same turns with the flag on as off, and reads the transcript only on a cold open', async () => {
+    forgetStoredThreads()
+    mocks.getChatThreadTranscript.mockClear()
+    const sequential = await openTwice()
+    expect(mocks.getChatThreadTranscript).toHaveBeenCalledTimes(2)
+
+    vi.stubEnv('VITE_CHAT_PARALLEL_THREAD_LOAD', 'true')
+    forgetStoredThreads()
+    mocks.getChatThreadTranscript.mockClear()
+    const parallel = await openTwice()
+    expect(mocks.getChatThreadTranscript).toHaveBeenCalledTimes(1)
+
+    expect(parallel).toEqual(sequential)
+    expect(parallel[0]).toMatchObject([
+      { role: 'user', content: QUESTION.content, createdAt: STAMP },
+      { role: 'assistant', content: ANSWER.content, citations: [SOURCE] },
+    ])
+  })
+
+  it('still evicts a thread the server no longer has, with the flag on', async () => {
+    vi.stubEnv('VITE_CHAT_PARALLEL_THREAD_LOAD', 'true')
+    upsertChatThreadHistory({ threadId: THREAD, title: 'Cold open', preview: 'Cold open', updatedAt: STAMP })
+    mocks.getThreadMessages.mockRejectedValue(new ApiError('Thread not found.', 404, 'thread_not_found'))
+    setActiveChatThreadId(THREAD)
+    await withController(async () => {
+      await tick(30)
+    })
+    expect(readChatThreadHistory().map((item) => item.threadId)).not.toContain(THREAD)
+    expect(readActiveChatThreadId()).toBeNull()
   })
 })

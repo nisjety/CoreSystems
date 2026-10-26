@@ -15,6 +15,7 @@ import {
   listChatThreadsPage,
   modelEffortLevels,
   modelSupportsAgentic,
+  parallelThreadLoadEnabled,
   parseTurnTiming,
   queueInvocationInput,
   resumeStream,
@@ -2448,5 +2449,49 @@ describe('chat-client thread search (WS17 S4)', () => {
 
     await expect(searchChatThreads('   ')).rejects.toThrow()
     expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('chat-client thread listing under WS09 S6', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.unstubAllEnvs()
+  })
+
+  const listing = () => new Response(JSON.stringify({
+    data: { sessions: [{ threadId: 'thread_1', title: 'One', preview: '', updatedAt: '2026-06-17T10:00:00.000Z' }] },
+  }), { headers: { 'Content-Type': 'application/json' }, status: 200 })
+
+  it('reads the flag only as the exact literal true', () => {
+    vi.stubEnv('VITE_CHAT_PARALLEL_THREAD_LOAD', 'true')
+    expect(parallelThreadLoadEnabled()).toBe(true)
+    vi.stubEnv('VITE_CHAT_PARALLEL_THREAD_LOAD', 'TRUE')
+    expect(parallelThreadLoadEnabled()).toBe(false)
+    vi.stubEnv('VITE_CHAT_PARALLEL_THREAD_LOAD', '1')
+    expect(parallelThreadLoadEnabled()).toBe(false)
+  })
+
+  it('shares one walk between concurrent callers, and gives each its own array', async () => {
+    vi.stubEnv('VITE_CHAT_PARALLEL_THREAD_LOAD', 'true')
+    const fetchMock = vi.fn(async () => listing())
+    vi.stubGlobal('fetch', fetchMock)
+
+    const [first, second] = await Promise.all([listChatThreads(), listChatThreads()])
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(second).toEqual(first)
+    expect(second).not.toBe(first)
+    // Once that walk has settled, the next call lists again rather than reusing it.
+    await listChatThreads()
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('walks the listing for every concurrent call while the flag is off', async () => {
+    const fetchMock = vi.fn(async () => listing())
+    vi.stubGlobal('fetch', fetchMock)
+
+    await Promise.all([listChatThreads(), listChatThreads()])
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 })
