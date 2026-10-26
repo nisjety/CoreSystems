@@ -12,6 +12,7 @@ import {
 import { Portal } from '@solidjs/web'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import { createElementHeight } from '@/shared/ui/verevon/createElementHeight'
+import { VerevonTextButton } from '@/shared/ui/verevon/VerevonTextButton'
 import {
   ArrowDown,
   CalendarClock,
@@ -139,6 +140,9 @@ export default function ChatPage() {
     input,
     setInput,
     setMessageListRef,
+    hasEarlierTurns,
+    loadingEarlierTurns,
+    loadEarlier,
   } = useChatController()
 
   // The attachment chip that summoned the canvas stays selected when several
@@ -328,6 +332,20 @@ export default function ChatPage() {
   const [viewport, setViewport] = createSignal({ top: 0, height: 0, rowGap: 0 })
   let listElement: HTMLDivElement | undefined
   let threadElement: HTMLDivElement | undefined
+  // WS09 S9. Older turns land above the reader. The row that followed the control
+  // is measured before the request and again once the turns are in, and the list
+  // scrolls by however far that row moved, so a reply streamed at the bottom in
+  // the meantime does not count as a shift.
+  const handleLoadEarlier = async (): Promise<void> => {
+    const control = threadElement?.querySelector<HTMLElement>('.verevon-chat-load-earlier')
+    const anchor = control?.nextElementSibling ?? null
+    const topBefore = anchor?.getBoundingClientRect().top ?? 0
+    await loadEarlier()
+    requestAnimationFrame(() => {
+      if (!listElement || !anchor?.isConnected) return
+      listElement.scrollTop += anchor.getBoundingClientRect().top - topBefore
+    })
+  }
   const measureViewport = () => {
     if (!listElement || !threadElement) return
     // The viewport's top edge, measured from the top of the transcript. The
@@ -734,6 +752,15 @@ export default function ChatPage() {
   const contextualPanel = () => (
     <Switch>
       <Match when={activeTab() === 'sources'}>
+        {/* WS09 S9. The sources are those of the loaded turns; say so while older ones remain. */}
+        <Show when={hasEarlierTurns()}>
+          <p class="verevon-chat-sources-partial" role="note">
+            {i18n.tr(
+              'Eldre meldinger er ikke lastet, så kildene i dem vises ikke. Last inn eldre meldinger for å se dem.',
+              'Older turns are not loaded, so their sources are not shown. Load earlier messages to see them.',
+            )}
+          </p>
+        </Show>
         <SourcesPanel grounding={latestGrounding()} sources={evidenceSources()} />
       </Match>
       <Match when={activeTab() === 'artifacts'}>
@@ -1034,6 +1061,18 @@ export default function ChatPage() {
                   viewportObserver?.observe(element)
                 }}
               >
+                {/* WS09 S9. The thread was opened on its newest page; older turns are one request away. */}
+                <Show when={hasEarlierTurns()}>
+                  <VerevonTextButton
+                    class="verevon-chat-load-earlier"
+                    disabled={loadingEarlierTurns()}
+                    onClick={() => void handleLoadEarlier()}
+                  >
+                    {loadingEarlierTurns()
+                      ? i18n.tr('Laster eldre meldinger …', 'Loading earlier messages …')
+                      : i18n.tr('Last inn eldre meldinger', 'Load earlier messages')}
+                  </VerevonTextButton>
+                </Show>
                 {/* Keyed by turn id: messageRows rebuilds its row objects on every copy, feedback or approval change; unkeyed, each change remounted the whole transcript. */}
                 <Show
                   when={virtualizeTranscript}

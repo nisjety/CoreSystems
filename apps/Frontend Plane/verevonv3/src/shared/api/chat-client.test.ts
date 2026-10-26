@@ -11,10 +11,12 @@ import {
   getChatThread,
   getChatThreadTranscript,
   getThreadContext,
+  getThreadMessages,
   listChatThreads,
   listChatThreadsPage,
   modelEffortLevels,
   modelSupportsAgentic,
+  pagedTranscriptEnabled,
   parallelThreadLoadEnabled,
   parseTurnTiming,
   queueInvocationInput,
@@ -2256,6 +2258,72 @@ describe('lifecycle notices (WS15 S1)', () => {
 
     expect(onCompaction).toHaveBeenCalledWith({ scope: 'history', outcome: 'truncated', requestId: 'req-1' })
     expect(onContextChange).toHaveBeenCalledWith({ change: 'history_shed', messagesDropped: 4, requestId: 'req-1' })
+  })
+})
+
+describe('WS09 S9 paged thread messages', () => {
+  const json = { headers: { 'Content-Type': 'application/json' }, status: 200 }
+
+  afterEach(() => {
+    vi.unstubAllEnvs()
+    vi.unstubAllGlobals()
+  })
+
+  it('sends the page size and the cursor, and reads has_more from the page the BFF returns', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: {
+        thread_id: 't1',
+        messages: [
+          { message_id: '01M', role: 'user', content: 'Older question' },
+          { message_id: '01N', role: 'assistant', content: 'Older answer' },
+        ],
+        has_more: true,
+      },
+    }), json))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const page = await getThreadMessages('t1', { limit: 100, beforeMessageId: '01P' })
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain('/api/v1/chat/threads/t1/messages?limit=100&before=01P')
+    expect(page.hasMore).toBe(true)
+    expect(page.messages.map((message) => [message.id, message.content])).toEqual([
+      ['01M', 'Older question'],
+      ['01N', 'Older answer'],
+    ])
+  })
+
+  it('reports no older page when the oldest message has no id to continue from', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: { messages: [{ role: 'user', content: 'Written before ids were returned' }], has_more: true },
+    }), json)))
+
+    const page = await getThreadMessages('t1', { limit: 100 })
+
+    expect(page.hasMore).toBe(false)
+    expect(page.messages).toHaveLength(1)
+  })
+
+  it('reads the whole thread as a plain list, with no query, when no page is asked for', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: { thread_id: 't1', messages: [{ message_id: '01M', role: 'user', content: 'Only' }] },
+    }), json))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const messages = await getThreadMessages('t1')
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toMatch(/\/api\/v1\/chat\/threads\/t1\/messages$/)
+    expect(Array.isArray(messages)).toBe(true)
+    expect(messages.map((message) => message.id)).toEqual(['01M'])
+  })
+
+  it('turns paging on only for the exact value true', () => {
+    expect(pagedTranscriptEnabled()).toBe(false)
+    vi.stubEnv('VITE_CHAT_PAGED_TRANSCRIPT', 'TRUE')
+    expect(pagedTranscriptEnabled()).toBe(false)
+    vi.stubEnv('VITE_CHAT_PAGED_TRANSCRIPT', '1')
+    expect(pagedTranscriptEnabled()).toBe(false)
+    vi.stubEnv('VITE_CHAT_PAGED_TRANSCRIPT', 'true')
+    expect(pagedTranscriptEnabled()).toBe(true)
   })
 })
 

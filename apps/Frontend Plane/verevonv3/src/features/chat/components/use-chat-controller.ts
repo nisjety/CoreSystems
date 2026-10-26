@@ -75,6 +75,7 @@ import {
   listChatThreadEvents,
   getThreadMessages,
   getChatThread,
+  pagedTranscriptEnabled,
   parallelThreadLoadEnabled,
   approvePlan,
   rejectPlan,
@@ -91,6 +92,7 @@ import {
   type ChatFeedbackRating,
   type ChatStreamHandlers,
   type ChatThreadEvent,
+  type ChatThreadMessagesPage,
 } from '@/shared/api/chat-client'
 import { OPENAI_CODEX_SUBSCRIPTION_PROVIDER } from '@/shared/api/chatgpt-subscription-client'
 import { resolveReplaySubscriptionConnectionId } from '@/shared/ai/model-selection'
@@ -119,6 +121,7 @@ import {
 import {
   applyToolResult,
   buildTaskSteps,
+  cachedTurnsBeforeWindow,
   citationEvidence,
   composerToolIdForToolName,
   createId,
@@ -127,6 +130,7 @@ import {
   extractCitationsFromToolOutput,
   formatUsageSummary,
   humanizeToolName,
+  isSameTurn,
   markQueuedInputsDelivered,
   mergeServerTurnsWithCachedMetadata,
   messageToTurn,
@@ -241,6 +245,11 @@ function safeBranchBoundary(turns: readonly ChatTurn[], requestedIndex: number):
 export function buildContinuationModelContent(userContent: string, partialAnswer: string): string {
   return `${userContent}\n\n[System: Svaret ditt ble avbrutt før det var ferdig. Du hadde allerede skrevet nøyaktig følgende, og det er allerede vist til brukeren — ikke gjenta noe av det:\n"""\n${partialAnswer}\n"""\nFortsett svaret nøyaktig der det slapp. Ikke skriv en innledning, ikke oppsummer det som står over, og ikke start på nytt — skriv bare den direkte fortsettelsen, som om teksten aldri stoppet.]`
 }
+
+/** WS09 S9. Messages per page of a paged thread, on open and for each "load earlier". */
+const THREAD_PAGE_SIZE = 100
+/** WS09 S9. The newest messages read to find the saved answer of a trailing turn. */
+const SAVED_ANSWER_TAIL_SIZE = 4
 
 /**
  * The numeric sequence behind an SSE `id:`. Model Gateway numbers every
@@ -471,6 +480,10 @@ export function useChatController() {
    * after the turns it summarises.
    */
   const [generatedTitle, setGeneratedTitle] = createSignal<string | null>(null)
+  // WS09 S9. A paged read leaves older messages on the server. These say whether
+  // any remain, and whether the next older page is on its way.
+  const [hasEarlierTurns, setHasEarlierTurns] = createSignal(false)
+  const [loadingEarlierTurns, setLoadingEarlierTurns] = createSignal(false)
   const title = () => generatedTitle() ?? createChatTitle(state.turns)
   /**
    * A durable Model run is not automatically a Work surface. The gateway
@@ -1152,6 +1165,20 @@ export function useChatController() {
     return [...merged, pending]
   }
 
+  // WS09 S9. The id of the oldest message the server has returned for the open
+  // thread, which is the cursor for the next older page, and how many turns at
+  // the head of the list are local-only and lie before that window.
+  let earlierCursor: string | null = null
+  let leadingTurnCount = 0
+  let earlierPageLoading = false
+
+  /** WS09 S9. The newest page of the thread when paging is on, the whole thread when it is off. */
+  const readThreadMessages = (threadId: string): Promise<ChatThreadMessagesPage> => (
+    pagedTranscriptEnabled()
+      ? getThreadMessages(threadId, { limit: THREAD_PAGE_SIZE })
+      : getThreadMessages(threadId).then((messages) => ({ messages, hasMore: false }))
+  )
+
   const loadThread = async (threadId: string) => {
     // The active-thread event for a newly-created conversation is a
     // confirmation, not a request to replace the optimistic live transcript.
@@ -1175,6 +1202,9 @@ export function useChatController() {
     snapshotWriter.flush()
     const seq = ++threadLoadSequence
     hydratingThreadId = threadId
+    earlierCursor = null
+    leadingTurnCount = 0
+    setHasEarlierTurns(false)
     setState((s) => {
       s.threadId = threadId
       s.status = 'idle'
@@ -1206,9 +1236,10 @@ export function useChatController() {
     // carries grounding, citations and artifacts (the messages read drops them), and
     // the session already carries the updatedAt the transcript would add.
     const parallelLoad = parallelThreadLoadEnabled()
+    const paged = pagedTranscriptEnabled()
     const localCached = readChatThreadTranscript(threadId)
     const localHasTurns = (localCached?.turns.length ?? 0) > 0
-    const messagesRequest = parallelLoad ? getThreadMessages(threadId) : undefined
+    const messagesRequest = parallelLoad ? readThreadMessages(threadId) : undefined
     void messagesRequest?.catch(() => undefined)
     const transcriptRequest = parallelLoad && !localHasTurns
       ? getChatThreadTranscript(threadId).catch(() => null)
@@ -1221,7 +1252,9 @@ export function useChatController() {
     const session = await getChatThread(threadId).catch(() => null)
     const scoped = session?.spaceRef?.trim()
     if (scoped) scopedThreadRefs.set(threadId, scoped)
-    const transcriptSkipped = parallelLoad && session !== null && localHasTurns
+    // A paged open skips the transcript the same way (WS09 S9): the newest page
+    // carries the messages, and the snapshot carries the grounding the page lacks.
+    const transcriptSkipped = (parallelLoad || paged) && session !== null && localHasTurns
     const serverCached = transcriptSkipped
       ? null
       : await (transcriptRequest ?? getChatThreadTranscript(threadId).catch(() => null))
@@ -1243,20 +1276,29 @@ export function useChatController() {
     ) as ChatThreadTranscriptStep[] | undefined
     const cachedTaskSteps = cachedTaskStepValues?.map(transcriptStepToTaskStep) ?? []
     try {
-      const history = await (messagesRequest ?? getThreadMessages(threadId))
+      const page = await (messagesRequest ?? readThreadMessages(threadId))
       if (seq !== threadLoadSequence) return
+      const history = page.messages
       // A skipped transcript would have stamped the session's updatedAt, and it
       // exists only for a thread that has messages to return.
       const cachedUpdatedAt = serverCached?.updatedAt
         ?? (transcriptSkipped && history.length > 0 ? session?.updatedAt : undefined)
         ?? localCached?.updatedAt
       const serverTurns = dedupeChatTurns(history.map(messageToTurn))
-      const mergedTurns = carryInFlightAssistantTurn(
+      // A window that is not the whole thread (WS09 S9) matches cached turns by
+      // their ids and words, and keeps the cached turns that lie before it.
+      const partial = paged && page.hasMore
+      const windowTurns = carryInFlightAssistantTurn(
         serverTurns.length > 0
-          ? mergeServerTurnsWithCachedMetadata(serverTurns, cachedTurns)
+          ? mergeServerTurnsWithCachedMetadata(serverTurns, cachedTurns, { partial })
           : cachedTurns,
         cachedTurns,
       )
+      const leadingTurns = partial ? cachedTurnsBeforeWindow(serverTurns, localCachedTurns) : []
+      leadingTurnCount = leadingTurns.length
+      earlierCursor = partial ? (history[0]?.id ?? null) : null
+      setHasEarlierTurns(earlierCursor !== null)
+      const mergedTurns = partial ? [...leadingTurns, ...windowTurns] : windowTurns
       let turns = fillMissingTurnTimestamps(mergedTurns, threadId, cachedUpdatedAt)
       // Cancelling private validation may leave no canonical assistant text,
       // and so may a run that failed, or one still working when this device
@@ -1359,6 +1401,48 @@ export function useChatController() {
   }
 
   /**
+   * WS09 S9. Prepend the next older page of the open thread. The local turns the
+   * page covers are replaced by the page's copies, which keep their metadata. The
+   * local turns older than the page stay while more pages remain, so a snapshot
+   * longer than one page is not cut short; at the start of the thread nothing is
+   * older than the page, so they are dropped, as an unpaged read would drop them.
+   * Ignored while a page is loading, when no older page is known, and when the
+   * thread changed under the request.
+   */
+  const loadEarlier = async () => {
+    const threadId = state.threadId
+    const cursor = earlierCursor
+    if (!threadId || !cursor || earlierPageLoading) return
+    const seq = threadLoadSequence
+    earlierPageLoading = true
+    setLoadingEarlierTurns(true)
+    try {
+      const page = await getThreadMessages(threadId, { limit: THREAD_PAGE_SIZE, beforeMessageId: cursor })
+      if (seq !== threadLoadSequence || state.threadId !== threadId) return
+      const visible = untrack(() => snapshot(state.turns))
+      const head = visible.slice(0, leadingTurnCount)
+      const pageTurns = dedupeChatTurns(page.messages.map(messageToTurn))
+      const isCovered = (turn: ChatTurn | undefined) => turn !== undefined
+        && pageTurns.some((older) => isSameTurn(older, turn))
+      let coveredFrom = head.length
+      while (coveredFrom > 0 && isCovered(head[coveredFrom - 1])) coveredFrom -= 1
+      const kept = page.hasMore ? head.slice(0, coveredFrom) : []
+      const olderTurns = mergeServerTurnsWithCachedMetadata(pageTurns, head.slice(coveredFrom), { partial: true })
+      earlierCursor = page.hasMore ? (page.messages[0]?.id ?? null) : null
+      leadingTurnCount = kept.length
+      setHasEarlierTurns(earlierCursor !== null)
+      setState((s) => {
+        s.turns = [...kept, ...olderTurns, ...visible.slice(head.length)]
+      })
+    } catch {
+      // The control stays up, so the same page can be asked for again.
+    } finally {
+      earlierPageLoading = false
+      setLoadingEarlierTurns(false)
+    }
+  }
+
+  /**
    * Resumable streams (chat-parity §3b): if the last assistant turn survived
    * into the persisted transcript still `status: 'waiting'`, the tab
    * closed/reloaded mid-answer — `ChatMessages` renders ANY turn with that
@@ -1423,6 +1507,21 @@ export function useChatController() {
     threadId: string,
     assistantId: string,
   ): Promise<{ kind: 'found'; answer: ChatTurn } | { kind: 'none' } | { kind: 'unreadable' }> => {
+    if (pagedTranscriptEnabled()) {
+      // WS09 S9. The saved answer is the trailing turn, so the newest few messages
+      // hold it. The messages read carries no citations, artifacts or grounding:
+      // an adopted answer keeps whatever the stream delivered for those.
+      const tail = await getThreadMessages(threadId, { limit: SAVED_ANSWER_TAIL_SIZE })
+        .then((page) => page.messages, () => undefined)
+      if (tail === undefined) return { kind: 'unreadable' }
+      const answer = savedAnswerForTrailingTurn(
+        state.turns,
+        assistantId,
+        dedupeChatTurns(tail.map(messageToTurn)),
+        { partial: true },
+      )
+      return answer ? { kind: 'found', answer } : { kind: 'none' }
+    }
     const transcript = await getChatThreadTranscript(threadId).catch(() => undefined)
     if (transcript === undefined) return { kind: 'unreadable' }
     const serverTurns = dedupeChatTurns((transcript?.turns ?? []).map((turn) =>
@@ -1956,6 +2055,9 @@ export function useChatController() {
     // cannot repopulate the new empty chat after the user chose New chat.
     threadLoadSequence += 1
     hydratingThreadId = null
+    earlierCursor = null
+    leadingTurnCount = 0
+    setHasEarlierTurns(false)
     setState(() => ({
       turns: [],
       taskSteps: [],
@@ -4267,5 +4369,9 @@ export function useChatController() {
     input,
     setInput,
     setMessageListRef,
+    // WS09 S9. The page's "load earlier" control.
+    hasEarlierTurns,
+    loadingEarlierTurns,
+    loadEarlier,
   }
 }

@@ -753,13 +753,22 @@ export function unsettledRunTurn(threadId: string, latestRunId: string, message:
  * of questions, and the server's last question must be the one this turn
  * answered. Any doubt returns `null`, which leaves the turn as the browser
  * settled it; adopting the wrong answer would be worse than not adopting one.
+ *
+ * `partial` is for a window of the newest messages (WS09 S9). Its question count
+ * cannot match the whole local thread, so only the trailing question is compared.
  */
-export function savedAnswerForTrailingTurn(localTurns: ChatTurn[], turnId: string, serverTurns: ChatTurn[]): ChatTurn | null {
+export function savedAnswerForTrailingTurn(
+  localTurns: ChatTurn[],
+  turnId: string,
+  serverTurns: ChatTurn[],
+  options: { partial?: boolean } = {},
+): ChatTurn | null {
   const index = localTurns.findIndex((turn) => turn.id === turnId)
   if (index < 0 || index !== localTurns.length - 1 || localTurns[index]?.role !== 'assistant') return null
   const localQuestions = localTurns.slice(0, index).filter((turn) => turn.role === 'user')
   const serverQuestionIndexes = serverTurns.flatMap((turn, at) => (turn.role === 'user' ? [at] : []))
-  if (localQuestions.length === 0 || serverQuestionIndexes.length !== localQuestions.length) return null
+  if (localQuestions.length === 0) return null
+  if (options.partial ? serverQuestionIndexes.length === 0 : serverQuestionIndexes.length !== localQuestions.length) return null
   const lastQuestionAt = serverQuestionIndexes.at(-1) as number
   const normalize = (value: string) => value.trim().replace(/\s+/g, ' ')
   const asked = normalize(localQuestions.at(-1)?.content ?? '')
@@ -968,7 +977,16 @@ export function timestampsAreClose(left: string, right: string): boolean {
   return Math.abs(leftTime - rightTime) < 60_000
 }
 
-export function mergeServerTurnsWithCachedMetadata(serverTurns: ChatTurn[], cachedTurns: ChatTurn[]): ChatTurn[] {
+/**
+ * `partial` marks `serverTurns` as a window of the thread (WS09 S9). A position
+ * in a window says nothing about the cached turn at the same place in the whole
+ * thread, so a turn in a window is matched by its id or its words only.
+ */
+export function mergeServerTurnsWithCachedMetadata(
+  serverTurns: ChatTurn[],
+  cachedTurns: ChatTurn[],
+  options: { partial?: boolean } = {},
+): ChatTurn[] {
   if (cachedTurns.length === 0) return serverTurns
   const usedCachedIds = new Set<string>()
   const roleOffsets: Record<ChatTurn['role'], number> = { assistant: 0, user: 0 }
@@ -976,7 +994,9 @@ export function mergeServerTurnsWithCachedMetadata(serverTurns: ChatTurn[], cach
   const merged = serverTurns.map((serverTurn) => {
     const roleIndex = roleOffsets[serverTurn.role]
     roleOffsets[serverTurn.role] += 1
-    const cachedTurn = selectCachedTurnForServerTurn(serverTurn, cachedTurns, usedCachedIds, roleIndex)
+    const cachedTurn = options.partial
+      ? selectCachedTurnByIdOrWords(serverTurn, cachedTurns, usedCachedIds)
+      : selectCachedTurnForServerTurn(serverTurn, cachedTurns, usedCachedIds, roleIndex)
     if (!cachedTurn) return serverTurn
     usedCachedIds.add(cachedTurn.id)
     return {
@@ -1080,6 +1100,33 @@ export function selectCachedTurnForServerTurn(
     ?? unusedSameRole.find((turn) => turnsProbablyMatch(serverTurn, turn))
     ?? unusedSameRole[roleIndex]
     ?? (serverTurn.role === 'assistant' ? [...unusedSameRole].reverse().find(hasCachedTurnMetadata) : undefined)
+}
+
+function selectCachedTurnByIdOrWords(
+  serverTurn: ChatTurn,
+  cachedTurns: ChatTurn[],
+  usedCachedIds: Set<string>,
+): ChatTurn | undefined {
+  const unusedSameRole = cachedTurns.filter((turn) => turn.role === serverTurn.role && !usedCachedIds.has(turn.id))
+  return unusedSameRole.find((turn) => turn.id === serverTurn.id)
+    ?? unusedSameRole.find((turn) => turnsProbablyMatch(serverTurn, turn))
+}
+
+/** Whether two turns are one message: the same id, or the same role and words. */
+export function isSameTurn(left: ChatTurn, right: ChatTurn): boolean {
+  return left.role === right.role && (left.id === right.id || turnsProbablyMatch(left, right))
+}
+
+/**
+ * The cached turns that lie before a window of the thread (WS09 S9). A window
+ * read leaves them out, but the local snapshot still holds them, so they stay
+ * until "load earlier" reaches the same messages. A snapshot that does not reach
+ * the window at all is older than it: keeping it would put a gap in the middle
+ * of the transcript and pass that gap off as continuous, so nothing is kept.
+ */
+export function cachedTurnsBeforeWindow(serverTurns: ChatTurn[], cachedTurns: ChatTurn[]): ChatTurn[] {
+  const firstShared = cachedTurns.findIndex((cached) => serverTurns.some((server) => isSameTurn(server, cached)))
+  return firstShared > 0 ? cachedTurns.slice(0, firstShared) : []
 }
 
 export function turnsProbablyMatch(left: ChatTurn, right: ChatTurn): boolean {

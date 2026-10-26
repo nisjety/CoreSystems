@@ -2474,13 +2474,57 @@ export async function getThreadContext(
   }
 }
 
+/**
+ * WS09 S9. With `VITE_CHAT_PAGED_TRANSCRIPT` set to exactly `true`, a thread is
+ * read in pages: the newest page on open, older pages on request. Off, the whole
+ * thread is read in one call, as it always was. Read at call time so a test can
+ * stub it.
+ */
+export function pagedTranscriptEnabled(): boolean {
+  return import.meta.env.VITE_CHAT_PAGED_TRANSCRIPT === 'true'
+}
+
+/** A page of a thread's messages, oldest first. */
+export type ChatThreadMessagesPage = {
+  messages: ChatMessage[]
+  /** True when older messages exist before `messages[0]`. */
+  hasMore: boolean
+}
+
+export type ChatThreadMessagesPageRequest = {
+  /** How many of the newest messages to return; the server clamps it. */
+  limit: number
+  /** The id of the oldest message already held: the page is the messages before it. */
+  beforeMessageId?: string
+}
+
+export function getThreadMessages(threadId: string): Promise<ChatMessage[]>
+export function getThreadMessages(
+  threadId: string,
+  page: ChatThreadMessagesPageRequest,
+): Promise<ChatThreadMessagesPage>
 export async function getThreadMessages(
   threadId: string,
-): Promise<ChatMessage[]> {
+  page?: ChatThreadMessagesPageRequest,
+): Promise<ChatMessage[] | ChatThreadMessagesPage> {
+  const search = new URLSearchParams()
+  if (page) {
+    search.set('limit', String(page.limit))
+    if (page.beforeMessageId) search.set('before', page.beforeMessageId)
+  }
+  const query = search.toString()
   const raw = await requestJson<unknown>(
-    `/api/v1/chat/threads/${encodeURIComponent(threadId)}/messages`,
+    `/api/v1/chat/threads/${encodeURIComponent(threadId)}/messages${query ? `?${query}` : ''}`,
   )
-  return normalizeThreadMessages(raw)
+  const messages = normalizeThreadMessages(raw)
+  if (!page) return messages
+  const record = objectValue(raw)
+  const oldestId = objectValue(Array.isArray(record?.messages) ? record?.messages[0] : undefined)?.message_id
+  // A page can only be continued from a message the server can name. A row
+  // written before ids were returned has none, so the page it starts cannot
+  // anchor the next one, and the reader is not offered a page it cannot ask for.
+  const anchored = typeof oldestId === 'string' && oldestId !== ''
+  return { messages, hasMore: record?.has_more === true && anchored }
 }
 
 /**
