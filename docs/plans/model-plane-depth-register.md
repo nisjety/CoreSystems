@@ -1014,6 +1014,21 @@ Built so far (batches B01 to B07): WS01-S0, WS01-S1 (partial), WS01-S6; WS02-S1,
 | D1-777 | WS09-S8 | follow-up | P3 | 26 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-25.json | open |
 | D1-778 | WS04-S7 | test-gap | P2 | Found by the lead's model-gateway --lib run (2026-10-26): the idempotency_registry tests an_outage_does_not_end_the_renewal and the_renewal_stops_once_the_stream_ends_and_settle_takes_over (added with the D1-481 renewal, e05ace637) failed 3/3: on the paused clock tokio::time::advance woke the renewal task but nothing polled it before the assertion. The lead first read it as an outage ending the renewal; HEAD's renew already answered true on an outage (trait doc, Redis store and fake), so the code was right and the tests were wrong. The tester's pass for e05ace637 cannot have run these tests. | resolved 2026-10-26 (Wave 1 depth packet mg-idempotency-renewal-survives-outage) |
 
+
+### Wave-mode batch W1-26 (2026-10-26)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D1-779 | WS02-S10.code | follow-up | P1 | Both named openai tests are unrun until the two lead shared edits land (provider/mod.rs field, grpc.rs mapping). The lib target fails only with the 5 missing-field errors. | open |
+| D1-780 | WS02-S10.code | risk | P1 | The adapter sends req.cache_scope_key as given. No shape check (32 lowercase hex, optionally ':sub') runs at the gate, so a caller bug could send non-derived text to OpenAI. Add the check before the switch is enabled anywhere. | open |
+| D1-781 | WS02-S10.code | risk | P1 | openai.rs sends_prompt_cache_key forwards req.cache_scope_key verbatim with no shape check (32 lowercase hex, optional ':sub'). A caller bug could put non-derived text, possibly content, into a provider body. Add the check before the switch is enabled anywhere. | open |
+| D1-782 | WS02-S10.code | live-proof | P1 | buf regen of the Go bindings so go/gen/model_plane/v1/inference.pb.go carries InferRequest.cache_scope_key = 19 (lead only; buf breaking stays vacuous until the WS12-S2 baseline exists). | open |
+| D1-783 | WS02-S10.code | live-proof | P1 | D7 enablement decision: the gate sends the key only to the first-party default endpoint (provider_id None, OpenAi flavor, default base). Azure and UnifiedAzureAi stay off until staging confirms they accept the parameter. | open |
+| D1-784 | WS02-S10.code | live-proof | P1 | Live proof (lead only): enable INFERENCE_OPENAI_PROMPT_CACHE_KEY on staging for the first-party OpenAI route and show a cache hit rate no lower than the S8 best run (S2 view evidence). | open |
+| D1-785 | WS02-S10.code | live-proof | P1 | After both shared edits, from apps/Model Plane/rust run `CARGO_INCREMENTAL=0 cargo test -p inference-core --lib openai`. Expect prompt_cache_key_sent_only_when_enabled_and_not_zdr and openai_zdr_body_has_no_prompt_cache_key to pass. Quote the 'test result:' line and the 'Compiling inference-core' line. Nothing in openai.rs has run yet. | open |
+| D1-786 | WS02-S10.code | live-proof | P1 | After the shared edits, also run `CARGO_INCREMENTAL=0 cargo check -p inference-core --all-targets`. The integration tests under inference-core/tests/ (span_attribution_test.rs, model_entitlement_chain_test.rs, fallback_test.rs, connection_zdr_capabilities_contract.rs, cache_test.rs) build provider::InferRequest literals. They appear to use ..Default::default() but that is unverified, and the lib run does not compile them. | open |
+| D1-787 | WS02-S10.code | follow-up | P3 | 10 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-26.json | open |
+
 ## Wave 2 (WS13 to WS27)
 
 Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS27-S0, WS27-S1. Wave 2 is not started as a wave: these came in with Wave 1 batches because they were Wave 1 prerequisites.
@@ -1766,3 +1781,4 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS07-S10 | money, audit | W1-24 | no |
 | WS09-S9 | zdr | W1-25 | no |
 | WS09-S8 | zdr, auth, authority | W1-25 | no |
+| WS02-S10.code | zdr | W1-26 | no |
