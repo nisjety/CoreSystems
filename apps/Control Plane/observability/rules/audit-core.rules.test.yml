@@ -149,6 +149,45 @@ tests:
         exp_alerts: []
 
   - interval: 1m
+    name: a purge refused for a broken prefix fires while the counter rises
+    input_series:
+      - series: 'audit_core_chain_purge_blocked_total{kind="row_hash_mismatch"}'
+        values: '0x5 1x20'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: ControlAuditChainPurgeBlocked
+        exp_alerts:
+          - exp_labels: { severity: critical, plane: control, kind: row_hash_mismatch }
+            exp_annotations:
+              summary: "audit-core refused to purge an org's expired audit rows: a chain prefix or checkpoint did not verify"
+
+  - interval: 1m
+    name: an unchanged purge-refused counter stays quiet
+    input_series:
+      - series: 'audit_core_chain_purge_blocked_total{kind="row_hash_mismatch"}'
+        values: '1x300'
+    alert_rule_test:
+      - eval_time: 200m
+        alertname: ControlAuditChainPurgeBlocked
+        exp_alerts: []
+
+  - interval: 1m
+    name: a purge refusal stays up for the 25-hour window and then clears
+    input_series:
+      - series: 'audit_core_chain_purge_blocked_total{kind="row_hash_mismatch"}'
+        values: '0x5 1x1700'
+    alert_rule_test:
+      - eval_time: 24h
+        alertname: ControlAuditChainPurgeBlocked
+        exp_alerts:
+          - exp_labels: { severity: critical, plane: control, kind: row_hash_mismatch }
+            exp_annotations:
+              summary: "audit-core refused to purge an org's expired audit rows: a chain prefix or checkpoint did not verify"
+      - eval_time: 27h
+        alertname: ControlAuditChainPurgeBlocked
+        exp_alerts: []
+
+  - interval: 1m
     name: a verifier that stopped finishing passes goes stale after 36 hours
     input_series:
       - series: 'audit_core_chain_last_verify_timestamp_seconds'

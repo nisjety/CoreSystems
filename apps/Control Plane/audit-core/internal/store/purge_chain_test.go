@@ -213,6 +213,18 @@ func countChained(t *testing.T, ctx context.Context, pool *pgxpool.Pool, org str
 	return n
 }
 
+// countIncidentsOfKind counts the incident rows of one kind in the shared test
+// database, so a test can tie a counter's rise to the rows a sweep wrote.
+func countIncidentsOfKind(t *testing.T, ctx context.Context, pool *pgxpool.Pool, kind string) int {
+	t.Helper()
+	var n int
+	if err := pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM audit_chain_incidents WHERE kind = $1`, kind).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
 func TestPurgeWritesSignedCheckpointAndChainStillVerifies(t *testing.T) {
 	ctx, pool := chainDB(t)
 	org := pruneOrg(t, pool, "ckpt")
@@ -342,6 +354,8 @@ func TestPurgeRefusesATamperedPrefixAndDeletesNothing(t *testing.T) {
 				t.Fatal(err)
 			}
 			rowsBefore := countChained(t, ctx, pool, org)
+			blockedBefore := counterValue(t, "audit_core_chain_purge_blocked_total", map[string]string{"kind": tc.kind})
+			incidentsBefore := countIncidentsOfKind(t, ctx, pool, tc.kind)
 
 			res, err := st.Purge(ctx, 365)
 			if err != nil {
@@ -349,6 +363,16 @@ func TestPurgeRefusesATamperedPrefixAndDeletesNothing(t *testing.T) {
 			}
 			if res.OrgsBlocked < 1 {
 				t.Fatalf("OrgsBlocked = %d, want at least 1", res.OrgsBlocked)
+			}
+			// One counter tick per blocked org, beside its incident row. The test
+			// database is shared, so the rise must equal the incident rows this sweep
+			// wrote for the kind (one, when only this org is tampered).
+			written := countIncidentsOfKind(t, ctx, pool, tc.kind) - incidentsBefore
+			if written < 1 {
+				t.Fatalf("no %s incident was written for the blocked org", tc.kind)
+			}
+			if got := counterValue(t, "audit_core_chain_purge_blocked_total", map[string]string{"kind": tc.kind}) - blockedBefore; got != float64(written) {
+				t.Fatalf("blocked-purge counter for %s rose by %v, want %d (one per blocked org)", tc.kind, got, written)
 			}
 			if got := countChained(t, ctx, pool, org); got != rowsBefore {
 				t.Fatalf("chained rows %d -> %d: a purge of a prefix that does not verify must delete nothing", rowsBefore, got)
@@ -571,11 +595,21 @@ func TestPurgeDryRunVerifiesAndPlansButChangesNothing(t *testing.T) {
 		`UPDATE audit_events SET details = '{"n": 999}'::jsonb WHERE org_id = $1 AND chain_seq = 2`, org); err != nil {
 		t.Fatal(err)
 	}
+	blockedBefore := counterValue(t, "audit_core_chain_purge_blocked_total", map[string]string{"kind": "row_hash_mismatch"})
+	incidentsBefore := countIncidentsOfKind(t, ctx, pool, "row_hash_mismatch")
 	if _, err := st.Purge(ctx, 365); err != nil {
 		t.Fatal(err)
 	}
 	if inc := loadIncidents(t, ctx, pool, org); len(inc) != 1 || inc[0].kind != "row_hash_mismatch" {
 		t.Fatalf("dry-run incidents = %+v, want one row_hash_mismatch", inc)
+	}
+	// A dry run counts its refusal too: the counter rises beside the row it wrote.
+	written := countIncidentsOfKind(t, ctx, pool, "row_hash_mismatch") - incidentsBefore
+	if written < 1 {
+		t.Fatal("a dry run that found a bad prefix wrote no row_hash_mismatch incident")
+	}
+	if got := counterValue(t, "audit_core_chain_purge_blocked_total", map[string]string{"kind": "row_hash_mismatch"}) - blockedBefore; got != float64(written) {
+		t.Fatalf("dry-run blocked counter rose by %v, want %d", got, written)
 	}
 }
 

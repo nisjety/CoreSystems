@@ -63,6 +63,17 @@ groups:
         annotations:
           summary: "audit-core found an org's chain head disagreeing with its stored tip row at insert time"
 
+      # A chained purge refused to delete an org's expired rows, because a prefix
+      # or checkpoint did not verify (audit_chain_incidents holds the org and the
+      # kind). The purge runs every 24 hours in each replica. The 25-hour window
+      # keeps the alert up until the sweep after the last refusal has run without
+      # one. The series carries the incident kind only: no org, no row content.
+      - alert: ControlAuditChainPurgeBlocked
+        expr: increase(audit_core_chain_purge_blocked_total[25h]) > 0
+        labels: { severity: critical, plane: control }
+        annotations:
+          summary: "audit-core refused to purge an org's expired audit rows: a chain prefix or checkpoint did not verify"
+
       - alert: ControlAuditChainVerifyStale
         # The verifier runs once a day by default (AUDIT_CHAIN_VERIFY_INTERVAL);
         # 36 hours leaves one missed pass. Raise this with a longer interval.

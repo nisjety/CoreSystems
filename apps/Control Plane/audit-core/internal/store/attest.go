@@ -11,6 +11,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/triodelab/controlplane/audit-core/internal/chain"
+	"github.com/triodelab/controlplane/audit-core/internal/metrics"
 )
 
 // PruneMode says what Purge may do to chained rows.
@@ -334,6 +335,9 @@ func (s *Store) blockPurge(ctx context.Context, orgID, kind string, firstBadSeq 
 	`, orgID, kind, bad, "purge refused; nothing was deleted"); err != nil {
 		return pruneBatch{}, fmt.Errorf("record chain incident: %w", err)
 	}
+	// Counted once the row is in, so the counter never runs ahead of the
+	// incident table it mirrors. Dry-run mode counts too, as it writes the row.
+	metrics.RecordChainPurgeBlocked(kind)
 	log.Error().Str("org_id", orgID).Str("kind", kind).Int64("first_bad_seq", firstBadSeq).
 		Msg("audit chain purge blocked: the prefix does not verify, nothing was deleted")
 	return pruneBatch{outcome: pruneBlocked}, nil
