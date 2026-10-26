@@ -334,7 +334,7 @@ func TestControlLifecycleSIEMExporterReadsEnabledEntitledDestinationsWithTheirSe
 	if _, err := service.UpdateSIEMDestination(ctx, "org-siem-enterprise", disabled.ID, "u", "admin", UpdateSIEMDestinationRequest{ExpectedRevision: 1, Enabled: ptr(false)}); err != nil {
 		t.Fatalf("disable: %v", err)
 	}
-	other := siemCreate(t, ctx, service, "org-siem-other", "pg-fixture-other-0123456789")
+	other := siemCreate(t, ctx, service, "org-siem-other", "lllllllllllllllllllllllllll")
 
 	rows, err := service.ListSIEMDestinationsForExport(ctx, nil)
 	if err != nil {
