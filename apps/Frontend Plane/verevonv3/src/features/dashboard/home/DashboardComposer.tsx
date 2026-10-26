@@ -1,3 +1,4 @@
+import { registerReloadGuard } from "@/app/chunk-recovery";
 import { chatAppearanceActive } from "@/features/chat/lib/chat-appearance-preview";
 import {
 	ATTACHMENT_ACCEPT,
@@ -1011,6 +1012,10 @@ export function DashboardComposer(props: {
 	const [knowledgeImporting, setKnowledgeImporting] = createSignal(false);
 	const [knowledgeImportNotice, setKnowledgeImportNotice] = createSignal<string | null>(null);
 	const [handoffPending, setHandoffPending] = createSignal(false);
+	// A stale-build reload (chunk-recovery) would lose what the page holds only in
+	// memory: unsent attachments, and a submission whose handoff has not finished.
+	// While either is held the page shows its notice instead of reloading.
+	onCleanup(registerReloadGuard(() => files().length > 0 || handoffPending()));
 	const [submitError, setSubmitError] = createSignal<string | null>(null);
 	const [historyPanelPosition, setHistoryPanelPosition] =
 		createSignal<PanelPosition>({ bottom: 0, right: 0, maxHeight: 400 });
