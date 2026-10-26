@@ -95,7 +95,7 @@ An org left on is an org whose chat is refused. Then:
 
 ## Pass 2 (after a real attestation, task Z-40)
 
-Not part of pass 1. Once a deployment is attested in writing and the six `*_ZDR_*` fields are set in the signed policy, `/api/v1/models` lists `zdr` on the covered model. Repeat sections 3 to 5 with the turn expected to stream an answer (`ZDR_LIVE_TURN_EXPECT=answer`, spec extended then): zero thread and message delta, `mp:gw:cache:*` unchanged, no feedback row, no audit envelope.
+Not part of pass 1. Once a deployment is attested in writing and the six `*_ZDR_*` fields are set in the signed policy, `/api/v1/models` lists `zdr` on the covered model. Repeat sections 3 to 5 with the turn expected to stream an answer (`ZDR_LIVE_TURN=1 ZDR_LIVE_TURN_EXPECT=answer`; the test is "pass 2: a ZDR-TEST org turn streams an answer from an attested chat model" in `tests/e2e/zdr-live-turn.spec.ts`): zero thread and message delta, `mp:gw:cache:*` unchanged, no feedback row, no audit envelope.
 
 ## Attestation lapse alerts
 
