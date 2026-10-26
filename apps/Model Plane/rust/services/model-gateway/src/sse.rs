@@ -9570,36 +9570,41 @@ async fn durable_thread_grant(
 
 /// The one grant a durable-switch replica may hold in memory: the one an approval taken HERE
 /// could not record in Session Core (`plan_approval` keeps it when `SetRunMode` fails after
-/// its retries, so the approving replica keeps honouring what the human approved). It is
-/// consulted only when Session Core answered and said there is NO grant: a grant Session Core
-/// does hold always wins, and a read that failed is not an answer (the run then fails closed,
-/// see [`resolve_autonomy_rung`]). The durable path records nothing else in memory, so
-/// anything found here is exactly such a fallback.
+/// its retries, so the approving replica keeps honouring what the human approved). A read that
+/// failed is not an answer (the run then fails closed, see [`resolve_autonomy_rung`]). Session
+/// Core's grant stands unless this copy is NARROWER: an older, broader durable grant must not
+/// outlive a newer narrower approval whose write failed here, and a tie keeps Session Core's
+/// grant as stated. The durable path records nothing else in memory, so anything found here is
+/// exactly such a fallback.
 fn with_local_fallback(
     grant: crate::session_flow::ThreadGrant,
     store: &crate::coordinator::PlanModeStore,
     org_id: &str,
     thread_id: &str,
 ) -> crate::session_flow::ThreadGrant {
-    if grant.read_failed || grant.rung.is_some() {
+    if grant.read_failed {
         return grant;
     }
-    match store.granted_rung(org_id, thread_id) {
-        Some(rung) => {
-            tracing::info!(
-                org_id,
-                thread_id,
-                rung = mp_contracts::autonomy::label(rung),
-                "plan grant taken from this replica's memory: session-core holds none and the approval's write failed here"
-            );
-            crate::session_flow::ThreadGrant {
-                rung: Some(rung),
-                approved_plan_id: store.peek_approved_plan(org_id, thread_id),
-                expires_at_unix: store.grant_expires_at(org_id, thread_id),
-                read_failed: false,
-            }
+    let Some(rung) = store.granted_rung(org_id, thread_id) else {
+        return grant;
+    };
+    if let Some(durable) = grant.rung {
+        if mp_contracts::autonomy::rank(rung) >= mp_contracts::autonomy::rank(durable) {
+            return grant;
         }
-        None => grant,
+    }
+    tracing::info!(
+        org_id,
+        thread_id,
+        rung = mp_contracts::autonomy::label(rung),
+        session_core_rung = grant.rung.map(mp_contracts::autonomy::label),
+        "plan grant taken from this replica's memory: the approval's write failed here and session-core holds no grant or a wider one"
+    );
+    crate::session_flow::ThreadGrant {
+        rung: Some(rung),
+        approved_plan_id: store.peek_approved_plan(org_id, thread_id),
+        expires_at_unix: store.grant_expires_at(org_id, thread_id),
+        read_failed: false,
     }
 }
 
@@ -20158,6 +20163,39 @@ mod execute_turn_tests {
         // A store that never recorded one changes nothing.
         let empty = crate::coordinator::PlanModeStore::new();
         assert_eq!(with_local_fallback(none.clone(), &empty, "org-1", "thread-1"), none);
+    }
+
+    /// A copy in memory that is NARROWER than Session Core's grant wins: an older, broader durable
+    /// grant must not outlive a newer narrower approval whose write failed here, and the copy's own
+    /// plan and expiry go with its rung. An equal rung keeps Session Core's grant as stated, and
+    /// another org's copy is no grant of this one.
+    #[test]
+    fn a_narrower_copy_in_memory_wins_over_an_older_broader_durable_grant() {
+        let store = crate::coordinator::PlanModeStore::new();
+        store.record_grant("org-1", "thread-1", Rung::WorkspaceWrite, "plan-7");
+        let broad = crate::session_flow::ThreadGrant {
+            rung: Some(Rung::DangerFullAccess),
+            approved_plan_id: Some("plan-old".to_owned()),
+            expires_at_unix: Some(1),
+            read_failed: false,
+        };
+        let fallback = with_local_fallback(broad.clone(), &store, "org-1", "thread-1");
+        assert_eq!(fallback.rung, Some(Rung::WorkspaceWrite));
+        assert_eq!(fallback.approved_plan_id.as_deref(), Some("plan-7"));
+        assert_eq!(fallback.expires_at_unix, store.grant_expires_at("org-1", "thread-1"));
+        assert!(!fallback.read_failed);
+
+        let same = crate::session_flow::ThreadGrant {
+            rung: Some(Rung::WorkspaceWrite),
+            approved_plan_id: Some("plan-durable".to_owned()),
+            expires_at_unix: Some(2),
+            read_failed: false,
+        };
+        assert_eq!(with_local_fallback(same.clone(), &store, "org-1", "thread-1"), same);
+
+        let other_org = crate::coordinator::PlanModeStore::new();
+        other_org.record_grant("org-2", "thread-1", Rung::ReadOnly, "plan-9");
+        assert_eq!(with_local_fallback(broad.clone(), &other_org, "org-1", "thread-1"), broad);
     }
 
     /// The ratchet: only an execute turn, only at the widest rung, and only ever stricter.

@@ -453,6 +453,14 @@ impl PlanModeStore {
         }
         None
     }
+
+    /// Forget this thread's grant in memory, but only the one that belongs to `org_id`. Called once
+    /// an approval is durably recorded in Session Core: a copy kept here is only the fallback for an
+    /// approval whose write failed, and an older copy must not keep answering for the thread
+    /// (`with_local_fallback` honours the narrower of the two). Another org's entry is left alone.
+    pub fn clear_grant(&self, org_id: &str, thread_id: &str) {
+        self.grants.remove_if(thread_id, |_, held| held.org_id == org_id);
+    }
 }
 
 /// Enters plan mode for a run and emits a best-effort lifecycle event.
@@ -1352,6 +1360,26 @@ mod tests {
             "plan_7",
         );
         assert_eq!(store.granted_rung("org-1", "thread-1"), None);
+    }
+
+    /// `clear_grant` forgets this org's memory copy of the thread's grant and leaves another org's
+    /// entry for the same thread id alone, so the durable approval clears only its own copy.
+    #[test]
+    fn clear_grant_forgets_only_its_own_orgs_copy() {
+        use mp_contracts::model_plane::v1::AutonomyRung;
+        let store = PlanModeStore::new();
+        store.record_grant("org-1", "thread-1", AutonomyRung::WorkspaceWrite, "plan-7");
+        store.clear_grant("org-2", "thread-1");
+        assert_eq!(
+            store.granted_rung("org-1", "thread-1"),
+            Some(AutonomyRung::WorkspaceWrite),
+            "another org's clear leaves the copy"
+        );
+        store.clear_grant("org-1", "thread-1");
+        assert_eq!(store.granted_rung("org-1", "thread-1"), None);
+        assert_eq!(store.peek_approved_plan("org-1", "thread-1"), None, "its plan goes with it");
+        // A thread that holds nothing is a no-op.
+        store.clear_grant("org-1", "thread-2");
     }
 
     /// The durable grant switch (WS04 S4): strict like the execute switch (only `true`, in any

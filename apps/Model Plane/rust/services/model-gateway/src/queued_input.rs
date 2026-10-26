@@ -476,9 +476,12 @@ pub enum StreamThread {
         thread_id: String,
         conversation_only: bool,
     },
-    /// On another replica, which said so over the run-control bus. Its source scope is not on
-    /// the bus.
-    Peer(String),
+    /// On another replica, which said so over the run-control bus, with the stream's own source
+    /// scope as the owner's probe answer states it (`None` from an owner that predates the field).
+    Peer {
+        thread_id: String,
+        conversation_only: Option<bool>,
+    },
     /// No stream of this caller is live anywhere: it ended, never ran, or is somebody else's.
     Gone,
     /// The bus could not say, so the stream may or may not be live.
@@ -505,7 +508,10 @@ pub async fn stream_thread(
     let mut msg = RunControlMsg::new(RunControlOp::Probe, org_id, user_id);
     request_id.clone_into(&mut msg.request_id);
     match control.request(&subject, &msg).await {
-        Ok(reply) if reply.found => reply.thread_id.map_or(StreamThread::Gone, StreamThread::Peer),
+        Ok(reply) if reply.found => match reply.thread_id {
+            Some(thread_id) => StreamThread::Peer { thread_id, conversation_only: reply.conversation_only },
+            None => StreamThread::Gone,
+        },
         Ok(_)
         | Err(
             RunControlError::NoOwner | RunControlError::Disabled | RunControlError::InvalidSubject,
@@ -1008,7 +1014,7 @@ mod tests {
         );
         assert_eq!(
             ask(&peer_queue, &peer, "org-a", "user-a").await,
-            StreamThread::Peer("thread-1".into())
+            StreamThread::Peer { thread_id: "thread-1".into(), conversation_only: Some(false) }
         );
         for (org, user) in [("org-b", "user-a"), ("org-a", "user-b")] {
             assert_eq!(ask(&peer_queue, &peer, org, user).await, StreamThread::Gone, "{org}/{user}");
@@ -1027,6 +1033,23 @@ mod tests {
         assert_eq!(
             ask(&peer_queue, &RunControl::off(), "org-a", "user-a").await,
             StreamThread::Gone
+        );
+    }
+
+    /// A peer learns a conversation-only stream's scope from its owner, so a message sent to that
+    /// stream is stored under the scope its thread requires, without a guess.
+    #[tokio::test]
+    async fn a_peer_learns_the_scope_of_a_conversation_only_stream_from_its_owner() {
+        let hub = crate::run_control::LoopbackHub::new();
+        let (owner, peer) = (replica(&hub), replica(&hub));
+        let (owner_cancels, owner_queue) = (crate::cancel_registry::CancelRegistry::new(), QueuedInputRegistry::new());
+        let _flag = owner_cancels.register_run("req-1", "org-a", "user-a", "run-1");
+        owner_queue.register("req-1", "org-a", "user-a", "thread-1", true, RetrievalScope::Auto);
+        assert!(owner.attach(&owner_cancels, &owner_queue, "req-1", "run-1").await);
+
+        assert_eq!(
+            stream_thread(&QueuedInputRegistry::new(), &peer, "req-1", "org-a", "user-a").await,
+            StreamThread::Peer { thread_id: "thread-1".into(), conversation_only: Some(true) }
         );
     }
 }

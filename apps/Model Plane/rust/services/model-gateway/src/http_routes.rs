@@ -8343,6 +8343,12 @@ async fn plan_approval(
     // The grant is on the thread in Session Core only when the write succeeded AND it stated the
     // grant (a waived credential's did not).
     let durably_recorded = persisted.is_ok() && !waived;
+    // A grant Session Core now holds supersedes the copy this replica kept for an earlier approval
+    // whose write failed: that copy is only a fallback (`with_local_fallback` in sse.rs), and it must
+    // not keep answering for the thread when it is the narrower of the two.
+    if durable_grant && durably_recorded {
+        state.plan_mode.clear_grant(&claims.org_id, &thread_id);
+    }
     if let Err(error) = &persisted {
         if durable_grant {
             // The status code only: the message can carry upstream text.
@@ -8824,7 +8830,7 @@ where
     .await
     {
         StreamThread::Here { thread_id, conversation_only } => (thread_id, Some(conversation_only)),
-        StreamThread::Peer(thread_id) => (thread_id, None),
+        StreamThread::Peer { thread_id, conversation_only } => (thread_id, conversation_only),
         StreamThread::Gone => {
             return answer(queue_refusal(request_id, &EnqueueOutcome::NoActiveStream, None), None);
         }
@@ -8838,10 +8844,10 @@ where
         }
     }
 
-    // A stream on this replica states its own source scope. One on another replica does not on the
-    // bus: its message is first tried as an ordinary one, and a conversation-only thread's refusal
-    // (the one precondition a wrong guess can fail) is answered by the same message under the
-    // conversation-only scope.
+    // A stream on this replica states its own source scope, and so does its owner's probe answer on
+    // another replica. Only an owner that predates the field leaves the scope unknown: its message is
+    // then tried as an ordinary one, and a conversation-only thread's refusal (the one precondition a
+    // wrong guess can fail) is answered by the same message under the conversation-only scope.
     let mut stored = persist(thread_id.clone(), known_scope.unwrap_or(false), client_message_id.clone()).await;
     if known_scope.is_none()
         && matches!(&stored, Err(status) if status.code() == tonic::Code::FailedPrecondition)
@@ -13221,8 +13227,8 @@ mod run_owner_publish_tests {
         let _flag = owner.cancels.register_run("req-1", "org-a", "user-a", "run-1");
         assert!(owner.run_control.attach(&owner.cancels, &owner.queued_inputs, "req-1", "run-1").await);
 
-        // The owner's thread is conversation-only and the peer cannot know: the first store is
-        // refused for it and the same message is stored under the conversation-only scope.
+        // The owner's thread is conversation-only, and its probe answer says so: the one store is
+        // already under that scope, so nothing is refused and retried.
         let transcript = FakeTranscript { conversation_only: true, ..FakeTranscript::default() };
         let who = claims("org-a", "user-a");
         let (status, answer) = send_queued(&peer, &who, &transcript, &queue_body("use EUR", Some("msg-1"))).await;
@@ -13254,6 +13260,96 @@ mod run_owner_publish_tests {
         assert_eq!(answer["error"], "run_control_unavailable");
         assert_eq!(answer["persisted"], false);
         assert!(silent.rows().is_empty());
+    }
+
+    /// A message sent to another replica for a conversation-only stream is stored once, under the scope
+    /// the owner states in its probe answer: the first store is not guessed, refused and retried.
+    #[tokio::test]
+    async fn a_message_to_a_peer_stream_is_stored_once_under_the_scope_the_owner_states() {
+        use crate::run_control::{LoopbackHub, RunControl};
+        let hub = LoopbackHub::new();
+        let mut owner = streaming(true).await;
+        let (mut peer, _publisher) = test_state().await;
+        for state in [&mut owner, &mut peer] {
+            state.run_control = RunControl::loopback(hub.clone(), std::time::Duration::from_millis(200));
+        }
+        let _flag = owner.cancels.register_run("req-1", "org-a", "user-a", "run-1");
+        assert!(owner.run_control.attach(&owner.cancels, &owner.queued_inputs, "req-1", "run-1").await);
+
+        // Each store records the scope it was asked for, and a conversation-only thread refuses any
+        // other, so a guessed first attempt would show up as a second entry here.
+        let asked = Arc::new(std::sync::Mutex::new(Vec::<bool>::new()));
+        let persist = {
+            let asked = asked.clone();
+            move |_thread: String, conversation_only: bool, _id: String| {
+                asked.lock().unwrap().push(conversation_only);
+                let stored = if conversation_only {
+                    Ok(crate::session_flow::AppendReceipt { message_id: "message-0".to_owned(), deduplicated: false })
+                } else {
+                    Err(tonic::Status::failed_precondition("conversation-only source scope required"))
+                };
+                std::future::ready(stored)
+            }
+        };
+        let response = queue_input_with_receipts(
+            &peer,
+            &claims("org-a", "user-a"),
+            "req-1",
+            &queue_body("use EUR", Some("msg-1")),
+            &persist,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(*asked.lock().unwrap(), [true], "one store, under the scope the owner stated");
+        assert_eq!(owner.queued_inputs.drain_receipted("req-1").len(), 1, "and queued once");
+    }
+
+    /// An owner that predates the scope field answers a probe with the thread alone: the message is
+    /// first tried as an ordinary one, and retried as conversation-only on the one refusal a wrong
+    /// guess can get, as it was before the field existed.
+    #[tokio::test]
+    async fn an_owner_that_does_not_state_its_scope_keeps_the_guess_and_retry() {
+        use crate::run_control::{LoopbackHub, RunControl, RunControlOp, RunControlReply, RunControlSubject};
+        let hub = LoopbackHub::new();
+        let (mut peer, _publisher) = test_state().await;
+        peer.run_control = RunControl::loopback(hub.clone(), std::time::Duration::from_millis(200));
+        let old_owner = RunControl::loopback(hub.clone(), std::time::Duration::from_millis(200));
+        let _listener = old_owner
+            .listen(&[RunControlSubject::request_any_op("req-1").expect("subject")], |msg| match msg.op {
+                RunControlOp::Probe => RunControlReply {
+                    thread_id: Some("thread-1".to_owned()),
+                    ..RunControlReply::found()
+                },
+                _ => RunControlReply::not_found(),
+            })
+            .await
+            .expect("listen");
+
+        let asked = Arc::new(std::sync::Mutex::new(Vec::<bool>::new()));
+        let persist = {
+            let asked = asked.clone();
+            move |_thread: String, conversation_only: bool, _id: String| {
+                asked.lock().unwrap().push(conversation_only);
+                let stored = if conversation_only {
+                    Ok(crate::session_flow::AppendReceipt { message_id: "message-0".to_owned(), deduplicated: false })
+                } else {
+                    Err(tonic::Status::failed_precondition("conversation-only source scope required"))
+                };
+                std::future::ready(stored)
+            }
+        };
+        // The old owner does not queue the message, so the answer is not checked: the stores are.
+        let _ = queue_input_with_receipts(
+            &peer,
+            &claims("org-a", "user-a"),
+            "req-1",
+            &queue_body("use EUR", Some("msg-1")),
+            &persist,
+        )
+        .await;
+
+        assert_eq!(*asked.lock().unwrap(), [false, true], "guessed as ordinary, then retried");
     }
 
     /// One id, one queued delivery, even when the retry comes while the first copy still waits.

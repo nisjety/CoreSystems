@@ -187,6 +187,11 @@ pub struct RunControlReply {
     pub thread_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<String>,
+    /// Whether the stream is conversation-only, as the owner's probe answer states it, so a message
+    /// sent to another replica is stored under the scope its thread requires, with no guess. Absent
+    /// from every other reply, and from a probe answer an older owner sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_only: Option<bool>,
 }
 
 impl RunControlReply {
@@ -197,6 +202,7 @@ impl RunControlReply {
             found: true,
             thread_id: None,
             outcome: None,
+            conversation_only: None,
         }
     }
 
@@ -853,8 +859,12 @@ fn stream_owner(
             if msg.request_id == request_id
                 && cancels.is_live_for(&request_id, &msg.org_id, &msg.user_id) =>
         {
+            // The thread and the stream's own scope come from one registration: a peer that stores a
+            // message for this stream needs both, so the owner states them together.
+            let stream = queued_inputs.stream_for(&request_id, &msg.org_id, &msg.user_id);
             RunControlReply {
-                thread_id: queued_inputs.thread_for(&request_id, &msg.org_id, &msg.user_id),
+                thread_id: stream.as_ref().map(|(thread_id, _)| thread_id.clone()),
+                conversation_only: stream.map(|(_, conversation_only)| conversation_only),
                 ..RunControlReply::found()
             }
         }
@@ -1269,6 +1279,16 @@ mod tests {
         let mut keys: Vec<_> = reply.as_object().expect("object").keys().cloned().collect();
         keys.sort();
         assert_eq!(keys, ["found", "outcome", "thread_id", "v"]);
+        // The owner's probe answer states the stream's scope, and only then does the key appear.
+        let probe = serde_json::to_value(RunControlReply {
+            thread_id: Some("t".into()),
+            conversation_only: Some(true),
+            ..RunControlReply::found()
+        })
+        .expect("serialize");
+        let mut keys: Vec<_> = probe.as_object().expect("object").keys().cloned().collect();
+        keys.sort();
+        assert_eq!(keys, ["conversation_only", "found", "thread_id", "v"]);
     }
 
     #[tokio::test]
@@ -1542,6 +1562,42 @@ mod tests {
         }
         assert!(!flag.load(std::sync::atomic::Ordering::Relaxed));
         assert!(queued_inputs.drain("req-1").is_empty());
+    }
+
+    /// The owner's probe answer states the stream's thread AND its own scope, for a conversation-only
+    /// stream and an ordinary one alike; a caller that is not the stream's owner learns neither.
+    #[tokio::test]
+    async fn a_probe_answer_states_the_streams_thread_and_scope() {
+        let hub = LoopbackHub::new();
+        let (owner, peer) = (rc(&hub), rc(&hub));
+        let (owner_cancels, owner_queue) = (CancelRegistry::new(), QueuedInputRegistry::new());
+        let _flag = owner_cancels.register_run("req-1", "org-a", "user-a", "run-1");
+        owner_queue.register("req-1", "org-a", "user-a", "thread-1", true, RetrievalScope::Auto);
+        assert!(owner.attach(&owner_cancels, &owner_queue, "req-1", "run-1").await);
+        let _ordinary = owner_cancels.register_run("req-2", "org-a", "user-a", "run-2");
+        owner_queue.register("req-2", "org-a", "user-a", "thread-2", false, RetrievalScope::Auto);
+        assert!(owner.attach(&owner_cancels, &owner_queue, "req-2", "run-2").await);
+
+        let probe = |request_id: &str, user_id: &str| {
+            let mut msg = RunControlMsg::new(RunControlOp::Probe, "org-a", user_id);
+            msg.request_id = request_id.into();
+            msg
+        };
+        let subject = |request_id: &str| {
+            RunControlSubject::request(request_id, RunControlOp::Probe).expect("subject")
+        };
+
+        let reply = peer.request(&subject("req-1"), &probe("req-1", "user-a")).await.expect("answered");
+        assert!(reply.found);
+        assert_eq!(reply.thread_id.as_deref(), Some("thread-1"));
+        assert_eq!(reply.conversation_only, Some(true));
+        let reply = peer.request(&subject("req-2"), &probe("req-2", "user-a")).await.expect("answered");
+        assert_eq!(reply.thread_id.as_deref(), Some("thread-2"));
+        assert_eq!(reply.conversation_only, Some(false), "an ordinary stream says so too");
+
+        let stranger = peer.request(&subject("req-1"), &probe("req-1", "user-b")).await.expect("answered");
+        assert!(!stranger.found);
+        assert_eq!((stranger.thread_id, stranger.conversation_only), (None, None));
     }
 
     #[tokio::test]
