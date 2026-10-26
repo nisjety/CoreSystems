@@ -28662,6 +28662,15 @@ body.verevon-chat-canvas-resizing * {
   gap: 34px;
 }
 
+/* Off-screen turns skip layout and paint until they scroll near the viewport
+   (WS09-S7). The rule is gated on data-chat-containment, which ChatPage sets only
+   for VITE_CHAT_CONTENT_CONTAINMENT=true. The latest assistant turn is never
+   contained, so the streaming answer and its action row always render. */
+.verevon-chat-thread[data-chat-containment="on"] > .verevon-chat-message:not([data-latest]) {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 480px;
+}
+
 /* Comfortable reading measure (~72ch) for assistant answers — a long answer now
    wraps at a pleasant line length instead of spanning the full thread width. */
 .verevon-chat-content,
