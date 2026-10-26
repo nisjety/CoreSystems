@@ -981,6 +981,21 @@ Built so far (batches B01 to B07): WS01-S0, WS01-S1 (partial), WS01-S6; WS02-S1,
 | D1-756 | WS20-S1 | defect | P1 | capability-core cron sweeper (internal/cron/sweeper.go): every tx.Exec in the fire path discards its error, rows.Err() is never checked, and all due schedules (LIMIT 100) share one transaction. One failing fire therefore rolls back the whole batch, stays due, is ordered first and rolls back every later sweep too: a single bad schedule stops every cron fire, and the log shows only 'commit unexpectedly resulted in rollback'. Found by the round-D packet for D1-755 and confirmed by the lead's integration runs. | resolved 2026-10-26 (Wave 1 depth packet capcore-cron-sweeper-errors-and-savepoints) |
 | D1-757 | WS05-S5 | defect | P2 | tool_policies (migration 0017): pinned_digest is nullable and tool_policies_allow_digest_check (decision <> 'allow' OR pinned_digest ~ regex) evaluates to NULL for a NULL digest, which Postgres accepts, so an allow row without its digest pin can be stored. Found by the lead's integration run: TestToolPoliciesAgainstPostgres/the_table_refuses_what_the_API_never_writes fails (tool_policies_integration_test.go:310), the only failure left in capability-core. | resolved 2026-10-26 (Wave 1 depth packet capcore-tool-policies-allow-needs-digest) |
 
+
+### Wave-mode batch W1-25 (2026-10-26)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D1-758 | WS09-S9 | decision | P1 | The plan gates S8 and S9 on the WS09-S1 long-thread measurement (D5) and the owner's sign-off on Q1 and Q7; the owner ordered the build on 2026-10-26, so the switch is built default-off and the measured trigger remains open. | open |
+| D1-759 | WS09-S9 | risk | P1 | The paged readSavedAnswer branch reads the messages tail, which carries no citations, artifacts or grounding, so an adopted saved answer keeps only what the stream delivered; carry those fields in the tail read or keep the transcript for adoption before the flag goes on. | open |
+| D1-760 | WS09-S9 | risk | P1 | A cold open with no local snapshot still reads the whole /transcript route (the S6 path reads it too), so the row's 'reads <= 1 page' holds only for warm opens; the transcript route needs paging in the S8 BFF scope, or its metadata dependency removed. | open |
+| D1-761 | WS09-S9 | risk | P1 | Local-only turns older than the server window (the snapshot's leading turns) are actionable: edit, branch, regenerate, rerun and continue. The row's rule that actions outside the window are disabled until loaded is not implemented, and an edit on a leading turn truncates the list and sends an id the server may not know. | open |
+| D1-762 | WS09-S9 | risk | P1 | Older pages carry only what the messages read returns, so turns older than the local snapshot show no citations, grounding or artifacts in the Sources tab. | open |
+| D1-763 | WS09-S9 | live-proof | P1 | Nothing here is live-proven: the cold-open request shape, the has_more round trip with S8, the scroll anchor on a rebuilt stack, and saved-answer adoption need the lead's live run before the flag is switched on. | open |
+| D1-764 | WS09-S9 | decision | P1 | The S8/S9 gate (the S1 measurement against the D5 trigger, plus Q1/Q7) is still open: the slice is built default-off on the owner's 2026-10-26 order. | open |
+| D1-765 | WS09-S9 | risk | P1 | Turns that exist only locally, older than the server window, stay actionable (edit, branch, regenerate). The edit, rewind and branch paths (s.turns slices near use-chat-controller.ts:3996/4081/4193/4228/4256) replace or truncate s.turns but do not reset leadingTurnCount or earlierCursor, so a later loadEarlier can treat window turns as head turns. The row asks for these actions to be disabled outside the window until loaded. | open |
+| D1-766 | WS09-S9 | follow-up | P3 | 26 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-25.json | open |
+
 ## Wave 2 (WS13 to WS27)
 
 Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS27-S0, WS27-S1. Wave 2 is not started as a wave: these came in with Wave 1 batches because they were Wave 1 prerequisites.
@@ -1731,3 +1746,4 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS04-S8 | data-loss, audit | W1-23 | no |
 | WS11-S9 | money | W1-23 | no |
 | WS07-S10 | money, audit | W1-24 | no |
+| WS09-S9 | zdr | W1-25 | no |
