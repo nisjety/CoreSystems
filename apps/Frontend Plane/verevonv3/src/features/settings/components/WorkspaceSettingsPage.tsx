@@ -13,6 +13,7 @@ import { CronSchedulesSection } from '@/features/settings/components/CronSchedul
 import { OrgModelAccessSection } from '@/features/settings/components/OrgModelAccessSection'
 import { OrgQuotasSection } from '@/features/settings/components/OrgQuotasSection'
 import { MemorySection } from '@/features/settings/components/MemorySection'
+import { LearningSection } from '@/features/settings/components/LearningSection'
 import { ChatGptSubscriptionPanel } from '@/features/integrations/components/ChatGptSubscriptionPanel'
 import { HyperswitchCheckout } from '@/features/billing/components/HyperswitchCheckout'
 import { NexiCheckout } from '@/features/billing/components/NexiCheckout'
@@ -242,6 +243,8 @@ const sectionStatusCards: Record<WorkspaceSettingsSectionId, StatusCard[]> = {
   'model-access': [],
   // Memory renders its own live list, so it carries no shared status grid.
   memory: [],
+  // Learning renders its own proposals and ledger, so it carries no shared status grid.
+  learning: [],
 }
 
 function getBusinessHourRows(i18n: ReturnType<typeof useI18n>) {
@@ -505,6 +508,9 @@ function WorkspaceSettingsSection(props: {
       </Match>
       <Match when={props.section === 'memory'}>
         <MemorySection />
+      </Match>
+      <Match when={props.section === 'learning'}>
+        <LearningSection />
       </Match>
     </Switch>
   )

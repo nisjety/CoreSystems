@@ -265,6 +265,18 @@ pub fn build_router_with_readiness(
         )
         .route("/v1/memories/reset", post(reset_memory))
         .route("/v1/memories/:memory_id", delete(delete_memory_entry))
+        // Learning governance (WS07-S9): the owner's decisions on learned skills and
+        // the ledger of what was learned. The user bearer only; the owner is the
+        // verified caller on every hop, and session-core re-checks ownership.
+        .route("/v1/learning/ledger", get(list_learning_ledger))
+        .route(
+            "/v1/learning/proposals/:skill_id/decision",
+            post(decide_learning_proposal),
+        )
+        .route(
+            "/v1/learning/ledger/:entry_id/undo",
+            post(undo_learning_entry),
+        )
         // chat-parity §2: list models + per-model feature families for the picker.
         .route("/v1/models", get(list_models))
         // chat-parity §2: upload a document into Data Plane (→ retrievable via RAG).
@@ -6625,6 +6637,92 @@ fn session_memory_error(context: &str, error: &tonic::Status) -> HttpJsonError {
     }
 }
 
+/// Map a session-core gRPC error from the learning surfaces to an HTTP error.
+/// Unlike `session_memory_error`, `NotFound` has its own code: a proposal or ledger
+/// entry that is not the owner's, or is gone. A failed precondition carries the
+/// refusal's code as its whole message (`not_proposed`, `already_undone`,
+/// `entry_superseded`, `memory_undo_via_delete`, ...), which the owner's surface can
+/// show as it is.
+fn session_learning_error(context: &str, error: &tonic::Status) -> HttpJsonError {
+    match error.code() {
+        tonic::Code::NotFound => (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": {
+                    "code": "learning_not_found",
+                    "message": error.message(),
+                }
+            })),
+        ),
+        tonic::Code::PermissionDenied => (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": {
+                    "code": "forbidden",
+                    "message": error.message(),
+                }
+            })),
+        ),
+        tonic::Code::InvalidArgument => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": {
+                    "code": "invalid_argument",
+                    "message": error.message(),
+                }
+            })),
+        ),
+        tonic::Code::FailedPrecondition => (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": {
+                    "code": error.message(),
+                    "message": error.message(),
+                }
+            })),
+        ),
+        _ => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({
+                "error": format!("{context}: {}", error.message()),
+            })),
+        ),
+    }
+}
+
+/// One ledger entry for the owner's surface. The snapshots stay the JSON text
+/// session-core stored, which the SPA parses. The actor's id is left out: the owner's
+/// surface needs only whether a person or Verevon made the change.
+fn learning_entry_json(entry: &mp_contracts::model_plane::v1::LearningLedgerEntry) -> Value {
+    json!({
+        "entry_id": entry.entry_id,
+        "kind": entry.kind,
+        "action": entry.action,
+        "skill_id": entry.skill_id,
+        "skill_name": entry.skill_name,
+        "revision": entry.revision,
+        "actor_kind": entry.actor_kind,
+        "thread_id": entry.thread_id,
+        "reason": entry.reason,
+        "before_json": entry.before_json,
+        "after_json": entry.after_json,
+        "undone": entry.undone,
+        "undoable": entry.undoable,
+        "created_at": entry.created_at.as_ref().map_or(Value::Null, prost_ts_to_rfc3339),
+    })
+}
+
+/// Only the two literal words; anything else is refused rather than defaulted,
+/// because a typo must never accept a proposal the owner did not mean to.
+fn parse_skill_decision(word: &str) -> Option<mp_contracts::model_plane::v1::SkillDecision> {
+    use mp_contracts::model_plane::v1::SkillDecision;
+    match word {
+        "accept" => Some(SkillDecision::Accept),
+        "reject" => Some(SkillDecision::Reject),
+        _ => None,
+    }
+}
+
 /// Serialize a `RunDetail` for the runs-history UI. `Snake_case` wire keys match
 /// the rest of the orchestration surface; the SPA client normalizes to
 /// camelCase. Timestamps are emitted as RFC3339 strings (null when unset) and
@@ -10417,6 +10515,148 @@ async fn reset_memory(
         "semantic_unconfirmed": response.semantic_unconfirmed,
         "degraded": response.degraded,
         "degradation_reason": response.degradation_reason,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct LearningLedgerQuery {
+    cursor: Option<String>,
+    limit: Option<u32>,
+}
+
+/// "What Verevon learned": the signed-in user's ledger of skill changes and learned
+/// memories, newest first, one page at a time. Whose ledger it is comes from the
+/// verified claims, never from the query.
+async fn list_learning_ledger(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Query(query): Query<LearningLedgerQuery>,
+) -> Result<Json<Value>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::ListLearningLedgerRequest;
+
+    let response = state
+        .learning_client
+        .clone()
+        .list_learning_ledger(authenticated_session_request(
+            ListLearningLedgerRequest {
+                org_id: claims.org_id.clone(),
+                user_id: claims.user_id.clone(),
+                cursor: query.cursor.unwrap_or_default(),
+                limit: query.limit.unwrap_or_default(),
+                kinds: Vec::new(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|e| session_learning_error("session-core list_learning_ledger failed", &e))?
+        .into_inner();
+
+    Ok(Json(json!({
+        "entries": response.entries.iter().map(learning_entry_json).collect::<Vec<_>>(),
+        "next_cursor": response.next_cursor,
+        "memory_skip_reason": response.memory_skip_reason,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct LearningDecisionBody {
+    decision: String,
+}
+
+/// Accepts or rejects one learned-skill proposal. The owner is the verified caller,
+/// and session-core refuses anyone else. A ZDR caller is refused before the hop: the
+/// decision writes a revision that holds skill text.
+async fn decide_learning_proposal(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path(skill_id): Path<String>,
+    Json(body): Json<LearningDecisionBody>,
+) -> Result<Json<Value>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::DecideSkillProposalRequest;
+    require_non_zdr_durable_mutation(&claims)?;
+
+    let trimmed = skill_id.trim();
+    if trimmed.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "skill_id is required"})),
+        ));
+    }
+    let Some(decision) = parse_skill_decision(body.decision.trim()) else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": {
+                    "code": "invalid_skill_decision",
+                    "message": "decision must be one of: accept, reject",
+                }
+            })),
+        ));
+    };
+
+    let response = state
+        .learning_client
+        .clone()
+        .decide_skill_proposal(authenticated_session_request(
+            DecideSkillProposalRequest {
+                org_id: claims.org_id.clone(),
+                skill_id: trimmed.to_owned(),
+                decision: decision as i32,
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|e| session_learning_error("session-core decide_skill_proposal failed", &e))?
+        .into_inner();
+
+    Ok(Json(json!({
+        "review_state": response.review_state,
+        "enabled": response.enabled,
+        "revision": response.revision,
+    })))
+}
+
+/// Undoes the newest change to one of the owner's learned skills: the snapshot taken
+/// before it is restored, or the skill is removed if the change created it. A learned
+/// memory is not undone here (session-core refuses it with `memory_undo_via_delete`),
+/// and a ZDR caller is refused before the hop, as for a decision.
+async fn undo_learning_entry(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path(entry_id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::UndoLearningEntryRequest;
+    require_non_zdr_durable_mutation(&claims)?;
+
+    let trimmed = entry_id.trim();
+    if trimmed.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "entry_id is required"})),
+        ));
+    }
+
+    let response = state
+        .learning_client
+        .clone()
+        .undo_learning_entry(authenticated_session_request(
+            UndoLearningEntryRequest {
+                org_id: claims.org_id.clone(),
+                entry_id: trimmed.to_owned(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|e| session_learning_error("session-core undo_learning_entry failed", &e))?
+        .into_inner();
+
+    Ok(Json(json!({
+        "action": response.action,
+        "skill_id": response.skill_id,
+        "revision": response.revision,
     })))
 }
 

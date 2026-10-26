@@ -51,6 +51,7 @@ use crate::domains::integrations::providers::start_connect_session as start_inte
 use crate::domains::knowledge::documents::create_document;
 use crate::domains::knowledge::products::{extract_products, summarize_products};
 use crate::domains::knowledge::sync::register_sharepoint;
+use crate::domains::learning::{decide_proposal, undo_entry, LearningDecisionBody};
 use crate::domains::mcp::{delete_server as delete_mcp_server, share_server as share_mcp_server};
 use crate::domains::memory::{
     delete_memory, remember_memory, reset_memory, set_memory_controls, RememberBody, ResetBody,
@@ -3532,6 +3533,92 @@ pub(super) async fn dispatch_memory_remember(
     .into_response();
     let (status, payload) = response_to_status_and_json(response).await;
     owner_json_response_to_envelope("memory.remember", user, status, payload)
+}
+
+// The learning actions reuse learning.rs's handlers, as the memory actions reuse
+// memory.rs's: the owner is the verified session, and the browser never names whose
+// proposal it decides or whose change it undoes.
+pub(super) async fn dispatch_learning_accept_skill(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    dispatch_learning_decision(
+        "learning.accept_skill",
+        "accept",
+        state,
+        user,
+        headers,
+        input,
+    )
+    .await
+}
+
+pub(super) async fn dispatch_learning_reject_skill(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    dispatch_learning_decision(
+        "learning.reject_skill",
+        "reject",
+        state,
+        user,
+        headers,
+        input,
+    )
+    .await
+}
+
+async fn dispatch_learning_decision(
+    action_id: &str,
+    decision: &str,
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let skill_id = ticket_string(input, "skillId");
+    if skill_id.is_empty() {
+        return ticket_bad_request(&format!("{action_id} requires a non-empty 'skillId'"));
+    }
+    let response = decide_proposal(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        PathExtractor(skill_id.to_owned()),
+        Json(LearningDecisionBody {
+            decision: decision.to_owned(),
+        }),
+    )
+    .await
+    .into_response();
+    let (status, payload) = response_to_status_and_json(response).await;
+    owner_json_response_to_envelope(action_id, user, status, payload)
+}
+
+pub(super) async fn dispatch_learning_undo(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let entry_id = ticket_string(input, "entryId");
+    if entry_id.is_empty() {
+        return ticket_bad_request("learning.undo requires a non-empty 'entryId'");
+    }
+    let response = undo_entry(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        PathExtractor(entry_id.to_owned()),
+    )
+    .await
+    .into_response();
+    let (status, payload) = response_to_status_and_json(response).await;
+    owner_json_response_to_envelope("learning.undo", user, status, payload)
 }
 
 pub(super) async fn dispatch_settings_update_me(

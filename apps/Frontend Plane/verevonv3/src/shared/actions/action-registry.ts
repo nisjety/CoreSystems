@@ -762,6 +762,17 @@ const memoryRememberInput = z.object({
   content: z.string().trim().min(1),
 })
 
+// A learned-skill proposal, by the skill's id. Only its owner may decide it, and
+// session-core checks that; the caller's own identity never comes from here.
+const learningSkillDecisionInput = z.object({
+  skillId: z.string().min(1),
+})
+
+// One ledger entry of the caller's own, by its id; a learned memory is not undone here.
+const learningUndoInput = z.object({
+  entryId: z.string().min(1),
+})
+
 const settingsUpdateMeInput = z.object({
   name: z.string().trim().optional(),
   displayName: z.string().trim().optional(),
@@ -2616,6 +2627,39 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: true,
     inputSchema: memoryRememberInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'learning.accept_skill',
+    label: 'Accept learned skill',
+    description: 'Accept a skill Verevon proposed from the caller\'s own conversation, so it is used in their chats. Only the owner of the proposal can decide it.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: learningSkillDecisionInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'learning.reject_skill',
+    label: 'Reject learned skill',
+    description: 'Reject a skill Verevon proposed, so it is never used. Only the owner of the proposal can decide it.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: learningSkillDecisionInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'learning.undo',
+    label: 'Undo learning',
+    description: 'Undo the newest change to one of the caller\'s learned skills by restoring the snapshot taken before it, or removing the skill if the change created it. Only the owner can undo.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: learningUndoInput,
     outputSchema: envelopeStatusOutput,
   },
   {

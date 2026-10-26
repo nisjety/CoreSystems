@@ -37,7 +37,9 @@ use super::dispatchers::{
     dispatch_integrations_trigger_sync, dispatch_knowledge_create_document,
     dispatch_knowledge_extract_products, dispatch_knowledge_register_sharepoint_source,
     dispatch_knowledge_summarize_products,
-    dispatch_leads_create_list, dispatch_leads_delete_list, dispatch_mcp_delete_server,
+    dispatch_leads_create_list, dispatch_leads_delete_list,
+    dispatch_learning_accept_skill, dispatch_learning_reject_skill, dispatch_learning_undo,
+    dispatch_mcp_delete_server,
     dispatch_mcp_share_server, dispatch_membership_invite_member,
     dispatch_membership_remove_member, dispatch_membership_update_member_role,
     dispatch_memory_delete, dispatch_memory_remember, dispatch_memory_reset,
@@ -227,6 +229,13 @@ pub(super) async fn execute_action(
         }
         "memory.reset" => dispatch_memory_reset(&state, &user, &headers, &body.input).await,
         "memory.remember" => dispatch_memory_remember(&state, &user, &headers, &body.input).await,
+        "learning.accept_skill" => {
+            dispatch_learning_accept_skill(&state, &user, &headers, &body.input).await
+        }
+        "learning.reject_skill" => {
+            dispatch_learning_reject_skill(&state, &user, &headers, &body.input).await
+        }
+        "learning.undo" => dispatch_learning_undo(&state, &user, &headers, &body.input).await,
         "settings.update_me" => dispatch_settings_update_me(&state, &user, &body.input).await,
         "settings.update_preferences" => {
             dispatch_settings_update_preferences(&state, &user, &body.input).await

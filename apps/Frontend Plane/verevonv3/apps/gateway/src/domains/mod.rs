@@ -21,6 +21,7 @@ pub mod insights;
 pub mod integrations;
 pub mod knowledge;
 pub mod leads;
+pub mod learning;
 pub mod mail_task;
 pub mod mail_task_thread_bridge;
 pub mod mcp;
