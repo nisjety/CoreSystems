@@ -356,7 +356,7 @@ async fn require_durable_run_owner(
     .await
 }
 
-/// The run's DURABLE row (WS04 S4, the durable grant switch): its mode, and the thread it belongs
+/// The run's DURABLE row (WS04 S4): its mode, and the thread it belongs
 /// to. The mode says whether the run is in plan mode whatever this replica's flag holds; the
 /// thread is the only key an in-memory grant may ever use, because the request's own
 /// `session_id` is the caller's word and the ownership check above covers the run, not it.
@@ -1450,7 +1450,7 @@ impl ModelGateway for GatewayService {
         request: Request<ExitPlanModeRequest>,
     ) -> Result<Response<ExitPlanModeResponse>, Status> {
         let identity = authorize_rpc(&request, RpcAccess::Write)?;
-        let req = request.into_inner();
+        let mut req = request.into_inner();
         require_durable_run_owner(&self.state, &identity, &req.run_id).await?;
         let run_id = req.run_id.clone();
         let org_id = req.org_id.clone();
@@ -1469,17 +1469,14 @@ impl ModelGateway for GatewayService {
         // replica. Left to the in-memory exit, a grant that is durable and cluster-wide would
         // be published with no RUN_PLAN_MODE_EXITED to say who granted what.
         let durable_grant = self.state.plan_mode.durable_grant_enabled();
-        // The run's own row, read once, before anything is written, published or recorded. The
-        // ownership check above covers the RUN, not the `session_id` the request names, so a
-        // caller who owns run R could otherwise name another user's conversation and have a
-        // grant kept in memory against it. The conversation is the run's `thread_id` and
-        // nothing else: a `session_id` that names another one is refused, and the only key the
-        // in-memory fallback below uses is the run's own thread.
-        let run_detail = if durable_grant {
-            read_run_detail(&self.state, &identity, &run_id).await
-        } else {
-            None
-        };
+        // The run's own row, read once, before anything is written, published or recorded, and
+        // whatever the switch says: the in-memory grant the switch-off exit records is keyed on
+        // the request's `session_id`. The ownership check above covers the RUN, not that id, so a
+        // caller who owns run R could otherwise name another user's conversation and have a grant
+        // kept in memory against it. The conversation is the run's `thread_id` and nothing else: a
+        // `session_id` that names another one is refused, and every in-memory grant below is keyed
+        // on the run's own thread.
+        let run_detail = read_run_detail(&self.state, &identity, &run_id).await;
         let run_thread: Option<String> = match &run_detail {
             Some(detail) => {
                 if !session_id.is_empty() && session_id != detail.thread_id {
@@ -1489,7 +1486,9 @@ impl ModelGateway for GatewayService {
                 }
                 Some(detail.thread_id.clone())
             }
-            None if durable_grant && !session_id.is_empty() => {
+            // With the switch off the grant is in memory and has no key but the run's thread, so an
+            // unreadable run is refused even when the request names no conversation.
+            None if !durable_grant || !session_id.is_empty() => {
                 // The run's conversation cannot be read, so the one named cannot be checked.
                 return Err(Status::unavailable(
                     "the run could not be read to check its conversation",
@@ -1514,6 +1513,11 @@ impl ModelGateway for GatewayService {
             )
             .await?
         } else {
+            // The in-memory grant is keyed on the request's `session_id`, so the handler gets the
+            // run's own thread, the one checked above: an empty id is then keyed there too.
+            if let Some(thread_id) = &run_thread {
+                req.session_id.clone_from(thread_id);
+            }
             coordinator::handle_exit_plan_mode(
                 &self.state.plan_mode,
                 &*self.state.publisher,
@@ -4333,6 +4337,16 @@ mod tests {
             // The one run whose durable row says it is in plan mode (entered on another
             // replica, so this replica holds no flag): the durable grant switch reads it.
             let run_id = request.into_inner().run_id;
+            // The owner's own run, which entered plan mode on this replica only: the set_run_mode
+            // double refuses its durable write, so its row still says `execute`.
+            if run_id == "run-owned" {
+                return Ok(Response::new(RunDetail {
+                    run_id,
+                    mode: "execute".to_owned(),
+                    thread_id: "session-test".to_owned(),
+                    ..Default::default()
+                }));
+            }
             // They all belong to the conversation `session-test`, which is what
             // `exit_plan_request` names.
             if matches!(
@@ -4387,7 +4401,12 @@ mod tests {
             Ok(Response::new(ResolveRunOwnerResponse {
                 authorized: matches!(
                     request.run_id.as_str(),
-                    "run-owned" | "run-durable-plan" | "run-victim-attempt" | "run-refused-mode"
+                    // `run-unreadable` is owned, yet `get_run` above cannot read it.
+                    "run-owned"
+                        | "run-durable-plan"
+                        | "run-victim-attempt"
+                        | "run-refused-mode"
+                        | "run-unreadable"
                 )
                     && request.org_id == "org_test"
                     && request.user_id == "user_test",
@@ -4873,6 +4892,91 @@ mod tests {
             Some(mp_contracts::model_plane::v1::AutonomyRung::WorkspaceWrite),
             "the in-memory grant, as ever"
         );
+    }
+
+    /// D1-025: with the durable grant switch OFF the in-memory grant is keyed on the request's
+    /// `session_id`, so the exit checks that id against the run's own thread just as the switch-on
+    /// path does. A caller who owns run R and names another conversation is refused before
+    /// anything is published or recorded.
+    #[tokio::test]
+    async fn exit_plan_mode_with_the_switch_off_refuses_another_thread_and_plants_no_grant() {
+        let (mut service, publisher) = test_run_ownership_service().await;
+        service.state.plan_mode = service.state.plan_mode.clone().with_durable_grant_enabled(false);
+        let mut request = exit_plan_request("run-victim-attempt");
+        request.session_id = "victim-thread".to_owned();
+        request.granted_rung = mp_contracts::model_plane::v1::AutonomyRung::DangerFullAccess as i32;
+
+        let error = service
+            .exit_plan_mode(authenticated(request))
+            .await
+            .expect_err("a session_id that is not the run's conversation is refused");
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+        for thread in ["victim-thread", "session-test"] {
+            assert_eq!(
+                service.state.plan_mode.granted_rung("org_test", thread),
+                None,
+                "no grant exists for {thread}"
+            );
+        }
+        assert!(publisher.drain().is_empty(), "nothing was published");
+    }
+
+    /// D1-025: with the switch off, a `session_id` naming the run's own conversation, or none at
+    /// all, still exits, and the in-memory grant lands on that conversation and on no other key.
+    #[tokio::test]
+    async fn exit_plan_mode_with_the_switch_off_grants_on_the_runs_own_thread() {
+        for session_id in ["session-test", ""] {
+            let (mut service, _publisher) = test_run_ownership_service().await;
+            let plan_mode = service.state.plan_mode.clone().with_durable_grant_enabled(false);
+            service.state.plan_mode = plan_mode;
+            let mut request = exit_plan_request("run-durable-plan");
+            request.session_id = session_id.to_owned();
+
+            service
+                .exit_plan_mode(authenticated(request))
+                .await
+                .expect("the run's own conversation may exit plan mode");
+            assert_eq!(
+                service.state.plan_mode.granted_rung("org_test", "session-test"),
+                Some(mp_contracts::model_plane::v1::AutonomyRung::WorkspaceWrite),
+                "the grant is on the run's own thread for session_id {session_id:?}"
+            );
+            assert_eq!(
+                service.state.plan_mode.granted_rung("org_test", ""),
+                None,
+                "no grant is keyed on an empty thread for session_id {session_id:?}"
+            );
+        }
+    }
+
+    /// D1-025: with the switch off, a run the owner may act on but Session Core cannot read has no
+    /// thread to check the `session_id` against or to key the grant on, so the exit is refused.
+    #[tokio::test]
+    async fn exit_plan_mode_with_the_switch_off_refuses_an_unreadable_run_and_plants_no_grant() {
+        let (mut service, publisher) = test_run_ownership_service().await;
+        service.state.plan_mode = service.state.plan_mode.clone().with_durable_grant_enabled(false);
+        for session_id in ["session-test", ""] {
+            let mut request = exit_plan_request("run-unreadable");
+            request.session_id = session_id.to_owned();
+
+            let error = service
+                .exit_plan_mode(authenticated(request))
+                .await
+                .expect_err("a run that cannot be read is refused");
+            assert_eq!(
+                error.code(),
+                tonic::Code::Unavailable,
+                "for session_id {session_id:?}"
+            );
+        }
+        for thread in ["session-test", ""] {
+            assert_eq!(
+                service.state.plan_mode.granted_rung("org_test", thread),
+                None,
+                "no grant exists for {thread:?}"
+            );
+        }
+        assert!(publisher.drain().is_empty(), "nothing was published");
     }
 
     /// WS04 S4 second review, defect 0 (an authority hole): with the durable grant switch on, a

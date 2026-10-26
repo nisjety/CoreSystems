@@ -6600,15 +6600,17 @@ async fn gate_and_ground_web_search_outcome(
     if let Some(answer) = &instant {
         // Structured, and at INFO: a short-circuit that turns out to be wrong has
         // to be diagnosable from the logs alone — which source, which label, which
-        // value, which period, and which question term tied them together.
+        // value and which period. The question, and the term that tied the fact to
+        // it, are the user's words: they are counted here, never printed, whatever
+        // the ZDR posture.
         tracing::info!(
             source = %answer.url,
             fact_label = %answer.figure.label,
             fact_value = %answer.figure.value,
             fact_period = %answer.figure.period,
             subject = answer.subject,
-            entity = %answer.entity,
-            question = %question,
+            entity_chars = answer.entity.chars().count(),
+            question_chars = question.chars().count(),
             hits_set_aside = scored.hits.len().saturating_sub(1),
             "instant answer: an authoritative structured fact ended the search"
         );
@@ -6623,7 +6625,7 @@ async fn gate_and_ground_web_search_outcome(
         tracing::debug!(
             found = gate.found,
             kept = gate.kept,
-            query = %question,
+            query_chars = question.chars().count(),
             "web search: relevance gate set hits aside"
         );
     }
@@ -7782,8 +7784,8 @@ pub async fn run_tool_rounds_for_model_with_attachments(
                                 fact_value = %answer.figure.value,
                                 fact_period = %answer.figure.period,
                                 subject = answer.subject,
-                                entity = %answer.entity,
-                                question = %turn_question,
+                                entity_chars = answer.entity.chars().count(),
+                                question_chars = turn_question.chars().count(),
                                 "instant answer: a curated statistics lookup ended the search"
                             );
                             outcome.output =
@@ -9698,6 +9700,50 @@ mod tests {
         assert!(!inline_tool_allowed("browser_agent"));
         assert!(inline_tool_allowed("web_search"));
         assert!(inline_tool_allowed("knowledge_search"));
+    }
+
+    /// The question and the search query are the user's own words, and a log line
+    /// is retained wherever it lands, whatever the ZDR posture. So a tracing field
+    /// counts them (`question_chars`) and never formats them. A name inside a longer
+    /// identifier, such as `query_chars`, is a different field and is not matched.
+    #[test]
+    fn tracing_counts_the_question_and_query_text_and_never_formats_it() {
+        // Both shapes of a formatted field, `name = %value` and the shorthand `%name`.
+        fn formats(line: &str, name: &str) -> bool {
+            let ident = |c: char| c.is_alphanumeric() || c == '_';
+            line.match_indices(name).any(|(at, _)| {
+                let before = &line[..at];
+                let after = &line[at + name.len()..];
+                if before.ends_with(ident) || after.starts_with(ident) {
+                    return false;
+                }
+                let assigned = after
+                    .trim_start()
+                    .strip_prefix('=')
+                    .is_some_and(|rest| rest.trim_start().starts_with(['%', '?']));
+                before.ends_with(['%', '?']) || assigned
+            })
+        }
+        // The scan must see the shapes it forbids, or it proves nothing.
+        assert!(formats("        question = %question,", "question"));
+        assert!(formats("            query = %question,", "query"));
+        assert!(formats("    %turn_question,", "turn_question"));
+        assert!(!formats("        question_chars = question.chars().count(),", "question"));
+        assert!(!formats("    let turn_question = build();", "turn_question"));
+
+        // `include_str!` reads this file. The production part ends where the test module
+        // starts, since the first `#[cfg(test)]` sits above the dispatcher.
+        let source = include_str!("tool_loop.rs");
+        let production = &source[..source.find("\nmod tests {").expect("test module")];
+        for line in production.lines().filter(|line| !line.trim_start().starts_with("//")) {
+            for name in ["question", "turn_question", "query"] {
+                assert!(
+                    !formats(line, name),
+                    "`{name}` is the user's text: count it, never format it: {}",
+                    line.trim()
+                );
+            }
+        }
     }
 
     /// The Ask loop's read arms and the admission contract must name the same reads
