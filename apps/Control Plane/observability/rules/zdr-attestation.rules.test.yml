@@ -1,0 +1,143 @@
+# promtool unit tests for zdr-attestation.rules.yml:
+#   promtool test rules zdr-attestation.rules.test.yml
+#
+# promtool time starts at 0, so time() at eval_time 240h is 864000 (ten days).
+# Each review-by value below is 864000 plus the seconds left until that day (less
+# than 864000 once that day has passed).
+# Every series is constant over the 240 hours, so the result at eval_time is the
+# result of the rule's boundary arithmetic alone.
+rule_files:
+  - zdr-attestation.rules.yml
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    name: far-future review-by stays quiet
+    input_series:
+      - series: 'mp_inference_zdr_attestation_review_by_timestamp_seconds{surface="far"}'
+        values: '8640000+0x14400'
+    alert_rule_test:
+      - eval_time: 240h
+        alertname: ZdrAttestationReviewDue
+        exp_alerts: []
+      - eval_time: 240h
+        alertname: ZdrAttestationReviewImminent
+        exp_alerts: []
+      - eval_time: 240h
+        alertname: ZdrAttestationLapsed
+        exp_alerts: []
+
+  - interval: 1m
+    name: ten days out fires the warning only
+    input_series:
+      - series: 'mp_inference_zdr_attestation_review_by_timestamp_seconds{surface="warn"}'
+        values: '1728000+0x14400'
+    alert_rule_test:
+      - eval_time: 240h
+        alertname: ZdrAttestationReviewDue
+        exp_alerts:
+          - exp_labels: { severity: warning, plane: model, surface: warn }
+            exp_annotations:
+              summary: "A ZDR attestation needs renewal within 14 days"
+              runbook: "apps/Model Plane/docs/runbooks/zdr-attestation-and-live-proof.md#attestation-lapse-alerts"
+      - eval_time: 240h
+        alertname: ZdrAttestationReviewImminent
+        exp_alerts: []
+      - eval_time: 240h
+        alertname: ZdrAttestationLapsed
+        exp_alerts: []
+
+  - interval: 1m
+    name: two days out fires the critical alert only
+    input_series:
+      - series: 'mp_inference_zdr_attestation_review_by_timestamp_seconds{surface="crit"}'
+        values: '1036800+0x14400'
+    alert_rule_test:
+      - eval_time: 240h
+        alertname: ZdrAttestationReviewDue
+        exp_alerts: []
+      - eval_time: 240h
+        alertname: ZdrAttestationReviewImminent
+        exp_alerts:
+          - exp_labels: { severity: critical, plane: model, surface: crit }
+            exp_annotations:
+              summary: "A ZDR attestation review-by day is within 3 days; ZDR stops for its surface after that day"
+              runbook: "apps/Model Plane/docs/runbooks/zdr-attestation-and-live-proof.md#attestation-lapse-alerts"
+      - eval_time: 240h
+        alertname: ZdrAttestationLapsed
+        exp_alerts: []
+
+  - interval: 1m
+    name: review-by two days in the past fires lapsed only
+    input_series:
+      - series: 'mp_inference_zdr_attestation_review_by_timestamp_seconds{surface="lapsed"}'
+        values: '691200+0x14400'
+    alert_rule_test:
+      - eval_time: 240h
+        alertname: ZdrAttestationReviewDue
+        exp_alerts: []
+      - eval_time: 240h
+        alertname: ZdrAttestationReviewImminent
+        exp_alerts: []
+      - eval_time: 240h
+        alertname: ZdrAttestationLapsed
+        exp_alerts:
+          - exp_labels: { severity: critical, plane: model, surface: lapsed }
+            exp_annotations:
+              summary: "A ZDR attestation has lapsed; ZDR is no longer granted for its surface"
+              runbook: "apps/Model Plane/docs/runbooks/zdr-attestation-and-live-proof.md#attestation-lapse-alerts"
+
+  - interval: 1m
+    name: boundaries at three days, the review-by day, the day after and one minute past it
+    input_series:
+      - series: 'mp_inference_zdr_attestation_review_by_timestamp_seconds{surface="at14d"}'
+        values: '2073600+0x14400'
+      - series: 'mp_inference_zdr_attestation_review_by_timestamp_seconds{surface="at3d"}'
+        values: '1123200+0x14400'
+      - series: 'mp_inference_zdr_attestation_review_by_timestamp_seconds{surface="lastday"}'
+        values: '777600+0x14400'
+      - series: 'mp_inference_zdr_attestation_review_by_timestamp_seconds{surface="pastday"}'
+        values: '777540+0x14400'
+      - series: 'mp_inference_zdr_attestation_review_by_timestamp_seconds{surface="reviewday"}'
+        values: '864000+0x14400'
+    alert_rule_test:
+      - eval_time: 240h
+        alertname: ZdrAttestationReviewDue
+        exp_alerts:
+          - exp_labels: { severity: warning, plane: model, surface: at3d }
+            exp_annotations:
+              summary: "A ZDR attestation needs renewal within 14 days"
+              runbook: "apps/Model Plane/docs/runbooks/zdr-attestation-and-live-proof.md#attestation-lapse-alerts"
+      - eval_time: 240h
+        alertname: ZdrAttestationReviewImminent
+        exp_alerts:
+          - exp_labels: { severity: critical, plane: model, surface: lastday }
+            exp_annotations:
+              summary: "A ZDR attestation review-by day is within 3 days; ZDR stops for its surface after that day"
+              runbook: "apps/Model Plane/docs/runbooks/zdr-attestation-and-live-proof.md#attestation-lapse-alerts"
+          - exp_labels: { severity: critical, plane: model, surface: reviewday }
+            exp_annotations:
+              summary: "A ZDR attestation review-by day is within 3 days; ZDR stops for its surface after that day"
+              runbook: "apps/Model Plane/docs/runbooks/zdr-attestation-and-live-proof.md#attestation-lapse-alerts"
+      - eval_time: 240h
+        alertname: ZdrAttestationLapsed
+        exp_alerts:
+          - exp_labels: { severity: critical, plane: model, surface: pastday }
+            exp_annotations:
+              summary: "A ZDR attestation has lapsed; ZDR is no longer granted for its surface"
+              runbook: "apps/Model Plane/docs/runbooks/zdr-attestation-and-live-proof.md#attestation-lapse-alerts"
+
+  - interval: 1m
+    name: no series means no alerts
+    input_series:
+      - series: 'unrelated_metric'
+        values: '1+0x14400'
+    alert_rule_test:
+      - eval_time: 240h
+        alertname: ZdrAttestationReviewDue
+        exp_alerts: []
+      - eval_time: 240h
+        alertname: ZdrAttestationReviewImminent
+        exp_alerts: []
+      - eval_time: 240h
+        alertname: ZdrAttestationLapsed
+        exp_alerts: []

@@ -69,6 +69,13 @@ scrape_configs:
       - targets: ['model-gateway:8080']
         labels: { service: model-gateway, plane: model }
 
+  # inference-core serves /metrics on its health port 8082 (ZDR attestation review-by gauge).
+  - job_name: model-inference-core
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['model-plane-inference-core-1:8082']
+        labels: { service: inference-core, plane: model }
+
   - job_name: verevon-gateway
     metrics_path: /metrics
     static_configs:

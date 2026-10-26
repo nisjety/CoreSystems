@@ -96,3 +96,20 @@ An org left on is an org whose chat is refused. Then:
 ## Pass 2 (after a real attestation, task Z-40)
 
 Not part of pass 1. Once a deployment is attested in writing and the six `*_ZDR_*` fields are set in the signed policy, `/api/v1/models` lists `zdr` on the covered model. Repeat sections 3 to 5 with the turn expected to stream an answer (`ZDR_LIVE_TURN_EXPECT=answer`, spec extended then): zero thread and message delta, `mp:gw:cache:*` unchanged, no feedback row, no audit envelope.
+
+## Attestation lapse alerts
+
+Three alerts in `apps/Control Plane/observability/rules/zdr-attestation.rules.yml` read the review-by gauge that inference-core publishes for each provider surface, `mp_inference_zdr_attestation_review_by_timestamp_seconds`. The gauge is the start of the review-by UTC day. The attestation stops granting ZDR after that day, so the alerts count down to it. No pager is wired yet (decision D1): the alerts show in the Prometheus UI only.
+
+- `ZdrAttestationReviewDue` (warning): 3 to 14 days before the review-by day. Start the renewal for that surface.
+- `ZdrAttestationReviewImminent` (critical): under 3 days before the review-by day, until that day ends. The renewal must be in force before it ends.
+- `ZdrAttestationLapsed` (critical): the review-by day has ended, so ZDR is no longer granted for that surface.
+
+What to do:
+
+1. Renew the attestation for the surface in writing.
+2. Re-sign the policy that carries the attestation (the six `*_ZDR_*` fields, see Pass 2 above).
+3. Restart inference-core. The gauge is set once at boot from the verified attestation, so the alerts clear only after the restart and the next scrape.
+4. Confirm `/api/v1/models` lists `zdr` on the covered model again.
+
+A missing series raises no alert. If inference-core is down, or the `model-inference-core` scrape target is not up in the Prometheus UI, the countdown is blind: fix the target first.
