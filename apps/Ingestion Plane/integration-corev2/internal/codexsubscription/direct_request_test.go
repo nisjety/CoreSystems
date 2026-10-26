@@ -157,7 +157,9 @@ func TestDirectBodyGoldenRoles(t *testing.T) {
 	freshAuth(t, h.home, h.now)
 	request := testRequest()
 	request.Messages = goldenRolesMessages()
-	body, err := h.transport.requestBody(request, directModelProfiles["gpt-5.6-terra"], true, false, false, promptCacheKey(request.ConnectionID, request.Model))
+	// The golden pins the body's shape, so the cache key is a fixed literal here;
+	// TestPromptCacheKeyScoping covers how promptCacheKey derives the real one.
+	body, err := h.transport.requestBody(request, directModelProfiles["gpt-5.6-terra"], true, false, false, "fixture-cache-key")
 	if err != nil {
 		t.Fatal(err)
 	}
