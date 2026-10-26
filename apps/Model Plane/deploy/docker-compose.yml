@@ -1877,17 +1877,20 @@ services:
       BROWSER_BROKER_MAX_RUN_DOMAINS: ${BROWSER_BROKER_MAX_RUN_DOMAINS:-8}
       # Durable grant store (WS1.C). Required: without it the broker exits 1 at
       # boot unless BROWSER_BROKER_ALLOW_EPHEMERAL_DEVELOPMENT=true (dev only).
-      # Quarry's Postgres server (ingestion-postgres, reached over the
-      # browser-broker-db network below), but a DEDICATED database and role
-      # (browser_broker): browser_ tables never share a schema with Quarry's
-      # databases. apps/Ingestion Plane/scripts/bootstrap_broker_db.sh creates
-      # them from the same BROWSER_BROKER_PG_PASSWORD. The password must be
-      # URL-safe (it sits inside this URL). No depends_on: the database lives in
-      # another compose project; until it answers the entrypoint's migration step
-      # fails, the container exits and restarts (unless-stopped). ZDR grants are
-      # never written here (X-2): they stay in memory, so the broker stays one
-      # replica.
-      DATABASE_URL: postgresql://browser_broker:${BROWSER_BROKER_PG_PASSWORD:?BROWSER_BROKER_PG_PASSWORD is required}@ingestion-postgres:5432/browser_broker
+      # The store is this plane's own postgres, in the session_core database and
+      # as the postgres superuser role that the other persisting services use.
+      # The plane creates no per-service database or role, so a dedicated one
+      # would need an init path first. The entrypoint's migrations create
+      # browser_grants on each start. The password is MODEL_POSTGRES_PASSWORD,
+      # which this plane already requires, and it must be URL-safe (it sits
+      # inside this URL). ZDR grants are never written here (X-2): they stay in
+      # memory, so the broker stays one replica.
+      DATABASE_URL: postgresql://postgres:${MODEL_POSTGRES_PASSWORD:?MODEL_POSTGRES_PASSWORD is required}@postgres:5432/session_core
+    # The entrypoint's migrations need postgres, so wait for it to be healthy;
+    # otherwise a first boot before it answers fails and restarts the container.
+    depends_on:
+      postgres:
+        condition: service_healthy
     # Quarry (Ingestion Plane) validates grants over gRPC, so the broker must be
     # reachable on inter-plane-bus. Auth is a verified JWT with audience
     # browser-broker on every method; only the gRPC health service is public.
@@ -1897,8 +1900,6 @@ services:
         aliases:
           - model-plane-browser-broker-1
           - browser-broker
-      # Postgres-only link to ingestion-postgres (Ingestion Plane compose owns it).
-      browser-broker-db: {}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8087/healthz"]
       interval: 10s
@@ -2129,8 +2130,4 @@ networks:
   default:
     name: model-plane-network
   inter-plane-bus:
-    external: true
-  # Created by the Ingestion Plane compose (service postgres); the broker is the
-  # only Model Plane service on it.
-  browser-broker-db:
     external: true
