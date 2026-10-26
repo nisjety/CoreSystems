@@ -201,6 +201,38 @@ func normalizeSkillShares(ownerUserID string, grantees []string) ([]string, erro
 	return clean, nil
 }
 
+// errSkillNotCallersToChange answers a change to a user-scoped skill by a caller who neither
+// owns it nor is an org admin. It is a 403 because the sharing check in update already answers
+// 403 to the same caller about the same skill.
+var errSkillNotCallersToChange = errors.New("only the skill owner or an org admin may change or delete this skill")
+
+// ensureSkillCallerMayChange runs inside the mutation's transaction, before its statement. It
+// locks the skill's row and reads its scope and owner, so the statement that follows cannot
+// race a change to either. An org-scoped skill stays open to every member, as it always was.
+// A skill that is not there passes: the statement then changes nothing and the caller gets 404.
+func ensureSkillCallerMayChange(ctx context.Context, tx registryDatabase, id, orgID, callerID string, isAdmin bool) error {
+	rows, err := tx.Query(ctx, `
+		SELECT scope, owner_user_id FROM agent_skills
+		WHERE id=$1 AND org_id=$2 FOR UPDATE
+	`, id, orgID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return rows.Err()
+	}
+	var scope, ownerUserID string
+	if err := rows.Scan(&scope, &ownerUserID); err != nil {
+		return err
+	}
+	isOwner := ownerUserID != "" && ownerUserID == callerID
+	if scope == "org" || isAdmin || isOwner {
+		return nil
+	}
+	return errSkillNotCallersToChange
+}
+
 func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -384,6 +416,8 @@ func (h *SkillsHandler) update(w http.ResponseWriter, r *http.Request, id string
 	}
 	now := time.Now().UTC()
 	orgID := verifiedOrganizationID(r)
+	callerID := verifiedActorID(r)
+	isAdmin := verifiedIsAdmin(r)
 	var sharedJSON any
 	if update.SharedWith != nil {
 		var scope, ownerUserID string
@@ -403,7 +437,6 @@ func (h *SkillsHandler) update(w http.ResponseWriter, r *http.Request, id string
 			return
 		}
 		// A user-owned resource may only be shared by its durable owner.
-		callerID := verifiedActorID(r)
 		if ownerUserID == "" || callerID != ownerUserID {
 			jsonErr(w, "only the skill owner may change sharing", http.StatusForbidden)
 			return
@@ -431,6 +464,11 @@ func (h *SkillsHandler) update(w http.ResponseWriter, r *http.Request, id string
 	var result pgconn.CommandTag
 	proposalUndecided := false
 	err := h.mutateSkill(r, "", "", func(tx registryDatabase) error {
+		// A user-owned skill changes only for its owner or an admin. The check takes the row
+		// lock before the statement below, so the check and the write see the same skill.
+		if err := ensureSkillCallerMayChange(r.Context(), tx, id, orgID, callerID, isAdmin); err != nil {
+			return err
+		}
 		var err error
 		result, err = tx.Exec(r.Context(), `
 			UPDATE agent_skills
@@ -449,6 +487,10 @@ func (h *SkillsHandler) update(w http.ResponseWriter, r *http.Request, id string
 		}
 		return err
 	})
+	if errors.Is(err, errSkillNotCallersToChange) {
+		jsonErr(w, err.Error(), http.StatusForbidden)
+		return
+	}
 	if proposalUndecided {
 		jsonErr(w, "proposal_requires_decision", http.StatusConflict)
 		return
@@ -460,12 +502,20 @@ func (h *SkillsHandler) update(w http.ResponseWriter, r *http.Request, id string
 }
 
 func (h *SkillsHandler) delete(w http.ResponseWriter, r *http.Request, id string) {
+	orgID := verifiedOrganizationID(r)
 	var result pgconn.CommandTag
 	err := h.mutateSkill(r, "", "", func(tx registryDatabase) error {
+		if err := ensureSkillCallerMayChange(r.Context(), tx, id, orgID, verifiedActorID(r), verifiedIsAdmin(r)); err != nil {
+			return err
+		}
 		var err error
-		result, err = tx.Exec(r.Context(), `DELETE FROM agent_skills WHERE id=$1 AND org_id=$2`, id, verifiedOrganizationID(r))
+		result, err = tx.Exec(r.Context(), `DELETE FROM agent_skills WHERE id=$1 AND org_id=$2`, id, orgID)
 		return err
 	})
+	if errors.Is(err, errSkillNotCallersToChange) {
+		jsonErr(w, err.Error(), http.StatusForbidden)
+		return
+	}
 	if !writeSingleScopedMutation(w, "agent skill", result, err) {
 		return
 	}
