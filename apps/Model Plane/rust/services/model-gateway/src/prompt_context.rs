@@ -18,7 +18,9 @@
 //! a fresh Codex thread per call and caches nothing between calls. Both routes
 //! keep exactly the prompt they had.
 
-use mp_contracts::model_plane::v1::{ChatMessage, ToolDefinition};
+use mp_contracts::model_plane::v1::{
+    ChatMessage, PromptTierPlan as WirePromptTierPlan, ToolDefinition,
+};
 use mp_contracts::prompt_tier::{plan_of, PromptTier, PromptTierPlan};
 
 /// Operator switch for [`PromptOrder::StablePrefix`], the conditional tools
@@ -282,6 +284,21 @@ impl PromptContext {
         }
     }
 
+    /// The prompt's messages in `order`, and under the stable order the plan of the
+    /// standing blocks it leads with. The legacy order has no tiers, so it has no plan
+    /// and renders exactly as [`PromptContext::render`] does.
+    #[must_use]
+    pub fn render_planned(self, order: PromptOrder) -> (Vec<ChatMessage>, Option<PromptTierPlan>) {
+        match order {
+            PromptOrder::Legacy => (self.render_legacy(), None),
+            PromptOrder::StablePrefix => {
+                let tiered = self.render_stable_prefix();
+                let plan = tiered.plan();
+                (tiered.messages, Some(plan))
+            }
+        }
+    }
+
     /// Byte-identical to the insertions the chat path made before these
     /// slots existed. Blocks it put at index 0 lead, in reverse insertion
     /// order; blocks it put at the first non-system position follow the
@@ -412,6 +429,45 @@ pub fn conditional_tools_last(tools: Vec<ToolDefinition>) -> Vec<ToolDefinition>
         ordered.extend(conditional.iter().filter(|tool| tool.name == name).cloned());
     }
     ordered
+}
+
+/// The plan as the inference calls carry it: how many leading messages are Stable and
+/// how many Context. `None` when the prompt leads with no standing block, since an empty
+/// plan names nothing a provider could cache.
+#[must_use]
+pub fn wire_plan(plan: PromptTierPlan) -> Option<WirePromptTierPlan> {
+    if plan.stable + plan.context == 0 {
+        return None;
+    }
+    Some(WirePromptTierPlan {
+        stable_messages: u32::try_from(plan.stable).ok()?,
+        context_messages: u32::try_from(plan.context).ok()?,
+    })
+}
+
+/// `plan`, if it still describes the messages `outgoing` sends; otherwise `None`.
+///
+/// A plan names the leading messages of the prompt it was computed on, and nothing after
+/// them. `outgoing` keeps that claim only while its first `stable + context` messages are
+/// the composed ones, role and content, and every one of them is a system message. A
+/// message inserted ahead of them, one dropped from among them, or a retry that rewrote
+/// the head sends no plan: a provider would otherwise cache a prefix the prompt lacks.
+#[must_use]
+pub fn plan_for(
+    plan: Option<&WirePromptTierPlan>,
+    composed: &[ChatMessage],
+    outgoing: &[ChatMessage],
+) -> Option<WirePromptTierPlan> {
+    let plan = plan?;
+    let counted = (plan.stable_messages as usize) + (plan.context_messages as usize);
+    if counted == 0 || composed.len() < counted || outgoing.len() < counted {
+        return None;
+    }
+    let intact = composed[..counted]
+        .iter()
+        .zip(&outgoing[..counted])
+        .all(|(made, sent)| sent.role == "system" && made.role == sent.role && made.content == sent.content);
+    intact.then_some(*plan)
 }
 
 #[cfg(test)]
@@ -982,5 +1038,71 @@ mod tests {
         ]));
         let without = names(conditional_tools_last(vec![tool("a"), tool("b")]));
         assert_eq!(&with[..2], without.as_slice());
+    }
+
+    #[test]
+    fn the_legacy_order_has_no_plan_and_renders_as_it_always_did() {
+        let context = full_context(history_with_pins_and_summary());
+        let (messages, plan) = context.clone().render_planned(PromptOrder::Legacy);
+        assert_eq!(plan, None);
+        assert_eq!(messages, context.render(PromptOrder::Legacy));
+    }
+
+    #[test]
+    fn the_stable_order_plan_counts_the_standing_blocks_it_leads_with() {
+        let context = full_context(history_with_pins_and_summary());
+        let (messages, plan) = context.clone().render_planned(PromptOrder::StablePrefix);
+        assert_eq!(messages, context.render(PromptOrder::StablePrefix));
+        assert_eq!(plan, Some(PromptTierPlan { stable: 2, context: 4 }));
+        assert_eq!(
+            wire_plan(PromptTierPlan { stable: 2, context: 4 }),
+            Some(WirePromptTierPlan {
+                stable_messages: 2,
+                context_messages: 4
+            })
+        );
+        assert_eq!(
+            wire_plan(PromptTierPlan { stable: 0, context: 3 }),
+            Some(WirePromptTierPlan {
+                stable_messages: 0,
+                context_messages: 3
+            })
+        );
+        assert_eq!(wire_plan(PromptTierPlan::default()), None);
+    }
+
+    #[test]
+    fn a_plan_holds_only_while_the_messages_it_counts_are_the_composed_ones() {
+        let composed =
+            full_context(history_with_pins_and_summary()).render(PromptOrder::StablePrefix);
+        let plan = WirePromptTierPlan {
+            stable_messages: 2,
+            context_messages: 4,
+        };
+        // Unchanged, with more appended: the plan stands.
+        let mut appended = composed.clone();
+        appended.push(turn("user", "a follow-up"));
+        assert_eq!(plan_for(Some(&plan), &composed, &appended), Some(plan));
+        // No plan in, none out; an empty plan names nothing to send.
+        assert_eq!(plan_for(None, &composed, &appended), None);
+        let empty = WirePromptTierPlan {
+            stable_messages: 0,
+            context_messages: 0,
+        };
+        assert_eq!(plan_for(Some(&empty), &composed, &composed), None);
+        // A counted message whose content changed.
+        let mut edited = composed.clone();
+        edited[1].content = "discipline, edited".to_owned();
+        assert_eq!(plan_for(Some(&plan), &composed, &edited), None);
+        // A counted message removed: everything after it shifts under the plan.
+        let mut dropped = composed.clone();
+        dropped.remove(0);
+        assert_eq!(plan_for(Some(&plan), &composed, &dropped), None);
+        // A counted message sent as another role, with the same text.
+        let mut demoted = composed.clone();
+        demoted[3].role = "user".to_owned();
+        assert_eq!(plan_for(Some(&plan), &composed, &demoted), None);
+        // A plan that counts more messages than the list holds.
+        assert_eq!(plan_for(Some(&plan), &composed[..3], &composed[..3]), None);
     }
 }

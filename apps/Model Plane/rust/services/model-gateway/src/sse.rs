@@ -2526,7 +2526,21 @@ pub async fn invoke_stream_sse(
     // never warns about a tool this turn cannot call. Guidance is context, not
     // history: it goes with the system blocks.
     prompt.user_supplied_args = crate::tool_loop::user_supplied_args_notice(&tool_defs);
-    let mut messages = prompt.render(cache_options.prompt_order());
+    // The stable order names the standing blocks it leads with: the leading Stable and Context
+    // messages. Their plan goes to the calls below on a non-ZDR turn only, and the composed head is
+    // kept so each later call can check that the plan still describes the messages it sends.
+    let (mut messages, standing) = prompt.render_planned(cache_options.prompt_order());
+    let prompt_tiers = standing
+        .filter(|_| !effective_zdr)
+        .and_then(crate::prompt_context::wire_plan);
+    let composed_head: Vec<ChatMessage> = match &prompt_tiers {
+        Some(plan) => messages
+            .iter()
+            .take((plan.stable_messages as usize) + (plan.context_messages as usize))
+            .cloned()
+            .collect(),
+        None => Vec::new(),
+    };
     // The images belong to the user turn this prompt ends with; from here the prompt only grows.
     let image_parts = image_parts.bind(&messages);
     // The files reach the model only through `code_interpreter`. A turn that stages files but offers no
@@ -3007,6 +3021,10 @@ pub async fn invoke_stream_sse(
         let mut document_tool_failures: u32 = 0;
         if !tool_defs.is_empty() {
             seq = sink.sync_cursor(seq).await;
+            // The research and forced-search passes above may have rewritten the head of the prompt,
+            // so the plan goes to the tool rounds only while it still describes that head.
+            let rounds_tiers =
+                crate::prompt_context::plan_for(prompt_tiers.as_ref(), &composed_head, &messages);
             let rounds = crate::tool_loop::run_tool_rounds_for_model_with_attachments(
                 &session_state,
                 &req_id,
@@ -3049,6 +3067,7 @@ pub async fn invoke_stream_sse(
                 Some(&sink),
                 &staged,
                 &image_parts,
+                rounds_tiers,
             )
             .await;
             seq = sink.sync_cursor(seq).await;
@@ -3146,6 +3165,9 @@ pub async fn invoke_stream_sse(
             answer_token_budget(),
             crate::thinking::ladder_enabled(),
         );
+        // The answer sends the plan only while the messages it sends still lead with the composed head.
+        let answer_tiers =
+            crate::prompt_context::plan_for(prompt_tiers.as_ref(), &composed_head, &messages);
         let mut grpc_req = InferRequest {
             request_id: req_id.clone(),
             org_id: org_clone.clone(),
@@ -3164,6 +3186,7 @@ pub async fn invoke_stream_sse(
             min_privacy_tier: min_privacy_tier_wire,
             thinking_budget_tokens: thinking_plan.budget_tokens,
             reasoning_effort: thinking_plan.effort_wire(),
+            prompt_tiers: answer_tiers,
             ..Default::default()
         };
         crate::vision::parts::attach(&mut grpc_req, &image_parts);
@@ -3461,6 +3484,12 @@ pub async fn invoke_stream_sse(
                 finish_stream_registrations(&cancels, &queued_inputs, &req_id);
                 return;
             }
+            // The shed rewrote the list: the plan holds only if the head it counts survived it.
+            grpc_req.prompt_tiers = crate::prompt_context::plan_for(
+                prompt_tiers.as_ref(),
+                &composed_head,
+                &grpc_req.messages,
+            );
             length_retries += 1;
             tracing::warn!(
                 request_id = %req_id,

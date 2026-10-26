@@ -15,8 +15,8 @@ use std::fmt::Write as _;
 use chrono::{Datelike, Utc};
 use mp_contracts::dataplane::retrieval_v2::RetrieveRequest;
 use mp_contracts::model_plane::v1::{
-    ChatMessage, FinalizeToolActionRequest, InferRequest, ReserveToolActionRequest,
-    SearchMemoryRequest, ToolCall, ToolDefinition,
+    ChatMessage, FinalizeToolActionRequest, InferRequest, PromptTierPlan,
+    ReserveToolActionRequest, SearchMemoryRequest, ToolCall, ToolDefinition,
 };
 use mp_contracts::office_verification::{OfficeKind, OfficeVerification, VerificationLevel};
 use mp_events::publisher::EventPublisher;
@@ -6730,6 +6730,8 @@ pub async fn run_tool_rounds(
         sandbox_bearer,
         sink,
         &crate::vision::parts::ImageParts::none(),
+        // No caller of this entry point holds a composed plan to name.
+        None,
     )
     .await
 }
@@ -6780,6 +6782,9 @@ pub async fn run_tool_rounds_for_model(
     sink: Option<&crate::sse_events::RichEventSink>,
     // The turn's images (WS08-S4): carried on every round's request, never altered here.
     images: &crate::vision::parts::ImageParts,
+    // The composer's stable-order plan of the prompt's standing blocks (WS02-S9), named on the
+    // tool-decision requests while it still describes their head. `None` names none.
+    prompt_tiers: Option<PromptTierPlan>,
 ) -> Result<ToolRounds, &'static str> {
     run_tool_rounds_for_model_with_attachments(
         state,
@@ -6811,6 +6816,7 @@ pub async fn run_tool_rounds_for_model(
         sink,
         &crate::turn_attachments::ValidatedAttachments::none(),
         images,
+        prompt_tiers,
     )
     .await
 }
@@ -6856,6 +6862,7 @@ pub async fn run_tool_rounds_for_model_with_attachments(
     sink: Option<&crate::sse_events::RichEventSink>,
     attachments: &crate::turn_attachments::ValidatedAttachments,
     images: &crate::vision::parts::ImageParts,
+    prompt_tiers: Option<PromptTierPlan>,
 ) -> Result<ToolRounds, &'static str> {
     // Resolved ONCE for the whole turn rather than per call: the entitlement is a
     // property of the turn, and a value re-derived per round is a value that can
@@ -6875,6 +6882,16 @@ pub async fn run_tool_rounds_for_model_with_attachments(
     // The turn's clock rides on the live sink; a caller without one (tests,
     // other routes) times nothing.
     let timing = sink.and_then(crate::sse_events::RichEventSink::timing);
+    // The plan names the leading messages of the prompt as composed. Keep that head as it was
+    // handed in, so each decision request can check the plan still describes what it sends.
+    let composed_head: Vec<ChatMessage> = match &prompt_tiers {
+        Some(plan) => base_messages
+            .iter()
+            .take((plan.stable_messages as usize) + (plan.context_messages as usize))
+            .cloned()
+            .collect(),
+        None => Vec::new(),
+    };
     let mut messages = base_messages;
     // The images name a message by index, so the rounds may only append to the
     // prompt: checked when the loop ends.
@@ -7169,6 +7186,9 @@ pub async fn run_tool_rounds_for_model_with_attachments(
             // Every round is a fresh decision: inference-core's response cache must
             // not replay an earlier identical draft (a quick retry, or back-to-back
             // runs of the same brief), so the round opts out like the review does.
+            // Named only while the messages it counts are still the composed head (`plan_for`).
+            let decision_tiers =
+                crate::prompt_context::plan_for(prompt_tiers.as_ref(), &composed_head, &decision_messages);
             let mut decision = with_authorization(
                 InferRequest {
                     // A source-bound plan has many authority/dependency distinctions.
@@ -7196,10 +7216,9 @@ pub async fn run_tool_rounds_for_model_with_attachments(
                     min_residency: String::new(),
                     // The broker proposes calls as data; the gateway owns execution.
                     subscription_connection_id: subscription_connection_id.to_owned(),
-                    // This loop is handed a finished message list, not the tiers it
-                    // was composed from, so it names none until the composer's plan
-                    // (`prompt_context::TieredPrompt::plan`) is carried in.
-                    prompt_tiers: None,
+                    // The composer's plan of the standing blocks, named only while it still describes
+                    // this request's head (`plan_for`); none for a legacy-order or ZDR prompt.
+                    prompt_tiers: decision_tiers,
                     image_parts: Vec::new(),
                 },
                 inference_bearer,
@@ -7983,6 +8002,7 @@ pub async fn run_tool_rounds_for_model_with_attachments(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mp_contracts::model_plane::v1 as mpv1;
 
     #[test]
     fn checked_single_post_revision_finishes_but_mixed_requests_keep_the_tool_path() {
@@ -14118,5 +14138,289 @@ mod tests {
             );
         }
         assert!(seen > 0, "result_query is advertised");
+    }
+
+    /// The inference core a decision-round test serves. It keeps every `Infer` request and
+    /// answers each with no tool call, which ends the tool phase after its first decision.
+    /// The loop makes no other RPC, so every other method refuses.
+    #[derive(Default)]
+    struct RecordingCore(std::sync::Arc<std::sync::Mutex<Vec<mpv1::InferRequest>>>);
+
+    type RecordedInferStream = std::pin::Pin<
+        Box<dyn futures::Stream<Item = Result<mpv1::InferChunk, tonic::Status>> + Send>,
+    >;
+    type RecordedVideoStream = std::pin::Pin<
+        Box<
+            dyn futures::Stream<
+                    Item = Result<mpv1::StreamVideoGenerationContentResponse, tonic::Status>,
+                > + Send,
+        >,
+    >;
+
+    #[tonic::async_trait]
+    impl mpv1::inference_core_server::InferenceCore for RecordingCore {
+        type InferStreamStream = RecordedInferStream;
+        type StreamVideoGenerationContentStream = RecordedVideoStream;
+
+        async fn infer(
+            &self,
+            request: tonic::Request<mpv1::InferRequest>,
+        ) -> Result<tonic::Response<mpv1::InferResponse>, tonic::Status> {
+            self.0.lock().expect("recorded requests").push(request.into_inner());
+            Ok(tonic::Response::new(mpv1::InferResponse {
+                model_used: "mock".to_owned(),
+                stop_reason: "end_turn".to_owned(),
+                ..Default::default()
+            }))
+        }
+
+        async fn infer_stream(
+            &self,
+            _: tonic::Request<mpv1::InferRequest>,
+        ) -> Result<tonic::Response<RecordedInferStream>, tonic::Status> {
+            Err(tonic::Status::unimplemented("infer_stream"))
+        }
+        async fn create_embedding(
+            &self,
+            _: tonic::Request<mpv1::CreateEmbeddingRequest>,
+        ) -> Result<tonic::Response<mpv1::CreateEmbeddingResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("create_embedding"))
+        }
+        async fn get_model_access(
+            &self,
+            _: tonic::Request<mpv1::GetModelAccessRequest>,
+        ) -> Result<tonic::Response<mpv1::GetModelAccessResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("get_model_access"))
+        }
+        async fn list_models(
+            &self,
+            _: tonic::Request<mpv1::ListModelsRequest>,
+        ) -> Result<tonic::Response<mpv1::ListModelsResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("list_models"))
+        }
+        async fn synthesize_speech(
+            &self,
+            _: tonic::Request<mpv1::SynthesizeSpeechRequest>,
+        ) -> Result<tonic::Response<mpv1::SynthesizeSpeechResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("synthesize_speech"))
+        }
+        async fn transcribe_speech(
+            &self,
+            _: tonic::Request<mpv1::TranscribeSpeechRequest>,
+        ) -> Result<tonic::Response<mpv1::TranscribeSpeechResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("transcribe_speech"))
+        }
+        async fn list_speech_voices(
+            &self,
+            _: tonic::Request<mpv1::ListSpeechVoicesRequest>,
+        ) -> Result<tonic::Response<mpv1::ListSpeechVoicesResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("list_speech_voices"))
+        }
+        async fn translate_text(
+            &self,
+            _: tonic::Request<mpv1::TranslateTextRequest>,
+        ) -> Result<tonic::Response<mpv1::TranslateTextResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("translate_text"))
+        }
+        async fn batch_translate_text(
+            &self,
+            _: tonic::Request<mpv1::BatchTranslateTextRequest>,
+        ) -> Result<tonic::Response<mpv1::BatchTranslateTextResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("batch_translate_text"))
+        }
+        async fn detect_text_language(
+            &self,
+            _: tonic::Request<mpv1::DetectTextLanguageRequest>,
+        ) -> Result<tonic::Response<mpv1::DetectTextLanguageResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("detect_text_language"))
+        }
+        async fn list_translation_languages(
+            &self,
+            _: tonic::Request<mpv1::ListTranslationLanguagesRequest>,
+        ) -> Result<tonic::Response<mpv1::ListTranslationLanguagesResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("list_translation_languages"))
+        }
+        async fn generate_image(
+            &self,
+            _: tonic::Request<mpv1::GenerateImageRequest>,
+        ) -> Result<tonic::Response<mpv1::GenerateImageResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("generate_image"))
+        }
+        async fn analyze_image(
+            &self,
+            _: tonic::Request<mpv1::AnalyzeImageRequest>,
+        ) -> Result<tonic::Response<mpv1::AnalyzeImageResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("analyze_image"))
+        }
+        async fn extract_image_text(
+            &self,
+            _: tonic::Request<mpv1::ExtractImageTextRequest>,
+        ) -> Result<tonic::Response<mpv1::ExtractImageTextResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("extract_image_text"))
+        }
+        async fn analyze_document(
+            &self,
+            _: tonic::Request<mpv1::AnalyzeDocumentRequest>,
+        ) -> Result<tonic::Response<mpv1::AnalyzeDocumentResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("analyze_document"))
+        }
+        async fn analyze_language(
+            &self,
+            _: tonic::Request<mpv1::AnalyzeLanguageRequest>,
+        ) -> Result<tonic::Response<mpv1::AnalyzeLanguageResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("analyze_language"))
+        }
+        async fn create_realtime_session(
+            &self,
+            _: tonic::Request<mpv1::CreateRealtimeSessionRequest>,
+        ) -> Result<tonic::Response<mpv1::CreateRealtimeSessionResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("create_realtime_session"))
+        }
+        async fn create_video_generation_job(
+            &self,
+            _: tonic::Request<mpv1::CreateVideoGenerationJobRequest>,
+        ) -> Result<tonic::Response<mpv1::CreateVideoGenerationJobResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("create_video_generation_job"))
+        }
+        async fn get_video_generation_job(
+            &self,
+            _: tonic::Request<mpv1::GetVideoGenerationJobRequest>,
+        ) -> Result<tonic::Response<mpv1::GetVideoGenerationJobResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("get_video_generation_job"))
+        }
+        async fn stream_video_generation_content(
+            &self,
+            _: tonic::Request<mpv1::StreamVideoGenerationContentRequest>,
+        ) -> Result<tonic::Response<RecordedVideoStream>, tonic::Status> {
+            Err(tonic::Status::unimplemented("stream_video_generation_content"))
+        }
+    }
+
+    /// Serves `core` on a loopback port and returns a client connected to it.
+    async fn serve_recording_core(
+        core: RecordingCore,
+    ) -> mpv1::inference_core_client::InferenceCoreClient<tonic::transport::Channel> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind the recording core");
+        let addr = listener.local_addr().expect("recording core address");
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(mpv1::inference_core_server::InferenceCoreServer::new(core))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await
+                .ok();
+        });
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+            .expect("recording core endpoint")
+            .connect()
+            .await
+            .expect("connect to the recording core");
+        mpv1::inference_core_client::InferenceCoreClient::new(channel)
+    }
+
+    /// The first decision request a tool loop sends for `base_messages` with the plan
+    /// `prompt_tiers`. The decision round proposes no call, so the loop ends there.
+    async fn first_decision_request(
+        base_messages: Vec<ChatMessage>,
+        prompt_tiers: Option<mpv1::PromptTierPlan>,
+    ) -> mpv1::InferRequest {
+        let core = RecordingCore::default();
+        let sent = core.0.clone();
+        let mut state = crate::state::AppState::new();
+        state.inference_client = serve_recording_core(core).await;
+        let tools = vec![ToolDefinition {
+            name: "fetch_url".to_owned(),
+            description: "Fetch a page.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{}}"#.to_owned(),
+        }];
+        let rounds = run_tool_rounds_for_model(
+            &state,
+            "req-decision",
+            "run-decision",
+            "org_test",
+            "user_test",
+            "thread_test",
+            "",
+            None,
+            None,
+            "",
+            "",
+            None,
+            None,
+            false,
+            None,
+            false,
+            0,
+            "gpt-4o-mini",
+            "",
+            "openai",
+            "",
+            base_messages,
+            tools,
+            "auto".to_owned(),
+            None,
+            None,
+            None,
+            &crate::vision::parts::ImageParts::none(),
+            prompt_tiers,
+        )
+        .await;
+        assert!(rounds.is_ok(), "the decision round ends the tool phase without an error");
+        let mut sent = sent.lock().expect("recorded requests");
+        assert!(!sent.is_empty(), "the decision round reached the inference core");
+        sent.swap_remove(0)
+    }
+
+    /// A standing head of two system blocks and one user turn, as the composer leaves it.
+    fn composed_turn_head() -> Vec<ChatMessage> {
+        vec![
+            ChatMessage {
+                role: "system".to_owned(),
+                content: "standing text".to_owned(),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "system".to_owned(),
+                content: "authored instructions".to_owned(),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "user".to_owned(),
+                content: "hello".to_owned(),
+                ..Default::default()
+            },
+        ]
+    }
+
+    #[tokio::test]
+    async fn a_decision_round_carries_the_composed_plan_while_its_head_is_intact() {
+        let plan = mpv1::PromptTierPlan {
+            stable_messages: 1,
+            context_messages: 1,
+        };
+        let request = Box::pin(first_decision_request(composed_turn_head(), Some(plan))).await;
+        let sent = request
+            .prompt_tiers
+            .map(|plan| (plan.stable_messages, plan.context_messages));
+        assert_eq!(sent, Some((1, 1)));
+    }
+
+    #[tokio::test]
+    async fn a_decision_round_sends_no_plan_when_the_caller_passes_none() {
+        let request = Box::pin(first_decision_request(composed_turn_head(), None)).await;
+        assert_eq!(request.prompt_tiers, None);
+    }
+
+    #[tokio::test]
+    async fn a_plan_that_counts_a_non_system_message_is_not_sent() {
+        let mut head = composed_turn_head();
+        head[0].role = "user".to_owned();
+        let plan = mpv1::PromptTierPlan {
+            stable_messages: 1,
+            context_messages: 0,
+        };
+        let request = Box::pin(first_decision_request(head, Some(plan))).await;
+        assert_eq!(request.prompt_tiers, None);
     }
 }
