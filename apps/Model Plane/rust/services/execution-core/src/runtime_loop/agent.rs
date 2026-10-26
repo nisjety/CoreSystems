@@ -2126,15 +2126,37 @@ async fn park_at_boundary(
         max_rounds,
         parks_so_far: gate.parks_so_far,
     };
-    let site = super::park::ParkSite {
+    let site = park_site(ctx);
+    super::park::try_park(&site, folds, &snapshot, &facts, stop).await
+}
+
+/// The park site of a run's loop: the route values every park fold and every round fold of a
+/// parkable run carries, read from the one context so that the two folds cannot disagree.
+fn park_site<'c>(ctx: &'c LoopContext<'_>) -> super::park::ParkSite<'c> {
+    super::park::ParkSite {
         run_id: &ctx.req.run_id,
         session_channel: ctx.session_channel,
         session_bearer: ctx.session_bearer,
         route_model: ctx.route.model(),
         route_connection_id: ctx.route.subscription_connection_id(),
         child_ceiling: ctx.child_ceiling,
-    };
-    super::park::try_park(&site, folds, &snapshot, &facts, stop).await
+    }
+}
+
+/// The closed token a parkable loop ends its call with when another writer holds the run's fold.
+/// The call answers nothing and writes no receipt: the writer that holds the fold owns the run.
+const LOOP_SUPERSEDED: &str = "loop_checkpoint_superseded";
+
+/// The end of a parkable loop whose fold another writer holds (see [`LOOP_SUPERSEDED`]). A crash
+/// park re-seals a slow loop's own round fold, and a continuation resumes that park while the
+/// loop still runs, so the loop must stop at its next save rather than run beside it.
+fn superseded(run_id: &str, rounds_executed: u32) -> tonic::Status {
+    warn!(
+        run_id = %run_id,
+        rounds = rounds_executed,
+        "run_agent: this parkable loop's fold is held by another writer; the loop stops before any further inference, append or effect"
+    );
+    tonic::Status::aborted(LOOP_SUPERSEDED)
 }
 
 /// The gate of a run's fold writer: the ONE place it is built, so the decision a resume makes
@@ -3680,6 +3702,11 @@ async fn run_rounds(
                 let fold = open_round_fold(authority);
                 let held = folds.save_pre_effect(fold).await
                     == runtime_loop::fold::PreEffect::Hold;
+                // A parkable loop whose fold another writer holds dispatches nothing of this round
+                // and ends here (see `superseded`).
+                if held && park_gate.run_parkable && folds.lost_fence() {
+                    return Err(superseded(&req.run_id, rounds_executed));
+                }
                 // A failed writer never saves again: the model is not invited to retry.
                 let for_good = held && folds.is_failed();
                 if held {
@@ -4374,26 +4401,35 @@ async fn run_rounds(
         // The durable loop's fold at the end of a round that ran tools (WS03 S6): best
         // effort, never holds the loop. A round that ends in an answer saves nothing.
         if let Some(authority) = fold_authority.as_ref().filter(|_| folds.is_active()) {
-            let fold = runtime_loop::fold::build_fold(
-                &runtime_loop::fold::Snapshot {
-                    run_id: &req.run_id,
-                    segment_no: folds.segment(),
-                    rounds_executed,
-                    delegated_rounds,
-                    step_seq,
-                    children_started: children_started.load(std::sync::atomic::Ordering::Relaxed),
-                    grounded,
-                    compaction_triggered,
-                    attempted_retrievals: &attempted_retrievals,
-                    messages: &messages,
-                    authority: authority.clone(),
-                    prompt_digest: &fold_prompt_digest,
-                    effect_ledger: ctx.effect_ledger,
-                },
-                None,
-                None,
-            );
+            let snapshot = runtime_loop::fold::Snapshot {
+                run_id: &req.run_id,
+                segment_no: folds.segment(),
+                rounds_executed,
+                delegated_rounds,
+                step_seq,
+                children_started: children_started.load(std::sync::atomic::Ordering::Relaxed),
+                grounded,
+                compaction_triggered,
+                attempted_retrievals: &attempted_retrievals,
+                messages: &messages,
+                authority: authority.clone(),
+                prompt_digest: &fold_prompt_digest,
+                effect_ledger: ctx.effect_ledger,
+            };
+            // A parkable run's round fold carries the route keys a crash park is refused without
+            // (WS03 S8-B): the keys its park fold carries, with the parks taken so far. Any other
+            // run's fold is the fold it always was.
+            let fold = if park_gate.run_parkable {
+                super::park::park_fold(&snapshot, &park_site(ctx), park_gate.parks_so_far, None)
+            } else {
+                runtime_loop::fold::build_fold(&snapshot, None, None)
+            };
             folds.save_round(fold).await;
+        }
+        // A parkable loop whose fold another writer now holds stops before its next round (see
+        // `superseded`). Any other run carries on, as it did before parking existed.
+        if park_gate.run_parkable && folds.lost_fence() {
+            return Err(superseded(&req.run_id, rounds_executed));
         }
     }
 
@@ -24359,11 +24395,28 @@ mod tests {
         state: crate::state::StateStore,
     }
 
+    /// The four keys a parkable run's folds carry (`park_fold`).
+    const ROUTE_KEYS: [&str; 4] = [
+        mp_contracts::loop_fold::EXT_PARKS,
+        mp_contracts::loop_fold::EXT_ROUTE_MODEL,
+        mp_contracts::loop_fold::EXT_ROUTE_CONNECTION,
+        mp_contracts::loop_fold::EXT_CHILD_CEILING,
+    ];
+
+    /// Whether a fold carries any of the four route keys.
+    fn carries_route_keys(fold: &mp_contracts::loop_fold::LoopFoldV1) -> bool {
+        ROUTE_KEYS.iter().any(|key| fold.extensions.contains_key(*key))
+    }
+
     /// What a park test may vary beyond the script.
+    #[allow(clippy::struct_excessive_bools)]
     struct ParkShape {
         derivable: bool,
         waived: bool,
         zdr: bool,
+        /// A pinned run that may act: both switches on, with the destructive tool offered. Its
+        /// request must not be plan mode.
+        effects: bool,
         round_delay: Option<std::time::Duration>,
         deadline: fn(std::time::Instant) -> crate::run_budget::RunDeadline,
     }
@@ -24373,6 +24426,7 @@ mod tests {
             derivable: true,
             waived: false,
             zdr: false,
+            effects: false,
             round_delay: None,
             deadline: |_| crate::run_budget::RunDeadline::NONE,
         };
@@ -24413,6 +24467,14 @@ mod tests {
                     allow_effects: true,
                 },
             )
+        } else if how.effects {
+            (
+                plain_caller(),
+                Switches {
+                    enabled: true,
+                    allow_effects: true,
+                },
+            )
         } else {
             (plain_caller(), SWITCH_ON)
         };
@@ -24440,12 +24502,16 @@ mod tests {
         };
         let state = crate::state::StateStore::new();
         let deadline = (how.deadline)(std::time::Instant::now());
+        let mut tools = offered_tool_defs();
+        if how.effects {
+            tools.push(delete_records_tool());
+        }
         let result = run_agent_with_route_parkable(
             &state,
             session_channel,
             inference_channel,
             req,
-            offered_tool_defs(),
+            tools,
             None,
             Some("session-token".to_owned()),
             "inference-token".to_owned(),
@@ -25061,7 +25127,9 @@ mod tests {
     }
 
     /// With parking off (every other switch on), no park call is made and the run is the
-    /// committed one: the same response, receipts and round folds, byte for byte.
+    /// committed one: the same response, receipts and round folds, and no route key on any of
+    /// them. With parking on, a run that never stops writes the same saves, with the four route
+    /// keys added to its round folds and nothing else changed.
     #[tokio::test]
     async fn loop_park_with_parking_off_no_park_call_is_made_and_folds_are_byte_identical() {
         let off = ParkKnobs {
@@ -25089,10 +25157,15 @@ mod tests {
             assert!(r.run_parked_events.is_empty());
             assert!(r.close_calls.is_empty());
             assert_eq!(r.managed_terminal_outcomes, failed_receipt("provider_unavailable"));
+            assert!(
+                r.loop_saves.iter().all(|save| !carries_route_keys(&save.fold())),
+                "parking off: the round fold is the one the loop always wrote"
+            );
         }
 
-        // A run that never stops: the folds it writes are the same with parking on and off,
-        // so parking changes nothing about the folds of a run that does not park.
+        // A run that never stops: its folds are the same with parking on and off, but for the
+        // four route keys a parkable run's round folds carry. Parking changes nothing else about a
+        // run that does not park.
         let script = || {
             vec![
                 read_round(&["w1"]),
@@ -25106,29 +25179,231 @@ mod tests {
         assert_eq!(on.result.as_ref().unwrap(), off.result.as_ref().unwrap());
         let (on, off) = (on.rec.lock().unwrap(), off.rec.lock().unwrap());
         assert_eq!(on.loop_saves.len(), 2, "two round folds");
-        let shape = |saves: &[LoopSave]| -> Vec<(String, u64, Vec<u8>, String, String)> {
+        let summary = |saves: &[LoopSave]| -> Vec<(String, u64, String, String)> {
             saves
                 .iter()
                 .map(|s| {
                     (
                         s.kind.clone(),
                         s.expected_seq,
-                        s.fold.clone(),
                         s.pause_ref.clone(),
                         s.authority_digest.clone(),
                     )
                 })
                 .collect()
         };
-        assert_eq!(shape(&on.loop_saves), shape(&off.loop_saves), "byte-identical round folds");
+        assert_eq!(summary(&on.loop_saves), summary(&off.loop_saves), "the same saves");
+        let without_route_keys = |saves: &[LoopSave]| -> Vec<mp_contracts::loop_fold::LoopFoldV1> {
+            saves
+                .iter()
+                .map(|save| {
+                    let mut fold = save.fold();
+                    for key in ROUTE_KEYS {
+                        fold.extensions.remove(key);
+                    }
+                    fold
+                })
+                .collect()
+        };
+        assert_eq!(
+            without_route_keys(&on.loop_saves),
+            without_route_keys(&off.loop_saves),
+            "the folds are the same but for the route keys"
+        );
+        assert!(
+            off.loop_saves.iter().all(|save| !carries_route_keys(&save.fold())),
+            "parking off: no round fold carries a route key"
+        );
         for save in &on.loop_saves {
             let fold = save.fold();
-            assert_eq!(mp_contracts::loop_fold::parks_in(&fold), 0, "no park key on a round fold");
-            assert!(mp_contracts::loop_fold::route_model_in(&fold).is_none());
+            assert_eq!(mp_contracts::loop_fold::parks_in(&fold), 0, "a fresh run has taken no park");
+            assert_eq!(mp_contracts::loop_fold::route_model_in(&fold), Some("gpt-5.6-terra"));
             assert!(save.park_reason.is_empty() && save.park_until.is_none());
         }
         assert_eq!(on.managed_terminal_outcomes, off.managed_terminal_outcomes);
         assert_eq!(on.appended_assistant, off.appended_assistant);
+    }
+
+    /// A parkable run's round folds carry the four route keys from its first round: no park taken
+    /// yet, the route the run is pinned to, and its sub-agent ceiling. session-core's crash park
+    /// refuses a round fold without them (its `route_unrecorded` rule), so each rule is read here.
+    #[tokio::test]
+    async fn loop_park_a_parkable_round_fold_carries_the_route_keys_at_zero_parks() {
+        let run = drive_park(
+            subscription_request(),
+            vec![
+                read_round(&["w1"]),
+                read_round(&["w2"]),
+                Scripted::Answer("done".to_owned()),
+            ],
+            |_| {},
+        )
+        .await;
+        assert_eq!(run.result.expect("finalized").final_output, "done");
+        let r = run.rec.lock().unwrap();
+        let kinds: Vec<&str> = r.loop_saves.iter().map(|s| s.kind.as_str()).collect();
+        assert_eq!(kinds, ["round", "round"]);
+        for save in &r.loop_saves {
+            let fold = save.fold();
+            assert_eq!(mp_contracts::loop_fold::parks_in(&fold), 0, "no park taken yet");
+            assert_eq!(mp_contracts::loop_fold::route_model_in(&fold), Some("gpt-5.6-terra"));
+            assert_eq!(mp_contracts::loop_fold::route_connection_in(&fold), Some("conn_1"));
+            assert_eq!(
+                mp_contracts::loop_fold::child_ceiling_in(&fold),
+                Some(crate::subagent::resolve_child_ceiling(None, None))
+            );
+            // session-core's crash-park rules on a round fold, as `crash_park_refusal` reads them.
+            assert!(!fold.authority.provider_hint.is_empty());
+            assert!(mp_contracts::loop_fold::route_model_in(&fold).is_some_and(|m| !m.is_empty()));
+            assert!(
+                mp_contracts::loop_fold::route_connection_in(&fold).is_some_and(|c| !c.is_empty())
+            );
+            assert!(mp_contracts::loop_fold::child_ceiling_in(&fold).is_some_and(|c| c > 0));
+            assert!(fold.pending.is_none() && fold.round_in_flight.is_none(), "a round boundary");
+            assert!(!fold.extensions.contains_key("thread_watermark"), "the executor never stamps one");
+        }
+    }
+
+    /// A parkable loop whose round fold comes back stale or closed stops there: nothing more is
+    /// inferred, it reports no answer and it writes no receipt, since the fold is another
+    /// writer's. The same script on a run that cannot park keeps its outcome: the loop carries on
+    /// and answers.
+    #[tokio::test]
+    async fn loop_park_a_parkable_loop_superseded_at_its_round_fold_stops_and_answers_nothing() {
+        let script = || {
+            vec![
+                read_round(&["w1"]),
+                read_round(&["w2"]),
+                Scripted::Answer("done".to_owned()),
+            ]
+        };
+        for status in [
+            Status::aborted("loop_checkpoint_stale"),
+            Status::failed_precondition("loop_checkpoint_closed"),
+        ] {
+            let label = status.message().to_owned();
+            let parkable = drive_park(subscription_request(), script(), |rec| {
+                rec.loop_save_failures
+                    .push(failing_save("round", 1, status.clone(), false));
+            })
+            .await;
+            let ended = parkable.result.expect_err("a superseded loop ends its call");
+            assert_eq!(ended.code(), tonic::Code::Aborted, "{label}");
+            assert_eq!(ended.message(), "loop_checkpoint_superseded", "{label}");
+            assert_eq!(
+                parkable.observed.lock().unwrap().len(),
+                1,
+                "{label}: no inference after the save that failed"
+            );
+            let r = parkable.rec.lock().unwrap();
+            assert_eq!(r.loop_save_attempts, 1, "{label}: no save after the superseded one");
+            assert!(r.managed_terminal_outcomes.is_empty(), "{label}: no receipt");
+            assert!(r.appended_assistant.is_empty(), "{label}: no answer appended");
+        }
+
+        let unparkable = drive_park_with(
+            ParkKnobs {
+                parking: false,
+                ..ParkKnobs::ON
+            },
+            ParkShape::PLAIN,
+            subscription_request(),
+            script(),
+            |rec| {
+                rec.loop_save_failures.push(failing_save(
+                    "round",
+                    1,
+                    Status::aborted("loop_checkpoint_stale"),
+                    false,
+                ));
+            },
+        )
+        .await;
+        let response = unparkable.result.expect("the run that cannot park still ends");
+        assert_eq!(response.final_output, "done");
+        assert_eq!(unparkable.observed.lock().unwrap().len(), 3, "the loop carries on");
+        assert_eq!(
+            unparkable.rec.lock().unwrap().loop_save_attempts,
+            1,
+            "a failed writer saves no more"
+        );
+    }
+
+    /// The same on the effect gate: a parkable loop whose pre-effect save comes back stale
+    /// reserves no effect and infers nothing more. The same run that cannot park holds its
+    /// effectful call back and goes on.
+    #[tokio::test]
+    async fn loop_park_a_parkable_loop_superseded_before_an_effect_reserves_nothing() {
+        let acting = || pb::RunAgentRequest {
+            mode: "auto".to_owned(),
+            plan_mode: false,
+            ..subscription_request()
+        };
+        let script = || {
+            vec![
+                read_round(&["w1"]),
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![delete_call("d1")],
+                },
+                read_round(&["w3"]),
+                Scripted::Answer("done".to_owned()),
+            ]
+        };
+        let stale_before_effect = |rec: &mut Recorder| {
+            rec.loop_save_failures.push(failing_save(
+                "pre_effect",
+                1,
+                Status::aborted("loop_checkpoint_stale"),
+                false,
+            ));
+        };
+        let parkable = drive_park_with(
+            ParkKnobs::ON,
+            ParkShape {
+                effects: true,
+                ..ParkShape::PLAIN
+            },
+            acting(),
+            script(),
+            stale_before_effect,
+        )
+        .await;
+        let ended = parkable.result.expect_err("a superseded loop ends its call");
+        assert_eq!(ended.code(), tonic::Code::Aborted);
+        assert_eq!(ended.message(), "loop_checkpoint_superseded");
+        assert_eq!(
+            parkable.observed.lock().unwrap().len(),
+            2,
+            "no inference after the superseded pre-effect save"
+        );
+        {
+            let r = parkable.rec.lock().unwrap();
+            assert!(r.reservations.is_empty(), "the effect was never reserved, so never dispatched");
+            assert!(r.managed_terminal_outcomes.is_empty(), "no receipt");
+        }
+
+        let unparkable = drive_park_with(
+            ParkKnobs {
+                parking: false,
+                ..ParkKnobs::ON
+            },
+            ParkShape {
+                effects: true,
+                ..ParkShape::PLAIN
+            },
+            acting(),
+            script(),
+            stale_before_effect,
+        )
+        .await;
+        let response = unparkable.result.expect("the run that cannot park still ends");
+        assert_eq!(response.final_output, "done");
+        assert!(
+            unparkable.rec.lock().unwrap().reservations.is_empty(),
+            "the held call is not reserved"
+        );
+        assert_eq!(unparkable.observed.lock().unwrap().len(), 4, "the loop carries on");
     }
 
     /// Parking upgrades a failure and is never a new way to fail: whatever goes wrong writing
@@ -25221,8 +25496,10 @@ mod tests {
             }
         }
 
-        // The writer is not active: its round save failed for good, so the loop knows it
-        // cannot save a park and does not try. The committed failure, no park call at all.
+        // The writer is not active: its round save was refused for good, so the loop knows it
+        // cannot save a park and does not try. The committed failure, no park call at all. A
+        // stale answer is not this case: a parkable loop stops on it instead (see
+        // `loop_park_a_parkable_loop_superseded_at_its_round_fold_stops_and_answers_nothing`).
         let run = drive_park(
             subscription_request(),
             vec![read_round(&["w1"]), usage_limit_at("2099-01-01T00:00:00Z")],
@@ -25230,7 +25507,7 @@ mod tests {
                 rec.loop_save_failures.push(failing_save(
                     "round",
                     1,
-                    Status::aborted("loop_checkpoint_stale"),
+                    Status::permission_denied("no"),
                     false,
                 ));
             },
@@ -25308,6 +25585,10 @@ mod tests {
         let r = run.rec.lock().unwrap();
         assert_eq!(park_attempts(&r), 0, "{:?}", r.order);
         assert_eq!(r.managed_terminal_outcomes, failed_receipt("provider_unavailable"));
+        assert!(
+            r.loop_saves.iter().all(|save| !carries_route_keys(&save.fold())),
+            "a run that cannot park writes round folds without the route keys"
+        );
         drop(r);
 
         // The control for the whole file: the same run with a derivable set does park.
@@ -25404,6 +25685,10 @@ mod tests {
             assert_eq!(park_attempts(&r), 0, "a continuation makes no park save: {:?}", r.order);
             assert!(r.run_parked_events.is_empty());
             assert!(r.close_calls.is_empty());
+            assert!(
+                r.loop_saves.iter().all(|save| !carries_route_keys(&save.fold())),
+                "a continuation writes no fold with a route key"
+            );
         }
 
         // The control: a FRESH run of the same pinned route at the same stop does park.
@@ -26728,6 +27013,100 @@ mod tests {
                 assert_eq!(root_receipts(&r), failed_receipt("provider_unavailable"));
             }
         }
+    }
+
+    /// A park resume's round folds carry the count its claimed fold records: the resumed loop has
+    /// taken no park of its own yet, so its route keys are the parked fold's.
+    #[tokio::test]
+    async fn loop_park_a_park_resume_round_fold_carries_the_count_it_resumed_at() {
+        let _on = hold(ParkKnobs::ON, SWITCH_ON);
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        park_through_run_agent(&rec, &ALLOW_CAPABILITY_POLICY, subscription_request()).await;
+        let (parked_fold, saves_at_park) = {
+            let r = rec.lock().unwrap();
+            (the_park(&r).fold(), r.loop_saves.len())
+        };
+        assert_eq!(mp_contracts::loop_fold::parks_in(&parked_fold), 1, "the park taken first");
+
+        let run = run_agent_on(
+            &rec,
+            &plain_caller(),
+            &ALLOW_CAPABILITY_POLICY,
+            park_resume_request(),
+            vec![read_round(&["w2"]), Scripted::Answer("four".to_owned())],
+        )
+        .await;
+        assert_eq!(run.result.expect("the resumed run is a response").final_output, "four");
+
+        let r = rec.lock().unwrap();
+        let resumed_rounds: Vec<mp_contracts::loop_fold::LoopFoldV1> = r.loop_saves[saves_at_park..]
+            .iter()
+            .filter(|save| save.kind == "round")
+            .map(LoopSave::fold)
+            .collect();
+        assert_eq!(resumed_rounds.len(), 1, "the one round the resumed loop ran");
+        let fold = &resumed_rounds[0];
+        assert_eq!(mp_contracts::loop_fold::parks_in(fold), 1, "the count its claimed fold records");
+        assert_eq!(
+            mp_contracts::loop_fold::route_model_in(fold),
+            mp_contracts::loop_fold::route_model_in(&parked_fold)
+        );
+        assert_eq!(
+            mp_contracts::loop_fold::route_connection_in(fold),
+            mp_contracts::loop_fold::route_connection_in(&parked_fold)
+        );
+        assert_eq!(
+            mp_contracts::loop_fold::child_ceiling_in(fold),
+            mp_contracts::loop_fold::child_ceiling_in(&parked_fold)
+        );
+    }
+
+    /// session-core stamps a thread watermark into the round fold it re-seals as a crash park, and
+    /// the stamp is the store's own. A resume restores the run from the park's fields and never
+    /// carries that stamp forward: the folds the resumed loop writes, its round fold and the park
+    /// it takes again, carry no `thread_watermark`.
+    #[tokio::test]
+    async fn loop_park_a_resume_of_a_crash_park_writes_no_thread_watermark() {
+        let _on = hold(ParkKnobs::ON, SWITCH_ON);
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        park_through_run_agent(&rec, &ALLOW_CAPABILITY_POLICY, pinned_with_rounds(8)).await;
+        let saves_at_park = rec.lock().unwrap().loop_saves.len();
+        {
+            let mut r = rec.lock().unwrap();
+            let answer = claimed_park_answer(&r, |fold| {
+                fold.extensions
+                    .insert("thread_watermark".to_owned(), serde_json::json!(7));
+            });
+            r.claim_response = Some(Ok(answer));
+        }
+
+        let run = run_agent_on(
+            &rec,
+            &plain_caller(),
+            &ALLOW_CAPABILITY_POLICY,
+            park_resume_request(),
+            vec![read_round(&["w2"]), usage_limit_due_now()],
+        )
+        .await;
+        let response = run.result.expect("a response");
+        assert_eq!(response.status, "parked", "{response:?}");
+
+        let r = rec.lock().unwrap();
+        let kinds: Vec<&str> = r.loop_saves[saves_at_park..]
+            .iter()
+            .map(|s| s.kind.as_str())
+            .collect();
+        assert_eq!(kinds, ["pre_effect", "round", "park"], "{:?}", r.order);
+        for save in &r.loop_saves[saves_at_park..] {
+            assert!(
+                !save.fold().extensions.contains_key("thread_watermark"),
+                "{}: a stamp is never carried forward",
+                save.kind
+            );
+        }
+        let parked_again = r.loop_saves.last().expect("the park");
+        assert_eq!(mp_contracts::loop_fold::parks_in(&parked_again.fold()), 2, "the second park");
+        assert_eq!(parked_again.pause_ref, mp_contracts::loop_fold::park_ref("run_test", 2));
     }
 
     // --- Attachments of a Do run (WS08-S6) ---

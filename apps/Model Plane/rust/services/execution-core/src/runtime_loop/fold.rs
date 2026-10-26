@@ -1002,6 +1002,14 @@ impl<'a> FoldWriter<'a> {
         matches!(self.state, State::Failed(_))
     }
 
+    /// The writer lost its fence: a save came back stale or closed, so another writer holds the
+    /// run's fold, or the fold is closed for good. Only a parkable loop acts on it (it stops before
+    /// anything more is inferred, appended or dispatched). A refusal for good is not a lost fence:
+    /// nothing else holds the fold, and the loop keeps the behaviour it always had.
+    pub(crate) fn lost_fence(&self) -> bool {
+        matches!(self.state, State::Failed(SaveError::Stale | SaveError::Closed))
+    }
+
     /// The writer is saving folds or has failed. A failed writer holds effects for
     /// the rest of the run, so the effect gate must still ask it.
     pub(crate) fn engaged(&self) -> bool {
@@ -3105,6 +3113,28 @@ mod tests {
             Err(ParkSaveError::Save(SaveError::Unavailable { ambiguous: false }))
         );
         assert_eq!(probe.connections(), 0, "no writer that is not active reached the store");
+    }
+
+    /// Only a stale or a closed answer is a lost fence. A refusal for good fails the writer too,
+    /// but nothing else holds the fold on its account; an unavailable or switched-off store does
+    /// not fail the writer at all.
+    #[tokio::test]
+    async fn only_a_stale_or_closed_answer_is_a_lost_fence() {
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
+        for (error, lost) in [
+            (SaveError::Stale, true),
+            (SaveError::Closed, true),
+            (SaveError::Refused(RefusedBy::Denied), false),
+            (SaveError::Unavailable { ambiguous: true }, false),
+            (SaveError::StoreOff, false),
+        ] {
+            let mut writer = FoldWriter::new(&channel, Some("b"), "run-1", all_good());
+            assert!(writer.is_active(), "{error:?}: the control writes");
+            writer.apply(error);
+            assert_eq!(writer.lost_fence(), lost, "{error:?}");
+        }
+        let writer = FoldWriter::new(&channel, Some("b"), "run-1", all_good());
+        assert!(!writer.lost_fence(), "an active writer holds no lost fence");
     }
 
     #[test]

@@ -28,9 +28,9 @@
 //!
 //! The park fold is conversation content, written through the same gate and scrub as every
 //! fold (never for a zero-retention, waived, Space or delegated run). The four extension
-//! keys a park adds are identifiers and counts, never a credential. Logs and events are
-//! content-free: ids, counts, closed tokens and timestamps. The park reason reaches only
-//! the response and the store, never an event.
+//! keys a parkable run's folds carry (its park fold and its round folds) are identifiers and
+//! counts, never a credential. Logs and events are content-free: ids, counts, closed tokens
+//! and timestamps. The park reason reaches only the response and the store, never an event.
 
 use std::collections::BTreeSet;
 
@@ -362,24 +362,22 @@ pub(crate) struct ParkedRun {
     pub park_until: DateTime<Utc>,
 }
 
-/// The park fold: the round-boundary fold of the loop's locals, naming its park, with the
-/// four keys a resume needs to rebuild the run (the count of parks this one included, the
-/// route's model and connection id, and the sub-agent ceiling). They are written here and
-/// nowhere else, and only on a park fold.
-pub(crate) fn park_fold(snapshot: &Snapshot<'_>, site: &ParkSite<'_>, n: u32) -> LoopFoldV1 {
-    let mut fold = fold::build_fold(
-        snapshot,
-        None,
-        Some(PendingPause {
-            kind: PauseKind::Park,
-            pause_ref: lf::park_ref(site.run_id, n),
-            step_id: String::new(),
-            call: String::new(),
-            action_fingerprint: String::new(),
-        }),
-    );
+/// The loop's fold at a round boundary, carrying the four keys a resume and session-core's crash
+/// park need to rebuild the run: the count of parks taken (`parks`, the park being written
+/// included), the route's model and connection id, and the sub-agent ceiling. `pending` is the
+/// park's own pending for the park write, and `None` for the round fold a parkable loop saves at
+/// the end of a round. session-core re-seals that round fold as a crash park and refuses one
+/// without these keys, so the round fold carries them too. They are written here and nowhere
+/// else, and only on a fold of a run that `run_parkable` admits.
+pub(crate) fn park_fold(
+    snapshot: &Snapshot<'_>,
+    site: &ParkSite<'_>,
+    parks: u32,
+    pending: Option<PendingPause>,
+) -> LoopFoldV1 {
+    let mut fold = fold::build_fold(snapshot, None, pending);
     fold.extensions
-        .insert(lf::EXT_PARKS.to_owned(), serde_json::Value::from(n));
+        .insert(lf::EXT_PARKS.to_owned(), serde_json::Value::from(parks));
     fold.extensions.insert(
         lf::EXT_ROUTE_MODEL.to_owned(),
         serde_json::Value::from(site.route_model),
@@ -393,6 +391,17 @@ pub(crate) fn park_fold(snapshot: &Snapshot<'_>, site: &ParkSite<'_>, n: u32) ->
         serde_json::Value::from(site.child_ceiling),
     );
     fold
+}
+
+/// The pending a park fold names: the park of this count, at no step and no call.
+fn park_pending(run_id: &str, n: u32) -> PendingPause {
+    PendingPause {
+        kind: PauseKind::Park,
+        pause_ref: lf::park_ref(run_id, n),
+        step_id: String::new(),
+        call: String::new(),
+        action_fingerprint: String::new(),
+    }
 }
 
 /// Park the run at this stop, or return `None` and let the caller take its committed return.
@@ -428,7 +437,7 @@ pub(crate) async fn try_park(
     let park_until = park_until_for(reason, retry_after_ms, resets_at, Utc::now());
     let n = facts.parks_so_far.saturating_add(1);
     let park_ref = lf::park_ref(site.run_id, n);
-    let fold = park_fold(snapshot, site, n);
+    let fold = park_fold(snapshot, site, n, Some(park_pending(site.run_id, n)));
     let expected = folds.expected_seq();
     match folds.save_park(fold, reason, park_until).await {
         Ok(seq) => {
@@ -827,9 +836,9 @@ pub(crate) fn classify_park_claim(status: &tonic::Status) -> ResumeRefusal {
 }
 
 /// The structural checks of a claimed park fold, before anything of it is used. A park
-/// resume restores ONLY a fold this executor's park write produced (`park_fold`): a fold of an
-/// approval pause, a round, a segment or an in-place continuation is never resumable through
-/// the park path, whatever row it sits in. In order:
+/// resume restores ONLY a fold the park write produced (`try_park`, which builds it with
+/// `park_fold`): a fold of an approval pause, a round, a segment or an in-place continuation is
+/// never resumable through the park path, whatever row it sits in. In order:
 ///
 /// 1. the row is a park;
 /// 2. the fold is this run's;
@@ -1431,7 +1440,7 @@ mod tests {
         let snapshot = snapshot(&retrievals, &messages);
         let round_fold = fold::build_fold(&snapshot, None, None);
         for n in 1..=MAX_PARKS_PER_RUN {
-            let fold = park_fold(&snapshot, &site(&channel), n);
+            let fold = park_fold(&snapshot, &site(&channel), n, Some(park_pending("run-1", n)));
             assert!(fold.round_in_flight.is_none(), "a park is at a round boundary");
             let pending = fold.pending.as_ref().expect("a park names itself");
             assert_eq!(pending.kind, PauseKind::Park);
@@ -1460,7 +1469,25 @@ mod tests {
             }
             assert_eq!(stripped, round_fold, "n={n}");
         }
-        // A round fold never carries the keys: they are written only on a park.
+        // A parkable run's round fold is the same keys with no pending: the parks it has taken so
+        // far (none on a fresh run), the route it is pinned to and its sub-agent ceiling.
+        let parkable_round = park_fold(&snapshot, &site(&channel), 0, None);
+        assert!(parkable_round.pending.is_none(), "a round fold names no park");
+        assert_eq!(lf::parks_in(&parkable_round), 0);
+        assert_eq!(lf::route_model_in(&parkable_round), Some("gpt-5.6-terra"));
+        assert_eq!(lf::route_connection_in(&parkable_round), Some("conn_1"));
+        assert_eq!(lf::child_ceiling_in(&parkable_round), Some(4));
+        let mut stripped = parkable_round;
+        for key in [
+            lf::EXT_PARKS,
+            lf::EXT_ROUTE_MODEL,
+            lf::EXT_ROUTE_CONNECTION,
+            lf::EXT_CHILD_CEILING,
+        ] {
+            stripped.extensions.remove(key);
+        }
+        assert_eq!(stripped, round_fold, "the four keys are the whole difference from a plain round");
+        // A plain round fold, the one a run that cannot park saves, carries none of them.
         assert_eq!(lf::parks_in(&round_fold), 0);
         assert!(lf::route_model_in(&round_fold).is_none());
     }
@@ -1686,7 +1713,7 @@ mod tests {
         let mut snapshot = snapshot(&retrievals, &messages);
         snapshot.authority.tool_names = names.into_iter().collect();
         snapshot.prompt_digest = &digest;
-        park_fold(&snapshot, &site(&channel), 2)
+        park_fold(&snapshot, &site(&channel), 2, Some(park_pending("run-1", 2)))
     }
 
     /// The write and the check agree: what `park_fold` writes passes `check_park_fold`, and its
