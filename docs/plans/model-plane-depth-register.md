@@ -998,6 +998,21 @@ Built so far (batches B01 to B07): WS01-S0, WS01-S1 (partial), WS01-S6; WS02-S1,
 | D1-767 | WS02-S2 | test-gap | P2 | Found by the lead's cost-core run on Postgres: TestPostgresLedger_CacheMissReasonRoundTrip looked rows up by the raw idempotency key, but the store writes it org-scoped and hashed (scopedIdempotencyKey, "v2:<sha256>"), so it failed although the miss reasons round-trip correctly. | resolved 2026-10-26 (the test looks rows up by the key the store wrote and checks all four; cost-core's 7 packages pass on Postgres) |
 | D1-768 | pre-existing | test-gap | P2 | Outside the build (S4.2, 2026-09-13): ReadOutput gained a ceiling *AudienceCeiling parameter in 96eecbefe and two calls in sandbox-manager's process store_integration_test.go were never updated, so that integration package has not compiled since. | resolved 2026-10-26 (both calls pass nil, the unrestricted read the file's other calls use; sandbox-manager's 9 packages pass with -tags integration) |
 
+
+### Wave-mode batch W1-25 (2026-10-26)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D1-769 | WS09-S8 | test-gap | P1 | The four tests in mod thread_messages_page_tests (http_routes.rs:15182) have not run. Once the four production edits and the e2e edit are in, the module-path filter thread_messages_page_tests selects them. | open |
+| D1-770 | WS09-S8 | live-proof | P1 | The three list_conversation_pages DB tests compile and are listed but have not run against Postgres. The lead runs them through the harness. | open |
+| D1-771 | WS09-S8 | live-proof | P1 | transcript-paging-proof.sh has not run. It needs rebuilt session-core, model-gateway and BFF images and a disposable database; its EXPLAIN output is the tail-query evidence. | open |
+| D1-772 | WS09-S8 | decision | P1 | Plan gate D5 (WS09-S1 long-thread measurement) is not evidenced. The owner ordered the build on 2026-10-26, so the gate stays open and is recorded here, not resolved. | open |
+| D1-773 | WS09-S8 | decision | P1 | DEC-29 (the cursor is the message id, resolved inside the thread under the audience ceiling) and DEC-39 (tags 6, 7 and 2) are plan defaults that still need owner and integrator sign-off. | open |
+| D1-774 | WS09-S8 | test-gap | P1 | No ZDR golden row for paged thread reads. zdr_posture_matrix.rs was not edited because the row needs a read-route entry in the canonical matrix. Parity holds by construction, but no test pins it. | open |
+| D1-775 | WS09-S8 | risk | P1 | Concurrent WS09-S9 frontend edits and capability-core edits sit in this worktree. Keep them out of the S8 commit. | open |
+| D1-776 | WS09-S8 | test-gap | P1 | No ZDR golden row pins paged thread reads (zdr_posture_matrix.rs is owned but unedited). Parity holds only by construction: the page SQL repeats the unpaged org join and audience-ceiling predicate. | open |
+| D1-777 | WS09-S8 | follow-up | P3 | 26 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-25.json | open |
+
 ## Wave 2 (WS13 to WS27)
 
 Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS27-S0, WS27-S1. Wave 2 is not started as a wave: these came in with Wave 1 batches because they were Wave 1 prerequisites.
@@ -1749,3 +1764,4 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS11-S9 | money | W1-23 | no |
 | WS07-S10 | money, audit | W1-24 | no |
 | WS09-S9 | zdr | W1-25 | no |
+| WS09-S8 | zdr, auth, authority | W1-25 | no |
