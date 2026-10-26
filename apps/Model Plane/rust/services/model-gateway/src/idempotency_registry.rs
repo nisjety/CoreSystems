@@ -278,6 +278,9 @@ impl CommitGuard {
 impl Drop for CommitGuard {
     fn drop(&mut self) {
         if let Some(release) = self.shared.take() {
+            // Stop the renewal before the settle is spawned, so that no renewal re-extends the
+            // claim the settle is about to write as `Done` or delete.
+            release.stop_renewal();
             // The stream has ended: the settle reads the buffer and writes Redis, so it cannot
             // run in `drop` itself. Outside a runtime (a unit test) the claim simply expires.
             if let Ok(runtime) = tokio::runtime::Handle::try_current() {
@@ -377,6 +380,12 @@ pub trait SharedClaimStore: Send + Sync {
         request_id: &'a str,
         done: Option<&'a SharedClaimValue>,
     ) -> BoxFuture<'a, ()>;
+    /// Extends a Pending claim to [`PENDING_TTL`] while it is still `request_id`'s, so a stream
+    /// that outlives the TTL keeps its claim. `false` when the key is gone, belongs to another
+    /// request or is already `Done`, and the renewal then stops. `true` when it was extended, and
+    /// also when the store cannot answer: an outage must not end the renewal for good, so the next
+    /// tick tries again.
+    fn renew<'a>(&'a self, key: &'a str, request_id: &'a str) -> BoxFuture<'a, bool>;
 }
 
 /// What a request that holds the local claim learns from the shared one.
@@ -399,9 +408,22 @@ struct SharedRelease {
     thread_id: Option<String>,
     stream_buffers: StreamBufferStore,
     buffer_key: String,
+    /// The renewal tick that keeps the Pending claim alive while the stream runs. `None` when
+    /// there was no runtime to run it on.
+    renewal: Option<tokio::task::AbortHandle>,
 }
 
 impl SharedRelease {
+    /// Stops the renewal. The guard calls this before it spawns the settle, so no renewal can
+    /// re-extend the claim the settle writes as `Done` or deletes. Dropping an unsettled release
+    /// does it too: a tick left running would renew a dead request's claim for as long as the
+    /// runtime lives.
+    fn stop_renewal(&self) {
+        if let Some(renewal) = &self.renewal {
+            renewal.abort();
+        }
+    }
+
     /// A stream that buffered its `done` frame is a completed answer a duplicate can still
     /// attach to for [`DONE_TTL`]. Any other end (an error, a stop, a refusal before the run
     /// started) removes the claim, as the local guard releases its own, so a retry is free to run.
@@ -421,6 +443,12 @@ impl SharedRelease {
         self.store
             .settle(&self.key, &self.request_id, done.as_ref())
             .await;
+    }
+}
+
+impl Drop for SharedRelease {
+    fn drop(&mut self) {
+        self.stop_renewal();
     }
 }
 
@@ -444,6 +472,18 @@ impl CommitGuard {
         };
         match store.claim(&key, &pending).await {
             SharedClaimOutcome::Won => {
+                // A Pending claim lapses after PENDING_TTL unless it is renewed, and a stream that
+                // outlives it would let a duplicate on another replica start a second run. With no
+                // runtime to tick on (a unit test) the claim lapses as it always did.
+                let renewal = tokio::runtime::Handle::try_current().ok().map(|runtime| {
+                    runtime
+                        .spawn(keep_claim_alive(
+                            store.clone(),
+                            key.clone(),
+                            request_id.to_owned(),
+                        ))
+                        .abort_handle()
+                });
                 self.shared = Some(SharedRelease {
                     store: store.clone(),
                     key,
@@ -452,6 +492,7 @@ impl CommitGuard {
                     thread_id: None,
                     stream_buffers: stream_buffers.clone(),
                     buffer_key: buffer_key.to_owned(),
+                    renewal,
                 });
                 SharedAttempt::Owner
             }
@@ -466,6 +507,23 @@ impl CommitGuard {
         if let Some(release) = self.shared.as_mut() {
             release.run_id = Some(run_id.to_owned());
             release.thread_id = Some(thread_id.to_owned());
+        }
+    }
+}
+
+/// Renews a Pending claim every third of [`PENDING_TTL`] while its stream runs, so a live stream
+/// never lets its claim lapse. Stops when `renew` reports the claim is no longer this request's;
+/// otherwise the guard aborts the task when the stream ends.
+async fn keep_claim_alive(store: Arc<dyn SharedClaimStore>, key: String, request_id: String) {
+    loop {
+        tokio::time::sleep(PENDING_TTL / 3).await;
+        if !store.renew(&key, &request_id).await {
+            // Logged by operation only: the key holds the org and user ids.
+            tracing::warn!(
+                op = "renew",
+                "shared idempotency claim was lost while its stream ran; a duplicate may start"
+            );
+            return;
         }
     }
 }
@@ -602,6 +660,41 @@ impl SharedClaimStore for RedisClaimStore {
                 None => {
                     self.run("settle_delete", conn.del::<_, ()>(key)).await;
                 }
+            }
+        })
+    }
+
+    fn renew<'a>(&'a self, key: &'a str, request_id: &'a str) -> BoxFuture<'a, bool> {
+        Box::pin(async move {
+            let mut conn = self.conn.clone();
+            // `run` has logged the failure and opened the breaker. The claim may still be ours
+            // once Redis answers, so the renewal carries on rather than ending for good.
+            let Some(raw) = self
+                .run("renew_get", conn.get::<_, Option<String>>(key))
+                .await
+            else {
+                return true;
+            };
+            let held = raw.and_then(|raw| serde_json::from_str::<SharedClaimValue>(&raw).ok());
+            if held.is_none_or(|held| {
+                held.request_id != request_id || held.state != SharedClaimState::Pending
+            }) {
+                return false;
+            }
+            // The read-then-write of `settle`, with the same 250 ms window. Inside it a claim can
+            // lapse and pass to another request, which this PEXPIRE then extends; and a renewal
+            // can land after the settle's write, leaving a `Done` value on the pending TTL and so
+            // shortening its replay window. A key that is gone stays gone: PEXPIRE is a no-op.
+            let ttl_ms = u64::try_from(PENDING_TTL.as_millis()).unwrap_or(u64::MAX);
+            let mut expire = redis::cmd("PEXPIRE");
+            expire.arg(key).arg(ttl_ms);
+            // 0 when the key vanished between the two commands: the claim is gone, so stop.
+            match self
+                .run("renew_expire", expire.query_async::<i64>(&mut conn))
+                .await
+            {
+                Some(extended) => extended == 1,
+                None => true,
             }
         })
     }
@@ -860,19 +953,43 @@ mod tests {
     // -- The shared claim ----------------------------------------------------------------
 
     /// A Redis stand-in two registries (two replicas) can share. `down` makes it answer
-    /// nothing, like an open breaker.
+    /// nothing, like an open breaker. Keys expire on the tokio clock, as Redis's `PX` would, so
+    /// a paused test moves their TTLs.
     #[derive(Default)]
     struct FakeShared {
-        map: Mutex<std::collections::HashMap<String, SharedClaimValue>>,
+        /// Each claim with the instant its TTL runs out.
+        map: Mutex<std::collections::HashMap<String, (SharedClaimValue, tokio::time::Instant)>>,
         down: std::sync::atomic::AtomicBool,
+        /// Every `renew` call, answered or not.
+        renewals: std::sync::atomic::AtomicUsize,
     }
 
     impl FakeShared {
         fn is_down(&self) -> bool {
             self.down.load(Ordering::SeqCst)
         }
+        /// The value of a key whose TTL has not run out.
         fn held(&self, key: &str) -> Option<SharedClaimValue> {
-            self.map.lock().unwrap().get(key).cloned()
+            let now = tokio::time::Instant::now();
+            self.map
+                .lock()
+                .unwrap()
+                .get(key)
+                .filter(|(_, expires)| *expires > now)
+                .map(|(value, _)| value.clone())
+        }
+        /// The TTL a live key has left.
+        fn ttl(&self, key: &str) -> Option<Duration> {
+            let now = tokio::time::Instant::now();
+            self.map
+                .lock()
+                .unwrap()
+                .get(key)
+                .filter(|(_, expires)| *expires > now)
+                .map(|(_, expires)| expires.duration_since(now))
+        }
+        fn renewals(&self) -> usize {
+            self.renewals.load(Ordering::SeqCst)
         }
     }
 
@@ -886,11 +1003,13 @@ mod tests {
                 if self.is_down() {
                     return SharedClaimOutcome::Unavailable;
                 }
+                let now = tokio::time::Instant::now();
                 let mut map = self.map.lock().unwrap();
+                map.retain(|_, (_, expires)| *expires > now);
                 match map.get(key) {
-                    Some(held) => SharedClaimOutcome::Held(held.clone()),
+                    Some((held, _)) => SharedClaimOutcome::Held(held.clone()),
                     None => {
-                        map.insert(key.to_owned(), value.clone());
+                        map.insert(key.to_owned(), (value.clone(), now + PENDING_TTL));
                         SharedClaimOutcome::Won
                     }
                 }
@@ -909,18 +1028,43 @@ mod tests {
                 if self.is_down() {
                     return;
                 }
+                let now = tokio::time::Instant::now();
                 let mut map = self.map.lock().unwrap();
-                if map.get(key).is_none_or(|held| held.request_id != request_id) {
+                map.retain(|_, (_, expires)| *expires > now);
+                if map
+                    .get(key)
+                    .is_none_or(|(held, _)| held.request_id != request_id)
+                {
                     return;
                 }
                 match done {
                     Some(value) => {
-                        map.insert(key.to_owned(), value.clone());
+                        map.insert(key.to_owned(), (value.clone(), now + DONE_TTL));
                     }
                     None => {
                         map.remove(key);
                     }
                 }
+            })
+        }
+        fn renew<'a>(&'a self, key: &'a str, request_id: &'a str) -> BoxFuture<'a, bool> {
+            Box::pin(async move {
+                self.renewals.fetch_add(1, Ordering::SeqCst);
+                // As in the Redis store, an outage answers true and the renewal goes on.
+                if self.is_down() {
+                    return true;
+                }
+                let now = tokio::time::Instant::now();
+                let mut map = self.map.lock().unwrap();
+                map.retain(|_, (_, expires)| *expires > now);
+                let Some((held, expires)) = map.get_mut(key) else {
+                    return false;
+                };
+                if held.request_id != request_id || held.state != SharedClaimState::Pending {
+                    return false;
+                }
+                *expires = now + PENDING_TTL;
+                true
             })
         }
     }
@@ -1107,5 +1251,174 @@ mod tests {
         assert_eq!(store.claim(&key, &theirs).await, SharedClaimOutcome::Won);
         store.settle(&key, "req-mine", None).await;
         assert_eq!(fake.held(&key), Some(theirs));
+    }
+
+    /// Lets every ready task run (a renewal tick, a settle) without moving the paused clock. A
+    /// yield keeps the test ready, so the runtime never advances time on its own meanwhile.
+    async fn run_ready_tasks() {
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_pending_claim_outlives_its_ttl_while_its_stream_runs() {
+        let (fake, store) = fake();
+        let buffers = StreamBufferStore::new();
+        let reg = IdempotencyRegistry::new();
+        let (guard, attempt) = send(&reg, &store, ORG, "req-A", &buffers).await;
+        assert_eq!(attempt, SharedAttempt::Owner);
+        let key = shared_claim_key(ORG, USER, "send-1");
+        run_ready_tasks().await;
+        // Four renewals, the last at 160 s: the claim's own TTL would have run out at 120 s.
+        for _ in 0..4 {
+            tokio::time::advance(PENDING_TTL / 3).await;
+            run_ready_tasks().await;
+        }
+        assert_eq!(fake.renewals(), 4);
+        assert!(
+            fake.held(&key).is_some(),
+            "a live stream keeps its claim past PENDING_TTL"
+        );
+        assert_eq!(
+            fake.ttl(&key),
+            Some(PENDING_TTL),
+            "the last renewal restored the full TTL"
+        );
+        drop(guard);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_renewal_stops_once_the_stream_ends_and_settle_takes_over() {
+        let (fake, store) = fake();
+        let buffers = StreamBufferStore::new();
+        let reg = IdempotencyRegistry::new();
+        let (mut guard, attempt) = send(&reg, &store, ORG, "req-A", &buffers).await;
+        assert_eq!(attempt, SharedAttempt::Owner);
+        let key = shared_claim_key(ORG, USER, "send-1");
+        run_ready_tasks().await;
+        tokio::time::advance(PENDING_TTL / 3).await;
+        assert_eq!(fake.renewals(), 1);
+        guard.record_run("run-1", "thr-1");
+        let buffer_key = crate::stream_buffer::scoped_stream_key(ORG, USER, "req-A");
+        buffers
+            .finish(
+                &buffer_key,
+                crate::stream_buffer::StreamDone {
+                    seq: 3,
+                    model_used: "m".into(),
+                    input_tokens: 1,
+                    output_tokens: 1,
+                },
+            )
+            .await;
+        drop(guard);
+        run_ready_tasks().await;
+        assert_eq!(
+            fake.held(&key).map(|value| value.state),
+            Some(SharedClaimState::Done)
+        );
+        assert_eq!(
+            fake.ttl(&key),
+            Some(DONE_TTL),
+            "settle wrote the Done value for DONE_TTL"
+        );
+        // Three renewal periods later: no renewal ran, and the Done value was not extended.
+        tokio::time::advance(PENDING_TTL * 3).await;
+        run_ready_tasks().await;
+        assert_eq!(fake.renewals(), 1, "no renewal after the guard dropped");
+        assert_eq!(fake.ttl(&key), Some(DONE_TTL - PENDING_TTL * 3));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn renew_never_extends_a_claim_another_request_owns() {
+        let (fake, store) = fake();
+        let key = shared_claim_key(ORG, USER, "send-1");
+        let theirs = SharedClaimValue {
+            request_id: "req-theirs".into(),
+            run_id: None,
+            thread_id: None,
+            state: SharedClaimState::Pending,
+        };
+        assert_eq!(store.claim(&key, &theirs).await, SharedClaimOutcome::Won);
+        tokio::time::advance(Duration::from_secs(100)).await;
+        assert!(
+            !store.renew(&key, "req-mine").await,
+            "another request's claim is not ours"
+        );
+        tokio::time::advance(Duration::from_secs(30)).await;
+        assert_eq!(
+            fake.held(&key),
+            None,
+            "nothing extended it, so it ran out at 120 s"
+        );
+        // Once this request has settled its own claim as Done, a renewal leaves it alone too.
+        let done_key = shared_claim_key(ORG, USER, "send-2");
+        let mine = SharedClaimValue {
+            request_id: "req-mine".into(),
+            ..theirs.clone()
+        };
+        assert_eq!(store.claim(&done_key, &mine).await, SharedClaimOutcome::Won);
+        let done = SharedClaimValue {
+            state: SharedClaimState::Done,
+            ..mine.clone()
+        };
+        store.settle(&done_key, "req-mine", Some(&done)).await;
+        assert!(
+            !store.renew(&done_key, "req-mine").await,
+            "a Done claim is never re-extended"
+        );
+        assert_eq!(fake.ttl(&done_key), Some(DONE_TTL));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_outage_does_not_end_the_renewal() {
+        let (fake, store) = fake();
+        let buffers = StreamBufferStore::new();
+        let reg = IdempotencyRegistry::new();
+        let (guard, attempt) = send(&reg, &store, ORG, "req-A", &buffers).await;
+        assert_eq!(attempt, SharedAttempt::Owner);
+        let key = shared_claim_key(ORG, USER, "send-1");
+        run_ready_tasks().await;
+        // The renewal at 40 s lands in an outage; the one at 80 s, after recovery, extends it.
+        fake.down.store(true, Ordering::SeqCst);
+        tokio::time::advance(PENDING_TTL / 3).await;
+        fake.down.store(false, Ordering::SeqCst);
+        tokio::time::advance(PENDING_TTL / 3).await;
+        run_ready_tasks().await;
+        assert_eq!(
+            fake.renewals(),
+            2,
+            "the renewal in the outage did not end the loop"
+        );
+        // Past the claim's original 120 s: only the 80 s renewal's extension holds it now.
+        tokio::time::advance(Duration::from_secs(50)).await;
+        assert!(
+            fake.held(&key).is_some(),
+            "the renewal after the outage extended the claim"
+        );
+        drop(guard);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dropping_the_release_stops_its_renewal() {
+        let (fake, store) = fake();
+        let buffers = StreamBufferStore::new();
+        let reg = IdempotencyRegistry::new();
+        let (mut guard, attempt) = send(&reg, &store, ORG, "req-A", &buffers).await;
+        assert_eq!(attempt, SharedAttempt::Owner);
+        let key = shared_claim_key(ORG, USER, "send-1");
+        run_ready_tasks().await;
+        // A release dropped without a settle (a replaced claim, a drop with no runtime) must not
+        // leave its renewal running for a claim nobody will settle.
+        drop(guard.shared.take());
+        tokio::time::advance(PENDING_TTL * 3).await;
+        run_ready_tasks().await;
+        assert_eq!(fake.renewals(), 0);
+        assert_eq!(
+            fake.held(&key),
+            None,
+            "with no renewal the claim ran out at 120 s"
+        );
     }
 }
