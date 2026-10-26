@@ -7,6 +7,7 @@ import {
 } from './orchestration-client'
 
 import { readSseStream, type SseEvent } from './sse'
+import { createDeltaCoalescer, type DeltaCoalescer } from './delta-coalescer'
 import type { ChatEventPayloads } from './chat-event-payloads.generated'
 import { isZdrCode } from './zdr-refusals'
 import {
@@ -2027,10 +2028,41 @@ function streamConnectionFailure(err: unknown, fallback: string): ChatErrorEvent
   return { code: 'connection_error', message: err instanceof Error ? err.message : fallback }
 }
 
+/**
+ * WS09 S4: with `VITE_CHAT_DELTA_FRAME_BATCH` set to exactly `true`, a stream's
+ * text callbacks go through a frame batch. The dispatcher is handed an object
+ * whose text callbacks feed the coalescer, and the coalescer emits to the real
+ * ones. Off, there is no batch and the stream dispatches as it always did.
+ */
+type FrameBatch = { deltas: DeltaCoalescer; handlers: ChatStreamHandlers }
+
+function frameBatchFor(handlers: ChatStreamHandlers, signal?: AbortSignal): FrameBatch | undefined {
+  if (import.meta.env.VITE_CHAT_DELTA_FRAME_BATCH !== 'true') return undefined
+  const deltas = createDeltaCoalescer((run) => {
+    if (run.kind === 'message') handlers.onMessage?.({ content: run.text, requestId: run.requestId })
+    else handlers.onReasoning?.({ delta: run.text })
+  }, signal)
+  // Inherits every other callback from `handlers`, which is then read at dispatch time as before.
+  const textHandlers: ChatStreamHandlers = Object.create(handlers)
+  textHandlers.onMessage = ({ content, requestId }) => deltas.push('message', requestId, content)
+  textHandlers.onReasoning = ({ delta }) => deltas.push('reasoning', undefined, delta)
+  return { deltas, handlers: textHandlers }
+}
+
 /** One SSE frame: the resume filter first, then the cursor, then the event. */
-function dispatchFrame(event: SseEvent, handlers: ChatStreamHandlers): void {
+function dispatchFrame(event: SseEvent, handlers: ChatStreamHandlers, batch?: FrameBatch): void {
   if (handlers.acceptFrame && !handlers.acceptFrame(event.id || undefined)) return
   if (event.id) handlers.onFrameId?.(event.id)
+  if (!batch) {
+    dispatchEvent(event, handlers)
+    return
+  }
+  if (event.event === 'chunk' || event.event === 'reasoning_delta') {
+    dispatchEvent(event, batch.handlers)
+    return
+  }
+  // Text still waiting for its frame reaches the handler before a frame that is not a delta.
+  batch.deltas.flush()
   dispatchEvent(event, handlers)
 }
 
@@ -2053,6 +2085,7 @@ export async function streamChat(
     return
   }
 
+  const batch = frameBatchFor(handlers, signal)
   await readSseStream(
     '/api/v1/chat/stream',
     {
@@ -2061,11 +2094,14 @@ export async function streamChat(
       signal,
       lastEventId,
     },
-    (event) => dispatchFrame(event, handlers),
+    (event) => dispatchFrame(event, handlers, batch),
     (err) => {
       connError = err
     },
   )
+  // The stream ended, by close, error or abort: the text still waiting for its
+  // frame goes out before the connection error is reported.
+  batch?.deltas.close()
 
   if (connError) {
     handlers.onError?.(streamConnectionFailure(connError, 'Connection failed'))
@@ -2080,14 +2116,16 @@ export async function resumeStream(
 ): Promise<void> {
   let connError: unknown
 
+  const batch = frameBatchFor(handlers, signal)
   await readSseStream(
     `/api/v1/chat/stream/resume/${encodeURIComponent(requestId)}`,
     { method: 'GET', signal, lastEventId },
-    (event) => dispatchFrame(event, handlers),
+    (event) => dispatchFrame(event, handlers, batch),
     (err) => {
       connError = err
     },
   )
+  batch?.deltas.close()
 
   if (connError) {
     handlers.onError?.(streamConnectionFailure(connError, 'Resume failed'))
