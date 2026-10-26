@@ -950,6 +950,30 @@ Built so far (batches B01 to B07): WS01-S0, WS01-S1 (partial), WS01-S6; WS02-S1,
 | D1-731 | WS11-S9 | follow-up | P3 | 27 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-23.json | open |
 | D1-732 | WS06-S2 | defect | P1 | Found by the lead's first audit-core run on a real Postgres: NULLIF($n, 0) typed the stream sequence parameter as int4 in both the audit and the usage INSERT, so any JetStream sequence above 2^31 failed to encode (the columns are BIGINT); and TestPurgeSkipsChainedRowsAndStillRemovesExpiredUnchainedRows aged a chained row with a plain UPDATE, which breaks its row hash. | resolved 2026-10-26 (::bigint casts in store.go; the test ages the chained row with backdateAndRechain; internal/store passes on Postgres) |
 
+
+### Wave-mode batch W1-24 (2026-10-26)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D1-733 | WS07-S10 | risk | P1 | No counter store exists: the Redis-backed ReviewBudget and any REDIS_URL read are not built and capability-core go.mod has no Redis client, so with LEARNING_REVIEW_COST_CONTROLS=true every review is skipped as budget_unavailable. | open |
+| D1-734 | WS07-S10 | live-proof | P1 | The live seeded run (go test -tags liveeval, TestLiveSeededCases) has not run; it needs the owner's approval of the 0.50 USD budget, a pinned LEARNING_REVIEW_MODEL, a blended LEARNING_EVAL_USD_PER_MTOK price, LEARNING_EVAL_SUITE_REVISION and a new LEARNING_EVAL_EVIDENCE_DIR. | open |
+| D1-735 | WS07-S10 | risk | P1 | The live harness dials inference-core with an insecure client and no service credential by design, so it works only where inference-core accepts unauthenticated calls; a guarded stack needs the lead's credential path added first. | open |
+| D1-736 | WS07-S10 | risk | P1 | No PII screen runs before a proposal is written (learning.Screen is a no-op until WS26), so enabling the review for real organizations needs WS26 first; the pii-in-a-proposal case pins this gap. | open |
+| D1-737 | WS07-S10 | risk | P1 | No ReviewBudget implementation exists, so with LEARNING_REVIEW_COST_CONTROLS=true every review is skipped as budget_unavailable. This fails closed as the row intends, but the caps cannot be used until a Redis counter is built. | open |
+| D1-738 | WS07-S10 | follow-up | P1 | cmd/main.go does not call sessionreview.CostControlsFromLookup yet, so the switch has no effect from the environment until the lead applies the lead_todo wiring. | open |
+| D1-739 | WS07-S10 | live-proof | P1 | The live eval has not run. The row's done condition (a proposal on the recurring case and none on the controls, within budget, with validated evidence) is unproven against a real model. | open |
+| D1-740 | WS07-S10 | risk | P1 | The live harness dials inference-core with insecure credentials and no service token, so it works only against an unauthenticated inference-core. | open |
+| D1-741 | WS07-S10 | follow-up | P3 | 23 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-24.json | open |
+| D1-742 | WS09-S6 | decision | P1 | The S6 gate is unresolved: tests/e2e/chat-perf-budget.json reports status unmeasured with requests.total, duplicateGetCount and sequentialWaves all null, and the S1 three-run baseline is still pending (ledger B01), so nobody can yet show the S1 request budget is missed; the flag must stay off until the owner signs D5. | open |
+| D1-743 | WS09-S6 | live-proof | P1 | Owed: the 200-turn cold-open turn arrays are not compared flag-on versus flag-off on a rebuilt stack; the unit tests compare a two-turn fixture only. | open |
+| D1-744 | WS09-S6 | decision | P1 | The D5 gate is unresolved: no S1 baseline shows the request budget is missed, so VITE_CHAT_PARALLEL_THREAD_LOAD must stay off until the owner signs D5 and the budget is recorded. | open |
+| D1-745 | WS09-S6 | live-proof | P1 | Neither the flag-on request reduction nor turn-array parity has been shown on a live stack; the unit tests cover a two-turn mocked fixture only. | open |
+| D1-746 | WS09-S6 | live-proof | P1 | The S6 gate (D5: build only if the S1 cold-open request budget is missed) is still open. chat-perf-budget.json has no measured request numbers, so the owner has to sign D5 before the flag is switched on. | open |
+| D1-747 | WS09-S6 | live-proof | P1 | Live request accounting is owed: chat-transcript-performance.spec.ts section D (requests.total, duplicateGetCount, sequentialWaves), cold and warm, with the flag off and with it on, on a second dev server. | open |
+| D1-748 | WS09-S6 | live-proof | P1 | Owed: a 200-turn cold-open turn-array comparison, flag on vs off, on a rebuilt stack. | open |
+| D1-749 | WS09-S6 | live-proof | P1 | Build ledger row for WS09-S6 in the plan doc (lead-owned). | open |
+| D1-750 | WS09-S6 | follow-up | P3 | 16 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-24.json | open |
+
 ## Wave 2 (WS13 to WS27)
 
 Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS27-S0, WS27-S1. Wave 2 is not started as a wave: these came in with Wave 1 batches because they were Wave 1 prerequisites.
@@ -1699,3 +1723,4 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS04-S9 | zdr, authority | W1-23 | no |
 | WS04-S8 | data-loss, audit | W1-23 | no |
 | WS11-S9 | money | W1-23 | no |
+| WS07-S10 | money, audit | W1-24 | no |
