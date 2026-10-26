@@ -181,6 +181,69 @@ printf '# Rollback rehearsal: result PASSED\n' >"$gate_dir/evidence/rollback-reh
 run_gate rehearsal_passed
 expect_gate rehearsal_passed 'r["checks"]["rollback_rehearsal"] == "passed" and not any(b.startswith("rollback_rehearsal_") for b in r["blockers"])'
 
+# Digest binding: a PASSED record counts only for the candidate and rollback manifests it names.
+# scripts/rollback-rehearsal.sh writes their sha256 on its candidate and rollback lines.
+mkdir -p "$gate_dir/other-candidate"
+printf 'candidate manifest\n' >"$gate_dir/good-candidate/artifact-manifest.tsv"
+printf 'rollback manifest\n' >"$gate_dir/good-rollback/artifact-manifest.tsv"
+printf 'other candidate manifest\n' >"$gate_dir/other-candidate/artifact-manifest.tsv"
+# manifest_sha FILE: the sha256 of the file's bytes, computed here rather than by the gate's tool.
+manifest_sha() {
+  python3 -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())' <"$1"
+}
+candidate_sha="$(manifest_sha "$gate_dir/good-candidate/artifact-manifest.tsv")"
+rollback_sha="$(manifest_sha "$gate_dir/good-rollback/artifact-manifest.tsv")"
+other_sha="$(manifest_sha "$gate_dir/other-candidate/artifact-manifest.tsv")"
+# rehearsal_record FILE CANDIDATE_SHA ROLLBACK_SHA: a PASSED record in the format rollback-rehearsal.sh writes.
+rehearsal_record() {
+  printf '# Rollback rehearsal: result PASSED\n# Names, versions, counts and pass/fail only. No credential, runtime value or row content.\ndate: 2026-10-21\ncandidate: revision r-candidate, root manifest sha256 %s\nrollback: revision r-rollback, root manifest sha256 %s\nsession-core migrations unknown to the rollback: 0\n' "$2" "$3" >"$1"
+}
+
+# With both artifact paths set, a record naming their manifests passes, with LF or CRLF line endings.
+rehearsal_record "$gate_dir/evidence/rollback-rehearsal-2026-10-21.txt" "$candidate_sha" "$rollback_sha"
+run_gate rehearsal_bound MODEL_PLANE_CANDIDATE_ARTIFACT_DIR="$gate_dir/good-candidate" \
+  MODEL_PLANE_ROLLBACK_ARTIFACT_DIR="$gate_dir/good-rollback" MODEL_PLANE_ARTIFACT_VERIFY_KEY=trusted-key-ref
+expect_gate rehearsal_bound 'r["checks"]["rollback_rehearsal"] == "passed" and not any(b.startswith("rollback_rehearsal_") for b in r["blockers"])'
+printf '# Rollback rehearsal: result PASSED\r\ndate: 2026-10-21\r\ncandidate: revision r-candidate, root manifest sha256 %s\r\nrollback: revision r-rollback, root manifest sha256 %s\r\n' "$candidate_sha" "$rollback_sha" >"$gate_dir/evidence/rollback-rehearsal-2026-10-21.txt"
+run_gate rehearsal_bound_crlf MODEL_PLANE_CANDIDATE_ARTIFACT_DIR="$gate_dir/good-candidate" \
+  MODEL_PLANE_ROLLBACK_ARTIFACT_DIR="$gate_dir/good-rollback" MODEL_PLANE_ARTIFACT_VERIFY_KEY=trusted-key-ref
+expect_gate rehearsal_bound_crlf 'r["checks"]["rollback_rehearsal"] == "passed"'
+
+# A rehearsal of other artifacts passes nothing, and its mismatch cannot be waived.
+rehearsal_record "$gate_dir/evidence/rollback-rehearsal-2026-10-21.txt" "$other_sha" "$rollback_sha"
+run_gate rehearsal_other_candidate MODEL_PLANE_CANDIDATE_ARTIFACT_DIR="$gate_dir/good-candidate" \
+  MODEL_PLANE_ROLLBACK_ARTIFACT_DIR="$gate_dir/good-rollback" MODEL_PLANE_ARTIFACT_VERIFY_KEY=trusted-key-ref
+expect_gate rehearsal_other_candidate '"rollback_rehearsal_artifact_mismatch" in r["blockers"] and r["checks"]["rollback_rehearsal"] == "mismatch"'
+printf 'rollback_rehearsal_artifact_mismatch\truntime\tops\tother artifacts\t2026-10-20\t2026-10-30\tticket-2\n' >"$gate_dir/waivers.tsv"
+run_gate rehearsal_mismatch_unwaivable MODEL_PLANE_CANDIDATE_ARTIFACT_DIR="$gate_dir/good-candidate" \
+  MODEL_PLANE_ROLLBACK_ARTIFACT_DIR="$gate_dir/good-rollback" MODEL_PLANE_ARTIFACT_VERIFY_KEY=trusted-key-ref
+expect_gate rehearsal_mismatch_unwaivable '"rollback_rehearsal_artifact_mismatch" in r["blockers"] and "release_gate_waivers_invalid" in r["blockers"] and r["waived"] == []'
+printf '# header only\n' >"$gate_dir/waivers.tsv"
+
+# The rollback side is bound as well.
+rehearsal_record "$gate_dir/evidence/rollback-rehearsal-2026-10-21.txt" "$candidate_sha" "$other_sha"
+run_gate rehearsal_other_rollback MODEL_PLANE_CANDIDATE_ARTIFACT_DIR="$gate_dir/good-candidate" \
+  MODEL_PLANE_ROLLBACK_ARTIFACT_DIR="$gate_dir/good-rollback" MODEL_PLANE_ARTIFACT_VERIFY_KEY=trusted-key-ref
+expect_gate rehearsal_other_rollback '"rollback_rehearsal_artifact_mismatch" in r["blockers"] and r["checks"]["rollback_rehearsal"] == "mismatch"'
+
+# Each side is named exactly once: an empty digest, or a second line naming another manifest, does not bind.
+printf '# Rollback rehearsal: result PASSED\ndate: 2026-10-21\ncandidate: revision r-candidate, root manifest sha256 \nrollback: revision r-rollback, root manifest sha256 %s\n' "$rollback_sha" >"$gate_dir/evidence/rollback-rehearsal-2026-10-21.txt"
+run_gate rehearsal_empty_digest MODEL_PLANE_CANDIDATE_ARTIFACT_DIR="$gate_dir/good-candidate" \
+  MODEL_PLANE_ROLLBACK_ARTIFACT_DIR="$gate_dir/good-rollback" MODEL_PLANE_ARTIFACT_VERIFY_KEY=trusted-key-ref
+expect_gate rehearsal_empty_digest '"rollback_rehearsal_artifact_mismatch" in r["blockers"] and r["checks"]["rollback_rehearsal"] == "mismatch"'
+rehearsal_record "$gate_dir/evidence/rollback-rehearsal-2026-10-21.txt" "$candidate_sha" "$rollback_sha"
+printf 'candidate: revision r-other, root manifest sha256 %s\n' "$other_sha" >>"$gate_dir/evidence/rollback-rehearsal-2026-10-21.txt"
+run_gate rehearsal_two_candidates MODEL_PLANE_CANDIDATE_ARTIFACT_DIR="$gate_dir/good-candidate" \
+  MODEL_PLANE_ROLLBACK_ARTIFACT_DIR="$gate_dir/good-rollback" MODEL_PLANE_ARTIFACT_VERIFY_KEY=trusted-key-ref
+expect_gate rehearsal_two_candidates '"rollback_rehearsal_artifact_mismatch" in r["blockers"] and r["checks"]["rollback_rehearsal"] == "mismatch"'
+
+# A PASSED record without digest lines cannot be bound to any artifact.
+printf '# Rollback rehearsal: result PASSED\ndate: 2026-10-21\n' >"$gate_dir/evidence/rollback-rehearsal-2026-10-21.txt"
+run_gate rehearsal_unbound MODEL_PLANE_CANDIDATE_ARTIFACT_DIR="$gate_dir/good-candidate" \
+  MODEL_PLANE_ROLLBACK_ARTIFACT_DIR="$gate_dir/good-rollback" MODEL_PLANE_ARTIFACT_VERIFY_KEY=trusted-key-ref
+expect_gate rehearsal_unbound '"rollback_rehearsal_artifact_mismatch" in r["blockers"] and r["checks"]["rollback_rehearsal"] == "mismatch"'
+rm "$gate_dir/evidence/rollback-rehearsal-2026-10-21.txt"
+
 # Waivers: unexpired rows remove the blocker and are listed; expired rows do not; a bad row voids the file.
 rm "$gate_dir/evidence/rollback-rehearsal-2026-10-20.txt" "$gate_dir/evidence/rollback-rehearsal-2026-08-01.txt"
 printf 'rollback_rehearsal_missing\truntime\tops\tfirst host not ready\t2026-10-20\t2026-11-10\tticket-1\n' >"$gate_dir/waivers.tsv"

@@ -34,8 +34,8 @@ immutable evidence record is required.
 Profiles (default full; CORESYSTEM_CONFORMANCE_PROFILE sets the default):
   runtime  the Model Plane runtime gate: clean tree, required files, signed
            candidate and rollback artifacts, a passed and recent rollback
-           rehearsal, a valid thresholds file and capability ledger. A ready
-           runtime report is not promotion.
+           rehearsal of those same artifacts, a valid thresholds file and
+           capability ledger. A ready runtime report is not promotion.
   full     runtime plus approved thresholds, a fully promoted capability
            ledger and the dev-runtime and cross-plane preflights.
 
@@ -175,6 +175,38 @@ fi
 add_check candidate_artifact "$candidate_state"
 add_check rollback_artifact "$rollback_state"
 
+# The root manifest digest of one artifact, or nothing when its manifest is absent.
+artifact_manifest_sha256() {
+  local file="$1" digest=""
+  [[ -f "$file" ]] || return 0
+  if command -v sha256sum >/dev/null 2>&1; then
+    digest="$(sha256sum "$file" 2>/dev/null | awk '{print $1}' || true)"
+  elif command -v shasum >/dev/null 2>&1; then
+    digest="$(shasum -a 256 "$file" 2>/dev/null | awk '{print $1}' || true)"
+  fi
+  printf '%s' "$digest"
+}
+
+# True only when the evidence records exactly one candidate line and one rollback line, and each
+# names the root manifest digest of the artifact under review. Reads are CR-tolerant; a line with
+# no digest, or a second line for the same side, never matches.
+rehearsal_matches_artifacts() {
+  local file="$1" candidate_sha rollback_sha
+  candidate_sha="$(artifact_manifest_sha256 "$candidate_dir/artifact-manifest.tsv")"
+  rollback_sha="$(artifact_manifest_sha256 "$rollback_dir/artifact-manifest.tsv")"
+  [[ -n "$candidate_sha" && -n "$rollback_sha" ]] || return 1
+  tr -d '\r' <"$file" | awk -v want_candidate="$candidate_sha" -v want_rollback="$rollback_sha" '
+    function digest(line) {
+      if (match(line, /root manifest sha256 [0-9a-f]+$/))
+        return substr(line, RSTART + length("root manifest sha256 "))
+      return ""
+    }
+    index($0, "candidate: revision ") == 1 { candidates++; if (digest($0) != want_candidate) bad = 1 }
+    index($0, "rollback: revision ") == 1 { rollbacks++; if (digest($0) != want_rollback) bad = 1 }
+    END { if (!bad && candidates == 1 && rollbacks == 1) exit 0; exit 1 }
+  '
+}
+
 # A rehearsal result is the newest rollback-rehearsal-<date>.txt that
 # scripts/rollback-rehearsal.sh wrote: it must say PASSED and be recent enough.
 rehearsal_max_age="$DEFAULT_REHEARSAL_MAX_AGE_DAYS"
@@ -208,10 +240,17 @@ PY
     rehearsal_state=passed
   fi
 fi
+# A PASSED rehearsal is evidence only for the artifacts it rehearsed. The binding needs both
+# artifact paths; without them the artifact_missing blockers already block the gate.
+if [[ "$rehearsal_state" == passed && -n "$candidate_dir" && -n "$rollback_dir" ]] &&
+  ! rehearsal_matches_artifacts "$rehearsal_file"; then
+  rehearsal_state=mismatch
+fi
 case "$rehearsal_state" in
   missing) add_blocker rollback_rehearsal_missing ;;
   failed) add_blocker rollback_rehearsal_failed ;;
   stale) add_blocker rollback_rehearsal_stale ;;
+  mismatch) add_blocker rollback_rehearsal_artifact_mismatch ;;
 esac
 add_check rollback_rehearsal "$rehearsal_state"
 
@@ -312,7 +351,7 @@ add_check cross_plane_preflight "$cross_preflight_status"
 # report and lists it under "waived". An expired row for a live blocker adds
 # waiver_expired:<blocker>; a malformed file blocks everything it would have waived.
 # Blockers that say the evidence is wrong (a failed signature check, an invalid
-# thresholds or waiver file) cannot be waived.
+# thresholds or waiver file, a rehearsal of other artifacts) cannot be waived.
 apply_waivers() {
   # A missing file is already a missing_file blocker; with no file nothing is waived.
   [[ -f "$WAIVERS" ]] || return 0
@@ -338,7 +377,7 @@ def unwaivable(blocker):
         or blocker.startswith("waiver_expired:")
         or blocker in {"release_gate_waivers_invalid",
                        "artifact_verify_key_missing", "acceptance_thresholds_invalid",
-                       "dirty_worktree"}
+                       "dirty_worktree", "rollback_rehearsal_artifact_mismatch"}
     )
 
 
