@@ -1606,7 +1606,7 @@ async fn run_agent_with_route_parkable(
 
     // The attached files, held for the whole run and released when this scope ends on any
     // path, a cancelled request included (WS08-S6).
-    let _run_inputs = register_run_inputs(&req)?;
+    let _run_inputs = register_run_inputs(&req, deadline)?;
 
     // A continuation (build plan WS03 S3, S7b): consume the granted approval exactly once,
     // then either restore the paused loop from its fold (the in-place resume) or start the
@@ -2334,15 +2334,22 @@ fn split_attachments(
 /// returned guard lives: the loop's own scope, so a terminal, an error and a cancelled
 /// request (the dropped future) all release them. Images are not staged. `None` for the
 /// run with no files, which is every run today.
+///
+/// The registration lives as long as the run may: its remaining deadline, never less than the
+/// registry's default lifetime and at most a day when the run has no limit (see
+/// `run_inputs::ttl_for_run`). A Do run past the default keeps its files for the whole run.
 #[allow(clippy::result_large_err)]
 fn register_run_inputs(
     req: &pb::RunAgentRequest,
+    deadline: crate::run_budget::RunDeadline,
 ) -> Result<Option<crate::run_inputs::RunInputsGuard>, tonic::Status> {
+    let ttl = crate::run_inputs::ttl_for_run(deadline.remaining_at(std::time::Instant::now()));
     crate::run_inputs::global()
-        .register(
+        .register_until(
             &req.org_id,
             &req.run_id,
             split_attachments(&req.attachments).0,
+            ttl,
         )
         .map_err(|refusal| {
             tonic::Status::resource_exhausted(match refusal {
@@ -2545,6 +2552,23 @@ async fn run_rounds(
             seeded
         }
     };
+    // A resumed conversation keeps the sandbox note its run wrote when the files were attached,
+    // and the files do not survive the pause (v1). A resume that carries none is refused here,
+    // before the fence and before any round, so the model is never told of files it cannot read.
+    // An in-place resume has already spent its approval (`begin_continuation` consumes it before
+    // the seed is restored), so this refusal comes after the consume, as `in_place_seed_invalid`
+    // does; a park resume consumed nothing.
+    if in_place
+        && split_attachments(&req.attachments).0.is_empty()
+        && messages.iter().any(|message| {
+            message.role == "system"
+                && mp_contracts::attachments::is_sandbox_note(&message.content)
+        })
+    {
+        return Err(tonic::Status::failed_precondition(
+            mp_contracts::attachments::ATTACHMENTS_EXPIRED,
+        ));
+    }
 
     let mut inference = InferenceCoreClient::new(ctx.inference_channel.clone());
     let mut answer: Option<String> = None;
@@ -4009,6 +4033,9 @@ async fn run_rounds(
                             // covers exactly one call.
                             ctx.release.as_ref(),
                             ctx.result_store.as_deref(),
+                            // Only the root loop reads the run's attached files: a delegated
+                            // child does not inherit them (WS08-S6).
+                            ctx.depth == 0,
                         )
                         .await;
                         // The ledger's word first: a call that holds an effectful reservation
@@ -26857,6 +26884,137 @@ mod tests {
             .join("\n");
         assert!(child.contains("look something up"), "{child}");
         assert!(!child.contains("attachments/"), "the child is not told of files it cannot read");
+    }
+
+    /// A delegated child runs `code_interpreter` without the parent's files. The registration is
+    /// the root loop's to read (WS08-S6): the child's program finds no `attachments/` directory
+    /// and is never handed the parent's files to stage. Where the OS sandbox is unavailable,
+    /// staging is refused outright, so that refusal would show in the child's own result.
+    #[tokio::test]
+    async fn a_child_code_interpreter_step_sees_no_attached_files() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let req = pb::RunAgentRequest {
+            // `auto`, so the child's program runs rather than waiting for an approval.
+            mode: "auto".to_owned(),
+            ..attached_request("run-att-child-code")
+        };
+        // The program reports the one fact the child could see: whether `attachments/` exists.
+        let probe = r#"{"code":"import os\nprint(\"dir:\" + str(os.path.isdir(\"attachments\")))"}"#;
+        let run = run_agent_on(
+            &rec,
+            &plain_caller(),
+            &ALLOW_CAPABILITY_POLICY,
+            req,
+            vec![
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![subagent_call(
+                        "sub-a",
+                        r#"{"goal":"look at the data","max_rounds":2}"#,
+                    )],
+                },
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![pb::ToolCall {
+                        id: "ci-child".to_owned(),
+                        name: "code_interpreter".to_owned(),
+                        arguments_json: probe.to_owned(),
+                    }],
+                },
+                Scripted::Answer("Child reported.".to_owned()),
+                Scripted::Answer("Parent done.".to_owned()),
+            ],
+        )
+        .await;
+        let response = run.result.expect("the run completes");
+        assert_eq!(response.status, "completed", "{}", response.final_output);
+
+        // Round 2 is the child's second round: the one that holds its code_interpreter result.
+        let messages = run.messages.lock().unwrap();
+        let child_result = messages[2]
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let outcomes = [
+            "dir:False",
+            "dir:True",
+            "OS sandbox",
+            "code_interpreter execution failed",
+        ];
+        assert!(
+            outcomes.iter().any(|outcome| child_result.contains(outcome)),
+            "the child's code_interpreter call produced no result: {child_result}"
+        );
+        assert!(
+            !child_result.contains("OS sandbox"),
+            "the child was handed the parent's files to stage: {child_result}"
+        );
+        assert!(
+            !child_result.contains("dir:True"),
+            "the child's program found the parent's attachments/: {child_result}"
+        );
+    }
+
+    /// A parked run that attached files resumes only with them. Its paused conversation keeps the
+    /// note that names them, and the files did not survive the pause: a resume without them is
+    /// refused before its fence and before any round, while the same resume of a run that
+    /// attached nothing proceeds.
+    #[tokio::test]
+    async fn a_park_resume_with_a_stale_attachment_note_is_refused_before_any_round() {
+        let _on = hold(ParkKnobs::ON, SWITCH_ON);
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let attached = pb::RunAgentRequest {
+            attachments: vec![attachment_of(
+                "sales.csv",
+                b"month,revenue\n1,10\n",
+                pb::RunAttachmentKind::File,
+                "text/csv",
+            )],
+            ..subscription_request()
+        };
+        park_through_run_agent(&rec, &ALLOW_CAPABILITY_POLICY, attached).await;
+        let (saves_at_park, terminals_at_park) = {
+            let recorded = rec.lock().unwrap();
+            (recorded.loop_saves.len(), recorded.managed_terminal_outcomes.len())
+        };
+
+        let run = run_agent_on(
+            &rec,
+            &plain_caller(),
+            &ALLOW_CAPABILITY_POLICY,
+            park_resume_request(),
+            vec![Scripted::Answer("four".to_owned())],
+        )
+        .await;
+        let refusal = run
+            .result
+            .expect_err("a resume without the files its note names is refused");
+        assert_eq!(refusal.message(), mp_contracts::attachments::ATTACHMENTS_EXPIRED);
+        assert!(run.messages.lock().unwrap().is_empty(), "no round was inferred");
+        {
+            let recorded = rec.lock().unwrap();
+            assert_eq!(recorded.loop_saves.len(), saves_at_park, "no fence was saved");
+            assert_eq!(
+                recorded.managed_terminal_outcomes.len(),
+                terminals_at_park,
+                "the refused run was not terminalized"
+            );
+        }
+
+        // The same resume of a run that attached nothing has no note in its fold, and proceeds.
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        park_through_run_agent(&rec, &ALLOW_CAPABILITY_POLICY, subscription_request()).await;
+        let run = run_agent_on(
+            &rec,
+            &plain_caller(),
+            &ALLOW_CAPABILITY_POLICY,
+            park_resume_request(),
+            vec![Scripted::Answer("four".to_owned())],
+        )
+        .await;
+        let response = run.result.expect("the resumed run is a response");
+        assert_eq!(response.status, "completed", "{response:?}");
     }
 
     #[tokio::test]

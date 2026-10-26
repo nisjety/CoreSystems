@@ -434,6 +434,7 @@ pub async fn execute_step(
         sandbox,
         None,
         None,
+        true,
     )
     .await
 }
@@ -500,6 +501,7 @@ pub(crate) async fn execute_step_with_browser_grant(
         sandbox,
         None,
         None,
+        true,
     )
     .await
 }
@@ -570,6 +572,7 @@ pub(crate) async fn execute_step_with_subagent(
         sandbox,
         release,
         None,
+        true,
     )
     .await
 }
@@ -613,6 +616,9 @@ pub(crate) async fn execute_step_with_result_handles(
     sandbox: Option<&crate::sandbox_lease::SandboxLeaseContext<'_>>,
     release: Option<&resume::ApprovedRelease>,
     result_store: Option<&result_handles::ResultHandles>,
+    // Whether the step may read the files its run attached (`run_inputs`). Only the root loop
+    // reads them: a delegated child does not inherit its parent's files (WS08-S6).
+    read_run_inputs: bool,
 ) -> StepOutcome {
     execute_step_inner(
         tool_name,
@@ -639,6 +645,7 @@ pub(crate) async fn execute_step_with_result_handles(
         sandbox,
         release,
         result_store,
+        read_run_inputs,
     )
     .await
 }
@@ -685,6 +692,9 @@ async fn execute_step_inner(
     // The run's held results (WS25-S5). Present only for an agent loop of a run that
     // holds them; read by the parking tail and by `result_query`.
     result_store: Option<&result_handles::ResultHandles>,
+    // The run's attached files are read only when this is true: a delegated child's
+    // `code_interpreter` runs without them (WS08-S6). Every caller but the agent loop passes true.
+    read_run_inputs: bool,
 ) -> StepOutcome {
     let released = release.is_some_and(|r| r.covers(step_id, tool_name, tool_input));
     // An MCP tool carries the call's content to a third-party server, so it is
@@ -889,8 +899,13 @@ async fn execute_step_inner(
         };
         // The files the request carrying this step attached, registered under the
         // run for the length of the call (`ExecuteStep`). Read here, not passed
-        // down, so the model's own tool input cannot name or replace them.
-        let ro_inputs = crate::run_inputs::global().get(org_id, run_id);
+        // down, so the model's own tool input cannot name or replace them. A
+        // delegated child reads none: it does not inherit its parent's files.
+        let ro_inputs = if read_run_inputs {
+            crate::run_inputs::global().get(org_id, run_id)
+        } else {
+            None
+        };
         execute_code_interpreter(
             tool_input,
             run_id,
@@ -2376,6 +2391,7 @@ mod connector_tool_tests {
                     tool, input, "ask", "", "org-1", "user-1", "run-1", "step-1", "", None, None,
                     None, zdr, waived, 0, None, None, None, &NoPolicy, None, None, None, None,
                     None,
+                    true,
                 )
                 .await;
                 assert_eq!(out.status, "failed", "{tool} zdr={zdr} waived={waived}");

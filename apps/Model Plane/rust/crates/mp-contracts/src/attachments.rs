@@ -34,6 +34,9 @@ pub const MAX_ATTACHMENT_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_TOTAL_BYTES: usize = 16 * 1024 * 1024;
 /// Longest file name, in bytes.
 pub const MAX_NAME_BYTES: usize = 255;
+/// Refused on a resume whose paused conversation holds the sandbox note but carries no files:
+/// the files were not kept across the pause (see [`is_sandbox_note`]).
+pub const ATTACHMENTS_EXPIRED: &str = "attachments_expired";
 
 /// Why a list was refused. The token is closed: it is the only text that leaves
 /// the refusing service.
@@ -166,7 +169,7 @@ pub fn sandbox_note(attachments: &[RunAttachment]) -> String {
         return String::new();
     }
     let mut note = format!(
-        "The user attached files to this message. code_interpreter can read them, read-only, in the `{ATTACHMENTS_DIR}/` directory of its working directory (writes there fail; copy a file out first if you need to change it). They exist for this turn only: a later message has them only if the user attaches them again."
+        "{SANDBOX_NOTE_OPENING} code_interpreter can read them, read-only, in the `{ATTACHMENTS_DIR}/` directory of its working directory (writes there fail; copy a file out first if you need to change it). They exist for this turn only: a later message has them only if the user attaches them again."
     );
     for attachment in listed {
         let _ = write!(
@@ -177,6 +180,18 @@ pub fn sandbox_note(attachments: &[RunAttachment]) -> String {
         );
     }
     note
+}
+
+/// The opening sentence of the note [`sandbox_note`] writes. [`is_sandbox_note`] matches it, so
+/// the note and its recogniser cannot drift apart.
+const SANDBOX_NOTE_OPENING: &str = "The user attached files to this message.";
+
+/// Whether `content` is a note [`sandbox_note`] wrote, by its opening sentence. A resumed run
+/// checks the system messages of its paused conversation with it: a note there names files the
+/// pause did not keep.
+#[must_use]
+pub fn is_sandbox_note(content: &str) -> bool {
+    content.starts_with(SANDBOX_NOTE_OPENING)
 }
 
 #[cfg(test)]
@@ -303,6 +318,17 @@ mod tests {
         }
         assert!(sandbox_note(&[]).is_empty());
         assert!(sandbox_note(&[attachment("../x", b"x")]).is_empty());
+    }
+
+    #[test]
+    fn a_sandbox_note_is_recognised_and_other_text_is_not() {
+        let note = sandbox_note(&[attachment("sales.csv", b"a,b\n")]);
+        assert!(note.starts_with(SANDBOX_NOTE_OPENING));
+        assert!(is_sandbox_note(&note));
+        assert!(!is_sandbox_note(""));
+        assert!(!is_sandbox_note("Please attach the sales file again."));
+        assert!(!is_sandbox_note("The user attached files to this message"));
+        assert!(!is_sandbox_note(&format!("Earlier text. {note}")));
     }
 
     #[test]

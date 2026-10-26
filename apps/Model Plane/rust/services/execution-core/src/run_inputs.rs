@@ -30,6 +30,9 @@ const DEFAULT_MAX_BYTES: usize = 64 * 1024 * 1024;
 /// Longer than any single tool call (`EXECUTION_CODE_TIMEOUT_SECS` is minutes at
 /// most), so a live registration is never swept from under its own call.
 const DEFAULT_TTL: Duration = Duration::from_secs(15 * 60);
+/// Longest a registration may live, whatever its run's deadline says. A run with no time limit
+/// still has a leaked guard swept within a day.
+const MAX_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// One validated attachment, ready to be written into a workspace.
 pub struct StagedFile {
@@ -99,6 +102,8 @@ struct Entry {
     refs: usize,
     bytes: usize,
     registered_at: Instant,
+    /// How long this registration may live, measured from `registered_at`.
+    ttl: Duration,
 }
 
 #[derive(Default)]
@@ -193,14 +198,33 @@ impl RunInputs {
         run_id: &str,
         attachments: &[RunAttachment],
     ) -> Result<Option<RunInputsGuard>, RegisterError> {
+        self.register_until(org_id, run_id, attachments, self.ttl)
+    }
+
+    /// [`register`](Self::register) with the registration's own lifetime: the sweep evicts it once
+    /// it is `ttl` old, whatever else is registered. A run that outlives the default asks for its
+    /// own. A registration that already exists keeps the longer of the two lifetimes, so a shorter
+    /// one of the same run never cuts a longer one short.
+    ///
+    /// # Errors
+    ///
+    /// [`RegisterError`] when the registry is at its entry or byte bound.
+    pub fn register_until(
+        &self,
+        org_id: &str,
+        run_id: &str,
+        attachments: &[RunAttachment],
+        ttl: Duration,
+    ) -> Result<Option<RunInputsGuard>, RegisterError> {
         if attachments.is_empty() {
             return Ok(None);
         }
         let key = (org_id.to_owned(), run_id.to_owned());
         let mut state = lock(&self.state);
-        Self::sweep_locked(&mut state, Instant::now(), self.ttl);
+        Self::sweep_locked(&mut state, Instant::now());
         if let Some(entry) = state.entries.get_mut(&key) {
             entry.refs += 1;
+            entry.ttl = entry.ttl.max(ttl);
             return Ok(Some(RunInputsGuard {
                 state: Arc::clone(&self.state),
                 key,
@@ -236,6 +260,7 @@ impl RunInputs {
                 refs: 1,
                 bytes,
                 registered_at: Instant::now(),
+                ttl,
             },
         );
         tracing::debug!(
@@ -259,16 +284,16 @@ impl RunInputs {
             .map(|entry| Arc::clone(&entry.set))
     }
 
-    /// Evicts every registration older than the TTL as of `now`; returns how many.
+    /// Evicts every registration older than its own lifetime as of `now`; returns how many.
     pub fn sweep_at(&self, now: Instant) -> usize {
-        Self::sweep_locked(&mut lock(&self.state), now, self.ttl)
+        Self::sweep_locked(&mut lock(&self.state), now)
     }
 
-    fn sweep_locked(state: &mut State, now: Instant, ttl: Duration) -> usize {
+    fn sweep_locked(state: &mut State, now: Instant) -> usize {
         let stale: Vec<(String, String)> = state
             .entries
             .iter()
-            .filter(|(_, entry)| now.saturating_duration_since(entry.registered_at) >= ttl)
+            .filter(|(_, entry)| now.saturating_duration_since(entry.registered_at) >= entry.ttl)
             .map(|(key, _)| key.clone())
             .collect();
         for key in &stale {
@@ -290,6 +315,14 @@ impl RunInputs {
 pub fn global() -> &'static RunInputs {
     static GLOBAL: OnceLock<RunInputs> = OnceLock::new();
     GLOBAL.get_or_init(RunInputs::default)
+}
+
+/// The lifetime of a registration for a run with `remaining` of its time budget left (`None` when
+/// the run has no limit): the run's own time, never less than [`DEFAULT_TTL`] and never more than
+/// [`MAX_TTL`]. A Do run longer than the default keeps its files for the whole run.
+#[must_use]
+pub fn ttl_for_run(remaining: Option<Duration>) -> Duration {
+    remaining.map_or(MAX_TTL, |left| left.clamp(DEFAULT_TTL, MAX_TTL))
 }
 
 /// A poisoned lock is still released: the data is bytes to zero, and refusing to
@@ -437,6 +470,67 @@ mod tests {
             .expect("registers");
         let refused = registry.register("org", "run-2", &[attachment("b.bin", b"2")]);
         assert_eq!(refused.err(), Some(RegisterError::EntryCap));
+    }
+
+    #[test]
+    fn a_registration_with_its_own_lifetime_outlives_the_default_sweep() {
+        let registry = RunInputs::with_limits(4, 1024, DEFAULT_TTL);
+        let _long = registry
+            .register_until(
+                "org",
+                "long-run",
+                &[attachment("a.csv", b"long")],
+                Duration::from_secs(60 * 60),
+            )
+            .expect("registers")
+            .expect("guard");
+        let _default = registry
+            .register("org", "default-run", &[attachment("b.csv", b"short")])
+            .expect("registers")
+            .expect("guard");
+        // Both guards are held, so only each registration's own lifetime decides the sweep.
+        let later = Instant::now() + Duration::from_secs(16 * 60);
+        assert_eq!(registry.sweep_at(later), 1, "only the default-lifetime entry goes");
+        assert!(registry.get("org", "long-run").is_some(), "the longer run keeps its files");
+        assert!(registry.get("org", "default-run").is_none());
+    }
+
+    #[test]
+    fn a_shared_registration_keeps_the_longest_lifetime_asked_for() {
+        let registry = RunInputs::with_limits(4, 1024, DEFAULT_TTL);
+        let _short = registry
+            .register("org", "run", &[attachment("a.csv", b"one")])
+            .expect("registers")
+            .expect("guard");
+        let _long = registry
+            .register_until(
+                "org",
+                "run",
+                &[attachment("a.csv", b"one")],
+                Duration::from_secs(2 * 60 * 60),
+            )
+            .expect("shares")
+            .expect("guard");
+        let later = Instant::now() + Duration::from_secs(16 * 60);
+        assert_eq!(registry.sweep_at(later), 0, "the longest guard's lifetime holds");
+        assert!(registry.get("org", "run").is_some());
+    }
+
+    #[test]
+    fn a_run_lives_as_long_as_its_deadline_within_the_bounds() {
+        assert_eq!(ttl_for_run(None), MAX_TTL, "no limit: the ceiling");
+        assert_eq!(
+            ttl_for_run(Some(Duration::from_secs(60))),
+            DEFAULT_TTL,
+            "never less than the default"
+        );
+        let two_hours = Duration::from_secs(2 * 60 * 60);
+        assert_eq!(ttl_for_run(Some(two_hours)), two_hours);
+        assert_eq!(
+            ttl_for_run(Some(Duration::from_secs(100 * 60 * 60))),
+            MAX_TTL,
+            "never more than the ceiling"
+        );
     }
 
     #[test]
