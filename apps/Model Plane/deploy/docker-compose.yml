@@ -1668,6 +1668,14 @@ services:
       # consumer; the service credentials above are untouched. Set
       # LEARNING_REVIEW_ENABLED=true to turn learning back on.
       LEARNING_REVIEW_ENABLED: ${LEARNING_REVIEW_ENABLED:-false}
+      # Cost controls for the learning review (WS07-S10). Off unless the switch is
+      # exactly true; the bounds apply only then. With no counter store wired the
+      # day caps skip every review (budget_unavailable), so keep the switch false.
+      LEARNING_REVIEW_COST_CONTROLS: ${LEARNING_REVIEW_COST_CONTROLS:-false}
+      LEARNING_REVIEW_MIN_USER_TURNS: ${LEARNING_REVIEW_MIN_USER_TURNS:-3}
+      LEARNING_REVIEW_MAX_TRANSCRIPT_CHARS: ${LEARNING_REVIEW_MAX_TRANSCRIPT_CHARS:-60000}
+      LEARNING_REVIEW_MAX_PER_USER_PER_DAY: ${LEARNING_REVIEW_MAX_PER_USER_PER_DAY:-5}
+      LEARNING_REVIEW_MAX_PER_ORG_PER_DAY: ${LEARNING_REVIEW_MAX_PER_ORG_PER_DAY:-100}
       # Capability Core reauthorizes every due scheduled fire directly with
       # Control before it can prepare a service-owned Session Core thread.
       # The credential must be registered only as capability-core with

@@ -821,6 +821,17 @@ func startLearningConsumer(ctx context.Context, nc *nats.Conn, sc mpv1.SessionCo
 		slog.Info("learning-review consumer disabled (session-core/inference-core not dialed)")
 		return
 	}
+	// Cost controls (WS07-S10) are off unless the switch is exactly true. A
+	// malformed bound keeps the consumer down: a review it cannot bound must
+	// not run unbounded.
+	costControls, costOn, costErr := sessionreview.CostControlsFromLookup(os.Getenv)
+	if costErr != nil {
+		slog.Error("learning-review consumer not started: cost controls misconfigured", "error", costErr)
+		return
+	}
+	if costOn {
+		opts = append(opts, sessionreview.WithCostControls(costControls))
+	}
 	js, err := nc.JetStream()
 	if err != nil {
 		slog.Error("JetStream context unavailable; learning-review consumer disabled", "error", err)

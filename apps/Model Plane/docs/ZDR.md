@@ -362,6 +362,12 @@ it, keyed to the run's retention class and never to the org: memory indexing, dr
 extraction and learning review (owner default D-B, 2026-10-03). The acknowledgement text
 names this.
 
+[live-only] The learning review's cost controls (WS07-S10) keep one counter per owner and one
+per organization for each UTC day, keyed by identifiers and holding only an integer, so they
+hold no content. A zero-retention envelope is refused before its transcript is read and is
+never counted. Session Core withholds zero-retention and waived runs before they are announced
+(learning_events.rs), so the review never receives them.
+
 ### 5.6 What the waiver can never do
 Never org-wide (no write to org-core), never for another member (the decision requires
 the session user to equal the acknowledging user and the connection's owner), never for
