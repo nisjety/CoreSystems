@@ -498,16 +498,25 @@ func (s *Server) GetCapability(ctx context.Context, req *mpv1.GetCapabilityReque
 // name the registry does not hold is denied, as is a name the registry binds to
 // a different capability (`tool_not_bound`); a built-in name the registry holds
 // nowhere is decided against the capability's own class and floor, its ceiling.
+// With TOOL_POLICY_ENFORCED on, the stored tool policies of the org and of the
+// named person apply as well (policy.EvaluateTool).
 // The tool, the user, the class and floor, the policy source and the pinned
 // digest are all signed into the decision evidence.
 func (s *Server) EvaluatePolicy(ctx context.Context, req *mpv1.EvaluatePolicyRequest) (*mpv1.EvaluatePolicyResponse, error) {
 	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "EvaluatePolicy")))
-	orgID, err := verifiedOrganizationID(ctx)
+	principal, err := verifiedPrincipal(ctx)
 	if err != nil {
 		return nil, err
 	}
+	orgID := principal.OrganizationID
 	if req == nil || !policy.IsSupportedScope(req.Scope) {
 		return nil, mapErr(domain.ErrInvalidArgument)
+	}
+	// A service (execution-core) asserts the person its run acts for; a person may
+	// only name themselves. The named person's stored policies decide the call, so a
+	// person naming someone else could be decided under that person's own allow.
+	if principal.PrincipalType != "service" && req.GetUserId() != "" && req.GetUserId() != principal.ActorID {
+		return nil, status.Error(codes.PermissionDenied, "a caller may only evaluate policies for themselves")
 	}
 	capability, rolloutState, err := s.capabilityForPolicy(ctx, orgID, req.CapabilityId)
 	if err != nil {
@@ -547,11 +556,14 @@ func (s *Server) EvaluatePolicy(ctx context.Context, req *mpv1.EvaluatePolicyReq
 			PolicySource: policy.PolicySourceCapabilityGate,
 		}, binding), nil
 	}
-	result, err := s.policy.EvaluateCapability(ctx, capability, req.RunId, req.AgentId, orgID, req.Scope)
+	// EvaluateTool is the capability decision tightened by the binding, and by the
+	// stored policies when TOOL_POLICY_ENFORCED is on. With the switch off the
+	// decision and its signed evidence are the ones this path produced before.
+	result, err := s.policy.EvaluateTool(ctx, capability, binding, req.GetUserId(), req.RunId, req.AgentId, orgID, req.Scope)
 	if err != nil {
 		return nil, mapErr(err)
 	}
-	return s.policyResponse(req, orgID, capability, policy.Decide(result, binding), binding), nil
+	return s.policyResponse(req, orgID, capability, result, binding), nil
 }
 
 // capabilityForPolicy resolves the capability snapshot a decision is made

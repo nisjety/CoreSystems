@@ -163,7 +163,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	pol := policy.New(reg).WithScopeResolver(scopeStore)
+	// WS05-S5: the engine reads stored per-tool policies only when
+	// TOOL_POLICY_ENFORCED is the literal "true"; off, they are stored and ignored.
+	// The handler is built here because the engine takes it; its routes are mounted
+	// with the other policy APIs below.
+	toolPolicies := api.NewToolPoliciesHandler(pool)
+	toolPolicyEnforced := policy.ToolPolicyEnforcedFromLookup(os.Getenv)
+	slog.Info("tool policies", "enforced", toolPolicyEnforced)
+	pol := policy.New(reg).WithScopeResolver(scopeStore).WithToolPolicies(toolPolicies, toolPolicyEnforced)
 
 	// Letta's /v1/tools/search searches tool definitions, not memories. When
 	// explicitly configured it is only a discovery ranker; the server
@@ -282,6 +289,9 @@ func main() {
 	api.NewPluginsHandler(pool).WithPublisher(recPub).Register(protectedMux)
 	// Behind ORG_AGENT_POLICY_API (off by default): the handler answers 404 while it is off.
 	api.NewOrgAgentPolicyHandler(pool, api.OrgAgentPolicyAPIFromLookup(os.Getenv)).Register(protectedMux)
+	// WS05-S5: writes need a person and capability:write; reads are the org's
+	// and the caller's own. Enforcement is the engine's, behind TOOL_POLICY_ENFORCED.
+	toolPolicies.Register(protectedMux)
 	mcpHandler := api.NewMCPHandler(pool).WithPublisher(recPub).WithVault(mcpVault).WithMCPServiceToken(mcpServiceToken)
 	mcpHandler.Register(protectedMux)
 	// Deliberately on publicMux, not protectedMux: see RegisterInternal's doc

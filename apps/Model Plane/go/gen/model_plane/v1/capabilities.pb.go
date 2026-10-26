@@ -562,8 +562,10 @@ type EvaluatePolicyResponse struct {
 	ApprovalFloor string `protobuf:"bytes,8,opt,name=approval_floor,json=approvalFloor,proto3" json:"approval_floor,omitempty"`
 	// What produced the decision: "risk_level" (the capability's own risk),
 	// "approval_floor" (a class or floor raised it to ask), "tool_review" (the
-	// tool is not approved or is not in the registry) or "capability_gate" (the
-	// capability is out of rollout, unavailable, out of scope or ungranted).
+	// tool is not approved or is not in the registry), "capability_gate" (the
+	// capability is out of rollout, unavailable, out of scope or ungranted) or,
+	// only when TOOL_POLICY_ENFORCED is on, a stored per-tool policy:
+	// "tool_policy_never", "tool_policy_ask" or "tool_policy_allow".
 	PolicySource string `protobuf:"bytes,9,opt,name=policy_source,json=policySource,proto3" json:"policy_source,omitempty"`
 	// Pinned definition digest of the evaluated MCP tool, lower-case hex. Empty
 	// for a built-in tool and for a capability-level evaluation.
