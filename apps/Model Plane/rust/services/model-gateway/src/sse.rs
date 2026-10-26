@@ -216,6 +216,59 @@ fn do_run_attachments(
     Ok(carried)
 }
 
+/// The files an Ask turn carries to `code_interpreter` (WS08-S5), judged and hashed before any run
+/// exists, so a refusal leaves none behind. An agentic turn's files ride the Do run instead, so it
+/// stages none here. Empty with the switch off, and for a turn that carries no file.
+///
+/// # Errors
+/// The typed refusal of the first file that cannot be staged, or of any file on a zero-retention or
+/// waived turn (`persistence_free`).
+fn ask_turn_attachments(
+    attachments: &[crate::vision::InvokeAttachment],
+    agentic: bool,
+    staging_enabled: bool,
+    persistence_free: bool,
+) -> Result<crate::turn_attachments::ValidatedAttachments, crate::attachment_policy::AttachmentRefusal> {
+    if agentic {
+        return Ok(crate::turn_attachments::ValidatedAttachments::none());
+    }
+    crate::turn_attachments::ValidatedAttachments::from_invoke(attachments, staging_enabled, persistence_free)
+}
+
+/// The kind inference-core declares for a turn whose picked model cannot read the image it carries
+/// (`PROVIDER_ERROR_VISION_UNSUPPORTED`). It is the trailer value, and the code the frame and the run
+/// end under. A literal, because the two services share no crate: the test
+/// `the_vision_refusal_is_spelled_as_inference_core_declares_it` pins the two spellings together.
+const VISION_UNSUPPORTED: &str = "vision_unsupported";
+
+/// What the client is told when the picked model cannot read the image the turn carries.
+const VISION_UNSUPPORTED_MESSAGE: &str = "The selected model cannot read images. Pick a model that reads images, or remove the image and send the message again.";
+
+/// What the client is told when the turn carries files that no `code_interpreter` can read on it.
+const FILES_NEED_CODE_TOOL_MESSAGE: &str = "The attached files cannot be read on this turn, because the code tool is not offered for it. Remove the files and send the message again.";
+
+/// The typed refusal of an image turn whose picked model cannot read the image, read from the trailer
+/// inference-core sets on it: the code, the sentence, and that a retry cannot succeed. Exactly that
+/// kind is recognised. Any other kind, and a missing trailer, is `None` and keeps the mapping it had.
+fn vision_unsupported_refusal(status: &tonic::Status) -> Option<(&'static str, &'static str, bool)> {
+    let kind = status
+        .metadata()
+        .get(crate::compaction::PROVIDER_ERROR_KIND_TRAILER)?
+        .to_str()
+        .ok()?;
+    (kind == VISION_UNSUPPORTED).then_some((VISION_UNSUPPORTED, VISION_UNSUPPORTED_MESSAGE, false))
+}
+
+/// The catalogue a vision check asks inference-core for: the turn's own provider, so a vision model of
+/// another provider cannot stand in for the picked one. An empty hint leaves the request as it was,
+/// the unfiltered default.
+fn vision_catalogue_request(provider_hint: &str) -> mp_contracts::model_plane::v1::ListModelsRequest {
+    mp_contracts::model_plane::v1::ListModelsRequest {
+        provider: provider_hint.to_owned(),
+        ..Default::default()
+    }
+}
+
 fn error_stream(
     request_id: &str,
     code: &str,
@@ -1561,7 +1614,8 @@ pub async fn invoke_stream_sse(
             .inference_client
             .clone()
             .list_models(authenticated_inference_request(
-                mp_contracts::model_plane::v1::ListModelsRequest::default(),
+                // The turn's own provider: a vision model of another provider does not stand in for it.
+                vision_catalogue_request(&provider_hint),
                 &inference_bearer,
             ))
             .await
@@ -1614,6 +1668,34 @@ pub async fn invoke_stream_sse(
     };
     if !do_attachments.is_empty() {
         tracing::info!(request_id = %request_id, attachments = do_attachments.len(), "attachments ride the Do run");
+    }
+    // The files an Ask turn carries to `code_interpreter` (WS08-S5), judged here before any run exists.
+    // Empty with the switch off, and on an agentic turn, whose files ride the Do run above.
+    let staged = match ask_turn_attachments(
+        &req.attachments,
+        agentic_requested,
+        crate::turn_attachments::sandbox_staging_enabled(),
+        effective_zdr || retention_class.is_some(),
+    ) {
+        Ok(staged) => staged,
+        Err(refusal) => {
+            return error_stream(&request_id, refusal.code.as_str(), &refusal.message, false);
+        }
+    };
+    // The vision answer and image generation carry no tools, so no `code_interpreter` reads a file on
+    // them. Refused here, before the run, rather than answered without the file.
+    if !staged.is_empty()
+        && (req.generate_image
+            || (image_parts.is_empty()
+                && do_attachments.is_empty()
+                && crate::vision::select_image(&req.attachments).is_some()))
+    {
+        return error_stream(
+            &request_id,
+            crate::attachment_policy::AttachmentCode::MediaUnsupported.as_str(),
+            FILES_NEED_CODE_TOOL_MESSAGE,
+            false,
+        );
     }
 
     // Start keys are durable Session Core metadata. Keep the raw browser/API
@@ -2447,6 +2529,21 @@ pub async fn invoke_stream_sse(
     let mut messages = prompt.render(cache_options.prompt_order());
     // The images belong to the user turn this prompt ends with; from here the prompt only grows.
     let image_parts = image_parts.bind(&messages);
+    // The files reach the model only through `code_interpreter`. A turn that stages files but offers no
+    // such tool is refused on the prepared run, before anything is registered or spawned.
+    if !staged.is_empty() && !tool_defs.iter().any(|tool| tool.name == "code_interpreter") {
+        timing.fail();
+        return prepared_direct_failure_stream(
+            &state,
+            &session_run,
+            &model_bearer,
+            &request_id,
+            crate::attachment_policy::AttachmentCode::MediaUnsupported.as_str(),
+            FILES_NEED_CODE_TOOL_MESSAGE,
+            false,
+        )
+        .await;
+    }
 
     // chat-parity §4: register this stream so POST /v1/invoke/{id}/cancel can
     // stop it cooperatively. `cancels` is moved into the task to finish() on end.
@@ -2910,7 +3007,7 @@ pub async fn invoke_stream_sse(
         let mut document_tool_failures: u32 = 0;
         if !tool_defs.is_empty() {
             seq = sink.sync_cursor(seq).await;
-            let rounds = crate::tool_loop::run_tool_rounds_for_model(
+            let rounds = crate::tool_loop::run_tool_rounds_for_model_with_attachments(
                 &session_state,
                 &req_id,
                 &session_run_for_terminal.run_id,
@@ -2950,6 +3047,7 @@ pub async fn invoke_stream_sse(
                 ingestion_bearer.as_ref(),
                 sandbox_bearer.as_ref(),
                 Some(&sink),
+                &staged,
                 &image_parts,
             )
             .await;
@@ -7608,9 +7706,14 @@ async fn run_infer_fallback(
                         crate::subscription_failure::SUBSCRIPTION_ROUTE_UNAVAILABLE,
                     ))
                 });
-            let terminal_code = subscription_failure
-                .as_ref()
-                .map_or("inference_unavailable", |failure| failure.code);
+            // A refusal the picked model declared for an image it cannot read is the turn's own answer,
+            // not an outage: the run ends under that code, and so does the frame (below).
+            let vision_refusal = vision_unsupported_refusal(&e);
+            let terminal_code = match (&subscription_failure, vision_refusal) {
+                (Some(failure), _) => failure.code,
+                (None, Some((code, _, _))) => code,
+                (None, None) => "inference_unavailable",
+            };
             let mut seq = first_seq;
             if let Err(error) = crate::session_flow::terminalize_direct_inference_run_authenticated(
                 state,
@@ -7663,10 +7766,17 @@ async fn run_infer_fallback(
                         message: refusal.message(),
                         retryable: refusal.retryable(),
                     },
-                    None => crate::sse_events::ChatEvent::Error {
-                        code: "model_plane_unavailable".to_owned(),
-                        message: e.message().to_owned(),
-                        retryable: true,
+                    None => match vision_refusal {
+                        Some((code, message, retryable)) => crate::sse_events::ChatEvent::Error {
+                            code: code.to_owned(),
+                            message: message.to_owned(),
+                            retryable,
+                        },
+                        None => crate::sse_events::ChatEvent::Error {
+                            code: "model_plane_unavailable".to_owned(),
+                            message: e.message().to_owned(),
+                            retryable: true,
+                        },
                     },
                 },
             };
@@ -20659,5 +20769,91 @@ mod do_attachment_tests {
         let mut cleared = with;
         cleared.attachments.clear();
         assert_eq!(prost::Message::encode_to_vec(&cleared), prost::Message::encode_to_vec(&without));
+    }
+}
+
+#[cfg(test)]
+mod ask_turn_tests {
+    use super::*;
+    use crate::attachment_policy::AttachmentCode;
+    use crate::vision::InvokeAttachment;
+    use base64::Engine as _;
+    use mp_contracts::model_plane::v1::RunAttachmentKind;
+
+    fn file(name: &str, bytes: &[u8]) -> InvokeAttachment {
+        InvokeAttachment {
+            kind: Some("file".to_owned()),
+            name: Some(name.to_owned()),
+            data_base64: Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
+            mime_type: Some("text/csv".to_owned()),
+            ..InvokeAttachment::default()
+        }
+    }
+
+    /// A refusal the way inference-core sends one: a failed precondition, with its kind on the trailer.
+    fn refusal(kind: Option<&str>) -> tonic::Status {
+        let mut status = tonic::Status::failed_precondition("the picked model refused the request");
+        if let Some(kind) = kind {
+            status
+                .metadata_mut()
+                .insert(crate::compaction::PROVIDER_ERROR_KIND_TRAILER, kind.parse().expect("a trailer value"));
+        }
+        status
+    }
+
+    #[test]
+    fn an_ask_turn_stages_its_files_only_with_the_switch_on() {
+        let staged = ask_turn_attachments(&[file("sales.csv", b"a,b\n1,2\n")], false, true, false)
+            .expect("the file is staged");
+        let [carried] = staged.run_attachments() else {
+            panic!("only the file is staged");
+        };
+        assert_eq!(carried.name, "sales.csv");
+        assert_eq!(carried.kind, RunAttachmentKind::File as i32);
+        let off = ask_turn_attachments(&[file("sales.csv", b"a,b")], false, false, false).expect("off");
+        assert!(off.is_empty(), "the switch off stages nothing");
+        let agentic = ask_turn_attachments(&[file("sales.csv", b"a,b")], true, true, false).expect("agentic");
+        assert!(agentic.is_empty(), "an agentic turn's files ride the Do run, not this path");
+    }
+
+    #[test]
+    fn a_zero_retention_or_waived_turn_refuses_its_files() {
+        // The call site passes `effective_zdr || retention_class.is_some()`, which is true for both.
+        let refused = ask_turn_attachments(&[file("a.csv", b"1")], false, true, true).expect_err("refused");
+        assert_eq!(refused.code, AttachmentCode::MediaUnsupported);
+    }
+
+    #[test]
+    fn a_vision_refusal_is_its_own_code_and_is_not_retried() {
+        let (code, message, retryable) =
+            vision_unsupported_refusal(&refusal(Some("vision_unsupported"))).expect("the vision refusal");
+        assert_eq!(code, "vision_unsupported");
+        assert!(message.contains("cannot read images"), "{message}");
+        assert!(!retryable, "a retry of the same image cannot succeed");
+        assert!(vision_unsupported_refusal(&refusal(Some("subscription_usage_limit"))).is_none());
+        assert!(vision_unsupported_refusal(&refusal(Some("too_long"))).is_none());
+        assert!(vision_unsupported_refusal(&refusal(None)).is_none());
+    }
+
+    #[test]
+    fn the_vision_check_names_the_turns_own_provider() {
+        assert_eq!(vision_catalogue_request("azure-openai").provider, "azure-openai");
+        assert_eq!(
+            vision_catalogue_request(""),
+            mp_contracts::model_plane::v1::ListModelsRequest::default(),
+            "an empty hint is the unfiltered default"
+        );
+    }
+
+    #[test]
+    fn the_vision_refusal_is_spelled_as_inference_core_declares_it() {
+        let inference = include_str!("../../inference-core/src/grpc.rs");
+        let declared = "pub const PROVIDER_ERROR_VISION_UNSUPPORTED: &str = \"";
+        let start = inference
+            .find(declared)
+            .expect("inference-core declares the vision refusal kind")
+            + declared.len();
+        let end = inference[start..].find('"').expect("a closing quote");
+        assert_eq!(&inference[start..start + end], VISION_UNSUPPORTED);
     }
 }
