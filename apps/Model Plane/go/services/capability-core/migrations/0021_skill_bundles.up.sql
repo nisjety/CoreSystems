@@ -36,7 +36,8 @@ CREATE TABLE IF NOT EXISTS skill_bundle_files (
     sha256      TEXT NOT NULL,
     size_bytes  INTEGER NOT NULL,
     executable  BOOLEAN NOT NULL DEFAULT FALSE,
-    binary      BOOLEAN NOT NULL DEFAULT FALSE,
+    -- is_binary, not binary: BINARY is a reserved word in PostgreSQL and cannot name a column.
+    is_binary   BOOLEAN NOT NULL DEFAULT FALSE,
     PRIMARY KEY (bundle_id, path),
     CONSTRAINT skill_bundle_files_sha256_check CHECK (sha256 ~ '^[0-9a-f]{64}$'),
     CONSTRAINT skill_bundle_files_size_check CHECK (size_bytes BETWEEN 0 AND 1048576)

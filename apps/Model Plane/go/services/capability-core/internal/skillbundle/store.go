@@ -117,10 +117,10 @@ func (s *Store) Put(ctx context.Context, orgID, skillID, actor string, bundle Bu
 		return PutResult{}, fmt.Errorf("store skill bundle blobs: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO skill_bundle_files (bundle_id, path, sha256, size_bytes, executable, binary)
-		SELECT $1, u.path, u.sha256, u.size_bytes, u.executable, u.binary
+		INSERT INTO skill_bundle_files (bundle_id, path, sha256, size_bytes, executable, is_binary)
+		SELECT $1, u.path, u.sha256, u.size_bytes, u.executable, u.is_binary
 		FROM unnest($2::text[], $3::text[], $4::int[], $5::bool[], $6::bool[])
-		     AS u(path, sha256, size_bytes, executable, binary)
+		     AS u(path, sha256, size_bytes, executable, is_binary)
 	`, bundleID, paths, digests, sizes, executables, binaries); err != nil {
 		return PutResult{}, fmt.Errorf("store skill bundle files: %w", err)
 	}
@@ -240,7 +240,7 @@ func (s *Store) List(ctx context.Context, orgID string, skillIDs []string) ([]Su
 // ErrNotFound when the org has no bundle for the skill.
 func (s *Store) Manifest(ctx context.Context, orgID, skillID string) (Manifest, error) {
 	rows, err := s.db.Query(ctx, `
-		SELECT b.manifest_sha256, f.path, f.sha256, f.size_bytes, f.executable, f.binary
+		SELECT b.manifest_sha256, f.path, f.sha256, f.size_bytes, f.executable, f.is_binary
 		FROM skill_bundles b
 		JOIN skill_bundle_files f ON f.bundle_id = b.id
 		WHERE b.org_id = $1 AND b.skill_id = $2
