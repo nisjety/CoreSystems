@@ -183,6 +183,7 @@ import { planExecuteEnabled } from '@/shared/chat/plan-execute'
 import { readPinnedMessages, togglePinnedMessage } from '../lib/chat-pinned-messages'
 import { CHAT_SURFACE_IDS, chatSurfaceSpec, isChatTab } from '../lib/chat-surfaces'
 import { createSnapshotWriter, flushOnPageLifecycle, parseSnapshotThrottleMs } from '../lib/snapshot-throttle'
+import { nextFollowState, virtualizeTranscript } from '../lib/transcript-window'
 
 /**
  * WS09 S3. `VITE_CHAT_SNAPSHOT_THROTTLE_MS` is the cadence of the local transcript
@@ -2123,7 +2124,9 @@ export function useChatController() {
   const handleScroll = () => {
     if (!messageListRef) return
     const dist = messageListRef.scrollHeight - messageListRef.scrollTop - messageListRef.clientHeight
-    autoFollow.current = dist < 80
+    // WS09 S10: with the window on, the bottom moves as measured turns settle,
+    // so the follow re-arms at 40 px rather than flipping at a single 80 px line.
+    autoFollow.current = virtualizeTranscript ? nextFollowState(autoFollow.current, dist) : dist < 80
     setShowScrollDown(dist > 160)
   }
 

@@ -69,6 +69,7 @@ import { speechPlayer } from '@/features/voice/speech-playback'
 import { latestVoiceReply } from '@/features/voice/voice-reply'
 import { pinnedMessagesFull } from '../lib/chat-pinned-messages'
 import { selectChatThread } from '../lib/chat-thread-history'
+import { planTranscriptWindow, resolveTurnHeights, virtualizeTranscript } from '../lib/transcript-window'
 
 export default function ChatPage() {
   const i18n = useI18n()
@@ -315,6 +316,88 @@ export default function ChatPage() {
     version: index === turns.length - 1 ? finalExchangeVersion() : null,
     editLocked: turn.role === 'user' && isEffectfulChatTurn(turns[index + 1]?.effectClass),
   })))
+
+  // WS09 S10, behind `VITE_CHAT_VIRTUALIZE` (see transcript-window.ts). The window
+  // mounts the turns on screen, the tail, the streaming turn and the focused turn,
+  // and stands in for each run it leaves out with a spacer. Heights are kept by
+  // turn id, so a turn that scrolls out keeps the height it was measured at. With
+  // the switch off none of this runs.
+  const measuredTurnHeights = new Map<string, number>()
+  const [turnHeightsVersion, setTurnHeightsVersion] = createSignal(0)
+  const [focusedTurnId, setFocusedTurnId] = createSignal<string | null>(null)
+  const [viewport, setViewport] = createSignal({ top: 0, height: 0, rowGap: 0 })
+  let listElement: HTMLDivElement | undefined
+  let threadElement: HTMLDivElement | undefined
+  const measureViewport = () => {
+    if (!listElement || !threadElement) return
+    // The viewport's top edge, measured from the top of the transcript. The
+    // scroll offset cancels out of the difference of the two rects.
+    const next = {
+      top: Math.max(0, listElement.getBoundingClientRect().top - threadElement.getBoundingClientRect().top),
+      height: listElement.clientHeight,
+      rowGap: Number.parseFloat(getComputedStyle(threadElement).rowGap) || 0,
+    }
+    const previous = viewport()
+    if (previous.top !== next.top || previous.height !== next.height || previous.rowGap !== next.rowGap) {
+      setViewport(next)
+    }
+  }
+  const observesResize = virtualizeTranscript && typeof ResizeObserver !== 'undefined'
+  // A turn that leaves the window reports a zero size once more; it is dropped from
+  // the observer here, not measured as empty.
+  const turnObserver = observesResize
+    ? new ResizeObserver((entries, observer) => {
+        for (const entry of entries) {
+          const element = entry.target as HTMLElement
+          if (!element.isConnected) {
+            observer.unobserve(element)
+            continue
+          }
+          if (element.dataset.turnId) measuredTurnHeights.set(element.dataset.turnId, element.offsetHeight)
+        }
+        setTurnHeightsVersion((version) => version + 1)
+        measureViewport()
+      })
+    : undefined
+  const viewportObserver = observesResize
+    ? new ResizeObserver((entries, observer) => {
+        for (const entry of entries) {
+          if (!entry.target.isConnected) observer.unobserve(entry.target)
+        }
+        measureViewport()
+      })
+    : undefined
+  onCleanup(() => {
+    turnObserver?.disconnect()
+    viewportObserver?.disconnect()
+  })
+  const transcriptPlan = createMemo(() => {
+    if (!virtualizeTranscript) return undefined
+    turnHeightsVersion()
+    const rows = messageRows()
+    const view = viewport()
+    const streamingIndex = isStreaming() ? rows.findLastIndex((row) => row.turn.role === 'assistant') : -1
+    const focusedIndex = focusedTurnId() === null ? -1 : rows.findIndex((row) => row.turn.id === focusedTurnId())
+    return planTranscriptWindow({
+      heights: resolveTurnHeights(rows.map((row) => row.turn.id), measuredTurnHeights),
+      rowGap: view.rowGap,
+      scrollTop: view.top,
+      viewportHeight: view.height,
+      streamingIndex: streamingIndex >= 0 ? streamingIndex : undefined,
+      focusedIndex: focusedIndex >= 0 ? focusedIndex : undefined,
+    })
+  })
+  const windowRows = createMemo(() => {
+    const plan = transcriptPlan()
+    if (!plan) return []
+    const rows = messageRows()
+    const mounted: Array<{ index: number; gapBefore: number; row: (typeof rows)[number] }> = []
+    for (const item of plan.items) {
+      const row = rows[item.index]
+      if (row) mounted.push({ ...item, row })
+    }
+    return mounted
+  })
 
   // Context inspector data. Keyed on (thread, tab) so it is fetched only while
   // the Steps tab is open and refetched when the thread changes — assembling a
@@ -722,28 +805,69 @@ export default function ChatPage() {
    * the workspace tab strip's roving tabindex and the canvas resize handle all
    * bind arrows, and stealing them here would break each one.
    */
-  const handleTranscriptArrowKeys = (event: KeyboardEvent & { currentTarget: HTMLDivElement }) => {
-    if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return
-    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return
-    if (event.defaultPrevented) return
+  const transcriptArrowStep = (event: KeyboardEvent): number => {
+    if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return 0
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return 0
+    if (event.defaultPrevented) return 0
     const target = event.target as HTMLElement | null
-    if (!target) return
+    if (!target) return 0
     if (target.closest('input, textarea, select, [contenteditable="true"], [role="tablist"], [role="listbox"], [role="menu"], [role="separator"]')) {
-      return
+      return 0
     }
+    return event.key === 'ArrowDown' ? 1 : -1
+  }
+
+  const handleTranscriptArrowKeys = (event: KeyboardEvent & { currentTarget: HTMLDivElement }) => {
+    const step = transcriptArrowStep(event)
+    if (step === 0) return
     const list = event.currentTarget
     const messages = Array.from(list.querySelectorAll<HTMLElement>('.verevon-chat-message'))
     if (messages.length === 0) return
-    const current = target.closest<HTMLElement>('.verevon-chat-message')
+    const current = (event.target as HTMLElement).closest<HTMLElement>('.verevon-chat-message')
     const index = current ? messages.indexOf(current) : -1
     // Entering the transcript from elsewhere lands on the newest message going
     // up, and the oldest going down, rather than jumping to an arbitrary end.
     const next = index < 0
-      ? (event.key === 'ArrowUp' ? messages.length - 1 : 0)
-      : Math.min(messages.length - 1, Math.max(0, index + (event.key === 'ArrowDown' ? 1 : -1)))
+      ? (step > 0 ? 0 : messages.length - 1)
+      : Math.min(messages.length - 1, Math.max(0, index + step))
     if (next === index) return
     event.preventDefault()
     messages[next]?.focus()
+  }
+
+  // Keeps turn `index` mounted and moves focus to its message once the window has
+  // rendered it. A focused turn stays in the window, so focus is not dropped when
+  // the turn would otherwise leave the screen.
+  const focusTurn = (index: number) => {
+    const turn = messageRows()[index]?.turn
+    if (!turn) return
+    setFocusedTurnId(turn.id)
+    requestAnimationFrame(() => {
+      threadElement?.querySelector<HTMLElement>(`[data-turn-index="${index}"] .verevon-chat-message`)?.focus()
+    })
+  }
+
+  // The arrow walk while the window is on. The messages mounted now are only the
+  // window, so the step is taken over turn indices, and `focusTurn` is what walks
+  // across a stretch the window has not mounted.
+  const handleVirtualArrowKeys = (event: KeyboardEvent) => {
+    const step = transcriptArrowStep(event)
+    if (step === 0) return
+    const count = messageRows().length
+    if (count === 0) return
+    const current = (event.target as HTMLElement).closest<HTMLElement>('[data-turn-index]')
+    const index = current ? Number(current.dataset.turnIndex) : -1
+    const next = index < 0
+      ? (step > 0 ? 0 : count - 1)
+      : Math.min(count - 1, Math.max(0, index + step))
+    if (next === index) return
+    event.preventDefault()
+    focusTurn(next)
+  }
+
+  const handleVirtualScroll = () => {
+    handleScroll()
+    measureViewport()
   }
 
   const workspaceNavigation = () => (
@@ -760,6 +884,56 @@ export default function ChatPage() {
       traceAvailable={Boolean(liveRunId())}
       onChange={setActiveTab}
     />
+  )
+
+  // One row of the transcript, shared by the full list and the window so both
+  // mount the same message. The row is passed as an accessor, as `<For>` gives it.
+  type MessageRow = ReturnType<typeof messageRows>[number]
+  const renderMessageRow = (row: () => MessageRow) => (
+    <>
+      <Show when={row().showDateDivider}>
+        <DateDivider value={row().createdAt} />
+      </Show>
+      <MessageBlock
+        copied={row().copied}
+        message={row().turn}
+        onBranch={() => branchAt(row().turn.id)}
+        onCopy={() => void copyTurn(row().turn)}
+        onEdit={(text) => void editAndResubmit(row().turn.id, text)}
+        onRegenerate={regenerateLatest}
+        onContinue={() => continueGeneration(row().turn.id)}
+        onRerunAsNewTurn={() => void rerunAsNewTurn(row().turn.id)}
+        onScheduleThis={() => openScheduleDialogForTurn(row().turn.id)}
+        onFeedback={(rating, note) => submitTurnFeedback(row().turn.id, rating, note)}
+        onApprovalDecision={(approvalId, decision) =>
+          void handleApprovalDecision(row().turn.id, approvalId, decision)
+        }
+        onApprovePlan={(rung, justification, steps) =>
+          void approveTurnPlan(row().turn.id, rung, justification, steps)
+        }
+        onRejectPlan={(_planId, reason) => void rejectTurnPlan(row().turn.id, reason)}
+        pinned={pinnedMessages().includes(row().turn.id)}
+        pinDisabled={pinnedMessagesFull(pinnedMessages())}
+        onTogglePin={() => togglePin(row().turn.id)}
+        planApproval={row().planApproval}
+        docked={row().docked}
+        onSelectFollowUp={setInput}
+        onViewSteps={() => setActiveTab('steps')}
+        onViewAttachments={(attachmentId) => {
+          setSelectedAttachmentId(attachmentId)
+          setActiveTab('artifacts')
+        }}
+        // The version switcher only ever applies to the trailing
+        // assistant turn — chat-versions.ts guards versioning to
+        // the final exchange, so no other turn can have one.
+        version={row().version}
+        isLatest={row().isLatest}
+        onSelectVersion={selectExchangeVersion}
+        editLocked={row().editLocked}
+        threadId={state.threadId}
+        temporaryChat={readAloudBlocked()}
+      />
+    </>
   )
 
   return (
@@ -824,10 +998,14 @@ export default function ChatPage() {
               id="verevon-chat-tabpanel-chat"
               role="tabpanel"
               aria-label="Chat"
-              ref={setMessageListRef}
+              ref={(element) => {
+                listElement = element
+                setMessageListRef(element)
+                viewportObserver?.observe(element)
+              }}
               class="verevon-chat-message-list"
-              onScroll={handleScroll}
-              onKeyDown={handleTranscriptArrowKeys}
+              onScroll={virtualizeTranscript ? handleVirtualScroll : handleScroll}
+              onKeyDown={virtualizeTranscript ? handleVirtualArrowKeys : handleTranscriptArrowKeys}
             >
               <ThreadVisibilityBanners
                 temporary={isActiveThreadTemporary}
@@ -848,56 +1026,48 @@ export default function ChatPage() {
                   </div>
                 </Show>
               </div>
-              <div class="verevon-chat-thread">
+              <div
+                class="verevon-chat-thread"
+                role={virtualizeTranscript ? 'feed' : undefined}
+                ref={(element) => {
+                  threadElement = element
+                  viewportObserver?.observe(element)
+                }}
+              >
                 {/* Keyed by turn id: messageRows rebuilds its row objects on every copy, feedback or approval change; unkeyed, each change remounted the whole transcript. */}
-                <For each={messageRows()} keyed={(row) => row.turn.id}>
-                  {(row) => (
-                    <>
-                      <Show when={row().showDateDivider}>
-                        <DateDivider value={row().createdAt} />
-                      </Show>
-                      <MessageBlock
-                        copied={row().copied}
-                        message={row().turn}
-                        onBranch={() => branchAt(row().turn.id)}
-                        onCopy={() => void copyTurn(row().turn)}
-                        onEdit={(text) => void editAndResubmit(row().turn.id, text)}
-                        onRegenerate={regenerateLatest}
-                        onContinue={() => continueGeneration(row().turn.id)}
-                        onRerunAsNewTurn={() => void rerunAsNewTurn(row().turn.id)}
-                        onScheduleThis={() => openScheduleDialogForTurn(row().turn.id)}
-                        onFeedback={(rating, note) => submitTurnFeedback(row().turn.id, rating, note)}
-                        onApprovalDecision={(approvalId, decision) =>
-                          void handleApprovalDecision(row().turn.id, approvalId, decision)
-                        }
-                        onApprovePlan={(rung, justification, steps) =>
-                          void approveTurnPlan(row().turn.id, rung, justification, steps)
-                        }
-                        onRejectPlan={(_planId, reason) => void rejectTurnPlan(row().turn.id, reason)}
-                        pinned={pinnedMessages().includes(row().turn.id)}
-                        pinDisabled={pinnedMessagesFull(pinnedMessages())}
-                        onTogglePin={() => togglePin(row().turn.id)}
-                        planApproval={row().planApproval}
-                        docked={row().docked}
-                        onSelectFollowUp={setInput}
-                        onViewSteps={() => setActiveTab('steps')}
-                        onViewAttachments={(attachmentId) => {
-                          setSelectedAttachmentId(attachmentId)
-                          setActiveTab('artifacts')
-                        }}
-                        // The version switcher only ever applies to the trailing
-                        // assistant turn — chat-versions.ts guards versioning to
-                        // the final exchange, so no other turn can have one.
-                        version={row().version}
-                        isLatest={row().isLatest}
-                        onSelectVersion={selectExchangeVersion}
-                        editLocked={row().editLocked}
-                        threadId={state.threadId}
-                        temporaryChat={readAloudBlocked()}
-                      />
-                    </>
+                <Show
+                  when={virtualizeTranscript}
+                  fallback={(
+                    <For each={messageRows()} keyed={(row) => row.turn.id}>
+                      {renderMessageRow}
+                    </For>
                   )}
-                </For>
+                >
+                  {/* Each mounted turn is an article with its place in the whole transcript, so a screen reader hears "3 of 240" with the window in place. */}
+                  <For each={windowRows()} keyed={(item) => item.row.turn.id}>
+                    {(item) => (
+                      <>
+                        <Show when={item().gapBefore > 0}>
+                          <div aria-hidden="true" style={{ height: `${item().gapBefore}px`, 'flex-shrink': 0 }} />
+                        </Show>
+                        <div
+                          role="article"
+                          aria-setsize={messageRows().length}
+                          aria-posinset={item().index + 1}
+                          data-turn-id={item().row.turn.id}
+                          data-turn-index={item().index}
+                          ref={(element) => turnObserver?.observe(element)}
+                          onFocusIn={() => setFocusedTurnId(item().row.turn.id)}
+                        >
+                          {renderMessageRow(() => item().row)}
+                        </div>
+                      </>
+                    )}
+                  </For>
+                  <Show when={(transcriptPlan()?.gapAfter ?? 0) > 0}>
+                    <div aria-hidden="true" style={{ height: `${transcriptPlan()?.gapAfter ?? 0}px`, 'flex-shrink': 0 }} />
+                  </Show>
+                </Show>
                 {/* The transcript's retry notice and live region already cover
                     an identical error. Distinct errors still need this alert
                     and keyboard focus, especially when partial output remains. */}
