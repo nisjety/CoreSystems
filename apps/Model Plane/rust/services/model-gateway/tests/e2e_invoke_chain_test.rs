@@ -1453,7 +1453,7 @@ impl SessionCore for MockSessionCore {
                 ..Default::default()
             })
             .collect();
-        Ok(Response::new(ListConversationResponse { messages }))
+        Ok(Response::new(ListConversationResponse { messages, has_more: false }))
     }
 
     async fn list_threads(

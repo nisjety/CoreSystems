@@ -6003,6 +6003,9 @@ async fn load_recent_thread_messages(
             space_id: String::new(),
             space_read_decision_ref: String::new(),
             space_read_decision_token: String::new(),
+            // Unpaged (WS09-S8): the whole conversation in sequence order.
+            limit: 0,
+            before_message_id: String::new(),
         },
         bearer,
     ) {
@@ -8385,6 +8388,9 @@ async fn read_latest_assistant(
             space_id: String::new(),
             space_read_decision_ref: String::new(),
             space_read_decision_token: String::new(),
+            // Unpaged (WS09-S8): the whole conversation in sequence order.
+            limit: 0,
+            before_message_id: String::new(),
         },
         bearer,
     )
