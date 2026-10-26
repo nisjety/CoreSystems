@@ -1255,6 +1255,7 @@ fn to_internal_request(
                 context: plan.context_messages as usize,
             })
             .unwrap_or_default(),
+        cache_scope_key: req.cache_scope_key.clone(),
         org_id: principal.org_id.clone(),
         user_id: principal.budget_user_id(),
         // The verified caller's own token, forwarded so the intent layer's

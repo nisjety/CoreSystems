@@ -246,6 +246,14 @@ type InferRequest struct {
 	// a counted message that is not a system message) is ignored, never an error:
 	// it is a hint about layout, not an instruction. It carries counts only.
 	PromptTiers *PromptTierPlan `protobuf:"bytes,18,opt,name=prompt_tiers,json=promptTiers,proto3" json:"prompt_tiers,omitempty"`
+	// Provider prompt-cache routing key for this conversation: the first 32 hex
+	// characters of blake3 over the org and thread ids (mp-contracts
+	// `prompt_tier::cache_scope_key`), with `:sub` appended for a delegated
+	// subagent. Empty (default) names no scope and is sent exactly as before. It is
+	// derived from identifiers only, never from message content: inference-core
+	// sends it to a provider only behind INFERENCE_OPENAI_PROMPT_CACHE_KEY, and
+	// never on a Zero Data Retention request.
+	CacheScopeKey string `protobuf:"bytes,19,opt,name=cache_scope_key,json=cacheScopeKey,proto3" json:"cache_scope_key,omitempty"`
 	// Images that ride with the messages, by index into `messages` as sent (the
 	// original list, system messages included). Empty (default) is a text-only
 	// request and is sent to the provider exactly as before.
@@ -257,7 +265,6 @@ type InferRequest struct {
 	// `FAILED_PRECONDITION` and the kind `vision_unsupported`, never by dropping
 	// the images. The bytes are request-scope memory only: never cached, never
 	// logged, and a field of the internal request that the Debug output redacts.
-	// Tag 19 is reserved by WS02 (`cache_scope_key`).
 	ImageParts    []*InferImagePart `protobuf:"bytes,20,rep,name=image_parts,json=imageParts,proto3" json:"image_parts,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -417,6 +424,13 @@ func (x *InferRequest) GetPromptTiers() *PromptTierPlan {
 		return x.PromptTiers
 	}
 	return nil
+}
+
+func (x *InferRequest) GetCacheScopeKey() string {
+	if x != nil {
+		return x.CacheScopeKey
+	}
+	return ""
 }
 
 func (x *InferRequest) GetImageParts() []*InferImagePart {
@@ -5976,7 +5990,7 @@ var File_model_plane_v1_inference_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\n" +
-	"\x1emodel_plane/v1/inference.proto\x12\x0emodel_plane.v1\"\x8d\a\n" +
+	"\x1emodel_plane/v1/inference.proto\x12\x0emodel_plane.v1\"\xb5\a\n" +
 	"\fInferRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x15\n" +
@@ -5999,7 +6013,8 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\x1asubscription_connection_id\x18\x0f \x01(\tR\x18subscriptionConnectionId\x12?\n" +
 	"\x1cprefer_priority_service_tier\x18\x10 \x01(\bR\x19preferPriorityServiceTier\x12J\n" +
 	"\x10reasoning_effort\x18\x11 \x01(\x0e2\x1f.model_plane.v1.ReasoningEffortR\x0freasoningEffort\x12A\n" +
-	"\fprompt_tiers\x18\x12 \x01(\v2\x1e.model_plane.v1.PromptTierPlanR\vpromptTiers\x12?\n" +
+	"\fprompt_tiers\x18\x12 \x01(\v2\x1e.model_plane.v1.PromptTierPlanR\vpromptTiers\x12&\n" +
+	"\x0fcache_scope_key\x18\x13 \x01(\tR\rcacheScopeKey\x12?\n" +
 	"\vimage_parts\x18\x14 \x03(\v2\x1e.model_plane.v1.InferImagePartR\n" +
 	"imageParts\"f\n" +
 	"\x0eInferImagePart\x12#\n" +

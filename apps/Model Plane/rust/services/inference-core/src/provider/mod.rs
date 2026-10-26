@@ -169,6 +169,11 @@ pub struct InferRequest {
     /// byte-for-byte. Read only by the Anthropic adapter, behind
     /// `INFERENCE_ANTHROPIC_TIERED_SYSTEM`, and never on a ZDR request.
     pub prompt_tiers: mp_contracts::prompt_tier::PromptTierPlan,
+    /// Provider prompt-cache routing key from the proto
+    /// (`mp_contracts::prompt_tier::cache_scope_key`); empty names none. Read
+    /// only by the OpenAI adapter, behind `INFERENCE_OPENAI_PROMPT_CACHE_KEY`,
+    /// on the first-party endpoint, and never on a ZDR request (WS02-S10).
+    pub cache_scope_key: String,
     /// Images attached to messages of this request. Empty is a text-only
     /// request and the pre-existing behaviour byte-for-byte. A non-empty list
     /// is served only by a provider and model that accept images (see
