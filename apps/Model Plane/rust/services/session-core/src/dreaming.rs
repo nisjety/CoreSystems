@@ -1282,6 +1282,7 @@ async fn load_pending_messages(
          WHERE m.role IN ('user', 'assistant') \
            AND NOT EXISTS (SELECT 1 FROM user_memory_controls c WHERE c.org_id = t.org_id AND c.user_id = t.user_id AND m.created_at <= c.extract_after) \
            AND NOT EXISTS (SELECT 1 FROM user_memory_controls c WHERE c.org_id = t.org_id AND c.user_id = t.user_id AND c.memory_state <> 'on' AND $2) \
+           AND (NOT $2 OR t.memory_resumed_at IS NULL OR m.created_at > t.memory_resumed_at) \
            AND NOT EXISTS ( \
              SELECT 1 FROM dream_runs d \
              WHERE d.thread_id = m.thread_id \
@@ -1298,7 +1299,8 @@ async fn load_pending_messages(
     )
     .bind(limit)
     // A paused or off user's messages are not read at all, so none reaches the
-    // extractor's model; after a resume `extract_after` keeps them out for good.
+    // extractor's model; after a resume `extract_after` keeps them out for good, and
+    // `memory_resumed_at` does the same for a thread that was set off and back on.
     .bind(crate::memory_control::controls_enabled())
     .bind(gate.active)
     .bind(gate.fail_closed)
@@ -1336,7 +1338,8 @@ async fn load_preceding_context(
         return Ok(Vec::new());
     };
     // The same org filter as the pending query: the turns an org had memory off
-    // for are not shown to the extractor as context either.
+    // for are not shown to the extractor as context either, and nor are the turns
+    // a thread had off before it was resumed.
     let org_filter = crate::org_policy::pending_filter(5, 6, 7);
     let gate = crate::org_policy::pending_gate();
     let mut rows = sqlx::query_as::<_, (String, String)>(
@@ -1347,6 +1350,7 @@ async fn load_preceding_context(
            AND m.role IN ('user', 'assistant') \
            AND NOT EXISTS (SELECT 1 FROM user_memory_controls c WHERE c.org_id = t.org_id AND c.user_id = t.user_id AND m.created_at <= c.extract_after) \
            AND NOT EXISTS (SELECT 1 FROM user_memory_controls c WHERE c.org_id = t.org_id AND c.user_id = t.user_id AND c.memory_state <> 'on' AND $4) \
+           AND (NOT $4 OR t.memory_resumed_at IS NULL OR m.created_at > t.memory_resumed_at) \
            {org_filter} \
            AND (m.created_at, m.sequence) < ( \
              SELECT b.created_at, b.sequence FROM messages b WHERE b.id = $2 \
@@ -1640,12 +1644,20 @@ pub(crate) async fn index_agent_memory(
     };
 
     let mut tx = pool.begin().await?;
-    // The gate under the user's row lock. A refusal comes back as the empty id
-    // (the same answer as a thread that is not the caller's); the handler asks
-    // the gate again to tell the two apart and name the reason.
-    if !crate::memory_control::resolve_in_tx(&mut tx, false, org_id, owner_user_id)
-        .await?
-        .generation_allowed
+    // The gate under the user's row lock, with the thread's own mode read under the
+    // same lock: a thread set off after the handler's check and before this write is
+    // refused here. A refusal comes back as the empty id (the same answer as a thread
+    // that is not the caller's); the handler asks the gate again to tell the two apart
+    // and name the reason.
+    if !crate::memory_control::resolve_in_tx_for_thread(
+        &mut tx,
+        false,
+        org_id,
+        owner_user_id,
+        thread_id,
+    )
+    .await?
+    .generation_allowed
     {
         tx.rollback().await?;
         return Ok(String::new());
@@ -2918,5 +2930,81 @@ mod tests {
         let slots = existing_slots(&pool, &org, "user-a", &thread).await;
         assert_eq!(slots.user, ["tool_use"]);
         assert_eq!(slots.thread, ["project_context"]);
+    }
+
+    /// D1-570: Dreaming neither reads nor is shown what a thread said while it was off, once the
+    /// thread is back on, and what was said after the resume is still read. Needs a disposable
+    /// Postgres.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn dreaming_reads_nothing_a_thread_said_while_it_was_off() {
+        let pool = disposable_pool().await;
+        let org = format!("resume-watermark-{}", new_ulid());
+        let thread = seed_thread(&pool, &org, "user-a").await;
+        sqlx::query("UPDATE threads SET memory_resumed_at = now() - interval '1 minute' WHERE id = $1")
+            .bind(&thread)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (before, after) = (new_ulid(), new_ulid());
+        sqlx::query(
+            "INSERT INTO messages (id, thread_id, role, content, created_at) \
+             VALUES ($1, $2, 'user', 'Husk at jeg heter Ima.', now() - interval '2 minutes')",
+        )
+        .bind(&before)
+        .bind(&thread)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO messages (id, thread_id, role, content, created_at) \
+             VALUES ($1, $2, 'user', 'Husk at jeg heter Kari.', now() - interval '30 seconds')",
+        )
+        .bind(&after)
+        .bind(&thread)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let pending: Vec<String> = load_pending_messages(&pool, 100_000)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|message| message.thread_id == thread)
+            .map(|message| message.message_id)
+            .collect();
+        assert_eq!(pending, [after.as_str()], "only what was said after the resume is read");
+        let context = load_preceding_context(&pool, &thread, Some(after.as_str()))
+            .await
+            .unwrap();
+        assert!(context.is_empty(), "and none of it is shown as context to a later turn");
+    }
+
+    /// D1-573, under the lock: a manual save into a thread set off is refused at the write, and the
+    /// same save lands once the thread inherits again. Needs a disposable Postgres.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn a_manual_save_into_a_thread_set_off_is_refused_at_the_write() {
+        let pool = disposable_pool().await;
+        let org = format!("manual-save-{}", new_ulid());
+        let thread = seed_thread(&pool, &org, "user-a").await;
+        sqlx::query("UPDATE threads SET memory_mode = 'off' WHERE id = $1")
+            .bind(&thread)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let refused = index_agent_memory(&pool, &org, &thread, "user-a", "USER", "Husk at jeg heter Ima.")
+            .await
+            .unwrap();
+        assert_eq!(refused, "", "a thread set off saves nothing");
+        sqlx::query("UPDATE threads SET memory_mode = 'inherit' WHERE id = $1")
+            .bind(&thread)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let saved = index_agent_memory(&pool, &org, &thread, "user-a", "USER", "Husk at jeg heter Kari.")
+            .await
+            .unwrap();
+        assert!(!saved.is_empty(), "the same save lands once the thread inherits again");
     }
 }

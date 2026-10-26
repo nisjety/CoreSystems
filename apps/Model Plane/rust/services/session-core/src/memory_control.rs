@@ -567,9 +567,11 @@ pub(crate) async fn permits_extraction(
         return Ok(false);
     }
     // A message of a thread set off is not extracted from either (unless the kill
-    // switch restored the behaviour before the mode existed). Nor is one written
-    // while the org had memory off: it is at or before the mirror's watermark.
-    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM messages m JOIN threads t ON t.id = m.thread_id JOIN user_memory_controls c ON c.org_id = t.org_id AND c.user_id = t.user_id WHERE m.id = $3 AND t.org_id = $1 AND t.user_id = $2 AND m.created_at > c.extract_after AND (t.memory_mode = 'inherit' OR NOT $4) AND (NOT $5 OR NOT EXISTS (SELECT 1 FROM org_learning_policy_mirror p WHERE p.org_id = t.org_id AND m.created_at <= p.memory_enabled_since)))")
+    // switch restored the behaviour before the mode existed), and nor is one written
+    // while the thread was off once it is back on: it is at or before the thread's
+    // resume watermark. Nor is one written while the org had memory off: it is at or
+    // before the mirror's watermark.
+    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM messages m JOIN threads t ON t.id = m.thread_id JOIN user_memory_controls c ON c.org_id = t.org_id AND c.user_id = t.user_id WHERE m.id = $3 AND t.org_id = $1 AND t.user_id = $2 AND m.created_at > c.extract_after AND (t.memory_mode = 'inherit' OR NOT $4) AND (NOT $4 OR t.memory_resumed_at IS NULL OR m.created_at > t.memory_resumed_at) AND (NOT $5 OR NOT EXISTS (SELECT 1 FROM org_learning_policy_mirror p WHERE p.org_id = t.org_id AND m.created_at <= p.memory_enabled_since)))")
         .bind(org).bind(user).bind(message_id).bind(controls_enabled()).bind(crate::org_policy::settings().governed).fetch_one(&mut **tx).await
 }
 
@@ -877,6 +879,33 @@ mod tests {
         assert!(revert.contains("DROP COLUMN IF EXISTS memory_mode"));
     }
 
+    /// D1-570: the extraction gate reads the thread's resume watermark, under the kill switch like
+    /// the rest of the gate. A thread that was never resumed has no watermark, so nothing changes
+    /// for it.
+    #[test]
+    fn the_extraction_gate_reads_the_thread_resume_watermark() {
+        let source = include_str!("memory_control.rs");
+        let (_, _, gate) = between(
+            source,
+            "pub(crate) async fn permits_extraction(",
+            "pub(crate) async fn record_forgetting(",
+        );
+        assert!(gate.contains(
+            "AND (NOT $4 OR t.memory_resumed_at IS NULL OR m.created_at > t.memory_resumed_at)"
+        ));
+    }
+
+    #[test]
+    fn the_resume_watermark_migration_only_adds_a_nullable_column_and_has_a_revert() {
+        let migration = include_str!("../migrations/0068_thread_memory_resumed_at.sql");
+        assert!(migration.contains(
+            "ALTER TABLE threads ADD COLUMN IF NOT EXISTS memory_resumed_at TIMESTAMPTZ NULL;"
+        ));
+        assert!(!migration.contains("DROP "), "the migration adds a column and removes nothing");
+        let revert = include_str!("../migrations/revert/0068_thread_memory_resumed_at.down.sql");
+        assert!(revert.contains("ALTER TABLE threads DROP COLUMN IF EXISTS memory_resumed_at;"));
+    }
+
     #[test]
     fn reasons_are_the_closed_wire_tokens() {
         let tokens: Vec<&str> = [
@@ -1035,7 +1064,7 @@ mod tests {
         let gates = [
             "permits_extraction(",
             "permits_extraction(",
-            "resolve_in_tx(",
+            "resolve_in_tx_for_thread(",
         ];
         for ((_, _, body), gate) in entry_points.iter().zip(gates) {
             assert!(

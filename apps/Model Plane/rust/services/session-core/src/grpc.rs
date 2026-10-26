@@ -4281,6 +4281,128 @@ mod persona_db_tests {
         assert!(recalled(&off_thread).await);
     }
 
+    /// D1-570: a thread set off and back to inherit mines nothing said while it was off. The user's
+    /// own resume moves `extract_after`; the thread's moves `memory_resumed_at`, which the gate and
+    /// the Dreaming readers compare against. Needs a disposable Postgres.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn thread_resume_watermark_keeps_off_period_messages_out_of_extraction() {
+        let pool = PgPool::connect(&std::env::var("DATABASE_URL").expect("disposable database required"))
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let suffix = new_ulid();
+        let org = format!("thread-resume-test-{suffix}");
+        let thread = create_thread_inner(
+            &pool,
+            pb::CreateThreadRequest {
+                session_key: format!("resume-{suffix}"),
+                org_id: org.clone(),
+                user_id: "test-user".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .thread_id;
+        let svc = test_service(pool.clone());
+        let set_mode = |mode: &str| {
+            let mut request = Request::new(pb::UpdateThreadPresentationRequest {
+                org_id: org.clone(),
+                thread_id: thread.clone(),
+                memory_mode: Some(mode.to_owned()),
+                ..Default::default()
+            });
+            request
+                .extensions_mut()
+                .insert(VerifiedIdentity::user_for_test(&org, "test-user"));
+            svc.update_thread_presentation(request)
+        };
+        let append = |content: &str| {
+            let pool = pool.clone();
+            let request = pb::AppendMessageRequest {
+                thread_id: thread.clone(),
+                role: "user".to_owned(),
+                content: content.to_owned(),
+                ..Default::default()
+            };
+            async move {
+                let mut tx = pool.begin().await.unwrap();
+                let appended = append_message_in_tx(&mut tx, &request, "test-user")
+                    .await
+                    .unwrap();
+                tx.commit().await.unwrap();
+                appended.message_id
+            }
+        };
+        let permits = |message_id: String| {
+            let pool = pool.clone();
+            let org = org.clone();
+            async move {
+                let mut tx = pool.begin().await.unwrap();
+                let allowed =
+                    crate::memory_control::permits_extraction(&mut tx, &org, "test-user", &message_id)
+                        .await
+                        .unwrap();
+                tx.rollback().await.unwrap();
+                allowed
+            }
+        };
+        let watermark = || async {
+            sqlx::query_scalar::<_, Option<DateTime<Utc>>>(
+                "SELECT memory_resumed_at FROM threads WHERE id = $1",
+            )
+            .bind(&thread)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+        let memory = || async {
+            sqlx::query_scalar::<_, String>("SELECT content FROM agent_memory WHERE org_id = $1")
+                .bind(&org)
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+        };
+
+        // Only the change from off to inherit moves the watermark.
+        set_mode("inherit").await.expect("inherit to inherit");
+        assert_eq!(watermark().await, None, "inherit to inherit leaves it untouched");
+        set_mode("off").await.expect("inherit to off");
+        assert_eq!(watermark().await, None, "inherit to off leaves it untouched");
+        let while_off = append("Husk at jeg heter Ima.").await;
+
+        // The message is stamped by this process and the watermark by the database, so a short
+        // pause keeps the two readings apart.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        set_mode("inherit").await.expect("off to inherit");
+        let resumed_at = watermark().await;
+        assert!(resumed_at.is_some(), "off to inherit sets the watermark");
+        set_mode("inherit").await.expect("inherit to inherit again");
+        assert_eq!(watermark().await, resumed_at, "inherit to inherit leaves it untouched");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let after_resume = append("Husk at jeg heter Kari.").await;
+        assert!(
+            !permits(while_off.clone()).await,
+            "a message written while off is not extracted after the resume"
+        );
+        assert!(
+            permits(after_resume.clone()).await,
+            "a message written after the resume is extracted"
+        );
+        crate::dreaming::dream_once(&pool, None, None, None, 1000)
+            .await
+            .unwrap();
+        let rows = memory().await;
+        assert!(rows.iter().any(|row| row.contains("Kari")), "the thread learns again");
+        assert!(
+            rows.iter().all(|row| !row.contains("Ima")),
+            "Dreaming does not mine what was said while off"
+        );
+    }
+
     /// Owner decision 17: a zero-retention owner may archive and delete the threads they own. The owner
     /// checks still apply, and the rest of their threads are left alone. Needs a disposable Postgres.
     #[tokio::test]
@@ -7676,6 +7798,10 @@ impl SessionCore for SessionService {
                 .begin()
                 .await
                 .map_err(|error| Status::internal(error.to_string()))?;
+            // `memory_resumed_at` is the off -> inherit watermark, on the database clock. SET
+            // expressions read the row as it was before this statement, so it moves only when the
+            // mode was `off` and is now `inherit`. A message created at or before it is never mined
+            // afterwards: `memory_control::permits_extraction` and the Dreaming readers check it.
             let changed: Option<(String, String)> = sqlx::query_as(
                 "UPDATE threads
                  SET presentation_title = CASE WHEN $3 THEN $4 ELSE presentation_title END,
@@ -7686,7 +7812,8 @@ impl SessionCore for SessionService {
                      END,
                      persona_enabled = CASE WHEN $10 THEN $11 ELSE persona_enabled END,
                      archived_at = CASE WHEN $12 THEN NULL ELSE archived_at END,
-                     memory_mode = CASE WHEN $13 THEN $14 ELSE memory_mode END
+                     memory_mode = CASE WHEN $13 THEN $14 ELSE memory_mode END,
+                     memory_resumed_at = CASE WHEN $13 AND memory_mode = 'off' AND $14 = 'inherit' THEN clock_timestamp() ELSE memory_resumed_at END
                  WHERE id = $1 AND org_id = $2 AND (archived_at IS NULL OR $12)
                  RETURNING id, user_id",
             )
