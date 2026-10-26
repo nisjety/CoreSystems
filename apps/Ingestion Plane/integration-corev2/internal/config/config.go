@@ -120,6 +120,10 @@ type Config struct {
 	CodexSubscriptionQueueTimeout                time.Duration
 	CodexAppServerHardened                       bool
 	CodexAppServerThreadEffort                   bool
+	// CodexSubscriptionWideReasoningEffort admits medium and xhigh beside low
+	// and high (WS11-S9). Off unless CODEX_SUBSCRIPTION_WIDE_REASONING_EFFORT is
+	// exactly "true"; the Q7 gate is still open.
+	CodexSubscriptionWideReasoningEffort bool
 	// codexSubscriptionUnparsed names broker knobs whose value did not parse;
 	// ValidateRuntime rejects them instead of silently using the default.
 	codexSubscriptionUnparsed []string
@@ -362,6 +366,7 @@ func Load() (Config, error) {
 		CodexSubscriptionMaxConcurrency:              codexKnobs.maxConcurrency,
 		CodexSubscriptionMaxConcurrencyPerConnection: codexKnobs.maxPerConnection,
 		CodexSubscriptionQueueTimeout:                codexKnobs.queueTimeout,
+		CodexSubscriptionWideReasoningEffort:         codexKnobs.wideReasoningEffort,
 		CodexAppServerHardened:                       codexKnobs.hardened,
 		CodexAppServerThreadEffort:                   codexKnobs.threadEffort,
 		codexSubscriptionUnparsed:                    codexKnobs.unparsed,
@@ -967,14 +972,15 @@ func validCodexOriginator(raw string) bool {
 // startup rather than silently replaced by a default. They are read before
 // the Config literal so every unparsed name is collected first.
 type codexSubscriptionKnobs struct {
-	maxRetries       int
-	refreshSkew      time.Duration
-	maxConcurrency   int
-	maxPerConnection int
-	queueTimeout     time.Duration
-	hardened         bool
-	threadEffort     bool
-	unparsed         []string
+	maxRetries          int
+	refreshSkew         time.Duration
+	maxConcurrency      int
+	maxPerConnection    int
+	queueTimeout        time.Duration
+	hardened            bool
+	threadEffort        bool
+	wideReasoningEffort bool
+	unparsed            []string
 }
 
 func loadCodexSubscriptionKnobs() codexSubscriptionKnobs {
@@ -986,6 +992,9 @@ func loadCodexSubscriptionKnobs() codexSubscriptionKnobs {
 	knobs.queueTimeout = strictEnvDuration("CODEX_SUBSCRIPTION_QUEUE_TIMEOUT", 30*time.Second, &knobs.unparsed)
 	knobs.hardened = strictEnvBool("CODEX_APP_SERVER_HARDENED", true, &knobs.unparsed)
 	knobs.threadEffort = strictEnvBool("CODEX_APP_SERVER_THREAD_EFFORT", true, &knobs.unparsed)
+	// Exactly "true" only: strictEnvBool uses ParseBool, which would also switch
+	// this on for "1".
+	knobs.wideReasoningEffort = strings.TrimSpace(os.Getenv("CODEX_SUBSCRIPTION_WIDE_REASONING_EFFORT")) == "true"
 	return knobs
 }
 
