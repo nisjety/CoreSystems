@@ -2227,6 +2227,90 @@ export function ToolCallCard(props: { call: ChatToolCall }) {
 }
 
 /**
+ * `VITE_CHAT_QUEUE_RETRACT=true` lets the person take back a mid-run message while the gateway
+ * still holds it. Off, the strip is the read-only tray it has always been. Exact string, as for
+ * `VITE_CHAT_RENDER_LEGACY`.
+ */
+const chatQueueRetract = () => import.meta.env.VITE_CHAT_QUEUE_RETRACT === 'true'
+
+/**
+ * Only a message the gateway accepted and has not delivered can be taken back, and the gateway
+ * answers a take-back by the client message id that send was made under.
+ */
+const canTakeBack = (entry: QueuedInput) =>
+  entry.state === 'pending' && entry.accepted === true && Boolean(entry.clientMessageId)
+
+/**
+ * Edit and Remove for one queued message. Each control appears only with its handler: the
+ * parent decides what a take-back does, and nothing here claims one the gateway has not answered.
+ */
+function QueuedInputControls(props: {
+  entry: QueuedInput
+  onEdit?: (entry: QueuedInput, text: string) => void
+  onRetract?: (entry: QueuedInput) => void
+}) {
+  const i18n = useI18n()
+  const [editing, setEditing] = createSignal(false)
+  const [draft, setDraft] = createSignal('')
+
+  const startEditing = () => {
+    setDraft(props.entry.content)
+    setEditing(true)
+  }
+
+  const submitEdit = () => {
+    const next = draft().trim()
+    if (!next || !props.onEdit) return
+    setEditing(false)
+    props.onEdit(props.entry, next)
+  }
+
+  return (
+    <Show
+      when={!editing()}
+      fallback={(
+        <div class="verevon-chat-edit-box">
+          <textarea
+            aria-label={i18n.tr('Rediger melding', 'Edit message')}
+            ref={(el) => queueMicrotask(() => {
+              el.focus()
+              el.setSelectionRange(el.value.length, el.value.length)
+            })}
+            value={draft()}
+            rows={Math.min(10, Math.max(2, draft().split('\n').length))}
+            onInput={(event) => setDraft(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                event.preventDefault()
+                submitEdit()
+              }
+              if (event.key === 'Escape') setEditing(false)
+            }}
+          />
+          <div>
+            <button type="button" onClick={() => setEditing(false)}>{i18n.tr('Avbryt', 'Cancel')}</button>
+            <button type="button" disabled={!draft().trim()} onClick={submitEdit}>{i18n.tr('Send på nytt', 'Send again')}</button>
+          </div>
+        </div>
+      )}
+    >
+      <div class="verevon-chat-message-actions">
+        <Show when={props.onEdit}>
+          <MessageAction label={i18n.tr('Rediger', 'Edit')} onClick={startEditing}>
+            <Pencil size={14} />
+          </MessageAction>
+        </Show>
+        <Show when={props.onRetract}>
+          <MessageAction label={i18n.tr('Fjern', 'Remove')} onClick={() => props.onRetract?.(props.entry)}>
+            <X size={14} />
+          </MessageAction>
+        </Show>
+      </div>
+    </Show>
+  )
+}
+
+/**
  * Messages the user sent WHILE the agent was working.
  *
  * Rendered under the in-progress answer, where the newest thing the user did
@@ -2234,7 +2318,11 @@ export function ToolCallCard(props: { call: ChatToolCall }) {
  * with the reason. Silence here is the bug this replaces — the send path used to
  * discard mid-run input with no trace at all.
  */
-export function QueuedInputStrip(props: { entries: QueuedInput[] }) {
+export function QueuedInputStrip(props: {
+  entries: QueuedInput[]
+  onEdit?: (entry: QueuedInput, text: string) => void
+  onRetract?: (entry: QueuedInput) => void
+}) {
   const i18n = useI18n()
   const label = (entry: QueuedInput) => {
     if (entry.state === 'delivered') return 'levert til agenten'
@@ -2259,6 +2347,9 @@ export function QueuedInputStrip(props: { entries: QueuedInput[] }) {
                   )}
                 </Show>
               </p>
+              <Show when={chatQueueRetract() && canTakeBack(entry) && (props.onEdit || props.onRetract)}>
+                <QueuedInputControls entry={entry} onEdit={props.onEdit} onRetract={props.onRetract} />
+              </Show>
             </li>
           )}
         </For>
