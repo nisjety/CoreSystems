@@ -1094,9 +1094,69 @@ impl FallbackChain {
                     );
                     rewritten.reasoning_effort = Some(applied);
                 }
+            } else {
+                // A request with no level carries only the legacy budget, which is
+                // what the gateway sends when its effort ladder is off. Without this
+                // branch an exhausted org would still spend the whole budget.
+                let budget = rewritten.thinking_budget_tokens;
+                let applied = effort::cap_legacy_budget(budget, decision.effort_cap);
+                if applied != budget {
+                    info!(
+                        request_id = %req.request_id,
+                        resolved_model = %rewritten.model,
+                        posture = ?decision.posture,
+                        requested_budget = budget,
+                        applied_budget = applied,
+                        clamped = true,
+                        "thinking budget clamped by budget posture"
+                    );
+                    rewritten.thinking_budget_tokens = applied;
+                }
             }
         }
         Some(rewritten)
+    }
+
+    /// Lower a request's effort to the org's `max_effort` ceiling. model-gateway
+    /// clamps the same ceiling for the callers it fronts; this is the enforcement
+    /// point for a caller that reaches inference-core directly, such as the agent
+    /// loop, which would otherwise run a deep loop under a role capped at `low`.
+    /// It clamps down only, and only when the policy is enforced: shadow mode
+    /// serves the request as it is. Returns `None` when nothing changes, so the
+    /// common path neither clones the request nor reads the policy.
+    ///
+    /// It runs before the response cache is read, because the cache key carries
+    /// the effort level: an answer made above the ceiling must not answer a
+    /// request the ceiling now bounds.
+    fn apply_effort_ceiling(req: &InferRequest) -> Option<InferRequest> {
+        let access = req.access.as_deref().filter(|access| access.enforced())?;
+        // An empty or unknown ceiling limits nothing: org-core validates the name
+        // when the policy is written, and a stray value must not lower a request.
+        let ceiling = effort::Level::from_name(&access.resolved().policy.as_ref()?.max_effort)?;
+        let reasoning_effort = req
+            .reasoning_effort
+            .map(|requested| effort::clamp_to_cap(requested, Some(ceiling)));
+        // A request with no level is bounded by its legacy budget instead.
+        let thinking_budget_tokens = if req.reasoning_effort.is_none() {
+            effort::cap_legacy_budget(req.thinking_budget_tokens, Some(ceiling))
+        } else {
+            req.thinking_budget_tokens
+        };
+        if reasoning_effort == req.reasoning_effort
+            && thinking_budget_tokens == req.thinking_budget_tokens
+        {
+            return None;
+        }
+        info!(
+            request_id = %req.request_id,
+            ceiling = ceiling.as_str(),
+            clamped = true,
+            "effort clamped by the org's effort ceiling"
+        );
+        let mut clamped = req.clone();
+        clamped.reasoning_effort = reasoning_effort;
+        clamped.thinking_budget_tokens = thinking_budget_tokens;
+        Some(clamped)
     }
 
     #[allow(dead_code)]
@@ -1307,6 +1367,10 @@ impl FallbackChain {
             self.tool_ladder(&resolved.model, resolved.access.as_deref(), &resolved.provider_hint)
         });
         let req: &InferRequest = intent_req.as_ref().unwrap_or(req);
+        // The org's effort ceiling bounds the request before the cache is read,
+        // because the cache key carries the effort level.
+        let ceiled = Self::apply_effort_ceiling(req);
+        let req: &InferRequest = ceiled.as_ref().unwrap_or(req);
         validate_min_residency(req)?;
         // An image is part of the question but not of the cache key, and a
         // stored answer about one image must never answer another: a request
@@ -1725,6 +1789,8 @@ impl FallbackChain {
             self.tool_ladder(&resolved.model, resolved.access.as_deref(), &resolved.provider_hint)
         });
         let req: &InferRequest = intent_req.as_ref().unwrap_or(req);
+        let ceiled = Self::apply_effort_ceiling(req);
+        let req: &InferRequest = ceiled.as_ref().unwrap_or(req);
         validate_min_residency(req)?;
 
         let mut total_attempts: u32 = 0;
@@ -4456,6 +4522,209 @@ mod resolution_tests {
 
         assert!(matches!(error, ProviderError::RateLimited { .. }));
         assert_eq!(asked.lock().unwrap().as_slice(), ["claude-sonnet-4-6"]);
+    }
+
+    /// Records the reasoning effort and the legacy budget each call reached it
+    /// with, so the effort-ceiling tests can see what the policy let through.
+    struct EffortRecordingProvider {
+        seen: Arc<Mutex<Vec<(Option<effort::Level>, i32)>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ProviderRouter for EffortRecordingProvider {
+        fn capabilities(&self) -> crate::provider::ProviderCapabilities {
+            crate::provider::ProviderCapabilities {
+                model_family: ModelFamily::OpenAiCompatible,
+                residency: Residency::Eu,
+                ..crate::provider::ProviderCapabilities::default()
+            }
+        }
+
+        async fn infer(&self, req: &InferRequest) -> Result<InferResponse, ProviderError> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((req.reasoning_effort, req.thinking_budget_tokens));
+            Ok(InferResponse {
+                request_id: req.request_id.clone(),
+                content: "ok".to_owned(),
+                model_used: req.model.clone(),
+                stop_reason: "stop".to_owned(),
+                ..InferResponse::default()
+            })
+        }
+
+        async fn infer_stream(
+            &self,
+            req: &InferRequest,
+        ) -> Result<mpsc::Receiver<InferChunk>, ProviderError> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((req.reasoning_effort, req.thinking_budget_tokens));
+            let (_tx, rx) = mpsc::channel(1);
+            Ok(rx)
+        }
+    }
+
+    /// An org policy as org-core answers it, whose only limit is the `max_effort`
+    /// ceiling. `enforced` picks enforce over shadow.
+    fn effort_ceiling_access(enforced: bool, max_effort: &str) -> Arc<RequestAccess> {
+        let body = serde_json::json!({
+            "state": "org",
+            "revision": 1,
+            "policy": {"allow_mode": "all", "allow": [], "deny": [], "max_effort": max_effort},
+        });
+        let mode = if enforced {
+            mp_contracts::model_entitlement::Mode::Enforce
+        } else {
+            mp_contracts::model_entitlement::Mode::Shadow
+        };
+        let resolved = mp_contracts::model_entitlement::ResolvedAccess::from_body(&body)
+            .expect("a readable policy body");
+        Arc::new(RequestAccess::new(Arc::new(resolved), mode, "org-1"))
+    }
+
+    /// A request for a model every policy here allows, carrying the given effort
+    /// level, legacy budget and access.
+    fn effort_probe(
+        id: &str,
+        reasoning_effort: Option<effort::Level>,
+        thinking_budget_tokens: i32,
+        access: Option<Arc<RequestAccess>>,
+    ) -> InferRequest {
+        InferRequest {
+            request_id: id.to_owned(),
+            model: "gpt-5-mini".to_owned(),
+            reasoning_effort,
+            thinking_budget_tokens,
+            access,
+            ..Default::default()
+        }
+    }
+
+    /// What the provider was handed by one unary call through a fresh chain.
+    async fn effort_reached_unary(request: &InferRequest) -> Vec<(Option<effort::Level>, i32)> {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let provider: BoxedProvider = Arc::new(EffortRecordingProvider { seen: seen.clone() });
+        let chain =
+            FallbackChain::new_with_providers(vec![("azure-openai".to_owned(), provider)], 1);
+        chain.infer(request).await.unwrap();
+        let reached = seen.lock().unwrap().clone();
+        reached
+    }
+
+    /// The same request through the streaming path.
+    async fn effort_reached_streamed(request: &InferRequest) -> Vec<(Option<effort::Level>, i32)> {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let provider: BoxedProvider = Arc::new(EffortRecordingProvider { seen: seen.clone() });
+        let chain =
+            FallbackChain::new_with_providers(vec![("azure-openai".to_owned(), provider)], 1);
+        let _rx = chain.infer_stream(request).await.unwrap();
+        let reached = seen.lock().unwrap().clone();
+        reached
+    }
+
+    #[tokio::test]
+    async fn an_enforced_effort_ceiling_lowers_the_level_on_the_unary_path() {
+        let request = effort_probe(
+            "effort-unary-level",
+            Some(effort::Level::High),
+            0,
+            Some(effort_ceiling_access(true, "low")),
+        );
+        assert_eq!(
+            effort_reached_unary(&request).await,
+            [(Some(effort::Level::Low), 0)]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_enforced_effort_ceiling_caps_the_legacy_budget_when_no_level_is_set() {
+        let request = effort_probe(
+            "effort-unary-budget",
+            None,
+            4096,
+            Some(effort_ceiling_access(true, "low")),
+        );
+        assert_eq!(effort_reached_unary(&request).await, [(None, 1024)]);
+    }
+
+    #[tokio::test]
+    async fn an_enforced_effort_ceiling_applies_on_the_streaming_path_too() {
+        let level = effort_probe(
+            "effort-stream-level",
+            Some(effort::Level::High),
+            0,
+            Some(effort_ceiling_access(true, "low")),
+        );
+        assert_eq!(
+            effort_reached_streamed(&level).await,
+            [(Some(effort::Level::Low), 0)]
+        );
+        let budget = effort_probe(
+            "effort-stream-budget",
+            None,
+            4096,
+            Some(effort_ceiling_access(true, "low")),
+        );
+        assert_eq!(effort_reached_streamed(&budget).await, [(None, 1024)]);
+    }
+
+    #[tokio::test]
+    async fn a_shadowed_or_absent_policy_leaves_the_effort_exactly_as_asked() {
+        let shadow = Some(effort_ceiling_access(false, "low"));
+        let level = effort_probe(
+            "effort-shadow-level",
+            Some(effort::Level::High),
+            0,
+            shadow.clone(),
+        );
+        assert_eq!(
+            effort_reached_unary(&level).await,
+            [(Some(effort::Level::High), 0)]
+        );
+        let budget = effort_probe("effort-shadow-budget", None, 4096, shadow);
+        assert_eq!(effort_reached_unary(&budget).await, [(None, 4096)]);
+        // A service principal carries no access, so no policy ever clamps it.
+        let service = effort_probe(
+            "effort-service-principal",
+            Some(effort::Level::High),
+            0,
+            None,
+        );
+        assert_eq!(
+            effort_reached_unary(&service).await,
+            [(Some(effort::Level::High), 0)]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_effort_ceiling_never_raises_and_ignores_an_empty_or_unknown_name() {
+        for (index, ceiling) in ["", "ultra"].into_iter().enumerate() {
+            let request = effort_probe(
+                &format!("effort-ceiling-{index}"),
+                Some(effort::Level::High),
+                4096,
+                Some(effort_ceiling_access(true, ceiling)),
+            );
+            assert_eq!(
+                effort_reached_unary(&request).await,
+                [(Some(effort::Level::High), 4096)],
+                "ceiling {ceiling:?} must not lower the request"
+            );
+        }
+        // A ceiling above the request leaves the request where it was.
+        let below = effort_probe(
+            "effort-below-ceiling",
+            Some(effort::Level::Low),
+            0,
+            Some(effort_ceiling_access(true, "max")),
+        );
+        assert_eq!(
+            effort_reached_unary(&below).await,
+            [(Some(effort::Level::Low), 0)]
+        );
     }
 
     #[test]
