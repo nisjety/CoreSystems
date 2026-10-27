@@ -75,6 +75,7 @@ pub mod review_proposal_rule;
 pub mod retrieval;
 pub mod retrieval_metadata;
 pub mod retrieval_tools;
+pub mod room_metadata;
 pub mod run_budget;
 pub mod run_context;
 pub mod run_control;

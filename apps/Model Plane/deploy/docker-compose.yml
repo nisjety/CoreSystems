@@ -217,6 +217,9 @@ services:
       MP_COMPAT_MODE: v1_only
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: model-gateway
+      # Shared-Space transcript reads return only allowlisted metadata keys
+      # (WS07-S9a). `1` restores the old pass-through (kill switch only).
+      SPACE_ROOM_METADATA_LEGACY_PASSTHROUGH: ${SPACE_ROOM_METADATA_LEGACY_PASSTHROUGH:-false}
       # Empty by default = "Verevon Auto": inference-core resolves an unpinned
       # request to the configured provider's own default (per-provider), so chat
       # works with whichever provider key is set (Anthropic-only, OpenAI-only,

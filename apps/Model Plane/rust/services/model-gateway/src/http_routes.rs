@@ -10012,6 +10012,14 @@ async fn list_thread_messages(
     let limit = query.limit.unwrap_or(0).min(thread_messages_page_ceiling(
         std::env::var(THREAD_MESSAGES_MAX_LIMIT_ENV).ok().as_deref(),
     ));
+    // A shared-Space read (it carries a Control decision) sees only the
+    // allowlisted metadata keys (WS07-S9a); the owner's Chat read is unchanged.
+    let space_read_decision_ref = query.space_read_decision_ref.unwrap_or_default();
+    let legacy_metadata_passthrough = crate::room_metadata::legacy_passthrough(
+        std::env::var(crate::room_metadata::LEGACY_PASSTHROUGH_ENV)
+            .ok()
+            .as_deref(),
+    );
 
     let response = state
         .session_client
@@ -10021,7 +10029,7 @@ async fn list_thread_messages(
                 org_id: claims.org_id.clone(),
                 thread_id: trimmed.to_owned(),
                 space_id: query.space_id.unwrap_or_default(),
-                space_read_decision_ref: query.space_read_decision_ref.unwrap_or_default(),
+                space_read_decision_ref: space_read_decision_ref.clone(),
                 space_read_decision_token: query.space_read_decision_token.unwrap_or_default(),
                 limit,
                 before_message_id: before,
@@ -10045,11 +10053,15 @@ async fn list_thread_messages(
                 content: m.content,
                 agent_name: m.agent_name,
                 author_subject_id: m.author_subject_id,
-                metadata: m.metadata.as_ref().map(prost_struct_to_json).and_then(
-                    |value| match value {
-                        Value::Object(map) if !map.is_empty() => Some(map),
-                        _ => None,
-                    },
+                metadata: crate::room_metadata::visible_metadata(
+                    m.metadata.as_ref().map(prost_struct_to_json).and_then(
+                        |value| match value {
+                            Value::Object(map) if !map.is_empty() => Some(map),
+                            _ => None,
+                        },
+                    ),
+                    &space_read_decision_ref,
+                    legacy_metadata_passthrough,
                 ),
             })
             .collect();
