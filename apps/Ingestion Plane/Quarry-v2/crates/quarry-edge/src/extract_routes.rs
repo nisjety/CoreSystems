@@ -413,11 +413,13 @@ async fn extract_run(
     )
     .await;
     if !crate::usage_attrs::corrected_rules(&*state.usage) {
-        let run_id: quarry_core::ids::kinds::RunKind = quarry_core::ids::Id::new();
+        // D2-033: keyed by the request id, as the corrected metric above is. A fresh id
+        // per call made a retried request (the same `X-Request-Id`) a second event that
+        // billing-core could not recognise as the first; billing-core dedupes on this id.
         state
             .usage
             .meter(quarry_runtime::UsageEvent::new(
-                run_id.to_string(),
+                request_id.clone(),
                 claims.org_id.clone(),
                 quarry_runtime::usage_metrics::SEARCH_QUERY,
                 targets.len() as f64,
@@ -494,6 +496,73 @@ mod tests {
         .into_response();
         assert_eq!(response.status(), StatusCode::OK);
         crate::test_support::response_json(response).await["results"][0].clone()
+    }
+
+    /// A meter that keeps every event, in the default (`Off`) browser-metrics mode.
+    #[derive(Default)]
+    struct KeptEvents(std::sync::Mutex<Vec<quarry_runtime::UsageEvent>>);
+
+    #[async_trait]
+    impl quarry_runtime::UsageMeter for KeptEvents {
+        async fn meter(&self, event: quarry_runtime::UsageEvent) {
+            self.0.lock().unwrap().push(event);
+        }
+    }
+
+    async fn extract_under_request_id(
+        usage: &Arc<KeptEvents>,
+        request_id: &str,
+    ) -> StatusCode {
+        let mut state = crate::test_support::test_state(Arc::new(HtmlDriver(
+            "<html><body><article><p>Prose.</p></article></body></html>".to_string(),
+        )));
+        state.usage = usage.clone();
+        quarry_runtime::request_context::scope(request_id.to_string(), async {
+            extract(
+                State(state),
+                Extension(crate::test_support::claims_for_org("org_alpha")),
+                Json(ExtractRequest {
+                    urls: vec!["https://ssb.example/kommunefakta".into()],
+                    schema: None,
+                    prompt: None,
+                    max_urls: None,
+                    zdr: None,
+                    privacy: None,
+                    signals: None,
+                }),
+            )
+            .await
+            .into_response()
+            .status()
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_retried_legacy_extract_carries_the_same_billing_event_id() {
+        // D2-033: with the browser metrics off, the extract is billed as one search query.
+        // The event id must follow the request id, so a retry with the same id is the same
+        // event for billing-core's dedupe and a different request is a different one.
+        let usage = Arc::new(KeptEvents::default());
+        assert_eq!(extract_under_request_id(&usage, "req_retry_1").await, StatusCode::OK);
+        assert_eq!(extract_under_request_id(&usage, "req_retry_1").await, StatusCode::OK);
+        assert_eq!(extract_under_request_id(&usage, "req_other_2").await, StatusCode::OK);
+        let ids: Vec<String> = usage
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| event.metric == quarry_runtime::usage_metrics::SEARCH_QUERY)
+            .map(|event| event.event_id.clone())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                "quarry:req_retry_1:quarry.search.query".to_string(),
+                "quarry:req_retry_1:quarry.search.query".to_string(),
+                "quarry:req_other_2:quarry.search.query".to_string(),
+            ]
+        );
     }
 
     #[tokio::test]
