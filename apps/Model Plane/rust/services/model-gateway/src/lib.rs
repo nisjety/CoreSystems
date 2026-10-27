@@ -84,6 +84,8 @@ pub mod semantic_screening;
 pub mod session_flow;
 mod session_terminal_auth;
 pub mod skills;
+pub mod space_routes;
+pub mod space_sse;
 pub mod sse;
 pub mod sse_events;
 pub mod state;

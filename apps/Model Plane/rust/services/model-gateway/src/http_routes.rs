@@ -316,6 +316,8 @@ pub fn build_router_with_readiness(
         .merge(crate::browser_run::router())
         // A signed-in user's browser grant (issue / release); the broker mints it.
         .merge(crate::browser_grants::router())
+        // Space room routes /v1/spaces/* (one file per feature under space_routes/).
+        .merge(crate::space_routes::router())
         // AI modality routes  /v1/ai/*
         .merge(ai_routes())
         // App-Plane proxies (capabilities/tasks/cron/memory/skills)

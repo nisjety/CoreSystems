@@ -24,6 +24,7 @@ use mp_contracts::model_plane::v1::{
     run_service_server::RunServiceServer,
     session_core_server::{SessionCore, SessionCoreServer},
     session_retention_service_server::{SessionRetentionService, SessionRetentionServiceServer},
+    space_room_read_service_server::SpaceRoomReadServiceServer,
     thread_autonomy_server::{ThreadAutonomy, ThreadAutonomyServer},
 };
 use mp_contracts::run_origin::{RunOrigin, ORIGIN_METADATA_KEY};
@@ -52,7 +53,7 @@ use crate::terminalization;
 
 /// Standard gRPC health names registered on the unauthenticated health-only
 /// surface. Business RPCs remain independently intercepted.
-pub const HEALTH_SERVICE_NAMES: [&str; 9] = [
+pub const HEALTH_SERVICE_NAMES: [&str; 10] = [
     "model_plane.v1.SessionCore",
     "model_plane.v1.ManagedRunLifecycle",
     "model_plane.v1.OrchestrationCoreService",
@@ -62,6 +63,7 @@ pub const HEALTH_SERVICE_NAMES: [&str; 9] = [
     "model_plane.v1.RunService",
     "model_plane.v1.SessionRetentionService",
     "model_plane.v1.ThreadAutonomy",
+    "model_plane.v1.SpaceRoomReadService",
 ];
 
 const RUN_STARTED_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.RunStarted";
@@ -3264,20 +3266,39 @@ pub(crate) struct AppendedMessage {
     pub(crate) memory: Option<AppendedMemory>,
 }
 
+/// An append made under the thread owner's authority: the call every existing
+/// caller makes. A thin wrapper over [`append_message_in_tx_as`] with
+/// `AppendAs::Owner`, so the member seam (P-SC1) changes no owner behaviour.
+pub(crate) async fn append_message_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    req: &pb::AppendMessageRequest,
+    author_subject_id: &str,
+) -> Result<AppendedMessage, Status> {
+    append_message_in_tx_as(tx, req, author_subject_id, crate::space::authz::AppendAs::Owner).await
+}
+
 /// The whole durable half of an append -- thread lock, Space authority,
 /// source scope, the message row, its `MESSAGE_APPENDED` event and memory
 /// extraction -- inside the caller's transaction. Shared by `AppendMessage`
 /// and `CompleteDirectRunWithMessage`, so an answer saved together with its
 /// run's terminal receipt is stored exactly as an ordinary append stores it.
 /// The caller commits, then passes `memory` to [`sync_appended_memory`].
+/// `append_as` names the authority: `Owner` is the former behaviour; `Member`
+/// is refused until the member gate (WS01-S3) lands.
 // The body is the former `append_message_inner`, moved unchanged; splitting it
 // would scatter checks that must all run under the one thread lock.
 #[allow(clippy::too_many_lines)]
-pub(crate) async fn append_message_in_tx(
+pub(crate) async fn append_message_in_tx_as(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     req: &pb::AppendMessageRequest,
     author_subject_id: &str,
+    append_as: crate::space::authz::AppendAs,
 ) -> Result<AppendedMessage, Status> {
+    if append_as != crate::space::authz::AppendAs::Owner {
+        return Err(Status::permission_denied(
+            "member appends are not enabled on this Session Core",
+        ));
+    }
     let author_subject_id = if req.role.trim() == "user" {
         author_subject_id.trim()
     } else {
@@ -9649,6 +9670,10 @@ pub async fn serve(
             learning_governance,
             auth.clone(),
         ))
+        .add_service(SpaceRoomReadServiceServer::with_interceptor(
+            crate::space::read_service::SpaceRoomReadGrpc,
+            auth.clone(),
+        ))
         .add_service(RunServiceServer::with_interceptor(runs, auth))
         .serve(addr)
         .await?;
@@ -12700,6 +12725,7 @@ mod tests {
                 "model_plane.v1.RunService",
                 "model_plane.v1.SessionRetentionService",
                 "model_plane.v1.ThreadAutonomy",
+                "model_plane.v1.SpaceRoomReadService",
             ]
         );
     }

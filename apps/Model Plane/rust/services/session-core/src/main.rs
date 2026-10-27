@@ -40,6 +40,7 @@ mod routing_policy_grpc;
 mod run_phase;
 mod run_service_grpc;
 mod service_token;
+mod space;
 mod space_deletion_reconciler;
 mod space_membership_nats;
 mod store;

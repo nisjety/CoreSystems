@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package model_plane.v1;
+
+option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1";
+
+// SpaceRoomReadService: Session Core's read-side aggregates for the Space room
+// (artifacts, timeline, thread activity summary). Separate file and service so
+// that SessionCore and every mock of it stay source-compatible.
+//
+// P-SC1 registers the service EMPTY: it carries no RPC yet, so it exposes
+// nothing and persists nothing. Each consumer adds its RPC and messages here,
+// in merge order, one proto PR at a time:
+//   WS07-S9   ListSpaceArtifacts
+//   WS15-S6   ListSpaceTimeline
+//   WS11-S2   attention reads
+// Every RPC added here is owner-plane read-only: Space access never widens an
+// owner-plane ACL, and a ZDR thread fails closed with the typed refusal
+// catalogue (mp-contracts zdr_refusal.rs).
+service SpaceRoomReadService {}
