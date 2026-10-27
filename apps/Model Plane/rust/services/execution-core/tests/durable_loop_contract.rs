@@ -614,38 +614,34 @@ fn run_agent_order_violations(executor_grpc: &str) -> Vec<String> {
 }
 
 /// The pause site decides `loop` from "not ZDR and not waived". "Not ZDR" alone let a waived
-/// run (whose `zdr` flag is false) mint a loop approval it must never have.
+/// run (whose `zdr` flag is false) mint a loop approval it must never have. The site is
+/// `run_pause_mode_with`, which takes the run's gate first, so the flag is its second argument;
+/// the bare `run_pause_mode` (the gate-off wrapper for fixtures) takes the flag first.
 fn pause_site_violations(executor_loop: &str, every_source: &[(String, String)]) -> Vec<String> {
     let mut violations = Vec::new();
     let agent = Code::new(executor_loop).without_tests();
-    let call = Regex::new(r"\brun_pause_mode\s*\(").expect("pattern");
-    let calls: Vec<_> = call.find_iter(&agent.skel).collect();
+    let call = Regex::new(r"\brun_pause_mode(_with)?\s*\(").expect("pattern");
+    let calls: Vec<_> = call.captures_iter(&agent.skel).collect();
     if calls.len() != 1 {
         violations.push(format!(
-            "agent.rs calls run_pause_mode {} times, expected the one pause site",
+            "agent.rs calls run_pause_mode_with (or run_pause_mode) {} times, expected the one pause site",
             calls.len()
         ));
     }
+    // Each term must be negated: a bare `zdr`, or a dropped `!`, would let a run that must not
+    // loop (a ZDR run, or a waived one) mint a loop approval.
+    let not_zdr = Regex::new(r"!\s*[\w.]*\bzdr\b").expect("pattern");
+    let not_waived = Regex::new(r"!\s*[\w.]*\bis_waived\s*\(\s*\)").expect("pattern");
     for found in calls {
-        // The first argument: up to the first top-level comma.
-        let mut depth = 0_i32;
-        let mut first = String::new();
-        for ch in agent.text[found.end()..].chars() {
-            match ch {
-                '(' | '[' | '{' => depth += 1,
-                ')' | ']' | '}' => depth -= 1,
-                ',' if depth == 0 => break,
-                _ => {}
-            }
-            if depth < 0 {
-                break;
-            }
-            first.push(ch);
-        }
-        if !(first.contains("zdr") && first.contains("is_waived()")) {
+        let paren = found.get(0).expect("a match has a whole span").end() - 1;
+        let persistent = usize::from(found.get(1).is_some());
+        let argument = call_arguments(&agent, paren)
+            .get(persistent)
+            .cloned()
+            .unwrap_or_default();
+        if !(not_zdr.is_match(&argument) && not_waived.is_match(&argument)) {
             violations.push(format!(
-                "the pause site passes `{}` as persistent: it must say not-ZDR AND not-waived",
-                first.trim()
+                "the pause site passes `{argument}` as persistent: it must say not-ZDR AND not-waived"
             ));
         }
     }
@@ -4419,7 +4415,7 @@ fn store_proofs() -> Vec<StoreProof> {
         },
         StoreProof {
             store: None,
-            gate: "loop approval minted at the pause site: run_pause_mode fed !req.zdr && !ctx.route.is_waived() (execution-core)",
+            gate: "loop approval minted at the pause site: run_pause_mode_with fed !req.zdr && !ctx.route.is_waived() (execution-core)",
             tests: &[
                 (EXECUTOR_LOOP, "a_waived_run_never_offers_a_loop_approval"),
                 (
@@ -5978,6 +5974,18 @@ fn every_guard_goes_red_when_the_code_it_guards_regresses() {
     must_flag(
         pause_site_violations(
             &mutate(&agent, "!req.zdr && !ctx.route.is_waived()", "!req.zdr"),
+            &every,
+        ),
+        "not-ZDR AND not-waived",
+    );
+    // The waiver term is right, but the `zdr` term has lost its negation: a ZDR run would loop.
+    must_flag(
+        pause_site_violations(
+            &mutate(
+                &agent,
+                "!req.zdr && !ctx.route.is_waived()",
+                "req.zdr && !ctx.route.is_waived()",
+            ),
             &every,
         ),
         "not-ZDR AND not-waived",
