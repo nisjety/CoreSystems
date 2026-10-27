@@ -6641,6 +6641,82 @@ mod tests {
         );
     }
 
+    /// WS07-S4: drive the room's thread listing with Control's shared-read answer as
+    /// given. Everything else is the item-4b fixture's: an editor of `space-room`,
+    /// a Space lookup, a marker query and one thread from Model Gateway.
+    async fn space_threads_with_read_decision(
+        decision: ResponseTemplate,
+    ) -> (u16, Value, MockServer, MockServer) {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (state, application, model_gateway, auth, user_core) = room_4b_fixture(
+            ResponseTemplate::new(200).set_body_json(json!({"value": {"lastReadAt": 1}})),
+            ResponseTemplate::new(200).set_body_json(json!({})),
+            ResponseTemplate::new(200).set_body_json(json!({})),
+        )
+        .await;
+        // The fixture declines the shared read first; a later mount for the same
+        // route is matched after it, so replace it by answering on a fresh route
+        // table: reset, then mount the answer under test.
+        user_core.reset().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId":"user-1", "orgId":"org-1", "role":"member", "onboardingStatus":"COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces/space-room/membership"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"space_ref": "space-room", "kind": "room", "role": "editor", "subject_id": "user-1"}
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/thread-read-decision"))
+            .respond_with(decision)
+            .mount(&user_core)
+            .await;
+        let (status, body) =
+            room_4b_request(state, "GET", "/api/v1/spaces/space-room/threads", None).await;
+        drop((application, auth));
+        (status, body, model_gateway, user_core)
+    }
+
+    /// A declined Control decision is a 200 listing that says shared reads are not
+    /// available (the SPA then says so once, instead of probing every post), and the
+    /// transcript route still refuses with 403.
+    #[tokio::test]
+    async fn space_threads_say_shared_read_is_unavailable_when_control_declines() {
+        let (status, body, _model_gateway, _user_core) = space_threads_with_read_decision(
+            ResponseTemplate::new(403).set_body_json(json!({"error": {"code": "forbidden"}})),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["shared_read"]["available"], false);
+        // The threads themselves still list: the reader may take part in the room.
+        assert_eq!(body["data"]["threads"][0]["thread_id"], "thread-1");
+
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (transcript_status, transcript_body, model_gateway) = space_thread_transcript_response(
+            ResponseTemplate::new(403).set_body_json(json!({"error": "not entitled"})),
+        )
+        .await;
+        assert_eq!(transcript_status, 403);
+        assert_eq!(transcript_body["error"]["code"], "space_read_not_authorized");
+        assert!(model_gateway.received_requests().await.expect("requests").is_empty());
+    }
+
+    /// An accepted decision says shared reads are available.
+    #[tokio::test]
+    async fn space_threads_say_shared_read_is_available_when_control_accepts() {
+        let (status, body, _model_gateway, _user_core) =
+            space_threads_with_read_decision(activity_read_decision()).await;
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["shared_read"]["available"], true);
+        assert_eq!(body["data"]["threads"][0]["thread_id"], "thread-1");
+    }
+
     async fn presence_fixture(
         convex_presence: ResponseTemplate,
     ) -> (crate::config::AppState, MockServer) {
