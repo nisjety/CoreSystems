@@ -214,6 +214,7 @@ func (s *Server) ValidateGrant(ctx context.Context, req *ValidateGrantRequest) (
 		DeniedDomains:      append([]string(nil), g.DeniedDomains...),
 		AbsoluteExpiresAt:  timestamppb.New(absoluteOf(g)),
 		ResourceId:         g.ResourceID,
+		SessionKey:         g.SessionKey,
 	}, nil
 }
 

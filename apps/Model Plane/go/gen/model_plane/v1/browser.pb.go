@@ -702,7 +702,13 @@ type ValidateGrantResponse struct {
 	DeniedDomains     []string               `protobuf:"bytes,51,rep,name=denied_domains,json=deniedDomains,proto3" json:"denied_domains,omitempty"`
 	AbsoluteExpiresAt *timestamppb.Timestamp `protobuf:"bytes,52,opt,name=absolute_expires_at,json=absoluteExpiresAt,proto3" json:"absolute_expires_at,omitempty"`
 	// The run an "attach" grant is bound to; empty for every other kind.
-	ResourceId    string `protobuf:"bytes,53,opt,name=resource_id,json=resourceId,proto3" json:"resource_id,omitempty"`
+	ResourceId string `protobuf:"bytes,53,opt,name=resource_id,json=resourceId,proto3" json:"resource_id,omitempty"`
+	// The key the grant was issued under: the session key of a session grant,
+	// and for a run grant the idempotency key of the one run it was derived for
+	// (the same value as DeriveRunGrantRequest.session_key). A consumer can bind
+	// a presented run grant to that run: a run grant must not back a different
+	// run. Empty for a grant issued without one.
+	SessionKey    string `protobuf:"bytes,54,opt,name=session_key,json=sessionKey,proto3" json:"session_key,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -880,6 +886,13 @@ func (x *ValidateGrantResponse) GetAbsoluteExpiresAt() *timestamppb.Timestamp {
 func (x *ValidateGrantResponse) GetResourceId() string {
 	if x != nil {
 		return x.ResourceId
+	}
+	return ""
+}
+
+func (x *ValidateGrantResponse) GetSessionKey() string {
+	if x != nil {
+		return x.SessionKey
 	}
 	return ""
 }
@@ -1363,7 +1376,7 @@ const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\x15BrowserHealthResponse\x12\x16\n" +
 	"\x06status\x18\x01 \x01(\tR\x06status\"1\n" +
 	"\x14ValidateGrantRequest\x12\x19\n" +
-	"\bgrant_id\x18\x01 \x01(\tR\agrantId\"\xde\x06\n" +
+	"\bgrant_id\x18\x01 \x01(\tR\agrantId\"\xff\x06\n" +
 	"\x15ValidateGrantResponse\x12\x19\n" +
 	"\bgrant_id\x18\x01 \x01(\tR\agrantId\x12\x16\n" +
 	"\x06active\x18\x02 \x01(\bR\x06active\x129\n" +
@@ -1389,7 +1402,9 @@ const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\x0edenied_domains\x183 \x03(\tR\rdeniedDomains\x12J\n" +
 	"\x13absolute_expires_at\x184 \x01(\v2\x1a.google.protobuf.TimestampR\x11absoluteExpiresAt\x12\x1f\n" +
 	"\vresource_id\x185 \x01(\tR\n" +
-	"resourceId\"\xd9\x03\n" +
+	"resourceId\x12\x1f\n" +
+	"\vsession_key\x186 \x01(\tR\n" +
+	"sessionKey\"\xd9\x03\n" +
 	"\x15DeriveRunGrantRequest\x12&\n" +
 	"\x0fparent_grant_id\x18\x01 \x01(\tR\rparentGrantId\x12\x1f\n" +
 	"\vsession_key\x18\x02 \x01(\tR\n" +

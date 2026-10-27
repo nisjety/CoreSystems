@@ -225,6 +225,13 @@ message ValidateGrantResponse {
   google.protobuf.Timestamp absolute_expires_at = 52;
   // The run an "attach" grant is bound to; empty for every other kind.
   string resource_id = 53;
+
+  // The key the grant was issued under: the session key of a session grant,
+  // and for a run grant the idempotency key of the one run it was derived for
+  // (the same value as DeriveRunGrantRequest.session_key). A consumer can bind
+  // a presented run grant to that run: a run grant must not back a different
+  // run. Empty for a grant issued without one.
+  string session_key = 54;
 }
 
 message DeriveRunGrantRequest {

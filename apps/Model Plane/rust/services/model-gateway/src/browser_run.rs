@@ -272,8 +272,10 @@ enum GrantClaim {
 /// that a presented run grant already backs a live run, or that a keyed retry
 /// changed the run's limits. This guard answers both inside one gateway
 /// process; it is not durable and not shared between replicas. The durable
-/// fix (the broker binding a run grant to one run, Session Core storing the
-/// start fingerprint) is recorded in the depth register.
+/// half of the grant claim is `run_grant_is_bound_to_another_run` (the broker
+/// reports the run key a run grant was derived for); the durable half of the
+/// fingerprint (Session Core storing the start fingerprint) is recorded in the
+/// depth register.
 #[derive(Debug, Default)]
 pub(crate) struct RunStartGuard {
     inner: Mutex<StartGuardInner>,
@@ -727,8 +729,16 @@ async fn resolve_browser_grant(
             .await;
         }
         // A run grant (or a grant from a broker that predates kinds) keeps
-        // the exact-equality path below.
-        "run" | "" => {}
+        // the exact-equality path below. One this gateway derived for an
+        // earlier run is bound to that run and backs no other (D1-001).
+        "run" | "" => {
+            if run_grant_is_bound_to_another_run(&response.session_key, run_key) {
+                return Err((
+                    StatusCode::CONFLICT,
+                    Json(json!({ "error": "browser_grant_in_use" })),
+                ));
+            }
+        }
         "sensitive_approval" => {
             return Err(bad_request(
                 "a sensitive approval grant cannot start a browser run",
@@ -783,6 +793,19 @@ async fn resolve_browser_grant(
             None
         },
     })
+}
+
+/// True when a presented run grant was derived (by this gateway) for a run other than
+/// the one starting (D1-001). The broker reports the key a grant was issued under
+/// (`ValidateGrantResponse.session_key`); for a run grant this gateway derived it is
+/// that run's `run_key` (`browser-<ulid>` or `browser-idem-<hash>`). The check
+/// survives a restart, a second replica and the end of the first run, which the
+/// process-local `RunStartGuard` claim does not. A key of any other shape (a caller
+/// that derived the grant itself) or none (a broker that predates the field) is not
+/// bound here and keeps only the guard's live-run claim.
+fn run_grant_is_bound_to_another_run(grant_session_key: &str, run_key: &str) -> bool {
+    let key = grant_session_key.trim();
+    key.starts_with("browser-") && key != run_key
 }
 
 /// Derives a run grant from a validated session grant. The broker enforces
@@ -3055,6 +3078,39 @@ mod tests {
         assert_eq!(result.expect("a presented run grant").budget, None);
     }
 
+    /// D1-001, the durable half: a run grant the broker says was derived for another run
+    /// is refused without any live-run claim, so a restart, a second replica or the end
+    /// of the first run does not free it. Other key shapes are not bound.
+    #[tokio::test]
+    async fn a_presented_run_grant_derived_for_another_run_is_refused() {
+        let run_grant = |session_key: &str| ValidateGrantResponse {
+            kind: "run".to_owned(),
+            session_key: session_key.to_owned(),
+            ..session_validation("run-9", &["example.com"])
+        };
+        for (session_key, refused) in [
+            ("browser-01J0OTHERRUN", true),
+            ("browser-idem-0123456789abcdef", true),
+            ("browser-run-key", false),
+            ("caller-derived-key", false),
+            ("", false),
+        ] {
+            let (result, _) = resolve_with_mint(
+                TestBrowserBroker::validating(Ok(run_grant(session_key))),
+                browser_request("run-9"),
+                BudgetMint::default(),
+            )
+            .await;
+            if refused {
+                let error = result.expect_err(session_key);
+                assert_eq!(error.0, StatusCode::CONFLICT, "{session_key}");
+                assert_eq!(error.1 .0["error"], "browser_grant_in_use", "{session_key}");
+            } else {
+                result.unwrap_or_else(|_| panic!("{session_key:?} must be accepted"));
+            }
+        }
+    }
+
     /// The parent's own claim is the second ceiling on what the broker may return
     /// (the first is what was asked for). With nothing minted nothing is asked for,
     /// so the parent's is the only one in play and this is the test that reaches it.
@@ -4677,6 +4733,28 @@ mod tests {
             assert_eq!(h.lifecycle.starts.lock().expect("starts").len(), 1);
             assert_eq!(h.dispatches().len(), 1);
             assert_eq!(h.revokes(), 0, "a presented grant is never revoked here");
+        }
+
+        /// D1-001 durable: a run grant derived for an earlier run is refused by a start
+        /// with an empty guard (a restart, another replica, the first run long over).
+        #[tokio::test]
+        async fn a_run_grant_derived_for_an_earlier_run_is_refused_with_an_empty_guard() {
+            let run_grant = ValidateGrantResponse {
+                kind: "run".to_owned(),
+                parent_grant_id: "session-1".to_owned(),
+                session_key: "browser-01J0EARLIERRUN".to_owned(),
+                ..session_validation("run-9", &["example.com"])
+            };
+            let h = Harness::with_broker(true, TestBrowserBroker::validating(Ok(run_grant))).await;
+            let error = h
+                .start(None, browser_request("run-9"))
+                .await
+                .expect_err("the grant belongs to another run");
+            assert_eq!(error.0, StatusCode::CONFLICT);
+            assert_eq!(error.1 .0["error"], "browser_grant_in_use");
+            assert!(h.lifecycle.starts.lock().expect("starts").is_empty());
+            assert!(h.dispatches().is_empty());
+            assert_eq!(h.revokes(), 0);
         }
 
         /// A keyed retry of the run that holds a presented run grant is the same

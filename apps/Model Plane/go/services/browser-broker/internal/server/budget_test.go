@@ -35,6 +35,34 @@ func TestAcquireGrantStoresAndReturnsABudgetClaim(t *testing.T) {
 	}
 }
 
+// A run grant says which run it was derived for (D1-001): ValidateGrant returns the
+// session key it was issued under, so a consumer can bind a presented run grant to
+// that one run. The parent session grant returns its own key.
+func TestValidateGrantReturnsTheSessionKeyTheRunGrantWasDerivedUnder(t *testing.T) {
+	srv := testServerFor(grant.NewMemoryRepository(), userPrincipal(false))
+	parent := acquire(t, srv, &AcquireGrantRequest{})
+	run, err := srv.DeriveRunGrant(context.Background(), deriveReq(parent.GetGrantId(), func(r *DeriveRunGrantRequest) {
+		r.SessionKey = "browser-run-key-1"
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := srv.ValidateGrant(context.Background(), &ValidateGrantRequest{GrantId: run.GetGrantId()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.GetKind() != "run" || got.GetSessionKey() != "browser-run-key-1" {
+		t.Fatalf("run grant: kind=%q session_key=%q", got.GetKind(), got.GetSessionKey())
+	}
+	p, err := srv.ValidateGrant(context.Background(), &ValidateGrantRequest{GrantId: parent.GetGrantId()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.GetKind() != "session" || p.GetSessionKey() == "" || p.GetSessionKey() == got.GetSessionKey() {
+		t.Fatalf("session grant: kind=%q session_key=%q", p.GetKind(), p.GetSessionKey())
+	}
+}
+
 func TestValidateGrantReturnsBudgetVerbatim(t *testing.T) {
 	srv := testServerFor(grant.NewMemoryRepository(), userPrincipal(false))
 	parent := acquire(t, srv, &AcquireGrantRequest{
