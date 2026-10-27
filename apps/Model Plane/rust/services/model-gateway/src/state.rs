@@ -120,6 +120,9 @@ pub struct AppState {
     /// identities. This prevents public request/idempotency strings from
     /// becoming durable data (including on ZDR paths).
     pub(crate) managed_start_keys: ManagedStartKeyDeriver,
+    /// In-process guard for browser run starts: which presented run grant backs
+    /// which live run, and the request fingerprint of each keyed start.
+    pub(crate) run_start_guard: Arc<crate::browser_run::RunStartGuard>,
     /// Run read model + cancel path. Hosted by session-core on the same gRPC
     /// server, so it reuses the session endpoint/channel.
     pub run_client: RunServiceClient<Channel>,
@@ -404,6 +407,7 @@ impl AppState {
             session_terminal_tokens: None,
             mail_task_bridge_tokens: None,
             managed_start_keys: ManagedStartKeyDeriver::test_only(),
+            run_start_guard: Arc::default(),
             run_client: RunServiceClient::new(run_channel),
             orchestration_client: OrchestrationCoreServiceClient::new(orchestration_channel),
             execution_client: ExecutionCoreClient::new(execution_channel),
