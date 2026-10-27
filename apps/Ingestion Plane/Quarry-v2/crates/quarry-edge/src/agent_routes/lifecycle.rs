@@ -502,13 +502,30 @@ pub async fn start_run(
     } else {
         crate::limits::Allowance::Unconfigured
     };
+    // D1-021: a resume names its run id here, so the registry refuses it, under the lock
+    // that counts the caps, when that run is already live (or being resumed right now).
+    let run_id_text = run_id.to_string();
     let slot = state
         .agent_runs
-        .try_reserve_with(&org_id, run_class, org_limits.run_override())
-        .map_err(|denied| {
-            crate::metrics::record_run_denied(denied.reason);
-            crate::metrics::record_run_start(run_class.label(), "denied");
-            driver_err(&request_id, denied.into_error())
+        .try_reserve_for(
+            &org_id,
+            run_class,
+            org_limits.run_override(),
+            resume_checkpoint.is_some().then_some(run_id_text.as_str()),
+        )
+        .map_err(|denied| match denied {
+            super::run_registry::ReserveDenied::Capacity(denied) => {
+                crate::metrics::record_run_denied(denied.reason);
+                crate::metrics::record_run_start(run_class.label(), "denied");
+                driver_err(&request_id, denied.into_error())
+            }
+            super::run_registry::ReserveDenied::ResumeLive => {
+                crate::metrics::record_run_start(run_class.label(), "denied");
+                driver_err(
+                    &request_id,
+                    QuarryError::new(ErrorCode::Conflict, "agent run is already live"),
+                )
+            }
         })?;
 
     let session = state
@@ -521,15 +538,15 @@ pub async fn start_run(
     // action. Install the broker-derived boundary immediately after lease
     // acquisition so a resumed checkpoint cannot create its first CDP
     // context with the proxy's default, unconstrained policy.
+    // D2-019: the same resolved boundary is stored on the run's context below, so every
+    // later action installs it again instead of one rebuilt from the grant's allow list.
+    let run_egress = super::human_browse::open_web_egress(
+        &nav_policy,
+        crate::agent_policy_gate::egress_policy(&web_decision, &constraints.allowed_domains),
+    );
     if let Err(error) = state
         .agent_driver
-        .configure_egress_policy(
-            &session,
-            super::human_browse::open_web_egress(
-                &nav_policy,
-                crate::agent_policy_gate::egress_policy(&web_decision, &constraints.allowed_domains),
-            ),
-        )
+        .configure_egress_policy(&session, run_egress.clone())
         .await
     {
         let _ = state.agent_driver.release(session).await;
@@ -628,6 +645,7 @@ pub async fn start_run(
             challenge_observation_count: 0,
             // WS7.G: the run's web-policy deny list, installed with every action's egress policy.
             egress_denied: web_decision.policy().denied_hosts(),
+            egress_policy: Some(run_egress),
             ..Default::default()
         }, last_observation: None }),
         summary: LaneSummary {

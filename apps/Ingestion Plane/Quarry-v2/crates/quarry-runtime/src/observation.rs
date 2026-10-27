@@ -82,6 +82,12 @@ pub struct ObservationContext {
     /// frame or redirect to one of these hosts is refused at the browser boundary. Empty
     /// means the policy installed is exactly the one built from the run's allowed domains.
     pub egress_denied: Vec<String>,
+    /// D2-019: the egress boundary the run was started under (its allow list narrowed by the
+    /// web policy, the open-web policy, the deny list). When set, every action installs
+    /// exactly this policy instead of rebuilding one from `constraints.allowed_domains`,
+    /// which would drop the narrowing and the open-web mode after the first step. `None`
+    /// (a context built outside `start_run`, the legacy agent loop) keeps the rebuild.
+    pub egress_policy: Option<BrowserEgressPolicy>,
 }
 
 /// Page identity captured at observation time. Deliberately tiny so carrying
@@ -335,13 +341,12 @@ impl ObservationRunner {
         // REST handler: browser WebSocket actions and any future internal
         // caller use the same run-scoped policy before a page can make an
         // effectful request.
-        self.browser
-            .configure_egress_policy(
-                session,
-                BrowserEgressPolicy::from_allowed_domains(&request.constraints.allowed_domains)
-                    .with_denied_domains(&ctx.egress_denied),
-            )
-            .await?;
+        let egress = match ctx.egress_policy.as_ref() {
+            Some(resolved) => resolved.clone(),
+            None => BrowserEgressPolicy::from_allowed_domains(&request.constraints.allowed_domains)
+                .with_denied_domains(&ctx.egress_denied),
+        };
+        self.browser.configure_egress_policy(session, egress).await?;
         if action_requires_atomic_target(&request.action)
             && !self.browser.capabilities().atomic_target_actions
         {
@@ -3418,6 +3423,8 @@ mod tests {
         /// Claims governed full-fidelity visual evidence, so an explicit screenshot
         /// action gets past the capability gate and reaches the withheld-image path.
         visual_fidelity: bool,
+        /// D2-019: every egress policy the runner installed, in order.
+        egress_seen: std::sync::Mutex<Vec<BrowserEgressPolicy>>,
     }
 
     impl ContentDriver {
@@ -3435,8 +3442,9 @@ mod tests {
         async fn configure_egress_policy(
             &self,
             _session: &quarry_browser::BrowserSession,
-            _policy: BrowserEgressPolicy,
+            policy: BrowserEgressPolicy,
         ) -> QuarryResult<()> {
+            self.egress_seen.lock().unwrap().push(policy);
             Ok(())
         }
         fn capabilities(&self) -> quarry_browser::BrowserDriverCapabilities {
@@ -3556,6 +3564,146 @@ mod tests {
                 _ => Err(QuarryError::unsupported_action("evaluate")),
             }
         }
+    }
+
+    /// D2-019: a run that carries its resolved egress keeps it on every action. Before the
+    /// fix, step 2 rebuilt the policy from `constraints.allowed_domains` and lost the
+    /// narrowing and the open-web mode that `start_run` had installed.
+    #[tokio::test]
+    async fn the_run_carried_egress_is_installed_on_every_action_not_rebuilt_from_constraints() {
+        let driver = Arc::new(ContentDriver {
+            html: b"<html><body><p>hello</p></body></html>",
+            ..Default::default()
+        });
+        let runner = ObservationRunner {
+            browser: driver.clone(),
+            artifacts: None,
+            events: None,
+            visual_processor: None,
+            org_id: "org".into(),
+        };
+        let lease = BrowserLease {
+            lease_id: Id::new(),
+            profile_id: Id::new(),
+            session_affinity_key: "test".into(),
+            proxy_affinity: ProxyAffinity {
+                pool: String::new(),
+                sticky_key: None,
+            },
+            ttl_s: 60,
+            capabilities: vec![],
+            artifact_bucket: String::new(),
+            persist_profile: false,
+            viewport: None,
+            org_id: "org".into(),
+        };
+        let session = driver.acquire(&lease).await.unwrap();
+        let request = AgentActionRequest {
+            run_id: Id::new(),
+            lease_id: lease.lease_id.clone(),
+            action: AgentAction::Evaluate {
+                script: "document.title = 'x'".into(),
+            },
+            instruction: None,
+            constraints: AgentConstraints {
+                max_steps: 3,
+                // The grant's own list is wider than what the web policy narrowed it to.
+                allowed_domains: vec!["example.com".into(), "other.test".into()],
+                max_runtime_s: None,
+                max_cost_usd: None,
+            },
+            zdr: ZdrMode::Off,
+            extraction_profile: None,
+        };
+
+        // A narrowed allow list: only a.example.com stays reachable.
+        let narrowed = BrowserEgressPolicy::from_allowed_domains(&["a.example.com".to_string()]);
+        let mut ctx = ObservationContext {
+            egress_policy: Some(narrowed.clone()),
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            let _ = runner.execute(&request, &session, &mut ctx).await;
+        }
+        {
+            let seen = driver.egress_seen.lock().unwrap();
+            assert_eq!(seen.len(), 2, "one install per action");
+            assert_eq!(seen[0], narrowed, "step 1 installs the resolved policy");
+            assert_eq!(seen[1], narrowed, "step 2 installs the same resolved policy");
+            assert!(!seen[1].allows_url("https://other.test/x"), "narrowing survives step 2");
+        }
+
+        // The open-web mode and its denied list survive too.
+        driver.egress_seen.lock().unwrap().clear();
+        let open = BrowserEgressPolicy::open_web(&["blocked.test".to_string()]);
+        let mut open_ctx = ObservationContext {
+            egress_policy: Some(open.clone()),
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            let _ = runner.execute(&request, &session, &mut open_ctx).await;
+        }
+        let seen = driver.egress_seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert!(seen.iter().all(|policy| *policy == open));
+        assert!(seen[1].allows_url("https://anywhere.test/x"));
+        assert!(!seen[1].allows_url("https://blocked.test/x"), "denied list survives step 2");
+    }
+
+    /// Without a carried policy the old behaviour stands: the policy is built from the
+    /// request's allowed domains and the context's deny list.
+    #[tokio::test]
+    async fn a_context_without_a_carried_egress_builds_it_from_the_constraints() {
+        let driver = Arc::new(ContentDriver {
+            html: b"<html><body><p>hello</p></body></html>",
+            ..Default::default()
+        });
+        let runner = ObservationRunner {
+            browser: driver.clone(),
+            artifacts: None,
+            events: None,
+            visual_processor: None,
+            org_id: "org".into(),
+        };
+        let lease = BrowserLease {
+            lease_id: Id::new(),
+            profile_id: Id::new(),
+            session_affinity_key: "test".into(),
+            proxy_affinity: ProxyAffinity {
+                pool: String::new(),
+                sticky_key: None,
+            },
+            ttl_s: 60,
+            capabilities: vec![],
+            artifact_bucket: String::new(),
+            persist_profile: false,
+            viewport: None,
+            org_id: "org".into(),
+        };
+        let session = driver.acquire(&lease).await.unwrap();
+        let request = AgentActionRequest {
+            run_id: Id::new(),
+            lease_id: lease.lease_id.clone(),
+            action: AgentAction::Evaluate {
+                script: "document.title = 'x'".into(),
+            },
+            instruction: None,
+            constraints: AgentConstraints {
+                max_steps: 3,
+                allowed_domains: vec!["example.com".into()],
+                max_runtime_s: None,
+                max_cost_usd: None,
+            },
+            zdr: ZdrMode::Off,
+            extraction_profile: None,
+        };
+        let mut ctx = ObservationContext::default();
+        let _ = runner.execute(&request, &session, &mut ctx).await;
+        let seen = driver.egress_seen.lock().unwrap();
+        assert_eq!(
+            seen[0],
+            BrowserEgressPolicy::from_allowed_domains(&["example.com".to_string()])
+        );
     }
 
     #[tokio::test]

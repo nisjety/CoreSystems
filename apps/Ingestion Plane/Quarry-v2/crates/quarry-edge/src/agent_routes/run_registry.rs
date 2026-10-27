@@ -13,6 +13,9 @@ pub struct Inner {
     pending_global: usize,
     pending_org: HashMap<String, usize>,
     pending_interactive: HashMap<String, usize>,
+    /// D1-021: run ids a resume has claimed but not committed yet, so two resumes of the
+    /// same id racing each other cannot both get past the "is it live" check.
+    pending_resume_ids: std::collections::HashSet<String>,
 }
 
 impl Inner {
@@ -75,6 +78,14 @@ impl CapacityDenied {
             "retry_after_seconds": self.retry_after_s,
         }))
     }
+}
+
+/// Why a start or resume was not admitted: the caps said no, or the run a resume names is
+/// already live (or is being resumed by another request right now).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReserveDenied {
+    Capacity(CapacityDenied),
+    ResumeLive,
 }
 
 /// What the registry reports about itself.
@@ -156,8 +167,34 @@ impl RunRegistry {
         class: RunClass,
         plan: RunCapOverride,
     ) -> Result<RunSlot, CapacityDenied> {
+        match self.try_reserve_for(org_id, class, plan, None) {
+            Ok(slot) => Ok(slot),
+            Err(ReserveDenied::Capacity(denied)) => Err(denied),
+            // No resume id was given, so the run-live refusal cannot happen.
+            Err(ReserveDenied::ResumeLive) => unreachable!("no resume id was named"),
+        }
+    }
+
+    /// As [`try_reserve_with`](Self::try_reserve_with), and for a resume (D1-021) the run
+    /// id it names is checked under the same lock that counts the caps: a run that is
+    /// already live, or that another resume is committing, is refused (`ResumeLive`)
+    /// instead of being replaced. Before this, `commit` inserted over the live entry, so a
+    /// second session was started for the id and the first one, with its action possibly
+    /// running, was dropped from the registry without being released.
+    pub fn try_reserve_for(
+        self: &Arc<Self>,
+        org_id: &str,
+        class: RunClass,
+        plan: RunCapOverride,
+        resume_run_id: Option<&str>,
+    ) -> Result<RunSlot, ReserveDenied> {
         let limits = &self.limits;
         let mut inner = self.inner.lock().expect("agent_runs mutex poisoned");
+        if let Some(run_id) = resume_run_id {
+            if inner.runs.contains_key(run_id) || inner.pending_resume_ids.contains(run_id) {
+                return Err(ReserveDenied::ResumeLive);
+            }
+        }
         let global = inner.runs.len() + inner.pending_global;
         let in_org = inner
             .runs
@@ -173,12 +210,14 @@ impl RunRegistry {
             })
             .count()
             + inner.pending_interactive.get(org_id).copied().unwrap_or(0);
-        let denied = |reason, scope, limit, active| CapacityDenied {
-            reason,
-            scope,
-            limit,
-            active,
-            retry_after_s: limits.cap_retry_after_s,
+        let denied = |reason, scope, limit, active| {
+            ReserveDenied::Capacity(CapacityDenied {
+                reason,
+                scope,
+                limit,
+                active,
+                retry_after_s: limits.cap_retry_after_s,
+            })
         };
         if limits.max_concurrent_runs > 0 && global >= limits.max_concurrent_runs as usize {
             return Err(denied(
@@ -213,6 +252,9 @@ impl RunRegistry {
             }
         }
         inner.pending_global += 1;
+        if let Some(run_id) = resume_run_id {
+            inner.pending_resume_ids.insert(run_id.to_owned());
+        }
         *inner.pending_org.entry(org_id.to_owned()).or_default() += 1;
         if class == RunClass::Interactive {
             *inner.pending_interactive.entry(org_id.to_owned()).or_default() += 1;
@@ -221,6 +263,7 @@ impl RunRegistry {
             registry: self.clone(),
             org_id: org_id.to_owned(),
             class,
+            resume_run_id: resume_run_id.map(str::to_owned),
             committed: false,
         })
     }
@@ -232,6 +275,8 @@ pub struct RunSlot {
     registry: Arc<RunRegistry>,
     org_id: String,
     class: RunClass,
+    /// The id a resume claimed (D1-021), released with the slot.
+    resume_run_id: Option<String>,
     committed: bool,
 }
 
@@ -248,6 +293,9 @@ impl std::fmt::Debug for RunSlot {
 impl RunSlot {
     fn release_pending(&self, inner: &mut Inner) {
         inner.pending_global = inner.pending_global.saturating_sub(1);
+        if let Some(run_id) = self.resume_run_id.as_deref() {
+            inner.pending_resume_ids.remove(run_id);
+        }
         if let Some(count) = inner.pending_org.get_mut(&self.org_id) {
             *count = count.saturating_sub(1);
             if *count == 0 {
@@ -286,6 +334,67 @@ impl Drop for RunSlot {
                 self.release_pending(&mut inner);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod resume_claim_tests {
+    use super::*;
+    use RunClass::Agent;
+
+    fn registry() -> Arc<RunRegistry> {
+        Arc::new(RunRegistry::new(RunLimits::unlimited()))
+    }
+
+    #[test]
+    fn a_second_resume_of_the_same_id_is_refused_while_the_first_is_pending() {
+        let runs = registry();
+        let first = runs
+            .try_reserve_for("org_a", Agent, RunCapOverride::NONE, Some("run_1"))
+            .expect("the first resume claims the id");
+        let second = runs.try_reserve_for("org_a", Agent, RunCapOverride::NONE, Some("run_1"));
+        assert_eq!(second.unwrap_err(), ReserveDenied::ResumeLive);
+        // Another id is not affected, and neither is a start that names none.
+        assert!(runs
+            .try_reserve_for("org_a", Agent, RunCapOverride::NONE, Some("run_2"))
+            .is_ok());
+        assert!(runs
+            .try_reserve_for("org_a", Agent, RunCapOverride::NONE, None)
+            .is_ok());
+        // A resume that fails before it commits gives the id back.
+        drop(first);
+        assert!(runs
+            .try_reserve_for("org_a", Agent, RunCapOverride::NONE, Some("run_1"))
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_resume_of_a_run_that_is_live_is_refused_and_the_live_entry_is_not_replaced() {
+        let runs = registry();
+        let claims = crate::test_support::claims_for_org("org_a");
+        let state = crate::test_support::test_state(crate::test_support::StubDriver::ok());
+        let live = crate::test_support::insert_live_run(&state, &claims);
+        let run_id = live
+            .entry
+            .try_lock()
+            .expect("nothing holds the run yet")
+            .run_id
+            .to_string();
+        runs.lock()
+            .unwrap()
+            .insert(run_id.clone(), live.clone());
+        let refused = runs.try_reserve_for("org_a", Agent, RunCapOverride::NONE, Some(&run_id));
+        assert_eq!(refused.unwrap_err(), ReserveDenied::ResumeLive);
+        let held = runs.lock().unwrap().get(&run_id).cloned().expect("still registered");
+        assert!(
+            Arc::ptr_eq(&held.live, &live.live),
+            "the live run is the one that was there before the refused resume"
+        );
+        // Once the run has left the registry (closed), the id can be resumed.
+        runs.lock().unwrap().remove(&run_id);
+        assert!(runs
+            .try_reserve_for("org_a", Agent, RunCapOverride::NONE, Some(&run_id))
+            .is_ok());
     }
 }
 

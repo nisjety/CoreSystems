@@ -1919,3 +1919,64 @@ async fn a_revoked_grant_stops_a_tab_open_and_an_action_but_not_a_tab_select_or_
     assert_eq!(edge.driver.selected_tabs(), vec![tab.clone()]);
     assert_eq!(edge.driver.closed_tabs(), vec![tab]);
 }
+
+// ── D1-021: a resume does not replace a live run ────────────────────────────
+
+/// `resume_run_id` naming a run that is still live used to start a second session for the id
+/// and overwrite the registry entry, dropping the first (and its running action) without a
+/// release. It is now a 409 and the live run is left exactly as it was.
+#[tokio::test]
+#[serial]
+async fn a_resume_of_a_live_run_is_refused_and_the_live_run_is_untouched() {
+    let edge = Edge::start(RunLimits::default()).await;
+    let person = member_token();
+    let run = edge.start_run(&person, json!({})).await;
+    let before = edge.live(&run).expect("the run is live");
+    assert_eq!(edge.driver.acquired().len(), 1);
+
+    let refused = edge
+        .post(&person, "/v1/agent/runs", json!({ "resume_run_id": run }))
+        .await;
+    assert_eq!(refused.status, 409, "{}", refused.body);
+    assert_eq!(refused.code(), "CONFLICT", "{}", refused.body);
+
+    let after = edge.live(&run).expect("the run is still live");
+    assert!(
+        std::sync::Arc::ptr_eq(&before.live, &after.live),
+        "the registry still holds the run that was there"
+    );
+    assert_eq!(edge.driver.acquired().len(), 1, "no second browser session was acquired");
+    assert!(edge.driver.released().is_empty(), "nothing was released");
+    // The run still answers its owner.
+    let step = edge.step(&person, &run, wait_action(), None).await;
+    assert_eq!(step.status, 200, "{}", step.body);
+}
+
+// ── D2-019: the run carries its resolved egress ─────────────────────────────
+
+/// A started run stores the egress boundary it was started under on its lane, which is what
+/// every later action installs (`ObservationRunner::execute` used to rebuild one from the
+/// grant's allow list on each action and lose the web policy's narrowing and the open-web
+/// mode after step 1). The runtime half is pinned in quarry-runtime's observation tests.
+#[tokio::test]
+#[serial]
+async fn a_started_run_carries_its_resolved_egress_on_its_lane() {
+    let edge = Edge::start(RunLimits::default()).await;
+    let person = member_token();
+    let run = edge
+        .start_run(
+            &person,
+            json!({ "constraints": { "max_steps": 5, "allowed_domains": ["example.com"] } }),
+        )
+        .await;
+    let handle = edge.live(&run).expect("the run is live");
+    let lane = handle.entry.lock().await.human_lane.clone();
+    let carried = lane.0.lock().await.ctx.egress_policy.clone();
+    assert_eq!(
+        carried,
+        Some(quarry_browser::BrowserEgressPolicy::from_allowed_domains(&[
+            "example.com".to_owned()
+        ])),
+        "the lane holds the policy the run was started under"
+    );
+}
