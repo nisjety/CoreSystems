@@ -1,36 +1,67 @@
 use super::*;
 
+/// The query of `GET .../tabs`. `grant_id` is how the attachment's delegate names its
+/// attach grant (the lane check of `delegate_step` reads it from the step body; a GET has
+/// none). The run's owner sends nothing.
+#[derive(Debug, Default, Deserialize)]
+pub struct TabListQuery {
+    #[serde(default, alias = "grantId")]
+    pub grant_id: Option<String>,
+}
+
 /// `GET /v1/agent/runs/{run_id}/tabs` — list live browser tabs.
+///
+/// The run's owner sees every tab. The live attachment's delegate (D2-074) sees only the
+/// tab its attachment opened, the one it may act on: the person's own tabs, and anything
+/// the ledger does not tie to this attachment, are not listed to it. Anyone else is the
+/// same 404 as an unknown run.
 pub async fn list_tabs(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
     Path(run_id): Path<String>,
+    Query(query): Query<TabListQuery>,
 ) -> Result<Json<Envelope<BrowserTabsData>>, ApiErr> {
     let request_id = crate::request_id::current();
-    let entry_arc = {
+    let handle = {
         let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
         map.get(&run_id).map(|handle| {
             if handle.live.owned_by(&claims) {
                 handle.live.touch();
             }
-            handle.entry.clone()
+            handle.clone()
         })
     };
-    let Some(entry_arc) = entry_arc else {
+    let Some(handle) = handle else {
         return Err(status_err(
             StatusCode::NOT_FOUND,
             &request_id,
             "agent run not found",
         ));
     };
+    let entry_arc = handle.entry.clone();
 
     let mut entry = entry_arc.lock().await;
     if !caller_owns_live_run(&entry, &claims) {
-        return Err(status_err(
-            StatusCode::NOT_FOUND,
-            &request_id,
-            "agent run not found",
-        ));
+        // Not the owner: only the live attachment's delegate may list, and only its own tab.
+        let Some(attach) = super::attach::delegate_attach_of(
+            &handle,
+            &entry,
+            &claims,
+            query.grant_id.as_deref(),
+        ) else {
+            return Err(status_err(
+                StatusCode::NOT_FOUND,
+                &request_id,
+                "agent run not found",
+            ));
+        };
+        let tabs = state
+            .agent_driver
+            .list_tabs(&entry.session)
+            .await
+            .map_err(|e| driver_err(&request_id, e))?;
+        let own = delegate_visible_tabs(&handle, &attach, tabs);
+        return Ok(Json(Envelope::ok(request_id, BrowserTabsData { tabs: own })));
     }
 
     let tabs = state
@@ -41,6 +72,25 @@ pub async fn list_tabs(
     prune_tab_openers(&mut entry, &tabs);
 
     Ok(Json(Envelope::ok(request_id, BrowserTabsData { tabs })))
+}
+
+/// The tabs a delegate may see: the one its attachment opened, and only while the ledger
+/// still ties that tab to this attachment. The ledger, not the browser, decides who holds
+/// a tab, so a tab the person opened or took over under another id is never in the list.
+pub(super) fn delegate_visible_tabs(
+    handle: &RunHandle,
+    attach: &AttachState,
+    tabs: Vec<BrowserTab>,
+) -> Vec<BrowserTab> {
+    let ledger = handle.live.tabs();
+    tabs.into_iter()
+        .filter(|tab| {
+            tab.tab_id == attach.tab_id
+                && ledger
+                    .get(&tab.tab_id)
+                    .is_some_and(|meta| meta.attach_id.as_deref() == Some(attach.attach_id.as_str()))
+        })
+        .collect()
 }
 
 /// The most full opener records (class and the agent's ids) a run keeps.
@@ -106,6 +156,17 @@ pub async fn new_tab(
         return Err(run_gone_err(&state, &claims, &request_id, &run_id).await);
     };
 
+    // O5: the ownership check comes first and needs no lock (`owned_by`, the rule a step
+    // uses), so a caller who does not own the run is refused before it counts as in flight.
+    // Counting first let a stranger's call hold a run's expiry off for as long as it
+    // queued on the run lock.
+    if !handle.live.owned_by(&claims) {
+        return Err(status_err(
+            StatusCode::NOT_FOUND,
+            &request_id,
+            "agent run not found",
+        ));
+    }
     // Counts as in flight from before it waits for the run lock, as a step does, so
     // the sweeper never releases a run a tab call is queued on.
     let _in_flight = handle.live.in_flight_guard();
@@ -250,6 +311,17 @@ pub async fn select_tab(
         return Err(run_gone_err(&state, &claims, &request_id, &run_id).await);
     };
 
+    // O5: the ownership check comes first and needs no lock (`owned_by`, the rule a step
+    // uses), so a caller who does not own the run is refused before it counts as in flight.
+    // Counting first let a stranger's call hold a run's expiry off for as long as it
+    // queued on the run lock.
+    if !handle.live.owned_by(&claims) {
+        return Err(status_err(
+            StatusCode::NOT_FOUND,
+            &request_id,
+            "agent run not found",
+        ));
+    }
     // Counts as in flight from before it waits for the run lock, as a step does, so
     // the sweeper never releases a run a tab call is queued on.
     let _in_flight = handle.live.in_flight_guard();
@@ -316,6 +388,17 @@ pub async fn close_tab(
         return Err(run_gone_err(&state, &claims, &request_id, &run_id).await);
     };
 
+    // O5: the ownership check comes first and needs no lock (`owned_by`, the rule a step
+    // uses), so a caller who does not own the run is refused before it counts as in flight.
+    // Counting first let a stranger's call hold a run's expiry off for as long as it
+    // queued on the run lock.
+    if !handle.live.owned_by(&claims) {
+        return Err(status_err(
+            StatusCode::NOT_FOUND,
+            &request_id,
+            "agent run not found",
+        ));
+    }
     // Counts as in flight from before it waits for the run lock, as a step does, so
     // the sweeper never releases a run a tab call is queued on.
     let _in_flight = handle.live.in_flight_guard();

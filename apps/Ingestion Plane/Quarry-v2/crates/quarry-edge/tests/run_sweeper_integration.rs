@@ -1064,6 +1064,45 @@ async fn a_tab_call_queued_on_the_run_lock_is_in_flight_and_holds_the_run() {
     }
 }
 
+/// O5: a tab call counts as in flight only for a caller who owns the run. The ownership check
+/// is the lock-free one a step uses and it comes first, so a stranger's call is the 404 at
+/// once, is not counted, and cannot keep the run from expiring while it would have queued on
+/// the run lock. Before, the count was taken first and a stranger's queued call held it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_tab_call_from_someone_who_does_not_own_the_run_is_not_counted_in_flight() {
+    for which in TAB_CALLS {
+        let limits = idle_limits(60);
+        let edge = Arc::new(Edge::start(limits.clone()).await);
+        let person = member_token();
+        let run = edge.start_run(&person, json!({})).await;
+        let tab_id = a_tab_id(&edge, &person, &run).await;
+        let handle = edge.live(&run).expect("the run is live");
+
+        // A running action holds the run's lock. The owner's call would queue on it; the
+        // stranger's must not wait for it at all.
+        let running = handle.entry.lock().await;
+        for stranger in [stranger_token(), other_member_token()] {
+            let queued = spawn_call(&edge, &stranger, tab_call(which, &run, &tab_id));
+            let reply = tokio::time::timeout(Duration::from_secs(10), queued)
+                .await
+                .unwrap_or_else(|_| panic!("a stranger's tab {which} waited on the run lock"))
+                .expect("the call task");
+            assert_eq!(reply.status, 404, "tab {which}: {}", reply.body);
+            assert_eq!(
+                handle.live.in_flight(),
+                0,
+                "a stranger's tab {which} is not in flight on someone else's run"
+            );
+        }
+        assert_eq!(
+            handle.live.verdict(later(120_000), &limits).is_some(),
+            true,
+            "the run still expires: nothing is holding it (tab {which})"
+        );
+        drop(running);
+    }
+}
+
 /// Queue `call` on the run's lock, then release the run under it as the sweeper does
 /// (closed, out of the registry, the checkpoint left active). With `explicit` the
 /// owner's close also closes the checkpoint, as `DELETE /v1/agent/runs/{id}` does.

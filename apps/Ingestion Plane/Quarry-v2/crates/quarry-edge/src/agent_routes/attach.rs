@@ -563,7 +563,7 @@ pub async fn control_tab(
 /// caller is the live attachment's delegate (the lane check), so nothing else is revealed.
 /// The live attachment this caller may use as its delegate, or `None` (every delegate refusal
 /// is the same 404). The caller holds the entry lock; no lane lock is taken here.
-fn delegate_attach_of(
+pub(super) fn delegate_attach_of(
     handle: &RunHandle,
     entry: &RunEntry,
     claims: &crate::auth::Claims,
@@ -756,6 +756,40 @@ pub(super) async fn delegate_step(
     }
     let step_result = runner.execute(&req, &pinned, &mut lane.ctx).await;
     let mut entry = handle.entry.lock().await;
+    // D2-031: the attachment may have been released, revoked or ended (or the run closed)
+    // while the browser ran this step. Admission was checked before it ran; the lane's owner
+    // is checked again here, before anything is recorded or returned. A step whose
+    // attachment is gone answers the same 404 as any call from a delegate that is no longer
+    // one, advances nothing on the run, and leaves a failed receipt under the step key it
+    // reserved (so the run's step numbers have no hole). The page effect of the one action
+    // that was already running cannot be undone; the receipt says its outcome was not
+    // delivered, not that it did not happen.
+    let attach_still_live = !entry.closed
+        && handle
+            .live
+            .attaches()
+            .live()
+            .is_some_and(|live| live.attach_id == attach_id);
+    if !attach_still_live {
+        let receipt = ReceiptBuilder::start(receipt_run_id, receipt_step)
+            .org_id(receipt_org)
+            .actor_id(receipt_actor)
+            .initiator(StepInitiator::Agent, admitted.control_epoch)
+            .agent(admitted.agent.clone())
+            .failed_cost(estimated_action_cost_usd(&receipt_action))
+            .cost_source(CostSource::FlatTable)
+            .tab(Some(tab_id.clone()), Some(attach_id.clone()))
+            .typed_field(typed_kind)
+            .fail(
+                receipt_action,
+                &QuarryError::new(ErrorCode::NotFound, "attach_released_during_step"),
+            );
+        if let Err(error) = state.receipts.append(receipt).await {
+            // zdr-log-ok: a ZDR run has no delegate (attach is refused for it); the store error text is what an operator needs
+            tracing::warn!(%error, "could not record the receipt of a delegate step whose attachment ended");
+        }
+        return Err(not_found());
+    }
     let observation = match step_result {
         Ok(observation) => {
             let cost_usd = receipt_cost_usd(&observation.telemetry, &receipt_action);
@@ -921,5 +955,322 @@ mod attach_tests {
     fn attach_defaults_are_inside_the_bounds() {
         assert!(ATTACH_DEFAULT_STEPS >= 1 && ATTACH_DEFAULT_STEPS <= ATTACH_MAX_STEPS);
         assert!(ATTACH_DEFAULT_RUNTIME_S >= 1 && ATTACH_DEFAULT_RUNTIME_S <= ATTACH_MAX_RUNTIME_S);
+    }
+}
+
+/// D2-031 and D2-074: a delegate's steps and its tab list, against a driver double that can hold
+/// a step inside the browser (so a test can release the attachment while the step runs).
+#[cfg(test)]
+mod delegate_lane_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Answers every call a `wait` step makes from memory. When armed, `content` (the first
+    /// read after the action) signals `entered` and then waits for `gate`.
+    struct DelegateDriver {
+        armed: AtomicBool,
+        entered: tokio::sync::Notify,
+        gate: tokio::sync::Notify,
+        tab_ids: Vec<String>,
+    }
+
+    impl DelegateDriver {
+        fn new(tab_ids: &[&str]) -> Arc<Self> {
+            Arc::new(Self {
+                armed: AtomicBool::new(false),
+                entered: tokio::sync::Notify::new(),
+                gate: tokio::sync::Notify::new(),
+                tab_ids: tab_ids.iter().map(|id| (*id).to_owned()).collect(),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl quarry_browser::BrowserDriver for DelegateDriver {
+        async fn acquire(&self, lease: &BrowserLease) -> QuarryResult<BrowserSession> {
+            Ok(BrowserSession {
+                lease: lease.clone(),
+                tab_pin: None,
+                inner: Arc::new(TokioMutex::new(SessionInner::default())),
+            })
+        }
+        async fn release(&self, _session: BrowserSession) -> QuarryResult<()> {
+            Ok(())
+        }
+        async fn configure_egress_policy(
+            &self,
+            _session: &BrowserSession,
+            _policy: BrowserEgressPolicy,
+        ) -> QuarryResult<()> {
+            Ok(())
+        }
+        async fn goto(&self, _session: &BrowserSession, _url: &str) -> QuarryResult<()> {
+            Ok(())
+        }
+        async fn content(&self, _session: &BrowserSession) -> QuarryResult<bytes::Bytes> {
+            if self.armed.load(Ordering::SeqCst) {
+                self.entered.notify_one();
+                self.gate.notified().await;
+            }
+            Ok(bytes::Bytes::from_static(b"<html><body><p>page</p></body></html>"))
+        }
+        async fn screenshot(&self, _session: &BrowserSession, _full_page: bool) -> QuarryResult<bytes::Bytes> {
+            Ok(bytes::Bytes::from_static(b"\x89PNG"))
+        }
+        async fn pdf(&self, _session: &BrowserSession) -> QuarryResult<bytes::Bytes> {
+            Ok(bytes::Bytes::from_static(b"%PDF"))
+        }
+        async fn list_tabs(&self, _session: &BrowserSession) -> QuarryResult<Vec<BrowserTab>> {
+            Ok(self
+                .tab_ids
+                .iter()
+                .map(|id| BrowserTab {
+                    tab_id: id.clone(),
+                    title: None,
+                    url: None,
+                    active: id == "tab_home",
+                })
+                .collect())
+        }
+    }
+
+    /// Validates the attach grant for the run id that is written into field 0 once the run exists.
+    struct AttachGrant(Arc<std::sync::Mutex<String>>);
+
+    #[async_trait::async_trait]
+    impl quarry_runtime::GrantValidator for AttachGrant {
+        async fn validate(&self, grant_id: &str) -> QuarryResult<GrantValidation> {
+            // The run has no grant of its own in these tests, so the parent is the empty id.
+            Ok(GrantValidation {
+                grant_id: grant_id.to_owned(),
+                active: true,
+                expires_at: None,
+                allowed_domains: vec!["example.com".to_owned()],
+                allowed_actions: Vec::new(),
+                allowed_frame_ids: Vec::new(),
+                allowed_dialog_ids: Vec::new(),
+                allowed_artifact_ids: Vec::new(),
+                parent_grant_id: Some(String::new()),
+                kind: "attach".to_owned(),
+                owner_id: "u1".to_owned(),
+                zdr: false,
+                budget: None,
+                policy_mode: "allow_list".to_owned(),
+                denied_domains: Vec::new(),
+                absolute_expires_at: None,
+                resource_id: self.0.lock().unwrap().clone(),
+            })
+        }
+    }
+
+    fn service_claims() -> crate::auth::Claims {
+        crate::auth::Claims {
+            principal_type: Some("service".to_owned()),
+            service_id: Some("svc_execution_core".to_owned()),
+            sub: "svc_execution_core".to_owned(),
+            user_id: "svc_execution_core".to_owned(),
+            ..crate::test_support::claims_for_org("org")
+        }
+    }
+
+    struct Fixture {
+        state: AppState,
+        handle: RunHandle,
+        driver: Arc<DelegateDriver>,
+        run_id: String,
+    }
+
+    /// A live run owned by `u1` in `org`, with one attachment (`att_1`, tab `tab_agent`) held by
+    /// the service principal `svc_execution_core`.
+    async fn fixture(tab_ids: &[&str]) -> Fixture {
+        let driver = DelegateDriver::new(tab_ids);
+        let resource = Arc::new(std::sync::Mutex::new(String::new()));
+        let mut state = crate::test_support::test_state_with_grants(
+            crate::test_support::StubDriver::ok(),
+            Arc::new(AttachGrant(resource.clone())),
+            false,
+        );
+        state.agent_driver = driver.clone();
+        let handle = crate::test_support::insert_live_run(&state, &crate::test_support::claims_for_org("org"));
+        let run_id = handle.entry.lock().await.run_id.to_string();
+        *resource.lock().unwrap() = run_id.clone();
+        handle
+            .live
+            .attaches()
+            .begin(AttachState {
+                attach_id: "att_1".to_owned(),
+                grant_id: "grant_attach".to_owned(),
+                delegate_actor: "svc_execution_core".to_owned(),
+                tab_id: "tab_agent".to_owned(),
+                allowed_domains: vec!["example.com".to_owned()],
+                budget: AttachBudget::new(5, 60),
+                lane: LaneRef::new(LaneState {
+                    ctx: ObservationContext {
+                        current_url: "https://example.com/".to_owned(),
+                        ..Default::default()
+                    },
+                    last_observation: None,
+                }),
+                phase: BrowserAttachState::Attached,
+                started_ms: unix_ms_now(),
+                last_activity_ms: unix_ms_now(),
+            })
+            .expect("no attachment yet");
+        {
+            let mut ledger = handle.live.tabs();
+            ledger.seed("tab_home", OpenedBy::Human);
+            ledger.open_agent_tab("tab_agent", "att_1");
+        }
+        Fixture { state, handle, driver, run_id }
+    }
+
+    fn wait_step(grant: &str) -> StepBody {
+        StepBody {
+            action: AgentAction::Wait { ms: 0 },
+            initiated_by: None,
+            ai_run_id: None,
+            agent_label: None,
+            instruction: None,
+            extraction_profile: None,
+            grant_id: Some(grant.to_owned()),
+        }
+    }
+
+    /// D2-031: the attachment is released while the browser is running the delegate's step.
+    /// The step used to finish as if nothing had happened: a completed receipt, the run's
+    /// step and checkpoint advanced, a 200 for a delegate that no longer is one. It now
+    /// answers the 404 any released delegate gets, advances nothing, and leaves a failed
+    /// receipt under its step key.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_delegate_step_that_finishes_after_the_release_records_no_success() {
+        let f = fixture(&["tab_home", "tab_agent"]).await;
+        f.driver.armed.store(true, Ordering::SeqCst);
+
+        let state = f.state.clone();
+        let handle = f.handle.clone();
+        let step = tokio::spawn(async move {
+            delegate_step(&state, &handle, &service_claims(), "req_race", wait_step("grant_attach")).await
+        });
+        // The step is inside the browser: admitted, charged, its entry lock released.
+        tokio::time::timeout(std::time::Duration::from_secs(10), f.driver.entered.notified())
+            .await
+            .expect("the delegate step reached the browser");
+
+        // The person releases the attachment (the registry change `release_attach` makes).
+        let ended = f
+            .handle
+            .live
+            .attaches()
+            .end("att_1", BrowserAttachState::Released);
+        assert!(ended.is_some(), "the attachment was live and is now ended");
+        f.driver.gate.notify_one();
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), step)
+            .await
+            .expect("the step finishes")
+            .expect("the task did not panic");
+        let (status, _) = result.expect_err("a released delegate gets no success");
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let rid: RunKind = f.run_id.parse().unwrap();
+        let receipts = f.state.receipts.list(&rid).await.unwrap();
+        assert_eq!(receipts.len(), 1, "one receipt under the reserved step key: {receipts:?}");
+        assert!(
+            !matches!(receipts[0].outcome, StepOutcome::Completed { .. }),
+            "no completed receipt for a step the released delegate was not told about: {receipts:?}"
+        );
+        let entry = f.handle.entry.lock().await;
+        assert_eq!(entry.summary.step, 0, "the run's step did not advance");
+        assert!(entry.summary.last_observation.is_none());
+    }
+
+    /// The same step with the attachment still live is a completed, recorded step: the
+    /// re-check does not refuse a step that is entitled to finish.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_delegate_step_on_a_live_attachment_still_completes() {
+        let f = fixture(&["tab_home", "tab_agent"]).await;
+        let reply = delegate_step(&f.state, &f.handle, &service_claims(), "req_ok", wait_step("grant_attach"))
+            .await
+            .expect("the live delegate's step completes");
+        assert!(!reply.0.data.is_none());
+        let rid: RunKind = f.run_id.parse().unwrap();
+        let receipts = f.state.receipts.list(&rid).await.unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert!(matches!(receipts[0].outcome, StepOutcome::Completed { .. }), "{receipts:?}");
+    }
+
+    async fn list_as(
+        f: &Fixture,
+        claims: crate::auth::Claims,
+        grant: Option<&str>,
+    ) -> Result<Vec<String>, StatusCode> {
+        let reply = list_tabs(
+            State(f.state.clone()),
+            Extension(claims),
+            Path(f.run_id.clone()),
+            Query(TabListQuery { grant_id: grant.map(str::to_owned) }),
+        )
+        .await;
+        match reply {
+            Ok(Json(envelope)) => Ok(envelope
+                .data
+                .expect("data")
+                .tabs
+                .into_iter()
+                .map(|tab| tab.tab_id)
+                .collect()),
+            Err((status, _)) => Err(status),
+        }
+    }
+
+    /// D2-074: the owner lists every tab; the attachment's delegate lists only the tab its
+    /// attachment opened; a delegate with the wrong grant, and any other caller, is the 404.
+    #[tokio::test]
+    async fn a_delegate_lists_only_its_own_tab_and_the_owner_lists_all() {
+        let f = fixture(&["tab_home", "tab_agent", "tab_person"]).await;
+        f.handle.live.tabs().seed("tab_person", OpenedBy::Human);
+
+        let owner = list_as(&f, crate::test_support::claims_for_org("org"), None).await.unwrap();
+        assert_eq!(owner, vec!["tab_home", "tab_agent", "tab_person"]);
+
+        let delegate = list_as(&f, service_claims(), Some("grant_attach")).await.unwrap();
+        assert_eq!(delegate, vec!["tab_agent"], "the delegate sees its own tab and no other");
+
+        // The delegate's tab being taken over does not widen what it may see.
+        f.handle
+            .live
+            .tabs()
+            .set_holder("tab_agent", BrowserTabHolder::Human, None)
+            .unwrap();
+        let after = list_as(&f, service_claims(), Some("grant_attach")).await.unwrap();
+        assert_eq!(after, vec!["tab_agent"]);
+
+        // Without the grant, or with another one, the delegate is a stranger.
+        assert_eq!(list_as(&f, service_claims(), None).await, Err(StatusCode::NOT_FOUND));
+        assert_eq!(
+            list_as(&f, service_claims(), Some("grant_other")).await,
+            Err(StatusCode::NOT_FOUND)
+        );
+        // Another service principal, and another member of the org, are strangers too.
+        let mut other_service = service_claims();
+        other_service.user_id = "svc_other".to_owned();
+        assert_eq!(
+            list_as(&f, other_service, Some("grant_attach")).await,
+            Err(StatusCode::NOT_FOUND)
+        );
+        let mut member = crate::test_support::claims_for_org("org");
+        member.user_id = "u2".to_owned();
+        assert_eq!(list_as(&f, member, None).await, Err(StatusCode::NOT_FOUND));
+    }
+
+    /// Once the attachment has ended there is no delegate any more.
+    #[tokio::test]
+    async fn a_released_delegate_cannot_list_tabs() {
+        let f = fixture(&["tab_home", "tab_agent"]).await;
+        f.handle.live.attaches().end("att_1", BrowserAttachState::Released);
+        assert_eq!(
+            list_as(&f, service_claims(), Some("grant_attach")).await,
+            Err(StatusCode::NOT_FOUND)
+        );
     }
 }
