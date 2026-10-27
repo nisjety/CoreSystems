@@ -164,3 +164,39 @@ PART 3 - CLAUDE 5.5 ON THE OWNER'S ANTHROPIC KEY, D1-789/D1-790 CHECKED (2026-10
   New finding D1-793: verify-replica-run-control.sh sends one bearer where stream, queue and rating need the
   session and inference bearers too; the WS04-S9 proof is not run until that is fixed.
   Test data left: one retried turn in the existing thread and one new two-message thread in the owner's chat list.
+
+
+PART 4 - WS04-S9 TWO-REPLICA PROOF, FLIP, WS08-S8 OCR IN THE IMAGE, STACK STATE (2026-10-27 15:26-17:40 UTC)
+  NATS: the running server mounted the main checkout's nats.conf, which lacks the WS04 run-control grants. It was
+  recreated from its own replayed config with only that bind mount pointed at the worktree's deploy/nats.conf
+  (validated first with nats-server -t inside the running server; same passwords, same JetStream volume). No
+  authorization violations after the swap; every Model Plane service reconnected. Rollback container:
+  model-plane-nats-1-rollback-runctl-acl. A compose recreate of NATS from the main checkout would drop the grants;
+  the gateway's boot self-test then degrades the bus to off (it does not take the gateway down).
+  Proof user: the project's own local e2e fixture account (seed-verified-test-user.sh), org "Verevon E2E Test",
+  non-ZDR; its auth-core session kept in a umask-077 cookie jar outside the repo; bearers minted per case and never
+  printed or written.
+  Runs of scripts/verify-replica-run-control.sh, in order, each one finding something:
+    run 1: preflight and case 1 Stop-via-peer pass; A's gateway_active_streams stays at 1 -> D1-795 (gauge counted
+      by hand, every stopped stream leaked one). Fixed by a drop guard (75c19bc6f).
+    diagnostic runs: case 2 had no tool round (the proof sent no `tools` feature); case 3 refused with
+      data_plane_auth_required (the proof sent three of the BFF's eight delegated bearers); then agent_run_failed
+      twice: execution-core runs agent turns on EXECUTION_AGENT_MODEL=model-router, which the Anthropic-only chain
+      cannot serve (set to claude-sonnet-5-5 in the test env file for this stack), and then Anthropic 400
+      "tools.15.custom.name ... ^[a-zA-Z0-9_-]{1,128}$" for the dotted agent tool names -> D1-797, retried three
+      times -> D1-798. Fixed in 9e01bbae8 (per-request reversible wire-name map, a rejected 4xx is not retried).
+    run 3: cases 1, 2 pass; case 3 approval, Do run on B and the thread grant pass, but the script looked for a
+      RUN_PLAN_MODE_EXITED row in session-core's events table, which no service writes (bus-only event) -> D1-801;
+      the check now reads runs.mode.
+    run 4: PASS, all six cases (evidence file live-proof-ws04-replica-run-control-2026-10-27.txt).
+  Flip committed in 08ae0b374: RUN_CONTROL_BUS, DURABLE_PLAN_GRANT, SHARED_TURN_RECORD, SEND_RECEIPTS default true;
+  SHARED_IDEMPOTENCY false. Replica B was then stopped and removed; the stack runs one gateway replica again.
+  WS08-S8: imports-core built from a clean snapshot of HEAD 98b302b0c and run as a throwaway container (no network,
+  no secrets) on a two-page image-only PDF: with CHAT_EXTRACT_OCR_ENABLED=true the extract returned the scanned
+  text (HACCP, hygiene, rengjoring found); with it false the same call refused 422 "No readable text found", as
+  today. The deployed imports-api was not changed (the switch is default off).
+  FINAL STATE: model-gateway and execution-core on 08ae0b374, inference-core on 9e01bbae8, the rest as in part 3;
+  MODEL_GATEWAY_EFFORT_LADDER and EXECUTION_CORE_RUN_EFFORT off (WS11-S8 is built, inert); EXECUTION_AGENT_MODEL
+  and DEFAULT_MODEL claude-sonnet-5-5 from the test env file outside the repos. A browser smoke turn after the
+  flip answered on claude-sonnet-5-5. Test data left: the proof user's threads and runs in session-core, the owner's
+  three test threads.
