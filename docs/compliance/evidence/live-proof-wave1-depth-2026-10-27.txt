@@ -130,3 +130,37 @@ FINAL STATE (2026-10-27 06:12 UTC)
   old images); the intermediate audit-core chain-on/off rollback containers were removed. Backups and
   :rollback-20261027 tags as in part 1. Test data left: the two chat turns in the owner's chat list (a new
   conversation with two document searches) and their audit rows; the synthetic paging rows were deleted.
+
+PART 3 - CLAUDE 5.5 ON THE OWNER'S ANTHROPIC KEY, D1-789/D1-790 CHECKED (2026-10-27 15:13-15:23 UTC)
+  Order: live tests use the owner's Anthropic API key with claude-sonnet-5-5 only (never a Verevon route or a
+  ChatGPT/Codex subscription). The key lives in one env file outside both checkouts, passed to
+  recreate-with-live-env.sh as EXTRA_ENV_FILE (last, so it wins); it is not in this file or any repo file.
+  Images: inference-core from 058c36753 and model-gateway from e7cb5c0fb, both built from a clean git archive of
+  HEAD (not the working tree, which held another round's uncommitted proto field and broke the model-gateway build
+  with E0063). Revision labels checked on the running containers. Both healthy. inference-core logs one provider
+  in its chain: anthropic. ANTHROPIC_NATIVE_CONTEXT_MANAGEMENT=true, INFERENCE_ANTHROPIC_TIERED_SYSTEM=false,
+  INFERENCE_CORE_ANTHROPIC_ADAPTIVE_THINKING=false (the last has no say for 5.5 models). DEFAULT_MODEL is set on
+  model-gateway from the same env file.
+  Rollback: the earlier containers' image ids were already gone from the image store when tagging was tried, so
+  the fallback is the :rollback-20261027 tags or a rebuild of d67c5a43f.
+
+  D1-791, retired id: the thread whose turn had failed with 404 (picker still on claude-sonnet-4-20250514) was
+  retried from the SPA. inference-core: DEBUG "retired Claude model id answered by its successor" from
+  claude-sonnet-4-20250514 to claude-sonnet-5-5; infer succeeded, provider anthropic, model_used and
+  provider_reported_model claude-sonnet-5-5; effort_resolved wire AnthropicAdaptive requested high applied high
+  clamped false; DEBUG "forced tool_choice is not accepted by this model; sending auto"; prompt-cache breakpoints
+  3 with min_cacheable_tokens 512; the second call read 12357 tokens from the cache. The answer rendered with one
+  Knowledge search tool step and the provenance line "Behandlet: global (Anthropic)".
+  D1-791, fresh thread: the picker's manual list shows CLAUDE claude-sonnet-5-5, claude-opus-5-5,
+  claude-haiku-5-5 (the retired ids are gone). New thread on claude-sonnet-5-5 with one knowledge-search prompt:
+  three effort_resolved lines (AnthropicAdaptive, high, applied high), cache reads 7761 and 12502 tokens,
+  infer_stream started on claude-sonnet-5-5, the answer with one tool step, and "Hentet 5 minner fra tidligere
+  samtaler". No 400 from the API in the window, with the context-management beta header on.
+  D1-789: GET /api/v1/memory from the signed-in page through the BFF to capability-core answered 200, 20
+  memories, degraded false, degradation_reason empty; session-core ran the memory-controls query.
+  D1-790: session-core's last "org agent policy refresh failed ... agent-policy answered 403 Forbidden" is at
+  13:26:48 UTC (six in the 4 h window, all before the org-core registry swap); none from then to 15:20.
+  New finding D1-792: model-gateway's finetune poller is refused by auth-core (403) on every tick.
+  New finding D1-793: verify-replica-run-control.sh sends one bearer where stream, queue and rating need the
+  session and inference bearers too; the WS04-S9 proof is not run until that is fixed.
+  Test data left: one retried turn in the existing thread and one new two-message thread in the owner's chat list.
