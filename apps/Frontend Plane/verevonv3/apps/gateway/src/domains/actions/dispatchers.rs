@@ -5318,6 +5318,8 @@ pub(super) async fn dispatch_browser_create_tab(
     let response = new_browser_tab(
         StateExtractor(state.clone()),
         ExtensionExtractor(user.clone()),
+        // D2-012: no verified caller class reaches the dispatcher yet (see CallerClass).
+        None,
         headers.clone(),
         PathExtractor(session_id.to_owned()),
         Json(body),
@@ -5345,6 +5347,8 @@ pub(super) async fn dispatch_browser_select_tab(
     let response = select_browser_tab(
         StateExtractor(state.clone()),
         ExtensionExtractor(user.clone()),
+        // D2-012: no verified caller class reaches the dispatcher yet (see CallerClass).
+        None,
         headers.clone(),
         PathExtractor((session_id.to_owned(), tab_id.to_owned())),
         QueryExtractor(TabActorQuery { actor }),
@@ -5372,6 +5376,8 @@ pub(super) async fn dispatch_browser_close_tab(
     let response = close_browser_tab(
         StateExtractor(state.clone()),
         ExtensionExtractor(user.clone()),
+        // D2-012: no verified caller class reaches the dispatcher yet (see CallerClass).
+        None,
         headers.clone(),
         PathExtractor((session_id.to_owned(), tab_id.to_owned())),
         QueryExtractor(TabActorQuery { actor }),
@@ -5417,6 +5423,8 @@ pub(super) async fn dispatch_browser_run_action(
     let response = run_browser_action(
         StateExtractor(state.clone()),
         ExtensionExtractor(user.clone()),
+        // D2-012: no verified caller class reaches the dispatcher yet (see CallerClass).
+        None,
         headers.clone(),
         PathExtractor(session_id.to_owned()),
         Json(body),

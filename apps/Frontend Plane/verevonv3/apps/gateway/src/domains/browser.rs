@@ -262,6 +262,39 @@ pub(crate) enum BrowserActionActor {
     Human,
 }
 
+/// Who is on the other end of a browser call, as the gateway verified it (D2-012). It is
+/// a request extension the authentication layer inserts, never a field of the body.
+///
+/// Nothing inserts `ServicePrincipal` yet: how the Model Plane authenticates to this
+/// gateway when it drives browser actions is an open owner decision. Until a producer
+/// exists every call is `User` and behaves exactly as before; the enforcement below is
+/// in place so that wiring the producer is the only step left.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum CallerClass {
+    /// A person's session. It cannot prove it is not a model acting through the
+    /// person's own session, so `body.actor` stays advisory and can only tighten.
+    #[default]
+    User,
+    /// A verified service principal (the Model Plane). Always the agent.
+    // reason: no authentication layer produces this class yet (open owner decision, D2-012);
+    // only the tests construct it until the producer lands.
+    #[allow(dead_code)]
+    ServicePrincipal,
+}
+
+/// The actor a browser call acts as. A service principal is always the agent, whatever
+/// its body or query says; under a user session the stated actor is taken, which can
+/// only tighten (a stated `agent` is refused during takeover and cannot reload).
+fn effective_actor(
+    caller: Option<Extension<CallerClass>>,
+    stated: BrowserActionActor,
+) -> BrowserActionActor {
+    match caller.map(|Extension(class)| class).unwrap_or_default() {
+        CallerClass::ServicePrincipal => BrowserActionActor::Agent,
+        CallerClass::User => stated,
+    }
+}
+
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum BrowserControlMode {
@@ -852,6 +885,7 @@ async fn get_owner_timeline(
 pub(crate) async fn run_action(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    caller: Option<Extension<CallerClass>>,
     headers: HeaderMap,
     Path(session_id): Path<String>,
     Json(body): Json<ActionBody>,
@@ -862,7 +896,7 @@ pub(crate) async fn run_action(
             return (StatusCode::BAD_REQUEST, Json(error(code, message))).into_response()
         }
     };
-    let actor = body.actor;
+    let actor = effective_actor(caller, body.actor);
     if reload_refused_for_actor(&action, actor) {
         return (
             StatusCode::FORBIDDEN,
@@ -1047,10 +1081,12 @@ async fn get_tabs(
 pub(crate) async fn new_tab(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    caller: Option<Extension<CallerClass>>,
     headers: HeaderMap,
     Path(session_id): Path<String>,
     Json(body): Json<NewTabBody>,
 ) -> Response {
+    let actor = effective_actor(caller, body.actor);
     if !is_valid_path_segment(&session_id) {
         return (
             StatusCode::BAD_REQUEST,
@@ -1071,7 +1107,7 @@ pub(crate) async fn new_tab(
     let cookie = cookie_header(&headers);
     let token = quarry_token(&state, &user, &cookie).await;
     if let Some(refusal) =
-        refuse_agent_tab_call_during_takeover(&state, &user, token.as_deref(), &session_id, body.actor)
+        refuse_agent_tab_call_during_takeover(&state, &user, token.as_deref(), &session_id, actor)
             .await
     {
         return refusal;
@@ -1082,8 +1118,8 @@ pub(crate) async fn new_tab(
         &format!("/v1/agent/runs/{}/tabs", urlencoding::encode(&session_id)),
         Some(new_tab_request_body(
             url,
-            body.actor,
-            &AgentAdvisory::from_headers(&headers).for_actor(body.actor),
+            actor,
+            &AgentAdvisory::from_headers(&headers).for_actor(actor),
         )),
         token.as_deref(),
         &user.user_id,
@@ -1120,6 +1156,7 @@ pub(crate) async fn new_tab(
 pub(crate) async fn select_tab(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    caller: Option<Extension<CallerClass>>,
     headers: HeaderMap,
     Path((session_id, tab_id)): Path<(String, String)>,
     Query(call): Query<TabActorQuery>,
@@ -1132,7 +1169,7 @@ pub(crate) async fn select_tab(
         Some(tab_id),
         Method::POST,
         "select",
-        call.actor,
+        effective_actor(caller, call.actor),
         None,
     )
     .await
@@ -1141,6 +1178,7 @@ pub(crate) async fn select_tab(
 pub(crate) async fn close_tab(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    caller: Option<Extension<CallerClass>>,
     headers: HeaderMap,
     Path((session_id, tab_id)): Path<(String, String)>,
     Query(call): Query<TabActorQuery>,
@@ -1153,7 +1191,7 @@ pub(crate) async fn close_tab(
         Some(tab_id),
         Method::DELETE,
         "close",
-        call.actor,
+        effective_actor(caller, call.actor),
         None,
     )
     .await
@@ -5378,10 +5416,20 @@ pub(crate) mod tests {
         actor: BrowserActionActor,
         headers: HeaderMap,
     ) -> [StatusCode; 3] {
+        call_tab_routes_as(state, actor, headers, None).await
+    }
+
+    async fn call_tab_routes_as(
+        state: &AppState,
+        actor: BrowserActionActor,
+        headers: HeaderMap,
+        caller: Option<CallerClass>,
+    ) -> [StatusCode; 3] {
         let user = test_user("user-owner", "org-owner");
         let select = select_tab(
             State(state.clone()),
             Extension(user.clone()),
+            caller.map(Extension),
             headers.clone(),
             Path(("run-1".to_owned(), "tab-1".to_owned())),
             Query(TabActorQuery { actor }),
@@ -5390,6 +5438,7 @@ pub(crate) mod tests {
         let close = close_tab(
             State(state.clone()),
             Extension(user.clone()),
+            caller.map(Extension),
             headers.clone(),
             Path(("run-1".to_owned(), "tab-1".to_owned())),
             Query(TabActorQuery { actor }),
@@ -5398,6 +5447,7 @@ pub(crate) mod tests {
         let open = new_tab(
             State(state.clone()),
             Extension(user),
+            caller.map(Extension),
             headers,
             Path("run-1".to_owned()),
             Json(NewTabBody { url: None, actor }),
@@ -5466,6 +5516,7 @@ pub(crate) mod tests {
             let response = run_action(
                 State(state),
                 Extension(test_user("user-owner", "org-owner")),
+                None,
                 headers.clone(),
                 Path("run-1".to_owned()),
                 Json(ActionBody {
@@ -6893,6 +6944,7 @@ pub(crate) mod tests {
             run_action(
                 State(state.clone()),
                 Extension(attacker.clone()),
+                None,
                 headers.clone(),
                 Path("run-owned".to_owned()),
                 Json(ActionBody {
@@ -6922,6 +6974,7 @@ pub(crate) mod tests {
             new_tab(
                 State(state.clone()),
                 Extension(attacker.clone()),
+                None,
                 headers.clone(),
                 Path("run-owned".to_owned()),
                 Json(NewTabBody::default()),
@@ -8062,6 +8115,140 @@ pub(crate) mod tests {
         let typed = sanitize_action(json!({ "type": "reload", "ignore_cache": "yes" }))
             .expect_err("non-boolean ignore_cache must be refused");
         assert_eq!(typed.0, "invalid_browser_action");
+    }
+
+    /// D2-012: a verified service principal is the agent whatever it states, a person's
+    /// session keeps the stated actor, and a call with no class is a person's.
+    #[test]
+    fn a_service_principal_is_the_agent_whatever_it_states() {
+        let sp = || Some(Extension(CallerClass::ServicePrincipal));
+        for stated in [BrowserActionActor::Human, BrowserActionActor::Agent] {
+            assert_eq!(effective_actor(sp(), stated), BrowserActionActor::Agent, "{stated:?}");
+        }
+        for caller in [None, Some(Extension(CallerClass::User))] {
+            assert_eq!(
+                effective_actor(caller, BrowserActionActor::Human),
+                BrowserActionActor::Human
+            );
+            assert_eq!(
+                effective_actor(caller, BrowserActionActor::Agent),
+                BrowserActionActor::Agent
+            );
+        }
+    }
+
+    /// D2-012: a service principal stating `human` still cannot reload (WS9.B). It is
+    /// refused before any upstream call, so the test needs no Quarry.
+    #[tokio::test]
+    async fn a_service_principal_stating_human_cannot_reload() {
+        let response = run_action(
+            State(test_app_state()),
+            Extension(test_user("user-owner", "org-owner")),
+            Some(Extension(CallerClass::ServicePrincipal)),
+            HeaderMap::new(),
+            Path("run-1".to_owned()),
+            Json(ActionBody {
+                action: json!({ "type": "reload" }),
+                actor: BrowserActionActor::Human,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// D2-012: during a person's takeover a service principal stating `human` is refused
+    /// like any agent, and nothing reaches Quarry (no step, no control change).
+    #[tokio::test]
+    async fn a_service_principal_stating_human_is_refused_during_takeover() {
+        let quarry = wiremock::MockServer::start().await;
+        mount_tab_run(&quarry, "human_takeover").await;
+        let mut state = test_app_state();
+        state.quarry_edge_url = quarry.uri();
+
+        let response = run_action(
+            State(state.clone()),
+            Extension(test_user("user-owner", "org-owner")),
+            Some(Extension(CallerClass::ServicePrincipal)),
+            HeaderMap::new(),
+            Path("run-1".to_owned()),
+            Json(ActionBody {
+                action: json!({ "type": "wait", "ms": 10 }),
+                actor: BrowserActionActor::Human,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            call_tab_routes_as(
+                &state,
+                BrowserActionActor::Human,
+                HeaderMap::new(),
+                Some(CallerClass::ServicePrincipal)
+            )
+            .await,
+            [StatusCode::CONFLICT; 3]
+        );
+        assert!(
+            quarry_mutations(&quarry).await.is_empty(),
+            "a refused call never reaches Quarry"
+        );
+    }
+
+    /// D2-012: outside a takeover a service principal stating `human` neither flips the
+    /// run into takeover nor sends a person's step: Quarry gets the agent's step only.
+    #[tokio::test]
+    async fn a_service_principal_stating_human_cannot_start_a_takeover() {
+        use wiremock::{
+            matchers::{method as wm_method, path as wm_path},
+            Mock, ResponseTemplate,
+        };
+
+        let quarry = wiremock::MockServer::start().await;
+        mount_tab_run(&quarry, "agent_control").await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/agent/runs/run-1/step"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": { "ok": true } })))
+            .mount(&quarry)
+            .await;
+        let mut state = test_app_state();
+        state.quarry_edge_url = quarry.uri();
+
+        let response = run_action(
+            State(state.clone()),
+            Extension(test_user("user-owner", "org-owner")),
+            Some(Extension(CallerClass::ServicePrincipal)),
+            HeaderMap::new(),
+            Path("run-1".to_owned()),
+            Json(ActionBody {
+                action: json!({ "type": "wait", "ms": 10 }),
+                actor: BrowserActionActor::Human,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let mutations = quarry_mutations(&quarry).await;
+        assert_eq!(mutations.len(), 1, "{mutations:?}");
+        assert_eq!(mutations[0].1, "/v1/agent/runs/run-1/step");
+        assert_eq!(mutations[0].2["initiated_by"], "agent", "{:?}", mutations[0]);
+
+        let quarry = wiremock::MockServer::start().await;
+        mount_tab_run(&quarry, "agent_control").await;
+        state.quarry_edge_url = quarry.uri();
+        assert_eq!(
+            call_tab_routes_as(
+                &state,
+                BrowserActionActor::Human,
+                HeaderMap::new(),
+                Some(CallerClass::ServicePrincipal)
+            )
+            .await,
+            [StatusCode::OK; 3]
+        );
+        let mutations = quarry_mutations(&quarry).await;
+        assert_eq!(mutations.len(), 3, "{mutations:?}");
+        assert!(mutations[0].1.ends_with("select?initiatedBy=agent"), "{:?}", mutations[0]);
+        assert!(mutations[1].1.ends_with("tab-1?initiatedBy=agent"), "{:?}", mutations[1]);
+        assert_eq!(mutations[2].2["initiatedBy"], "agent", "{:?}", mutations[2]);
     }
 
     #[test]
