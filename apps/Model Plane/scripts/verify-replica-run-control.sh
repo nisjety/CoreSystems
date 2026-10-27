@@ -1,15 +1,25 @@
 #!/usr/bin/env bash
 # verify-replica-run-control.sh — the WS04-S9 live proof for replica-safe run control.
 #
-# Runs five cases against a stack that is already up with two model-gateway replicas
+# Runs six cases against a stack that is already up with two model-gateway replicas
 # (deploy/docker-compose.replicas.yml: A on 127.0.0.1:8080, B on 127.0.0.1:28080) and the
 # NATS container running with the run-control ACL:
-#   1. Stop sent to B for a stream owned by A ends A's stream with `stopped`; B answers 202 via peer.
-#   2. A queued message sent to B is delivered by A at a tool-round boundary (`queued_input`).
-#   3. A plan approved on A grants its thread durably; a Do run on B starts under that grant.
+#   1. Stop sent to B for a stream owned by A ends A's stream with `stopped`; B answers 202 via peer,
+#      and A's active-stream gauge returns to 0.
+#   2. A queued message sent to B is delivered by A at a tool-round boundary (`queued_input`); its
+#      client message id is stored once, and a repeat sent to B stores no second row.
+#   3. A plan approved on A grants its thread durably; a Do run on B starts under that grant, and B
+#      logs the grant read.
 #   4. kill -9 of A mid-stream: Stop on B answers 404, the durable run cancel is accepted, a queue
 #      on B answers resend_as_new_turn, and resume on B answers from the buffer; A is restarted.
 #   5. NATS stopped: Stop on B answers 503 run_control_unavailable, never 202 or 404.
+#   6. A turn streamed on A is rated on B, which reads its run reference from the shared turn record.
+#      It runs after case 3 and before case 4, because case 4 kills A.
+#
+# Every turn asks for the direct Anthropic API and nothing else: the provider is fixed to
+# anthropic (never a Verevon route, a ChatGPT/Codex subscription or Azure Foundry, which registers as
+# azure-anthropic), and the model is PROOF_MODEL. A preflight turn on each replica must report
+# provider_used anthropic before any case runs.
 #
 # Every response, frame summary and run_control_requests_total sample is written to the evidence
 # file, which is the evidence the switch-flip gate looks for. This script does not edit compose:
@@ -24,15 +34,30 @@
 # MODEL_GATEWAY_SHARED_IDEMPOTENCY stays unset (WS04-S7 is not flipped by this proof).
 #
 # Usage:    MP_PROOF_BEARER=<bearer of the proof user> ./scripts/verify-replica-run-control.sh
-# Optional: PROOF_TOOL_PROMPT must make the model call a tool on the proof stack (case 2 waits
-#           for a tool_call frame); PROOF_PLAN_PROMPT must make it propose a plan (case 3 waits for
-#           plan_proposed). PROOF_OUT overrides the evidence file; the other PROOF_* variables are
-#           read at the top of the script.
+# Optional: PROOF_MODEL is the Anthropic model id every turn asks for (default claude-sonnet-5-5). It may
+#           use only letters, digits, '.', '_', ':' and '-', at most 64 of them. PROOF_SHORT_PROMPT is the
+#           preflight and case 6 turn. PROOF_TOOL_PROMPT must make the model call a tool on the proof stack
+#           (case 2 waits for a tool_call frame); PROOF_PLAN_PROMPT must make it propose a plan (case 3 waits
+#           for plan_proposed). PROOF_OUT overrides the evidence file; the other PROOF_* variables are read at
+#           the top of the script.
 # The bearer is read from the environment and is never printed or written.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 : "${MP_PROOF_BEARER:?set MP_PROOF_BEARER to the bearer of the proof user (never printed)}"
+
+# The owner's order: the direct Anthropic API only. This is assigned, not defaulted, so an exported
+# PROOF_PROVIDER cannot move the proof to another provider.
+PROOF_PROVIDER=anthropic
+readonly PROOF_PROVIDER
+PROOF_MODEL="${PROOF_MODEL:-claude-sonnet-5-5}"
+# The model id is written into JSON bodies and the log, so refuse anything outside the id alphabet
+# before the evidence file is opened or any docker or curl call is made.
+MODEL_ID_RE='^[A-Za-z0-9._:-]{1,64}$'
+if ! [[ "$PROOF_MODEL" =~ $MODEL_ID_RE ]]; then
+  echo "FAIL: PROOF_MODEL must be 1 to 64 letters, digits, '.', '_', ':' or '-'" >&2
+  exit 1
+fi
 
 A="${PROOF_A:-http://127.0.0.1:8080}"
 B="${PROOF_B:-http://127.0.0.1:28080}"
@@ -44,9 +69,10 @@ LONG_PROMPT="${PROOF_LONG_PROMPT:-Write a long, careful essay of about two thous
 TOOL_PROMPT="${PROOF_TOOL_PROMPT:-Call a tool to check the current date, then write a long, careful essay on the history of salt.}"
 PLAN_PROMPT="${PROOF_PLAN_PROMPT:-Propose a short plan for a one-page note on salt. Do not carry the plan out.}"
 DO_PROMPT="${PROOF_DO_PROMPT:-Carry out the approved plan now and write the one-page note on salt.}"
+SHORT_PROMPT="${PROOF_SHORT_PROMPT:-Say hello in one short sentence.}"
 JUSTIFICATION="Owner approved this plan during the WS04-S9 live proof; the run may write the one-page note only."
 
-for text in "$LONG_PROMPT" "$TOOL_PROMPT" "$PLAN_PROMPT" "$DO_PROMPT"; do
+for text in "$LONG_PROMPT" "$TOOL_PROMPT" "$PLAN_PROMPT" "$DO_PROMPT" "$SHORT_PROMPT"; do
   case "$text" in
     *\"*|*\\*) echo "FAIL: prompts go into JSON unescaped; no double quotes or backslashes" >&2; exit 1 ;;
   esac
@@ -137,8 +163,32 @@ switch_value() { # switch_value <container> <name> -> the value the container wa
 
 psql_one() { docker exec "$PG_CTR" psql -U postgres -d session_core -tAc "$1" | tr -d '\r'; }
 
+show_model() { # show_model <file> -> the model the connected frame names
+  echo "    model=$(json_field model "$(frame_data "$1" connected)")"
+}
+
+active_streams() { # active_streams <base> -> the gateway_active_streams sample as a number, or nothing
+  curl -s "$1/metrics" 2>/dev/null | awk '/^gateway_active_streams / {print $2 + 0; exit}' || true
+}
+
+served_by_direct() { # served_by_direct <base> <label> -> fails unless the turn's usage frame names the direct provider
+  local out="$WORK/preflight-$2.sse" P PU
+  # features:["usage"] opts in to the usage frame, which carries provider_used; sse_events.rs:1191 withholds it otherwise.
+  start_stream "$1" "$out" '{"content":"'"$SHORT_PROMPT"'","features":["usage"],"provider":"anthropic","model":"'"$PROOF_MODEL"'"}'; P=$STREAM_PID
+  wait_frame "$out" connected 60 || fail "preflight: no connected frame from $2"
+  show_model "$out"
+  wait "$P" 2>/dev/null || true
+  PU="$(json_field provider_used "$(frame_data "$out" usage)")"
+  echo "    $2 usage frame: provider_used=${PU:-<none>}"
+  if [ "$PU" != "$PROOF_PROVIDER" ]; then
+    fail "preflight: $2 answered provider_used '${PU:-<none>}', wanted '$PROOF_PROVIDER'. Either inference-core registered azure-anthropic instead of the direct provider (fallback.rs:621-652), or D1-791 is not fixed."
+  fi
+  echo "    ok: $2 is served by $PROOF_PROVIDER"
+}
+
 echo "==> WS04-S9 replica run-control proof, $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "    A=$A ($A_CTR)  B=$B ($B_CTR)  nats=$NATS_CTR  evidence=$EVIDENCE"
+echo "    provider=$PROOF_PROVIDER model=$PROOF_MODEL"
 
 step "preflight: switches as the containers were started, and readiness"
 for ctr in "$A_CTR" "$B_CTR"; do
@@ -153,9 +203,14 @@ for base in "$A" "$B"; do
   if ready "$base"; then echo "    $base /readyz: run_control=ok"; else fail "$base is not run_control=ok"; fi
 done
 
+step "preflight: a short turn on each replica is served by the direct Anthropic provider"
+served_by_direct "$A" A
+served_by_direct "$B" B
+
 step "case 1: Stop on B for a stream owned by A"
-start_stream "$A" "$WORK/case1.sse" "{\"content\":\"$LONG_PROMPT\"}"; P=$STREAM_PID
+start_stream "$A" "$WORK/case1.sse" '{"content":"'"$LONG_PROMPT"'","provider":"anthropic","model":"'"$PROOF_MODEL"'"}'; P=$STREAM_PID
 wait_frame "$WORK/case1.sse" connected 60 || fail "case 1: no connected frame on A"
+show_model "$WORK/case1.sse"
 RID="$(json_field request_id "$(frame_data "$WORK/case1.sse" connected)")"
 if [ -z "$RID" ]; then fail "case 1: the connected frame carries no request_id"; fi
 wait_frame "$WORK/case1.sse" chunk 120 || fail "case 1: no chunk from A"
@@ -169,22 +224,45 @@ esac
 wait "$P" 2>/dev/null || true
 expect "$(frame_count "$WORK/case1.sse" stopped)" 1 "case 1: A's stream ends with one stopped frame"
 frame_summary "$WORK/case1.sse"
+GAUGE=""
+for i in $(seq 1 15); do
+  GAUGE="$(active_streams "$A")"
+  if [ "$GAUGE" = "0" ]; then break; fi
+  sleep 1
+done
+echo "    gateway_active_streams on A after the stream ended: ${GAUGE:-<no sample>}"
+[ "$GAUGE" = "0" ] || fail "case 1: A's gateway_active_streams did not return to 0 within 15 s"
+echo "    ok: A's active-stream gauge is back to 0"
 show_metrics "$A" A
 show_metrics "$B" B
 
 step "case 2: a queued message sent to B is delivered by A"
-start_stream "$A" "$WORK/case2.sse" "{\"content\":\"$TOOL_PROMPT\"}"; P=$STREAM_PID
+start_stream "$A" "$WORK/case2.sse" '{"content":"'"$TOOL_PROMPT"'","provider":"anthropic","model":"'"$PROOF_MODEL"'"}'; P=$STREAM_PID
 wait_frame "$WORK/case2.sse" connected 60 || fail "case 2: no connected frame on A"
-RID="$(json_field request_id "$(frame_data "$WORK/case2.sse" connected)")"
+show_model "$WORK/case2.sse"
+CONNECTED="$(frame_data "$WORK/case2.sse" connected)"
+RID="$(json_field request_id "$CONNECTED")"
+THREAD_ID="$(json_field thread_id "$CONNECTED")"
 if [ -z "$RID" ]; then fail "case 2: the connected frame carries no request_id"; fi
 wait_frame "$WORK/case2.sse" tool_call 240 || fail "case 2: no tool round on A; set PROOF_TOOL_PROMPT to a prompt that calls a tool"
-CODE="$(http_post "$B" "/v1/invoke/$RID/queue" '{"content":"Also say in one line who first traded salt."}')"
+CMID="ws04proof-$STAMP-$RANDOM"
+QUEUE_BODY="{\"content\":\"Also say in one line who first traded salt.\",\"client_message_id\":\"$CMID\"}"
+CODE="$(http_post "$B" "/v1/invoke/$RID/queue" "$QUEUE_BODY")"
 echo "    POST B /v1/invoke/$RID/queue -> $CODE $(last_body)"
-expect "$CODE" 200 "case 2: queue via B answers 200"
+expect "$CODE" 202 "case 2: queue via B answers 202"
 case "$(last_body)" in
   *'"queued":true'*) echo "    ok: the answer says queued true" ;;
   *) fail "case 2: the answer does not say queued true" ;;
 esac
+case "$(last_body)" in
+  *'"persisted":true'*) echo "    ok: the send receipt says persisted" ;;
+  *) fail "case 2: the send receipt does not say persisted" ;;
+esac
+# Scoped to the thread, so an id reused by an earlier run lives in another thread and cannot count here.
+expect "$(psql_one "SELECT count(*) FROM messages WHERE thread_id='$THREAD_ID' AND client_message_id='$CMID'")" 1 "case 2: one stored row for the client message id"
+CODE="$(http_post "$B" "/v1/invoke/$RID/queue" "$QUEUE_BODY")"
+echo "    POST B /v1/invoke/$RID/queue again, same body -> $CODE"
+expect "$(psql_one "SELECT count(*) FROM messages WHERE thread_id='$THREAD_ID' AND client_message_id='$CMID'")" 1 "case 2: the repeat stores no second row"
 wait_frame "$WORK/case2.sse" queued_input 240 || fail "case 2: A did not deliver the queued message"
 echo "    queued_input on A: $(frame_data "$WORK/case2.sse" queued_input)"
 CODE="$(http_post "$A" "/v1/invoke/$RID/cancel")"
@@ -194,11 +272,13 @@ frame_summary "$WORK/case2.sse"
 show_metrics "$B" B
 
 step "case 3: plan approved on A, Do run on B under the durable grant"
-start_stream "$A" "$WORK/case3-plan.sse" "{\"content\":\"$PLAN_PROMPT\",\"plan_mode\":true}"; P=$STREAM_PID
+CASE3_START="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+start_stream "$A" "$WORK/case3-plan.sse" '{"content":"'"$PLAN_PROMPT"'","plan_mode":true,"provider":"anthropic","model":"'"$PROOF_MODEL"'"}'; P=$STREAM_PID
 wait_frame "$WORK/case3-plan.sse" plan_proposed 240 || fail "case 3: no plan_proposed on A; set PROOF_PLAN_PROMPT to a prompt that proposes a plan"
 PLAN_ID="$(json_field plan_id "$(frame_data "$WORK/case3-plan.sse" plan_proposed)")"
 wait "$P" 2>/dev/null || true
 CONNECTED="$(frame_data "$WORK/case3-plan.sse" connected)"
+show_model "$WORK/case3-plan.sse"
 RUN_ID="$(json_field run_id "$CONNECTED")"
 THREAD_ID="$(json_field thread_id "$CONNECTED")"
 if [ -z "$PLAN_ID" ] || [ -z "$RUN_ID" ] || [ -z "$THREAD_ID" ]; then
@@ -207,16 +287,45 @@ fi
 CODE="$(http_post "$A" "/v1/runs/$RUN_ID/plan-approval" "{\"decision\":\"approve\",\"plan_id\":\"$PLAN_ID\",\"granted_rung\":\"workspace_write\",\"justification\":\"$JUSTIFICATION\"}")"
 echo "    POST A /v1/runs/$RUN_ID/plan-approval -> $CODE $(last_body)"
 expect "$CODE" 200 "case 3: approval on A answers 200"
-start_stream "$B" "$WORK/case3-do.sse" "{\"content\":\"$DO_PROMPT\",\"thread_id\":\"$THREAD_ID\"}"; P=$STREAM_PID
+start_stream "$B" "$WORK/case3-do.sse" '{"content":"'"$DO_PROMPT"'","thread_id":"'"$THREAD_ID"'","provider":"anthropic","model":"'"$PROOF_MODEL"'"}'; P=$STREAM_PID
 wait "$P" 2>/dev/null || true
+show_model "$WORK/case3-do.sse"
 expect "$(frame_count "$WORK/case3-do.sse" error)" 0 "case 3: the Do run on B raised no error frame"
 expect "$(psql_one "SELECT granted_rung || '|' || granted_plan_id FROM threads WHERE id='$THREAD_ID'")" "workspace_write|$PLAN_ID" "case 3: the grant is on the thread row in session-core"
 expect "$(psql_one "SELECT count(*) FROM events WHERE run_id='$RUN_ID' AND event_type='RUN_PLAN_MODE_EXITED'")" 1 "case 3: one RUN_PLAN_MODE_EXITED event for the approved run"
+# B logs the grant read when the Do run starts. Match that line by its thread id and rung, from the time this case started.
+GRANT_LINE="$(docker logs --since "$CASE3_START" "$B_CTR" 2>&1 | grep -F 'plan grant read from session-core for the run start' | grep -F "$THREAD_ID" | grep -F 'workspace_write' | head -1 || true)"
+if [ -z "$GRANT_LINE" ]; then
+  fail "case 3: B logged no 'plan grant read from session-core for the run start' line for thread $THREAD_ID at workspace_write"
+fi
+echo "    B log: $GRANT_LINE"
+show_metrics "$B" B
+
+step "case 6: a turn streamed on A is rated on B (shared turn record)"
+start_stream "$A" "$WORK/case6.sse" '{"content":"'"$SHORT_PROMPT"'","features":["usage"],"provider":"anthropic","model":"'"$PROOF_MODEL"'"}'; P=$STREAM_PID
+wait_frame "$WORK/case6.sse" connected 60 || fail "case 6: no connected frame on A"
+show_model "$WORK/case6.sse"
+RID="$(json_field request_id "$(frame_data "$WORK/case6.sse" connected)")"
+if [ -z "$RID" ]; then fail "case 6: the connected frame carries no request_id"; fi
+wait "$P" 2>/dev/null || true
+expect "$(json_field provider_used "$(frame_data "$WORK/case6.sse" usage)")" "$PROOF_PROVIDER" "case 6: the turn on A was served by $PROOF_PROVIDER"
+CODE="$(http_post "$B" "/v1/feedback" "{\"request_id\":\"$RID\",\"rating\":\"positive\"}")"
+echo "    POST B /v1/feedback -> $CODE $(last_body)"
+case "$CODE" in
+  200) echo "    ok: B rated the turn streamed on A" ;;
+  409)
+    case "$(last_body)" in
+      *turn_not_rateable*) fail "case 6: B cannot rate a turn streamed on A (turn_not_rateable): the shared turn record (MODEL_GATEWAY_SHARED_TURN_RECORD) did not hand the run reference to B" ;;
+    esac
+    fail "case 6: feedback via B answered 409" ;;
+  *) fail "case 6: feedback via B answered $CODE, wanted 200" ;;
+esac
 show_metrics "$B" B
 
 step "case 4: kill -9 of the owner A mid-stream"
-start_stream "$A" "$WORK/case4.sse" "{\"content\":\"$LONG_PROMPT\"}"; P=$STREAM_PID
+start_stream "$A" "$WORK/case4.sse" '{"content":"'"$LONG_PROMPT"'","provider":"anthropic","model":"'"$PROOF_MODEL"'"}'; P=$STREAM_PID
 wait_frame "$WORK/case4.sse" connected 60 || fail "case 4: no connected frame on A"
+show_model "$WORK/case4.sse"
 CONNECTED="$(frame_data "$WORK/case4.sse" connected)"
 RID="$(json_field request_id "$CONNECTED")"
 RUN_ID="$(json_field run_id "$CONNECTED")"
@@ -252,8 +361,9 @@ if ready "$A"; then echo "    A restarted: run_control=ok"; else fail "case 4: A
 show_metrics "$B" B
 
 step "case 5: NATS stopped, Stop on B answers 503"
-start_stream "$A" "$WORK/case5.sse" "{\"content\":\"$LONG_PROMPT\"}"; P=$STREAM_PID
+start_stream "$A" "$WORK/case5.sse" '{"content":"'"$LONG_PROMPT"'","provider":"anthropic","model":"'"$PROOF_MODEL"'"}'; P=$STREAM_PID
 wait_frame "$WORK/case5.sse" connected 60 || fail "case 5: no connected frame on A"
+show_model "$WORK/case5.sse"
 RID="$(json_field request_id "$(frame_data "$WORK/case5.sse" connected)")"
 if [ -z "$RID" ]; then fail "case 5: the connected frame carries no request_id"; fi
 wait_frame "$WORK/case5.sse" chunk 120 || fail "case 5: no chunk from A"
@@ -273,4 +383,4 @@ wait "$P" 2>/dev/null || true
 show_metrics "$B" B
 
 echo
-echo "PASS — the five run-control cases were recorded in $EVIDENCE"
+echo "PASS — the six run-control cases were recorded in $EVIDENCE"
