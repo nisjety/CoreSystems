@@ -167,6 +167,13 @@ func TestServiceScopeForRequest(t *testing.T) {
 		{name: "Owner effect reservation commit", method: http.MethodPost, path: "/api/v1/internal/spaces/owner-effect-reservations/reservation_1/commit", want: "spaces:agent-action:reservation"},
 		{name: "Owner effect reservation lookup", method: http.MethodGet, path: "/api/v1/internal/spaces/owner-effect-reservations/reservation_1", want: "spaces:agent-action:reservation"},
 		{name: "Space effect policy", method: http.MethodPut, path: "/api/v1/internal/spaces/effect-policy", want: "spaces:policy:write"},
+		{name: "Space org policy view", method: http.MethodGet, path: "/api/v1/internal/spaces/org-policy", want: "spaces:policy:admin:read"},
+		{name: "Space org policy history", method: http.MethodGet, path: "/api/v1/internal/spaces/org-policy/events", want: "spaces:policy:admin:read"},
+		{name: "Space org policy write", method: http.MethodPut, path: "/api/v1/internal/spaces/org-policy/entitlements", want: "spaces:policy:admin:write"},
+		{name: "Space org policy any other method is a write", method: http.MethodPost, path: "/api/v1/internal/spaces/org-policy/entitlements", want: "spaces:policy:admin:write"},
+		{name: "People directory search", method: http.MethodGet, path: "/api/v1/internal/directory/people", want: "directory:read:self"},
+		{name: "People directory ignores a caller header", method: http.MethodGet, path: "/api/v1/internal/directory/people", userID: "subject", want: "directory:read:self"},
+		{name: "People directory other method", method: http.MethodPost, path: "/api/v1/internal/directory/people", want: "directory:read:self"},
 		{name: "membership write", method: http.MethodPost, path: "/api/v1/internal/memberships/ensure", want: "memberships:write"},
 		{name: "user sync", method: http.MethodPost, path: "/api/v1/internal/users/enrich-from-provider", want: "users:sync"},
 		{name: "mail-task alias resolve", method: http.MethodGet, path: "/api/v1/internal/mail-task/resolve", want: "mail-task:resolve"},
@@ -186,6 +193,30 @@ func TestServiceScopeForRequest(t *testing.T) {
 				t.Fatalf("scope = %q; want %q", got, test.want)
 			}
 		})
+	}
+}
+
+// WS03-S3 and WS04-S3 scopes are only ever honoured with a verified gateway
+// delegation: a service credential alone never proves an org admin or a caller.
+func TestFeatureScopesRequireVerifiedDelegation(t *testing.T) {
+	for _, scope := range []string{
+		"spaces:policy:admin:read", "spaces:policy:admin:write", "directory:read:self",
+		"spaces:resolve", "spaces:issue", "authz:read", "users:read:self",
+	} {
+		if !serviceScopeRequiresVerifiedDelegation(scope) {
+			t.Errorf("scope %q must require a verified delegation", scope)
+		}
+	}
+	for _, scope := range []string{
+		"spaces:policy:write", "spaces:register", "spaces:membership:write", "users:read:any", "memberships:write",
+	} {
+		if serviceScopeRequiresVerifiedDelegation(scope) {
+			t.Errorf("service-only scope %q must not require a delegation", scope)
+		}
+	}
+	// The org-policy scopes are told apart from the operator policy scope.
+	if serviceScopeRequiresVerifiedDelegation("spaces:policy:write") == serviceScopeRequiresVerifiedDelegation("spaces:policy:admin:write") {
+		t.Error("the operator scope and the org-admin scope must differ in their delegation requirement")
 	}
 }
 
