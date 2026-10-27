@@ -332,6 +332,20 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
     no: 'Nettleseren kunne ikke utføre denne handlingen. Sjekk adressen eller handlingen, og prøv igjen.',
     en: 'The browser could not carry out this action. Check the address or the action, and try again.',
   },
+  // A saved scrape preview link that is not valid, and a scheduled run kind or action that this
+  // installation has not turned on.
+  invalid_scrape_artifact: {
+    no: 'Lenken til den lagrede forhåndsvisningen er ikke gyldig. Hent siden på nytt.',
+    en: 'The link to the saved preview is not valid. Fetch the page again.',
+  },
+  unsupported_schedule_kind: {
+    no: 'Denne typen planlagt kjøring er ikke slått på her ennå.',
+    en: 'This kind of scheduled run is not turned on here yet.',
+  },
+  schedule_action_unavailable: {
+    no: 'Denne handlingen for planlagte kjøringer er ikke slått på her ennå.',
+    en: 'This action for scheduled runs is not turned on here yet.',
+  },
   zdr_persistent_profile_forbidden: {
     no: 'Denne organisasjonen lagrer ikke data, så nettleseren kan ikke bruke en varig profil. Bruk en midlertidig profil.',
     en: 'This organization does not retain data, so the browser cannot use a persistent profile. Use a temporary profile.',
