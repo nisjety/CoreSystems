@@ -226,6 +226,9 @@ services:
       # WS04-S3: people search for the member picker (GET /api/v1/directory/people). Rollout control
       # only; Control's directory read under the signed delegation decides what the caller sees.
       SPACE_PEOPLE_SEARCH_API: ${SPACE_PEOPLE_SEARCH_API:-true}
+      # WS07-S9: the room artifact aggregate route; a rollout control only (Control's shared-read
+      # decision and Session Core's audience ceiling decide what is listed).
+      SPACE_ROOM_ARTIFACTS_API: ${SPACE_ROOM_ARTIFACTS_API:-true}
     ports:
       - "${VEREVON_BIND_ADDRESS:-127.0.0.1}:3185:3185"
     networks:

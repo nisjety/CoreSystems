@@ -194,6 +194,12 @@ pub(crate) struct SpaceFeatureFlags {
     /// authorization input: Control's directory read (signed delegation, scope
     /// `directory:read:self`) decides what the caller may see.
     pub(crate) people_search_api: bool,
+    /// `SPACE_ROOM_ARTIFACTS_API` (WS07-S9): `GET /api/v1/spaces/{space_ref}/artifacts`, the room
+    /// artifact aggregate, and `features.room_artifacts`. Off answers 404
+    /// `space_room_artifacts_disabled` and the SPA hides the chips and the tab. A rollout control,
+    /// never an authorization input: Control's shared-read decision and Session Core's audience
+    /// ceiling decide what the caller may list.
+    pub(crate) room_artifacts: bool,
     /// `SPACE_SEND_IDEMPOTENCY_API` (WS01-S5): reported to the SPA as `features.send_idempotency`
     /// (the SPA attaches a client send id to an agent-path send so a retry cannot double-post).
     /// Session Core's dedupe is inert without a key. A rollout control, never an authorization input.
@@ -216,6 +222,7 @@ impl SpaceFeatureFlags {
             realtime_stream: space_flag("SPACE_REALTIME_STREAM"),
             room_details_ui: space_flag("SPACE_ROOM_DETAILS_UI"),
             people_search_api: space_flag("SPACE_PEOPLE_SEARCH_API"),
+            room_artifacts: space_flag("SPACE_ROOM_ARTIFACTS_API"),
             send_idempotency_api: space_flag("SPACE_SEND_IDEMPOTENCY_API"),
             thread_pane_ui: space_flag("SPACE_THREAD_PANE_UI"),
         }

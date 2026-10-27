@@ -32,6 +32,7 @@ use denial::{typed_response, with_gap_details, Decision, SpaceDenial};
 pub(crate) mod directory;
 pub(crate) mod human_posts;
 pub(crate) mod room_admin;
+mod room_artifacts;
 mod schedule_template;
 mod stream;
 
@@ -819,6 +820,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
 fn module_routes() -> Router<AppState> {
     Router::new()
         .merge(human_posts::routes())
+        .merge(room_artifacts::routes())
         .merge(stream::routes())
 }
 
@@ -5039,6 +5041,7 @@ async fn space_context(
                     "connectivity_banner": state.space_features.connectivity_banner_ui,
                     "room_details": state.space_features.room_details_ui,
                     "people_search": state.space_features.people_search_api,
+                    "room_artifacts": state.space_features.room_artifacts,
                 },
                 "limits": { "post_max_chars": human_posts::POST_MAX_CHARS },
             }}),
