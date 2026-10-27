@@ -23,7 +23,8 @@ pub struct OpenTabOptions {
     /// new tab anyway, so the session always has somewhere to act.
     pub activate: bool,
     /// Egress policy for this tab only. `None` leaves the tab on the session
-    /// policy.
+    /// policy. A tab policy only narrows: the tab's requests answer to the
+    /// session policy and this one both (see [`TabEgressPolicy`]).
     pub egress_policy: Option<BrowserEgressPolicy>,
 }
 
@@ -34,16 +35,40 @@ pub fn addressed_tab_id<'a>(pin: Option<&'a str>, active: Option<&'a str>) -> Op
     pin.or(active)
 }
 
-/// The egress policy for a request made from one tab: the tab's own policy
-/// when it has one, otherwise the session policy, otherwise deny-all. A
-/// missing policy never means unconstrained.
+/// The egress policy that governs a request made from one tab: the meet of the
+/// session policy and the tab's own policy (D2-013). A tab can narrow what the
+/// session allows, never widen it: a request is allowed only when every policy
+/// that applies allows it. Evaluating both at the request, instead of building one
+/// merged policy, keeps the meet exact across the allow-list and open-web modes and
+/// their deny lists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TabEgressPolicy {
+    session: BrowserEgressPolicy,
+    tab: Option<BrowserEgressPolicy>,
+}
+
+impl TabEgressPolicy {
+    /// Whether a request from the tab may reach `raw`.
+    pub fn allows_url(&self, raw: &str) -> bool {
+        self.session.allows_url(raw)
+            && self.tab.as_ref().map_or(true, |tab| tab.allows_url(raw))
+    }
+}
+
+/// The egress policy for a request made from one tab: the session policy met with
+/// the tab's own policy when it has one. A session with no policy is deny-all, so a
+/// tab policy alone is never authority, and a missing policy never means
+/// unconstrained.
 pub fn resolve_tab_egress_policy(
     tab: Option<&BrowserEgressPolicy>,
     session: Option<&BrowserEgressPolicy>,
-) -> BrowserEgressPolicy {
-    tab.or(session)
-        .cloned()
-        .unwrap_or_else(BrowserEgressPolicy::deny_all)
+) -> TabEgressPolicy {
+    TabEgressPolicy {
+        session: session
+            .cloned()
+            .unwrap_or_else(BrowserEgressPolicy::deny_all),
+        tab: tab.cloned(),
+    }
 }
 
 /// Whether an observation attributed to `tab_id` is visible through a handle
@@ -66,15 +91,70 @@ mod tests {
         BrowserEgressPolicy::from_allowed_domains(&domains)
     }
 
-    // Key lookup order: the tab entry first, then the session entry, then deny-all.
+    // The effective policy is the meet of the session policy and the tab policy.
 
     #[test]
-    fn tab_policy_wins_over_session_policy() {
+    fn a_tab_policy_narrows_an_unrestricted_session() {
         let tab = policy(&["agent.example"]);
         let session = policy(&[]);
         let resolved = resolve_tab_egress_policy(Some(&tab), Some(&session));
         assert!(resolved.allows_url("https://agent.example/page"));
         assert!(!resolved.allows_url("https://third.example/page"));
+    }
+
+    #[test]
+    fn a_tab_policy_wider_than_the_session_cannot_widen_it() {
+        // D2-013: the tab names a host the session does not allow, and an
+        // unrestricted tab sits under a restricted session.
+        let session = policy(&["shop.example"]);
+        let wider = policy(&["shop.example", "other.example"]);
+        let resolved = resolve_tab_egress_policy(Some(&wider), Some(&session));
+        assert!(resolved.allows_url("https://shop.example/cart"));
+        assert!(!resolved.allows_url("https://other.example/"));
+        let unrestricted_tab = policy(&[]);
+        let resolved = resolve_tab_egress_policy(Some(&unrestricted_tab), Some(&session));
+        assert!(resolved.allows_url("https://shop.example/cart"));
+        assert!(!resolved.allows_url("https://other.example/"));
+    }
+
+    #[test]
+    fn the_effective_policy_is_the_intersection_of_two_allow_lists() {
+        let session = policy(&["a.example", "b.example"]);
+        let tab = policy(&["b.example", "c.example"]);
+        let resolved = resolve_tab_egress_policy(Some(&tab), Some(&session));
+        assert!(resolved.allows_url("https://b.example/"));
+        assert!(resolved.allows_url("https://www.b.example/"));
+        assert!(!resolved.allows_url("https://a.example/"));
+        assert!(!resolved.allows_url("https://c.example/"));
+        // Disjoint lists allow nothing, instead of falling back to either side.
+        let disjoint = policy(&["z.example"]);
+        let resolved = resolve_tab_egress_policy(Some(&disjoint), Some(&session));
+        assert!(!resolved.allows_url("https://a.example/"));
+        assert!(!resolved.allows_url("https://z.example/"));
+    }
+
+    #[test]
+    fn the_session_deny_list_and_open_web_floor_hold_on_a_wider_tab() {
+        let open_session = BrowserEgressPolicy::open_web(&["bank.example".to_owned()]);
+        // An unrestricted tab policy does not lift the session's denied list or
+        // the open-web refusal of private hosts.
+        let tab = policy(&[]);
+        let resolved = resolve_tab_egress_policy(Some(&tab), Some(&open_session));
+        assert!(resolved.allows_url("https://news.example/"));
+        assert!(!resolved.allows_url("https://bank.example/"));
+        assert!(!resolved.allows_url("http://127.0.0.1/"));
+        // And the tab's own deny list narrows an unrestricted session.
+        let denying_tab = policy(&[]).with_denied_domains(&["ads.example".to_owned()]);
+        let resolved = resolve_tab_egress_policy(Some(&denying_tab), Some(&policy(&[])));
+        assert!(!resolved.allows_url("https://ads.example/"));
+        assert!(resolved.allows_url("https://news.example/"));
+    }
+
+    #[test]
+    fn a_tab_policy_without_a_session_policy_is_not_authority() {
+        let tab = policy(&["agent.example"]);
+        let resolved = resolve_tab_egress_policy(Some(&tab), None);
+        assert!(!resolved.allows_url("https://agent.example/"));
     }
 
     #[test]

@@ -2014,9 +2014,11 @@ async fn install_network_guard(
             let request_id = event.request_id.clone();
             let request_url = event.request.url.clone();
             let method = event.request.method.clone();
-            // The tab's own policy, then the session's, else deny-all (WS8.E).
-            // A page can start emitting Fetch events as soon as its CDP target is
-            // attached: a missing policy must never mean unconstrained.
+            // The meet of the session's policy and the tab's own one (WS8.E, D2-013):
+            // a tab can narrow what the session allows, never widen it, and a session
+            // with no policy is deny-all. A page can start emitting Fetch events as
+            // soon as its CDP target is attached: a missing policy must never mean
+            // unconstrained.
             let tab_policy = tab_policies
                 .lock()
                 .await
