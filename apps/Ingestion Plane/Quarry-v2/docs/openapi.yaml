@@ -3989,6 +3989,8 @@ components:
           type: integer
           minimum: 0
           maximum: 86400
+          format: int64
+          default: 0
           description: Catch-up window for missed fires (WS15.S1).
         pause_on_failure:
           type: boolean
@@ -4013,18 +4015,10 @@ components:
           nullable: true
         overlap_policy:
           $ref: '#/components/schemas/OverlapPolicy'
-        catchup_window_s:
-          type: integer
-          format: int64
-          default: 0
-        pause_on_failure:
-          type: boolean
-          default: false
         preset:
           type: string
           nullable: true
-          description: When set
-          this is a W2 change-monitor create; target_ref becomes required: null
+          description: When set, this is a W2 change-monitor create; target_ref becomes required. The preset becomes the cron (hourly, daily or weekly).
         target_ref:
           type: string
           nullable: true
