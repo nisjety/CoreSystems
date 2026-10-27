@@ -6,7 +6,7 @@
 use std::time::Instant;
 
 use axum::{
-    extract::Request,
+    extract::{MatchedPath, Request},
     http::StatusCode,
     middleware::Next,
     response::{IntoResponse, Response},
@@ -33,10 +33,24 @@ pub fn record_zdr_waiver_contract_version() {
     ));
 }
 
+/// The `route` label value for a request that matched no route.
+pub const UNMATCHED_ROUTE: &str = "unmatched";
+
+/// The route label for a request: the matched route TEMPLATE (`/v1/threads/:thread_id`), never
+/// the raw URI path, so thread, run and space ids cannot enter Prometheus. A request that
+/// matched no route (the fallback) is `unmatched`. The middleware is a `Router::layer`, which
+/// wraps each route, so axum has set [`MatchedPath`] before it runs.
+fn route_label(request: &Request) -> String {
+    request
+        .extensions()
+        .get::<MatchedPath>()
+        .map_or_else(|| UNMATCHED_ROUTE.to_owned(), |m| m.as_str().to_owned())
+}
+
 /// Axum middleware that records request count, duration, and status metrics.
 pub async fn metrics_middleware(request: Request, next: Next) -> Response {
     let method = request.method().to_string();
-    let path = request.uri().path().to_owned();
+    let route = route_label(&request);
     let start = Instant::now();
 
     let response = next.run(request).await;
@@ -47,7 +61,7 @@ pub async fn metrics_middleware(request: Request, next: Next) -> Response {
     counter!(
         "gateway_requests_total",
         "method" => method.clone(),
-        "path" => path.clone(),
+        "route" => route.clone(),
         "status" => status
     )
     .increment(1);
@@ -55,7 +69,7 @@ pub async fn metrics_middleware(request: Request, next: Next) -> Response {
     histogram!(
         "gateway_request_duration_seconds",
         "method" => method,
-        "path" => path
+        "route" => route
     )
     .record(duration);
 
