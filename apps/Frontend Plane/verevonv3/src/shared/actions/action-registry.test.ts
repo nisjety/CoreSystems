@@ -438,7 +438,7 @@ describe('action registry', () => {
   })
 
   it('registers the human post actions as low-risk, ungated, model-plane actions the model cannot execute (WS01-S5)', () => {
-    for (const id of ['spaces.create_post', 'spaces.reply_in_thread']) {
+    for (const id of ['spaces.create_post', 'spaces.reply_in_thread'] as const) {
       const action = getActionDescriptor(id)
       expect(action, id).toBeDefined()
       expect(action?.ownerPlane).toBe('model')
@@ -464,7 +464,7 @@ describe('action registry', () => {
   })
 
   it('registers the Space effect-policy actions as high-risk, approval-gated, control-plane actions the model cannot execute (WS03-S4)', () => {
-    for (const id of ['spaces.set_effect_entitlements', 'spaces.apply_effect_preset']) {
+    for (const id of ['spaces.set_effect_entitlements', 'spaces.apply_effect_preset'] as const) {
       const action = getActionDescriptor(id)
       expect(action, id).toBeDefined()
       expect(action?.ownerPlane).toBe('control')
