@@ -29,6 +29,7 @@ import {
   browserErrorMessage,
   deleteBrowserProfile,
   getBrowserOwnerTimeline,
+  keepAliveBrowserSession,
   listBrowserProfiles,
   probeBrowserProfile,
   renameBrowserProfile,
@@ -74,6 +75,8 @@ import { DashboardPlanBadge } from './DashboardPlanBadge'
 import { ProductPicker } from './ProductPicker'
 import { ScrapePreviewPanel } from './KnowledgeScrapePreview'
 import { navigationFailureFromError, type BrowserNavigationFailure } from '@/features/browser/session/browser-navigation-error'
+import type { KeepAliveOutcome } from '@/features/browser/session/session-keepalive'
+import { ApiError } from '@/shared/api/http'
 import { PROFILE_SCOPE_LABELS, type BrowserProfileManagerProps } from './BrowserChrome'
 import { createBrowserLoopController, type BrowserLoopState } from './browser-loop'
 import {
@@ -850,6 +853,23 @@ export function KnowledgeComposer(props: {
       }
     } finally {
       window.clearTimeout(timeout)
+    }
+  }
+
+  /**
+   * WS8.D: one keep-alive call for the open browser session. The chrome runs its timer only for a
+   * session that advertises human_browsing, which Quarry does not project yet, so nothing calls this
+   * until it does. A session that can no longer be renewed is 'expired' (the timer stops once).
+   */
+  const keepAliveBrowser = async (): Promise<KeepAliveOutcome> => {
+    const id = orgId()
+    const sessionId = preview()?.browserSession?.session.id
+    if (!id || !sessionId) return 'failed'
+    try {
+      await keepAliveBrowserSession(id, sessionId)
+      return 'alive'
+    } catch (error) {
+      return error instanceof ApiError && error.code === 'browser_session_expired' ? 'expired' : 'failed'
     }
   }
 
@@ -1658,6 +1678,7 @@ export function KnowledgeComposer(props: {
             onBrowserLoopStop={() => browserLoop.requestStop()}
             onDecideBrowserApproval={(key, decision) => void handleDecideBrowserApproval(key, decision)}
             onBrowserNewTab={createPreviewBrowserTab}
+            onKeepAlive={keepAliveBrowser}
             onBrowserSelectTab={selectPreviewBrowserTab}
             onBrowserSuggestAction={performBrowserSuggestedAction}
             onBrowserSocketObservation={handleBrowserSocketObservation}

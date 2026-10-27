@@ -20,6 +20,7 @@ import type { ScrapeCaptureView } from '@/shared/api/knowledge-client'
 import type { BrowserLoopState } from './browser-loop'
 import { BrowserChrome, type BrowserProfileManagerProps } from './BrowserChrome'
 import type { BrowserNavigationFailure } from '@/features/browser/session/browser-navigation-error'
+import type { KeepAliveOutcome } from '@/features/browser/session/session-keepalive'
 import { browserSessionFromPreview, type BrowserApprovalEntry, type BrowserStepRationale } from './browser-session'
 import { hostnameOf, type ScrapeBlock, type ScrapePreview } from './knowledge-preview'
 
@@ -272,6 +273,7 @@ function BrowserSessionSurface(props: {
   browserNavigationError?: BrowserNavigationFailure | null
   hovered: number | null
   onBrowserAction?: (action: BrowserAction) => void
+  onKeepAlive?: () => Promise<KeepAliveOutcome>
   onBrowserNavigationDismiss?: () => void
   onBrowserNavigationRetry?: (url: string) => void
   onBrowserAutoRun?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
@@ -324,6 +326,7 @@ function BrowserSessionSurface(props: {
         browserNavigationError={props.browserNavigationError}
         onBrowserNavigationDismiss={props.onBrowserNavigationDismiss}
         onBrowserNavigationRetry={props.onBrowserNavigationRetry}
+        onKeepAlive={props.onKeepAlive}
         frameControls={
           <div class="knowledge-browser-frame__controls">
             <button
@@ -480,6 +483,7 @@ export function ScrapePreviewPanel(props: {
   browserNavigationError?: BrowserNavigationFailure | null
   decidingBrowserApprovalKeys?: string[]
   onBrowserAction?: (action: BrowserAction) => void
+  onKeepAlive?: () => Promise<KeepAliveOutcome>
   onBrowserNavigationDismiss?: () => void
   onBrowserNavigationRetry?: (url: string) => void
   onBrowserAutoRun?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
@@ -544,6 +548,7 @@ export function ScrapePreviewPanel(props: {
         onBrowserAction={props.onBrowserAction}
         onBrowserNavigationDismiss={props.onBrowserNavigationDismiss}
         onBrowserNavigationRetry={props.onBrowserNavigationRetry}
+        onKeepAlive={props.onKeepAlive}
         onBrowserAutoRun={props.onBrowserAutoRun}
         onBrowserControlMode={props.onBrowserControlMode}
         onBrowserLoopPause={props.onBrowserLoopPause}
