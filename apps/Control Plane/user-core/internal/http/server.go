@@ -33,6 +33,7 @@ type Server struct {
 	aclRepo                    *users.AclRepository
 	spaceRepo                  *spaces.Repository
 	spaceOrgPolicy             spaceOrgPolicyConfig // org-admin Space policy (WS03-S3)
+	peopleDirectory            peopleDirectory      // people search (WS04-S3)
 	mailTaskService            *mailtask.Service
 	mailTaskUserLookup         MailTaskUserLookup
 	mailTaskEffectPolicy       MailTaskEffectPolicyResolver

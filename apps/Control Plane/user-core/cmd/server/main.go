@@ -17,6 +17,7 @@ import (
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/clients"
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/config"
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/database"
+	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/directory"
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/grpc"
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/handlers"
 	httpserver "github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/http"
@@ -388,6 +389,8 @@ func main() {
 	httpServer.SetScheduleContractsEnabled(os.Getenv("SCHEDULE_CONTRACT_ENABLED") == "true")
 	// WS03-S3: org-admin Space policy writes. Strict literal true; off by default.
 	httpServer.SetSpacePolicyAdminWrites(os.Getenv("SPACE_POLICY_ADMIN_WRITES") == "true")
+	// WS04-S3: people search for the Space member picker (one SQL join in user-core).
+	httpServer.SetPeopleDirectory(directory.NewStore(db))
 	httpServer.SetAuthInternalCredential(serviceCredential)
 	// Personal inbound-mail alias (chat-wave2 mail-task spec). The service is
 	// always wired; every route stays 503 on its own until
