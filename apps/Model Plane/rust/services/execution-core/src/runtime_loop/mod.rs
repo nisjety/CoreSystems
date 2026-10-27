@@ -9,6 +9,7 @@ pub(crate) mod post_mutation;
 pub mod retry;
 pub(crate) mod result_handles;
 pub(crate) mod resume;
+pub(crate) mod run_effort;
 // WS20 S6. The file lives at the crate root; lib.rs should declare it there (shared edit).
 #[path = "../scheduled_agent.rs"]
 pub(crate) mod scheduled_agent;

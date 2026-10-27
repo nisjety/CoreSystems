@@ -410,3 +410,34 @@ fn the_attachment_golden_bytes_decode_and_an_absent_list_stays_empty() {
     let decoded = RunAgentRequest::decode(before.encode_to_vec().as_slice()).expect("decode");
     assert!(decoded.attachments.is_empty());
 }
+
+// ---- RunAgentRequest.reasoning_effort (field 21, build plan WS11 S8) ----
+
+/// A run at the High level. Field 21 is a varint enum: key `a801` (21 << 3, two bytes), then
+/// `ReasoningEffort::High` = 4. Unspecified is proto3's default and is not written, so a
+/// request that predates the field keeps its bytes.
+const RUN_REASONING_EFFORT_WIRE_HEX: &str = "a80104";
+
+#[test]
+fn a_run_reasoning_effort_encodes_to_the_golden_bytes() {
+    use mp_contracts::model_plane::v1::{ReasoningEffort, RunAgentRequest};
+    let run = RunAgentRequest {
+        reasoning_effort: ReasoningEffort::High as i32,
+        ..Default::default()
+    };
+    assert_eq!(hex(&run.encode_to_vec()), RUN_REASONING_EFFORT_WIRE_HEX);
+}
+
+#[test]
+fn the_reasoning_effort_golden_bytes_decode_and_an_absent_level_stays_unspecified() {
+    use mp_contracts::model_plane::v1::{ReasoningEffort, RunAgentRequest};
+    let decoded =
+        RunAgentRequest::decode(unhex(RUN_REASONING_EFFORT_WIRE_HEX).as_slice()).expect("decode");
+    assert_eq!(decoded.reasoning_effort, ReasoningEffort::High as i32, "field 21 present");
+    // A request without the field adds no bytes: it is what an executor that predates the field
+    // reads and writes, so the default level is today's behaviour.
+    let before = RunAgentRequest { run_id: "r1".to_owned(), ..Default::default() };
+    assert_eq!(hex(&before.encode_to_vec()), "0a027231");
+    let decoded = RunAgentRequest::decode(before.encode_to_vec().as_slice()).expect("decode");
+    assert_eq!(decoded.reasoning_effort, ReasoningEffort::Unspecified as i32);
+}

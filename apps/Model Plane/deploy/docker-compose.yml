@@ -1199,6 +1199,9 @@ services:
       # before it runs and finalized after, and a call that cannot be reserved is not
       # run. OFF by default. Needs session-core's migration 0048.
       EXECUTION_EFFECT_LEDGER_ENABLED: ${EXECUTION_EFFECT_LEDGER_ENABLED:-false}
+      # WS11-S8: a Do run's rounds use the turn's effort level (RunAgentRequest field 21).
+      # Only the literal `true` turns it on; off, every round sends no level, as before.
+      EXECUTION_CORE_RUN_EFFORT: ${EXECUTION_CORE_RUN_EFFORT:-false}
       # WS25-S5: run-scoped result handles and result_query. `on` or `true` enables; off by default.
       EXECUTION_RESULT_HANDLES: ${EXECUTION_RESULT_HANDLES:-off}
       # Durable loop fold writer (WS03 S6): the Do loop saves its history, counters and

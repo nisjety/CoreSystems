@@ -10417,6 +10417,10 @@ fn build_run_agent_request(
         // (`do_run_attachments`); empty with `CHAT_DO_ATTACHMENTS_ENABLED` off, for a
         // turn without attachments and for a continuation.
         attachments,
+        // The run's effort level (WS11-S8). Unspecified until the gateway half sets it,
+        // which keeps the request bytes as they were; execution-core uses it only with
+        // EXECUTION_CORE_RUN_EFFORT on.
+        reasoning_effort: mp_contracts::model_plane::v1::ReasoningEffort::Unspecified as i32,
     }
 }
 

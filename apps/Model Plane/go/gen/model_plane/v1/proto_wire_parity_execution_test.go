@@ -166,6 +166,38 @@ func TestRunAgentRequestWithoutRunContextHasNone(t *testing.T) {
 	}
 }
 
+// RunAgentRequest.reasoning_effort (field 21, build plan WS11 S8). The same bytes are pinned
+// in rust/crates/mp-contracts/tests/proto_wire_parity_execution.rs.
+const runReasoningEffortWireHex = "a80104"
+
+func TestRunAgentRequestReasoningEffortDecodesFromGoldenHex(t *testing.T) {
+	raw, err := hex.DecodeString(runReasoningEffortWireHex)
+	if err != nil {
+		t.Fatalf("bad golden hex: %v", err)
+	}
+	var decoded RunAgentRequest
+	if err := proto.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got := decoded.GetReasoningEffort(); got != ReasoningEffort_REASONING_EFFORT_HIGH {
+		t.Fatalf("reasoning_effort (field 21) = %v, want HIGH", got)
+	}
+}
+
+func TestRunAgentRequestWithoutReasoningEffortIsUnspecified(t *testing.T) {
+	raw, err := proto.Marshal(&RunAgentRequest{RunId: "r1"})
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	var decoded RunAgentRequest
+	if err := proto.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got := decoded.GetReasoningEffort(); got != ReasoningEffort_REASONING_EFFORT_UNSPECIFIED {
+		t.Fatalf("an absent reasoning_effort must be UNSPECIFIED, got %v", got)
+	}
+}
+
 // RunAgentResponse.usage (field 9, build plan WS02 S3). The same bytes are pinned
 // in rust/crates/mp-contracts/tests/proto_wire_parity_execution.rs.
 const (

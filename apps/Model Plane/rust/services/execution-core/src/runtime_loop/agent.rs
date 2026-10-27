@@ -2914,12 +2914,18 @@ async fn run_rounds(
             );
         }
 
+        // The run's own reasoning level (WS11 S8, DEC-36 Q1). The gateway sets it on a fresh
+        // Do or Plan run. It reaches inference-core only when EXECUTION_CORE_RUN_EFFORT is the
+        // literal `true`; otherwise every round sends Unspecified, as it did before. A delegated
+        // child's context carries the parent's request, so its rounds send the same level.
+        let reasoning_effort =
+            super::run_effort::round_level(super::run_effort::enabled(), req.reasoning_effort);
         let mut infer_request = tonic::Request::new(pb::InferRequest {
             // No extended thinking on the governed agent loop: the effort
             // dial is a chat-surface control, and a deployed agent's budget
             // is its round budget.
             thinking_budget_tokens: 0,
-            reasoning_effort: 0,
+            reasoning_effort,
             request_id: req.run_id.clone(),
             org_id: req.org_id.clone(),
             // The run's route, the same on every round of the parent and of
@@ -3105,6 +3111,7 @@ async fn run_rounds(
             cache_creation_input_tokens = response.cache_creation_input_tokens,
             stop_reason = %response.stop_reason,
             tool_calls = response.tool_calls.len(),
+            reasoning_effort = reasoning_effort,
             "run_agent: inference round usage"
         );
 
@@ -9427,6 +9434,9 @@ mod tests {
     /// `(tools offered, tool_choice)` of each `InferRequest`, in call order.
     type ObservedTooling = Arc<Mutex<Vec<(usize, String)>>>;
 
+    /// `(reasoning_effort, thinking_budget_tokens)` of each `InferRequest`, in call order.
+    type ObservedEffort = Arc<Mutex<Vec<(i32, i32)>>>;
+
     /// The route fields one `InferRequest` carried, in call order.
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct ObservedRoute {
@@ -9485,6 +9495,9 @@ mod tests {
         observed_tooling: ObservedTooling,
         /// The image parts each `InferRequest` carried, in call order.
         observed_images: ObservedImages,
+        /// `(reasoning_effort, thinking_budget_tokens)` of each `InferRequest`, in call order:
+        /// the evidence of which level a run's rounds were sent.
+        observed_effort: ObservedEffort,
         /// When set, every `infer` call holds for `delay` while counting itself
         /// in-flight, so a test can read back how many ran AT ONCE. Absent for
         /// every ordinary test: no sleep, no counting.
@@ -9522,6 +9535,7 @@ mod tests {
                 observed_messages: Arc::new(Mutex::new(Vec::new())),
                 observed_tooling: Arc::default(),
                 observed_images: Arc::default(),
+                observed_effort: Arc::default(),
                 probe: None,
             }
         }
@@ -9535,6 +9549,7 @@ mod tests {
                 observed_messages: Arc::new(Mutex::new(Vec::new())),
                 observed_tooling: Arc::default(),
                 observed_images: Arc::default(),
+                observed_effort: Arc::default(),
                 probe: None,
             }
         }
@@ -9551,6 +9566,7 @@ mod tests {
                 observed_messages,
                 observed_tooling: Arc::default(),
                 observed_images: Arc::default(),
+                observed_effort: Arc::default(),
                 probe: None,
             }
         }
@@ -9564,6 +9580,7 @@ mod tests {
                 observed_messages: Arc::new(Mutex::new(Vec::new())),
                 observed_tooling: Arc::default(),
                 observed_images: Arc::default(),
+                observed_effort: Arc::default(),
                 probe: None,
             }
         }
@@ -9577,6 +9594,7 @@ mod tests {
                 observed_messages: Arc::new(Mutex::new(Vec::new())),
                 observed_tooling: Arc::default(),
                 observed_images: Arc::default(),
+                observed_effort: Arc::default(),
                 probe: Some(probe),
             }
         }
@@ -9599,6 +9617,7 @@ mod tests {
                 observed_messages: Arc::new(Mutex::new(Vec::new())),
                 observed_tooling: Arc::default(),
                 observed_images: Arc::default(),
+                observed_effort: Arc::default(),
                 probe: None,
             }
         }
@@ -9640,6 +9659,10 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((tools_offered, observed.tool_choice.clone()));
+            self.observed_effort
+                .lock()
+                .unwrap()
+                .push((observed.reasoning_effort, observed.thinking_budget_tokens));
             self.observed_images
                 .lock()
                 .unwrap()
@@ -11107,6 +11130,19 @@ mod tests {
         spawn_inference_channel_inner(MockInference::with_concurrency_probe(script, probe)).await
     }
 
+    /// Like [`spawn_inference_channel`] but records, for every `InferRequest`, its
+    /// `reasoning_effort` and `thinking_budget_tokens`, in call order.
+    async fn spawn_inference_channel_with_effort(
+        script: Vec<Scripted>,
+        observed_effort: ObservedEffort,
+    ) -> Channel {
+        spawn_inference_channel_inner(MockInference {
+            observed_effort,
+            ..MockInference::new(script)
+        })
+        .await
+    }
+
     async fn spawn_inference_channel_inner(mock: MockInference) -> Channel {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -11160,6 +11196,9 @@ mod tests {
             resume: None,
             // Nothing attached, which is what every run before the field sent.
             attachments: Vec::new(),
+            // Unspecified, which is what every run before the field sent; the run-level
+            // tests set it explicitly.
+            reasoning_effort: pb::ReasoningEffort::Unspecified as i32,
         }
     }
 
@@ -11896,6 +11935,125 @@ mod tests {
                  the request's model, not the environment's"
             );
         }
+    }
+
+    // --- The run's reasoning level (`runtime_loop::run_effort`, WS11 S8) ---
+
+    /// Runs a plain request (no route pinned) through the real loop and returns its response
+    /// and the `(reasoning_effort, thinking_budget_tokens)` of every round, in call order.
+    async fn run_recording_effort(
+        req: pb::RunAgentRequest,
+        script: Vec<Scripted>,
+    ) -> (pb::RunAgentResponse, Vec<(i32, i32)>) {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        real_rules_for(&rec);
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let observed_effort: ObservedEffort = Arc::default();
+        let inference_channel =
+            spawn_inference_channel_with_effort(script, observed_effort.clone()).await;
+        let resp = run_with_real_credentials(session_channel, inference_channel, req).await;
+        let observed = observed_effort.lock().unwrap().clone();
+        (resp, observed)
+    }
+
+    /// A tool round, then an answer: two rounds, no delegation.
+    fn two_plain_rounds() -> Vec<Scripted> {
+        vec![
+            Scripted::ToolCalls {
+                content: String::new(),
+                calls: vec![failing_tool_call("wx-1")],
+            },
+            Scripted::Answer("Done.".to_owned()),
+        ]
+    }
+
+    #[tokio::test]
+    async fn run_rounds_passes_the_run_level() {
+        // A Do run whose level the gateway set: every round carries that level, and no
+        // thinking budget rides beside it.
+        let _switch = crate::runtime_loop::run_effort::RunEffortSwitch::set(true);
+        let high = pb::ReasoningEffort::High as i32;
+        let mut req = sample_request();
+        req.reasoning_effort = high;
+        let (resp, observed) = run_recording_effort(req, two_plain_rounds()).await;
+        assert_eq!(resp.status, "completed", "{}", resp.final_output);
+        assert_eq!(
+            observed,
+            vec![(high, 0), (high, 0)],
+            "both rounds carry High, no budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn default_run_is_unchanged() {
+        // The switch is off, so the level the run asked for never reaches inference-core:
+        // every round is the request it was before the field existed.
+        let _switch = crate::runtime_loop::run_effort::RunEffortSwitch::set(false);
+        let mut req = sample_request();
+        req.reasoning_effort = pb::ReasoningEffort::High as i32;
+        let (resp, observed) = run_recording_effort(req, two_plain_rounds()).await;
+        assert_eq!(resp.status, "completed", "{}", resp.final_output);
+        assert_eq!(
+            observed,
+            vec![(0, 0), (0, 0)],
+            "off: every round is Unspecified"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unspecified_run_sends_nothing() {
+        let _switch = crate::runtime_loop::run_effort::RunEffortSwitch::set(true);
+        let (resp, observed) = run_recording_effort(sample_request(), two_plain_rounds()).await;
+        assert_eq!(resp.status, "completed", "{}", resp.final_output);
+        assert_eq!(
+            observed,
+            vec![(0, 0), (0, 0)],
+            "a run that asked for no level sends none"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_level_is_sent_as_unspecified() {
+        // A number this executor does not know is sent as Unspecified and never fails a round.
+        let _switch = crate::runtime_loop::run_effort::RunEffortSwitch::set(true);
+        let mut req = sample_request();
+        req.reasoning_effort = 99;
+        let (resp, observed) = run_recording_effort(req, two_plain_rounds()).await;
+        assert_eq!(resp.status, "completed", "{}", resp.final_output);
+        assert_eq!(observed, vec![(0, 0), (0, 0)]);
+    }
+
+    #[tokio::test]
+    async fn delegated_rounds_carry_the_run_level() {
+        // Parent delegates, the child runs a tool round and answers, the parent answers: four
+        // rounds, two loops. A child's context carries the parent's request, so all four
+        // rounds carry the level.
+        let _switch = crate::runtime_loop::run_effort::RunEffortSwitch::set(true);
+        let high = pb::ReasoningEffort::High as i32;
+        let mut req = sample_request();
+        req.reasoning_effort = high;
+        let (resp, observed) = run_recording_effort(
+            req,
+            vec![
+                Scripted::ToolCalls {
+                    content: "Delegating.".to_owned(),
+                    calls: vec![subagent_call(
+                        "sub-1",
+                        r#"{"goal":"Find the Bergen weather"}"#,
+                    )],
+                },
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![failing_tool_call("wx-1")],
+                },
+                Scripted::Answer("Bergen: 8 degrees.".to_owned()),
+                Scripted::Answer("Delegated result: Bergen: 8 degrees.".to_owned()),
+            ],
+        )
+        .await;
+        assert_eq!(resp.status, "completed", "{}", resp.final_output);
+        assert_eq!(resp.rounds_executed, 4, "2 parent rounds + 2 child rounds");
+        assert_eq!(observed, vec![(high, 0); 4], "parent, child, child, parent");
     }
 
     // --- The run's time budget (`crate::run_budget`) ---
@@ -13109,6 +13267,7 @@ mod tests {
                 "model_used",
                 "output_tokens",
                 "provider_used",
+                "reasoning_effort",
                 "round",
                 "run_id",
                 "stop_reason",
@@ -13125,6 +13284,8 @@ mod tests {
         assert_eq!(field(&usage[0], "cache_creation_input_tokens"), "0");
         assert_eq!(field(&usage[0], "stop_reason"), "tool_use");
         assert_eq!(field(&usage[0], "tool_calls"), "1");
+        // The run asked for no level and the switch is off, so the round sent Unspecified.
+        assert_eq!(field(&usage[0], "reasoning_effort"), "0");
         assert_eq!(field(&usage[0], "provider_used"), "openai-codex-subscription");
         assert_eq!(field(&usage[0], "model_used"), "gpt-5.6-terra");
         assert_eq!(field(&usage[1], "round"), "2");

@@ -240,6 +240,16 @@ message RunAgentRequest {
   // delegated subagent does not inherit it. Field 20 is reserved for this
   // message in the build plan's proto reservation table (section 4.3).
   repeated RunAttachment attachments = 20;
+
+  // The run's reasoning level (build plan WS11 S8, DEC-36 Q1). The gateway sets it on a
+  // fresh Do or Plan run from the turn's clamped effort, and execution-core sends it on
+  // every inference round the run makes, delegated children included. Unspecified = no
+  // reasoning, which is today's behaviour. It is a request parameter only: never stored
+  // in a checkpoint, a fold, an event, the run context or runs.metadata. Execution-core
+  // ignores it unless EXECUTION_CORE_RUN_EFFORT is the literal `true`. A continuation or
+  // park-resume segment carries only what its own request sends. Field 21 is reserved for
+  // this message in the build plan's proto reservation table (section 4.3).
+  ReasoningEffort reasoning_effort = 21;
 }
 
 // AgentResume names the approved call a continuation segment may release, and

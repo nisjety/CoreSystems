@@ -489,9 +489,18 @@ type RunAgentRequest struct {
 	// zero-retention or waived run refuses a non-empty list at the boundary, and a
 	// delegated subagent does not inherit it. Field 20 is reserved for this
 	// message in the build plan's proto reservation table (section 4.3).
-	Attachments   []*RunAttachment `protobuf:"bytes,20,rep,name=attachments,proto3" json:"attachments,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Attachments []*RunAttachment `protobuf:"bytes,20,rep,name=attachments,proto3" json:"attachments,omitempty"`
+	// The run's reasoning level (build plan WS11 S8, DEC-36 Q1). The gateway sets it on a
+	// fresh Do or Plan run from the turn's clamped effort, and execution-core sends it on
+	// every inference round the run makes, delegated children included. Unspecified = no
+	// reasoning, which is today's behaviour. It is a request parameter only: never stored
+	// in a checkpoint, a fold, an event, the run context or runs.metadata. Execution-core
+	// ignores it unless EXECUTION_CORE_RUN_EFFORT is the literal `true`. A continuation or
+	// park-resume segment carries only what its own request sends. Field 21 is reserved for
+	// this message in the build plan's proto reservation table (section 4.3).
+	ReasoningEffort ReasoningEffort `protobuf:"varint,21,opt,name=reasoning_effort,json=reasoningEffort,proto3,enum=model_plane.v1.ReasoningEffort" json:"reasoning_effort,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *RunAgentRequest) Reset() {
@@ -662,6 +671,13 @@ func (x *RunAgentRequest) GetAttachments() []*RunAttachment {
 		return x.Attachments
 	}
 	return nil
+}
+
+func (x *RunAgentRequest) GetReasoningEffort() ReasoningEffort {
+	if x != nil {
+		return x.ReasoningEffort
+	}
+	return ReasoningEffort_REASONING_EFFORT_UNSPECIFIED
 }
 
 // AgentResume names the approved call a continuation segment may release, and
@@ -1862,7 +1878,7 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"tool_calls\x18\t \x01(\rR\ttoolCalls\x12!\n" +
 	"\finput_tokens\x18\n" +
 	" \x01(\rR\vinputTokens\x12#\n" +
-	"\routput_tokens\x18\v \x01(\rR\foutputTokens\"\x97\x06\n" +
+	"\routput_tokens\x18\v \x01(\rR\foutputTokens\"\xe3\x06\n" +
 	"\x0fRunAgentRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1b\n" +
 	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\x12\n" +
@@ -1886,7 +1902,8 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"\vrun_context\x18\x12 \x01(\v2\x1a.model_plane.v1.RunContextR\n" +
 	"runContext\x123\n" +
 	"\x06resume\x18\x13 \x01(\v2\x1b.model_plane.v1.AgentResumeR\x06resume\x12?\n" +
-	"\vattachments\x18\x14 \x03(\v2\x1d.model_plane.v1.RunAttachmentR\vattachments\"\x83\x02\n" +
+	"\vattachments\x18\x14 \x03(\v2\x1d.model_plane.v1.RunAttachmentR\vattachments\x12J\n" +
+	"\x10reasoning_effort\x18\x15 \x01(\x0e2\x1f.model_plane.v1.ReasoningEffortR\x0freasoningEffort\"\x83\x02\n" +
 	"\vAgentResume\x12\x12\n" +
 	"\x04mode\x18\x01 \x01(\tR\x04mode\x12\x1f\n" +
 	"\vapproval_id\x18\x02 \x01(\tR\n" +
@@ -2030,10 +2047,11 @@ var file_model_plane_v1_execution_proto_goTypes = []any{
 	(*ToolDefinition)(nil),               // 16: model_plane.v1.ToolDefinition
 	(PrivacyTier)(0),                     // 17: model_plane.v1.PrivacyTier
 	(AutonomyRung)(0),                    // 18: model_plane.v1.AutonomyRung
-	(*ChatMessage)(nil),                  // 19: model_plane.v1.ChatMessage
-	(*RunContextStatus)(nil),             // 20: model_plane.v1.RunContextStatus
-	(*CancelRunRequest)(nil),             // 21: model_plane.v1.CancelRunRequest
-	(*CancelRunResponse)(nil),            // 22: model_plane.v1.CancelRunResponse
+	(ReasoningEffort)(0),                 // 19: model_plane.v1.ReasoningEffort
+	(*ChatMessage)(nil),                  // 20: model_plane.v1.ChatMessage
+	(*RunContextStatus)(nil),             // 21: model_plane.v1.RunContextStatus
+	(*CancelRunRequest)(nil),             // 22: model_plane.v1.CancelRunRequest
+	(*CancelRunResponse)(nil),            // 23: model_plane.v1.CancelRunResponse
 }
 var file_model_plane_v1_execution_proto_depIdxs = []int32{
 	16, // 0: model_plane.v1.RunAgentRequest.tools:type_name -> model_plane.v1.ToolDefinition
@@ -2042,30 +2060,31 @@ var file_model_plane_v1_execution_proto_depIdxs = []int32{
 	5,  // 3: model_plane.v1.RunAgentRequest.run_context:type_name -> model_plane.v1.RunContext
 	4,  // 4: model_plane.v1.RunAgentRequest.resume:type_name -> model_plane.v1.AgentResume
 	10, // 5: model_plane.v1.RunAgentRequest.attachments:type_name -> model_plane.v1.RunAttachment
-	19, // 6: model_plane.v1.RunContext.history:type_name -> model_plane.v1.ChatMessage
-	20, // 7: model_plane.v1.RunContext.status:type_name -> model_plane.v1.RunContextStatus
-	7,  // 8: model_plane.v1.RunAgentResponse.usage:type_name -> model_plane.v1.RunUsage
-	8,  // 9: model_plane.v1.RunUsage.legs:type_name -> model_plane.v1.RunUsageLeg
-	17, // 10: model_plane.v1.ExecuteStepRequest.min_privacy_tier:type_name -> model_plane.v1.PrivacyTier
-	10, // 11: model_plane.v1.ExecuteStepRequest.attachments:type_name -> model_plane.v1.RunAttachment
-	0,  // 12: model_plane.v1.RunAttachment.kind:type_name -> model_plane.v1.RunAttachmentKind
-	9,  // 13: model_plane.v1.ExecutionCore.ExecuteStep:input_type -> model_plane.v1.ExecuteStepRequest
-	12, // 14: model_plane.v1.ExecutionCore.ResumeRun:input_type -> model_plane.v1.ResumeRunRequest
-	21, // 15: model_plane.v1.ExecutionCore.CancelRun:input_type -> model_plane.v1.CancelRunRequest
-	14, // 16: model_plane.v1.ExecutionCore.PauseRun:input_type -> model_plane.v1.PauseRunRequest
-	3,  // 17: model_plane.v1.ExecutionCore.RunAgent:input_type -> model_plane.v1.RunAgentRequest
-	1,  // 18: model_plane.v1.ExecutionCore.ExecuteScheduledStep:input_type -> model_plane.v1.ExecuteScheduledStepRequest
-	11, // 19: model_plane.v1.ExecutionCore.ExecuteStep:output_type -> model_plane.v1.ExecuteStepResponse
-	13, // 20: model_plane.v1.ExecutionCore.ResumeRun:output_type -> model_plane.v1.ResumeRunResponse
-	22, // 21: model_plane.v1.ExecutionCore.CancelRun:output_type -> model_plane.v1.CancelRunResponse
-	15, // 22: model_plane.v1.ExecutionCore.PauseRun:output_type -> model_plane.v1.PauseRunResponse
-	6,  // 23: model_plane.v1.ExecutionCore.RunAgent:output_type -> model_plane.v1.RunAgentResponse
-	2,  // 24: model_plane.v1.ExecutionCore.ExecuteScheduledStep:output_type -> model_plane.v1.ExecuteScheduledStepResponse
-	19, // [19:25] is the sub-list for method output_type
-	13, // [13:19] is the sub-list for method input_type
-	13, // [13:13] is the sub-list for extension type_name
-	13, // [13:13] is the sub-list for extension extendee
-	0,  // [0:13] is the sub-list for field type_name
+	19, // 6: model_plane.v1.RunAgentRequest.reasoning_effort:type_name -> model_plane.v1.ReasoningEffort
+	20, // 7: model_plane.v1.RunContext.history:type_name -> model_plane.v1.ChatMessage
+	21, // 8: model_plane.v1.RunContext.status:type_name -> model_plane.v1.RunContextStatus
+	7,  // 9: model_plane.v1.RunAgentResponse.usage:type_name -> model_plane.v1.RunUsage
+	8,  // 10: model_plane.v1.RunUsage.legs:type_name -> model_plane.v1.RunUsageLeg
+	17, // 11: model_plane.v1.ExecuteStepRequest.min_privacy_tier:type_name -> model_plane.v1.PrivacyTier
+	10, // 12: model_plane.v1.ExecuteStepRequest.attachments:type_name -> model_plane.v1.RunAttachment
+	0,  // 13: model_plane.v1.RunAttachment.kind:type_name -> model_plane.v1.RunAttachmentKind
+	9,  // 14: model_plane.v1.ExecutionCore.ExecuteStep:input_type -> model_plane.v1.ExecuteStepRequest
+	12, // 15: model_plane.v1.ExecutionCore.ResumeRun:input_type -> model_plane.v1.ResumeRunRequest
+	22, // 16: model_plane.v1.ExecutionCore.CancelRun:input_type -> model_plane.v1.CancelRunRequest
+	14, // 17: model_plane.v1.ExecutionCore.PauseRun:input_type -> model_plane.v1.PauseRunRequest
+	3,  // 18: model_plane.v1.ExecutionCore.RunAgent:input_type -> model_plane.v1.RunAgentRequest
+	1,  // 19: model_plane.v1.ExecutionCore.ExecuteScheduledStep:input_type -> model_plane.v1.ExecuteScheduledStepRequest
+	11, // 20: model_plane.v1.ExecutionCore.ExecuteStep:output_type -> model_plane.v1.ExecuteStepResponse
+	13, // 21: model_plane.v1.ExecutionCore.ResumeRun:output_type -> model_plane.v1.ResumeRunResponse
+	23, // 22: model_plane.v1.ExecutionCore.CancelRun:output_type -> model_plane.v1.CancelRunResponse
+	15, // 23: model_plane.v1.ExecutionCore.PauseRun:output_type -> model_plane.v1.PauseRunResponse
+	6,  // 24: model_plane.v1.ExecutionCore.RunAgent:output_type -> model_plane.v1.RunAgentResponse
+	2,  // 25: model_plane.v1.ExecutionCore.ExecuteScheduledStep:output_type -> model_plane.v1.ExecuteScheduledStepResponse
+	20, // [20:26] is the sub-list for method output_type
+	14, // [14:20] is the sub-list for method input_type
+	14, // [14:14] is the sub-list for extension type_name
+	14, // [14:14] is the sub-list for extension extendee
+	0,  // [0:14] is the sub-list for field type_name
 }
 
 func init() { file_model_plane_v1_execution_proto_init() }
