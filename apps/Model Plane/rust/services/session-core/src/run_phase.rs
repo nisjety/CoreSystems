@@ -150,3 +150,7 @@ pub(crate) async fn ensure_thread_idle(
         None => Ok(()),
     }
 }
+
+#[cfg(test)]
+#[path = "run_phase_tests.rs"]
+mod tests;

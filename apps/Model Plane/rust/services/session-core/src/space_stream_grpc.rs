@@ -771,3 +771,11 @@ impl StreamState {
         Ok(value)
     }
 }
+
+#[cfg(test)]
+#[path = "space_stream_grpc_tests.rs"]
+mod tests;
+
+#[cfg(test)]
+#[path = "space_stream_grpc_db_tests.rs"]
+mod db_tests;

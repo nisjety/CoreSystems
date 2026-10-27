@@ -16,8 +16,8 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-const KEY_ID: &str = "control-w1-key";
-const DECISION_REF: &str = "stream-decision-1";
+pub(crate) const KEY_ID: &str = "control-w1-key";
+pub(crate) const DECISION_REF: &str = "stream-decision-1";
 
 fn now() -> DateTime<Utc> {
     DateTime::parse_from_rfc3339("2026-10-27T12:00:00Z")
@@ -25,7 +25,7 @@ fn now() -> DateTime<Utc> {
         .with_timezone(&Utc)
 }
 
-fn signing_key() -> SigningKey {
+pub(crate) fn signing_key() -> SigningKey {
     SigningKey::from_bytes(&[41_u8; 32])
 }
 
@@ -76,7 +76,7 @@ fn read_claims(audience: &str, permissions: &[&str], zdr: bool) -> Value {
 
 /// Mints a read-shaped decision for `audience`. `edit` runs before the digest is computed, so
 /// it can change any bound field; `tamper_digest` replaces the digest after it was computed.
-fn mint(
+pub(crate) fn mint(
     audience: &str,
     permissions: &[&str],
     zdr: bool,
@@ -93,6 +93,61 @@ fn mint(
         json!(thread_read_payload_digest(&parsed))
     };
     sign(&signing_key(), &claims)
+}
+
+/// Serialises the tests that publish the Control verification key through the environment.
+static STREAM_KEYS_ENV: Mutex<()> = Mutex::new(());
+
+/// Publishes the test verification key as `CONTROL_SPACE_DECISION_PUBLIC_KEYS_JSON` for the
+/// handler tests that go through `verify_space_stream_decision`; removes it on drop.
+pub(crate) struct StreamKeysEnv {
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+impl StreamKeysEnv {
+    pub(crate) fn publish() -> Self {
+        let guard = STREAM_KEYS_ENV
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let keys = json!({
+            KEY_ID: URL_SAFE_NO_PAD.encode(signing_key().verifying_key().to_bytes())
+        });
+        env::set_var("CONTROL_SPACE_DECISION_PUBLIC_KEYS_JSON", keys.to_string());
+        Self { _guard: guard }
+    }
+}
+
+impl Drop for StreamKeysEnv {
+    fn drop(&mut self) {
+        env::remove_var("CONTROL_SPACE_DECISION_PUBLIC_KEYS_JSON");
+    }
+}
+
+/// A stream decision valid at the wall clock now (the handler verifies at `Utc::now()`), for
+/// `org`, `user` and `space`; `edit` runs before the digest is computed.
+pub(crate) fn live_stream_token(
+    org: &str,
+    user: &str,
+    space: &str,
+    audience_revision: i64,
+    zdr: bool,
+    edit: impl FnOnce(&mut Value),
+) -> String {
+    mint(
+        CONTROL_SPACE_STREAM_AUDIENCE,
+        &["thread:read"],
+        zdr,
+        |claims| {
+            claims["org_id"] = json!(org);
+            claims["subject_id"] = json!(user);
+            claims["space_ref"] = json!(space);
+            claims["recipient_audience_revision"] = json!(audience_revision);
+            claims["issued_at"] = json!(Utc::now().to_rfc3339());
+            claims["expires_at"] = json!((Utc::now() + chrono::Duration::minutes(2)).to_rfc3339());
+            edit(claims);
+        },
+        false,
+    )
 }
 
 fn stream_token() -> String {

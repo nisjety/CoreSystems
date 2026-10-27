@@ -264,3 +264,7 @@ impl SpaceRoomReadService for SpaceRoomReadGrpc {
         }))
     }
 }
+
+#[cfg(test)]
+#[path = "read_service_tests.rs"]
+mod tests;
