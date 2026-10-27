@@ -27,7 +27,8 @@ const FV = 'apps/Frontend Plane/verevonv3'
 const MP_RUST = 'apps/Model Plane/rust'
 const CONVEX = 'apps/Application Plane/convex-core'
 const AUTH = 'apps/Control Plane/auth-core'
-const TARGETS = { mp: 'C:/dev/space-target-mp', gw: 'C:/dev/space-target-gw' }
+// Shared cargo target dirs of the local build host; CI (Linux) overrides them so no `C:/dev/...` directory is created in the checkout.
+const TARGETS = { mp: process.env.SPACE_TARGET_MP ?? 'C:/dev/space-target-mp', gw: process.env.SPACE_TARGET_GW ?? 'C:/dev/space-target-gw' }
 
 /** Each command: id, cwd (repo relative), command line, parser, env, timeout in minutes. */
 export function commands(root) {
