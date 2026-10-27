@@ -364,12 +364,15 @@ fn permission_pause_cause(gate: permission::RunGate<'_>, tool_name: &str) -> Cau
     // OR-ed with the run's declared floor, as at the direct-call refusal: under
     // `enforce` a `durable_owner` tool pauses as an owner effect though its name is not
     // reserved, and a reserved name keeps this answer whatever the view says. The
-    // consent branch below stays on the name.
+    // consent branch is OR-ed the same way: under `enforce` a read class carrying the
+    // `ask` floor is a disclosure, and a reserved name keeps it whatever the view says.
     if permission::requires_durable_owner_approval(tool_name)
         || gate.requires_durable_owner_approval(tool_name.trim())
     {
         CauseCode::OwnerEffectReserved
-    } else if permission::requires_consent_to_disclose(tool_name) {
+    } else if permission::requires_consent_to_disclose(tool_name)
+        || gate.requires_consent_to_disclose(tool_name.trim())
+    {
         CauseCode::ConsentToDisclose
     } else if tool_name == EXECUTE_PROVIDER_ACTION_TOOL {
         CauseCode::ProviderWrite
@@ -3846,6 +3849,89 @@ mod tests {
         assert_eq!(
             permission_pause_cause(enforce, "tickets.create"),
             CauseCode::OwnerEffectReserved
+        );
+    }
+
+    /// The consent branch follows the rule the approval label follows: a disclosure is a
+    /// read carrying the `ask` floor under `enforce`, or the reserved read. Another class
+    /// with that floor is a side effect and pauses as one, a provider write keeps its own
+    /// cause, and the gate off keeps the name's answer.
+    #[test]
+    fn the_pause_cause_names_a_disclosure_only_for_a_read_ask_floor_or_a_reserved_name() {
+        use crate::capability_policy::ToolClassGate;
+        use crate::permission::{record_run_views, RunGate, ToolClassView};
+        use crate::runtime_loop::subagent_results::READ_TOOL;
+        let (org, run) = ("org-d1-273-cause", "run-d1-273-cause");
+        record_run_views(
+            org,
+            run,
+            [
+                (
+                    "mcp__srv__lookup".to_owned(),
+                    ToolClassView::from_registry("mcp__srv__lookup", "read", "ask", "d"),
+                ),
+                (
+                    "mcp__srv__pay".to_owned(),
+                    ToolClassView::from_registry("mcp__srv__pay", "external_write", "ask", "d"),
+                ),
+                (
+                    "mcp__srv__mystery".to_owned(),
+                    ToolClassView::from_registry("mcp__srv__mystery", "unclassified", "none", "d"),
+                ),
+                (
+                    "mcp__srv__own".to_owned(),
+                    ToolClassView::from_registry("mcp__srv__own", "read", "durable_owner", "d"),
+                ),
+                (
+                    EXECUTE_PROVIDER_ACTION_TOOL.to_owned(),
+                    ToolClassView::from_registry(
+                        EXECUTE_PROVIDER_ACTION_TOOL,
+                        "external_write",
+                        "ask",
+                        "d",
+                    ),
+                ),
+                (
+                    READ_TOOL.to_owned(),
+                    ToolClassView::from_registry(READ_TOOL, "external_write", "none", "d"),
+                ),
+            ],
+        );
+        let enforce = RunGate::with_gate(ToolClassGate::Enforce, org, run);
+        let off = RunGate::with_gate(ToolClassGate::Off, org, run);
+        assert_eq!(
+            permission_pause_cause(enforce, "mcp__srv__lookup"),
+            CauseCode::ConsentToDisclose
+        );
+        assert_eq!(
+            permission_pause_cause(enforce, "mcp__srv__pay"),
+            CauseCode::RiskyEffectUnderAsk
+        );
+        assert_eq!(
+            permission_pause_cause(enforce, "mcp__srv__mystery"),
+            CauseCode::RiskyEffectUnderAsk
+        );
+        assert_eq!(
+            permission_pause_cause(enforce, EXECUTE_PROVIDER_ACTION_TOOL),
+            CauseCode::ProviderWrite
+        );
+        assert_eq!(
+            permission_pause_cause(enforce, "mcp__srv__own"),
+            CauseCode::OwnerEffectReserved
+        );
+        assert_eq!(
+            permission_pause_cause(enforce, READ_TOOL),
+            CauseCode::ConsentToDisclose,
+            "a reserved name is a disclosure whatever the view says"
+        );
+        assert_eq!(
+            permission_pause_cause(off, "mcp__srv__lookup"),
+            CauseCode::RiskyEffectUnderAsk,
+            "the gate off reads no view"
+        );
+        assert_eq!(
+            permission_pause_cause(off, READ_TOOL),
+            CauseCode::ConsentToDisclose
         );
     }
 

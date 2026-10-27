@@ -579,8 +579,12 @@ pub fn requires_durable_owner_approval_with(
     )
 }
 
-/// [`requires_consent_to_disclose`] under the gate: a disclosure is a read that
-/// carries the `ask` floor.
+/// [`requires_consent_to_disclose`] under the gate. A declared disclosure is a read
+/// class carrying the `ask` floor. An `ask` floor on any other class is a side-effect
+/// approval, and an unclassified tool has that floor by implication without being a
+/// read. The reserved name stays out of this closure, so shadow still counts a reserved
+/// name whose row disagrees; call sites OR it in, and a view can add the marker but
+/// never remove it.
 #[must_use]
 pub fn requires_consent_to_disclose_with(
     gate: ToolClassGate,
@@ -593,7 +597,7 @@ pub fn requires_consent_to_disclose_with(
         tool_name,
         "disclosure_consent",
         requires_consent_to_disclose(tool_name),
-        |view| view.floor == ApprovalFloor::Ask,
+        |view| view.class == SideEffectClass::Read && view.floor == ApprovalFloor::Ask,
     )
 }
 
@@ -1913,5 +1917,72 @@ mod class_tests {
         assert!(!RunGate::with_gate(ToolClassGate::Off, org, run)
             .requires_durable_owner_approval("mcp__s__pay"));
         assert!(enforce.requires_durable_owner_approval("tickets.create"));
+    }
+
+    /// A disclosure is a read class carrying the `ask` floor, not any `ask` floor. An
+    /// approval on a side effect is not one, and an unclassified tool has the floor by
+    /// implication without being a read. Off and shadow answer by name.
+    #[test]
+    fn an_ask_floor_is_a_disclosure_only_on_a_read_class() {
+        let read_tool = crate::runtime_loop::subagent_results::READ_TOOL;
+        let lookup = ToolClassView::from_registry("mcp__s__lookup", "read", "ask", "d");
+        assert!(requires_consent_to_disclose_with(
+            ToolClassGate::Enforce,
+            Some(&lookup),
+            "mcp__s__lookup"
+        ));
+        for (tool, class, floor) in [
+            ("mcp__s__w", "external_write", "ask"),
+            ("mcp__s__del", "destructive", "ask"),
+            ("mcp__s__mystery", "unclassified", "none"),
+            ("mcp__s__mem", "context_write", "ask"),
+            ("mcp__s__box", "sandbox_compute", "ask"),
+            ("mcp__s__own", "read", "durable_owner"),
+        ] {
+            let view = ToolClassView::from_registry(tool, class, floor, "d");
+            assert!(
+                !requires_consent_to_disclose_with(ToolClassGate::Enforce, Some(&view), tool),
+                "{tool} ({class}/{floor}) is a side effect, not a disclosure"
+            );
+        }
+        assert_eq!(
+            ToolClassView::from_registry("mcp__s__mystery", "unclassified", "none", "d").floor(),
+            ApprovalFloor::Ask,
+            "an unclassified tool is asked for by implication, and is still not a read"
+        );
+        // Off and shadow answer by name, whatever the view says.
+        let drift = ToolClassView::from_registry(read_tool, "external_write", "none", "d");
+        for gate in [ToolClassGate::Off, ToolClassGate::Shadow] {
+            assert!(
+                !requires_consent_to_disclose_with(gate, Some(&lookup), "mcp__s__lookup"),
+                "{gate:?}"
+            );
+            assert!(
+                requires_consent_to_disclose_with(gate, Some(&drift), read_tool),
+                "{gate:?}"
+            );
+        }
+        // Shadow counts a disagreement and the legacy answer decides. A side effect with
+        // the ask floor agrees with the name, so it is silent. The reserved name whose
+        // row says external write disagrees, so it is counted, once.
+        let counted = Counted::default();
+        let guard = metrics::set_default_local_recorder(&counted);
+        let pay = ToolClassView::from_registry("mcp__s__pay", "external_write", "ask", "d");
+        assert!(!requires_consent_to_disclose_with(
+            ToolClassGate::Shadow,
+            Some(&pay),
+            "mcp__s__pay"
+        ));
+        assert!(requires_consent_to_disclose_with(
+            ToolClassGate::Shadow,
+            Some(&drift),
+            read_tool
+        ));
+        drop(guard);
+        let seen = counted.0.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            ["tool_class_divergence_total{point=disclosure_consent,tool=read_subagent_result}"]
+        );
     }
 }

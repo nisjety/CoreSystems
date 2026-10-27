@@ -6959,42 +6959,79 @@ async fn record_tool_step(
     }
 }
 
-/// HITL pause: mint a durable approval for the gated tool (same shape as the
-/// `ExecuteStep` RPC), then flip the run `AwaitingApproval` and return an
-/// `awaiting_approval` response. A persistence failure returns `unavailable`
-/// before either state change or pause event. Deliberately NO terminal
-/// `CompleteStep` and NO plan COMPLETED/FAILED transition — a durable run is
-/// paused, not finished; resume re-invokes `run_agent`.
-/// Which kind of approval a pause is actually asking for.
+/// Which kind of approval a pause is actually asking for, under the run's gate.
 ///
 /// `Destructive` is the honest label for the gate this loop was built around — a
-/// real side effect held behind the `ask` posture. It is the wrong label for
-/// `permission::requires_consent_to_disclose`, where nothing is destroyed and
-/// what the person is being asked is whether content may cross into this
-/// conversation. `Permission` is the enum's own name for exactly that.
-pub(crate) fn approval_kind_for(tool_name: &str) -> pb::ApprovalKind {
-    if crate::permission::requires_consent_to_disclose(tool_name) {
+/// real side effect held behind the `ask` posture. It is the wrong label for a
+/// disclosure, where nothing is destroyed and what the person is being asked is
+/// whether content may cross into this conversation. `Permission` is the enum's own
+/// name for exactly that. A call is a disclosure when the reserved name says so, or
+/// when the run declares it a read class carrying the `ask` floor.
+pub(crate) fn approval_kind_for_with(
+    gate: crate::permission::RunGate<'_>,
+    tool_name: &str,
+) -> pb::ApprovalKind {
+    if crate::permission::requires_consent_to_disclose(tool_name)
+        || gate.requires_consent_to_disclose(tool_name.trim())
+    {
         pb::ApprovalKind::Permission
     } else {
         pb::ApprovalKind::Destructive
     }
 }
 
-/// The sentence the person reads before deciding.
+/// The sentence the person reads before deciding, under the run's gate.
 ///
 /// "tool 'X' requires approval" describes the mechanism, not the choice. For a
-/// disclosure it says what would be disclosed and where it would go, because
-/// that is the whole content of the decision.
-pub(crate) fn approval_reason_for(tool_name: &str) -> String {
+/// disclosure it says what would be disclosed and where it would go, because that is
+/// the whole content of the decision. The reserved name keeps its subagent sentence. A
+/// disclosure the run declares gets a generic one, since a declared class does not say
+/// whose content it is. Only the tool name is ever in the sentence, never the tool
+/// input or output (zero data retention).
+pub(crate) fn approval_reason_for_with(
+    gate: crate::permission::RunGate<'_>,
+    tool_name: &str,
+) -> String {
     if crate::permission::requires_consent_to_disclose(tool_name) {
         return format!(
             "'{tool_name}' would bring what a delegated subagent concluded into this \
              conversation. Approve to let the agent read that finding."
         );
     }
+    if gate.requires_consent_to_disclose(tool_name.trim()) {
+        return format!(
+            "'{tool_name}' would bring content from outside this run into this \
+             conversation. Approve to let the agent read it."
+        );
+    }
     format!("tool '{tool_name}' requires approval")
 }
 
+/// [`approval_kind_for_with`] with the gate off: the name-only answer, for a fixture
+/// that has no run to read a view from.
+#[cfg(test)]
+pub(crate) fn approval_kind_for(tool_name: &str) -> pb::ApprovalKind {
+    approval_kind_for_with(
+        crate::permission::RunGate::with_gate(crate::capability_policy::ToolClassGate::Off, "", ""),
+        tool_name,
+    )
+}
+
+/// [`approval_reason_for_with`] with the gate off: the name-only answer.
+#[cfg(test)]
+pub(crate) fn approval_reason_for(tool_name: &str) -> String {
+    approval_reason_for_with(
+        crate::permission::RunGate::with_gate(crate::capability_policy::ToolClassGate::Off, "", ""),
+        tool_name,
+    )
+}
+
+/// HITL pause: mint a durable approval for the gated tool (same shape as the
+/// `ExecuteStep` RPC), then flip the run `AwaitingApproval` and return an
+/// `awaiting_approval` response. A persistence failure returns `unavailable`
+/// before either state change or pause event. Deliberately NO terminal
+/// `CompleteStep` and NO plan COMPLETED/FAILED transition — a durable run is
+/// paused, not finished; resume re-invokes `run_agent`.
 async fn pause_for_approval(
     state: &crate::state::StateStore,
     session_channel: &Channel,
@@ -7013,8 +7050,11 @@ async fn pause_for_approval(
     // approval; closed again if the approval cannot be created.
     mut pause_fold: Option<runtime_loop::fold::PauseFold<'_, '_>>,
 ) -> Result<pb::RunAgentResponse, tonic::Status> {
+    // One gate for the whole pause: the descriptor, the kind and the reason all read the
+    // run's snapshot, so they cannot disagree about what the person is shown.
+    let gate = crate::permission::RunGate::for_run(&req.org_id, &req.run_id);
     let mut continuation_descriptor_json = continuation_descriptor(
-        crate::permission::RunGate::for_run(&req.org_id, &req.run_id),
+        gate,
         req,
         step_id,
         tool_name,
@@ -7067,11 +7107,11 @@ async fn pause_for_approval(
             // `ask`), and false of a consent gate: telling someone that reading
             // a finding is a destructive operation is how a prompt stops meaning
             // anything. The kind and the reason both say which one this is.
-            kind: approval_kind_for(tool_name) as i32,
+            kind: approval_kind_for_with(gate, tool_name) as i32,
             requested_of: req.org_id.clone(),
             org_id: req.org_id.clone(),
             user_id: req.user_id.clone(),
-            reason: approval_reason_for(tool_name),
+            reason: approval_reason_for_with(gate, tool_name),
             expires_in_seconds: 3600,
             // Let session-core mint the durable approval id (matrix §4.1).
             client_approval_id: String::new(),
@@ -15461,6 +15501,93 @@ mod tests {
         assert_eq!(
             approval_reason_for("delete_records"),
             "tool 'delete_records' requires approval"
+        );
+    }
+
+    /// Under `enforce` the label and the sentence follow the run's declared classes. A
+    /// read that carries the `ask` floor is a disclosure. A side effect, or an
+    /// unclassified tool, with the same floor is a destructive gate that says only the
+    /// mechanism. The reserved name keeps its own sentence whatever the view says. The
+    /// gate off, or a run with no snapshot, answers by name.
+    #[test]
+    fn under_enforce_an_ask_floor_on_a_risky_or_unclassified_class_is_labelled_destructive_and_a_read_ask_floor_a_disclosure() {
+        use crate::capability_policy::ToolClassGate;
+        use crate::permission::{record_run_views, RunGate, ToolClassView};
+        use crate::runtime_loop::subagent_results::READ_TOOL;
+
+        let (org, run) = ("org-d1-273-kind", "run-d1-273-kind");
+        record_run_views(
+            org,
+            run,
+            [
+                (
+                    "mcp__srv__lookup".to_owned(),
+                    ToolClassView::from_registry("mcp__srv__lookup", "read", "ask", "d"),
+                ),
+                (
+                    "mcp__srv__pay".to_owned(),
+                    ToolClassView::from_registry("mcp__srv__pay", "external_write", "ask", "d"),
+                ),
+                (
+                    "mcp__srv__mystery".to_owned(),
+                    ToolClassView::from_registry("mcp__srv__mystery", "unclassified", "none", "d"),
+                ),
+                (
+                    READ_TOOL.to_owned(),
+                    ToolClassView::from_registry(READ_TOOL, "external_write", "none", "d"),
+                ),
+            ],
+        );
+        let enforce = RunGate::with_gate(ToolClassGate::Enforce, org, run);
+        assert_eq!(
+            approval_kind_for_with(enforce, "mcp__srv__lookup"),
+            pb::ApprovalKind::Permission
+        );
+        let lookup = approval_reason_for_with(enforce, "mcp__srv__lookup");
+        assert!(lookup.contains("into this conversation"), "{lookup}");
+        assert!(
+            !lookup.contains("requires approval") && !lookup.contains("subagent"),
+            "{lookup}"
+        );
+        for tool in ["mcp__srv__pay", "mcp__srv__mystery"] {
+            assert_eq!(
+                approval_kind_for_with(enforce, tool),
+                pb::ApprovalKind::Destructive,
+                "{tool}"
+            );
+            assert_eq!(
+                approval_reason_for_with(enforce, tool),
+                format!("tool '{tool}' requires approval")
+            );
+        }
+        // The reserved name keeps its own sentence, whatever its view says.
+        assert_eq!(
+            approval_kind_for_with(enforce, READ_TOOL),
+            pb::ApprovalKind::Permission
+        );
+        assert_eq!(
+            approval_reason_for_with(enforce, READ_TOOL),
+            approval_reason_for(READ_TOOL)
+        );
+        // The gate off reads no view: the name answers.
+        let off = RunGate::with_gate(ToolClassGate::Off, org, run);
+        assert_eq!(
+            approval_kind_for_with(off, "mcp__srv__lookup"),
+            pb::ApprovalKind::Destructive
+        );
+        assert_eq!(
+            approval_reason_for_with(off, "mcp__srv__lookup"),
+            "tool 'mcp__srv__lookup' requires approval"
+        );
+        // A run with no snapshot answers by name, whatever the gate says.
+        let unknown = RunGate::with_gate(ToolClassGate::Enforce, org, "another-run");
+        assert_eq!(
+            approval_kind_for_with(unknown, "mcp__srv__lookup"),
+            pb::ApprovalKind::Destructive
+        );
+        assert_eq!(
+            approval_reason_for_with(unknown, "mcp__srv__lookup"),
+            "tool 'mcp__srv__lookup' requires approval"
         );
     }
 

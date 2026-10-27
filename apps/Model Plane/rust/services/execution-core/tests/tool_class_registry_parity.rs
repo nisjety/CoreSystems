@@ -357,7 +357,9 @@ fn differing_fields(row: &Seeded, args: &str) -> BTreeSet<&'static str> {
     if requires_durable_owner_approval(&row.tool) != (floor == ApprovalFloor::DurableOwner) {
         differing.insert("durable_owner_approval");
     }
-    if requires_consent_to_disclose(&row.tool) != (floor == ApprovalFloor::Ask) {
+    if requires_consent_to_disclose(&row.tool)
+        != (row.class == SideEffectClass::Read && floor == ApprovalFloor::Ask)
+    {
         differing.insert("consent_to_disclose");
     }
     if evaluate_call(PermissionMode::Ask, &row.tool, args)
