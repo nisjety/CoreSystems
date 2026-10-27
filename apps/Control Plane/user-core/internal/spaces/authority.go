@@ -9,6 +9,7 @@ package spaces
 import (
 	"fmt"
 	"strings"
+	"time"
 )
 
 type Kind string
@@ -234,6 +235,9 @@ type SpaceIndexEntry struct {
 	OrgID    string `json:"org_id"`
 	Kind     Kind   `json:"kind"`
 	Role     string `json:"role"`
+	// State is the registration state the index resolved: "active" or
+	// "archived" (WS04-S7). Archived rooms stay listed and readable.
+	State string `json:"state"`
 }
 
 // MemberGrant is one subject's place in a Space. `service` covers agent and
@@ -369,6 +373,10 @@ type CurrentMembership struct {
 	// RosterMode is "managed" (Control writers) or "org_derived" (the
 	// organization room, whose roster follows the organization).
 	RosterMode string `json:"roster_mode,omitempty"`
+	// State is "active" or, for ResolveReadableUserMembership only, "archived"
+	// (WS04-S7). ArchivedAt is set when State is "archived".
+	State      string     `json:"state,omitempty"`
+	ArchivedAt *time.Time `json:"archived_at,omitempty"`
 }
 
 func (m CurrentMembership) Validate() error {

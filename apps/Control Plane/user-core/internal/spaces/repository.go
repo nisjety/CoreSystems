@@ -119,12 +119,19 @@ func (r *Repository) Register(ctx context.Context, registration Registration) (*
 		if current.OrgID != registration.OrgID || current.Kind != registration.Kind || current.OwnerPrincipalID != registration.OwnerPrincipalID {
 			return nil, fmt.Errorf("space reference is already registered with a different organization, kind, or owner")
 		}
+		// Archive is Control-owned (WS04-S7): an Application lifecycle event
+		// that maps to active never un-archives a room. suspended, deleting
+		// and deleted always win.
+		nextState := registrationState
+		if current.RegistrationState == RegistrationStateArchived && registrationState == "active" {
+			nextState = RegistrationStateArchived
+		}
 		if registration.LifecycleRevision > current.ApplicationLifecycleRevision {
 			if err := tx.QueryRow(ctx, `
 				UPDATE registered_spaces
 				SET application_lifecycle_revision=$2, registration_state=$3, updated_at=NOW()
 				WHERE space_ref=$1
-				RETURNING registration_state, updated_at`, current.SpaceRef, registration.LifecycleRevision, registrationState,
+				RETURNING registration_state, updated_at`, current.SpaceRef, registration.LifecycleRevision, nextState,
 			).Scan(&current.RegistrationState, &current.UpdatedAt); err != nil {
 				return nil, fmt.Errorf("advance registered Space lifecycle revision: %w", err)
 			}
@@ -134,7 +141,7 @@ func (r *Repository) Register(ctx context.Context, registration Registration) (*
 					return nil, err
 				}
 			}
-		} else if registration.LifecycleRevision == current.ApplicationLifecycleRevision && current.RegistrationState != registrationState {
+		} else if registration.LifecycleRevision == current.ApplicationLifecycleRevision && current.RegistrationState != nextState {
 			return nil, fmt.Errorf("space lifecycle revision conflicts with registered authorization state")
 		}
 	}
@@ -537,7 +544,7 @@ func (r *Repository) RosterForSpace(ctx context.Context, spaceRef, orgID, subjec
 		JOIN registered_spaces s ON s.space_ref = m.space_ref
 		LEFT JOIN users u ON u.id = m.subject_id AND m.subject_type = 'user'
 		WHERE m.space_ref = $1 AND m.active
-		  AND s.org_id = $2 AND s.registration_state = 'active'
+		  AND s.org_id = $2 AND s.registration_state IN ('active', 'archived')
 		  AND EXISTS (
 		      SELECT 1 FROM space_memberships caller
 		      WHERE caller.space_ref = $1 AND caller.subject_type = 'user'
@@ -590,11 +597,11 @@ func (r *Repository) SpacesForSubject(ctx context.Context, orgID, subjectID stri
 		return nil, fmt.Errorf("organization and subject are required")
 	}
 	rows, err := r.db.Pool.Query(ctx, `
-		SELECT s.space_ref, s.org_id, s.space_kind, m.role
+		SELECT s.space_ref, s.org_id, s.space_kind, m.role, s.registration_state
 		FROM registered_spaces s
 		JOIN space_memberships m ON m.space_ref = s.space_ref
 		WHERE s.org_id = $1
-		  AND s.registration_state = 'active'
+		  AND s.registration_state IN ('active', 'archived')
 		  AND m.subject_type = 'user' AND m.subject_id = $2 AND m.active = TRUE
 		  AND EXISTS (
 		      SELECT 1 FROM user_org_memberships u
@@ -609,7 +616,7 @@ func (r *Repository) SpacesForSubject(ctx context.Context, orgID, subjectID stri
 	entries := make([]SpaceIndexEntry, 0, 8)
 	for rows.Next() {
 		var entry SpaceIndexEntry
-		if err := rows.Scan(&entry.SpaceRef, &entry.OrgID, &entry.Kind, &entry.Role); err != nil {
+		if err := rows.Scan(&entry.SpaceRef, &entry.OrgID, &entry.Kind, &entry.Role, &entry.State); err != nil {
 			return nil, fmt.Errorf("scan Space index entry: %w", err)
 		}
 		entries = append(entries, entry)
@@ -916,6 +923,18 @@ func canonicalRecipientSubjects(recipients []string) ([]string, error) {
 // access decision: recipient, policy, and owner-resource facts are owned by
 // separate authoritative inputs and must be intersected by a later issuer.
 func (r *Repository) ResolveCurrentUserMembership(ctx context.Context, spaceRef, orgID, subjectID string) (*CurrentMembership, error) {
+	return r.resolveUserMembership(ctx, spaceRef, orgID, subjectID, []string{"active"})
+}
+
+// ResolveReadableUserMembership is ResolveCurrentUserMembership for READ
+// surfaces only (WS04-S7): it also resolves an archived room, and reports the
+// state and archive time. The gateway asks for it with ?readable=1 from the
+// read handlers; every write decision keeps the strict active-only resolver.
+func (r *Repository) ResolveReadableUserMembership(ctx context.Context, spaceRef, orgID, subjectID string) (*CurrentMembership, error) {
+	return r.resolveUserMembership(ctx, spaceRef, orgID, subjectID, []string{"active", "archived"})
+}
+
+func (r *Repository) resolveUserMembership(ctx context.Context, spaceRef, orgID, subjectID string, states []string) (*CurrentMembership, error) {
 	if r == nil || r.db == nil {
 		return nil, fmt.Errorf("space authority repository unavailable")
 	}
@@ -924,7 +943,7 @@ func (r *Repository) ResolveCurrentUserMembership(ctx context.Context, spaceRef,
 		SELECT s.space_ref, s.org_id, m.subject_id, s.space_kind, m.role,
 		       r.authority_revision, r.membership_revision, r.privacy_revision,
 		       r.recipient_audience_revision, r.entitlement_revision,
-		       s.roster_mode,
+		       s.roster_mode, s.registration_state, s.archived_at,
 		       (s.space_kind='personal' OR EXISTS (
 			SELECT 1 FROM space_recipient_audience_members a
 			WHERE a.space_ref=s.space_ref
@@ -938,7 +957,7 @@ func (r *Repository) ResolveCurrentUserMembership(ctx context.Context, spaceRef,
 		  ON r.space_ref=s.space_ref
 		WHERE s.space_ref=$1
 		  AND s.org_id=$2
-		  AND s.registration_state='active'
+		  AND s.registration_state = ANY($4::text[])
 		  AND m.subject_type='user'
 		  AND m.subject_id=$3
 		  AND m.active=TRUE
@@ -946,12 +965,12 @@ func (r *Repository) ResolveCurrentUserMembership(ctx context.Context, spaceRef,
 			SELECT 1 FROM user_org_memberships u
 			WHERE u.user_id=$3 AND u.org_id=$2 AND u.status='active'
 		  )`,
-		strings.TrimSpace(spaceRef), strings.TrimSpace(orgID), strings.TrimSpace(subjectID),
+		strings.TrimSpace(spaceRef), strings.TrimSpace(orgID), strings.TrimSpace(subjectID), states,
 	).Scan(
 		&membership.SpaceRef, &membership.OrgID, &membership.SubjectID, &membership.Kind, &membership.Role,
 		&membership.Revisions.Authority, &membership.Revisions.Membership, &membership.Revisions.Privacy,
 		&membership.Revisions.RecipientAudience, &membership.Revisions.Entitlement,
-		&membership.RosterMode, &membership.RecipientReady,
+		&membership.RosterMode, &membership.State, &membership.ArchivedAt, &membership.RecipientReady,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNoCurrentMembership
@@ -1077,7 +1096,7 @@ func (r *Repository) ResolveSharedRetrievalDecisionEvidence(ctx context.Context,
 		JOIN space_recipient_audiences a ON a.space_ref=s.space_ref AND a.revision=r.recipient_audience_revision
 		JOIN space_recipient_audience_members am ON am.space_ref=a.space_ref AND am.revision=a.revision AND am.subject_id=m.subject_id
 		JOIN space_effect_policies p ON p.org_id=s.org_id
-		WHERE s.space_ref=$1 AND s.org_id=$2 AND s.registration_state='active'
+		WHERE s.space_ref=$1 AND s.org_id=$2 AND s.registration_state IN ('active','archived')
 		  AND s.space_kind <> 'personal'
 		  AND m.subject_type='user' AND m.subject_id=$3 AND m.active=TRUE
 		  AND EXISTS (SELECT 1 FROM user_org_memberships u WHERE u.user_id=$3 AND u.org_id=$2 AND u.status='active')`,
@@ -1124,7 +1143,7 @@ func (r *Repository) ResolveSharedThreadReadDecisionEvidence(ctx context.Context
 		JOIN space_recipient_audiences a ON a.space_ref=s.space_ref AND a.revision=r.recipient_audience_revision
 		JOIN space_recipient_audience_members am ON am.space_ref=a.space_ref AND am.revision=a.revision AND am.subject_id=m.subject_id
 		JOIN space_effect_policies p ON p.org_id=s.org_id
-		WHERE s.space_ref=$1 AND s.org_id=$2 AND s.registration_state='active'
+		WHERE s.space_ref=$1 AND s.org_id=$2 AND s.registration_state IN ('active','archived')
 		  AND s.space_kind <> 'personal'
 		  AND m.subject_type='user' AND m.subject_id=$3 AND m.active=TRUE
 		  AND EXISTS (SELECT 1 FROM user_org_memberships u WHERE u.user_id=$3 AND u.org_id=$2 AND u.status='active')`,
@@ -1468,7 +1487,7 @@ func fenceActiveSpaces(ctx context.Context, tx pgx.Tx, orgID string, privacy, en
 		    entitlement_revision=entitlement_revision + CASE WHEN $3 THEN 1 ELSE 0 END,
 		    updated_at=NOW()
 		FROM registered_spaces s
-		WHERE r.space_ref=s.space_ref AND s.org_id=$1 AND s.registration_state='active'`,
+		WHERE r.space_ref=s.space_ref AND s.org_id=$1 AND s.registration_state IN ('active','archived')`,
 		orgID, privacy, entitlement)
 	if err != nil {
 		return 0, fmt.Errorf("fence Space authorities for effect policy: %w", err)

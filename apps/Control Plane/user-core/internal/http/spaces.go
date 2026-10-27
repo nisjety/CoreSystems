@@ -454,7 +454,13 @@ func (s *Server) resolveCurrentSpaceMembership(c *gin.Context) {
 	if !s.spaceRepoAvailable(c) {
 		return
 	}
-	membership, err := s.spaceRepo.ResolveCurrentUserMembership(
+	resolveMembership := s.spaceRepo.ResolveCurrentUserMembership
+	if c.Query("readable") == "1" {
+		// Read surfaces only (WS04-S7): also resolves an archived room and
+		// reports its state. Write decisions never take this path.
+		resolveMembership = s.spaceRepo.ResolveReadableUserMembership
+	}
+	membership, err := resolveMembership(
 		c.Request.Context(), c.Param("space_ref"), c.GetString("org_id"), c.GetString("user_id"),
 	)
 	if errors.Is(err, spaces.ErrNoCurrentMembership) {
@@ -533,7 +539,7 @@ func (s *Server) issueThreadDecision(c *gin.Context) {
 	if !bindSpaceDecisionBody(c, &request, "space_ref and idempotency_key are required", &request.SpaceRef, &request.IdempotencyKey) {
 		return
 	}
-	evidence, membership, ok := s.resolveKindEvidence(c, request.SpaceRef,
+	evidence, membership, ok := s.resolveThreadWriteEvidence(c, request.SpaceRef,
 		s.spaceRepo.ResolvePersonalThreadDecisionEvidence, s.spaceRepo.ResolveSharedThreadDecisionEvidence,
 		"current recipient audience authority required")
 	if !ok {
@@ -582,7 +588,7 @@ func (s *Server) issueThreadAppendDecision(c *gin.Context) {
 		&request.SpaceRef, &request.ThreadID, &request.ContentDigest, &request.IdempotencyKey) {
 		return
 	}
-	evidence, _, ok := s.resolveKindEvidence(c, request.SpaceRef,
+	evidence, _, ok := s.resolveThreadWriteEvidence(c, request.SpaceRef,
 		s.spaceRepo.ResolvePersonalThreadDecisionEvidence, s.spaceRepo.ResolveSharedThreadDecisionEvidence,
 		"current recipient audience authority required")
 	if !ok {
@@ -751,7 +757,7 @@ func (s *Server) issueRetrievalDecision(c *gin.Context) {
 	if !bindSpaceDecisionBody(c, &request, "space_ref and idempotency_key are required", &request.SpaceRef, &request.IdempotencyKey) {
 		return
 	}
-	evidence, membership, ok := s.resolveKindEvidence(c, request.SpaceRef,
+	evidence, membership, ok := s.resolveReadKindEvidence(c, request.SpaceRef,
 		s.spaceRepo.ResolvePersonalRetrievalDecisionEvidence, s.spaceRepo.ResolveSharedRetrievalDecisionEvidence,
 		"current retrieval authority required")
 	if !ok {
@@ -1537,7 +1543,24 @@ func (s *Server) resolveKindEvidence(
 	personal, shared func(ctx context.Context, spaceRef, orgID, subjectID string) (spaces.PersonalThreadDecisionEvidence, error),
 	audienceMsg string,
 ) (spaces.PersonalThreadDecisionEvidence, *spaces.CurrentMembership, bool) {
-	membership, err := s.spaceRepo.ResolveCurrentUserMembership(c.Request.Context(), spaceRef, c.GetString("org_id"), c.GetString("user_id"))
+	return s.resolveKindEvidenceFor(c, spaceRef, s.spaceRepo.ResolveCurrentUserMembership, false, personal, shared, audienceMsg)
+}
+
+// resolveKindEvidenceFor is resolveKindEvidence with the membership resolver
+// chosen by the caller (WS04-S7: a read decision uses the readable resolver) and
+// an optional typed 409 room_archived for the write decisions.
+func (s *Server) resolveKindEvidenceFor(
+	c *gin.Context,
+	spaceRef string,
+	resolveMembership func(ctx context.Context, spaceRef, orgID, subjectID string) (*spaces.CurrentMembership, error),
+	archivedIs409 bool,
+	personal, shared func(ctx context.Context, spaceRef, orgID, subjectID string) (spaces.PersonalThreadDecisionEvidence, error),
+	audienceMsg string,
+) (spaces.PersonalThreadDecisionEvidence, *spaces.CurrentMembership, bool) {
+	membership, err := resolveMembership(c.Request.Context(), spaceRef, c.GetString("org_id"), c.GetString("user_id"))
+	if archivedIs409 && s.refuseArchivedWrite(c, err, spaceRef) {
+		return spaces.PersonalThreadDecisionEvidence{}, nil, false
+	}
 	if s.writeSpaceDenial(c, err, spaceRef, spaces.ExpectMembershipOnly, "current Space authority required", http.StatusServiceUnavailable, "Space authority unavailable") {
 		return spaces.PersonalThreadDecisionEvidence{}, nil, false
 	}
