@@ -1,5 +1,7 @@
-import { cleanup, render, screen, waitFor } from '@solidjs/testing-library'
+import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+import { ApiError } from '@/shared/api/http'
 
 const orgClient = vi.hoisted(() => ({ listOrganizationMembers: vi.fn() }))
 const spacesClient = vi.hoisted(() => ({
@@ -340,5 +342,228 @@ describe('SpaceMemberControls with the Control writer', () => {
     await waitFor(() => expect(spacesClient.addSpaceMember).toHaveBeenCalled())
     expect(screen.queryByText(/Tilgangen forberedes/)).toBeNull()
     expect(screen.queryByText(/ikke bekreftet/)).toBeNull()
+  })
+})
+
+// WS04-S3: with `features.people_search` the picker is a debounced search over the directory. The
+// server decides who the caller may see (organisation from the session, the room's own members left
+// out); the component only debounces, pages by cursor and drops stale answers.
+describe('SpaceMemberControls people search (WS04-S3)', () => {
+  const person = (id: string, name: string) => ({ subjectId: id, displayName: name, email: `${id}@example.test`, isSelf: false })
+  const ola = person('user_2', 'Ola Hansen')
+  const nina = person('user_3', 'Nina Berg')
+  const kari = person('user_4', 'Kari Solheim')
+
+  // `'absent'` leaves the prop off, which a default parameter value of `undefined` could not express.
+  const renderSearch = (peopleSearch: boolean | 'absent' = true) =>
+    render(() => (
+      <SpaceMemberControls spaceRef="space_1" orgId="org_1" roster={() => roster} peopleSearch={peopleSearch === 'absent' ? undefined : peopleSearch} />
+    ))
+  const openPicker = () => screen.getByRole('button', { name: /Legg til personer/ }).click()
+  const box = () => screen.getByRole('searchbox') as HTMLInputElement
+  const type = (value: string) => fireEvent.input(box(), { target: { value } })
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+  const searchCalls = () => spacesClient.searchDirectoryPeople.mock.calls as Array<[string, Record<string, unknown>]>
+
+  it('shows a search box and never reads the organisation list', async () => {
+    spacesClient.searchDirectoryPeople.mockResolvedValue({ people: [nina], nextCursor: null })
+    renderSearch()
+    openPicker()
+    expect(await screen.findByText('Nina Berg')).toBeTruthy()
+    expect(box().placeholder).toBe('Navn eller e-post')
+    expect(box().maxLength).toBe(100)
+    expect(orgClient.listOrganizationMembers).not.toHaveBeenCalled()
+  })
+
+  it('opens with a first page for the empty query, 20 at a time, leaving out the room’s own members', async () => {
+    renderSearch()
+    openPicker()
+    await waitFor(() => expect(spacesClient.searchDirectoryPeople).toHaveBeenCalledTimes(1))
+    expect(searchCalls()[0]?.[0]).toBe('')
+    expect(searchCalls()[0]?.[1]).toEqual({ limit: 20, cursor: null, excludeMemberOf: 'space_1' })
+  })
+
+  it('does not search before the picker is opened', async () => {
+    renderSearch()
+    await sleep(50)
+    expect(spacesClient.searchDirectoryPeople).not.toHaveBeenCalled()
+  })
+
+  it('debounces typing to one request 250 ms after the last keystroke', async () => {
+    renderSearch()
+    openPicker()
+    await waitFor(() => expect(spacesClient.searchDirectoryPeople).toHaveBeenCalledTimes(1))
+    type('k')
+    await sleep(100)
+    type('ka')
+    await sleep(100)
+    type('kar')
+    // 200 ms since the first keystroke, 0 since the last: nothing yet.
+    expect(spacesClient.searchDirectoryPeople).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(spacesClient.searchDirectoryPeople).toHaveBeenCalledTimes(2))
+    await sleep(400)
+    expect(spacesClient.searchDirectoryPeople).toHaveBeenCalledTimes(2)
+    expect(searchCalls()[1]?.[0]).toBe('kar')
+    expect(searchCalls()[1]?.[1]).toMatchObject({ cursor: null, excludeMemberOf: 'space_1' })
+  })
+
+  it('sends the trimmed text', async () => {
+    renderSearch()
+    openPicker()
+    await waitFor(() => expect(spacesClient.searchDirectoryPeople).toHaveBeenCalledTimes(1))
+    type('  nina  ')
+    await waitFor(() => expect(spacesClient.searchDirectoryPeople).toHaveBeenCalledTimes(2))
+    expect(searchCalls()[1]?.[0]).toBe('nina')
+  })
+
+  it('drops an answer that arrives after a newer search was made', async () => {
+    let answerFirst: (page: unknown) => void = () => undefined
+    spacesClient.searchDirectoryPeople
+      .mockImplementationOnce(() => new Promise((resolve) => { answerFirst = resolve }))
+      .mockResolvedValueOnce({ people: [kari], nextCursor: null })
+    renderSearch()
+    openPicker()
+    await waitFor(() => expect(spacesClient.searchDirectoryPeople).toHaveBeenCalledTimes(1))
+    type('kari')
+    expect(await screen.findByText('Kari Solheim')).toBeTruthy()
+
+    // The slow first page finally lands: it must not replace the newer list.
+    answerFirst({ people: [nina], nextCursor: 'old-cursor' })
+    await sleep(50)
+    expect(screen.queryByText('Nina Berg')).toBeNull()
+    expect(screen.getByText('Kari Solheim')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Vis flere' })).toBeNull()
+  })
+
+  it('Show more appends the next page using the server’s cursor, and goes away at the end', async () => {
+    spacesClient.searchDirectoryPeople
+      .mockResolvedValueOnce({ people: [nina], nextCursor: 'cursor-2' })
+      .mockResolvedValueOnce({ people: [kari], nextCursor: null })
+    renderSearch()
+    openPicker()
+    expect(await screen.findByText('Nina Berg')).toBeTruthy()
+    screen.getByRole('button', { name: 'Vis flere' }).click()
+    expect(await screen.findByText('Kari Solheim')).toBeTruthy()
+    expect(screen.getByText('Nina Berg')).toBeTruthy()
+    expect(searchCalls()[1]?.[1]).toMatchObject({ cursor: 'cursor-2', limit: 20, excludeMemberOf: 'space_1' })
+    expect(screen.queryByRole('button', { name: 'Vis flere' })).toBeNull()
+  })
+
+  it('a new search starts from the first page again and replaces the list', async () => {
+    spacesClient.searchDirectoryPeople
+      .mockResolvedValueOnce({ people: [nina], nextCursor: 'cursor-2' })
+      .mockResolvedValueOnce({ people: [kari], nextCursor: null })
+    renderSearch()
+    openPicker()
+    await screen.findByText('Nina Berg')
+    type('kari')
+    expect(await screen.findByText('Kari Solheim')).toBeTruthy()
+    expect(screen.queryByText('Nina Berg')).toBeNull()
+    expect(searchCalls()[1]?.[1]).toMatchObject({ cursor: null })
+  })
+
+  it('hides people who are already on the room’s roster, even if the server sends them', async () => {
+    spacesClient.searchDirectoryPeople.mockResolvedValue({ people: [ola, nina], nextCursor: null })
+    renderSearch()
+    openPicker()
+    expect(await screen.findByText('Nina Berg')).toBeTruthy()
+    expect(screen.queryByText('Ola Hansen')).toBeNull()
+    expect(screen.getAllByRole('button', { name: 'Legg til' })).toHaveLength(1)
+  })
+
+  it('adds a found person by their subject id', async () => {
+    spacesClient.searchDirectoryPeople.mockResolvedValue({ people: [nina], nextCursor: null })
+    renderSearch()
+    openPicker()
+    ;(await screen.findByRole('button', { name: 'Legg til' })).click()
+    await waitFor(() => expect(spacesClient.addSpaceMember).toHaveBeenCalledWith('space_1', 'user_3', undefined))
+  })
+
+  it('says nothing matches a search that found nobody, and nothing left to add for the empty query', async () => {
+    spacesClient.searchDirectoryPeople.mockResolvedValue({ people: [], nextCursor: null })
+    renderSearch()
+    openPicker()
+    expect(await screen.findByText('Ingen flere personer å legge til i dette rommet.')).toBeTruthy()
+    type('zzz')
+    expect(await screen.findByText('Ingen personer passer søket.')).toBeTruthy()
+  })
+
+  it('shows a typed error, not an empty list, for a disabled, unavailable or rate-limited search', async () => {
+    const cases: Array<[number, string, string]> = [
+      [404, 'feature_disabled', 'Denne funksjonen er ikke slått på for deg ennå.'],
+      [503, 'directory_unavailable', 'Personsøket er utilgjengelig akkurat nå. Prøv igjen om litt.'],
+      [429, 'rate_limited', 'For mange forespørsler akkurat nå. Rommet oppdateres litt saktere en liten stund.'],
+    ]
+    for (const [status, code, expected] of cases) {
+      spacesClient.searchDirectoryPeople.mockReset().mockRejectedValue(new ApiError('x', status, code))
+      renderSearch()
+      openPicker()
+      const alert = await screen.findByRole('alert')
+      expect(alert.textContent, code).toBe(expected)
+      expect(screen.queryByText('Ingen personer passer søket.'), code).toBeNull()
+      expect(screen.queryByText('Ingen flere personer å legge til i dette rommet.'), code).toBeNull()
+      expect(screen.queryByRole('button', { name: 'Legg til' }), code).toBeNull()
+      cleanup()
+    }
+  })
+
+  it('uses its own sentence for a failure with no code', async () => {
+    spacesClient.searchDirectoryPeople.mockRejectedValue(new TypeError('Failed to fetch'))
+    renderSearch()
+    openPicker()
+    expect((await screen.findByRole('alert')).textContent).toBe('Personsøket mislyktes. Prøv igjen om litt.')
+  })
+
+  it('a failed Show more keeps the people already found and says why', async () => {
+    spacesClient.searchDirectoryPeople
+      .mockResolvedValueOnce({ people: [nina], nextCursor: 'cursor-2' })
+      .mockRejectedValueOnce(new ApiError('x', 503, 'directory_unavailable'))
+    renderSearch()
+    openPicker()
+    await screen.findByText('Nina Berg')
+    screen.getByRole('button', { name: 'Vis flere' }).click()
+    expect((await screen.findByRole('alert')).textContent).toContain('Personsøket er utilgjengelig')
+    expect(screen.getByText('Nina Berg')).toBeTruthy()
+  })
+
+  it('a recovered search clears the earlier error', async () => {
+    spacesClient.searchDirectoryPeople
+      .mockRejectedValueOnce(new ApiError('x', 503, 'directory_unavailable'))
+      .mockResolvedValueOnce({ people: [nina], nextCursor: null })
+    renderSearch()
+    openPicker()
+    await screen.findByRole('alert')
+    type('nina')
+    expect(await screen.findByText('Nina Berg')).toBeTruthy()
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('with peopleSearch off the picker lists the organisation as before, with no search box', async () => {
+    renderSearch(false)
+    openPicker()
+    expect(await screen.findByText('Nina Berg')).toBeTruthy()
+    expect(screen.queryByRole('searchbox')).toBeNull()
+    expect(orgClient.listOrganizationMembers).toHaveBeenCalledWith('org_1')
+    expect(spacesClient.searchDirectoryPeople).not.toHaveBeenCalled()
+    expect(screen.queryByRole('button', { name: 'Vis flere' })).toBeNull()
+  })
+
+  it('with peopleSearch undefined (the server did not say) it is not treated as on', async () => {
+    renderSearch('absent')
+    openPicker()
+    expect(await screen.findByText('Nina Berg')).toBeTruthy()
+    expect(screen.queryByRole('searchbox')).toBeNull()
+    expect(orgClient.listOrganizationMembers).toHaveBeenCalledTimes(1)
+    expect(spacesClient.searchDirectoryPeople).not.toHaveBeenCalled()
+  })
+
+  it('stops searching once the component is removed', async () => {
+    const view = renderSearch()
+    openPicker()
+    await waitFor(() => expect(spacesClient.searchDirectoryPeople).toHaveBeenCalledTimes(1))
+    type('kari')
+    view.unmount()
+    await sleep(400)
+    expect(spacesClient.searchDirectoryPeople).toHaveBeenCalledTimes(1)
   })
 })

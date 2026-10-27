@@ -117,6 +117,15 @@ describe('SpaceThreadPanel (WS01-S7a)', () => {
       expect(screen.getByTestId('pane-footer')).toBeTruthy()
     })
 
+    // A restricted thread is still a thread the member can post in (the room's composer decides),
+    // so the footer is drawn for it; only a thread that is gone has nothing to reply to.
+    it('draws the footer for a restricted thread too', async () => {
+      spacesClient.getSpaceThreadTranscript.mockRejectedValue(new ApiError('forbidden', 403, 'space_read_not_authorized'))
+      renderPanel('thr_1', { footer: <div data-testid="pane-footer" /> })
+      await screen.findByText(/Denne samtalen er ikke delt med deg/)
+      expect(screen.getByTestId('pane-footer')).toBeTruthy()
+    })
+
     it('does not draw the footer for a thread that is not available to this member', async () => {
       spacesClient.getSpaceThreadTranscript.mockRejectedValue(new ApiError('missing', 404, null))
       renderPanel('thr_1', { footer: <div data-testid="pane-footer" /> })

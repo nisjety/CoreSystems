@@ -350,3 +350,78 @@ describe('SpaceRoomTimeline — thread pane entry and read states (WS01-S7a)', (
     expect(screen.getAllByText('Lagerhjelpen').length).toBeGreaterThan(0)
   })
 })
+
+describe('SpaceRoomTimeline — long thread collapse and reply count (WS01-S7b)', () => {
+  const post = { thread_id: 't1', space_id: 'room-1', title: 'Innkjøp', latest_run_status: 'completed' }
+  const turnsOf = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({ role: 'user', content: `Melding ${i + 1}`, authorSubjectId: 'user-1' }))
+  const transcriptOf = (n: number) =>
+    spacesClient.loadSpaceTranscript.mockResolvedValue({ state: 'ok', threadId: 't1', turns: turnsOf(n) })
+  const on = () => true
+
+  it('shows the first turn, a "N more messages" row and the last three for a six-turn thread, and the row opens the pane', async () => {
+    transcriptOf(6)
+    const open = vi.fn()
+    renderRoom([post], [agent], { onOpenThread: open, collapseLongThreads: on })
+
+    expect(await screen.findByText('Melding 1')).toBeTruthy()
+    for (const n of [4, 5, 6]) expect(screen.getByText(`Melding ${n}`)).toBeTruthy()
+    expect(screen.queryByText('Melding 2')).toBeNull()
+    expect(screen.queryByText('Melding 3')).toBeNull()
+
+    const row = screen.getByRole('button', { name: '2 meldinger til i tråden' })
+    expect(row.className).toContain('verevon-room-post__collapsed')
+    row.click()
+    expect(open).toHaveBeenCalledTimes(1)
+    expect(open.mock.calls[0]?.[0]).toMatchObject({ thread_id: 't1' })
+  })
+
+  it('says "1 melding til" in the singular when exactly one turn is hidden', async () => {
+    transcriptOf(5)
+    renderRoom([post], [agent], { onOpenThread: vi.fn(), collapseLongThreads: on })
+    expect(await screen.findByRole('button', { name: '1 melding til i tråden' })).toBeTruthy()
+    expect(screen.queryByText('Melding 2')).toBeNull()
+  })
+
+  it('does not collapse a thread of four turns or fewer', async () => {
+    transcriptOf(4)
+    renderRoom([post], [agent], { onOpenThread: vi.fn(), collapseLongThreads: on })
+    expect(await screen.findByText('Melding 4')).toBeTruthy()
+    for (const n of [1, 2, 3]) expect(screen.getByText(`Melding ${n}`)).toBeTruthy()
+    expect(document.querySelector('.verevon-room-post__collapsed')).toBeNull()
+  })
+
+  it('draws every turn with the flag off', async () => {
+    transcriptOf(6)
+    renderRoom([post], [agent], { onOpenThread: vi.fn(), collapseLongThreads: () => false })
+    expect(await screen.findByText('Melding 6')).toBeTruthy()
+    for (const n of [1, 2, 3, 4, 5]) expect(screen.getByText(`Melding ${n}`)).toBeTruthy()
+    expect(document.querySelector('.verevon-room-post__collapsed')).toBeNull()
+  })
+
+  it('draws every turn with the flag on but no pane to open (onOpenThread absent)', async () => {
+    transcriptOf(6)
+    renderRoom([post], [agent], { collapseLongThreads: on })
+    expect(await screen.findByText('Melding 6')).toBeTruthy()
+    for (const n of [1, 2, 3, 4, 5]) expect(screen.getByText(`Melding ${n}`)).toBeTruthy()
+    expect(document.querySelector('.verevon-room-post__collapsed')).toBeNull()
+  })
+
+  it('names the reply count on the footer button from reply_count', async () => {
+    renderRoom([{ ...post, reply_count: 3 }], [agent], { onOpenThread: vi.fn(), collapseLongThreads: on })
+    expect(await screen.findByRole('button', { name: 'Åpne tråd · 3 svar' })).toBeTruthy()
+  })
+
+  it('uses the singular for one reply', async () => {
+    renderRoom([{ ...post, reply_count: 1 }], [agent], { onOpenThread: vi.fn(), collapseLongThreads: on })
+    expect(await screen.findByRole('button', { name: 'Åpne tråd · 1 svar' })).toBeTruthy()
+  })
+
+  it('keeps the plain footer label with no replies or with the flag off', async () => {
+    const view = renderRoom([{ ...post, reply_count: 0 }], [agent], { onOpenThread: vi.fn(), collapseLongThreads: on })
+    expect(await screen.findByRole('button', { name: 'Åpne tråd' })).toBeTruthy()
+    view.unmount()
+    renderRoom([{ ...post, reply_count: 5 }], [agent], { onOpenThread: vi.fn(), collapseLongThreads: () => false })
+    expect(await screen.findByRole('button', { name: 'Åpne tråd' })).toBeTruthy()
+  })
+})

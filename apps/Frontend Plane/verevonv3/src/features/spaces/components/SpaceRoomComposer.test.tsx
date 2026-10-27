@@ -1143,3 +1143,94 @@ describe('SpaceRoomComposer — human posts (WS01-S6)', () => {
     })
   })
 })
+
+describe('SpaceRoomComposer — reliable send on the agent path (WS01-S8)', () => {
+  beforeEach(() => {
+    vi.stubEnv('VITE_SPACE_SEND_IDEMPOTENCY_API', 'true')
+  })
+
+  it('offers Try again for a dropped connection and repeats the send under the same key', async () => {
+    const stream = scriptedStream()
+    renderComposer()
+    await send('Rydd lageret')
+    stream.handlers().onError?.({ code: 'connection_error', message: 'x' })
+    stream.finish()
+    const retry = await screen.findByRole('button', { name: 'Prøv igjen' })
+
+    // The repeat goes out as the same send: same idempotency key, same session key.
+    const first = chatClient.streamChat.mock.calls[0]?.[0] as { clientMessageId?: string; sessionKey?: string }
+    expect(first.clientMessageId).toMatch(/^[0-9a-f]{32}$/)
+    expect(first.sessionKey).toBe(`space-post-${first.clientMessageId}`)
+
+    scriptedStream()
+    fireEvent.click(retry)
+    await waitFor(() => expect(chatClient.streamChat).toHaveBeenCalledTimes(2))
+    const second = chatClient.streamChat.mock.calls[1]?.[0] as { clientMessageId?: string; sessionKey?: string }
+    expect(second.clientMessageId).toBe(first.clientMessageId)
+    expect(second.sessionKey).toBe(first.sessionKey)
+  })
+
+  it('offers no Try again for an answer the server gave', async () => {
+    const stream = scriptedStream()
+    renderComposer()
+    await send('Rydd lageret')
+    stream.handlers().onError?.({ code: 'spend_hard_stop', message: 'x' })
+    stream.finish()
+    await screen.findByRole('alert')
+    expect(screen.queryByRole('button', { name: 'Prøv igjen' })).toBeNull()
+  })
+
+  it('says a send the server already had was received, and shows no error', async () => {
+    const stream = scriptedStream()
+    renderComposer()
+    await send('Rydd lageret')
+    stream.handlers().onError?.({ code: 'managed_run_already_started', message: 'x' })
+    stream.finish()
+    expect(await screen.findByText('Meldingen var allerede mottatt. Svaret vises i rommet.')).toBeTruthy()
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Prøv igjen' })).toBeNull()
+  })
+
+  it('with the send key off a dropped connection is a plain error with no Try again', async () => {
+    vi.stubEnv('VITE_SPACE_SEND_IDEMPOTENCY_API', 'false')
+    const stream = scriptedStream()
+    renderComposer()
+    await send('Rydd lageret')
+    const request = chatClient.streamChat.mock.calls[0]?.[0] as { clientMessageId?: string; sessionKey?: string }
+    expect(request.clientMessageId).toBeUndefined()
+    expect(request.sessionKey).toBeUndefined()
+    stream.handlers().onError?.({ code: 'connection_error', message: 'x' })
+    stream.finish()
+    await screen.findByRole('alert')
+    expect(screen.queryByRole('button', { name: 'Prøv igjen' })).toBeNull()
+  })
+})
+
+describe('SpaceRoomComposer — a fixed reply target (WS01-S7b)', () => {
+  const renderWithTarget = (fixed: boolean | undefined) =>
+    render(() => (
+      <SpaceRoomComposer
+        spaceRef="room-1"
+        roster={() => []}
+        agents={() => []}
+        threads={() => []}
+        replyTarget={() => ({ threadId: 'thr_7', title: 'Innkjøp' })}
+        onClearReplyTarget={() => undefined}
+        replyTargetFixed={fixed}
+      />
+    ))
+
+  it('hides the cancel-reply button when the target is the surface itself (the thread pane)', () => {
+    renderWithTarget(true)
+    expect(screen.getByText(/Svarer i/)).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Avbryt svar' })).toBeNull()
+  })
+
+  it('keeps the cancel-reply button for the room composer', () => {
+    renderWithTarget(undefined)
+    expect(screen.getByRole('button', { name: 'Avbryt svar' })).toBeTruthy()
+    cleanup()
+    renderWithTarget(false)
+    expect(screen.getByRole('button', { name: 'Avbryt svar' })).toBeTruthy()
+  })
+})

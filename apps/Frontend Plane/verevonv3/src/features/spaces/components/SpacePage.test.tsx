@@ -120,6 +120,30 @@ vi.mock('@/shared/api/chat-client', async (importOriginal) => {
   }
 })
 
+// WS02-S5: the live stream controller is replaced by a recorder the tests drive by hand (its own
+// behaviour is covered in lib/space-stream.test.ts). Nothing here opens a connection.
+type StreamMockInstance = {
+  options: { spaceRef: string; onChange: () => void; onState?: (state: string) => void }
+  start: ReturnType<typeof vi.fn>
+  stop: ReturnType<typeof vi.fn>
+  rearm: ReturnType<typeof vi.fn>
+  state: () => string
+}
+const streamMock = vi.hoisted(() => ({ instances: [] as unknown[] }) as { instances: StreamMockInstance[] })
+vi.mock('../lib/space-stream', () => ({
+  createSpaceStreamController: (options: StreamMockInstance['options']) => {
+    const instance: StreamMockInstance = {
+      options,
+      start: vi.fn(),
+      stop: vi.fn(),
+      rearm: vi.fn(),
+      state: () => 'idle',
+    }
+    streamMock.instances.push(instance)
+    return instance
+  },
+}))
+
 const personalContext = {
   space: { space_ref: 'space_personal_1', name: 'Personal Space', kind: 'personal', lifecycle: 'active' },
   membership: {
@@ -1484,6 +1508,357 @@ describe('SpacePage', () => {
       const pane = await screen.findByRole('complementary', { name: 'Innkjøp' })
       await within(pane).findByText('Hva koster det?')
       expect(within(pane).queryByRole('textbox')).toBeNull()
+    })
+  })
+
+  // WS04-S2: the room's topic under its name, and the name/topic form for an owner or manager.
+  describe('room name and topic (WS04-S2)', () => {
+    const roomContext = (over: { topic?: string | null; role?: string; roomDetails?: boolean; kind?: string } = {}) => ({
+      space: {
+        space_ref: 'space_room_1', name: 'Leveranse', kind: over.kind ?? 'room', lifecycle: 'active',
+        is_organization_room: false,
+        ...(over.topic === undefined ? {} : { topic: over.topic }),
+      },
+      membership: {
+        space_ref: 'space_room_1', org_id: 'org_1', subject_id: 'user_1', kind: over.kind ?? 'room', role: over.role ?? 'owner',
+        revisions: { authority: 1, membership: 1, privacy: 1, recipient_audience: 1, entitlement: 1 },
+      },
+      ...(over.roomDetails === undefined ? {} : { features: { room_details: over.roomDetails } }),
+    })
+
+    const open = async (context: ReturnType<typeof roomContext>) => {
+      spacesClient.getSpaceContext.mockResolvedValue(context)
+      spacesClient.getSpaceThreads.mockResolvedValue({ ...context, threads: [] })
+      renderSpacePage('/spaces/space_room_1')
+      await screen.findByRole('heading', { name: 'Leveranse', level: 1 })
+    }
+
+    it('shows the topic as a paragraph under the room name when one is set', async () => {
+      await open(roomContext({ topic: 'Ukentlig levering til kundene' }))
+      const topic = document.querySelector('.verevon-space-header__topic')
+      expect(topic?.textContent).toBe('Ukentlig levering til kundene')
+      expect(topic?.tagName).toBe('P')
+    })
+
+    it('shows no topic paragraph when the topic is null, absent or only whitespace', async () => {
+      for (const topic of [null, undefined, '   ']) {
+        const view = renderSpacePageForTopic(topic)
+        await screen.findByRole('heading', { name: 'Leveranse', level: 1 })
+        expect(document.querySelector('.verevon-space-header__topic'), String(topic)).toBeNull()
+        view.unmount()
+      }
+    })
+
+    function renderSpacePageForTopic(topic: string | null | undefined) {
+      const context = roomContext(topic === undefined ? {} : { topic })
+      spacesClient.getSpaceContext.mockResolvedValue(context)
+      spacesClient.getSpaceThreads.mockResolvedValue({ ...context, threads: [] })
+      return renderSpacePage('/spaces/space_room_1')
+    }
+
+    it('offers the edit form to an owner when features.room_details is on', async () => {
+      await open(roomContext({ roomDetails: true }))
+      expect(screen.getByRole('button', { name: 'Rediger navn og emne' })).toBeTruthy()
+    })
+
+    it('offers it to a manager too', async () => {
+      await open(roomContext({ roomDetails: true, role: 'manager' }))
+      expect(screen.getByRole('button', { name: 'Rediger navn og emne' })).toBeTruthy()
+    })
+
+    it('has no edit form for an editor', async () => {
+      await open(roomContext({ roomDetails: true, role: 'editor' }))
+      expect(screen.queryByRole('button', { name: 'Rediger navn og emne' })).toBeNull()
+    })
+
+    it('has no edit form for a viewer', async () => {
+      await open(roomContext({ roomDetails: true, role: 'viewer' }))
+      expect(screen.queryByRole('button', { name: 'Rediger navn og emne' })).toBeNull()
+    })
+
+    it('has no edit form on a personal Space even with the flag on', async () => {
+      const context = roomContext({ roomDetails: true, kind: 'personal' })
+      spacesClient.getSpaceContext.mockResolvedValue(context)
+      spacesClient.getSpaceThreads.mockResolvedValue({ ...context, threads: [] })
+      renderSpacePage('/spaces/space_room_1')
+      await screen.findByRole('heading', { level: 1 })
+      expect(screen.queryByRole('button', { name: 'Rediger navn og emne' })).toBeNull()
+    })
+
+    it('has no edit form with the flag off', async () => {
+      await open(roomContext({ roomDetails: false }))
+      expect(screen.queryByRole('button', { name: 'Rediger navn og emne' })).toBeNull()
+    })
+
+    it('has no edit form when the context carries no features at all', async () => {
+      await open(roomContext())
+      expect(screen.queryByRole('button', { name: 'Rediger navn og emne' })).toBeNull()
+    })
+  })
+
+  // WS02-S5: the live stream is a transport; the page keeps the listing as the source of truth and
+  // falls back to the 6 s poll whenever the stream is not live. The controller itself is covered in
+  // lib/space-stream.test.ts; here it is the mock above, driven by hand.
+  describe('the live stream through the page (WS02-S5)', () => {
+    const LISTING_POLL_MS = 6_000
+    const PRESENCE_BEAT_MS = 6_000
+    const RECHECK_MS = 30_000
+
+    // Records every interval the page starts and every one it clears, and never runs them: a test
+    // runs a handler by hand, so "60 s idle" is ten calls rather than a minute of fake clock.
+    function captureIntervals() {
+      const created: { id: number; timeout: number | undefined; handler: () => void }[] = []
+      const cleared = new Set<number>()
+      let next = 100
+      vi.spyOn(window, 'setInterval').mockImplementation(((handler: TimerHandler, timeout?: number) => {
+        const id = next++
+        created.push({ id, timeout, handler: handler as () => void })
+        return id as unknown as number
+      }) as typeof window.setInterval)
+      vi.spyOn(window, 'clearInterval').mockImplementation(((id?: number) => {
+        if (id !== undefined) cleared.add(id)
+      }) as typeof window.clearInterval)
+      return {
+        created,
+        active: (timeout: number) => created.filter((entry) => entry.timeout === timeout && !cleared.has(entry.id)),
+      }
+    }
+
+    const presenceCalls = (status: 'online' | 'offline') =>
+      spacesClient.recordSpacePresence.mock.calls.filter((call) => call[1] === status)
+
+    beforeEach(() => {
+      streamMock.instances.length = 0
+      spacesClient.getSpaceContext.mockResolvedValue(personalContext)
+    })
+
+    const controller = async () => {
+      await waitFor(() => expect(streamMock.instances.length).toBeGreaterThan(0))
+      return streamMock.instances[streamMock.instances.length - 1] as (typeof streamMock.instances)[number]
+    }
+
+    it('starts one stream for the room once membership is confirmed, on this room’s ref', async () => {
+      renderSpacePage()
+      await screen.findByRole('heading', { name: 'Personlig rom', level: 1 })
+      expect(streamMock.instances).toHaveLength(1)
+      expect(streamMock.instances[0]?.options.spaceRef).toBe('space_personal_1')
+      expect(streamMock.instances[0]?.start).toHaveBeenCalledTimes(1)
+    })
+
+    it('re-reads the listing once per stream change, and never beats presence or says offline for it', async () => {
+      renderSpacePage()
+      await screen.findByRole('heading', { name: 'Personlig rom', level: 1 })
+      await waitFor(() => expect(presenceCalls('online').length).toBeGreaterThan(0))
+      const threadReads = spacesClient.getSpaceThreads.mock.calls.length
+      const beats = presenceCalls('online').length
+
+      const live = await controller()
+      live.options.onChange()
+      live.options.onChange()
+      await waitFor(() => expect(spacesClient.getSpaceThreads.mock.calls.length).toBeGreaterThan(threadReads))
+      flush()
+
+      // The listing refetched; presence did not move with it, and nobody "left the room".
+      expect(presenceCalls('online')).toHaveLength(beats)
+      expect(presenceCalls('offline')).toHaveLength(0)
+    })
+
+    it('keeps the 6 s presence beat running on its own timer while the stream is live', async () => {
+      const intervals = captureIntervals()
+      renderSpacePage()
+      await screen.findByRole('heading', { name: 'Personlig rom', level: 1 })
+      const live = await controller()
+      live.options.onState?.('live')
+      flush()
+
+      // Presence expires at 30 s server-side; with the listing quiet it must keep its own beat.
+      expect(PRESENCE_BEAT_MS).toBeLessThan(30_000)
+      const beating = intervals.active(PRESENCE_BEAT_MS)
+      expect(beating).toHaveLength(1)
+      const before = presenceCalls('online').length
+      for (let minute = 0; minute < 10; minute += 1) beating[0]?.handler()
+      expect(presenceCalls('online').length).toBe(before + 10)
+      expect(presenceCalls('offline')).toHaveLength(0)
+    })
+
+    it('polls the listing every 6 s only while the stream is not live', async () => {
+      const intervals = captureIntervals()
+      renderSpacePage()
+      await screen.findByRole('heading', { name: 'Personlig rom', level: 1 })
+      const stream = await controller()
+
+      // Idle: the presence beat and the fallback poll.
+      expect(intervals.active(LISTING_POLL_MS)).toHaveLength(2)
+
+      stream.options.onState?.('live')
+      flush()
+      await waitFor(() => expect(intervals.active(LISTING_POLL_MS)).toHaveLength(1))
+
+      stream.options.onState?.('degraded')
+      flush()
+      await waitFor(() => expect(intervals.active(LISTING_POLL_MS)).toHaveLength(2))
+
+      stream.options.onState?.('unavailable')
+      flush()
+      expect(intervals.active(LISTING_POLL_MS)).toHaveLength(2)
+    })
+
+    it('the fallback poll reads the listing, and the page still refetches when the tab returns while live', async () => {
+      const intervals = captureIntervals()
+      renderSpacePage()
+      await screen.findByRole('heading', { name: 'Personlig rom', level: 1 })
+      const stream = await controller()
+      const reads = spacesClient.getSpaceThreads.mock.calls.length
+      // Run every active 6 s timer: the presence one ignores the listing, the poll reads it.
+      for (const entry of intervals.active(LISTING_POLL_MS)) entry.handler()
+      await waitFor(() => expect(spacesClient.getSpaceThreads.mock.calls.length).toBeGreaterThan(reads))
+
+      stream.options.onState?.('live')
+      flush()
+      const liveReads = spacesClient.getSpaceThreads.mock.calls.length
+      document.dispatchEvent(new Event('visibilitychange'))
+      await waitFor(() => expect(spacesClient.getSpaceThreads.mock.calls.length).toBeGreaterThan(liveReads))
+    })
+
+    it('a successful membership recheck gives a stream that ended forbidden one new attempt', async () => {
+      const intervals = captureIntervals()
+      renderSpacePage()
+      await screen.findByRole('heading', { name: 'Personlig rom', level: 1 })
+      const stream = await controller()
+      expect(stream.rearm).not.toHaveBeenCalled()
+
+      intervals.active(RECHECK_MS)[0]?.handler()
+      await waitFor(() => expect(spacesClient.getSpaceContext).toHaveBeenCalledTimes(2))
+      await waitFor(() => expect(stream.rearm).toHaveBeenCalledTimes(1))
+    })
+
+    it('a failed recheck keeps the page fail-closed, stops the stream and never rearms it', async () => {
+      const intervals = captureIntervals()
+      spacesClient.getSpaceContext
+        .mockResolvedValueOnce(personalContext)
+        .mockRejectedValueOnce(new Error('membership revoked'))
+      renderSpacePage()
+      await screen.findByRole('heading', { name: 'Personlig rom', level: 1 })
+      const stream = await controller()
+
+      intervals.active(RECHECK_MS)[0]?.handler()
+      expect(await screen.findByRole('heading', { name: 'Rom utilgjengelig' })).toBeTruthy()
+      await waitFor(() => expect(stream.stop).toHaveBeenCalled())
+      expect(stream.rearm).not.toHaveBeenCalled()
+      expect(screen.queryByText('Live')).toBeNull()
+    })
+
+    it('says Live in the meta row for a live stream, and nothing for an idle or unavailable one', async () => {
+      renderSpacePage()
+      await screen.findByRole('heading', { name: 'Personlig rom', level: 1 })
+      const stream = await controller()
+      expect(document.querySelector('.verevon-space-live')).toBeNull()
+
+      stream.options.onState?.('live')
+      flush()
+      await waitFor(() => expect(document.querySelector('.verevon-space-live')?.textContent).toBe('Live'))
+
+      stream.options.onState?.('degraded')
+      flush()
+      await waitFor(() =>
+        expect(document.querySelector('.verevon-space-live')?.textContent).toBe('Oppdateres hvert par sekunder'),
+      )
+
+      stream.options.onState?.('unavailable')
+      flush()
+      await waitFor(() => expect(document.querySelector('.verevon-space-live')).toBeNull())
+    })
+
+    it('stops the stream when the page unmounts', async () => {
+      const view = renderSpacePage()
+      await screen.findByRole('heading', { name: 'Personlig rom', level: 1 })
+      const stream = await controller()
+      view.unmount()
+      expect(stream.stop).toHaveBeenCalled()
+    })
+  })
+
+  // WS01-S7b: with human posts on and the pane available, Reply opens the pane and the pane holds
+  // the reply composer, fixed to that thread. With human posts off nothing changes.
+  describe('replying in the thread pane (WS01-S7b)', () => {
+    const thread = {
+      thread_id: 'thread_1',
+      space_id: 'space_personal_1',
+      title: 'Innkjøp',
+      preview: 'Forhåndsvisning',
+      latest_run_status: 'completed',
+      updated_at: '2026-10-27T10:00:00Z',
+    }
+    const postsContext = { ...personalContext, features: { human_posts: true } }
+
+    beforeEach(() => {
+      vi.stubEnv('VITE_SPACE_THREAD_PANE_UI', 'true')
+      spacesClient.getSpaceThreads.mockResolvedValue({ ...personalContext, threads: [thread] })
+      spacesClient.getSpaceThreadTranscript.mockResolvedValue({
+        threadId: 'thread_1',
+        turns: [{ role: 'user', content: 'Hva koster det?', authorSubjectId: 'user_1' }],
+      })
+    })
+
+    it('with human posts on, the pane shows a composer aimed at that thread with no cancel control', async () => {
+      spacesClient.getSpaceContext.mockResolvedValue(postsContext)
+      renderSpacePage('/spaces/space_personal_1?thread_id=thread_1')
+      const pane = await screen.findByRole('complementary', { name: 'Innkjøp' })
+      await within(pane).findByText('Hva koster det?')
+      expect(within(pane).getByRole('textbox')).toBeTruthy()
+      expect(within(pane).getByText(/Svarer i/).textContent).toContain('Innkjøp')
+      expect(within(pane).queryByRole('button', { name: 'Avbryt svar' })).toBeNull()
+    })
+
+    it('Reply opens the pane (?thread_id) instead of pointing the room composer', async () => {
+      spacesClient.getSpaceContext.mockResolvedValue(postsContext)
+      renderSpacePage()
+      const timeline = within(await screen.findByRole('list', { name: 'Samtaler i rommet' }))
+      expect(document.querySelector('.verevon-space-auxpane')).toBeNull()
+      fireEvent.click(timeline.getByRole('button', { name: 'Svar' }))
+      flush()
+      const pane = await screen.findByRole('complementary', { name: 'Innkjøp' })
+      expect(within(pane).getByText(/Svarer i/)).toBeTruthy()
+      // The room's own composer is not the one aimed at the thread: exactly one "Svarer i" on the page.
+      expect(screen.getAllByText(/Svarer i/)).toHaveLength(1)
+    })
+
+    it('with human posts off the pane has no composer and Reply points the room composer as before', async () => {
+      spacesClient.getSpaceContext.mockResolvedValue(personalContext)
+      renderSpacePage()
+      const timeline = within(await screen.findByRole('list', { name: 'Samtaler i rommet' }))
+      fireEvent.click(timeline.getByRole('button', { name: 'Svar' }))
+      flush()
+      expect(await screen.findByText(/Svarer i/)).toBeTruthy()
+      expect(screen.getByRole('button', { name: 'Avbryt svar' })).toBeTruthy()
+      expect(document.querySelector('.verevon-space-auxpane')).toBeNull()
+    })
+
+    it('with human posts on but the pane switched off, Reply still points the room composer', async () => {
+      vi.stubEnv('VITE_SPACE_THREAD_PANE_UI', 'false')
+      spacesClient.getSpaceContext.mockResolvedValue(postsContext)
+      renderSpacePage()
+      const timeline = within(await screen.findByRole('list', { name: 'Samtaler i rommet' }))
+      fireEvent.click(timeline.getByRole('button', { name: 'Svar' }))
+      flush()
+      expect(await screen.findByText(/Svarer i/)).toBeTruthy()
+      expect(document.querySelector('.verevon-space-auxpane')).toBeNull()
+    })
+
+    it('draws a long thread collapsed in the room only with human posts on', async () => {
+      const turns = Array.from({ length: 6 }, (_, i) => ({
+        role: 'user', content: `Melding ${i + 1}`, authorSubjectId: 'user_1',
+      }))
+      spacesClient.getSpaceThreadTranscript.mockResolvedValue({ threadId: 'thread_1', turns })
+      spacesClient.getSpaceContext.mockResolvedValue(postsContext)
+      const view = renderSpacePage()
+      expect(await screen.findByRole('button', { name: '2 meldinger til i tråden' })).toBeTruthy()
+      view.unmount()
+      spacesClient.getSpaceContext.mockResolvedValue(personalContext)
+      renderSpacePage()
+      expect(await screen.findByText('Melding 6')).toBeTruthy()
+      expect(screen.getByText('Melding 2')).toBeTruthy()
+      expect(document.querySelector('.verevon-room-post__collapsed')).toBeNull()
     })
   })
 

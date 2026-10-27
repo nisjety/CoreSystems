@@ -45,6 +45,14 @@ test('a post from A is seen by B, who replies, and no agent run starts', async (
     await pane.getByRole('button', { name: /^Send$/ }).click()
     await expect(pageA.getByText(`Svar fra B ${marker}`)).toBeVisible({ timeout: 30_000 })
 
+    // WS01-S7b: A comes back to the room. B's reply shows as a count on A's own thread, and A's own
+    // thread is badged new because its latest message is someone else's (an owner-only rule would
+    // have hidden it).
+    await pageA.reload()
+    const postA = pageA.locator('.verevon-room-post', { hasText: `Hei fra A ${marker}` })
+    await expect(postA.getByRole('button', { name: /Åpne tråd · 1 svar|Open thread · 1 reply/ })).toBeVisible({ timeout: 30_000 })
+    await expect(postA.getByText(/^(Ny|New)$/)).toBeVisible()
+
     // Human posts start no run: the room shows no working agent for them.
     await expect(pageA.getByText(/Verevon jobber|Verevon is working/)).toHaveCount(0)
   } finally {

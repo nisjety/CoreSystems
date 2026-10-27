@@ -389,5 +389,152 @@ describe('space send pipeline (P-SPA2)', () => {
       })
       await pipeline.send(input())
     })
+
+    // WS01-S8: the cursor is the last frame id seen; without one the whole answer is replayed, so the text restarts.
+    it('restarts the answer text when the resume has no cursor to continue from', async () => {
+      vi.useFakeTimers()
+      const { pipeline } = pipelineWith({ sendIdempotency: true })
+      streamChat.mockImplementationOnce(async (_request: unknown, handlers: ChatStreamHandlers) => {
+        handlers.onConnected?.({ requestId: 'req_5' } as never)
+        handlers.onMessage?.({ content: 'Hal' } as never)
+        handlers.onError?.({ code: 'connection_error', message: 'x' } as never)
+      })
+      resumeStream.mockImplementationOnce(async (_requestId: string, handlers: ChatStreamHandlers) => {
+        handlers.onMessage?.({ content: 'Hallo igjen' } as never)
+        handlers.onDone?.({} as never)
+      })
+      const sending = pipeline.send(input())
+      await vi.advanceTimersByTimeAsync(1500)
+      await sending
+      flush()
+      expect(resumeStream.mock.calls[0]?.[3]).toBeUndefined()
+      // Not "HalHallo igjen": the replay starts the text over.
+      expect(pipeline.exchange()).toMatchObject({ status: 'done', assistantContent: 'Hallo igjen' })
+    })
+
+    it('keeps the text it has when it resumes from a cursor', async () => {
+      vi.useFakeTimers()
+      const { pipeline } = pipelineWith({ sendIdempotency: true })
+      streamChat.mockImplementationOnce(async (_request: unknown, handlers: ChatStreamHandlers) => {
+        handlers.onConnected?.({ requestId: 'req_5' } as never)
+        handlers.onMessage?.({ content: 'Hal' } as never)
+        handlers.onFrameId?.('7')
+        handlers.onError?.({ code: 'connection_error', message: 'x' } as never)
+      })
+      resumeStream.mockImplementationOnce(async (_requestId: string, handlers: ChatStreamHandlers) => {
+        handlers.onMessage?.({ content: 'lo' } as never)
+        handlers.onDone?.({} as never)
+      })
+      const sending = pipeline.send(input())
+      await vi.advanceTimersByTimeAsync(1500)
+      await sending
+      flush()
+      expect(pipeline.exchange()).toMatchObject({ status: 'done', assistantContent: 'Hallo' })
+    })
+
+    it('resumes at most three times with growing waits, then ends in a retryable error and marks the room unreachable', async () => {
+      vi.useFakeTimers()
+      const { pipeline } = pipelineWith({ sendIdempotency: true })
+      streamChat.mockImplementationOnce(async (_request: unknown, handlers: ChatStreamHandlers) => {
+        handlers.onConnected?.({ requestId: 'req_5' } as never)
+        handlers.onError?.({ code: 'connection_error', message: 'x' } as never)
+      })
+      resumeStream.mockImplementation(async (_requestId: unknown, handlers: ChatStreamHandlers) => {
+        handlers.onError?.({ code: 'connection_error', message: 'x' } as never)
+      })
+      const sending = pipeline.send(input())
+
+      // The first wait is 1 s: nothing happens at 900 ms.
+      await vi.advanceTimersByTimeAsync(900)
+      expect(resumeStream).toHaveBeenCalledTimes(0)
+      await vi.advanceTimersByTimeAsync(200)
+      expect(resumeStream).toHaveBeenCalledTimes(1)
+      // The second wait is 2 s, counted from the end of the first resume (t = 1.1 s now).
+      await vi.advanceTimersByTimeAsync(1800)
+      expect(resumeStream).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(300)
+      expect(resumeStream).toHaveBeenCalledTimes(2)
+      // The third wait is 4 s (t = 3.2 s now).
+      await vi.advanceTimersByTimeAsync(3700)
+      expect(resumeStream).toHaveBeenCalledTimes(2)
+      await vi.advanceTimersByTimeAsync(300)
+      await sending
+      flush()
+
+      expect(resumeStream).toHaveBeenCalledTimes(3)
+      expect(pipeline.exchange()).toMatchObject({
+        status: 'error',
+        errorCode: 'connection_error',
+        errorMessage: 'described:connection_error',
+        retryable: true,
+      })
+      expect(spaceConnectivity()).toBe('unreachable')
+      expect(pipeline.submitting()).toBe(false)
+    })
+
+    it('does not resume a drop before the server announced the turn: it is a retryable error at once', async () => {
+      const { pipeline } = pipelineWith({ sendIdempotency: true })
+      streamChat.mockImplementationOnce(async (_request: unknown, handlers: ChatStreamHandlers) => {
+        handlers.onError?.({ code: 'connection_error', message: 'x' } as never)
+      })
+      await pipeline.send(input())
+      flush()
+      expect(resumeStream).not.toHaveBeenCalled()
+      expect(pipeline.exchange()).toMatchObject({ status: 'error', retryable: true })
+    })
+
+    it('with the send key off a dropped stream is an error at once, never resumed, and not retryable', async () => {
+      const { pipeline } = pipelineWith({ sendIdempotency: false })
+      streamChat.mockImplementationOnce(async (_request: unknown, handlers: ChatStreamHandlers) => {
+        handlers.onConnected?.({ requestId: 'req_5' } as never)
+        handlers.onError?.({ code: 'connection_error', message: 'x' } as never)
+      })
+      await pipeline.send(input())
+      flush()
+      expect(resumeStream).not.toHaveBeenCalled()
+      expect(pipeline.exchange()).toMatchObject({ status: 'error', errorCode: 'connection_error' })
+      expect(pipeline.exchange()?.retryable).toBeUndefined()
+    })
+
+    it('a stop during the resume wait ends the wait and never resumes', async () => {
+      vi.useFakeTimers()
+      const { pipeline } = pipelineWith({ sendIdempotency: true })
+      streamChat.mockImplementationOnce(async (_request: unknown, handlers: ChatStreamHandlers) => {
+        handlers.onConnected?.({ requestId: 'req_5' } as never)
+        handlers.onError?.({ code: 'connection_error', message: 'x' } as never)
+      })
+      cancelInvocation.mockResolvedValue(undefined)
+      const sending = pipeline.send(input())
+      await vi.advanceTimersByTimeAsync(100)
+      await pipeline.stop()
+      await vi.advanceTimersByTimeAsync(5000)
+      await sending
+      flush()
+      expect(resumeStream).not.toHaveBeenCalled()
+      expect(cancelInvocation).toHaveBeenCalledWith('req_5')
+      expect(pipeline.exchange()).toMatchObject({ status: 'stopped' })
+    })
+
+    it('a retry after exhausted resumes reuses the first send id', async () => {
+      vi.useFakeTimers()
+      const { pipeline } = pipelineWith({ sendIdempotency: true })
+      streamChat
+        .mockImplementationOnce(async (_request: unknown, handlers: ChatStreamHandlers) => {
+          handlers.onConnected?.({ requestId: 'req_5' } as never)
+          handlers.onError?.({ code: 'connection_error', message: 'x' } as never)
+        })
+        .mockResolvedValueOnce(undefined)
+      resumeStream.mockImplementation(async (_requestId: unknown, handlers: ChatStreamHandlers) => {
+        handlers.onError?.({ code: 'connection_error', message: 'x' } as never)
+      })
+      const sending = pipeline.send(input())
+      await vi.advanceTimersByTimeAsync(8000)
+      await sending
+      flush()
+      const firstId = (streamChat.mock.calls[0]?.[0] as Record<string, unknown>).clientMessageId
+      await pipeline.retry()
+      expect(streamChat).toHaveBeenCalledTimes(2)
+      expect((streamChat.mock.calls[1]?.[0] as Record<string, unknown>).clientMessageId).toBe(firstId)
+    })
   })
 })
