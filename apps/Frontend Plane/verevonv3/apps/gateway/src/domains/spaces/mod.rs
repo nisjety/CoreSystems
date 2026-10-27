@@ -29,6 +29,7 @@ use crate::{
 
 mod denial;
 use denial::{typed_response, with_gap_details, Decision, SpaceDenial};
+pub(crate) mod directory;
 pub(crate) mod human_posts;
 pub(crate) mod room_admin;
 mod schedule_template;
@@ -737,6 +738,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/spaces/{space_ref}",
             patch(room_admin::update_room_details_route),
         )
+        .route("/api/v1/directory/people", get(directory::people_route))
         .route("/api/v1/spaces/{space_ref}/context", get(space_context))
         .route("/api/v1/spaces/{space_ref}/actions", get(space_actions))
 		.route(
@@ -5036,6 +5038,7 @@ async fn space_context(
                     "send_idempotency": state.space_features.send_idempotency_api,
                     "connectivity_banner": state.space_features.connectivity_banner_ui,
                     "room_details": state.space_features.room_details_ui,
+                    "people_search": state.space_features.people_search_api,
                 },
                 "limits": { "post_max_chars": human_posts::POST_MAX_CHARS },
             }}),

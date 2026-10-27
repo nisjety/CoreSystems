@@ -223,6 +223,9 @@ services:
       # WS04-S2: room name and topic (PATCH /api/v1/spaces/{space_ref}). Rollout control only; the
       # caller's live Control role (owner or manager) decides who may rename.
       SPACE_ROOM_DETAILS_UI: ${SPACE_ROOM_DETAILS_UI:-true}
+      # WS04-S3: people search for the member picker (GET /api/v1/directory/people). Rollout control
+      # only; Control's directory read under the signed delegation decides what the caller sees.
+      SPACE_PEOPLE_SEARCH_API: ${SPACE_PEOPLE_SEARCH_API:-true}
     ports:
       - "${VEREVON_BIND_ADDRESS:-127.0.0.1}:3185:3185"
     networks:

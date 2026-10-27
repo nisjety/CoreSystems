@@ -189,6 +189,11 @@ pub(crate) struct SpaceFeatureFlags {
     /// (owner or manager) decides who may rename. The topic is a label, so Zero Data Retention
     /// organizations are unaffected.
     pub(crate) room_details_ui: bool,
+    /// `SPACE_PEOPLE_SEARCH_API` (WS04-S3): `GET /api/v1/directory/people`, the people search the
+    /// room member picker uses. Off answers 404 `feature_disabled`. A rollout control, never an
+    /// authorization input: Control's directory read (signed delegation, scope
+    /// `directory:read:self`) decides what the caller may see.
+    pub(crate) people_search_api: bool,
     /// `SPACE_SEND_IDEMPOTENCY_API` (WS01-S5): reported to the SPA as `features.send_idempotency`
     /// (the SPA attaches a client send id to an agent-path send so a retry cannot double-post).
     /// Session Core's dedupe is inert without a key. A rollout control, never an authorization input.
@@ -210,6 +215,7 @@ impl SpaceFeatureFlags {
             policy_admin_api: space_flag("SPACE_POLICY_ADMIN_API"),
             realtime_stream: space_flag("SPACE_REALTIME_STREAM"),
             room_details_ui: space_flag("SPACE_ROOM_DETAILS_UI"),
+            people_search_api: space_flag("SPACE_PEOPLE_SEARCH_API"),
             send_idempotency_api: space_flag("SPACE_SEND_IDEMPOTENCY_API"),
             thread_pane_ui: space_flag("SPACE_THREAD_PANE_UI"),
         }
