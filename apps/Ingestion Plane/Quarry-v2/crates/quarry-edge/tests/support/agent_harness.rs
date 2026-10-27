@@ -198,6 +198,9 @@ pub struct RecordingDriver {
     tab_urls: Mutex<Vec<Option<String>>>,
     tab_ids: Mutex<Vec<String>>,
     refuse_next_acquire: AtomicBool,
+    /// Set by [`RecordingDriver::claim_atomic_targets`]: the driver then says it can
+    /// verify and execute snapshot targets, so a ref action reaches the snapshot check.
+    atomic_targets: AtomicBool,
     tab_seq: AtomicU32,
     tab_selects: Mutex<Vec<String>>,
     tab_closes: Mutex<Vec<String>>,
@@ -291,6 +294,13 @@ impl RecordingDriver {
         assert!(waited.is_ok(), "the driver never reached goto #{count}: {what}");
     }
 
+    /// Claim atomic snapshot-target actions from now on. The double still performs
+    /// none: a test uses it to get a ref action past the capability gate to the
+    /// snapshot check (a stale or unknown snapshot).
+    pub fn claim_atomic_targets(&self) {
+        self.atomic_targets.store(true, Ordering::SeqCst);
+    }
+
     /// Make the next `acquire` fail as a driver would.
     pub fn refuse_next_acquire(&self) {
         self.refuse_next_acquire.store(true, Ordering::SeqCst);
@@ -308,6 +318,7 @@ impl BrowserDriver for RecordingDriver {
             security_evidence: true,
             persistent_profile: true,
             full_visual_fidelity: true,
+            atomic_target_actions: self.atomic_targets.load(Ordering::SeqCst),
             ..BrowserDriverCapabilities::default()
         }
     }

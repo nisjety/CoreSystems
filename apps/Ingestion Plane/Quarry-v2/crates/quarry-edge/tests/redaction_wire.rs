@@ -45,6 +45,8 @@ fn token_shape() -> String {
 #[tokio::test]
 async fn a_stale_type_ref_error_body_has_no_secret() {
     let edge = Edge::start(RunLimits::default()).await;
+    // A ref action reaches the snapshot check only when the driver claims atomic targets.
+    edge.driver.claim_atomic_targets();
     let person = member_token();
     let run = edge.start_run(&person, json!({})).await;
     let secret = typed_secret();
@@ -172,6 +174,10 @@ fn legacy_receipt(run: &str, step: u32, text: &str) -> quarry_runtime::StepRecei
 /// `GET .../receipts` returns typed text masked: a password field's text by its kind, an
 /// ordinary field's text kept under the default policy, and a legacy row that holds raw
 /// text masked on read (the stored row is not rewritten).
+///
+/// The steps are sent as the agent's (`initiated_by: agent`): a person's step on a
+/// non-ZDR run is recorded as metadata only (WS8.B) and its text is the plain marker
+/// `[redacted]`, which is a different branch with its own tests in `human_browse`.
 #[tokio::test]
 async fn receipts_endpoint_returns_masked_typed_text() {
     let edge = Edge::start(RunLimits::default()).await;
@@ -184,7 +190,7 @@ async fn receipts_endpoint_returns_masked_typed_text() {
             &person,
             &run,
             json!({ "type": "type", "selector": "input#password", "text": secret }),
-            None,
+            Some("agent"),
         )
         .await;
     let _ = edge
@@ -192,7 +198,7 @@ async fn receipts_endpoint_returns_masked_typed_text() {
             &person,
             &run,
             json!({ "type": "type", "selector": "#q", "text": "wireless headphones" }),
-            None,
+            Some("agent"),
         )
         .await;
     edge.state
@@ -274,7 +280,8 @@ async fn checkpoint_current_url_has_no_query_token() {
     assert!(checkpoint.current_url.contains("example.test/cb"));
 }
 
-/// An action sent over the browser socket is recorded as masked as one sent over REST.
+/// An action sent over the browser socket is recorded as masked as one sent over REST. The
+/// socket action is the agent's (`initiated_by: agent`), so it is masked by the control kind.
 #[tokio::test]
 async fn ws_action_receipt_is_masked() {
     let edge = Edge::start(RunLimits::default()).await;
@@ -289,6 +296,7 @@ async fn ws_action_receipt_is_masked() {
             &json!({
                 "type": "action",
                 "action": { "type": "type", "selector": "input#password", "text": secret },
+                "initiated_by": "agent",
             })
             .to_string(),
         )
