@@ -381,6 +381,15 @@ impl Harness {
             .expect("request reaches the edge")
     }
 
+    async fn get(&self, bearer: &str, route: &str) -> reqwest::Response {
+        self.client
+            .get(format!("http://{}{route}", self.addr))
+            .bearer_auth(bearer)
+            .send()
+            .await
+            .expect("request reaches the edge")
+    }
+
     /// Give the spawned drain task a moment to forward what the handler sent.
     async fn settled_events(&self) -> Vec<EventType> {
         tokio::time::sleep(Duration::from_millis(150)).await;
@@ -1069,6 +1078,112 @@ async fn durable_crawl_and_batch_are_refused_for_a_zdr_org_user_and_open_otherwi
         assert_eq!(accepted.status().as_u16(), 200, "{route}");
     }
     assert_eq!(control.received_requests().await.unwrap().len(), 2);
+}
+
+// ── /v1/{crawl,batch,jobs}/:id/errors (D2-047) ──────────────────────────────
+
+/// Control Plane as the edge reads it for a job's status and errors. The errors
+/// carry page URLs, which is what the ZDR floor must keep from a ZDR caller.
+async fn control_plane_job_reads_double() -> MockServer {
+    let control = MockServer::start().await;
+    for (id, kind) in [
+        ("job_01J9MMMMMMMMMMMMMMMMMMMMMM", "crawl"),
+        ("job_01J9BBBBBBBBBBBBBBBBBBBBBB", "batch"),
+    ] {
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/jobs/{id}/summary")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": {
+                "job": {
+                    "id": id,
+                    "org_id": "ignored-by-the-edge",
+                    "kind": kind,
+                    "status": "running",
+                    "created_at": "2026-10-27T10:00:00Z",
+                    "desired_seq": 0,
+                    "applied_seq": 0
+                },
+                "phase": "running",
+                "counts": { "completed": 1, "failed": 1, "blocked": 0, "retried": 0, "extracted": 0 },
+                "total": 2,
+                "total_kind": "budget",
+                "last_seq": 2,
+                "warnings": []
+            } })))
+            .mount(&control)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/jobs/{id}/errors")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": {
+                "errors": [{
+                    "id": "evt_1", "seq": 1, "ts": "2026-10-27T10:00:01Z",
+                    "url": "https://zdr-errors-canary.test/private",
+                    "code": "client_4xx", "category": "client_4xx", "retryable": false, "status": 404
+                }],
+                "blocked": []
+            } })))
+            .mount(&control)
+            .await;
+    }
+    control
+}
+
+/// The errors of a job name the URLs of the pages that failed. Under the token's ZDR
+/// floor the three errors routes refuse before control is asked anything (not even the
+/// status read); a standard organization still gets its errors, and the read carries
+/// its own org id. The body cannot lower the floor: these routes take no body.
+#[tokio::test]
+async fn job_errors_are_refused_for_a_zdr_org_user_and_open_to_a_standard_org() {
+    let control = control_plane_job_reads_double().await;
+    let control_url = control.uri();
+    let harness = Harness::start_with(move |state| AppState {
+        control_base_url: control_url,
+        ..state
+    })
+    .await;
+    let routes = [
+        "/v1/crawl/job_01J9MMMMMMMMMMMMMMMMMMMMMM/errors",
+        "/v1/batch/job_01J9BBBBBBBBBBBBBBBBBBBBBB/errors",
+        "/v1/jobs/job_01J9MMMMMMMMMMMMMMMMMMMMMM/errors",
+    ];
+
+    for route in routes {
+        let refused = harness.get(&user_in_zdr_org(), route).await;
+        assert_eq!(refused.status().as_u16(), 403, "{route}");
+        let text = refused.text().await.unwrap();
+        assert!(
+            text.contains("zero data retention"),
+            "{route}: the refusal says why: {text}"
+        );
+        assert!(
+            !text.contains("zdr-errors-canary"),
+            "{route}: a refused read leaked an error URL: {text}"
+        );
+    }
+    assert!(
+        control.received_requests().await.unwrap().is_empty(),
+        "a refused errors read never reaches Control Plane, not even for the status"
+    );
+
+    for route in routes {
+        let served = harness.get(&user_in_standard_org(), route).await;
+        assert_eq!(served.status().as_u16(), 200, "{route}");
+        let payload: Value = served.json().await.unwrap();
+        assert_eq!(
+            payload["data"]["errors"][0]["url"], "https://zdr-errors-canary.test/private",
+            "{route}: a standard organization reads its errors: {payload}"
+        );
+    }
+    let standard_org = golden_org("user_in_standard_org");
+    let reads = control.received_requests().await.unwrap();
+    assert!(!reads.is_empty());
+    for request in reads {
+        assert_eq!(
+            request.url.query_pairs().find(|(key, _)| key == "org_id").map(|(_, value)| value.into_owned()),
+            Some(standard_org.clone()),
+            "the read is scoped to the verified org: {}",
+            request.url
+        );
+    }
 }
 
 // ── /v1/audio ───────────────────────────────────────────────────────────────

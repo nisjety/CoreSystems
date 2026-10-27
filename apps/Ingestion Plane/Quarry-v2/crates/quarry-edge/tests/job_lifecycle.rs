@@ -335,8 +335,15 @@ fn job_summary_accepts_the_origin_and_phase_control_sends() {
 
 // ---- Job control (WS15.L2) -----------------------------------------------------
 
+/// The one id the double treats as an ACCEPTED job (not yet started by a workflow):
+/// control ends it at once on a cancel (`jobs_control.go`: "a cancel of an accepted
+/// job ends it at once"), so its record is already `cancelled` with the request applied.
+const ACCEPTED_JOB: &str = "job_01J9CCCCCCCCCCCCCCCCCCCCCC";
+
 /// Control's answer to a control verb: 409 for a terminal job, otherwise the job
-/// record with the request recorded (desired_seq ahead of applied_seq).
+/// record with the request recorded. A job that is running has the request pending
+/// (desired_seq ahead of applied_seq, status unchanged until the orchestrator applies
+/// it); an accepted job's cancel is applied at once (status cancelled, seqs equal).
 async fn control_job_verb(
     State(captured): State<Captured>,
     Path(id): Path<String>,
@@ -355,7 +362,7 @@ async fn control_job_verb(
         );
     }
     let action = body["action"].as_str().unwrap_or_default();
-    let cancelled = action == "cancel";
+    let cancelled = action == "cancel" && id == ACCEPTED_JOB;
     (
         StatusCode::OK,
         Json(json!({ "data": {
@@ -366,7 +373,7 @@ async fn control_job_verb(
             "created_at": "2026-10-23T10:00:00Z",
             "desired_state": action,
             "desired_seq": 1,
-            "applied_seq": if cancelled { 1 } else { 0 },
+            "applied_seq": i32::from(cancelled),
         } })),
     )
 }
@@ -399,6 +406,14 @@ async fn cancel_is_org_checked_and_409_on_terminal() {
     assert_eq!(body["data"]["phase"], "cancelling");
     assert_eq!(body["data"]["control"]["desired"], "cancel");
     assert_eq!(body["data"]["control"]["pending"], true);
+
+    // An accepted job is cancelled at once: control's record is already cancelled, nothing
+    // is pending, so the edge answers 200 with the terminal phase, not 202.
+    let (status, body) = send_control(addr, reqwest::Method::DELETE, &format!("/v1/crawl/{ACCEPTED_JOB}")).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["data"]["phase"], "cancelled");
+    assert_eq!(body["data"]["status"], "cancelled");
+    assert_eq!(body["data"]["control"]["pending"], false);
 
     let (status, body) = send_control(addr, reqwest::Method::DELETE, "/v1/crawl/job_01J9FFFFFFFFFFFFFFFFFFFFFF").await;
     assert_eq!(status, 404, "a foreign or missing id is a 404: {body}");
