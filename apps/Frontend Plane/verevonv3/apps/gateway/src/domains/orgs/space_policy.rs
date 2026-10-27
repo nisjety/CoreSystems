@@ -276,3 +276,447 @@ pub(crate) async fn list_space_policy_events(
     )
     .await
 }
+
+#[cfg(test)]
+mod tests {
+    //! WS03-S4 tests: the real router with wiremock for auth-core and user-core (Control). No model
+    //! and no database is involved.
+    use super::*;
+    use axum::{body::Body, http::Request};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const KEY: &str = "idem-key-12345";
+    const POLICY_PATH: &str = "/api/v1/internal/spaces/org-policy";
+
+    struct Fx {
+        state: AppState,
+        _auth: MockServer,
+        control: MockServer,
+    }
+
+    /// `role` is the caller's live organization role (Control's session-context answer). The
+    /// `policy_admin_api` flag is ON; `control_status` / `control_body` is what every
+    /// org-policy path answers.
+    async fn fixture(role: &str, control_status: u16, control_body: Value) -> Fx {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+        let control = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId": "user-1", "orgId": "org-1", "role": role,
+                "onboardingStatus": "COMPLETED"
+            })))
+            .mount(&control)
+            .await;
+        for method in ["GET", "PUT"] {
+            for suffix in ["", "/entitlements", "/events"] {
+                Mock::given(wm_method(method))
+                    .and(wm_path(format!("{POLICY_PATH}{suffix}")))
+                    .respond_with(
+                        ResponseTemplate::new(control_status).set_body_json(control_body.clone()),
+                    )
+                    .mount(&control)
+                    .await;
+            }
+        }
+        let mut state = crate::tests::test_state(false);
+        state.auth_core_url = auth.uri();
+        state.user_core_url = control.uri();
+        state.space_features.policy_admin_api = true;
+        Fx {
+            state,
+            _auth: auth,
+            control,
+        }
+    }
+
+    async fn call(state: &AppState, method: &str, uri: &str, body: Option<Value>) -> (u16, Value, String) {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("cookie", "better-auth.session_token=session-1");
+        if body.is_some() {
+            builder = builder.header("content-type", "application/json");
+        }
+        let request = builder
+            .body(Body::from(body.map(|v| v.to_string()).unwrap_or_default()))
+            .unwrap();
+        let response = crate::build_router(state.clone())
+            .oneshot(request)
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let raw = String::from_utf8_lossy(&response.into_body().collect().await.unwrap().to_bytes())
+            .into_owned();
+        let parsed = serde_json::from_str(&raw).unwrap_or(Value::Null);
+        (status, parsed, raw)
+    }
+
+    /// Requests Control received on the org-policy namespace.
+    async fn policy_calls(fx: &Fx) -> Vec<wiremock::Request> {
+        fx.control
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.url.path().starts_with(POLICY_PATH))
+            .collect()
+    }
+
+    fn put_uri() -> &'static str {
+        "/api/v1/orgs/org-1/space-policy/entitlements"
+    }
+
+    fn valid_put() -> Value {
+        json!({
+            "idempotency_key": KEY,
+            "expected_entitlement_revision": 4,
+            "entitlements": {"effects_enabled": true, "external_send": false},
+        })
+    }
+
+    #[tokio::test]
+    async fn member_and_viewer_get_403_and_control_receives_no_calls() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for role in ["member", "viewer"] {
+            let fx = fixture(role, 200, json!({"data": {}})).await;
+            for (method, uri, body) in [
+                ("GET", "/api/v1/orgs/org-1/space-policy", None),
+                ("PUT", put_uri(), Some(valid_put())),
+                ("GET", "/api/v1/orgs/org-1/space-policy/events", None),
+            ] {
+                let (status, parsed, _) = call(&fx.state, method, uri, body).await;
+                assert_eq!(status, 403, "{role} {method} {uri}");
+                assert_eq!(parsed["error"]["code"], "forbidden");
+            }
+            assert!(policy_calls(&fx).await.is_empty(), "{role}: zero Control calls");
+        }
+    }
+
+    #[tokio::test]
+    async fn admin_calls_reach_control_with_a_signed_v1_delegation_and_the_org_id() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture("admin", 200, json!({"data": {"entitlement_revision": 5}})).await;
+        let (status, parsed, _) = call(&fx.state, "GET", "/api/v1/orgs/org-1/space-policy", None).await;
+        assert_eq!(status, 200);
+        assert_eq!(parsed["data"]["entitlement_revision"], 5);
+        let (status, _, _) = call(&fx.state, "PUT", put_uri(), Some(valid_put())).await;
+        assert_eq!(status, 200);
+        let (status, _, _) = call(
+            &fx.state,
+            "GET",
+            "/api/v1/orgs/org-1/space-policy/events?limit=25&cursor=1234",
+            None,
+        )
+        .await;
+        assert_eq!(status, 200);
+
+        let calls = policy_calls(&fx).await;
+        assert_eq!(calls.len(), 3);
+        let paths: Vec<&str> = calls.iter().map(|r| r.url.path()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                POLICY_PATH,
+                "/api/v1/internal/spaces/org-policy/entitlements",
+                "/api/v1/internal/spaces/org-policy/events",
+            ]
+        );
+        assert_eq!(calls[1].method.as_str(), "PUT");
+        assert_eq!(calls[2].url.query(), Some("limit=25&cursor=1234"));
+        for request in &calls {
+            let header = |name: &str| {
+                request
+                    .headers
+                    .get(name)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or_default()
+                    .to_owned()
+            };
+            assert_eq!(header("x-delegation-version"), "v1");
+            assert!(!header("x-delegation-signature").is_empty(), "signed");
+            assert_eq!(header("x-org-id"), "org-1");
+            assert_eq!(header("x-user-id"), "user-1");
+        }
+        // The PUT body is rebuilt from the allowed fields.
+        let sent: Value = serde_json::from_slice(&calls[1].body).unwrap();
+        assert_eq!(sent["idempotency_key"], KEY);
+        assert_eq!(sent["expected_entitlement_revision"], 4);
+        assert_eq!(sent["entitlements"]["effects_enabled"], true);
+    }
+
+    #[tokio::test]
+    async fn owner_is_an_admin_too() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture("owner", 200, json!({"data": {}})).await;
+        let (status, _, _) = call(&fx.state, "GET", "/api/v1/orgs/org-1/space-policy", None).await;
+        assert_eq!(status, 200);
+    }
+
+    #[tokio::test]
+    async fn flag_off_gives_404_on_all_three_routes_before_any_role_check() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        // A plain member: a role check would answer 403, so a 404 proves the flag is first.
+        let mut fx = fixture("member", 200, json!({"data": {}})).await;
+        fx.state.space_features.policy_admin_api = false;
+        for (method, uri, body) in [
+            ("GET", "/api/v1/orgs/org-1/space-policy", None),
+            ("PUT", put_uri(), Some(valid_put())),
+            ("GET", "/api/v1/orgs/org-1/space-policy/events", None),
+        ] {
+            let (status, parsed, _) = call(&fx.state, method, uri, body).await;
+            assert_eq!(status, 404, "{method} {uri}");
+            assert_eq!(parsed["error"]["code"], "space_policy_admin_disabled");
+        }
+        assert!(policy_calls(&fx).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn put_shape_errors_are_400_and_never_reach_control() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture("admin", 200, json!({"data": {}})).await;
+        // 33 distinct valid keys (letters and underscores only).
+        let mut thirty_three = serde_json::Map::new();
+        for i in 0..33_u8 {
+            let key: String = format!(
+                "k_{}{}",
+                (b'a' + (i / 26)) as char,
+                (b'a' + (i % 26)) as char
+            );
+            thirty_three.insert(key, json!(true));
+        }
+        assert_eq!(thirty_three.len(), 33);
+        let cases: Vec<(&str, Value, &str)> = vec![
+            (
+                "both preset and entitlements",
+                json!({"idempotency_key": KEY, "expected_entitlement_revision": 1,
+                       "preset_id": "balanced", "entitlements": {"a": true}}),
+                "preset_id",
+            ),
+            (
+                "neither preset nor entitlements",
+                json!({"idempotency_key": KEY, "expected_entitlement_revision": 1}),
+                "preset_id",
+            ),
+            (
+                "missing idempotency key",
+                json!({"expected_entitlement_revision": 1, "preset_id": "balanced"}),
+                "idempotency_key",
+            ),
+            (
+                "short idempotency key",
+                json!({"idempotency_key": "1234567", "expected_entitlement_revision": 1,
+                       "preset_id": "balanced"}),
+                "idempotency_key",
+            ),
+            (
+                "long idempotency key",
+                json!({"idempotency_key": "k".repeat(129), "expected_entitlement_revision": 1,
+                       "preset_id": "balanced"}),
+                "idempotency_key",
+            ),
+            (
+                "missing expected revision",
+                json!({"idempotency_key": KEY, "preset_id": "balanced"}),
+                "expected_entitlement_revision",
+            ),
+            (
+                "negative expected revision",
+                json!({"idempotency_key": KEY, "expected_entitlement_revision": -1,
+                       "preset_id": "balanced"}),
+                "expected_entitlement_revision",
+            ),
+            (
+                "unknown field org_id",
+                json!({"idempotency_key": KEY, "expected_entitlement_revision": 1,
+                       "preset_id": "balanced", "org_id": "org-2"}),
+                "body",
+            ),
+            (
+                "unknown field role",
+                json!({"idempotency_key": KEY, "expected_entitlement_revision": 1,
+                       "preset_id": "balanced", "role": "owner"}),
+                "body",
+            ),
+            (
+                "unknown field actor",
+                json!({"idempotency_key": KEY, "expected_entitlement_revision": 1,
+                       "preset_id": "balanced", "actor": "someone"}),
+                "body",
+            ),
+            (
+                "non-boolean entitlement",
+                json!({"idempotency_key": KEY, "expected_entitlement_revision": 1,
+                       "entitlements": {"effects_enabled": "yes"}}),
+                "entitlements",
+            ),
+            (
+                "bad entitlement key",
+                json!({"idempotency_key": KEY, "expected_entitlement_revision": 1,
+                       "entitlements": {"Effects-Enabled": true}}),
+                "entitlements",
+            ),
+            (
+                "entitlement key too long",
+                json!({"idempotency_key": KEY, "expected_entitlement_revision": 1,
+                       "entitlements": {"a".repeat(49): true}}),
+                "entitlements",
+            ),
+            (
+                "more than 32 entitlement keys",
+                json!({"idempotency_key": KEY, "expected_entitlement_revision": 1,
+                       "entitlements": Value::Object(thirty_three)}),
+                "entitlements",
+            ),
+            (
+                "entitlements not an object",
+                json!({"idempotency_key": KEY, "expected_entitlement_revision": 1,
+                       "entitlements": ["a"]}),
+                "entitlements",
+            ),
+            (
+                "blank preset",
+                json!({"idempotency_key": KEY, "expected_entitlement_revision": 1,
+                       "preset_id": "  "}),
+                "preset_id",
+            ),
+        ];
+        for (name, body, field) in cases {
+            let (status, parsed, raw) = call(&fx.state, "PUT", put_uri(), Some(body)).await;
+            assert_eq!(status, 400, "{name}: {raw}");
+            assert_eq!(parsed["error"]["code"], "space_policy_invalid_request", "{name}");
+            assert_eq!(parsed["error"]["details"]["field"], field, "{name}");
+        }
+        assert!(policy_calls(&fx).await.is_empty(), "no shape error reached Control");
+    }
+
+    #[tokio::test]
+    async fn the_idempotency_key_is_never_generated() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture("admin", 200, json!({"data": {}})).await;
+        let (status, _, _) = call(
+            &fx.state,
+            "PUT",
+            put_uri(),
+            Some(json!({"expected_entitlement_revision": 1, "preset_id": "balanced"})),
+        )
+        .await;
+        assert_eq!(status, 400);
+        assert!(policy_calls(&fx).await.is_empty());
+        // A valid key is forwarded unchanged, so a retry reuses it.
+        for _ in 0..2 {
+            let (status, _, _) = call(&fx.state, "PUT", put_uri(), Some(valid_put())).await;
+            assert_eq!(status, 200);
+        }
+        let calls = policy_calls(&fx).await;
+        assert_eq!(calls.len(), 2);
+        for request in calls {
+            let sent: Value = serde_json::from_slice(&request.body).unwrap();
+            assert_eq!(sent["idempotency_key"], KEY);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_org_other_than_the_active_one_is_403() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture("admin", 200, json!({"data": {}})).await;
+        for (method, uri, body) in [
+            ("GET", "/api/v1/orgs/org-2/space-policy", None),
+            ("PUT", "/api/v1/orgs/org-2/space-policy/entitlements", Some(valid_put())),
+            ("GET", "/api/v1/orgs/org-2/space-policy/events", None),
+        ] {
+            let (status, _, _) = call(&fx.state, method, uri, body).await;
+            assert_eq!(status, 403, "{method} {uri}");
+        }
+        assert!(policy_calls(&fx).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn events_query_values_are_validated() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture("admin", 200, json!({"data": []})).await;
+        for query in [
+            "limit=0",
+            "limit=101",
+            "limit=abc",
+            "limit=-1",
+            "cursor=abc",
+            "cursor=12x",
+            "cursor=1234567890123456789012",
+        ] {
+            let (status, parsed, _) = call(
+                &fx.state,
+                "GET",
+                &format!("/api/v1/orgs/org-1/space-policy/events?{query}"),
+                None,
+            )
+            .await;
+            assert_eq!(status, 400, "{query}");
+            assert_eq!(parsed["error"]["code"], "space_policy_invalid_request", "{query}");
+        }
+        assert!(policy_calls(&fx).await.is_empty());
+        for (query, forwarded) in [("limit=100", "limit=100"), ("limit=1&cursor=9", "limit=1&cursor=9"), ("", "")] {
+            let (status, _, _) = call(
+                &fx.state,
+                "GET",
+                &format!("/api/v1/orgs/org-1/space-policy/events?{query}"),
+                None,
+            )
+            .await;
+            assert_eq!(status, 200, "{query}");
+            let calls = policy_calls(&fx).await;
+            let last = calls.last().unwrap();
+            assert_eq!(last.url.query().unwrap_or(""), forwarded);
+        }
+    }
+
+    #[tokio::test]
+    async fn control_409_and_422_pass_through_unchanged() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        // Keys are in sorted order and the JSON is compact, so the serialised bytes are stable.
+        let conflict = json!({
+            "code": "space_policy_revision_conflict",
+            "details": {"current_entitlement_revision": 9},
+            "error": "The policy changed.",
+        });
+        let fx = fixture("admin", 409, conflict.clone()).await;
+        let (status, parsed, raw) = call(&fx.state, "PUT", put_uri(), Some(valid_put())).await;
+        assert_eq!(status, 409);
+        assert_eq!(parsed, conflict);
+        assert_eq!(parsed["details"]["current_entitlement_revision"], 9);
+        assert_eq!(raw, conflict.to_string());
+
+        let unprocessable = json!({
+            "code": "space_policy_not_permitted",
+            "details": {"entitlement": "external_send"},
+            "error": "Not permitted.",
+        });
+        let fx = fixture("admin", 422, unprocessable.clone()).await;
+        let (status, parsed, raw) = call(&fx.state, "PUT", put_uri(), Some(valid_put())).await;
+        assert_eq!(status, 422);
+        assert_eq!(parsed, unprocessable);
+        assert_eq!(raw, unprocessable.to_string());
+    }
+
+    #[test]
+    fn entitlement_key_shape_is_lowercase_letters_and_underscores_up_to_48() {
+        assert!(is_entitlement_key("effects_enabled"));
+        assert!(is_entitlement_key(&"a".repeat(48)));
+        assert!(!is_entitlement_key(""));
+        assert!(!is_entitlement_key(&"a".repeat(49)));
+        assert!(!is_entitlement_key("Effects"));
+        assert!(!is_entitlement_key("effects-enabled"));
+        assert!(!is_entitlement_key("effects1"));
+    }
+}

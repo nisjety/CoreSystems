@@ -635,3 +635,680 @@ pub(crate) async fn space_scope_for_thread(
         },
     })
 }
+
+#[cfg(test)]
+mod tests {
+    //! WS01-S5 tests: the real router with wiremock for auth-core, user-core (Control), org-core,
+    //! Application (Convex) and model-gateway. No model is called: model-gateway is a mock.
+    use super::*;
+    use axum::{body::Body, http::Request};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const SEND_ID: &str = "send_id_0123456789ab";
+    const TOKEN_SECRET: &str = "decision-token-secret-xyzxyz";
+
+    struct Fx {
+        state: AppState,
+        _auth: MockServer,
+        user_core: MockServer,
+        _org_core: MockServer,
+        _application: MockServer,
+        model_gateway: MockServer,
+    }
+
+    fn active_space() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"value": [
+            {"spaceRef": "space-room", "name": "Room", "kind": "room", "lifecycle": "active"}
+        ]}))
+    }
+
+    fn org_posture(zdr: bool) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(
+            json!({"data": {"metadata": {"interactiveRetention": {"zdr": zdr}}}}),
+        )
+    }
+
+    /// `org_core`: org-core's answer to the ZDR posture read; `application`: the Convex answer to
+    /// the Space lifecycle lookup. Flags: human posts on, everything else off.
+    async fn fixture(org_core: ResponseTemplate, application: ResponseTemplate) -> Fx {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+        for slug in ["session-core", "model-plane"] {
+            Mock::given(wm_method("GET"))
+                .and(wm_path(format!("/api/{slug}/token")))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({"token": "plane-token"})),
+                )
+                .mount(&auth)
+                .await;
+        }
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId": "user-1", "orgId": "org-1", "role": "member",
+                "onboardingStatus": "COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        let org = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/organizations/org-1"))
+            .respond_with(org_core)
+            .mount(&org)
+            .await;
+        let app = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .respond_with(application)
+            .mount(&app)
+            .await;
+        let model_gateway = MockServer::start().await;
+        let mut state = crate::tests::test_state(false);
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        state.org_core_url = org.uri();
+        state.application_convex_url = app.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        state.model_gateway_url = model_gateway.uri();
+        state.space_features.human_posts_api = true;
+        Fx {
+            state,
+            _auth: auth,
+            user_core,
+            _org_core: org,
+            _application: app,
+            model_gateway,
+        }
+    }
+
+    async fn default_fixture() -> Fx {
+        fixture(org_posture(false), active_space()).await
+    }
+
+    fn decision_body(path_name: &str) -> Value {
+        json!({"data": {
+            "decision": {
+                "space_ref": "space-room",
+                "decision_ref": "decision-1",
+                "recipient_audience_ref": "audience-1",
+                "recipient_audience_revision": 3,
+                "recipient_audience_hash": "hash-1",
+                "privacy_policy_ref": "privacy-1",
+                "authority_revision": 7,
+                "resource_authorization_ref": "resauth-1",
+                "action_schema_hash": format!("schema-{path_name}"),
+                "payload_digest": "sha256:payload",
+                "idempotency_key": format!("space-post-{SEND_ID}"),
+            },
+            "token": TOKEN_SECRET,
+        }})
+    }
+
+    async fn mount_decision(fx: &Fx, name: &str) {
+        Mock::given(wm_method("POST"))
+            .and(wm_path(format!("/api/v1/internal/spaces/{name}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(decision_body(name)))
+            .mount(&fx.user_core)
+            .await;
+    }
+
+    async fn mount_decision_status(fx: &Fx, name: &str, response: ResponseTemplate) {
+        Mock::given(wm_method("POST"))
+            .and(wm_path(format!("/api/v1/internal/spaces/{name}")))
+            .respond_with(response)
+            .mount(&fx.user_core)
+            .await;
+    }
+
+    fn stored(deduplicated: bool) -> ResponseTemplate {
+        ResponseTemplate::new(if deduplicated { 200 } else { 201 }).set_body_json(json!({
+            "thread_id": "thread-1",
+            "message_id": format!("space-post-{SEND_ID}"),
+            "sequence": 1,
+            "deduplicated": deduplicated,
+        }))
+    }
+
+    async fn mount_model(fx: &Fx, route: &str, response: ResponseTemplate) {
+        Mock::given(wm_method("POST"))
+            .and(wm_path(route))
+            .respond_with(response)
+            .mount(&fx.model_gateway)
+            .await;
+    }
+
+    async fn send(
+        state: &AppState,
+        uri: &str,
+        extra_header: Option<(&str, &str)>,
+        body: Value,
+    ) -> (u16, Value, String) {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("cookie", "better-auth.session_token=session-1")
+            .header("content-type", "application/json");
+        if let Some((name, value)) = extra_header {
+            builder = builder.header(name, value);
+        }
+        let request = builder.body(Body::from(body.to_string())).unwrap();
+        let response = crate::build_router(state.clone())
+            .oneshot(request)
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let raw = String::from_utf8_lossy(&response.into_body().collect().await.unwrap().to_bytes())
+            .into_owned();
+        let parsed = serde_json::from_str(&raw).unwrap_or(Value::Null);
+        (status, parsed, raw)
+    }
+
+    fn create_uri() -> &'static str {
+        "/api/v1/spaces/space-room/threads"
+    }
+
+    fn reply_uri() -> &'static str {
+        "/api/v1/spaces/space-room/threads/thread-1/messages"
+    }
+
+    fn post(content: &str) -> Value {
+        json!({"content": content, "client_send_id": SEND_ID})
+    }
+
+    /// Control (user-core) requests to the Space decision namespace: (path, JSON body).
+    async fn control_calls(fx: &Fx) -> Vec<(String, Value)> {
+        fx.user_core
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.url.path().starts_with("/api/v1/internal/spaces/"))
+            .map(|r| {
+                (
+                    r.url.path().to_owned(),
+                    serde_json::from_slice(&r.body).unwrap_or(Value::Null),
+                )
+            })
+            .collect()
+    }
+
+    async fn model_calls(fx: &Fx) -> Vec<(String, Value)> {
+        fx.model_gateway
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| {
+                (
+                    r.url.path().to_owned(),
+                    serde_json::from_slice(&r.body).unwrap_or(Value::Null),
+                )
+            })
+            .collect()
+    }
+
+    fn assert_no_secret(raw: &str) {
+        assert!(!raw.contains(TOKEN_SECRET), "decision token leaked: {raw}");
+        assert!(!raw.contains("decision-1"), "decision ref leaked: {raw}");
+        assert!(!raw.contains("space_decision"), "decision field leaked: {raw}");
+        assert!(!raw.contains("plane-token"), "bearer leaked: {raw}");
+    }
+
+    #[tokio::test]
+    async fn create_post_mints_create_decision_without_retrieval_and_sends_keys() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = default_fixture().await;
+        mount_decision(&fx, "thread-decision").await;
+        mount_model(&fx, "/v1/threads", stored(false)).await;
+        let (status, body, raw) = send(&fx.state, create_uri(), None, post("  hello room  ")).await;
+        assert_eq!(status, 201, "{raw}");
+        assert_eq!(
+            body["data"],
+            json!({
+                "space_ref": "space-room",
+                "thread_id": "thread-1",
+                "message_id": format!("space-post-{SEND_ID}"),
+                "sequence": 1,
+                "deduplicated": false,
+            })
+        );
+        assert_no_secret(&raw);
+
+        let control = control_calls(&fx).await;
+        assert_eq!(control.len(), 1, "one decision and no retrieval decision: {control:?}");
+        assert_eq!(control[0].0, "/api/v1/internal/spaces/thread-decision");
+        assert_eq!(control[0].1["space_ref"], "space-room");
+        assert_eq!(control[0].1["session_key"], format!("space-post-{SEND_ID}"));
+        assert_eq!(control[0].1["idempotency_key"], format!("space-post-{SEND_ID}"));
+        assert!(control.iter().all(|(path, _)| !path.contains("retrieval")));
+
+        let model = model_calls(&fx).await;
+        assert_eq!(model.len(), 1);
+        assert_eq!(model[0].0, "/v1/threads");
+        let sent = &model[0].1;
+        assert_eq!(sent["session_key"], format!("space-post-{SEND_ID}"));
+        assert_eq!(sent["space_context"]["space_id"], "space-room");
+        assert_eq!(sent["space_context"]["space_decision_token"], TOKEN_SECRET);
+        assert_eq!(sent["first_message"]["post_kind"], "post");
+        assert_eq!(
+            sent["first_message"]["client_message_id"],
+            format!("space-post-{SEND_ID}")
+        );
+        assert_eq!(sent["first_message"]["content"], "hello room");
+    }
+
+    #[tokio::test]
+    async fn a_deduplicated_send_answers_200() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = default_fixture().await;
+        mount_decision(&fx, "thread-decision").await;
+        mount_model(&fx, "/v1/threads", stored(true)).await;
+        let (status, body, _) = send(&fx.state, create_uri(), None, post("hello")).await;
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["deduplicated"], true);
+        assert_eq!(body["data"]["thread_id"], "thread-1");
+    }
+
+    #[tokio::test]
+    async fn reply_mints_v2_decision_bound_to_content_digest() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = default_fixture().await;
+        mount_decision(&fx, "thread-append-decision").await;
+        mount_model(&fx, "/v1/threads/thread-1/messages", stored(false)).await;
+        let (status, body, raw) = send(&fx.state, reply_uri(), None, post("  reply text \n")).await;
+        assert_eq!(status, 201, "{raw}");
+        assert!(body["data"].get("space_ref").is_none(), "a reply names no space_ref");
+        assert_eq!(body["data"]["thread_id"], "thread-1");
+        assert_no_secret(&raw);
+
+        let digest = format!("sha256:{}", hex::encode(Sha256::digest(b"reply text")));
+        let control = control_calls(&fx).await;
+        assert_eq!(control.len(), 1);
+        assert_eq!(control[0].0, "/api/v1/internal/spaces/thread-append-decision");
+        assert_eq!(control[0].1["post_kind"], "post");
+        assert_eq!(control[0].1["thread_id"], "thread-1");
+        assert_eq!(control[0].1["content_digest"], json!(digest));
+        assert_eq!(control[0].1["idempotency_key"], format!("space-post-{SEND_ID}"));
+
+        let model = model_calls(&fx).await;
+        assert_eq!(model.len(), 1);
+        assert_eq!(model[0].1["content"], "reply text", "the digested bytes are the sent bytes");
+        assert_eq!(
+            hex::encode(Sha256::digest(model[0].1["content"].as_str().unwrap().as_bytes())),
+            digest.trim_start_matches("sha256:")
+        );
+        assert_eq!(model[0].1["post_kind"], "post");
+        assert_eq!(model[0].1["client_message_id"], format!("space-post-{SEND_ID}"));
+        assert_eq!(model[0].1["space_append_context"]["space_decision_token"], TOKEN_SECRET);
+    }
+
+    #[tokio::test]
+    async fn forged_authority_fields_are_rejected_not_forwarded() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = default_fixture().await;
+        mount_decision(&fx, "thread-decision").await;
+        mount_decision(&fx, "thread-append-decision").await;
+        mount_model(&fx, "/v1/threads", stored(false)).await;
+        mount_model(&fx, "/v1/threads/thread-1/messages", stored(false)).await;
+        let forged = [
+            ("role", json!("owner")),
+            ("org_id", json!("org-2")),
+            ("space_context", json!({"space_id": "space-other"})),
+            ("space_append_context", json!({"space_id": "space-other"})),
+            ("metadata", json!({"k": "v"})),
+            ("space_decision_token", json!("forged")),
+            ("decision_ref", json!("forged")),
+            ("content_digest", json!("sha256:forged")),
+        ];
+        for uri in [create_uri(), reply_uri()] {
+            for (field, value) in &forged {
+                let mut body = post("hello");
+                body[*field] = value.clone();
+                let (status, parsed, _) = send(&fx.state, uri, None, body).await;
+                assert_eq!(status, 400, "{uri} {field}");
+                assert_eq!(parsed["error"]["code"], "invalid_post", "{uri} {field}");
+            }
+        }
+        assert!(control_calls(&fx).await.is_empty(), "no Control call");
+        assert!(model_calls(&fx).await.is_empty(), "no model-gateway call");
+    }
+
+    #[tokio::test]
+    async fn zdr_org_gets_typed_412_before_any_control_call() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        // Org ZDR on.
+        let fx = fixture(org_posture(true), active_space()).await;
+        mount_decision(&fx, "thread-decision").await;
+        let (status, body, _) = send(&fx.state, create_uri(), None, post("hello")).await;
+        assert_eq!(status, 412);
+        assert_eq!(body["error"]["code"], "zdr_durable_mutation_forbidden");
+        assert!(control_calls(&fx).await.is_empty());
+        assert!(model_calls(&fx).await.is_empty());
+        let user_core_all = fx.user_core.received_requests().await.unwrap_or_default();
+        assert!(
+            user_core_all
+                .iter()
+                .all(|r| !r.url.path().contains("decision")),
+            "zero Control decision requests"
+        );
+
+        // x-zdr header on a non-ZDR org.
+        let fx = default_fixture().await;
+        let (status, body, _) = send(&fx.state, reply_uri(), Some(("x-zdr", "true")), post("hello")).await;
+        assert_eq!(status, 412);
+        assert_eq!(body["error"]["code"], "zdr_durable_mutation_forbidden");
+        assert!(control_calls(&fx).await.is_empty());
+
+        // zdr:true in the body: refused before the unknown-field check.
+        let mut with_zdr = post("hello");
+        with_zdr["zdr"] = json!(true);
+        let (status, body, _) = send(&fx.state, create_uri(), None, with_zdr).await;
+        assert_eq!(status, 412);
+        assert_eq!(body["error"]["code"], "zdr_durable_mutation_forbidden");
+        assert!(control_calls(&fx).await.is_empty());
+        assert!(model_calls(&fx).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn zdr_refusal_body_matches_spa_golden() {
+        let golden: Value = serde_json::from_str(include_str!(
+            "../../../../../src/shared/api/contracts/zdr-refusals.json"
+        ))
+        .expect("golden parses");
+        let codes = golden["codes"].as_array().expect("codes");
+        for code in [zdr::ZDR_DURABLE_MUTATION_FORBIDDEN, zdr::ZDR_DECISION_UNAVAILABLE] {
+            let entry = codes
+                .iter()
+                .find(|entry| entry["code"] == code)
+                .unwrap_or_else(|| panic!("{code} is in the golden"));
+            let body = zdr::zdr_refusal_body(code);
+            assert_eq!(body["error"]["code"], code);
+            assert_eq!(body["error"]["message"], entry["message_en"], "{code}");
+            assert_eq!(body["error"]["retryable"], entry["retryable"], "{code}");
+            assert_eq!(body["error"]["action"], entry["action"], "{code}");
+        }
+    }
+
+    #[tokio::test]
+    async fn org_core_failure_is_typed_503_not_zdr() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(ResponseTemplate::new(500), active_space()).await;
+        mount_decision(&fx, "thread-decision").await;
+        let (status, body, _) = send(&fx.state, create_uri(), None, post("hello")).await;
+        assert_eq!(status, 503);
+        assert_eq!(body["error"]["code"], "zdr_decision_unavailable");
+        assert_eq!(body["error"]["retryable"], true);
+        assert!(control_calls(&fx).await.is_empty());
+        assert!(model_calls(&fx).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn flag_off_is_404_before_org_zdr_and_body() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut fx = fixture(org_posture(true), active_space()).await;
+        fx.state.space_features.human_posts_api = false;
+        // Org ZDR on and a malformed body: the flag answers first.
+        let (status, body, _) = send(&fx.state, create_uri(), Some(("x-zdr", "true")), json!({"role": "owner"})).await;
+        assert_eq!(status, 404);
+        assert_eq!(body["error"]["code"], "space_human_posts_disabled");
+        assert!(control_calls(&fx).await.is_empty());
+        assert!(model_calls(&fx).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stale_authority_is_retried_once() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        // 409 then 201: two mints, success.
+        let fx = default_fixture().await;
+        mount_decision(&fx, "thread-append-decision").await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/threads/thread-1/messages"))
+            .respond_with(ResponseTemplate::new(409).set_body_json(json!({
+                "error": {"code": "space_authority_stale", "message": "stale", "details": {}}
+            })))
+            .up_to_n_times(1)
+            .mount(&fx.model_gateway)
+            .await;
+        mount_model(&fx, "/v1/threads/thread-1/messages", stored(false)).await;
+        let (status, body, _) = send(&fx.state, reply_uri(), None, post("hello")).await;
+        assert_eq!(status, 201);
+        assert_eq!(body["data"]["thread_id"], "thread-1");
+        assert_eq!(control_calls(&fx).await.len(), 2, "re-minted once");
+        assert_eq!(model_calls(&fx).await.len(), 2);
+
+        // 409 twice: the stale error surfaces after exactly two attempts.
+        let fx = default_fixture().await;
+        mount_decision(&fx, "thread-append-decision").await;
+        mount_model(
+            &fx,
+            "/v1/threads/thread-1/messages",
+            ResponseTemplate::new(409).set_body_json(json!({
+                "error": {"code": "space_authority_stale", "message": "stale", "details": {}}
+            })),
+        )
+        .await;
+        let (status, body, _) = send(&fx.state, reply_uri(), None, post("hello")).await;
+        assert_eq!(status, 409);
+        assert_eq!(body["error"]["code"], "space_authority_stale");
+        assert_eq!(control_calls(&fx).await.len(), 2);
+        assert_eq!(model_calls(&fx).await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn control_403_maps_to_space_post_not_authorized() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let denial = json!({
+            "error": "Your role cannot post here.",
+            "code": "space_role_insufficient",
+            "resolvable_by": "space_manager",
+            "details": {"required_roles": ["editor"], "secret": "dropped"},
+        });
+        // Flag off: fixed code and message, no typed reason.
+        let fx = default_fixture().await;
+        mount_decision_status(&fx, "thread-decision", ResponseTemplate::new(403).set_body_json(denial.clone())).await;
+        let (status, body, _) = send(&fx.state, create_uri(), None, post("hello")).await;
+        assert_eq!(status, 403);
+        assert_eq!(body["error"]["code"], "space_post_not_authorized");
+        assert!(body["error"].get("details").is_none());
+        assert!(model_calls(&fx).await.is_empty());
+
+        // Flag on and Control sent a reason: typed details.reason, allowlisted details only.
+        let mut fx = default_fixture().await;
+        fx.state.space_features.denials_typed = true;
+        mount_decision_status(&fx, "thread-decision", ResponseTemplate::new(403).set_body_json(denial)).await;
+        let (status, body, _) = send(&fx.state, create_uri(), None, post("hello")).await;
+        assert_eq!(status, 403);
+        assert_eq!(body["error"]["code"], "space_post_not_authorized");
+        assert_eq!(body["error"]["details"]["reason"], "space_role_insufficient");
+        assert_eq!(body["error"]["details"]["resolvable_by"], "space_manager");
+        assert!(body["error"]["details"].get("secret").is_none());
+
+        // Flag on but Control sent no reason: the fixed refusal, never a bare Control body.
+        let mut fx = default_fixture().await;
+        fx.state.space_features.denials_typed = true;
+        mount_decision_status(
+            &fx,
+            "thread-decision",
+            ResponseTemplate::new(403).set_body_json(json!({"error": "forbidden"})),
+        )
+        .await;
+        let (status, body, _) = send(&fx.state, create_uri(), None, post("hello")).await;
+        assert_eq!(status, 403);
+        assert_eq!(body["error"]["code"], "space_post_not_authorized");
+        assert!(body["error"].get("details").is_none());
+    }
+
+    #[tokio::test]
+    async fn other_control_statuses_map_to_typed_errors() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for (control, expected_status, expected_code) in [
+            (404_u16, 404_u16, "space_not_found"),
+            (400, 400, "invalid_post"),
+            (409, 409, "space_authority_stale"),
+            (500, 503, "space_decision_unavailable"),
+        ] {
+            let fx = default_fixture().await;
+            mount_decision_status(
+                &fx,
+                "thread-decision",
+                ResponseTemplate::new(control).set_body_json(json!({"error": "nope"})),
+            )
+            .await;
+            let (status, body, raw) = send(&fx.state, create_uri(), None, post("hello")).await;
+            assert_eq!(status, expected_status, "control {control}: {raw}");
+            assert_eq!(body["error"]["code"], expected_code, "control {control}");
+            assert!(model_calls(&fx).await.is_empty(), "control {control}");
+        }
+    }
+
+    #[tokio::test]
+    async fn validation_refuses_bad_content_and_send_ids() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = default_fixture().await;
+        mount_decision(&fx, "thread-decision").await;
+        mount_model(&fx, "/v1/threads", stored(false)).await;
+        for content in ["", "   \n\t ", "a\u{0}b"] {
+            let (status, body, _) = send(&fx.state, create_uri(), None, post(content)).await;
+            assert_eq!(status, 400, "{content:?}");
+            assert_eq!(body["error"]["code"], "invalid_post");
+        }
+        let too_long = "x".repeat(8001);
+        let (status, body, _) = send(&fx.state, create_uri(), None, post(&too_long)).await;
+        assert_eq!(status, 400);
+        assert_eq!(body["error"]["code"], "invalid_post");
+        assert_eq!(body["error"]["details"]["max_chars"], 8000);
+        // 8000 characters is the limit, inclusive.
+        let (status, _, _) = send(&fx.state, create_uri(), None, post(&"x".repeat(8000))).await;
+        assert_eq!(status, 201);
+
+        for id in ["short", "has space 0123456789", "bad!char0123456789a", &"a".repeat(65)] {
+            let (status, body, _) = send(
+                &fx.state,
+                create_uri(),
+                None,
+                json!({"content": "hello", "client_send_id": id}),
+            )
+            .await;
+            assert_eq!(status, 400, "{id}");
+            assert_eq!(body["error"]["code"], "invalid_client_send_id", "{id}");
+        }
+        // Missing send id is a body-shape refusal.
+        let (status, body, _) = send(&fx.state, create_uri(), None, json!({"content": "hello"})).await;
+        assert_eq!(status, 400);
+        assert_eq!(body["error"]["code"], "invalid_post");
+    }
+
+    #[tokio::test]
+    async fn blank_thread_id_is_404_thread_not_found() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = default_fixture().await;
+        let (status, body, _) = send(
+            &fx.state,
+            "/api/v1/spaces/space-room/threads/%20/messages",
+            None,
+            post("hello"),
+        )
+        .await;
+        assert_eq!(status, 404);
+        assert_eq!(body["error"]["code"], "thread_not_found");
+        assert!(control_calls(&fx).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn space_lifecycle_none_is_404_and_error_is_503() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(org_posture(false), ResponseTemplate::new(200).set_body_json(json!({"value": []}))).await;
+        mount_decision(&fx, "thread-decision").await;
+        let (status, body, _) = send(&fx.state, create_uri(), None, post("hello")).await;
+        assert_eq!(status, 404);
+        assert_eq!(body["error"]["code"], "space_not_found");
+        assert!(control_calls(&fx).await.is_empty());
+
+        let fx = fixture(org_posture(false), ResponseTemplate::new(503)).await;
+        mount_decision(&fx, "thread-decision").await;
+        let (status, body, _) = send(&fx.state, create_uri(), None, post("hello")).await;
+        assert_eq!(status, 503);
+        assert_eq!(body["error"]["code"], "space_lifecycle_unavailable");
+        assert!(control_calls(&fx).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn model_gateway_errors_pass_through_with_status() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let cases: Vec<(u16, Value, u16, &str)> = vec![
+            (
+                502,
+                json!({"error": {"code": "post_not_stored", "message": "m", "details": {"thread_id": "thread-9"}}}),
+                502,
+                "post_not_stored",
+            ),
+            (
+                409,
+                json!({"error": {"code": "idempotency_key_conflict", "message": "m", "details": {}}}),
+                409,
+                "idempotency_key_conflict",
+            ),
+            (
+                404,
+                json!({"error": {"code": "thread_not_found", "message": "m", "details": {}}}),
+                404,
+                "thread_not_found",
+            ),
+            (
+                412,
+                zdr::zdr_refusal_body(zdr::ZDR_DURABLE_MUTATION_FORBIDDEN),
+                412,
+                "zdr_durable_mutation_forbidden",
+            ),
+        ];
+        for (upstream, upstream_body, expected, code) in cases {
+            let fx = default_fixture().await;
+            mount_decision(&fx, "thread-decision").await;
+            mount_model(&fx, "/v1/threads", ResponseTemplate::new(upstream).set_body_json(upstream_body.clone())).await;
+            let (status, body, raw) = send(&fx.state, create_uri(), None, post("hello")).await;
+            assert_eq!(status, expected, "{raw}");
+            assert_eq!(body["error"]["code"], code);
+            assert_eq!(body, upstream_body);
+            assert_no_secret(&raw);
+        }
+        // A non-JSON upstream failure is a typed 503.
+        let fx = default_fixture().await;
+        mount_decision(&fx, "thread-decision").await;
+        mount_model(&fx, "/v1/threads", ResponseTemplate::new(500).set_body_string("boom")).await;
+        let (status, body, _) = send(&fx.state, create_uri(), None, post("hello")).await;
+        assert_eq!(status, 503);
+        assert_eq!(body["error"]["code"], "session_unavailable");
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_success_body_is_a_typed_502() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = default_fixture().await;
+        mount_decision(&fx, "thread-decision").await;
+        mount_model(&fx, "/v1/threads", ResponseTemplate::new(201).set_body_json(json!({"thread_id": "thread-1"}))).await;
+        let (status, body, _) = send(&fx.state, create_uri(), None, post("hello")).await;
+        assert_eq!(status, 502);
+        assert_eq!(body["error"]["code"], "session_unavailable");
+    }
+
+    #[test]
+    fn send_id_shape_is_16_to_64_url_safe_characters() {
+        assert!(valid_send_id(&"a".repeat(16)));
+        assert!(valid_send_id(&"a-_Z9".repeat(12)));
+        assert!(!valid_send_id(&"a".repeat(15)));
+        assert!(!valid_send_id(&"a".repeat(65)));
+        assert!(!valid_send_id("aaaaaaaaaaaaaaa."));
+        assert!(!valid_send_id("aaaaaaaaaaaaaaaé"));
+    }
+}

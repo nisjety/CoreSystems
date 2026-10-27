@@ -273,4 +273,63 @@ mod tests {
             &json!({ "metadata": { "interactiveRetention": { "zdr": false } } })
         ));
     }
+
+    #[test]
+    fn treat_as_zdr_is_true_for_enabled_and_unknown_and_false_only_for_disabled() {
+        assert!(OrgZdrPosture::Enabled.treat_as_zdr());
+        assert!(OrgZdrPosture::Unknown.treat_as_zdr());
+        assert!(!OrgZdrPosture::Disabled.treat_as_zdr());
+    }
+
+    fn test_user() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.com".to_owned(),
+            user_name: "User One".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: Some(crate::middleware::AuthorizedMembership {
+                organization_id: "org-1".to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    /// A lookup against an unreachable org-core is `Unknown` (an outage, not a posture) and the
+    /// fail-closed collapse reads it as ZDR.
+    #[tokio::test]
+    async fn an_unreachable_org_core_is_unknown_and_fails_closed() {
+        let state = AppState::for_tests();
+        let user = test_user();
+        assert_eq!(org_zdr_lookup(&state, &user).await, OrgZdrPosture::Unknown);
+        assert!(org_zdr_enabled(&state, &user).await);
+    }
+
+    /// No authorized org scope is also `Unknown`, without any call.
+    #[tokio::test]
+    async fn no_authorized_org_scope_is_unknown() {
+        let state = AppState::for_tests();
+        let mut user = test_user();
+        user.authorized_membership = None;
+        assert_eq!(org_zdr_lookup(&state, &user).await, OrgZdrPosture::Unknown);
+    }
+
+    #[test]
+    fn refusal_bodies_use_the_catalogue_shape() {
+        let forbidden = zdr_refusal_body(ZDR_DURABLE_MUTATION_FORBIDDEN);
+        assert_eq!(forbidden["error"]["code"], "zdr_durable_mutation_forbidden");
+        assert_eq!(forbidden["error"]["retryable"], false);
+        assert_eq!(forbidden["error"]["action"], "none");
+        let unavailable = zdr_refusal_body(ZDR_DECISION_UNAVAILABLE);
+        assert_eq!(unavailable["error"]["code"], "zdr_decision_unavailable");
+        assert_eq!(unavailable["error"]["retryable"], true);
+        assert_eq!(unavailable["error"]["action"], "retry");
+        // Any other code falls back to the stricter refusal.
+        assert_eq!(
+            zdr_refusal_body("something_else")["error"]["code"],
+            "zdr_durable_mutation_forbidden"
+        );
+    }
 }

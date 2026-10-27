@@ -833,4 +833,120 @@ mod tests {
             "declared exactly once"
         );
     }
+
+    /// Runs `body` with the given env vars set (and restored), serialised on the shared lock.
+    fn with_env<T>(vars: &[(&str, Option<&str>)], body: impl FnOnce() -> T) -> T {
+        let _guard = super::TEST_ENV_LOCK.blocking_lock();
+        let saved: Vec<(String, Option<String>)> = vars
+            .iter()
+            .map(|(key, _)| ((*key).to_owned(), std::env::var(key).ok()))
+            .collect();
+        for (key, value) in vars {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        let out = body();
+        for (key, value) in saved {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        out
+    }
+
+    /// P-GW1: a default-built flag set has every Space flag off, so a test literal that never names
+    /// the field and `AppState::for_tests()` can never accidentally turn a route on.
+    #[test]
+    fn space_feature_flags_default_has_every_flag_off() {
+        let flags = super::SpaceFeatureFlags::default();
+        assert!(!flags.denials_typed);
+        assert!(!flags.csp_report_log_hosts);
+        assert!(!flags.connectivity_banner_ui);
+        assert!(!flags.human_posts_api);
+        assert!(!flags.membership_writer_api);
+        assert!(!flags.policy_admin_api);
+        assert!(!flags.realtime_stream);
+        assert!(!flags.room_details_ui);
+        assert!(!flags.people_search_api);
+        assert!(!flags.room_artifacts);
+        assert!(!flags.send_idempotency_api);
+        assert!(!flags.thread_pane_ui);
+    }
+
+    /// P-GW1 / WS01-S5 / WS03-S4: an unset Space flag is OFF under `APP_ENV=production`, ON in
+    /// development, and an explicit value wins in both.
+    #[test]
+    fn space_flag_is_off_in_production_when_unset_and_on_in_dev() {
+        let key = "SPACE_TEST_ONLY_FLAG_P_GW1";
+        with_env(&[("APP_ENV", Some("production")), (key, None)], || {
+            assert!(!super::space_flag(key));
+        });
+        with_env(&[("APP_ENV", Some("prod")), (key, None)], || {
+            assert!(!super::space_flag(key));
+        });
+        with_env(&[("APP_ENV", Some("development")), (key, None)], || {
+            assert!(super::space_flag(key));
+        });
+        with_env(&[("APP_ENV", Some("production")), (key, Some("true"))], || {
+            assert!(super::space_flag(key));
+        });
+        with_env(&[("APP_ENV", Some("development")), (key, Some("off"))], || {
+            assert!(!super::space_flag(key));
+        });
+    }
+
+    /// WS01-S5 and WS03-S4: the human-post, thread-pane, send-idempotency, connectivity-banner and
+    /// policy-admin flags are off in production when their variable is unset, on in development,
+    /// and honour an explicit value.
+    #[test]
+    fn ws01_and_ws03_flags_follow_the_space_flag_rule() {
+        let keys = [
+            "SPACE_HUMAN_POSTS_API",
+            "SPACE_THREAD_PANE_UI",
+            "SPACE_SEND_IDEMPOTENCY_API",
+            "SPACE_CONNECTIVITY_BANNER_UI",
+            "SPACE_POLICY_ADMIN_API",
+            "SPACE_REALTIME_STREAM",
+        ];
+        let unset = |app_env: &'static str| -> Vec<(&'static str, Option<&'static str>)> {
+            let mut vars = vec![("APP_ENV", Some(app_env))];
+            vars.extend(keys.iter().map(|key| (*key, None)));
+            vars
+        };
+        with_env(&unset("production"), || {
+            let flags = super::SpaceFeatureFlags::from_env();
+            assert!(!flags.human_posts_api);
+            assert!(!flags.thread_pane_ui);
+            assert!(!flags.send_idempotency_api);
+            assert!(!flags.connectivity_banner_ui);
+            assert!(!flags.policy_admin_api);
+            assert!(!flags.realtime_stream);
+        });
+        with_env(&unset("development"), || {
+            let flags = super::SpaceFeatureFlags::from_env();
+            assert!(flags.human_posts_api);
+            assert!(flags.thread_pane_ui);
+            assert!(flags.send_idempotency_api);
+            assert!(flags.connectivity_banner_ui);
+            assert!(flags.policy_admin_api);
+            assert!(flags.realtime_stream);
+        });
+        let mut explicit = unset("production");
+        explicit.retain(|(key, _)| *key != "SPACE_POLICY_ADMIN_API");
+        explicit.push(("SPACE_POLICY_ADMIN_API", Some("true")));
+        with_env(&explicit, || {
+            let flags = super::SpaceFeatureFlags::from_env();
+            assert!(flags.policy_admin_api, "explicit true wins in production");
+            assert!(!flags.human_posts_api, "the others stay off");
+        });
+        let mut explicit_off = unset("development");
+        explicit_off.retain(|(key, _)| *key != "SPACE_POLICY_ADMIN_API");
+        explicit_off.push(("SPACE_POLICY_ADMIN_API", Some("false")));
+        with_env(&explicit_off, || {
+            assert!(!super::SpaceFeatureFlags::from_env().policy_admin_api);
+        });
+    }
 }

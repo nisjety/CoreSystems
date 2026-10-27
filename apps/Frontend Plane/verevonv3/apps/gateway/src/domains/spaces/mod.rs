@@ -9639,6 +9639,86 @@ mod tests {
         ));
     }
 
+    /// WS01-S5: `features.*` mirrors `SpaceFeatureFlags` (every flag off by default, each one
+    /// reported independently) and `limits.post_max_chars` is 8000.
+    #[tokio::test]
+    async fn space_context_carries_features_and_limits() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut seen: Vec<Value> = Vec::new();
+        for (human_posts, thread_pane, send_idempotency, connectivity_banner) in
+            [(false, false, false, false), (true, false, true, false), (false, true, false, true)]
+        {
+            let auth = MockServer::start().await;
+            Mock::given(wm_method("GET"))
+                .and(wm_path("/api/auth/get-session"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                    "session": {"activeOrganizationId": "org-1"}
+                })))
+                .mount(&auth)
+                .await;
+            let user_core = MockServer::start().await;
+            Mock::given(wm_method("GET"))
+                .and(wm_path("/api/v1/me/session-context"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "userId":"user-1", "orgId":"org-1", "role":"member", "onboardingStatus":"COMPLETED"
+                })))
+                .mount(&user_core)
+                .await;
+            Mock::given(wm_method("GET"))
+                .and(wm_path("/api/v1/internal/spaces/space-personal/membership"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {
+                    "space_ref":"space-personal", "org_id":"org-1", "subject_id":"user-1", "role":"owner"
+                }})))
+                .mount(&user_core)
+                .await;
+            let application = MockServer::start().await;
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/api/query"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": [
+                    {"spaceRef":"space-personal", "name":"Personal Space", "kind":"personal", "lifecycle":"active"}
+                ]})))
+                .mount(&application)
+                .await;
+            let mut state = crate::tests::test_state(false);
+            state.application_convex_url = application.uri();
+            state.application_convex_service_key = "application-test-key".into();
+            state.auth_core_url = auth.uri();
+            state.user_core_url = user_core.uri();
+            state.space_features.human_posts_api = human_posts;
+            state.space_features.thread_pane_ui = thread_pane;
+            state.space_features.send_idempotency_api = send_idempotency;
+            state.space_features.connectivity_banner_ui = connectivity_banner;
+            let (status, body) = {
+                let response = crate::build_router(state)
+                    .oneshot(
+                        Request::builder()
+                            .uri("/api/v1/spaces/space-personal/context")
+                            .header("cookie", "better-auth.session_token=session-1")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let status = response.status().as_u16();
+                let body: Value = serde_json::from_slice(
+                    &response.into_body().collect().await.unwrap().to_bytes(),
+                )
+                .unwrap();
+                (status, body)
+            };
+            assert_eq!(status, 200);
+            let features = &body["data"]["features"];
+            assert_eq!(features["human_posts"], human_posts);
+            assert_eq!(features["thread_pane"], thread_pane);
+            assert_eq!(features["send_idempotency"], send_idempotency);
+            assert_eq!(features["connectivity_banner"], connectivity_banner);
+            assert_eq!(body["data"]["limits"]["post_max_chars"], 8000);
+            seen.push(features.clone());
+        }
+        assert_ne!(seen[0], seen[1], "the flags are reported, not constant");
+    }
+
     #[tokio::test]
     async fn space_threads_rechecks_lifecycle_and_membership_then_forwards_only_the_space_filter() {
         let _env = crate::config::TEST_ENV_LOCK.lock().await;

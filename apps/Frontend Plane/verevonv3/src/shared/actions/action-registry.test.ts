@@ -436,4 +436,55 @@ describe('action registry', () => {
     expect(remember?.inputSchema.safeParse({ threadId: 't1', content: 'Jeg heter Ima' }).success).toBe(true)
     expect(remember?.inputSchema.safeParse({ threadId: 't1', content: '   ' }).success).toBe(false)
   })
+
+  it('registers the human post actions as low-risk, ungated, model-plane actions the model cannot execute (WS01-S5)', () => {
+    for (const id of ['spaces.create_post', 'spaces.reply_in_thread']) {
+      const action = getActionDescriptor(id)
+      expect(action, id).toBeDefined()
+      expect(action?.ownerPlane).toBe('model')
+      expect(action?.risk).toBe('low')
+      expect(action?.requiresApproval).toBe(false)
+      expect(action?.reversible).toBe(false)
+      // A post is a person speaking in a room, never an agent proposal.
+      expect(isModelExecutableAction(id)).toBe(false)
+    }
+    const send = 'send_id_0123456789ab'
+    const create = getActionDescriptor('spaces.create_post')
+    expect(create?.inputSchema.safeParse({ spaceRef: 'space-room', content: 'hello', clientSendId: send }).success).toBe(true)
+    // The send id is required and shaped like the gateway's ^[A-Za-z0-9_-]{16,64}$.
+    expect(create?.inputSchema.safeParse({ spaceRef: 'space-room', content: 'hello' }).success).toBe(false)
+    expect(create?.inputSchema.safeParse({ spaceRef: 'space-room', content: 'hello', clientSendId: 'short' }).success).toBe(false)
+    expect(create?.inputSchema.safeParse({ spaceRef: 'space-room', content: 'hello', clientSendId: 'has space 0123456789' }).success).toBe(false)
+    expect(create?.inputSchema.safeParse({ spaceRef: 'space-room', content: '   ', clientSendId: send }).success).toBe(false)
+    expect(create?.inputSchema.safeParse({ spaceRef: 'space-room', content: 'x'.repeat(8001), clientSendId: send }).success).toBe(false)
+    expect(create?.inputSchema.safeParse({ spaceRef: 'space-room', content: 'x'.repeat(8000), clientSendId: send }).success).toBe(true)
+    const reply = getActionDescriptor('spaces.reply_in_thread')
+    expect(reply?.inputSchema.safeParse({ spaceRef: 'space-room', threadId: 'thread-1', content: 'hi', clientSendId: send }).success).toBe(true)
+    expect(reply?.inputSchema.safeParse({ spaceRef: 'space-room', content: 'hi', clientSendId: send }).success).toBe(false)
+  })
+
+  it('registers the Space effect-policy actions as high-risk, approval-gated, control-plane actions the model cannot execute (WS03-S4)', () => {
+    for (const id of ['spaces.set_effect_entitlements', 'spaces.apply_effect_preset']) {
+      const action = getActionDescriptor(id)
+      expect(action, id).toBeDefined()
+      expect(action?.ownerPlane).toBe('control')
+      expect(action?.risk).toBe('high')
+      expect(action?.requiresApproval).toBe(true)
+      expect(action?.reversible).toBe(true)
+      // An agent must never widen the entitlement floor.
+      expect(isModelExecutableAction(id)).toBe(false)
+    }
+    const set = getActionDescriptor('spaces.set_effect_entitlements')
+    const base = { orgId: 'org_1', expectedEntitlementRevision: 2, entitlements: { effects_enabled: true } }
+    expect(set?.inputSchema.safeParse(base).success).toBe(true)
+    // The revision the edit started from is required: never a blind overwrite.
+    expect(set?.inputSchema.safeParse({ orgId: 'org_1', entitlements: {} }).success).toBe(false)
+    expect(set?.inputSchema.safeParse({ ...base, expectedEntitlementRevision: -1 }).success).toBe(false)
+    expect(set?.inputSchema.safeParse({ ...base, entitlements: { 'Bad-Key': true } }).success).toBe(false)
+    expect(set?.inputSchema.safeParse({ ...base, entitlements: { effects_enabled: 'yes' } }).success).toBe(false)
+    const preset = getActionDescriptor('spaces.apply_effect_preset')
+    expect(preset?.inputSchema.safeParse({ orgId: 'org_1', expectedEntitlementRevision: 0, presetId: 'balanced' }).success).toBe(true)
+    expect(preset?.inputSchema.safeParse({ orgId: 'org_1', expectedEntitlementRevision: 0 }).success).toBe(false)
+    expect(preset?.inputSchema.safeParse({ orgId: 'org_1', expectedEntitlementRevision: 0, presetId: 'p'.repeat(49) }).success).toBe(false)
+  })
 })

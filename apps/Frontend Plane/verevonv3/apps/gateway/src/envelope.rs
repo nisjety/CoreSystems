@@ -124,4 +124,21 @@ mod tests {
         assert!(!body.to_string().contains("http://"));
         assert!(!body.to_string().contains("https://"));
     }
+
+    #[test]
+    fn error_with_details_carries_the_given_details_object() {
+        let body = super::error_with_details(
+            "invalid_post",
+            "The post is not valid.",
+            json!({ "field": "content", "max_chars": 8000 }),
+        );
+        assert_eq!(body["error"]["code"], "invalid_post");
+        assert_eq!(body["error"]["message"], "The post is not valid.");
+        assert_eq!(
+            body["error"]["details"],
+            json!({ "field": "content", "max_chars": 8000 })
+        );
+        assert_eq!(body.as_object().map(|o| o.len()), Some(1));
+        assert_eq!(body["error"].as_object().map(|o| o.len()), Some(3));
+    }
 }

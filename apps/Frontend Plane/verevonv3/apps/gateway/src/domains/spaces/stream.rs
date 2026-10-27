@@ -931,3 +931,745 @@ fn validate_event(event: &RawEvent, space_ref: &str) -> Result<ValidFrame, ()> {
         _ => Err(()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! WS02-S4 tests. The gateway is a binary crate, so the router-level tests live here (an
+    //! integration test under `tests/` cannot reach the router); `tests/space_stream_relay.rs`
+    //! pins the vendored contract copy against its owners. No model is called: model-gateway is a
+    //! wiremock server and every body is a canned SSE document.
+    use super::*;
+    use axum::http::Request;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const SPACE: &str = "space-room";
+    const DECISION_REF: &str = "decision-ref-secret-1";
+    const DECISION_TOKEN: &str = "decision-token-secret-xyzxyz";
+    const GOLDEN: &str = include_str!("../../../tests/fixtures/contracts/space-events.json");
+
+    struct Fx {
+        state: AppState,
+        _auth: MockServer,
+        user_core: MockServer,
+        _org_core: MockServer,
+        model_gateway: MockServer,
+    }
+
+    fn org_posture(zdr: bool) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(
+            json!({"data": {"metadata": {"interactiveRetention": {"zdr": zdr}}}}),
+        )
+    }
+
+    fn decision_ok() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"data": {
+            "decision": {"decision_ref": DECISION_REF, "space_ref": SPACE},
+            "token": DECISION_TOKEN,
+        }}))
+    }
+
+    fn sse(content: &str) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_raw(content.as_bytes().to_vec(), "text/event-stream")
+    }
+
+    fn connected_block() -> String {
+        sse_block(
+            "connected",
+            Some("1.5"),
+            &json!({"v": 1, "space_id": SPACE, "generation": 1, "head": 5, "resumed": false,
+                    "lease_seconds": 90, "heartbeat_seconds": 10, "mode": "live"}),
+        )
+    }
+
+    fn space_event_data(seq: u64) -> Value {
+        json!({"v": 1, "source": "session", "space_id": SPACE, "generation": 1, "seq": seq,
+               "kind": "message.appended", "at": "2026-10-27T10:00:00Z",
+               "actor": {"type": "user", "id": "user-2"},
+               "refs": {"thread_id": "thread-1", "message_id": "m-1", "message_sequence": 3, "role": "user"}})
+    }
+
+    /// `org_core`: org-core's posture answer; `decision`: Control's answer to the stream decision;
+    /// `upstream`: model-gateway's answer to the event stream. Flag ON.
+    async fn fixture(org_core: ResponseTemplate, decision: ResponseTemplate, upstream: ResponseTemplate) -> Fx {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+        for slug in ["session-core", "model-plane"] {
+            Mock::given(wm_method("GET"))
+                .and(wm_path(format!("/api/{slug}/token")))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({"token": "plane-token"})),
+                )
+                .mount(&auth)
+                .await;
+        }
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId": "user-1", "orgId": "org-1", "role": "member",
+                "onboardingStatus": "COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/thread-read-decision"))
+            .respond_with(decision)
+            .mount(&user_core)
+            .await;
+        let org = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/organizations/org-1"))
+            .respond_with(org_core)
+            .mount(&org)
+            .await;
+        let model_gateway = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path(format!("/v1/spaces/{SPACE}/events")))
+            .respond_with(upstream)
+            .mount(&model_gateway)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        state.org_core_url = org.uri();
+        state.model_gateway_url = model_gateway.uri();
+        state.space_features.realtime_stream = true;
+        Fx {
+            state,
+            _auth: auth,
+            user_core,
+            _org_core: org,
+            model_gateway,
+        }
+    }
+
+    async fn default_fixture(upstream: ResponseTemplate) -> Fx {
+        fixture(org_posture(false), decision_ok(), upstream).await
+    }
+
+    fn request(extra: Option<(&str, &str)>) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method("GET")
+            .uri(format!("/api/v1/spaces/{SPACE}/events"))
+            .header("cookie", "better-auth.session_token=session-1");
+        if let Some((name, value)) = extra {
+            builder = builder.header(name, value);
+        }
+        builder.body(Body::empty()).unwrap()
+    }
+
+    async fn get(app: &Router, extra: Option<(&str, &str)>) -> Response {
+        app.clone().oneshot(request(extra)).await.unwrap()
+    }
+
+    fn app(state: &AppState) -> Router {
+        crate::build_router(state.clone())
+    }
+
+    async fn text(response: Response) -> (u16, String) {
+        let status = response.status().as_u16();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    async fn upstream_requests(fx: &Fx) -> Vec<wiremock::Request> {
+        fx.model_gateway.received_requests().await.unwrap_or_default()
+    }
+
+    async fn control_decision_requests(fx: &Fx) -> Vec<wiremock::Request> {
+        fx.user_core
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.url.path().starts_with("/api/v1/internal/spaces/"))
+            .collect()
+    }
+
+    fn user_without_membership() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.com".to_owned(),
+            user_name: "User One".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: None,
+        }
+    }
+
+    // ---- route level --------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn flag_off_is_404_space_stream_disabled() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut fx = default_fixture(sse(&connected_block())).await;
+        fx.state.space_features.realtime_stream = false;
+        let (status, body) = text(get(&app(&fx.state), None).await).await;
+        assert_eq!(status, 404);
+        assert!(body.contains("space_stream_disabled"), "{body}");
+        assert!(control_decision_requests(&fx).await.is_empty());
+        assert!(upstream_requests(&fx).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn no_membership_is_403_active_membership_required() {
+        let state = crate::tests::test_state(false);
+        let mut state = state;
+        state.space_features.realtime_stream = true;
+        let response = space_events(
+            State(state),
+            Extension(user_without_membership()),
+            Extension(Arc::new(StreamRuntime::new())),
+            HeaderMap::new(),
+            Path(SPACE.to_owned()),
+        )
+        .await;
+        let (status, body) = text(response).await;
+        assert_eq!(status, 403);
+        assert!(body.contains("active_membership_required"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn no_membership_through_the_router_is_refused_before_the_handler() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = default_fixture(sse(&connected_block())).await;
+        // Session context without an org: the live membership authority refuses first.
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(json!({"error": "no"})))
+            .with_priority(1)
+            .mount(&fx.user_core)
+            .await;
+        let (status, _) = text(get(&app(&fx.state), None).await).await;
+        assert!(status == 403 || status == 503, "status {status}");
+        assert!(upstream_requests(&fx).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_bad_space_ref_is_400_invalid_space() {
+        let mut state = crate::tests::test_state(false);
+        state.space_features.realtime_stream = true;
+        let mut user = user_without_membership();
+        user.authorized_membership = Some(crate::middleware::AuthorizedMembership {
+            organization_id: "org-1".to_owned(),
+            role: "member".to_owned(),
+        });
+        for bad in ["bad ref", "tab\tref", &"a".repeat(129), "  "] {
+            let response = space_events(
+                State(state.clone()),
+                Extension(user.clone()),
+                Extension(Arc::new(StreamRuntime::new())),
+                HeaderMap::new(),
+                Path(bad.to_owned()),
+            )
+            .await;
+            let (status, body) = text(response).await;
+            assert_eq!(status, 400, "{bad:?}");
+            assert!(body.contains("invalid_space"), "{body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_bad_last_event_id_is_400_invalid_cursor() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = default_fixture(sse(&connected_block())).await;
+        let router = app(&fx.state);
+        for bad in ["abc", "1.x", ".5", "1.", "1.2.3", "1", "-1.2", "1 .2"] {
+            let (status, body) = text(get(&router, Some(("last-event-id", bad))).await).await;
+            assert_eq!(status, 400, "{bad:?}");
+            assert!(body.contains("invalid_cursor"), "{body}");
+        }
+        assert!(control_decision_requests(&fx).await.is_empty());
+        assert!(upstream_requests(&fx).await.is_empty());
+        // A well-formed cursor passes and is forwarded as Last-Event-ID.
+        let (status, _) = text(get(&router, Some(("last-event-id", "7.42"))).await).await;
+        assert_eq!(status, 200);
+        let upstream = upstream_requests(&fx).await;
+        assert_eq!(upstream.len(), 1);
+        assert_eq!(
+            upstream[0].headers.get("last-event-id").and_then(|v| v.to_str().ok()),
+            Some("7.42")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_31st_subscribe_in_a_minute_is_429_rate_limited_with_retry_after() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        // Org ZDR keeps every call cheap (no upstream) and releases its slot at once.
+        let fx = fixture(org_posture(true), decision_ok(), sse(&connected_block())).await;
+        let router = app(&fx.state);
+        for attempt in 1..=30 {
+            let (status, _) = text(get(&router, None).await).await;
+            assert_eq!(status, 200, "attempt {attempt}");
+        }
+        let response = get(&router, None).await;
+        assert_eq!(response.status().as_u16(), 429);
+        let retry_after = response
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok())
+            .expect("Retry-After");
+        assert!(retry_after >= 1);
+        let (_, body) = text(response).await;
+        assert!(body.contains("rate_limited"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn the_13th_concurrent_stream_is_429_capacity_and_the_slot_is_released_on_drop() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = default_fixture(sse(&connected_block())).await;
+        let router = app(&fx.state);
+        let mut open = Vec::new();
+        for attempt in 1..=12 {
+            let response = get(&router, None).await;
+            assert_eq!(response.status().as_u16(), 200, "stream {attempt}");
+            open.push(response); // body unread: the slot is held while the response lives
+        }
+        let response = get(&router, None).await;
+        assert_eq!(response.status().as_u16(), 429);
+        assert!(response.headers().get("retry-after").is_some());
+        let (_, body) = text(response).await;
+        assert!(body.contains("space_stream_capacity"), "{body}");
+        // Dropping one stream frees its slot.
+        drop(open.pop());
+        let response = get(&router, None).await;
+        assert_eq!(response.status().as_u16(), 200, "slot released on drop");
+    }
+
+    #[tokio::test]
+    async fn org_zdr_gets_poll_only_then_closing_with_no_control_or_upstream_call() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(org_posture(true), decision_ok(), sse(&connected_block())).await;
+        let (status, body) = text(get(&app(&fx.state), None).await).await;
+        assert_eq!(status, 200);
+        assert!(body.starts_with("event: connected\n"), "{body}");
+        assert!(body.contains("\"mode\":\"poll_only\""), "{body}");
+        assert!(body.contains("event: closing\n"), "{body}");
+        assert!(body.contains("\"code\":\"zdr_poll_only\""), "{body}");
+        assert!(body.contains("\"reconnect\":false"), "{body}");
+        assert!(control_decision_requests(&fx).await.is_empty());
+        assert!(upstream_requests(&fx).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn org_core_down_and_the_zdr_header_also_give_poll_only() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(ResponseTemplate::new(500), decision_ok(), sse(&connected_block())).await;
+        let (status, body) = text(get(&app(&fx.state), None).await).await;
+        assert_eq!(status, 200);
+        assert!(body.contains("zdr_poll_only"), "fails closed: {body}");
+        assert!(control_decision_requests(&fx).await.is_empty());
+        assert!(upstream_requests(&fx).await.is_empty());
+
+        let fx = default_fixture(sse(&connected_block())).await;
+        let (status, body) = text(get(&app(&fx.state), Some(("x-zdr", "true"))).await).await;
+        assert_eq!(status, 200);
+        assert!(body.contains("zdr_poll_only"), "{body}");
+        assert!(control_decision_requests(&fx).await.is_empty());
+        assert!(upstream_requests(&fx).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn control_403_and_404_give_403_stream_forbidden_and_5xx_gives_503() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for control in [403_u16, 404] {
+            let fx = fixture(
+                org_posture(false),
+                ResponseTemplate::new(control).set_body_json(json!({"error": "no"})),
+                sse(&connected_block()),
+            )
+            .await;
+            let (status, body) = text(get(&app(&fx.state), None).await).await;
+            assert_eq!(status, 403, "control {control}");
+            assert!(body.contains("space_stream_forbidden"), "{body}");
+            assert!(upstream_requests(&fx).await.is_empty());
+        }
+        let fx = fixture(
+            org_posture(false),
+            ResponseTemplate::new(500).set_body_json(json!({"error": "down"})),
+            sse(&connected_block()),
+        )
+        .await;
+        let (status, body) = text(get(&app(&fx.state), None).await).await;
+        assert_eq!(status, 503);
+        assert!(body.contains("space_stream_unavailable"), "{body}");
+        assert!(upstream_requests(&fx).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_mint_names_the_stream_audience_and_the_decision_only_travels_as_headers() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = default_fixture(sse(&connected_block())).await;
+        let (status, body) = text(get(&app(&fx.state), None).await).await;
+        assert_eq!(status, 200);
+        assert!(!body.contains(DECISION_REF), "decision ref leaked: {body}");
+        assert!(!body.contains(DECISION_TOKEN), "decision token leaked: {body}");
+        assert!(!body.contains("plane-token"), "bearer leaked: {body}");
+
+        let mints = control_decision_requests(&fx).await;
+        assert_eq!(mints.len(), 1);
+        assert_eq!(mints[0].url.path(), "/api/v1/internal/spaces/thread-read-decision");
+        let sent: Value = serde_json::from_slice(&mints[0].body).unwrap();
+        assert_eq!(sent["service_audience"], "model-plane-space-stream");
+        assert_eq!(sent["space_ref"], SPACE);
+        assert!(sent["idempotency_key"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("space-stream-"));
+
+        let upstream = upstream_requests(&fx).await;
+        assert_eq!(upstream.len(), 1);
+        let header = |name: &str| {
+            upstream[0]
+                .headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned)
+        };
+        assert_eq!(header("x-space-decision-ref").as_deref(), Some(DECISION_REF));
+        assert_eq!(header("x-space-decision-token").as_deref(), Some(DECISION_TOKEN));
+        assert_eq!(header("x-org-id").as_deref(), Some("org-1"));
+        assert_eq!(header("x-user-id").as_deref(), Some("user-1"));
+        let body_text = String::from_utf8_lossy(&upstream[0].body);
+        assert!(!body_text.contains(DECISION_TOKEN), "token must not ride in a body");
+        assert!(upstream[0].url.query().unwrap_or("").find("token").is_none());
+    }
+
+    #[tokio::test]
+    async fn upstream_statuses_map_to_fixed_browser_errors() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let cases: Vec<(ResponseTemplate, u16, &str, bool)> = vec![
+            (ResponseTemplate::new(401).set_body_string("leak-401"), 401, "unauthorized", false),
+            (ResponseTemplate::new(403).set_body_string("leak-403"), 403, "space_stream_forbidden", false),
+            (ResponseTemplate::new(400).set_body_string("leak-400"), 502, "invalid_model_gateway_response", false),
+            (
+                ResponseTemplate::new(503)
+                    .insert_header("retry-after", "3")
+                    .set_body_string("leak-503"),
+                429,
+                "space_stream_capacity",
+                true,
+            ),
+            (ResponseTemplate::new(503).set_body_string("leak-503b"), 503, "space_stream_unavailable", false),
+            (ResponseTemplate::new(500).set_body_string("leak-500"), 503, "space_stream_unavailable", false),
+        ];
+        for (template, expected_status, expected_code, has_retry_after) in cases {
+            let fx = default_fixture(template).await;
+            let response = get(&app(&fx.state), None).await;
+            assert_eq!(response.status().as_u16(), expected_status, "{expected_code}");
+            assert_eq!(response.headers().get("retry-after").is_some(), has_retry_after);
+            let (_, body) = text(response).await;
+            assert!(body.contains(expected_code), "{body}");
+            assert!(!body.contains("leak-"), "upstream body must never be forwarded: {body}");
+        }
+        // A 200 that is not an event stream is refused.
+        let fx = default_fixture(
+            ResponseTemplate::new(200).set_body_raw(b"{}".to_vec(), "application/json"),
+        )
+        .await;
+        let (status, body) = text(get(&app(&fx.state), None).await).await;
+        assert_eq!(status, 502);
+        assert!(body.contains("invalid_model_gateway_response"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_valid_stream_is_relayed_reserialised_and_audience_revision_is_stripped() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut event = space_event_data(6);
+        event["audience_revision"] = json!(9);
+        let upstream = format!(
+            "{}{}{}{}",
+            connected_block(),
+            sse_block("space_event", Some("1.6"), &event),
+            sse_block("heartbeat", Some("1.6"), &json!({"head": 6, "generation": 1})),
+            sse_block("closing", Some("1.6"), &json!({"code": "lease_expired", "reconnect": true, "retry_after_ms": 0})),
+        );
+        let fx = default_fixture(sse(&upstream)).await;
+        let (status, body) = text(get(&app(&fx.state), None).await).await;
+        assert_eq!(status, 200);
+        assert!(body.contains("event: connected\nid: 1.5\n"), "{body}");
+        assert!(body.contains("event: space_event\nid: 1.6\n"), "{body}");
+        assert!(body.contains("event: heartbeat\n"), "{body}");
+        assert!(body.trim_end().ends_with("\"retry_after_ms\":0}"), "{body}");
+        assert!(body.contains("event: closing\n"), "{body}");
+        assert!(!body.contains("audience_revision"), "{body}");
+        assert!(!body.contains("invalid_frame"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_violating_frame_ends_the_stream_with_closing_invalid_frame() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut leaking = space_event_data(6);
+        leaking["content"] = json!("the secret message text");
+        let upstream = format!(
+            "{}{}{}",
+            connected_block(),
+            sse_block("space_event", Some("1.6"), &leaking),
+            sse_block("heartbeat", None, &json!({"head": 9, "generation": 1})),
+        );
+        let fx = default_fixture(sse(&upstream)).await;
+        let (status, body) = text(get(&app(&fx.state), None).await).await;
+        assert_eq!(status, 200);
+        assert!(body.contains("event: connected\n"));
+        assert!(!body.contains("secret message text"), "{body}");
+        assert!(body.contains("event: closing\n"), "{body}");
+        assert!(body.contains("\"code\":\"invalid_frame\""), "{body}");
+        assert!(body.contains("\"reconnect\":true"), "{body}");
+        assert!(!body.contains("event: heartbeat"), "nothing after the violation: {body}");
+    }
+
+    #[tokio::test]
+    async fn an_upstream_that_ends_without_closing_gets_closing_upstream_unavailable() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = default_fixture(sse(&connected_block())).await;
+        let (status, body) = text(get(&app(&fx.state), None).await).await;
+        assert_eq!(status, 200);
+        assert!(body.contains("event: connected\n"));
+        assert!(body.contains("\"code\":\"upstream_unavailable\""), "{body}");
+        assert!(body.contains("\"reconnect\":true"), "{body}");
+    }
+
+    // ---- validator ----------------------------------------------------------------------
+
+    fn raw(event: &str, id: Option<&str>, data: &Value) -> RawEvent {
+        RawEvent {
+            event: event.to_owned(),
+            id: id.map(str::to_owned),
+            data: data.to_string(),
+        }
+    }
+
+    fn rejected(event: &RawEvent) -> bool {
+        validate_event(event, SPACE).is_err()
+    }
+
+    #[test]
+    fn the_validator_drops_each_contract_violation() {
+        // Extra `content` field.
+        let mut with_content = space_event_data(1);
+        with_content["content"] = json!("text");
+        assert!(rejected(&raw("space_event", Some("1.1"), &with_content)));
+        // Foreign space id.
+        let mut foreign = space_event_data(1);
+        foreign["space_id"] = json!("space-other");
+        assert!(rejected(&raw("space_event", Some("1.1"), &foreign)));
+        // Unknown kind carrying refs.
+        let mut unknown_with_refs = space_event_data(1);
+        unknown_with_refs["kind"] = json!("brand.new.kind");
+        assert!(rejected(&raw("space_event", Some("1.1"), &unknown_with_refs)));
+        // A non-registry event name.
+        assert!(rejected(&raw("mystery", None, &json!({}))));
+        assert!(rejected(&raw("", None, &json!({}))));
+        // An oversized string.
+        let mut oversized = space_event_data(1);
+        oversized["refs"]["thread_id"] = json!("t".repeat(129));
+        assert!(rejected(&raw("space_event", Some("1.1"), &oversized)));
+        // An SSE id that is not this frame's cursor, or not a cursor at all.
+        assert!(rejected(&raw("space_event", Some("1.2"), &space_event_data(1))));
+        assert!(rejected(&raw("space_event", Some("junk"), &space_event_data(1))));
+        // A ref outside the kind allowlist, and a ref of the wrong type.
+        let mut stray_ref = space_event_data(1);
+        stray_ref["refs"]["agent_id"] = json!("agent-1");
+        assert!(rejected(&raw("space_event", Some("1.1"), &stray_ref)));
+        let mut bad_type = space_event_data(1);
+        bad_type["refs"]["message_sequence"] = json!("3");
+        assert!(rejected(&raw("space_event", Some("1.1"), &bad_type)));
+        // Version, source and actor type outside the contract.
+        for (field, value) in [
+            ("v", json!(2)),
+            ("source", json!("application")),
+            ("actor", json!({"type": "robot"})),
+            ("at", json!("")),
+        ] {
+            let mut event = space_event_data(1);
+            event[field] = value;
+            assert!(rejected(&raw("space_event", Some("1.1"), &event)), "{field}");
+        }
+        // Malformed JSON.
+        assert!(rejected(&RawEvent {
+            event: "heartbeat".into(),
+            id: None,
+            data: "{not json".into(),
+        }));
+        // Closing: a code outside the closed set; connected: a foreign space or unknown mode.
+        assert!(rejected(&raw("closing", None, &json!({"code": "other", "reconnect": true, "retry_after_ms": 0}))));
+        assert!(rejected(&raw(
+            "connected",
+            None,
+            &json!({"v": 1, "space_id": "space-other", "generation": 1, "head": 0, "resumed": false,
+                    "lease_seconds": 1, "heartbeat_seconds": 1, "mode": "live"})
+        )));
+        assert!(rejected(&raw(
+            "connected",
+            None,
+            &json!({"v": 1, "space_id": SPACE, "generation": 1, "head": 0, "resumed": false,
+                    "lease_seconds": 1, "heartbeat_seconds": 1, "mode": "weird"})
+        )));
+        // Error frame with a code outside the set.
+        assert!(rejected(&raw("error", None, &json!({"error": {"code": "boom", "message": "m"}}))));
+        // cursor_too_old with an unknown reason.
+        assert!(rejected(&raw("cursor_too_old", None, &json!({"reason": "because", "head": 1, "generation": 1}))));
+    }
+
+    #[test]
+    fn an_unknown_kind_without_refs_is_forwarded_as_hidden() {
+        let mut unknown = space_event_data(4);
+        unknown["kind"] = json!("brand.new.kind");
+        unknown["refs"] = json!({});
+        let frame = validate_event(&raw("space_event", Some("1.4"), &unknown), SPACE).expect("forwarded");
+        assert!(!frame.closing);
+        assert!(frame.text.contains("\"kind\":\"hidden\""), "{}", frame.text);
+        assert!(!frame.text.contains("brand.new.kind"));
+        assert!(frame.text.starts_with("event: space_event\nid: 1.4\n"));
+    }
+
+    #[test]
+    fn audience_revision_is_stripped_and_every_registry_kind_validates() {
+        let mut event = space_event_data(2);
+        event["audience_revision"] = json!(12);
+        let frame = validate_event(&raw("space_event", Some("1.2"), &event), SPACE).unwrap();
+        assert!(!frame.text.contains("audience_revision"));
+        for kind in [
+            "thread.created", "message.appended", "thread.updated", "thread.archived",
+            "thread.deleted", "run.state_changed", "hidden", "redacted",
+        ] {
+            let refs = match kind {
+                "thread.created" => json!({"thread_id": "t-1", "origin": "human"}),
+                "message.appended" => json!({"thread_id": "t-1", "message_id": "m-1", "message_sequence": 1, "role": "user"}),
+                "thread.updated" => json!({"thread_id": "t-1", "fields": ["title", "pinned"]}),
+                "thread.archived" | "thread.deleted" => json!({"thread_id": "t-1"}),
+                "run.state_changed" => json!({"run_id": "r-1", "thread_id": "t-1", "state": "running", "prev": "queued"}),
+                _ => json!({}),
+            };
+            let mut event = space_event_data(3);
+            event["kind"] = json!(kind);
+            event["refs"] = refs;
+            assert!(validate_event(&raw("space_event", Some("1.3"), &event), SPACE).is_ok(), "{kind}");
+        }
+        // Closing and error frames end the stream.
+        let closing = validate_event(
+            &raw("closing", None, &json!({"code": "membership_revoked", "reconnect": false, "retry_after_ms": 0})),
+            SPACE,
+        )
+        .unwrap();
+        assert!(closing.closing);
+        let error = validate_event(
+            &raw("error", None, &json!({"error": {"code": "unauthorized", "message": "m", "details": {"x": 1}}})),
+            SPACE,
+        )
+        .unwrap();
+        assert!(error.closing);
+        assert!(error.text.contains("\"details\":{}"), "details dropped: {}", error.text);
+    }
+
+    // ---- SSE parser ---------------------------------------------------------------------
+
+    #[test]
+    fn the_parser_handles_split_chunks_crlf_and_comments() {
+        let mut parser = SseParser::default();
+        let mut events = Vec::new();
+        for chunk in ["eve", "nt: heart", "beat\r\nid: 1.", "2\r\ndata: {\"a\"", ":1}\r\n", "\r\n: keep-alive\n\n"] {
+            events.extend(parser.push(chunk.as_bytes()).expect("parse"));
+        }
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].event, "heartbeat");
+        assert_eq!(events[0].id.as_deref(), Some("1.2"));
+        assert_eq!(events[0].data, "{\"a\":1}");
+        // A comment-only block yields no event, and two data lines join with a newline.
+        let events = parser.push(b": hi\n\nevent: x\ndata: one\ndata: two\n\n").unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data, "one\ntwo");
+    }
+
+    #[test]
+    fn the_parser_bounds_a_line_and_an_event() {
+        let mut parser = SseParser::default();
+        assert!(parser.push("x".repeat(MAX_FRAME_BYTES + 1).as_bytes()).is_err(), "oversize line");
+        let mut parser = SseParser::default();
+        let mut result = Ok(Vec::new());
+        for _ in 0..8 {
+            result = parser.push(format!("data: {}\n", "y".repeat(4096)).as_bytes());
+            if result.is_err() {
+                break;
+            }
+        }
+        assert!(result.is_err(), "oversize event");
+    }
+
+    // ---- golden -------------------------------------------------------------------------
+
+    fn golden() -> Value {
+        serde_json::from_str(GOLDEN).expect("vendored space-events.json parses")
+    }
+
+    fn words(value: &Value) -> std::collections::BTreeSet<String> {
+        value
+            .as_array()
+            .expect("array")
+            .iter()
+            .map(|word| word.as_str().expect("string").to_owned())
+            .collect()
+    }
+
+    fn owned(set: &[&str]) -> std::collections::BTreeSet<String> {
+        set.iter().map(|word| (*word).to_owned()).collect()
+    }
+
+    #[test]
+    fn the_kind_and_ref_tables_equal_the_golden() {
+        let golden = golden();
+        let kinds = golden["kinds"].as_object().expect("kinds");
+        let mut all_refs = std::collections::BTreeSet::new();
+        for (kind, entry) in kinds {
+            let ours = kind_ref_keys(kind).unwrap_or_else(|| panic!("{kind} missing from stream.rs"));
+            assert_eq!(owned(ours), words(&entry["refs"]), "refs of {kind}");
+            all_refs.extend(words(&entry["refs"]));
+        }
+        assert_eq!(all_refs, words(&golden["ref_keys"]), "ref_keys is the union of the kind refs");
+        assert!(kind_ref_keys("not.in.the.registry").is_none());
+    }
+
+    #[test]
+    fn the_closed_word_tables_equal_the_golden() {
+        let golden = golden();
+        let closing: std::collections::BTreeSet<String> = golden["events"]["closing"]["codes"]
+            .as_object()
+            .expect("closing codes")
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(owned(CLOSING_CODES), closing);
+        assert_eq!(owned(ERROR_CODES), words(&golden["events"]["error"]["codes"]));
+        assert_eq!(owned(RUN_STATES), words(&golden["closed_words"]["run_state"]));
+        assert_eq!(owned(UPDATED_FIELDS), words(&golden["closed_words"]["thread_updated_fields"]));
+        // Gateway-emitted closing codes keep their reconnect flag.
+        assert_eq!(golden["events"]["closing"]["codes"]["invalid_frame"]["reconnect"], true);
+        assert_eq!(golden["events"]["closing"]["codes"]["upstream_unavailable"]["reconnect"], true);
+        assert_eq!(golden["events"]["closing"]["codes"]["zdr_poll_only"]["reconnect"], false);
+        assert_eq!(golden["events"]["connected"]["mode"], json!(["live", "poll_only"]));
+        assert_eq!(golden["events"]["cursor_too_old"]["reason"], json!(["retention", "generation_changed", "ahead_of_head"]));
+    }
+
+    #[test]
+    fn the_cursor_grammar_is_generation_dot_seq() {
+        assert!(valid_cursor("1.2"));
+        assert!(valid_cursor("123456789012345678.0"));
+        for bad in ["", "1", "1.", ".1", "a.b", "1.2.3", "1234567890123456789.1"] {
+            assert!(!valid_cursor(bad), "{bad:?}");
+        }
+        assert_eq!(golden()["cursor"]["grammar"], "<generation>.<seq>");
+    }
+}

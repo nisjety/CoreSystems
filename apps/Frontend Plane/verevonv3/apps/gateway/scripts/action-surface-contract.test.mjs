@@ -76,3 +76,28 @@ test('the live Space fragments are discovered and carry the moved base actions',
   const ids = allRegistryIds('', spaceFragmentSources(spaceFragmentsDirectory));
   assert.ok(ids.has('spaces.create_room'), 'base fragment ids must be read from domains/spaces');
 });
+
+// WS01-S5 and WS03-S4. Independent of the whole-set equality test above (the registry/handlers
+// drift it reports predates the Space work): each new id is declared in its own fragment, is part
+// of the registry set, and has an execute_action arm that reaches a named dispatch_ function.
+for (const [fragment, ids] of [
+  ['ws01.ts', ['spaces.create_post', 'spaces.reply_in_thread']],
+  ['ws03.ts', ['spaces.set_effect_entitlements', 'spaces.apply_effect_preset']],
+]) {
+  test(`${fragment} action ids are in the registry set and reach a gateway dispatcher`, () => {
+    const fragmentSource = fs.readFileSync(path.join(spaceFragmentsDirectory, fragment), 'utf8');
+    const fragmentIds = actionRegistryIds(fragmentSource);
+    const registryIds = allRegistryIds('', spaceFragmentSources(spaceFragmentsDirectory));
+    const handlerSource = fs.readFileSync(handlerPath, 'utf8');
+    for (const actionId of ids) {
+      assert.ok(fragmentIds.has(actionId), `${actionId} is declared in ${fragment}`);
+      assert.ok(registryIds.has(actionId), `${actionId} is in the registry set`);
+      const quotedId = actionId.replace('.', '\\.');
+      assert.match(
+        handlerSource,
+        new RegExp(`"${quotedId}"[\\s\\S]{0,320}?=>[\\s\\S]{0,160}?dispatch_`),
+        `${actionId} must reach a named owner dispatcher`,
+      );
+    }
+  });
+}
