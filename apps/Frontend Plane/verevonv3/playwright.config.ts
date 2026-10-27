@@ -1,5 +1,5 @@
 import { defineConfig, devices } from '@playwright/test'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { productCaptureSettings } from './tests/e2e/product-capture-policy'
@@ -64,6 +64,16 @@ const PRODUCT_RECORDING_SPEC = /product-recording\.spec\.ts/
  * `vite preview --port 5176 --strictPort`, and the spec makes one lazy chunk 404.
  */
 const CHUNK_RECOVERY_SPEC = /chunk-recovery\.spec\.ts/
+/**
+ * Space specs (`space-<feature>.spec.ts`, plan M0-T0) sign in from seeded storage states
+ * (E2E_STORAGE_STATE_A..F, written by `scripts/space-e2e-seed.sh`) and need no setup
+ * project. They run against E2E_BASE_URL (a second Vite server, not :5173) and use
+ * tests/e2e/space-fixtures.ts, which turns a skip into a failure under E2E_REQUIRE_SPACE=1.
+ */
+const SPACE_SPECS = /(^|\/)space-[^/]*\.spec\.ts$/
+const SPACE_STORAGE_STATE = process.env.E2E_STORAGE_STATE_A && existsSync(process.env.E2E_STORAGE_STATE_A)
+  ? process.env.E2E_STORAGE_STATE_A
+  : undefined
 const CHUNK_BASE_URL = process.env.CHUNK_E2E_BASE_URL || 'http://localhost:5176'
 if (process.env.PRODUCT_RECORDING_CAPTURE === '1' && process.env.PRODUCT_RECORDING_MODE === 'rehearsal') throw new Error('Do not combine release capture and rehearsal flags')
 const capture = productCaptureSettings(process.env.PRODUCT_RECORDING_MODE || (process.env.PRODUCT_RECORDING_CAPTURE === '1' ? 'release' : undefined),
@@ -96,7 +106,7 @@ export default defineConfig({
     {
       name: 'e2e',
       testMatch: /.*\.spec\.ts/,
-      testIgnore: [BROWSER_WORKSPACE_SPECS, CHAT_WORKSPACE_SPECS, PRODUCT_READINESS_SPECS, PRODUCT_RECORDING_SPEC, CHUNK_RECOVERY_SPEC],
+      testIgnore: [BROWSER_WORKSPACE_SPECS, CHAT_WORKSPACE_SPECS, PRODUCT_READINESS_SPECS, PRODUCT_RECORDING_SPEC, CHUNK_RECOVERY_SPEC, SPACE_SPECS],
       dependencies: ['setup'],
       use: { ...devices['Desktop Chrome'], storageState: STORAGE_STATE },
     },
@@ -116,6 +126,11 @@ export default defineConfig({
       testMatch: CHAT_WORKSPACE_SPECS,
       dependencies: ['local-setup'],
       use: { ...devices['Desktop Chrome'], baseURL: LOCAL_BASE_URL, storageState: LOCAL_STORAGE_STATE },
+    },
+    {
+      name: 'space',
+      testMatch: SPACE_SPECS,
+      use: { ...devices['Desktop Chrome'], baseURL: BASE_URL, ...(SPACE_STORAGE_STATE ? { storageState: SPACE_STORAGE_STATE } : {}) },
     },
     {
       name: 'chunk-recovery',
