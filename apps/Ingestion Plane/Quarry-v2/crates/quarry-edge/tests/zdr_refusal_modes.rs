@@ -33,7 +33,10 @@ use quarry_browser::session::{
 use quarry_core::ids::kinds::ProfileKind;
 use quarry_edge::state::AppState;
 
-use zdr_harness::{golden_token, user_in_standard_org, user_in_zdr_org, Harness};
+use zdr_harness::{
+    golden_token, user_in_standard_org, user_in_standard_org_with_profile_import, user_in_zdr_org,
+    user_in_zdr_org_with_profile_import, Harness,
+};
 
 const ZDR_ORG: &str = "org-zdr-golden";
 const INTERNAL_TOKEN: &str = "refusal-modes-internal-token";
@@ -208,7 +211,9 @@ fn empty_profiles() -> Arc<dyn ProfileStore> {
     Arc::new(InMemoryProfileStore::new())
 }
 
-/// One request per refused action: `(row, action, response)`. Each carries `marker` in its
+/// One request per refused action: `(row, action, response)`. `token` must carry the profile
+/// import scope (`user_in_*_with_profile_import`): without it the save is refused by the
+/// principal check (WS17.P0) before the ZDR decision this file is about. Each carries `marker` in its
 /// URL so a leak into the log is visible. `profile_id` is the profile the update renames: pass a
 /// profile the organization holds to see whether a refused update changed it.
 async fn durable_writes(
@@ -329,7 +334,7 @@ async fn observe_mode_serves_a_zdr_org_as_before_and_logs_one_content_free_event
     // A standard organization: served, and not observed.
     let unheld = ProfileKind::new().to_string();
     for (_row, action, response) in
-        durable_writes(&harness, &user_in_standard_org(), &probe, &unheld).await
+        durable_writes(&harness, &user_in_standard_org_with_profile_import(), &probe, &unheld).await
     {
         assert_ne!(
             response.status().as_u16(),
@@ -358,7 +363,7 @@ async fn observe_mode_serves_a_zdr_org_as_before_and_logs_one_content_free_event
     // A ZDR organization: served as before.
     let mut expected: BTreeSet<(String, String)> = BTreeSet::new();
     for (row, action, response) in
-        durable_writes(&harness, &user_in_zdr_org(), &probe, &held.to_string()).await
+        durable_writes(&harness, &user_in_zdr_org_with_profile_import(), &probe, &held.to_string()).await
     {
         let status = response.status().as_u16();
         let payload: Value = response.json().await.unwrap_or(Value::Null);
@@ -503,7 +508,7 @@ async fn enforced_zdr_org_is_refused_every_durable_write_and_control_plane_sees_
     let mut expected: BTreeSet<(String, String)> = BTreeSet::new();
 
     for (row, action, response) in
-        durable_writes(&harness, &user_in_zdr_org(), &probe, &held.to_string()).await
+        durable_writes(&harness, &user_in_zdr_org_with_profile_import(), &probe, &held.to_string()).await
     {
         expected.insert((row.to_owned(), action.to_owned()));
         assert_eq!(response.status().as_u16(), 403, "{row}/{action}");
@@ -626,8 +631,11 @@ async fn enforced_internal_change_record_refuses_a_declared_zdr_body_only() {
     );
 }
 
-/// A ZDR organization can still wind down: list schedules, pause and delete a schedule, list,
-/// read and delete the profiles it already holds, and read the change history.
+/// A ZDR organization can still wind down: list schedules, pause and delete a schedule, list
+/// and delete the profiles it already holds, and read the change history. Since WS17.P0 a profile
+/// read and a restore probe are NOT wind-down: under the flag they are refused like the writes
+/// (`ProfileOp::zdr_action` names only list and delete as never refused), and each leaves one
+/// `zdr.refused` event. This test pins both halves.
 #[tokio::test]
 async fn enforced_zdr_org_can_still_wind_down() {
     let _serial = CAPTURE_LOCK.lock().await;
@@ -720,10 +728,13 @@ async fn enforced_zdr_org_can_still_wind_down() {
         latest["error"]["details"]["zdr_refusal"].is_null(),
         "{latest}"
     );
-    assert!(
-        refused_since(mark).is_empty(),
-        "no wind-down call left a zdr.refused event: {:?}",
-        refused_since(mark)
+    // The wind-down calls above left no event; the read and the probe left exactly one each.
+    assert_refused_events(
+        &refused_since(mark),
+        &BTreeSet::from([
+            ("profiles".to_owned(), "read".to_owned()),
+            ("profiles".to_owned(), "probe".to_owned()),
+        ]),
     );
 }
 
@@ -735,7 +746,7 @@ async fn enforced_standard_org_is_unchanged() {
     capture();
     let control = control_plane().await;
     let harness = edge(control.uri(), true, empty_profiles()).await;
-    let standard = user_in_standard_org();
+    let standard = user_in_standard_org_with_profile_import();
     let probe = marker();
     let mark = refused_mark();
 

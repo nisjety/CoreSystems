@@ -104,6 +104,13 @@ fn unix_now() -> i64 {
 
 /// A token whose claims are the golden case `case`, freshly timed.
 fn token(case: &str) -> String {
+    token_with_scopes(case, &[])
+}
+
+/// The golden case `case`, freshly timed, with `extra_scopes` added to its `scopes` claim.
+/// No golden case carries the profile import scope (no production token does, WS17.P0), so
+/// a test of the profile save asks for it here instead of editing the golden.
+fn token_with_scopes(case: &str, extra_scopes: &[&str]) -> String {
     use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 
     let golden: Value = serde_json::from_str(GOLDEN).expect("golden is JSON");
@@ -112,6 +119,11 @@ fn token(case: &str) -> String {
     let mut claims = entry["claims"].as_object().expect("claims object").clone();
     let ttl = entry["ttl_seconds"].as_i64().expect("ttl_seconds");
     let now = unix_now();
+    if !extra_scopes.is_empty() {
+        let mut scopes = claims.get("scopes").and_then(Value::as_array).cloned().unwrap_or_default();
+        scopes.extend(extra_scopes.iter().map(|scope| json!(scope)));
+        claims.insert("scopes".into(), Value::Array(scopes));
+    }
     claims.insert("iat".into(), json!(now));
     claims.insert("nbf".into(), json!(now - 5));
     claims.insert("exp".into(), json!(now + ttl));
@@ -128,6 +140,17 @@ pub fn user_in_zdr_org() -> String {
 
 pub fn user_in_standard_org() -> String {
     token("user_in_standard_org")
+}
+
+/// [`user_in_zdr_org`] holding the profile import scope, so `POST /v1/profiles` (the save)
+/// reaches the ZDR decision instead of the scope check in front of it.
+pub fn user_in_zdr_org_with_profile_import() -> String {
+    token_with_scopes("user_in_zdr_org", &[quarry_edge::profile_guard::IMPORT_SCOPE])
+}
+
+/// [`user_in_standard_org`] holding the profile import scope.
+pub fn user_in_standard_org_with_profile_import() -> String {
+    token_with_scopes("user_in_standard_org", &[quarry_edge::profile_guard::IMPORT_SCOPE])
 }
 
 /// Any case of the golden: `service_model_gateway`, `service_execution_core`, ...

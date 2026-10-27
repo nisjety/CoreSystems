@@ -41,7 +41,7 @@ use quarry_edge::state::AppState;
 
 use zdr_harness::{
     control_plane_double, golden_token, model_plane_double, user_in_standard_org,
-    user_in_zdr_org, Harness,
+    user_in_zdr_org, user_in_zdr_org_with_profile_import, Harness,
 };
 
 /// The durable job routes: refused for a ZDR organization, open otherwise.
@@ -153,9 +153,10 @@ async fn gap_rows_currently_violate_profiles() {
         .expect("a profile id")
         .to_owned();
 
+    // The save needs the profile import scope (WS17.P0); no golden case carries it.
     let saved = harness
         .post(
-            &token,
+            &user_in_zdr_org_with_profile_import(),
             "/v1/profiles",
             json!({ "snapshot": { "cookies": [], "local_storage": [], "session_storage": [] } }),
         )

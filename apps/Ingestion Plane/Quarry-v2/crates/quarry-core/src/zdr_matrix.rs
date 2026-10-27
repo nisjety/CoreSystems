@@ -246,13 +246,67 @@ pub const ROWS: &[Row] = &[
             "/v1/team/activity",
             "/v1/runs/{id}/events",
             "/v1/jobs/{id}/events",
+            "/v1/crawl/{id}/events",
+            "/v1/batch/{id}/events",
         ],
         treatment: Treatment::Inert {
             reason: "reads or proxies Control Plane records; Quarry stores nothing for the caller",
         },
         status: Status::Enforced,
         enforced_by: &[],
-        basis: "resource_routes forwards to Control Plane with the verified identity and keeps no copy; EXCEPT POST /v1/sources with monitor:true, which registers a recurring change-monitor schedule in Control Plane and is classified by the schedules row (it is refused or observed under the same flag and stamps the posture on the schedule)",
+        basis: "resource_routes forwards to Control Plane with the verified identity and keeps no copy (the crawl and batch event tails are the same handler as the job event tail, scoped to one kind; a ZDR organization can only hold jobs that pre-date its ZDR, and reads them as before); EXCEPT POST /v1/sources with monitor:true, which registers a recurring change-monitor schedule in Control Plane and is classified by the schedules row (it is refused or observed under the same flag and stamps the posture on the schedule)",
+        log: Log::Unverified,
+    },
+    Row {
+        id: "job_lifecycle_reads",
+        routes: &[
+            "/v1/crawl/ongoing",
+            "/v1/crawl/{id}",
+            "/v1/batch/ongoing",
+            "/v1/batch/{id}",
+            "/v1/jobs/{id}",
+        ],
+        treatment: Treatment::Inert {
+            reason: "reads Control Plane's job record (status, phase, counts, closed-vocabulary warnings); Quarry stores nothing and the view names no page URL",
+        },
+        status: Status::Enforced,
+        enforced_by: &[],
+        basis: "job_lifecycle_routes get_job, get_crawl, get_batch and ongoing_* are org-scoped reads through control_client; the page URLs of a job are on the errors routes (job_errors row) and the event tails (control_records row). DELETE /v1/crawl/{id} and DELETE /v1/batch/{id} share these paths and are the cancel verb of the job_control row",
+        log: Log::Unverified,
+    },
+    Row {
+        id: "job_errors",
+        routes: &[
+            "/v1/crawl/{id}/errors",
+            "/v1/batch/{id}/errors",
+            "/v1/jobs/{id}/errors",
+        ],
+        treatment: Treatment::Refused {
+            code: "FORBIDDEN",
+            feature: "job_error_urls",
+        },
+        status: Status::Enforced,
+        enforced_by: &[
+            "zdr_claim_floor::job_errors_are_refused_for_a_zdr_org_user_and_open_to_a_standard_org",
+            "job_lifecycle::zdr_caller_can_cancel_but_not_read_errors",
+        ],
+        basis: "job_lifecycle_routes::errors_for refuses a caller whose token floor is ZDR before it asks Control Plane anything: the error list names the URL of every page that failed. Unconditional, not behind the durable-resource flag",
+        log: Log::Unverified,
+    },
+    Row {
+        id: "job_control",
+        routes: &[
+            "/v1/crawl/{id}/pause",
+            "/v1/crawl/{id}/resume",
+            "/v1/batch/{id}/pause",
+            "/v1/batch/{id}/resume",
+        ],
+        treatment: Treatment::Inert {
+            reason: "a control verb carries an action word and the actor id, no page content; a ZDR organization can only hold jobs that pre-date its ZDR, and cancelling one is wind-down",
+        },
+        status: Status::Enforced,
+        enforced_by: &["job_lifecycle::zdr_caller_can_cancel_but_not_read_errors"],
+        basis: "job_lifecycle_routes::control_request writes {action, actor, actor_type} to Control Plane and answers the job record; dark behind QUARRY_EDGE__JOB_CONTROL (501 off); a service principal is refused 403. Cancel is DELETE on the crawl or batch path shared with the lifecycle read",
         log: Log::Unverified,
     },
     Row {
@@ -328,10 +382,10 @@ pub const ROWS: &[Row] = &[
             warning: "a browser profile (cookies, storage) is a durable resource a ZDR organization can create",
         },
         status: Status::Gap {
-            issue: "WS4.H stage B: with QUARRY_EDGE__ZDR_REFUSE_DURABLE_RESOURCES on, create, save and update are refused and list, read, restore_probe and delete stay open so profiles can be erased; the flag default stays off until ADR-4 sign-off and the customer notice",
+            issue: "WS4.H stage B: with QUARRY_EDGE__ZDR_REFUSE_DURABLE_RESOURCES on, create, save, update, read and restore_probe are refused and only list and delete stay open so profiles can be erased; the flag default stays off until ADR-4 sign-off and the customer notice",
         },
         enforced_by: &["zdr_gap_rows::gap_rows_currently_violate_profiles"],
-        basis: "profile_routes call zdr_refusal::refuse on create, save and update (default off: observe, zdr.would_refuse, served as before); the agent start refuses a persistent profile in both modes",
+        basis: "profile_routes call profile_guard::precheck, whose ZDR half is zdr_refusal::refuse, on create, save, update, read and restore_probe (default off: observe, zdr.would_refuse, served as before); list and delete are never refused. precheck also refuses a service principal on every operation and a save without the quarry:profiles:import scope (WS17.P0), before the ZDR decision, whatever the flag; the agent start refuses a persistent profile in both modes",
         log: Log::Unverified,
     },
     Row {
@@ -373,6 +427,21 @@ pub const ROWS: &[Row] = &[
         log: Log::Unverified,
     },
     Row {
+        id: "agent_attach",
+        routes: &[
+            "/v1/agent/runs/{run_id}/attach",
+            "/v1/agent/runs/{run_id}/attach/{attach_id}",
+        ],
+        treatment: Treatment::Refused {
+            code: "FORBIDDEN",
+            feature: "agent_attach",
+        },
+        status: Status::Enforced,
+        enforced_by: &[],
+        basis: "attach::attach_run refuses a ZDR run (reason attach_zdr_refused) before it reads the grant or opens a tab, in both modes; the route is also dark behind QUARRY_EDGE__ATTACH. The release route has nothing to release for a ZDR run. No test drives a ZDR run through the attach route yet: the refusal is a three-line guard in the handler",
+        log: Log::Unverified,
+    },
+    Row {
         id: "agent_run_surface",
         routes: &[
             "/v1/agent/runs/{run_id}",
@@ -385,6 +454,7 @@ pub const ROWS: &[Row] = &[
             "/v1/agent/runs/{run_id}/tabs",
             "/v1/agent/runs/{run_id}/tabs/{tab_id}",
             "/v1/agent/runs/{run_id}/tabs/{tab_id}/select",
+            "/v1/agent/runs/{run_id}/tabs/{tab_id}/control",
             "/v1/agent/runs/{run_id}/devtools",
             "/v1/agent/runs/{run_id}/frames/ws",
             "/v1/agent/runs/{run_id}/frames/stream",
@@ -395,7 +465,7 @@ pub const ROWS: &[Row] = &[
         treatment: Treatment::Honored,
         status: Status::Enforced,
         enforced_by: &["agent_routes::tests::zdr_expiry_writes_no_timeline_row_and_no_checkpoint"],
-        basis: "every step, tab and control change skips receipts and timeline rows when the run is ZDR (step.rs, control.rs, projection.rs)",
+        basis: "every step, tab and control change skips receipts and timeline rows when the run is ZDR (step.rs, control.rs, projection.rs; the person's tab hand-over, attach::control_tab, records through control::record_browser_timeline_event, which returns before any write for a ZDR run)",
         log: Log::Unverified,
     },
     Row {
@@ -463,6 +533,28 @@ pub const ROWS: &[Row] = &[
         log: Log::Unverified,
     },
     Row {
+        id: "internal_schedule_preflight",
+        routes: &["/v1/internal/schedules/preflight"],
+        treatment: Treatment::Inert {
+            reason: "answers allow with the posture unchecked and stores nothing; it carries a schedule id and an org id",
+        },
+        status: Status::Enforced,
+        enforced_by: &[],
+        basis: "schedule_preflight::preflight checks the runtime token and the run binding, then returns the S2 answer. It does NOT check the ZDR posture at fire time (WS15.S4 is not built), so an organization that turns ZDR on later keeps its schedules firing: that is the schedules row's gap, not a second one",
+        log: Log::Unverified,
+    },
+    Row {
+        id: "internal_org_profile_purge",
+        routes: &["/v1/internal/orgs/{org}/profiles"],
+        treatment: Treatment::Inert {
+            reason: "erases the organization's profile families and answers counts only; it stores nothing",
+        },
+        status: Status::Enforced,
+        enforced_by: &[],
+        basis: "internal_routes::purge_org_profiles checks the shared internal token, walks the org erasure families in AppState and reports row, tombstone and cache-key counts (WS17.E3); it is how a ZDR organization's erasure is carried out, so it is never refused",
+        log: Log::Unverified,
+    },
+    Row {
         id: "internal_page_images",
         routes: &["/v1/internal/page-images/{org}/{doc}/{page}/{hash}"],
         treatment: Treatment::Inert {
@@ -477,6 +569,7 @@ pub const ROWS: &[Row] = &[
         id: "internal_queues",
         routes: &[
             "/v1/internal/queues/{queue_name}/enqueue",
+            "/v1/internal/queues/{queue_name}/enqueue_batch",
             "/v1/internal/queues/{queue_name}/pop",
             "/v1/internal/queues/{queue_name}/ack",
         ],
