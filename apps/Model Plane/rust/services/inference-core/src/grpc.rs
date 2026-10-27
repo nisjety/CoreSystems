@@ -1825,6 +1825,11 @@ fn provider_error_to_status(error: provider::ProviderError) -> Status {
         // added is the machine-readable type, so a caller no longer has to
         // re-derive it from provider prose.
         provider::ProviderError::TooLong { detail } => too_long_status(&detail),
+        // The provider refused the request itself. Sending it again cannot change the answer,
+        // so the code says so: `invalid_argument`, not the `unavailable` that asks the caller to
+        // come back later. No kind trailer: the kind vocabulary is pinned by the committed status
+        // contract, which this change does not regenerate.
+        provider::ProviderError::RequestRejected { detail } => Status::invalid_argument(detail),
         provider::ProviderError::AllExhausted { attempts } => {
             Status::unavailable(format!("all providers exhausted after {attempts} attempts"))
         }
@@ -2311,6 +2316,21 @@ mod tests {
         assert_eq!(status.message(), "subscription_context_too_long");
         assert_eq!(trailer(&status, PROVIDER_ERROR_KIND_TRAILER), Some("too_long"));
         assert_eq!(trailer(&status, RETRY_AFTER_MS_TRAILER), None);
+    }
+
+    /// A refusal of the request reaches the caller as an invalid argument carrying the
+    /// provider's own text, with no retry timing and no kind trailer. The code is what says the
+    /// same request must not be sent again.
+    #[test]
+    fn a_provider_rejection_is_invalid_argument_with_no_retry_timing() {
+        let detail = "400 Bad Request: tools.15.custom.name: String should match pattern";
+        let status = provider_error_to_status(provider::ProviderError::RequestRejected {
+            detail: detail.to_owned(),
+        });
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert_eq!(status.message(), detail);
+        assert_eq!(trailer(&status, RETRY_AFTER_MS_TRAILER), None);
+        assert_eq!(trailer(&status, PROVIDER_ERROR_KIND_TRAILER), None);
     }
 
     /// A started turn the broker failed without a typed reason reaches the
@@ -2957,6 +2977,7 @@ mod tests {
             E::Unavailable(_) => "ProviderError::Unavailable",
             E::SubscriptionFailed(_) => "ProviderError::SubscriptionFailed",
             E::TooLong { .. } => "ProviderError::TooLong",
+            E::RequestRejected { .. } => "ProviderError::RequestRejected",
             E::AllExhausted { .. } => "ProviderError::AllExhausted",
             E::UnsupportedModel(_) => "ProviderError::UnsupportedModel",
             E::ResidencyViolation(_) => "ProviderError::ResidencyViolation",

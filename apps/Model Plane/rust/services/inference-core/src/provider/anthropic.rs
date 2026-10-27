@@ -9,6 +9,7 @@
 //!   and an `api-version` query param both 401 — do not add them). This is the
 //!   fix for the direct API returning 400 "credit balance too low".
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use futures_util::StreamExt;
@@ -677,6 +678,142 @@ fn tool_choice_wire(model: &str, choice: &str) -> serde_json::Value {
     }
 }
 
+/// The longest tool name the Messages API accepts.
+const TOOL_NAME_MAX_LEN: usize = 128;
+
+/// The tool a forced `tool_choice` names: any choice that is not one of the keywords the
+/// gateway sends. An empty choice is `auto`.
+fn named_tool_choice(choice: &str) -> Option<&str> {
+    match choice {
+        "" | "auto" | "none" | "required" => None,
+        name => Some(name),
+    }
+}
+
+/// Whether the Messages API takes `name` as a tool name unchanged: 1 to 128 ASCII letters,
+/// digits, `_` or `-` (its `^[a-zA-Z0-9_-]{1,128}$`).
+fn is_wire_tool_name(name: &str) -> bool {
+    (1..=TOOL_NAME_MAX_LEN).contains(&name.len())
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+/// The spelling each tool name of a request goes out under.
+///
+/// The Messages API refuses a tool name outside `^[a-zA-Z0-9_-]{1,128}$`, and one such
+/// name is a 400 for the whole request. The gateway names its tools with dots
+/// (`web.search`, `plan.propose`), so those go out under a spelling the API takes, and the
+/// calls the model makes under it are named back to the caller. A name the API already
+/// takes goes out unchanged, so a request whose names are all accepted is the body it
+/// always was.
+///
+/// Built from the request alone, so the body and the decoding of its response always agree
+/// on the same spellings.
+#[derive(Debug, Default)]
+struct ToolWireNames {
+    /// Each name the request carries, as the caller spells it, to its wire spelling.
+    to_wire: HashMap<String, String>,
+    /// The wire spelling of each renamed name, back to the caller's spelling.
+    to_original: HashMap<String, String>,
+}
+
+impl ToolWireNames {
+    fn for_request(req: &InferRequest) -> Self {
+        // Each distinct name once, in request order: the tools, then a forced choice.
+        let mut seen: HashSet<&str> = HashSet::new();
+        let originals: Vec<&str> = req
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .chain(named_tool_choice(&req.tool_choice))
+            .filter(|name| seen.insert(*name))
+            .collect();
+        // Names the API takes keep their spelling and are claimed before any rewritten name is
+        // chosen, so a rewrite never lands on a spelling a caller already uses.
+        let mut taken: HashSet<String> = originals
+            .iter()
+            .copied()
+            .filter(|name| is_wire_tool_name(name))
+            .map(str::to_owned)
+            .collect();
+        let mut names = Self::default();
+        for original in originals {
+            if is_wire_tool_name(original) {
+                names.to_wire.insert(original.to_owned(), original.to_owned());
+            } else {
+                let wire = unique_wire_name(original, &mut taken);
+                names.to_wire.insert(original.to_owned(), wire.clone());
+                names.to_original.insert(wire, original.to_owned());
+            }
+        }
+        names
+    }
+
+    /// The spelling `original` goes out under. A name the request did not carry is sent as
+    /// it is given.
+    fn wire(&self, original: &str) -> String {
+        self.to_wire
+            .get(original)
+            .cloned()
+            .unwrap_or_else(|| original.to_owned())
+    }
+
+    /// The caller's spelling of a wire name this request renamed, if it renamed one.
+    fn original(&self, wire: &str) -> Option<&str> {
+        self.to_original.get(wire).map(String::as_str)
+    }
+
+    /// Whether the request carried `name` as it is spelled.
+    fn carries(&self, name: &str) -> bool {
+        self.to_wire.contains_key(name)
+    }
+}
+
+/// A spelling of `original` that the API takes and no other name in `taken` uses, which it
+/// then claims.
+fn unique_wire_name(original: &str, taken: &mut HashSet<String>) -> String {
+    // Every character the API refuses becomes `_`, so the spelling still reads as the
+    // caller's name. The result is ASCII, so cutting it at a byte offset is safe.
+    let base: String = original
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let base = if base.is_empty() {
+        "tool".to_owned()
+    } else {
+        base
+    };
+    let mut candidate = base[..base.len().min(TOOL_NAME_MAX_LEN)].to_owned();
+    let mut suffix = 2_u32;
+    while taken.contains(&candidate) {
+        let tail = format!("_{suffix}");
+        let stem = base.len().min(TOOL_NAME_MAX_LEN - tail.len());
+        candidate = format!("{}{tail}", &base[..stem]);
+        suffix += 1;
+    }
+    taken.insert(candidate.clone());
+    candidate
+}
+
+/// Name each tool call the model made as the caller spelled the tool. A name the request did
+/// not carry passes through unchanged, and is logged by name only.
+fn restore_tool_names(names: &ToolWireNames, calls: &mut [super::ToolCall]) {
+    for call in calls {
+        if let Some(original) = names.original(&call.name) {
+            call.name = original.to_owned();
+        } else if !names.carries(&call.name) {
+            debug!(tool = %call.name, "tool call names a tool this request did not offer");
+        }
+    }
+}
+
 /// The retired Claude ids and the current model that answers for each. Matched
 /// exactly, ignoring case and surrounding whitespace: a date-stamped or unknown id
 /// is not guessed at, since a guess would send a thread to a model its owner did
@@ -1101,13 +1238,15 @@ fn build_request_body_with_flags(
     // chat-parity §2 function-calling: translate tool definitions to the
     // Anthropic `tools`/`tool_choice` shape. Empty → omitted.
     if !req.tools.is_empty() {
+        // The spellings the API accepts, and the forced choice under the same spellings.
+        let names = ToolWireNames::for_request(req);
         let tools: Vec<serde_json::Value> = req
             .tools
             .iter()
             .map(|t| {
                 let schema = super::tool_parameters(&t.name, &t.parameters_json);
                 serde_json::json!({
-                    "name": t.name,
+                    "name": names.wire(&t.name),
                     "description": t.description,
                     "input_schema": schema,
                 })
@@ -1119,7 +1258,11 @@ fn build_request_body_with_flags(
         } else {
             req.tool_choice.as_str()
         };
-        body["tool_choice"] = tool_choice_wire(&req.model, tc);
+        let mut choice = tool_choice_wire(&req.model, tc);
+        if let Some(name) = choice["name"].as_str().map(str::to_owned) {
+            choice["name"] = serde_json::Value::String(names.wire(&name));
+        }
+        body["tool_choice"] = choice;
     }
 
     // Native token-based compaction complements gateway message-count/tool
@@ -1267,6 +1410,28 @@ fn parse_response(request_id: &str, json: &serde_json::Value) -> InferResponse {
     }
 }
 
+/// The typed error for a non-success Messages response.
+///
+/// Overflow keeps its own type, which sends the chain on to a provider with a larger window.
+/// A refusal of the request itself is typed `RequestRejected`, so the chain does not send the
+/// same request to this provider again.
+fn classify_failure(status: reqwest::StatusCode, body: &str) -> ProviderError {
+    match crate::provider::overflow::classify_http_failure(status, body) {
+        ProviderError::Http(detail) if refuses_request(status) => {
+            ProviderError::RequestRejected { detail }
+        }
+        typed => typed,
+    }
+}
+
+/// Whether `status` is the API refusing the request: a client error that a second send would
+/// get again. A 429 is read as a rate limit before this is reached. Timeouts (408), conflicts
+/// (409) and auth failures (401, 403) can clear without any change to the request, and every
+/// 5xx is a server fault, so all of those keep the generic error and its retries.
+fn refuses_request(status: reqwest::StatusCode) -> bool {
+    status.is_client_error() && !matches!(status.as_u16(), 401 | 403 | 408 | 409 | 429)
+}
+
 #[allow(clippy::too_many_lines)]
 #[async_trait::async_trait]
 impl ProviderRouter for AnthropicProvider {
@@ -1400,9 +1565,7 @@ impl ProviderRouter for AnthropicProvider {
                 .text()
                 .await
                 .unwrap_or_else(|_| "no body".to_owned());
-            return Err(crate::provider::overflow::classify_http_failure(
-                status, &text,
-            ));
+            return Err(classify_failure(status, &text));
         }
 
         let json: serde_json::Value = response
@@ -1422,7 +1585,9 @@ impl ProviderRouter for AnthropicProvider {
             "infer completed"
         );
         log_applied_context_edits(&req.model, self.provider_name(), &json);
-        Ok(parse_response(&req.request_id, &json))
+        let mut response = parse_response(&req.request_id, &json);
+        restore_tool_names(&ToolWireNames::for_request(req), &mut response.tool_calls);
+        Ok(response)
     }
 
     async fn infer_stream(
@@ -1469,9 +1634,7 @@ impl ProviderRouter for AnthropicProvider {
                 .text()
                 .await
                 .unwrap_or_else(|_| "no body".to_owned());
-            return Err(crate::provider::overflow::classify_http_failure(
-                status, &text,
-            ));
+            return Err(classify_failure(status, &text));
         }
 
         let request_id = req.request_id.clone();
@@ -1799,6 +1962,312 @@ mod tool_tests {
             })
         );
         assert_eq!(blocks[1], serde_json::json!({"type": "text", "text": "what is this"}));
+    }
+}
+
+#[cfg(test)]
+mod tool_name_wire_tests {
+    //! The tool names on the Messages wire. The gateway's dotted names are a 400 there (see
+    //! `ToolWireNames`). The calls run against a local mock of the API, so the body sent and
+    //! the names read back are the ones a real call would carry.
+    use super::{
+        build_request_body_with_flags, classify_failure, is_wire_tool_name, AnthropicProvider,
+        ProviderRouter, ToolWireNames,
+    };
+    use crate::provider::{ChatMessage, InferRequest, ProviderError, ToolDefinition};
+    use std::collections::HashSet;
+    use wiremock::{
+        matchers::{method, path},
+        Mock, MockServer, ResponseTemplate,
+    };
+
+    const SCHEMA: &str = r#"{"type":"object","properties":{"city":{"type":"string"}}}"#;
+
+    /// The tools the gateway sends in one request: dotted names the API refuses, beside valid
+    /// names that a rewritten dotted name would collide with.
+    const GATEWAY_TOOLS: [&str; 6] = [
+        "plan.propose",
+        "web.search",
+        "web_search",
+        "subagent.research_fan_out",
+        "web.read",
+        "web_read",
+    ];
+
+    /// What `GATEWAY_TOOLS` goes out as. A rewrite that would collide with a valid name takes
+    /// the next free suffix, and the valid name keeps its spelling.
+    const GATEWAY_WIRE_NAMES: [&str; 6] = [
+        "plan_propose",
+        "web_search_2",
+        "web_search",
+        "subagent_research_fan_out",
+        "web_read_2",
+        "web_read",
+    ];
+
+    fn tool(name: &str) -> ToolDefinition {
+        ToolDefinition {
+            name: name.to_owned(),
+            description: format!("the {name} tool"),
+            parameters_json: SCHEMA.to_owned(),
+        }
+    }
+
+    fn gateway_request() -> InferRequest {
+        InferRequest {
+            model: "claude-sonnet-4-6".to_owned(),
+            max_tokens: 1024,
+            tools: GATEWAY_TOOLS.into_iter().map(tool).collect(),
+            tool_choice: "web.read".to_owned(),
+            ..InferRequest::default()
+        }
+    }
+
+    fn names_in(body: &serde_json::Value) -> Vec<String> {
+        body["tools"]
+            .as_array()
+            .expect("a tools array")
+            .iter()
+            .map(|entry| entry["name"].as_str().expect("a tool name").to_owned())
+            .collect()
+    }
+
+    /// Every name the API would refuse goes out under one it accepts, and no two tools share
+    /// a wire name. A forced choice goes out under the wire name of the tool it names, and each
+    /// wire name decodes back to exactly what the caller spelled.
+    #[test]
+    fn dotted_tool_names_go_out_as_names_the_api_accepts_and_decode_back() {
+        let req = gateway_request();
+        let body = build_request_body_with_flags(&req, false, false);
+        let sent = names_in(&body);
+
+        assert_eq!(sent, GATEWAY_WIRE_NAMES);
+        for name in &sent {
+            assert!(is_wire_tool_name(name), "the API refuses {name}");
+        }
+        let distinct: HashSet<&String> = sent.iter().collect();
+        assert_eq!(distinct.len(), sent.len(), "two tools share a wire name");
+        assert_eq!(
+            body["tool_choice"],
+            serde_json::json!({"type": "tool", "name": "web_read_2"})
+        );
+
+        let names = ToolWireNames::for_request(&req);
+        let decoded: Vec<&str> = sent
+            .iter()
+            .map(|wire| names.original(wire).unwrap_or(wire.as_str()))
+            .collect();
+        assert_eq!(decoded, GATEWAY_TOOLS);
+    }
+
+    /// A request whose names the API already takes is the body the adapter has always built
+    /// for it: the same tools in order, and an automatic choice.
+    #[test]
+    fn a_request_with_accepted_names_sends_the_same_body_as_before() {
+        let req = InferRequest {
+            model: "claude-sonnet-4-6".to_owned(),
+            max_tokens: 256,
+            messages: vec![ChatMessage {
+                compaction_summary: String::new(),
+                role: "user".to_owned(),
+                content: "Hei".to_owned(),
+                name: String::new(),
+            }],
+            tools: vec![tool("get_weather"), tool("web_search")],
+            tool_choice: "auto".to_owned(),
+            ..InferRequest::default()
+        };
+        let body = build_request_body_with_flags(&req, false, false);
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "model": "claude-sonnet-4-6",
+                "max_tokens": 256,
+                "messages": [{"role": "user", "content": "Hei"}],
+                "tools": [
+                    {
+                        "name": "get_weather",
+                        "description": "the get_weather tool",
+                        "input_schema": crate::provider::tool_parameters("get_weather", SCHEMA),
+                    },
+                    {
+                        "name": "web_search",
+                        "description": "the web_search tool",
+                        "input_schema": crate::provider::tool_parameters("web_search", SCHEMA),
+                    },
+                ],
+                "tool_choice": {"type": "auto"},
+            })
+        );
+    }
+
+    /// A tool call the model makes under a wire name comes back under the caller's spelling,
+    /// and a name the request never carried passes through unchanged.
+    #[tokio::test]
+    async fn a_unary_tool_call_is_named_back_to_the_caller() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/anthropic/v1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "model": "claude-sonnet-4-6",
+                "stop_reason": "tool_use",
+                "content": [
+                    {"type": "tool_use", "id": "tu_1", "name": "plan_propose", "input": {}},
+                    {"type": "tool_use", "id": "tu_2", "name": "web_search", "input": {}},
+                    {"type": "tool_use", "id": "tu_3", "name": "made_up", "input": {}},
+                ],
+                "usage": {"input_tokens": 10, "output_tokens": 2},
+            })))
+            .mount(&server)
+            .await;
+        let provider = AnthropicProvider::new_azure("key", server.uri(), vec![])
+            .expect("azure-flavored provider for the mock endpoint");
+        let req = InferRequest {
+            model: "claude-sonnet-4-6".to_owned(),
+            max_tokens: 256,
+            tools: vec![tool("plan.propose"), tool("web_search")],
+            ..InferRequest::default()
+        };
+
+        let response = provider.infer(&req).await.expect("the mock answers");
+        let called: Vec<&str> = response
+            .tool_calls
+            .iter()
+            .map(|call| call.name.as_str())
+            .collect();
+        assert_eq!(called, ["plan.propose", "web_search", "made_up"]);
+
+        let received = server.received_requests().await.expect("requests are recorded");
+        let sent: serde_json::Value =
+            serde_json::from_slice(&received[0].body).expect("the request body is JSON");
+        assert_eq!(names_in(&sent), ["plan_propose", "web_search"]);
+    }
+
+    /// The streamed request carries the same wire names as the unary one.
+    #[tokio::test]
+    async fn a_streamed_request_sends_the_same_wire_names() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/anthropic/v1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                concat!(
+                    "event: message_start\n",
+                    "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",",
+                    "\"model\":\"claude-sonnet-4-6\",\"usage\":{\"input_tokens\":10,\"output_tokens\":1}}}\n\n",
+                    "event: message_stop\n",
+                    "data: {\"type\":\"message_stop\"}\n\n"
+                ),
+                "text/event-stream",
+            ))
+            .mount(&server)
+            .await;
+        let provider = AnthropicProvider::new_azure("key", server.uri(), vec![])
+            .expect("azure-flavored provider for the mock endpoint");
+
+        let mut stream = provider
+            .infer_stream(&gateway_request())
+            .await
+            .expect("the stream starts");
+        assert!(stream.recv().await.expect("the final chunk").done);
+
+        let received = server.received_requests().await.expect("requests are recorded");
+        let sent: serde_json::Value =
+            serde_json::from_slice(&received[0].body).expect("the request body is JSON");
+        assert_eq!(names_in(&sent), GATEWAY_WIRE_NAMES);
+    }
+
+    /// A 400 that is not an overflow is the API refusing the request. Both routes type it as a
+    /// rejection, so the chain does not send the same request to this provider again.
+    #[tokio::test]
+    async fn a_refused_request_is_a_rejection_on_both_routes() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/anthropic/v1/messages"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "tools.0.custom.name: String should match pattern",
+                },
+            })))
+            .mount(&server)
+            .await;
+        let provider = AnthropicProvider::new_azure("key", server.uri(), vec![])
+            .expect("azure-flavored provider for the mock endpoint");
+        let req = gateway_request();
+
+        let unary = provider
+            .infer(&req)
+            .await
+            .expect_err("the API refuses the request");
+        assert!(
+            matches!(&unary, ProviderError::RequestRejected { detail }
+                if detail.contains("tools.0.custom.name")),
+            "{unary:?}"
+        );
+        let streamed = provider
+            .infer_stream(&req)
+            .await
+            .err()
+            .expect("the API refuses the stream too");
+        assert!(
+            matches!(streamed, ProviderError::RequestRejected { .. }),
+            "{streamed:?}"
+        );
+    }
+
+    /// An overflow is still an overflow: the 400 that says so keeps the typed error the chain
+    /// walks on to a larger window with.
+    #[tokio::test]
+    async fn an_overflow_400_keeps_its_typed_overflow() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/anthropic/v1/messages"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "prompt is too long: 210000 tokens > 200000 maximum",
+                },
+            })))
+            .mount(&server)
+            .await;
+        let provider = AnthropicProvider::new_azure("key", server.uri(), vec![])
+            .expect("azure-flavored provider for the mock endpoint");
+
+        let err = provider
+            .infer(&gateway_request())
+            .await
+            .expect_err("the API refuses the prompt");
+        assert!(matches!(err, ProviderError::TooLong { .. }), "{err:?}");
+    }
+
+    /// Only a refusal of the request is typed as one. Auth failures, timeouts, conflicts, rate
+    /// limits and server errors keep the generic error, which the chain retries.
+    #[test]
+    fn only_a_refusal_of_the_request_is_typed_as_a_rejection() {
+        let body = r#"{"type":"error","error":{"type":"invalid_request_error","message":"no"}}"#;
+        for code in [400, 404, 413, 422] {
+            let status = reqwest::StatusCode::from_u16(code).expect("a valid status");
+            assert!(
+                matches!(
+                    classify_failure(status, body),
+                    ProviderError::RequestRejected { .. }
+                ),
+                "{code} refuses the request"
+            );
+        }
+        for code in [401, 403, 408, 409, 429, 500, 502, 503, 529] {
+            let status = reqwest::StatusCode::from_u16(code).expect("a valid status");
+            assert!(
+                matches!(classify_failure(status, body), ProviderError::Http(_)),
+                "{code} keeps its retries"
+            );
+        }
+        assert!(matches!(
+            classify_failure(reqwest::StatusCode::BAD_REQUEST, "prompt is too long"),
+            ProviderError::TooLong { .. }
+        ));
     }
 }
 

@@ -1128,6 +1128,18 @@ pub enum ProviderError {
     #[error("prompt too long for the provider: {detail}")]
     TooLong { detail: String },
 
+    /// The provider refused this request as malformed: a client error that a second send
+    /// would get again. The chain does not retry the same request on that provider; it walks
+    /// on to the next provider or model, as it does past [`ProviderError::TooLong`].
+    /// Throttling, timeouts, conflicts and auth failures can clear without a change to the
+    /// request, so they are not this.
+    ///
+    /// Kept apart from [`ProviderError::InvalidResponse`], which also carries a 200 body that
+    /// does not parse, a failure a retry can clear. `detail` is the provider's original
+    /// `"<status>: <body>"` text.
+    #[error("request rejected by the provider: {detail}")]
+    RequestRejected { detail: String },
+
     #[error("all providers exhausted after {attempts} total attempts")]
     AllExhausted { attempts: u32 },
 

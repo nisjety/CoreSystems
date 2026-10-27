@@ -343,6 +343,12 @@ struct ThrottleState {
     /// walk still CONTINUES past a TooLong on purpose: a later provider with a
     /// larger window is the recovery path, and only exhaustion reports it.
     too_long_detail: Option<String>,
+    /// The first `RequestRejected` detail any provider returned during the walk.
+    ///
+    /// A provider that refused the request is not retried, but the walk still asks the next
+    /// provider or model, which may serve the same request. When nothing else was learned,
+    /// exhaustion names the refusal, since the same request would be refused again.
+    rejected_detail: Option<String>,
     /// The first final subscription outcome of the walk: a
     /// [`ProviderError::SubscriptionRefused`], or a
     /// [`ProviderError::SubscriptionFailed`] turn.
@@ -392,6 +398,12 @@ impl ThrottleState {
         }
     }
 
+    fn record_rejected(&mut self, detail: &str) {
+        if self.rejected_detail.is_none() {
+            self.rejected_detail = Some(detail.to_owned());
+        }
+    }
+
     fn throttled(&self) -> bool {
         self.soonest_retry_ms.is_some()
     }
@@ -421,16 +433,20 @@ impl ThrottleState {
         // shortly" is still the true story. TooLong next: it is deterministic —
         // the same prompt overflows the same providers every time — so once no
         // retry can help, the caller needs the typed overflow to trigger
-        // compaction, not a generic exhaustion. AllExhausted only when the walk
-        // learned nothing more specific.
-        match (&self.soonest_retry_ms, &self.too_long_detail) {
-            (Some(retry_after_ms), _) => ProviderError::RateLimited {
+        // compaction, not a generic exhaustion. RequestRejected after that: a provider refused
+        // the request itself, and a retry would hear the same refusal. AllExhausted only when
+        // the walk learned nothing more specific.
+        match (&self.soonest_retry_ms, &self.too_long_detail, &self.rejected_detail) {
+            (Some(retry_after_ms), _, _) => ProviderError::RateLimited {
                 retry_after_ms: *retry_after_ms,
             },
-            (None, Some(detail)) => ProviderError::TooLong {
+            (None, Some(detail), _) => ProviderError::TooLong {
                 detail: detail.clone(),
             },
-            (None, None) => ProviderError::AllExhausted { attempts },
+            (None, None, Some(detail)) => ProviderError::RequestRejected {
+                detail: detail.clone(),
+            },
+            (None, None, None) => ProviderError::AllExhausted { attempts },
         }
     }
 }
@@ -1662,6 +1678,15 @@ impl FallbackChain {
                         throttle.record_too_long(&detail);
                         break; // Deterministic for this provider — retrying cannot help.
                     }
+                    Err(ProviderError::RequestRejected { detail }) => {
+                        warn!(
+                            provider = %name,
+                            attempt = attempt,
+                            "provider rejected the request as malformed; walking on"
+                        );
+                        throttle.record_rejected(&detail);
+                        break; // Deterministic for this provider — the same request is refused again.
+                    }
                     Err(ProviderError::SubscriptionRefused {
                         reason,
                         retry_after_ms,
@@ -2029,6 +2054,15 @@ impl FallbackChain {
                         throttle.record_too_long(&detail);
                         break; // Deterministic for this provider — retrying cannot help.
                     }
+                    Err(ProviderError::RequestRejected { detail }) => {
+                        warn!(
+                            provider = %name,
+                            attempt = attempt,
+                            "provider rejected the request as malformed; walking on"
+                        );
+                        throttle.record_rejected(&detail);
+                        break; // Deterministic for this provider — the same request is refused again.
+                    }
                     Err(ProviderError::SubscriptionRefused {
                         reason,
                         retry_after_ms,
@@ -2176,6 +2210,15 @@ impl FallbackChain {
                         );
                         throttle.record_too_long(&detail);
                         break; // Deterministic for this provider — retrying cannot help.
+                    }
+                    Err(ProviderError::RequestRejected { detail }) => {
+                        warn!(
+                            provider = %name,
+                            attempt = attempt,
+                            "provider rejected the request as malformed; walking on"
+                        );
+                        throttle.record_rejected(&detail);
+                        break; // Deterministic for this provider — the same request is refused again.
                     }
                     Err(e) => {
                         warn!(
@@ -4084,6 +4127,221 @@ mod resolution_tests {
             ProviderError::RateLimited { retry_after_ms } => assert_eq!(retry_after_ms, 4_000),
             other => panic!("throttling must survive as RateLimited, got {other:?}"),
         }
+    }
+
+    /// Refuses every call as a malformed request, counting the calls. This is the shape
+    /// the Anthropic adapter gives a 400 that is not an overflow.
+    struct MalformedRequestProvider {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl MalformedRequestProvider {
+        fn refusal(&self) -> ProviderError {
+            ProviderError::RequestRejected {
+                detail: "400 Bad Request: tools.0.custom.name: String should match pattern"
+                    .to_owned(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ProviderRouter for MalformedRequestProvider {
+        fn capabilities(&self) -> crate::provider::ProviderCapabilities {
+            crate::provider::ProviderCapabilities::default()
+        }
+
+        async fn infer(&self, _req: &InferRequest) -> Result<InferResponse, ProviderError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(self.refusal())
+        }
+
+        async fn infer_stream(
+            &self,
+            _req: &InferRequest,
+        ) -> Result<mpsc::Receiver<InferChunk>, ProviderError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(self.refusal())
+        }
+
+        async fn create_embedding(
+            &self,
+            _req: &EmbedRequest,
+        ) -> Result<EmbedResponse, ProviderError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(self.refusal())
+        }
+    }
+
+    /// Fails every call with a server error, counting the calls.
+    struct ServerErrorProvider {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ProviderRouter for ServerErrorProvider {
+        fn capabilities(&self) -> crate::provider::ProviderCapabilities {
+            crate::provider::ProviderCapabilities::default()
+        }
+
+        async fn infer(&self, _req: &InferRequest) -> Result<InferResponse, ProviderError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(ProviderError::Http("500 Internal Server Error: upstream".to_owned()))
+        }
+
+        async fn infer_stream(
+            &self,
+            _req: &InferRequest,
+        ) -> Result<mpsc::Receiver<InferChunk>, ProviderError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(ProviderError::Http("500 Internal Server Error: upstream".to_owned()))
+        }
+    }
+
+    /// A request its provider refuses as malformed is sent to that provider once on each
+    /// route, not once per retry, because the same request is refused again. The chain
+    /// then walks on to the next provider, which serves it.
+    #[tokio::test]
+    async fn a_malformed_request_is_sent_once_per_provider_and_the_chain_walks_on() {
+        use std::sync::atomic::Ordering;
+        let refused = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = Arc::new(Mutex::new(None));
+        let chain = FallbackChain::new_with_providers(
+            vec![
+                (
+                    "azure-openai".into(),
+                    Arc::new(MalformedRequestProvider { calls: refused.clone() }) as BoxedProvider,
+                ),
+                (
+                    "openai".into(),
+                    Arc::new(RecordingProvider { seen_model: seen.clone(), ..Default::default() })
+                        as BoxedProvider,
+                ),
+            ],
+            3,
+        );
+        let request = InferRequest {
+            request_id: "malformed".into(),
+            model: "gpt-4o-mini".into(),
+            ..Default::default()
+        };
+
+        let response = chain.infer(&request).await.expect("the second provider serves it");
+        assert_eq!(response.provider_used, "openai");
+        assert_eq!(refused.load(Ordering::SeqCst), 1, "one unary attempt, not three");
+
+        chain.infer_stream(&request).await.expect("the second provider streams it");
+        assert_eq!(refused.load(Ordering::SeqCst), 2, "one stream attempt, not three");
+        assert!(seen.lock().unwrap().is_some());
+    }
+
+    /// A walk that only ever saw a refusal reports the refusal, not generic exhaustion,
+    /// and still makes one attempt.
+    #[tokio::test]
+    async fn a_walk_that_only_saw_a_refusal_reports_the_refusal() {
+        use std::sync::atomic::Ordering;
+        let refused = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let chain = FallbackChain::new_with_providers(
+            vec![(
+                "azure-openai".into(),
+                Arc::new(MalformedRequestProvider { calls: refused.clone() }) as BoxedProvider,
+            )],
+            3,
+        );
+        let request = InferRequest {
+            request_id: "refused-only".into(),
+            model: "gpt-4o-mini".into(),
+            ..Default::default()
+        };
+
+        match chain.infer(&request).await {
+            Err(ProviderError::RequestRejected { detail }) => {
+                assert!(detail.contains("tools.0.custom.name"), "{detail}");
+            }
+            other => panic!("expected the refusal back, got {other:?}"),
+        }
+        assert_eq!(refused.load(Ordering::SeqCst), 1);
+    }
+
+    /// The embedding walk types a refusal the same way: one attempt, then the chain walks on.
+    #[tokio::test]
+    async fn a_refused_embedding_input_is_sent_once_per_provider() {
+        use std::sync::atomic::Ordering;
+        let refused = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let chain = FallbackChain::new_with_providers(
+            vec![(
+                "azure-openai".to_owned(),
+                Arc::new(MalformedRequestProvider { calls: refused.clone() }) as BoxedProvider,
+            )],
+            3,
+        );
+        let request = EmbedRequest {
+            request_id: "embed-refused".to_owned(),
+            provider_hint: "azure-openai".to_owned(),
+            text: "hello".to_owned(),
+            model: "text-embedding-3-large".to_owned(),
+            region: "swedencentral".to_owned(),
+            ..Default::default()
+        };
+
+        assert!(matches!(
+            chain.create_embedding(&request).await,
+            Err(ProviderError::RequestRejected { .. })
+        ));
+        assert_eq!(refused.load(Ordering::SeqCst), 1);
+    }
+
+    /// A failure a retry can clear keeps its retries: a 5xx is three attempts on the same
+    /// provider before the chain gives up on it.
+    #[tokio::test]
+    async fn a_server_error_is_still_retried_on_the_same_provider() {
+        use std::sync::atomic::Ordering;
+        let failing = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let chain = FallbackChain::new_with_providers(
+            vec![(
+                "azure-openai".into(),
+                Arc::new(ServerErrorProvider { calls: failing.clone() }) as BoxedProvider,
+            )],
+            3,
+        );
+        let request = InferRequest {
+            request_id: "server-error".into(),
+            model: "gpt-4o-mini".into(),
+            ..Default::default()
+        };
+
+        assert!(matches!(
+            chain.infer(&request).await,
+            Err(ProviderError::AllExhausted { attempts: 3 })
+        ));
+        assert_eq!(failing.load(Ordering::SeqCst), 3);
+    }
+
+    /// A refusal is reported only when nothing more specific happened. Throttling and an
+    /// overflow outrank it, and the first refusal is the one named.
+    #[test]
+    fn a_refusal_is_reported_only_when_nothing_more_specific_happened() {
+        let mut throttle = ThrottleState::default();
+        throttle.record_rejected("400: tools.0.custom.name");
+        assert!(!throttle.throttled(), "a refusal is never waited out");
+        assert!(matches!(
+            throttle.exhausted_error(2),
+            ProviderError::RequestRejected { detail } if detail == "400: tools.0.custom.name"
+        ));
+        throttle.record_too_long("413: too long");
+        assert!(matches!(throttle.exhausted_error(2), ProviderError::TooLong { .. }));
+        throttle.record(2_000);
+        assert!(matches!(
+            throttle.exhausted_error(2),
+            ProviderError::RateLimited { retry_after_ms: 2_000 }
+        ));
+
+        let mut first = ThrottleState::default();
+        first.record_rejected("first");
+        first.record_rejected("second");
+        assert!(matches!(
+            first.exhausted_error(1),
+            ProviderError::RequestRejected { detail } if detail == "first"
+        ));
     }
 
     #[test]
