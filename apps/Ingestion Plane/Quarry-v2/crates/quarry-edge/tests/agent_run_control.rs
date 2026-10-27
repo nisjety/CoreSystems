@@ -692,11 +692,14 @@ async fn a_socket_action_labelled_agent_during_a_takeover_is_refused() {
     let refused = socket
         .next_matching(|message| message["type"] == "error")
         .await;
-    // The socket's error carries the error's Display, which begins with its code.
+    // The socket's error frame carries the REST code and details (O4), not the error's
+    // Display (`UserTookOver: ...`).
+    assert_eq!(refused["code"], "USER_TOOK_OVER", "{refused}");
+    assert_eq!(refused["details"]["control_mode"], "human_takeover", "{refused}");
     assert!(
         refused["message"]
             .as_str()
-            .is_some_and(|text| text.starts_with("UserTookOver:")),
+            .is_some_and(|text| !text.contains("UserTookOver")),
         "{refused}"
     );
 
@@ -1097,12 +1100,7 @@ async fn a_socket_action_takes_the_hint_under_either_spelling() {
             .next_matching(|message| message["type"] == "error" || message["type"] == "observation")
             .await;
         assert_eq!(refused["type"], "error", "{key}: {refused}");
-        assert!(
-            refused["message"]
-                .as_str()
-                .is_some_and(|text| text.starts_with("UserTookOver:")),
-            "{key}: {refused}"
-        );
+        assert_eq!(refused["code"], "USER_TOOK_OVER", "{key}: {refused}");
     }
 }
 

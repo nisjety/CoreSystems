@@ -109,10 +109,7 @@ pub(super) async fn browser_ws_loop(
                         }
                     }
                     Err(err) => {
-                        let _ = send_ws_json(&mut socket, serde_json::json!({
-                            "type": "error",
-                            "message": err.to_string()
-                        })).await;
+                        let _ = send_ws_json(&mut socket, ws_error_frame(err)).await;
                         break;
                     }
                 }
@@ -164,18 +161,19 @@ pub(super) async fn browser_ws_loop(
                                         }
                                     }
                                     Err(err) => {
-                                        let _ = send_ws_json(&mut socket, serde_json::json!({
-                                            "type": "error",
-                                            "message": err.to_string()
-                                        })).await;
+                                        let _ = send_ws_json(&mut socket, ws_error_frame(err)).await;
                                     }
                                 }
                             }
                             Err(err) => {
-                                let _ = send_ws_json(&mut socket, serde_json::json!({
-                                    "type": "error",
-                                    "message": format!("invalid websocket message: {err}")
-                                })).await;
+                                let _ = send_ws_json(
+                                    &mut socket,
+                                    ws_error_frame(QuarryError::new(
+                                        ErrorCode::BadRequest,
+                                        format!("invalid websocket message: {err}"),
+                                    )),
+                                )
+                                .await;
                             }
                         }
                     }
@@ -198,9 +196,56 @@ pub(super) async fn browser_ws_loop(
     }
 }
 
+/// The socket's error frame (O4, D1-022). It carries what the REST error body carries: the
+/// code in its wire spelling (`USER_TOOK_OVER`, `FORBIDDEN`, ...), the message, the
+/// retry hint and the details, so a client reads one vocabulary on both transports. The
+/// frame used to send the error's `Display` (`UserTookOver: ...`), a Rust identifier and
+/// the text unmasked; the message and the details now leave as REST sends them, masked
+/// by `QuarryError::redacted`.
+pub(super) fn ws_error_frame(err: QuarryError) -> serde_json::Value {
+    let err = err.redacted();
+    let mut frame = serde_json::json!({
+        "type": "error",
+        "code": err.code.wire_name(),
+        "message": err.message,
+        "retryable": err.retryable,
+    });
+    if let Some(details) = err.details {
+        frame["details"] = details;
+    }
+    frame
+}
+
 pub(super) async fn send_ws_json(
     socket: &mut WebSocket,
     value: serde_json::Value,
 ) -> Result<(), axum::Error> {
     socket.send(Message::Text(value.to_string())).await
+}
+
+#[cfg(test)]
+mod ws_error_frame_tests {
+    use super::*;
+
+    #[test]
+    fn the_frame_carries_the_rest_code_the_message_and_the_details() {
+        let frame = ws_error_frame(
+            QuarryError::new(ErrorCode::UserTookOver, "the person has taken control")
+                .with_details(serde_json::json!({ "control_mode": "human_takeover", "control_epoch": 1 })),
+        );
+        assert_eq!(frame["type"], "error");
+        assert_eq!(frame["code"], "USER_TOOK_OVER");
+        assert_eq!(frame["message"], "the person has taken control");
+        assert_eq!(frame["retryable"], false);
+        assert_eq!(frame["details"]["control_epoch"], 1);
+        // The Rust identifier of the code is not on the wire.
+        assert!(!frame.to_string().contains("UserTookOver"), "{frame}");
+    }
+
+    #[test]
+    fn a_frame_without_details_has_no_details_key() {
+        let frame = ws_error_frame(QuarryError::new(ErrorCode::BadRequest, "invalid websocket message"));
+        assert_eq!(frame["code"], "BAD_REQUEST");
+        assert!(frame.get("details").is_none(), "{frame}");
+    }
 }
