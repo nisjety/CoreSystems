@@ -703,6 +703,24 @@ mod tests {
     }
 
     #[test]
+    fn the_claude_5_5_models_are_adaptive_with_all_five_levels() {
+        for model in ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"] {
+            let row = support(Family::Anthropic, model);
+            assert_eq!(row.wire, Wire::AnthropicAdaptive, "{model}");
+            assert_eq!(
+                row.levels.to_vec(),
+                vec![Level::Low, Level::Medium, Level::High, Level::XHigh, Level::Max],
+                "{model}"
+            );
+            // Below the weakest declared level the weakest is applied, never a jump up.
+            let minimal = resolve(Some(Level::Minimal), row).expect("a level was asked");
+            assert_eq!(minimal.applied, Level::Low, "{model}");
+        }
+        assert_eq!(claude_version("claude-opus-5-5"), Some((5, 5)));
+        assert_eq!(claude_version("claude-haiku-5-5"), Some((5, 5)));
+    }
+
+    #[test]
     fn every_codex_model_is_the_broker_ladder() {
         let support = support(Family::Codex, "anything-the-operator-enables");
         assert_eq!(support.wire, Wire::CodexEffort);

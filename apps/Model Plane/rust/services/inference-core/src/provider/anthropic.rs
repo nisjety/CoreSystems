@@ -26,13 +26,22 @@ use super::{InferChunk, InferRequest, InferResponse, ModelInfo, ProviderError, P
 mod checkpoint_tests;
 
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
+// Stays on 2023-06-01. This adapter never sends temperature, top_p or top_k, which
+// API version 2026-10-21 refuses on every model, so the newer version would remove
+// nothing from what is sent here. Moving the header is a separate upgrade.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
+
+/// The Claude 5.5 models: the ids the catalogue offers, and the ids the wire rules
+/// below are written against. Exact strings, never a date-stamped form.
+const CLAUDE_OPUS_5_5: &str = "claude-opus-5-5";
+const CLAUDE_SONNET_5_5: &str = "claude-sonnet-5-5";
+const CLAUDE_HAIKU_5_5: &str = "claude-haiku-5-5";
 
 /// Default Claude model used when a request leaves the model unspecified
 /// ("Verevon Auto"). The fallback chain substitutes this when Anthropic is the
 /// provider serving an unpinned request, so chat works against an
 /// Anthropic-only deployment with no client- or operator-chosen model.
-pub(crate) const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-20250514";
+pub(crate) const DEFAULT_ANTHROPIC_MODEL: &str = CLAUDE_SONNET_5_5;
 
 /// Default Claude deployment for the Azure Foundry flavor when a request leaves
 /// the model unspecified. Names the cheapest chat-capable Claude deployment so
@@ -208,9 +217,16 @@ fn ephemeral_cache_control() -> serde_json::Value {
 /// or future deployment names fall back to the Sonnet-class 1024.
 fn min_cacheable_tokens(model: &str) -> usize {
     let model = model.to_ascii_lowercase();
-    if model.contains("haiku") {
-        // Haiku-class: the economy tier carries the highest floor, so the same
-        // prompt that caches on Sonnet may be too small to cache here.
+    // Each generation publishes its own floor, and the floors are not monotonic:
+    // 512 on Opus 5 and later, Sonnet 5.5 and Haiku 5.5; 1024 on Sonnet 5; 4096 on
+    // Opus 4.5 / 4.6 and Haiku 4.5. Rows are checked in order, so a narrower name
+    // precedes the family it sits inside.
+    if model.contains("haiku-5") {
+        512
+    } else if model.contains("haiku-4") {
+        4_096
+    } else if model.contains("haiku") {
+        // Haiku 3.5, and any Haiku name this table does not know.
         2_048
     } else if model.contains("opus-4-5")
         || model.contains("opus-4.5")
@@ -223,9 +239,15 @@ fn min_cacheable_tokens(model: &str) -> usize {
         || model.contains("mythos-preview")
     {
         2_048
+    } else if model.contains("opus-5")
+        || model.contains("sonnet-5-5")
+        || model.contains("fable-5")
+        || model.contains("mythos-5")
+    {
+        512
     } else {
-        // Sonnet-class (and Opus 4.8 / Opus 5, whose real floors are lower —
-        // treating them as 1024 is the conservative direction).
+        // Sonnet-class (Sonnet 4.x, Sonnet 5, Opus 4.8). Unknown and future names
+        // land here too: the conservative direction for a generation not in the table.
         1_024
     }
 }
@@ -563,6 +585,8 @@ fn resolve_thinking_budget(model: &str, requested: i32, max_tokens: i32) -> Opti
 /// class (`effort::support`). Only the literal `true` enables it: the default
 /// stays off until the live probe shows what Foundry accepts for the newest
 /// models, so a typo can never switch the wire shape.
+/// The Claude 5.5 models take the ladder wire whatever this says: they reject the
+/// budget form, so for them the switch has no meaning (see [`is_claude_5_5`]).
 const ADAPTIVE_THINKING_ENV: &str = "INFERENCE_CORE_ANTHROPIC_ADAPTIVE_THINKING";
 
 fn adaptive_thinking_enabled() -> bool {
@@ -577,19 +601,22 @@ fn adaptive_thinking_flag_enabled(raw: Option<&str>) -> bool {
 
 /// The requested level resolved against this model's wire class. The gateway
 /// still speaks token budgets today, so a request with no explicit level falls
-/// back to the ladder level its budget maps onto.
+/// back to the ladder level its budget maps onto; a Claude 5.5 request with neither
+/// runs at that model's documented default (see [`claude_5_5_default_effort`]).
 fn resolve_ladder_effort(req: &InferRequest) -> Option<effort::Resolved> {
     let requested = req
         .reasoning_effort
-        .or_else(|| effort::from_legacy_budget(req.thinking_budget_tokens));
+        .or_else(|| effort::from_legacy_budget(req.thinking_budget_tokens))
+        .or_else(|| claude_5_5_default_effort(&req.model));
     let support = effort::ModelAliases::from_env().support(Family::Anthropic, &req.model);
     effort::resolve(requested, support)
 }
 
 /// The levels the catalogue lists for a model. Empty while the ladder wire is
-/// off: a level the adapter would not render must not be offered.
+/// off, unless the model takes only the ladder wire (the 5.5 models): a level the
+/// adapter would not render must not be offered.
 fn advertised_effort_levels(model: &str, ladder: bool) -> Vec<effort::Level> {
-    if !ladder {
+    if !ladder && !is_claude_5_5(model) {
         return Vec::new();
     }
     effort::ModelAliases::from_env()
@@ -598,11 +625,94 @@ fn advertised_effort_levels(model: &str, ladder: bool) -> Vec<effort::Level> {
         .to_vec()
 }
 
+/// The model a request names, with a Foundry deployment alias resolved to the base
+/// model it stands for (see [`effort::ModelAliases`]).
+fn base_model(model: &str) -> String {
+    effort::ModelAliases::from_env().base_model(model)
+}
+
+/// The Claude 5.5 models. They take only the adaptive thinking wire: the legacy
+/// `thinking: {type: enabled, budget_tokens}` form is rejected at every effort
+/// level, so the switch that chooses the wire for other models has no say here.
+fn is_claude_5_5(model: &str) -> bool {
+    matches!(
+        base_model(model).as_str(),
+        CLAUDE_OPUS_5_5 | CLAUDE_SONNET_5_5 | CLAUDE_HAIKU_5_5
+    )
+}
+
+/// The effort a Claude 5.5 request runs at when the caller names no level: the
+/// model's documented default (`medium` on Opus 5.5 and Haiku 5.5, `high` on Sonnet
+/// 5.5). It is sent explicitly, as the reference advises for every 5.5 model, so a
+/// later change to the API default cannot move these calls without a code change.
+/// The org's effort ceiling in `fallback.rs` bounds this same level.
+pub(crate) fn claude_5_5_default_effort(model: &str) -> Option<effort::Level> {
+    match base_model(model).as_str() {
+        CLAUDE_OPUS_5_5 | CLAUDE_HAIKU_5_5 => Some(effort::Level::Medium),
+        CLAUDE_SONNET_5_5 => Some(effort::Level::High),
+        _ => None,
+    }
+}
+
+/// Whether `model` accepts a forced `tool_choice` (`any`, or a named tool). The 5.5
+/// Opus and Sonnet models answer either with a 400; Haiku 5.5 and the older models
+/// the adapter serves take both.
+fn accepts_forced_tool_choice(model: &str) -> bool {
+    !matches!(base_model(model).as_str(), CLAUDE_OPUS_5_5 | CLAUDE_SONNET_5_5)
+}
+
+/// The `tool_choice` for the gateway's `choice` (`auto`, `none`, `required`, or a
+/// tool name). Where the model refuses a forced choice it goes out as `auto`: the
+/// prompt has to steer the call, and the caller checks that one was made.
+fn tool_choice_wire(model: &str, choice: &str) -> serde_json::Value {
+    match choice {
+        "auto" => serde_json::json!({ "type": "auto" }),
+        "none" => serde_json::json!({ "type": "none" }),
+        _ if !accepts_forced_tool_choice(model) => {
+            debug!(model, "forced tool_choice is not accepted by this model; sending auto");
+            serde_json::json!({ "type": "auto" })
+        }
+        "required" => serde_json::json!({ "type": "any" }),
+        name => serde_json::json!({ "type": "tool", "name": name }),
+    }
+}
+
+/// The retired Claude ids and the current model that answers for each. Matched
+/// exactly, ignoring case and surrounding whitespace: a date-stamped or unknown id
+/// is not guessed at, since a guess would send a thread to a model its owner did
+/// not pick.
+fn successor_of_retired_model(model: &str) -> Option<&'static str> {
+    match model.trim().to_ascii_lowercase().as_str() {
+        "claude-opus-4-20250514" => Some(CLAUDE_OPUS_5_5),
+        "claude-sonnet-4-20250514" => Some(CLAUDE_SONNET_5_5),
+        "claude-3-5-haiku-20241022" => Some(CLAUDE_HAIKU_5_5),
+        _ => None,
+    }
+}
+
+/// The request as the current model serves it, when it names a retired id. `None`
+/// means "send it as given", which is every request but those few, so the common
+/// path copies nothing. The log carries the two ids and never the content.
+pub(crate) fn with_current_model(req: &InferRequest) -> Option<InferRequest> {
+    let successor = successor_of_retired_model(&req.model)?;
+    debug!(
+        from = %req.model,
+        to = successor,
+        "retired Claude model id answered by its successor"
+    );
+    let mut mapped = req.clone();
+    mapped.model = successor.to_owned();
+    Some(mapped)
+}
+
 /// Write `thinking` (and, for the adaptive class, `output_config`) into the
 /// request body, and raise `max_tokens` by the level's allowance: thinking is
 /// spent from `max_tokens` on every class, so without the raise a deeper level
 /// would only shrink the answer.
 fn apply_thinking(body: &mut serde_json::Value, req: &InferRequest, ladder: bool) {
+    // The 5.5 models take only the adaptive wire, so they take the ladder whatever
+    // the switch says.
+    let ladder = ladder || is_claude_5_5(&req.model);
     if !ladder {
         if let Some(budget) =
             resolve_thinking_budget(&req.model, req.thinking_budget_tokens, req.max_tokens)
@@ -890,6 +1000,10 @@ fn build_request_body_with_flags(
     native_enabled: bool,
     tiered_enabled: bool,
 ) -> serde_json::Value {
+    // A retired id is sent as its successor, so every rule below sees the model
+    // that answers the call.
+    let current = with_current_model(req);
+    let req = current.as_ref().unwrap_or(req);
     // The Anthropic Messages API takes the system prompt as a TOP-LEVEL `system`
     // parameter, not as a message with role "system" — sending it inline 400s:
     // "messages.0: use the top-level 'system' parameter for the initial system
@@ -935,6 +1049,10 @@ fn build_request_body_with_flags(
         "max_tokens": req.max_tokens,
     });
     apply_thinking(&mut body, req, adaptive_thinking_enabled());
+    // No sampling parameter is sent to any model. On API version 2026-10-21 all three
+    // are refused everywhere; on 2023-06-01 the 5.5 models refuse or narrow them
+    // (Haiku 5.5 takes only temperature 1 and top_p 0.99), so leaving them out is the
+    // one choice that is safe on either version.
     // `temperature` is deliberately omitted. Anthropic constrains it to [0, 1]
     // (vs OpenAI's [0, 2]) and the newest Claude models reject it outright
     // ("`temperature` is deprecated for this model" — e.g. claude-opus-4-8), so
@@ -988,12 +1106,7 @@ fn build_request_body_with_flags(
         } else {
             req.tool_choice.as_str()
         };
-        body["tool_choice"] = match tc {
-            "auto" => serde_json::json!({ "type": "auto" }),
-            "none" => serde_json::json!({ "type": "none" }),
-            "required" => serde_json::json!({ "type": "any" }),
-            name => serde_json::json!({ "type": "tool", "name": name }),
-        };
+        body["tool_choice"] = tool_choice_wire(&req.model, tc);
     }
 
     // Native token-based compaction complements gateway message-count/tool
@@ -1145,7 +1258,8 @@ fn parse_response(request_id: &str, json: &serde_json::Value) -> InferResponse {
 #[async_trait::async_trait]
 impl ProviderRouter for AnthropicProvider {
     fn capabilities(&self) -> super::ProviderCapabilities {
-        // Claude: tools, vision, extended thinking, streaming; 200k context.
+        // Claude: tools, vision, extended thinking, streaming; 1M context on the direct
+        // 5.5 catalogue and 200k on Foundry.
         // No first-party embeddings API.
         super::ProviderCapabilities {
             provider_id: self.provider_name().to_owned(),
@@ -1167,8 +1281,16 @@ impl ProviderRouter for AnthropicProvider {
             supports_embeddings: false,
             supports_zdr: self.zdr.as_deref().is_some_and(ZdrAttestation::in_force_now),
             modalities: vec!["chat".to_owned(), "vision".to_owned()],
-            max_context_tokens: 200_000,
-            max_output_tokens: 8_192,
+            max_context_tokens: match &self.flavor {
+                AnthropicFlavor::Direct => 1_000_000,
+                AnthropicFlavor::Azure { .. } => 200_000,
+            },
+            // 128K is the streamed ceiling. A unary call above about 16K output can outlast
+            // the provider read timeout (120 s by default), so long outputs should stream.
+            max_output_tokens: match &self.flavor {
+                AnthropicFlavor::Direct => 128_000,
+                AnthropicFlavor::Azure { .. } => 8_192,
+            },
         }
     }
 
@@ -1181,8 +1303,8 @@ impl ProviderRouter for AnthropicProvider {
         let ids: Vec<String> = match &self.flavor {
             AnthropicFlavor::Direct => [
                 DEFAULT_ANTHROPIC_MODEL,
-                "claude-opus-4-20250514",
-                "claude-3-5-haiku-20241022",
+                CLAUDE_OPUS_5_5,
+                CLAUDE_HAIKU_5_5,
             ]
             .iter()
             .map(|s| (*s).to_owned())
@@ -1224,6 +1346,9 @@ impl ProviderRouter for AnthropicProvider {
     }
 
     async fn infer(&self, req: &InferRequest) -> Result<InferResponse, ProviderError> {
+        // The header and the logs below name the model that answers, as the body does.
+        let current = with_current_model(req);
+        let req = current.as_ref().unwrap_or(req);
         let body = build_request_body(req);
 
         let mut request = self
@@ -1291,6 +1416,8 @@ impl ProviderRouter for AnthropicProvider {
         &self,
         req: &InferRequest,
     ) -> Result<mpsc::Receiver<InferChunk>, ProviderError> {
+        let current = with_current_model(req);
+        let req = current.as_ref().unwrap_or(req);
         let mut body = build_request_body(req);
         body["stream"] = serde_json::Value::Bool(true);
 
@@ -1551,7 +1678,7 @@ mod tool_tests {
     fn build_request_body_includes_tools_in_anthropic_shape() {
         let req = InferRequest {
             thinking_budget_tokens: 0,
-            model: "claude-sonnet-4-20250514".to_owned(),
+            model: "claude-sonnet-4-6".to_owned(),
             max_tokens: 1024,
             tools: vec![ToolDefinition {
                 name: "get_weather".to_owned(),
@@ -1864,14 +1991,14 @@ mod prompt_cache_tests {
 
     #[test]
     fn haiku_class_floor_is_higher_so_a_mid_sized_prompt_caches_only_on_sonnet() {
-        assert_eq!(min_cacheable_tokens("claude-haiku-4-5"), 2_048);
+        assert_eq!(min_cacheable_tokens("claude-haiku-4-5"), 4_096);
         assert_eq!(min_cacheable_tokens("claude-sonnet-4-6"), 1_024);
         assert_eq!(min_cacheable_tokens("claude-opus-4-5"), 4_096);
         // Unknown/future deployment names fall back to the Sonnet-class floor.
         assert_eq!(min_cacheable_tokens("some-future-claude"), 1_024);
 
         // ~6 KiB of prompt ≈ 1500 estimated tokens: over Sonnet's 1024 floor,
-        // under Haiku's 2048. The same prompt must cache on one and not the other.
+        // under Haiku 4.5's 4096. The same prompt must cache on one and not the other.
         let mid_sized = |model: &str| InferRequest {
             thinking_budget_tokens: 0,
             model: model.to_owned(),
@@ -2999,5 +3126,270 @@ mod ladder_wire_tests {
             vec![Level::Low, Level::Medium, Level::High]
         );
         assert!(advertised_effort_levels("claude-3-5-haiku-20241022", true).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod claude_5_5_wire_tests {
+    use super::{
+        advertised_effort_levels, apply_thinking, build_request_body_with_flags,
+        min_cacheable_tokens, successor_of_retired_model, with_current_model, AnthropicProvider,
+        ProviderRouter, CLAUDE_HAIKU_5_5, CLAUDE_OPUS_5_5, CLAUDE_SONNET_5_5,
+        DEFAULT_ANTHROPIC_MODEL,
+    };
+    use crate::provider::effort::Level;
+    use crate::provider::{ChatMessage, InferRequest, ToolDefinition};
+
+    const CLAUDE_5_5_MODELS: [&str; 3] = [CLAUDE_OPUS_5_5, CLAUDE_SONNET_5_5, CLAUDE_HAIKU_5_5];
+
+    fn request(model: &str, effort: Option<Level>, legacy_budget: i32) -> InferRequest {
+        InferRequest {
+            model: model.to_owned(),
+            max_tokens: 4096,
+            reasoning_effort: effort,
+            thinking_budget_tokens: legacy_budget,
+            messages: vec![ChatMessage {
+                compaction_summary: String::new(),
+                role: "user".to_owned(),
+                content: "Hei".to_owned(),
+                name: String::new(),
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// The body as the adapter sends it, with the process switches at their defaults.
+    fn body(req: &InferRequest) -> serde_json::Value {
+        build_request_body_with_flags(req, false, false)
+    }
+
+    fn with_tool(model: &str, choice: &str) -> InferRequest {
+        InferRequest {
+            tools: vec![ToolDefinition {
+                name: "get_weather".to_owned(),
+                description: "Get the weather".to_owned(),
+                parameters_json: r#"{"type":"object","properties":{}}"#.to_owned(),
+            }],
+            tool_choice: choice.to_owned(),
+            ..request(model, None, 0)
+        }
+    }
+
+    #[test]
+    fn each_5_5_model_is_sent_under_its_exact_id() {
+        for model in CLAUDE_5_5_MODELS {
+            assert_eq!(body(&request(model, None, 0))["model"], model);
+        }
+        assert_eq!(DEFAULT_ANTHROPIC_MODEL, CLAUDE_SONNET_5_5);
+    }
+
+    #[test]
+    fn a_5_5_request_with_an_effort_is_adaptive_at_that_effort() {
+        for model in CLAUDE_5_5_MODELS {
+            let sent = body(&request(model, Some(Level::High), 0));
+            assert_eq!(sent["thinking"]["type"], "adaptive", "{model}");
+            assert_eq!(sent["thinking"]["display"], "summarized", "{model}");
+            assert!(sent["thinking"].get("budget_tokens").is_none(), "{model}");
+            assert_eq!(sent["output_config"]["effort"], "high", "{model}");
+            // The high level's allowance is added to the caller's ceiling.
+            assert_eq!(sent["max_tokens"], 4096 + 4096, "{model}");
+        }
+    }
+
+    #[test]
+    fn a_5_5_legacy_budget_is_read_as_a_level_never_sent_as_a_budget() {
+        for model in CLAUDE_5_5_MODELS {
+            let sent = body(&request(model, None, 2048));
+            assert_eq!(sent["thinking"]["type"], "adaptive", "{model}");
+            assert!(sent["thinking"].get("budget_tokens").is_none(), "{model}");
+            assert_eq!(sent["output_config"]["effort"], "medium", "{model}");
+        }
+    }
+
+    #[test]
+    fn a_5_5_request_naming_no_level_runs_at_the_documented_default() {
+        for (model, default, allowance) in [
+            (CLAUDE_OPUS_5_5, "medium", 2048),
+            (CLAUDE_SONNET_5_5, "high", 4096),
+            (CLAUDE_HAIKU_5_5, "medium", 2048),
+        ] {
+            let sent = body(&request(model, None, 0));
+            assert_eq!(sent["thinking"]["type"], "adaptive", "{model}");
+            assert!(sent["thinking"].get("budget_tokens").is_none(), "{model}");
+            assert_eq!(sent["output_config"]["effort"], default, "{model}");
+            // The default level's allowance is added to the caller's ceiling, as for a named level.
+            assert_eq!(sent["max_tokens"], 4096 + allowance, "{model}");
+        }
+    }
+
+    #[test]
+    fn every_level_reaches_a_5_5_model_and_minimal_rounds_up_to_low() {
+        for model in CLAUDE_5_5_MODELS {
+            for (asked, sent_as) in [
+                (Level::Minimal, "low"),
+                (Level::Low, "low"),
+                (Level::Medium, "medium"),
+                (Level::High, "high"),
+                (Level::XHigh, "xhigh"),
+                (Level::Max, "max"),
+            ] {
+                let sent = body(&request(model, Some(asked), 0));
+                assert_eq!(sent["output_config"]["effort"], sent_as, "{model} asked {asked:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_adaptive_switch_has_no_say_over_the_5_5_wire() {
+        for model in CLAUDE_5_5_MODELS {
+            for req in [
+                request(model, Some(Level::Low), 2048),
+                request(model, None, 2048),
+                request(model, None, 0),
+            ] {
+                let mut off = serde_json::json!({});
+                let mut on = serde_json::json!({});
+                apply_thinking(&mut off, &req, false);
+                apply_thinking(&mut on, &req, true);
+                assert_eq!(off, on, "{model}");
+            }
+        }
+    }
+
+    #[test]
+    fn no_sampling_parameter_is_sent_to_a_5_5_model() {
+        for model in CLAUDE_5_5_MODELS {
+            let mut req = request(model, Some(Level::Low), 0);
+            req.temperature = 0.7;
+            let sent = body(&req);
+            for key in ["temperature", "top_p", "top_k"] {
+                assert!(sent.get(key).is_none(), "{model} sent {key}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_forced_tool_choice_is_sent_as_auto_on_opus_and_sonnet_5_5() {
+        for model in [CLAUDE_OPUS_5_5, CLAUDE_SONNET_5_5] {
+            for forced in ["required", "get_weather"] {
+                assert_eq!(
+                    body(&with_tool(model, forced))["tool_choice"]["type"],
+                    "auto",
+                    "{model} {forced}"
+                );
+            }
+            assert_eq!(body(&with_tool(model, "auto"))["tool_choice"]["type"], "auto", "{model}");
+            assert_eq!(body(&with_tool(model, "none"))["tool_choice"]["type"], "none", "{model}");
+        }
+        // Haiku 5.5 takes a forced choice, and so does an older model.
+        assert_eq!(body(&with_tool(CLAUDE_HAIKU_5_5, "required"))["tool_choice"]["type"], "any");
+        assert_eq!(
+            body(&with_tool("claude-sonnet-4-6", "get_weather"))["tool_choice"]["name"],
+            "get_weather"
+        );
+    }
+
+    #[test]
+    fn a_retired_model_id_is_sent_as_its_successor_on_the_adaptive_wire() {
+        for (retired, successor) in [
+            ("claude-opus-4-20250514", CLAUDE_OPUS_5_5),
+            ("claude-sonnet-4-20250514", CLAUDE_SONNET_5_5),
+            ("claude-3-5-haiku-20241022", CLAUDE_HAIKU_5_5),
+        ] {
+            let sent = body(&request(retired, Some(Level::Medium), 0));
+            assert_eq!(sent["model"], successor, "{retired}");
+            assert_eq!(sent["thinking"]["type"], "adaptive", "{retired}");
+            assert_eq!(sent["output_config"]["effort"], "medium", "{retired}");
+        }
+    }
+
+    #[test]
+    fn the_successor_map_is_exact_and_leaves_every_other_id_alone() {
+        assert_eq!(
+            successor_of_retired_model(" Claude-Sonnet-4-20250514 "),
+            Some(CLAUDE_SONNET_5_5)
+        );
+        for model in [
+            "claude-sonnet-4-20250515",
+            "claude-sonnet-4-6",
+            "claude-opus-5-5",
+            "claude-3-5-haiku-20241023",
+            "",
+        ] {
+            assert_eq!(successor_of_retired_model(model), None, "{model:?}");
+        }
+        assert!(with_current_model(&request("claude-sonnet-4-6", None, 0)).is_none());
+        let retired = request("claude-opus-4-20250514", None, 0);
+        let mapped = with_current_model(&retired).expect("a retired id is mapped");
+        assert_eq!(mapped.model, CLAUDE_OPUS_5_5);
+        assert_eq!(mapped.messages.len(), 1);
+        assert_eq!(mapped.messages[0].content, "Hei");
+    }
+
+    #[test]
+    fn the_catalogue_offers_the_three_5_5_models_with_their_levels_and_limits() {
+        let provider = AnthropicProvider::new("test-key").expect("a provider with a key");
+        let models = provider.list_models();
+        let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
+        assert_eq!(ids, [CLAUDE_SONNET_5_5, CLAUDE_OPUS_5_5, CLAUDE_HAIKU_5_5]);
+        for model in &models {
+            assert_eq!(
+                model.effort_levels,
+                vec![Level::Low, Level::Medium, Level::High, Level::XHigh, Level::Max],
+                "{}",
+                model.id
+            );
+        }
+        assert!(models.iter().any(|model| model.id == CLAUDE_HAIKU_5_5 && model.cheap));
+        assert_eq!(advertised_effort_levels(CLAUDE_OPUS_5_5, false).len(), 5);
+        let caps = provider.capabilities();
+        assert_eq!(caps.max_context_tokens, 1_000_000);
+        assert_eq!(caps.max_output_tokens, 128_000);
+    }
+
+    #[test]
+    fn the_cacheable_floor_follows_each_generations_published_minimum() {
+        for model in [
+            CLAUDE_OPUS_5_5,
+            CLAUDE_SONNET_5_5,
+            CLAUDE_HAIKU_5_5,
+            "claude-opus-5",
+            "claude-fable-5-1",
+            "claude-mythos-5-1",
+        ] {
+            assert_eq!(min_cacheable_tokens(model), 512, "{model}");
+        }
+        assert_eq!(min_cacheable_tokens("claude-sonnet-5"), 1_024);
+        assert_eq!(min_cacheable_tokens("claude-haiku-4-5"), 4_096);
+        assert_eq!(min_cacheable_tokens("claude-3-5-haiku-20241022"), 2_048);
+        assert_eq!(min_cacheable_tokens("claude-opus-4-6"), 4_096);
+        assert_eq!(min_cacheable_tokens("claude-opus-4-7"), 2_048);
+    }
+
+    #[test]
+    fn a_5_5_prompt_above_the_512_floor_is_marked_for_caching() {
+        for model in CLAUDE_5_5_MODELS {
+            let req = InferRequest {
+                model: model.to_owned(),
+                max_tokens: 256,
+                messages: vec![
+                    ChatMessage {
+                        compaction_summary: String::new(),
+                        role: "system".to_owned(),
+                        content: "y".repeat(2_400),
+                        name: String::new(),
+                    },
+                    ChatMessage {
+                        compaction_summary: String::new(),
+                        role: "user".to_owned(),
+                        content: "Hei".to_owned(),
+                        name: String::new(),
+                    },
+                ],
+                ..Default::default()
+            };
+            let sent = body(&req);
+            assert_eq!(sent["system"][0]["cache_control"]["type"], "ephemeral", "{model}");
+        }
     }
 }

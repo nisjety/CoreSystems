@@ -74,7 +74,11 @@ impl PromptCache {
             hasher.update(&(scope.len() as u64).to_le_bytes());
             hasher.update(scope.as_bytes());
         }
+        // Length-prefixed like the identity scopes above: without it a model name could
+        // merge into the hint before it, and two different served models share an entry.
+        hasher.update(&(req.provider_hint.len() as u64).to_le_bytes());
         hasher.update(req.provider_hint.as_bytes());
+        hasher.update(&(req.model.len() as u64).to_le_bytes());
         hasher.update(req.model.as_bytes());
         for msg in &req.messages {
             hasher.update(msg.role.as_bytes());
@@ -204,7 +208,7 @@ mod tests {
         InferRequest {
             request_id: "req-1".to_owned(),
             provider_hint: String::new(),
-            model: "claude-sonnet-4-20250514".to_owned(),
+            model: "claude-sonnet-5-5".to_owned(),
             messages: vec![ChatMessage {
                 compaction_summary: String::new(),
                 role: "user".to_owned(),
@@ -224,7 +228,7 @@ mod tests {
             compaction_summary: String::new(),
             request_id: "req-1".to_owned(),
             content: "Hi there!".to_owned(),
-            model_used: "claude-sonnet-4-20250514".to_owned(),
+            model_used: "claude-sonnet-5-5".to_owned(),
             stop_reason: "end_turn".to_owned(),
             input_tokens: 10,
             output_tokens: 5,
@@ -504,5 +508,22 @@ mod tests {
         cache.put(&split_one, &sample_response());
 
         assert!(cache.get(&split_two).is_none());
+    }
+
+    /// The model and the hint before it are length-prefixed too, so a model name that
+    /// starts where the hint ends cannot merge with it into one key.
+    #[test]
+    fn a_model_name_cannot_merge_into_the_provider_hint_before_it() {
+        let mut split_one = sample_request();
+        split_one.provider_hint = "claude-sonnet-5".to_owned();
+        split_one.model = "-5".to_owned();
+        let mut split_two = sample_request();
+        split_two.provider_hint = "claude-sonnet-5-".to_owned();
+        split_two.model = "5".to_owned();
+
+        assert_ne!(
+            PromptCache::cache_key(&split_one),
+            PromptCache::cache_key(&split_two)
+        );
     }
 }

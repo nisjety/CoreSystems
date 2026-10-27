@@ -1122,8 +1122,10 @@ impl FallbackChain {
     /// point for a caller that reaches inference-core directly, such as the agent
     /// loop, which would otherwise run a deep loop under a role capped at `low`.
     /// It clamps down only, and only when the policy is enforced: shadow mode
-    /// serves the request as it is. Returns `None` when nothing changes, so the
-    /// common path neither clones the request nor reads the policy.
+    /// serves the request as it is. A Claude 5.5 request that names neither a
+    /// level nor a budget runs at its model's default, so that default is what the
+    /// ceiling bounds. Returns `None` when nothing changes, so the common path
+    /// neither clones the request nor reads the policy.
     ///
     /// It runs before the response cache is read, because the cache key carries
     /// the effort level: an answer made above the ceiling must not answer a
@@ -1133,9 +1135,26 @@ impl FallbackChain {
         // An empty or unknown ceiling limits nothing: org-core validates the name
         // when the policy is written, and a stray value must not lower a request.
         let ceiling = effort::Level::from_name(&access.resolved().policy.as_ref()?.max_effort)?;
-        let reasoning_effort = req
-            .reasoning_effort
-            .map(|requested| effort::clamp_to_cap(requested, Some(ceiling)));
+        // A Claude 5.5 request that names neither a level nor a budget runs at its
+        // model's default level, which the adapter sends explicitly, so the ceiling
+        // bounds that level as if it had been requested. The budget test is `<= 0`
+        // because that is when the adapter falls back to the default: a positive
+        // budget is read as a level by `from_legacy_budget`.
+        let model_default = if req.reasoning_effort.is_none() && req.thinking_budget_tokens <= 0 {
+            super::anthropic::claude_5_5_default_effort(&req.model)
+        } else {
+            None
+        };
+        let reasoning_effort = match (req.reasoning_effort, model_default) {
+            (Some(requested), _) => Some(effort::clamp_to_cap(requested, Some(ceiling))),
+            // Set only when the ceiling lowers the default: a default the ceiling
+            // leaves alone stays unset, so the request reaches the adapter as it was.
+            (None, Some(default)) => {
+                let bounded = effort::clamp_to_cap(default, Some(ceiling));
+                (bounded < default).then_some(bounded)
+            }
+            (None, None) => None,
+        };
         // A request with no level is bounded by its legacy budget instead.
         let thinking_budget_tokens = if req.reasoning_effort.is_none() {
             effort::cap_legacy_budget(req.thinking_budget_tokens, Some(ceiling))
@@ -1353,6 +1372,10 @@ impl FallbackChain {
 
     async fn infer_with_response_cache(&self, req: &InferRequest, cache_response: bool) -> Result<InferResponse, ProviderError> {
         let mut clock = CallClock::start();
+        // A retired Claude id is answered by its successor, so the entitlement check,
+        // the cache key and every rung of the ladder all name the model that serves.
+        let current = super::anthropic::with_current_model(req);
+        let req: &InferRequest = current.as_ref().unwrap_or(req);
         // A model the caller named is checked against their organisation's
         // entitlement first of all: before the intent layer spends a budget call
         // and before the cache can answer with a model they may not use.
@@ -1734,6 +1757,13 @@ impl FallbackChain {
         }
         let mut rewritten = req.clone();
         effective.clone_into(&mut rewritten.model);
+        // The effort ceiling ran on the unresolved id (an unpinned "Verevon Auto"
+        // request, or the pinned model before a ladder rung replaced it), where a
+        // Claude 5.5 default is invisible. Bound the resolved model too: the clamp
+        // only lowers and is idempotent, so an already bounded request is unchanged.
+        if let Some(ceiled) = Self::apply_effort_ceiling(&rewritten) {
+            rewritten = ceiled;
+        }
         std::borrow::Cow::Owned(rewritten)
     }
 
@@ -1781,6 +1811,9 @@ impl FallbackChain {
         req: &InferRequest,
     ) -> Result<mpsc::Receiver<InferChunk>, ProviderError> {
         let mut clock = CallClock::start();
+        // A retired Claude id is answered by its successor, as on the unary path.
+        let current = super::anthropic::with_current_model(req);
+        let req: &InferRequest = current.as_ref().unwrap_or(req);
         // Entitlement of a pinned model first, as on the unary path.
         let pinned = self.pinned_model(req)?;
         // Verevon intent layer — same resolution as the unary path.
@@ -2194,7 +2227,7 @@ mod resolution_tests {
         for m in ["", "   ", "default", "AUTO", "Verevon", "verevon-auto"] {
             assert!(is_unspecified_model(m), "{m:?} should be unspecified");
         }
-        for m in ["claude-sonnet-4-20250514", "gpt-4o-mini"] {
+        for m in ["claude-sonnet-5-5", "gpt-4o-mini"] {
             assert!(!is_unspecified_model(m), "{m:?} should be specified");
         }
     }
@@ -3315,14 +3348,67 @@ mod resolution_tests {
         let req = InferRequest {
             thinking_budget_tokens: 0,
             request_id: "r2".to_owned(),
-            model: "claude-opus-4-20250514".to_owned(),
+            model: "claude-opus-5-5".to_owned(),
             ..Default::default()
         };
         chain.infer(&req).await.unwrap();
         assert_eq!(
             seen.lock().unwrap().as_deref(),
-            Some("claude-opus-4-20250514")
+            Some("claude-opus-5-5")
         );
+    }
+
+    #[tokio::test]
+    async fn a_retired_pinned_model_is_answered_by_its_successor() {
+        let seen = Arc::new(Mutex::new(None));
+        let chain = chain_with(seen.clone());
+        let req = InferRequest {
+            thinking_budget_tokens: 0,
+            request_id: "r2-retired".to_owned(),
+            model: "claude-opus-4-20250514".to_owned(),
+            ..Default::default()
+        };
+        let response = chain.infer(&req).await.unwrap();
+        assert_eq!(seen.lock().unwrap().as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(response.model_used, "claude-opus-5-5");
+    }
+
+    #[tokio::test]
+    async fn a_retired_model_and_its_successor_share_one_response_cache_entry() {
+        let seen = Arc::new(Mutex::new(None));
+        let chain = chain_with(seen.clone());
+        let successor = InferRequest {
+            thinking_budget_tokens: 0,
+            request_id: "cache-successor".to_owned(),
+            model: "claude-sonnet-5-5".to_owned(),
+            ..Default::default()
+        };
+        chain.infer(&successor).await.unwrap();
+        // A call that reached the provider would record its model here, so the
+        // sentinel shows that the retired-id request was answered from the cache.
+        *seen.lock().unwrap() = Some("sentinel".to_owned());
+        let retired = InferRequest {
+            request_id: "cache-retired".to_owned(),
+            model: "claude-sonnet-4-20250514".to_owned(),
+            ..successor.clone()
+        };
+        let response = chain.infer(&retired).await.unwrap();
+        assert_eq!(response.request_id, "cache-successor");
+        assert_eq!(seen.lock().unwrap().as_deref(), Some("sentinel"));
+    }
+
+    #[tokio::test]
+    async fn the_streaming_path_answers_a_retired_model_with_its_successor() {
+        let seen = Arc::new(Mutex::new(None));
+        let chain = chain_with(seen.clone());
+        let req = InferRequest {
+            thinking_budget_tokens: 0,
+            request_id: "stream-retired".to_owned(),
+            model: "claude-3-5-haiku-20241022".to_owned(),
+            ..Default::default()
+        };
+        chain.infer_stream(&req).await.unwrap();
+        assert_eq!(seen.lock().unwrap().as_deref(), Some("claude-haiku-5-5"));
     }
 
     #[tokio::test]
@@ -4725,6 +4811,94 @@ mod resolution_tests {
             effort_reached_unary(&below).await,
             [(Some(effort::Level::Low), 0)]
         );
+    }
+
+    #[test]
+    fn an_unpinned_anthropic_request_is_bounded_by_the_ceiling_after_its_model_resolves() {
+        // An unpinned request names no model, so apply_effort_ceiling sees no Claude
+        // 5.5 default; request_for then rewrites it to the Anthropic default. The
+        // ceiling must bound the resolved model's default as well, or an org capped
+        // at low would run the common chat path at the model's default.
+        let chain = chain_with(Arc::new(Mutex::new(None)));
+        let unpinned = InferRequest {
+            request_id: "effort-unpinned".to_owned(),
+            model: String::new(),
+            access: Some(effort_ceiling_access(true, "low")),
+            ..Default::default()
+        };
+        let sent = chain.request_for(&unpinned, &unpinned.model, "anthropic");
+        assert_eq!(sent.model, "claude-sonnet-5-5");
+        assert_eq!(sent.reasoning_effort, Some(effort::Level::Low));
+
+        // No ceiling, or a shadow one, leaves the level to the model default.
+        let free = InferRequest { access: None, ..unpinned.clone() };
+        assert_eq!(chain.request_for(&free, &free.model, "anthropic").reasoning_effort, None);
+        let shadow = InferRequest {
+            access: Some(effort_ceiling_access(false, "low")),
+            ..unpinned.clone()
+        };
+        assert_eq!(chain.request_for(&shadow, &shadow.model, "anthropic").reasoning_effort, None);
+    }
+
+    #[test]
+    fn an_effort_ceiling_bounds_the_claude_5_5_default_of_a_request_naming_no_level() {
+        // A Claude 5.5 request with neither a level nor a budget runs at its model's
+        // default (high on Sonnet 5.5), which the adapter sends explicitly. The
+        // ceiling bounds that level too, so a thread saved on a retired id cannot run
+        // above the org's cap just because it names no effort.
+        let sonnet = InferRequest {
+            request_id: "effort-5-5-default".to_owned(),
+            model: "claude-sonnet-5-5".to_owned(),
+            access: Some(effort_ceiling_access(true, "low")),
+            ..Default::default()
+        };
+        let bounded = FallbackChain::apply_effort_ceiling(&sonnet)
+            .expect("an enforced low ceiling lowers the high default of claude-sonnet-5-5");
+        assert_eq!(bounded.reasoning_effort, Some(effort::Level::Low));
+        assert_eq!(bounded.thinking_budget_tokens, 0);
+
+        // Without an enforced ceiling the request is passed through unchanged.
+        let unceiled = InferRequest {
+            access: None,
+            ..sonnet.clone()
+        };
+        assert!(FallbackChain::apply_effort_ceiling(&unceiled).is_none());
+        let shadow = InferRequest {
+            access: Some(effort_ceiling_access(false, "low")),
+            ..sonnet.clone()
+        };
+        assert!(FallbackChain::apply_effort_ceiling(&shadow).is_none());
+
+        // A ceiling that leaves the default alone changes nothing, and so does a
+        // model with no 5.5 default.
+        let at_default = InferRequest {
+            access: Some(effort_ceiling_access(true, "high")),
+            ..sonnet.clone()
+        };
+        assert!(FallbackChain::apply_effort_ceiling(&at_default).is_none());
+        let earlier = InferRequest {
+            model: "claude-sonnet-4-6".to_owned(),
+            ..sonnet.clone()
+        };
+        assert!(FallbackChain::apply_effort_ceiling(&earlier).is_none());
+
+        // Opus 5.5 defaults to medium, and a negative budget asks for no thinking
+        // just as zero does, so the ceiling bounds the default there too.
+        let opus = InferRequest {
+            model: "claude-opus-5-5".to_owned(),
+            ..sonnet.clone()
+        };
+        let opus_bounded =
+            FallbackChain::apply_effort_ceiling(&opus).expect("medium is above a low ceiling");
+        assert_eq!(opus_bounded.reasoning_effort, Some(effort::Level::Low));
+        let negative = InferRequest {
+            thinking_budget_tokens: -1,
+            ..sonnet
+        };
+        let negative_bounded = FallbackChain::apply_effort_ceiling(&negative)
+            .expect("a negative budget leaves the default to the ceiling");
+        assert_eq!(negative_bounded.reasoning_effort, Some(effort::Level::Low));
+        assert_eq!(negative_bounded.thinking_budget_tokens, -1);
     }
 
     #[test]
