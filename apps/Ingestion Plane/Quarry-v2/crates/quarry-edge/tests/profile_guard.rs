@@ -411,7 +411,7 @@ async fn import_over_cap_is_413() {
 
     let post = |size: usize| {
         let body = json!({
-            "snapshot": { "cookies": [], "local_storage": [["k", "x".repeat(size)]] }
+            "snapshot": { "cookies": [], "local_storage": [["k", "x".repeat(size)]], "session_storage": [] }
         });
         client
             .post(format!("http://{addr}/v1/profiles"))

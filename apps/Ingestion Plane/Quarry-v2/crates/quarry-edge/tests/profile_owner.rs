@@ -16,7 +16,7 @@ use quarry_browser::session::{ProfileScope, SaveMeta, SessionSnapshot};
 use quarry_core::envelope::Envelope;
 use quarry_core::ids::kinds::ProfileKind;
 use quarry_edge::auth::Claims;
-use quarry_edge::profile_guard::{self, OwnerEnforce, ProfileOp};
+use quarry_edge::profile_guard::{self, OwnerEnforce, ProfileOp, IMPORT_SCOPE};
 use quarry_edge::profile_routes::{
     self, CreateProfileRequest, LoadProfileResponse, RestoreProbeRequest, SaveProfileRequest,
     UpdateProfileRequest,
@@ -45,7 +45,10 @@ fn claims(user: &str) -> Claims {
         service_id: None,
         nbf: None,
         aud: None,
-        scopes: Vec::new(),
+        // A save (the import route) needs the import scope (WS17.P0); the owner check
+        // under test sits behind it, so every caller here holds it. The scope itself is
+        // tested in `profile_guard.rs`.
+        scopes: vec![IMPORT_SCOPE.to_owned()],
         zdr: None,
     }
 }

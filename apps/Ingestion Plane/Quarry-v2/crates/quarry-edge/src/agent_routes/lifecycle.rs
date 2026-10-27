@@ -365,6 +365,22 @@ pub async fn start_run(
             Some("zdr_persistent_profile_forbidden"),
         ));
     }
+    // WS17.P2 (D2-045): a run that names a profile attaches it, so the owner and ACL check of
+    // `/v1/profiles*` applies here too: another user's private profile is a 404 under
+    // `enforce` (an unknown id is allowed: the run creates it). A resumed run keeps the profile
+    // its checkpoint holds, which its own owner started, and a ZDR run never reaches this far.
+    if resume_checkpoint.is_none() {
+        if let Some(requested) = body.profile_id.as_deref().and_then(|s| s.parse::<ProfileKind>().ok()) {
+            crate::profile_guard::authorize(
+                &state,
+                &claims,
+                &requested,
+                crate::profile_guard::ProfileOp::Attach,
+            )
+            .await
+            .map_err(|error| driver_err(&request_id, error))?;
+        }
+    }
     // WS7.D: the run's web policy, resolved once from the caller's principal, the ZDR posture,
     // the operator baseline and the request's `policy` ask. A refusal here consumes nothing.
     let web_decision = crate::agent_policy_gate::resolve_for_start(

@@ -22,8 +22,9 @@
 //!
 //! Logs carry the op and the reason class only: never a profile id, a name or an owner id.
 //!
-//! The attach path (`agent_routes`, the profile id block) is not wired here: the queue
-//! defers it to WS8.F. `ProfileOp::Attach` is decided like every other op, ready for it.
+//! The attach path is the start of a run that names a `profile_id` (`agent_routes::lifecycle`):
+//! it calls `authorize` with `ProfileOp::Attach` (D2-045, `tests/profile_attach.rs`). The WS8.F
+//! agent attachment (`POST /v1/agent/runs/{id}/attach`) names no profile, so it has no call.
 
 use quarry_browser::session::{ProfileScope, ProfileStore, ProfileSummary};
 use quarry_core::error::{ErrorCode, QuarryError};
@@ -88,7 +89,7 @@ pub enum ProfileOp {
     Probe,
     /// Deleting a profile.
     Delete,
-    /// Attaching a profile to a run (WS8.F wires the call site).
+    /// Attaching a profile to a run (the start of a run that names a `profile_id`).
     Attach,
 }
 
