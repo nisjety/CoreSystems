@@ -74,6 +74,7 @@ var orgAgentPolicySettings = []orgAgentSetting{
 	{key: "ext.plugins", kind: "allow_list", order: []string{"none", "approved_only", "any"}, def: "any", failClose: "none", reserved: true},
 	{key: "mcp_tool_approval", kind: "enum", order: []string{"approved_only", "trust_annotations"}, def: "trust_annotations", failClose: "approved_only"},
 	{key: "user_hooks", kind: "enum", order: []string{"denied", "allowed"}, def: "allowed", failClose: "denied", reserved: true},
+	{key: "reference_uploads", kind: "enum", order: []string{"off", "on"}, def: "off", failClose: "off", reserved: true},
 }
 
 // orgAgentRefusal is one closed refusal code and the status it answers with.

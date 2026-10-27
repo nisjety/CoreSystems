@@ -66,6 +66,14 @@
       "default": "allowed",
       "fail_closed_value": "denied",
       "status": "reserved"
+    },
+    {
+      "key": "reference_uploads",
+      "kind": "enum",
+      "strictness_order": ["off", "on"],
+      "default": "off",
+      "fail_closed_value": "off",
+      "status": "reserved"
     }
   ],
   "refusals": ["unknown_key", "invalid_value", "not_enforced", "exceeds_platform_ceiling"]

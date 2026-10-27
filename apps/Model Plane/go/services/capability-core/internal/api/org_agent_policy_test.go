@@ -168,6 +168,7 @@ func TestOrgAgentPolicyValidationRefusesBeforeTheRegistryIsTouched(t *testing.T)
 		{name: "a bool written as text", body: `{"settings":{"lockdown":"yes"}}`, status: http.StatusBadRequest, code: "invalid_value"},
 		{name: "a reserved plugins key with a non-default value", body: `{"settings":{"ext.plugins":{"mode":"none","ids":[]}}}`, status: http.StatusUnprocessableEntity, code: "not_enforced"},
 		{name: "a reserved hooks key with a non-default value", body: `{"settings":{"user_hooks":"denied"}}`, status: http.StatusUnprocessableEntity, code: "not_enforced"},
+		{name: "a reserved reference uploads key with a non-default value", body: `{"settings":{"reference_uploads":"on"}}`, status: http.StatusUnprocessableEntity, code: "not_enforced"},
 		{name: "ids under a mode that names none", body: `{"settings":{"ext.mcp_servers":{"mode":"any","ids":["srv.one"]}}}`, status: http.StatusBadRequest, code: "invalid_value"},
 		{name: "an id that is not an identifier", body: `{"settings":{"ext.mcp_servers":{"mode":"approved_only","ids":["has space"]}}}`, status: http.StatusBadRequest, code: "invalid_value"},
 		{name: "an allow-list with an extra field", body: `{"settings":{"ext.mcp_servers":{"mode":"approved_only","ids":["srv.one"],"extra":1}}}`, status: http.StatusBadRequest, code: "invalid_value"},
@@ -235,6 +236,9 @@ func TestOrgAgentPolicyReadsTheDefaultsWhenNoRowExists(t *testing.T) {
 	}
 	if !reflect.DeepEqual(view.Settings["mode_cap"], "auto") || len(view.Settings) != len(orgAgentPolicySettings) {
 		t.Fatalf("settings = %v", view.Settings)
+	}
+	if !reflect.DeepEqual(view.Settings["reference_uploads"], "off") {
+		t.Fatalf("reference_uploads = %v, want the default off", view.Settings["reference_uploads"])
 	}
 }
 

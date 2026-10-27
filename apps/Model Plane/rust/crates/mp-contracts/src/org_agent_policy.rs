@@ -142,6 +142,17 @@ pub const SETTINGS: &[SettingDef] = &[
         fail_closed_value: "denied",
         status: Status::Reserved,
     },
+    // WS08-S8 / DEC-37: the per-org opt-in for durable reference uploads. Reserved until a
+    // consumer enforces it (the WS25-S9 policy client, behind a CHAT_REFERENCE_UPLOADS_ENABLED
+    // kill switch), so any value but the default is refused as not_enforced.
+    SettingDef {
+        key: "reference_uploads",
+        kind: Kind::Enum,
+        strictness_order: &["off", "on"],
+        default: "off",
+        fail_closed_value: "off",
+        status: Status::Reserved,
+    },
 ];
 
 /// Why a document is refused. The codes are the closed vocabulary capability-core
@@ -359,6 +370,31 @@ mod tests {
             &loosest_ceiling()
         )
         .is_ok());
+    }
+
+    #[test]
+    fn org_agent_policy_reference_uploads_takes_only_off_until_it_is_enforced() {
+        let settings = defaults();
+        assert_eq!(settings["reference_uploads"], json!("off"));
+        assert_eq!(
+            validate(
+                &doc(&json!({"reference_uploads": "on"})),
+                &loosest_ceiling()
+            ),
+            Err(Refusal::NotEnforced)
+        );
+        assert!(validate(
+            &doc(&json!({"reference_uploads": "off"})),
+            &loosest_ceiling()
+        )
+        .is_ok());
+        assert_eq!(
+            validate(
+                &doc(&json!({"reference_uploads": true})),
+                &loosest_ceiling()
+            ),
+            Err(Refusal::InvalidValue)
+        );
     }
 
     #[test]
