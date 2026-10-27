@@ -210,6 +210,20 @@ jobs:
             echo "expected at least 7 run phase tests to run, got ${passed:-0}"
             exit 1
           fi
+      # WS02 S1: the Space event log's Postgres tests (contiguous seq under concurrent
+      # writers, rollback leaves no hole, NOTIFY after commit, trigger failure swallowed
+      # and counted, sweeper moves min_seq, suppress prevents rows during purge, no row
+      # for a zdr run, redacted after erase). The count fails the job if the filter
+      # stops matching them.
+      - name: Run the Space event log tests against a migrated database
+        run: |
+          set -euo pipefail
+          cargo test -p session-core --bin session-core space_event -- --ignored --test-threads=1 2>&1 | tee space-event-tests.log
+          passed=$(grep -oE "test result: ok\. [0-9]+ passed" space-event-tests.log | grep -oE "[0-9]+" | head -1)
+          if [ -z "$passed" ] || [ "$passed" -lt 8 ]; then
+            echo "expected at least 8 space event log tests to run, got ${passed:-0}"
+            exit 1
+          fi
 
   # WS12 S11 (D11): an optional clippy warning-count ratchet. It never denies a
   # warning. It is off unless the repo variable MODEL_PLANE_CLIPPY_RATCHET is the

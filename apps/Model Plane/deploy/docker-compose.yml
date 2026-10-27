@@ -853,6 +853,15 @@ services:
       # Space decision ZDR flag on the legacy owner create/append paths (WS06-S2). `observe`
       # counts and proceeds; only the exact value `enforce` refuses typed. Never an authorization input.
       SESSION_CORE_SPACE_ZDR: ${SESSION_CORE_SPACE_ZDR:-observe}
+      # Space event log (WS02-S1): the migration-0072 triggers write ids-and-kinds rows only
+      # while this is `true` (or `1`). On here for dev; docker-compose.production.yml and
+      # docker-compose.release.yml pin it to "false". Off to on bumps every Space's generation
+      # (clients resnapshot). Never an authorization input. Zero-retention runs never write rows.
+      SPACE_REALTIME_EMIT: ${SPACE_REALTIME_EMIT:-true}
+      SPACE_EVENT_LOG_RETENTION_DAYS: ${SPACE_EVENT_LOG_RETENTION_DAYS:-14}
+      # Read by the SpaceEvents stream (WS02-S3), inert until then.
+      SPACE_STREAM_DB_POOL: ${SPACE_STREAM_DB_POOL:-8}
+      SPACE_STREAM_MAX_STREAMS: ${SPACE_STREAM_MAX_STREAMS:-5000}
       SESSION_CORE_LOOP_CHECKPOINT_ENABLED: ${SESSION_CORE_LOOP_CHECKPOINT_ENABLED:-false}
       # Sweep that closes a tool reservation still open long after its run ended or
       # parked, as `unknown_outcome` (WS03 S5). Off by default: turning it on changes

@@ -79,6 +79,15 @@ async fn main() -> Result<()> {
 
     let pool = store::connect_postgres().await?;
     store::run_migrations(&pool).await?;
+    // Space event log (WS02-S1): the triggers from migration 0072 write rows only while
+    // this flag is on. Off by default; a failure to write the flag leaves the stored value
+    // as it was and never stops startup (the log is a realtime aid, not authority).
+    let space_event_emit = space::events::emit_enabled_from_env();
+    if let Err(error) = space::events::sync_flag(&pool, space_event_emit).await {
+        warn!(%error, "space event log flag could not be synced");
+    }
+    info!(space_event_emit, "space event log configured");
+    let space_wakes = space::events::SpaceWakes::new();
     // The adapter is optional only when no Letta endpoint is configured. Once
     // enabled, its dedicated Auth Core service-principal configuration is
     // mandatory so background dreaming/search never falls back to anonymous
@@ -222,6 +231,31 @@ async fn main() -> Result<()> {
         },
     ));
 
+    // Space event log: the NOTIFY listener only runs while emitting is on (it holds one pool
+    // connection); the retention sweeper always runs, because retention is owed for rows
+    // already written.
+    let space_listener_pool = pool.clone();
+    let space_listener_wakes = space_wakes.clone();
+    let space_listener_handle = tokio::spawn(async move {
+        if !space_event_emit {
+            std::future::pending::<()>().await;
+        }
+        supervise_background("session-core Space event listener", move || {
+            let pool = space_listener_pool.clone();
+            let wakes = space_listener_wakes.clone();
+            async move { space::events::run_listener(pool, wakes).await }
+        })
+        .await
+    });
+    let space_sweeper_pool = pool.clone();
+    let space_sweeper_handle = tokio::spawn(supervise_background(
+        "session-core Space event retention sweeper",
+        move || {
+            let pool = space_sweeper_pool.clone();
+            async move { space::events::run_retention_sweeper(pool).await }
+        },
+    ));
+
     let shutdown = shutdown_signal();
 
     tokio::select! {
@@ -237,6 +271,8 @@ async fn main() -> Result<()> {
         result = semantic_reconciliation_handle => result??,
         result = terminalization_handle => result??,
         result = tool_ledger_handle => result??,
+        result = space_listener_handle => result??,
+        result = space_sweeper_handle => result??,
         () = shutdown => {},
     }
 

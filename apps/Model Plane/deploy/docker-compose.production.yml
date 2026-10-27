@@ -68,6 +68,8 @@ services:
       SESSION_CORE_SERVICE_ID: ${SESSION_CORE_SERVICE_ID:?SESSION_CORE_SERVICE_ID is required}
       SESSION_CORE_SERVICE_API_KEY: ${SESSION_CORE_SERVICE_API_KEY:?SESSION_CORE_SERVICE_API_KEY is required}
       SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY: ${SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY:?SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY is required}
+      # Space event log (WS02-S1): off in production until the rollout order turns it on.
+      SPACE_REALTIME_EMIT: "false"
   inference-core:
     <<: *hardened-service
     ports: !reset []

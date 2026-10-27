@@ -8473,6 +8473,13 @@ impl SessionCore for SessionService {
                 .begin()
                 .await
                 .map_err(|error| Status::internal(error.to_string()))?;
+            // Space event log: the deferred thread-delete triggers fire at commit and
+            // would write fresh `thread.deleted` rows for a Space being erased. Suppress
+            // them for this transaction and drop the Space's log and head with it.
+            crate::space::events::purge_space(&mut tx, &req.org_id, &req.space_id)
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?;
+
             // Lock exactly the scoped owner rows before deleting their
             // descendants. This is idempotent: a retry after a committed
             // deletion observes an empty set and cannot touch an unscoped

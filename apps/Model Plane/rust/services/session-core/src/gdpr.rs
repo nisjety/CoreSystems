@@ -237,6 +237,11 @@ pub async fn purge_organization_data(
     let mut tx: Transaction<'_, Postgres> = pool.begin().await?;
     let mut summary = PurgeSummary::default();
 
+    // Space event log: switch the deferred event triggers off for this transaction FIRST.
+    // They fire at commit, and without this the thread/run deletes below would write new
+    // `thread.deleted` rows for an org that was just erased.
+    crate::space::events::suppress(&mut tx).await?;
+
     // The loop's sealed folds are erased with the org's runs, before them.
     sqlx::query(
         "DELETE FROM run_loop_checkpoints WHERE run_id IN (SELECT id FROM runs WHERE org_id = $1)",
@@ -370,6 +375,17 @@ pub async fn purge_organization_data(
     .execute(&mut *tx)
     .await?
     .rows_affected();
+
+    // Space event log (ids and kinds only): the org's rows and per-Space heads go with its
+    // events. Not counted in the summary (the erasure proof counts content tables).
+    sqlx::query("DELETE FROM space_event_log WHERE org_id = $1")
+        .bind(org_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM space_event_heads WHERE org_id = $1")
+        .bind(org_id)
+        .execute(&mut *tx)
+        .await?;
 
     // `runs` — cascades `session_tool_audit_intents` and
     // `managed_run_terminalization_outbox` (ON DELETE CASCADE).
