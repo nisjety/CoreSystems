@@ -17,7 +17,7 @@ export function BrowserNavigationError(props: {
     <div class="browser-navigation-error" role="alert" data-reason={props.failure.reason}>
       <div class="browser-navigation-error__body">
         <p class="browser-navigation-error__title">Siden kunne ikke åpnes</p>
-        <p class="browser-navigation-error__message">{props.failure.message}</p>
+        <p class="browser-navigation-error__message">{props.failure.sentence}</p>
         <p class="browser-navigation-error__url" title={props.failure.url}>
           {props.failure.url}
         </p>

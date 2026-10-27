@@ -42,9 +42,9 @@ describe('navigationFailureFromError (WS9.B)', () => {
       new ApiError('internal stack detail 10.0.0.5', 500, 'unknown_code_xyz'),
       tr,
     )
-    expect(failure?.message).not.toContain('internal stack detail')
-    expect(failure?.message).not.toContain('unknown_code_xyz')
-    expect(failure?.message.length).toBeGreaterThan(0)
+    expect(failure?.sentence).not.toContain('internal stack detail')
+    expect(failure?.sentence).not.toContain('unknown_code_xyz')
+    expect(failure?.sentence.length).toBeGreaterThan(0)
   })
 
   it('returns no retry URL when there is no failure', () => {

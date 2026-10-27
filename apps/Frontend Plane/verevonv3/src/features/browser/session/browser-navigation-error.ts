@@ -11,7 +11,7 @@ export type BrowserNavigationFailure = {
   /** A typed reason for the card. Never a raw message from the server. */
   reason: 'invalid_url' | 'blocked' | 'unreachable' | 'failed'
   /** The user-facing sentence, already chosen by the caller's `tr` (no raw error text). */
-  message: string
+  sentence: string
 }
 
 export type NavigationCopy = (noText: string, enText: string) => string
@@ -35,7 +35,7 @@ export function navigationFailureFromError(
   return {
     url: action.url,
     reason: navigationReasonOf(error),
-    message: describeBrowserError(error, tr, FALLBACK_COPY).message,
+    sentence: describeBrowserError(error, tr, FALLBACK_COPY).message,
   }
 }
 

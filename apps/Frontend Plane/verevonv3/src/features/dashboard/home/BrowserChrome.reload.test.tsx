@@ -37,7 +37,7 @@ function session(capabilities: string[]) {
 }
 
 const failure: BrowserNavigationFailure = {
-  message: 'Adressen finnes ikke.',
+  sentence: 'Adressen finnes ikke.',
   reason: 'unreachable',
   url: 'https://this-host-does-not-resolve.invalid/',
 }
