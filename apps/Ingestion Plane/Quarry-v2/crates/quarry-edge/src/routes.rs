@@ -2608,7 +2608,7 @@ mod tests {
 
         let response = call_scrape_with(
             state.clone(),
-            serde_json::json!({ "url": "https://example.com/a", "formats": ["markdown", "pdf"], "timeout_ms": 5 }),
+            serde_json::json!({ "url": "https://example.com/a", "formats": ["markdown", "docx"], "timeout_ms": 5 }),
         )
         .await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);

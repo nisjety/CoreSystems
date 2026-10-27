@@ -398,13 +398,22 @@ mod tests {
 
     #[test]
     fn bad_option_values_come_back_as_field_errors() {
+        // An unknown format name is a field error at its index. ("pdf" is a format now.)
         let errors = parse(
-            json!({ "url": "https://example.com", "formats": ["markdown", "pdf"] }),
+            json!({ "url": "https://example.com", "formats": ["markdown", "docx"] }),
             &lenient(),
         )
         .unwrap_err();
         assert_eq!(errors[0].path, "formats[1]");
         assert_eq!(errors[0].code, "unsupported_format");
+        // A bad value inside a capture option is a field error at the format's index.
+        let errors = parse(
+            json!({ "url": "https://example.com", "formats": [{ "type": "pdf", "format": "Quarto" }] }),
+            &lenient(),
+        )
+        .unwrap_err();
+        assert_eq!(errors[0].path, "formats[0]");
+        assert_eq!(errors[0].code, "invalid_type");
     }
 
     #[test]
