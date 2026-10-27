@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const spacesClient = vi.hoisted(() => ({
   getSpaceThreadTranscript: vi.fn(),
+  loadSpaceTranscript: vi.fn(),
   updateSpaceThreadPresentation: vi.fn(),
 }))
 vi.mock('@/shared/api/spaces-client', () => spacesClient)
@@ -35,6 +36,8 @@ const renderRoom = (
 
 beforeEach(() => {
   spacesClient.getSpaceThreadTranscript.mockReset()
+  spacesClient.loadSpaceTranscript.mockReset()
+  spacesClient.loadSpaceTranscript.mockResolvedValue({ state: 'ok', threadId: 't1', turns: [] })
   spacesClient.getSpaceThreadTranscript.mockResolvedValue({ turns: [] })
   spacesClient.updateSpaceThreadPresentation.mockReset()
   spacesClient.updateSpaceThreadPresentation.mockResolvedValue({ thread_id: 't1' })
@@ -186,5 +189,164 @@ describe('SpaceRoomTimeline — room hygiene (item 4b)', () => {
     expect(await screen.findByRole('alert')).toBeTruthy()
     expect(screen.getByText(/Ingenting ble endret/)).toBeTruthy()
     expect(changed).not.toHaveBeenCalled()
+  })
+})
+
+// WS01-S6: the sender's own posts, drawn from the send journal before the room's projection carries them.
+describe('SpaceRoomTimeline — pending posts (WS01-S6)', () => {
+  const entry = (overrides: Record<string, unknown> = {}) => ({
+    sendId: 'send-1',
+    kind: 'post_new',
+    spaceRef: 'room-1',
+    content: 'Hei fra meg',
+    stage: 'sending',
+    createdAt: 1,
+    ...overrides,
+  })
+
+  it('draws a pending new post in an otherwise empty room instead of the intro', async () => {
+    renderRoom([], [agent], { pendingPosts: () => [entry()] })
+    const list = await screen.findByRole('list', { name: 'Samtaler i rommet' })
+    expect(list.textContent).toContain('Hei fra meg')
+    expect(list.textContent).toContain('Sender …')
+  })
+
+  it('draws a pending new post as the last post, after the room’s own', async () => {
+    renderRoom(
+      [{ thread_id: 't1', space_id: 'room-1', title: 'Innkjøp', preview: 'Eksisterende', latest_run_status: 'completed' }],
+      [agent],
+      { pendingPosts: () => [entry()] },
+    )
+    await screen.findByText('Eksisterende')
+    const posts = [...document.querySelectorAll('.verevon-room-timeline > li')]
+    expect(posts).toHaveLength(2)
+    expect(posts[0]?.textContent).toContain('Eksisterende')
+    expect(posts[1]?.classList.contains('verevon-room-post--pending')).toBe(true)
+    expect(posts[1]?.textContent).toContain('Hei fra meg')
+  })
+
+  it.each([
+    ['queued', 'Sendes når du er på nett igjen'],
+    ['sending', 'Sender …'],
+    ['accepted', 'Sendt'],
+    ['failed', 'Ikke sendt, prøv igjen'],
+  ])('says %s in words', async (stage, text) => {
+    renderRoom([], [agent], { pendingPosts: () => [entry({ stage })] })
+    const state = await screen.findByText(text)
+    expect(state.closest('[data-stage]')?.getAttribute('data-stage')).toBe(stage)
+  })
+
+  it('gives a failed row the alert role and every other stage a status', async () => {
+    renderRoom([], [agent], { pendingPosts: () => [entry({ stage: 'failed' })] })
+    const failed = await screen.findByText('Ikke sendt, prøv igjen')
+    expect(failed.getAttribute('role')).toBe('alert')
+    cleanup()
+    renderRoom([], [agent], { pendingPosts: () => [entry({ stage: 'sending' })] })
+    expect((await screen.findByText('Sender …')).getAttribute('role')).toBe('status')
+  })
+
+  it('draws a pending reply after the thread’s own turns, and only on its thread', async () => {
+    spacesClient.loadSpaceTranscript.mockImplementation(async (_spaceRef: string, threadId: string) => ({
+      state: 'ok',
+      threadId,
+      turns: threadId === 't1'
+        ? [
+            { role: 'user', content: 'Første' },
+            { role: 'assistant', content: 'Assistentens oppsummering' },
+          ]
+        : [],
+    }))
+    renderRoom(
+      [
+        { thread_id: 't1', space_id: 'room-1', title: 'En', latest_run_status: 'completed' },
+        { thread_id: 't2', space_id: 'room-1', title: 'To', preview: 'Annen', latest_run_status: 'completed' },
+      ],
+      [agent],
+      { pendingPosts: () => [entry({ kind: 'post_reply', threadId: 't1', content: 'Mitt svar' })] },
+    )
+    const reply = await screen.findByText('Mitt svar')
+    const answer = await screen.findByText('Assistentens oppsummering')
+    // After the real turns in document order, inside the same post.
+    expect(answer.compareDocumentPosition(reply) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(reply.closest('.verevon-room-post')).toBe(answer.closest('.verevon-room-post'))
+    expect(screen.getAllByText('Mitt svar')).toHaveLength(1)
+  })
+
+  it('draws nothing extra without a journal', async () => {
+    renderRoom([{ thread_id: 't1', space_id: 'room-1', title: 'Innkjøp', preview: 'Eksisterende', latest_run_status: 'completed' }])
+    await screen.findByText('Eksisterende')
+    expect(document.querySelector('.verevon-room-post--pending')).toBeNull()
+    expect(document.querySelector('.verevon-room-turn--pending')).toBeNull()
+  })
+})
+
+// WS01-S7a: the side pane's entry point and the per-post read states.
+describe('SpaceRoomTimeline — thread pane entry and read states (WS01-S7a)', () => {
+  const post = { thread_id: 't1', space_id: 'room-1', title: 'Innkjøp', preview: 'Forhåndsvisning', latest_run_status: 'completed' }
+
+  it('offers Open thread on every post only when the pane exists, and hands over the thread', async () => {
+    const open = vi.fn()
+    renderRoom([post], [agent], { onOpenThread: open })
+    const button = await screen.findByRole('button', { name: /Åpne tråd/ })
+    button.click()
+    expect(open).toHaveBeenCalledTimes(1)
+    expect(open.mock.calls[0]?.[0]).toMatchObject({ thread_id: 't1' })
+  })
+
+  it('has no Open thread control while the pane is off', async () => {
+    renderRoom([post])
+    await screen.findByText('Forhåndsvisning')
+    expect(screen.queryByRole('button', { name: /Åpne tråd/ })).toBeNull()
+  })
+
+  it('shows the restricted notice on a 403 and keeps the preview', async () => {
+    spacesClient.loadSpaceTranscript.mockResolvedValue({ state: 'restricted' })
+    renderRoom([post])
+    expect(await screen.findByText(/Denne samtalen er ikke delt med deg/)).toBeTruthy()
+    expect(screen.getByText('Forhåndsvisning')).toBeTruthy()
+    expect(document.body.textContent ?? '').not.toMatch(/logg inn/i)
+  })
+
+  it('says a thread that is gone is no longer available', async () => {
+    spacesClient.loadSpaceTranscript.mockResolvedValue({ state: 'missing' })
+    renderRoom([post])
+    expect(await screen.findByText(/ikke lenger tilgjengelig/)).toBeTruthy()
+  })
+
+  it('falls back to the preview with a retry on any other failure, never the restricted notice', async () => {
+    spacesClient.loadSpaceTranscript.mockResolvedValueOnce({ state: 'error' })
+    renderRoom([post])
+    expect(await screen.findByText('Forhåndsvisning')).toBeTruthy()
+    const alert = await screen.findByRole('alert')
+    expect(alert.textContent).toContain('Kunne ikke hente denne samtalen')
+    expect(screen.queryByText(/ikke delt med deg/)).toBeNull()
+    spacesClient.loadSpaceTranscript.mockResolvedValueOnce({
+      state: 'ok',
+      threadId: 't1',
+      turns: [{ role: 'user', content: 'Nå virker det' }],
+    })
+    ;(screen.getByRole('button', { name: 'Prøv igjen' })).click()
+    expect(await screen.findByText('Nå virker det')).toBeTruthy()
+  })
+
+  it('makes no transcript request when shared reads are off, and says so once for the room', async () => {
+    renderRoom([post], [agent], { sharedReadAvailable: () => false })
+    expect(await screen.findByText(/Samtalene i dette rommet er ikke delt med deg/)).toBeTruthy()
+    expect(spacesClient.loadSpaceTranscript).not.toHaveBeenCalled()
+  })
+
+  it('still renders turns after the turn list extraction: author, text and agent name', async () => {
+    spacesClient.loadSpaceTranscript.mockResolvedValue({
+      state: 'ok',
+      threadId: 't1',
+      turns: [
+        { role: 'user', content: 'Hva er status?', authorSubjectId: 'user-1' },
+        { role: 'assistant', content: 'Alt er klart.', agentName: 'Lagerhjelpen' },
+      ],
+    })
+    renderRoom([post], [agent])
+    expect(await screen.findByText('Alt er klart.')).toBeTruthy()
+    expect(screen.getByText('Hva er status?')).toBeTruthy()
+    expect(screen.getAllByText('Lagerhjelpen').length).toBeGreaterThan(0)
   })
 })

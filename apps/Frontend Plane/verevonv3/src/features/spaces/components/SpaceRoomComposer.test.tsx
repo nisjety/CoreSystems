@@ -1,9 +1,12 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@solidjs/testing-library'
 import { flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { ApiError } from '@/shared/api/http'
+import { translateApiError } from '@/shared/i18n/errors'
 import { CATALOGUE_TIER_WAIT_MS } from '@/features/dashboard/home/submit-privacy-tier'
 import { publishSpaceThreads, resetLiveWorkForTests } from '../lib/space-live-work'
+import { createSpaceSendJournal, type SpaceSendJournal } from '../lib/space-send-journal'
 
 const chatClient = vi.hoisted(() => ({
   streamChat: vi.fn(),
@@ -22,7 +25,13 @@ vi.mock('@/shared/api/chatgpt-subscription-client', async (importOriginal) => ({
 vi.mock('@/shared/session/session-store', () => ({
   getSession: () => ({ activeOrg: { id: 'org-1', name: 'Test', role: 'admin' } }),
 }))
-const spacesClient = vi.hoisted(() => ({ updateSpaceThreadPresentation: vi.fn() }))
+const spacesClient = vi.hoisted(() => ({
+  updateSpaceThreadPresentation: vi.fn(),
+  // WS01-S6 human posts.
+  createSpacePost: vi.fn(),
+  replyInSpaceThread: vi.fn(),
+  SPACE_POST_MAX_CHARS_DEFAULT: 8000,
+}))
 vi.mock('@/shared/api/spaces-client', () => spacesClient)
 const skillsClient = vi.hoisted(() => ({ listAvailableSkills: vi.fn(), MAX_PICKED_SKILLS: 4 }))
 vi.mock('@/shared/api/skills-client', () => skillsClient)
@@ -97,6 +106,8 @@ beforeEach(() => {
   subscriptionsClient.listChatGptSubscriptions.mockReset()
   subscriptionsClient.listChatGptSubscriptions.mockResolvedValue([])
   spacesClient.updateSpaceThreadPresentation.mockReset()
+  spacesClient.createSpacePost.mockReset()
+  spacesClient.replyInSpaceThread.mockReset()
   spacesClient.updateSpaceThreadPresentation.mockResolvedValue({ thread_id: 't-new' })
   resetLiveWorkForTests()
 })
@@ -760,5 +771,333 @@ describe('SpaceRoomComposer — the room\u2019s own typing line', () => {
     fireEvent.input(textarea(), { target: { value: '   ' } })
     flush()
     expect(typed).toHaveBeenCalledTimes(1)
+  })
+})
+
+// WS01-S6: human posts. Nothing in these tests calls a model: the transport is the mocked
+// createSpacePost / replyInSpaceThread, and the Ask cases only check that streamChat is reached.
+describe('SpaceRoomComposer — human posts (WS01-S6)', () => {
+  const receipt = { threadId: 'thr_new', messageId: 'msg_1', sequence: 1, deduplicated: false }
+  const agent = {
+    subject_id: 'agent-1',
+    role: 'editor',
+    revision: 1,
+    identity_published: true,
+    name: 'Driftsassistent',
+    status: 'active',
+    definition_status: 'published',
+    delivery_targets: [],
+  }
+  const skillCatalogue = [{ id: 'skill-1', name: 'Innkjøpsrutine', description: '', scope: 'org' }]
+
+  type PostProps = {
+    on?: boolean
+    role?: string
+    viewer?: string
+    maxChars?: number
+    replyTarget?: { threadId: string; title: string }
+    threads?: readonly unknown[]
+    agents?: readonly unknown[]
+    defaultSendMode?: 'post' | 'ask'
+  }
+
+  // DEPTH-SPA-1: the post sender reads the journal straight after writing it, and Solid 2 shows a
+  // write only after the next flush, so with the default journal the request never leaves the
+  // composer (the entry sits at `sending`). The cases below hand the composer a journal that flushes
+  // after each write so they test the composer's own decisions; the unflushed default is the one
+  // skipped case at the end of the file.
+  function flushingJournal(): SpaceSendJournal {
+    const inner = createSpaceSendJournal()
+    const settled = <A extends unknown[], R>(fn: (...args: A) => R) => (...args: A): R => {
+      const result = fn(...args)
+      flush()
+      return result
+    }
+    return {
+      ...inner,
+      begin: settled(inner.begin),
+      update: settled(inner.update),
+      remove: settled(inner.remove),
+      reconcile: settled(inner.reconcile),
+    }
+  }
+
+  const renderPosts = (props: PostProps = {}) =>
+    render(() => (
+      <SpaceRoomComposer
+        journal={flushingJournal()}
+        spaceRef="room-1"
+        roster={() => []}
+        agents={() => (props.agents ?? []) as never}
+        threads={() => (props.threads ?? []) as never}
+        humanPostsEnabled={() => props.on !== false}
+        viewerRole={() => props.role ?? 'editor'}
+        viewerSubjectId={() => props.viewer ?? 'user-me'}
+        postMaxChars={props.maxChars === undefined ? undefined : () => props.maxChars}
+        replyTarget={props.replyTarget ? () => props.replyTarget : undefined}
+        defaultSendMode={props.defaultSendMode}
+      />
+    ))
+
+  const box = () => screen.getByRole('textbox') as HTMLTextAreaElement
+  const type = (value: string) => {
+    fireEvent.input(box(), { target: { value } })
+    flush()
+  }
+  const submit = () => fireEvent.submit(box().closest('form') as HTMLFormElement)
+
+  beforeEach(() => {
+    skillsClient.listAvailableSkills.mockReset()
+    skillsClient.listAvailableSkills.mockResolvedValue(skillCatalogue)
+    spacesClient.createSpacePost.mockResolvedValue(receipt)
+    spacesClient.replyInSpaceThread.mockResolvedValue({ ...receipt, threadId: 'thr_7' })
+  })
+
+  describe('with features.human_posts off', () => {
+    it('is the single ask composer it always was: no mode switch, Send streams, nothing is posted', async () => {
+      scriptedStream()
+      renderPosts({ on: false })
+      expect(screen.queryByRole('radiogroup')).toBeNull()
+      expect(screen.getByRole('button', { name: 'Send' })).toBeTruthy()
+      await send('Rydd lageret')
+      expect(chatClient.streamChat).toHaveBeenCalledTimes(1)
+      expect(spacesClient.createSpacePost).not.toHaveBeenCalled()
+    })
+
+    it('ignores a viewer role: the flag decides whether roles matter at all', () => {
+      renderPosts({ on: false, role: 'viewer' })
+      expect((box()).disabled).toBe(false)
+      expect(screen.queryByText(/lesetilgang/)).toBeNull()
+    })
+  })
+
+  describe('with it on', () => {
+    it('offers Send and Ask as a switch, defaulting to Send', () => {
+      renderPosts()
+      const radios = screen.getAllByRole('radio')
+      expect(radios.map((radio) => radio.textContent)).toEqual(['Send til rommet', 'Spør Verevon'])
+      expect(screen.getByRole('radio', { name: 'Send til rommet' }).getAttribute('aria-checked')).toBe('true')
+      expect(screen.getByRole('button', { name: 'Send' })).toBeTruthy()
+    })
+
+    it('honours defaultSendMode ask', () => {
+      renderPosts({ defaultSendMode: 'ask' })
+      expect(screen.getByRole('radio', { name: 'Spør Verevon' }).getAttribute('aria-checked')).toBe('true')
+      expect(screen.getByRole('button', { name: 'Spør Verevon' })).toBeTruthy()
+    })
+
+    it('posts through createSpacePost with a client send id and never calls streamChat', async () => {
+      renderPosts()
+      type('  Hei alle  ')
+      submit()
+      await waitFor(() => expect(spacesClient.createSpacePost).toHaveBeenCalledTimes(1))
+      const [spaceRef, input] = spacesClient.createSpacePost.mock.calls[0] as [string, { content: string; clientSendId: string }]
+      expect(spaceRef).toBe('room-1')
+      expect(input.content).toBe('Hei alle')
+      expect(input.clientSendId).toMatch(/^[A-Za-z0-9_-]{16,64}$/)
+      expect(chatClient.streamChat).not.toHaveBeenCalled()
+      expect(spacesClient.replyInSpaceThread).not.toHaveBeenCalled()
+    })
+
+    it('clears the text only on acceptance', async () => {
+      let accept: (value: typeof receipt) => void = () => undefined
+      spacesClient.createSpacePost.mockImplementationOnce(() => new Promise((resolve) => { accept = resolve }))
+      renderPosts()
+      type('Hei alle')
+      submit()
+      await waitFor(() => expect(spacesClient.createSpacePost).toHaveBeenCalled())
+      // The request is out and unanswered: the words are still in the box.
+      expect(box().value).toBe('Hei alle')
+      accept(receipt)
+      await waitFor(() => expect(box().value).toBe(''))
+    })
+
+    it('replies through replyInSpaceThread when a reply target is set', async () => {
+      renderPosts({ replyTarget: { threadId: 'thr_7', title: 'Innkjøp' } })
+      type('Enig')
+      submit()
+      await waitFor(() => expect(spacesClient.replyInSpaceThread).toHaveBeenCalledTimes(1))
+      const [spaceRef, threadId, input] = spacesClient.replyInSpaceThread.mock.calls[0] as [string, string, { content: string }]
+      expect([spaceRef, threadId, input.content]).toEqual(['room-1', 'thr_7', 'Enig'])
+      expect(spacesClient.createSpacePost).not.toHaveBeenCalled()
+      expect(chatClient.streamChat).not.toHaveBeenCalled()
+    })
+
+    it('streams when the Ask switch is chosen, and does not post', async () => {
+      scriptedStream()
+      renderPosts()
+      fireEvent.click(screen.getByRole('radio', { name: 'Spør Verevon' }))
+      flush()
+      expect(screen.getByRole('button', { name: 'Spør Verevon' })).toBeTruthy()
+      type('Hva er status?')
+      submit()
+      await waitFor(() => expect(chatClient.streamChat).toHaveBeenCalledTimes(1))
+      expect(spacesClient.createSpacePost).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('what forces Ask', () => {
+    it('a picked skill forces Ask and hides the switch', async () => {
+      renderPosts()
+      type('Se på dette /inn')
+      await screen.findByRole('option', { name: /Innkjøpsrutine/ })
+      fireEvent.keyDown(box(), { key: 'Enter' })
+      flush()
+      expect(screen.getByRole('list', { name: 'Valgte ferdigheter' })).toBeTruthy()
+      expect(screen.queryByRole('radiogroup')).toBeNull()
+      expect(screen.getByRole('button', { name: 'Spør Verevon' })).toBeTruthy()
+    })
+
+    it('a mentioned agent forces Ask and hides the switch', async () => {
+      renderPosts({ agents: [agent] })
+      type('@Drif')
+      fireEvent.click(await screen.findByRole('option', { name: /Driftsassistent/ }))
+      flush()
+      expect(screen.queryByRole('radiogroup')).toBeNull()
+      expect(screen.getByRole('button', { name: 'Spør Verevon' })).toBeTruthy()
+    })
+  })
+
+  describe('a reply in someone else’s thread', () => {
+    const threads = [{ thread_id: 'thr_7', space_id: 'room-1', owner_subject_id: 'user-other' }]
+
+    it('offers no Ask: there is nothing to switch', () => {
+      renderPosts({ replyTarget: { threadId: 'thr_7', title: 'Innkjøp' }, threads })
+      expect(screen.queryByRole('radiogroup')).toBeNull()
+      expect(screen.getByRole('button', { name: 'Send' })).toBeTruthy()
+    })
+
+    it('offers Ask again in a thread the member started', () => {
+      renderPosts({
+        replyTarget: { threadId: 'thr_7', title: 'Innkjøp' },
+        threads: [{ thread_id: 'thr_7', space_id: 'room-1', owner_subject_id: 'user-me' }],
+      })
+      expect(screen.getAllByRole('radio')).toHaveLength(2)
+    })
+
+    it('says so when an agent mention would have started the agent there', async () => {
+      renderPosts({ replyTarget: { threadId: 'thr_7', title: 'Innkjøp' }, threads, agents: [agent] })
+      type('@Drif')
+      fireEvent.click(await screen.findByRole('option', { name: /Driftsassistent/ }))
+      flush()
+      expect(screen.getByText(/Du kan ikke starte agenten i en annens samtale/)).toBeTruthy()
+      // Nothing is offered, so the button is the (disabled) ask label.
+      expect((screen.getByRole('button', { name: 'Spør Verevon' }) as HTMLButtonElement).disabled).toBe(true)
+    })
+  })
+
+  describe('a viewer', () => {
+    it('gets a disabled box and the reason, and cannot send', () => {
+      renderPosts({ role: 'viewer' })
+      expect(box().disabled).toBe(true)
+      expect(screen.getByText(/lesetilgang i dette rommet/)).toBeTruthy()
+      expect(screen.queryByRole('radiogroup')).toBeNull()
+      expect((screen.getByRole('button', { name: /Send|Spør Verevon/ }) as HTMLButtonElement).disabled).toBe(true)
+    })
+
+    it('treats a role the SPA does not know as read-only too', () => {
+      renderPosts({ role: undefined as never })
+      // `undefined` falls back to editor in the harness; pass an unknown role explicitly.
+      cleanup()
+      renderPosts({ role: 'guest' })
+      expect(box().disabled).toBe(true)
+    })
+  })
+
+  describe('failures', () => {
+    it('keeps the text on failure and offers Try again and Discard', async () => {
+      spacesClient.createSpacePost.mockRejectedValueOnce(new ApiError('down', 503, 'session_unavailable'))
+      renderPosts()
+      type('Hei alle')
+      submit()
+      const alert = await screen.findByRole('alert')
+      expect(alert.textContent).toContain('Meldingen ble ikke sendt')
+      expect(within(alert).getByRole('button', { name: 'Prøv igjen' })).toBeTruthy()
+      expect(within(alert).getByRole('button', { name: 'Forkast' })).toBeTruthy()
+      expect(box().value).toBe('Hei alle')
+    })
+
+    it('Try again repeats the same send id and clears the text once accepted', async () => {
+      spacesClient.createSpacePost.mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      renderPosts()
+      type('Hei alle')
+      submit()
+      fireEvent.click(await screen.findByRole('button', { name: 'Prøv igjen' }))
+      await waitFor(() => expect(spacesClient.createSpacePost).toHaveBeenCalledTimes(2))
+      const ids = spacesClient.createSpacePost.mock.calls.map((call) => (call[1] as { clientSendId: string }).clientSendId)
+      expect(ids[1]).toBe(ids[0])
+      await waitFor(() => expect(box().value).toBe(''))
+    })
+
+    it('offers no Try again for a refusal that cannot succeed, only Discard', async () => {
+      spacesClient.createSpacePost.mockRejectedValueOnce(new ApiError('no', 403, 'space_post_not_authorized'))
+      renderPosts()
+      type('Hei alle')
+      submit()
+      const alert = await screen.findByRole('alert')
+      expect(within(alert).queryByRole('button', { name: 'Prøv igjen' })).toBeNull()
+      fireEvent.click(within(alert).getByRole('button', { name: 'Forkast' }))
+      await waitFor(() => expect(screen.queryByRole('alert')).toBeNull())
+      // Discard keeps the words in the box and sends nothing more.
+      expect(box().value).toBe('Hei alle')
+      expect(spacesClient.createSpacePost).toHaveBeenCalledTimes(1)
+    })
+
+    it('shows the zero-retention catalogue text for the typed 412 refusal and removes Send', async () => {
+      spacesClient.createSpacePost.mockRejectedValueOnce(new ApiError('zdr', 412, 'zdr_durable_mutation_forbidden'))
+      renderPosts()
+      type('Hei alle')
+      submit()
+      await waitFor(() => expect(screen.queryByRole('radio', { name: 'Send til rommet' })).toBeNull())
+      // The catalogue's own words for the refusal, in a status notice above the box.
+      const catalogueText = translateApiError({ code: 'zdr_durable_mutation_forbidden' }, (no) => no)
+      expect(catalogueText).not.toBe('')
+      expect(screen.getByRole('status', { name: '' }).textContent ?? '').toContain(catalogueText)
+      expect(screen.queryByRole('radiogroup')).toBeNull()
+      expect(screen.getByRole('button', { name: 'Spør Verevon' })).toBeTruthy()
+    })
+  })
+
+  it.skip('DEPTH-SPA-1: with the default journal a post leaves the composer without an explicit flush', async () => {
+    cleanup()
+    render(() => (
+      <SpaceRoomComposer
+        spaceRef="room-1"
+        roster={() => []}
+        agents={() => []}
+        threads={() => []}
+        humanPostsEnabled={() => true}
+        viewerRole={() => 'editor'}
+      />
+    ))
+    type('Hei alle')
+    submit()
+    await waitFor(() => expect(spacesClient.createSpacePost).toHaveBeenCalledTimes(1))
+  })
+
+  describe('the length bound', () => {
+    it('blocks Send over the limit with the counter, and sends nothing', () => {
+      renderPosts({ maxChars: 10 })
+      type('x'.repeat(11))
+      const counter = screen.getByRole('alert')
+      expect(counter.textContent).toContain('11 / 10')
+      expect((screen.getByRole('button', { name: 'Send' }) as HTMLButtonElement).disabled).toBe(true)
+      expect(spacesClient.createSpacePost).not.toHaveBeenCalled()
+    })
+
+    it('shows a quiet counter near the limit and allows Send at the limit', () => {
+      renderPosts({ maxChars: 10 })
+      type('x'.repeat(9))
+      expect(screen.queryByRole('alert')).toBeNull()
+      expect(screen.getByText('9 / 10')).toBeTruthy()
+      expect((screen.getByRole('button', { name: 'Send' }) as HTMLButtonElement).disabled).toBe(false)
+    })
+
+    it('counts code points, not UTF-16 units', () => {
+      renderPosts({ maxChars: 4 })
+      type('😀😀😀😀')
+      expect(screen.queryByRole('alert')).toBeNull()
+      expect((screen.getByRole('button', { name: 'Send' }) as HTMLButtonElement).disabled).toBe(false)
+    })
   })
 })

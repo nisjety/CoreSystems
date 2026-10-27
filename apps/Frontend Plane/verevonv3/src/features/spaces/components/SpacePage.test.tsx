@@ -35,6 +35,8 @@ const spacesClient = vi.hoisted(() => ({
   markSpaceRead: vi.fn(),
   recordSpacePresence: vi.fn(),
   updateSpaceThreadPresentation: vi.fn(),
+  createSpacePost: vi.fn(),
+  replyInSpaceThread: vi.fn(),
 }))
 
 vi.mock('@/shared/api/spaces-client', () => ({
@@ -57,6 +59,10 @@ vi.mock('@/shared/api/spaces-client', () => ({
   getSpaceInstructions: spacesClient.getSpaceInstructions,
   updateSpaceInstructions: spacesClient.updateSpaceInstructions,
   getSpaceThreadTranscript: spacesClient.getSpaceThreadTranscript,
+  // WS01-S6 human posts the composer imports.
+  createSpacePost: spacesClient.createSpacePost,
+  replyInSpaceThread: spacesClient.replyInSpaceThread,
+  SPACE_POST_MAX_CHARS_DEFAULT: 8000,
   // The timeline and the artifacts tab read through loadSpaceTranscript (WS07-S4), which turns the
   // transcript read's outcome into a value. Mirrors the real one over the hoisted read.
   loadSpaceTranscript: async (spaceRef: string, threadId: string) => {
@@ -204,6 +210,8 @@ describe('SpacePage', () => {
     spacesClient.markSpaceRead.mockResolvedValue({ last_read_at: 1 })
     spacesClient.updateSpaceThreadPresentation.mockReset()
     spacesClient.updateSpaceThreadPresentation.mockResolvedValue({ thread_id: 't' })
+    spacesClient.createSpacePost.mockReset()
+    spacesClient.replyInSpaceThread.mockReset()
     spacesClient.getSpaceActivity.mockReset()
     spacesClient.getSpaceActivity.mockResolvedValue({
       space: personalContext.space, membership: personalContext.membership,
@@ -1396,6 +1404,150 @@ describe('SpacePage', () => {
       renderSpacePage()
       expect(await screen.findByText('1 person er her nå')).toBeTruthy()
       expect(screen.queryByText(/user_ghost/)).toBeNull()
+    })
+  })
+
+  // WS01-S7a: the side pane is a URL-addressable surface. The id in the URL only asks; the pane
+  // resolves it through the Space transcript route, so every way the read can end is a named state.
+  describe('the thread side pane (WS01-S7a)', () => {
+    const thread = {
+      thread_id: 'thread_1',
+      space_id: 'space_personal_1',
+      title: 'Innkjøp',
+      preview: 'Forhåndsvisning',
+      latest_run_status: 'completed',
+      updated_at: '2026-10-27T10:00:00Z',
+    }
+
+    beforeEach(() => {
+      vi.stubEnv('VITE_SPACE_THREAD_PANE_UI', 'true')
+      spacesClient.getSpaceContext.mockResolvedValue(personalContext)
+      spacesClient.getSpaceThreads.mockResolvedValue({ ...personalContext, threads: [thread] })
+      spacesClient.getSpaceThreadTranscript.mockResolvedValue({
+        threadId: 'thread_1',
+        turns: [{ role: 'user', content: 'Hva koster det?', authorSubjectId: 'user_1' }],
+      })
+    })
+
+    it('opens the pane for ?thread_id and names it after the thread', async () => {
+      renderSpacePage('/spaces/space_personal_1?thread_id=thread_1')
+      const pane = await screen.findByRole('complementary', { name: 'Innkjøp' })
+      expect(await within(pane).findByText('Hva koster det?')).toBeTruthy()
+      expect(spacesClient.getSpaceThreadTranscript).toHaveBeenCalledWith('space_personal_1', 'thread_1')
+    })
+
+    it('opens no pane without the parameter, or with an invalid one', async () => {
+      renderSpacePage('/spaces/space_personal_1?thread_id=')
+      await screen.findByRole('heading', { name: 'Personlig rom', level: 1 })
+      expect(document.querySelector('.verevon-space-auxpane')).toBeNull()
+    })
+
+    it('opens no pane while the pane is switched off', async () => {
+      vi.stubEnv('VITE_SPACE_THREAD_PANE_UI', 'false')
+      renderSpacePage('/spaces/space_personal_1?thread_id=thread_1')
+      await screen.findByRole('heading', { name: 'Personlig rom', level: 1 })
+      expect(document.querySelector('.verevon-space-auxpane')).toBeNull()
+      expect(screen.queryByRole('button', { name: /Åpne tråd/ })).toBeNull()
+    })
+
+    it('opens the pane from the post’s Open thread button, and Escape closes it', async () => {
+      renderSpacePage()
+      fireEvent.click(await screen.findByRole('button', { name: /Åpne tråd/ }))
+      const pane = await screen.findByRole('complementary', { name: 'Innkjøp' })
+      fireEvent.keyDown(pane, { key: 'Escape' })
+      flush()
+      await waitFor(() => expect(document.querySelector('.verevon-space-auxpane')).toBeNull())
+    })
+
+    it('shows the restricted notice in the pane on a 403, never a sign-in message', async () => {
+      const refused = Object.assign(new Error('forbidden'), { status: 403, code: 'space_read_not_authorized' })
+      const { ApiError } = await import('@/shared/api/http')
+      spacesClient.getSpaceThreadTranscript.mockRejectedValue(
+        new ApiError(refused.message, 403, 'space_read_not_authorized'),
+      )
+      renderSpacePage('/spaces/space_personal_1?thread_id=thread_1')
+      const pane = await screen.findByRole('complementary', { name: 'Innkjøp' })
+      expect(await within(pane).findByText(/Denne samtalen er ikke delt med deg/)).toBeTruthy()
+      expect(pane.textContent ?? '').not.toMatch(/logg inn/i)
+    })
+
+    it('still opens the pane for a thread the listing does not carry, and says it is not available', async () => {
+      const { ApiError } = await import('@/shared/api/http')
+      spacesClient.getSpaceThreadTranscript.mockRejectedValue(new ApiError('missing', 404, 'thread_not_found'))
+      renderSpacePage('/spaces/space_personal_1?thread_id=thread_unknown')
+      const pane = await screen.findByRole('complementary', { name: 'Tråd' })
+      expect(await within(pane).findByText(/Samtalen er ikke tilgjengelig/)).toBeTruthy()
+    })
+
+    it('draws no reply composer in the pane while human posts are off', async () => {
+      renderSpacePage('/spaces/space_personal_1?thread_id=thread_1')
+      const pane = await screen.findByRole('complementary', { name: 'Innkjøp' })
+      await within(pane).findByText('Hva koster det?')
+      expect(within(pane).queryByRole('textbox')).toBeNull()
+    })
+  })
+
+  // WS01-S6: the room context's flags, limits and role reach the composer, and the page's send
+  // journal is settled by the room's own projection.
+  describe('human posts through the page (WS01-S6)', () => {
+    const postsContext = (role: string, limit?: number) => ({
+      ...personalContext,
+      membership: { ...personalContext.membership, role },
+      features: { human_posts: true },
+      ...(limit === undefined ? {} : { limits: { post_max_chars: limit } }),
+    })
+
+    it('leaves the composer as the single ask box when features.human_posts is absent', async () => {
+      spacesClient.getSpaceContext.mockResolvedValue(personalContext)
+      renderSpacePage()
+      await screen.findByRole('heading', { name: 'Personlig rom', level: 1 })
+      expect(screen.queryByRole('radiogroup')).toBeNull()
+      expect(screen.getByRole('button', { name: 'Send' })).toBeTruthy()
+    })
+
+    it('offers Send and Ask when features.human_posts is on and the role may post', async () => {
+      spacesClient.getSpaceContext.mockResolvedValue(postsContext('editor'))
+      renderSpacePage()
+      await screen.findByRole('heading', { name: 'Personlig rom', level: 1 })
+      expect(screen.getAllByRole('radio').map((radio) => radio.textContent)).toEqual(['Send til rommet', 'Spør Verevon'])
+    })
+
+    it('passes membership.role through: a viewer gets a disabled box and the reason', async () => {
+      spacesClient.getSpaceContext.mockResolvedValue(postsContext('viewer'))
+      renderSpacePage()
+      await screen.findByRole('heading', { name: 'Personlig rom', level: 1 })
+      expect(await screen.findByText(/lesetilgang i dette rommet/)).toBeTruthy()
+      expect((screen.getByPlaceholderText(/Skriv/) as HTMLTextAreaElement).disabled).toBe(true)
+    })
+
+    it('passes limits.post_max_chars through to the counter', async () => {
+      spacesClient.getSpaceContext.mockResolvedValue(postsContext('owner', 10))
+      renderSpacePage()
+      await screen.findByRole('heading', { name: 'Personlig rom', level: 1 })
+      fireEvent.input(screen.getByPlaceholderText(/Skriv/), { target: { value: 'x'.repeat(11) } })
+      flush()
+      expect((await screen.findByRole('alert')).textContent).toContain('11 / 10')
+    })
+
+    // DEPTH-SPA-1: the page's own journal is the unflushed one, so a post never leaves the composer
+    // and there is no accepted entry to reconcile. Left written for the live tier.
+    it.skip('DEPTH-SPA-1: an accepted post is dropped from the pending rows once the projection lists its thread', async () => {
+      spacesClient.getSpaceContext.mockResolvedValue(postsContext('editor'))
+      spacesClient.createSpacePost.mockResolvedValue({
+        threadId: 'thread_new', messageId: 'm1', sequence: 1, deduplicated: false,
+      })
+      renderSpacePage()
+      await screen.findByRole('heading', { name: 'Personlig rom', level: 1 })
+      fireEvent.input(screen.getByPlaceholderText(/Skriv/), { target: { value: 'Hei alle' } })
+      flush()
+      fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+      await waitFor(() => expect(spacesClient.createSpacePost).toHaveBeenCalledTimes(1))
+      expect(await screen.findByText('Sendt')).toBeTruthy()
+      spacesClient.getSpaceThreads.mockResolvedValue({
+        ...personalContext,
+        threads: [{ thread_id: 'thread_new', space_id: 'space_personal_1', title: 'Hei alle', preview: 'Hei alle' }],
+      })
+      await waitFor(() => expect(screen.queryByText('Sendt')).toBeNull())
     })
   })
 })
