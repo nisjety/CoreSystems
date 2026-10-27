@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -150,6 +151,7 @@ func TestServiceScopeForRequest(t *testing.T) {
 		{name: "Space personal-thread decision", method: http.MethodPost, path: "/api/v1/internal/spaces/personal-thread-decision", want: "spaces:issue"},
 		{name: "Space shared-thread decision", method: http.MethodPost, path: "/api/v1/internal/spaces/thread-decision", want: "spaces:issue"},
 		{name: "Space thread append decision", method: http.MethodPost, path: "/api/v1/internal/spaces/thread-append-decision", want: "spaces:issue"},
+		{name: "Space retrieval decision", method: http.MethodPost, path: "/api/v1/internal/spaces/retrieval-decision", want: "spaces:issue"},
 		{name: "Space personal-retrieval decision", method: http.MethodPost, path: "/api/v1/internal/spaces/personal-retrieval-decision", want: "spaces:issue"},
 		{name: "Space personal-import decision", method: http.MethodPost, path: "/api/v1/internal/spaces/personal-import-decision", want: "spaces:issue"},
 		{name: "Space schedule-create decision", method: http.MethodPost, path: "/api/v1/internal/spaces/schedule-create-decision", want: "spaces:issue"},
@@ -414,5 +416,41 @@ func TestServiceCredentialHelpers(t *testing.T) {
 	c.Set("service_scopes", []string{"users:read:any"})
 	if !hasServiceScope(c, "users:read:any") || hasServiceScope(c, "users:write:any") {
 		t.Fatal("context scope matching returned an unexpected result")
+	}
+}
+
+// WS05-S3: a Space internal route that is registered but has no scope rule falls through to
+// the generic users:* scopes, so the gateway credential that holds those would reach it.
+// Every route registered under /api/v1/internal/spaces must resolve to a spaces:* scope.
+func TestServiceScopeTableCoversNewPaths(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	server := NewServer(nil, nil, nil, nil, "0")
+
+	const prefix = "/api/v1/internal/spaces"
+	checked := 0
+	for _, route := range server.router.Routes() {
+		if route.Path != prefix && !strings.HasPrefix(route.Path, prefix+"/") {
+			continue
+		}
+		path := route.Path
+		for _, segment := range strings.Split(route.Path, "/") {
+			if strings.HasPrefix(segment, ":") {
+				path = strings.Replace(path, segment, "sample-1", 1)
+			}
+		}
+		request := httptest.NewRequest(route.Method, path, nil)
+		scope := serviceScopeForRequest(request)
+		if !strings.HasPrefix(scope, "spaces:") {
+			t.Errorf("%s %s resolves to scope %q, want a spaces:* scope (no scope rule matches it)", route.Method, route.Path, scope)
+		}
+		// A caller header must not change a Space route's scope.
+		request.Header.Set("X-User-Id", "subject")
+		if again := serviceScopeForRequest(request); again != scope {
+			t.Errorf("%s %s: scope %q changes to %q with X-User-Id", route.Method, route.Path, scope, again)
+		}
+		checked++
+	}
+	if checked < 30 {
+		t.Fatalf("only %d Space routes found on the engine, the route walk is broken", checked)
 	}
 }
