@@ -1,4 +1,4 @@
-import { Bot, MessageCircle, Pin, PinOff, Sparkles } from '@/shared/icons'
+import { Bot, MessageCircle, Pin, PinOff } from '@/shared/icons'
 import { createMemo, createSignal, For, Show } from 'solid-js'
 
 import {
@@ -9,7 +9,9 @@ import {
   stripMarkdownPreview,
   threadStatus,
 } from '@/features/spaces/lib/space-thread-presentation'
+import { AgentAvatar } from './AgentAvatar'
 import { SpaceApprovalPanel } from './SpaceApprovalPanel'
+import { agentAvatarColor, agentForName } from '../lib/agent-avatar'
 import { PostTurnHeader, SpaceTurnList, normalizeTranscriptTurns, resolveAuthorName } from './sidepane/SpaceTurnList'
 import type { TranscriptTurn } from './sidepane/SpaceTurnList'
 import { SpaceRestrictedNotice } from './SpaceRestrictedNotice'
@@ -136,6 +138,7 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
               roster={props.roster}
               viewerSubjectId={props.viewerSubjectId}
               agentName={agentName()}
+              agents={props.agents}
               transcriptEnabled={sharedRead}
               artifactsOn={artifactsOn}
               liveArtifacts={props.liveArtifacts}
@@ -158,6 +161,8 @@ function SpaceRoomPost(props: {
   readonly roster: () => readonly SpaceRosterMember[]
   readonly viewerSubjectId?: () => string | undefined
   readonly agentName: string
+  /** Roster agents, for the avatar colour of an assistant turn (exactly-one-name match, else neutral). */
+  readonly agents: () => readonly SpaceAgent[]
   /** False when the room's shared read is unavailable: no transcript call is made. */
   readonly transcriptEnabled: () => boolean
   /** `features.room_artifacts`: chips, sheet and artifact-only turns. Off, the post reads as before. */
@@ -331,6 +336,7 @@ function SpaceRoomPost(props: {
           roster={props.roster}
           viewerSubjectId={props.viewerSubjectId}
           agentName={props.agentName}
+          agents={props.agents}
           onOpenArtifact={props.artifactsOn ? setOpenArtifactId : undefined}
         />
       </Show>
@@ -367,9 +373,12 @@ function SpaceRoomPost(props: {
           rather than a new line per transition. */}
       <Show when={isWorking()}>
         <div class="verevon-room-turn verevon-room-turn--working" role="status" aria-live="polite">
-          <span class="verevon-room-turn__avatar verevon-room-turn__avatar--agent" aria-hidden="true">
-            <Sparkles size={14} />
-          </span>
+          <AgentAvatar
+            kind="agent"
+            size={30}
+            name={props.agentName}
+            color={agentAvatarColor(agentForName(props.agents(), props.agentName))}
+          />
           <div class="verevon-room-turn__content">
             <PostTurnHeader author={props.agentName} isAgent />
             <p class="verevon-room-turn__working">

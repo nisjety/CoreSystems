@@ -1,11 +1,13 @@
-import { Bot, Sparkles } from '@/shared/icons'
+import { Bot } from '@/shared/icons'
 import { For, Show } from 'solid-js'
 
 import { ChatMarkdown } from '@/features/chat/components/ChatMessages'
 import type { ChatArtifact } from '@/features/chat/components/chat-types'
 import { SpaceArtifactChip } from '../SpaceArtifactChip'
-import type { SpaceRosterMember } from '@/shared/api/spaces-client'
+import type { SpaceAgent, SpaceRosterMember } from '@/shared/api/spaces-client'
 import { useI18n } from '@/shared/i18n'
+import { AgentAvatar } from '../AgentAvatar'
+import { agentAvatarColor, agentForName } from '../../lib/agent-avatar'
 
 /**
  * The rows of one thread, read-only. Extracted from the room timeline so the
@@ -110,6 +112,12 @@ export interface SpaceTurnListProps {
   /** Room-level fallback name for an assistant turn that recorded no persona. */
   readonly agentName: string
   /**
+   * The room roster's agents, for the avatar colour of an assistant turn. A turn
+   * maps to an agent only when its name matches exactly one; absent (the side
+   * pane) every agent avatar is neutral.
+   */
+  readonly agents?: () => readonly SpaceAgent[]
+  /**
    * When provided, an assistant turn's artifacts render as chips under it and
    * pressing one calls this with the artifact id. Absent (the side pane), the
    * artifacts are not shown and an artifact-only turn renders no row at all.
@@ -128,17 +136,19 @@ export function SpaceTurnList(props: SpaceTurnListProps) {
     <For each={visibleTurns()}>
       {(turn) => (
         <div class="verevon-room-turn" data-role={turn.role}>
-          <span
-            class={[
-              'verevon-room-turn__avatar',
-              { 'verevon-room-turn__avatar--agent': turn.role === 'assistant' },
-            ]}
-            aria-hidden="true"
+          <Show
+            when={turn.role === 'assistant'}
+            fallback={
+              <span class="verevon-room-turn__avatar" aria-hidden="true">{initials(authorOf(turn))}</span>
+            }
           >
-            <Show when={turn.role === 'assistant'} fallback={initials(authorOf(turn))}>
-              <Sparkles size={14} />
-            </Show>
-          </span>
+            <AgentAvatar
+              kind="agent"
+              size={30}
+              name={turn.agentName ?? props.agentName}
+              color={agentAvatarColor(agentForName(props.agents?.() ?? [], turn.agentName ?? props.agentName))}
+            />
+          </Show>
           <div class="verevon-room-turn__content">
             <PostTurnHeader
               // The turn's own recorded persona wins; the room-level

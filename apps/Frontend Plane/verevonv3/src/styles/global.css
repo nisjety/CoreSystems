@@ -45306,6 +45306,23 @@ so it
   color: var(--verevon-surface);
 }
 
+/* WS07-S7: shared agent/member avatar. Fill and glyph colour come inline from a
+   validated #rrggbb; without one the neutral treatment below applies. */
+.verevon-agent-avatar {
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 999px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  line-height: 1;
+}
+
+.verevon-agent-avatar--neutral {
+  background: var(--verevon-text);
+  color: var(--verevon-surface);
+}
+
 .verevon-room-turn__content {
   display: grid;
   gap: 3px;

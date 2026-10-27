@@ -35,6 +35,8 @@ import {
   threadStatus,
   threadTitle,
 } from '../lib/space-thread-presentation'
+import { AgentAvatar } from './AgentAvatar'
+import { agentAvatarColor } from '../lib/agent-avatar'
 import { SpaceBindAgentDialog } from './SpaceBindAgentDialog'
 import { SpaceCockpit } from './SpaceCockpit'
 import { SpaceConfirmButton } from './SpaceConfirmButton'
@@ -1046,13 +1048,16 @@ function SpaceAgentCard(props: {
   }
   const displayName = () =>
     agent().name?.trim() || i18n.tr('Agent uten publisert navn', 'Agent with no published name')
-  // The initial is decoration over a name we already show; when there is no
-  // name it must not invent a letter, so it falls back to a neutral mark.
-  const initial = () => (agent().name?.trim()?.[0] ?? '·').toUpperCase()
 
   return (
     <li class="verevon-space-agent">
-      <span class="verevon-space-agent__avatar" aria-hidden="true">{initial()}</span>
+      <AgentAvatar
+        kind="agent"
+        size={34}
+        name={agent().name}
+        color={agentAvatarColor(agent())}
+        class="verevon-space-agent__avatar"
+      />
       <div class="verevon-space-agent__body">
         <p class="verevon-space-agent__name">
           {displayName()}

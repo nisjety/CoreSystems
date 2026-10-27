@@ -12,6 +12,8 @@ import type {
 import { useI18n } from '@/shared/i18n'
 import { translateApiError } from '@/shared/i18n/errors'
 import { liveThreadsIn, ownStream } from '../lib/space-live-work'
+import { agentAvatarColor } from '../lib/agent-avatar'
+import { AgentAvatar } from './AgentAvatar'
 import { threadTitle } from '../lib/space-thread-presentation'
 import {
   DEFAULT_SPACE_COMPOSER_MODE,
@@ -81,6 +83,8 @@ type MentionCandidate = {
   readonly kind: 'person' | 'agent'
   /** Only present for `kind: 'agent'` — the Control subject id to invoke. */
   readonly subjectId?: string
+  /** Validated avatar colour for `kind: 'agent'`; absent renders neutral. */
+  readonly color?: string
 }
 
 /**
@@ -196,6 +200,7 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
         label: agent.name as string,
         kind: 'agent' as const,
         subjectId: agent.subject_id,
+        color: agentAvatarColor(agent),
       }))
     return [...agents, ...people]
   })
@@ -567,9 +572,12 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
                       when={item.kind === 'skill' ? item.skill : undefined}
                       fallback={
                         <>
-                          <span class="verevon-space-room-mentions__kind" aria-hidden="true">
-                            {item.kind === 'mention' && item.candidate.kind === 'agent' ? '●' : '·'}
-                          </span>
+                          <Show
+                            when={item.kind === 'mention' && item.candidate.kind === 'agent' ? item.candidate : undefined}
+                            fallback={<span class="verevon-space-room-mentions__kind" aria-hidden="true">·</span>}
+                          >
+                            {(agent) => <AgentAvatar kind="agent" size={18} name={agent().label} color={agent().color} />}
+                          </Show>
                           {item.kind === 'mention' ? item.candidate.label : ''}
                         </>
                       }

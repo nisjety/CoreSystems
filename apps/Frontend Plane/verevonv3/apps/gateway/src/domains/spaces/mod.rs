@@ -1318,6 +1318,9 @@ async fn list_space_threads(
                 "space": public_space(&space),
                 "membership": crate::envelope::unwrap_data(&membership),
                 "threads": thread_items,
+                // WS07-S4: Control's shared-read answer, so the SPA can say
+                // "not shared with you" once instead of probing every post.
+                "shared_read": { "available": read.is_some() },
                 "read_marker": read_marker,
                 "unavailable": unavailable,
             }
@@ -3475,11 +3478,7 @@ pub(crate) async fn create_space_agent(
         .get("avatar_color")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|value| {
-            value.len() == 7
-                && value.starts_with('#')
-                && value[1..].chars().all(|ch| ch.is_ascii_hexdigit())
-        })
+        .filter(|value| valid_avatar_color(value))
         .map(str::to_owned);
 
     // Who may create is a Control fact about THIS room, not an org role: the
@@ -4281,12 +4280,22 @@ async fn compose_space_agents(
                         ("triggerModes", "trigger_modes"),
                         ("allowedTools", "allowed_tools"),
                         ("approvalMode", "approval_mode"),
+                        ("avatarColor", "avatar_color"),
                     ] {
                         if let Some(value) = binding.get(from) {
                             if !value.is_null() {
                                 object.insert(to.to_owned(), value.clone());
                             }
                         }
+                    }
+                    // WS07-S7: colour is presentation only and reaches the browser
+                    // only in the 7-character hex form; anything else is dropped.
+                    let colour_ok = object
+                        .get("avatar_color")
+                        .and_then(Value::as_str)
+                        .is_some_and(valid_avatar_color);
+                    if !colour_ok {
+                        object.remove("avatar_color");
                     }
                     object.insert(
                         "delivery_targets".to_owned(),
@@ -4316,6 +4325,15 @@ async fn compose_space_agents(
         .collect();
 
     Ok(agents)
+}
+
+/// An agent avatar colour is exactly `#rrggbb`. Shared by the create path and
+/// the roster field map so a stored value can never reach the browser (or a
+/// style attribute) in any other shape.
+fn valid_avatar_color(value: &str) -> bool {
+    value.len() == 7
+        && value.starts_with('#')
+        && value[1..].chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
 /// The one field the browser may name a mention by: the Control subject id

@@ -796,6 +796,8 @@ export type SpaceAgent = {
   trigger_modes?: readonly ('mention' | 'group')[]
   allowed_tools?: readonly string[]
   approval_mode?: 'auto' | 'require_confirmation' | 'blocked'
+  /** Presentation-only `#rrggbb`; the gateway drops anything else. Never an authorization input. */
+  avatar_color?: string
   delivery_targets: readonly SpaceAgentDeliveryTarget[]
   updated_at?: number
 }
