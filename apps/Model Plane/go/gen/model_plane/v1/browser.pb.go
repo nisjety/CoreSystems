@@ -707,8 +707,9 @@ type ValidateGrantResponse struct {
 	// and for a run grant the idempotency key of the one run it was derived for
 	// (the same value as DeriveRunGrantRequest.session_key). A consumer can bind
 	// a presented run grant to that run: a run grant must not back a different
-	// run. Empty for a grant issued without one.
-	SessionKey    string `protobuf:"bytes,54,opt,name=session_key,json=sessionKey,proto3" json:"session_key,omitempty"`
+	// run. Empty for a grant issued without one. Field 13 with the grant's base
+	// fields: 54-59 stay reserved for the WS8.C follow-ons of the R-6 ledger.
+	SessionKey    string `protobuf:"bytes,13,opt,name=session_key,json=sessionKey,proto3" json:"session_key,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1403,7 +1404,7 @@ const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\x13absolute_expires_at\x184 \x01(\v2\x1a.google.protobuf.TimestampR\x11absoluteExpiresAt\x12\x1f\n" +
 	"\vresource_id\x185 \x01(\tR\n" +
 	"resourceId\x12\x1f\n" +
-	"\vsession_key\x186 \x01(\tR\n" +
+	"\vsession_key\x18\r \x01(\tR\n" +
 	"sessionKey\"\xd9\x03\n" +
 	"\x15DeriveRunGrantRequest\x12&\n" +
 	"\x0fparent_grant_id\x18\x01 \x01(\tR\rparentGrantId\x12\x1f\n" +

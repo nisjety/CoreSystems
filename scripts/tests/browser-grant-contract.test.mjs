@@ -73,7 +73,9 @@ test('upstream proto: grant messages keep their field numbers and add kind/zdr/o
   assert.deepEqual(issued.get(11), { name: 'zdr', type: 'bool', repeated: false });
 
   const validated = messages.get('ValidateGrantResponse');
-  assert.deepEqual(numbers(validated), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, ...BUDGET_NUMBERS, 50, 51, 52, 53]);
+  assert.deepEqual(numbers(validated), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, ...BUDGET_NUMBERS, 50, 51, 52, 53]);
+  // D1-001: the key the grant was issued under, so a consumer can bind a run grant to its run.
+  assert.deepEqual(validated.get(13), { name: "session_key", type: "string", repeated: false });
   assert.deepEqual(validated.get(10), { name: 'kind', type: 'string', repeated: false });
   assert.deepEqual(validated.get(11), { name: 'owner_id', type: 'string', repeated: false });
   assert.deepEqual(validated.get(12), { name: 'zdr', type: 'bool', repeated: false });

@@ -230,8 +230,9 @@ message ValidateGrantResponse {
   // and for a run grant the idempotency key of the one run it was derived for
   // (the same value as DeriveRunGrantRequest.session_key). A consumer can bind
   // a presented run grant to that run: a run grant must not back a different
-  // run. Empty for a grant issued without one.
-  string session_key = 54;
+  // run. Empty for a grant issued without one. Field 13 with the grant's base
+  // fields: 54-59 stay reserved for the WS8.C follow-ons of the R-6 ledger.
+  string session_key = 13;
 }
 
 message DeriveRunGrantRequest {
