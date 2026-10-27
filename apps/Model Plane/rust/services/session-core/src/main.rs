@@ -43,6 +43,7 @@ mod service_token;
 mod space;
 mod space_deletion_reconciler;
 mod space_membership_nats;
+mod space_stream_grpc;
 mod store;
 mod terminalization;
 mod tool_ledger;
@@ -105,6 +106,7 @@ async fn main() -> Result<()> {
         events_tx.clone(),
         letta_memory.clone(),
         grpc_auth,
+        space_wakes.clone(),
     ));
     let http_handle = tokio::spawn(http_health::serve(prom_handle));
     let nats_pool = pool.clone();

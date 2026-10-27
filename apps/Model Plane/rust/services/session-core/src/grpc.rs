@@ -24,6 +24,7 @@ use mp_contracts::model_plane::v1::{
     run_service_server::RunServiceServer,
     session_core_server::{SessionCore, SessionCoreServer},
     session_retention_service_server::{SessionRetentionService, SessionRetentionServiceServer},
+    space_events_server::SpaceEventsServer,
     space_room_read_service_server::SpaceRoomReadServiceServer,
     thread_autonomy_server::{ThreadAutonomy, ThreadAutonomyServer},
 };
@@ -54,7 +55,7 @@ use crate::terminalization;
 
 /// Standard gRPC health names registered on the unauthenticated health-only
 /// surface. Business RPCs remain independently intercepted.
-pub const HEALTH_SERVICE_NAMES: [&str; 10] = [
+pub const HEALTH_SERVICE_NAMES: [&str; 11] = [
     "model_plane.v1.SessionCore",
     "model_plane.v1.ManagedRunLifecycle",
     "model_plane.v1.OrchestrationCoreService",
@@ -65,6 +66,7 @@ pub const HEALTH_SERVICE_NAMES: [&str; 10] = [
     "model_plane.v1.SessionRetentionService",
     "model_plane.v1.ThreadAutonomy",
     "model_plane.v1.SpaceRoomReadService",
+    "model_plane.v1.SpaceEvents",
 ];
 
 const RUN_STARTED_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.RunStarted";
@@ -2773,16 +2775,17 @@ fn thread_read_payload_digest(claims: &ControlSpaceDecisionClaims) -> String {
 
 #[allow(clippy::result_large_err)]
 #[allow(clippy::too_many_arguments)]
-fn verify_thread_read_space_decision_with_key(
+fn verify_thread_read_claims_with_key(
     token: &str,
     decision_ref: &str,
     org_id: &str,
     user_id: &str,
     space_id: &str,
+    expected_audience: &str,
     expected_key_id: &str,
     key: &VerifyingKey,
     now: DateTime<Utc>,
-) -> Result<VerifiedSpaceRead, Status> {
+) -> Result<VerifiedReadClaims, Status> {
     if token.len() > MAX_CONTROL_SPACE_DECISION_TOKEN_BYTES {
         return Err(Status::invalid_argument(
             "Control Space read decision is too large",
@@ -2825,7 +2828,7 @@ fn verify_thread_read_space_decision_with_key(
         && claims.org_id == org_id
         && claims.subject_id == user_id
         && claims.space_ref == space_id
-        && claims.service_audience == CONTROL_SPACE_DECISION_AUDIENCE
+        && claims.service_audience == expected_audience
         && claims.action_id == CONTROL_THREAD_READ_ACTION
         && claims.action_schema_hash == CONTROL_THREAD_READ_SCHEMA
         && claims.payload_digest == thread_read_payload_digest(&claims)
@@ -2875,9 +2878,104 @@ fn verify_thread_read_space_decision_with_key(
         i64::try_from(claims.recipient_audience_revision).map_err(|_| {
             Status::permission_denied("Control Space read decision revision is invalid")
         })?;
-    Ok(VerifiedSpaceRead {
+    Ok(VerifiedReadClaims {
         recipient_audience_revision,
+        issued_at: claims.issued_at,
+        expires_at: claims.expires_at,
+        zero_data_retention: claims.zero_data_retention,
     })
+}
+
+/// What the claims-returning read-decision verifier keeps of a verified decision. The
+/// Space event stream (WS02-S3) needs the expiry, issue time and `zero_data_retention`
+/// that [`VerifiedSpaceRead`] deliberately discards.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct VerifiedReadClaims {
+    pub(crate) recipient_audience_revision: i64,
+    pub(crate) issued_at: DateTime<Utc>,
+    pub(crate) expires_at: DateTime<Utc>,
+    pub(crate) zero_data_retention: bool,
+}
+
+/// The existing `model.thread.read` verifier: audience `model-plane`, answering only the
+/// revision ceiling. A thin caller of [`verify_thread_read_claims_with_key`].
+#[allow(clippy::result_large_err)]
+#[allow(clippy::too_many_arguments)]
+fn verify_thread_read_space_decision_with_key(
+    token: &str,
+    decision_ref: &str,
+    org_id: &str,
+    user_id: &str,
+    space_id: &str,
+    expected_key_id: &str,
+    key: &VerifyingKey,
+    now: DateTime<Utc>,
+) -> Result<VerifiedSpaceRead, Status> {
+    let verified = verify_thread_read_claims_with_key(
+        token,
+        decision_ref,
+        org_id,
+        user_id,
+        space_id,
+        CONTROL_SPACE_DECISION_AUDIENCE,
+        expected_key_id,
+        key,
+        now,
+    )?;
+    Ok(VerifiedSpaceRead {
+        recipient_audience_revision: verified.recipient_audience_revision,
+    })
+}
+
+/// The Control audience that authorizes the Space event stream (WS02-S2 issues it). A read
+/// decision (`model-plane`) is refused by the stream and a stream decision by `ListThreads`,
+/// because each verifier compares the signed `service_audience` exactly.
+pub(crate) const CONTROL_SPACE_STREAM_AUDIENCE: &str = "model-plane-space-stream";
+
+/// Verifies the Control decision that opens a Space event stream: signature and key id,
+/// audience `model-plane-space-stream`, action, schema, payload digest, subject, org, Space,
+/// `thread:read` without any write permission, privacy completeness and the time window.
+#[allow(clippy::result_large_err)]
+pub(crate) fn verify_space_stream_decision(
+    token: &str,
+    decision_ref: &str,
+    org_id: &str,
+    user_id: &str,
+    space_id: &str,
+    now: DateTime<Utc>,
+) -> Result<VerifiedReadClaims, Status> {
+    if token.trim().is_empty() || decision_ref.trim().is_empty() || space_id.trim().is_empty() {
+        return Err(Status::invalid_argument(
+            "a Space event stream requires space_id, decision ref, and token together",
+        ));
+    }
+    if user_id.trim().is_empty() {
+        return Err(Status::permission_denied(
+            "a Space event stream requires an authenticated user subject",
+        ));
+    }
+    let keys = configured_control_space_decision_keys()?;
+    let key_id = token
+        .split('.')
+        .nth(1)
+        .and_then(|part| URL_SAFE_NO_PAD.decode(part).ok())
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let key = keys
+        .get(&key_id)
+        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    verify_thread_read_claims_with_key(
+        token,
+        decision_ref,
+        org_id,
+        user_id,
+        space_id,
+        CONTROL_SPACE_STREAM_AUDIENCE,
+        &key_id,
+        key,
+        now,
+    )
 }
 
 /// Resolve an optional shared-Space read authority for one request.
@@ -9779,6 +9877,7 @@ pub async fn serve(
     events_tx: tokio::sync::broadcast::Sender<mp_contracts::model_plane::v1::OrchestrationEvent>,
     letta_memory: Option<LettaMemoryAdapter>,
     auth: JwtVerifier,
+    space_wakes: crate::space::events::SpaceWakes,
 ) -> anyhow::Result<()> {
     let addr = "0.0.0.0:9091".parse()?;
     info!("gRPC listening on :9091");
@@ -9872,6 +9971,9 @@ pub async fn serve(
         enabled: crate::message_search::message_search_enabled(),
     };
 
+    // Space event stream (WS02-S3): its own small read pool, built before `pool` moves.
+    let space_events = crate::space_stream_grpc::SpaceEventsGrpc::new(pool.clone(), space_wakes);
+
     let session = SessionService {
         pool,
         retrieval_client,
@@ -9922,6 +10024,10 @@ pub async fn serve(
         ))
         .add_service(SpaceRoomReadServiceServer::with_interceptor(
             crate::space::read_service::SpaceRoomReadGrpc,
+            auth.clone(),
+        ))
+        .add_service(SpaceEventsServer::with_interceptor(
+            space_events,
             auth.clone(),
         ))
         .add_service(RunServiceServer::with_interceptor(runs, auth))
@@ -12976,6 +13082,7 @@ mod tests {
                 "model_plane.v1.SessionRetentionService",
                 "model_plane.v1.ThreadAutonomy",
                 "model_plane.v1.SpaceRoomReadService",
+                "model_plane.v1.SpaceEvents",
             ]
         );
     }

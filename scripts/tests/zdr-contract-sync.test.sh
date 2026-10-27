@@ -171,6 +171,13 @@ GOLDENS=(
   # tests/space_routes_zdr_classes.rs (every /api/v1/spaces route has a row). The consumers vendor a
   # copy, with the pin, in the same slice as those lints (VENDORED and CONSUMERS rows then).
   "apps/Model Plane/api/contracts/space-surface.v1.json|3a941eed3e5c9ce403545dcf079f7da36216fcf98890f9ad8d814d4c0cba9fb2"
+
+  # WS02-S3: the Space event stream vocabulary (SSE events, cursor grammar, kind registry, closing codes,
+  # refs allowlist, HTTP error map). AUTHORED by hand with the slice that serves it (session-core
+  # SpaceEvents gRPC, model-gateway GET /v1/spaces/:space_id/events); a generated check under
+  # MP_UPDATE_GOLDEN=1 is owed to the test phase. The gateway BFF (WS02-S4) and the SPA (WS02-S5) vendor a
+  # copy, with the pin, in their own slices (VENDORED and CONSUMERS rows then).
+  "apps/Model Plane/api/contracts/space-events.json|452cc619dd5c4f07e3fb67a2c0776b7a7b3a478cb9a5b3a09e686f809603535f"
 )
 
 # "<repo-relative copy>|<repo-relative golden>"

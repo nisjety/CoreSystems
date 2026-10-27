@@ -39,7 +39,7 @@ use mp_contracts::model_plane::v1::{
     message_search_client::MessageSearchClient,
     orchestration_core_service_client::OrchestrationCoreServiceClient,
     run_service_client::RunServiceClient, sandbox_manager_client::SandboxManagerClient,
-    session_core_client::SessionCoreClient,
+    session_core_client::SessionCoreClient, space_events_client::SpaceEventsClient,
 };
 use tonic::{
     codegen::http::Uri,
@@ -69,6 +69,7 @@ pub fn offline_state() -> AppState {
     state.session_client = SessionCoreClient::new(offline_channel());
     state.message_search_client = MessageSearchClient::new(offline_channel());
     state.learning_client = LearningGovernanceServiceClient::new(offline_channel());
+    state.space_events_client = SpaceEventsClient::new(offline_channel());
     state.managed_run_client = ManagedRunLifecycleClient::new(offline_channel());
     state.run_client = RunServiceClient::new(offline_channel());
     state.orchestration_client = OrchestrationCoreServiceClient::new(offline_channel());

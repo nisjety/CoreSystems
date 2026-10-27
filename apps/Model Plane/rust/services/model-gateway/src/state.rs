@@ -18,7 +18,7 @@ use mp_contracts::model_plane::v1::{
     memory_service_client::MemoryServiceClient,
     orchestration_core_service_client::OrchestrationCoreServiceClient,
     run_service_client::RunServiceClient, sandbox_manager_client::SandboxManagerClient,
-    session_core_client::SessionCoreClient,
+    session_core_client::SessionCoreClient, space_events_client::SpaceEventsClient,
 };
 use mp_events::envelope::Envelope;
 use mp_events::publisher::{EventPublisher, InMemoryPublisher, PublishError};
@@ -105,6 +105,9 @@ pub struct AppState {
     pub message_search_client: MessageSearchClient<Channel>,
     /// Session Core's LearningGovernance service on the same endpoint as `session_client` (WS07-S9).
     pub learning_client: LearningGovernanceServiceClient<Channel>,
+    /// Session Core's SpaceEvents service (the Space event tail), on the same endpoint as
+    /// `session_client` (WS02-S3).
+    pub space_events_client: SpaceEventsClient<Channel>,
     /// Additive managed-run terminalization service hosted by Session Core on
     /// the same gRPC endpoint. It deliberately remains separate from the
     /// legacy `SessionCore` client so existing callers retain their contracts.
@@ -418,6 +421,7 @@ impl AppState {
             inference_client: InferenceCoreClient::new(inference_channel),
             message_search_client: MessageSearchClient::new(session_channel.clone()),
             learning_client: LearningGovernanceServiceClient::new(session_channel.clone()),
+            space_events_client: SpaceEventsClient::new(session_channel.clone()),
             session_client: SessionCoreClient::new(session_channel),
             managed_run_client: ManagedRunLifecycleClient::new(managed_run_channel),
             session_terminal_tokens: None,
@@ -580,6 +584,11 @@ impl AppState {
             "http://localhost:9091",
         )?);
         let learning_client = LearningGovernanceServiceClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
+        let space_events_client = SpaceEventsClient::new(Self::lazy_channel(
             "SESSION_CORE_URL",
             "SESSION_CORE_ADDR",
             "http://localhost:9091",
@@ -785,6 +794,7 @@ impl AppState {
             state.session_client = session_client;
             state.message_search_client = message_search_client;
             state.learning_client = learning_client;
+            state.space_events_client = space_events_client;
             state.managed_run_client = managed_run_client;
             state.session_terminal_tokens = Some(session_terminal_tokens);
             state.mail_task_bridge_tokens = mail_task_bridge_tokens.clone();
@@ -838,6 +848,7 @@ impl AppState {
             state.session_client = session_client;
             state.message_search_client = message_search_client;
             state.learning_client = learning_client;
+            state.space_events_client = space_events_client;
             state.managed_run_client = managed_run_client;
             state.session_terminal_tokens = Some(session_terminal_tokens);
             state.mail_task_bridge_tokens = mail_task_bridge_tokens;
