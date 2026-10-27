@@ -72,12 +72,10 @@ describe('RegionBoundary', () => {
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
-  // DEPTH-SHELL-1: Solid 2.0.0-rc.0 hands `Errored`'s fallback the error as an accessor
-  // (`fallback(err, reset)` where `err()` is the error). RegionBoundary passes that function straight to
-  // FailureCard as `error`, so every failure classifies as render_error: the stale_deploy,
-  // session_expired and gateway_unreachable copy and the hidden Retry never show. Fix is `error()` in
-  // RegionBoundary; un-skip these two when it lands.
-  it.skip('DEPTH-SHELL-1: classifies a thrown stale-import TypeError as stale_deploy', async () => {
+  // DEPTH-SHELL-1 (fixed): Solid 2.0.0-rc.0 hands `Errored`'s fallback the error as an accessor, and
+  // RegionBoundary now reads it before classifying, so stale_deploy, session_expired and
+  // gateway_unreachable show their own copy and Retry is hidden where it cannot help.
+  it('DEPTH-SHELL-1: classifies a thrown stale-import TypeError as stale_deploy', async () => {
     function Bad(): never {
       throw new TypeError('Failed to fetch dynamically imported module: /assets/Page-x.js')
     }
@@ -90,8 +88,12 @@ describe('RegionBoundary', () => {
     expect(alert.getAttribute('data-failure-class')).toBe('stale_deploy')
   })
 
-  it.skip('DEPTH-SHELL-1: classifies a rejected lazy() import as stale_deploy and offers no Retry', async () => {
-    const Stale = lazy(() => Promise.reject(new TypeError('Failed to fetch dynamically imported module: /assets/Page-x.js')))
+  it('DEPTH-SHELL-1: classifies a rejected lazy() import as stale_deploy and offers no Retry', async () => {
+    // The boundary is what handles this failure; mark the loader's promise handled so vitest does not
+    // also report it as an unhandled rejection.
+    const failed = Promise.reject(new TypeError('Failed to fetch dynamically imported module: /assets/Page-x.js'))
+    failed.catch(() => undefined)
+    const Stale = lazy(() => failed)
     render(() => (
       <RegionBoundary region="outlet">
         <Stale />

@@ -1100,7 +1100,7 @@ describe('SpaceRoomComposer — human posts (WS01-S6)', () => {
     })
   })
 
-  it.skip('DEPTH-SPA-1: with the default journal a post leaves the composer without an explicit flush', async () => {
+  it('DEPTH-SPA-1: with the default journal a post leaves the composer without an explicit flush', async () => {
     cleanup()
     render(() => (
       <SpaceRoomComposer

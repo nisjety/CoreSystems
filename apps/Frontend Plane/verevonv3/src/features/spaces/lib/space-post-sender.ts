@@ -103,9 +103,11 @@ export function createSpacePostSender(options: SpacePostSenderOptions): SpacePos
     return stage === 'queued' || stage === 'sending'
   }
 
-  async function attempt(sendId: string): Promise<void> {
-    const entry = journal.get(sendId)
-    if (!entry) return
+  // Takes the entry itself: Solid 2 applies a signal write at the next flush, so `journal.get`
+  // straight after `journal.begin` still sees the old list and the first send would never go out.
+  // Reads after the request (an await) are safe: the writes have been flushed by then.
+  async function attempt(entry: SpaceJournalEntry): Promise<void> {
+    const sendId = entry.sendId
     if (!online()) {
       journal.update(sendId, { stage: 'queued' })
       return
@@ -124,8 +126,7 @@ export function createSpacePostSender(options: SpacePostSenderOptions): SpacePos
       setTimeout(() => {
         if (journal.get(sendId)?.stage === 'accepted') journal.remove(sendId)
       }, ACCEPTED_TTL_MS)
-      const accepted = journal.get(sendId)
-      if (accepted) options.onAccepted?.(accepted, receipt)
+      options.onAccepted?.({ ...entry, stage: 'accepted', threadId: receipt.threadId, failure: undefined }, receipt)
     } catch (error) {
       if (!journal.get(sendId)) return
       const failure = classify(error, options.describeError)
@@ -151,26 +152,25 @@ export function createSpacePostSender(options: SpacePostSenderOptions): SpacePos
       && prior.content === content
       && (kind === 'post_new' || prior.threadId === input.replyThreadId)
     if (prior && !sameSend) journal.remove(prior.sendId)
-    const sendId = sameSend && prior ? prior.sendId : newSpaceSendId()
-    if (!sameSend) {
-      journal.begin({
-        sendId,
-        kind,
-        spaceRef,
-        threadId: input.replyThreadId,
-        content,
-        baselineUpdatedAt: input.replyThreadId ? options.baselineUpdatedAt?.(input.replyThreadId) : undefined,
-        stage: online() ? 'sending' : 'queued',
-      })
-    }
-    setCurrentId(sendId)
-    await attempt(sendId)
+    const entry = sameSend && prior
+      ? prior
+      : journal.begin({
+          sendId: newSpaceSendId(),
+          kind,
+          spaceRef,
+          threadId: input.replyThreadId,
+          content,
+          baselineUpdatedAt: input.replyThreadId ? options.baselineUpdatedAt?.(input.replyThreadId) : undefined,
+          stage: online() ? 'sending' : 'queued',
+        })
+    setCurrentId(entry.sendId)
+    await attempt(entry)
   }
 
   async function retry(): Promise<void> {
     const entry = current()
     if (!entry || entry.stage !== 'failed' || entry.failure?.retryable !== true) return
-    await attempt(entry.sendId)
+    await attempt(entry)
   }
 
   function discard(): void {
@@ -183,7 +183,7 @@ export function createSpacePostSender(options: SpacePostSenderOptions): SpacePos
   // A queued post goes out once when the browser is back.
   const onOnline = () => {
     const entry = current()
-    if (entry?.stage === 'queued') void attempt(entry.sendId)
+    if (entry?.stage === 'queued') void attempt(entry)
   }
   if (typeof window !== 'undefined') window.addEventListener('online', onOnline)
   const dispose = () => {

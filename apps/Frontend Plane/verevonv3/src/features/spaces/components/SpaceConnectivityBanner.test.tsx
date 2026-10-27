@@ -29,19 +29,18 @@ afterEach(() => {
   flush()
 })
 
-// DEPTH-SPA-2: SpaceConnectivityBanner calls watchBrowserConnectivity() in its component body, whose
-// first `sync()` writes a signal inside the owned scope. Solid 2 refuses that write
-// (REACTIVE_WRITE_IN_OWNED_SCOPE), so with the banner switched on the component throws on mount.
-// The cases that need the banner mounted are skipped until the write moves into onMount/an effect;
-// the connectivity state itself is covered in lib/space-connectivity.test.ts.
+// DEPTH-SPA-2 (fixed): the banner starts the watcher in onMount, and the watcher writes only on a
+// change, so mounting it no longer writes a signal inside the component body (Solid 2 refuses that
+// with REACTIVE_WRITE_IN_OWNED_SCOPE). The connectivity state itself is covered in
+// lib/space-connectivity.test.ts.
 describe('SpaceConnectivityBanner (WS01-S8)', () => {
-  it.skip('DEPTH-SPA-2: renders nothing while online', () => {
+  it('DEPTH-SPA-2: renders nothing while online', () => {
     render(() => <SpaceConnectivityBanner />)
     expect(screen.queryByRole('status')).toBeNull()
     expect(document.querySelector('.verevon-space-connectivity')).toBeNull()
   })
 
-  it.skip('DEPTH-SPA-2: says the user is offline after the browser goes offline', async () => {
+  it('DEPTH-SPA-2: says the user is offline after the browser goes offline', async () => {
     render(() => <SpaceConnectivityBanner />)
     setNavigatorOnline(false)
     window.dispatchEvent(new Event('offline'))
@@ -52,7 +51,7 @@ describe('SpaceConnectivityBanner (WS01-S8)', () => {
     expect(banner.getAttribute('aria-live')).toBe('polite')
   })
 
-  it.skip('DEPTH-SPA-2: says the room is unreachable, with the retry sentence, after an unresumable send', async () => {
+  it('DEPTH-SPA-2: says the room is unreachable, with the retry sentence, after an unresumable send', async () => {
     render(() => <SpaceConnectivityBanner />)
     noteSendTransportLost()
     flush()
@@ -62,7 +61,7 @@ describe('SpaceConnectivityBanner (WS01-S8)', () => {
     expect(banner.getAttribute('data-state')).toBe('unreachable')
   })
 
-  it.skip('DEPTH-SPA-2: offline wins over unreachable', async () => {
+  it('DEPTH-SPA-2: offline wins over unreachable', async () => {
     render(() => <SpaceConnectivityBanner />)
     noteSendTransportLost()
     setNavigatorOnline(false)
@@ -72,7 +71,7 @@ describe('SpaceConnectivityBanner (WS01-S8)', () => {
     expect(spaceConnectivity()).toBe('offline')
   })
 
-  it.skip('DEPTH-SPA-2: goes away on the online event, which also clears an unreachable room', async () => {
+  it('DEPTH-SPA-2: goes away on the online event, which also clears an unreachable room', async () => {
     render(() => <SpaceConnectivityBanner />)
     noteSendTransportLost()
     setNavigatorOnline(false)
@@ -86,7 +85,7 @@ describe('SpaceConnectivityBanner (WS01-S8)', () => {
     expect(spaceConnectivity()).toBe('online')
   })
 
-  it.skip('DEPTH-SPA-2: goes away when a later send reaches the server', async () => {
+  it('DEPTH-SPA-2: goes away when a later send reaches the server', async () => {
     render(() => <SpaceConnectivityBanner />)
     noteSendTransportLost()
     flush()
@@ -107,7 +106,7 @@ describe('SpaceConnectivityBanner (WS01-S8)', () => {
     expect(document.querySelector('.verevon-space-connectivity')).toBeNull()
   })
 
-  it.skip('DEPTH-SPA-2: stops following browser events once it is removed', () => {
+  it('DEPTH-SPA-2: stops following browser events once it is removed', () => {
     const view = render(() => <SpaceConnectivityBanner />)
     view.unmount()
     setNavigatorOnline(false)

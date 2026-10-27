@@ -86,9 +86,9 @@ describe('space connectivity state (WS01-S8)', () => {
     expect(spaceConnectivity()).toBe('online')
   })
 
-  // DEPTH-SPA-2: the first sync() writes a signal, so starting the watcher from a component body (as
-  // SpaceConnectivityBanner does) throws REACTIVE_WRITE_IN_OWNED_SCOPE under Solid 2.
-  it.skip('DEPTH-SPA-2: can be started from inside an owned scope without throwing', () => {
+  // DEPTH-SPA-2 (fixed): the first sync() writes only when the state changed, so the watcher can start
+  // inside an owned scope without Solid 2 refusing the write.
+  it('DEPTH-SPA-2: can be started from inside an owned scope without throwing', () => {
     createRoot((dispose) => {
       const off = watchBrowserConnectivity()
       off()

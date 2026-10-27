@@ -1,4 +1,4 @@
-import { onCleanup, Show } from 'solid-js'
+import { onSettled, Show } from 'solid-js'
 
 import { useI18n } from '@/shared/i18n'
 import {
@@ -18,8 +18,9 @@ import './space-connectivity.css'
 export function SpaceConnectivityBanner() {
   const i18n = useI18n()
   if (!spaceConnectivityBannerEnabled()) return null
-  const stop = watchBrowserConnectivity()
-  onCleanup(stop)
+  // Started once settled, not in the component body: the watcher's first sync may write a signal.
+  // The returned stop function is the cleanup.
+  onSettled(() => watchBrowserConnectivity())
 
   return (
     <Show when={spaceConnectivity() !== 'online'}>

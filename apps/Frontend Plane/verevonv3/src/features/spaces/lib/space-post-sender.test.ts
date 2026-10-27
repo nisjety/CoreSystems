@@ -32,7 +32,7 @@ type Harness = {
 
 // Solid 2 batches signal writes until the next flush, and the sender reads the journal straight
 // after writing it. The logic tests below flush after every journal write so they test the
-// sender's decisions; the one test of the unflushed path is skipped as DEPTH-SPA-1.
+// sender's decisions; the one test of the unflushed path (DEPTH-SPA-1) runs on the plain journal.
 function flushingJournal(): SpaceSendJournal {
   const inner = createSpaceSendJournal()
   const settled = <A extends unknown[], R>(fn: (...args: A) => R) => (...args: A): R => {
@@ -83,9 +83,9 @@ afterEach(() => {
 })
 
 describe('space post sender (WS01-S6)', () => {
-  // DEPTH-SPA-1: with the real journal and no flush between its write and the sender's read,
-  // `attempt` finds no entry (Solid 2 reads the committed value) and returns before any request.
-  it.skip('DEPTH-SPA-1: a send reaches the transport without an explicit flush', async () => {
+  // DEPTH-SPA-1 (fixed): the sender hands `attempt` the entry `begin` returned instead of reading
+  // the journal back, which Solid 2 would answer with the not-yet-flushed list.
+  it('DEPTH-SPA-1: a send reaches the transport without an explicit flush', async () => {
     createSpacePost.mockResolvedValue(receipt)
     const journal = createSpaceSendJournal()
     const sender = createSpacePostSender({

@@ -1,4 +1,4 @@
-import { createSignal } from 'solid-js'
+import { createSignal, untrack } from 'solid-js'
 
 /**
  * What the room's composer may honestly say about the connection (WS01-S8,
@@ -47,7 +47,12 @@ export function noteSendTransportOk(): void {
  */
 export function watchBrowserConnectivity(): () => void {
   if (typeof window === 'undefined') return () => undefined
-  const sync = () => setBrowserIsOnline(browserOnline())
+  // Writes only on a change: the first sync usually finds nothing to do, and a write while a component
+  // body is still running halts the reactive system under Solid 2 (REACTIVE_WRITE_IN_OWNED_SCOPE).
+  const sync = () => {
+    const now = browserOnline()
+    if (untrack(browserIsOnline) !== now) setBrowserIsOnline(now)
+  }
   const back = () => {
     setBrowserIsOnline(true)
     setSendUnreachable(false)

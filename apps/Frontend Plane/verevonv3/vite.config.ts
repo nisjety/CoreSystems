@@ -118,6 +118,13 @@ export default defineConfig({
     environment: 'jsdom',
     globals: true,
     setupFiles: ['./src/test/setup.ts'],
+    // Solid's lazy() also raises a rejected loader on a derived promise the boundary cannot see. This one
+    // sentinel is the stale-deploy case in RegionBoundary.test.tsx, which the boundary does handle (the
+    // test asserts it); every other unhandled error still fails the run.
+    onUnhandledError(error) {
+      // Duck-typed: the error comes from jsdom's realm, where `instanceof Error` is false.
+      if (String((error as { message?: unknown } | null)?.message ?? '').includes('/assets/Page-x.js')) return false
+    },
     // Playwright specs live under tests/e2e and import @playwright/test — they
     // must never be collected by vitest (they run via `pnpm test:e2e`).
     exclude: [

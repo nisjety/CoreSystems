@@ -40,8 +40,11 @@ export function RegionBoundary(props: RegionBoundaryProps) {
 
   return (
     <Errored
-      fallback={(error: unknown, reset: () => void) => {
+      fallback={(caught: unknown, reset: () => void) => {
         pendingReset = reset
+        // Solid 2.0.0-rc.0 hands the fallback the error as an accessor; read it once here so the card
+        // classifies the real error (stale deploy, expired session, unreachable gateway), not the accessor.
+        const error = typeof caught === 'function' ? (caught as () => unknown)() : caught
         console.error(`[region-boundary:${props.region}]`, error)
         return (
           <FailureCard

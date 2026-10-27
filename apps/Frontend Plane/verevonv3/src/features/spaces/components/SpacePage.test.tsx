@@ -1904,9 +1904,9 @@ describe('SpacePage', () => {
       expect((await screen.findByRole('alert')).textContent).toContain('11 / 10')
     })
 
-    // DEPTH-SPA-1: the page's own journal is the unflushed one, so a post never leaves the composer
-    // and there is no accepted entry to reconcile. Left written for the live tier.
-    it.skip('DEPTH-SPA-1: an accepted post is dropped from the pending rows once the projection lists its thread', async () => {
+    // DEPTH-SPA-1 (fixed): the sender no longer reads the journal back after writing it, so the page's
+    // own journal delivers the post and the accepted entry is reconciled against the projection.
+    it('DEPTH-SPA-1: an accepted post is dropped from the pending rows once the projection lists its thread', async () => {
       spacesClient.getSpaceContext.mockResolvedValue(postsContext('editor'))
       spacesClient.createSpacePost.mockResolvedValue({
         threadId: 'thread_new', messageId: 'm1', sequence: 1, deduplicated: false,
@@ -1915,14 +1915,16 @@ describe('SpacePage', () => {
       await screen.findByRole('heading', { name: 'Personlig rom', level: 1 })
       fireEvent.input(screen.getByPlaceholderText(/Skriv/), { target: { value: 'Hei alle' } })
       flush()
-      fireEvent.click(screen.getByRole('button', { name: 'Send' }))
-      await waitFor(() => expect(spacesClient.createSpacePost).toHaveBeenCalledTimes(1))
-      expect(await screen.findByText('Sendt')).toBeTruthy()
+      // The page re-reads the room once on acceptance, so the projection must already list the new
+      // thread when that read happens; a later change would wait for the next poll or stream frame.
       spacesClient.getSpaceThreads.mockResolvedValue({
         ...personalContext,
         threads: [{ thread_id: 'thread_new', space_id: 'space_personal_1', title: 'Hei alle', preview: 'Hei alle' }],
       })
+      fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+      await waitFor(() => expect(spacesClient.createSpacePost).toHaveBeenCalledTimes(1))
       await waitFor(() => expect(screen.queryByText('Sendt')).toBeNull())
+      expect(screen.queryByText('Hei alle', { selector: '.verevon-room-pending *' })).toBeNull()
     })
   })
 
