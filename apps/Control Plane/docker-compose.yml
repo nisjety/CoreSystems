@@ -791,6 +791,13 @@ services:
     # convergence and Compose retries failures without gating Control startup.
     # Audit Core connects independently and reports each unavailable plane as
     # degraded until this process succeeds and its fixed consumers can bind.
+    # The application bus is NOT optional (WS01-S4): it owns the application
+    # audit stream and the two audit-core durables, and a skipped failure exited
+    # 0, so Compose never retried and the topology never converged once the
+    # Application Plane came up. A failure now exits 1 and restart: on-failure
+    # retries it; nothing depends on this service, so Control startup is not
+    # gated. The model bus stays optional: Model Plane's own nats-provisioner
+    # converges the same stream (postmortem 0002, follow-up 1).
     audit-extra-nats-provisioner:
         <<: *core-security
         build:
@@ -802,7 +809,7 @@ services:
         entrypoint: ["/usr/local/bin/nats-provisioner"]
         environment:
             AUDIT_NATS_PROVISION_BUSES: >-
-                [{"name":"model","plane":"model","url":"nats://model-nats:4222","user":"observability-provisioner-model","password":"${MODEL_NATS_PROVISIONER_PASSWORD:?MODEL_NATS_PROVISIONER_PASSWORD is required}","optional":true},{"name":"application","plane":"application","url":"nats://application-nats:4222","user":"observability-provisioner-application","password":"${APPLICATION_NATS_PROVISIONER_PASSWORD:?APPLICATION_NATS_PROVISIONER_PASSWORD is required}","optional":true}]
+                [{"name":"model","plane":"model","url":"nats://model-nats:4222","user":"observability-provisioner-model","password":"${MODEL_NATS_PROVISIONER_PASSWORD:?MODEL_NATS_PROVISIONER_PASSWORD is required}","optional":true},{"name":"application","plane":"application","url":"nats://application-nats:4222","user":"observability-provisioner-application","password":"${APPLICATION_NATS_PROVISIONER_PASSWORD:?APPLICATION_NATS_PROVISIONER_PASSWORD is required}"}]
         networks:
             - inter-plane-bus
 

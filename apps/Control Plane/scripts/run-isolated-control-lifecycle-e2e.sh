@@ -158,7 +158,7 @@ for (const expectedFile of expectedFiles) {
 NODE
 }
 
-echo "[1/7] Better Auth invitation repair and reviewed historical owner preflight"
+echo "[1/8] Better Auth invitation repair and reviewed historical owner preflight"
 (
   cd "$root_dir/auth-core"
   TEST_DATABASE_URL="$(dsn auth_invitation)" \
@@ -185,7 +185,7 @@ echo "[1/7] Better Auth invitation repair and reviewed historical owner prefligh
     invitation-acceptance-rate-limit.ts
 )
 
-echo "[2/7] Auth deletion outbox partial-failure resume and exact endpoints"
+echo "[2/8] Auth deletion outbox partial-failure resume and exact endpoints"
 (
   cd "$root_dir/auth-core"
   lifecycle_dsn="$(dsn auth_outbox)"
@@ -195,7 +195,7 @@ echo "[2/7] Auth deletion outbox partial-failure resume and exact endpoints"
       src/auth/organization-deletion-lifecycle.postgres.spec.ts
 )
 
-echo "[3/7] Org projection/plan ordering, durable GDPR audit, erasure retry, and tombstone"
+echo "[3/8] Org projection/plan ordering, durable GDPR audit, erasure retry, and tombstone"
 (
   cd "$root_dir/org-core"
   CONTROL_LIFECYCLE_TEST_DATABASE_URL="$(dsn org_lifecycle)" \
@@ -227,14 +227,20 @@ echo "[3/7] Org projection/plan ordering, durable GDPR audit, erasure retry, and
     client.go publishAuditMessage
 )
 
-echo "[4/7] Org scoped HTTP middleware, routes, handlers, and Postgres"
+echo "[4/8] Org scoped HTTP middleware, routes, handlers, and Postgres"
 (
   cd "$root_dir/org-core"
   CONTROL_LIFECYCLE_TEST_DATABASE_URL="$(dsn org_lifecycle)" \
     go test ./internal/http -count=1
 )
 
-echo "[5/7] Full Billing package: revisions, atomic usage, stale writers, and tombstones"
+echo "[5/8] Org model entitlement repository under RLS (migration 021, compare-and-set, history, GDPR cascade)"
+(
+  cd "$root_dir/org-core"
+  CONTROL_LIFECYCLE_TEST_DATABASE_URL="$(dsn org_lifecycle)"     go test ./internal/modelentitlement       -run '^TestControlLifecycleModelEntitlementRepositoryUnderRLS$'       -count=1 -v
+)
+
+echo "[6/8] Full Billing package: revisions, atomic usage, stale writers, and tombstones"
 (
   cd "$root_dir/billing-core"
   CONTROL_LIFECYCLE_TEST_DATABASE_URL="$(dsn billing_lifecycle)" \
@@ -252,7 +258,7 @@ echo "[5/7] Full Billing package: revisions, atomic usage, stale writers, and to
     service.go RecordUsage
 )
 
-echo "[6/7] Billing durable plan consumer retry and dead-letter boundary"
+echo "[7/8] Billing durable plan consumer retry and dead-letter boundary"
 (
   cd "$root_dir/billing-core"
   go test ./internal/nats \
@@ -260,7 +266,7 @@ echo "[6/7] Billing durable plan consumer retry and dead-letter boundary"
     -count=1
 )
 
-echo "[7/7] Billing scoped HTTP middleware, routes, handlers, and Postgres"
+echo "[8/8] Billing scoped HTTP middleware, routes, handlers, and Postgres"
 (
   cd "$root_dir/billing-core"
   CONTROL_LIFECYCLE_TEST_DATABASE_URL="$(dsn billing_lifecycle)" \

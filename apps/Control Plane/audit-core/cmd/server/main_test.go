@@ -138,6 +138,25 @@ func TestRequiredProvisioningIsIndependentFromOptionalExtraPlanes(t *testing.T) 
 			t.Fatalf("optional extra-plane provisioner is missing %q", requiredText)
 		}
 	}
+	// WS01-S4 (D1-115): the application bus owns the application audit stream and the two
+	// audit-core durables. Marked optional, a failed attempt was skipped with exit 0, so
+	// restart: on-failure never retried it and the topology never converged once the
+	// Application Plane came up. It must fail (and be retried) instead.
+	appStart := strings.Index(extra, `"name":"application"`)
+	if appStart < 0 {
+		t.Fatal("extra-plane provisioner has no application bus entry")
+	}
+	// The entry ends at the brace that closes the JSON object, not at the one closing the
+	// ${...} password interpolation inside it.
+	appEntry := extra[appStart:]
+	for _, closer := range []string{"},{", "}]"} {
+		if end := strings.Index(appEntry, closer); end >= 0 {
+			appEntry = appEntry[:end]
+		}
+	}
+	if strings.Contains(appEntry, `"optional"`) {
+		t.Fatalf("the application bus entry must not be optional: %s", appEntry)
+	}
 	for _, service := range []string{"auth-core", "user-core", "org-core", "billing-core", "session-core", "audit-core"} {
 		block, blockErr := composeServiceBlock(compose, service)
 		if blockErr != nil {
