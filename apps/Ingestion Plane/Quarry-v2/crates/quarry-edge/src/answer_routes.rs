@@ -43,7 +43,8 @@ pub struct ErrorBody {
 
 /// `POST /v1/answer`. WS4.J: wraps `answer_run` so a ZDR run's metadata-only tombstone is
 /// sent once, from the response status (off unless the flag is on; fail open). The
-/// streamed variant (`answer_stream`) ends inside its stream and emits no tombstone yet.
+/// streamed variant (`answer_stream`) ends inside its stream, so it sends its tombstone
+/// from the stream's end instead (D1-003, [`crate::zdr_tombstone::StreamEnd`]).
 pub async fn answer(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
@@ -184,7 +185,17 @@ pub async fn answer_stream(
         )
             .into_response();
     }
+    // D1-003: a streamed ZDR answer leaves its tombstone from the stream's end, whether the
+    // stream finishes, fails or is dropped by a client that went away. Off unless the
+    // tombstone flag is on (it stays off until counsel signs it off); a standard run is None.
+    let mut tombstone = crate::zdr_tombstone::StreamEnd::new(crate::zdr_tombstone::Pending::begin(
+        state.tombstones.as_ref(),
+        claims.effective_zdr(req.zdr.unwrap_or(false)),
+        &claims.org_id,
+        crate::zdr_tombstone::Kind::Answer,
+    ));
     let Some(pipeline) = state.answer_pipeline.clone() else {
+        tombstone.status(StatusCode::NOT_IMPLEMENTED.as_u16());
         return (
             StatusCode::NOT_IMPLEMENTED,
             Json(
@@ -230,6 +241,8 @@ pub async fn answer_stream(
     let usage = state.usage.clone();
 
     let sse = Sse::new(async_stream::stream! {
+        // Held for the life of the stream: dropped (and sent) when the stream ends or is dropped.
+        let mut tombstone = tombstone;
         // Warm answer-cache hit → replay instantly, skip search + synthesis.
         if let Some(c) = &scache {
             if let Some(cached) = c.get::<String>(&cache_key).await {
@@ -249,6 +262,7 @@ pub async fn answer_stream(
         let prepared = match pipeline.prepare(&pipeline_req).await {
             Ok(p) => p,
             Err(e) => {
+                tombstone.failed(&e);
                 yield Ok(Event::default()
                     .event("error")
                     .data(serde_json::json!({ "message": e.message }).to_string()));
@@ -261,6 +275,7 @@ pub async fn answer_stream(
         yield Ok(Event::default().event("citations").data(citations_json));
 
         if prepared.sources_used == 0 {
+            tombstone.ok();
             yield Ok(Event::default()
                 .event("done")
                 .data(serde_json::json!({ "answer": "", "cached": false }).to_string()));
@@ -302,6 +317,7 @@ pub async fn answer_stream(
                 }
             }
             Err(e) => {
+                tombstone.failed(&e);
                 yield Ok(Event::default()
                     .event("error")
                     .data(serde_json::json!({ "message": e.message }).to_string()));
@@ -332,6 +348,7 @@ pub async fn answer_stream(
                 .await;
         }
 
+        tombstone.ok();
         yield Ok(Event::default()
             .event("done")
             .data(serde_json::json!({ "answer": full, "cached": false }).to_string()));

@@ -518,6 +518,12 @@ impl Pending {
             return;
         }
         let (outcome, class) = outcome_of_status(status);
+        self.finish_with(outcome, class);
+    }
+
+    /// Sends the tombstone for a run that ended with `outcome`. `class` is a closed
+    /// `ErrorCode` wire name or `None`; never an error text.
+    pub fn finish_with(self, outcome: Outcome, class: Option<&'static str>) {
         let Some(mut tombstone) =
             Tombstone::new(&self.run_id, &self.org_id, self.kind, outcome, Utc::now())
         else {
@@ -526,6 +532,67 @@ impl Pending {
         tombstone = tombstone.with_started_at(self.started_at);
         tombstone.error_class = class;
         self.emitter.emit(tombstone);
+    }
+}
+
+/// The tombstone of a STREAMED run (D1-003: `/v1/answer/stream`). The handler returns
+/// before the run ends, so the response status says nothing; the run ends when the
+/// stream does. This guard lives inside the stream and sends the tombstone when it is
+/// dropped, which happens exactly when the stream is: after its last frame, after an
+/// `error` frame, or when the client goes away and the server drops the stream
+/// mid-run (cancellation). The outcome is whatever the stream recorded before then
+/// ([`StreamEnd::ok`], [`StreamEnd::failed`], [`StreamEnd::status`]); a drop with
+/// nothing recorded is `cancelled`, with no error class.
+///
+/// A guard over `None` (no emitter, or the run is not under ZDR) does nothing at all,
+/// so a standard stream costs nothing and emits nothing. The send is the same fail-open
+/// spawned delivery as every other tombstone; with no tokio runtime to spawn on (a
+/// drop during runtime shutdown) it is skipped rather than panicking.
+pub struct StreamEnd {
+    pending: Option<Pending>,
+    ended: Option<(Outcome, Option<&'static str>)>,
+}
+
+impl StreamEnd {
+    #[must_use]
+    pub fn new(pending: Option<Pending>) -> Self {
+        Self {
+            pending,
+            ended: None,
+        }
+    }
+
+    /// The stream completed.
+    pub fn ok(&mut self) {
+        self.ended = Some((Outcome::Ok, None));
+    }
+
+    /// The stream ended with this error (its class goes in the tombstone, never its text).
+    pub fn failed(&mut self, error: &QuarryError) {
+        self.ended = Some((Outcome::from_error(error), Some(crate::zdr_log::class(error))));
+    }
+
+    /// The run ended as an HTTP status would say (the refusal before the stream starts).
+    /// A status that means no run took place records nothing, so the guard sends nothing.
+    pub fn status(&mut self, status: u16) {
+        if status_means_no_run(status) {
+            self.pending = None;
+        } else {
+            self.ended = Some(outcome_of_status(status));
+        }
+    }
+}
+
+impl Drop for StreamEnd {
+    fn drop(&mut self) {
+        let Some(pending) = self.pending.take() else {
+            return;
+        };
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        let (outcome, class) = self.ended.take().unwrap_or((Outcome::Cancelled, None));
+        pending.finish_with(outcome, class);
     }
 }
 
