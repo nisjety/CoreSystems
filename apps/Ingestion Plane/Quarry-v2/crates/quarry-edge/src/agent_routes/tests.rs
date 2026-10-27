@@ -1281,6 +1281,61 @@ async fn human_step_is_allowed_during_takeover() {
     }
 }
 
+/// R-8 and WS8.F: a person who takes over an agent-class run that hit its cap is not refused
+/// and spends nothing, in shadow (the default) and in on. Without the takeover the same
+/// person's step on that run still counts (the run class is the budget subject).
+#[tokio::test]
+async fn a_takeover_step_on_a_capped_agent_class_run_is_not_refused_and_spends_nothing() {
+    for mode in [crate::budget::BudgetMode::Shadow, crate::budget::BudgetMode::On] {
+        let _pinned = crate::budget::test_mode::pin(mode);
+        let state = test_state_with_static_driver();
+        let claims = crate::test_support::claims_for_org("org");
+        let capped = |takeover: bool| {
+            let mut budget = agent_budget(1);
+            budget.charge(true, 0);
+            let mut entry = entry_with_budget(Some(budget));
+            entry.actor_id = claims.actor_id().to_string();
+            entry.constraints.max_steps = 1;
+            entry.summary.step = 1;
+            if takeover {
+                entry.control_mode = BrowserControlMode::HumanTakeover;
+                entry.control_epoch = 1;
+            }
+            handle_for(entry)
+        };
+        let action = AgentAction::Back;
+
+        let handle = capped(true);
+        let mut entry = handle.entry.lock().await;
+        let steps_before = entry.budget.as_ref().map(|b| b.ledger.snapshot(std::time::Instant::now()).steps);
+        let admitted = admit_action(&state, &handle, &mut entry, input(StepInitiator::Human, &action, true))
+            .await
+            .unwrap_or_else(|error| panic!("{mode:?}: the person's takeover step is admitted: {error:?}"));
+        assert!(admitted.takeover);
+        assert_eq!(
+            entry.budget.as_ref().map(|b| b.ledger.snapshot(std::time::Instant::now()).steps),
+            steps_before,
+            "{mode:?}: admission spends nothing"
+        );
+        assert!(!super::human_browse::counts_against_step_budget(
+            admitted.initiator,
+            admitted.takeover,
+            entry.budget.as_ref()
+        ));
+        drop(entry);
+
+        let handle = capped(false);
+        let mut entry = handle.entry.lock().await;
+        let error = admit_action(&state, &handle, &mut entry, input(StepInitiator::Human, &action, true))
+            .await
+            .expect_err("without a takeover a person's step on an agent-class run still counts");
+        assert!(
+            matches!(error.code, ErrorCode::RateLimited | ErrorCode::BudgetExhausted),
+            "{mode:?}: {error:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn agent_hint_on_user_token_is_refused_during_takeover() {
     let state = test_state_with_static_driver();

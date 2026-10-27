@@ -138,11 +138,18 @@ pub(super) fn open_web_egress(
 /// class (plan R-8): a step on an agent-class run counts whoever drives it, so a person's
 /// token holding a `run` grant, or a person's step on a run started with the `agent` hint,
 /// cannot step past the agent's bounds. On any other run a person's own step is exempt (a
-/// person's session is never capped) and an agent's or the system's step counts.
+/// person's session is never capped) and an agent's or the system's step counts. A person's
+/// step while the person holds the browser (`takeover`) is always exempt: the plan keeps the
+/// initiator for takeover and receipts only, and the runtime clock is paused for it (WS6.B,
+/// WS8.F), so taking over a run that hit its cap neither is refused nor spends what is left.
 pub(super) fn counts_against_step_budget(
     initiator: StepInitiator,
+    takeover: bool,
     budget: Option<&crate::budget::RunBudget>,
 ) -> bool {
+    if initiator == StepInitiator::Human && takeover {
+        return false;
+    }
     initiator != StepInitiator::Human
         || budget.is_some_and(|budget| budget.class == crate::budget::RunClass::Agent)
 }
@@ -279,25 +286,33 @@ mod tests {
 
     #[test]
     fn human_steps_do_not_consume_max_steps() {
-        assert!(!counts_against_step_budget(StepInitiator::Human, None));
+        assert!(!counts_against_step_budget(StepInitiator::Human, false, None));
         let interactive = run_budget(crate::budget::RunClass::Interactive);
-        assert!(!counts_against_step_budget(StepInitiator::Human, Some(&interactive)));
+        assert!(!counts_against_step_budget(StepInitiator::Human, false, Some(&interactive)));
     }
 
     #[test]
     fn agent_steps_still_consume_max_steps() {
-        assert!(counts_against_step_budget(StepInitiator::Agent, None));
-        assert!(counts_against_step_budget(StepInitiator::System, None));
+        assert!(counts_against_step_budget(StepInitiator::Agent, false, None));
+        assert!(counts_against_step_budget(StepInitiator::System, false, None));
         let interactive = run_budget(crate::budget::RunClass::Interactive);
-        assert!(counts_against_step_budget(StepInitiator::Agent, Some(&interactive)));
+        assert!(counts_against_step_budget(StepInitiator::Agent, false, Some(&interactive)));
     }
 
     #[test]
     fn a_persons_step_on_an_agent_class_run_counts_because_the_run_class_is_the_budget_subject() {
         // R-8: the subject is the run class, not the step's initiator.
         let agent = run_budget(crate::budget::RunClass::Agent);
-        assert!(counts_against_step_budget(StepInitiator::Human, Some(&agent)));
-        assert!(counts_against_step_budget(StepInitiator::Agent, Some(&agent)));
+        assert!(counts_against_step_budget(StepInitiator::Human, false, Some(&agent)));
+        assert!(counts_against_step_budget(StepInitiator::Agent, false, Some(&agent)));
+    }
+
+    #[test]
+    fn a_persons_step_during_a_takeover_never_counts_even_on_an_agent_class_run() {
+        // The plan keeps the initiator for takeover and receipts only (R-8, WS8.F).
+        let agent = run_budget(crate::budget::RunClass::Agent);
+        assert!(!counts_against_step_budget(StepInitiator::Human, true, Some(&agent)));
+        assert!(!counts_against_step_budget(StepInitiator::Human, true, None));
     }
 
     #[test]

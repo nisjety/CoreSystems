@@ -261,6 +261,9 @@ pub(super) struct Admitted {
     /// Which agent, when `initiator` is `Agent`.
     pub agent: Option<AgentIdentity>,
     pub control_epoch: u64,
+    /// A person held the browser when the step was admitted. A person's step then never
+    /// counts against the run's step budget.
+    pub takeover: bool,
 }
 
 pub(super) struct AdmitInput<'a> {
@@ -415,7 +418,8 @@ pub(super) async fn admit_action(
 
     // 9. budget: the request's own step cap where the gate does not own it, then the
     // gate, whose first refusal per segment is announced before the 402 is returned.
-    if super::human_browse::counts_against_step_budget(input.initiator.class, entry.budget.as_ref()) {
+    let takeover = snapshot.mode == BrowserControlMode::HumanTakeover;
+    if super::human_browse::counts_against_step_budget(input.initiator.class, takeover, entry.budget.as_ref()) {
         if crate::budget::legacy_step_cap_applies(entry.budget.as_ref(), crate::budget::current_mode()) {
             enforce_step_budget(entry)
                 .map_err(|message| QuarryError::new(ErrorCode::RateLimited, message))?;
@@ -457,6 +461,7 @@ pub(super) async fn admit_action(
         initiator: input.initiator.class,
         agent: input.initiator.agent,
         control_epoch: snapshot.epoch,
+        takeover,
     })
 }
 
@@ -478,5 +483,6 @@ pub(super) fn admit_tab_operation(
         initiator: initiator.class,
         agent: initiator.agent,
         control_epoch: snapshot.epoch,
+        takeover: snapshot.mode == BrowserControlMode::HumanTakeover,
     })
 }

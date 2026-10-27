@@ -77,7 +77,11 @@ pub async fn step(
     );
     let metadata_only = receipt_plan == super::human_browse::ReceiptPlan::Metadata;
     let counts_budget =
-        super::human_browse::counts_against_step_budget(admitted.initiator, entry.budget.as_ref());
+        super::human_browse::counts_against_step_budget(
+            admitted.initiator,
+            admitted.takeover,
+            entry.budget.as_ref(),
+        );
 
     let req = AgentActionRequest {
         run_id: entry.run_id.clone(),
@@ -250,7 +254,11 @@ pub(super) async fn execute_ws_action(
     );
     let metadata_only = receipt_plan == super::human_browse::ReceiptPlan::Metadata;
     let counts_budget =
-        super::human_browse::counts_against_step_budget(admitted.initiator, entry.budget.as_ref());
+        super::human_browse::counts_against_step_budget(
+            admitted.initiator,
+            admitted.takeover,
+            entry.budget.as_ref(),
+        );
     let req = AgentActionRequest {
         run_id: entry.run_id.clone(),
         lease_id: entry.lease.lease_id.clone(),
