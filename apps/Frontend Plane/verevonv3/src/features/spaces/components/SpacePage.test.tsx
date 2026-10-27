@@ -1550,4 +1550,137 @@ describe('SpacePage', () => {
       await waitFor(() => expect(screen.queryByText('Sendt')).toBeNull())
     })
   })
+
+  // WS07-S13 (decision WS07-D3, option A): the artifact-first rule is an opt-in snippet an editor
+  // appends to the room's own instructions. The page never composes it by default.
+  describe('artifact rule snippet in the Space instructions', () => {
+    const RULE_NO_START = 'Når du blir bedt om en analyse, rapport, plan, dokument eller kode'
+    const RULE_EN_START = 'When asked for an analysis, report, plan, document or code'
+    const ADD = 'Legg til artefaktregelen'
+
+    function contextFor(role: string) {
+      return { ...personalContext, membership: { ...personalContext.membership, role } }
+    }
+
+    async function openInstructions() {
+      const panel = await openAgentTab()
+      const field = (await panel.findByRole('textbox', { name: 'Instrukser for rommet' })) as HTMLTextAreaElement
+      return { panel, field }
+    }
+
+    it.each(['editor', 'manager', 'owner'])('shows the add button to a %s', async (role) => {
+      spacesClient.getSpaceContext.mockResolvedValue(contextFor(role))
+      renderSpacePage()
+      const { panel } = await openInstructions()
+      expect(panel.getByRole('button', { name: ADD })).toBeTruthy()
+    })
+
+    it.each(['viewer', 'member'])('hides the add button from a %s', async (role) => {
+      spacesClient.getSpaceContext.mockResolvedValue(contextFor(role))
+      renderSpacePage()
+      const panel = await openAgentTab()
+      await panel.findByRole('heading', { name: 'Instrukser for rommet' })
+      expect(panel.queryByRole('button', { name: ADD })).toBeNull()
+      expect(panel.queryByRole('textbox', { name: 'Instrukser for rommet' })).toBeNull()
+    })
+
+    it('appends the rule once, marks the draft dirty, and does not save by itself', async () => {
+      spacesClient.getSpaceContext.mockResolvedValue(contextFor('editor'))
+      spacesClient.getSpaceInstructions.mockResolvedValue('Svar kort.')
+      renderSpacePage()
+      const { panel, field } = await openInstructions()
+      await waitFor(() => expect(field.value).toBe('Svar kort.'))
+      const save = panel.getByRole('button', { name: /Lagre instrukser/ }) as HTMLButtonElement
+      expect(save.disabled).toBe(true)
+
+      const add = panel.getByRole('button', { name: ADD }) as HTMLButtonElement
+      expect(add.disabled).toBe(false)
+      fireEvent.click(add)
+      flush()
+
+      await waitFor(() => expect(field.value).toContain(RULE_NO_START))
+      expect(field.value.startsWith('Svar kort.\n\n')).toBe(true)
+      expect(field.value.split(RULE_NO_START)).toHaveLength(2)
+      expect(save.disabled).toBe(false)
+      expect(spacesClient.updateSpaceInstructions).not.toHaveBeenCalled()
+
+      // Added once: the button now says so and a second click changes nothing.
+      expect(add.disabled).toBe(true)
+      expect(panel.getByText('Artefaktregelen er allerede lagt til.')).toBeTruthy()
+      const afterFirst = field.value
+      fireEvent.click(add)
+      flush()
+      expect(field.value).toBe(afterFirst)
+    })
+
+    it('uses the rule alone when the instructions are empty', async () => {
+      spacesClient.getSpaceContext.mockResolvedValue(contextFor('owner'))
+      renderSpacePage()
+      const { panel, field } = await openInstructions()
+      fireEvent.click(panel.getByRole('button', { name: ADD }))
+      flush()
+      await waitFor(() => expect(field.value.startsWith(RULE_NO_START)).toBe(true))
+    })
+
+    it('treats the English wording as already present, so a language switch cannot add a second copy', async () => {
+      spacesClient.getSpaceContext.mockResolvedValue(contextFor('manager'))
+      spacesClient.getSpaceInstructions.mockResolvedValue(
+        `Be concise.\n\n${RULE_EN_START} longer than a short answer, create it as an artifact and reply with one or two sentences saying what it is and how it changed. Revise the same artifact instead of creating a new one.`,
+      )
+      renderSpacePage()
+      const { panel, field } = await openInstructions()
+      await waitFor(() => expect(field.value).toContain(RULE_EN_START))
+      expect((panel.getByRole('button', { name: ADD }) as HTMLButtonElement).disabled).toBe(true)
+      expect(panel.getByText('Artefaktregelen er allerede lagt til.')).toBeTruthy()
+    })
+
+    it('is not fooled by whitespace differences in the saved rule', async () => {
+      spacesClient.getSpaceContext.mockResolvedValue(contextFor('manager'))
+      spacesClient.getSpaceInstructions.mockResolvedValue(
+        'Når du blir bedt om en analyse,   rapport, plan,\ndokument eller kode som er lengre enn et kort svar, lag det som en artefakt og svar med én eller to setninger om hva det er og hva som er endret. Revider den samme artefakten i stedet for å lage en ny.',
+      )
+      renderSpacePage()
+      const { panel, field } = await openInstructions()
+      await waitFor(() => expect(field.value).toContain('Når du blir bedt'))
+      expect((panel.getByRole('button', { name: ADD }) as HTMLButtonElement).disabled).toBe(true)
+    })
+
+    it('disables the button with a hint when appending would pass 4000 characters', async () => {
+      spacesClient.getSpaceContext.mockResolvedValue(contextFor('editor'))
+      spacesClient.getSpaceInstructions.mockResolvedValue('x'.repeat(3900))
+      renderSpacePage()
+      const { panel, field } = await openInstructions()
+      await waitFor(() => expect(field.value).toHaveLength(3900))
+      expect((panel.getByRole('button', { name: ADD }) as HTMLButtonElement).disabled).toBe(true)
+      expect(panel.getByText(/har ikke plass til artefaktregelen/)).toBeTruthy()
+      fireEvent.click(panel.getByRole('button', { name: ADD }))
+      flush()
+      expect(field.value).toHaveLength(3900)
+    })
+
+    it('saves the appended draft through updateSpaceInstructions', async () => {
+      spacesClient.getSpaceContext.mockResolvedValue(contextFor('editor'))
+      spacesClient.getSpaceInstructions.mockResolvedValue('Svar kort.')
+      renderSpacePage()
+      const { panel, field } = await openInstructions()
+      await waitFor(() => expect(field.value).toBe('Svar kort.'))
+      fireEvent.click(panel.getByRole('button', { name: ADD }))
+      flush()
+      await waitFor(() => expect(field.value).toContain(RULE_NO_START))
+      const draft = field.value
+
+      fireEvent.click(panel.getByRole('button', { name: /Lagre instrukser/ }))
+      await waitFor(() => expect(spacesClient.updateSpaceInstructions).toHaveBeenCalledTimes(1))
+      expect(spacesClient.updateSpaceInstructions).toHaveBeenCalledWith('space_personal_1', draft)
+    })
+
+    it('never appends the rule on its own when the instructions load', async () => {
+      spacesClient.getSpaceContext.mockResolvedValue(contextFor('owner'))
+      spacesClient.getSpaceInstructions.mockResolvedValue('Svar kort.')
+      renderSpacePage()
+      const { field } = await openInstructions()
+      await waitFor(() => expect(field.value).toBe('Svar kort.'))
+      expect(field.value).not.toContain('artefakt')
+    })
+  })
 })

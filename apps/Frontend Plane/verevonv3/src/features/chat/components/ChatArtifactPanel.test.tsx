@@ -417,6 +417,120 @@ describe('ArtifactsPanel in English', () => {
   })
 })
 
+describe('ArtifactsPanel surfaces (WS07-S10)', () => {
+  afterEach(() => {
+    cleanup()
+  })
+
+  const html: ChatArtifact = { content: '<h1>Hei</h1><script>1</script>', id: 'page-1', kind: 'html', title: 'index.html', version: 1 }
+  const pdf: ChatArtifact = { content: 'data:application/pdf;base64,JVBERi0=', id: 'pdf-1', kind: 'pdf', title: 'rapport.pdf', version: 1 }
+  const image: ChatArtifact = { content: 'data:image/png;base64,iVBORw0KGgo=', id: 'img-1', kind: 'image', title: 'logo.png', version: 1 }
+  const sheet: ChatArtifact = {
+    content: `data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,${btoa('sheet')}`,
+    id: 'sheet-1',
+    kind: 'spreadsheet',
+    title: 'tall.xlsx',
+    version: 1,
+  }
+
+  it('keeps the chat surface as it was: html auto-previews, pdf frames, image and binary render', () => {
+    const chatHtml = render(() => <ArtifactsPanel items={[item(html)]} />)
+    expect(chatHtml.container.querySelector('iframe')?.getAttribute('sandbox')).toBe('allow-scripts')
+    expect(screen.queryByText('Kjør forhåndsvisning')).toBeNull()
+    cleanup()
+
+    const chatPdf = render(() => <ArtifactsPanel items={[item(pdf)]} surface="chat" />)
+    expect(chatPdf.container.querySelector('iframe')?.getAttribute('src')).toBe(pdf.content)
+    cleanup()
+
+    const chatImage = render(() => <ArtifactsPanel items={[item(image)]} surface="chat" />)
+    expect(chatImage.container.querySelector('img')).toBeTruthy()
+    cleanup()
+
+    const chatSheet = render(() => <ArtifactsPanel items={[item(sheet)]} surface="chat" />)
+    expect(chatSheet.container.querySelector('a[download]')).toBeTruthy()
+  })
+
+  it('gates room html behind Run preview: no iframe until the click', () => {
+    const { container } = render(() => <ArtifactsPanel items={[item({ ...html, id: 'room-gate-1' })]} surface="room" />)
+    expect(container.querySelector('iframe')).toBeNull()
+    expect(screen.getByText('Kjør forhåndsvisning')).toBeTruthy()
+
+    screen.getByText('Kjør forhåndsvisning').click()
+    flush()
+    const frame = container.querySelector('iframe')
+    expect(frame).toBeTruthy()
+    expect(frame?.getAttribute('sandbox')).toBe('allow-scripts')
+    expect(frame?.getAttribute('sandbox')).not.toContain('allow-same-origin')
+    expect(frame?.getAttribute('srcdoc')).toContain("default-src 'none'")
+    expect(screen.queryByText('Kjør forhåndsvisning')).toBeNull()
+  })
+
+  it('shows the code in the room without running anything', () => {
+    const { container } = render(() => <ArtifactsPanel items={[item({ ...html, id: 'room-gate-2' })]} surface="room" />)
+    screen.getByText('Vis kode').click()
+    flush()
+    expect(container.querySelector('.verevon-chat-artifact-code')).toBeTruthy()
+    expect(container.querySelector('iframe')).toBeNull()
+  })
+
+  it('asks again when the markup changes after the reader ran it', () => {
+    const first: ChatArtifact = { ...html, id: 'room-gate-3', content: '<p>one</p>', version: 1 }
+    const second: ChatArtifact = { ...first, content: '<p>two</p>', version: 2 }
+    const { container } = render(() => <ArtifactsPanel items={[item(first)]} surface="room" />)
+    screen.getByText('Kjør forhåndsvisning').click()
+    flush()
+    expect(container.querySelector('iframe')).toBeTruthy()
+    cleanup()
+
+    const next = render(() => <ArtifactsPanel items={[item(second)]} surface="room" />)
+    expect(next.container.querySelector('iframe')).toBeNull()
+    expect(screen.getByText('Kjør forhåndsvisning')).toBeTruthy()
+  })
+
+  it.each([
+    ['pdf', pdf],
+    ['image', image],
+    ['binary', sheet],
+  ] as const)('refuses a %s in the room with the not-available card and no download link', (_name, artifact) => {
+    const { container } = render(() => <ArtifactsPanel items={[item(artifact)]} surface="room" />)
+    expect(screen.getByText('Forhåndsvisning er ikke tilgjengelig i rommet')).toBeTruthy()
+    expect(container.querySelector('iframe')).toBeNull()
+    expect(container.querySelector('img')).toBeNull()
+    expect(container.querySelector('a[download]')).toBeNull()
+    expect(container.querySelector('a[href]')).toBeNull()
+  })
+
+  it('draws documents and code in the room as usual', () => {
+    const doc: ChatArtifact = { content: '## Notat\n\nBrødtekst', id: 'doc-room', kind: 'document', title: 'Notat', version: 1 }
+    const view = render(() => <ArtifactsPanel items={[item(doc)]} surface="room" />)
+    expect(screen.getByText('Brødtekst')).toBeTruthy()
+    view.unmount()
+    cleanup()
+
+    const code: ChatArtifact = { content: 'def hei():\n    return 1\n', id: 'code-room', kind: 'code', title: 'solve.py', version: 1 }
+    const codeView = render(() => <ArtifactsPanel items={[item(code)]} surface="room" />)
+    expect(codeView.container.querySelectorAll('.verevon-chat-artifact-code__gutter')).toHaveLength(2)
+  })
+
+  it('does not apply extra renderers on the room surface', () => {
+    const unregister = extraArtifactRenderers.register({
+      id: 'grid',
+      priority: 10,
+      match: (value) => value.kind === 'grid',
+      component: (props) => <p>Rutenett: {props.artifact.title}</p>,
+    })
+    try {
+      const grid: ChatArtifact = { content: 'a,b\n1,2', id: 'grid-room', kind: 'grid', title: 'Tall.csv', version: 1 }
+      render(() => <ArtifactsPanel items={[item(grid)]} surface="room" />)
+      expect(screen.queryByText('Rutenett: Tall.csv')).toBeNull()
+      expect(screen.getByText('Forhåndsvisning er ikke tilgjengelig i rommet')).toBeTruthy()
+    } finally {
+      unregister()
+    }
+  })
+})
+
 describe('ArtifactsPanel extra viewers', () => {
   afterEach(() => {
     cleanup()
