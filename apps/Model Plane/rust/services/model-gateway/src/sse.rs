@@ -1462,7 +1462,9 @@ pub async fn invoke_stream_sse(
     {
         tracing::warn!(error = %e, "failed to publish STREAM_OPENED");
     }
-    gateway_metrics::stream_opened();
+    // One unit of `gateway_active_streams`, owned by the producer task spawned below (see
+    // `ActiveStreamGuard`). An early return before that task exists drops it at once.
+    let active_stream = gateway_metrics::ActiveStreamGuard::open();
 
     let publisher = state.publisher.clone();
     let stream_buffers = state.stream_buffers.clone();
@@ -2620,6 +2622,9 @@ pub async fn invoke_stream_sse(
     // spinner for the entire phase and then dumped everything at once.
     timing.close(crate::turn_timing::Phase::Context, prepared_ms);
     tokio::spawn(async move {
+        // Owns the gauge unit: it drops when this task ends on any path, so a stop, a cancel, a
+        // client disconnect or a panic cannot leave the stream counted.
+        let _active_stream = active_stream;
         // Keep tool writes private until the assistant message is durable.
         let committed_artifacts = session_state.artifact_versions.clone();
         let artifact_base = committed_artifacts.fork_thread(&session_thread_id);
@@ -4681,7 +4686,6 @@ pub async fn invoke_stream_sse(
                     {
                         tracing::warn!(error = %e, "failed to publish USAGE_ENVELOPE");
                     }
-                    gateway_metrics::stream_closed();
 
                     info!(
                         request_id = %req_id,
@@ -7642,7 +7646,6 @@ async fn run_infer_fallback(
             let _ = publisher
                 .publish(&subjects::usage_subject(org_id), &usage)
                 .await;
-            gateway_metrics::stream_closed();
 
             // chat-parity §17: opt-in usage event (real tokens + latency).
             // Phase 7 B5 — price cost_usd off cost-core's catalogue (same
@@ -7783,7 +7786,6 @@ async fn run_infer_fallback(
             let _ = publisher
                 .publish(&subjects::stream_subject("closed"), &close)
                 .await;
-            gateway_metrics::stream_closed();
             // chat-parity §20: structured error — stable `code` + `retryable`
             // so the client can branch (the `message` field is preserved for
             // back-compat with existing error handlers).
@@ -20471,6 +20473,18 @@ mod execute_turn_tests {
             !invoke.contains("env::var"),
             "the handler reads no environment: the switch is the plan store's, read once"
         );
+    }
+
+    /// The gauge's one owner: the handler opens exactly one guard and its producer task holds it.
+    /// No hand-counted close is left for a new stop, error or panic path to forget.
+    #[test]
+    fn active_stream_gauge_has_one_owner_in_the_handler() {
+        let source = include_str!("sse.rs").replace("\r\n", "\n");
+        // Built from pieces, so that this test does not count its own needles.
+        assert_eq!(source.matches(concat!("stream_", "closed(")).count(), 0);
+        assert_eq!(source.matches(concat!("stream_", "opened(")).count(), 0);
+        assert_eq!(source.matches(concat!("ActiveStreamGuard::", "open()")).count(), 1);
+        assert_eq!(source.matches(concat!("let _active_stream", " = active_stream;")).count(), 1);
     }
 }
 
