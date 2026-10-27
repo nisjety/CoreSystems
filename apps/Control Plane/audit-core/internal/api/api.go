@@ -26,6 +26,7 @@ type API struct {
 	credentials []serviceCredential
 	nonces      *delegationNonceCache
 	readiness   func(context.Context) Readiness
+	readMode    string
 }
 
 type eventStore interface {
@@ -95,6 +96,10 @@ func New(s eventStore, rawCredentials string, readiness ...func(context.Context)
 	if err != nil {
 		return nil, err
 	}
+	readMode, err := auditReadModeFromEnv()
+	if err != nil {
+		return nil, err
+	}
 	provider := func(context.Context) Readiness { return Readiness{} }
 	if len(readiness) > 0 && readiness[0] != nil {
 		provider = readiness[0]
@@ -104,6 +109,7 @@ func New(s eventStore, rawCredentials string, readiness ...func(context.Context)
 		credentials: credentials,
 		nonces:      newDelegationNonceCache(100_000),
 		readiness:   provider,
+		readMode:    readMode,
 	}, nil
 }
 
@@ -215,19 +221,33 @@ func (a *API) listAudit(w http.ResponseWriter, r *http.Request) {
 		UserID: r.URL.Query().Get("user_id"),
 		Limit:  parseInt(r.URL.Query().Get("limit"), 100),
 	}
+	scope, filter, ok := a.resolveAuditScope(w, r, filter)
+	if !ok {
+		return
+	}
 	rows, err := a.store.ListAudit(r.Context(), filter)
 	if err != nil {
 		log.Error().Err(err).Str("org_id", orgID).Msg("listAudit failed")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": rows, "meta": map[string]any{
-		"count": len(rows),
+	var data any = rows
+	count := len(rows)
+	if scope == scopeOrgRedacted {
+		redacted := redactToolActionRows(rows)
+		data, count = redacted, len(redacted)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": data, "meta": map[string]any{
+		"count": count,
 		"limit": filter.Limit,
+		"scope": scope,
 	}, "error": nil})
 }
 
 func (a *API) listUsage(w http.ResponseWriter, r *http.Request) {
+	if !a.requireOrgAdminRead(w, r, "/v1/usage") {
+		return
+	}
 	orgID := r.URL.Query().Get("org_id")
 	if orgID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "org_id required"})
@@ -254,6 +274,9 @@ func (a *API) listUsage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) summariseUsage(w http.ResponseWriter, r *http.Request) {
+	if !a.requireOrgAdminRead(w, r, "/v1/usage/summary") {
+		return
+	}
 	orgID := r.URL.Query().Get("org_id")
 	if orgID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "org_id required"})

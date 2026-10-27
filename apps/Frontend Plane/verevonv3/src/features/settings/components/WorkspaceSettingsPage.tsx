@@ -35,7 +35,7 @@ import {
   type BillingPlanId,
 } from '@/features/billing/lib/plans'
 import { requestJson } from '@/shared/api/http'
-import { listAuditEvents, type AuditEvent } from '@/shared/api/audit-client'
+import { listAuditEvents, listOwnAuditEvents, type AuditEvent } from '@/shared/api/audit-client'
 import {
   inviteMember,
   removeMember,
@@ -1272,6 +1272,10 @@ function SsoSection() {
 
 function RecentSecurityEvents() {
   const i18n = useI18n()
+  const session = getSession()
+  // Presentation only: audit-core and the gateway enforce the same split from
+  // the signed org role. A member never receives org-wide rows to hide.
+  const orgWide = () => hasWorkspaceAdminAccess(session)
   const [events, setEvents] = createSignal<AuditEvent[]>([])
   const [loading, setLoading] = createSignal(true)
   const [loadFailed, setLoadFailed] = createSignal(false)
@@ -1281,7 +1285,10 @@ function RecentSecurityEvents() {
     () => {
       const controller = new AbortController()
 
-      listAuditEvents({ limit: 25 }, controller.signal)
+      const request = orgWide()
+        ? listAuditEvents({ limit: 25 }, controller.signal)
+        : listOwnAuditEvents(session.user?.id ?? '', 25, controller.signal).then((page) => page.events)
+      request
         .then((rows) => {
           setEvents(rows)
           setLoading(false)
@@ -1299,6 +1306,9 @@ function RecentSecurityEvents() {
 
   return (
     <Show when={!loading()} fallback={<p class="verevon-settings-panel-note">{i18n.tr('Laster sikkerhetshendelser …', 'Loading security events...')}</p>}>
+      <Show when={!orgWide()}>
+        <p class="verevon-settings-panel-note">{i18n.tr('Viser bare dine egne hendelser.', 'Showing your own events')}</p>
+      </Show>
       <Show when={!loadFailed()} fallback={<p class="verevon-settings-panel-note" role="alert">{i18n.tr('Kunne ikke laste sikkerhetshendelser.', 'Could not load security events.')}</p>}>
       <Show when={events().length > 0} fallback={<p class="verevon-settings-panel-note">{i18n.tr('Ingen sikkerhetshendelser ennå', 'No security events yet')}</p>}>
         <div class="verevon-settings-row-divider">
