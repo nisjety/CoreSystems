@@ -2,6 +2,8 @@ import { Bot, Sparkles } from '@/shared/icons'
 import { For, Show } from 'solid-js'
 
 import { ChatMarkdown } from '@/features/chat/components/ChatMessages'
+import type { ChatArtifact } from '@/features/chat/components/chat-types'
+import { SpaceArtifactChip } from '../SpaceArtifactChip'
 import type { SpaceRosterMember } from '@/shared/api/spaces-client'
 import { useI18n } from '@/shared/i18n'
 
@@ -27,6 +29,10 @@ export type TranscriptTurn = {
    * before authorship existed — those stay unnamed rather than borrowing a
    * name from the reader. */
   readonly authorSubjectId?: string
+  /** The server's message id, when it sent one. */
+  readonly messageId?: string
+  /** Artifacts this assistant turn persisted (already through the room's gate). */
+  readonly artifacts?: readonly ChatArtifact[]
 }
 
 export const MAX_TURNS_PER_POST = 30
@@ -42,7 +48,15 @@ export function normalizeTranscriptTurns(
     const record = turn as Record<string, unknown>
     const role = record.role
     const content = typeof record.content === 'string' ? record.content.trim() : ''
-    if ((role !== 'user' && role !== 'assistant') || !content) continue
+    if (role !== 'user' && role !== 'assistant') continue
+    const artifacts = role === 'assistant' && Array.isArray(record.artifacts)
+      ? (record.artifacts as readonly ChatArtifact[])
+      : []
+    // An artifact-only assistant turn is kept: it is the turn the chip hangs on.
+    if (!content && artifacts.length === 0) continue
+    const messageId = typeof record.messageId === 'string' && record.messageId.trim()
+      ? record.messageId.trim()
+      : undefined
     const agentName = typeof record.agentName === 'string' && record.agentName.trim()
       ? record.agentName.trim()
       : undefined
@@ -54,6 +68,8 @@ export function normalizeTranscriptTurns(
       content,
       ...(agentName ? { agentName } : {}),
       ...(authorSubjectId ? { authorSubjectId } : {}),
+      ...(messageId ? { messageId } : {}),
+      ...(artifacts.length > 0 ? { artifacts } : {}),
     })
     if (normalized.length >= maxTurns) break
   }
@@ -93,14 +109,23 @@ export interface SpaceTurnListProps {
   readonly viewerSubjectId?: () => string | undefined
   /** Room-level fallback name for an assistant turn that recorded no persona. */
   readonly agentName: string
+  /**
+   * When provided, an assistant turn's artifacts render as chips under it and
+   * pressing one calls this with the artifact id. Absent (the side pane), the
+   * artifacts are not shown and an artifact-only turn renders no row at all.
+   */
+  readonly onOpenArtifact?: (artifactId: string) => void
 }
 
 export function SpaceTurnList(props: SpaceTurnListProps) {
   const i18n = useI18n()
   const authorOf = (turn: TranscriptTurn) =>
     resolveAuthorName(turn.authorSubjectId, props.roster(), props.viewerSubjectId?.(), i18n.tr)
+  // A turn with no text is only a row when its artifacts can be shown.
+  const visibleTurns = () =>
+    props.turns().filter((turn) => turn.content.length > 0 || (props.onOpenArtifact && (turn.artifacts?.length ?? 0) > 0))
   return (
-    <For each={props.turns()}>
+    <For each={visibleTurns()}>
       {(turn) => (
         <div class="verevon-room-turn" data-role={turn.role}>
           <span
@@ -128,8 +153,19 @@ export function SpaceTurnList(props: SpaceTurnListProps) {
               when={turn.role === 'assistant'}
               fallback={<p class="verevon-room-turn__plain">{turn.content}</p>}
             >
-              <div class="verevon-room-turn__markdown">
-                <ChatMarkdown content={turn.content} />
+              <Show when={turn.content}>
+                <div class="verevon-room-turn__markdown">
+                  <ChatMarkdown content={turn.content} />
+                </div>
+              </Show>
+            </Show>
+            <Show when={props.onOpenArtifact && turn.role === 'assistant' && (turn.artifacts?.length ?? 0) > 0}>
+              <div class="verevon-space-artifact-chips">
+                <For each={turn.artifacts}>
+                  {(artifact) => (
+                    <SpaceArtifactChip artifact={artifact} onOpen={(id) => props.onOpenArtifact?.(id)} />
+                  )}
+                </For>
               </div>
             </Show>
           </div>

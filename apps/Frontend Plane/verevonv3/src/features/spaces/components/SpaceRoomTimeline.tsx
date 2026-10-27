@@ -13,6 +13,11 @@ import { SpaceApprovalPanel } from './SpaceApprovalPanel'
 import { PostTurnHeader, SpaceTurnList, normalizeTranscriptTurns, resolveAuthorName } from './sidepane/SpaceTurnList'
 import type { TranscriptTurn } from './sidepane/SpaceTurnList'
 import { SpaceRestrictedNotice } from './SpaceRestrictedNotice'
+import { SpaceArtifactChip } from './SpaceArtifactChip'
+import { SpaceArtifactSheet } from './SpaceArtifactSheet'
+import { roomItems } from '@/features/spaces/lib/room-artifact-items'
+import { roomArtifactsEnabled } from '@/features/spaces/lib/room-artifacts'
+import type { ChatArtifact } from '@/features/chat/components/chat-types'
 import { loadSpaceTranscript, updateSpaceThreadPresentation } from '@/shared/api/spaces-client'
 import type { SpaceAgent, SpaceRosterMember, SpaceThread } from '@/shared/api/spaces-client'
 import { useI18n } from '@/shared/i18n'
@@ -78,6 +83,12 @@ export interface SpaceRoomTimelineProps {
    * is today's behaviour on a gateway that does not say.
    */
   readonly sharedReadAvailable?: () => boolean
+  /**
+   * Artifacts the sender's own live stream produced in a thread, held in memory
+   * by the page until the next transcript read carries them. Absent while the
+   * room artifact surfaces are off.
+   */
+  readonly liveArtifacts?: (threadId: string) => readonly ChatArtifact[]
 }
 
 /** The room-level name for an assistant turn that recorded no persona: the
@@ -98,6 +109,7 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
 
   const agentName = createMemo(() => roomAgentName(props.agents()))
   const sharedRead = () => props.sharedReadAvailable?.() !== false
+  const artifactsOn = roomArtifactsEnabled()
 
   return (
     <Show
@@ -125,6 +137,8 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
               viewerSubjectId={props.viewerSubjectId}
               agentName={agentName()}
               transcriptEnabled={sharedRead}
+              artifactsOn={artifactsOn}
+              liveArtifacts={props.liveArtifacts}
               unread={() => props.unreadThreadIds?.().has(thread.thread_id) === true}
               onPresentationChanged={props.onPresentationChanged}
               onReply={props.onReply}
@@ -146,6 +160,9 @@ function SpaceRoomPost(props: {
   readonly agentName: string
   /** False when the room's shared read is unavailable: no transcript call is made. */
   readonly transcriptEnabled: () => boolean
+  /** `features.room_artifacts`: chips, sheet and artifact-only turns. Off, the post reads as before. */
+  readonly artifactsOn: boolean
+  readonly liveArtifacts?: (threadId: string) => readonly ChatArtifact[]
   readonly onReply?: (thread: SpaceThread) => void
   readonly onApprovalSettled?: () => void
   /** New since the reader arrived — see `SpaceRoomTimelineProps.unreadThreadIds`. */
@@ -174,7 +191,27 @@ function SpaceRoomPost(props: {
         : { state: load.state, turns: [] as readonly TranscriptTurn[] }
     },
   )
-  const turns = (): readonly TranscriptTurn[] => transcript()?.turns ?? []
+  // With the artifact surfaces off an artifact-only turn has nothing to show,
+  // so it is dropped here and the post reads exactly as it did before.
+  const turns = (): readonly TranscriptTurn[] => {
+    const all = transcript()?.turns ?? []
+    return props.artifactsOn ? all : all.filter((turn) => turn.content.length > 0)
+  }
+  const [openArtifactId, setOpenArtifactId] = createSignal<string | undefined>(undefined)
+  // Live artifacts from this browser's own stream that the transcript does not
+  // carry yet (same id and version). In memory only, never stored.
+  const pendingLive = (): readonly ChatArtifact[] => {
+    if (!props.artifactsOn) return []
+    const persisted = new Set(
+      turns().flatMap((turn) => (turn.artifacts ?? []).map((artifact) => `${artifact.id}\u0000${artifact.version}`)),
+    )
+    return (props.liveArtifacts?.(props.thread.thread_id) ?? []).filter(
+      (artifact) => !persisted.has(`${artifact.id}\u0000${artifact.version}`),
+    )
+  }
+  const artifactItems = createMemo(() =>
+    props.artifactsOn ? roomItems([...turns(), { artifacts: pendingLive() }]) : [],
+  )
   const readState = () => transcript()?.state
   // Before any turn has loaded, the post is still attributable: the thread's
   // own owner started it.
@@ -294,7 +331,27 @@ function SpaceRoomPost(props: {
           roster={props.roster}
           viewerSubjectId={props.viewerSubjectId}
           agentName={props.agentName}
+          onOpenArtifact={props.artifactsOn ? setOpenArtifactId : undefined}
         />
+      </Show>
+
+      <Show when={pendingLive().length > 0}>
+        <div class="verevon-space-artifact-chips">
+          <For each={pendingLive()}>
+            {(artifact) => <SpaceArtifactChip artifact={artifact} onOpen={setOpenArtifactId} />}
+          </For>
+        </div>
+      </Show>
+
+      <Show when={openArtifactId()}>
+        {(selectedId) => (
+          <SpaceArtifactSheet
+            items={artifactItems}
+            selectedId={selectedId()}
+            threadTitle={props.thread.title}
+            onClose={() => setOpenArtifactId(undefined)}
+          />
+        )}
       </Show>
 
       <Show when={awaitingApproval() ? props.thread.latest_run_id : undefined}>

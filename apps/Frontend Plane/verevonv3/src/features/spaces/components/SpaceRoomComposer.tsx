@@ -1,6 +1,7 @@
 import { createMemo, createSignal, For, Show } from 'solid-js'
 
 import { ChatMarkdown } from '@/features/chat/components/ChatMessages'
+import type { ChatArtifact } from '@/features/chat/components/chat-types'
 import { listAvailableSkills, MAX_PICKED_SKILLS, type Skill } from '@/shared/api/skills-client'
 import { WandSparkles } from '@/shared/icons'
 import type {
@@ -122,6 +123,12 @@ export interface SpaceRoomComposerProps {
   readonly typingSentence?: () => string | undefined
   /** This member is typing. The page decides how often that reaches the server. */
   readonly onTyping?: () => void
+  /**
+   * A live artifact from this member's own turn, with the thread it landed in.
+   * The page keeps it in memory until the next transcript read; nothing here
+   * stores it. Absent while the room artifact surfaces are off.
+   */
+  readonly onArtifact?: (artifact: ChatArtifact, threadId: string) => void
 }
 
 export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
@@ -152,9 +159,10 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
   const pipeline = createSpaceSendPipeline({
     host: props,
     resolveTier: privacyTiers.resolve,
-    // Known codes get the room's own words; an unknown one keeps the
-    // server's message rather than a generic line that hides it.
-    describeError: (event) => translateApiError({ code: event.code }, i18n.tr, {
+    // Known codes get the room's own words, and a typed Space denial (its
+    // details name the reason) gets the denial copy and next step; an unknown
+    // code keeps the server's message rather than a generic line that hides it.
+    describeError: (event) => translateApiError({ code: event.code, details: event.details }, i18n.tr, {
       no: event.message,
       en: event.message,
     }),

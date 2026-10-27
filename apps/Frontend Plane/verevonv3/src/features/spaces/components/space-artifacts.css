@@ -1,0 +1,137 @@
+/*
+ * Agent artifacts in the room: the chip under a turn and the per-thread sheet.
+ * Its own sheet on purpose: global.css carries uncommitted lines.
+ */
+
+.verevon-space-artifact-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.verevon-space-artifact-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 4px 10px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 999px;
+  background: var(--verevon-surface);
+  color: var(--verevon-text);
+  font: inherit;
+  font-size: 0.8125rem;
+  cursor: pointer;
+}
+
+.verevon-space-artifact-chip:hover {
+  background: var(--verevon-surface-soft);
+  border-color: var(--verevon-border-strong);
+}
+
+.verevon-space-artifact-chip:focus-visible {
+  outline: 2px solid var(--verevon-accent);
+  outline-offset: 2px;
+}
+
+.verevon-space-artifact-chip__icon {
+  display: inline-flex;
+  color: var(--verevon-text-muted);
+}
+
+.verevon-space-artifact-chip__title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.verevon-space-artifact-chip__meta {
+  color: var(--verevon-text-muted);
+  white-space: nowrap;
+}
+
+.verevon-space-artifact-sheet {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgb(15 18 20 / 42%);
+}
+
+.verevon-space-artifact-sheet__dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(960px, 100%);
+  height: min(86vh, 760px);
+  overflow: hidden;
+  border: 1px solid var(--verevon-border);
+  border-radius: 18px;
+  background: var(--verevon-surface);
+  box-shadow: 0 24px 64px rgb(0 0 0 / 24%);
+}
+
+.verevon-space-artifact-sheet__dialog:focus {
+  outline: none;
+}
+
+.verevon-space-artifact-sheet__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--verevon-border-soft);
+}
+
+.verevon-space-artifact-sheet__header h3 {
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 1rem;
+}
+
+.verevon-space-artifact-sheet__close {
+  display: inline-grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--verevon-text-muted);
+  cursor: pointer;
+}
+
+.verevon-space-artifact-sheet__close:hover {
+  background: var(--verevon-surface-soft);
+}
+
+.verevon-space-artifact-sheet__close:focus-visible {
+  outline: 2px solid var(--verevon-accent);
+  outline-offset: 2px;
+}
+
+.verevon-space-artifact-sheet__body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+@media (max-width: 640px) {
+  .verevon-space-artifact-sheet {
+    padding: 0;
+  }
+
+  .verevon-space-artifact-sheet__dialog {
+    width: 100%;
+    height: 100%;
+    border-radius: 0;
+  }
+}

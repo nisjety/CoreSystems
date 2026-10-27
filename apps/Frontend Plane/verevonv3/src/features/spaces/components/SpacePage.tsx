@@ -48,6 +48,8 @@ import {
 } from './sidepane/SpaceAuxPane'
 import { SpaceThreadPanel } from './sidepane/SpaceThreadPanel'
 import { spaceThreadPaneEnabled } from '../lib/space-thread-deep-link'
+import { roomArtifactsEnabled } from '../lib/room-artifacts'
+import type { ChatArtifact } from '@/features/chat/components/chat-types'
 import { resolveOpenSpacePane } from '../lib/space-pane-registry'
 import { publishSpaceThreads, publishSpaceUnread, retractSpaceThreads } from '../lib/space-live-work'
 import { unreadThreadIds } from '../lib/space-unread'
@@ -570,6 +572,22 @@ function SpaceConversationPanel(props: {
   readonly onOpenThread?: (thread: SpaceThread) => void
 }) {
   const i18n = useI18n()
+  // Live artifacts from THIS browser's own stream, by thread. Memory only: the
+  // room's record is the transcript, and these are shown only until a read
+  // carries them. Never written to localStorage, sessionStorage or IndexedDB.
+  const artifactsOn = roomArtifactsEnabled()
+  const [liveArtifacts, setLiveArtifacts] = createSignal<ReadonlyMap<string, readonly ChatArtifact[]>>(new Map())
+  const noteLiveArtifact = (artifact: ChatArtifact, threadId: string) => {
+    setLiveArtifacts((current) => {
+      const next = new Map(current)
+      const existing = next.get(threadId) ?? []
+      next.set(threadId, [
+        ...existing.filter((entry) => !(entry.id === artifact.id && entry.version === artifact.version)),
+        artifact,
+      ])
+      return next
+    })
+  }
   let focusComposer: (() => void) | undefined
   const [replyTarget, setReplyTarget] = createSignal<
     { threadId: string; title: string; awaitingApproval?: boolean } | undefined
@@ -629,6 +647,7 @@ function SpaceConversationPanel(props: {
             viewerSubjectId={props.viewerSubjectId}
             threads={props.threads}
             sharedReadAvailable={props.sharedReadAvailable}
+            liveArtifacts={artifactsOn ? (threadId) => liveArtifacts().get(threadId) ?? [] : undefined}
             roster={props.roster}
             agents={props.agents}
             onStartConversation={() => focusComposer?.()}
@@ -658,6 +677,7 @@ function SpaceConversationPanel(props: {
         onTyping={props.onTyping}
         replyTarget={replyTargetWithStatus}
         onClearReplyTarget={() => setReplyTarget(undefined)}
+        onArtifact={artifactsOn ? noteLiveArtifact : undefined}
       />
     </section>
   )

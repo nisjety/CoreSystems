@@ -1,5 +1,7 @@
 import { createSignal } from 'solid-js'
 
+import type { ChatArtifact } from '@/features/chat/components/chat-types'
+import { roomArtifactFromEvent } from './room-artifacts'
 import type { SubmitPrivacyTier, TurnPrivacyTierResolver } from '@/features/dashboard/home/submit-privacy-tier'
 import type { AiModelSelection } from '@/shared/ai/model-selection'
 import {
@@ -129,6 +131,12 @@ export interface SpaceSendPipelineHost {
   /** Called once a turn completes, so the caller can refetch the thread list. */
   readonly onExchangeSettled?: () => void
   readonly onClearReplyTarget?: () => void
+  /**
+   * A live artifact from this turn's own stream, with the thread it belongs to.
+   * Already through the room's kind and size gate. The host holds it in memory
+   * only; it is never written to browser storage.
+   */
+  readonly onArtifact?: (artifact: ChatArtifact, threadId: string) => void
 }
 
 export interface SpaceSendPipelineOptions {
@@ -191,6 +199,12 @@ export function createSpaceSendPipeline(options: SpaceSendPipelineOptions): Spac
         void updateSpaceThreadPresentation(host.spaceRef, threadId, { title: name })
           .then(() => settled?.())
           .catch(() => undefined)
+      },
+      onArtifact: (event) => {
+        const threadId = liveThreadId
+        const artifact = roomArtifactFromEvent(event)
+        if (!host.onArtifact || !threadId || !artifact) return
+        host.onArtifact(artifact, threadId)
       },
       onMessage: ({ content: delta }) => {
         setExchange((current) => current && { ...current, assistantContent: current.assistantContent + delta })

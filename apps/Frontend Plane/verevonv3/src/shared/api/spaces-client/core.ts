@@ -1,3 +1,5 @@
+import type { ChatArtifact } from '@/features/chat/components/chat-types'
+import { roomArtifactsFromMetadata } from '@/features/spaces/lib/room-artifacts'
 import { ApiError, requestJson } from '../http'
 
 export type SpaceMembership = {
@@ -285,6 +287,11 @@ export type SpaceWorkGap = {
    */
   readonly code?: string
   readonly reason: string
+  /**
+   * Why Control declined, when it said (`space_denials_typed`): `reason`,
+   * `resolvable_by` and the allowlisted keys. Read through `space-denials.ts`.
+   */
+  readonly details?: Readonly<Record<string, unknown>>
 }
 
 /**
@@ -328,7 +335,10 @@ function workGaps(value: unknown): SpaceWorkGap[] {
     const section = typeof record.section === 'string' ? record.section : ''
     const reason = typeof record.reason === 'string' ? record.reason : ''
     const code = typeof record.code === 'string' && record.code.trim() ? record.code.trim() : undefined
-    if (section && reason) gaps.push({ section, reason, ...(code ? { code } : {}) })
+    const details = record.details && typeof record.details === 'object' && !Array.isArray(record.details)
+      ? (record.details as Readonly<Record<string, unknown>>)
+      : undefined
+    if (section && reason) gaps.push({ section, reason, ...(code ? { code } : {}), ...(details ? { details } : {}) })
   }
   return gaps
 }
@@ -636,6 +646,13 @@ export type SpaceThreadTurn = {
    * every transcript was owner-bound and one name was always right by accident.
    */
   readonly authorSubjectId?: string
+  /** The server's id for this message, when it sent one. */
+  readonly messageId?: string
+  /**
+   * Artifacts the turn persisted, already through the room's kind and size
+   * gate (`roomArtifactsFromMetadata`). Only ever set on assistant turns.
+   */
+  readonly artifacts?: readonly ChatArtifact[]
 }
 
 export type SpaceThreadTranscript = {
@@ -652,7 +669,16 @@ function normalizeSpaceThreadTurns(value: unknown): readonly SpaceThreadTurn[] {
     const role = record.role
     const content = typeof record.content === 'string' ? record.content.trim() : ''
     if (role !== 'user' && role !== 'assistant' && role !== 'system' && role !== 'tool') continue
-    if (!content) continue
+    // An artifact-only assistant turn (the agent replied with the artifact and
+    // no prose) is kept: it is the turn the room's chip hangs on.
+    const artifacts = role === 'assistant' ? roomArtifactsFromMetadata(record.artifacts) : []
+    if (!content && artifacts.length === 0) continue
+    const messageId =
+      typeof record.message_id === 'string' && record.message_id.trim()
+        ? record.message_id.trim()
+        : typeof record.messageId === 'string' && record.messageId.trim()
+          ? record.messageId.trim()
+          : undefined
     const agentName = typeof record.agent_name === 'string' && record.agent_name.trim()
       ? record.agent_name.trim()
       : typeof record.agentName === 'string' && record.agentName.trim()
@@ -669,6 +695,8 @@ function normalizeSpaceThreadTurns(value: unknown): readonly SpaceThreadTurn[] {
       content,
       ...(agentName ? { agentName } : {}),
       ...(authorSubjectId ? { authorSubjectId } : {}),
+      ...(messageId ? { messageId } : {}),
+      ...(artifacts.length > 0 ? { artifacts } : {}),
     })
   }
   return turns
