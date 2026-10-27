@@ -184,9 +184,18 @@ services:
       context: ../..
       dockerfile: deploy/compose/Dockerfile.orchestrator
       args: *build-metadata
+    # A stop cancels in-flight activities and waits up to
+    # QUARRY_ORCH_WORKER_STOP_TIMEOUT_S per base worker (workflow, then activity),
+    # plus 5 s slack: at most 2 x 25 + 5 = 55 s with the bound at its 25 s maximum.
+    # Docker's default grace period is 10 s, which would kill the worker first and
+    # leave the bound inert (D2-062), so the grace period must stay above that
+    # total. Same values as apps/Ingestion Plane/docker-compose.yml: keep the two
+    # in step.
+    stop_grace_period: 60s
     environment:
       TEMPORAL_ADDR: "temporal:7233"
       QUARRY_TEMPORAL_HOSTPORT: "temporal:7233"
+      QUARRY_ORCH_WORKER_STOP_TIMEOUT_S: "${QUARRY_ORCH_WORKER_STOP_TIMEOUT_S:-20}"
       RUNTIME_BASE_URL: "http://quarry-edge:8082"
       EDGE_BASE_URL: "http://quarry-edge:8082"
       CONTROL_BASE_URL: "http://quarry-control:8081"

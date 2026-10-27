@@ -682,4 +682,10 @@ func TestListSchedules_WithoutOrgIsLegacyUnlessRequired(t *testing.T) {
 	if code, _ := callAs(t, h, http.MethodGet, "/v1/schedules"); code != http.StatusBadRequest {
 		t.Fatalf("with %s=1 an unscoped list must be 400, got %d", EnvSchedulesRequireOrg, code)
 	}
+	// D2-042: the orchestrator reconciles from the internal desired read, so the
+	// switch cannot take the reconciler's input away. This is what makes it safe
+	// to set after the deploy.
+	if rows := desiredRows(t, h); len(rows) != 1 || rows[0]["args"] == nil {
+		t.Fatalf("with %s=1 the desired read must still answer the wire shape: %v", EnvSchedulesRequireOrg, rows)
+	}
 }
