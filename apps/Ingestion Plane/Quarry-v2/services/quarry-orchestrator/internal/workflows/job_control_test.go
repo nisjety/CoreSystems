@@ -6,6 +6,7 @@ package workflows
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -123,33 +124,44 @@ func TestBatchJobWF_PauseThenResumeCompletesAll(t *testing.T) {
 }
 
 // TestBatchJobWF_PauseTwiceEmitsTwoDistinctEvents: two pauses in one run are two
-// run_paused events with two different ids (the pause count is in the id).
-// The second pause is requested when the first resume is observed.
+// run_paused events with two different ids (the pause count is in the id), and
+// each pause is released by its own resume.
+//
+// The order is fixed by the workflow, not by timing. Pause one is delivered
+// before the first URL and resume one at 2 s of workflow time. The second pause
+// is signalled from inside the first RunPage activity, so the workflow receives
+// it before that activity's result and reaches the gate before the next URL
+// already paused. Resume two is a delayed callback at 60 s: the test clock only
+// moves on while the workflow is blocked, so it fires in the second wait and
+// never earlier. A first version signalled the second pause from the
+// run_resumed event and never resumed it, so the run waited for ever.
 func TestBatchJobWF_PauseTwiceEmitsTwoDistinctEvents(t *testing.T) {
 	env, a := newEnv(t)
 	events := &controlEvents{}
-	secondRequested := false
-	env.OnActivity(a.EmitEvent, mock.Anything, mock.Anything, mock.Anything).Return(
-		func(_ context.Context, _ string, evt quarrycontracts.Event) error {
-			events.types = append(events.types, evt.Type)
-			events.ids = append(events.ids, evt.EventID)
-			if evt.Type == quarrycontracts.EvtRunResumed && !secondRequested {
-				secondRequested = true
+	events.record(env, a)
+
+	var calls atomic.Int32
+	env.OnActivity(a.RunPage, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, _ activities.RunPageInput) (activities.RunPageResult, error) {
+			if calls.Add(1) == 1 {
 				env.SignalWorkflow(SignalPause, nil)
 			}
-			return nil
+			return activities.RunPageResult{Status: 200}, nil
 		})
-	env.OnActivity(a.RunPage, mock.Anything, mock.Anything).Return(activities.RunPageResult{Status: 200}, nil)
 	env.RegisterDelayedCallback(func() { env.SignalWorkflow(SignalPause, nil) }, 0)
 	env.RegisterDelayedCallback(func() { env.SignalWorkflow(SignalResume, nil) }, 2*time.Second)
+	env.RegisterDelayedCallback(func() { env.SignalWorkflow(SignalResume, nil) }, 60*time.Second)
 
 	env.ExecuteWorkflow(BatchJobWF, BatchJobInput{RunID: "run_batch_twice", URLs: batchURLs(4)}, a)
 
 	require.True(t, env.IsWorkflowCompleted())
 	require.NoError(t, env.GetWorkflowError())
-	require.GreaterOrEqual(t, events.count(quarrycontracts.EvtRunPaused), 2)
-	require.Equal(t, events.count(quarrycontracts.EvtRunPaused), events.distinctIDs(quarrycontracts.EvtRunPaused),
+	require.Equal(t, int32(4), calls.Load(), "every URL is visited")
+	require.Equal(t, 2, events.count(quarrycontracts.EvtRunPaused), "one run_paused for each pause")
+	require.Equal(t, 2, events.count(quarrycontracts.EvtRunResumed), "one run_resumed for each pause")
+	require.Equal(t, 2, events.distinctIDs(quarrycontracts.EvtRunPaused),
 		"every run_paused of one run has its own event id")
+	require.Equal(t, quarrycontracts.EvtRunCompleted, events.last())
 }
 
 // TestCrawlJobWF_PauseUsesAwaitNotTimers: under lifecycle-v1 a paused crawl waits on

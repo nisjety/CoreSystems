@@ -30,7 +30,10 @@ const (
 	// ceilingS is the longest any job may run, whatever the environment says.
 	ceilingS = 21600
 	// floorS keeps a computed default (a batch of one URL) from being too short
-	// for one page to finish. A decision of this package, not in the plan text.
+	// for one page to finish. It applies to computed defaults only: a positive
+	// environment value is the operator's explicit choice and is clamped to the
+	// ceiling alone (the plan: the variable replaces the default, the ceiling
+	// stays). A decision of this package, not in the plan text.
 	floorS = 60
 )
 
@@ -49,18 +52,24 @@ func seconds(kind string, params map[string]any) int64 {
 		if pages := paramInt(params, "max_pages"); pages > 0 {
 			def = min64(crawlCapS, crawlPerPageS*pages)
 		}
-		secs = envOr(EnvCrawlS, def)
+		secs = envOr(EnvCrawlS, floored(def))
 	case "batch":
 		urls := int64(len(paramStrings(params, "urls")))
-		secs = envOr(EnvBatchS, min64(batchCapS, batchPerURLS*urls))
+		secs = envOr(EnvBatchS, floored(min64(batchCapS, batchPerURLS*urls)))
 	default:
-		secs = envOr(EnvScrapeS, scrapeDefaultS)
-	}
-	if secs < floorS {
-		secs = floorS
+		secs = envOr(EnvScrapeS, floored(scrapeDefaultS))
 	}
 	if secs > ceilingS {
 		secs = ceilingS
+	}
+	return secs
+}
+
+// floored raises a computed default to the floor. An environment override does
+// not pass through it.
+func floored(secs int64) int64 {
+	if secs < floorS {
+		return floorS
 	}
 	return secs
 }

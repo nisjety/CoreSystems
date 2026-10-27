@@ -60,10 +60,14 @@ func (m *Manager) prepareSpec(spec ScheduleSpec) ScheduleSpec {
 	if spec.Workflow != ScheduledJobWorkflow || len(spec.Args) == 0 {
 		return spec
 	}
-	wrap, ok := spec.Args[0].(map[string]any)
+	orig, ok := spec.Args[0].(map[string]any)
 	if !ok {
 		return spec
 	}
+	// The desired spec is shared with the caller (it is read again for the
+	// pause state and the log), so the stamped fields go into a copy of the
+	// wrapper, never into the map the caller holds.
+	wrap := copyMap(orig)
 	kind, _ := wrap["kind"].(string)
 	params := copyMap(wrap["params"])
 

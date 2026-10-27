@@ -217,8 +217,9 @@ func TestCreate_AppliesOverlapTimezoneJitterCatchup(t *testing.T) {
 	if act.WorkflowExecutionTimeout <= 0 || act.Workflow != ScheduledJobWorkflow {
 		t.Fatalf("action = %+v", act)
 	}
-	if overlapPolicy(spec.Overlap).String() != "SCHEDULE_OVERLAP_POLICY_CANCEL_OTHER" {
-		t.Fatal("cancel overlap must map to CANCEL_OTHER")
+	// Compared as the enum, not its String(): the SDK prints it as "CancelOther".
+	if overlapPolicy(spec.Overlap) != enumspb.SCHEDULE_OVERLAP_POLICY_CANCEL_OTHER {
+		t.Fatalf("cancel overlap = %v, must map to CANCEL_OTHER", overlapPolicy(spec.Overlap))
 	}
 	if pol := m.policyFor(spec, nil); pol.CatchupWindow != time.Hour || !pol.PauseOnFailure {
 		t.Fatalf("policy = %+v", pol)

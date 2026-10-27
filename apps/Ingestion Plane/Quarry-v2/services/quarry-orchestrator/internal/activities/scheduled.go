@@ -74,8 +74,24 @@ func (a *Activities) PreflightFire(ctx context.Context, in PreflightInput) (Pref
 // RegisterRunInput records one fire with control. RunKey is the fire's
 // idempotency key within its schedule; RunID is the run timeline the fire's
 // events use.
+//
+// ScheduleID must survive the JSON the SDK's data converter makes between the
+// workflow and the activity, so it has a tag of its own. (It was once json:"-" to
+// keep it out of the request body, and the activity then saw an empty id on
+// every fire.) The request body is registerRunBody, which leaves it out: the
+// schedule id is in the URL path.
 type RegisterRunInput struct {
-	ScheduleID string `json:"-"`
+	ScheduleID string `json:"schedule_id"`
+	RunKey     string `json:"run_key"`
+	RunID      string `json:"run_id"`
+	Status     string `json:"status"`
+	Reason     string `json:"reason,omitempty"`
+	WorkflowID string `json:"workflow_id,omitempty"`
+}
+
+// registerRunBody is the request body of POST /v1/internal/schedules/{id}/runs.
+// Org, kind and params are not sent: control takes them from the schedule row.
+type registerRunBody struct {
 	RunKey     string `json:"run_key"`
 	RunID      string `json:"run_id"`
 	Status     string `json:"status"`
@@ -97,7 +113,9 @@ func (a *Activities) RegisterScheduledRun(ctx context.Context, in RegisterRunInp
 	if in.ScheduleID == "" {
 		return RegisterRunResult{}, errs.New(errs.CategoryValidation, op, errors.New("schedule id is required")).Temporal()
 	}
-	body, err := json.Marshal(in)
+	body, err := json.Marshal(registerRunBody{
+		RunKey: in.RunKey, RunID: in.RunID, Status: in.Status, Reason: in.Reason, WorkflowID: in.WorkflowID,
+	})
 	if err != nil {
 		return RegisterRunResult{}, errs.New(errs.CategoryValidation, op, err).Temporal()
 	}
@@ -127,8 +145,17 @@ func (a *Activities) RegisterScheduledRun(ctx context.Context, in RegisterRunInp
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return RegisterRunResult{}, errs.FromHTTPStatus(op, resp.StatusCode, respBody).Temporal()
 	}
+	// Control answers every route in the {request_id, data} envelope. A bare
+	// object is read too, so a stub or an older control keeps working.
 	var out RegisterRunResult
-	if err := json.Unmarshal(respBody, &out); err != nil {
+	var wrapped struct {
+		Data json.RawMessage `json:"data"`
+	}
+	payload := respBody
+	if err := json.Unmarshal(respBody, &wrapped); err == nil && len(wrapped.Data) > 0 {
+		payload = wrapped.Data
+	}
+	if err := json.Unmarshal(payload, &out); err != nil {
 		return RegisterRunResult{}, errs.New(errs.CategoryValidation, op, fmt.Errorf("decode response: %w", err)).Temporal()
 	}
 	if out.JobID == "" {
