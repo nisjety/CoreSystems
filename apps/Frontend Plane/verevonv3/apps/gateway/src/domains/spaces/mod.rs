@@ -8969,6 +8969,77 @@ mod tests {
         assert_eq!(body["data"]["agents"][0]["subject_id"], "svc-support");
     }
 
+    /// WS07-S7: the avatar colour is presentation only and reaches the browser
+    /// solely as `#rrggbb`; every other shape is dropped from the field map.
+    #[tokio::test]
+    async fn the_agent_roster_carries_a_hex_avatar_colour_and_drops_anything_else() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let binding = |subject: &str, colour: Value| {
+            json!({
+                "bindingRef": format!("sab_space-1_{subject}"),
+                "agentRef": format!("agent-{subject}"),
+                "subjectId": subject,
+                "name": format!("Agent {subject}"),
+                "status": "active",
+                "definitionStatus": "active",
+                "avatarColor": colour,
+                "deliveryTargets": []
+            })
+        };
+        let (status, body) = space_agents_response(
+            json!([
+                service_member("svc-ok"),
+                service_member("svc-red"),
+                service_member("svc-short"),
+                service_member("svc-url"),
+                service_member("svc-null")
+            ]),
+            json!([
+                binding("svc-ok", json!("#2563eb")),
+                binding("svc-red", json!("red")),
+                binding("svc-short", json!("#12345")),
+                binding("svc-url", json!("url(x)")),
+                binding("svc-null", Value::Null)
+            ]),
+        )
+        .await;
+
+        assert_eq!(status, 200, "{body}");
+        let agents = body["data"]["agents"].as_array().expect("agents array");
+        let agent = |subject: &str| {
+            agents
+                .iter()
+                .find(|agent| agent["subject_id"] == subject)
+                .unwrap_or_else(|| panic!("agent {subject} listed"))
+        };
+        assert_eq!(agent("svc-ok")["avatar_color"], "#2563eb");
+        for subject in ["svc-red", "svc-short", "svc-url", "svc-null"] {
+            assert!(
+                agent(subject).get("avatar_color").is_none(),
+                "{subject} must not carry an avatar_color: {}",
+                agent(subject)
+            );
+        }
+        assert!(
+            body.to_string().find("url(x)").is_none(),
+            "a rejected colour must not appear anywhere in the response"
+        );
+    }
+
+    #[test]
+    fn valid_avatar_color_accepts_only_seven_character_hex() {
+        use super::valid_avatar_color;
+        for good in ["#2563eb", "#2563EB", "#000000", "#ffffff"] {
+            assert!(valid_avatar_color(good), "{good}");
+        }
+        for bad in [
+            "", "red", "#12345", "#1234567", "2563eb", "#12345g", "url(x)", " #2563eb", "#2563eb;",
+            "#ɐɐɐ",
+        ] {
+            assert!(!valid_avatar_color(bad), "{bad:?}");
+        }
+    }
+
     /// A roster we could not read must not render as "this room has no agents".
     #[tokio::test]
     async fn an_unreadable_roster_fails_rather_than_reporting_no_agents() {
