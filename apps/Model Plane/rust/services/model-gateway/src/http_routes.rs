@@ -10033,6 +10033,10 @@ async fn list_thread_messages(
                 space_read_decision_token: query.space_read_decision_token.unwrap_or_default(),
                 limit,
                 before_message_id: before,
+                // The UI transcript route is the only reader that shows human posts. Every
+                // other caller keeps the default (false), so a post never reaches model
+                // context or reattach_context.
+                include_human_posts: true,
             },
             &bearer,
         )?)

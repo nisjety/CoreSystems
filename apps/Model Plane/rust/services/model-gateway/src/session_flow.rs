@@ -305,6 +305,7 @@ async fn append_user_message(
             payload_digest: space.payload_digest,
             idempotency_key: space.idempotency_key,
             client_message_id: client_message_id.unwrap_or_default().to_owned(),
+            ..Default::default()
         },
         bearer,
     )

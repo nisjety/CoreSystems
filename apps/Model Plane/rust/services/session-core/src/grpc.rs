@@ -180,7 +180,7 @@ fn clamp_conversation_page_limit(limit: u32) -> i64 {
 }
 
 /// One stored turn as the transcript reads it: id, role, content, persona,
-/// metadata and author.
+/// metadata, author and post kind.
 type ConversationRow = (
     String,
     String,
@@ -188,13 +188,15 @@ type ConversationRow = (
     Option<String>,
     Option<serde_json::Value>,
     Option<String>,
+    String,
 );
 
 fn session_message_from_row(
-    (message_id, role, content, agent_name, metadata, author_subject_id): ConversationRow,
+    (message_id, role, content, agent_name, metadata, author_subject_id, post_kind): ConversationRow,
 ) -> pb::SessionMessage {
     pb::SessionMessage {
         message_id,
+        post_kind,
         role,
         content,
         agent_name: agent_name.unwrap_or_default(),
@@ -229,6 +231,7 @@ async fn conversation_cursor_sequence(
     org_id: &str,
     thread_id: &str,
     audience_ceiling: Option<i64>,
+    include_human_posts: bool,
     message_id: &str,
 ) -> Result<i64, Status> {
     let row: Option<(i64,)> = sqlx::query_as(
@@ -238,12 +241,14 @@ async fn conversation_cursor_sequence(
          WHERE m.id = $1 AND m.thread_id = $2 AND t.org_id = $3
            AND ($4::BIGINT IS NULL
                 OR m.recipient_audience_revision IS NULL
-                OR m.recipient_audience_revision <= $4)",
+                OR m.recipient_audience_revision <= $4)
+           AND ($5 OR m.post_kind <> 'post')",
     )
     .bind(message_id)
     .bind(thread_id)
     .bind(org_id)
     .bind(audience_ceiling)
+    .bind(include_human_posts)
     .fetch_optional(pool)
     .await
     .map_err(|error| Status::internal(error.to_string()))?;
@@ -261,11 +266,12 @@ async fn conversation_page_rows(
     org_id: &str,
     thread_id: &str,
     audience_ceiling: Option<i64>,
+    include_human_posts: bool,
     before_sequence: Option<i64>,
     fetch: i64,
 ) -> Result<Vec<ConversationRow>, Status> {
     sqlx::query_as::<_, ConversationRow>(
-        "SELECT m.id::text, m.role, m.content, m.agent_name, m.metadata, m.author_subject_id
+        "SELECT m.id::text, m.role, m.content, m.agent_name, m.metadata, m.author_subject_id, m.post_kind
          FROM messages m
          JOIN threads t ON t.id = m.thread_id
          WHERE m.thread_id = $1 AND t.org_id = $2
@@ -273,6 +279,7 @@ async fn conversation_page_rows(
                 OR m.recipient_audience_revision IS NULL
                 OR m.recipient_audience_revision <= $3)
            AND ($4::BIGINT IS NULL OR m.sequence < $4)
+           AND ($6 OR m.post_kind <> 'post')
          ORDER BY m.sequence DESC
          LIMIT $5",
     )
@@ -281,6 +288,7 @@ async fn conversation_page_rows(
     .bind(audience_ceiling)
     .bind(before_sequence)
     .bind(fetch)
+    .bind(include_human_posts)
     .fetch_all(pool)
     .await
     .map_err(|error| {
@@ -306,6 +314,7 @@ async fn conversation_page_response(
                 &req.org_id,
                 &req.thread_id,
                 audience_ceiling,
+                req.include_human_posts,
                 &req.before_message_id,
             )
             .await?,
@@ -316,6 +325,7 @@ async fn conversation_page_response(
         &req.org_id,
         &req.thread_id,
         audience_ceiling,
+        req.include_human_posts,
         before_sequence,
         limit + 1,
     )
@@ -3047,11 +3057,13 @@ async fn create_thread_inner_preverified(
             .map_err(|e| Status::internal(e.to_string()))?;
         let existing: Option<(String,)> = sqlx::query_as(
             "SELECT id FROM threads WHERE org_id = $1 AND user_id = $2 AND session_key = $3 \
+             AND space_id IS NOT DISTINCT FROM NULLIF($4, '') \
              ORDER BY id LIMIT 1",
         )
         .bind(&req.org_id)
         .bind(&req.user_id)
         .bind(&req.session_key)
+        .bind(&req.space_id)
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
@@ -3350,6 +3362,19 @@ pub(crate) async fn append_message_in_tx_as(
             "client_message_id must match [A-Za-z0-9][A-Za-z0-9_-]{0,127}",
         ));
     }
+    // "" and "turn" are the conversation turn every caller has always written; "post" is a
+    // human message to the room, which only a user row can be. Anything else is refused
+    // here so it never reaches the CHECK as a database error.
+    let post_kind = match req.post_kind.trim() {
+        "" | "turn" => "turn",
+        "post" if req.role.trim() == "user" => "post",
+        "post" => {
+            return Err(Status::invalid_argument("post_kind post needs role user"));
+        }
+        _ => {
+            return Err(Status::invalid_argument("post_kind must be turn or post"));
+        }
+    };
     let msg_id = new_ulid();
     let now = Utc::now();
     let mut letta_sync: Option<AppendedMemory> = None;
@@ -3486,8 +3511,8 @@ pub(crate) async fn append_message_in_tx_as(
     // Compared trimmed: the queue path stores the trimmed text and the resend carries the
     // composer's own.
     if !client_message_id.is_empty() {
-        let existing: Option<(String, i64, String, String)> = sqlx::query_as(
-            "SELECT id, sequence, role, content FROM messages
+        let existing: Option<(String, i64, String, String, String)> = sqlx::query_as(
+            "SELECT id, sequence, role, content, post_kind FROM messages
              WHERE thread_id = $1 AND client_message_id = $2",
         )
         .bind(&req.thread_id)
@@ -3495,8 +3520,11 @@ pub(crate) async fn append_message_in_tx_as(
         .fetch_optional(&mut **tx)
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
-        if let Some((existing_id, existing_sequence, existing_role, existing_content)) = existing {
-            if existing_role != req.role || existing_content.trim() != req.content.trim() {
+        if let Some((existing_id, existing_sequence, existing_role, existing_content, existing_kind)) = existing {
+            if existing_role != req.role
+                || existing_kind != post_kind
+                || existing_content.trim() != req.content.trim()
+            {
                 return Err(Status::already_exists(
                     "client_message_id already names a different message in this thread",
                 ));
@@ -3515,10 +3543,10 @@ pub(crate) async fn append_message_in_tx_as(
         "INSERT INTO messages
          (id, thread_id, role, content, created_at, agent_name, metadata, space_id, recipient_audience_ref,
           recipient_audience_revision, recipient_audience_hash, authority_revision, resource_authorization_ref,
-          author_subject_id)
+          author_subject_id, post_kind)
          SELECT $1, t.id, $3, $4, $5, NULLIF($6, ''), $7, t.space_id, t.recipient_audience_ref,
                 t.recipient_audience_revision, t.recipient_audience_hash, t.authority_revision, t.resource_authorization_ref,
-                NULLIF($8, '')
+                NULLIF($8, ''), $9
          FROM threads t WHERE t.id=$2
          RETURNING sequence, space_id, recipient_audience_ref, recipient_audience_revision,
                    recipient_audience_hash, authority_revision, resource_authorization_ref",
@@ -3531,6 +3559,7 @@ pub(crate) async fn append_message_in_tx_as(
     .bind(req.agent_name.trim())
     .bind(&metadata_json)
     .bind(author_subject_id)
+    .bind(post_kind)
     .fetch_one(&mut **tx)
     .await
     .map_err(|e| Status::internal(e.to_string()))?;
@@ -3580,6 +3609,8 @@ pub(crate) async fn append_message_in_tx_as(
         "message_id": &msg_id,
         "sequence": sequence,
         "role": &req.role,
+        "post_kind": post_kind,
+        "author_subject_id": author_subject_id,
         "space_id": row.1,
         "recipient_audience_ref": row.2,
         "recipient_audience_revision": row.3,
@@ -3596,7 +3627,9 @@ pub(crate) async fn append_message_in_tx_as(
     .await
     .map_err(|e| Status::internal(e.to_string()))?;
 
-    let candidates = if conversation_only { Vec::new() } else {
+    // A human post is the author's words to the room, not the thread owner's: it never becomes
+    // the owner's memory, so no candidate is extracted and nothing reaches the Letta mirror.
+    let candidates = if conversation_only || post_kind == "post" { Vec::new() } else {
         crate::dreaming::extract_memory_candidates(&req.role, &req.content, &req.thread_id)
     };
     // A paused or off user, or a thread set off, learns nothing from this turn:
@@ -5899,7 +5932,7 @@ async fn load_thread_messages(
          FROM (
              SELECT role, content, sequence
              FROM messages
-             WHERE thread_id = $1
+             WHERE thread_id = $1 AND post_kind <> 'post'
              ORDER BY sequence DESC
              LIMIT $2
          ) recent
@@ -7692,18 +7725,20 @@ impl SessionCore for SessionService {
                 // `m.id` is selected so a caller can name one earlier turn
                 // durably (message pinning). It was always in the table; this
                 // read simply never returned it.
-                "SELECT m.id::text, m.role, m.content, m.agent_name, m.metadata, m.author_subject_id
+                "SELECT m.id::text, m.role, m.content, m.agent_name, m.metadata, m.author_subject_id, m.post_kind
                  FROM messages m
                  JOIN threads t ON t.id = m.thread_id
                  WHERE m.thread_id = $1 AND t.org_id = $2
                    AND ($3::BIGINT IS NULL
                         OR m.recipient_audience_revision IS NULL
                         OR m.recipient_audience_revision <= $3)
+                   AND ($4 OR m.post_kind <> 'post')
                  ORDER BY m.sequence",
             )
                 .bind(&req.thread_id)
                 .bind(&req.org_id)
                 .bind(audience_ceiling)
+                .bind(req.include_human_posts)
                 .fetch_all(&self.pool)
                 .await
                 .map_err(|e| {
@@ -7787,6 +7822,9 @@ impl SessionCore for SessionService {
                 String,
                 bool,
                 Option<DateTime<Utc>>,
+                // {reply_count, last_author}: one JSON column because sqlx maps a row
+                // tuple of at most 16 columns.
+                Option<serde_json::Value>,
             )> = sqlx::query_as(
                 concat!("WITH page AS (
                     SELECT t.id, t.session_key, t.created_at, t.presentation_title,
@@ -7798,6 +7836,8 @@ impl SessionCore for SessionService {
                            OR (t.recipient_audience_revision IS NULL
                                OR t.recipient_audience_revision <= $6))
                       AND ($6::BIGINT IS NOT NULL OR t.user_id = $2)
+                      AND ($6::BIGINT IS NULL
+                           OR EXISTS (SELECT 1 FROM messages em WHERE em.thread_id = t.id))
                       AND (NULLIF($4, '') IS NULL OR t.space_id = $4)
                       AND (NULLIF($5, '') IS NULL OR t.origin = $5)
                       AND (NULLIF($7, '') IS NULL OR t.id = $7)
@@ -7823,7 +7863,9 @@ impl SessionCore for SessionService {
                     page.origin,
                     page.user_id,
                     page.persona_enabled,
-                    page.archived_at
+                    page.archived_at,
+                    jsonb_build_object('reply_count', reply_stats.reply_count,
+                                       'last_author', reply_stats.last_author) AS reply_stats
                  FROM page
                  LEFT JOIN LATERAL (
                     SELECT content
@@ -7846,6 +7888,23 @@ impl SessionCore for SessionService {
                     ORDER BY r.updated_at DESC, r.created_at DESC, r.id DESC
                     LIMIT 1
                  ) latest_run ON TRUE
+                 LEFT JOIN LATERAL (
+                    SELECT GREATEST(COUNT(*) FILTER (WHERE m.role = 'user') - 1, 0) AS reply_count,
+                           (SELECT lm.author_subject_id
+                            FROM messages lm
+                            WHERE lm.thread_id = page.id AND lm.role = 'user'
+                              AND lm.author_subject_id IS NOT NULL
+                              AND ($6::BIGINT IS NULL
+                                   OR lm.recipient_audience_revision IS NULL
+                                   OR lm.recipient_audience_revision <= $6)
+                            ORDER BY lm.sequence DESC
+                            LIMIT 1) AS last_author
+                    FROM messages m
+                    WHERE m.thread_id = page.id
+                      AND ($6::BIGINT IS NULL
+                           OR m.recipient_audience_revision IS NULL
+                           OR m.recipient_audience_revision <= $6)
+                 ) reply_stats ON TRUE
                  ORDER BY (page.pinned_at IS NOT NULL) DESC, page.last_activity_at DESC, page.id DESC"),
             )
             .bind(&req.org_id)
@@ -7880,7 +7939,7 @@ impl SessionCore for SessionService {
             let threads = rows
                 .into_iter()
                 .map(
-                    |(thread_id, session_key, created_at, title, preview, pinned_at, last_activity_at, space_id, latest_run_id, latest_run_status, latest_run_updated_at, origin, owner_subject_id, persona_enabled, archived_at)| {
+                    |(thread_id, session_key, created_at, title, preview, pinned_at, last_activity_at, space_id, latest_run_id, latest_run_status, latest_run_updated_at, origin, owner_subject_id, persona_enabled, archived_at, reply_stats)| {
                         let fallback_title = if session_key.trim().is_empty() {
                             "Verevon Chat"
                         } else {
@@ -7906,6 +7965,16 @@ impl SessionCore for SessionService {
                             owner_subject_id,
                             persona_enabled,
                             archived_at: archived_at.map(to_proto_timestamp),
+                            reply_count: reply_stats
+                                .as_ref()
+                                .and_then(|stats| stats["reply_count"].as_u64())
+                                .and_then(|count| u32::try_from(count).ok())
+                                .unwrap_or_default(),
+                            last_author_subject_id: reply_stats
+                                .as_ref()
+                                .and_then(|stats| stats["last_author"].as_str())
+                                .unwrap_or_default()
+                                .to_owned(),
                         }
                     },
                 )

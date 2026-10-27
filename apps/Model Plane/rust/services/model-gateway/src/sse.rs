@@ -6019,6 +6019,7 @@ async fn load_recent_thread_messages(
             // Unpaged (WS09-S8): the whole conversation in sequence order.
             limit: 0,
             before_message_id: String::new(),
+            ..Default::default()
         },
         bearer,
     ) {
@@ -8404,6 +8405,7 @@ async fn read_latest_assistant(
             // Unpaged (WS09-S8): the whole conversation in sequence order.
             limit: 0,
             before_message_id: String::new(),
+            ..Default::default()
         },
         bearer,
     )

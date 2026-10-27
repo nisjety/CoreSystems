@@ -1280,6 +1280,8 @@ async fn load_pending_messages(
          FROM messages m \
          JOIN threads t ON t.id = m.thread_id \
          WHERE m.role IN ('user', 'assistant') \
+           AND m.post_kind <> 'post' \
+           AND (m.author_subject_id IS NULL OR m.author_subject_id = t.user_id) \
            AND NOT EXISTS (SELECT 1 FROM user_memory_controls c WHERE c.org_id = t.org_id AND c.user_id = t.user_id AND m.created_at <= c.extract_after) \
            AND NOT EXISTS (SELECT 1 FROM user_memory_controls c WHERE c.org_id = t.org_id AND c.user_id = t.user_id AND c.memory_state <> 'on' AND $2) \
            AND (NOT $2 OR t.memory_resumed_at IS NULL OR m.created_at > t.memory_resumed_at) \
@@ -1348,6 +1350,8 @@ async fn load_preceding_context(
          JOIN threads t ON t.id = m.thread_id \
          WHERE m.thread_id = $1 \
            AND m.role IN ('user', 'assistant') \
+           AND m.post_kind <> 'post' \
+           AND (m.author_subject_id IS NULL OR m.author_subject_id = t.user_id) \
            AND NOT EXISTS (SELECT 1 FROM user_memory_controls c WHERE c.org_id = t.org_id AND c.user_id = t.user_id AND m.created_at <= c.extract_after) \
            AND NOT EXISTS (SELECT 1 FROM user_memory_controls c WHERE c.org_id = t.org_id AND c.user_id = t.user_id AND c.memory_state <> 'on' AND $4) \
            AND (NOT $4 OR t.memory_resumed_at IS NULL OR m.created_at > t.memory_resumed_at) \
