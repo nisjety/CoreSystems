@@ -670,6 +670,29 @@ function SpaceConversationPanel(props: {
  */
 const MAX_SPACE_INSTRUCTIONS_LENGTH = 4000
 
+// WS07-S13 (decision WS07-D3, option A): the artifact-first rule is an opt-in
+// snippet an editor appends to the room's own instructions, never a default
+// composed by the gateway. Both locales are recognised as "already present"
+// so switching language cannot append a second copy.
+const ARTIFACT_RULE_NO =
+  'Når du blir bedt om en analyse, rapport, plan, dokument eller kode som er lengre enn et kort svar, lag det som en artefakt og svar med én eller to setninger om hva det er og hva som er endret. Revider den samme artefakten i stedet for å lage en ny.'
+const ARTIFACT_RULE_EN =
+  'When asked for an analysis, report, plan, document or code longer than a short answer, create it as an artifact and reply with one or two sentences saying what it is and how it changed. Revise the same artifact instead of creating a new one.'
+
+function normalizeInstructionText(text: string): string {
+  return text.replace(/\s+/g, ' ').trim()
+}
+
+function hasArtifactRule(text: string): boolean {
+  const normalized = normalizeInstructionText(text)
+  return normalized.includes(ARTIFACT_RULE_NO) || normalized.includes(ARTIFACT_RULE_EN)
+}
+
+function appendArtifactRule(text: string, rule: string): string {
+  const trimmed = text.replace(/\s+$/, '')
+  return trimmed.length === 0 ? rule : `${trimmed}\n\n${rule}`
+}
+
 /**
  * ADR-0003's Space layer — owner/manager/editor-authored instructions that
  * apply to every turn in this Space, composed with the platform and org
@@ -692,6 +715,16 @@ function SpaceInstructionsSection(props: { readonly spaceRef: string; readonly r
   const [formError, setFormError] = createSignal<string | null>(null)
   const canEdit = createMemo(() => canEditSpaceInstructions(props.role))
   const value = createMemo(() => (dirty() ? draft() : saved() ?? ''))
+  const artifactRulePresent = createMemo(() => hasArtifactRule(value()))
+  const artifactRuleText = () => i18n.tr(ARTIFACT_RULE_NO, ARTIFACT_RULE_EN)
+  const artifactRuleFits = createMemo(
+    () => appendArtifactRule(value(), artifactRuleText()).length <= MAX_SPACE_INSTRUCTIONS_LENGTH,
+  )
+  const handleAddArtifactRule = () => {
+    if (submitting() || artifactRulePresent() || !artifactRuleFits()) return
+    setDraft(appendArtifactRule(value(), artifactRuleText()))
+    setDirty(true)
+  }
 
   const handleSubmit = async (event: Event) => {
     event.preventDefault()
@@ -773,12 +806,42 @@ function SpaceInstructionsSection(props: { readonly spaceRef: string; readonly r
             />
           </Show>
           <div class="verevon-space-view__actions">
+            <button
+              type="button"
+              class="verevon-space-secondary-action"
+              disabled={submitting() || saved.loading || artifactRulePresent() || !artifactRuleFits()}
+              aria-describedby="space-artifact-rule-hint"
+              onClick={handleAddArtifactRule}
+            >
+              {i18n.tr('Legg til artefaktregelen', 'Add the artifact rule')}
+            </button>
             <button type="submit" class="verevon-space-secondary-action" disabled={submitting() || !dirty()}>
               <Show when={submitting()} fallback={<><Sparkles size={15} aria-hidden="true" /> {i18n.tr('Lagre instrukser', 'Save instructions')}</>}>
                 <Loader2 size={15} aria-hidden="true" /> {i18n.tr('Lagrer…', 'Saving…')}
               </Show>
             </button>
           </div>
+          <p id="space-artifact-rule-hint" class="verevon-space-inline-status">
+            <Show
+              when={artifactRulePresent()}
+              fallback={
+                <Show
+                  when={artifactRuleFits()}
+                  fallback={i18n.tr(
+                    'Instruksene har ikke plass til artefaktregelen (grense 4000 tegn).',
+                    'There is no room for the artifact rule in the instructions (4000 character limit).',
+                  )}
+                >
+                  {i18n.tr(
+                    'Ber agenten lage lengre svar som artefakter og revidere dem på stedet. Lagres først når du velger Lagre instrukser.',
+                    'Asks the agent to create longer answers as artifacts and revise them in place. Saved only when you choose Save instructions.',
+                  )}
+                </Show>
+              }
+            >
+              {i18n.tr('Artefaktregelen er allerede lagt til.', 'The artifact rule is already added.')}
+            </Show>
+          </p>
         </form>
       </Show>
     </section>
