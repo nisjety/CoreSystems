@@ -58,25 +58,29 @@ func TestIssueSpaceCapabilityDecisionBindsOneBackendClaim(t *testing.T) {
 	}
 }
 
-func TestIssueSpaceCapabilityDecisionGrantsEgressPermissionOnlyWhenClaimed(t *testing.T) {
+// WS06-S5 closed the egress vocabulary to the single bottom tier, so no claim
+// can earn space:egress today: an unrecognized tier is refused before signing
+// and the only signable claim grants no egress permission.
+func TestIssueSpaceCapabilityDecisionNeverGrantsEgressPermissionToday(t *testing.T) {
 	now := time.Now().UTC()
 	evidence := validPersonalThreadEvidence()
 	evidence.SandboxCapabilityEntitled = true
+
 	intent := validSpaceCapabilityIntent()
 	intent.Egress = "allow_domains"
+	if _, err := IssueSpaceCapabilityDecision(evidence, intent, "decision-1", "nonce-1", now); err == nil {
+		t.Fatal("an egress tier outside the closed vocabulary was signed")
+	}
 
+	intent.Egress = EgressDisabledByDefault
 	decision, err := IssueSpaceCapabilityDecision(evidence, intent, "decision-1", "nonce-1", now)
 	if err != nil {
 		t.Fatalf("IssueSpaceCapabilityDecision: %v", err)
 	}
-	found := false
 	for _, permission := range decision.Permissions {
 		if permission == "space:egress" {
-			found = true
+			t.Fatalf("the disabled_by_default tier granted space:egress: %#v", decision.Permissions)
 		}
-	}
-	if !found {
-		t.Fatalf("egress-capable claim did not grant space:egress: %#v", decision.Permissions)
 	}
 }
 
