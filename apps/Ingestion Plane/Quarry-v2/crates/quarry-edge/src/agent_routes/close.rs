@@ -80,14 +80,17 @@ pub(super) fn lane_refs(entry: &RunEntry, live: &RunLive) -> Vec<LaneRef> {
 /// WS8.H: wait, bounded in total, for each lane's running action to finish, so the browser
 /// session is not released under a call that is still running. A lane still held when the
 /// wait ends is logged and the session is released anyway (the drain has always done so).
-pub(super) async fn wait_for_lanes(run_id: &str, lanes: &[LaneRef], wait: Duration) {
+/// Returns whether every lane was idle within the wait; the shutdown drain uses that to leave a
+/// run an action still holds to the exit.
+pub(super) async fn wait_for_lanes(run_id: &str, lanes: &[LaneRef], wait: Duration) -> bool {
     let deadline = tokio::time::Instant::now() + wait;
     for lane in lanes {
         if tokio::time::timeout_at(deadline, lane.0.lock()).await.is_err() {
             tracing::warn!(run_id, "close: an action still holds a lane; releasing anyway");
-            return;
+            return false;
         }
     }
+    true
 }
 
 /// The one path that ends a run, for the owner's `DELETE` and for the sweeper. It
@@ -106,13 +109,30 @@ pub(super) async fn finish_run(
 ) -> QuarryResult<Option<serde_json::Value>> {
     // Waits for an action that is still running (a drain waits only so long).
     let mut entry = match reason {
-        CloseReason::Drain(wait) => match tokio::time::timeout(wait, handle.entry.lock()).await {
-            Ok(entry) => entry,
-            Err(_) => {
+        CloseReason::Drain(wait) => {
+            // WS8.H: a step releases the run entry while its browser call runs, so an action
+            // that still holds the run holds a lane, not the entry. A drain leaves such a run
+            // to the exit. The lanes are waited for without the entry held (the lock order
+            // is lane first, entry second), then the entry is taken as before.
+            let lanes = match tokio::time::timeout(wait, handle.entry.lock()).await {
+                Ok(entry) => lane_refs(&entry, &handle.live),
+                Err(_) => {
+                    tracing::warn!(run_id, "drain: an action still holds this run");
+                    return Err(drain_error(DRAIN_IN_USE));
+                }
+            };
+            if !wait_for_lanes(run_id, &lanes, wait).await {
                 tracing::warn!(run_id, "drain: an action still holds this run");
                 return Err(drain_error(DRAIN_IN_USE));
             }
-        },
+            match tokio::time::timeout(wait, handle.entry.lock()).await {
+                Ok(entry) => entry,
+                Err(_) => {
+                    tracing::warn!(run_id, "drain: an action still holds this run");
+                    return Err(drain_error(DRAIN_IN_USE));
+                }
+            }
+        }
         _ => handle.entry.lock().await,
     };
     if entry.closed {
@@ -327,6 +347,20 @@ pub async fn drain_runs(
                 // wait (bounded) for an action that is running, mark the run closed so a
                 // request queued behind it is refused instead of running on a released
                 // session, and release a clone of the session, as `finish_run` does.
+                // WS8.H: an action holds a lane, not the entry, while its browser call runs,
+                // so the lanes are waited for first (without the entry held: the lock order is
+                // lane first, entry second) and a run one still holds is left to the exit.
+                let Ok(first) = tokio::time::timeout(per_run_timeout, handle.entry.lock()).await
+                else {
+                    tracing::warn!(%run_id, "drain: an action still holds this run");
+                    return None;
+                };
+                let lanes = lane_refs(&first, &handle.live);
+                drop(first);
+                if !wait_for_lanes(&run_id.to_string(), &lanes, per_run_timeout).await {
+                    tracing::warn!(%run_id, "drain: an action still holds this run");
+                    return None;
+                }
                 let Ok(mut entry) = tokio::time::timeout(per_run_timeout, handle.entry.lock()).await
                 else {
                     tracing::warn!(%run_id, "drain: an action still holds this run");
