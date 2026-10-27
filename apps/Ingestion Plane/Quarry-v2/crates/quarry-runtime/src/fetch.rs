@@ -215,7 +215,10 @@ impl StaticDriver {
                 self.proxy_clients.get(uri).ok_or_else(|| {
                     QuarryError::new(
                         ErrorCode::Internal,
-                        format!("egress proxy client missing for configured proxy: {uri}"),
+                        format!(
+                            "egress proxy client missing for configured proxy: {}",
+                            redacted_proxy_uri(uri)
+                        ),
                     )
                 })
             }
@@ -508,7 +511,7 @@ fn attempt_record(
     let (egress, proxy_uri, processor_id) = match &decision.identity {
         EgressIdentity::Direct => ("direct", None, None),
         EgressIdentity::Proxy { uri, processor_id } => {
-            ("proxy", Some(uri.as_str()), processor_id.as_deref())
+            ("proxy", Some(redacted_proxy_uri(uri)), processor_id.as_deref())
         }
     };
     json!({
@@ -520,8 +523,28 @@ fn attempt_record(
         "decision_reason": decision.reason,
         "status": status,
         "error_code": error.map(|e| format!("{:?}", e.code)),
-        "error": error.map(|e| e.message.clone()),
+        // The error class only. The message of a transport error can carry the
+        // proxy URI (with its userinfo) or the target URL; these records are
+        // returned to the caller in the error details.
+        "error_class": error.map(|e| e.code.wire_name()),
     })
+}
+
+/// A proxy URI as it may appear in a response or a message: scheme, host and
+/// port only. The userinfo (`user:pass@`), path, query and fragment are
+/// dropped. A value that does not parse is replaced by a fixed word so the
+/// raw text never leaks through the fallback.
+fn redacted_proxy_uri(uri: &str) -> String {
+    match Url::parse(uri) {
+        Ok(parsed) => match parsed.host_str() {
+            Some(host) => match parsed.port() {
+                Some(port) => format!("{}://{}:{}", parsed.scheme(), host, port),
+                None => format!("{}://{}", parsed.scheme(), host),
+            },
+            None => "proxy".to_string(),
+        },
+        Err(_) => "proxy".to_string(),
+    }
 }
 
 fn blocked_error(
@@ -604,10 +627,11 @@ fn build_client(
         // proxy. Reqwest parses socks5/socks5h/http/https from the URI
         // scheme; on parse failure we surface a clear error so misC-
         // configured pools fail fast at startup.
-        let parsed = reqwest::Proxy::all(&p.uri).map_err(|e| {
+        let parsed = reqwest::Proxy::all(&p.uri).map_err(|_| {
+            // Neither the URI nor the reqwest text: both can hold the userinfo.
             QuarryError::new(
                 ErrorCode::Internal,
-                format!("invalid proxy URI {}: {e}", p.uri),
+                format!("invalid proxy URI {}", redacted_proxy_uri(&p.uri)),
             )
         })?;
         builder = builder.proxy(parsed);
@@ -1102,6 +1126,76 @@ mod tests {
         assert!(!driver
             .proxy_pin_resolvers
             .contains_key("http://p3.example:8080"));
+    }
+
+    fn proxy_decision(uri: &str) -> EgressDecision {
+        EgressDecision {
+            identity: EgressIdentity::Proxy {
+                uri: uri.to_string(),
+                processor_id: Some("quarry_proxy_pool".to_string()),
+            },
+            attempt: 0,
+            reason: "proxy egress".to_string(),
+        }
+    }
+
+    #[test]
+    fn attempt_record_never_carries_proxy_userinfo() {
+        let decision = proxy_decision("http://alice:s3cret@proxy.example:8080/path?token=abc");
+        let rec = attempt_record(&decision, Some(403), None, "block_status");
+        let text = rec.to_string();
+        assert!(!text.contains("alice"), "{text}");
+        assert!(!text.contains("s3cret"), "{text}");
+        assert!(!text.contains("token=abc"), "{text}");
+        assert_eq!(rec["proxy_uri"], "http://proxy.example:8080");
+        assert_eq!(rec["processor_id"], "quarry_proxy_pool");
+    }
+
+    #[test]
+    fn attempt_record_reports_an_error_class_and_not_the_error_text() {
+        let decision = proxy_decision("socks5h://bob:hunter2@proxy.example:1080");
+        let err = QuarryError::new(
+            ErrorCode::DriverFailed,
+            "error sending request for url (https://target.example/secret?q=1) via socks5h://bob:hunter2@proxy.example:1080",
+        );
+        let rec = attempt_record(&decision, None, Some(&err), "transport_error");
+        let text = rec.to_string();
+        assert!(!text.contains("hunter2"), "{text}");
+        assert!(!text.contains("bob"), "{text}");
+        assert!(!text.contains("target.example"), "{text}");
+        assert!(rec.get("error").is_none(), "{text}");
+        assert_eq!(rec["error_class"], ErrorCode::DriverFailed.wire_name());
+        assert_eq!(rec["error_code"], "DriverFailed");
+    }
+
+    #[test]
+    fn redacted_proxy_uri_handles_odd_inputs() {
+        assert_eq!(redacted_proxy_uri("http://u:p@h.example"), "http://h.example");
+        assert_eq!(redacted_proxy_uri("http://u@h.example:3128/x#f"), "http://h.example:3128");
+        assert_eq!(redacted_proxy_uri("not a url with u:p@x"), "proxy");
+    }
+
+    #[tokio::test]
+    async fn a_missing_proxy_client_error_does_not_carry_the_userinfo() {
+        let pool = ProxyPool::from_env_string("socks5://proxy.example:1080");
+        let driver =
+            StaticDriver::with_proxy_pool(Duration::from_secs(2), "QuarryTest/1.0", pool).unwrap();
+        let decision = proxy_decision("socks5://carol:pw123@unregistered.example:1080");
+        let url: Url = "http://example.com/".parse().unwrap();
+        let hints = FetchHints {
+            resolved_target: Some(crate::dns_guard::ResolvedTarget {
+                host: "example.com".to_string(),
+                addresses: vec!["93.184.216.34:80".parse().unwrap()],
+            }),
+            ..FetchHints::default()
+        };
+        let err = driver
+            .client_for_decision(&decision, &hints, &url)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::Internal);
+        assert!(!err.message.contains("pw123"), "{}", err.message);
+        assert!(!err.message.contains("carol"), "{}", err.message);
     }
 
     #[tokio::test]
