@@ -80,7 +80,9 @@ static DEFS: &[Def] = &[
         id: "shape.jwt",
         kind: MarkerKind::Token,
         min_profile: Profile::Live,
-        pattern: r"(?-u:\b)eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*",
+        // The `eyJ` prefix is matched in any case: an element fingerprint keeps its text
+        // lower-cased, and a token that went through that normaliser must still be masked.
+        pattern: r"(?-u:\b)(?i:eyj)[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*",
         replace: Replace::Whole,
         verify: None,
     },
@@ -576,6 +578,19 @@ mod tests {
                 assert!(t.is_empty(), "{p}");
             }
         }
+    }
+
+    #[test]
+    fn a_lower_cased_jwt_is_masked_too() {
+        // What an element fingerprint's normalised text holds for a token in the text.
+        let jwt = ["eyjhbgcioijiuzi1niisinr5cci6", ".eyjzdwiioiixmjm0", ".sflkxwrjsmekkf2qt4fwpm"].concat();
+        let (out, t) = run(Profile::Live, &format!("go {jwt} now"));
+        assert_eq!(out, "go [redacted:token] now");
+        assert_eq!(t.by_rule().get("shape.jwt"), Some(&1));
+        // Prose that merely starts the same way is not a token: it has no dotted segments.
+        let (out, t) = run(Profile::Live, "eyjafjallajokull erupted");
+        assert_eq!(out, "eyjafjallajokull erupted");
+        assert!(t.is_empty());
     }
 
     #[test]

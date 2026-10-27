@@ -98,13 +98,18 @@ fn mask_keyed_value(value: &mut Value, kind: MarkerKind, tally: &mut Tally) -> b
 /// The whole value is replaced, whatever its shape: an object or array under one
 /// of these keys (a structured `authorization` config, say) is masked as a
 /// unit rather than walked, because a credential can sit in any child.
-const HEADER_KEYS: [(&str, MarkerKind); 6] = [
+const HEADER_KEYS: [(&str, MarkerKind); 9] = [
     ("authorization", MarkerKind::Credential),
     ("proxy-authorization", MarkerKind::Credential),
     ("cookie", MarkerKind::Secret),
     ("set-cookie", MarkerKind::Secret),
     ("x-api-key", MarkerKind::Key),
     ("x-auth-token", MarkerKind::Token),
+    // The anti-forgery headers: a CSRF token is a credential for the session it
+    // belongs to (D1-030).
+    ("x-csrf-token", MarkerKind::Token),
+    ("x-xsrf-token", MarkerKind::Token),
+    ("x-csrftoken", MarkerKind::Token),
 ];
 /// Keys that hold the header name in a `{name, value}` pair.
 const HEADER_NAME_KEYS: [&str; 2] = ["name", "key"];
@@ -118,16 +123,42 @@ fn header_kind(s: &str) -> Option<MarkerKind> {
         .map(|(_, kind)| *kind)
 }
 
-/// If this object looks like `{"name": "Cookie", "value": ...}`, the kind to
-/// mask its `value` with.
-fn header_pair_kind(map: &serde_json::Map<String, Value>) -> Option<MarkerKind> {
-    map.iter().find_map(|(k, v)| {
-        if HEADER_NAME_KEYS.iter().any(|n| k.eq_ignore_ascii_case(n)) {
-            v.as_str().and_then(header_kind)
-        } else {
-            None
-        }
+/// The names of a session cookie that are not caught by a header name: `sid`,
+/// `connect.sid`, `JSESSIONID`, `PHPSESSID`, any `*session_id`. A cookie list dumped
+/// as JSON (HAR, CDP `Network.getCookies`) writes each cookie as `{"name": "sid",
+/// "value": ...}`, so the value has no word of its own for the text rules to see
+/// (D1-030). Runs under both profiles, like the `Cookie` header it belongs to.
+const SESSION_COOKIE_NAME: &str = r"(?i)^(?:s?sid|connect\.sid|jsessionid|phpsessid|asp\.net_sessionid|[a-z0-9_.-]*session[_-]?id)$";
+
+fn session_cookie_name() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| {
+        Regex::new(SESSION_COOKIE_NAME)
+            .unwrap_or_else(|e| panic!("session cookie name rule does not compile: {e}"))
     })
+}
+
+/// If this object looks like `{"name": "Cookie", "value": ...}`, the kind to
+/// mask its `value` with. The name is a credential header (both profiles), a
+/// session cookie name (both profiles), or, under `Durable` only, any name the
+/// key rules call a secret: `{"name": "password", "value": ...}` is the same
+/// secret as `{"password": ...}` (D1-030).
+fn pair_kind(map: &serde_json::Map<String, Value>, profile: Profile) -> Option<MarkerKind> {
+    map.iter()
+        .filter(|(k, _)| HEADER_NAME_KEYS.iter().any(|n| k.eq_ignore_ascii_case(n)))
+        .filter_map(|(_, v)| v.as_str())
+        .find_map(|name| {
+            let name = name.trim();
+            header_kind(name)
+                .or_else(|| session_cookie_name().is_match(name).then_some(MarkerKind::Secret))
+                .or_else(|| {
+                    if profile == Profile::Durable {
+                        key_kind(name)
+                    } else {
+                        None
+                    }
+                })
+        })
 }
 
 fn walk(value: &mut Value, profile: Profile, tally: &mut Tally, depth: usize) {
@@ -149,7 +180,7 @@ fn walk(value: &mut Value, profile: Profile, tally: &mut Tally, depth: usize) {
             }
         }
         Value::Object(map) => {
-            let pair = header_pair_kind(map);
+            let pair = pair_kind(map, profile);
             for (key, v) in map.iter_mut() {
                 let header = header_kind(key).or(if key.eq_ignore_ascii_case("value") {
                     pair
@@ -193,6 +224,8 @@ pub(crate) fn fingerprint_parts() -> Vec<String> {
                 .join(",")
         ),
         format!("json.header_name_keys|{}", HEADER_NAME_KEYS.join(",")),
+        format!("json.session_cookie_name|{SESSION_COOKIE_NAME}"),
+        "json.pair_name|header,session_cookie,durable_key_rules".to_owned(),
     ];
     parts.extend(
         KEY_RULES
@@ -219,6 +252,9 @@ fn behaviour_probe() -> String {
         json!({"Cookie": "sid=abcdefgh", "set-cookie": ["a=b"], "X-Api-Key": "kkkkkkkkkkkk", "x-auth-token": 7, "cookies_enabled": true}),
         json!({"headers": [{"name": "Cookie", "value": "sid=abcdefgh"}, {"key": "X-API-KEY", "value": "kkkkkkkkkkkk"}, {"name": "Accept", "value": "text/html"}]}),
         json!({"authorization": {"scheme": "Bearer", "credentials": ["abcdefgh"]}}),
+        json!({"jar": [{"name": "sid", "value": "abcdefgh"}, {"name": "JSESSIONID", "value": "abcdefgh"}, {"name": "theme", "value": "dark"}]}),
+        json!({"fields": [{"name": "password", "value": "hunter two"}, {"name": "api_key", "value": "abcdefgh"}, {"name": "username", "value": "ann"}]}),
+        json!({"X-Csrf-Token": "abcdefgh", "headers": [{"name": "X-XSRF-TOKEN", "value": "abcdefgh"}], "csrf_enabled": true}),
     ];
     let mut out = String::new();
     for profile in [Profile::Live, Profile::Durable] {
@@ -266,6 +302,70 @@ mod tests {
         assert_eq!(v["name"], "visible");
         assert_eq!(v["cookies_enabled"], true);
         assert_eq!(t.by_rule().get("json.key"), Some(&5));
+    }
+
+    #[test]
+    fn a_name_value_pair_with_a_secret_name_masks_the_value_under_durable_only() {
+        let input = json!({"fields": [
+            {"name": "password", "value": "hunter two"},
+            {"name": "api_key", "value": "abcdefgh"},
+            {"key": "accessToken", "value": 123456},
+            {"name": "username", "value": "ann"},
+            {"name": "max_tokens", "value": 4096},
+        ]});
+        let (d, dt) = durable(input.clone());
+        assert_eq!(d["fields"][0]["value"], "[redacted:password]");
+        assert_eq!(d["fields"][0]["name"], "password");
+        assert_eq!(d["fields"][1]["value"], "[redacted:key]");
+        assert_eq!(d["fields"][2]["value"], "[redacted:token]");
+        assert_eq!(d["fields"][3]["value"], "ann");
+        assert_eq!(d["fields"][4]["value"], 4096);
+        assert_eq!(dt.by_rule().get("json.key"), Some(&3));
+        // Live leaves the pair alone, as it leaves `{"password": ...}` alone.
+        let (l, lt) = live(input.clone());
+        assert_eq!(l, input);
+        assert!(lt.is_empty());
+    }
+
+    #[test]
+    fn a_session_cookie_pair_is_masked_under_both_profiles() {
+        let input = json!({"jar": [
+            {"name": "sid", "value": "abcdefgh", "domain": "example.test"},
+            {"name": "connect.sid", "value": "abcdefgh"},
+            {"name": "JSESSIONID", "value": "abcdefgh"},
+            {"name": "PHPSESSID", "value": "abcdefgh"},
+            {"name": "app_session_id", "value": "abcdefgh"},
+            {"name": "theme", "value": "dark"},
+            {"name": "side", "value": "left"},
+        ]});
+        for (v, t) in [live(input.clone()), durable(input.clone())] {
+            for i in 0..5 {
+                assert_eq!(v["jar"][i]["value"], "[redacted:secret]", "{i}");
+            }
+            assert_eq!(v["jar"][0]["domain"], "example.test");
+            assert_eq!(v["jar"][5]["value"], "dark");
+            assert_eq!(v["jar"][6]["value"], "left");
+            assert_eq!(t.by_rule().get("json.key"), Some(&5));
+        }
+    }
+
+    #[test]
+    fn a_csrf_token_header_is_masked_under_both_profiles() {
+        let input = json!({
+            "X-Csrf-Token": "abcdefgh",
+            "x-xsrf-token": "abcdefgh",
+            "X-CSRFToken": "abcdefgh",
+            "headers": [{"name": "X-CSRF-TOKEN", "value": "abcdefgh"}],
+            "csrf_enabled": true,
+        });
+        for (v, t) in [live(input.clone()), durable(input.clone())] {
+            assert_eq!(v["X-Csrf-Token"], "[redacted:token]");
+            assert_eq!(v["x-xsrf-token"], "[redacted:token]");
+            assert_eq!(v["X-CSRFToken"], "[redacted:token]");
+            assert_eq!(v["headers"][0]["value"], "[redacted:token]");
+            assert_eq!(v["csrf_enabled"], true);
+            assert_eq!(t.by_rule().get("json.key"), Some(&4));
+        }
     }
 
     #[test]

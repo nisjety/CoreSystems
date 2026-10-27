@@ -7,7 +7,7 @@ one set of rules is applied before anything Quarry captures reaches a caller, an
 artifact, an event, a receipt, a log or a model prompt, instead of each of those
 places growing its own filter.
 
-Rule set: `RULE_VERSION = "qr-redact/3"` (see "Version history"). Marker: `[redacted:<kind>]` with
+Rule set: `RULE_VERSION = "qr-redact/4"` (see "Version history"). Marker: `[redacted:<kind>]` with
 `<kind>` one of `password`, `otp`, `card`, `phone`, `secret`, `token`, `key`,
 `credential`.
 
@@ -81,7 +81,7 @@ Token shapes (both profiles):
 | Id | Matches | Marker |
 |---|---|---|
 | `shape.pem` | a `PRIVATE KEY` block; an unterminated block is masked to the end of the text | `key` |
-| `shape.jwt` | three dot-separated base64url segments starting `eyJ` | `token` |
+| `shape.jwt` | three dot-separated base64url segments starting `eyJ` (in any case: an element fingerprint keeps its text lower-cased) | `token` |
 | `shape.userinfo` | the password in `scheme://user:SECRET@host` | `credential` |
 | `shape.aws` | `AKIA` / `ASIA` access key ids | `key` |
 | `shape.github` | `ghp_ gho_ ghu_ ghs_ ghr_`, `github_pat_` | `token` |
@@ -104,8 +104,8 @@ Contextual rules (`Durable` only):
 | `ctx.pan` | 13 to 19 digits with a known issuer prefix, an issuer-valid length and a passing Luhn sum, written as one run or as 3 to 6 digit groups joined by single spaces or dashes, and not glued to a letter | `card` |
 | `url.query` | the value of `token`, `access_token`, `id_token`, `refresh_token`, `code`, `key`, `api_key`, `apikey`, `sig`, `signature`, `password`, `secret`, `session`, `sid`, `otp`, `jwt`, `x-amz-*` after `?`, `&` or `;` | `token` |
 | `url.fragment` | the value of `access_token`, `id_token`, `refresh_token`, `token`, `code` in a `#fragment` | `token` |
-| `json.key` (header rule, **both profiles**) | the value under an object key naming a credential header (any case): `Authorization`, `Proxy-Authorization` (`credential`), `Cookie`, `Set-Cookie` (`secret`), `X-Api-Key` (`key`), `X-Auth-Token` (`token`); and the `value` of a `{"name": "Cookie", "value": ...}` or `{"key": ...}` pair as HAR and CDP write headers. The whole value is replaced, scheme included, **whatever its shape**: an object or array under one of these keys is masked as a unit (over-masking by design: the key is the only context the walk has and a credential can sit in any child; a non-header field that happens to be called `authorization` loses its content) | per header |
-| `json.key` | the value under an object key that names a secret (`password`, `credential`, `api_key`, `private_key`, `token`, `accessToken`, `secret`, `session_id`, `cookie`, env-style `*_KEY`). Counters (`max_tokens`, `token_count`) and booleans survive; a number, array or object under such a key is replaced whole | per key |
+| `json.key` (header rule, **both profiles**) | the value under an object key naming a credential header (any case): `Authorization`, `Proxy-Authorization` (`credential`), `Cookie`, `Set-Cookie` (`secret`), `X-Api-Key` (`key`), `X-Auth-Token`, `X-Csrf-Token`, `X-Xsrf-Token`, `X-Csrftoken` (`token`); and the `value` of a `{"name": "Cookie", "value": ...}` or `{"key": ...}` pair as HAR and CDP write headers, or of a pair whose name is a session cookie name (`sid`, `ssid`, `connect.sid`, `JSESSIONID`, `PHPSESSID`, any `*session_id`; `secret`). The whole value is replaced, scheme included, **whatever its shape**: an object or array under one of these keys is masked as a unit (over-masking by design: the key is the only context the walk has and a credential can sit in any child; a non-header field that happens to be called `authorization` loses its content) | per header |
+| `json.key` | the value under an object key that names a secret (`password`, `credential`, `api_key`, `private_key`, `token`, `accessToken`, `secret`, `session_id`, `cookie`, env-style `*_KEY`); under `Durable` the same names also mask the `value` of a `{"name": "password", "value": ...}` or `{"key": ...}` pair. Counters (`max_tokens`, `token_count`) and booleans survive; a number, array or object under such a key is replaced whole | per key |
 
 Field rules (`field.*`, the first hit wins): `type=password` is a password and
 `type=tel` a phone (`field.password`, `field.phone`); checkboxes, buttons and
@@ -192,6 +192,12 @@ case, so give every verify rule and every threshold a positive and a negative ca
   (under `Live` they were only caught by the shape rules), and the golden gained
   three JSON cases (a cookie and api-key pair, cookie and api-key keys, a structured
   `authorization` value masked whole). Review residual of `qr-redact/2`.
+- `qr-redact/4` (D1-030): the three gaps the `qr-redact/3` review left. A `{"name": "password", "value": ...}`
+  pair is masked under `Durable` (the name goes through the key rules, so `api_key` and `accessToken` pairs
+  too), a session-cookie pair (`sid`, `JSESSIONID`, ...) under both profiles, and `X-Csrf-Token`,
+  `X-Xsrf-Token` and `X-Csrftoken` join the credential headers (keys and pairs, both profiles). The `eyJ`
+  prefix of `shape.jwt` is matched in any case, because the element fingerprint's `normalized_text` is the
+  lower-cased element text and kept a token the other fields masked. The golden gained four cases.
 
 ## Honest limits
 
@@ -205,8 +211,10 @@ case, so give every verify rule and every threshold a positive and a negative ca
 - **Heuristic.** A password that follows an unquoted label and contains spaces is
   masked only up to the first space; `Basic <base64>` outside an `Authorization`
   header is masked only when it carries a digit or a base64 symbol; labels are
-  English and Norwegian only; `{"name": "password", "value": ...}` pairs are not
-  covered by the object-key rule (only the credential header names above are); neither are cookies dumped as `{"name": "sid", "value": ...}`, where the cookie's own name is the only context (field facts cover them in S1 and S3).
+  English and Norwegian only; a `{"name": "password", "value": ...}` pair is masked under `Durable` only
+  (as the `password` key is), so `Live` leaves it; a session cookie is recognised by a short list of names
+  (`qr-redact/4`), so a cookie with an application-specific name (`auth`, `login`) is not masked unless its
+  name matches a key rule under `Durable`.
 - **Contextual rules over-mask on purpose** under `Durable`: `password: must
   contain 8 characters` loses one word.
 - **Leaves of any size are scanned whole.** The plan sketched a 64 KiB leaf cap;

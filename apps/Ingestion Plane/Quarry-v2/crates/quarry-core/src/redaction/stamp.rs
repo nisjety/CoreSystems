@@ -138,7 +138,7 @@ mod tests {
         s.probe = ProbeState::Partial;
         s.screenshot = ScreenshotState::Withheld;
         let v = serde_json::to_value(&s).unwrap();
-        assert_eq!(v["rule_version"], "qr-redact/3");
+        assert_eq!(v["rule_version"], "qr-redact/4");
         assert_eq!(v["profile"], "live");
         assert_eq!(v["mode"], "shadow");
         assert_eq!(v["values_masked"], 1);
