@@ -146,6 +146,9 @@ export default function SpacePage() {
   const [deletionError, setDeletionError] = createSignal('')
   const [deletionSubmitting, setDeletionSubmitting] = createSignal(false)
   const currentThreads = () => threads()?.threads ?? []
+  // Control's shared-read answer, relayed on the listing. Only an explicit
+  // `available: false` restricts; a failed or older listing changes nothing.
+  const sharedReadAvailable = () => (threads.error ? true : threads()?.shared_read?.available !== false)
   const activeRun = () => currentThreads().find((thread) => ACTIVE_RUN_STATUSES.has(thread.latest_run_status ?? ''))
 
   // Where the reader had caught up when they ARRIVED in this room (item 4b).
@@ -436,6 +439,7 @@ export default function SpacePage() {
                       spaceName={spaceDisplayName(current().space, i18n.tr)}
                       viewerSubjectId={() => current().membership.subject_id}
                       threads={currentThreads}
+                      sharedReadAvailable={sharedReadAvailable}
                       loading={() => threads.loading}
                       unavailable={threadsUnavailable}
                       roster={() => (roster.error ? [] : roster() ?? [])}
@@ -548,6 +552,8 @@ function SpaceConversationPanel(props: {
    * marked as theirs. Never used to name an unattributed turn. */
   readonly viewerSubjectId: () => string | undefined
   readonly threads: () => readonly SpaceThread[]
+  /** The listing's `shared_read.available`; false shows the room's restricted notice. */
+  readonly sharedReadAvailable?: () => boolean
   readonly loading: () => boolean
   readonly unavailable: () => boolean
   readonly roster: () => readonly SpaceRosterMember[]
@@ -622,6 +628,7 @@ function SpaceConversationPanel(props: {
             spaceName={props.spaceName}
             viewerSubjectId={props.viewerSubjectId}
             threads={props.threads}
+            sharedReadAvailable={props.sharedReadAvailable}
             roster={props.roster}
             agents={props.agents}
             onStartConversation={() => focusComposer?.()}

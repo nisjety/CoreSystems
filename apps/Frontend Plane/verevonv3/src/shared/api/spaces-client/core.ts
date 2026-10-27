@@ -1,4 +1,4 @@
-import { requestJson } from '../http'
+import { ApiError, requestJson } from '../http'
 
 export type SpaceMembership = {
   space_ref: string
@@ -73,8 +73,18 @@ export type SpaceThreads = {
   membership: SpaceMembership
   threads: readonly SpaceThread[]
   read_marker?: SpaceReadMarker
+  /**
+   * Whether this caller may read the other members' conversations in this room
+   * (Control's shared-read decision, relayed by the BFF). `getSpaceThreads`
+   * always fills it: an older gateway that does not say defaults to
+   * `{ available: true }` so nothing changes there. `available: false` is an
+   * answer, not an error.
+   */
+  shared_read?: SpaceSharedRead
   unavailable?: readonly SpaceWorkGap[]
 }
+
+export type SpaceSharedRead = { readonly available: boolean }
 
 /** Actor-filtered owner contracts available in a Space. This is an availability
  * view only: each owner plane reauthorizes the exact resource at execution. */
@@ -161,7 +171,15 @@ export async function getSpaceThreads(spaceRef: string): Promise<SpaceThreads> {
     threads: readonly SpaceThread[]
     read_marker?: unknown
     unavailable?: unknown
+    shared_read?: unknown
   }>(`/api/v1/spaces/${encodeURIComponent(spaceRef)}/threads`)
+  // Only an explicit `available: false` restricts; absent or malformed keeps
+  // today's behaviour (the transcript route still decides per read).
+  const sharedRead = response.shared_read
+  const shared_read: SpaceSharedRead = {
+    available:
+      !(sharedRead && typeof sharedRead === 'object' && (sharedRead as { available?: unknown }).available === false),
+  }
   const marker = response.read_marker
   const lastReadAt =
     marker && typeof marker === 'object' ? (marker as { last_read_at?: unknown }).last_read_at : undefined
@@ -176,6 +194,7 @@ export async function getSpaceThreads(spaceRef: string): Promise<SpaceThreads> {
     membership: response.membership,
     threads: response.threads,
     ...(read_marker ? { read_marker } : {}),
+    shared_read,
     unavailable: workGaps(response.unavailable),
   }
 }
@@ -679,6 +698,32 @@ export async function getSpaceThreadTranscript(
   return {
     threadId: response.transcript?.threadId ?? threadId,
     turns: normalizeSpaceThreadTurns(response.transcript?.turns),
+  }
+}
+
+/**
+ * Every way reading one Space thread can end, as a value instead of a thrown
+ * error, so a caller cannot forget a case (the room used to swallow the 403
+ * together with every other failure).
+ *
+ * - `restricted`: 403, Control declined the shared read (a real answer).
+ * - `missing`: 404, the thread is not (or no longer) there for this caller.
+ * - `error`: anything else (network, 5xx); worth a retry, never a silent preview.
+ */
+export type SpaceTranscriptLoad =
+  | { readonly state: 'ok'; readonly threadId: string; readonly turns: readonly SpaceThreadTurn[] }
+  | { readonly state: 'restricted' }
+  | { readonly state: 'missing' }
+  | { readonly state: 'error' }
+
+export async function loadSpaceTranscript(spaceRef: string, threadId: string): Promise<SpaceTranscriptLoad> {
+  try {
+    const snapshot = await getSpaceThreadTranscript(spaceRef, threadId)
+    return { state: 'ok', threadId: snapshot.threadId, turns: snapshot.turns }
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 403) return { state: 'restricted' }
+    if (error instanceof ApiError && error.status === 404) return { state: 'missing' }
+    return { state: 'error' }
   }
 }
 

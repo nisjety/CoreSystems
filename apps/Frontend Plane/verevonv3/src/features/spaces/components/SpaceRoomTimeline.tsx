@@ -13,8 +13,7 @@ import { SpaceApprovalPanel } from './SpaceApprovalPanel'
 import { PostTurnHeader, SpaceTurnList, normalizeTranscriptTurns, resolveAuthorName } from './sidepane/SpaceTurnList'
 import type { TranscriptTurn } from './sidepane/SpaceTurnList'
 import { SpaceRestrictedNotice } from './SpaceRestrictedNotice'
-import { getSpaceThreadTranscript, updateSpaceThreadPresentation } from '@/shared/api/spaces-client'
-import { ApiError } from '@/shared/api/http'
+import { loadSpaceTranscript, updateSpaceThreadPresentation } from '@/shared/api/spaces-client'
 import type { SpaceAgent, SpaceRosterMember, SpaceThread } from '@/shared/api/spaces-client'
 import { useI18n } from '@/shared/i18n'
 import { createResource } from '@/shared/lib/create-resource-compat'
@@ -72,6 +71,13 @@ export interface SpaceRoomTimelineProps {
   /** When provided, every post offers "Open thread" — the read-only side pane
    * bound to `?thread_id=`. Absent while the pane is switched off. */
   readonly onOpenThread?: (thread: SpaceThread) => void
+  /**
+   * Whether this reader may read the room's other conversations (the listing's
+   * `shared_read.available`). `false` shows one restricted notice above the
+   * timeline and makes no transcript call at all. Absent means available, which
+   * is today's behaviour on a gateway that does not say.
+   */
+  readonly sharedReadAvailable?: () => boolean
 }
 
 /** The room-level name for an assistant turn that recorded no persona: the
@@ -91,6 +97,7 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
   )
 
   const agentName = createMemo(() => roomAgentName(props.agents()))
+  const sharedRead = () => props.sharedReadAvailable?.() !== false
 
   return (
     <Show
@@ -103,6 +110,11 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
         />
       }
     >
+      {/* Once for the whole room, above the posts: when Control has not enabled
+          shared reads, every post would otherwise repeat the same refusal. */}
+      <Show when={!sharedRead()}>
+        <SpaceRestrictedNotice variant="room" />
+      </Show>
       <ol class="verevon-room-timeline" aria-label={i18n.tr('Samtaler i rommet', 'Room conversations')}>
         <For each={orderedThreads()}>
           {(thread) => (
@@ -112,6 +124,7 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
               roster={props.roster}
               viewerSubjectId={props.viewerSubjectId}
               agentName={agentName()}
+              transcriptEnabled={sharedRead}
               unread={() => props.unreadThreadIds?.().has(thread.thread_id) === true}
               onPresentationChanged={props.onPresentationChanged}
               onReply={props.onReply}
@@ -131,6 +144,8 @@ function SpaceRoomPost(props: {
   readonly roster: () => readonly SpaceRosterMember[]
   readonly viewerSubjectId?: () => string | undefined
   readonly agentName: string
+  /** False when the room's shared read is unavailable: no transcript call is made. */
+  readonly transcriptEnabled: () => boolean
   readonly onReply?: (thread: SpaceThread) => void
   readonly onApprovalSettled?: () => void
   /** New since the reader arrived — see `SpaceRoomTimelineProps.unreadThreadIds`. */
@@ -139,31 +154,28 @@ function SpaceRoomPost(props: {
   readonly onOpenThread?: (thread: SpaceThread) => void
 }) {
   const i18n = useI18n()
-  const [transcript] = createResource(
+  const [transcript, { refetch: refetchTranscript }] = createResource(
     // The revision suffix keeps a settled reply visible: refetching the thread
     // list bumps updated_at, which re-keys this source and refetches the
     // transcript for exactly the post that changed. NUL-joined because thread
     // ids may themselves contain any printable character, including spaces.
-    () => `${props.spaceRef}\u0000${props.thread.thread_id}\u0000${props.thread.updated_at ?? props.thread.latest_run_updated_at ?? ''}`,
+    // `undefined` (shared read unavailable) makes no request at all.
+    () => props.transcriptEnabled()
+      ? `${props.spaceRef}\u0000${props.thread.thread_id}\u0000${props.thread.updated_at ?? props.thread.latest_run_updated_at ?? ''}`
+      : undefined,
     async (key) => {
       const [spaceRef = '', threadId = ''] = key.split('\u0000')
-      // A 403 is a real answer, not a glitch: the organization has not enabled
-      // shared reads for this Space. It used to be swallowed with every other
-      // failure; it is now a named state the post can say out loud. Any other
-      // failure still falls back to the preview, as before.
-      let restricted = false
-      const snapshot = await getSpaceThreadTranscript(spaceRef, threadId).catch((error: unknown) => {
-        if (error instanceof ApiError && error.status === 403) restricted = true
-        return null
-      })
-      return {
-        restricted,
-        turns: normalizeTranscriptTurns(snapshot?.turns as readonly unknown[] | undefined),
-      }
+      // Each way the read can end is a named state: `restricted` (Control
+      // declined, a real answer), `missing` (404) and `error` (retryable) are
+      // said out loud instead of being swallowed into the preview.
+      const load = await loadSpaceTranscript(spaceRef, threadId)
+      return load.state === 'ok'
+        ? { state: 'ok' as const, turns: normalizeTranscriptTurns(load.turns as readonly unknown[] | undefined) }
+        : { state: load.state, turns: [] as readonly TranscriptTurn[] }
     },
   )
-  const turns = (): readonly TranscriptTurn[] => (transcript.error ? [] : transcript()?.turns ?? [])
-  const restricted = () => !transcript.error && transcript()?.restricted === true
+  const turns = (): readonly TranscriptTurn[] => transcript()?.turns ?? []
+  const readState = () => transcript()?.state
   // Before any turn has loaded, the post is still attributable: the thread's
   // own owner started it.
   const starterName = () =>
@@ -257,8 +269,21 @@ function SpaceRoomPost(props: {
                     ? i18n.tr('Henter samtalen …', 'Loading the conversation…')
                     : i18n.tr('Samtalen har ikke noe lesbart innhold ennå.', 'This conversation has no readable content yet.'))}
               </p>
-              <Show when={restricted()}>
+              <Show when={readState() === 'restricted'}>
                 <SpaceRestrictedNotice variant="thread" />
+              </Show>
+              <Show when={readState() === 'missing'}>
+                <p class="verevon-space-inline-status" role="status">
+                  {i18n.tr('Denne samtalen er ikke lenger tilgjengelig.', 'This conversation is no longer available.')}
+                </p>
+              </Show>
+              <Show when={readState() === 'error'}>
+                <div class="verevon-space-inline-status" role="alert">
+                  <span>{i18n.tr('Kunne ikke hente denne samtalen.', 'Could not load this conversation.')}</span>{' '}
+                  <button type="button" class="verevon-space-secondary-action" onClick={() => { void refetchTranscript() }}>
+                    {i18n.tr('Prøv igjen', 'Retry')}
+                  </button>
+                </div>
               </Show>
             </div>
           </div>
