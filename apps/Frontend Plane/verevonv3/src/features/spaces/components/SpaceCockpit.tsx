@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, For, Show } from 'solid-js'
+import { createContext, createEffect, createMemo, createSignal, For, Show, useContext, type Accessor, type Setter } from 'solid-js'
 import type { JSX } from '@solidjs/web'
 
 import { useI18n } from '@/shared/i18n'
@@ -59,9 +59,39 @@ export interface SpaceCockpitProps {
   readonly initialTab?: SpaceTabId
 }
 
+/**
+ * Which tab is showing, for a panel that must fetch only while it is the active
+ * one (WS07-S12). Panels mount eagerly and are merely hidden, so a panel that
+ * loads on mount loads whether or not anyone opens it; one that reads this
+ * context loads on first activation instead. Outside a cockpit it reports the
+ * default tab, so a lazy panel rendered alone stays idle rather than guessing.
+ */
+export const ActiveSpaceTabContext = createContext<Accessor<SpaceTabId>>(() => DEFAULT_SPACE_TAB)
+
+export function useActiveSpaceTab(): Accessor<SpaceTabId> {
+  return useContext(ActiveSpaceTabContext)
+}
+
 export function SpaceCockpit(props: SpaceCockpitProps) {
-  const i18n = useI18n()
   const [active, setActive] = createSignal<SpaceTabId>(props.initialTab ?? DEFAULT_SPACE_TAB)
+  // The provider wraps the view so the memo that evaluates the callers' tabs
+  // (and so constructs every panel) is created under it and the panels can read
+  // the context.
+  return (
+    <ActiveSpaceTabContext value={active}>
+      <SpaceCockpitView tabs={props.tabs} active={active} setActive={setActive} />
+    </ActiveSpaceTabContext>
+  )
+}
+
+function SpaceCockpitView(props: {
+  readonly tabs?: SpaceCockpitProps['tabs']
+  readonly active: Accessor<SpaceTabId>
+  readonly setActive: Setter<SpaceTabId>
+}) {
+  const i18n = useI18n()
+  const active = props.active
+  const setActive = props.setActive
   // One evaluation of the caller's tabs object per change — see the note on
   // `content` below for why reading `props.tabs` per tab is not free.
   const tabs = createMemo(() => props.tabs ?? {})

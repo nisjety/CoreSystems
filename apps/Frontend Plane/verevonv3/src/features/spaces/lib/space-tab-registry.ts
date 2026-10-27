@@ -9,6 +9,8 @@
  * tab shows is decided by the owning plane's decision, not by this list.
  */
 
+import { roomArtifactsEnabled } from './room-artifacts'
+
 export interface SpaceTabDefinition {
   readonly id: string
   readonly labelNo: string
@@ -51,6 +53,16 @@ export const SPACE_TABS = [
     purposeNo: 'Dokumenter, kilder, filer og minne som gjelder her.',
     purposeEn: 'Documents, sources, files, and memory relevant here.',
     owner: 'Data Plane',
+  },
+  {
+    id: 'artefakter',
+    labelNo: 'Artefakter',
+    labelEn: 'Artifacts',
+    purposeNo: 'Dokumenter og kode agentene har skrevet i rommet.',
+    purposeEn: 'Documents and code agents have written in the Space.',
+    owner: 'Model Plane',
+    // Hidden with the rest of the room artifact surfaces (WS07, features.room_artifacts).
+    enabled: roomArtifactsEnabled,
   },
   {
     id: 'aktivitet',

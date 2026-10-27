@@ -135,3 +135,82 @@
     border-radius: 0;
   }
 }
+
+/* The room's Artifacts tab (WS07-S12). */
+
+.verevon-space-artifacts__list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.verevon-space-artifacts__entry {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 12px;
+  background: var(--verevon-surface);
+  color: var(--verevon-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.verevon-space-artifacts__entry:hover {
+  background: var(--verevon-surface-soft);
+  border-color: var(--verevon-border-strong);
+}
+
+.verevon-space-artifacts__entry:focus-visible {
+  outline: 2px solid var(--verevon-accent);
+  outline-offset: 2px;
+}
+
+.verevon-space-artifacts__entry[aria-busy='true'] {
+  opacity: 0.7;
+  cursor: progress;
+}
+
+.verevon-space-artifacts__icon {
+  display: inline-flex;
+  margin-top: 2px;
+  color: var(--verevon-text-muted);
+}
+
+.verevon-space-artifacts__body {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.verevon-space-artifacts__title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.verevon-space-artifacts__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  color: var(--verevon-text-muted);
+  font-size: 0.8125rem;
+}
+
+.verevon-space-artifacts__live {
+  color: var(--verevon-accent);
+  font-weight: 600;
+}
+
+.verevon-space-artifacts__more {
+  display: grid;
+  gap: 8px;
+  justify-items: start;
+  margin-top: 12px;
+}

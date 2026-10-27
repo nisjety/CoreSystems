@@ -4,3 +4,4 @@
 // `export * from './<feature>'` line below (keep the list sorted after core).
 export * from './core'
 export * from './membership-writer'
+export * from './room-artifacts'

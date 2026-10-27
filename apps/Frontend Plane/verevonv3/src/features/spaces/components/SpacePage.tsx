@@ -59,7 +59,8 @@ import {
 import { SpaceThreadPanel } from './sidepane/SpaceThreadPanel'
 import { spaceThreadPaneEnabled } from '../lib/space-thread-deep-link'
 import { roomArtifactsEnabled } from '../lib/room-artifacts'
-import type { ChatArtifact } from '@/features/chat/components/chat-types'
+import { createRoomLiveArtifacts, type RoomLiveArtifacts } from '../lib/room-live-artifacts'
+import { SpaceArtifactsTab } from './SpaceArtifactsTab'
 import { resolveOpenSpacePane } from '../lib/space-pane-registry'
 import { publishSpaceThreads, publishSpaceUnread, retractSpaceThreads } from '../lib/space-live-work'
 import { unreadThreadIds } from '../lib/space-unread'
@@ -132,6 +133,9 @@ export default function SpacePage() {
     return pane?.id === 'thread' ? pane.value : null
   })
   const [auxPaneWidth, setAuxPaneWidth] = createSignal(readStoredAuxPaneWidth())
+  // The sender's own live artifacts, in memory: the timeline's chips and the
+  // Artifacts tab read the same store until a read carries them (WS07-S11/S12).
+  const liveArtifacts = createRoomLiveArtifacts()
   const openThread = (threadId: string) => setSearchParams({ thread_id: threadId })
   const closeThread = () => setSearchParams({ thread_id: undefined }, { replace: true })
   const [context, { refetch: refetchContext }] = createResource(spaceRef, getSpaceContext)
@@ -534,6 +538,7 @@ export default function SpacePage() {
                       spaceName={spaceDisplayName(current().space, i18n.tr)}
                       viewerSubjectId={() => current().membership.subject_id}
                       threads={currentThreads}
+                      liveArtifacts={liveArtifacts}
                       sharedReadAvailable={sharedReadAvailable}
                       loading={() => threads.loading}
                       unavailable={threadsUnavailable}
@@ -555,6 +560,9 @@ export default function SpacePage() {
                   ),
                   arbeid: <SpaceWorkPanel spaceRef={current().space.space_ref} />,
                   kunnskap: <SpaceKnowledgePanel spaceRef={current().space.space_ref} />,
+                  artefakter: (
+                    <SpaceArtifactsTab spaceRef={current().space.space_ref} live={liveArtifacts} />
+                  ),
                   aktivitet: (
                     <SpaceActivityPanel
                       spaceRef={current().space.space_ref}
@@ -667,24 +675,12 @@ function SpaceConversationPanel(props: {
   readonly onTyping?: () => void
   /** Opens a post in the read-only side pane; absent while the pane is off. */
   readonly onOpenThread?: (thread: SpaceThread) => void
+  /** The room's in-memory store of this browser's own live artifacts (owned by the page, shared with the Artifacts tab). */
+  readonly liveArtifacts: RoomLiveArtifacts
 }) {
   const i18n = useI18n()
-  // Live artifacts from THIS browser's own stream, by thread. Memory only: the
-  // room's record is the transcript, and these are shown only until a read
-  // carries them. Never written to localStorage, sessionStorage or IndexedDB.
   const artifactsOn = roomArtifactsEnabled()
-  const [liveArtifacts, setLiveArtifacts] = createSignal<ReadonlyMap<string, readonly ChatArtifact[]>>(new Map())
-  const noteLiveArtifact = (artifact: ChatArtifact, threadId: string) => {
-    setLiveArtifacts((current) => {
-      const next = new Map(current)
-      const existing = next.get(threadId) ?? []
-      next.set(threadId, [
-        ...existing.filter((entry) => !(entry.id === artifact.id && entry.version === artifact.version)),
-        artifact,
-      ])
-      return next
-    })
-  }
+  const noteLiveArtifact = props.liveArtifacts.note
   let focusComposer: (() => void) | undefined
   const [replyTarget, setReplyTarget] = createSignal<
     { threadId: string; title: string; awaitingApproval?: boolean } | undefined
@@ -744,7 +740,7 @@ function SpaceConversationPanel(props: {
             viewerSubjectId={props.viewerSubjectId}
             threads={props.threads}
             sharedReadAvailable={props.sharedReadAvailable}
-            liveArtifacts={artifactsOn ? (threadId) => liveArtifacts().get(threadId) ?? [] : undefined}
+            liveArtifacts={artifactsOn ? props.liveArtifacts.forThread : undefined}
             roster={props.roster}
             agents={props.agents}
             onStartConversation={() => focusComposer?.()}
