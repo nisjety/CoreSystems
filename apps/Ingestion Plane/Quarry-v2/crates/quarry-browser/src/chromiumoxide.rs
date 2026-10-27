@@ -8177,7 +8177,7 @@ mod bounded_calls_and_launch_dirs {
     const RECEIVERS: [&str; 5] = ["page", "guarded_page", "dialog_page", "element", "browser"];
 
     /// The methods on a receiver that are not a CDP round trip, with why.
-    const NOT_CDP: [(&str, &str); 10] = [
+    const NOT_CDP: [(&str, &str); 11] = [
         ("clone", "a handle copy"),
         ("take", "Option"),
         ("get_mut_child", "the browser's child process handle"),
@@ -8188,6 +8188,7 @@ mod bounded_calls_and_launch_dirs {
         ("kill", "the browser process, waited for under BROWSER_EXIT_WAIT"),
         ("wait", "the browser process, waited for under BROWSER_EXIT_WAIT"),
         ("try_wait", "the browser process"),
+        ("target_id", "the page handle's own target id, a getter: no round trip to Chromium"),
     ];
 
     /// Functions that make CDP calls without a bound of their own because every caller
