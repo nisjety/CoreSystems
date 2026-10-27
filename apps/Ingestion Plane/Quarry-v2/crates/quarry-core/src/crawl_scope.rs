@@ -513,33 +513,36 @@ mod tests {
 
     #[test]
     fn denial_samples_cap_per_code_and_per_page() {
+        // Eight codes of ten denials each. Three samples per code fill the page at twenty,
+        // so the page cap is reached inside the seventh code and the eighth keeps none.
+        // (Three codes can hold nine samples at most, so they never reach the page cap.)
+        let reasons = [
+            CrawlDenialReason::IncludePatternMiss,
+            CrawlDenialReason::ExternalHostDisabled {
+                host: "h.test".into(),
+            },
+            CrawlDenialReason::ContentTypeRejected {
+                content_type: "png".into(),
+            },
+            CrawlDenialReason::OutOfScope {
+                detail: "subdomain".into(),
+            },
+            CrawlDenialReason::DepthExceeded { depth: 3, limit: 2 },
+            CrawlDenialReason::MaxPagesReached { limit: 5 },
+            CrawlDenialReason::ExcludePatternHit {
+                pattern: "/x".into(),
+            },
+            CrawlDenialReason::NotCrawlable {
+                reason: "scheme".into(),
+            },
+        ];
         let mut counts = DenialCounts::default();
-        for i in 0..10 {
-            counts.record(
-                &format!("https://a.test/{i}"),
-                1,
-                &CrawlDenialReason::IncludePatternMiss,
-            );
+        for (host_index, reason) in reasons.iter().enumerate() {
+            for i in 0..10 {
+                counts.record(&format!("https://h{host_index}.test/{i}"), 1, reason);
+            }
         }
-        for i in 0..10 {
-            counts.record(
-                &format!("https://b.test/{i}"),
-                1,
-                &CrawlDenialReason::ExternalHostDisabled {
-                    host: format!("h{i}.test"),
-                },
-            );
-        }
-        for i in 0..10 {
-            counts.record(
-                &format!("https://c.test/{i}"),
-                1,
-                &CrawlDenialReason::ContentTypeRejected {
-                    content_type: "png".into(),
-                },
-            );
-        }
-        assert_eq!(counts.total(), 30);
+        assert_eq!(counts.total(), 80);
         assert_eq!(counts.counts["include_pattern_miss"], 10);
         assert_eq!(counts.samples.len(), MAX_SAMPLES_PER_PAGE);
         let include_samples = counts
@@ -548,6 +551,12 @@ mod tests {
             .filter(|s| s.code == "include_pattern_miss")
             .count();
         assert_eq!(include_samples, MAX_SAMPLES_PER_CODE);
+        let last_code_samples = counts
+            .samples
+            .iter()
+            .filter(|s| s.code == "not_crawlable")
+            .count();
+        assert_eq!(last_code_samples, 0, "the page is full before the eighth code");
     }
 
     #[test]
