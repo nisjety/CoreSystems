@@ -5259,3 +5259,43 @@ TypeScript trees stay stale on purpose.
 revoked (`grantlog.go`): kind, ZDR flag, host COUNT, and the grant id for a non-ZDR grant. A
 host, scope URL, organization or owner is never logged, and a ZDR grant's id is left out as
 well. `ValidateGrant` writes no line: it runs once per browser action.
+
+## DEC-37 (OD18) ruled: attachment caps, local OCR, fonts; WS08-S8 gate form (2026-10-27)
+
+**Source.** The owner ordered on 2026-10-27 that the recommended options be taken for 'WS08-S8:
+gate-form og OCR (DEC-37)'. The defaults come from OD18 in CHAT_GAP_CLOSURE_PLAN_2026-10-01.md
+(apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/). This entry rules only
+the caps, the OCR, the fonts and the S8 gate form. The other OD18 items (deck theme, binary
+staging, the editable cell, H11 and H12) are not decided here.
+
+**Caps.** Today both caps are one number for every attachment type, and both default to 1 MB:
+CHAT_EXTRACT_MAX_BYTES in imports-core and CHAT_ATTACHMENT_MAX_FILE_BYTES in model-gateway. The
+recommended option is taken: the cap rises to 4 MB for xlsx, pptx and pdf after the H1 zip
+guard lands. The 60,000-character limit per document stays. A per-type cap and the frontend
+content_base64 maximum (action-registry.ts) are WS08-S7 follow-ups, and both change the
+admission golden.
+
+**OCR.** Local Tesseract (eng and nor) and poppler in imports-core read only PDFs that have no
+text layer. Limits: 15 pages, an 18 s deadline for the whole request (under the BFF's 25 s),
+and one job at a time. Over the page cap or the deadline, the chat path truncates with a
+marker, and knowledge import refuses. The switch is CHAT_EXTRACT_OCR_ENABLED, default off,
+strict 'true'. There is no Azure egress: doc_intel.rs stays out.
+
+**Fonts.** The WS19-S4 default list applies. OD18's recommendation is standard fonts with
+transliteration.
+
+**ZDR.** ZDR keeps refusing attachments, and the subscription route keeps returning
+attachment_route_unsupported.
+
+**Gate form.** The per-org WS25 key reference_uploads (off or on, default off) is the S8 gate.
+It stays Reserved until a consumer enforces it. That consumer is the WS25-S9 policy client, and
+it also gets a CHAT_REFERENCE_UPLOADS_ENABLED kill switch.
+
+**Still blocked.** Durable reference uploads stay blocked on these:
+- WS08-S5 and WS08-S6, and the RunAttachment reference fields.
+- WS25-S9.
+- The action-surface gate (D1-322: the action-surface-contract node test is red and still open
+  in the depth register).
+- Data Plane and Ingestion agreement on the route.
+- A per-user dedupe key, so the ownership 409 in documents-api-go
+  (internal/handler/documents.go:316-318) is not an oracle.
