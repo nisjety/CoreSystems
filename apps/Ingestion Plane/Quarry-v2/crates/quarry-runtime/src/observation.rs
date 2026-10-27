@@ -3415,6 +3415,9 @@ mod tests {
         landed: std::sync::atomic::AtomicBool,
         /// WS12.S5: what `screenshot_masked` reports; unset means an unscanned image.
         masked_screenshot: Option<quarry_browser::MaskedScreenshot>,
+        /// Claims governed full-fidelity visual evidence, so an explicit screenshot
+        /// action gets past the capability gate and reaches the withheld-image path.
+        visual_fidelity: bool,
     }
 
     impl ContentDriver {
@@ -3439,6 +3442,7 @@ mod tests {
         fn capabilities(&self) -> quarry_browser::BrowserDriverCapabilities {
             quarry_browser::BrowserDriverCapabilities {
                 atomic_target_actions: self.atomic_targets,
+                full_visual_fidelity: self.visual_fidelity,
                 ..Default::default()
             }
         }
@@ -4132,6 +4136,7 @@ mod tests {
                 0,
                 1,
             )),
+            visual_fidelity: true,
             ..Default::default()
         });
         let runner = ObservationRunner {

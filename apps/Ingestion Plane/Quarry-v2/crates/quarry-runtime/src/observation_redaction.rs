@@ -24,7 +24,9 @@ use quarry_browser::{BrowserNativeProjection, ProjectionRedaction};
 use quarry_core::contracts::{
     AgentAction, BrowserDialog, ChallengeSignal, ConsoleLine, DomSummary, ExtractionResult,
 };
-use quarry_core::redaction::action::{redacted_for_record, RecordBranch, RecordPolicy};
+use quarry_core::redaction::action::{
+    redacted_for_record, selector_kind, RecordBranch, RecordPolicy,
+};
 use quarry_core::redaction::field::{mask_with, Classification};
 use quarry_core::redaction::{
     self, redact_json_with, redact_text_with, redact_url_with, FieldKind, Mode, ProbeState,
@@ -297,7 +299,11 @@ impl Redactor {
 /// `typed_field_kind`): a password, an OTP, a card number, a phone number or an
 /// unprobed field becomes `[redacted:<kind>]`; text for any other control keeps
 /// its words but passes the `Durable` rules. A raw `type` action names its
-/// control by selector only, so the selector's own words (`#password`) decide.
+/// control by selector only, so the selector's own words (`#password`) decide;
+/// when they say nothing either (`#q`, `input[name=x1]`) the control is not known
+/// and the text is masked as a secret, as a ref-addressed action is (D2-064). The
+/// stored receipt keeps its default text policy (X-19); an event leaves the run's
+/// own record and fails closed.
 /// A navigation loses its secret query and userinfo; a selected value, a dialog
 /// prompt and a script pass the `Durable` rules.
 #[must_use]
@@ -307,6 +313,14 @@ pub fn action_for_event(
     mode: Mode,
     tally: &mut Tally,
 ) -> Option<Value> {
+    let typed = match (action, typed) {
+        (AgentAction::Type { selector, .. }, None)
+            if selector_kind(selector) == FieldKind::Unknown =>
+        {
+            Some(FieldKind::Secret)
+        }
+        _ => typed,
+    };
     // WS12.S3: the one function every stored or emitted action goes through (the
     // receipt builder calls it too). An event keeps the default text policy.
     let out = redacted_for_record(
@@ -634,6 +648,35 @@ mod tests {
         };
         let value = action_for_event(&action, None, Mode::Enforce, &mut Tally::new()).unwrap();
         assert!(!value.to_string().contains(&password()));
+    }
+
+    #[test]
+    fn a_raw_type_action_with_no_known_control_is_masked_in_an_event() {
+        // D2-064: the selector says nothing, the snapshot is not read for a raw
+        // `type`, so the text may be a password: the event masks it.
+        for selector in ["#q", "input[name=x1]", "div.field > input"] {
+            let action = AgentAction::Type {
+                selector: selector.to_owned(),
+                text: password(),
+            };
+            let mut tally = Tally::new();
+            let value = action_for_event(&action, None, Mode::Enforce, &mut tally).unwrap();
+            assert_eq!(value["text"], "[redacted:secret]", "{selector}");
+            assert_eq!(tally.by_rule().get("field.label"), Some(&1), "{selector}");
+        }
+        // A control the probe decided is ordinary keeps its words.
+        let action = AgentAction::Type {
+            selector: "#q".to_owned(),
+            text: "wireless headphones".to_owned(),
+        };
+        let value = action_for_event(
+            &action,
+            Some(FieldKind::Unknown),
+            Mode::Enforce,
+            &mut Tally::new(),
+        )
+        .unwrap();
+        assert_eq!(value["text"], "wireless headphones");
     }
 
     #[test]
