@@ -18,15 +18,19 @@ import (
 // /v1/internal/change/record. These tests pin the wire contract in both
 // directions (stamped and legacy/unstamped).
 
-func firstArgs(t *testing.T, env map[string]any) map[string]any {
+// firstArgs returns args[0] of the only schedule in the orchestrator's desired
+// read. The create response is the tenant view (WS15.S1), which carries no
+// workflow args; the wire shape the reconciler decodes is
+// GET /v1/internal/schedules/desired, so that is where the stamp is read.
+func firstArgs(t *testing.T, h http.Handler) map[string]any {
 	t.Helper()
-	data, _ := env["data"].(map[string]any)
-	if data == nil {
-		t.Fatalf("missing data; env=%v", env)
+	rows := desiredRows(t, h)
+	if len(rows) != 1 {
+		t.Fatalf("desired rows=%d, want 1; rows=%v", len(rows), rows)
 	}
-	args, _ := data["args"].([]any)
+	args, _ := rows[0]["args"].([]any)
 	if len(args) != 1 {
-		t.Fatalf("args len=%d, want 1; data=%v", len(args), data)
+		t.Fatalf("args len=%d, want 1; row=%v", len(args), rows[0])
 	}
 	a0, _ := args[0].(map[string]any)
 	if a0 == nil {
@@ -51,7 +55,7 @@ func TestCreateScheduleStampsZdr(t *testing.T) {
 			if code != http.StatusCreated {
 				t.Fatalf("status=%d env=%v", code, env)
 			}
-			a0 := firstArgs(t, env)
+			a0 := firstArgs(t, h)
 			got, present := a0["zdr"]
 			if tc.want {
 				if got != true {
@@ -82,8 +86,8 @@ func TestUnstampedScheduleArgsAreUnchanged(t *testing.T) {
 	if code != http.StatusCreated {
 		t.Fatalf("status=%d env=%v", code, env)
 	}
-	if _, present := firstArgs(t, env)["zdr"]; present {
-		t.Fatalf("an unstamped schedule must not emit a zdr key: %v", firstArgs(t, env))
+	if _, present := firstArgs(t, h)["zdr"]; present {
+		t.Fatalf("an unstamped schedule must not emit a zdr key: %v", firstArgs(t, h))
 	}
 	raw, err := json.Marshal(changeMonitorArgs{OrgID: "o", URL: "https://x", CreatedBy: "u"})
 	if err != nil {
@@ -115,7 +119,7 @@ func TestWorkflowForCarriesZdr(t *testing.T) {
 	}
 }
 
-// The stamp must also survive the list view the orchestrator reconciler reads.
+// The stamp must also survive the desired read the orchestrator reconciler uses.
 func TestListScheduleCarriesStampToReconciler(t *testing.T) {
 	t.Parallel()
 	h, _ := newSchedulesServer(t)
@@ -123,16 +127,11 @@ func TestListScheduleCarriesStampToReconciler(t *testing.T) {
 		`{"org_id":"org_z","target_kind":"change_monitor","target_ref":"https://example.com/p","preset":"daily","enabled":true,"zdr":true}`); code != http.StatusCreated {
 		t.Fatalf("status=%d env=%v", code, env)
 	}
-	req := httptest.NewRequest(http.MethodGet, "/v1/schedules", nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-	env := decodeEnvelope(t, w.Body.Bytes())
-	list, _ := env["data"].([]any)
+	list := desiredRows(t, h)
 	if len(list) != 1 {
-		t.Fatalf("list=%v", env)
+		t.Fatalf("list=%v", list)
 	}
-	row, _ := list[0].(map[string]any)
-	args, _ := row["args"].([]any)
+	args, _ := list[0]["args"].([]any)
 	a0, _ := args[0].(map[string]any)
 	if a0["zdr"] != true {
 		t.Fatalf("list args[0]=%v, want zdr true", a0)

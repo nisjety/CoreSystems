@@ -46,6 +46,19 @@ func postScheduleRun(h http.Handler, id quarrycontracts.ID, body string) *httpte
 	return w
 }
 
+// decodeRegisterResult reads the registration answer. Like every control route it
+// is wrapped in the {request_id, data} envelope.
+func decodeRegisterResult(t *testing.T, body []byte) registerRunResult {
+	t.Helper()
+	var env struct {
+		Data registerRunResult `json:"data"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("decode registration envelope: %v; body=%s", err, body)
+	}
+	return env.Data
+}
+
 func newRunsServer(t *testing.T) (http.Handler, store.DB) {
 	t.Helper()
 	db := store.NewMemory()
@@ -69,9 +82,8 @@ func TestRegisterRun_IdempotentByRunKey(t *testing.T) {
 	if second.Code != http.StatusOK {
 		t.Fatalf("retry registration = %d, want 200; body=%s", second.Code, second.Body.String())
 	}
-	var a, b registerRunResult
-	_ = json.Unmarshal(first.Body.Bytes(), &a)
-	_ = json.Unmarshal(second.Body.Bytes(), &b)
+	a := decodeRegisterResult(t, first.Body.Bytes())
+	b := decodeRegisterResult(t, second.Body.Bytes())
 	if a.JobID == "" || a.JobID != b.JobID {
 		t.Fatalf("retry must return the same job: first=%q second=%q", a.JobID, b.JobID)
 	}
@@ -92,8 +104,7 @@ func TestRegisterRun_DerivesOrgAndParamsFromScheduleNotBody(t *testing.T) {
 	if w.Code != http.StatusCreated {
 		t.Fatalf("registration = %d; body=%s", w.Code, w.Body.String())
 	}
-	var res registerRunResult
-	_ = json.Unmarshal(w.Body.Bytes(), &res)
+	res := decodeRegisterResult(t, w.Body.Bytes())
 	job, ok := db.Jobs().GetByOrg("org_a", quarrycontracts.ID(res.JobID))
 	if !ok {
 		t.Fatal("job not found under the schedule's org")
@@ -137,8 +148,7 @@ func TestRegisterRun_SkippedRowIsTerminalWithEvent(t *testing.T) {
 	if w.Code != http.StatusCreated {
 		t.Fatalf("skipped registration = %d; body=%s", w.Code, w.Body.String())
 	}
-	var res registerRunResult
-	_ = json.Unmarshal(w.Body.Bytes(), &res)
+	res := decodeRegisterResult(t, w.Body.Bytes())
 	job, ok := db.Jobs().GetByOrg("org_a", quarrycontracts.ID(res.JobID))
 	if !ok {
 		t.Fatal("skipped job not found")

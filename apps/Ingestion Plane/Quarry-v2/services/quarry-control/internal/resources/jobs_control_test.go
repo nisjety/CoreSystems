@@ -129,6 +129,19 @@ func TestControl_PauseRaisesDesiredSeqAndRepeatIsNoop(t *testing.T) {
 	}
 }
 
+// decodePending reads the pending-control answer: a list inside the
+// {request_id, data} envelope every control route uses.
+func decodePending(t *testing.T, body []byte) []map[string]any {
+	t.Helper()
+	var env struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("decode pending-control envelope: %v; body=%s", err, body)
+	}
+	return env.Data
+}
+
 // TestPendingControl_ReturnsOnlyUnapplied: the internal pending read lists the jobs
 // whose desired state is ahead of what was applied, and drops them once acknowledged.
 func TestPendingControl_ReturnsOnlyUnapplied(t *testing.T) {
@@ -140,10 +153,7 @@ func TestPendingControl_ReturnsOnlyUnapplied(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("pending-control: status %d", rec.Code)
 	}
-	var pending []map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &pending); err != nil {
-		t.Fatal(err)
-	}
+	pending := decodePending(t, rec.Body.Bytes())
 	if len(pending) != 1 {
 		t.Fatalf("pending before ack: %d jobs, want 1", len(pending))
 	}
@@ -154,10 +164,7 @@ func TestPendingControl_ReturnsOnlyUnapplied(t *testing.T) {
 	}
 
 	rec = lcDo(h, http.MethodGet, "/v1/internal/jobs/pending-control", nil)
-	pending = nil
-	if err := json.Unmarshal(rec.Body.Bytes(), &pending); err != nil {
-		t.Fatal(err)
-	}
+	pending = decodePending(t, rec.Body.Bytes())
 	if len(pending) != 0 {
 		t.Fatalf("pending after ack: %d jobs, want 0", len(pending))
 	}

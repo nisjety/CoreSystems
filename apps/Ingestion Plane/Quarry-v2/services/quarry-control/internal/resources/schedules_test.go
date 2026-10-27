@@ -24,6 +24,27 @@ func newSchedulesServer(t *testing.T) (http.Handler, store.DB) {
 	return r, db
 }
 
+// desiredRows reads GET /v1/internal/schedules/desired, the orchestrator's
+// all-orgs read in the wire shape (workflow, args, paused). The create response
+// is the tenant view and does not carry these fields (WS15.S1).
+func desiredRows(t *testing.T, h http.Handler) []map[string]any {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/v1/internal/schedules/desired", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("desired status=%d body=%s", w.Code, w.Body.String())
+	}
+	env := decodeEnvelope(t, w.Body.Bytes())
+	list, _ := env["data"].([]any)
+	out := make([]map[string]any, 0, len(list))
+	for _, it := range list {
+		row, _ := it.(map[string]any)
+		out = append(out, row)
+	}
+	return out
+}
+
 func decodeEnvelope(t *testing.T, body []byte) map[string]any {
 	t.Helper()
 	var env map[string]any
@@ -330,7 +351,9 @@ func TestCreateSchedule_MissingOrgID_Returns400(t *testing.T) {
 // TestCreateSchedule_ChangeMonitor_EmitsWorkflowArgs is the load-bearing W2
 // test: a preset-driven change_monitor schedule must serialize to the
 // orchestrator with Workflow=ChangeMonitorWF, Args carrying org_id+url, the
-// preset mapped to a literal 5-field cron, and paused == !enabled.
+// preset mapped to a literal 5-field cron, and paused == !enabled. The wire
+// shape is read from the desired endpoint: since WS15.S1 the create response is
+// the tenant view, which carries cron and status but not workflow or args.
 func TestCreateSchedule_ChangeMonitor_EmitsWorkflowArgs(t *testing.T) {
 	t.Parallel()
 	h, _ := newSchedulesServer(t)
@@ -340,10 +363,14 @@ func TestCreateSchedule_ChangeMonitor_EmitsWorkflowArgs(t *testing.T) {
 	if code != http.StatusCreated {
 		t.Fatalf("status=%d, want 201; env=%v", code, env)
 	}
-	data, _ := env["data"].(map[string]any)
-	if data == nil {
-		t.Fatalf("missing data; env=%v", env)
+	if view, _ := env["data"].(map[string]any); view == nil || view["cron"] != "0 9 * * *" || view["status"] != "active" {
+		t.Fatalf("tenant view cron/status=%v, want daily preset and active", view)
 	}
+	rows := desiredRows(t, h)
+	if len(rows) != 1 {
+		t.Fatalf("desired len=%d, want 1; rows=%v", len(rows), rows)
+	}
+	data := rows[0]
 	if data["workflow"] != "ChangeMonitorWF" {
 		t.Fatalf("workflow=%v, want ChangeMonitorWF", data["workflow"])
 	}
@@ -360,20 +387,6 @@ func TestCreateSchedule_ChangeMonitor_EmitsWorkflowArgs(t *testing.T) {
 	arg0, _ := args[0].(map[string]any)
 	if arg0["org_id"] != "org_verevon" || arg0["url"] != "https://example.com/pricing" {
 		t.Fatalf("args[0]=%v, want {org_id:org_verevon, url:.../pricing}", arg0)
-	}
-
-	// The list view (what the reconciler reads) must carry the same shape.
-	req := httptest.NewRequest(http.MethodGet, "/v1/schedules", nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-	listEnv := decodeEnvelope(t, w.Body.Bytes())
-	list, _ := listEnv["data"].([]any)
-	if len(list) != 1 {
-		t.Fatalf("list len=%d, want 1; env=%v", len(list), listEnv)
-	}
-	first, _ := list[0].(map[string]any)
-	if first["workflow"] != "ChangeMonitorWF" {
-		t.Fatalf("list[0].workflow=%v, want ChangeMonitorWF", first["workflow"])
 	}
 }
 
@@ -401,9 +414,15 @@ func TestCreateSchedule_Scrape_EmptyWorkflow(t *testing.T) {
 	if code != http.StatusCreated {
 		t.Fatalf("status=%d, want 201; env=%v", code, env)
 	}
-	data, _ := env["data"].(map[string]any)
-	if data["workflow"] != "" {
-		t.Fatalf("scrape workflow=%v, want empty (unmapped in MVP)", data["workflow"])
+	_ = env
+	// The kill switch QUARRY_SCHEDULED_JOBS_ENABLED is unset here, so the kind
+	// stays unmapped in the orchestrator wire shape.
+	rows := desiredRows(t, h)
+	if len(rows) != 1 {
+		t.Fatalf("desired len=%d, want 1; rows=%v", len(rows), rows)
+	}
+	if rows[0]["workflow"] != "" {
+		t.Fatalf("scrape workflow=%v, want empty (unmapped while the kill switch is off)", rows[0]["workflow"])
 	}
 }
 
