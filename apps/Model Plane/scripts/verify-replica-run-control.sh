@@ -35,7 +35,8 @@
 #
 # Usage:    MP_PROOF_COOKIE_JAR=<curl cookie jar of a signed-in proof user> ./scripts/verify-replica-run-control.sh
 #           or, in direct mode, MP_PROOF_BEARER, MP_PROOF_SESSION_BEARER and MP_PROOF_INFERENCE_BEARER, all three set.
-# Cookie mode is the one to use. It mints the user, session-core and inference-core bearers from AUTH_CORE_URL
+# Cookie mode is the one to use (case 3's agentic turns also need the data-plane and the other delegated bearers
+# the BFF sends with a chat stream, which only cookie mode mints). It mints the user, session-core and inference-core bearers from AUTH_CORE_URL
 #           (default http://127.0.0.1:3011) with curl -b and jq -r: GET /api/model-plane/token, GET
 #           /api/session-core/token and GET /api/inference-core/token, each answering JSON with the token in `token`
 #           (model-plane-token.controller.ts:134-203, plane-token.controller.ts:203-274). Every request that carries
@@ -46,7 +47,9 @@
 # Optional: PROOF_MODEL is the Anthropic model id every turn asks for (default claude-sonnet-5-5). It may
 #           use only letters, digits, '.', '_', ':' and '-', at most 64 of them. PROOF_SHORT_PROMPT is the
 #           preflight and case 6 turn. PROOF_TOOL_PROMPT must make the model call a tool on the proof stack
-#           (case 2 waits for a tool_call frame); PROOF_PLAN_PROMPT must make it propose a plan (case 3 waits
+#           (case 2 waits for a tool_call frame; the turn asks for the `tools` feature as the SPA does, and the
+#           default names count_words, a local built-in that needs no network); PROOF_PLAN_PROMPT must make it
+#           propose a plan (case 3's plan and Do turns ask for `agentic`, as the SPA's plan and execute turns do; case 3 waits
 #           for plan_proposed). PROOF_OUT overrides the evidence file; the other PROOF_* variables are read at
 #           the top of the script.
 # The bearers are read from the environment or minted into shell variables; none is printed or written.
@@ -99,7 +102,7 @@ B_CTR="${PROOF_B_CONTAINER:-model-plane-model-gateway-b-1}"
 NATS_CTR="${PROOF_NATS_CONTAINER:-model-plane-nats-1}"
 PG_CTR="${PROOF_PG_CONTAINER:-model-plane-postgres-1}"
 LONG_PROMPT="${PROOF_LONG_PROMPT:-Write a long, careful essay of about two thousand words on the history of salt, with a heading for each section.}"
-TOOL_PROMPT="${PROOF_TOOL_PROMPT:-Call a tool to check the current date, then write a long, careful essay on the history of salt.}"
+TOOL_PROMPT="${PROOF_TOOL_PROMPT:-First use the count_words tool on the text: salt has been traded for thousands of years. Then write a long, careful essay on the history of salt.}"
 PLAN_PROMPT="${PROOF_PLAN_PROMPT:-Propose a short plan for a one-page note on salt. Do not carry the plan out.}"
 DO_PROMPT="${PROOF_DO_PROMPT:-Carry out the approved plan now and write the one-page note on salt.}"
 SHORT_PROMPT="${PROOF_SHORT_PROMPT:-Say hello in one short sentence.}"
@@ -151,7 +154,17 @@ mint_all() { # refreshes MP_PROOF_BEARER, MP_PROOF_SESSION_BEARER and MP_PROOF_I
   mint_token model-plane "the model-plane user token"; MP_PROOF_BEARER="$MINTED"
   mint_token session-core "session-core"; MP_PROOF_SESSION_BEARER="$MINTED"
   mint_token inference-core "inference-core"; MP_PROOF_INFERENCE_BEARER="$MINTED"
+  # A stream start also carries the other delegated bearers the Verevon BFF sends with a chat stream
+  # (verevonv3 apps/gateway/src/domains/chat/streams.rs): case 3's agentic turns are refused with
+  # data_plane_auth_required without the data-plane one. Held in an array, never printed.
+  STREAM_EXTRA_HDRS=()
+  local pair
+  for pair in data-plane:x-data-plane-authorization ingestion:x-ingestion-authorization \
+      capability-core:x-capability-authorization execution-core:x-execution-authorization cost-core:x-cost-authorization; do
+    mint_token "${pair%%:*}" "${pair%%:*}"; STREAM_EXTRA_HDRS+=(-H "${pair#*:}: Bearer $MINTED")
+  done
 }
+STREAM_EXTRA_HDRS=()
 http_post() { # http_post <base> <path> [json] [session] -> prints the status; the body is in $WORK/last.body
   # The session bearer goes out only with the fourth argument "session": queue, feedback, plan approval and the
   # durable run cancel take it (http_routes.rs:8632-8637, :7433-7437, :8063, :1962). Stop takes only the user token
@@ -178,6 +191,7 @@ start_stream() { # start_stream <base> <out-file> <json> -> STREAM_PID
     -H "Authorization: Bearer $MP_PROOF_BEARER" \
     -H "x-session-authorization: Bearer $MP_PROOF_SESSION_BEARER" \
     -H "x-inference-authorization: Bearer $MP_PROOF_INFERENCE_BEARER" \
+    ${STREAM_EXTRA_HDRS[@]+"${STREAM_EXTRA_HDRS[@]}"} \
     -H 'Content-Type: application/json' \
     -d "$3" >"$2" 2>/dev/null &
   STREAM_PID=$!
@@ -299,7 +313,7 @@ show_metrics "$A" A
 show_metrics "$B" B
 
 step "case 2: a queued message sent to B is delivered by A"
-start_stream "$A" "$WORK/case2.sse" '{"content":"'"$TOOL_PROMPT"'","provider":"anthropic","model":"'"$PROOF_MODEL"'"}'; P=$STREAM_PID
+start_stream "$A" "$WORK/case2.sse" '{"content":"'"$TOOL_PROMPT"'","features":["usage","tools"],"provider":"anthropic","model":"'"$PROOF_MODEL"'"}'; P=$STREAM_PID
 wait_frame "$WORK/case2.sse" connected 60 || fail "case 2: no connected frame on A"
 show_model "$WORK/case2.sse"
 CONNECTED="$(frame_data "$WORK/case2.sse" connected)"
@@ -335,7 +349,7 @@ show_metrics "$B" B
 
 step "case 3: plan approved on A, Do run on B under the durable grant"
 CASE3_START="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-start_stream "$A" "$WORK/case3-plan.sse" '{"content":"'"$PLAN_PROMPT"'","plan_mode":true,"provider":"anthropic","model":"'"$PROOF_MODEL"'"}'; P=$STREAM_PID
+start_stream "$A" "$WORK/case3-plan.sse" '{"content":"'"$PLAN_PROMPT"'","plan_mode":true,"features":["usage","tools","agentic"],"provider":"anthropic","model":"'"$PROOF_MODEL"'"}'; P=$STREAM_PID
 wait_frame "$WORK/case3-plan.sse" plan_proposed 240 || fail "case 3: no plan_proposed on A; set PROOF_PLAN_PROMPT to a prompt that proposes a plan"
 PLAN_ID="$(json_field plan_id "$(frame_data "$WORK/case3-plan.sse" plan_proposed)")"
 wait "$P" 2>/dev/null || true
@@ -349,7 +363,7 @@ fi
 CODE="$(http_post "$A" "/v1/runs/$RUN_ID/plan-approval" "{\"decision\":\"approve\",\"plan_id\":\"$PLAN_ID\",\"granted_rung\":\"workspace_write\",\"justification\":\"$JUSTIFICATION\"}" session)"
 echo "    POST A /v1/runs/$RUN_ID/plan-approval -> $CODE $(last_body)"
 expect "$CODE" 200 "case 3: approval on A answers 200"
-start_stream "$B" "$WORK/case3-do.sse" '{"content":"'"$DO_PROMPT"'","thread_id":"'"$THREAD_ID"'","provider":"anthropic","model":"'"$PROOF_MODEL"'"}'; P=$STREAM_PID
+start_stream "$B" "$WORK/case3-do.sse" '{"content":"'"$DO_PROMPT"'","thread_id":"'"$THREAD_ID"'","features":["usage","tools","agentic"],"provider":"anthropic","model":"'"$PROOF_MODEL"'"}'; P=$STREAM_PID
 wait "$P" 2>/dev/null || true
 show_model "$WORK/case3-do.sse"
 expect "$(frame_count "$WORK/case3-do.sse" error)" 0 "case 3: the Do run on B raised no error frame"
