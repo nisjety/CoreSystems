@@ -128,7 +128,9 @@ async fn observe_returns_every_href_and_reports_what_enforce_would_drop() {
         body["links"], plain["links"],
         "observe keeps every href as sent"
     );
-    assert_eq!(body["crawl"]["scope_applied"], false);
+    // The orchestrator ends a crawl whose report lacks scope_applied (D2-029), so observe
+    // says the edge evaluated the scope. It still drops no link, as the asserts above show.
+    assert_eq!(body["crawl"]["scope_applied"], true);
     assert_eq!(body["crawl"]["mode"], "observe");
 }
 

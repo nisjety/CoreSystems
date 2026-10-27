@@ -259,10 +259,11 @@ impl CompiledScope {
         hrefs: &[String],
         robots: Option<RobotsLookup<'_>>,
     ) -> FilterOutcome {
-        let mode_applies = self.mode == ScopeMode::Enforce;
+        // The orchestrator ends a crawl whose report lacks scope_applied (D2-029). Observe
+        // evaluates the scope as well; only enforce changes the links.
         let mut report = CrawlReport {
             v: CRAWL_CONTRACT_VERSION,
-            scope_applied: mode_applies,
+            scope_applied: true,
             mode: self.mode,
             links_seen: saturating_u32(hrefs.len()),
             links_allowed: 0,
@@ -1011,8 +1012,41 @@ mod tests {
             out.links,
             vec!["/a".to_string(), "https://other.test/".to_string()]
         );
-        assert!(!out.report.scope_applied);
+        assert!(
+            out.report.scope_applied,
+            "observe is evaluated, so the orchestrator keeps the crawl"
+        );
         assert_eq!(count(&out, "external_host_disabled"), 1);
+    }
+
+    #[test]
+    fn observe_reports_scope_applied_on_every_page_kind() {
+        let observe = CrawlContext {
+            scope_mode: ScopeMode::Observe,
+            ..base()
+        };
+        let crawled = run(observe.clone(), "https://example.com/", &["/a"]);
+        assert!(crawled.report.scope_applied, "the orchestrator needs the proof (D2-029)");
+        assert_eq!(crawled.links, vec!["/a".to_string()]);
+        let batch = run(
+            CrawlContext {
+                kind: CrawlKind::Batch,
+                ..observe
+            },
+            "https://example.com/",
+            &["/a"],
+        );
+        assert!(batch.report.scope_applied);
+        assert!(batch.links.is_empty());
+        let enforced = run(
+            CrawlContext {
+                scope_mode: ScopeMode::Enforce,
+                ..base()
+            },
+            "https://example.com/",
+            &["/a"],
+        );
+        assert!(enforced.report.scope_applied);
     }
 
     #[test]

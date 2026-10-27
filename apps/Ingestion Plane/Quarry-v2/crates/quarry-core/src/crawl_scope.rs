@@ -362,7 +362,8 @@ impl DenialCounts {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CrawlReport {
     pub v: u32,
-    /// True when the scope changed `links` (enforce mode).
+    /// True when the edge evaluated the scope the orchestrator sent. Set in both modes: the
+    /// orchestrator ends a crawl whose report lacks it (D2-029). Only enforce changes `links`.
     pub scope_applied: bool,
     pub mode: ScopeMode,
     /// Hrefs on the page, before any evaluation.
