@@ -148,11 +148,17 @@ pub(crate) struct AppState {
 /// `Default` is all-off, so test literals never name the field and `AppState::for_tests()` needs
 /// no edit. Production default is OFF; development may default ON (see [`space_flag`]).
 #[derive(Clone, Debug, Default)]
-pub(crate) struct SpaceFeatureFlags {}
+pub(crate) struct SpaceFeatureFlags {
+    /// `SPACE_DENIALS_TYPED` (WS03-S5): map Control's typed Space denials to the browser envelope.
+    /// Off restores pass-through. A rollout control, never an authorization input.
+    pub(crate) denials_typed: bool,
+}
 
 impl SpaceFeatureFlags {
     pub(crate) fn from_env() -> Self {
-        Self {}
+        Self {
+            denials_typed: space_flag("SPACE_DENIALS_TYPED"),
+        }
     }
 }
 

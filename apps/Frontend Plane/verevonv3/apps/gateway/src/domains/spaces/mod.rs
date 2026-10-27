@@ -22,11 +22,13 @@ use sha2::{Digest, Sha256};
 use crate::{
     config::AppState,
     contracts::ActionActor,
-    envelope::error,
+    envelope::{error, error_with_details},
     middleware::{require_session, AuthenticatedUser},
     upstream::{proxy_json, send_with_retry},
 };
 
+mod denial;
+use denial::{typed_response, with_gap_details, Decision, SpaceDenial};
 mod schedule_template;
 
 static THREAD_SCOPE_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -158,7 +160,7 @@ pub(crate) async fn inject_personal_thread_context(
         )
         .await;
         if !status.is_success() {
-            return Err((status, Json(response)));
+            return Err(typed_response(state, status, response, denial::OP_POST));
         }
         let data = crate::envelope::unwrap_data(&response);
         let decision = data
@@ -211,7 +213,7 @@ pub(crate) async fn inject_personal_thread_context(
     )
     .await;
     if !status.is_success() {
-        return Err((status, Json(response)));
+        return Err(typed_response(state, status, response, denial::OP_THREAD));
     }
     let data = crate::envelope::unwrap_data(&response);
     let decision = data
@@ -271,7 +273,12 @@ pub(crate) async fn inject_personal_thread_context(
     let retrieval_token = if retrieval_status == StatusCode::FORBIDDEN {
         String::new()
     } else if !retrieval_status.is_success() {
-        return Err((retrieval_status, Json(retrieval_response)));
+        return Err(typed_response(
+            state,
+            retrieval_status,
+            retrieval_response,
+            denial::OP_RETRIEVAL,
+        ));
     } else {
         let retrieval_token = crate::envelope::unwrap_data(&retrieval_response)
             .get("token")
@@ -395,7 +402,7 @@ pub(crate) async fn personal_import_ingress_decision(
     )
     .await;
     if !status.is_success() {
-        return Err((status, Json(response)));
+        return Err(typed_response(state, status, response, denial::OP_IMPORT));
     }
     let data = crate::envelope::unwrap_data(&response);
     let decision = data
@@ -569,7 +576,7 @@ pub(crate) async fn inject_personal_schedule_create_context(
     )
     .await;
     if !status.is_success() {
-        return Err((status, Json(response)));
+        return Err(typed_response(state, status, response, denial::OP_SCHEDULE));
     }
     let data = crate::envelope::unwrap_data(&response);
     let decision = data
@@ -943,7 +950,13 @@ async fn forward_owner_grant_mutation(
     )
     .await;
     if !control_status.is_success() {
-        return (control_status, Json(control_response)).into_response();
+        return typed_response(
+            state,
+            control_status,
+            control_response,
+            denial::OP_OWNER_GRANT,
+        )
+        .into_response();
     }
     let data = crate::envelope::unwrap_data(&control_response);
     let decision = match data.get("decision").and_then(Value::as_object) {
@@ -1216,7 +1229,7 @@ async fn list_space_threads(
     )
     .await;
     if !membership_status.is_success() {
-        return (membership_status, Json(membership));
+        return typed_response(&state, membership_status, membership, denial::OP_READ);
     }
     let session_token =
         match crate::domains::chat::shared::required_session_token(&state, &user, &headers).await {
@@ -1351,13 +1364,13 @@ async fn shared_thread_read_decision(
 /// point — a token leaked from one path cannot be replayed against the other —
 /// and the cost is one extra Control call on a page that already makes
 /// several.
-async fn shared_thread_read_decision_for(
+async fn shared_thread_read_decision_for_typed(
     state: &AppState,
     user: &AuthenticatedUser,
     org_id: &str,
     space_ref: &str,
     service_audience: &str,
-) -> Result<Option<(String, String)>, (StatusCode, Json<Value>)> {
+) -> Result<Decision<(String, String)>, (StatusCode, Json<Value>)> {
     let actor = ActionActor {
         user_id: user.user_id.clone(),
         user_email: user.user_email.clone(),
@@ -1386,7 +1399,9 @@ async fn shared_thread_read_decision_for(
     )
     .await;
     if status == StatusCode::FORBIDDEN || status == StatusCode::NOT_FOUND {
-        return Ok(None);
+        return Ok(Decision::Declined(SpaceDenial::from_response(
+            state, status, &response,
+        )));
     }
     if !status.is_success() {
         return Err((status, Json(response)));
@@ -1413,7 +1428,21 @@ async fn shared_thread_read_decision_for(
             )),
         ));
     }
-    Ok(Some((decision_ref, token)))
+    Ok(Decision::Granted((decision_ref, token)))
+}
+
+/// The legacy `Option` view of [`shared_thread_read_decision_for_typed`]: a
+/// decline is `None` whatever its reason.
+async fn shared_thread_read_decision_for(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+    space_ref: &str,
+    service_audience: &str,
+) -> Result<Option<(String, String)>, (StatusCode, Json<Value>)> {
+    shared_thread_read_decision_for_typed(state, user, org_id, space_ref, service_audience)
+        .await
+        .map(|decision| decision.split().0)
 }
 
 /// `GET /api/v1/spaces/{space_ref}/activity` — what has happened here.
@@ -1505,7 +1534,7 @@ async fn space_activity(
     )
     .await;
     if !membership_status.is_success() {
-        return (membership_status, Json(membership));
+        return typed_response(&state, membership_status, membership, denial::OP_READ);
     }
 
     let mut runs = Value::Array(vec![]);
@@ -1515,8 +1544,12 @@ async fn space_activity(
     let mut unavailable: Vec<Value> = Vec::new();
 
     // ---- runs, through the room's read authority -------------------------
-    let read = match shared_thread_read_decision(&state, &user, &org_id, space_ref).await {
-        Ok(read) => read,
+    let (read, read_denial) = match shared_thread_read_decision_for_typed(
+        &state, &user, &org_id, space_ref, "",
+    )
+    .await
+    {
+        Ok(decision) => decision.split(),
         Err(response) => return response,
     };
     match read.as_ref() {
@@ -1631,11 +1664,14 @@ async fn space_activity(
                 }
             }
         }
-        None => unavailable.push(json!({
-            "section": "runs",
-            "code": "runs_read_not_authorized",
-            "reason": "Reading this Space's shared work is not authorized.",
-        })),
+        None => unavailable.push(with_gap_details(
+            json!({
+                "section": "runs",
+                "code": "runs_read_not_authorized",
+                "reason": "Reading this Space's shared work is not authorized.",
+            }),
+            read_denial.as_ref(),
+        )),
     }
 
     // ---- owner receipts and the authority behind them --------------------
@@ -1730,12 +1766,12 @@ const SPACE_ACTIVITY_APPROVAL_RUNS: usize = 10;
 /// orgs have never turned it on), and NOT_FOUND means this Control predates the
 /// endpoint. Both are answers, so both degrade the Knowledge tab to a named gap
 /// rather than darkening it. Anything else is an outage and fails the call.
-async fn space_retrieval_decision(
+async fn space_retrieval_decision_typed(
     state: &AppState,
     user: &AuthenticatedUser,
     org_id: &str,
     space_ref: &str,
-) -> Result<Option<String>, (StatusCode, Json<Value>)> {
+) -> Result<Decision<String>, (StatusCode, Json<Value>)> {
     let actor = ActionActor {
         user_id: user.user_id.clone(),
         user_email: user.user_email.clone(),
@@ -1760,7 +1796,9 @@ async fn space_retrieval_decision(
     )
     .await;
     if status == StatusCode::FORBIDDEN || status == StatusCode::NOT_FOUND {
-        return Ok(None);
+        return Ok(Decision::Declined(SpaceDenial::from_response(
+            state, status, &response,
+        )));
     }
     if !status.is_success() {
         return Err((status, Json(response)));
@@ -1779,7 +1817,20 @@ async fn space_retrieval_decision(
             )),
         ));
     }
-    Ok(Some(token))
+    Ok(Decision::Granted(token))
+}
+
+/// The legacy `Option` view of [`space_retrieval_decision_typed`].
+#[allow(dead_code, reason = "legacy signature kept for existing callers and tests")]
+async fn space_retrieval_decision(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+    space_ref: &str,
+) -> Result<Option<String>, (StatusCode, Json<Value>)> {
+    space_retrieval_decision_typed(state, user, org_id, space_ref)
+        .await
+        .map(|decision| decision.split().0)
 }
 
 /// `GET /api/v1/spaces/{space_ref}/knowledge` — what this room knows about.
@@ -1868,7 +1919,7 @@ async fn space_knowledge(
     )
     .await;
     if !membership_status.is_success() {
-        return (membership_status, Json(membership));
+        return typed_response(&state, membership_status, membership, denial::OP_READ);
     }
 
     let mut documents = Value::Array(vec![]);
@@ -1877,14 +1928,17 @@ async fn space_knowledge(
     let mut documents_truncated = false;
     let mut unavailable: Vec<Value> = Vec::new();
 
-    match space_retrieval_decision(&state, &user, &org_id, space_ref).await {
+    match space_retrieval_decision_typed(&state, &user, &org_id, space_ref).await {
         Err(response) => return response,
-        Ok(None) => unavailable.push(json!({
-            "section": "knowledge",
-            "code": "knowledge_read_not_authorized",
-            "reason": "Reading this Space's knowledge is not authorized.",
-        })),
-        Ok(Some(decision)) => {
+        Ok(Decision::Declined(denial)) => unavailable.push(with_gap_details(
+            json!({
+                "section": "knowledge",
+                "code": "knowledge_read_not_authorized",
+                "reason": "Reading this Space's knowledge is not authorized.",
+            }),
+            denial.as_ref(),
+        )),
+        Ok(Decision::Granted(decision)) => {
             let url = format!("{}/v1/knowledge/space-sources", state.retrieval_engine_url);
             let (status, Json(payload)) =
                 crate::domains::knowledge::shared::proxy_data_plane_json_with_space_decision(
@@ -2083,7 +2137,7 @@ pub(crate) async fn record_space_presence(
     )
     .await;
     if !membership_status.is_success() {
-        return (membership_status, Json(membership));
+        return typed_response(&state, membership_status, membership, denial::OP_READ);
     }
     let Ok(result) = convex_gateway_call(
         &state,
@@ -2191,7 +2245,7 @@ pub(crate) async fn mark_space_read(
     )
     .await;
     if !membership_status.is_success() {
-        return (membership_status, Json(membership));
+        return typed_response(&state, membership_status, membership, denial::OP_READ);
     }
     let Ok(result) = convex_gateway_call(
         &state,
@@ -2341,7 +2395,7 @@ pub(crate) async fn space_thread_presentation(
     )
     .await;
     if !membership_status.is_success() {
-        return (membership_status, Json(membership));
+        return typed_response(&state, membership_status, membership, denial::OP_READ);
     }
     match crate::domains::chat::history::update_durable_presentation(
         &state, &user, &headers, thread_id, title, None, pinned, None,
@@ -2473,7 +2527,7 @@ async fn space_work(
     )
     .await;
     if !membership_status.is_success() {
-        return (membership_status, Json(membership));
+        return typed_response(&state, membership_status, membership, denial::OP_READ);
     }
 
     let session_token =
@@ -2484,8 +2538,12 @@ async fn space_work(
     let model_token = crate::domains::chat::shared::model_token(&state, &user, &headers).await;
 
     // ---- runs, through the room's read authority -------------------------
-    let read = match shared_thread_read_decision(&state, &user, &org_id, space_ref).await {
-        Ok(read) => read,
+    let (read, read_denial) = match shared_thread_read_decision_for_typed(
+        &state, &user, &org_id, space_ref, "",
+    )
+    .await
+    {
+        Ok(decision) => decision.split(),
         Err(response) => return response,
     };
     let mut runs = Value::Array(vec![]);
@@ -2528,11 +2586,14 @@ async fn space_work(
             // Control declined the shared read, or does not have the endpoint.
             // The room may still be usable; its OTHER members' work simply is
             // not visible, and saying which is better than an empty list.
-            unavailable.push(json!({
-                "section": "runs",
-                "code": "runs_read_not_authorized",
-                "reason": "Reading this Space's shared work is not authorized.",
-            }));
+            unavailable.push(with_gap_details(
+                json!({
+                    "section": "runs",
+                    "code": "runs_read_not_authorized",
+                    "reason": "Reading this Space's shared work is not authorized.",
+                }),
+                read_denial.as_ref(),
+            ));
         }
     }
 
@@ -2595,7 +2656,7 @@ async fn space_work(
     let mut processes = Value::Array(vec![]);
     match crate::domains::chat::shared::required_sandbox_token(&state, &user, &headers).await {
         Ok(sandbox) => {
-            let process_read = shared_thread_read_decision_for(
+            let process_read = shared_thread_read_decision_for_typed(
                 &state,
                 &user,
                 &org_id,
@@ -2604,7 +2665,7 @@ async fn space_work(
             )
             .await;
             match process_read {
-                Ok(Some((decision_ref, token))) => {
+                Ok(Decision::Granted((decision_ref, token))) => {
                     let url = format!(
                         "{}/v1/processes?space_ref={}&space_read_decision_ref={}&space_read_decision_token={}",
                         state.model_gateway_url,
@@ -2641,7 +2702,15 @@ async fn space_work(
                         }));
                     }
                 }
-                Ok(None) | Err(_) => unavailable.push(json!({
+                Ok(Decision::Declined(denial)) => unavailable.push(with_gap_details(
+                    json!({
+                        "section": "processes",
+                        "code": "processes_read_not_authorized",
+                        "reason": "Reading this Space's background processes is not authorized.",
+                    }),
+                    denial.as_ref(),
+                )),
+                Err(_) => unavailable.push(json!({
                     "section": "processes",
                     "code": "processes_read_not_authorized",
                     "reason": "Reading this Space's background processes is not authorized.",
@@ -2730,8 +2799,12 @@ async fn space_thread_transcript(
             )
         }
     }
-    let read = match shared_thread_read_decision(&state, &user, &org_id, space_ref).await {
-        Ok(read) => read,
+    let (read, read_denial) = match shared_thread_read_decision_for_typed(
+        &state, &user, &org_id, space_ref, "",
+    )
+    .await
+    {
+        Ok(decision) => decision.split(),
         Err(response) => return response,
     };
     let Some((decision_ref, token)) = read else {
@@ -2739,13 +2812,21 @@ async fn space_thread_transcript(
         // than falling back to the owner-bound route: silently returning only
         // the caller's own turns is how a room starts lying about who said
         // what.
-        return (
-            StatusCode::FORBIDDEN,
-            Json(error(
-                "space_read_not_authorized",
-                "Reading this Space's shared conversation is not authorized.",
-            )),
-        );
+        let message = "Reading this Space's shared conversation is not authorized.";
+        return match read_denial {
+            Some(denial) => (
+                StatusCode::FORBIDDEN,
+                Json(error_with_details(
+                    denial::OP_READ,
+                    message,
+                    denial.details_value(),
+                )),
+            ),
+            None => (
+                StatusCode::FORBIDDEN,
+                Json(error("space_read_not_authorized", message)),
+            ),
+        };
     };
     let session_token =
         match crate::domains::chat::shared::required_session_token(&state, &user, &headers).await {
@@ -4979,7 +5060,7 @@ async fn space_actions(
     )
     .await;
     if !membership_status.is_success() {
-        return (membership_status, Json(membership));
+        return typed_response(&state, membership_status, membership, denial::OP_READ);
     }
     match crate::domains::actions::dispatchers::human_owner_action_catalog_for(&state, &user).await
     {
