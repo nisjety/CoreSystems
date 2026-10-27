@@ -1,0 +1,363 @@
+// Docs and contract checks for Quarry option B (the Data Plane rerank) and the Model Plane switches.
+//
+// Run from the repository root:
+//   node --test "apps/Ingestion Plane/Quarry-v2/scripts/tests/docs-contract.test.mjs"
+//
+// The checks read the real files: the Ingestion compose (the quarry-edge block), quarry-edge's config
+// and main, the Quarry docs and openapi, the cross-plane token-request manifest that the code loads,
+// and the committed Control Plane registry. A missing file fails the test; nothing is skipped.
+
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { parseYamlSubset } from "../yaml-subset.mjs";
+
+// Assertions that pin work this branch does not have. They still run and are printed as TODO, so a failure is
+// visible but does not fail the suite. Drop the marker when the work lands on quarryv2-next.
+const OPTION_B =
+  "option B (the Data Plane rerank wire and config) exists only as uncommitted edits in C:/dev/CoresSystem (branch main); see .plan-work/quarry-w1w2/depth/D-D-B3-openapi-sdk.md";
+const QB_T17 =
+  "QB-T17: the compose defaults QUARRY_EDGE__AUTOPROMPT to 1 and omits six Model Plane switches; the flags-off default is an owner decision (see .plan-work/quarry-w1w2/depth/D-D-B3-openapi-sdk.md)";
+const pending = (name, reason, fn) => test(name, { todo: reason }, fn);
+
+const here = dirname(fileURLToPath(import.meta.url));
+const quarry = resolve(here, "..", "..");
+const ingestion = resolve(quarry, "..");
+const apps = resolve(ingestion, "..");
+
+const paths = {
+  compose: join(ingestion, "docker-compose.yml"),
+  config: join(quarry, "crates", "quarry-edge", "src", "config.rs"),
+  main: join(quarry, "crates", "quarry-edge", "src", "main.rs"),
+  docs: join(quarry, "docs"),
+  readme: join(quarry, "README.md"),
+  openapi: join(quarry, "docs", "openapi.yaml"),
+  crossPlaneAuth: join(quarry, "docs", "CROSS_PLANE_AUTH.md"),
+  crossPlaneIntegration: join(quarry, "docs", "CROSS_PLANE_INTEGRATION.md"),
+  runbooks: join(quarry, "docs", "RUNBOOKS.md"),
+  selfHost: join(quarry, "docs", "SELF_HOST.md"),
+  tokenRequests: join(quarry, "crates", "quarry-runtime", "contracts", "cross-plane-token-requests.json"),
+  registry: join(apps, "Control Plane", "config", "plane-service-principals.json"),
+};
+
+const read = (path) => {
+  assert.ok(existsSync(path), `required file is present: ${path}`);
+  return readFileSync(path, "utf8");
+};
+
+// Every Quarry document that a reader is told to trust: the docs folder and the README.
+const currentDocs = () => {
+  const files = readdirSync(paths.docs)
+    .filter((name) => name.endsWith(".md"))
+    .map((name) => join(paths.docs, name));
+  files.push(paths.readme);
+  return files.map((path) => ({ path, text: read(path) }));
+};
+
+// The quarry-edge service block of the Ingestion compose: the lines under `  quarry-edge:` up to the next
+// service key (two spaces, a name, a colon).
+function quarryEdgeBlock(compose) {
+  const lines = compose.split(/\r?\n/);
+  const start = lines.findIndex((line) => line === "  quarry-edge:");
+  assert.notEqual(start, -1, "the compose has a quarry-edge service");
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^  [A-Za-z0-9_.-]+:\s*$/.test(lines[i])) {
+      end = i;
+      break;
+    }
+  }
+  return lines.slice(start + 1, end);
+}
+
+// The environment of the block: keys at six spaces, values as written (quotes removed).
+function environmentOf(block) {
+  const env = new Map();
+  for (const line of block) {
+    const match = /^ {6}([A-Z][A-Z0-9_]*): (.*)$/.exec(line);
+    if (match) env.set(match[1], match[2].replace(/^"(.*)"$/, "$1"));
+  }
+  return env;
+}
+
+// The default a compose interpolation writes: `${NAME:-default}` gives `default`; a literal gives itself.
+function composeDefault(value) {
+  const match = /\$\{[A-Z0-9_]+:-([^}]*)\}/.exec(value);
+  return match ? match[1] : value;
+}
+
+// The properties of one component schema, read by indentation: the schema sits at four spaces under
+// `  schemas:`, its properties at eight spaces under `      properties:`. Each property maps to its raw body.
+function schemaProperties(spec, name) {
+  const lines = spec.split(/\r?\n/);
+  const schemasAt = lines.indexOf("  schemas:");
+  assert.notEqual(schemasAt, -1, "the openapi has components.schemas");
+  const start = lines.findIndex((line, index) => index > schemasAt && line === `    ${name}:`);
+  assert.notEqual(start, -1, `the openapi defines schema ${name}`);
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^ {4}\S/.test(lines[i]) || /^\S/.test(lines[i])) {
+      end = i;
+      break;
+    }
+  }
+  const block = lines.slice(start + 1, end);
+  const properties = new Map();
+  const at = block.findIndex((line) => line === "      properties:");
+  if (at === -1) return properties;
+  let current = null;
+  for (let i = at + 1; i < block.length; i++) {
+    const line = block[i];
+    if (/^ {6}\S/.test(line)) break;
+    const match = /^ {8}([A-Za-z_][A-Za-z0-9_]*):/.exec(line);
+    if (match) {
+      current = match[1];
+      properties.set(current, []);
+    } else if (current && line.trim() !== "") {
+      properties.get(current).push(line);
+    }
+  }
+  return properties;
+}
+
+// The body of one path (for example `/v1/search`) under `paths:`, up to the next path key.
+function pathBlock(spec, route) {
+  const lines = spec.split(/\r?\n/);
+  const start = lines.findIndex((line) => line === `  ${route}:`);
+  assert.notEqual(start, -1, `the openapi defines ${route}`);
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^ {2}\S/.test(lines[i]) || /^\S/.test(lines[i])) {
+      end = i;
+      break;
+    }
+  }
+  return lines.slice(start + 1, end).join("\n");
+}
+
+// The one line of a Markdown table row that names a route, for example `quarry-edge → data-plane`.
+function rowLine(text, label) {
+  const line = text.split(/\r?\n/).find((candidate) => candidate.includes(label));
+  assert.ok(line, `the Markdown row for "${label}" is present`);
+  return line;
+}
+
+const tokenRows = JSON.parse(read(paths.tokenRequests)).rows;
+const registry = JSON.parse(read(paths.registry));
+
+// ----------------------------------------------------------------------------- removed identifiers
+
+pending("no removed rerank identifier remains in the compose, the config, the code or the docs", OPTION_B, () => {
+  const removed = [
+    "SEMANTIC_RERANK_MODEL",
+    "semantic_rerank_model",
+    "ModelPlaneSearchReranker",
+    "build_rerank_prompt",
+    "reranker can call Model Plane",
+    "RERANK_WINDOW",
+  ];
+  const sources = [
+    ["compose", read(paths.compose)],
+    ["config.rs", read(paths.config)],
+    ["main.rs", read(paths.main)],
+    ["openapi.yaml", read(paths.openapi)],
+    ...currentDocs().map(({ path, text }) => [path, text]),
+  ];
+  for (const [label, text] of sources) {
+    for (const identifier of removed) {
+      assert.ok(!text.includes(identifier), `${label} still names ${identifier}`);
+    }
+  }
+});
+
+test("no current document says the semantic reranker calls the Model Plane", () => {
+  const phrase = /semantic reranker[^\n]{0,160}(model plane|model-plane|model-gateway|models:invoke)/i;
+  for (const { path, text } of currentDocs()) {
+    assert.doesNotMatch(text, phrase, `${path} describes the reranker as a Model Plane caller`);
+  }
+});
+
+// ----------------------------------------------------------------------------- rerank wiring
+
+pending("the rerank deadline is read from its env, clamped in the config and passed to the reranker", OPTION_B, () => {
+  const config = read(paths.config);
+  const main = read(paths.main);
+  assert.match(config, /pub rerank_deadline_ms:\s*Option<u64>/, "config.rs has the deadline field");
+  assert.match(config, /QUARRY_EDGE__RERANK_DEADLINE_MS/, "the field names its env variable");
+  assert.match(config, /pub fn rerank_deadline\(&self\)/, "config.rs derives the budget from the field");
+  assert.match(main, /\.with_deadline\(cfg\.rerank_deadline\(\)\)/, "main.rs gives the wrapper the budget");
+});
+
+pending("the rerank switches the compose sets are the ones the binary reads", OPTION_B, () => {
+  const env = environmentOf(quarryEdgeBlock(read(paths.compose)));
+  // A rerank key the binary never reads is a dead switch: each must be a field of EdgeConfig in config.rs.
+  const fields = new Set([...read(paths.config).matchAll(/^\s*pub ([a-z_][a-z0-9_]*)\s*:/gm)].map((m) => m[1]));
+  for (const key of env.keys()) {
+    if (!key.includes("RERANK")) continue;
+    const field = key.replace(/^QUARRY_EDGE__/, "").toLowerCase();
+    assert.ok(fields.has(field), `${key} is read by the binary (config.rs has the field ${field})`);
+  }
+  assert.equal(composeDefault(env.get("QUARRY_EDGE__SEMANTIC_RERANK")), "0", "rerank is dark by default until the ship check passes");
+  assert.ok(env.has("QUARRY_EDGE__SEMANTIC_RERANK_TOP_N"), "TOP_N is set");
+  assert.ok(env.has("QUARRY_EDGE__RERANK_SHADOW"), "shadow mode is set");
+  assert.ok(["0", "1"].includes(composeDefault(env.get("QUARRY_EDGE__RERANK_SHADOW"))), "shadow defaults to 0 or 1");
+  assert.equal(composeDefault(env.get("QUARRY_EDGE__RERANK_DEADLINE_MS")), "2000", "deadline default is 2000 ms");
+  assert.ok(!env.has("QUARRY_EDGE__SEMANTIC_RERANK_MODEL"), "the model-plane rerank model is removed");
+  assert.ok(!env.has("QUARRY_EDGE__RERANK_WINDOW"), "highlight windows are deferred, not configured");
+  for (const key of env.keys()) {
+    assert.ok(!/HIGHLIGHT/.test(key), `no highlight switch (${key}) is configured`);
+  }
+});
+
+pending("the compose rerank comments name the live check, the ship gate and the score opt-in", OPTION_B, () => {
+  const comments = quarryEdgeBlock(read(paths.compose))
+    .filter((line) => /^ {6}#/.test(line))
+    .join("\n");
+  assert.match(comments, /qb-preflight\.sh" --live --ship-qb-t09/, "the ship check is named");
+  assert.match(comments, /model-gateway[\s\S]{0,200}score_kinds|score_kinds[\s\S]{0,200}model-gateway/, "the model-gateway score opt-in (QB-T12) is named");
+});
+
+pending("the Model Plane switches default off, as the docs say (QB-T17)", QB_T17, () => {
+  const env = environmentOf(quarryEdgeBlock(read(paths.compose)));
+  for (const key of [
+    "QUARRY_EDGE__AUTOPROMPT",
+    "QUARRY_EDGE__LLM_CLASSIFY_INTENT",
+    "QUARRY_EDGE__PAGE_TITLE_ENRICH",
+    "QUARRY_EDGE__ANSWER_SYNTHESIS",
+    "QUARRY_EDGE__AI_FORMATS",
+    "QUARRY_EDGE__SEARCH_SUGGEST",
+    "QUARRY_EDGE__MODEL_AUDIO",
+  ]) {
+    assert.equal(composeDefault(env.get(key)), "0", `${key} defaults to 0`);
+  }
+});
+
+pending("the runbook and the self-host table state the rerank defaults the compose has", OPTION_B, () => {
+  const env = environmentOf(quarryEdgeBlock(read(paths.compose)));
+  const rerank = composeDefault(env.get("QUARRY_EDGE__SEMANTIC_RERANK"));
+  const shadow = composeDefault(env.get("QUARRY_EDGE__RERANK_SHADOW"));
+  const runbook = read(paths.runbooks);
+  assert.match(runbook, /QUARRY_EDGE__RERANK_DEADLINE_MS/, "RUNBOOKS names the deadline switch");
+  assert.match(runbook, /QUARRY_EDGE__RERANK_SHADOW[\s\S]{0,400}smoke run/, "RUNBOOKS names the shadow smoke run");
+  assert.ok(runbook.includes("`QUARRY_EDGE_SEMANTIC_RERANK` defaults to `" + rerank + "`"), "RUNBOOKS states the compose rerank default");
+  assert.ok(runbook.includes("sets it to `" + shadow + "`"), "RUNBOOKS states the compose shadow default");
+  const selfHost = read(paths.selfHost);
+  assert.ok(selfHost.includes("(the Ingestion compose sets `" + rerank + "`"), "SELF_HOST states the compose rerank default");
+  assert.ok(selfHost.includes("(the Ingestion compose sets `" + shadow + "`"), "SELF_HOST states the compose shadow default");
+});
+
+// ----------------------------------------------------------------------------- cross-plane docs
+
+test("the CROSS_PLANE_AUTH data-plane row names every scope the granted data-plane requests carry", () => {
+  const row = rowLine(read(paths.crossPlaneAuth), "quarry-edge → data-plane");
+  const scopes = new Set(
+    tokenRows.filter((r) => r.audience === "data-plane" && r.granted === true).flatMap((r) => r.scopes),
+  );
+  assert.ok(scopes.has("data:rerank"), "the manifest has the rerank row");
+  // The table has four cells between the outer bars; the Auth cell (index 2) is where the scopes are named.
+  const cells = row.split("|");
+  assert.equal(cells.length, 6, "the data-plane row has the four table cells");
+  for (const scope of scopes) {
+    assert.ok(cells[2].includes(scope), `the Auth cell of the data-plane row names ${scope}`);
+  }
+});
+
+test("the CROSS_PLANE_AUTH model-plane row says the mint is refused, not that it is implemented", () => {
+  const row = rowLine(read(paths.crossPlaneAuth), "quarry-edge → model-plane");
+  assert.match(row, /not granted/i, "the row says the model-gateway grant is absent");
+  assert.doesNotMatch(row, /\|\s*implemented\s*\|/i, "the row does not claim the path is implemented");
+  const modelRows = tokenRows.filter((r) => r.audience === "model-gateway");
+  assert.ok(modelRows.length > 0 && modelRows.every((r) => r.granted === false), "the manifest refuses every model row");
+  const audiences = registry["quarry-edge"].audiences ?? [];
+  assert.ok(!audiences.includes("model-gateway"), "the committed registry gives quarry-edge no model-gateway audience");
+});
+
+test("every granted data-plane scope is in the committed registry for quarry-edge", () => {
+  const row = registry["quarry-edge"];
+  const granted = row.scopesByAudience?.["data-plane"] ?? row.scopes ?? [];
+  for (const requested of tokenRows.filter((r) => r.audience === "data-plane" && r.granted === true)) {
+    for (const scope of requested.scopes) {
+      assert.ok(granted.includes(scope), `the registry grants quarry-edge ${scope} on data-plane (${requested.name})`);
+    }
+  }
+});
+
+test("each token-request row is named in the cross-plane integration table", () => {
+  const text = read(paths.crossPlaneIntegration);
+  for (const row of tokenRows) {
+    assert.ok(text.includes(`\`${row.name}\``), `the integration table names ${row.name}`);
+  }
+});
+
+pending("the integration table does not list the semantic reranker among the Model Plane callers", OPTION_B, () => {
+  const line = read(paths.crossPlaneIntegration)
+    .split(/\r?\n/)
+    .find((candidate) => candidate.includes("refuses the three Model Plane rows"));
+  assert.ok(line, "the Model Plane refusal sentence is present");
+  assert.doesNotMatch(line, /semantic reranker/i, "the reranker no longer calls the Model Plane");
+});
+
+// ----------------------------------------------------------------------------- openapi
+
+pending("SearchRequest documents zdr and score_kinds", OPTION_B, () => {
+  const spec = read(paths.openapi);
+  const properties = schemaProperties(spec, "SearchRequest");
+  assert.ok(properties.has("zdr"), "zdr is documented");
+  assert.ok(properties.has("score_kinds"), "score_kinds is documented");
+  assert.ok(
+    properties.get("score_kinds").join("\n").includes("cross_encoder.v1"),
+    "score_kinds names cross_encoder.v1",
+  );
+});
+
+pending("SearchResponse documents score_kind and the rerank report", OPTION_B, () => {
+  const spec = read(paths.openapi);
+  const properties = schemaProperties(spec, "SearchResponse");
+  assert.ok(properties.has("score_kind"), "score_kind is documented");
+  assert.ok(properties.has("rerank"), "rerank is documented");
+  assert.ok(
+    properties.get("rerank").join("\n").includes("#/components/schemas/RerankReport"),
+    "rerank refers to the RerankReport schema",
+  );
+});
+
+pending("RerankReport lists the five statuses the wire carries", OPTION_B, () => {
+  const spec = read(paths.openapi);
+  const properties = schemaProperties(spec, "RerankReport");
+  assert.ok(properties.has("status") && properties.has("reason") && properties.has("profile"));
+  const status = properties.get("status").join("\n");
+  for (const value of ["applied", "skipped", "degraded", "shadow", "rerank-not-configured"]) {
+    assert.ok(status.includes(value), `status names ${value}`);
+  }
+});
+
+pending("SearchResultItem documents the per-result score and no highlights", OPTION_B, () => {
+  const spec = read(paths.openapi);
+  const properties = schemaProperties(spec, "SearchResultItem");
+  assert.ok(properties.has("score"), "score is documented");
+  assert.ok(!properties.has("highlights"), "rerank highlights are deferred (QB-T06), not documented");
+});
+
+pending("the /v1/search operation documents its 400 refusals", OPTION_B, () => {
+  const block = pathBlock(read(paths.openapi), "/v1/search");
+  assert.ok(block.includes("'400':"), "the 400 response (ZDR_REQUIRED, SCORE_KIND_UNSUPPORTED) is documented");
+});
+
+// ----------------------------------------------------------------------------- whole-file parse
+
+test("openapi.yaml parses as one YAML document with no duplicate keys", () => {
+  const text = read(paths.openapi);
+  try {
+    parseYamlSubset(text);
+  } catch (error) {
+    assert.fail(`openapi.yaml does not parse as one YAML document: ${error.message}`);
+  }
+});
+
+test("the whole-file check refuses a duplicate key and accepts a folded quoted scalar", () => {
+  assert.throws(() => parseYamlSubset("a:\n  b: 1\n  b: 2\n"), /duplicate key "b"/);
+  assert.doesNotThrow(() => parseYamlSubset("a:\n  d: 'one\n\n    two'\n  e:\n  - x\n"));
+});
