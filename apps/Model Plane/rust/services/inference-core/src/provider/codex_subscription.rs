@@ -1069,21 +1069,26 @@ mod tests {
 
     #[test]
     fn every_level_clamps_into_low_or_high() {
+        // Read the ladder through effort::support, as production does, so the
+        // expectations hold with INFERENCE_CORE_CODEX_WIDE_EFFORT on or off.
+        // effort.rs wide_codex_clamp_keeps_medium_and_xhigh pins the wide ladder.
+        let wide = effort::support(Family::Codex, "gpt-6-astra")
+            .levels
+            .contains(&Level::XHigh);
         let expected = [
-            (Level::Minimal, "low"),
-            (Level::Low, "low"),
-            (Level::Medium, "low"),
-            (Level::High, "high"),
-            (Level::XHigh, "high"),
-            (Level::Max, "high"),
+            (Level::Minimal, "low", true),
+            (Level::Low, "low", false),
+            (Level::Medium, if wide { "medium" } else { "low" }, !wide),
+            (Level::High, "high", false),
+            (Level::XHigh, if wide { "xhigh" } else { "high" }, !wide),
+            (Level::Max, if wide { "xhigh" } else { "high" }, true),
         ];
-        for (level, wire) in expected {
+        for (level, wire, clamped) in expected {
             let resolved = resolved_for_level("gpt-6-astra", level);
             assert_eq!(codex_reasoning_effort(resolved), wire, "{level:?}");
             assert_eq!(resolved.expect("resolved").wire, effort::Wire::CodexEffort);
+            assert_eq!(resolved.expect("resolved").clamped(), clamped, "{level:?}");
         }
-        assert!(resolved_for_level("gpt-6-astra", Level::Medium).expect("resolved").clamped());
-        assert!(!resolved_for_level("gpt-6-astra", Level::High).expect("resolved").clamped());
     }
 
     #[test]
