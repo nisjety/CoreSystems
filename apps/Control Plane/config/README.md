@@ -22,6 +22,9 @@ per-machine and do not.
 
 ### Adding or changing a principal
 
+Space, Model Plane chat and Quarry work shares one weekly Control PR train for principals, `nats.conf` ACLs and
+compose credential blocks: see `PRINCIPAL-TRAIN.md` (rules, request template, batch ledger, golden re-pin).
+
 Edit this file, then re-run the plane runner. The generator:
 
 - **never rotates an existing credential.** A credential already present in the
