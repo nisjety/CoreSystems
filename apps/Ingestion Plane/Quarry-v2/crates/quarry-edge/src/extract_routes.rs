@@ -413,13 +413,17 @@ async fn extract_run(
     )
     .await;
     if !crate::usage_attrs::corrected_rules(&*state.usage) {
-        // D2-033: keyed by the request id, as the corrected metric above is. A fresh id
-        // per call made a retried request (the same `X-Request-Id`) a second event that
-        // billing-core could not recognise as the first; billing-core dedupes on this id.
+        // D2-033: this id is server-minted, never the caller's `X-Request-Id`. The request
+        // id is not unique across tenants and a client can repeat or oversize it, so using it
+        // as the billing key let a client suppress its own billing (billing-core's dedupe is
+        // by event id and refuses a repeat with a later `occurred_at`). A retry-safe key
+        // needs the caller's Idempotency-Key and a stable `occurred_at`: see
+        // depth/D-D-B3-egress-caps.md.
+        let run_id: quarry_core::ids::kinds::RunKind = quarry_core::ids::Id::new();
         state
             .usage
             .meter(quarry_runtime::UsageEvent::new(
-                request_id.clone(),
+                run_id.to_string(),
                 claims.org_id.clone(),
                 quarry_runtime::usage_metrics::SEARCH_QUERY,
                 targets.len() as f64,
@@ -539,14 +543,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_retried_legacy_extract_carries_the_same_billing_event_id() {
-        // D2-033: with the browser metrics off, the extract is billed as one search query.
-        // The event id must follow the request id, so a retry with the same id is the same
-        // event for billing-core's dedupe and a different request is a different one.
+    async fn a_client_chosen_request_id_cannot_collapse_legacy_extract_billing() {
+        // D2-033 (verifier finding): the billing event id is server-minted. A client that
+        // repeats one `X-Request-Id` (or sends an oversize one) still produces one distinct,
+        // billing-core-valid event per extract, so it cannot suppress its own billing.
         let usage = Arc::new(KeptEvents::default());
-        assert_eq!(extract_under_request_id(&usage, "req_retry_1").await, StatusCode::OK);
-        assert_eq!(extract_under_request_id(&usage, "req_retry_1").await, StatusCode::OK);
-        assert_eq!(extract_under_request_id(&usage, "req_other_2").await, StatusCode::OK);
+        let long_id = "r".repeat(128);
+        for id in ["same_id", "same_id", long_id.as_str()] {
+            assert_eq!(extract_under_request_id(&usage, id).await, StatusCode::OK);
+        }
         let ids: Vec<String> = usage
             .0
             .lock()
@@ -555,14 +560,16 @@ mod tests {
             .filter(|event| event.metric == quarry_runtime::usage_metrics::SEARCH_QUERY)
             .map(|event| event.event_id.clone())
             .collect();
-        assert_eq!(
-            ids,
-            vec![
-                "quarry:req_retry_1:quarry.search.query".to_string(),
-                "quarry:req_retry_1:quarry.search.query".to_string(),
-                "quarry:req_other_2:quarry.search.query".to_string(),
-            ]
-        );
+        assert_eq!(ids.len(), 3);
+        let distinct: std::collections::HashSet<&String> = ids.iter().collect();
+        assert_eq!(distinct.len(), 3, "each extract is its own billable event");
+        for id in &ids {
+            assert!(!id.contains("same_id") && !id.contains("rrrr"), "caller id must not be the key");
+            assert!(
+                quarry_runtime::usage::validate_event_id(id).is_ok(),
+                "event id must satisfy billing-core's rule"
+            );
+        }
     }
 
     #[tokio::test]
