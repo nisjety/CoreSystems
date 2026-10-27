@@ -931,6 +931,11 @@ struct ControlSpaceDecisionClaims {
     contract_digest: Option<String>,
     #[serde(default)]
     contract_expires_at: Option<DateTime<Utc>>,
+    // WS17-S1: the Space kind Control signed (`personal`, `room`, ...). Absent on decisions
+    // issued before the claim existed; the thread then stays kind-less and contained. Not part
+    // of any payload digest.
+    #[serde(default)]
+    space_kind: String,
 }
 
 /// Delegated-identity design, Gap B (03-design-2-token-exchange.md §2.2/§2.5).
@@ -2516,7 +2521,7 @@ fn verify_thread_space_decision_with_key(
     expected_key_id: &str,
     key: &VerifyingKey,
     now: DateTime<Utc>,
-) -> Result<(), Status> {
+) -> Result<String, Status> {
     if req.space_decision_token.len() > MAX_CONTROL_SPACE_DECISION_TOKEN_BYTES {
         return Err(Status::invalid_argument(
             "Control Space decision is too large",
@@ -2606,7 +2611,7 @@ fn verify_thread_space_decision_with_key(
         "thread_create",
         configured_space_zdr_mode(),
     )?;
-    Ok(())
+    Ok(claims.space_kind)
 }
 
 /// WS06-S2: the Space decision's `zero_data_retention` flag on the legacy owner
@@ -2645,7 +2650,7 @@ fn verify_thread_space_decision_with_keys(
     req: &pb::CreateThreadRequest,
     keys: &BTreeMap<String, VerifyingKey>,
     now: DateTime<Utc>,
-) -> Result<(), Status> {
+) -> Result<String, Status> {
     let key_id = req
         .space_decision_token
         .split('.')
@@ -2660,9 +2665,9 @@ fn verify_thread_space_decision_with_keys(
     verify_thread_space_decision_with_key(req, &key_id, key, now)
 }
 
-fn verify_thread_space_decision(req: &pb::CreateThreadRequest) -> Result<(), Status> {
+fn verify_thread_space_decision(req: &pb::CreateThreadRequest) -> Result<String, Status> {
     if !validate_thread_space_context_shape(req)? {
-        return Ok(());
+        return Ok(String::new());
     }
     let keys = configured_control_space_decision_keys()?;
     verify_thread_space_decision_with_keys(req, &keys, Utc::now())
@@ -2893,7 +2898,7 @@ fn verify_append_space_decision_with_key(
     expected_key_id: &str,
     key: &VerifyingKey,
     now: DateTime<Utc>,
-) -> Result<(), Status> {
+) -> Result<String, Status> {
     if req.space_decision_token.len() > MAX_CONTROL_SPACE_DECISION_TOKEN_BYTES {
         return Err(Status::invalid_argument(
             "Control Space decision is too large",
@@ -2976,16 +2981,16 @@ fn verify_append_space_decision_with_key(
         "message_append",
         configured_space_zdr_mode(),
     )?;
-    Ok(())
+    Ok(claims.space_kind)
 }
 
 fn verify_append_space_decision(
     req: &pb::AppendMessageRequest,
     org_id: &str,
     user_id: &str,
-) -> Result<(), Status> {
+) -> Result<String, Status> {
     if !validate_append_space_context_shape(req)? {
-        return Ok(());
+        return Ok(String::new());
     }
     let keys = configured_control_space_decision_keys()?;
     let key_id = req
@@ -3018,13 +3023,25 @@ async fn create_thread_inner(
     pool: &PgPool,
     req: pb::CreateThreadRequest,
 ) -> Result<Response<pb::CreateThreadResponse>, Status> {
-    verify_thread_space_decision(&req)?;
-    create_thread_inner_preverified(pool, req).await
+    let signed_kind = verify_thread_space_decision(&req)?;
+    let space_kind = crate::space::memory_scope::normalize_claim_space_kind(&signed_kind);
+    create_thread_inner_preverified_kind(pool, req, space_kind).await
 }
 
 async fn create_thread_inner_preverified(
     pool: &PgPool,
     req: pb::CreateThreadRequest,
+) -> Result<Response<pb::CreateThreadResponse>, Status> {
+    create_thread_inner_preverified_kind(pool, req, None).await
+}
+
+/// WS17-S1: `space_kind` is the Space kind from the verified Control decision, already
+/// normalised; `None` leaves the column NULL (contained). Only the verified create path
+/// passes one.
+async fn create_thread_inner_preverified_kind(
+    pool: &PgPool,
+    req: pb::CreateThreadRequest,
+    space_kind: Option<String>,
 ) -> Result<Response<pb::CreateThreadResponse>, Status> {
     let mut tx = pool
         .begin()
@@ -3068,6 +3085,20 @@ async fn create_thread_inner_preverified(
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
         if let Some((thread_id,)) = existing {
+            if let Some(kind) = space_kind.as_deref() {
+                // A retried create of a legacy thread learns its kind from this verified decision.
+                sqlx::query(
+                    "UPDATE threads SET space_kind = $2 WHERE id = $1 AND space_kind IS NULL AND space_id IS NOT NULL",
+                )
+                .bind(&thread_id)
+                .bind(kind)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+                tx.commit()
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?;
+            }
             return Ok(Response::new(pb::CreateThreadResponse {
                 thread_id,
                 created_at: None,
@@ -3086,8 +3117,8 @@ async fn create_thread_inner_preverified(
     let origin = resolve_thread_origin(&req)?;
 
     sqlx::query(
-        "INSERT INTO threads (id, session_key, org_id, user_id, created_at, space_id, space_decision_ref, recipient_audience_ref, recipient_audience_revision, recipient_audience_hash, privacy_policy_ref, resource_authorization_ref, authority_revision, origin)
-         VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), NULLIF($7, ''), NULLIF($8, ''), NULLIF($9, 0), NULLIF($10, ''), NULLIF($11, ''), NULLIF($12, ''), NULLIF($13, 0), $14)",
+        "INSERT INTO threads (id, session_key, org_id, user_id, created_at, space_id, space_decision_ref, recipient_audience_ref, recipient_audience_revision, recipient_audience_hash, privacy_policy_ref, resource_authorization_ref, authority_revision, origin, space_kind)
+         VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), NULLIF($7, ''), NULLIF($8, ''), NULLIF($9, 0), NULLIF($10, ''), NULLIF($11, ''), NULLIF($12, ''), NULLIF($13, 0), $14, $15)",
     )
     .bind(&thread_id)
     .bind(&req.session_key)
@@ -3107,6 +3138,7 @@ async fn create_thread_inner_preverified(
         Status::invalid_argument("authority_revision exceeds PostgreSQL BIGINT range")
     })?)
     .bind(origin)
+    .bind(space_kind.as_deref())
     .execute(&mut *tx)
     .await
     .map_err(|e| Status::internal(e.to_string()))?;
@@ -3380,13 +3412,15 @@ pub(crate) async fn append_message_in_tx_as(
     let mut letta_sync: Option<AppendedMemory> = None;
 
     let has_append_context = validate_append_space_context_shape(req)?;
-    let thread: (String, String, Option<String>, String) =
-        sqlx::query_as("SELECT org_id, user_id, space_id, source_scope FROM threads WHERE id = $1 FOR UPDATE")
+    let thread: (String, String, Option<String>, String, Option<String>) =
+        sqlx::query_as("SELECT org_id, user_id, space_id, source_scope, space_kind FROM threads WHERE id = $1 FOR UPDATE")
             .bind(&req.thread_id)
             .fetch_optional(&mut **tx)
             .await
             .map_err(|e| Status::internal(e.to_string()))?
             .ok_or_else(|| Status::not_found("thread not found"))?;
+    // WS17-S1: the thread's Space kind. A verified decision below stamps a kind-less thread.
+    let mut space_kind: Option<String> = thread.4.clone();
 
     match thread.2.as_deref() {
         Some(stored_space_id) => {
@@ -3431,7 +3465,23 @@ pub(crate) async fn append_message_in_tx_as(
                         "Control Space append decision targets another Space",
                     ));
                 }
-                verify_append_space_decision(req, &thread.0, &thread.1)?;
+                let signed_kind = verify_append_space_decision(req, &thread.0, &thread.1)?;
+                if space_kind.is_none() {
+                    if let Some(kind) =
+                        crate::space::memory_scope::normalize_claim_space_kind(&signed_kind)
+                    {
+                        // Self-heal (K4-12): a legacy thread learns its kind from its next verified decision.
+                        sqlx::query(
+                            "UPDATE threads SET space_kind = $2 WHERE id = $1 AND space_kind IS NULL",
+                        )
+                        .bind(&req.thread_id)
+                        .bind(&kind)
+                        .execute(&mut **tx)
+                        .await
+                        .map_err(|e| Status::internal(e.to_string()))?;
+                        space_kind = Some(kind);
+                    }
+                }
                 sqlx::query(
                     "UPDATE threads SET space_decision_ref = $2, recipient_audience_ref = $3, \
                      recipient_audience_revision = $4, recipient_audience_hash = $5, privacy_policy_ref = $6, \
@@ -3629,7 +3679,14 @@ pub(crate) async fn append_message_in_tx_as(
 
     // A human post is the author's words to the room, not the thread owner's: it never becomes
     // the owner's memory, so no candidate is extracted and nothing reaches the Letta mirror.
-    let candidates = if conversation_only || post_kind == "post" { Vec::new() } else {
+    // WS17-S1 C1: nothing said in a shared room is learned into the owner's memory, so a contained
+    // thread extracts nothing and records no dream run.
+    let contained =
+        crate::space::memory_scope::thread_is_contained(thread.2.as_deref(), space_kind.as_deref());
+    let candidates = if conversation_only || post_kind == "post" { Vec::new() } else if contained {
+        crate::space::memory_scope::record_contained("append_extract");
+        Vec::new()
+    } else {
         crate::dreaming::extract_memory_candidates(&req.role, &req.content, &req.thread_id)
     };
     // A paused or off user, or a thread set off, learns nothing from this turn:
@@ -6242,6 +6299,12 @@ async fn load_context_memory_rows(
     // The semantic mirror holds the user's rows only, so it is skipped unless
     // the user's memory is in use.
     if access != crate::memory_control::MemoryAccess::Full {
+        return Ok(rows);
+    }
+    // WS17-S1 C5: the semantic mirror holds the owner's rows, so a contained thread never reads it.
+    if crate::space::memory_scope::thread_is_contained_by_id(&svc.pool, thread_id).await {
+        crate::space::memory_scope::record_contained("read_letta");
+        record_semantic_memory_degraded(crate::space::memory_scope::DEGRADED_LETTA_SPACE_SUPPRESSED);
         return Ok(rows);
     }
     append_letta_memory_rows(
@@ -9062,6 +9125,13 @@ impl SessionService {
             None => return local(),
         };
 
+        // WS17-S1 C6: no org-wide Data Plane call for a contained thread; Space-scoped
+        // retrieval stays on the model-gateway path.
+        if crate::space::memory_scope::thread_is_contained_by_id(&self.pool, thread_id).await {
+            crate::space::memory_scope::record_contained("retrieval_org_wide");
+            return local();
+        }
+
         // Data Plane requires the caller's own `aud=data-plane` bearer and there
         // is no honest substitute, so an undelegated call answers from durable
         // local memory instead of attempting a call that can only 401.
@@ -9246,6 +9316,11 @@ impl SessionService {
     /// Failures are logged and ignored — persistence is best-effort.
     async fn persist_retrieval_evidence(&self, thread_id: &str, segments: &[String]) {
         if segments.is_empty() {
+            return;
+        }
+        // WS17-S1 C6: a contained thread persists no retrieval evidence into `memory_index`.
+        if crate::space::memory_scope::thread_is_contained_by_id(&self.pool, thread_id).await {
+            crate::space::memory_scope::record_contained("retrieval_persist");
             return;
         }
         let org_id: Option<String> =

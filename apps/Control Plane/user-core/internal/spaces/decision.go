@@ -95,6 +95,10 @@ type Decision struct {
 	IssuedAt          time.Time  `json:"issued_at"`
 	ExpiresAt         time.Time  `json:"expires_at"`
 	Nonce             string     `json:"nonce"`
+	// SpaceKind is the kind of the Space the decision was issued for (personal, room, ...).
+	// Model Plane stamps it on the thread so memory containment can tell a personal Space
+	// from a shared room. Additive and in no payload digest; omitted when empty.
+	SpaceKind string `json:"space_kind,omitempty"`
 }
 
 type DecisionExpectation struct {

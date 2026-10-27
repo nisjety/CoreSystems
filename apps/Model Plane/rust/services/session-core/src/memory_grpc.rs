@@ -398,6 +398,11 @@ impl MemoryService for MemoryGrpc {
         let limit = if req.limit == 0 { 10 } else { req.limit };
         let topic_filter = req.topic_filter.clone();
         let query_trimmed = req.query.trim();
+        // WS17-S1 C5: the semantic mirror holds the owner's rows, so a shared-room thread never
+        // reads it (a lookup failure reads as contained). The durable read applies the same rule.
+        let contained =
+            crate::space::memory_scope::thread_is_contained_by_id(&self.pool, req.thread_id.trim())
+                .await;
 
         // pgstore and the semantic backend are independent reads — run them
         // concurrently rather than sequentially. The semantic backend used to
@@ -410,7 +415,7 @@ impl MemoryService for MemoryGrpc {
         let letta_search = async {
             // The semantic mirror holds the user's rows only, so it is not asked
             // when the user's memory is not in use.
-            if query_trimmed.is_empty() || decision.access != MemoryAccess::Full {
+            if query_trimmed.is_empty() || decision.access != MemoryAccess::Full || contained {
                 return None;
             }
             let letta = self.letta.as_ref()?;
@@ -491,12 +496,19 @@ impl MemoryService for MemoryGrpc {
             .authorize_thread(&caller, req.org_id.trim(), req.thread_id.trim())
             .await?;
 
-        let (conversation_only,): (bool,) = sqlx::query_as(
-            "SELECT source_scope = 'conversation' FROM threads WHERE id = $1",
+        let (conversation_only, space_id, space_kind): (bool, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT source_scope = 'conversation', space_id, space_kind FROM threads WHERE id = $1",
         ).bind(req.thread_id.trim()).fetch_one(&self.pool).await
             .map_err(|e| Status::internal(e.to_string()))?;
         if conversation_only {
             return Err(Status::failed_precondition("Conversation-only tasks cannot create long-term memories."));
+        }
+        // WS17-S1 C4: a shared room writes thread-scope notes only. User, policy, agent and
+        // workspace topics would reach memory every thread of the owner or the org reads.
+        let contained = crate::space::memory_scope::thread_is_contained(space_id.as_deref(), space_kind.as_deref());
+        if contained && crate::space::memory_scope::topic_writes_beyond_thread(&req.topic) {
+            crate::space::memory_scope::record_contained("index_refused");
+            return Err(Status::failed_precondition(crate::space::memory_scope::REFUSAL_CONTAINED));
         }
         // A paused or off user, an org that disabled memory, or a thread set off
         // saves nothing, whoever asks (the tool loop, a service, the user): the
@@ -547,6 +559,10 @@ impl MemoryService for MemoryGrpc {
         let external_indexing = MemoryRetention::of(&caller).permits_external_memory_indexing();
         let degradation_reason = if !external_indexing {
             Some(WAIVED_MEMORY_INDEX_SUPPRESSED)
+        } else if contained {
+            // WS17-S1 C2: nothing said in a shared room is mirrored into the semantic memory.
+            crate::space::memory_scope::record_contained("letta_index");
+            Some(crate::space::memory_scope::DEGRADED_LETTA_SPACE_SUPPRESSED)
         } else if let Some(letta) = self.letta.as_ref() {
             letta
                 .index_detailed(

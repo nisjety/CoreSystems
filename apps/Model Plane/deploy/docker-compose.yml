@@ -862,6 +862,10 @@ services:
       # Read by the SpaceEvents stream (WS02-S3), inert until then.
       SPACE_STREAM_DB_POOL: ${SPACE_STREAM_DB_POOL:-8}
       SPACE_STREAM_MAX_STREAMS: ${SPACE_STREAM_MAX_STREAMS:-5000}
+      # Space memory containment (WS17-S1): a shared-room thread learns nothing into personal or
+      # tenant memory and recalls only its own rows. ON in every environment; only an exact
+      # `0`, `false` or `off` (plus a restart) restores the old behaviour. Never an authorization input.
+      MEMORY_SPACE_CONTAINMENT: ${MEMORY_SPACE_CONTAINMENT:-1}
       SESSION_CORE_LOOP_CHECKPOINT_ENABLED: ${SESSION_CORE_LOOP_CHECKPOINT_ENABLED:-false}
       # Sweep that closes a tool reservation still open long after its run ended or
       # parked, as `unknown_outcome` (WS03 S5). Off by default: turning it on changes

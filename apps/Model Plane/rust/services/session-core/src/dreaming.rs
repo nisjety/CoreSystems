@@ -141,6 +141,8 @@ struct PendingMessage {
     org_id: String,
     user_id: String,
     conversation_only: bool,
+    /// WS17-S1: the thread is a shared-room thread (contained), so nothing in it is learned.
+    contained: bool,
 }
 
 pub(crate) async fn run(pool: PgPool, letta: Option<LettaMemoryAdapter>) -> anyhow::Result<()> {
@@ -224,6 +226,21 @@ pub(crate) async fn dream_once(
         // thread is out of background derivation, so its messages are left
         // un-dreamt, and the pending query no longer selects them.
         if thread_has_waived_run(pool, &thread_id).await? {
+            continue;
+        }
+
+        // WS17-S1 C3: a shared room's messages are never read into the owner's memory. The skip is
+        // written to the ledger exactly like the conversation-only skip, so the pending query
+        // does not select them again.
+        if last.contained {
+            let mut tx = pool.begin().await?;
+            for message in &group {
+                record_dream_run(&mut tx, &org_id, &thread_id, "skipped_space_scope", 0, 0, Some(&message.message_id)).await?;
+                processed += 1;
+            }
+            tx.commit().await?;
+            crate::space::memory_scope::record_contained("dream_skip");
+            info!(%thread_id, messages = group.len(), "memory extraction skipped: shared Space room");
             continue;
         }
 
@@ -1275,8 +1292,9 @@ async fn load_pending_messages(
     // not mined, nor is the period it had memory off after it is switched back on.
     let org_filter = crate::org_policy::pending_filter(3, 4, 5);
     let gate = crate::org_policy::pending_gate();
-    let rows = sqlx::query_as::<_, (String, String, String, String, String, String, bool)>(
-        &format!("SELECT m.id, m.thread_id, m.role, m.content, t.org_id, t.user_id, t.source_scope = 'conversation' \
+    let rows = sqlx::query_as::<_, (String, String, String, String, String, String, bool, bool)>(
+        &format!("SELECT m.id, m.thread_id, m.role, m.content, t.org_id, t.user_id, t.source_scope = 'conversation', \
+                {contained} AND $6 \
          FROM messages m \
          JOIN threads t ON t.id = m.thread_id \
          WHERE m.role IN ('user', 'assistant') \
@@ -1297,7 +1315,7 @@ async fn load_pending_messages(
            ) \
            {org_filter} \
          ORDER BY m.created_at ASC, m.sequence ASC \
-         LIMIT $1"),
+         LIMIT $1", contained = crate::space::memory_scope::CONTAINED_SQL),
     )
     .bind(limit)
     // A paused or off user's messages are not read at all, so none reaches the
@@ -1307,13 +1325,14 @@ async fn load_pending_messages(
     .bind(gate.active)
     .bind(gate.fail_closed)
     .bind(gate.max_stale_secs)
+    .bind(crate::space::memory_scope::containment_on())
     .fetch_all(pool)
     .await?;
 
     Ok(rows
         .into_iter()
         .map(
-            |(message_id, thread_id, role, content, org_id, user_id, conversation_only)| PendingMessage {
+            |(message_id, thread_id, role, content, org_id, user_id, conversation_only, contained)| PendingMessage {
                 message_id,
                 thread_id,
                 role,
@@ -1321,6 +1340,7 @@ async fn load_pending_messages(
                 org_id,
                 user_id,
                 conversation_only,
+                contained,
             },
         )
         .collect())
@@ -1356,11 +1376,12 @@ async fn load_preceding_context(
            AND NOT EXISTS (SELECT 1 FROM user_memory_controls c WHERE c.org_id = t.org_id AND c.user_id = t.user_id AND c.memory_state <> 'on' AND $4) \
            AND (NOT $4 OR t.memory_resumed_at IS NULL OR m.created_at > t.memory_resumed_at) \
            {org_filter} \
+           AND NOT ({contained} AND $8) \
            AND (m.created_at, m.sequence) < ( \
              SELECT b.created_at, b.sequence FROM messages b WHERE b.id = $2 \
            ) \
          ORDER BY m.created_at DESC, m.sequence DESC \
-         LIMIT $3"),
+         LIMIT $3", contained = crate::space::memory_scope::CONTAINED_SQL),
     )
     .bind(thread_id)
     .bind(before_message_id)
@@ -1369,6 +1390,7 @@ async fn load_preceding_context(
     .bind(gate.active)
     .bind(gate.fail_closed)
     .bind(gate.max_stale_secs)
+    .bind(crate::space::memory_scope::containment_on())
     .fetch_all(pool)
     .await?;
     rows.reverse();
@@ -1388,14 +1410,24 @@ pub(crate) async fn load_agent_memory_context_rows(
     if access == MemoryAccess::None {
         return Ok(Vec::new());
     }
-    let Some((org_id, thread_user_id)) =
-        sqlx::query_as::<_, (String, String)>("SELECT org_id, user_id FROM threads WHERE id = $1")
-            .bind(thread_id)
-            .fetch_optional(pool)
-            .await?
+    let Some((org_id, thread_user_id, space_id, space_kind)) =
+        sqlx::query_as::<_, (String, String, Option<String>, Option<String>)>(
+            "SELECT org_id, user_id, space_id, space_kind FROM threads WHERE id = $1",
+        )
+        .bind(thread_id)
+        .fetch_optional(pool)
+        .await?
     else {
         return Ok(Vec::new());
     };
+    // WS17-S1 C5: a shared-room thread recalls only its own rows, never user, org or global
+    // memory. C7: a legacy row learned in a shared room is left out of every other thread.
+    let contained =
+        crate::space::memory_scope::thread_is_contained(space_id.as_deref(), space_kind.as_deref());
+    if contained {
+        crate::space::memory_scope::record_contained("read_context");
+    }
+    let legacy_exclusion = crate::space::memory_scope::legacy_room_origin_exclusion("$7", "$2");
 
     let user_id = user_id_hint
         .map(str::trim)
@@ -1403,17 +1435,18 @@ pub(crate) async fn load_agent_memory_context_rows(
         .unwrap_or(thread_user_id.as_str());
 
     let rows = sqlx::query_as::<_, (String, String, String, String, String)>(
-        "SELECT scope, kind, key, content, COALESCE(session_id, '') \
+        &format!("SELECT scope, kind, key, content, COALESCE(session_id, '') \
          FROM agent_memory \
          WHERE org_id = $1 \
            AND review_state = 'accepted' \
            AND is_latest = true \
            AND (expires_at IS NULL OR expires_at > now()) \
            AND ( \
-                (session_id IS NULL AND scope IN ('org', 'global')) \
+                (session_id IS NULL AND scope IN ('org', 'global') AND NOT $6) \
                 OR ($5 AND session_id = $2) \
-                OR ($5 AND session_id IS NULL AND scope = 'user' AND owner = $3) \
+                OR ($5 AND session_id IS NULL AND scope = 'user' AND owner = $3 AND NOT $6) \
            ) \
+           AND {legacy_exclusion} \
          ORDER BY \
            CASE scope \
              WHEN 'user' THEN 0 \
@@ -1423,13 +1456,15 @@ pub(crate) async fn load_agent_memory_context_rows(
              ELSE 4 \
            END, \
            updated_at DESC \
-         LIMIT $4",
+         LIMIT $4"),
     )
     .bind(&org_id)
     .bind(thread_id)
     .bind(user_id)
     .bind(limit)
     .bind(access == MemoryAccess::Full)
+    .bind(contained)
+    .bind(crate::space::memory_scope::containment_on())
     .fetch_all(pool)
     .await?;
 
@@ -1496,6 +1531,13 @@ pub(crate) async fn search_agent_memory(
     let candidate_limit = MAX_CANDIDATE_POOL.max(limit);
     let filters = normalize_topic_filters(request.topic_filter);
     let query = request.query.trim();
+    // WS17-S1 C5/C7: see `load_agent_memory_context_rows`. A lookup failure reads as contained.
+    let contained =
+        crate::space::memory_scope::thread_is_contained_by_id(pool, request.thread_id).await;
+    if contained {
+        crate::space::memory_scope::record_contained("read_search");
+    }
+    let legacy_exclusion = crate::space::memory_scope::legacy_room_origin_exclusion("$9", "$2");
 
     let rows = sqlx::query_as::<
         _,
@@ -1511,7 +1553,7 @@ pub(crate) async fn search_agent_memory(
             Vec<String>,
         ),
     >(
-        "SELECT id, COALESCE(session_id, ''), scope, kind, key, content, confidence, updated_at, \
+        &format!("SELECT id, COALESCE(session_id, ''), scope, kind, key, content, confidence, updated_at, \
          source_links \
          FROM agent_memory \
          WHERE org_id = $1 \
@@ -1519,8 +1561,9 @@ pub(crate) async fn search_agent_memory(
            AND is_latest = true \
            AND (expires_at IS NULL OR expires_at > now()) \
            AND (($7 AND session_id = $2) \
-                OR (session_id IS NULL AND scope <> 'user') \
-                OR ($7 AND session_id IS NULL AND scope = 'user' AND owner = $3)) \
+                OR (session_id IS NULL AND scope <> 'user' AND NOT $8) \
+                OR ($7 AND session_id IS NULL AND scope = 'user' AND owner = $3 AND NOT $8)) \
+           AND {legacy_exclusion} \
            AND ($4::timestamptz IS NULL OR updated_at > $4) \
            AND (cardinality($5::text[]) = 0 \
                 OR CASE \
@@ -1531,7 +1574,7 @@ pub(crate) async fn search_agent_memory(
                     ELSE 'MEMORY' \
                   END = ANY($5::text[])) \
          ORDER BY confidence DESC, updated_at DESC \
-         LIMIT $6",
+         LIMIT $6"),
     )
     .bind(request.org_id)
     .bind(request.thread_id)
@@ -1540,6 +1583,8 @@ pub(crate) async fn search_agent_memory(
     .bind(&filters)
     .bind(candidate_limit)
     .bind(request.access == MemoryAccess::Full)
+    .bind(contained)
+    .bind(crate::space::memory_scope::containment_on())
     .fetch_all(pool)
     .await?;
 
@@ -1613,15 +1658,24 @@ pub(crate) async fn index_agent_memory(
     content: &str,
 ) -> Result<String, sqlx::Error> {
     let topic = normalize_topic(topic);
-    let thread_exists = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM threads WHERE id = $1 AND org_id = $2 AND user_id = $3)",
+    let thread_row = sqlx::query_as::<_, (Option<String>, Option<String>)>(
+        "SELECT space_id, space_kind FROM threads WHERE id = $1 AND org_id = $2 AND user_id = $3",
     )
     .bind(thread_id)
     .bind(org_id)
     .bind(owner_user_id)
-    .fetch_one(pool)
+    .fetch_optional(pool)
     .await?;
-    if !thread_exists {
+    let Some((space_id, space_kind)) = thread_row else {
+        return Ok(String::new());
+    };
+    // WS17-S1 C4: a shared room writes only thread-scope rows. The handler refuses the wider
+    // topics with a typed error first; this is the same rule for any other caller, answered as
+    // "nothing written" (the empty id).
+    if crate::space::memory_scope::thread_is_contained(space_id.as_deref(), space_kind.as_deref())
+        && crate::space::memory_scope::topic_writes_beyond_thread(&topic)
+    {
+        crate::space::memory_scope::record_contained("index_refused");
         return Ok(String::new());
     }
 
@@ -2336,6 +2390,7 @@ mod tests {
     fn pending(thread_id: &str, message_id: &str) -> PendingMessage {
         PendingMessage {
             conversation_only: false,
+            contained: false,
             message_id: message_id.to_owned(),
             thread_id: thread_id.to_owned(),
             role: "user".to_owned(),

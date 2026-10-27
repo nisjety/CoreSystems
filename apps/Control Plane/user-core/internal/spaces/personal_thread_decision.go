@@ -552,5 +552,6 @@ func newEvidenceDecision(
 		IssuedAt:                  now.UTC(),
 		ExpiresAt:                 now.UTC().Add(personalDecisionLifetime),
 		Nonce:                     strings.TrimSpace(nonce),
+		SpaceKind:                 strings.TrimSpace(string(evidence.Membership.Kind)),
 	}
 }
