@@ -306,6 +306,12 @@ pub struct BrowserSessionProjectionData {
     /// run's first observation carries the driver's telemetry.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile_restore: Option<quarry_core::contracts::ProfileRestoreSummary>,
+    /// D2-030: `human_browse` when the run is a person's open-web session (the one kind the
+    /// gateway and the SPA act on: keep-alive, the person's controls), absent for every
+    /// other run. Absent, not a guess: the edge keeps the grant's kind only as the
+    /// navigation mode it admitted, and only a person's grant admits the open web.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grant_kind: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]

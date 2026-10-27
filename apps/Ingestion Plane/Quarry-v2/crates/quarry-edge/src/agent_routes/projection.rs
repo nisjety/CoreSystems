@@ -68,6 +68,10 @@ pub(super) fn live_browser_session_projection(
             .and_then(|observation| observation.telemetry.profile_restore.clone()),
         last_observation: entry.summary.last_observation.as_deref().cloned(),
         grant_id: entry.grant_id.clone(),
+        grant_kind: entry
+            .nav_policy
+            .is_open_web()
+            .then_some(super::human_browse::GRANT_KIND_HUMAN_BROWSE),
     }
 }
 
@@ -98,6 +102,34 @@ pub(super) fn checkpoint_browser_session_projection(
         last_observation: None,
         grant_id: checkpoint.grant_id,
         profile_restore: None,
+        grant_kind: (checkpoint.policy_mode.as_deref() == Some("open_web"))
+            .then_some(super::human_browse::GRANT_KIND_HUMAN_BROWSE),
+    }
+}
+
+#[cfg(test)]
+mod grant_kind_tests {
+    use super::*;
+
+    fn projection_of(open_web: bool) -> serde_json::Value {
+        let state = crate::test_support::test_state(crate::test_support::StubDriver::ok());
+        let claims = crate::test_support::claims_for_org("org");
+        let handle = crate::test_support::insert_live_run(&state, &claims);
+        let mut entry = handle.entry.try_lock().expect("nothing holds the run");
+        if open_web {
+            entry.nav_policy = super::super::human_browse::RunNavPolicy::OpenWeb { denied: Vec::new() };
+        }
+        serde_json::to_value(live_browser_session_projection(&entry, Vec::new())).unwrap()
+    }
+
+    /// D2-030: a person's open-web session says so, which is what the gateway reads to
+    /// advertise it (and what wakes the SPA's keep-alive timer); every other run omits it.
+    #[tokio::test]
+    async fn the_live_projection_names_a_human_browse_session_and_only_that() {
+        let human = projection_of(true);
+        assert_eq!(human["grantKind"], "human_browse", "{human}");
+        let other = projection_of(false);
+        assert!(other.get("grantKind").is_none(), "{other}");
     }
 }
 
