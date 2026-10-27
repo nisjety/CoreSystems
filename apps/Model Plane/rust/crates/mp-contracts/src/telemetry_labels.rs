@@ -199,3 +199,130 @@ fn label_keys(body: &str) -> Vec<String> {
     }
     keys
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn labels(source: &str) -> Vec<String> {
+        disallowed_metric_labels(source)
+            .into_iter()
+            .map(|d| d.label)
+            .collect()
+    }
+
+    #[test]
+    fn allowed_labels_are_clean() {
+        let src = r#"
+            counter!("a_total", "method" => m, "status" => s, "route" => r).increment(1);
+            gauge!("g", "outcome" => "ok").set(1.0);
+            histogram!("h", "tool" => "bash").record(1.0);
+        "#;
+        assert!(disallowed_metric_labels(src).is_empty());
+    }
+
+    #[test]
+    fn identifier_labels_are_rejected_with_the_metric_name() {
+        let src = r#"counter!("runs_total", "thread_id" => id.to_string()).increment(1);"#;
+        let found = disallowed_metric_labels(src);
+        assert_eq!(
+            found,
+            vec![DisallowedMetricLabel {
+                metric: "runs_total".to_owned(),
+                label: "thread_id".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn the_raw_path_label_is_not_on_the_list() {
+        assert!(!is_allowed_metric_label("path"));
+        assert!(is_allowed_metric_label("route"));
+        for id_like in ["thread_id", "run_id", "space_id", "org_id", "user_id"] {
+            assert!(!is_allowed_metric_label(id_like), "{id_like}");
+        }
+    }
+
+    #[test]
+    fn list_has_no_duplicates() {
+        let mut seen = std::collections::BTreeSet::new();
+        for key in METRIC_LABELS {
+            assert!(seen.insert(*key), "duplicate label {key}");
+        }
+    }
+
+    #[test]
+    fn comment_lines_are_ignored() {
+        let src = "// counter!(\"x\", \"thread_id\" => id).increment(1);\n\
+                   let y = 1; // histogram!(\"z\", \"run_id\" => id)\n";
+        assert!(disallowed_metric_labels(src).is_empty());
+    }
+
+    #[test]
+    fn slashes_inside_string_literals_are_not_comments() {
+        let src = r#"counter!("http://x", "run_id" => id).increment(1);"#;
+        assert_eq!(labels(src), vec!["run_id".to_owned()]);
+    }
+
+    #[test]
+    fn multi_line_macros_are_scanned() {
+        let src = "counter!(\n    \"multi_total\",\n    \"method\" => m,\n    \"space_id\" => s,\n    \"status\" => st\n)\n.increment(1);\n";
+        let found = disallowed_metric_labels(src);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].label, "space_id");
+        assert_eq!(found[0].metric, "multi_total");
+    }
+
+    #[test]
+    fn the_metrics_path_form_is_scanned() {
+        let src = r#"metrics::counter!("p_total", "thread_id" => id).increment(1);"#;
+        assert_eq!(labels(src), vec!["thread_id".to_owned()]);
+        let src = r#"metrics::histogram!("p_seconds", "run_id" => id).record(1.0);"#;
+        assert_eq!(labels(src), vec!["run_id".to_owned()]);
+    }
+
+    #[test]
+    fn a_non_literal_metric_name_still_checks_labels() {
+        let src = r#"counter!(NAME, "thread_id" => id).increment(1);"#;
+        let found = disallowed_metric_labels(src);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].label, "thread_id");
+        // The first string literal in the body is the label key, not a metric name; the guard
+        // still reports the key, which is what matters.
+        assert!(found[0].metric == "thread_id" || found[0].metric.is_empty());
+    }
+
+    #[test]
+    fn identifiers_that_merely_end_in_a_macro_name_are_not_macros() {
+        let src = r#"my_counter!("x", "thread_id" => id);"#;
+        assert!(disallowed_metric_labels(src).is_empty());
+    }
+
+    #[test]
+    fn a_macro_name_without_a_call_is_not_scanned() {
+        let src = r#"// use metrics::{counter, gauge};
+            let counter_name = "counter!"; let _ = "thread_id" => 1;"#;
+        assert!(disallowed_metric_labels(src).is_empty());
+    }
+
+    #[test]
+    fn several_macros_in_one_file_are_all_checked() {
+        let src = r#"
+            counter!("a", "method" => m).increment(1);
+            gauge!("b", "run_id" => r).set(1.0);
+            histogram!("c", "thread_id" => t).record(1.0);
+        "#;
+        assert_eq!(labels(src), vec!["run_id".to_owned(), "thread_id".to_owned()]);
+    }
+
+    #[test]
+    fn a_closing_paren_inside_a_string_does_not_end_the_macro() {
+        let src = r#"counter!("a", "method" => ")", "run_id" => r).increment(1);"#;
+        assert_eq!(labels(src), vec!["run_id".to_owned()]);
+    }
+
+    #[test]
+    fn an_unterminated_macro_does_not_panic() {
+        let _ = disallowed_metric_labels(r#"counter!("a", "run_id" => r"#);
+    }
+}

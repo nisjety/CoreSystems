@@ -500,6 +500,49 @@ async fn spawn_capture(
     })
 }
 
+/// Test seam (WS06-S7): the spawn gate is process-wide, so tests that exhaust it must not overlap
+/// (one test's hold would starve another's recovery check). This lock serialises them.
+#[cfg(test)]
+static GATE_HOLD_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Every permit of the process-wide spawn gate, held by one test at a time.
+#[cfg(test)]
+pub(crate) struct HeldGate {
+    permits: Option<tokio::sync::OwnedSemaphorePermit>,
+    _serial: tokio::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl HeldGate {
+    /// Give the permits back while keeping other gate-exhausting tests out.
+    pub(crate) fn release_permits(&mut self) {
+        self.permits = None;
+    }
+}
+
+/// Take EVERY permit of the process-wide spawn gate so a test can prove the "sandbox is busy"
+/// refusal without mutating the environment.
+#[cfg(test)]
+pub(crate) async fn hold_every_spawn_permit_for_test() -> HeldGate {
+    let serial = GATE_HOLD_SERIAL.lock().await;
+    let (semaphore, _) = spawn_gate();
+    let total = usize::try_from(positive_from_env(
+        "EXECUTION_SANDBOX_MAX_CONCURRENT",
+        DEFAULT_MAX_CONCURRENT_SPAWNS as u64,
+    ))
+    .unwrap_or(DEFAULT_MAX_CONCURRENT_SPAWNS)
+    .min(tokio::sync::Semaphore::MAX_PERMITS);
+    let permits = semaphore
+        .clone()
+        .acquire_many_owned(u32::try_from(total).expect("permit count fits u32"))
+        .await
+        .expect("the spawn gate is never closed");
+    HeldGate {
+        permits: Some(permits),
+        _serial: serial,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -806,5 +849,145 @@ mod tests {
             out.stdout.chars().count() < MAX_OUTPUT_CHARS + 100,
             "capped output must stay near the cap"
         );
+    }
+
+    // ---- WS06-S7: bounded output, env parsing, spawn admission --------------------------------
+
+    #[test]
+    fn parse_positive_falls_back_on_missing_zero_and_garbage() {
+        assert_eq!(parse_positive(None, 7), 7);
+        assert_eq!(parse_positive(Some("0"), 7), 7);
+        assert_eq!(parse_positive(Some(""), 7), 7);
+        assert_eq!(parse_positive(Some("abc"), 7), 7);
+        assert_eq!(parse_positive(Some("-5"), 7), 7);
+        assert_eq!(parse_positive(Some("1.5"), 7), 7);
+        assert_eq!(parse_positive(Some("99999999999999999999999"), 7), 7);
+        assert_eq!(parse_positive(Some("42"), 7), 42);
+        assert_eq!(parse_positive(Some(" 42 "), 7), 42);
+    }
+
+    #[test]
+    fn the_shipped_defaults_match_the_compose_files() {
+        assert_eq!(DEFAULT_MAX_OUTPUT_BYTES, 1_048_576);
+        assert_eq!(DEFAULT_MAX_CONCURRENT_SPAWNS, 8);
+        assert_eq!(DEFAULT_QUEUE_WAIT_MS, 5000);
+    }
+
+    #[tokio::test]
+    async fn read_capped_stops_at_the_cap_and_reports_it() {
+        let data = vec![b'a'; 20_000];
+        let mut buf = Vec::new();
+        let hit = read_capped(&data[..], &mut buf, 10_000)
+            .await
+            .expect("read");
+        assert!(hit, "more than the cap must be reported");
+        assert_eq!(buf.len(), 10_000, "the buffer holds exactly the cap");
+    }
+
+    #[tokio::test]
+    async fn read_capped_does_not_report_output_that_exactly_fits() {
+        let data = vec![b'a'; 10_000];
+        let mut buf = Vec::new();
+        let hit = read_capped(&data[..], &mut buf, 10_000)
+            .await
+            .expect("read");
+        assert!(!hit, "exactly the cap is not past the cap");
+        assert_eq!(buf.len(), 10_000);
+
+        let mut small = Vec::new();
+        assert!(!read_capped(&b"hi"[..], &mut small, 10_000)
+            .await
+            .expect("read"));
+        assert_eq!(small, b"hi");
+    }
+
+    /// A runaway child must be killed at the cap, not buffered: execution-core's memory stays
+    /// bounded by the cap (the returned text is itself capped far below it), and the outcome says
+    /// which ceiling tripped.
+    #[tokio::test]
+    async fn a_child_printing_100_mb_is_killed_at_the_output_cap() {
+        let started = std::time::Instant::now();
+        let out = execute_sandboxed_with_timeout(
+            &MpSandboxPolicy::DangerFullAccess,
+            "sh",
+            &args(&["-c", "yes | head -c 104857600"]),
+            Duration::from_secs(120),
+        )
+        .await
+        .expect("spawn sh");
+        assert_eq!(
+            out.limit_hit,
+            Some(LimitHit::Output {
+                stream: OutputStream::Stdout,
+                limit_bytes: max_output_bytes(),
+            }),
+            "stdout past the cap must report Output"
+        );
+        assert!(
+            out.stdout.chars().count() < MAX_OUTPUT_CHARS + 100,
+            "the returned text stays near the 64 KiB step cap, not the 100 MB the child printed"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "the kill must happen at the cap, not after the child finished printing"
+        );
+    }
+
+    #[tokio::test]
+    async fn stderr_past_the_cap_is_killed_and_attributed_to_stderr() {
+        let out = execute_sandboxed_with_timeout(
+            &MpSandboxPolicy::DangerFullAccess,
+            "sh",
+            &args(&["-c", "yes | head -c 104857600 >&2"]),
+            Duration::from_secs(120),
+        )
+        .await
+        .expect("spawn sh");
+        assert_eq!(
+            out.limit_hit,
+            Some(LimitHit::Output {
+                stream: OutputStream::Stderr,
+                limit_bytes: max_output_bytes(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_normal_exit_reports_no_limit_hit() {
+        let out = execute_sandboxed(
+            &MpSandboxPolicy::DangerFullAccess,
+            "echo",
+            &args(&["hello"]),
+        )
+        .await
+        .expect("spawn echo");
+        assert_eq!(out.limit_hit, None);
+        assert_eq!(out.exit_code, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn acquire_spawn_permit_times_out_with_would_block_when_the_gate_is_exhausted() {
+        let mut held = hold_every_spawn_permit_for_test().await;
+        let err = acquire_spawn_permit().await.expect_err("the gate is full");
+        assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock);
+        assert_eq!(err.to_string(), "sandbox is busy, retry later");
+
+        // Releasing the permits makes the gate usable again.
+        held.release_permits();
+        assert!(acquire_spawn_permit().await.is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_sandboxed_spawn_is_refused_with_would_block_when_the_gate_is_full() {
+        let _held = hold_every_spawn_permit_for_test().await;
+        let err = execute_sandboxed(
+            &MpSandboxPolicy::DangerFullAccess,
+            "echo",
+            &args(&["never runs"]),
+        )
+        .await
+        .expect_err("admission must refuse before any spawn");
+        assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock);
+        assert_eq!(err.to_string(), "sandbox is busy, retry later");
     }
 }
