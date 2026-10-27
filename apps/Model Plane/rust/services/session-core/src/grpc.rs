@@ -11011,7 +11011,8 @@ mod tests {
         valid_scheduled_step_digest, validate_append_space_context_shape,
         validate_scheduled_run_result_request, validate_scheduled_step_request,
         thread_read_payload_digest, validate_thread_space_context_shape, validate_user_checkpoint,
-        CONTROL_THREAD_READ_ACTION, CONTROL_THREAD_READ_SCHEMA,
+        thread_append_payload_digest_v2, CONTROL_THREAD_APPEND_SCHEMA,
+        CONTROL_THREAD_APPEND_SCHEMA_V2, CONTROL_THREAD_READ_ACTION, CONTROL_THREAD_READ_SCHEMA,
         verify_thread_read_space_decision, verify_thread_read_space_decision_with_key,
         ControlSpaceDecisionClaims,
         verify_append_space_decision_with_key, verify_scheduled_run_decision_with_keys,
@@ -12947,7 +12948,7 @@ mod tests {
     #[test]
     #[allow(clippy::result_large_err)] // the closure returns the verifier's `Status` error
     fn own_scheduled_thread_read_decision_issued_by_control_verifies() {
-        const TOKEN: &str = "v2.Y29udHJvbC13aXJlLXZlY3Rvci1rZXk.eyJkZWNpc2lvbl9yZWYiOiJvd24tcmVhZC13aXJlLTEiLCJvcmdfaWQiOiJvcmctMSIsInNwYWNlX3JlZiI6InNwYWNlLXBlcnNvbmFsIiwic3ViamVjdF9pZCI6InVzZXItMSIsInNlcnZpY2VfYXVkaWVuY2UiOiJtb2RlbC1wbGFuZSIsImFjdGlvbl9pZCI6Im1vZGVsLnRocmVhZC5yZWFkIiwiYWN0aW9uX3NjaGVtYV9oYXNoIjoic2hhMjU2OnRocmVhZC1yZWFkLXYxIiwicGF5bG9hZF9kaWdlc3QiOiJzaGEyNTY6Y2E5YmM3ZjJiMDI5YzQzNWY1MGRiYjY1NWNmZDFmZGU3YTU4NjNhOTUwNDAzNjNlOGFlN2NmMzBkY2M5NjRiOCIsImlkZW1wb3RlbmN5X2tleSI6InNwYWNlLXJlYWQtd2lyZS0xIiwicmVjaXBpZW50X2F1ZGllbmNlX3JlZiI6ImF1ZGllbmNlOnNwYWNlLXBlcnNvbmFsOjIiLCJyZWNpcGllbnRfYXVkaWVuY2VfaGFzaCI6InNoYTI1Njp0ZXN0LWF1ZGllbmNlIiwicHJpdmFjeV9wb2xpY3lfcmVmIjoicHJpdmFjeTpvcmctMTo1IiwicmVzb3VyY2VfYXV0aG9yaXphdGlvbl9yZWYiOiJjb250cm9sOnNwYWNlLXBlcnNvbmFsOnRocmVhZC1yZWFkOjciLCJhdXRob3JpdHlfcmV2aXNpb24iOjcsIm1lbWJlcnNoaXBfcmV2aXNpb24iOjQsInByaXZhY3lfcmV2aXNpb24iOjUsInJlY2lwaWVudF9hdWRpZW5jZV9yZXZpc2lvbiI6MiwiZW50aXRsZW1lbnRfcmV2aXNpb24iOjMsInBlcm1pc3Npb25zIjpbInRocmVhZDpyZWFkIl0sInB1cnBvc2UiOiJhc3Npc3RhbnRfY29sbGFib3JhdGlvbiIsImxhd2Z1bF9iYXNpcyI6ImNvbnRyYWN0IiwicHJpdmFjeV9jbGFzcyI6ImludGVybmFsIiwidGhpcmRfcGFydHlfcHJvY2Vzc2luZ19hbGxvd2VkIjpmYWxzZSwicmV0ZW50aW9uX2NsYXNzIjoic3RhbmRhcmQiLCJyZXNpZGVuY3kiOiJzd2VkZW5jZW50cmFsIiwiZGVsZXRpb25fc2NvcGUiOiJzcGFjZSIsInplcm9fZGF0YV9yZXRlbnRpb24iOmZhbHNlLCJpc3N1ZWRfYXQiOiIyMDI2LTEwLTAxVDEyOjAwOjAwWiIsImV4cGlyZXNfYXQiOiIyMDI2LTEwLTAxVDEyOjAyOjAwWiIsIm5vbmNlIjoibm9uY2Utd2lyZS0xIn0.ChmOC42y-MpKrWV9T-CdsX8rjVeqepJ213aODu261XDk-AkAh13OxJXnhJ7lVYUXpdUxQjRIGC6qrxkp5ZVfCQ";
+        const TOKEN: &str = "v2.Y29udHJvbC13aXJlLXZlY3Rvci1rZXk.eyJkZWNpc2lvbl9yZWYiOiJvd24tcmVhZC13aXJlLTEiLCJvcmdfaWQiOiJvcmctMSIsInNwYWNlX3JlZiI6InNwYWNlLXBlcnNvbmFsIiwic3ViamVjdF9pZCI6InVzZXItMSIsInNlcnZpY2VfYXVkaWVuY2UiOiJtb2RlbC1wbGFuZSIsImFjdGlvbl9pZCI6Im1vZGVsLnRocmVhZC5yZWFkIiwiYWN0aW9uX3NjaGVtYV9oYXNoIjoic2hhMjU2OnRocmVhZC1yZWFkLXYxIiwicGF5bG9hZF9kaWdlc3QiOiJzaGEyNTY6Y2E5YmM3ZjJiMDI5YzQzNWY1MGRiYjY1NWNmZDFmZGU3YTU4NjNhOTUwNDAzNjNlOGFlN2NmMzBkY2M5NjRiOCIsImlkZW1wb3RlbmN5X2tleSI6InNwYWNlLXJlYWQtd2lyZS0xIiwicmVjaXBpZW50X2F1ZGllbmNlX3JlZiI6ImF1ZGllbmNlOnNwYWNlLXBlcnNvbmFsOjIiLCJyZWNpcGllbnRfYXVkaWVuY2VfaGFzaCI6InNoYTI1Njp0ZXN0LWF1ZGllbmNlIiwicHJpdmFjeV9wb2xpY3lfcmVmIjoicHJpdmFjeTpvcmctMTo1IiwicmVzb3VyY2VfYXV0aG9yaXphdGlvbl9yZWYiOiJjb250cm9sOnNwYWNlLXBlcnNvbmFsOnRocmVhZC1yZWFkOjciLCJhdXRob3JpdHlfcmV2aXNpb24iOjcsIm1lbWJlcnNoaXBfcmV2aXNpb24iOjQsInByaXZhY3lfcmV2aXNpb24iOjUsInJlY2lwaWVudF9hdWRpZW5jZV9yZXZpc2lvbiI6MiwiZW50aXRsZW1lbnRfcmV2aXNpb24iOjMsInBlcm1pc3Npb25zIjpbInRocmVhZDpyZWFkIl0sInB1cnBvc2UiOiJhc3Npc3RhbnRfY29sbGFib3JhdGlvbiIsImxhd2Z1bF9iYXNpcyI6ImNvbnRyYWN0IiwicHJpdmFjeV9jbGFzcyI6ImludGVybmFsIiwidGhpcmRfcGFydHlfcHJvY2Vzc2luZ19hbGxvd2VkIjpmYWxzZSwicmV0ZW50aW9uX2NsYXNzIjoic3RhbmRhcmQiLCJyZXNpZGVuY3kiOiJzd2VkZW5jZW50cmFsIiwiZGVsZXRpb25fc2NvcGUiOiJzcGFjZSIsInplcm9fZGF0YV9yZXRlbnRpb24iOmZhbHNlLCJpc3N1ZWRfYXQiOiIyMDI2LTEwLTAxVDEyOjAwOjAwWiIsImV4cGlyZXNfYXQiOiIyMDI2LTEwLTAxVDEyOjAyOjAwWiIsIm5vbmNlIjoibm9uY2Utd2lyZS0xIiwic3BhY2Vfa2luZCI6InBlcnNvbmFsIn0.cXwllRNltAcl6e8fcfs4DDaURmgvbvivksjj6f4uyshZDo2gld2xIVt3pehPgS-cUpxAj55PbJ0TLWSLq35ADw";
         const PUBLIC_KEY: &str = "lHXGzw7aNAV1KNhpR4HsySrWOdfivSd2HtPvdJJL6wc";
         const KEY_ID: &str = "control-wire-vector-key";
 
@@ -13151,6 +13152,241 @@ mod tests {
             URL_SAFE_NO_PAD.encode(signing_key.sign(signing_input.as_bytes()).to_bytes())
         );
         (request, key_id)
+    }
+
+    // WS01-S2: thread-append schema v2 binds `post_kind`. The golden is shared with
+    // Control (`thread-append-v2.golden.json`, same bytes on both sides).
+    const THREAD_APPEND_V2_GOLDEN: &str =
+        include_str!("../tests/fixtures/thread-append-v2.golden.json");
+    // sha256 of the golden with CRLF folded to LF (autocrlf rewrites Windows checkouts).
+    const THREAD_APPEND_V2_GOLDEN_SHA256: &str =
+        "7c5d8215e76b22f63406477e36c61457abb37babc532b1b93989aee35a51407e";
+
+    fn thread_append_golden_request(
+        golden: &serde_json::Value,
+        action_schema_hash: &str,
+        post_kind: &str,
+    ) -> pb::AppendMessageRequest {
+        let input = &golden["input"];
+        let text = |key: &str| input[key].as_str().expect("golden text field").to_owned();
+        pb::AppendMessageRequest {
+            thread_id: text("thread_id"),
+            role: "user".to_owned(),
+            content: text("content"),
+            space_id: text("space_id"),
+            space_decision_ref: text("space_decision_ref"),
+            recipient_audience_ref: text("recipient_audience_ref"),
+            recipient_audience_hash: text("recipient_audience_hash"),
+            recipient_audience_revision: input["recipient_audience_revision"]
+                .as_u64()
+                .expect("audience revision"),
+            privacy_policy_ref: text("privacy_policy_ref"),
+            resource_authorization_ref: text("resource_authorization_ref"),
+            authority_revision: input["authority_revision"]
+                .as_u64()
+                .expect("authority revision"),
+            action_schema_hash: action_schema_hash.to_owned(),
+            idempotency_key: text("idempotency_key"),
+            post_kind: post_kind.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn thread_append_v2_digest_matches_control_golden() {
+        use sha2::{Digest, Sha256};
+        let normalized = THREAD_APPEND_V2_GOLDEN.replace("\r\n", "\n");
+        assert_eq!(
+            format!("{:x}", Sha256::digest(normalized.as_bytes())),
+            THREAD_APPEND_V2_GOLDEN_SHA256,
+            "the Rust copy of thread-append-v2.golden.json drifted from Control's; update both together"
+        );
+        let golden: serde_json::Value = serde_json::from_str(&normalized).expect("golden parses");
+        let input = &golden["input"];
+        let org_id = input["org_id"].as_str().expect("org");
+        let user_id = input["user_id"].as_str().expect("user");
+        let expected = &golden["expected"];
+        assert_eq!(expected["v1_schema"], CONTROL_THREAD_APPEND_SCHEMA);
+        assert_eq!(expected["v2_schema"], CONTROL_THREAD_APPEND_SCHEMA_V2);
+
+        let v1 = thread_append_golden_request(&golden, CONTROL_THREAD_APPEND_SCHEMA, "");
+        assert_eq!(
+            thread_append_payload_digest(&v1, org_id, user_id),
+            expected["v1_digest"].as_str().expect("v1 digest"),
+            "v1 encoding changed"
+        );
+        let v2 = thread_append_golden_request(&golden, CONTROL_THREAD_APPEND_SCHEMA_V2, "post");
+        assert_eq!(
+            thread_append_payload_digest_v2(&v2, org_id, user_id),
+            expected["v2_post_digest"].as_str().expect("v2 digest"),
+            "v2 encoding drifted from Control"
+        );
+        // The digest commits to the kind.
+        let v2_turn =
+            thread_append_golden_request(&golden, CONTROL_THREAD_APPEND_SCHEMA_V2, "turn");
+        assert_ne!(
+            thread_append_payload_digest_v2(&v2_turn, org_id, user_id),
+            thread_append_payload_digest_v2(&v2, org_id, user_id)
+        );
+    }
+
+    /// Signs a decision whose claimed schema and digest follow `schema_v2`, for a request
+    /// carrying `post_kind`, issued to `user-2` in a room.
+    fn signed_thread_append_request_for_kind(
+        signing_key: &SigningKey,
+        now: DateTime<Utc>,
+        schema_v2: bool,
+        post_kind: &str,
+    ) -> (pb::AppendMessageRequest, String) {
+        let key_id = "control-test-key".to_owned();
+        let key_part = URL_SAFE_NO_PAD.encode(key_id.as_bytes());
+        let mut request = pb::AppendMessageRequest {
+            thread_id: "thread-1".to_owned(),
+            role: "user".to_owned(),
+            content: "hello room".to_owned(),
+            space_id: "space-room-1".to_owned(),
+            space_decision_ref: "append-decision-2".to_owned(),
+            recipient_audience_ref: "audience:space-room-1:4".to_owned(),
+            recipient_audience_revision: 4,
+            recipient_audience_hash: "sha256:audience-hash".to_owned(),
+            privacy_policy_ref: "privacy:org-1:5".to_owned(),
+            authority_revision: 7,
+            resource_authorization_ref: "control:space-room-1:thread-append:7".to_owned(),
+            action_schema_hash: if schema_v2 {
+                CONTROL_THREAD_APPEND_SCHEMA_V2.to_owned()
+            } else {
+                CONTROL_THREAD_APPEND_SCHEMA.to_owned()
+            },
+            idempotency_key: "thread-append:2".to_owned(),
+            post_kind: post_kind.to_owned(),
+            ..Default::default()
+        };
+        request.payload_digest = if schema_v2 {
+            thread_append_payload_digest_v2(&request, "org-1", "user-2")
+        } else {
+            thread_append_payload_digest(&request, "org-1", "user-2")
+        };
+        let payload = serde_json::json!({
+            "decision_ref": request.space_decision_ref, "org_id": "org-1", "space_ref": request.space_id,
+            "subject_id": "user-2", "service_audience": CONTROL_SPACE_DECISION_AUDIENCE,
+            "action_id": CONTROL_THREAD_APPEND_ACTION, "action_schema_hash": request.action_schema_hash,
+            "payload_digest": request.payload_digest, "idempotency_key": request.idempotency_key,
+            "recipient_audience_ref": request.recipient_audience_ref, "recipient_audience_hash": request.recipient_audience_hash,
+            "privacy_policy_ref": request.privacy_policy_ref, "resource_authorization_ref": request.resource_authorization_ref,
+            "purpose": "assistant_collaboration", "lawful_basis": "contract", "privacy_class": "internal",
+            "third_party_processing_allowed": false, "retention_class": "standard", "residency": "swedencentral",
+            "deletion_scope": "space", "zero_data_retention": false, "nonce": "nonce-2",
+            "authority_revision": request.authority_revision, "membership_revision": 4, "privacy_revision": 5,
+            "recipient_audience_revision": request.recipient_audience_revision, "entitlement_revision": 3,
+            "permissions": ["thread:append"], "issued_at": now.to_rfc3339(),
+            "expires_at": (now + chrono::Duration::minutes(1)).to_rfc3339(),
+            "space_kind": "room",
+        });
+        let payload_part =
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).expect("test claims"));
+        let signing_input = format!("{CONTROL_SPACE_DECISION_VERSION}.{key_part}.{payload_part}");
+        request.space_decision_token = format!(
+            "{signing_input}.{}",
+            URL_SAFE_NO_PAD.encode(signing_key.sign(signing_input.as_bytes()).to_bytes())
+        );
+        (request, key_id)
+    }
+
+    fn verify_append_for_user_2(
+        request: &pb::AppendMessageRequest,
+        key_id: &str,
+        signing_key: &SigningKey,
+        now: DateTime<Utc>,
+    ) -> Result<String, tonic::Status> {
+        verify_append_space_decision_with_key(
+            request,
+            "org-1",
+            "user-2",
+            key_id,
+            &signing_key.verifying_key(),
+            now,
+        )
+    }
+
+    #[test]
+    fn v1_decision_cannot_authorize_a_post() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-27T12:00:00Z")
+            .expect("test time")
+            .with_timezone(&Utc);
+        let signing_key = SigningKey::from_bytes(&[21_u8; 32]);
+        // A fully consistent v1 decision (schema, digest and claims all v1) for a request that
+        // claims post_kind post must still be refused: only v2 binds the kind.
+        let (request, key_id) =
+            signed_thread_append_request_for_kind(&signing_key, now, false, "post");
+        let err = verify_append_for_user_2(&request, &key_id, &signing_key, now)
+            .expect_err("a v1 decision may not authorize a post");
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        assert!(err.message().contains("v1"), "{}", err.message());
+
+        // The same v1 decision still authorizes a turn (existing behaviour unchanged).
+        for kind in ["", "turn"] {
+            let (turn, key_id) =
+                signed_thread_append_request_for_kind(&signing_key, now, false, kind);
+            verify_append_for_user_2(&turn, &key_id, &signing_key, now)
+                .expect("a v1 decision must keep authorizing a turn");
+        }
+    }
+
+    #[test]
+    fn v2_decision_for_post_verifies_and_is_bound_to_the_kind() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-27T12:00:00Z")
+            .expect("test time")
+            .with_timezone(&Utc);
+        let signing_key = SigningKey::from_bytes(&[22_u8; 32]);
+        let (request, key_id) =
+            signed_thread_append_request_for_kind(&signing_key, now, true, "post");
+        let space_kind = verify_append_for_user_2(&request, &key_id, &signing_key, now)
+            .expect("a v2 decision must verify for a post");
+        assert_eq!(space_kind, "room");
+
+        // The same decision does not verify a request with a different post_kind: the digest
+        // binds the kind, so a post token cannot be replayed as a turn (or the reverse).
+        let as_turn = pb::AppendMessageRequest {
+            post_kind: "turn".to_owned(),
+            ..request.clone()
+        };
+        assert_eq!(
+            verify_append_for_user_2(&as_turn, &key_id, &signing_key, now)
+                .expect_err("a post decision must not authorize a turn")
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        // Another user cannot use it.
+        assert_eq!(
+            verify_append_space_decision_with_key(
+                &request,
+                "org-1",
+                "user-3",
+                &key_id,
+                &signing_key.verifying_key(),
+                now,
+            )
+            .expect_err("a post decision is bound to its subject")
+            .code(),
+            tonic::Code::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn v2_decision_for_a_turn_does_not_verify_as_a_post() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-27T12:00:00Z")
+            .expect("test time")
+            .with_timezone(&Utc);
+        let signing_key = SigningKey::from_bytes(&[23_u8; 32]);
+        let (request, key_id) =
+            signed_thread_append_request_for_kind(&signing_key, now, true, "turn");
+        verify_append_for_user_2(&request, &key_id, &signing_key, now)
+            .expect("a v2 decision over post_kind turn verifies");
+        let as_post = pb::AppendMessageRequest {
+            post_kind: "post".to_owned(),
+            ..request
+        };
+        assert!(verify_append_for_user_2(&as_post, &key_id, &signing_key, now).is_err());
     }
 
     #[test]
@@ -20014,23 +20250,23 @@ mod conversation_page_db_tests {
 
         // A reader whose decision was issued at revision 2 never sees revision 3,
         // and a turn with no snapshot is visible as it always was.
-        let page = conversation_page_rows(&pool, &org, &thread, Some(2), None, 10)
+        let page = conversation_page_rows(&pool, &org, &thread, Some(2), true, None, 10)
             .await
             .expect("ceiling page");
         let seen: Vec<&str> = page.iter().map(|row| row.0.as_str()).collect();
         assert_eq!(seen, [legacy.as_str(), mid.as_str(), early.as_str()]);
 
         // A hidden turn is no cursor for that reader, exactly as an unknown id is not.
-        let hidden = conversation_cursor_sequence(&pool, &org, &thread, Some(2), &late)
+        let hidden = conversation_cursor_sequence(&pool, &org, &thread, Some(2), true, &late)
             .await
             .expect_err("a hidden turn is refused as a cursor");
         assert_eq!(hidden.code(), tonic::Code::InvalidArgument);
-        conversation_cursor_sequence(&pool, &org, &thread, Some(2), &mid)
+        conversation_cursor_sequence(&pool, &org, &thread, Some(2), true, &mid)
             .await
             .expect("a visible turn is a cursor");
 
         // The owner's unfiltered read sees all four turns.
-        let owner = conversation_page_rows(&pool, &org, &thread, None, None, 10)
+        let owner = conversation_page_rows(&pool, &org, &thread, None, true, None, 10)
             .await
             .expect("owner page");
         assert_eq!(owner.len(), 4);
