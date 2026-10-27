@@ -1,4 +1,4 @@
-import { useParams } from '@solidjs/router'
+import { useParams, useSearchParams } from '@solidjs/router'
 // `Blocks` stands in for lucide's `Puzzle` on the "add existing agent" action:
 // the vendored Solid 2 icon barrel carries no Puzzle glyph, and lucide-solid
 // itself is Solid 1-only, so it cannot be imported here.
@@ -41,7 +41,13 @@ import { SpaceConfirmButton } from './SpaceConfirmButton'
 import { SpaceMemberControls, SpaceMemberRemoveButton } from './SpaceMemberControls'
 import { SpaceCreateAgentDialog } from './SpaceCreateAgentDialog'
 import { SpaceRoomComposer } from './SpaceRoomComposer'
-import { SpaceRoomTimeline } from './SpaceRoomTimeline'
+import { SpaceRoomTimeline, roomAgentName } from './SpaceRoomTimeline'
+import {
+  SpaceAuxPane,
+  readStoredAuxPaneWidth,
+} from './sidepane/SpaceAuxPane'
+import { SpaceThreadPanel } from './sidepane/SpaceThreadPanel'
+import { readSpaceThreadParam, spaceThreadPaneEnabled } from '../lib/space-thread-deep-link'
 import { publishSpaceThreads, publishSpaceUnread, retractSpaceThreads } from '../lib/space-live-work'
 import { unreadThreadIds } from '../lib/space-unread'
 import { hereSentence, readPresence, typingSentence } from '../lib/space-presence'
@@ -95,6 +101,17 @@ export default function SpacePage() {
   const i18n = useI18n()
   const params = useParams<{ spaceId: string }>()
   const spaceRef = () => params.spaceId?.trim() ?? ''
+  // `?thread_id=` opens one thread in the read-only side pane. The id is only a
+  // request: the pane resolves it through the Space transcript route, which
+  // asks Control, so a pasted or stale link can only land on a named state.
+  const [searchParams, setSearchParams] = useSearchParams()
+  const threadPaneEnabled = spaceThreadPaneEnabled()
+  const selectedThreadId = createMemo(() =>
+    threadPaneEnabled ? readSpaceThreadParam(searchParams.thread_id) : null,
+  )
+  const [auxPaneWidth, setAuxPaneWidth] = createSignal(readStoredAuxPaneWidth())
+  const openThread = (threadId: string) => setSearchParams({ thread_id: threadId })
+  const closeThread = () => setSearchParams({ thread_id: undefined }, { replace: true })
   const [context, { refetch: refetchContext }] = createResource(spaceRef, getSpaceContext)
   const [threadsUnavailable, setThreadsUnavailable] = createSignal(false)
   let latestThreadRequest = 0
@@ -353,7 +370,11 @@ export default function SpacePage() {
       </Show>
       <Show when={context.error ? undefined : context()}>
         {(current) => (
-          <div class="verevon-space-workroom">
+          <div
+            class="verevon-space-workroom"
+            data-aux-open={selectedThreadId() ? 'true' : undefined}
+            style={{ '--verevon-space-auxpane-width': `${auxPaneWidth()}px` }}
+          >
             <main class="verevon-space-canvas">
               <header class="verevon-space-header">
                 <div class="verevon-space-header__title">
@@ -418,6 +439,7 @@ export default function SpacePage() {
                       roster={() => (roster.error ? [] : roster() ?? [])}
                       agents={() => (agents.error ? [] : agents() ?? [])}
                       unreadThreadIds={unreadIds}
+                      onOpenThread={threadPaneEnabled ? (thread) => openThread(thread.thread_id) : undefined}
                       typingSentence={() => typingSentence(presenceReading(), i18n.tr)}
                       onTyping={noteTyping}
                       onExchangeSettled={() => {
@@ -487,6 +509,29 @@ export default function SpacePage() {
             </main>
 
             <SpacePulse activeRun={activeRun} threads={currentThreads} />
+
+            <Show when={selectedThreadId()}>
+              {(threadId) => {
+                const thread = () => currentThreads().find((item) => item.thread_id === threadId())
+                return (
+                  <SpaceAuxPane
+                    label={thread() ? threadTitle(thread() as SpaceThread, i18n.tr) : i18n.tr('Tråd', 'Thread')}
+                    width={auxPaneWidth()}
+                    onWidthChange={setAuxPaneWidth}
+                    onClose={closeThread}
+                  >
+                    <SpaceThreadPanel
+                      spaceRef={current().space.space_ref}
+                      threadId={threadId()}
+                      thread={thread}
+                      roster={() => (roster.error ? [] : roster() ?? [])}
+                      viewerSubjectId={() => current().membership.subject_id}
+                      agentName={roomAgentName(agents.error ? [] : agents() ?? [])}
+                    />
+                  </SpaceAuxPane>
+                )
+              }}
+            </Show>
           </div>
         )}
       </Show>
@@ -513,6 +558,8 @@ function SpaceConversationPanel(props: {
   readonly typingSentence?: () => string | undefined
   /** The member typed just now, so the room can say so before the next poll. */
   readonly onTyping?: () => void
+  /** Opens a post in the read-only side pane; absent while the pane is off. */
+  readonly onOpenThread?: (thread: SpaceThread) => void
 }) {
   const i18n = useI18n()
   let focusComposer: (() => void) | undefined
@@ -582,6 +629,7 @@ function SpaceConversationPanel(props: {
               focusComposer?.()
             }}
             onApprovalSettled={props.onExchangeSettled}
+            onOpenThread={props.onOpenThread}
             unreadThreadIds={props.unreadThreadIds}
             // A pin or retitle changes the server's order and names; re-read
             // rather than trust this browser's copy of either.

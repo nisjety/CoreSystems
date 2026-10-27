@@ -14,6 +14,7 @@ import { useI18n } from '@/shared/i18n'
 import { cn } from '@/shared/lib/cn'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import { spaceDisplayName } from '@/features/spaces/lib/space-name'
+import { spaceThreadHref } from '@/features/spaces/lib/space-thread-deep-link'
 import {
   isSpaceObserved,
   isSpaceWorking,
@@ -295,7 +296,7 @@ function SpaceThreadLink(props: { thread: SpaceThread }) {
   const unread = () => unreadThreadIdsIn(props.thread.space_id).has(props.thread.thread_id)
   return (
     <a
-      href={spaceHref(props.thread.space_id)}
+      href={spaceThreadHref(props.thread.space_id, props.thread.thread_id)}
       link
       class="core-sidebar-panel-link core-sidebar-space-thread"
       aria-label={threadLinkLabel(current(), i18n, { unread: unread() })}

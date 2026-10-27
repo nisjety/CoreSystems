@@ -1,0 +1,194 @@
+/*
+ * The room's right-hand pane, the read-only thread panel and the restricted
+ * notice. Its own sheet on purpose: global.css carries uncommitted lines.
+ *
+ * The pane is absolutely positioned inside the workroom, which reserves its
+ * width as right padding while it is open, so the canvas narrows instead of
+ * being covered. On a phone the pane covers the room (a full-width sheet).
+ */
+
+.verevon-space-workroom {
+  position: relative;
+}
+
+.verevon-space-workroom[data-aux-open] {
+  padding-right: var(--verevon-space-auxpane-width, 416px);
+}
+
+.verevon-space-auxpane {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 5;
+  display: flex;
+  max-width: 100%;
+  background: var(--verevon-surface);
+  border-left: 1px solid var(--verevon-border);
+  box-shadow: -8px 0 24px rgb(29 27 24 / 6%);
+}
+
+.verevon-space-auxpane:focus {
+  outline: none;
+}
+
+.verevon-space-auxpane:focus-visible {
+  outline: 2px solid var(--verevon-accent);
+  outline-offset: -2px;
+}
+
+.verevon-space-auxpane__separator {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -3px;
+  width: 7px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.verevon-space-auxpane__separator:hover,
+.verevon-space-auxpane__separator:focus-visible {
+  background: var(--verevon-border-strong);
+  outline: none;
+}
+
+.verevon-space-auxpane__frame {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+}
+
+.verevon-space-auxpane__header {
+  display: flex;
+  min-height: 62px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--verevon-border);
+}
+
+.verevon-space-auxpane__title {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--verevon-text);
+  font-size: 0.95rem;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.verevon-space-auxpane__close {
+  display: inline-flex;
+  width: 32px;
+  height: 32px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--verevon-text-muted);
+  cursor: pointer;
+}
+
+.verevon-space-auxpane__close:hover {
+  background: var(--verevon-surface-soft);
+  color: var(--verevon-text);
+}
+
+.verevon-space-auxpane__body {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  padding: 14px 16px 20px;
+}
+
+.verevon-space-thread-panel__meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 12px;
+  color: var(--verevon-text-muted);
+  font-size: 0.8rem;
+}
+
+.verevon-space-thread-panel__turns {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.verevon-space-restricted {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 10px;
+  background: var(--verevon-surface-soft);
+  color: var(--verevon-text-soft);
+}
+
+.verevon-space-restricted > svg {
+  flex: none;
+  margin-top: 2px;
+  color: var(--verevon-text-muted);
+}
+
+.verevon-space-restricted__body {
+  min-width: 0;
+}
+
+.verevon-space-restricted__body strong {
+  display: block;
+  font-size: 0.88rem;
+}
+
+.verevon-space-restricted__body p {
+  margin: 4px 0 0;
+  color: var(--verevon-text-muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.verevon-space-restricted__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.verevon-space-restricted__actions:empty {
+  display: none;
+}
+
+@media (max-width: 760px) {
+  .verevon-space-workroom[data-aux-open] {
+    padding-right: 0;
+  }
+
+  .verevon-space-auxpane {
+    width: 100% !important;
+    border-left: 0;
+  }
+
+  .verevon-space-auxpane__separator {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .verevon-space-auxpane {
+    animation: verevon-space-auxpane-in 140ms ease-out;
+  }
+}
+
+@keyframes verevon-space-auxpane-in {
+  from { opacity: 0; transform: translateX(12px); }
+  to { opacity: 1; transform: translateX(0); }
+}

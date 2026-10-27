@@ -34,6 +34,8 @@
  *   generic row rather than inventing a richer reading of it.
  */
 
+import { spaceThreadHref } from './space-thread-deep-link'
+
 /**
  * The render classes implemented today.
  *
@@ -196,9 +198,7 @@ export function activityFromThread(source: ThreadLikeActivitySource): SpaceActiv
   // the decision that unblocks it — actually lives. Landing the reader on
   // whichever tab the hash happened to hold would show them a count of work
   // needing them and no way to do it.
-  const href = owner
-    ? `/spaces/${encodeURIComponent(owner)}?thread_id=${encodeURIComponent(source.thread_id)}#chat`
-    : undefined
+  const href = owner ? spaceThreadHref(owner, source.thread_id) : undefined
 
   const conversation: SpaceActivityItem = {
     id: `thread:${source.thread_id}`,
@@ -322,9 +322,7 @@ export function activityFromRun(source: RunLikeActivitySource): SpaceActivityIte
   const object = source.goal?.trim() || 'Uten beskrevet mål'
   const owner = source.space_id?.trim()
   const threadId = source.thread_id?.trim()
-  const href = owner && threadId
-    ? `/spaces/${encodeURIComponent(owner)}?thread_id=${encodeURIComponent(threadId)}#chat`
-    : undefined
+  const href = owner && threadId ? spaceThreadHref(owner, threadId) : undefined
   const status = source.status?.trim()
   const known = status ? RUN_STATUS[status] : undefined
   const at = asIsoTime(source.updated_at) ?? asIsoTime(source.created_at)
