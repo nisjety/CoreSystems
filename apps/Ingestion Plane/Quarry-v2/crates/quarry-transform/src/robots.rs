@@ -27,18 +27,15 @@ impl RobotsTxt {
         let mut current_agents: Vec<String> = Vec::new();
         let mut after_agents = false;
 
-        // A blank line ends a record of the robots.txt format. It matters only to the next
-        // user-agent line, which then starts a new group: a named group with no rules stays
-        // empty and does not take the rules of the group after it. Rules after a blank line
-        // still belong to the group before them, as they always did.
-        let mut after_blank = false;
+        // RFC 9309 section 2.2 grammar: a group is `startgroupline *(startgroupline / emptyline)
+        // *(rule / emptyline)`. A blank line is skipped and never ends a group. Consecutive
+        // user-agent lines share the rules that follow them; only a rule line ends that list,
+        // so the next user-agent line after a rule starts a new group.
         for raw in input.lines() {
             let line = strip_comment(raw).trim();
             if line.is_empty() {
-                after_blank = true;
                 continue;
             }
-            let starts_after_blank = std::mem::take(&mut after_blank);
             let Some((key, value)) = line.split_once(':') else {
                 continue;
             };
@@ -47,7 +44,7 @@ impl RobotsTxt {
 
             match key.as_str() {
                 "user-agent" => {
-                    if after_agents || starts_after_blank {
+                    if after_agents {
                         // New group block — reset
                         current_agents.clear();
                         after_agents = false;
@@ -350,8 +347,19 @@ mod tests {
 
     #[test]
     fn a_named_group_with_no_rules_allows_everything() {
-        let r = RobotsTxt::parse("User-agent: quarrybot\n\nUser-agent: *\nDisallow: /\n");
+        // A rule line ends the `*` group, so the named group after it has no rules of its
+        // own: it allows everything, while every other agent still falls back to `*`.
+        let r = RobotsTxt::parse("User-agent: *\nDisallow: /\n\nUser-agent: quarrybot\n");
         assert!(r.is_allowed("quarrybot", "/anything"));
+        assert!(!r.is_allowed("other", "/anything"));
+    }
+
+    #[test]
+    fn a_blank_line_between_user_agent_lines_keeps_one_group() {
+        // RFC 9309 section 2.2: `*(startgroupline / emptyline)`. The two user-agent lines form
+        // one group, so the Disallow after them applies to quarrybot as well as to `*`.
+        let r = RobotsTxt::parse("User-agent: quarrybot\n\nUser-agent: *\n\nDisallow: /\n");
+        assert!(!r.is_allowed("quarrybot", "/anything"));
         assert!(!r.is_allowed("other", "/anything"));
     }
 
