@@ -1129,15 +1129,17 @@ impl RunBudget {
 }
 
 /// Whether the request's own step cap (`constraints.max_steps`) still refuses
-/// with the legacy 429. It stops where the gate owns the bound: a person's
-/// session is never capped, and an agent run is refused with the typed 402 once
-/// enforcement is `on`. Otherwise it stays as it was: with enforcement `off`
-/// there is no gate, and in `shadow` an agent run keeps its request cap until
-/// the gate is enforced.
+/// with the legacy 429. It stops only where the gate owns the bound, and the gate
+/// owns it only once enforcement is `on`: an agent run is then refused with the
+/// typed 402 and a person's session is never capped. In `shadow` (the default)
+/// and `off` nothing about a run's refusals changes: every run, a person's
+/// included, keeps its request cap as it was before the gate existed. A person's
+/// cap lifting in `shadow` would change live human behaviour with a mode that is
+/// meant to refuse nothing (D2-014; the numbers and the move to `on` are X-12).
 pub fn legacy_step_cap_applies(budget: Option<&RunBudget>, mode: BudgetMode) -> bool {
     match budget {
         None => true,
-        Some(budget) => budget.class == RunClass::Agent && mode != BudgetMode::On,
+        Some(_) => mode != BudgetMode::On,
     }
 }
 
@@ -1503,10 +1505,13 @@ mod tests {
         let person = RunBudget::start(&limits, RunClass::Interactive, &constraints(12, None, None), None, now);
         // Off: no gate at all, so the request cap is what it always was, for everyone.
         assert!(legacy_step_cap_applies(None, BudgetMode::Off));
-        // Shadow: an agent keeps its request cap; a person is never capped.
+        assert!(legacy_step_cap_applies(Some(&agent), BudgetMode::Off));
+        assert!(legacy_step_cap_applies(Some(&person), BudgetMode::Off));
+        // Shadow (the default) refuses nothing new: an agent and a person both keep the
+        // request cap they had before the gate (D2-014: a person's cap lifts only with `on`).
         assert!(legacy_step_cap_applies(Some(&agent), BudgetMode::Shadow));
-        assert!(!legacy_step_cap_applies(Some(&person), BudgetMode::Shadow));
-        // On: the typed gate owns the agent bound; the person is still uncapped.
+        assert!(legacy_step_cap_applies(Some(&person), BudgetMode::Shadow));
+        // On: the typed gate owns the agent bound; the person is then uncapped.
         assert!(!legacy_step_cap_applies(Some(&agent), BudgetMode::On));
         assert!(!legacy_step_cap_applies(Some(&person), BudgetMode::On));
     }

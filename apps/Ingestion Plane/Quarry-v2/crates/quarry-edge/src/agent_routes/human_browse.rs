@@ -134,10 +134,17 @@ pub(super) fn open_web_egress(
     }
 }
 
-/// Whether a step counts against the run's step budget. A person's steps do not
-/// (plan R-8: human steps are exempt); an agent's steps do.
-pub(super) fn counts_against_step_budget(initiator: StepInitiator) -> bool {
+/// Whether a step counts against the run's step budget. The budget subject is the run's
+/// class (plan R-8): a step on an agent-class run counts whoever drives it, so a person's
+/// token holding a `run` grant, or a person's step on a run started with the `agent` hint,
+/// cannot step past the agent's bounds. On any other run a person's own step is exempt (a
+/// person's session is never capped) and an agent's or the system's step counts.
+pub(super) fn counts_against_step_budget(
+    initiator: StepInitiator,
+    budget: Option<&crate::budget::RunBudget>,
+) -> bool {
     initiator != StepInitiator::Human
+        || budget.is_some_and(|budget| budget.class == crate::budget::RunClass::Agent)
 }
 
 /// What a step writes to the receipt store (WS8.B). A ZDR run writes nothing, as
@@ -255,15 +262,42 @@ mod tests {
         );
     }
 
+    fn run_budget(class: crate::budget::RunClass) -> crate::budget::RunBudget {
+        crate::budget::RunBudget::start(
+            &crate::budget::BudgetLimits::default(),
+            class,
+            &quarry_core::contracts::AgentConstraints {
+                max_steps: 5,
+                allowed_domains: Vec::new(),
+                max_runtime_s: None,
+                max_cost_usd: None,
+            },
+            None,
+            std::time::Instant::now(),
+        )
+    }
+
     #[test]
     fn human_steps_do_not_consume_max_steps() {
-        assert!(!counts_against_step_budget(StepInitiator::Human));
+        assert!(!counts_against_step_budget(StepInitiator::Human, None));
+        let interactive = run_budget(crate::budget::RunClass::Interactive);
+        assert!(!counts_against_step_budget(StepInitiator::Human, Some(&interactive)));
     }
 
     #[test]
     fn agent_steps_still_consume_max_steps() {
-        assert!(counts_against_step_budget(StepInitiator::Agent));
-        assert!(counts_against_step_budget(StepInitiator::System));
+        assert!(counts_against_step_budget(StepInitiator::Agent, None));
+        assert!(counts_against_step_budget(StepInitiator::System, None));
+        let interactive = run_budget(crate::budget::RunClass::Interactive);
+        assert!(counts_against_step_budget(StepInitiator::Agent, Some(&interactive)));
+    }
+
+    #[test]
+    fn a_persons_step_on_an_agent_class_run_counts_because_the_run_class_is_the_budget_subject() {
+        // R-8: the subject is the run class, not the step's initiator.
+        let agent = run_budget(crate::budget::RunClass::Agent);
+        assert!(counts_against_step_budget(StepInitiator::Human, Some(&agent)));
+        assert!(counts_against_step_budget(StepInitiator::Agent, Some(&agent)));
     }
 
     #[test]

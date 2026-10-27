@@ -415,7 +415,7 @@ pub(super) async fn admit_action(
 
     // 9. budget: the request's own step cap where the gate does not own it, then the
     // gate, whose first refusal per segment is announced before the 402 is returned.
-    if super::human_browse::counts_against_step_budget(input.initiator.class) {
+    if super::human_browse::counts_against_step_budget(input.initiator.class, entry.budget.as_ref()) {
         if crate::budget::legacy_step_cap_applies(entry.budget.as_ref(), crate::budget::current_mode()) {
             enforce_step_budget(entry)
                 .map_err(|message| QuarryError::new(ErrorCode::RateLimited, message))?;

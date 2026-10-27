@@ -423,6 +423,17 @@ async fn call_step(
     Result<(), (StatusCode, serde_json::Value)>,
     Arc<TokioMutex<RunEntry>>,
 ) {
+    call_step_on(entry_with_budget(budget), action, None).await
+}
+
+async fn call_step_on(
+    mut entry: RunEntry,
+    action: AgentAction,
+    initiated_by: Option<InitiatorHint>,
+) -> (
+    Result<(), (StatusCode, serde_json::Value)>,
+    Arc<TokioMutex<RunEntry>>,
+) {
     let state = crate::test_support::test_state(Arc::new(
         quarry_runtime::fetch::StaticDriver::new(
             std::time::Duration::from_secs(5),
@@ -431,7 +442,6 @@ async fn call_step(
         .expect("static driver"),
     ));
     let claims = crate::test_support::claims_for_org("org");
-    let mut entry = entry_with_budget(budget);
     entry.actor_id = claims.actor_id().to_string();
     let run_id = entry.run_id.to_string();
     let handle = handle_for(entry);
@@ -450,7 +460,7 @@ async fn call_step(
             action,
             instruction: None,
             extraction_profile: None,
-            initiated_by: None,
+            initiated_by,
             ai_run_id: None,
             agent_label: None,
         }),
@@ -492,6 +502,46 @@ async fn a_budget_refusal_comes_first_and_burns_no_single_use_approval() {
     let entry = entry_arc.lock().await;
     assert!(entry.used_sensitive_approval_grants.is_empty());
     assert_eq!(entry.summary.step, 0, "a refusal does not run the action");
+}
+
+/// D2-014: the request's own step cap (`constraints.max_steps`) refuses an agent-initiated step
+/// on a person-class run today (429; a person's own step has never been counted). Budget
+/// `shadow` is the default and is meant to refuse nothing new, so it must not lift that cap;
+/// only `on`, where the typed gate owns the bound and a person's run is never capped, does
+/// (X-12 is the decision to move to `on`).
+#[tokio::test]
+async fn a_persons_request_step_cap_lifts_only_when_budget_enforcement_is_on() {
+    use crate::budget::{BudgetMode, RunBudget, RunClass};
+    let person_run = || {
+        let budget = RunBudget::start(
+            &crate::budget::BudgetLimits::default(),
+            RunClass::Interactive,
+            &AgentConstraints {
+                max_steps: 2,
+                allowed_domains: vec![],
+                max_runtime_s: None,
+                max_cost_usd: None,
+            },
+            None,
+            std::time::Instant::now(),
+        );
+        let mut entry = entry_with_budget(Some(budget));
+        entry.constraints.max_steps = 2;
+        entry.summary.step = 2;
+        entry
+    };
+
+    let _shadow = crate::budget::test_mode::pin(BudgetMode::Shadow);
+    let (result, _) = call_step_on(person_run(), respond_dialog(), Some(InitiatorHint::Agent)).await;
+    let (status, body) = result.expect_err("the person-class run's request cap still refuses in shadow");
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    drop(_shadow);
+
+    let _on = crate::budget::test_mode::pin(BudgetMode::On);
+    let (result, _) = call_step_on(person_run(), respond_dialog(), Some(InitiatorHint::Agent)).await;
+    let (status, body) = result.expect_err("the step goes on to the approval check, which refuses it");
+    assert_ne!(status, StatusCode::TOO_MANY_REQUESTS, "on lifts a person's cap: {body}");
+    assert_ne!(body["error"]["code"], "BUDGET_EXHAUSTED", "{body}");
 }
 
 #[tokio::test]
