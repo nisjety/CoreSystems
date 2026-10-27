@@ -11,6 +11,7 @@ use quarry_core::lease::BrowserLease;
 use quarry_edge::state::AppState;
 use quarry_runtime::{fetch::StaticDriver, EventSink};
 use serde_json::Value;
+use serial_test::serial;
 use tokio::sync::mpsc;
 
 mod support;
@@ -93,6 +94,7 @@ async fn get_json(addr: SocketAddr, path: &str) -> (u16, Value) {
 }
 
 #[tokio::test]
+#[serial]
 async fn unhealthy_browser_answers_503_browser_unhealthy() {
     let health = BrowserHealth::from_slots(40, 2, vec![slot("ready", Some(false))]);
     assert_eq!(health.state, BrowserHealthState::Unhealthy);
@@ -117,6 +119,7 @@ async fn unhealthy_browser_answers_503_browser_unhealthy() {
 }
 
 #[tokio::test]
+#[serial]
 async fn healthy_and_idle_browsers_answer_200_with_a_browser_field() {
     let healthy = BrowserHealth::from_slots(40, 2, vec![slot("ready", Some(true))]);
     assert_eq!(healthy.state, BrowserHealthState::Healthy);
@@ -143,6 +146,7 @@ async fn healthy_and_idle_browsers_answer_200_with_a_browser_field() {
 }
 
 #[tokio::test]
+#[serial]
 async fn not_applicable_leaves_the_ready_body_byte_identical() {
     let addr = spawn_edge(Arc::new(FixedHealth(BrowserHealth::not_applicable()))).await;
     let (status, text) = get_text(addr, "/ready").await;
@@ -179,6 +183,7 @@ async fn spawn_edge_with_scrape_browser(
 }
 
 #[tokio::test]
+#[serial]
 async fn an_unhealthy_scrape_browser_answers_503_beside_a_healthy_agent_browser() {
     let healthy = BrowserHealth::from_slots(40, 1, vec![slot("ready", Some(true))]);
     let unhealthy = BrowserHealth::from_slots(40, 0, vec![slot("dead", Some(false))]);
@@ -216,6 +221,7 @@ async fn an_unhealthy_scrape_browser_answers_503_beside_a_healthy_agent_browser(
 }
 
 #[tokio::test]
+#[serial]
 async fn a_degraded_browser_is_ready() {
     let degraded = BrowserHealth::from_slots(
         40,
@@ -233,6 +239,30 @@ async fn a_degraded_browser_is_ready() {
     let (status, body) = get_json(addr, "/ready").await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["browser"]["state"], "degraded");
+}
+
+/// Puts the process-global drain flag back when a test ends, whether it passed or not.
+struct DrainGuard;
+
+impl Drop for DrainGuard {
+    fn drop(&mut self) {
+        quarry_edge::drain::reset_for_tests();
+    }
+}
+
+/// A draining edge answers `draining` before it looks at the browsers: an unhealthy browser
+/// does not change the answer, and the body names no browser.
+#[tokio::test]
+#[serial]
+async fn draining_takes_precedence_over_an_unhealthy_browser() {
+    let dead = BrowserHealth::from_slots(40, 0, vec![slot("dead", Some(false))]);
+    let addr = spawn_edge(Arc::new(FixedHealth(dead))).await;
+    let _guard = DrainGuard;
+    quarry_edge::drain::begin();
+    let (status, body) = get_json(addr, "/ready").await;
+    assert_eq!(status, 503, "{body}");
+    assert_eq!(body, serde_json::json!({ "status": "draining" }));
+    assert_eq!(get_text(addr, "/health").await.0, 200);
 }
 
 /// docs/openapi.yaml's `/ready` schemas, read from the file with the same
@@ -470,6 +500,7 @@ async fn spawn_edge_not_durable() -> SocketAddr {
 /// body is a process-wide switch that would take the other tests of this
 /// binary out of rotation, so it is only checked as a documented value.
 #[tokio::test]
+#[serial]
 async fn ready_bodies_match_the_documented_schemas_both_ways() {
     let text = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
