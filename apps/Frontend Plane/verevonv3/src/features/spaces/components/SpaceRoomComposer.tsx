@@ -1,20 +1,28 @@
 import { createMemo, createSignal, For, Show } from 'solid-js'
 
 import { ChatMarkdown } from '@/features/chat/components/ChatMessages'
-import { cancelInvocation, streamChat } from '@/shared/api/chat-client'
 import { listAvailableSkills, MAX_PICKED_SKILLS, type Skill } from '@/shared/api/skills-client'
-import { WandSparkles, X } from '@/shared/icons'
-import {
-  updateSpaceThreadPresentation,
-  type SpaceAgent,
-  type SpaceRosterMember,
-  type SpaceThread,
+import { WandSparkles } from '@/shared/icons'
+import type {
+  SpaceAgent,
+  SpaceRosterMember,
+  SpaceThread,
 } from '@/shared/api/spaces-client'
 import { useI18n } from '@/shared/i18n'
 import { translateApiError } from '@/shared/i18n/errors'
-import { beginOwnStream, endOwnStream, liveThreadsIn, ownStream } from '../lib/space-live-work'
+import { liveThreadsIn, ownStream } from '../lib/space-live-work'
 import { threadTitle } from '../lib/space-thread-presentation'
-import { AiModelPicker } from '@/shared/components/AiModelPicker'
+import {
+  DEFAULT_SPACE_COMPOSER_MODE,
+  type SpaceComposerModeId,
+  type SpaceComposerSlotContext,
+} from '../lib/space-composer-registry'
+import { createSpaceSendPipeline } from '../lib/space-send-pipeline'
+import {
+  SkillScope,
+  SpaceComposerChipSlot,
+  SpaceComposerToolbarSlot,
+} from './composer/SpaceComposerSlots'
 import { createTurnPrivacyTierResolver } from '@/features/dashboard/home/submit-privacy-tier'
 import { readAiModelSelection, type AiModelSelection } from '@/shared/ai/model-selection'
 import { OPENAI_CODEX_SUBSCRIPTION_PROVIDER } from '@/shared/api/chatgpt-subscription-client'
@@ -84,27 +92,6 @@ type PickerItem =
   | { readonly kind: 'mention'; readonly candidate: MentionCandidate }
   | { readonly kind: 'skill'; readonly skill: Skill }
 
-type Exchange = {
-  readonly userContent: string
-  assistantContent: string
-  /**
-   * `stopped` is its own state, not an error and not done. A server-side stop
-   * used to reach `onDone` and render a halted answer as a finished one; the
-   * transport now emits `stopped` separately, and this composer keeps the
-   * distinction all the way to the screen.
-   */
-  status: 'streaming' | 'done' | 'error' | 'stopped'
-  errorMessage?: string
-  /**
-   * The gateway's error code, kept beside the message so a refusal the room
-   * can act on — the spend hard stop — renders as what it is, with the way
-   * out, rather than as a generic "the reply stopped".
-   */
-  errorCode?: string
-  /** Whether the stop was recorded server-side, or only cut the local read. */
-  stopRecorded?: boolean
-}
-
 export interface SpaceRoomComposerProps {
   readonly spaceRef: string
   readonly roster: () => readonly SpaceRosterMember[]
@@ -158,17 +145,22 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
   const [activeIndex, setActiveIndex] = createSignal(0)
   let skillsLoading = false
   const pickerId = `room-picker-${Math.random().toString(36).slice(2, 8)}`
-  const [submitting, setSubmitting] = createSignal(false)
-  const [exchange, setExchange] = createSignal<Exchange | undefined>(undefined)
+  const [mode, setMode] = createSignal<SpaceComposerModeId>(DEFAULT_SPACE_COMPOSER_MODE)
   let textareaRef: HTMLTextAreaElement | undefined
-  // The in-flight turn's transport handles. `requestId` arrives on the
-  // `connected` frame and is the only thing the cancel endpoint accepts.
-  let abortController: AbortController | undefined
-  let liveRequestId: string | undefined
-  // The thread the in-flight turn is in, from the `connected` frame — the id a
-  // new post gets is minted server-side, so it is only known once the stream
-  // announces it.
-  let liveThreadId: string | undefined
+  // The send path (in-flight handles, exchange state, Stop) lives in the send
+  // pipeline; the composer keeps the box, the pickers and the chosen chips.
+  const pipeline = createSpaceSendPipeline({
+    host: props,
+    resolveTier: privacyTiers.resolve,
+    // Known codes get the room's own words; an unknown one keeps the
+    // server's message rather than a generic line that hides it.
+    describeError: (event) => translateApiError({ code: event.code }, i18n.tr, {
+      no: event.message,
+      en: event.message,
+    }),
+  })
+  const submitting = pipeline.submitting
+  const exchange = pipeline.exchange
 
   // Threads the server currently reports as working in this room, minus the
   // one this browser is streaming itself (that one has its own indicator in
@@ -377,146 +369,35 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
     const content = text().trim()
     if (!content || submitting() || blockedByApproval() || subscriptionIncompatible()) return
 
-    setSubmitting(true)
     closePicker()
-    const agentRef = mentionedAgentRef()
-    const picked = pickedSkills()
-    const modelSelection = selectedModel()
-    const replyThreadId = props.replyTarget?.()?.threadId
-    setExchange({ userContent: content, assistantContent: '', status: 'streaming' })
+    const input = {
+      content,
+      mode: mode(),
+      model: selectedModel(),
+      mentionedAgentRef: mentionedAgentRef(),
+      skills: pickedSkills(),
+      replyThreadId: props.replyTarget?.()?.threadId,
+    }
+    // The pipeline raises `submitting` and the exchange block synchronously,
+    // before its first await; the box is cleared right after, as before.
+    const sent = pipeline.send(input)
     setText('')
     setMentionedAgentRef(undefined)
     setPickedSkills([])
-    const controller = new AbortController()
-    abortController = controller
-    liveRequestId = undefined
-    liveThreadId = replyThreadId
-    const openedNewThread = !replyThreadId
-    beginOwnStream({ spaceRef: props.spaceRef, threadId: replyThreadId })
-
-    try {
-      // May wait (bounded) for a catalogue still loading. A Stop in that
-      // window has already said so on the exchange; send nothing.
-      const turnTier = await privacyTiers.resolve(modelSelection.model, modelSelection.provider)
-      if (controller.signal.aborted) return
-      await streamChat(
-        {
-          content,
-          model: modelSelection.model,
-          provider: modelSelection.provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER
-            ? modelSelection.provider
-            : undefined,
-          subscriptionConnectionId: modelSelection.provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER
-            ? modelSelection.subscriptionConnectionId
-            : undefined,
-          minPrivacyTier: turnTier.tier,
-          spaceRef: props.spaceRef,
-          mentionedAgentRef: agentRef,
-          threadId: replyThreadId,
-          // Picked skills ride as actions; chat-client puts their ids on the
-          // wire as `skill_ids`, never as tool specs.
-          actions: picked.length > 0
-            ? picked.map((skill) => ({ id: skill.id, name: skill.name, kind: 'skill' as const }))
-            : undefined,
-        },
-        {
-          onConnected: (event) => {
-            if (event.requestId?.trim()) liveRequestId = event.requestId.trim()
-            if (event.threadId?.trim()) liveThreadId = event.threadId.trim()
-          },
-          onTitle: ({ title }) => {
-            // Only for a thread this browser opened: the title event fires on a
-            // first exchange, and only the owner may write presentation. Writing
-            // it back is what makes the room's other members see the same name
-            // on their next poll instead of the raw first message.
-            const name = title?.trim()
-            const threadId = liveThreadId
-            if (!openedNewThread || !name || !threadId) return
-            const settled = props.onExchangeSettled
-            void updateSpaceThreadPresentation(props.spaceRef, threadId, { title: name })
-              .then(() => settled?.())
-              .catch(() => undefined)
-          },
-          onMessage: ({ content: delta }) => {
-            setExchange((current) => current && { ...current, assistantContent: current.assistantContent + delta })
-          },
-          onDone: () => {
-            // A stop that already landed must not be overwritten by a trailing
-            // `done`: the server emits `stopped` and may still close the
-            // stream normally afterwards.
-            setExchange((current) =>
-              current && current.status === 'streaming' ? { ...current, status: 'done' } : current,
-            )
-            props.onClearReplyTarget?.()
-            props.onExchangeSettled?.()
-          },
-          onStopped: () => {
-            setExchange((current) =>
-              current && { ...current, status: 'stopped', stopRecorded: true },
-            )
-          },
-          onError: (event) => {
-            setExchange((current) => current && {
-              ...current,
-              status: 'error',
-              errorCode: event.code,
-              // Known codes get the room's own words; an unknown one keeps the
-              // server's message rather than a generic line that hides it.
-              errorMessage: translateApiError({ code: event.code }, i18n.tr, {
-                no: event.message,
-                en: event.message,
-              }),
-            })
-          },
-        },
-        controller.signal,
-      )
-    } catch (error) {
-      // An abort we caused is not a failure. Anything else still is.
-      if (!(error instanceof DOMException && error.name === 'AbortError') && !controller.signal.aborted) {
-        setExchange((current) => current && current.status === 'streaming'
-          ? { ...current, status: 'error', errorMessage: error instanceof Error ? error.message : String(error) }
-          : current)
-      }
-    } finally {
-      if (abortController === controller) abortController = undefined
-      endOwnStream()
-      setSubmitting(false)
-    }
+    await sent
   }
 
-  /**
-   * Stop the turn in flight.
-   *
-   * Aborting the read is instant and local. Cancelling by `requestId` is what
-   * records the stop: it flips the run to `cancelled` in Session Core, which is
-   * what every other member's projection shows on its next poll. Without a
-   * `requestId` there is nothing to cancel with, and the exchange says so
-   * rather than claiming a stop it cannot prove.
-   */
-  async function stopMessage(): Promise<void> {
-    const controller = abortController
-    const requestId = liveRequestId
-    if (!controller) return
-    controller.abort()
-    setExchange((current) =>
-      current && current.status === 'streaming'
-        ? { ...current, status: 'stopped', stopRecorded: false }
-        : current,
-    )
-    if (!requestId) return
-    try {
-      await cancelInvocation(requestId)
-      setExchange((current) => current && current.status === 'stopped' ? { ...current, stopRecorded: true } : current)
-    } catch {
-      // Recorded state stays false: the run may well finish server-side, and
-      // saying "stopped" without proof is the one thing this must not do.
-    } finally {
-      // Re-read the projection either way, so the post's status follows the
-      // server rather than this browser's belief.
-      props.onClearReplyTarget?.()
-      props.onExchangeSettled?.()
-    }
+  const slotContext: SpaceComposerSlotContext = {
+    get spaceRef() { return props.spaceRef },
+    orgId,
+    mode,
+    setMode,
+    disabled: () => submitting() || blockedByApproval(),
+    text,
+    setText,
+    focus: () => textareaRef?.focus(),
+    model: { catalogue: privacyTiers.catalogue, onChange: setSelectedModel },
+    skills: { picked: pickedSkills, remove: removeSkill },
   }
 
   return (
@@ -573,7 +454,7 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
               <p class="verevon-space-room-exchange__stopped" role="status">
                 {current().stopRecorded
                   ? i18n.tr('Stoppet av deg. Rommet ser dette som stoppet.', 'Stopped by you. The room records it as stopped.')
-                  : liveRequestId
+                  : pipeline.liveRequestId()
                     ? i18n.tr('Stoppet her. Registrerer stoppet …', 'Stopped here. Recording the stop…')
                     : i18n.tr(
                         'Avbrutt før svaret startet. Kjøringen kan fortsatt fullføre på tjenersiden.',
@@ -585,7 +466,7 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
               <button
                 type="button"
                 class="verevon-space-room-exchange__stop"
-                onClick={() => { void stopMessage() }}
+                onClick={() => { void pipeline.stop() }}
               >
                 {i18n.tr('Stopp', 'Stop')}
               </button>
@@ -649,28 +530,8 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
             )}
           </p>
         </Show>
-        <AiModelPicker orgId={orgId} class="verevon-space-room-composer__model-picker" catalogue={privacyTiers.catalogue} onChange={setSelectedModel} />
-        <Show when={pickedSkills().length > 0}>
-          <ul class="verevon-space-room-skills" aria-label={i18n.tr('Valgte ferdigheter', 'Chosen skills')}>
-            <For each={pickedSkills()}>
-              {(skill) => (
-                <li class="verevon-space-room-skill-chip">
-                  <WandSparkles class="verevon-space-room-skill-chip__icon" aria-hidden="true" />
-                  <span>{skill.name}</span>
-                  <SkillScope scope={skill.scope} />
-                  <button
-                    type="button"
-                    class="verevon-space-room-skill-chip__remove"
-                    onClick={() => removeSkill(skill.id)}
-                    aria-label={i18n.tr(`Fjern ferdigheten ${skill.name}`, `Remove the skill ${skill.name}`)}
-                  >
-                    <X aria-hidden="true" />
-                  </button>
-                </li>
-              )}
-            </For>
-          </ul>
-        </Show>
+        <SpaceComposerToolbarSlot ctx={slotContext} />
+        <SpaceComposerChipSlot ctx={slotContext} />
         <Show when={pickerOpen()}>
           <ul
             id={pickerId}
@@ -774,27 +635,3 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
   )
 }
 
-/**
- * The scope a skill actually has. Two values exist in the registry — `org`
- * and `user` — and both are stated; anything else is left unbadged rather than
- * guessed. There is deliberately no "this room": the registry has no Space
- * scope to promise.
- */
-function SkillScope(props: { readonly scope: Skill['scope'] }) {
-  const i18n = useI18n()
-  const label = () =>
-    props.scope === 'user'
-      ? i18n.tr('Personlig', 'Personal')
-      : props.scope === 'org'
-        ? i18n.tr('Organisasjon', 'Organization')
-        : undefined
-  return (
-    <Show when={label()}>
-      {(text) => (
-        <span class="verevon-space-room-skill-scope" data-scope={props.scope}>
-          {text()}
-        </span>
-      )}
-    </Show>
-  )
-}
