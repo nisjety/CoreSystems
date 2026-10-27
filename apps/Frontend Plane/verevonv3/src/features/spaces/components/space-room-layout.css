@@ -1,0 +1,140 @@
+/*
+ * Room layout (UI slice U1): the geometry people expect from Slack and Teams.
+ *
+ *  - The timeline is the scroll region and the composer stays docked under it, so a long room never
+ *    pushes the box off screen.
+ *  - The conversations heading is one quiet row, not a hero block.
+ *  - The header never wraps: the topic gives way (ellipsis) before the title or the edit button do.
+ *  - The right side holds ONE pane at a time: opening a thread replaces the room pulse instead of
+ *    squeezing a third column beside it.
+ *
+ * Its own sheet on purpose: global.css is a shared monolith with uncommitted lines. Loaded after it, so
+ * equal-specificity rules here win.
+ */
+
+/* ── Docked composer ───────────────────────────────────────────────────────── */
+
+.verevon-space .verevon-space-panel:not([hidden]):has(> .verevon-space-view--conversations) {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.verevon-space-view--conversations {
+  flex: 1 1 0;
+  min-height: 0;
+}
+
+.verevon-space-view--conversations > .verevon-space-view__heading {
+  flex: none;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.verevon-space-view--conversations > .verevon-room-timeline {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 4px;
+  overscroll-behavior: contain;
+}
+
+.verevon-space-view--conversations > .verevon-space-room-composer {
+  flex: none;
+  margin-top: 6px;
+  border-top: 1px solid var(--verevon-border);
+  padding-top: 8px;
+}
+
+/* ── Conversations heading: one row ────────────────────────────────────────── */
+
+/* The eyebrow and the explanatory paragraph stay in the accessibility tree, just not on screen. */
+.verevon-space-view--conversations > .verevon-space-view__heading .verevon-space-eyebrow,
+.verevon-space-view--conversations > .verevon-space-view__heading p:not(.verevon-space-eyebrow) {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.verevon-space-view--conversations > .verevon-space-view__heading h2 {
+  margin-top: 0;
+  font-size: 15px;
+  letter-spacing: -0.01em;
+}
+
+/* ── Header never wraps ────────────────────────────────────────────────────── */
+
+.verevon-space .verevon-space-header {
+  flex-wrap: nowrap;
+}
+
+.verevon-space .verevon-space-header__title {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.verevon-space .verevon-space-header__topic {
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.verevon-space .verevon-space-room-settings,
+.verevon-space .verevon-space-room-settings .verevon-space-secondary-action {
+  flex: none;
+  white-space: nowrap;
+}
+
+.verevon-space .verevon-space-meta {
+  flex: none;
+  white-space: nowrap;
+}
+
+/* ── One right pane at a time ──────────────────────────────────────────────── */
+
+.verevon-space .verevon-space-workroom[data-aux-open] {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.verevon-space .verevon-space-workroom[data-aux-open] > .verevon-space-pulse,
+.verevon-space .verevon-space-workroom[data-aux-open] .verevon-space-meta {
+  display: none;
+}
+
+/* Below a laptop width the pulse yields to the conversation; its facts are in the composer line. */
+@media (max-width: 1180px) {
+  .verevon-space .verevon-space-workroom {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .verevon-space .verevon-space-workroom > .verevon-space-pulse {
+    display: none;
+  }
+}
+
+/* ── Phone width: the room's name comes first ──────────────────────────────── */
+
+@media (max-width: 760px) {
+  .verevon-space .verevon-space-header__title {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+
+  .verevon-space .verevon-space-header h1 {
+    flex: 1 1 calc(100% - 40px);
+  }
+
+  .verevon-space .verevon-space-header__topic {
+    order: 3;
+    flex: 1 1 100%;
+  }
+
+  .verevon-space .verevon-space-meta {
+    display: none;
+  }
+}

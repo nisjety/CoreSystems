@@ -200,4 +200,19 @@ describe('SpaceTurnList in the side pane (WS07-S8)', () => {
     expect(turnRow('Alt er klart.').avatar?.style.background).toBe(BLUE)
     expect(turnRow('Hva er status?').trigger?.textContent).toBe('Ola Hansen')
   })
+
+  it("the viewer's own avatar carries the name's initials, not the '(deg)' label's", () => {
+    // The viewer's turns are labelled "Kari Nordmann (deg)"; the avatar once read "K(".
+    render(() => (
+      <SpaceTurnList
+        turns={() => [{ role: 'user' as const, content: 'Min melding', authorSubjectId: 'user-1' }]}
+        roster={() => roster as never}
+        viewerSubjectId={() => 'user-1'}
+        agentName="Verevon"
+      />
+    ))
+    const row = turnRow('Min melding')
+    expect(row.author.textContent).toContain('Kari Nordmann')
+    expect(row.row.querySelector('.verevon-room-turn__avatar')?.textContent).toBe('KN')
+  })
 })

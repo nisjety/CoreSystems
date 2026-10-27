@@ -72,6 +72,7 @@ import { SpaceLiveIndicator } from './SpaceLiveIndicator'
 import { SpaceActivityPanel } from './SpaceActivityPanel'
 import { SpaceKnowledgePanel } from './SpaceKnowledgePanel'
 import { SpaceWorkPanel } from './SpaceWorkPanel'
+import './space-room-layout.css'
 
 // Mirrors the gateway's own gate (`CREATE_AGENT_ROLES`): creation is a
 // governed grant, so only roles that may grant get the entry points. The
