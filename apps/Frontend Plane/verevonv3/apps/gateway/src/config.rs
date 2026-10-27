@@ -156,6 +156,10 @@ pub(crate) struct SpaceFeatureFlags {
     /// public `/api/v1/client-config` route reports. Unlike the booleans its default is `banner`,
     /// never off. Carried here (not as an `AppState` field) so no test literal needs an edit.
     pub(crate) client_policy: crate::client_contract::ClientPolicy,
+    /// `CSP_REPORT_LOG_HOSTS` (WS07-S6): log the blocked ORIGIN (scheme and host, never a path
+    /// or query) of each CSP report, for a host inventory. Forced off when `APP_ENV` is
+    /// production (see `dev_only_flag`); the counters never carry a URL either way.
+    pub(crate) csp_report_log_hosts: bool,
 }
 
 impl SpaceFeatureFlags {
@@ -163,6 +167,7 @@ impl SpaceFeatureFlags {
         Self {
             denials_typed: space_flag("SPACE_DENIALS_TYPED"),
             client_policy: crate::client_contract::ClientPolicy::from_env(),
+            csp_report_log_hosts: dev_only_flag("CSP_REPORT_LOG_HOSTS"),
         }
     }
 }

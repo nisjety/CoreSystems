@@ -11,13 +11,19 @@
 //! a closed shape (unknown fields are refused), so no free text, URL, message or user id
 //! can enter a metric or a log line, which is what keeps this ZDR-safe.
 //!
-//! The CSP report route (`/api/v1/client-diagnostics/csp-report`) belongs to WS07-S6 and is
-//! added to this module's router there.
+//! - `POST /api/v1/client-diagnostics/csp-report` (WS07-S6): the sink for the
+//!   `Content-Security-Policy-Report-Only` candidate. It accepts `application/csp-report`,
+//!   `application/reports+json` and `application/json` (cap 8 KiB), maps each violation to a
+//!   closed directive set and increments `verevon_csp_reports_total{directive, disposition}`.
+//!   It never labels or logs the blocked URL, the document URL or the sample. Only when
+//!   `CSP_REPORT_LOG_HOSTS` is on (never in production, read once in `build_state`) is the
+//!   blocked ORIGIN (scheme and host) logged, for a host inventory in a non-production
+//!   environment.
 
 use axum::{
     body::Body,
     extract::State,
-    http::{header, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -41,6 +47,10 @@ pub(crate) fn router() -> Router<AppState> {
     Router::new()
         .route("/api/v1/client-config", get(get_client_config))
         .route("/api/v1/client-diagnostics", post(post_client_diagnostic))
+        .route(
+            "/api/v1/client-diagnostics/csp-report",
+            post(post_csp_report),
+        )
 }
 
 async fn get_client_config(State(state): State<AppState>) -> Response {
@@ -126,5 +136,230 @@ async fn post_client_diagnostic(State(state): State<AppState>, body: Body) -> Re
         "build_match" => matched,
     )
     .increment(1);
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// Largest accepted CSP report body (a real report is well under 2 KiB).
+const CSP_REPORT_BODY_LIMIT: usize = 8 * 1024;
+
+/// Media types a browser uses for CSP reports: `report-uri` sends `application/csp-report`,
+/// the Reporting API sends `application/reports+json`.
+const CSP_REPORT_CONTENT_TYPES: [&str; 3] = [
+    "application/csp-report",
+    "application/reports+json",
+    "application/json",
+];
+
+/// The closed directive label set. Anything else (including a client-invented name) is
+/// recorded as `other`, so a report can never widen the metric's cardinality.
+const CSP_DIRECTIVES: [&str; 20] = [
+    "default-src",
+    "connect-src",
+    "img-src",
+    "media-src",
+    "style-src",
+    "style-src-elem",
+    "style-src-attr",
+    "script-src",
+    "script-src-elem",
+    "script-src-attr",
+    "frame-src",
+    "child-src",
+    "worker-src",
+    "manifest-src",
+    "font-src",
+    "object-src",
+    "frame-ancestors",
+    "base-uri",
+    "form-action",
+    "navigate-to",
+];
+
+type JsonMap = serde_json::Map<String, serde_json::Value>;
+
+fn invalid_report() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(error(
+            "invalid_report",
+            "The body must be a Content-Security-Policy violation report.",
+        )),
+    )
+        .into_response()
+}
+
+fn csp_report_too_large() -> Response {
+    (
+        StatusCode::PAYLOAD_TOO_LARGE,
+        Json(error(
+            "report_too_large",
+            "The report exceeds the 8 KiB limit.",
+        )),
+    )
+        .into_response()
+}
+
+/// True when `Content-Type` names one of the accepted media types (parameters ignored).
+fn csp_content_type_ok(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            let media = value.split(';').next().unwrap_or("").trim();
+            CSP_REPORT_CONTENT_TYPES
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(media))
+        })
+}
+
+/// The directive label: the first token of `effective-directive` (or `effectiveDirective`),
+/// else of `violated-directive` (which carries the policy text after the name), mapped into
+/// [`CSP_DIRECTIVES`] or `other`.
+fn directive_label(report: &JsonMap) -> &'static str {
+    let named = |key: &str| {
+        report
+            .get(key)
+            .and_then(|value| value.as_str())
+            .and_then(|value| value.split_whitespace().next())
+            .map(str::to_ascii_lowercase)
+    };
+    let name = named("effective-directive")
+        .or_else(|| named("effectiveDirective"))
+        .or_else(|| named("violated-directive"))
+        .or_else(|| named("violatedDirective"))
+        .unwrap_or_default();
+    CSP_DIRECTIVES
+        .iter()
+        .copied()
+        .find(|known| *known == name)
+        .unwrap_or("other")
+}
+
+/// `report` or `enforce` (the CSP disposition), else `unknown`.
+fn disposition_label(report: &JsonMap) -> &'static str {
+    match report
+        .get("disposition")
+        .and_then(|value| value.as_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("report") => "report",
+        Some("enforce") => "enforce",
+        _ => "unknown",
+    }
+}
+
+/// The blocked ORIGIN only (`scheme://host[:port]`: no userinfo, path, query or fragment), or
+/// one of the CSP keyword sources (`inline`, `eval`, `data`, `blob`, `self`, ...) when the
+/// browser reports a keyword instead of a URL. Anything else is `other`. Used only for the
+/// non-production host inventory.
+fn blocked_origin(report: &JsonMap) -> String {
+    let blocked = report
+        .get("blocked-uri")
+        .or_else(|| report.get("blockedURL"))
+        .or_else(|| report.get("blockedUri"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    if let Some((scheme, rest)) = blocked.split_once("://") {
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+        let host = authority.rsplit('@').next().unwrap_or("");
+        let scheme_ok = !scheme.is_empty()
+            && scheme.len() <= 16
+            && scheme
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'));
+        let host_ok = !host.is_empty()
+            && host.len() <= 255
+            && host.bytes().all(|b| {
+                b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':' | b'[' | b']')
+            });
+        if scheme_ok && host_ok {
+            return format!(
+                "{}://{}",
+                scheme.to_ascii_lowercase(),
+                host.to_ascii_lowercase()
+            );
+        }
+        return "other".to_owned();
+    }
+    match blocked {
+        "inline" | "eval" | "data" | "blob" | "self" | "wasm-eval" | "filesystem" => {
+            blocked.to_owned()
+        }
+        _ => "other".to_owned(),
+    }
+}
+
+/// The violation objects in a body, whichever of the three wire shapes it uses:
+/// `{"csp-report": {...}}` (`report-uri`), `[{"type":"csp-violation","body":{...}}]`
+/// (Reporting API) or a bare violation object (`application/json`).
+fn csp_violations(value: &serde_json::Value) -> Vec<&JsonMap> {
+    use serde_json::Value;
+    match value {
+        Value::Array(entries) => entries
+            .iter()
+            .filter(|entry| entry.get("type").and_then(Value::as_str) == Some("csp-violation"))
+            .filter_map(|entry| entry.get("body").and_then(Value::as_object))
+            .collect(),
+        Value::Object(map) => {
+            if let Some(inner) = map.get("csp-report").and_then(Value::as_object) {
+                vec![inner]
+            } else if map.get("type").and_then(Value::as_str) == Some("csp-violation") {
+                map.get("body").and_then(Value::as_object).into_iter().collect()
+            } else if [
+                "effective-directive",
+                "effectiveDirective",
+                "violated-directive",
+                "violatedDirective",
+            ]
+            .iter()
+            .any(|key| map.contains_key(*key))
+            {
+                vec![map]
+            } else {
+                Vec::new()
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
+async fn post_csp_report(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    if !csp_content_type_ok(&headers) {
+        return invalid_report();
+    }
+    let Ok(bytes) = axum::body::to_bytes(body, CSP_REPORT_BODY_LIMIT).await else {
+        return csp_report_too_large();
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return invalid_report();
+    };
+    let violations = csp_violations(&value);
+    if violations.is_empty() {
+        return invalid_report();
+    }
+    let log_hosts = state.space_features.csp_report_log_hosts;
+    for violation in violations {
+        let directive = directive_label(violation);
+        let disposition = disposition_label(violation);
+        metrics::counter!(
+            "verevon_csp_reports_total",
+            "directive" => directive,
+            "disposition" => disposition,
+        )
+        .increment(1);
+        if log_hosts {
+            tracing::info!(
+                directive,
+                disposition,
+                blocked_origin = %blocked_origin(violation),
+                "csp report"
+            );
+        }
+    }
     StatusCode::NO_CONTENT.into_response()
 }

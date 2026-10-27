@@ -8,7 +8,8 @@
 //!
 //! Client resilience counters (WS07-S3, `domains/client_config.rs`), created with
 //! `metrics::counter!` where they are recorded: `verevon_client_failures_total{kind,
-//! build_match}`. WS07-S6 adds `verevon_csp_reports_total{directive, disposition}`.
+//! build_match}`; WS07-S6 adds `verevon_csp_reports_total{directive, disposition}`
+//! (closed directive set, never a URL).
 
 use std::time::Instant;
 
