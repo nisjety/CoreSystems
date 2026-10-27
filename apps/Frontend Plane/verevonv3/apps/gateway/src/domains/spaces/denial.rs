@@ -219,3 +219,228 @@ fn sanitize_detail(key: &str, value: &Value) -> Option<Value> {
         .filter(|value| is_detail_token(value))
         .map(|value| json!(value))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn denial_body(code: &str) -> Value {
+        json!({
+            "error": "You cannot post in this Space.",
+            "code": code,
+            "resolvable_by": "space_manager",
+            "details": {"entitlement": "space_posts", "required_roles": ["editor", "owner"]}
+        })
+    }
+
+    /// Every golden operation code keeps the Control status and yields the typed envelope with
+    /// the operation code outside and Control's denial code inside `details.reason`.
+    #[test]
+    fn map_control_denial_keeps_the_status_and_names_the_operation() {
+        for operation in [
+            OP_THREAD,
+            OP_POST,
+            OP_RETRIEVAL,
+            OP_IMPORT,
+            OP_SCHEDULE,
+            OP_OWNER_GRANT,
+            OP_READ,
+        ] {
+            for status in [
+                StatusCode::FORBIDDEN,
+                StatusCode::CONFLICT,
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ] {
+                let mapped = map_control_denial(status, &denial_body("space_role_insufficient"), operation)
+                    .expect("a well-formed denial is mapped");
+                assert_eq!(mapped["error"]["code"], operation);
+                assert_eq!(mapped["error"]["message"], "You cannot post in this Space.");
+                let details = &mapped["error"]["details"];
+                assert_eq!(details["reason"], "space_role_insufficient");
+                assert_eq!(details["resolvable_by"], "space_manager");
+                assert_eq!(details["entitlement"], "space_posts");
+                assert_eq!(details["required_roles"], json!(["editor", "owner"]));
+            }
+        }
+    }
+
+    #[test]
+    fn a_body_without_a_well_formed_code_keeps_the_pass_through() {
+        let forbidden = StatusCode::FORBIDDEN;
+        // No code at all, and a non-string code.
+        assert!(map_control_denial(forbidden, &json!({"error": "nope"}), OP_THREAD).is_none());
+        assert!(map_control_denial(forbidden, &json!({"code": 7}), OP_THREAD).is_none());
+        assert!(map_control_denial(forbidden, &json!("text"), OP_THREAD).is_none());
+        // Not a space_ code.
+        assert!(map_control_denial(forbidden, &denial_body("forbidden"), OP_THREAD).is_none());
+        assert!(map_control_denial(forbidden, &denial_body("member_not_in_organization"), OP_THREAD).is_none());
+        // Too short (needs 3 characters after the prefix), too long (over 60), uppercase, digits.
+        assert!(map_control_denial(forbidden, &denial_body("space_ab"), OP_THREAD).is_none());
+        assert!(map_control_denial(forbidden, &denial_body(&format!("space_{}", "a".repeat(61))), OP_THREAD).is_none());
+        assert!(map_control_denial(forbidden, &denial_body("space_Role_Bad"), OP_THREAD).is_none());
+        assert!(map_control_denial(forbidden, &denial_body("space_role_2"), OP_THREAD).is_none());
+        // The bounds themselves are accepted.
+        assert!(map_control_denial(forbidden, &denial_body("space_abc"), OP_THREAD).is_some());
+        assert!(map_control_denial(forbidden, &denial_body(&format!("space_{}", "a".repeat(60))), OP_THREAD).is_some());
+    }
+
+    #[test]
+    fn a_success_status_is_never_mapped() {
+        for status in [StatusCode::OK, StatusCode::CREATED, StatusCode::ACCEPTED] {
+            assert!(map_control_denial(status, &denial_body("space_role_insufficient"), OP_POST).is_none());
+        }
+    }
+
+    #[test]
+    fn injected_authority_detail_keys_are_dropped() {
+        let body = json!({
+            "error": "No.",
+            "code": "space_role_insufficient",
+            "resolvable_by": "none",
+            "details": {
+                "token": "tttt",
+                "space_decision_token": "tttt",
+                "resource_id": "res-1",
+                "attestation": "aaaa",
+                "org_id": "org-1",
+                "state": "archived"
+            }
+        });
+        let mapped = map_control_denial(StatusCode::FORBIDDEN, &body, OP_READ).unwrap();
+        let details = mapped["error"]["details"].as_object().unwrap();
+        for key in ["token", "space_decision_token", "resource_id", "attestation", "org_id"] {
+            assert!(!details.contains_key(key), "{key} must not cross to the browser");
+        }
+        assert_eq!(details["state"], "archived");
+        assert!(!mapped.to_string().contains("tttt"));
+    }
+
+    #[test]
+    fn non_token_detail_values_and_bad_required_roles_are_dropped() {
+        let parse = |details: Value| {
+            SpaceDenial::parse(&json!({"code": "space_role_insufficient", "details": details}))
+                .unwrap()
+                .details_value()
+        };
+        // Spaces, uppercase, objects, numbers and over-long strings are not tokens.
+        let dropped = parse(json!({
+            "entitlement": "has space",
+            "state": "UPPER",
+            "kind": {"nested": "x"},
+            "effect": 3,
+        }));
+        for key in ["entitlement", "state", "kind", "effect"] {
+            assert!(dropped.get(key).is_none(), "{key} must be dropped");
+        }
+        let long = "a".repeat(MAX_DETAIL_TOKEN + 1);
+        assert!(parse(json!({"entitlement": long})).get("entitlement").is_none());
+        let at_limit = "a".repeat(MAX_DETAIL_TOKEN);
+        assert_eq!(parse(json!({"entitlement": at_limit.clone()}))["entitlement"], at_limit);
+        // required_roles: empty, more than eight, non-array and any bad element are dropped whole.
+        assert!(parse(json!({"required_roles": []})).get("required_roles").is_none());
+        assert!(parse(json!({"required_roles": ["a","b","c","d","e","f","g","h","i"]}))
+            .get("required_roles")
+            .is_none());
+        assert!(parse(json!({"required_roles": "owner"})).get("required_roles").is_none());
+        assert!(parse(json!({"required_roles": ["owner", "Not A Token"]})).get("required_roles").is_none());
+        assert_eq!(
+            parse(json!({"required_roles": ["a","b","c","d","e","f","g","h"]}))["required_roles"]
+                .as_array()
+                .unwrap()
+                .len(),
+            8
+        );
+        // Detail keys outside the allowlist never appear, valid token or not.
+        assert!(parse(json!({"custom": "ok"})).get("custom").is_none());
+    }
+
+    #[test]
+    fn an_unknown_resolvable_by_becomes_operator() {
+        for raw in [json!("root"), json!(5), Value::Null] {
+            let denial = SpaceDenial::parse(&json!({"code": "space_role_insufficient", "resolvable_by": raw})).unwrap();
+            assert_eq!(denial.details_value()["resolvable_by"], "operator");
+        }
+        let absent = SpaceDenial::parse(&json!({"code": "space_role_insufficient"})).unwrap();
+        assert_eq!(absent.details_value()["resolvable_by"], "operator");
+        for known in RESOLVABLE_BY {
+            let denial = SpaceDenial::parse(&json!({"code": "space_role_insufficient", "resolvable_by": known})).unwrap();
+            assert_eq!(denial.details_value()["resolvable_by"], *known);
+        }
+    }
+
+    #[test]
+    fn the_message_is_bounded_and_defaults_when_missing() {
+        let long = "x".repeat(500);
+        let denial = SpaceDenial::parse(&json!({"code": "space_role_insufficient", "error": long})).unwrap();
+        assert_eq!(denial.message().chars().count(), MAX_MESSAGE_CHARS);
+        // Multi-byte characters are counted as characters, not bytes.
+        let wide = "\u{00e5}".repeat(300);
+        let denial = SpaceDenial::parse(&json!({"code": "space_role_insufficient", "error": wide})).unwrap();
+        assert_eq!(denial.message().chars().count(), MAX_MESSAGE_CHARS);
+        for missing in [json!({"code": "space_role_insufficient"}), json!({"code": "space_role_insufficient", "error": "   "}), json!({"code": "space_role_insufficient", "error": 4})] {
+            let denial = SpaceDenial::parse(&missing).unwrap();
+            assert_eq!(denial.message(), DEFAULT_MESSAGE);
+        }
+    }
+
+    #[test]
+    fn from_response_needs_the_flag_a_failure_status_and_a_reason() {
+        let mut state = AppState::for_tests();
+        let body = denial_body("space_role_insufficient");
+        assert!(SpaceDenial::from_response(&state, StatusCode::FORBIDDEN, &body).is_none());
+        state.space_features.denials_typed = true;
+        assert!(SpaceDenial::from_response(&state, StatusCode::FORBIDDEN, &body).is_some());
+        assert!(SpaceDenial::from_response(&state, StatusCode::OK, &body).is_none());
+        assert!(SpaceDenial::from_response(&state, StatusCode::FORBIDDEN, &json!({"error": "x"})).is_none());
+    }
+
+    #[test]
+    fn typed_response_is_byte_identical_pass_through_with_the_flag_off() {
+        let state = AppState::for_tests();
+        let body = denial_body("space_role_insufficient");
+        let (status, Json(out)) = typed_response(&state, StatusCode::FORBIDDEN, body.clone(), OP_THREAD);
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(out, body);
+    }
+
+    #[test]
+    fn typed_response_maps_with_the_flag_on_and_keeps_the_status() {
+        let mut state = AppState::for_tests();
+        state.space_features.denials_typed = true;
+        let (status, Json(out)) =
+            typed_response(&state, StatusCode::CONFLICT, denial_body("space_role_insufficient"), OP_POST);
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(out["error"]["code"], OP_POST);
+        assert_eq!(out["error"]["details"]["reason"], "space_role_insufficient");
+        // An untyped body stays as Control sent it, flag on.
+        let untyped = json!({"error": "forbidden"});
+        let (status, Json(out)) = typed_response(&state, StatusCode::FORBIDDEN, untyped.clone(), OP_POST);
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(out, untyped);
+    }
+
+    #[test]
+    fn gap_details_are_additive_and_keep_the_entry_strings() {
+        let entry = json!({"section": "runs", "code": "runs_read_not_authorized", "reason": "Not allowed."});
+        let denial = SpaceDenial::parse(&denial_body("space_role_insufficient")).unwrap();
+        let with = with_gap_details(entry.clone(), Some(&denial));
+        assert_eq!(with["section"], "runs");
+        assert_eq!(with["code"], "runs_read_not_authorized");
+        assert_eq!(with["reason"], "Not allowed.");
+        assert_eq!(with["details"]["reason"], "space_role_insufficient");
+        assert_eq!(with_gap_details(entry.clone(), None), entry);
+    }
+
+    #[test]
+    fn decision_split_returns_the_grant_or_the_optional_reason() {
+        let (grant, denial) = Decision::Granted(7).split();
+        assert_eq!(grant, Some(7));
+        assert!(denial.is_none());
+        let (grant, denial) = Decision::<i32>::Declined(None).split();
+        assert!(grant.is_none() && denial.is_none());
+        let reason = SpaceDenial::parse(&denial_body("space_role_insufficient"));
+        let (grant, denial) = Decision::<i32>::Declined(reason.clone()).split();
+        assert!(grant.is_none());
+        assert_eq!(denial, reason);
+    }
+}

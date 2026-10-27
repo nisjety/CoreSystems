@@ -10318,3 +10318,677 @@ mod tests {
         assert!(parsed.instructions.is_none());
     }
 }
+
+/// WS03-S5 (typed denial mapping at the real issuers and read routes) and the WS04-S2 / WS04-S3
+/// gateway surface that lives in this module (room topic projection, `features.*`).
+#[cfg(test)]
+mod ws03_s5_ws04_gateway_tests {
+    use super::{
+        forward_owner_grant_mutation, inject_personal_schedule_create_context,
+        inject_personal_thread_context, personal_import_ingress_decision, OwnerGrantMutationRequest,
+    };
+    use crate::config::AppState;
+    use crate::middleware::AuthenticatedUser;
+    use axum::{body::Body, http::Request};
+    use http_body_util::BodyExt;
+    use serde_json::{json, Value};
+    use tower::ServiceExt;
+    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn user() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.com".to_owned(),
+            user_name: "User One".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: None,
+        }
+    }
+
+    /// A Control refusal body as `user-core/internal/spaces/denial.go` writes it.
+    fn typed_denial() -> Value {
+        json!({
+            "error": "Your role cannot do this in the Space.",
+            "code": "space_role_insufficient",
+            "resolvable_by": "space_manager",
+            "details": {
+                "entitlement": "space_posts",
+                "required_roles": ["editor", "owner"],
+                "token": "tttt",
+                "resource_id": "res-1"
+            }
+        })
+    }
+
+    fn state_for(user_core: &MockServer, denials_typed: bool) -> AppState {
+        let mut state = crate::tests::test_state(false);
+        state.user_core_url = user_core.uri();
+        state.space_features.denials_typed = denials_typed;
+        state
+    }
+
+    async fn refusing_control(path: &str, status: u16, body: Value) -> MockServer {
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path(path))
+            .respond_with(ResponseTemplate::new(status).set_body_json(body))
+            .mount(&user_core)
+            .await;
+        user_core
+    }
+
+    /// Asserts the pass-through (flag off) and typed (flag on) shapes of one refusal.
+    fn assert_pass_through(result: Result<(), (axum::http::StatusCode, axum::Json<Value>)>) {
+        let (status, axum::Json(body)) = result.expect_err("a refusal is an error");
+        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(body, typed_denial(), "flag off keeps Control's body byte for byte");
+    }
+
+    fn assert_typed(
+        result: Result<(), (axum::http::StatusCode, axum::Json<Value>)>,
+        operation: &str,
+    ) {
+        let (status, axum::Json(body)) = result.expect_err("a refusal is an error");
+        assert_eq!(status, axum::http::StatusCode::FORBIDDEN, "the status is Control's");
+        assert_eq!(body["error"]["code"], operation);
+        assert_eq!(body["error"]["message"], "Your role cannot do this in the Space.");
+        let details = &body["error"]["details"];
+        assert_eq!(details["reason"], "space_role_insufficient");
+        assert_eq!(details["resolvable_by"], "space_manager");
+        assert_eq!(details["entitlement"], "space_posts");
+        assert_eq!(details["required_roles"], json!(["editor", "owner"]));
+        assert!(details.get("token").is_none() && details.get("resource_id").is_none());
+        assert!(!body.to_string().contains("tttt"));
+    }
+
+    async fn thread_create(state: &AppState) -> Result<(), (axum::http::StatusCode, axum::Json<Value>)> {
+        let mut body = json!({
+            "content": "hello", "space_ref": "room-1", "session_key": "s-1", "idempotency_key": "i-1"
+        });
+        inject_personal_thread_context(state, &user(), "org-1", &mut body).await
+    }
+
+    async fn thread_append(state: &AppState) -> Result<(), (axum::http::StatusCode, axum::Json<Value>)> {
+        let mut body = json!({
+            "content": "hello", "space_ref": "room-1", "thread_id": "thread-1", "idempotency_key": "i-1"
+        });
+        inject_personal_thread_context(state, &user(), "org-1", &mut body).await
+    }
+
+    async fn import(state: &AppState) -> Result<(), (axum::http::StatusCode, axum::Json<Value>)> {
+        let mut input = json!({"space_ref": "personal-1", "sourceType": "upload"});
+        personal_import_ingress_decision(state, &user(), "org-1", &mut input, "import-1")
+            .await
+            .map(|_| ())
+    }
+
+    async fn schedule(state: &AppState) -> Result<(), (axum::http::StatusCode, axum::Json<Value>)> {
+        let mut outbound = json!({
+            "space_ref": "personal-1", "name": "Nightly", "task_template": {"kind": "cron"}
+        });
+        inject_personal_schedule_create_context(
+            state, &user(), "org-1", &mut outbound, "cron-1", "create-1", false,
+        )
+        .await
+    }
+
+    /// Flag off: every issuer refusal reaches the browser exactly as Control wrote it.
+    #[tokio::test]
+    async fn with_the_flag_off_every_issuer_refusal_is_a_byte_identical_pass_through() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let create = refusing_control("/api/v1/internal/spaces/thread-decision", 403, typed_denial()).await;
+        assert_pass_through(thread_create(&state_for(&create, false)).await);
+        let append = refusing_control("/api/v1/internal/spaces/thread-append-decision", 403, typed_denial()).await;
+        assert_pass_through(thread_append(&state_for(&append, false)).await);
+        let imports = refusing_control("/api/v1/internal/spaces/personal-import-decision", 403, typed_denial()).await;
+        assert_pass_through(import(&state_for(&imports, false)).await);
+        let schedules = refusing_control("/api/v1/internal/spaces/schedule-create-decision", 403, typed_denial()).await;
+        assert_pass_through(schedule(&state_for(&schedules, false)).await);
+    }
+
+    /// Flag on: thread create gives `space_thread_not_authorized`, append gives
+    /// `space_post_not_authorized`, import and schedule name their own operation; the status is
+    /// the one Control sent.
+    #[tokio::test]
+    async fn with_the_flag_on_a_typed_issuer_refusal_names_the_refused_operation() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let create = refusing_control("/api/v1/internal/spaces/thread-decision", 403, typed_denial()).await;
+        assert_typed(thread_create(&state_for(&create, true)).await, "space_thread_not_authorized");
+        let append = refusing_control("/api/v1/internal/spaces/thread-append-decision", 403, typed_denial()).await;
+        assert_typed(thread_append(&state_for(&append, true)).await, "space_post_not_authorized");
+        let imports = refusing_control("/api/v1/internal/spaces/personal-import-decision", 403, typed_denial()).await;
+        assert_typed(import(&state_for(&imports, true)).await, "space_import_not_authorized");
+        let schedules = refusing_control("/api/v1/internal/spaces/schedule-create-decision", 403, typed_denial()).await;
+        assert_typed(schedule(&state_for(&schedules, true)).await, "space_schedule_not_authorized");
+    }
+
+    /// The original status survives the mapping, whatever it is.
+    #[tokio::test]
+    async fn the_original_status_is_kept_when_a_refusal_is_mapped() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let create = refusing_control("/api/v1/internal/spaces/thread-decision", 409, typed_denial()).await;
+        let (status, axum::Json(body)) = thread_create(&state_for(&create, true)).await.expect_err("refused");
+        assert_eq!(status, axum::http::StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "space_thread_not_authorized");
+    }
+
+    /// An untyped refusal keeps today's body even with the flag on.
+    #[tokio::test]
+    async fn an_untyped_issuer_refusal_stays_a_pass_through_with_the_flag_on() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let create = refusing_control(
+            "/api/v1/internal/spaces/thread-decision",
+            403,
+            json!({"error": "current shared Space authority required"}),
+        )
+        .await;
+        let (_, axum::Json(body)) = thread_create(&state_for(&create, true)).await.expect_err("refused");
+        assert_eq!(body, json!({"error": "current shared Space authority required"}));
+    }
+
+    /// A Control outage still fails the call, typed or not, and never turns into a success.
+    #[tokio::test]
+    async fn a_control_5xx_still_fails_the_call_with_its_status() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for flag in [false, true] {
+            let create = refusing_control(
+                "/api/v1/internal/spaces/thread-decision",
+                503,
+                json!({"error": "Space authority repository unavailable"}),
+            )
+            .await;
+            let (status, _) = thread_create(&state_for(&create, flag)).await.expect_err("an outage fails");
+            assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE, "flag {flag}");
+        }
+    }
+
+    /// A retrieval refusal on thread create degrades to ungrounded chat even with the flag on;
+    /// the typed mapping applies to the thread decision, never to this degradation.
+    #[tokio::test]
+    async fn a_retrieval_403_on_thread_create_still_degrades_with_the_flag_on() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/thread-decision"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"token": "control-signed-token", "decision": {
+                    "space_ref": "room-1", "decision_ref": "decision-1",
+                    "recipient_audience_ref": "audience-1", "privacy_policy_ref": "privacy-1",
+                    "recipient_audience_revision": 1, "recipient_audience_hash": "sha256:audience-1",
+                    "authority_revision": 7, "resource_authorization_ref": "resource-1",
+                    "action_schema_hash": "sha256:schema", "payload_digest": "sha256:payload",
+                    "idempotency_key": "i-1"
+                }}
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/retrieval-decision"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(typed_denial()))
+            .mount(&user_core)
+            .await;
+        let state = state_for(&user_core, true);
+        let mut body = json!({
+            "content": "hello", "space_ref": "room-1", "session_key": "s-1", "idempotency_key": "i-1"
+        });
+        inject_personal_thread_context(&state, &user(), "org-1", &mut body)
+            .await
+            .expect("a retrieval refusal must not fail the turn");
+        assert_eq!(body["space_context"]["retrieval_decision_token"], "");
+        assert_eq!(body["space_context"]["space_decision_token"], "control-signed-token");
+    }
+
+    /// Owner-grant refusals go through `forward_owner_grant_mutation`: pass-through with the flag
+    /// off, `space_owner_grant_not_authorized` with it on.
+    #[tokio::test]
+    async fn owner_grant_refusal_is_typed_only_with_the_flag_on() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let owner = || {
+            let mut owner = user();
+            owner.auth_role = Some("owner".to_owned());
+            owner.authorized_membership = Some(crate::middleware::AuthorizedMembership {
+                organization_id: "org-1".to_owned(),
+                role: "owner".to_owned(),
+            });
+            owner
+        };
+        for flag in [false, true] {
+            let control =
+                refusing_control("/api/v1/internal/spaces/owner-grant-decision", 403, typed_denial()).await;
+            let response = forward_owner_grant_mutation(
+                &state_for(&control, flag),
+                &owner(),
+                "space-1",
+                "conversation-1",
+                "create",
+                None,
+                OwnerGrantMutationRequest { idempotency_key: "grant-1".to_owned() },
+            )
+            .await;
+            assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+            let body: Value =
+                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+            if flag {
+                assert_eq!(body["error"]["code"], "space_owner_grant_not_authorized");
+                assert_eq!(body["error"]["details"]["reason"], "space_role_insufficient");
+            } else {
+                assert_eq!(body, typed_denial());
+            }
+        }
+    }
+
+    // ---- read routes ---------------------------------------------------------------------
+
+    fn membership_ok() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({
+            "data": {"space_ref": "space-room", "kind": "room", "role": "editor"}
+        }))
+    }
+
+    /// Drives one Space read route through the real router. `read_decision` answers
+    /// `thread-read-decision` (both audiences), `retrieval_decision` answers `retrieval-decision`
+    /// and `membership` answers the membership read. Returns status, body and the Model Gateway
+    /// mock.
+    async fn read_route(
+        uri: &str,
+        denials_typed: bool,
+        read_decision: ResponseTemplate,
+        retrieval_decision: ResponseTemplate,
+        membership: ResponseTemplate,
+    ) -> (u16, Value, MockServer) {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+        for slug in ["session-core", "capability-core", "sandbox-manager", "data-plane"] {
+            Mock::given(wm_method("GET"))
+                .and(wm_path(format!("/api/{slug}/token")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"token": "plane-token"})))
+                .mount(&auth)
+                .await;
+        }
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId":"user-1", "orgId":"org-1", "role":"member", "onboardingStatus":"COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces/space-room/membership"))
+            .respond_with(membership)
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/thread-read-decision"))
+            .respond_with(read_decision)
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/retrieval-decision"))
+            .respond_with(retrieval_decision)
+            .mount(&user_core)
+            .await;
+        let application = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": [
+                {"spaceRef":"space-room","name":"AQUATIQ AS","kind":"room","lifecycle":"active"}
+            ]})))
+            .mount(&application)
+            .await;
+        let model_gateway = MockServer::start().await;
+        let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        state.model_gateway_url = model_gateway.uri();
+        state.space_features.denials_typed = denials_typed;
+        let response = crate::build_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("cookie", "better-auth.session_token=session-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap_or(Value::Null);
+        (status, body, model_gateway)
+    }
+
+    fn gap<'a>(body: &'a Value, section: &str) -> &'a Value {
+        body["data"]["unavailable"]
+            .as_array()
+            .expect("gap list")
+            .iter()
+            .find(|gap| gap["section"] == section)
+            .unwrap_or_else(|| panic!("no {section} gap in {body}"))
+    }
+
+    fn decline(status: u16, body: Value) -> ResponseTemplate {
+        ResponseTemplate::new(status).set_body_json(body)
+    }
+
+    /// Work tab: a typed thread-read decline adds `details` to the runs and processes gaps and
+    /// keeps `section`, `code` and `reason`; with the flag off the gaps are today's.
+    #[tokio::test]
+    async fn work_gaps_carry_details_only_with_the_flag_on_and_keep_their_strings() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, _) = read_route(
+            "/api/v1/spaces/space-room/work",
+            true,
+            decline(403, typed_denial()),
+            decline(403, typed_denial()),
+            membership_ok(),
+        )
+        .await;
+        assert_eq!(status, 200);
+        for (section, code) in [("runs", "runs_read_not_authorized"), ("processes", "processes_read_not_authorized")] {
+            let entry = gap(&body, section);
+            assert_eq!(entry["code"], code);
+            assert!(entry["reason"].as_str().is_some_and(|reason| !reason.is_empty()));
+            assert_eq!(entry["details"]["reason"], "space_role_insufficient");
+            assert_eq!(entry["details"]["resolvable_by"], "space_manager");
+            assert_eq!(entry["details"]["entitlement"], "space_posts");
+            assert!(entry["details"].get("token").is_none());
+        }
+
+        let (status, body, _) = read_route(
+            "/api/v1/spaces/space-room/work",
+            false,
+            decline(403, typed_denial()),
+            decline(403, typed_denial()),
+            membership_ok(),
+        )
+        .await;
+        assert_eq!(status, 200);
+        for (section, code) in [("runs", "runs_read_not_authorized"), ("processes", "processes_read_not_authorized")] {
+            let entry = gap(&body, section);
+            assert_eq!(entry["code"], code);
+            assert!(entry.get("details").is_none(), "flag off adds nothing: {entry}");
+        }
+    }
+
+    /// A 404 (older Control) or an untyped decline names the gap without details, flag on.
+    #[tokio::test]
+    async fn an_untyped_or_missing_endpoint_decline_adds_no_details() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for template in [
+            decline(404, json!({"error": "not found"})),
+            decline(403, json!({"error": "not entitled"})),
+        ] {
+            let (status, body, _) = read_route(
+                "/api/v1/spaces/space-room/work",
+                true,
+                template,
+                decline(403, json!({"error": "not entitled"})),
+                membership_ok(),
+            )
+            .await;
+            assert_eq!(status, 200);
+            let entry = gap(&body, "runs");
+            assert_eq!(entry["code"], "runs_read_not_authorized");
+            assert!(entry.get("details").is_none(), "{entry}");
+        }
+    }
+
+    /// Control 5xx on the read decision still fails the call instead of being named as a gap.
+    #[tokio::test]
+    async fn a_control_5xx_on_the_read_decision_still_fails_the_work_call() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for flag in [false, true] {
+            let (status, _body, _) = read_route(
+                "/api/v1/spaces/space-room/work",
+                flag,
+                decline(503, json!({"error": "down"})),
+                decline(503, json!({"error": "down"})),
+                membership_ok(),
+            )
+            .await;
+            assert_eq!(status, 503, "flag {flag}");
+        }
+    }
+
+    /// Knowledge tab: the retrieval decline gap gets details with the flag on.
+    #[tokio::test]
+    async fn knowledge_gap_carries_details_with_the_flag_on() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, _) = read_route(
+            "/api/v1/spaces/space-room/knowledge",
+            true,
+            decline(403, typed_denial()),
+            decline(403, typed_denial()),
+            membership_ok(),
+        )
+        .await;
+        assert_eq!(status, 200);
+        let entry = gap(&body, "knowledge");
+        assert_eq!(entry["code"], "knowledge_read_not_authorized");
+        assert_eq!(entry["details"]["reason"], "space_role_insufficient");
+        assert_eq!(entry["details"]["required_roles"], json!(["editor", "owner"]));
+
+        let (_, body, _) = read_route(
+            "/api/v1/spaces/space-room/knowledge",
+            false,
+            decline(403, typed_denial()),
+            decline(403, typed_denial()),
+            membership_ok(),
+        )
+        .await;
+        assert!(gap(&body, "knowledge").get("details").is_none());
+    }
+
+    /// Transcript decline: `space_read_not_authorized` with details and the same message when the
+    /// reason is typed; no details when it is not or the flag is off.
+    #[tokio::test]
+    async fn transcript_decline_carries_details_and_keeps_the_message() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let uri = "/api/v1/spaces/space-room/threads/thread-1/transcript";
+        let message = "Reading this Space's shared conversation is not authorized.";
+        let (status, body, mg) =
+            read_route(uri, true, decline(403, typed_denial()), decline(403, typed_denial()), membership_ok()).await;
+        assert_eq!(status, 403);
+        assert_eq!(body["error"]["code"], "space_read_not_authorized");
+        assert_eq!(body["error"]["message"], message);
+        assert_eq!(body["error"]["details"]["reason"], "space_role_insufficient");
+        assert!(mg.received_requests().await.expect("requests").is_empty());
+
+        for (flag, template) in [
+            (true, decline(403, json!({"error": "not entitled"}))),
+            (true, decline(404, json!({"error": "not found"}))),
+            (false, decline(403, typed_denial())),
+        ] {
+            let (status, body, _) =
+                read_route(uri, flag, template, decline(403, typed_denial()), membership_ok()).await;
+            assert_eq!(status, 403);
+            assert_eq!(body["error"]["code"], "space_read_not_authorized");
+            assert_eq!(body["error"]["message"], message);
+            assert!(body["error"].get("details").is_none(), "{body}");
+        }
+    }
+
+    /// A membership refusal on a read route is typed `space_read_not_authorized` with the flag on
+    /// and Control's own body with it off.
+    #[tokio::test]
+    async fn a_membership_refusal_on_a_read_route_follows_the_flag() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, _) = read_route(
+            "/api/v1/spaces/space-room/work",
+            true,
+            membership_ok(),
+            membership_ok(),
+            decline(403, typed_denial()),
+        )
+        .await;
+        assert_eq!(status, 403);
+        assert_eq!(body["error"]["code"], "space_read_not_authorized");
+        assert_eq!(body["error"]["details"]["reason"], "space_role_insufficient");
+
+        let (status, body, _) = read_route(
+            "/api/v1/spaces/space-room/work",
+            false,
+            membership_ok(),
+            membership_ok(),
+            decline(403, typed_denial()),
+        )
+        .await;
+        assert_eq!(status, 403);
+        assert_eq!(body, typed_denial());
+    }
+
+    // ---- WS04-S2 / WS04-S3: list topic and space_context features --------------------------
+
+    /// Drives `uri` with the Control Space index and Application labels given.
+    async fn json_route(
+        uri: &str,
+        configure: impl FnOnce(&mut AppState),
+        control_spaces: Value,
+        application_spaces: Value,
+    ) -> (u16, Value) {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId":"user-1", "orgId":"org-1", "role":"member", "onboardingStatus":"COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"spaces": control_spaces}})))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces/space-room/membership"))
+            .respond_with(membership_ok())
+            .mount(&user_core)
+            .await;
+        let application = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": application_spaces})))
+            .mount(&application)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        configure(&mut state);
+        let response = crate::build_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("cookie", "better-auth.session_token=session-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap_or(Value::Null);
+        (status, body)
+    }
+
+    /// WS04-S2: the listing carries each room's topic, `null` when none is set.
+    #[tokio::test]
+    async fn the_space_list_carries_the_topic_and_null_when_absent() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body) = json_route(
+            "/api/v1/spaces",
+            |_| {},
+            json!([
+                {"space_ref": "space-room", "kind": "room", "role": "owner"},
+                {"space_ref": "space-plain", "kind": "room", "role": "editor"}
+            ]),
+            json!([
+                {"spaceRef": "space-room", "name": "Leveranse", "kind": "room", "lifecycle": "active", "topic": "Ukens leveranser"},
+                {"spaceRef": "space-plain", "name": "Kantine", "kind": "room", "lifecycle": "active"}
+            ]),
+        )
+        .await;
+        assert_eq!(status, 200);
+        let spaces = body["data"]["spaces"].as_array().expect("spaces");
+        let by_ref = |space_ref: &str| spaces.iter().find(|space| space["space_ref"] == space_ref).expect("space");
+        assert_eq!(by_ref("space-room")["topic"], "Ukens leveranser");
+        assert!(by_ref("space-plain")["topic"].is_null());
+        assert!(by_ref("space-plain").as_object().unwrap().contains_key("topic"));
+    }
+
+    /// WS04-S2: the single-Space projection carries the topic too.
+    #[tokio::test]
+    async fn the_space_context_projection_carries_the_topic() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body) = json_route(
+            "/api/v1/spaces/space-room/context",
+            |_| {},
+            json!([]),
+            json!([{"spaceRef": "space-room", "name": "Leveranse", "kind": "room", "lifecycle": "active", "topic": "Ukens leveranser"}]),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["space"]["topic"], "Ukens leveranser");
+        let (_, body) = json_route(
+            "/api/v1/spaces/space-room/context",
+            |_| {},
+            json!([]),
+            json!([{"spaceRef": "space-room", "name": "Leveranse", "kind": "room", "lifecycle": "active"}]),
+        )
+        .await;
+        assert!(body["data"]["space"]["topic"].is_null());
+    }
+
+    /// WS04-S2 and WS04-S3: `features.room_details` and `features.people_search` mirror the
+    /// flags, each reported independently, and both are off in a default state.
+    #[tokio::test]
+    async fn space_context_features_mirror_room_details_and_people_search_flags() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let room = json!([{"spaceRef": "space-room", "name": "Leveranse", "kind": "room", "lifecycle": "active"}]);
+        let mut seen = Vec::new();
+        for (room_details, people_search) in [(false, false), (true, false), (false, true), (true, true)] {
+            let (status, body) = json_route(
+                "/api/v1/spaces/space-room/context",
+                |state| {
+                    state.space_features.room_details_ui = room_details;
+                    state.space_features.people_search_api = people_search;
+                },
+                json!([]),
+                room.clone(),
+            )
+            .await;
+            assert_eq!(status, 200);
+            assert_eq!(body["data"]["features"]["room_details"], room_details);
+            assert_eq!(body["data"]["features"]["people_search"], people_search);
+            seen.push(body["data"]["features"].clone());
+        }
+        assert_ne!(seen[0], seen[1]);
+        assert_ne!(seen[0], seen[2]);
+    }
+}

@@ -949,4 +949,50 @@ mod tests {
             assert!(!super::SpaceFeatureFlags::from_env().policy_admin_api);
         });
     }
+
+    /// WS03-S5, WS04-S2, WS04-S3 and WS04-S6: the typed-denial, room-details, people-search and
+    /// membership-writer flags are off in production when unset, on in development, and honour an
+    /// explicit value in both.
+    #[test]
+    fn ws03_s5_and_ws04_flags_follow_the_space_flag_rule() {
+        let keys = [
+            "SPACE_DENIALS_TYPED",
+            "SPACE_ROOM_DETAILS_UI",
+            "SPACE_PEOPLE_SEARCH_API",
+            "SPACE_MEMBERSHIP_WRITER_API",
+        ];
+        let vars = |app_env: &'static str, value: Option<&'static str>| {
+            let mut vars = vec![("APP_ENV", Some(app_env))];
+            vars.extend(keys.iter().map(|key| (*key, value)));
+            vars
+        };
+        with_env(&vars("production", None), || {
+            let flags = super::SpaceFeatureFlags::from_env();
+            assert!(!flags.denials_typed);
+            assert!(!flags.room_details_ui);
+            assert!(!flags.people_search_api);
+            assert!(!flags.membership_writer_api);
+        });
+        with_env(&vars("development", None), || {
+            let flags = super::SpaceFeatureFlags::from_env();
+            assert!(flags.denials_typed);
+            assert!(flags.room_details_ui);
+            assert!(flags.people_search_api);
+            assert!(flags.membership_writer_api);
+        });
+        with_env(&vars("production", Some("true")), || {
+            let flags = super::SpaceFeatureFlags::from_env();
+            assert!(flags.denials_typed);
+            assert!(flags.room_details_ui);
+            assert!(flags.people_search_api);
+            assert!(flags.membership_writer_api);
+        });
+        with_env(&vars("development", Some("false")), || {
+            let flags = super::SpaceFeatureFlags::from_env();
+            assert!(!flags.denials_typed);
+            assert!(!flags.room_details_ui);
+            assert!(!flags.people_search_api);
+            assert!(!flags.membership_writer_api);
+        });
+    }
 }

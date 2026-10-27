@@ -83,6 +83,7 @@ test('the live Space fragments are discovered and carry the moved base actions',
 for (const [fragment, ids] of [
   ['ws01.ts', ['spaces.create_post', 'spaces.reply_in_thread']],
   ['ws03.ts', ['spaces.set_effect_entitlements', 'spaces.apply_effect_preset']],
+  ['ws04.ts', ['spaces.update_room_details', 'spaces.change_member_role', 'spaces.leave_room']],
 ]) {
   test(`${fragment} action ids are in the registry set and reach a gateway dispatcher`, () => {
     const fragmentSource = fs.readFileSync(path.join(spaceFragmentsDirectory, fragment), 'utf8');
@@ -101,3 +102,23 @@ for (const [fragment, ids] of [
     }
   });
 }
+
+// WS04-S2 and WS04-S6: the room admin actions are human-only. None of them may become model
+// executable: their model-access row is a closed `none` with `eligible: false`, so the catalog
+// manifest and the agent tool list never offer them.
+test('the WS04 room admin actions are not model executable', () => {
+  const modelAccessSource = fs.readFileSync(
+    path.join(verevonDirectory, 'src/shared/actions/model-access.ts'),
+    'utf8',
+  );
+  for (const actionId of [
+    'spaces.update_room_details',
+    'spaces.change_member_role',
+    'spaces.leave_room',
+  ]) {
+    const row = modelAccessSource.match(new RegExp(`'${actionId.replace('.', '\\.')}':\\s*([^\\n]+)`));
+    assert.ok(row, `${actionId} has a model-access row`);
+    assert.match(row[1], /^exempt\(/, `${actionId} is a closed (access none) row`);
+    assert.doesNotMatch(row[1], /eligible:\s*true/, `${actionId} must not be eligible`);
+  }
+});
