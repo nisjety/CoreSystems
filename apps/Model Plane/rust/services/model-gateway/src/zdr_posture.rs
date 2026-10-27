@@ -845,6 +845,9 @@ mod tests {
             // gated too, since a waived run never owns a question.
             ("http_routes.rs", "list_run_questions"),
             ("http_routes.rs", "answer_run_question"),
+            // Human posts in a Space room (WS01-S4) store free text under a member's name.
+            ("space_routes/posts.rs", "create_space_post"),
+            ("space_routes/posts.rs", "append_space_post"),
         ];
         let mut missing = Vec::new();
         for (file, function) in DURABLE_MUTATIONS {
@@ -1177,6 +1180,22 @@ mod tests {
                     .into_owned();
                 let text = std::fs::read_to_string(&path).expect("a source file is readable");
                 files.push((name, text));
+            }
+        }
+        // Space room routes live one level down and are named by subpath, so a function in
+        // `space_routes/` is found by the same scans as a top-level one (WS01-S4, K2-04).
+        let space_routes = source_dir().join("space_routes");
+        if let Ok(entries) = std::fs::read_dir(&space_routes) {
+            for entry in entries {
+                let path = entry.expect("a directory entry").path();
+                if path.extension().is_some_and(|ext| ext == "rs") {
+                    let name = format!(
+                        "space_routes/{}",
+                        path.file_name().expect("a file name").to_string_lossy()
+                    );
+                    let text = std::fs::read_to_string(&path).expect("a source file is readable");
+                    files.push((name, text));
+                }
             }
         }
         files.sort();

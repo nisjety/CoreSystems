@@ -349,6 +349,156 @@ pub fn send_receipt_id(
         .filter(|key| crate::queued_input::valid_client_message_id(key))
 }
 
+/// What Session Core stored for a human post (WS01-S4): the row's id and sequence, and whether the
+/// caller's `client_message_id` had already been stored (the repeat wrote nothing).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PostReceipt {
+    pub message_id: String,
+    pub sequence: u64,
+    pub deduplicated: bool,
+}
+
+/// Why a create-and-post did not finish.
+#[derive(Debug)]
+pub(crate) enum SpacePostError {
+    /// The thread could not be created; nothing was stored.
+    Create(tonic::Status),
+    /// The thread exists under `thread_id` but the post was not stored.
+    Append {
+        thread_id: String,
+        status: tonic::Status,
+    },
+}
+
+/// Append one human `post` (never a run, never a turn) to a thread. `space` is the Control decision
+/// the BFF minted for this post (a member's v2 `thread:append` decision); `None` is the decision-less
+/// first row of a thread its caller just created.
+pub(crate) async fn append_post_message(
+    client: &mut mp_contracts::model_plane::v1::session_core_client::SessionCoreClient<
+        tonic::transport::Channel,
+    >,
+    thread_id: &str,
+    content: &str,
+    bearer: &str,
+    space: Option<&ThreadSpaceContext>,
+    client_message_id: &str,
+) -> Result<PostReceipt, tonic::Status> {
+    let (space_id, space_decision_ref, recipient_audience_ref, recipient_audience_revision) = space
+        .map(|space| {
+            (
+                space.space_id.clone(),
+                space.space_decision_ref.clone(),
+                space.recipient_audience_ref.clone(),
+                space.recipient_audience_revision,
+            )
+        })
+        .unwrap_or_default();
+    let (recipient_audience_hash, privacy_policy_ref, authority_revision) = space
+        .map(|space| {
+            (
+                space.recipient_audience_hash.clone(),
+                space.privacy_policy_ref.clone(),
+                space.authority_revision,
+            )
+        })
+        .unwrap_or_default();
+    let (resource_authorization_ref, space_decision_token, action_schema_hash, payload_digest, idempotency_key) =
+        space
+            .map(|space| {
+                (
+                    space.resource_authorization_ref.clone(),
+                    space.space_decision_token.clone(),
+                    space.action_schema_hash.clone(),
+                    space.payload_digest.clone(),
+                    space.idempotency_key.clone(),
+                )
+            })
+            .unwrap_or_default();
+    let request = authenticated_request(
+        AppendMessageRequest {
+            thread_id: thread_id.to_owned(),
+            // Fixed: a post is a human row. The caller never names a role.
+            role: "user".to_owned(),
+            content: content.to_owned(),
+            metadata: None,
+            agent_name: String::new(),
+            space_id,
+            space_decision_ref,
+            recipient_audience_ref,
+            recipient_audience_revision,
+            recipient_audience_hash,
+            privacy_policy_ref,
+            authority_revision,
+            resource_authorization_ref,
+            space_decision_token,
+            action_schema_hash,
+            payload_digest,
+            idempotency_key,
+            client_message_id: client_message_id.to_owned(),
+            post_kind: "post".to_owned(),
+            ..Default::default()
+        },
+        Some(bearer),
+    )
+    .map_err(|_| tonic::Status::unauthenticated("verified session credential required"))?;
+    client.append_message(request).await.map(|response| {
+        let response = response.into_inner();
+        PostReceipt {
+            message_id: response.message_id,
+            sequence: response.sequence,
+            deduplicated: response.deduplicated,
+        }
+    })
+}
+
+/// Create (get-or-create on `session_key`) a Space thread under the BFF's create decision and store
+/// its first human post under `client_message_id`. No run is started. A retry with the same keys
+/// finds the thread again and the post by its id.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn create_space_post_thread(
+    state: &AppState,
+    bearer: &VerifiedSessionBearer,
+    org_id: &str,
+    user_id: &str,
+    session_key: &str,
+    space: &ThreadSpaceContext,
+    content: &str,
+    client_message_id: &str,
+) -> Result<(String, PostReceipt), SpacePostError> {
+    let mut client = state.session_client.clone();
+    let thread_id = create_thread(
+        &mut client,
+        Some(session_key),
+        org_id,
+        user_id,
+        Some(bearer.as_str()),
+        Some(space),
+    )
+    .await
+    .map_err(|error| {
+        SpacePostError::Create(
+            error
+                .downcast_ref::<tonic::Status>()
+                .cloned()
+                .unwrap_or_else(|| tonic::Status::unavailable("session-core create_thread failed")),
+        )
+    })?;
+    let receipt = append_post_message(
+        &mut client,
+        &thread_id,
+        content,
+        bearer.as_str(),
+        None,
+        client_message_id,
+    )
+    .await
+    .map_err(|status| SpacePostError::Append {
+        thread_id: thread_id.clone(),
+        status,
+    })?;
+    Ok((thread_id, receipt))
+}
+
 /// Ensure the request has a thread, persist the user prompt, and create a run.
 ///
 /// # Errors

@@ -220,6 +220,9 @@ services:
       # Shared-Space transcript reads return only allowlisted metadata keys
       # (WS07-S9a). `1` restores the old pass-through (kill switch only).
       SPACE_ROOM_METADATA_LEGACY_PASSTHROUGH: ${SPACE_ROOM_METADATA_LEGACY_PASSTHROUGH:-false}
+      # Human post routes (WS01-S4): POST /v1/threads and POST /v1/threads/:id/messages.
+      # Off unless an explicit on-word; a rollout control, never an authorization input.
+      SPACE_HUMAN_POSTS_API: ${SPACE_HUMAN_POSTS_API:-0}
       # Empty by default = "Verevon Auto": inference-core resolves an unpinned
       # request to the configured provider's own default (per-provider), so chat
       # works with whichever provider key is set (Anthropic-only, OpenAI-only,

@@ -11,6 +11,7 @@
 use axum::Router;
 
 mod artifacts;
+mod posts;
 
 use crate::state::AppState;
 
@@ -19,4 +20,5 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .merge(crate::space_sse::router())
         .merge(artifacts::router())
+        .merge(posts::router())
 }

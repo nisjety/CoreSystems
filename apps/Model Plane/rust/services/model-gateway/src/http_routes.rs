@@ -958,7 +958,7 @@ fn should_resume_granted_approval(
     ))
 }
 
-fn require_non_zdr_durable_mutation(claims: &Claims) -> Result<(), HttpJsonError> {
+pub(crate) fn require_non_zdr_durable_mutation(claims: &Claims) -> Result<(), HttpJsonError> {
     let zdr = crate::zdr_posture::zdr_or_refuse(claims, &crate::zdr_posture::Route::plain(false))?;
     if !zdr {
         return Ok(());
@@ -9176,6 +9176,10 @@ struct ThreadMessage {
     /// string". Presentation identity, never an authority claim.
     #[serde(skip_serializing_if = "String::is_empty")]
     author_subject_id: String,
+    /// `post` for a human message written to the room; omitted for a conversation turn
+    /// (`turn`, or a row from before post kinds), so a turn keeps the shape it always had.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    post_kind: String,
     /// The turn's persisted evidence, flattened so its keys (today
     /// `grounding`) sit directly on the message the way the live SSE path
     /// delivers them. Omitted entirely for turns recorded before metadata was
@@ -9248,6 +9252,18 @@ struct ThreadSummaryResponse {
     /// Set when the owner archived the thread; omitted for an active thread.
     #[serde(skip_serializing_if = "String::is_empty")]
     archived_at: String,
+    /// Replies after the first message, under the reader's audience ceiling (Session Core's
+    /// count); omitted when zero so a thread without replies keeps its shape.
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    reply_count: u32,
+    /// Who wrote the latest human row; omitted when Session Core names none.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    last_author_subject_id: String,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Serialize)]
@@ -9494,6 +9510,8 @@ async fn list_threads(
             owner_subject_id: thread.owner_subject_id,
             persona_enabled: thread.persona_enabled,
             archived_at: timestamp_to_rfc3339(thread.archived_at),
+            reply_count: thread.reply_count,
+            last_author_subject_id: thread.last_author_subject_id,
         })
         .collect();
 
@@ -10057,6 +10075,7 @@ async fn list_thread_messages(
                 content: m.content,
                 agent_name: m.agent_name,
                 author_subject_id: m.author_subject_id,
+                post_kind: if m.post_kind == "post" { m.post_kind } else { String::new() },
                 metadata: crate::room_metadata::visible_metadata(
                     m.metadata.as_ref().map(prost_struct_to_json).and_then(
                         |value| match value {
