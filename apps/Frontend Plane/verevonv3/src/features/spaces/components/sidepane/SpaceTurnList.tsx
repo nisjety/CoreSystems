@@ -4,10 +4,13 @@ import { For, Show } from 'solid-js'
 import { ChatMarkdown } from '@/features/chat/components/ChatMessages'
 import type { ChatArtifact } from '@/features/chat/components/chat-types'
 import { SpaceArtifactChip } from '../SpaceArtifactChip'
-import type { SpaceAgent, SpaceRosterMember } from '@/shared/api/spaces-client'
+import type { SpaceAgent, SpaceRosterMember, SpaceThread } from '@/shared/api/spaces-client'
 import { useI18n } from '@/shared/i18n'
 import { AgentAvatar } from '../AgentAvatar'
+import { SpaceIdentityHoverCard } from '../SpaceIdentityHoverCard'
 import { agentAvatarColor, agentForName } from '../../lib/agent-avatar'
+import { agentCardModel, memberCardModel } from '../../lib/agent-activity'
+import type { IdentityCardModel } from '../../lib/agent-activity'
 
 /**
  * The rows of one thread, read-only. Extracted from the room timeline so the
@@ -118,6 +121,13 @@ export interface SpaceTurnListProps {
    */
   readonly agents?: () => readonly SpaceAgent[]
   /**
+   * The room's threads and this list's own thread id. When `threads` is given,
+   * the author names open the identity hover card (the side pane omits it and
+   * keeps plain names).
+   */
+  readonly threads?: () => readonly SpaceThread[]
+  readonly threadId?: string
+  /**
    * When provided, an assistant turn's artifacts render as chips under it and
    * pressing one calls this with the artifact id. Absent (the side pane), the
    * artifacts are not shown and an artifact-only turn renders no row at all.
@@ -130,6 +140,33 @@ export function SpaceTurnList(props: SpaceTurnListProps) {
   const authorOf = (turn: TranscriptTurn) =>
     resolveAuthorName(turn.authorSubjectId, props.roster(), props.viewerSubjectId?.(), i18n.tr)
   // A turn with no text is only a row when its artifacts can be shown.
+  const cardFor = (turn: TranscriptTurn): IdentityCardModel | undefined => {
+    const threads = props.threads?.()
+    if (!threads) return undefined
+    const name = turn.role === 'assistant' ? turn.agentName ?? props.agentName : authorOf(turn)
+    if (turn.role === 'user') {
+      return turn.authorSubjectId
+        ? memberCardModel({ name, subjectId: turn.authorSubjectId, roster: props.roster(), threads })
+        : undefined
+    }
+    const agents = props.agents?.() ?? []
+    const agent = agentForName(agents, name)
+    if (!agent) return undefined
+    return agentCardModel({
+      name,
+      agent,
+      agents,
+      threads,
+      color: agentAvatarColor(agent),
+      roster: props.roster(),
+      turns: props.turns().map((entry) => ({
+        threadId: props.threadId,
+        role: entry.role,
+        agentName: entry.agentName,
+        content: entry.content,
+      })),
+    })
+  }
   const visibleTurns = () =>
     props.turns().filter((turn) => turn.content.length > 0 || (props.onOpenArtifact && (turn.artifacts?.length ?? 0) > 0))
   return (
@@ -158,6 +195,7 @@ export function SpaceTurnList(props: SpaceTurnListProps) {
               // happens to be reading.
               author={turn.role === 'assistant' ? turn.agentName ?? props.agentName : authorOf(turn)}
               isAgent={turn.role === 'assistant'}
+              card={cardFor(turn)}
             />
             <Show
               when={turn.role === 'assistant'}
@@ -185,11 +223,20 @@ export function SpaceTurnList(props: SpaceTurnListProps) {
   )
 }
 
-export function PostTurnHeader(props: { readonly author: string; readonly isAgent?: boolean }) {
+export function PostTurnHeader(props: {
+  readonly author: string
+  readonly isAgent?: boolean
+  /** When present, the name opens the identity hover card. */
+  readonly card?: IdentityCardModel
+}) {
   const i18n = useI18n()
   return (
     <div class="verevon-room-turn__header">
-      <strong class="verevon-room-turn__author">{props.author}</strong>
+      <strong class="verevon-room-turn__author">
+        <Show when={props.card} fallback={props.author}>
+          {(card) => <SpaceIdentityHoverCard model={card()}>{props.author}</SpaceIdentityHoverCard>}
+        </Show>
+      </strong>
       <Show when={props.isAgent}>
         <span class="verevon-room-turn__agent-chip">
           <Bot size={12} aria-hidden="true" />

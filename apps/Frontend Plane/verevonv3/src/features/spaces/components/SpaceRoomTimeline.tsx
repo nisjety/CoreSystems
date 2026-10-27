@@ -12,6 +12,8 @@ import {
 import { AgentAvatar } from './AgentAvatar'
 import { SpaceApprovalPanel } from './SpaceApprovalPanel'
 import { agentAvatarColor, agentForName } from '../lib/agent-avatar'
+import { agentCardModel, memberCardModel } from '../lib/agent-activity'
+import type { IdentityCardModel } from '../lib/agent-activity'
 import { PostTurnHeader, SpaceTurnList, normalizeTranscriptTurns, resolveAuthorName } from './sidepane/SpaceTurnList'
 import type { TranscriptTurn } from './sidepane/SpaceTurnList'
 import { SpaceRestrictedNotice } from './SpaceRestrictedNotice'
@@ -135,6 +137,7 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
             <SpaceRoomPost
               spaceRef={props.spaceRef}
               thread={thread}
+              threads={props.threads}
               roster={props.roster}
               viewerSubjectId={props.viewerSubjectId}
               agentName={agentName()}
@@ -158,6 +161,8 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
 function SpaceRoomPost(props: {
   readonly spaceRef: string
   readonly thread: SpaceThread
+  /** Every thread in the room, for the identity hover card's activity line. */
+  readonly threads: () => readonly SpaceThread[]
   readonly roster: () => readonly SpaceRosterMember[]
   readonly viewerSubjectId?: () => string | undefined
   readonly agentName: string
@@ -222,6 +227,36 @@ function SpaceRoomPost(props: {
   // own owner started it.
   const starterName = () =>
     resolveAuthorName(props.thread.owner_subject_id, props.roster(), props.viewerSubjectId?.(), i18n.tr)
+  // Identity hover cards: the post's starter (a member) and the working agent.
+  // No card when the author or agent cannot be pinned down.
+  const starterCard = (): IdentityCardModel | undefined =>
+    props.thread.owner_subject_id
+      ? memberCardModel({
+          name: starterName(),
+          subjectId: props.thread.owner_subject_id,
+          roster: props.roster(),
+          threads: props.threads(),
+        })
+      : undefined
+  const workingCard = (): IdentityCardModel | undefined => {
+    const agents = props.agents()
+    const agent = agentForName(agents, props.agentName)
+    if (!agent) return undefined
+    return agentCardModel({
+      name: props.agentName,
+      agent,
+      agents,
+      threads: props.threads(),
+      color: agentAvatarColor(agent),
+      roster: props.roster(),
+      turns: turns().map((turn) => ({
+        threadId: props.thread.thread_id,
+        role: turn.role,
+        agentName: turn.agentName,
+        content: turn.content,
+      })),
+    })
+  }
   const isFailed = () => FAILED_RUN_STATUSES.has(props.thread.latest_run_status ?? '')
   // Someone's agent is producing output in this post right now, per the
   // server's projection. This is what every OTHER member sees while a turn
@@ -303,7 +338,7 @@ function SpaceRoomPost(props: {
               <MessageCircle size={14} />
             </span>
             <div class="verevon-room-turn__content">
-              <PostTurnHeader author={starterName()} />
+              <PostTurnHeader author={starterName()} card={starterCard()} />
               <p class="verevon-room-turn__plain">
                 {(props.thread.preview && stripMarkdownPreview(props.thread.preview))
                   || props.thread.title?.trim()
@@ -337,6 +372,8 @@ function SpaceRoomPost(props: {
           viewerSubjectId={props.viewerSubjectId}
           agentName={props.agentName}
           agents={props.agents}
+          threads={props.threads}
+          threadId={props.thread.thread_id}
           onOpenArtifact={props.artifactsOn ? setOpenArtifactId : undefined}
         />
       </Show>
@@ -380,7 +417,7 @@ function SpaceRoomPost(props: {
             color={agentAvatarColor(agentForName(props.agents(), props.agentName))}
           />
           <div class="verevon-room-turn__content">
-            <PostTurnHeader author={props.agentName} isAgent />
+            <PostTurnHeader author={props.agentName} isAgent card={workingCard()} />
             <p class="verevon-room-turn__working">
               <span class="verevon-room-turn__working-dots" aria-hidden="true" />
               {props.thread.latest_run_status === 'queued'

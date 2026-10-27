@@ -36,7 +36,9 @@ import {
   threadTitle,
 } from '../lib/space-thread-presentation'
 import { AgentAvatar } from './AgentAvatar'
+import { SpaceIdentityHoverCard } from './SpaceIdentityHoverCard'
 import { agentAvatarColor } from '../lib/agent-avatar'
+import { agentCardModel } from '../lib/agent-activity'
 import { SpaceBindAgentDialog } from './SpaceBindAgentDialog'
 import { SpaceCockpit } from './SpaceCockpit'
 import { SpaceConfirmButton } from './SpaceConfirmButton'
@@ -479,6 +481,8 @@ export default function SpacePage() {
                       />
                       <SpaceAgentPanel
                         agents={agents}
+                        threads={currentThreads}
+                        roster={() => (roster.error ? [] : roster() ?? [])}
                         spaceRef={current().space.space_ref}
                         canGovern={canCreateAgent(current().membership.role)}
                         onChanged={() => {
@@ -898,6 +902,9 @@ function SpaceInstructionsSection(props: { readonly spaceRef: string; readonly r
  */
 function SpaceAgentPanel(props: {
   readonly agents: ResourceAccessor<readonly SpaceAgent[]>
+  /** Room threads and roster, for the identity hover card's activity line. */
+  readonly threads?: () => readonly SpaceThread[]
+  readonly roster?: () => readonly SpaceRosterMember[]
   readonly spaceRef: string
   readonly onCreateAgent?: () => void
   readonly onBindAgent?: () => void
@@ -970,6 +977,9 @@ function SpaceAgentPanel(props: {
               {(agent) => (
                 <SpaceAgentCard
                   agent={agent}
+                  allAgents={current}
+                  threads={props.threads}
+                  roster={props.roster}
                   spaceRef={props.spaceRef}
                   canGovern={props.canGovern}
                   onChanged={props.onChanged}
@@ -986,6 +996,9 @@ function SpaceAgentPanel(props: {
 /** One agent as a room participant. */
 function SpaceAgentCard(props: {
   readonly agent: SpaceAgent
+  readonly allAgents?: () => readonly SpaceAgent[]
+  readonly threads?: () => readonly SpaceThread[]
+  readonly roster?: () => readonly SpaceRosterMember[]
   readonly spaceRef: string
   readonly canGovern: boolean
   readonly onChanged?: () => void
@@ -1060,7 +1073,21 @@ function SpaceAgentCard(props: {
       />
       <div class="verevon-space-agent__body">
         <p class="verevon-space-agent__name">
-          {displayName()}
+          <Show when={agent().identity_published && agent().name?.trim() && props.threads} fallback={displayName()}>
+            <SpaceIdentityHoverCard
+              model={agentCardModel({
+                name: displayName(),
+                agent: agent(),
+                agents: props.allAgents?.() ?? [agent()],
+                threads: props.threads?.() ?? [],
+                turns: [],
+                color: agentAvatarColor(agent()),
+                roster: props.roster?.() ?? [],
+              })}
+            >
+              {displayName()}
+            </SpaceIdentityHoverCard>
+          </Show>
           <Show when={agent().title?.trim()}>
             {(title) => <span class="verevon-space-agent__title"> · {title()}</span>}
           </Show>
