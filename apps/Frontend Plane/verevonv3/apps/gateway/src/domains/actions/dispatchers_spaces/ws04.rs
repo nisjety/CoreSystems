@@ -7,7 +7,9 @@
 use axum::response::Response;
 use serde_json::{json, Map, Value};
 
-use crate::domains::spaces::room_admin::{change_member_role, feature_disabled, remove_member};
+use crate::domains::spaces::room_admin::{
+    change_member_role, feature_disabled, remove_member, update_room_details,
+};
 use crate::middleware::AuthenticatedUser;
 use crate::config::AppState;
 
@@ -59,4 +61,27 @@ pub(in crate::domains::actions) async fn dispatch_spaces_leave_room(
     }
     let (status, axum::Json(resp)) = remove_member(state, user, space_ref, "me").await;
     owner_json_response_to_envelope("spaces.leave_room", user, status, resp)
+}
+
+/// WS04-S2: `spaces.update_room_details`. Rides the same gateway function as
+/// `PATCH /api/v1/spaces/{space_ref}`, so the flag, the owner-or-manager gate and the typed
+/// errors exist once. The id is human-only (never model-executable).
+pub(in crate::domains::actions) async fn dispatch_spaces_update_room_details(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    input: &Value,
+) -> Response {
+    let space_ref = ticket_string(input, "spaceRef");
+    if space_ref.is_empty() {
+        return ticket_bad_request("spaces.update_room_details requires a non-empty 'spaceRef'");
+    }
+    let mut body = Map::new();
+    for field in ["name", "topic"] {
+        if let Some(value) = input.get(field) {
+            body.insert(field.to_owned(), value.clone());
+        }
+    }
+    let (status, axum::Json(resp)) =
+        update_room_details(state, user, space_ref, &Value::Object(body)).await;
+    owner_json_response_to_envelope("spaces.update_room_details", user, status, resp)
 }

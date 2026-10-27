@@ -183,6 +183,12 @@ pub(crate) struct SpaceFeatureFlags {
     /// on its 6 s poll. A rollout control, never an authorization input; an org under Zero Data
     /// Retention gets `poll_only` even when on.
     pub(crate) realtime_stream: bool,
+    /// `SPACE_ROOM_DETAILS_UI` (WS04-S2): `PATCH /api/v1/spaces/{space_ref}` (room name and topic),
+    /// the `spaces.update_room_details` action and `features.room_details`. Off answers 404
+    /// `feature_disabled`. A rollout control, never an authorization input: Control's live role
+    /// (owner or manager) decides who may rename. The topic is a label, so Zero Data Retention
+    /// organizations are unaffected.
+    pub(crate) room_details_ui: bool,
     /// `SPACE_SEND_IDEMPOTENCY_API` (WS01-S5): reported to the SPA as `features.send_idempotency`
     /// (the SPA attaches a client send id to an agent-path send so a retry cannot double-post).
     /// Session Core's dedupe is inert without a key. A rollout control, never an authorization input.
@@ -203,6 +209,7 @@ impl SpaceFeatureFlags {
             membership_writer_api: space_flag("SPACE_MEMBERSHIP_WRITER_API"),
             policy_admin_api: space_flag("SPACE_POLICY_ADMIN_API"),
             realtime_stream: space_flag("SPACE_REALTIME_STREAM"),
+            room_details_ui: space_flag("SPACE_ROOM_DETAILS_UI"),
             send_idempotency_api: space_flag("SPACE_SEND_IDEMPOTENCY_API"),
             thread_pane_ui: space_flag("SPACE_THREAD_PANE_UI"),
         }

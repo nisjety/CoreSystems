@@ -733,6 +733,10 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/spaces/{space_ref}/membership",
             get(current_membership),
         )
+        .route(
+            "/api/v1/spaces/{space_ref}",
+            patch(room_admin::update_room_details_route),
+        )
         .route("/api/v1/spaces/{space_ref}/context", get(space_context))
         .route("/api/v1/spaces/{space_ref}/actions", get(space_actions))
 		.route(
@@ -2935,6 +2939,10 @@ async fn list_personal_spaces(
                         .and_then(Value::as_str)
                         .unwrap_or("Space"),
                     "kind": entry.get("kind").and_then(Value::as_str).unwrap_or("room"),
+                    // Display label from the Application row (WS04-S2); null when none is set.
+                    "topic": label
+                        .and_then(|value| value.get("topic"))
+                        .and_then(Value::as_str),
                     "lifecycle": label
                         .and_then(|value| value.get("lifecycle"))
                         .and_then(Value::as_str)
@@ -4936,6 +4944,7 @@ fn public_space(space: &Value) -> Value {
         "name": space.get("name").and_then(Value::as_str).unwrap_or("Personal Space"),
         "kind": space.get("kind").and_then(Value::as_str).unwrap_or("personal"),
         "lifecycle": space.get("lifecycle").and_then(Value::as_str).unwrap_or_default(),
+        "topic": space.get("topic").and_then(Value::as_str),
     });
     // Emitted for every Space this projects, true or false. The argument is a
     // real Convex record, and Convex stores the flag as `optional(literal(true))`
@@ -5026,6 +5035,7 @@ async fn space_context(
                     "thread_pane": state.space_features.thread_pane_ui,
                     "send_idempotency": state.space_features.send_idempotency_api,
                     "connectivity_banner": state.space_features.connectivity_banner_ui,
+                    "room_details": state.space_features.room_details_ui,
                 },
                 "limits": { "post_max_chars": human_posts::POST_MAX_CHARS },
             }}),

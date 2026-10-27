@@ -392,3 +392,212 @@ pub(super) async fn change_member_role_route(
 ) -> Reply {
     change_member_role(&state, &user, &space_ref, &member_id, &body).await
 }
+
+// ---------------------------------------------------------------------------------------------
+// WS04-S2: room name and topic (`PATCH /api/v1/spaces/{space_ref}`).
+// ---------------------------------------------------------------------------------------------
+
+/// Roles that may rename a room or set its topic. The caller's live role comes from Control's
+/// membership decision (`resolve_space_role`); Application trusts the gateway for the role gate,
+/// exactly as it does for every other `*ForGateway` mutation.
+const DETAILS_ROLES: [&str; 2] = ["owner", "manager"];
+
+/// Raw-body ceiling checked before any upstream call. The authoritative rules (NFC, trim,
+/// whitespace collapse, name 1-120, topic 0-250, no control or bidi characters) live in
+/// Application's `spaceRoomRules.ts` and run on every write; this only refuses an absurd body.
+const DETAILS_RAW_MAX_CHARS: usize = 2000;
+
+fn details_invalid(field: &str, reason: &str) -> Reply {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(error_with_details(
+            "room_details_invalid",
+            "The room name or topic is not valid.",
+            json!({ "field": field, "reason": reason }),
+        )),
+    )
+}
+
+fn details_unavailable() -> Reply {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(error(
+            "room_details_unavailable",
+            "The room details could not be saved. Nothing was changed.",
+        )),
+    )
+}
+
+/// One optional string field of the body: absent or null is "not sent".
+fn details_field(body: &Value, field: &'static str) -> Result<Option<String>, Reply> {
+    match body.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) if text.chars().count() <= DETAILS_RAW_MAX_CHARS => {
+            Ok(Some(text.clone()))
+        }
+        Some(Value::String(_)) => Err(details_invalid(field, "too_long")),
+        Some(_) => Err(details_invalid(field, "not_a_string")),
+    }
+}
+
+/// Runs one Convex mutation and keeps its error text. `convex_gateway_call` drops it, but this
+/// route needs Application's stable messages to answer with a typed code. Convex reports a
+/// thrown error as a non-success status (or `status: "error"`) with an `errorMessage`; `Err(None)`
+/// is every other failure (not configured, unreachable, unreadable).
+async fn convex_mutation_message(
+    state: &AppState,
+    path: &str,
+    mut args: Value,
+) -> Result<Value, Option<String>> {
+    let convex_url = state.application_convex_url.clone();
+    let service_key = state.application_convex_service_key.clone();
+    if convex_url.trim().is_empty() || service_key.trim().is_empty() {
+        return Err(None);
+    }
+    args.as_object_mut()
+        .ok_or(None)?
+        .insert("serviceKey".to_owned(), Value::String(service_key));
+    let response = crate::upstream::send_with_retry(
+        state
+            .client
+            .post(format!("{}/api/mutation", convex_url.trim_end_matches('/')))
+            .json(&json!({ "path": path, "args": args })),
+    )
+    .await
+    .map_err(|_| None)?;
+    let http_ok = response.status().is_success();
+    let body = response.json::<Value>().await.map_err(|_| None)?;
+    if http_ok && body.get("status").and_then(Value::as_str) != Some("error") {
+        return body.get("value").cloned().ok_or(None);
+    }
+    Err(body
+        .get("errorMessage")
+        .and_then(Value::as_str)
+        .map(str::to_owned))
+}
+
+/// `room_details_invalid:<field>:<reason>` out of an Application error message, as validated
+/// tokens only (nothing else from the message is ever returned).
+fn invalid_details_from(message: &str) -> Option<(String, String)> {
+    const PREFIX: &str = "room_details_invalid:";
+    let start = message.find(PREFIX)? + PREFIX.len();
+    let tail = message[start..]
+        .split(|c: char| c.is_whitespace() || c == '"' || c == '\'')
+        .next()
+        .unwrap_or_default();
+    let (field, reason) = tail.split_once(':')?;
+    let token_ok = !reason.is_empty() && reason.chars().all(|c| c.is_ascii_lowercase() || c == '_');
+    (matches!(field, "name" | "topic" | "details") && token_ok)
+        .then(|| (field.to_owned(), reason.to_owned()))
+}
+
+/// Maps Application's stable mutation messages to the typed browser errors.
+fn map_details_failure(message: Option<&str>) -> Reply {
+    let Some(message) = message else {
+        return details_unavailable();
+    };
+    if message.contains("room_details_invalid:") {
+        return match invalid_details_from(message) {
+            Some((field, reason)) => details_invalid(&field, &reason),
+            None => details_invalid("details", "invalid"),
+        };
+    }
+    if message.contains("space_not_found") {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(error("space_not_found", "Space is not available.")),
+        );
+    }
+    if message.contains("space_kind_not_editable") {
+        return (
+            StatusCode::CONFLICT,
+            Json(error(
+                "space_kind_not_editable",
+                "Only a named room can be renamed or given a topic.",
+            )),
+        );
+    }
+    if message.contains("room_not_active") {
+        return (
+            StatusCode::CONFLICT,
+            Json(error("room_not_active", "This room is not active.")),
+        );
+    }
+    details_unavailable()
+}
+
+/// `PATCH /api/v1/spaces/{space_ref}` body `{name?, topic?}`. Owner or manager only, decided from
+/// Control's live membership BEFORE any Application request. An empty topic clears it. The topic
+/// is a display label: it is never composed into a prompt, an event or a notification, so a Zero
+/// Data Retention organization behaves the same and no model is called.
+pub(crate) async fn update_room_details(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    space_ref: &str,
+    body: &Value,
+) -> Reply {
+    if !state.space_features.room_details_ui {
+        return feature_disabled();
+    }
+    let (org_id, space_ref) = match scope(state, user, space_ref).await {
+        Ok(scope) => scope,
+        Err(reply) => return reply,
+    };
+    let name = match details_field(body, "name") {
+        Ok(name) => name,
+        Err(reply) => return reply,
+    };
+    let topic = match details_field(body, "topic") {
+        Ok(topic) => topic,
+        Err(reply) => return reply,
+    };
+    if name.is_none() && topic.is_none() {
+        return details_invalid("details", "empty_update");
+    }
+    match super::resolve_space_role(state, user, &org_id, &space_ref).await {
+        Ok(role) if DETAILS_ROLES.contains(&role.as_str()) => {}
+        Ok(_) => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(error(
+                    "room_role_forbidden",
+                    "Only a room owner or manager can change the room's name or topic.",
+                )),
+            )
+        }
+        Err(refusal) => return refusal,
+    }
+    let mut args = Map::new();
+    args.insert("externalAuthId".to_owned(), json!(user.user_id));
+    args.insert("externalOrgId".to_owned(), json!(org_id));
+    args.insert("spaceRef".to_owned(), json!(space_ref));
+    if let Some(name) = name {
+        args.insert("name".to_owned(), json!(name));
+    }
+    if let Some(topic) = topic {
+        args.insert("topic".to_owned(), json!(topic));
+    }
+    match convex_mutation_message(state, "spaces:updateRoomDetailsForGateway", Value::Object(args))
+        .await
+    {
+        Ok(result) => (
+            StatusCode::OK,
+            Json(json!({"data": {
+                "space_ref": result.get("spaceRef").and_then(Value::as_str).unwrap_or(&space_ref),
+                "name": result.get("name").and_then(Value::as_str).unwrap_or_default(),
+                "topic": result.get("topic").and_then(Value::as_str),
+            }})),
+        ),
+        Err(message) => map_details_failure(message.as_deref()),
+    }
+}
+
+/// Axum handler for `PATCH /api/v1/spaces/{space_ref}`.
+pub(super) async fn update_room_details_route(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(space_ref): Path<String>,
+    Json(body): Json<Value>,
+) -> Reply {
+    update_room_details(&state, &user, &space_ref, &body).await
+}

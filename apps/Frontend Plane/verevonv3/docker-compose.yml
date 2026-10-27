@@ -220,6 +220,9 @@ services:
       SPACE_THREAD_PANE_UI: ${SPACE_THREAD_PANE_UI:-true}
       SPACE_SEND_IDEMPOTENCY_API: ${SPACE_SEND_IDEMPOTENCY_API:-true}
       SPACE_CONNECTIVITY_BANNER_UI: ${SPACE_CONNECTIVITY_BANNER_UI:-true}
+      # WS04-S2: room name and topic (PATCH /api/v1/spaces/{space_ref}). Rollout control only; the
+      # caller's live Control role (owner or manager) decides who may rename.
+      SPACE_ROOM_DETAILS_UI: ${SPACE_ROOM_DETAILS_UI:-true}
     ports:
       - "${VEREVON_BIND_ADDRESS:-127.0.0.1}:3185:3185"
     networks:
