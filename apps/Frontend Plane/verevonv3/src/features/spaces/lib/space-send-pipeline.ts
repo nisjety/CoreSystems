@@ -6,6 +6,7 @@ import type { SubmitPrivacyTier, TurnPrivacyTierResolver } from '@/features/dash
 import type { AiModelSelection } from '@/shared/ai/model-selection'
 import {
   cancelInvocation,
+  resumeStream,
   streamChat,
   type ChatErrorEvent,
   type ChatStreamHandlers,
@@ -15,6 +16,61 @@ import type { Skill } from '@/shared/api/skills-client'
 import { updateSpaceThreadPresentation } from '@/shared/api/spaces-client'
 import { beginOwnStream, endOwnStream } from './space-live-work'
 import type { SpaceComposerModeId } from './space-composer-registry'
+import {
+  noteSendTransportLost,
+  noteSendTransportOk,
+  spaceSendIdempotencyEnabled,
+} from './space-connectivity'
+
+/**
+ * Reliable send on the agent path (WS01-S8, F-t1-033). With the send key on, one
+ * send is named by one `sendId` for its whole life, retries included:
+ *
+ * - `sendId` rides as `idempotency_key` (the gateway's retry identity of a send;
+ *   a repeat of it never dispatches a second run and, with send receipts on, is
+ *   one transcript row);
+ * - a send that opens a NEW thread also carries `session_key: space-post-{sendId}`,
+ *   so a repeat resolves to the thread the first one created instead of minting a
+ *   second (Session Core's create-thread is get-or-create by session key). A reply
+ *   keeps the thread id as its session key, as before;
+ * - a stream that drops after the server announced it is resumed by request id
+ *   (replay from the last frame seen, never from a guess), a bounded number of
+ *   times, before the send is called failed;
+ * - `managed_run_already_started` is the server saying "I already have this send":
+ *   that is acceptance, not an error, and the room's projection shows the run.
+ *
+ * The id matches the `client_send_id` shape the human-post routes take
+ * (`^[A-Za-z0-9_-]{16,64}$`), so one id can name a send on either path.
+ */
+const MAX_RESUMES = 3
+const RESUME_BACKOFF_MS = [1000, 2000, 4000]
+
+/** The stable name of one send: 32 hex characters, no dashes. */
+export function newSpaceSendId(): string {
+  try {
+    return crypto.randomUUID().replace(/-/g, '')
+  } catch {
+    return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 14)}${Math.random().toString(36).slice(2, 14)}`.padEnd(16, '0')
+  }
+}
+
+/** The session key of a send that opens a new thread. */
+export function spaceSendSessionKey(sendId: string): string {
+  return `space-post-${sendId}`
+}
+
+function waitOrAbort(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) return resolve()
+    const timer = setTimeout(done, ms)
+    function done() {
+      clearTimeout(timer)
+      signal.removeEventListener('abort', done)
+      resolve()
+    }
+    signal.addEventListener('abort', done)
+  })
+}
 
 /**
  * The room composer's send pipeline (P-SPA2): everything between "the member
@@ -54,6 +110,16 @@ export type SpaceExchange = {
   errorCode?: string
   /** Whether the stop was recorded server-side, or only cut the local read. */
   stopRecorded?: boolean
+  /**
+   * The send can be repeated under its own key (`pipeline.retry`): set only when the
+   * transport failed and the outcome is unknown, never for an answer the server gave.
+   */
+  retryable?: boolean
+  /**
+   * The server already had this send (`managed_run_already_started`): it is accepted,
+   * its run is in the room's projection, and there is no stream to show here.
+   */
+  acceptedEarlier?: boolean
 }
 
 /** What the composer hands over when a message is sent. */
@@ -66,6 +132,11 @@ export interface SpaceSendInput {
   readonly skills: readonly Skill[]
   /** Set when the message continues an existing room thread. */
   readonly replyThreadId?: string
+  /**
+   * The name of this send. Left out by the composer (the pipeline mints one);
+   * `retry` passes the first attempt's id back so the repeat is the same send.
+   */
+  readonly sendId?: string
 }
 
 /**
@@ -78,6 +149,8 @@ export type SpaceSendStage = 'started' | 'accepted' | 'settled'
 /** What a strategy gets for one send. */
 export interface SpaceSendRun {
   readonly input: SpaceSendInput
+  /** Set only while the send key is on (`spaceSendIdempotencyEnabled`); otherwise the send is keyless as before. */
+  readonly sendId?: string
   readonly spaceRef: string
   readonly signal: AbortSignal
   /** The turn's privacy tier for a selection; may wait (bounded) for the catalogue. */
@@ -110,6 +183,10 @@ const askStrategy: SpaceSendStrategy = async (run) => {
       spaceRef: run.spaceRef,
       mentionedAgentRef: input.mentionedAgentRef,
       threadId: input.replyThreadId,
+      // The send's name (F-t1-033). `sendId` is undefined while the key is off,
+      // which leaves both fields off the wire.
+      clientMessageId: run.sendId,
+      sessionKey: run.sendId && !input.replyThreadId ? spaceSendSessionKey(run.sendId) : undefined,
       // Picked skills ride as actions; chat-client puts their ids on the
       // wire as `skill_ids`, never as tool specs.
       actions: input.skills.length > 0
@@ -145,6 +222,8 @@ export interface SpaceSendPipelineOptions {
   /** The room's own words for a stream error: known codes translated, unknown kept. */
   readonly describeError: (event: ChatErrorEvent) => string
   readonly onStage?: (stage: SpaceSendStage) => void
+  /** Whether a send carries its key and resumes a dropped stream. Defaults to the build-time switch. */
+  readonly sendIdempotency?: () => boolean
 }
 
 export interface SpaceSendPipeline {
@@ -154,6 +233,12 @@ export interface SpaceSendPipeline {
   readonly liveRequestId: () => string | undefined
   readonly send: (input: SpaceSendInput) => Promise<void>
   readonly stop: () => Promise<void>
+  /**
+   * Repeat the last send under its own key. Only when its transport failed (the
+   * exchange says `retryable`): the server then either takes it once or answers
+   * that it already has it, and either way the transcript holds it once.
+   */
+  readonly retry: () => Promise<void>
 }
 
 export function createSpaceSendPipeline(options: SpaceSendPipelineOptions): SpaceSendPipeline {
@@ -168,9 +253,16 @@ export function createSpaceSendPipeline(options: SpaceSendPipelineOptions): Spac
   // new post gets is minted server-side, so it is only known once the stream
   // announces it.
   let liveThreadId: string | undefined
+  // The last send as it left the box, with its name, for `retry`.
+  let lastSend: SpaceSendInput | undefined
+  const idempotencyOn = () => (options.sendIdempotency ?? spaceSendIdempotencyEnabled)()
 
-  async function send(input: SpaceSendInput): Promise<void> {
+  async function send(raw: SpaceSendInput): Promise<void> {
     setSubmitting(true)
+    const reliable = idempotencyOn()
+    const sendId = reliable ? (raw.sendId ?? newSpaceSendId()) : undefined
+    const input: SpaceSendInput = sendId ? { ...raw, sendId } : raw
+    lastSend = input
     const replyThreadId = input.replyThreadId
     setExchange({ userContent: input.content, assistantContent: '', status: 'streaming' })
     options.onStage?.('started')
@@ -181,11 +273,37 @@ export function createSpaceSendPipeline(options: SpaceSendPipelineOptions): Spac
     const openedNewThread = !replyThreadId
     beginOwnStream({ spaceRef: host.spaceRef, threadId: replyThreadId })
 
+    // Reliability state of THIS send. `terminal`: the stream ended with an answer
+    // (done, stopped, or a server error), so a dropped read afterwards is moot.
+    // (Typed through `as` because the handlers below assign these out of sight of flow analysis.)
+    let terminal = false as boolean
+    let announced = false
+    let transportError = undefined as ChatErrorEvent | undefined
+    // The highest numbered frame applied, so a resume asks for the rest and a
+    // frame the server sends again is dropped, never shown twice.
+    let lastFrameId = undefined as string | undefined
+    let appliedThrough = undefined as number | undefined
+    // A resume with no cursor replays the whole answer: start the text over.
+    let restartTextOnNext = false
+
     const handlers: ChatStreamHandlers = {
+      acceptFrame: (id) => {
+        if (!reliable || !id || !/^\d+$/.test(id)) return true
+        const sequence = Number(id)
+        if (appliedThrough !== undefined && sequence <= appliedThrough) return false
+        appliedThrough = sequence
+        return true
+      },
+      onFrameId: (id) => {
+        if (reliable) lastFrameId = id
+      },
       onConnected: (event) => {
         if (event.requestId?.trim()) liveRequestId = event.requestId.trim()
         if (event.threadId?.trim()) liveThreadId = event.threadId.trim()
-        options.onStage?.('accepted')
+        noteSendTransportOk()
+        // A resumed stream announces itself again; the stage is reported once.
+        if (!announced) options.onStage?.('accepted')
+        announced = true
       },
       onTitle: ({ title }) => {
         // Only for a thread this browser opened: the title event fires on a
@@ -207,9 +325,16 @@ export function createSpaceSendPipeline(options: SpaceSendPipelineOptions): Spac
         host.onArtifact(artifact, threadId)
       },
       onMessage: ({ content: delta }) => {
-        setExchange((current) => current && { ...current, assistantContent: current.assistantContent + delta })
+        const restart = restartTextOnNext
+        restartTextOnNext = false
+        setExchange((current) => current && {
+          ...current,
+          assistantContent: (restart ? '' : current.assistantContent) + delta,
+        })
       },
       onDone: () => {
+        terminal = true
+        noteSendTransportOk()
         // A stop that already landed must not be overwritten by a trailing
         // `done`: the server emits `stopped` and may still close the
         // stream normally afterwards.
@@ -220,28 +345,81 @@ export function createSpaceSendPipeline(options: SpaceSendPipelineOptions): Spac
         host.onExchangeSettled?.()
       },
       onStopped: () => {
+        terminal = true
         setExchange((current) =>
           current && { ...current, status: 'stopped', stopRecorded: true },
         )
       },
       onError: (event) => {
+        // The server already has this send: accepted, not failed. There is no
+        // stream of ours to show (the original request owns it); the room's
+        // projection shows the run, so re-read it.
+        if (event.code === 'managed_run_already_started') {
+          terminal = true
+          noteSendTransportOk()
+          setExchange((current) => current && current.status === 'streaming'
+            ? { ...current, status: 'done', acceptedEarlier: true }
+            : current)
+          host.onClearReplyTarget?.()
+          host.onExchangeSettled?.()
+          return
+        }
+        // A dropped read after the server announced the turn: its outcome is
+        // unknown and the run may well be going. Hold the error; the loop below
+        // resumes the stream before calling the send failed.
+        if (reliable && event.code === 'connection_error' && liveRequestId && !terminal) {
+          transportError = event
+          return
+        }
+        terminal = true
         setExchange((current) => current && {
           ...current,
           status: 'error',
           errorCode: event.code,
           errorMessage: options.describeError(event),
+          // A failure to reach the server at all (nothing announced) can be repeated
+          // under the same key; an answer the server gave cannot.
+          ...(reliable && event.code === 'connection_error' ? { retryable: true } : {}),
         })
+        if (reliable && event.code === 'connection_error') noteSendTransportLost()
       },
     }
 
     try {
       await SEND_STRATEGIES[input.mode]({
         input,
+        sendId,
         spaceRef: host.spaceRef,
         signal: controller.signal,
         resolveTier: options.resolveTier,
         handlers,
       })
+      // Resume a stream that dropped after it was announced, a bounded number of
+      // times with growing waits; the run keeps going server-side meanwhile.
+      let resumes = 0
+      while (transportError && !terminal && !controller.signal.aborted && liveRequestId && resumes < MAX_RESUMES) {
+        const waitMs = RESUME_BACKOFF_MS[resumes] ?? RESUME_BACKOFF_MS[RESUME_BACKOFF_MS.length - 1] ?? 1000
+        resumes += 1
+        transportError = undefined
+        await waitOrAbort(waitMs, controller.signal)
+        if (controller.signal.aborted) break
+        restartTextOnNext = lastFrameId === undefined
+        await resumeStream(liveRequestId, handlers, controller.signal, lastFrameId)
+      }
+      if (transportError && !terminal && !controller.signal.aborted) {
+        const lost = transportError
+        terminal = true
+        noteSendTransportLost()
+        setExchange((current) => current && current.status === 'streaming'
+          ? {
+              ...current,
+              status: 'error',
+              errorCode: lost.code,
+              errorMessage: options.describeError(lost),
+              retryable: true,
+            }
+          : current)
+      }
     } catch (error) {
       // An abort we caused is not a failure. Anything else still is.
       if (!(error instanceof DOMException && error.name === 'AbortError') && !controller.signal.aborted) {
@@ -291,5 +469,11 @@ export function createSpaceSendPipeline(options: SpaceSendPipelineOptions): Spac
     }
   }
 
-  return { exchange, submitting, liveRequestId: () => liveRequestId, send, stop }
+  async function retry(): Promise<void> {
+    const again = lastSend
+    if (!again || submitting() || exchange()?.retryable !== true) return
+    await send(again)
+  }
+
+  return { exchange, submitting, liveRequestId: () => liveRequestId, send, stop, retry }
 }

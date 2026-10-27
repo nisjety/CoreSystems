@@ -21,6 +21,7 @@ import {
   type SpaceComposerSlotContext,
 } from '../lib/space-composer-registry'
 import { createSpaceSendPipeline } from '../lib/space-send-pipeline'
+import { SpaceConnectivityBanner } from './SpaceConnectivityBanner'
 import {
   SkillScope,
   SpaceComposerChipSlot,
@@ -448,6 +449,14 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
                       )}
                     </Show>
                     {current().errorMessage}
+                    {/* A dropped connection leaves the outcome unknown, so the send
+                        can be repeated under its own key: the room gets it once. */}
+                    <Show when={current().retryable && !submitting()}>
+                      {' '}
+                      <button type="button" onClick={() => { void pipeline.retry() }}>
+                        {i18n.tr('Prøv igjen', 'Try again')}
+                      </button>
+                    </Show>
                   </p>
                 </Show>
               }
@@ -473,6 +482,16 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
                         'Avbrutt før svaret startet. Kjøringen kan fortsatt fullføre på tjenersiden.',
                         'Cut off before the reply started. The run may still finish server-side.',
                       )}
+              </p>
+            </Show>
+            {/* The server already had this send (a retry of one it took): accepted,
+                not failed. The run shows in the room, not in this block. */}
+            <Show when={current().acceptedEarlier}>
+              <p class="verevon-space-room-exchange__stopped" role="status">
+                {i18n.tr(
+                  'Meldingen var allerede mottatt. Svaret vises i rommet.',
+                  'This message was already received. The reply shows in the room.',
+                )}
               </p>
             </Show>
             <Show when={current().status === 'streaming'}>
@@ -519,6 +538,8 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
               )}
         </p>
       </Show>
+
+      <SpaceConnectivityBanner />
 
       <form onSubmit={(event) => { event.preventDefault(); void submitMessage() }}>
         <Show when={props.replyTarget?.()}>

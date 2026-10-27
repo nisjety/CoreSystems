@@ -214,6 +214,7 @@ const ERROR_COPY: Record<string, ErrorCopy> = {
   // the catalogue modules above.
 
   // WS01 human posts and threads
+  managed_run_already_started: { no: 'Meldingen var allerede mottatt. Svaret vises i rommet.', en: 'This message was already received. The reply shows in the room.' },
 
   // WS02 realtime stream
   rate_limited: { no: 'For mange forespørsler akkurat nå. Rommet oppdateres litt saktere en liten stund.', en: 'Too many requests right now. The room will refresh a little more slowly for a moment.' },
