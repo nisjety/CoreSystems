@@ -109,6 +109,11 @@ set_convex_env "APPLICATION_SPACE_LIFECYCLE_TOKEN" "${APPLICATION_SPACE_LIFECYCL
 # Control. Both must reach the deployment, not just this container.
 set_convex_env "APPLICATION_ORG_CORE_SERVICE_TOKEN" "${APPLICATION_ORG_CORE_SERVICE_TOKEN:-}"
 set_convex_env "CONTROL_SPACE_MEMBERSHIP_BASE_URL" "${CONTROL_SPACE_MEMBERSHIP_BASE_URL:-http://user-core:3012/api/v1/internal/spaces}"
+# WS04-S1 flag space_org_room_reconcile_sync: the 10-minute org-room roster cron
+# and the debounced org-core event hook. Off unless a compose file turns it on
+# (dev compose does; production stays off until enabled). Read by the functions
+# at handler time, so set 0 and `docker restart convex-gateway` to stop it.
+set_convex_env "SPACE_ORG_ROOM_RECONCILE" "${SPACE_ORG_ROOM_RECONCILE:-0}"
 
 # ─────────────────────────────────────────────────────────────────────────
 # Force-deploy functions before starting dev mode.

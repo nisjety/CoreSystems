@@ -11,7 +11,7 @@
  */
 
 import { v } from "convex/values";
-import { internalAction, internalMutation } from "./_generated/server";
+import { internalAction, internalMutation, type MutationCtx } from "./_generated/server";
 import { api, internal } from "./_generated/api";
 import { normalizeProjectionRole, shouldApplyMembershipRemoval } from "./membershipProjection";
 import {
@@ -218,6 +218,17 @@ export const onOrganizationProjectionChanged = internalMutation({
   },
 });
 
+/**
+ * WS04-S1: after a membership projection really changed, ask for a debounced
+ * re-sync of the organization room's roster. The scheduled mutation is gated by
+ * `SPACE_ORG_ROOM_RECONCILE`; a lost schedule is healed by the 10-minute cron.
+ */
+async function requestOrgRoomRosterSync(ctx: MutationCtx, externalOrgId: string) {
+  await ctx.scheduler.runAfter(0, internal.spaceMembershipSync.requestOrganizationRoomSync, {
+    externalOrgId,
+  });
+}
+
 export const onOrganizationMembershipProjectionChanged = internalMutation({
   args: {
     action: v.union(v.literal("upsert"), v.literal("remove")),
@@ -364,6 +375,7 @@ export const onOrganizationMembershipProjectionChanged = internalMutation({
         });
       }
       if (tombstone) await ctx.db.delete(tombstone._id);
+      await requestOrgRoomRosterSync(ctx, args.orgId);
       return { status: membership ? "updated" : "created" };
     }
 
@@ -403,6 +415,7 @@ export const onOrganizationMembershipProjectionChanged = internalMutation({
       )
       .collect();
     for (const session of sessions) await ctx.db.delete(session._id);
+    await requestOrgRoomRosterSync(ctx, args.orgId);
     return { status: membership ? "removed" : "tombstoned" };
   },
 });

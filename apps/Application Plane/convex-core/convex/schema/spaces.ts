@@ -239,4 +239,14 @@ export const spaceTables = {
   })
     .index("by_space", ["spaceRef"])
     .index("by_space_and_subject", ["spaceRef", "externalAuthId"]),
+
+  // WS04-S1: one row per organization with a debounced room-roster sync queued
+  // or running (see `convex/spaceMembershipSync.ts`). Holds an org id and a
+  // timestamp only; the row is deleted when the run finishes.
+  spaceOrgRoomSyncRequests: defineTable({
+    externalOrgId: v.string(),
+    dueAt: v.number(),
+    state: v.union(v.literal("scheduled"), v.literal("running")),
+  })
+    .index("by_external_org", ["externalOrgId"]),
 };

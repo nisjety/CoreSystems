@@ -16,6 +16,7 @@ import type * as authz from "../authz.js";
 import type * as controlSessions from "../controlSessions.js";
 import type * as conversationProjection from "../conversationProjection.js";
 import type * as conversations from "../conversations.js";
+import type * as crons from "../crons.js";
 import type * as http from "../http.js";
 import type * as imports from "../imports.js";
 import type * as ingest from "../ingest.js";
@@ -65,6 +66,7 @@ declare const fullApi: ApiFromModules<{
   controlSessions: typeof controlSessions;
   conversationProjection: typeof conversationProjection;
   conversations: typeof conversations;
+  crons: typeof crons;
   http: typeof http;
   imports: typeof imports;
   ingest: typeof ingest;

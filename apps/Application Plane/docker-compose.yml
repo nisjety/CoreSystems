@@ -151,6 +151,10 @@ services:
             # the credential that registers Spaces.
             APPLICATION_ORG_CORE_SERVICE_TOKEN: ${APPLICATION_ORG_CORE_SERVICE_TOKEN:-}
             CONTROL_SPACE_MEMBERSHIP_BASE_URL: ${CONTROL_SPACE_MEMBERSHIP_BASE_URL:-http://user-core:3012/api/v1/internal/spaces}
+            # WS04-S1 flag space_org_room_reconcile_sync: 10-minute org-room
+            # roster cron plus debounced org-core event hook. On in this dev
+            # compose; a production deployment sets it to 0 until enabled.
+            SPACE_ORG_ROOM_RECONCILE: ${SPACE_ORG_ROOM_RECONCILE:-1}
         volumes:
             # `npx convex dev` (startup.sh) only pushes what it can see. Without this
             # mount /app/convex is the snapshot baked at image-build time, so every
