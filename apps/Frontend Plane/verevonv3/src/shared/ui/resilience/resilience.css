@@ -42,3 +42,23 @@
   gap: 8px;
   margin-top: 8px;
 }
+
+/* New-version banner (WS07-S2). Top centre so it never covers the stale-build notice at the bottom. */
+.new-version-banner {
+  position: fixed;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: calc(100vw - 32px);
+  padding: 8px 12px;
+  border: 1px solid var(--verevon-border, #e7e7e5);
+  border-radius: 12px;
+  background: var(--verevon-surface, #ffffff);
+  color: var(--verevon-text, #1a1a1a);
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.18);
+  font-size: 13px;
+}

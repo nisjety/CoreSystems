@@ -2,6 +2,7 @@ import { fileURLToPath, URL } from 'node:url'
 import { configDefaults, defineConfig } from 'vitest/config'
 import { ViteMcp } from 'vite-plugin-mcp'
 import solid from '@solidjs/vite-plugin'
+import type { Plugin } from 'vite'
 
 // Server-only proxy target (NOT VITE_-prefixed, so it never leaks to the client
 // bundle). VITE_VEREVON_GATEWAY_URL is kept as a fallback for backward compat.
@@ -17,9 +18,48 @@ const isVitest = Boolean(process.env.VITEST)
 // explicitly so normal local Docker/browser work stays reliable.
 const enableViteMcp = process.env.VEREVON_VITE_MCP_ENABLED === 'true'
 
+// Build id (WS07-S2). The Docker `build` stage passes SOURCE_REVISION (the git
+// sha) and BUILD_DATE; outside an image build neither is set and the id is
+// `dev`, which the stale-tab check never treats as a new version. At most 12
+// characters, so the same value fits the diagnostics beacon's `build` field.
+const rawRevision = (process.env.SOURCE_REVISION ?? '').trim()
+const buildId =
+  rawRevision === '' || rawRevision === 'unverified' || rawRevision === 'unknown'
+    ? 'dev'
+    : rawRevision.slice(0, 12)
+const builtAt = (process.env.BUILD_DATE ?? '').trim() || new Date().toISOString()
+// The SPA's client contract version, written to version.json. WS07-S3 owns the
+// constant pair (gateway + SPA) and its parity test; keep this number equal to it.
+const clientContract = 1
+
+// Emits dist/version.json and stamps <meta name="verevon-build"> into index.html.
+// nginx serves /version.json no-store; the SPA and the boot watchdog compare it
+// with the meta value / the compiled-in id to detect a newer deploy.
+function verevonBuildInfo(): Plugin {
+  return {
+    name: 'verevon-build-info',
+    transformIndexHtml() {
+      return [
+        { tag: 'meta', attrs: { name: 'verevon-build', content: buildId }, injectTo: 'head-prepend' },
+      ]
+    },
+    generateBundle() {
+      this.emitFile({
+        type: 'asset',
+        fileName: 'version.json',
+        source: JSON.stringify({ build_id: buildId, built_at: builtAt, client_contract: clientContract }),
+      })
+    },
+  }
+}
+
 export default defineConfig({
+  define: {
+    __VEREVON_BUILD_ID__: JSON.stringify(buildId),
+  },
   plugins: [
     solid(),
+    verevonBuildInfo(),
     // Exposes Vite's dev-time MCP endpoint at /__mcp/sse only when an
     // operator deliberately starts a single-client MCP debugging session.
     !isVitest && enableViteMcp && ViteMcp({

@@ -6,6 +6,7 @@ import { StaleBuildNotice } from '@/app/shell/StaleBuildNotice'
 import { CoreShell } from '@/features/core/components/CoreShell'
 import { SESSION_EXPIRED_EVENT } from '@/shared/api/http'
 import { I18nProvider } from '@/shared/i18n'
+import { NewVersionBanner } from '@/shared/ui/resilience/NewVersionBanner'
 import { clearSession, loadSession } from '@/shared/session/session-store'
 
 export function AppShell(props: { children?: JSX.Element }) {
@@ -34,6 +35,7 @@ export function AppShell(props: { children?: JSX.Element }) {
           <CoreShell>{props.children}</CoreShell>
         </Show>
         <StaleBuildNotice />
+        <NewVersionBanner />
       </QueryProvider>
     </I18nProvider>
   )

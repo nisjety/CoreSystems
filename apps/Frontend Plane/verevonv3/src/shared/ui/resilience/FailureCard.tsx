@@ -1,5 +1,6 @@
-import { createSignal, Show } from 'solid-js'
+import { createEffect, createSignal, Show } from 'solid-js'
 
+import { checkClientVersion } from '@/shared/build/version-check'
 import { useI18n } from '@/shared/i18n'
 import { cn } from '@/shared/lib/cn'
 import { Button } from '@/shared/ui/Button'
@@ -32,6 +33,11 @@ export function FailureCard(props: FailureCardProps) {
   const [copied, setCopied] = createSignal(false)
   const errorClass = () => classifyClientError(props.error)
   const copy = () => FAILURE_COPY[errorClass()]
+
+  // A stale_deploy card means a newer build is probably live: ask now (WS07-S2).
+  createEffect(errorClass, (cls) => {
+    if (cls === 'stale_deploy') void checkClientVersion({ force: true })
+  })
 
   const copyDetails = async () => {
     const details = buildFailureDetails({ errorClass: errorClass(), region: props.region })

@@ -2,6 +2,7 @@
 import { render } from '@solidjs/web'
 import App from '@/app/App'
 import { installChunkRecovery } from '@/app/chunk-recovery'
+import { startVersionCheck } from '@/shared/build/version-check'
 import { RegionBoundary } from '@/shared/ui/resilience/RegionBoundary'
 import 'katex/dist/katex.min.css'
 import '@/styles/global.css'
@@ -22,3 +23,6 @@ render(
 
 // The boot watchdog (WS07-S2) waits for this flag; it means the first render ran.
 ;(window as unknown as { __verevonBoot?: boolean }).__verevonBoot = true
+
+// Stale-tab check (WS07-S2): compares /version.json with this build; shows the banner, never reloads.
+startVersionCheck()

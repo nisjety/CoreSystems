@@ -64,6 +64,13 @@ ENV CI=true
 # find module '@verevon/remote-core'" instead of a legible build error.
 # Mirrors the same fix in the `spa-verify` CI job's workflow step.
 RUN pnpm --filter @verevon/remote-core run build
+# Build id (WS07-S2): vite.config.ts reads these to define __VEREVON_BUILD_ID__
+# and to emit dist/version.json plus <meta name="verevon-build">. ARGs do not
+# cross stages, so they are declared again here, before `pnpm build`. Without
+# them the build id is `dev` and the "new version" banner never shows.
+ARG SOURCE_REVISION=
+ARG BUILD_DATE=
+ENV SOURCE_REVISION=${SOURCE_REVISION}     BUILD_DATE=${BUILD_DATE}
 RUN pnpm build
 
 # Static production image. nginx-unprivileged runs as UID 101 and listens on a
@@ -75,6 +82,7 @@ LABEL org.opencontainers.image.revision="${SOURCE_REVISION}" \
       org.opencontainers.image.created="${BUILD_DATE}"
 
 COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY nginx-security-headers.conf /etc/nginx/snippets/verevon-security-headers.conf
 COPY --from=build --chown=101:101 /app/dist/ /usr/share/nginx/html/
 
 EXPOSE 8080
