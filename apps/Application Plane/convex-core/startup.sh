@@ -114,6 +114,16 @@ set_convex_env "CONTROL_SPACE_MEMBERSHIP_BASE_URL" "${CONTROL_SPACE_MEMBERSHIP_B
 # (dev compose does; production stays off until enabled). Read by the functions
 # at handler time, so set 0 and `docker restart convex-gateway` to stop it.
 set_convex_env "SPACE_ORG_ROOM_RECONCILE" "${SPACE_ORG_ROOM_RECONCILE:-0}"
+# WS04-S5: the registration worker (spaceAudienceRegistration.ts) delivers each
+# recipient-audience snapshot to Control. Both values were previously set in no
+# compose file or here, so no shared room ever registered an audience. Control's
+# principal entry has one token, so the audience token defaults to the
+# lifecycle token. SPACE_AUDIENCE_RECONCILE is flag space_audience_reconcile_sync
+# (the reconcile action and its 10-minute cron); 0 stops it, and the last
+# registered audience stays in force.
+set_convex_env "CONTROL_SPACE_AUDIENCE_URL" "${CONTROL_SPACE_AUDIENCE_URL:-http://user-core:3012/api/v1/internal/spaces/recipient-audiences}"
+set_convex_env "APPLICATION_SPACE_AUDIENCE_TOKEN" "${APPLICATION_SPACE_AUDIENCE_TOKEN:-${APPLICATION_SPACE_LIFECYCLE_TOKEN:-}}"
+set_convex_env "SPACE_AUDIENCE_RECONCILE" "${SPACE_AUDIENCE_RECONCILE:-0}"
 
 # ─────────────────────────────────────────────────────────────────────────
 # Force-deploy functions before starting dev mode.

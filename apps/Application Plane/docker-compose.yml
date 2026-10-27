@@ -155,6 +155,13 @@ services:
             # roster cron plus debounced org-core event hook. On in this dev
             # compose; a production deployment sets it to 0 until enabled.
             SPACE_ORG_ROOM_RECONCILE: ${SPACE_ORG_ROOM_RECONCILE:-1}
+            # WS04-S5 flag space_audience_reconcile_sync: recipient audience
+            # follows the roster. The audience token defaults to the lifecycle
+            # token (Control's principal entry has one token). On in this dev
+            # compose; a production deployment sets it to 0 until enabled.
+            CONTROL_SPACE_AUDIENCE_URL: ${CONTROL_SPACE_AUDIENCE_URL:-http://user-core:3012/api/v1/internal/spaces/recipient-audiences}
+            APPLICATION_SPACE_AUDIENCE_TOKEN: ${APPLICATION_SPACE_AUDIENCE_TOKEN:-${APPLICATION_SPACE_LIFECYCLE_TOKEN:-}}
+            SPACE_AUDIENCE_RECONCILE: ${SPACE_AUDIENCE_RECONCILE:-1}
         volumes:
             # `npx convex dev` (startup.sh) only pushes what it can see. Without this
             # mount /app/convex is the snapshot baked at image-build time, so every

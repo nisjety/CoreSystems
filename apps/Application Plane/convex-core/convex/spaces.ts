@@ -514,6 +514,44 @@ export const listActiveOrganizationRooms = internalQuery({
   },
 });
 
+/** Every active non-personal Space: the set whose recipient audience the reconcile maintains (WS04-S5). */
+export const listActiveSharedSpaces = internalQuery({
+  args: {},
+  handler: async (ctx) => {
+    const spaces = await ctx.db.query("spaces").collect();
+    return spaces
+      .filter((space: any) => space.kind !== "personal" && space.lifecycle === "active")
+      .map((space: any) => ({
+        spaceRef: space.spaceRef,
+        externalOrgId: space.externalOrgId,
+      }));
+  },
+});
+
+/**
+ * The Space and its active recipient audience, for the reconcile's plan
+ * (WS04-S5). Returns ids that already live in Application; nothing goes to a
+ * browser.
+ */
+export const activeAudienceForReconcile = internalQuery({
+  args: { spaceRef: v.string() },
+  handler: async (ctx, args) => {
+    const space = await getSpaceByRef(ctx, args.spaceRef);
+    if (!space) return { space: null, audience: null };
+    const audience = await activeRecipientAudience(ctx, args.spaceRef);
+    return {
+      space: { kind: space.kind, lifecycle: space.lifecycle, externalOrgId: space.externalOrgId },
+      audience: audience
+        ? {
+            revision: audience.revision,
+            controlState: audience.controlState,
+            recipientExternalAuthIds: audience.recipientExternalAuthIds,
+          }
+        : null,
+    };
+  },
+});
+
 export const getPersonalSpace = query({
   args: { externalOrgId: v.string() },
   handler: async (ctx, args) => {
@@ -1497,6 +1535,16 @@ export const acknowledgeRegistrationClaim = internalMutation({
         await ctx.scheduler.runAfter(0, internal.spaceMembershipSync.syncOrganizationRoom, {
           spaceRef: updated.spaceRef,
           externalOrgId: updated.externalOrgId,
+        });
+      }
+      // WS04-S5: every shared kind needs a recipient audience before any
+      // member can obtain a shared decision, not only the organization room.
+      // The action is flag-gated and idempotent; for the organization room it
+      // may run before the roster sync lands, and the post-sync call replaces
+      // the owner-only snapshot.
+      if (updated.kind !== "personal") {
+        await ctx.scheduler.runAfter(0, internal.spaceAudienceReconcile.reconcileRoomAudience, {
+          spaceRef: updated.spaceRef,
         });
       }
     }

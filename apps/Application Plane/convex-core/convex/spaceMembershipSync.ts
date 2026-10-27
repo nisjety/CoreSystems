@@ -172,6 +172,11 @@ export const syncOrganizationRoom = internalAction({
     if (!applied.ok) {
       return { status: "rejected" as const, httpStatus: applied.status };
     }
+    // WS04-S5: the recipient audience follows the roster. The action is
+    // flag-gated and idempotent, and a failure here is healed by its cron.
+    await ctx.scheduler.runAfter(0, internal.spaceAudienceReconcile.reconcileRoomAudience, {
+      spaceRef: args.spaceRef,
+    });
     return { status: "applied" as const, members: members.length };
   },
 });

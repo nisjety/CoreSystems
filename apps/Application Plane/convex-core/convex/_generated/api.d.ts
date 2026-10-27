@@ -35,6 +35,8 @@ import type * as reconciliationNonces from "../reconciliationNonces.js";
 import type * as searches from "../searches.js";
 import type * as spaceAgents from "../spaceAgents.js";
 import type * as spaceAudience from "../spaceAudience.js";
+import type * as spaceAudiencePlan from "../spaceAudiencePlan.js";
+import type * as spaceAudienceReconcile from "../spaceAudienceReconcile.js";
 import type * as spaceAudienceRegistration from "../spaceAudienceRegistration.js";
 import type * as spaceDeletionAuthorization from "../spaceDeletionAuthorization.js";
 import type * as spaceDeletionData from "../spaceDeletionData.js";
@@ -86,6 +88,8 @@ declare const fullApi: ApiFromModules<{
   searches: typeof searches;
   spaceAgents: typeof spaceAgents;
   spaceAudience: typeof spaceAudience;
+  spaceAudiencePlan: typeof spaceAudiencePlan;
+  spaceAudienceReconcile: typeof spaceAudienceReconcile;
   spaceAudienceRegistration: typeof spaceAudienceRegistration;
   spaceDeletionAuthorization: typeof spaceDeletionAuthorization;
   spaceDeletionData: typeof spaceDeletionData;

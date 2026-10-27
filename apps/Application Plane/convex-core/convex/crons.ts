@@ -19,4 +19,13 @@ crons.interval(
   {},
 );
 
+// WS04-S5: keep every shared Space's recipient audience equal to Control's
+// roster. Heals a missed trigger and retries `waiting` and `projection_lag`.
+crons.interval(
+  "space audience reconcile",
+  { minutes: 10 },
+  internal.spaceAudienceReconcile.reconcileAllRoomAudiences,
+  {},
+);
+
 export default crons;
