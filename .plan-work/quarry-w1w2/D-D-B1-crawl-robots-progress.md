@@ -95,3 +95,18 @@ Uncommitted and not ours: crates/quarry-edge/tests/support/fixture_site.rs (EOL-
 - quarry-runtime --lib: 994 passed, 2 failed. The two failures are observation::tests::an_explicit_screenshot_action_is_refused_when_the_image_is_withheld
   and observation_redaction::tests::the_dom_summary_masks_shapes_and_keeps_the_fingerprint_id. Both are in the W2 failure list
   (batch 2, D-B2-profiles-receipts) and do not use crawl_filter or robots. Not touched by this unit.
+
+## Continuation 2026-10-27: verifier finding on the blank-line group rule
+
+The open note "Robots blank-line rule (item 5)" above is superseded by this section. A verifier found that item 5 (a blank line starts a new robots group, commit 67e3b3d3e) contradicts RFC 9309. The RFC text was checked on 2026-10-27 (WebFetch of https://www.rfc-editor.org/rfc/rfc9309.txt): section 2.2 gives `group = startgroupline *(startgroupline / emptyline) *(rule / emptyline)`, and section 2.2.1 says that the rules of all groups matching one user-agent MUST be combined.
+
+- Fixed in e5e14bb6c (fix(quarry-transform)): parse() skips blank lines and does not end a group on them; only a rule line (allow, disallow, crawl-delay) ends the user-agent list. The test a_named_group_with_no_rules_allows_everything keeps its name and meaning, with the input `User-agent: *`, `Disallow: /`, a blank line, `User-agent: quarrybot` (the rule line separates the groups). The new test a_blank_line_between_user_agent_lines_keeps_one_group asserts the RFC case.
+- The W2-U63 note "a named empty group allows everything" still holds where a rule line separates the groups. It no longer applies to consecutive user-agent lines, which the RFC treats as one group.
+- Verified (qtest; run log in the unit scratch folder, run1.log): quarry-transform --lib robots 24 passed; quarry-transform --lib 201 passed, 0 failed; quarry-edge --test crawl_scope_robots 15 passed; --test crawl_limits 5 passed; quarry-core --lib crawl_scope 13 passed; quarry-runtime --lib robots_gate 26 passed; quarry-runtime --lib crawl_filter 32 passed; quarry-edge --lib crawl_request 20 passed; cargo check --workspace --all-targets exit 0.
+
+Open, not changed here:
+- Crawl-delay still ends the user-agent list in the code (the crawl-delay branch sets after_agents). The RFC grammar has no Crawl-delay line. Low. The owner can decide whether an unknown line should end a group.
+- The RFC reading of the blank-line rule is a compliance reading. The owner should confirm it (verifier note). Robots enforce stays off (X-10), so no live behaviour changes today.
+- Go not changed. services/quarry-orchestrator crawl_scope_test.go checks only appliedBy (true is proof, false is not), and no Go test asserts that observe reports scope_applied false. Go tests were not run in this session.
+- No depth/D-D-B1-crawl-robots.md file was written, because of the rule against findings .md files for subagents. The open findings are in this file and in the unit's final result.
+- Trailer: the fix commit carries Co-Authored-By: Claude Haiku 5.5, per the session attribution reminder. The workflow text asked for Opus 5.5 on every commit. The owner should confirm which line the repository carries (the same question as the W2-U64 hand-over).
