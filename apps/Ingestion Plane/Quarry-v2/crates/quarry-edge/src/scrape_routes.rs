@@ -18,7 +18,7 @@ use quarry_core::envelope::Envelope;
 use quarry_core::error::{ErrorCode, QuarryError};
 use quarry_core::ids::kinds::ArtifactKind;
 use quarry_core::output::NormalizedOutput;
-use quarry_core::scrape::{EffectiveScrapeOptions, ScrapeResponse};
+use quarry_core::scrape::{ActionOutcomeView, EffectiveScrapeOptions, ScrapeResponse};
 
 fn fail(request_id: &str, error: QuarryError) -> Response {
     (
@@ -41,6 +41,10 @@ pub struct ScrapeRecord {
     pub output: NormalizedOutput,
     #[serde(default)]
     pub effective_options: Option<EffectiveScrapeOptions>,
+    /// WS13.5: what each scrape-time action did, with artifact references (a
+    /// record is never written under ZDR, so there are no inline bytes here).
+    #[serde(default)]
+    pub actions: Vec<ActionOutcomeView>,
 }
 
 pub async fn get_scrape(
@@ -81,6 +85,7 @@ pub async fn get_scrape(
     };
     let mut data = ScrapeResponse::from_output(record.output);
     data.effective_options = record.effective_options;
+    data.actions = record.actions;
     data.scrape_id = Some(id);
     let mut response = Json(Envelope::ok(request_id, data)).into_response();
     response.headers_mut().insert(

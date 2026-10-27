@@ -78,6 +78,37 @@ async fn capture_disabled_is_a_field_error() {
 }
 
 #[tokio::test]
+async fn actions_disabled_is_a_field_error() {
+    // WS13.5: the committed default is QUARRY_EDGE__SCRAPE_ACTIONS=off. A request
+    // with actions is refused at the actions path before any fetch, for every caller.
+    let addr = spawn_app().await;
+    let client = reqwest::Client::new();
+
+    let resp = authed(client.post(format!("http://{addr}/v1/scrape")).json(
+        &serde_json::json!({
+            "url": "https://example.com/",
+            "actions": [{ "type": "click", "selector": "#go" }],
+        }),
+    ))
+    .send()
+    .await
+    .unwrap();
+
+    assert_eq!(resp.status().as_u16(), 400, "actions with the switch off is a 400");
+    let body: Value = resp.json().await.unwrap();
+    let fields = body["error"]["details"]["fields"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        fields
+            .iter()
+            .any(|field| field["code"] == "feature_disabled" && field["path"] == "actions"),
+        "expected a feature_disabled field error at actions, got {body}"
+    );
+}
+
+#[tokio::test]
 async fn scrape_stream_refuses_capture_formats_instead_of_dropping_them() {
     let addr = spawn_app().await;
     let client = reqwest::Client::new();

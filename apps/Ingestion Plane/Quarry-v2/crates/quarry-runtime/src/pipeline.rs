@@ -58,6 +58,10 @@ pub struct InlineParts {
     pub pdf: Option<quarry_core::scrape::InlineCapture>,
     /// WS13.4b: what the captures measured, in both modes.
     pub captures: Option<quarry_core::scrape::CapturesReport>,
+    /// WS13.5: what each scrape-time action did, in request order (empty when
+    /// the run had none). A capture an action took is referenced by artifact id
+    /// (not ZDR) or carried as base64 under the inline cap (ZDR).
+    pub actions: Vec<quarry_core::scrape::ActionOutcomeView>,
 }
 
 /// What [`PageRunner::persist_captures`] made of one run's captures. The refs
@@ -70,6 +74,7 @@ pub struct CaptureOutput {
     pub inline_screenshot: Option<quarry_core::scrape::InlineCapture>,
     pub inline_pdf: Option<quarry_core::scrape::InlineCapture>,
     pub captures: Option<quarry_core::scrape::CapturesReport>,
+    pub actions: Vec<quarry_core::scrape::ActionOutcomeView>,
     pub omitted: Vec<String>,
     pub warnings: Vec<quarry_core::scrape::ScrapeWarning>,
 }
@@ -725,7 +730,71 @@ impl PageRunner {
             }
         }
 
-        out.captures = Some(report);
+        // WS13.5: what the scrape-time actions took. Each output goes through the same
+        // path as a final capture: stored under a label of its own (not ZDR), or inline
+        // under the cap that the final captures also draw on (ZDR). The outcome list is
+        // index-aligned with the output bytes.
+        for (position, outcome) in caps.actions.iter().enumerate() {
+            let mut view = quarry_core::scrape::ActionOutcomeView::from_outcome(outcome);
+            let bytes = caps
+                .action_outputs
+                .get(position)
+                .and_then(Option::as_ref)
+                .filter(|held| !held.bytes.is_empty());
+            if let (Some(output), Some(held)) = (view.output.as_mut(), bytes) {
+                if store {
+                    let kind = if output.kind == "pdf" { "pdf" } else { "screenshot" };
+                    let label = quarry_core::artifact::page_hash(
+                        resp.final_url.as_ref(),
+                        &format!("{fingerprint}#cap:action.{}.{}", outcome.index, output.kind),
+                    );
+                    let handle = self
+                        .artifacts
+                        .put(&org, run_id, &label, kind, held.bytes.clone())
+                        .await?;
+                    self.event_sink
+                        .emit(
+                            run_id.clone(),
+                            EventType::ArtifactWritten,
+                            json!({
+                                "url": resp.final_url.to_string(),
+                                "format": format!("action_{}", output.kind),
+                                "action_index": outcome.index,
+                                "artifact_id": handle.artifact_id.to_string(),
+                                "bytes": handle.bytes,
+                            }),
+                            format!(
+                                "{}:{}:artifact:action.{}",
+                                run_id, resp.final_url, outcome.index
+                            ),
+                        )
+                        .await;
+                    output.bytes = handle.bytes;
+                    output.artifact_id = Some(handle.artifact_id.to_string());
+                } else if held.bytes.len() <= inline_cap.saturating_sub(inline_used) {
+                    inline_used += held.bytes.len();
+                    output.bytes = held.bytes.len() as u64;
+                    output.data_base64 =
+                        Some(base64::engine::general_purpose::STANDARD.encode(&held.bytes));
+                } else {
+                    out.omitted.push(format!("actions[{}].output", outcome.index));
+                    out.warnings.push(quarry_core::scrape::ScrapeWarning::new(
+                        "capture_exceeds_inline_cap",
+                        format!(
+                            "the output of actions[{}] is larger than the inline cap and is left out",
+                            outcome.index
+                        ),
+                    ));
+                }
+            }
+            out.actions.push(view);
+        }
+
+        // The report is the final captures' measurements; a run that only ran actions
+        // and saw nothing blocked has none to give.
+        if self.render.capture.is_some() || report != quarry_core::scrape::CapturesReport::default() {
+            out.captures = Some(report);
+        }
         Ok(out)
     }
 
@@ -1499,6 +1568,7 @@ impl PageRunner {
             parts.screenshot = captured.inline_screenshot.take();
             parts.pdf = captured.inline_pdf.take();
             parts.captures = captured.captures.take();
+            parts.actions = std::mem::take(&mut captured.actions);
             parts.omitted.append(&mut captured.omitted);
             parts.warnings.append(&mut captured.warnings);
             let cap = inline_request.max_bytes;
@@ -3450,6 +3520,230 @@ mod capture_pipeline_tests {
             .warnings
             .iter()
             .any(|w| w.code == "capture_exceeds_inline_cap"));
+    }
+
+    // ---- WS13.5: what the scrape-time actions took ----
+
+    use crate::artifact_store::ArtifactStore;
+    use crate::capture::ActionOutputBytes;
+    use quarry_core::scrape_actions::{ActionOutcome, ActionOutput, ActionStatus};
+
+    fn plain_outcome(index: usize, kind: &str) -> ActionOutcome {
+        ActionOutcome {
+            index,
+            kind: kind.to_owned(),
+            status: ActionStatus::Ok,
+            duration_ms: 4,
+            error: None,
+            output: None,
+        }
+    }
+
+    fn capture_outcome(index: usize, kind: &str, content_type: &str, bytes: usize) -> ActionOutcome {
+        ActionOutcome {
+            output: Some(ActionOutput {
+                kind: kind.to_owned(),
+                content_type: content_type.to_owned(),
+                bytes: bytes as u64,
+                width: (kind == "screenshot").then_some(800),
+                height: (kind == "screenshot").then_some(600),
+            }),
+            ..plain_outcome(index, kind)
+        }
+    }
+
+    /// Captures as a browser fetch hands them over after `click, screenshot, wait, pdf`.
+    fn action_captures(
+        screenshot_bytes: usize,
+        pdf_bytes: usize,
+        final_screenshot: Option<CapturedImage>,
+    ) -> crate::capture::PageCaptures {
+        crate::capture::PageCaptures {
+            screenshot: final_screenshot,
+            actions: vec![
+                plain_outcome(0, "click"),
+                capture_outcome(1, "screenshot", "image/png", screenshot_bytes),
+                plain_outcome(2, "wait"),
+                capture_outcome(3, "pdf", "application/pdf", pdf_bytes),
+            ],
+            action_outputs: vec![
+                None,
+                Some(ActionOutputBytes {
+                    content_type: "image/png".into(),
+                    bytes: vec![0x89; screenshot_bytes],
+                }),
+                None,
+                Some(ActionOutputBytes {
+                    content_type: "application/pdf".into(),
+                    bytes: vec![0x25; pdf_bytes],
+                }),
+            ],
+            ..Default::default()
+        }
+    }
+
+    fn actions_render() -> RenderHints {
+        RenderHints {
+            actions: Some(Arc::new(
+                quarry_core::scrape_actions::validate_actions(
+                    vec![
+                        serde_json::json!({ "type": "click", "selector": "#go" }),
+                        serde_json::json!({ "type": "screenshot" }),
+                        serde_json::json!({ "type": "wait", "milliseconds": 10 }),
+                        serde_json::json!({ "type": "pdf" }),
+                    ],
+                    quarry_core::scrape_actions::ActionOnError::Abort,
+                    &quarry_core::scrape_actions::ActionLimits::default(),
+                    &quarry_core::capture::CaptureLimits::default(),
+                )
+                .expect("the actions validate"),
+            )),
+            ..RenderHints::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn action_outputs_are_stored_with_distinct_keys_and_org() {
+        let (tx, mut rx) = mpsc::channel(64);
+        let driver = CaptureDriver {
+            captures: action_captures(48, 32, Some(png(64))),
+        };
+        let mut render = actions_render();
+        render.capture = both_render().capture;
+        let store = Arc::new(InMemoryStore::new());
+        let mut runner = runner(tx, ZdrMode::Off, driver, render);
+        runner.artifacts = store.clone();
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://www.example.com/".parse().unwrap();
+        let (out, inline) = runner
+            .run_with_inline_request(&run_id, &url, None, &InlineRequest::default_for(ZdrMode::Off))
+            .await
+            .expect("run ok");
+
+        // Four entries, in request order, with the capture entries pointing at artifacts.
+        let kinds: Vec<_> = inline.actions.iter().map(|a| (a.index, a.kind.as_str())).collect();
+        assert_eq!(kinds, vec![(0, "click"), (1, "screenshot"), (2, "wait"), (3, "pdf")]);
+        assert!(inline.actions[0].output.is_none() && inline.actions[2].output.is_none());
+        let shot = inline.actions[1].output.as_ref().expect("screenshot output");
+        let pdf = inline.actions[3].output.as_ref().expect("pdf output");
+        let shot_id = shot.artifact_id.clone().expect("a stored screenshot has an id");
+        let pdf_id = pdf.artifact_id.clone().expect("a stored pdf has an id");
+        assert!(shot.data_base64.is_none() && pdf.data_base64.is_none(), "nothing inline when stored");
+        assert_eq!((shot.bytes, pdf.bytes), (48, 32));
+        assert_eq!((shot.width, shot.height), (Some(800), Some(600)));
+
+        // Distinct keys: the two action outputs and the final screenshot are three artifacts.
+        let final_shot = out.formats.screenshot.expect("the final screenshot is stored too");
+        let ids = [shot_id.clone(), pdf_id.clone(), final_shot.artifact_id.to_string()];
+        assert_eq!(
+            ids.iter().collect::<std::collections::BTreeSet<_>>().len(),
+            3,
+            "an action output never overwrites a final capture: {ids:?}"
+        );
+
+        // Org stamp: the request's org reads each back; another org reads nothing.
+        for (id, expected) in [(&shot_id, 48usize), (&pdf_id, 32usize)] {
+            let artifact: quarry_core::ids::kinds::ArtifactKind = id.parse().expect("an artifact id");
+            let bytes = store.get("org_capture", &artifact).await.expect("same org reads it");
+            assert_eq!(bytes.len(), expected);
+            assert!(
+                store.get("org_other", &artifact).await.is_err(),
+                "another org must not read an action output"
+            );
+        }
+
+        // One content-free ArtifactWritten per stored action output (and no bytes in it).
+        let mut action_events = 0;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event.event_type, EventType::ArtifactWritten)
+                && event.payload.get("action_index").is_some()
+            {
+                action_events += 1;
+                assert!(event.payload.get("data_base64").is_none());
+            }
+        }
+        assert_eq!(action_events, 2);
+    }
+
+    #[tokio::test]
+    async fn action_outputs_inline_under_zdr_without_artifact_events() {
+        let (tx, mut rx) = mpsc::channel(64);
+        let driver = CaptureDriver {
+            captures: action_captures(48, 32, None),
+        };
+        let store = Arc::new(InMemoryStore::new());
+        let mut runner = runner(tx, ZdrMode::On, driver, actions_render());
+        runner.artifacts = store.clone();
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://www.example.com/".parse().unwrap();
+        let (_out, inline) = runner
+            .run_with_inline_request(&run_id, &url, None, &InlineRequest::default_for(ZdrMode::On))
+            .await
+            .expect("run ok");
+
+        let shot = inline.actions[1].output.as_ref().expect("screenshot output");
+        let pdf = inline.actions[3].output.as_ref().expect("pdf output");
+        assert!(shot.artifact_id.is_none() && pdf.artifact_id.is_none(), "no id under ZDR");
+        assert!(shot.data_base64.as_deref().is_some_and(|data| !data.is_empty()));
+        assert!(pdf.data_base64.as_deref().is_some_and(|data| !data.is_empty()));
+        assert_eq!(shot.bytes, 48);
+        // ZDR floor: nothing reached the store and no artifact event was emitted.
+        let listed = store
+            .list("org_capture", &quarry_core::pagination::ListFilter::default())
+            .await
+            .expect("list");
+        assert!(listed.items.is_empty(), "ZDR writes no artifact for an action output");
+        while let Ok(event) = rx.try_recv() {
+            assert!(
+                !matches!(event.event_type, EventType::ArtifactWritten),
+                "no artifact event for an action output under ZDR"
+            );
+        }
+        // No action-only captures block when nothing was captured at the end.
+        assert!(inline.captures.is_none());
+    }
+
+    #[tokio::test]
+    async fn zdr_action_output_over_the_shared_inline_cap_is_left_out_and_named() {
+        let (tx, _rx) = mpsc::channel(64);
+        // 48 + 32 = 80 bytes of action output against a 60-byte cap: the screenshot fits,
+        // the pdf does not (the cap is one budget across the run, final captures included).
+        let driver = CaptureDriver {
+            captures: action_captures(48, 32, None),
+        };
+        let mut render = actions_render();
+        render.capture_inline_max_bytes = Some(60);
+        let runner = runner(tx, ZdrMode::On, driver, render);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://www.example.com/".parse().unwrap();
+        let (_out, inline) = runner
+            .run_with_inline_request(&run_id, &url, None, &InlineRequest::default_for(ZdrMode::On))
+            .await
+            .expect("run ok");
+
+        assert!(inline.actions[1].output.as_ref().unwrap().data_base64.is_some());
+        let pdf = inline.actions[3].output.as_ref().unwrap();
+        assert!(pdf.data_base64.is_none() && pdf.artifact_id.is_none());
+        assert_eq!(pdf.bytes, 32, "the size is still reported");
+        assert!(inline.omitted.iter().any(|field| field == "actions[3].output"));
+        assert!(inline.warnings.iter().any(|w| w.code == "capture_exceeds_inline_cap"));
+    }
+
+    #[tokio::test]
+    async fn a_run_without_actions_reports_no_actions() {
+        let (tx, _rx) = mpsc::channel(64);
+        let driver = CaptureDriver {
+            captures: captures(Some(png(64)), None),
+        };
+        let runner = runner(tx, ZdrMode::Off, driver, both_render());
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://www.example.com/".parse().unwrap();
+        let (_out, inline) = runner
+            .run_with_inline_request(&run_id, &url, None, &InlineRequest::default_for(ZdrMode::Off))
+            .await
+            .expect("run ok");
+        assert!(inline.actions.is_empty());
+        assert!(inline.captures.is_some(), "a final capture still reports its measurements");
     }
 }
 

@@ -689,7 +689,11 @@ async fn scrape_with(
 
     // WS13.4b: a capture needs the browser. Without one, refuse with 501 rather
     // than hand the plan to the default driver, which would drop the capture.
-    if !resolved.capture.is_empty() && !state.drivers.has(quarry_core::output::DriverKind::Browser) {
+    // WS13.5: actions need it for the same reason (the default driver would run the
+    // page without them and answer 200).
+    if (!resolved.capture.is_empty() || resolved.actions.is_some())
+        && !state.drivers.has(quarry_core::output::DriverKind::Browser)
+    {
         let error = crate::scrape_actions::browser_unavailable();
         return Err((
             StatusCode::from_u16(error.code.http_status()).unwrap_or(StatusCode::NOT_IMPLEMENTED),
@@ -706,8 +710,8 @@ async fn scrape_with(
     };
 
     // WS13.5: a page an action changed is not evidence of its URL, so nothing that
-    // indexes, titles or re-renders it runs for an actions request.
-    let actions_safe = resolved.actions.is_some();
+    // indexes, titles, re-renders or ingests it runs for an actions request
+    // (`scrape_actions::safe_mode_runner`, applied right after the runner is built).
     let runner = PageRunner {
         driver,
         security: crate::web_policy_edge::security_engine(&state.security, &state.policy, &decision),
@@ -719,7 +723,7 @@ async fn scrape_with(
         user_id: Some(claims.actor_id().to_owned()),
         privacy: privacy.clone(),
         cancel_token: None,
-        local_index: if actions_safe { None } else { state.local_index.clone() },
+        local_index: state.local_index.clone(),
         policy: quarry_runtime::RunPolicy::from(decision.policy()),
         scheduler: state.scheduler.clone(),
         autoscale: Some(quarry_runtime::global_autoscale()),
@@ -732,17 +736,22 @@ async fn scrape_with(
             // WS13.4b: captures ride the same render hints; a request without
             // them leaves the hints exactly as they were.
             crate::scrape_actions::apply_capture(&mut render, &resolved, settings.limits().captures);
-            crate::scrape_actions::apply_actions(&mut render, &resolved);
+            crate::scrape_actions::apply_actions(
+                &mut render,
+                &resolved,
+                settings.limits().captures,
+            );
             render
         },
-        page_renderer: if actions_safe { None } else { state.page_renderer.clone() },
+        page_renderer: state.page_renderer.clone(),
         // Ad-hoc single-page scrape, not a crawl target — don't materialize
         // a "tracked website" row for it.
         source_registrar: None,
-        title_enricher: if actions_safe { None } else { state.page_title_enricher.clone() },
+        title_enricher: state.page_title_enricher.clone(),
         doc_routing,
         robots: None,
     };
+    let runner = crate::scrape_actions::safe_mode_runner(runner, resolved.actions.is_some());
 
     let run_id: RunKind = quarry_core::ids::Id::new();
     let prev_fp = req.prev_fingerprint.clone();
@@ -837,6 +846,7 @@ async fn scrape_with(
                 let record = serde_json::json!({
                     "output": &out,
                     "effective_options": &effective_options,
+                    "actions": &inline.actions,
                 });
                 let page_hash =
                     quarry_core::artifact::page_hash(&out.url.final_url, &out.fingerprint);
@@ -869,6 +879,7 @@ async fn scrape_with(
                 screenshot: inline.screenshot,
                 pdf: inline.pdf,
                 captures: inline.captures,
+                actions: inline.actions,
             }))
         }
         Err(err) => {

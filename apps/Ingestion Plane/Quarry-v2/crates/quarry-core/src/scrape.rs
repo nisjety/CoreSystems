@@ -13,7 +13,8 @@ use serde::{Deserialize, Serialize};
 use crate::capture::{CaptureLimits, CapturePlan, PdfOptions, ScreenshotOptions};
 use crate::output::NormalizedOutput;
 use crate::scrape_actions::{
-    validate_actions, ActionLimits, ActionOnError, ActionsSummary, ValidatedActions,
+    validate_actions, ActionError, ActionLimits, ActionOnError, ActionOutcome, ActionStatus,
+    ActionsSummary, ValidatedActions,
 };
 
 /// Inline text is capped so a ZDR response stays a reasonable size; the flag
@@ -94,6 +95,12 @@ pub struct ScrapeResponse {
     /// only, never a URL. Absent when the request captured nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub captures: Option<CapturesReport>,
+    /// WS13.5: what each scrape-time action did, in request order. Absent (and
+    /// not on the wire) when the request carried no actions. Metadata and
+    /// artifact references only; under ZDR a capture an action took travels in
+    /// the entry's `output.data_base64` under the inline cap.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<ActionOutcomeView>,
 }
 
 impl ScrapeResponse {
@@ -112,6 +119,66 @@ impl ScrapeResponse {
             screenshot: None,
             pdf: None,
             captures: None,
+            actions: Vec::new(),
+        }
+    }
+}
+
+/// WS13.5: one scrape-time action's outcome as the wire carries it
+/// (`data.actions[]`). The runtime's [`ActionOutcome`] with the capture's
+/// stored reference or inline bytes attached. Never a selector or a typed text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionOutcomeView {
+    pub index: usize,
+    /// The action's type (`click`, `screenshot`, ...).
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub status: ActionStatus,
+    pub duration_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<ActionError>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<ActionOutputView>,
+}
+
+/// WS13.5: what a `screenshot` or `pdf` action produced. At most one of
+/// `artifact_id` (stored, not ZDR) and `data_base64` (inline, ZDR, under the
+/// cap) is set; neither means the bytes were over the inline cap and left out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionOutputView {
+    /// `screenshot` or `pdf`.
+    pub kind: String,
+    pub content_type: String,
+    /// Size of the decoded bytes.
+    pub bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_base64: Option<String>,
+}
+
+impl ActionOutcomeView {
+    /// The view of an outcome with no stored reference and no inline bytes yet.
+    pub fn from_outcome(outcome: &ActionOutcome) -> Self {
+        Self {
+            index: outcome.index,
+            kind: outcome.kind.clone(),
+            status: outcome.status,
+            duration_ms: outcome.duration_ms,
+            error: outcome.error.clone(),
+            output: outcome.output.as_ref().map(|output| ActionOutputView {
+                kind: output.kind.clone(),
+                content_type: output.content_type.clone(),
+                bytes: output.bytes,
+                width: output.width,
+                height: output.height,
+                artifact_id: None,
+                data_base64: None,
+            }),
         }
     }
 }

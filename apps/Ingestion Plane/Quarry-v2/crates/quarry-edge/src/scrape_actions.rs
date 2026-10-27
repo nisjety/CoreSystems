@@ -26,7 +26,7 @@ use quarry_core::error::{ErrorCode, QuarryError};
 use quarry_core::scrape::ResolvedScrapeOptions;
 use quarry_runtime::driver::RenderHints;
 use quarry_runtime::driver_plan::{plan_from_signals, DriverSignals};
-use quarry_runtime::DriverPlan;
+use quarry_runtime::{DriverPlan, PageRunner};
 
 use crate::auth::{Claims, SCOPE_SCRAPE_INTERACT};
 
@@ -138,7 +138,7 @@ pub fn requests_capture(formats: Option<&serde_json::Value>) -> bool {
 pub fn browser_unavailable() -> QuarryError {
     QuarryError::new(
         ErrorCode::Unsupported,
-        "screenshot and pdf need a browser, and none is available on this endpoint",
+        "screenshot, pdf and actions need a browser, and none is available on this endpoint",
     )
     .with_details(serde_json::json!({ "reason": "browser_capability_unavailable" }))
 }
@@ -211,12 +211,38 @@ pub fn check_principal(
 }
 
 /// WS13.5: put the request's actions on the render hints. Nothing is set when the
-/// request has none, so the default path is unchanged.
-pub fn apply_actions(render: &mut RenderHints, resolved: &ResolvedScrapeOptions) {
+/// request has none, so the default path is unchanged. An action that takes a
+/// screenshot or a PDF runs under the same capture limits, and under ZDR its bytes
+/// travel inline under the same cap, as a final capture's do.
+pub fn apply_actions(
+    render: &mut RenderHints,
+    resolved: &ResolvedScrapeOptions,
+    limits: CaptureLimits,
+) {
     if let Some(actions) = resolved.actions.as_ref() {
         render.actions = Some(std::sync::Arc::new(actions.clone()));
         render.actions_deadline = Some(std::time::Duration::from_millis(ACTIONS_RUN_DEADLINE_MS));
+        if actions.capture_count > 0 && render.capture_inline_max_bytes.is_none() {
+            render.capture_limits = limits;
+            render.capture_inline_max_bytes = Some(inline_max_bytes());
+        }
     }
+}
+
+/// WS13.5: the safe-mode runner. A page an action changed is not evidence of its
+/// URL, so nothing that indexes, titles, re-renders, registers or ingests it may
+/// run for a request with actions. Every optional hop on [`PageRunner`] that can
+/// persist or derive knowledge from the page is cleared here, in one place, and
+/// the test `safe_mode_clears_every_evidence_hop` names each field.
+pub fn safe_mode_runner(mut runner: PageRunner, actions: bool) -> PageRunner {
+    if actions {
+        runner.ingest = None;
+        runner.local_index = None;
+        runner.page_renderer = None;
+        runner.source_registrar = None;
+        runner.title_enricher = None;
+    }
+    runner
 }
 
 /// WS13.5: the handler's bound on the run. With actions it is 115 s; otherwise the
@@ -388,5 +414,166 @@ mod tests {
         quarry_core::scrape::ScrapeOptions::default()
             .resolve(false, &quarry_core::scrape::ScrapeLimits::default())
             .expect("default options resolve")
+    }
+
+    fn resolved_with(actions: serde_json::Value) -> ResolvedScrapeOptions {
+        let options = quarry_core::scrape::ScrapeOptions::from_value(&serde_json::json!({
+            "actions": actions
+        }))
+        .expect("the options parse");
+        let limits = quarry_core::scrape::ScrapeLimits {
+            actions_enabled: true,
+            ..quarry_core::scrape::ScrapeLimits::default()
+        };
+        options.resolve(false, &limits).expect("the actions resolve")
+    }
+
+    #[test]
+    fn actions_with_a_capture_take_the_capture_limits_and_the_inline_cap() {
+        let resolved = resolved_with(serde_json::json!([{ "type": "screenshot" }]));
+        let limits = CaptureLimits::default();
+        let mut render = RenderHints::default();
+        apply_actions(&mut render, &resolved, limits);
+        assert!(render.actions.is_some());
+        assert_eq!(render.capture_limits, limits);
+        assert_eq!(render.capture_inline_max_bytes, Some(inline_max_bytes()));
+        assert!(render.capture.is_none(), "an action capture is not a final capture");
+    }
+
+    #[test]
+    fn actions_without_a_capture_leave_the_capture_hints_alone() {
+        let resolved = resolved_with(serde_json::json!([{ "type": "press", "key": "Enter" }]));
+        let mut render = RenderHints::default();
+        apply_actions(&mut render, &resolved, CaptureLimits::default());
+        assert!(render.actions.is_some());
+        assert!(render.capture_inline_max_bytes.is_none());
+    }
+
+    /// A runner with every optional hop empty, to be filled by a test.
+    fn bare_runner() -> PageRunner {
+        use quarry_core::privacy::PrivacyPolicy;
+        use quarry_core::zdr::ZdrMode;
+        use std::sync::Arc;
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        PageRunner {
+            driver: Arc::new(
+                quarry_runtime::fetch::StaticDriver::new(std::time::Duration::from_secs(1), "test")
+                    .expect("static driver"),
+            ),
+            security: Arc::new(
+                quarry_security::preflight::DefaultEngine::new().with_allow_private_hosts(true),
+            ),
+            artifacts: Arc::new(quarry_runtime::artifact_store::InMemoryStore::new()),
+            event_sink: quarry_runtime::EventSink::new(tx),
+            zdr: ZdrMode::Off,
+            ingest: None,
+            org_id: Some("org_safe".into()),
+            user_id: None,
+            privacy: PrivacyPolicy::default(),
+            cancel_token: None,
+            local_index: None,
+            policy: quarry_runtime::RunPolicy::default(),
+            scheduler: None,
+            autoscale: None,
+            render: RenderHints::default(),
+            page_renderer: None,
+            source_registrar: None,
+            title_enricher: None,
+            doc_routing: quarry_runtime::DocRouting::Off,
+            robots: None,
+        }
+    }
+
+    struct NoIngest;
+
+    #[async_trait::async_trait]
+    impl quarry_runtime::ingest_client::DataPlaneIngest for NoIngest {
+        async fn ingest(
+            &self,
+            _request: &quarry_core::contracts::DataPlaneIngestRequest,
+        ) -> quarry_core::QuarryResult<quarry_core::contracts::DataPlaneIngestResponse> {
+            Err(QuarryError::new(ErrorCode::Internal, "not reached"))
+        }
+    }
+
+    struct NoRegistrar;
+
+    #[async_trait::async_trait]
+    impl quarry_runtime::source_registrar::SourceRegistrar for NoRegistrar {
+        async fn register_source(
+            &self,
+            _org_id: &str,
+            _name: &str,
+            _url: &str,
+            _kind: &str,
+        ) -> quarry_core::QuarryResult<()> {
+            Ok(())
+        }
+    }
+
+    /// D2-025. Safe mode is the absence of five optional hops. A field that is
+    /// added to `PageRunner` and not cleared would leave safe mode a silent no-op
+    /// for that hop, so this test (1) fills every hop it can construct and proves
+    /// each is cleared, (2) proves a request without actions keeps them all, and
+    /// (3) destructures `PageRunner` with every field named, so a new field fails
+    /// to compile here until someone decides which side of safe mode it is on.
+    /// `page_renderer` needs a NATS JetStream context and cannot be built in a unit
+    /// test: its assignment is covered by the destructure and by the evidence
+    /// step (a live actions request leaves the page-image index untouched).
+    #[tokio::test]
+    async fn safe_mode_clears_every_evidence_hop() {
+        use std::sync::Arc;
+        let filled = || {
+            let mut runner = bare_runner();
+            runner.ingest = Some(Arc::new(NoIngest));
+            runner.local_index = Some(
+                quarry_runtime::local_index::TantivyLocalIndex::in_memory().expect("local index"),
+            );
+            runner.source_registrar = Some(Arc::new(NoRegistrar));
+            runner.title_enricher = Some(Arc::new(quarry_runtime::page_extract::PageTitleEnricher::new(
+                Arc::new(
+                    quarry_runtime::mp_client::ModelPlaneClient::new("http://127.0.0.1:9")
+                        .expect("model plane client"),
+                ),
+            )));
+            runner
+        };
+
+        // A request without actions keeps every hop it was given.
+        let kept = safe_mode_runner(filled(), false);
+        assert!(kept.ingest.is_some(), "ingest stays without actions");
+        assert!(kept.local_index.is_some(), "local_index stays without actions");
+        assert!(kept.source_registrar.is_some(), "source_registrar stays without actions");
+        assert!(kept.title_enricher.is_some(), "title_enricher stays without actions");
+
+        // A request with actions loses them all, whatever it carried.
+        let PageRunner {
+            driver: _,
+            security: _,
+            artifacts: _,
+            event_sink: _,
+            zdr: _,
+            ingest,
+            org_id,
+            user_id: _,
+            privacy: _,
+            cancel_token: _,
+            local_index,
+            policy: _,
+            scheduler: _,
+            autoscale: _,
+            render: _,
+            page_renderer,
+            source_registrar,
+            title_enricher,
+            doc_routing: _,
+            robots: _,
+        } = safe_mode_runner(filled(), true);
+        assert!(ingest.is_none(), "ingest is cleared by safe mode");
+        assert!(local_index.is_none(), "local_index is cleared by safe mode");
+        assert!(page_renderer.is_none(), "page_renderer is cleared by safe mode");
+        assert!(source_registrar.is_none(), "source_registrar is cleared by safe mode");
+        assert!(title_enricher.is_none(), "title_enricher is cleared by safe mode");
+        assert_eq!(org_id.as_deref(), Some("org_safe"), "safe mode keeps the org stamp");
     }
 }
