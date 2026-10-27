@@ -385,7 +385,7 @@ Built so far (batches B01 to B07): WS01-S0, WS01-S1 (partial), WS01-S6; WS02-S1,
 | ID | Slice | Kind | P | Finding | Status |
 |---|---|---|---|---|---|
 | D1-282 | WS04-S5 | live-proof | P1 | Needed before the switch is flipped in S9: with two replicas on the shared Redis/Dragonfly, stream a turn on A and rate it on B, and confirm the feedback envelope carries the skill ids. Also confirm the breaker-open path (Redis down) degrades to turn_not_rateable / run-only without delaying the rating. | resolved 2026-10-26 (Wave 1 depth packet ws04-s9-proof-script-anthropic) |
-| D1-283 | WS04-S5 | live-proof | P1 | docker-compose.yml needs MODEL_GATEWAY_SHARED_TURN_RECORD default false (owned by S1/S9), flipped on in S9. | open |
+| D1-283 | WS04-S5 | live-proof | P1 | docker-compose.yml needs MODEL_GATEWAY_SHARED_TURN_RECORD default false (owned by S1/S9), flipped on in S9. | resolved 2026-10-27 (Wave 1 depth packet ws04-s9-compose-expose) |
 | D1-284 | WS04-S5 | live-proof | P1 | Plan row command `cargo test -q -p model-gateway --all-targets` not run on Windows (only --lib); non-lib targets are known to fail on Windows. | open |
 | D1-285 | WS04-S5 | live-proof | P1 | Flip MODEL_GATEWAY_SHARED_TURN_RECORD to on in docker-compose.yml only in S9, together with the two-replica live proof listed in depth_findings. Add the env key there (default off) when S1/S9 own that file; I did not touch deploy files. | open |
 | D1-286 | WS04-S5 | live-proof | P1 | Run `cargo test -q -p model-gateway --all-targets` per the plan row where the platform allows. On Windows only --lib was run; the pre-existing non-lib target failures were not checked. | open |
@@ -649,7 +649,7 @@ Built so far (batches B01 to B07): WS01-S0, WS01-S1 (partial), WS01-S6; WS02-S1,
 | D1-484 | WS04-S7 | live-proof | P1 | Needs a two-replica live proof (same key to :8080 and :8081 gives one runs row and identical frames) and an ignored live test of RedisClaimStore (SET NX PX, settle) against Dragonfly; the Redis implementation itself has no test. | open |
 | D1-485 | WS04-S7 | live-proof | P1 | Live two-replica proof with MODEL_GATEWAY_SHARED_IDEMPOTENCY on and REDIS_URL set (needs docker; one runs row, same frames on both streams) | open |
 | D1-486 | WS04-S7 | live-proof | P1 | Live Redis (Dragonfly) test of RedisClaimStore SET NX PX and settle | open |
-| D1-487 | WS04-S7 | live-proof | P1 | The switch is not in the compose env; the lead adds it only if the owner wants it exposed (stays off in S9) | open |
+| D1-487 | WS04-S7 | live-proof | P1 | The switch is not in the compose env; the lead adds it only if the owner wants it exposed (stays off in S9) | resolved 2026-10-27 (Wave 1 depth packet ws04-s9-compose-expose) |
 | D1-488 | WS04-S7 | follow-up | P3 | 9 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W1-14.json | open |
 
 
