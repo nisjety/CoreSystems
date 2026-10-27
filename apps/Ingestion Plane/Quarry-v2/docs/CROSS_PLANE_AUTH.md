@@ -8,8 +8,8 @@ D2 + D3 / cluster #14.
 | ------------------------------ | ----- | ---------------- | ------------------- |
 | **client → quarry-edge**       | JWT (auth-core JWKS, P0) | n/a (request-fresh) | not yet |
 | **quarry-edge → quarry-control** | **HMAC-SHA256** (this doc) | timestamp + nonce  | `Idempotency-Key` header |
-| **quarry-edge → data-plane** | Per-org Auth Core service JWT (`aud=data-plane`, route-minimal scopes) | cached until 30s before expiry; one 401 refresh | implemented over HTTP |
-| **quarry-edge → model-plane** | Per-org Auth Core service JWT (`aud=model-gateway`, `models:invoke`) | cached until 30s before expiry; one 401 refresh | implemented |
+| **quarry-edge → data-plane** | Per-org Auth Core service JWT (`aud=data-plane`, route-minimal scopes: `data:read`, `data:rerank`, `documents:write`, `org:data:read_all`) | cached until 30s before expiry; one 401 refresh | implemented over HTTP |
+| **quarry-edge → model-plane** | Per-org Auth Core service JWT (`aud=model-gateway`, `models:invoke`) | cached until 30s before expiry; one 401 refresh | not granted: every model-gateway row is `granted: false` and the registry gives quarry-edge no model-gateway audience (D16, QB-T17), so the mint is refused and every caller degrades |
 
 ## Wire shape
 
