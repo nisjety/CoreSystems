@@ -829,6 +829,10 @@ services:
             AUDIT_EXTRA_NATS_BUSES: >-
                 [{"name":"model","plane":"model","url":"nats://model-nats:4222","user":"audit-core-model","password":"${AUDIT_MODEL_NATS_PASSWORD:?AUDIT_MODEL_NATS_PASSWORD is required}"},{"name":"application","plane":"application","url":"nats://application-nats:4222","user":"audit-core-application","password":"${AUDIT_APPLICATION_NATS_PASSWORD:?AUDIT_APPLICATION_NATS_PASSWORD is required}"}]
             HTTP_PORT: "8187"
+            # The chain switch (WS06-S2): only the literal 1 turns chained inserts on. Without this
+            # line the switch could only arrive through env_file, so an exported value never reached
+            # the container (D1-296). Off by default.
+            AUDIT_CHAIN_ENABLED: ${AUDIT_CHAIN_ENABLED:-0}
             AUDIT_CHAIN_KEY_ID: ${AUDIT_CHAIN_KEY_ID:-}
             AUDIT_CHAIN_PRIVATE_KEY_BASE64: ${AUDIT_CHAIN_PRIVATE_KEY_BASE64:-}
             AUDIT_CHAIN_PUBLIC_KEY_BASE64: ${AUDIT_CHAIN_PUBLIC_KEY_BASE64:-}

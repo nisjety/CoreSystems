@@ -1,8 +1,8 @@
 Live proof: Wave 1 depth fixes on the developer stack (migrations 024 and 0025, the redeploy of the Wave 1 services)
 Date: 2026-10-27 (UTC, from about 00:40). Branch `model-plane`, every image built from d67c5a43f.
 Verification level: LIVE-VERIFIED on a developer stack. Not production. No secrets, tokens or payload content below.
-Status: PART 1 (this file). The transcript paging proof (WS09-S8) and the audit chain-on proof (D1-297) need a
-signed-in session and follow in part 2.
+Status: COMPLETE. Part 1 (deploy, migrations 024 and 0025) and part 2 (transcript paging, audit chain-on), the
+latter through the owner's signed-in session in the Browser pane.
 
 SAFETY NET (before anything changed)
   pg_dump of the affected dev databases to C:/dev/backups/live-proof-2026-10-27 (outside both checkouts):
@@ -81,3 +81,52 @@ OBSERVATIONS (not caused by these changes unless stated)
   - Rollback is not image-only any more: session-core's old image cannot boot over migrations 0049-0068 (strict
     migrator; 0058 drops the (org_id, name) unique index the old upsert uses). Rolling back means restoring the
     session_core dump and the :rollback-20261027 image.
+
+PART 2 (2026-10-27 06:00-06:12 UTC, through the owner's signed-in session at localhost:5173)
+
+PROOF: tail-first transcript paging through the BFF (WS09-S8; transcript-paging-proof.sh's checks, run as a page fetch)
+  Session: GET /api/v1/session/current 200, the owner of org FUEk9LuqykPUnW2n7dhrbEeNKwRsV5uf (cross-checked: the
+  user's 116 chat threads in session_core carry the same org).
+  Seed (session_core, prefix ws09s8-20261027t022522z): two threads with origin 'system' (kept out of the chat list),
+  400 turns in -thread and one in -other, plus one completed dream_runs row per seeded message, so session-core's
+  Dreaming worker never mines the synthetic turns into the user's memory.
+  Result (GET /api/v1/chat/threads/{thread}/messages from the page, the BFF proxying model-gateway and session-core):
+    ok true, no failure; 4 pages, sizes 100 100 100 100, has_more true true true false; 400 turns, 400 unique,
+    turn 0 .. turn 399 in conversation order; the unpaged read unchanged (200, 400 turns, no has_more key, first
+    turn 0); refused with 400: limit=0, limit=201, limit=fifty, before without a limit, before=a%26limit%3D1
+    (invalid_request each), and a real message id from another thread (invalid_thread_request).
+  Tail query plan: Index Scan Backward using idx_messages_thread_id (Index Cond thread_id = ... AND sequence < $1),
+    101 rows, execution 0.462 ms.
+  Cleanup in one transaction: no runs, memory_index, plans, todos or scheduled_step_receipts rows referenced the
+    threads; DELETE 401 dream_runs, DELETE 401 messages, DELETE 2 threads; 0 left. No memory was written.
+
+PROOF: the audit hash chain switched on and off on live data (WS06-S2, D1-297; D1-296 fixed in the same commit)
+  Baseline: 0 chained rows, 0 heads, 110159 audit rows.
+  On: audit-core swapped with AUDIT_CHAIN_ENABLED=1 and AUDIT_CHAIN_VERIFY_INTERVAL=30s (no signing key: the boot
+  WARN "audit chain is on without a signing key" is expected in development). Boot: "audit chain catch-up
+  complete", durable and extra-plane consumers ready.
+  One governed tool action: the owner's chat turn "Søk i dokumentene mine etter «Verevon» med dokumentsøket" ran
+  Knowledge search; session-core published tool_action_reserved and tool_action on verevon.audit.v2.model.*, and
+  audit-core chained them for the org as seq 6 and 7, between auth-core control events (plane_service_token_issued).
+  Checks: per org (5 orgs) gaps 0, link breaks 0 (prev_hash = previous row_hash), genesis
+    sha256('VAC1/genesis/'||org) ok; every head equals its last row (seq and hash), state ok.
+  Restart mid-stream: audit-core stopped at 06:04:55Z; a second tool-using turn ("... etter «rapport»") ran while it
+    was down; started at 06:06:37Z: the queued tool_action_reserved and tool_action arrived from JetStream at
+    06:06:37 and were chained as seq 9 and 11 (an auth-core event took 10); the org's chain 1..11 still had gaps 0,
+    link breaks 0, head = last row, state ok.
+  Verifier (in-process, every 30 s): recomputed every chained row through seq 12 for the owner's org with no broken
+    row; status partial / no_attestation in every org (no signing key in development).
+  Metrics after the restart: audit_core_chain_appends_total{result="appended"} 7, audit_core_chain_broken_total 0,
+    audit_core_chain_head_lock_wait_seconds count 11, sum 0.19 s (before the restart: 3 appends, count 3, sum
+    0.0077 s; the counters reset on restart).
+  Off: audit-core swapped again with AUDIT_CHAIN_ENABLED and AUDIT_CHAIN_VERIFY_INTERVAL removed: the switch is
+    unset, no catch-up at boot, the 20 chained rows and 5 heads kept (as the runbook says), and the 7 audit rows that
+    arrived afterwards are unchained. No revert SQL was run.
+
+FINAL STATE (2026-10-27 06:12 UTC)
+  Running from d67c5a43f: session-core, model-gateway, org-core, audit-core (chain off), the BFF gateway.
+  Unchanged images: capability-core (D1-789), inference-core, execution-core and the rest of the stack.
+  Rollback containers kept: org-core-service-, audit-core-service- and verevon-gateway-rs-rollback-20261027 (their
+  old images); the intermediate audit-core chain-on/off rollback containers were removed. Backups and
+  :rollback-20261027 tags as in part 1. Test data left: the two chat turns in the owner's chat list (a new
+  conversation with two document searches) and their audit rows; the synthetic paging rows were deleted.
