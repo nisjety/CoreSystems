@@ -763,11 +763,14 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(store
+        // The save wrote a row, so the profile has metadata: no name, and the default scope.
+        // The trait answers None only when there is neither a row nor a snapshot.
+        let unnamed = store
             .load_metadata("org_a", &profile_id)
             .await
             .unwrap()
-            .is_none());
+            .expect("a saved profile has a metadata row");
+        assert_eq!(unnamed.name, None);
 
         let metadata = ProfileMetadata {
             name: Some("Work Gmail".into()),
