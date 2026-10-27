@@ -140,3 +140,105 @@ async fn zdr_crawl_is_still_refused_so_no_backlog_row_exists() {
         "a refused ZDR crawl reached control"
     );
 }
+
+// D2-017 (WS6.H): the plan-dependent caps ride in the job's params.
+
+struct PlanResolver(quarry_edge::limits::PlanCaps);
+
+#[async_trait::async_trait]
+impl quarry_edge::limits::LimitsResolver for PlanResolver {
+    async fn org_limits(
+        &self,
+        _org_id: &str,
+    ) -> Result<quarry_edge::limits::OrgLimits, quarry_core::error::QuarryError> {
+        Ok(quarry_edge::limits::OrgLimits {
+            origin: quarry_edge::limits::LimitsOrigin::Entitlement,
+            caps: self.0,
+            ..quarry_edge::limits::OrgLimits::floor()
+        })
+    }
+}
+
+/// A control that stores every job body it is sent and answers 200.
+async fn spawn_recording_control() -> (String, Arc<std::sync::Mutex<Vec<Value>>>) {
+    let seen: Arc<std::sync::Mutex<Vec<Value>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = seen.clone();
+    let app = Router::new().route(
+        "/v1/jobs",
+        post(move |Json(body): Json<Value>| {
+            let sink = sink.clone();
+            async move {
+                sink.lock().unwrap().push(body);
+                (StatusCode::OK, Json(json!({ "data": { "id": "job_1" } })))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (format!("http://{addr}"), seen)
+}
+
+async fn spawn_edge_with_limits(
+    control_url: String,
+    limits: Arc<dyn quarry_edge::limits::LimitsResolver>,
+) -> SocketAddr {
+    std::env::set_var("QUARRY_EDGE_AUTH_DEV_BYPASS", "1");
+    let (tx, mut rx) = mpsc::channel(64);
+    tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    let driver = Arc::new(StaticDriver::new(Duration::from_secs(5), "quarry-test").unwrap());
+    let state = AppState {
+        control_base_url: control_url,
+        limits,
+        ..support::base_state(driver, EventSink::new(tx))
+    };
+    let app = quarry_edge::routes::router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    addr
+}
+
+#[tokio::test]
+async fn two_plans_stamp_different_admission_caps_on_crawl_and_batch_jobs() {
+    use quarry_edge::limits::PlanCaps;
+    let plans = [
+        PlanCaps { crawl_jobs: Some(2), job_backlog: Some(20), ..PlanCaps::default() },
+        PlanCaps { crawl_jobs: Some(10), job_backlog: Some(500), ..PlanCaps::default() },
+    ];
+    for caps in plans {
+        let (control, seen) = spawn_recording_control().await;
+        let edge = spawn_edge_with_limits(control, Arc::new(PlanResolver(caps))).await;
+        let (status, envelope) =
+            post_json(edge, "/v1/crawl", json!({ "url": "https://example.com/" })).await;
+        assert_eq!(status, 200, "{envelope}");
+        let (status, envelope) = post_json(
+            edge,
+            "/v1/batch",
+            json!({ "urls": ["https://example.com/a"] }),
+        )
+        .await;
+        assert_eq!(status, 200, "{envelope}");
+        let bodies = seen.lock().unwrap().clone();
+        assert_eq!(bodies.len(), 2);
+        for body in bodies {
+            assert_eq!(
+                body["params"]["admission"],
+                json!({ "cap": caps.crawl_jobs, "backlog_cap": caps.job_backlog }),
+                "{body}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_static_floor_stamps_no_admission_so_control_keeps_its_defaults() {
+    let (control, seen) = spawn_recording_control().await;
+    let edge = spawn_edge_with_limits(control, Arc::new(quarry_edge::limits::StaticFloor)).await;
+    let (status, envelope) =
+        post_json(edge, "/v1/crawl", json!({ "url": "https://example.com/" })).await;
+    assert_eq!(status, 200, "{envelope}");
+    let bodies = seen.lock().unwrap().clone();
+    assert_eq!(bodies.len(), 1);
+    assert!(bodies[0]["params"].get("admission").is_none(), "{}", bodies[0]);
+}

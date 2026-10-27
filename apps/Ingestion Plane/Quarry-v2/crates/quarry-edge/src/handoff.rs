@@ -76,6 +76,55 @@ pub async fn forward_job_signed(
     post_job(control_base_url, org_id, body, idempotency_key, signer).await
 }
 
+/// WS6.H: the plan-dependent admission caps stamped into a durable job's params
+/// (`params.admission = {cap, backlog_cap}`), which control reads when job
+/// admission is on (`QUARRY_JOB_ADMISSION`; off, control ignores the stamp).
+///
+/// Only an entitlement answer carries plan values: the floor and the fail-open
+/// answer stamp nothing, so control keeps its own defaults for those. A plan
+/// value of `0` is not stamped either: control reads a cap below 1 as "none
+/// given" and would apply its default, so a stamped `0` would not mean what it
+/// says. Edge-built params only: a caller's body never reaches this stamp.
+pub fn admission_stamp(limits: &crate::limits::OrgLimits) -> Option<serde_json::Value> {
+    if limits.origin != crate::limits::LimitsOrigin::Entitlement {
+        return None;
+    }
+    let positive = |value: Option<u32>| value.filter(|v| *v >= 1);
+    let cap = positive(limits.caps.crawl_jobs);
+    let backlog_cap = positive(limits.caps.job_backlog);
+    if cap.is_none() && backlog_cap.is_none() {
+        return None;
+    }
+    let mut stamp = serde_json::Map::new();
+    if let Some(cap) = cap {
+        stamp.insert("cap".to_string(), serde_json::json!(cap));
+    }
+    if let Some(backlog_cap) = backlog_cap {
+        stamp.insert("backlog_cap".to_string(), serde_json::json!(backlog_cap));
+    }
+    Some(serde_json::Value::Object(stamp))
+}
+
+/// `params` with the organization's admission stamp set (see
+/// [`admission_stamp`]). Any `admission` key already in `params` is replaced or,
+/// when the plan has no value to stamp, removed, so the stamp is always the edge's.
+pub fn with_admission(
+    mut params: serde_json::Value,
+    limits: &crate::limits::OrgLimits,
+) -> serde_json::Value {
+    if let Some(map) = params.as_object_mut() {
+        match admission_stamp(limits) {
+            Some(stamp) => {
+                map.insert("admission".to_string(), stamp);
+            }
+            None => {
+                map.remove("admission");
+            }
+        }
+    }
+    params
+}
+
 /// Service principals that run Model Plane work for a user. A job one of them
 /// submits has an agent origin; any other service principal is an API client.
 const MODEL_PLANE_PRINCIPALS: &[&str] = &["service:model-gateway", "service:execution-core"];
@@ -369,6 +418,49 @@ mod tests {
         .expect("accepted");
         let received = server.received_requests().await.unwrap();
         assert!(received[0].headers.get("x-quarry-sig").is_none());
+    }
+
+    fn entitlement(caps: crate::limits::PlanCaps) -> crate::limits::OrgLimits {
+        crate::limits::OrgLimits {
+            origin: crate::limits::LimitsOrigin::Entitlement,
+            caps,
+            ..crate::limits::OrgLimits::floor()
+        }
+    }
+
+    #[test]
+    fn two_plans_stamp_two_different_admission_caps() {
+        use crate::limits::PlanCaps;
+        let small = entitlement(PlanCaps { crawl_jobs: Some(2), job_backlog: Some(20), ..PlanCaps::default() });
+        let large = entitlement(PlanCaps { crawl_jobs: Some(10), job_backlog: Some(500), ..PlanCaps::default() });
+        let params = serde_json::json!({ "kind": "crawl", "url": "https://example.com/" });
+        let a = with_admission(params.clone(), &small);
+        let b = with_admission(params, &large);
+        assert_eq!(a["admission"], serde_json::json!({ "cap": 2, "backlog_cap": 20 }));
+        assert_eq!(b["admission"], serde_json::json!({ "cap": 10, "backlog_cap": 500 }));
+        assert_eq!(a["kind"], "crawl", "the rest of the params is untouched");
+    }
+
+    #[test]
+    fn the_floor_the_open_answer_and_a_plan_with_no_value_stamp_nothing() {
+        use crate::limits::{OrgLimits, PlanCaps};
+        let params = serde_json::json!({ "kind": "batch" });
+        assert!(with_admission(params.clone(), &OrgLimits::floor()).get("admission").is_none());
+        assert!(with_admission(params.clone(), &OrgLimits::open()).get("admission").is_none());
+        assert!(with_admission(params.clone(), &entitlement(PlanCaps::default())).get("admission").is_none());
+        // A plan value of 0 is not a usable cap for control, so it is not stamped.
+        let zero = entitlement(PlanCaps { crawl_jobs: Some(0), job_backlog: Some(0), ..PlanCaps::default() });
+        assert!(with_admission(params, &zero).get("admission").is_none());
+    }
+
+    #[test]
+    fn one_plan_value_stamps_only_that_key_and_a_stale_admission_key_is_replaced() {
+        use crate::limits::PlanCaps;
+        let only_cap = entitlement(PlanCaps { crawl_jobs: Some(4), ..PlanCaps::default() });
+        let stamped = with_admission(serde_json::json!({ "admission": { "cap": 999, "backlog_cap": 999 } }), &only_cap);
+        assert_eq!(stamped["admission"], serde_json::json!({ "cap": 4 }));
+        let none = with_admission(serde_json::json!({ "admission": { "cap": 999 } }), &crate::limits::OrgLimits::floor());
+        assert!(none.get("admission").is_none(), "a caller-shaped stamp never survives");
     }
 
     #[test]

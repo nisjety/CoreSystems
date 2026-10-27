@@ -1066,7 +1066,7 @@ async fn crawl_handoff(
         &state.control_base_url,
         &org_id,
         "crawl",
-        serde_json::json!({
+        crate::handoff::with_admission(serde_json::json!({
             "kind": "crawl",
             "url": req.url,
             "scope": scope.scope_value(),
@@ -1079,7 +1079,7 @@ async fn crawl_handoff(
             "org_id": org_id,
             "user_id": claims.user_id,
             "ingest": req.ingest,
-        }),
+        }), &org_limits),
         &origin,
         idempotency_key.as_deref(),
         state.internal_signer.as_deref(),
@@ -1223,14 +1223,14 @@ async fn batch_handoff(
         &state.control_base_url,
         &claims.org_id,
         "batch",
-        serde_json::json!({
+        crate::handoff::with_admission(serde_json::json!({
             "kind": "batch",
             "urls": req.urls,
             "robots": "respect",
             "org_id": claims.org_id,
             "user_id": claims.user_id,
             "ingest": req.ingest,
-        }),
+        }), &org_limits),
         &origin,
         idempotency_key.as_deref(),
         state.internal_signer.as_deref(),
