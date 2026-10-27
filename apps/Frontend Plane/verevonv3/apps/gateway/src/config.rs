@@ -898,6 +898,25 @@ mod tests {
         });
     }
 
+    /// WS07-S6: `CSP_REPORT_LOG_HOSTS` is a dev-only flag: it follows its variable outside
+    /// production and stays off under `APP_ENV=production` or `prod` even when set to true.
+    #[test]
+    fn csp_report_log_hosts_is_a_dev_only_flag() {
+        with_env(&[("APP_ENV", Some("production")), ("CSP_REPORT_LOG_HOSTS", Some("true"))], || {
+            assert!(!super::SpaceFeatureFlags::from_env().csp_report_log_hosts);
+        });
+        with_env(&[("APP_ENV", Some("prod")), ("CSP_REPORT_LOG_HOSTS", Some("true"))], || {
+            assert!(!super::SpaceFeatureFlags::from_env().csp_report_log_hosts);
+        });
+        with_env(&[("APP_ENV", Some("development")), ("CSP_REPORT_LOG_HOSTS", Some("true"))], || {
+            assert!(super::SpaceFeatureFlags::from_env().csp_report_log_hosts);
+        });
+        // Unset is off in every environment: it is not a `space_flag` (no dev default of on).
+        with_env(&[("APP_ENV", Some("development")), ("CSP_REPORT_LOG_HOSTS", None)], || {
+            assert!(!super::SpaceFeatureFlags::from_env().csp_report_log_hosts);
+        });
+    }
+
     /// WS01-S5 and WS03-S4: the human-post, thread-pane, send-idempotency, connectivity-banner and
     /// policy-admin flags are off in production when their variable is unset, on in development,
     /// and honour an explicit value.

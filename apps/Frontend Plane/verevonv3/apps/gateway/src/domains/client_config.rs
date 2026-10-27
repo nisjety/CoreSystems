@@ -363,3 +363,475 @@ async fn post_csp_report(
     }
     StatusCode::NO_CONTENT.into_response()
 }
+
+#[cfg(test)]
+mod tests {
+    //! WS07-S3 and WS07-S6 tests: the real router (no session cookie: the routes are public),
+    //! with a thread-local Prometheus recorder to read the counters back and a thread-local
+    //! tracing subscriber to read the log line.
+    use super::*;
+    use crate::client_contract::{
+        min_contract_from, ClientPolicy, ClientVersionPolicy, CLIENT_MIN_CONTRACT,
+    };
+    use axum::http::Request;
+    use http_body_util::BodyExt;
+    use metrics_exporter_prometheus::PrometheusBuilder;
+    use serde_json::Value;
+    use std::sync::{Arc, Mutex};
+    use tower::ServiceExt;
+
+    async fn call(
+        state: &AppState,
+        method: &str,
+        uri: &str,
+        content_type: Option<&str>,
+        body: Vec<u8>,
+    ) -> (u16, Option<String>, String) {
+        let mut builder = Request::builder().method(method).uri(uri);
+        if let Some(content_type) = content_type {
+            builder = builder.header("content-type", content_type);
+        }
+        let response = crate::build_router(state.clone())
+            .oneshot(builder.body(Body::from(body)).unwrap())
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let cache = response
+            .headers()
+            .get("cache-control")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let raw = String::from_utf8_lossy(&response.into_body().collect().await.unwrap().to_bytes())
+            .into_owned();
+        (status, cache, raw)
+    }
+
+    async fn diagnostic(state: &AppState, body: &str) -> (u16, String) {
+        let (status, _, raw) = call(
+            state,
+            "POST",
+            "/api/v1/client-diagnostics",
+            Some("application/json"),
+            body.as_bytes().to_vec(),
+        )
+        .await;
+        (status, raw)
+    }
+
+    async fn csp(state: &AppState, content_type: Option<&str>, body: &[u8]) -> (u16, String) {
+        let (status, _, raw) = call(
+            state,
+            "POST",
+            "/api/v1/client-diagnostics/csp-report",
+            content_type,
+            body.to_vec(),
+        )
+        .await;
+        (status, raw)
+    }
+
+    fn state() -> AppState {
+        crate::tests::test_state(false)
+    }
+
+    fn map(value: Value) -> JsonMap {
+        value.as_object().expect("an object").clone()
+    }
+
+    // ---- WS07-S3: policy and contract parsing ----
+
+    #[test]
+    fn policy_parse_defaults_to_banner_for_unset_or_garbage() {
+        assert_eq!(ClientVersionPolicy::parse(None), ClientVersionPolicy::Banner);
+        assert_eq!(ClientVersionPolicy::parse(Some("")), ClientVersionPolicy::Banner);
+        assert_eq!(
+            ClientVersionPolicy::parse(Some("sometimes")),
+            ClientVersionPolicy::Banner
+        );
+        assert_eq!(ClientVersionPolicy::parse(Some(" OFF ")), ClientVersionPolicy::Off);
+        assert_eq!(
+            ClientVersionPolicy::parse(Some("Enforce")),
+            ClientVersionPolicy::Enforce
+        );
+        assert_eq!(
+            ClientVersionPolicy::parse(Some("banner")),
+            ClientVersionPolicy::Banner
+        );
+        assert_eq!(ClientVersionPolicy::default().as_str(), "banner");
+    }
+
+    #[test]
+    fn min_contract_from_only_raises_the_floor() {
+        assert_eq!(min_contract_from(None), CLIENT_MIN_CONTRACT);
+        assert_eq!(min_contract_from(Some("0")), CLIENT_MIN_CONTRACT);
+        assert_eq!(min_contract_from(Some("not-a-number")), CLIENT_MIN_CONTRACT);
+        assert_eq!(min_contract_from(Some("-4")), CLIENT_MIN_CONTRACT);
+        assert_eq!(min_contract_from(Some(" 7 ")), 7.max(CLIENT_MIN_CONTRACT));
+        assert!(min_contract_from(Some("9")) >= 9);
+    }
+
+    #[tokio::test]
+    async fn client_config_returns_the_contract_envelope_with_no_store_and_no_session() {
+        let mut state = state();
+        state.space_features.client_policy = ClientPolicy {
+            policy: ClientVersionPolicy::Enforce,
+            min_contract: 4,
+            revision: "abc1234def56".to_owned(),
+            build_date: "2026-10-20".to_owned(),
+        };
+        let (status, cache, raw) = call(&state, "GET", "/api/v1/client-config", None, vec![]).await;
+        assert_eq!(status, 200, "{raw}");
+        assert_eq!(cache.as_deref(), Some("no-store"));
+        let body: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            body,
+            json!({"data": {
+                "contract": CLIENT_CONTRACT,
+                "min_contract": 4,
+                "policy": "enforce",
+                "revision": "abc1234def56",
+                "build_date": "2026-10-20",
+            }})
+        );
+    }
+
+    #[tokio::test]
+    async fn client_config_defaults_are_banner_unverified_unknown() {
+        let (status, _, raw) = call(&state(), "GET", "/api/v1/client-config", None, vec![]).await;
+        assert_eq!(status, 200, "{raw}");
+        let body: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(body["data"]["policy"], "banner");
+        assert_eq!(body["data"]["revision"], "unverified");
+        assert_eq!(body["data"]["build_date"], "unknown");
+        assert_eq!(body["data"]["min_contract"], CLIENT_MIN_CONTRACT);
+    }
+
+    // ---- WS07-S3: diagnostics beacon ----
+
+    #[tokio::test]
+    async fn diagnostics_accepts_each_kind_with_a_hex_or_dev_build() {
+        for kind in DIAGNOSTIC_KINDS {
+            for build in ["a", "abc123", "0123456789ab", "ABCDEF", "dev"] {
+                let (status, raw) =
+                    diagnostic(&state(), &json!({"kind": kind, "build": build}).to_string()).await;
+                assert_eq!(status, 204, "{kind}/{build}: {raw}");
+                assert!(raw.is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn diagnostics_refuses_unknown_kind_bad_build_extra_field_non_json_and_oversize() {
+        let oversize = format!(
+            r#"{{"kind":"watchdog","build":"abc","pad":"{}"}}"#,
+            "x".repeat(600)
+        );
+        let cases: Vec<(&str, String)> = vec![
+            ("unknown kind", json!({"kind": "boom", "build": "abc"}).to_string()),
+            ("non-hex build", json!({"kind": "watchdog", "build": "xyz!"}).to_string()),
+            (
+                "too long build",
+                json!({"kind": "watchdog", "build": "0123456789abc"}).to_string(),
+            ),
+            ("empty build", json!({"kind": "watchdog", "build": ""}).to_string()),
+            (
+                "extra field",
+                json!({"kind": "watchdog", "build": "abc", "message": "free text"}).to_string(),
+            ),
+            ("missing build", json!({"kind": "watchdog"}).to_string()),
+            ("not json", "kind=watchdog".to_owned()),
+            ("oversize", oversize),
+        ];
+        for (label, body) in cases {
+            let (status, raw) = diagnostic(&state(), &body).await;
+            assert_eq!(status, 400, "{label}: {raw}");
+            let parsed: Value = serde_json::from_str(&raw).unwrap();
+            assert_eq!(parsed["error"]["code"], "invalid_diagnostic", "{label}");
+        }
+    }
+
+    #[test]
+    fn build_match_labels_are_a_closed_set() {
+        assert_eq!(build_match("dev", "abc123"), "dev");
+        assert_eq!(build_match("abc", "abc123456789"), "match");
+        assert_eq!(build_match("ABC", "abc123456789"), "match");
+        assert_eq!(build_match("fff", "abc123456789"), "mismatch");
+        assert_eq!(build_match("abc", "unverified"), "unknown");
+        assert_eq!(build_match("abc", "unknown"), "unknown");
+        assert_eq!(build_match("abc", "  "), "unknown");
+    }
+
+    #[tokio::test]
+    async fn the_failure_counter_carries_only_kind_and_build_match() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let mut state = state();
+        state.space_features.client_policy.revision = "abc123456789".to_owned();
+        for (build, expected) in [("abc123", "match"), ("fff000", "mismatch"), ("dev", "dev")] {
+            let (status, _) = diagnostic(
+                &state,
+                &json!({"kind": "render_error", "build": build}).to_string(),
+            )
+            .await;
+            assert_eq!(status, 204);
+            let rendered = handle.render();
+            assert!(
+                rendered.lines().any(|line| {
+                    line.starts_with("verevon_client_failures_total{")
+                        && line.contains("kind=\"render_error\"")
+                        && line.contains(&format!("build_match=\"{expected}\""))
+                }),
+                "{expected}: {rendered}"
+            );
+        }
+        let rendered = handle.render();
+        assert!(
+            !rendered.contains("abc123\""),
+            "the raw build id must not be a label: {rendered}"
+        );
+        assert!(!rendered.contains("fff000"), "{rendered}");
+    }
+
+    // ---- WS07-S6: csp-report route ----
+
+    #[tokio::test]
+    async fn csp_report_accepts_the_three_wire_shapes() {
+        let legacy = json!({"csp-report": {
+            "document-uri": "https://app.example.com/page?token=SECRET",
+            "violated-directive": "img-src 'self'",
+            "effective-directive": "img-src",
+            "blocked-uri": "https://cdn.example.net/pic.png",
+            "disposition": "report"
+        }})
+        .to_string();
+        let reporting = json!([{"type": "csp-violation", "url": "https://app.example.com/", "body": {
+            "effectiveDirective": "connect-src",
+            "blockedURL": "https://api.example.net/v1",
+            "disposition": "report"
+        }}])
+        .to_string();
+        let bare =
+            json!({"effective-directive": "script-src", "blocked-uri": "inline"}).to_string();
+        for (content_type, body) in [
+            ("application/csp-report", legacy.clone()),
+            ("application/csp-report; charset=utf-8", legacy),
+            ("application/reports+json", reporting),
+            ("application/json", bare),
+        ] {
+            let (status, raw) = csp(&state(), Some(content_type), body.as_bytes()).await;
+            assert_eq!(status, 204, "{content_type}: {raw}");
+        }
+    }
+
+    #[tokio::test]
+    async fn csp_report_refuses_other_content_types_non_json_and_reports_with_no_violation() {
+        let valid = json!({"csp-report": {"effective-directive": "img-src"}}).to_string();
+        let (status, raw) = csp(&state(), Some("text/plain"), valid.as_bytes()).await;
+        assert_eq!(status, 400, "{raw}");
+        assert!(raw.contains("invalid_report"));
+        let (status, _) = csp(&state(), None, valid.as_bytes()).await;
+        assert_eq!(status, 400);
+        let (status, raw) = csp(&state(), Some("application/csp-report"), b"not json").await;
+        assert_eq!(status, 400, "{raw}");
+        assert!(raw.contains("invalid_report"));
+        for body in [
+            json!({"hello": "world"}).to_string(),
+            json!([]).to_string(),
+            json!([{"type": "network-error", "body": {"effectiveDirective": "img-src"}}])
+                .to_string(),
+            json!("string").to_string(),
+        ] {
+            let (status, raw) = csp(&state(), Some("application/json"), body.as_bytes()).await;
+            assert_eq!(status, 400, "{body}: {raw}");
+            assert!(raw.contains("invalid_report"));
+        }
+    }
+
+    #[tokio::test]
+    async fn csp_report_over_8_kib_is_413_report_too_large() {
+        let body = json!({"csp-report": {
+            "effective-directive": "img-src",
+            "script-sample": "x".repeat(CSP_REPORT_BODY_LIMIT + 1),
+        }})
+        .to_string();
+        let (status, raw) = csp(&state(), Some("application/csp-report"), body.as_bytes()).await;
+        assert_eq!(status, 413, "{raw}");
+        assert!(raw.contains("report_too_large"));
+        let just_under = json!({"csp-report": {
+            "effective-directive": "img-src",
+            "script-sample": "x".repeat(CSP_REPORT_BODY_LIMIT - 200),
+        }})
+        .to_string();
+        assert!(just_under.len() < CSP_REPORT_BODY_LIMIT);
+        let (status, _) =
+            csp(&state(), Some("application/csp-report"), just_under.as_bytes()).await;
+        assert_eq!(status, 204);
+    }
+
+    #[test]
+    fn directive_label_maps_into_the_closed_set() {
+        for directive in CSP_DIRECTIVES {
+            let by_effective = map(json!({"effective-directive": directive}));
+            assert_eq!(directive_label(&by_effective), directive);
+        }
+        // The effective directive wins and only its first token counts.
+        let both = map(
+            json!({"effective-directive": "img-src", "violated-directive": "connect-src 'self'"}),
+        );
+        assert_eq!(directive_label(&both), "img-src");
+        // The violated directive carries the policy text after the name.
+        let violated = map(json!({"violated-directive": "connect-src 'self' https://x.example"}));
+        assert_eq!(directive_label(&violated), "connect-src");
+        let camel = map(json!({"effectiveDirective": "font-src"}));
+        assert_eq!(directive_label(&camel), "font-src");
+        let upper = map(json!({"effective-directive": "IMG-SRC"}));
+        assert_eq!(directive_label(&upper), "img-src");
+        // Anything else, including a client-invented name, is `other`.
+        assert_eq!(
+            directive_label(&map(json!({"effective-directive": "made-up-src"}))),
+            "other"
+        );
+        assert_eq!(directive_label(&map(json!({"effective-directive": 5}))), "other");
+        assert_eq!(directive_label(&map(json!({}))), "other");
+    }
+
+    #[test]
+    fn disposition_label_is_report_enforce_or_unknown() {
+        assert_eq!(disposition_label(&map(json!({"disposition": "report"}))), "report");
+        assert_eq!(disposition_label(&map(json!({"disposition": "ENFORCE"}))), "enforce");
+        assert_eq!(disposition_label(&map(json!({"disposition": "whatever"}))), "unknown");
+        assert_eq!(disposition_label(&map(json!({"disposition": 1}))), "unknown");
+        assert_eq!(disposition_label(&map(json!({}))), "unknown");
+    }
+
+    #[test]
+    fn blocked_origin_is_scheme_and_host_only() {
+        let origin = |blocked: &str| blocked_origin(&map(json!({"blocked-uri": blocked})));
+        assert_eq!(
+            origin("https://cdn.example.net/a/b.png?token=SECRET#frag"),
+            "https://cdn.example.net"
+        );
+        assert_eq!(
+            origin("https://user:pass@Host.Example.com:8443/p?q=1"),
+            "https://host.example.com:8443"
+        );
+        assert_eq!(origin("wss://live.example.com/socket"), "wss://live.example.com");
+        for keyword in ["inline", "eval", "data", "blob", "self", "wasm-eval", "filesystem"] {
+            assert_eq!(origin(keyword), keyword);
+        }
+        assert_eq!(origin("data:image/png;base64,AAAA"), "other");
+        assert_eq!(origin("something-else"), "other");
+        assert_eq!(origin(""), "other");
+        assert_eq!(origin("https://bad host/path"), "other");
+        assert_eq!(origin("ht tp://host/path"), "other");
+        assert_eq!(
+            blocked_origin(&map(json!({"blockedURL": "https://r.example.com/x"}))),
+            "https://r.example.com"
+        );
+        let stripped = origin("https://cdn.example.net/a/b.png?token=SECRET#frag");
+        assert!(!stripped.contains("SECRET") && !stripped.contains("/a/"));
+    }
+
+    #[tokio::test]
+    async fn no_url_reaches_a_csp_metric_label() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let body = json!({"csp-report": {
+            "document-uri": "https://app.example.com/private/page?token=SECRET",
+            "violated-directive": "img-src 'self'",
+            "effective-directive": "invented-src",
+            "blocked-uri": "https://evil.example.net/secret/path?x=1",
+            "script-sample": "SAMPLE-TEXT",
+            "disposition": "report"
+        }})
+        .to_string();
+        let (status, _) = csp(&state(), Some("application/csp-report"), body.as_bytes()).await;
+        assert_eq!(status, 204);
+        let rendered = handle.render();
+        let line = rendered
+            .lines()
+            .find(|line| line.starts_with("verevon_csp_reports_total{"))
+            .unwrap_or_else(|| panic!("no counter in {rendered}"));
+        assert!(line.contains("directive=\"other\""), "{line}");
+        assert!(line.contains("disposition=\"report\""), "{line}");
+        for leaked in [
+            "evil.example.net",
+            "secret",
+            "SECRET",
+            "SAMPLE-TEXT",
+            "app.example.com",
+            "https://",
+        ] {
+            assert!(!rendered.contains(leaked), "{leaked} leaked: {rendered}");
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogBuffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    async fn logged_for(log_hosts: bool) -> String {
+        let buffer = LogBuffer::default();
+        let writer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let mut state = state();
+        state.space_features.csp_report_log_hosts = log_hosts;
+        let body = json!({"csp-report": {
+            "effective-directive": "img-src",
+            "blocked-uri": "https://evil.example.net/secret/path?x=1",
+            "document-uri": "https://app.example.com/private?token=SECRET",
+            "disposition": "report"
+        }})
+        .to_string();
+        let (status, _) = csp(&state, Some("application/csp-report"), body.as_bytes()).await;
+        assert_eq!(status, 204);
+        let bytes = buffer.0.lock().unwrap().clone();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    #[tokio::test]
+    async fn the_blocked_origin_is_logged_only_when_csp_report_log_hosts_is_on() {
+        let off = logged_for(false).await;
+        assert!(!off.contains("csp report"), "{off}");
+        assert!(!off.contains("evil.example.net"), "{off}");
+        let on = logged_for(true).await;
+        assert!(on.contains("csp report"), "{on}");
+        assert!(on.contains("https://evil.example.net"), "{on}");
+        for leaked in ["secret", "SECRET", "app.example.com", "x=1"] {
+            assert!(!on.contains(leaked), "{leaked} leaked: {on}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_routes_need_no_session() {
+        // No cookie, no auth-core mock (the base URL points at a closed port): all three answer.
+        let state = state();
+        let (status, _, _) = call(&state, "GET", "/api/v1/client-config", None, vec![]).await;
+        assert_eq!(status, 200);
+        let (status, _) = diagnostic(&state, r#"{"kind":"watchdog","build":"dev"}"#).await;
+        assert_eq!(status, 204);
+        let (status, _) = csp(
+            &state,
+            Some("application/csp-report"),
+            br#"{"csp-report":{"effective-directive":"img-src"}}"#,
+        )
+        .await;
+        assert_eq!(status, 204);
+    }
+}

@@ -10965,6 +10965,35 @@ mod ws03_s5_ws04_gateway_tests {
         assert!(body["data"]["space"]["topic"].is_null());
     }
 
+    /// WS07-S9.gw: `features.room_artifacts` mirrors the flag, is reported next to the other
+    /// features, and is off in a default state.
+    #[tokio::test]
+    async fn space_context_features_include_room_artifacts() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let room = json!([{"spaceRef": "space-room", "name": "Leveranse", "kind": "room", "lifecycle": "active"}]);
+        for flag in [false, true] {
+            let (status, body) = json_route(
+                "/api/v1/spaces/space-room/context",
+                |state| state.space_features.room_artifacts = flag,
+                json!([]),
+                room.clone(),
+            )
+            .await;
+            assert_eq!(status, 200);
+            let features = body["data"]["features"].as_object().expect("a features block");
+            assert!(features.contains_key("room_artifacts"));
+            assert_eq!(features["room_artifacts"], flag);
+        }
+        let (_, body) = json_route(
+            "/api/v1/spaces/space-room/context",
+            |_| {},
+            json!([]),
+            room,
+        )
+        .await;
+        assert_eq!(body["data"]["features"]["room_artifacts"], false);
+    }
+
     /// WS04-S2 and WS04-S3: `features.room_details` and `features.people_search` mirror the
     /// flags, each reported independently, and both are off in a default state.
     #[tokio::test]

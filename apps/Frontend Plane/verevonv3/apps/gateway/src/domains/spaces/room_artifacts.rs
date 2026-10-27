@@ -291,3 +291,378 @@ async fn list_room_artifacts(
         .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
     response
 }
+
+#[cfg(test)]
+mod tests {
+    //! WS07-S9.gw tests: the real router with wiremock for auth-core, user-core (Control), org-core,
+    //! Application (Convex) and model-gateway. No model is called: model-gateway is a mock.
+    use super::*;
+    use axum::{body::Body, http::Request};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const TOKEN_SECRET: &str = "decision-token-secret-xyzxyz";
+    const ARTIFACTS_URI: &str = "/api/v1/spaces/space-room/artifacts";
+
+    struct Fx {
+        state: AppState,
+        _auth: MockServer,
+        user_core: MockServer,
+        _org_core: MockServer,
+        _application: MockServer,
+        model_gateway: MockServer,
+    }
+
+    fn active_space() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"value": [
+            {"spaceRef": "space-room", "name": "Room", "kind": "room", "lifecycle": "active"}
+        ]}))
+    }
+
+    fn org_posture(zdr: bool) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(
+            json!({"data": {"metadata": {"interactiveRetention": {"zdr": zdr}}}}),
+        )
+    }
+
+    async fn fixture(org_core: ResponseTemplate, flag: bool) -> Fx {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+        for slug in ["session-core", "model-plane"] {
+            Mock::given(wm_method("GET"))
+                .and(wm_path(format!("/api/{slug}/token")))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({"token": "plane-token"})),
+                )
+                .mount(&auth)
+                .await;
+        }
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId": "user-1", "orgId": "org-1", "role": "member",
+                "onboardingStatus": "COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        let org = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/organizations/org-1"))
+            .respond_with(org_core)
+            .mount(&org)
+            .await;
+        let app = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .respond_with(active_space())
+            .mount(&app)
+            .await;
+        let model_gateway = MockServer::start().await;
+        let mut state = crate::tests::test_state(false);
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        state.org_core_url = org.uri();
+        state.application_convex_url = app.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        state.model_gateway_url = model_gateway.uri();
+        state.space_features.room_artifacts = flag;
+        Fx {
+            state,
+            _auth: auth,
+            user_core,
+            _org_core: org,
+            _application: app,
+            model_gateway,
+        }
+    }
+
+    async fn default_fixture() -> Fx {
+        fixture(org_posture(false), true).await
+    }
+
+    fn grant() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"data": {
+            "decision": {"space_ref": "space-room", "decision_ref": "decision-1"},
+            "token": TOKEN_SECRET,
+        }}))
+    }
+
+    async fn mount_read_decision(fx: &Fx, response: ResponseTemplate) {
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/thread-read-decision"))
+            .respond_with(response)
+            .mount(&fx.user_core)
+            .await;
+    }
+
+    async fn mount_listing(fx: &Fx, response: ResponseTemplate) {
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/spaces/space-room/artifacts"))
+            .respond_with(response)
+            .mount(&fx.model_gateway)
+            .await;
+    }
+
+    fn item(artifact_id: &str) -> Value {
+        json!({
+            "thread_id": "thread-1",
+            "message_id": "message-1",
+            "artifact_id": artifact_id,
+            "kind": "markdown",
+            "title": "Plan",
+            "version": 2,
+            "version_count": 3,
+            "size_chars": 1200,
+            "created_at": "2026-10-20T10:00:00Z",
+        })
+    }
+
+    async fn get(state: &AppState, uri: &str) -> (u16, Value, String, Option<String>) {
+        let request = Request::builder()
+            .method("GET")
+            .uri(uri)
+            .header("cookie", "better-auth.session_token=session-1")
+            .body(Body::empty())
+            .unwrap();
+        let response = crate::build_router(state.clone())
+            .oneshot(request)
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let cache = response
+            .headers()
+            .get("cache-control")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let raw = String::from_utf8_lossy(&response.into_body().collect().await.unwrap().to_bytes())
+            .into_owned();
+        let parsed = serde_json::from_str(&raw).unwrap_or(Value::Null);
+        (status, parsed, raw, cache)
+    }
+
+    async fn model_urls(fx: &Fx) -> Vec<String> {
+        fx.model_gateway
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|request| request.url.to_string())
+            .collect()
+    }
+
+    fn assert_no_secret(raw: &str) {
+        assert!(!raw.contains(TOKEN_SECRET), "decision token leaked: {raw}");
+        assert!(!raw.contains("decision-1"), "decision ref leaked: {raw}");
+        assert!(!raw.contains("plane-token"), "bearer leaked: {raw}");
+    }
+
+    #[tokio::test]
+    async fn flag_off_answers_404_space_room_artifacts_disabled_and_calls_nothing() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(org_posture(false), false).await;
+        mount_read_decision(&fx, grant()).await;
+        let (status, body, _, _) = get(&fx.state, ARTIFACTS_URI).await;
+        assert_eq!(status, 404);
+        assert_eq!(body["error"]["code"], "space_room_artifacts_disabled");
+        assert!(model_urls(&fx).await.is_empty());
+        let control = fx.user_core.received_requests().await.unwrap_or_default();
+        assert!(control
+            .iter()
+            .all(|request| !request.url.path().contains("thread-read-decision")));
+    }
+
+    #[tokio::test]
+    async fn control_read_decline_is_403_space_read_not_authorized_without_a_token() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = default_fixture().await;
+        mount_read_decision(
+            &fx,
+            ResponseTemplate::new(403).set_body_json(json!({
+                "error": "You cannot read this Space.",
+                "code": "space_role_insufficient",
+            })),
+        )
+        .await;
+        mount_listing(&fx, ResponseTemplate::new(200).set_body_json(json!({"artifacts": []})))
+            .await;
+        let (status, body, raw, _) = get(&fx.state, ARTIFACTS_URI).await;
+        assert_eq!(status, 403, "{raw}");
+        assert_eq!(body["error"]["code"], "space_read_not_authorized");
+        assert_no_secret(&raw);
+        assert!(model_urls(&fx).await.is_empty(), "no read after a decline");
+    }
+
+    #[tokio::test]
+    async fn invalid_limit_and_cursor_are_400_before_any_upstream_call() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = default_fixture().await;
+        mount_read_decision(&fx, grant()).await;
+        mount_listing(&fx, ResponseTemplate::new(200).set_body_json(json!({"artifacts": []})))
+            .await;
+        for limit in ["0", "201", "abc"] {
+            let (status, body, _, _) =
+                get(&fx.state, &format!("{ARTIFACTS_URI}?limit={limit}")).await;
+            assert_eq!(status, 400, "limit={limit}");
+            assert_eq!(body["error"]["code"], "invalid_limit", "limit={limit}");
+            assert_eq!(body["error"]["details"]["field"], "limit");
+        }
+        let too_long = "c".repeat(MAX_CURSOR_LEN + 1);
+        for cursor in ["bad%00cursor", "line%0Abreak", too_long.as_str()] {
+            let (status, body, _, _) =
+                get(&fx.state, &format!("{ARTIFACTS_URI}?cursor={cursor}")).await;
+            assert_eq!(status, 400, "cursor={cursor}");
+            assert_eq!(body["error"]["code"], "invalid_cursor", "cursor={cursor}");
+            assert_eq!(body["error"]["details"]["field"], "cursor");
+        }
+        assert!(model_urls(&fx).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_foreign_space_item_is_502_invalid_model_gateway_response() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = default_fixture().await;
+        mount_read_decision(&fx, grant()).await;
+        let mut foreign = item("artifact-2");
+        foreign["space_id"] = json!("space-other");
+        mount_listing(
+            &fx,
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"artifacts": [item("artifact-1"), foreign]})),
+        )
+        .await;
+        let (status, body, raw, _) = get(&fx.state, ARTIFACTS_URI).await;
+        assert_eq!(status, 502, "{raw}");
+        assert_eq!(body["error"]["code"], "invalid_model_gateway_response");
+        assert!(!raw.contains("space-other"));
+    }
+
+    #[tokio::test]
+    async fn unknown_fields_are_dropped_content_is_never_present_and_last_page_cursor_is_null() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = default_fixture().await;
+        mount_read_decision(&fx, grant()).await;
+        let mut first = item("artifact-1");
+        first["content"] = json!("SECRET-ARTIFACT-BODY");
+        first["internal_note"] = json!("drop-me");
+        first["space_id"] = json!("space-room");
+        first["agent_name"] = json!("Analyst");
+        mount_listing(
+            &fx,
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"artifacts": [first, item("artifact-2")]})),
+        )
+        .await;
+        let (status, body, raw, cache) = get(&fx.state, &format!("{ARTIFACTS_URI}?limit=2")).await;
+        assert_eq!(status, 200, "{raw}");
+        assert_eq!(cache.as_deref(), Some("no-store"));
+        assert!(!raw.contains("SECRET-ARTIFACT-BODY"));
+        assert!(!raw.contains("drop-me"));
+        assert_no_secret(&raw);
+        let data = &body["data"];
+        let artifacts = data["artifacts"].as_array().unwrap();
+        assert_eq!(artifacts.len(), 2);
+        let keys: std::collections::BTreeSet<_> = artifacts[0]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "agent_name",
+                "artifact_id",
+                "created_at",
+                "kind",
+                "message_id",
+                "size_chars",
+                "thread_id",
+                "title",
+                "version",
+                "version_count",
+            ]
+            .into_iter()
+            .collect()
+        );
+        assert_eq!(artifacts[0]["agent_name"], "Analyst");
+        assert!(artifacts[1].get("agent_name").is_none());
+        assert!(data["next_cursor"].is_null());
+        assert_eq!(data["shared_read"], json!({"available": true}));
+        // The decision rides the upstream query string only.
+        let urls = model_urls(&fx).await;
+        assert_eq!(urls.len(), 1);
+        assert!(urls[0].contains("limit=2"));
+        assert!(urls[0].contains("space_read_decision_ref=decision-1"));
+        assert!(urls[0].contains(TOKEN_SECRET));
+    }
+
+    #[tokio::test]
+    async fn a_next_cursor_passes_through_and_a_request_cursor_is_forwarded() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = default_fixture().await;
+        mount_read_decision(&fx, grant()).await;
+        mount_listing(
+            &fx,
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"artifacts": [item("artifact-1")], "next_cursor": "cur-2"})),
+        )
+        .await;
+        let (status, body, _, _) = get(&fx.state, &format!("{ARTIFACTS_URI}?cursor=cur-1")).await;
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["next_cursor"], "cur-2");
+        let urls = model_urls(&fx).await;
+        assert!(urls[0].contains("cursor=cur-1"), "{}", urls[0]);
+        assert!(urls[0].contains("limit=50"), "default limit: {}", urls[0]);
+    }
+
+    #[tokio::test]
+    async fn retention_zdr_is_true_false_or_null_when_org_core_fails() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let cases = [
+            (org_posture(true), json!(true)),
+            (org_posture(false), json!(false)),
+            (ResponseTemplate::new(500), Value::Null),
+        ];
+        for (posture, expected) in cases {
+            let fx = fixture(posture, true).await;
+            mount_read_decision(&fx, grant()).await;
+            mount_listing(&fx, ResponseTemplate::new(200).set_body_json(json!({"artifacts": []})))
+                .await;
+            let (status, body, raw, _) = get(&fx.state, ARTIFACTS_URI).await;
+            assert_eq!(status, 200, "{raw}");
+            assert_eq!(body["data"]["retention"]["zdr"], expected, "{raw}");
+            assert_eq!(body["data"]["shared_read"]["available"], true);
+            assert_eq!(body["data"]["artifacts"], json!([]));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_model_gateway_503_passes_through_without_the_decision() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = default_fixture().await;
+        mount_read_decision(&fx, grant()).await;
+        mount_listing(
+            &fx,
+            ResponseTemplate::new(503).set_body_json(json!({"error": {
+                "code": "space_artifacts_unavailable",
+                "message": "Space artifacts are unavailable.",
+                "details": {}
+            }})),
+        )
+        .await;
+        let (status, body, raw, _) = get(&fx.state, ARTIFACTS_URI).await;
+        assert_eq!(status, 503, "{raw}");
+        assert_eq!(body["error"]["code"], "space_artifacts_unavailable");
+        assert_no_secret(&raw);
+    }
+}
