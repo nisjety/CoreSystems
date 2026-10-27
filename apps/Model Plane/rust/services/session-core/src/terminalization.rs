@@ -4352,3 +4352,37 @@ mod park_recovery_db_tests {
         assert_eq!(won.kind, "park");
     }
 }
+
+/// WS06-S1: a ZDR managed start that names an existing thread is the typed
+/// `zdr_feature_not_supported` refusal for the `agent_run` feature.
+#[cfg(test)]
+mod zdr_refusal_tests {
+    use super::*;
+    use mp_contracts::zdr_refusal::Refusal;
+
+    fn start(thread_id: &str) -> pb::StartManagedRunRequest {
+        pb::StartManagedRunRequest {
+            thread_id: thread_id.to_owned(),
+            org_id: "org-1".to_owned(),
+            user_id: "user-1".to_owned(),
+            start_key: "opaque-start-1".to_owned(),
+            terminal_source: pb::ManagedRunSource::GatewayDirect as i32,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn zdr_refusal_managed_start_with_a_thread_names_the_agent_run_feature() {
+        let status = validate_managed_start_request(&start("thread-1"), true)
+            .expect_err("a ZDR run needs a fresh metadata-only thread");
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        let refusal = Refusal::from_status(&status).expect("typed refusal");
+        assert_eq!(refusal.code(), mp_contracts::zdr_refusal::code::FEATURE_NOT_SUPPORTED);
+        assert_eq!(refusal.feature(), Some("agent_run"));
+    }
+
+    #[test]
+    fn zdr_refusal_managed_start_without_a_thread_is_accepted() {
+        assert!(validate_managed_start_request(&start(""), true).is_ok());
+    }
+}

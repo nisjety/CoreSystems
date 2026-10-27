@@ -651,4 +651,31 @@ mod tests {
             .into_inner();
         assert_eq!(ui.hits.len(), 2);
     }
+
+    /// WS06-S1: a ZDR credential's recall search is the typed durable-mutation refusal
+    /// (answered before any row is read, so no database is needed).
+    #[tokio::test]
+    async fn zdr_refusal_recall_search_is_durable_mutation_forbidden() {
+        use mp_contracts::zdr_refusal::Refusal;
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://unreachable.invalid/session")
+            .expect("lazy pool");
+        let service = MessageSearchGrpc { pool, enabled: true };
+        let mut request = Request::new(pb::SearchMessagesRequest {
+            org_id: "org-1".to_owned(),
+            user_id: "user-1".to_owned(),
+            purpose: pb::SearchPurpose::Recall as i32,
+            query: "budget".to_owned(),
+            ..Default::default()
+        });
+        request
+            .extensions_mut()
+            .insert(crate::auth::VerifiedIdentity::user_for_test_with_zdr("org-1", "user-1", true));
+        let status = service.search(request).await.expect_err("ZDR recall is refused");
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+        assert_eq!(
+            Refusal::from_status(&status).map(|refusal| refusal.code()),
+            Some(mp_contracts::zdr_refusal::code::DURABLE_MUTATION_FORBIDDEN)
+        );
+    }
 }

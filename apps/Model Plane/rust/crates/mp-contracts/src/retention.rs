@@ -550,4 +550,19 @@ mod tests {
             Resolution::Refuse(Refusal::WAIVER_ROUTE_MISMATCH)
         );
     }
+
+    #[test]
+    fn space_zdr_mode_parses_exactly() {
+        assert_eq!(space_zdr_mode(Some("enforce")), SpaceZdrMode::Enforce);
+        // Only the exact lower-case word enables enforcement; everything else is the default.
+        for raw in [None, Some(""), Some("observe"), Some("Enforce"), Some("ENFORCE"), Some("true"), Some("1"), Some(" enforce"), Some("enforce ")] {
+            assert_eq!(space_zdr_mode(raw), SpaceZdrMode::Observe, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn space_zdr_mode_label_is_a_closed_word() {
+        assert_eq!(SpaceZdrMode::Observe.enforced_label(), "false");
+        assert_eq!(SpaceZdrMode::Enforce.enforced_label(), "true");
+    }
 }

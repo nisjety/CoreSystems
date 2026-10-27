@@ -2188,4 +2188,50 @@ mod tests {
             assert_eq!(merged[1].content, "unrelated recent row");
         }
     }
+
+    /// WS06-S1: the two ZDR refusals of `memory_grpc.rs` carry the catalogue kind.
+    #[test]
+    fn zdr_refusal_memory_preflight_is_durable_mutation_forbidden() {
+        use mp_contracts::zdr_refusal::Refusal;
+        let zdr = VerifiedIdentity::user_for_test_with_zdr("org-1", "user-1", true);
+        let status = authorize_memory_preflight(&zdr, "org-1", "session:read")
+            .expect_err("a ZDR caller has no durable memory");
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(
+            Refusal::from_status(&status).map(|refusal| refusal.code()),
+            Some(mp_contracts::zdr_refusal::code::DURABLE_MUTATION_FORBIDDEN)
+        );
+        // A persistent caller of the same org passes, and a tenant mismatch stays untyped.
+        let persistent = VerifiedIdentity::user_for_test("org-1", "user-1");
+        assert!(authorize_memory_preflight(&persistent, "org-1", "session:read").is_ok());
+        let cross = authorize_memory_preflight(&persistent, "org-2", "session:read")
+            .expect_err("another tenant is refused");
+        assert!(Refusal::from_status(&cross).is_none());
+    }
+
+    #[tokio::test]
+    async fn zdr_refusal_set_memory_controls_is_durable_mutation_forbidden() {
+        use mp_contracts::zdr_refusal::Refusal;
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://unreachable.invalid/session")
+            .expect("lazy pool");
+        let service = MemoryGrpc::new(pool, None);
+        let mut request = Request::new(SetMemoryControlsRequest {
+            org_id: "org-1".to_owned(),
+            user_id: "user-1".to_owned(),
+            ..Default::default()
+        });
+        request
+            .extensions_mut()
+            .insert(VerifiedIdentity::user_for_test_with_zdr("org-1", "user-1", true));
+        let status = service
+            .set_memory_controls(request)
+            .await
+            .expect_err("a ZDR user may not change memory controls");
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(
+            Refusal::from_status(&status).map(|refusal| refusal.code()),
+            Some(mp_contracts::zdr_refusal::code::DURABLE_MUTATION_FORBIDDEN)
+        );
+    }
 }

@@ -2059,6 +2059,149 @@ mod tests {
         );
     }
 
+    /// WS06-S1: an org or user mismatch of the delegated Data Plane bearer is a plain identity
+    /// refusal (no ZDR kind trailer), while a ZDR or waiver mismatch is the typed
+    /// `zdr_posture_mismatch` refusal, both `PermissionDenied`.
+    #[tokio::test]
+    async fn delegated_data_plane_identity_mismatch_is_not_a_posture_refusal() {
+        use mp_contracts::zdr_refusal::{code, Refusal};
+        let verifier = test_verifier("session-core").await;
+        let caller = VerifiedIdentity::user_for_test("org-1", "user-1");
+
+        for mutate in [
+            (|claims: &mut Value| {
+                claims["sub"] = json!("user-2");
+                claims["user_id"] = json!("user-2");
+            }) as fn(&mut Value),
+            |claims: &mut Value| claims["org_id"] = json!("org-2"),
+        ] {
+            let mut claims = user_claims("data-plane");
+            mutate(&mut claims);
+            let status = verifier
+                .delegated_data_plane_bearer(&delegating_request(&sign(&claims, "key-1")), &caller)
+                .expect_err("identity mismatch is refused");
+            assert_eq!(status.code(), Code::PermissionDenied);
+            assert!(
+                Refusal::from_status(&status).is_none(),
+                "an identity mismatch carries no ZDR kind trailer"
+            );
+        }
+
+        // A ZDR mismatch: the persistent caller is offered a ZDR bearer.
+        let mut zdr_claims = user_claims("data-plane");
+        zdr_claims["zdr"] = json!(true);
+        let status = verifier
+            .delegated_data_plane_bearer(&delegating_request(&sign(&zdr_claims, "key-1")), &caller)
+            .expect_err("a ZDR mismatch is refused");
+        assert_eq!(status.code(), Code::PermissionDenied);
+        assert_eq!(
+            Refusal::from_status(&status).map(|refusal| refusal.code()),
+            Some(code::POSTURE_MISMATCH)
+        );
+
+        // A waiver mismatch: a waived caller is offered a bare persistent bearer.
+        let waived_caller =
+            VerifiedIdentity::user_for_test_with_waiver("org-1", "user-1", "conn-1", "ack-1");
+        let bare = sign(&user_claims("data-plane"), "key-1");
+        let status = verifier
+            .delegated_data_plane_bearer(&delegating_request(&bare), &waived_caller)
+            .expect_err("a waiver mismatch is refused");
+        assert_eq!(status.code(), Code::PermissionDenied);
+        assert_eq!(
+            Refusal::from_status(&status).map(|refusal| refusal.code()),
+            Some(code::POSTURE_MISMATCH)
+        );
+    }
+
+    /// WS06-S1: the six pure ZDR refusal sites of `auth.rs` each carry the catalogue kind
+    /// (the seventh, the delegated bearer posture mismatch, is pinned above).
+    fn assert_typed(status: &Status, expected_code: Code, kind: &str, feature: Option<&str>) {
+        use mp_contracts::zdr_refusal::Refusal;
+        assert_eq!(status.code(), expected_code);
+        let refusal = Refusal::from_status(status).expect("the status carries a catalogue kind");
+        assert_eq!(refusal.code(), kind);
+        assert_eq!(refusal.feature(), feature);
+    }
+
+    #[test]
+    fn zdr_refusal_authorize_operation_write_is_durable_mutation_forbidden() {
+        let zdr = VerifiedIdentity::user_for_test_with_zdr("org-1", "user-1", true);
+        let status = authorize_operation(&zdr, "session:write").expect_err("ZDR write is refused");
+        assert_typed(&status, Code::FailedPrecondition, "zdr_durable_mutation_forbidden", None);
+        // A read stays open to a ZDR credential.
+        assert!(authorize_operation(&zdr, "session:read").is_ok());
+    }
+
+    #[test]
+    fn zdr_refusal_space_deletion_service_is_durable_mutation_forbidden() {
+        let zdr = VerifiedIdentity::service_for_test_as(
+            "org-1",
+            SPACE_DELETION_SERVICE,
+            &[],
+            true,
+        );
+        let status = authorize_space_deletion_service(&zdr).expect_err("ZDR is refused");
+        assert_typed(&status, Code::FailedPrecondition, "zdr_durable_mutation_forbidden", None);
+    }
+
+    #[test]
+    fn zdr_refusal_scheduled_step_service_names_the_scheduled_step_feature() {
+        let zdr = VerifiedIdentity::service_for_test_as("org-1", SCHEDULED_STEP_SERVICE, &[], true);
+        let status = authorize_scheduled_step_service(&zdr).expect_err("ZDR is refused");
+        assert_typed(
+            &status,
+            Code::FailedPrecondition,
+            "zdr_feature_not_supported",
+            Some("scheduled_step"),
+        );
+    }
+
+    #[test]
+    fn zdr_refusal_run_action_authority_names_the_agent_run_feature() {
+        let zdr = VerifiedIdentity::service_for_test_as(
+            "org-1",
+            RUN_ACTION_AUTHORITY_SERVICE,
+            &[],
+            true,
+        );
+        let status = authorize_run_action_authority_service(&zdr).expect_err("ZDR is refused");
+        assert_typed(
+            &status,
+            Code::FailedPrecondition,
+            "zdr_feature_not_supported",
+            Some("agent_run"),
+        );
+    }
+
+    #[test]
+    fn zdr_refusal_scheduled_step_authority_names_the_scheduled_step_feature() {
+        let zdr = VerifiedIdentity::service_for_test_as(
+            "org-1",
+            RUN_ACTION_AUTHORITY_SERVICE,
+            &[],
+            true,
+        );
+        let status = authorize_scheduled_step_authority_service(&zdr).expect_err("ZDR is refused");
+        assert_typed(
+            &status,
+            Code::FailedPrecondition,
+            "zdr_feature_not_supported",
+            Some("scheduled_step"),
+        );
+    }
+
+    #[test]
+    fn zdr_refusal_system_run_owner_is_durable_mutation_forbidden() {
+        let zdr = VerifiedIdentity::service_for_test_as(
+            "org-1",
+            "service:execution-core",
+            &[SYSTEM_RUN_OWNER_SCOPE],
+            true,
+        );
+        let status = authorize_system_run_owner(&zdr).expect_err("ZDR cannot own a durable run");
+        assert_typed(&status, Code::FailedPrecondition, "zdr_durable_mutation_forbidden", None);
+    }
+
     /// Owner decision 17: a zero-retention user must always be able to delete or archive the threads
     /// and memories they own. The ordinary write gate still refuses that user, so the housekeeping
     /// gate is the only door open to them, and a service caller is held to the write gate.
