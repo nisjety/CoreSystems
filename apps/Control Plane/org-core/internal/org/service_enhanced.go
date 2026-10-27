@@ -612,6 +612,9 @@ func (s *Service) GetRetentionPosture(ctx context.Context, id string) (*Retentio
 // rejected with ErrPlanUpgradeRequired unless the org's plan is entitled;
 // disabling it is always allowed. The stored value is durable org-admin intent;
 // live enforcement is applied through auth-core's managed retention policy.
+// A false-to-true transition enqueues a cleanup event in the same transaction;
+// the call publishes it once inline as best effort, and a publish failure does
+// not fail the call because the outbox worker retries it.
 // Returns the refreshed organization projection.
 func (s *Service) SetInteractiveRetention(ctx context.Context, orgID string, zdr bool, changedBy string) (*Organization, error) {
 	if strings.TrimSpace(orgID) == "" {
@@ -635,7 +638,7 @@ func (s *Service) SetInteractiveRetention(ctx context.Context, orgID string, zdr
 	}
 	if enqueued {
 		if _, err := s.FlushInteractiveRetentionOutbox(ctx, 100); err != nil {
-			return nil, err
+			log.Printf("org-core: interactive retention %s: inline outbox flush failed, left pending for the outbox worker: %v", orgID, err)
 		}
 	}
 	return s.repo.GetOrganization(ctx, orgID)
