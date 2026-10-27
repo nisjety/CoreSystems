@@ -22,7 +22,7 @@ mod support;
 use support::fixture_site::{FixtureSiteDriver, FIXTURE_A};
 
 const RUNTIME_TOKEN: &str = "crawl-scope-runtime-token";
-const INTERNAL_SECRET: &str = "crawl-scope-internal-secret";
+const INTERNAL_SECRET: &str = "crawl-scope-internal-secret-0123456789";
 const ORG: &str = "org_crawl_scope_test";
 
 type HmacSha256 = Hmac<Sha256>;
