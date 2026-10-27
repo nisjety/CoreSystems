@@ -1,6 +1,6 @@
 # Hand-over: D-B1-compile-units (W2-green, batch 1 of the depth plan, 2026-10-27)
 
-Read first: `.plan-work/quarry-w1w2/wf-D-B1-compile-units-progress.md` (milestones and the test log) and `.plan-work/quarry-w1w2/depth/D-B1-compile-units.md` (what is still open, with owners).
+Read first: `.plan-work/quarry-w1w2/wf-D-B1-compile-units-progress.md` (milestones and the test log) and `.plan-work/quarry-w1w2/depth/D-D-B1-compile-units.md` (what is still open, with owners).
 
 ## What is done (local commits on quarryv2-next, nothing pushed)
 
@@ -42,7 +42,7 @@ Not run: the live Chromium lane (CHROMIUMOXIDE_TEST=1), the Redis and Postgres s
 
 ## What is left for the next person
 
-Nothing in the batch's list is open. The open findings with owners are in `depth/D-B1-compile-units.md`, items 1 to 11. The most useful next steps:
+Nothing in the batch's list is open. The open findings with owners are in `depth/D-D-B1-compile-units.md`, items 1 to 11. The most useful next steps:
 - item 2 (quarry-runtime cached profile store, Redis-gated): the same wrong expectation as the session.rs fix, not run here;
 - item 3 (default scope of a metadata-less profile, in-memory vs Postgres): a decision, not a test fix;
 - item 1 (agent_routes step cap test, 403 vs 429): belongs to the budget and agent-policy unit, whose edits were moving during this run.

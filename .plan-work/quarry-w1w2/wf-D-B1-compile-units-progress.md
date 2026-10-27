@@ -26,7 +26,7 @@ Not mine (leave alone): quarry-edge src/{lib.rs,main.rs}, tests/support/{agent_h
 - [x] M4: quarry-edge routes and scrape_contract fixed ("pdf" is a supported format now): d83f69807.
 - [x] M5: D1-026: the padding fix is already 217fc5484 (WS5.E); table-heavy size test in markdown.rs: b8e951f80.
 - [x] M6: D1-065: sweeper and Degraded tests already existed and pass; draining-precedence test and #[serial] on ready_browser.rs: c78b4b70e.
-- [x] M7: final cargo check --workspace --all-targets exit 0 (logs/test3.log, QTEST_CHECK2 rc=0); named tests green (see the final test log below); notes written: depth/D-B1-compile-units.md, wf-D-B1-compile-units.md.
+- [x] M7: final cargo check --workspace --all-targets exit 0 (logs/test3.log, QTEST_CHECK2 rc=0); named tests green (see the final test log below); notes written: depth/D-D-B1-compile-units.md, wf-D-B1-compile-units.md.
 
 ## Test results log
 
