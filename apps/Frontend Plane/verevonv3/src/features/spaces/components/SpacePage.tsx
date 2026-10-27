@@ -636,6 +636,7 @@ export default function SpacePage() {
                       orgId={current().membership.org_id}
                       actorId={current().membership.subject_id}
                       writerApi={writerApi()}
+                      peopleSearch={current().features?.people_search === true}
                       isOrganizationRoom={current().space.is_organization_room}
                       onMembersChanged={() => {
                         void refetchRoster()
@@ -1406,6 +1407,8 @@ function SpaceMembersPanel(props: {
   readonly actorId: string
   /** The server's Control member writer is on: role select, leave, owner removal (WS04-S6). */
   readonly writerApi: boolean
+  /** The gateway's people-search route is on: the picker searches the directory (WS04-S3). */
+  readonly peopleSearch?: boolean
   /** The organization's own channel derives its roster from org-core, so it
    * has no editable member list — see `SpaceMemberControls`.
    *
@@ -1485,6 +1488,7 @@ function SpaceMembersPanel(props: {
           onChanged={props.onMembersChanged}
           actorRole={props.role}
           writerApi={props.writerApi}
+          peopleSearch={props.peopleSearch}
         />
       </Show>
 

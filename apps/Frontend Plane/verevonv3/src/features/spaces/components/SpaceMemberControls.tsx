@@ -1,5 +1,5 @@
 import { Loader2, Users } from '@/shared/icons'
-import { createMemo, createSignal, For, Show } from 'solid-js'
+import { createEffect, createMemo, createSignal, For, onCleanup, Show } from 'solid-js'
 
 import { SpaceConfirmButton } from './SpaceConfirmButton'
 
@@ -9,6 +9,8 @@ import {
   changeSpaceMemberRole,
   leaveSpaceRoom,
   removeSpaceMember,
+  searchDirectoryPeople,
+  type DirectoryPerson,
   type SpaceAudienceState,
   type SpaceRosterMember,
 } from '@/shared/api/spaces-client'
@@ -62,6 +64,23 @@ export interface SpaceMemberControlsProps {
    */
   readonly actorRole?: string
   readonly writerApi?: boolean
+  /**
+   * The gateway's people-search route is on (WS04-S3, `features.people_search`). With it the
+   * picker is a debounced search box over the directory (the room's own members left out by the
+   * server); without it the picker lists the organization as before. `undefined` means the
+   * server did not say, which is NOT the same as "on".
+   */
+  readonly peopleSearch?: boolean
+}
+
+const SEARCH_DEBOUNCE_MS = 250
+const SEARCH_PAGE_SIZE = 20
+const SEARCH_MAX_CHARS = 100
+
+type Candidate = { readonly userId: string; readonly name: string; readonly email: string }
+
+function candidateFromPerson(person: DirectoryPerson): Candidate {
+  return { userId: person.subjectId, name: person.displayName, email: person.email }
 }
 
 export function SpaceMemberControls(props: SpaceMemberControlsProps) {
@@ -72,9 +91,75 @@ export function SpaceMemberControls(props: SpaceMemberControlsProps) {
   const [audience, setAudience] = createSignal<SpaceAudienceState | undefined>(undefined)
   const [addRole, setAddRole] = createSignal<RoomRole>('editor')
   const addRoles = createMemo(() => (props.writerApi ? assignableRolesForAdd(props.actorRole ?? '') : []))
+  const searching = () => props.peopleSearch === true
   const [candidates] = createResource(
-    () => (open() ? props.orgId ?? '' : ''),
+    () => (open() && !searching() ? props.orgId ?? '' : ''),
     async (orgId) => (orgId ? listOrganizationMembers(orgId) : []),
+  )
+
+  // WS04-S3 search state. A search is the server's: it decides who the caller may see, and this
+  // only debounces the typing, pages with the server's cursor and drops a stale answer.
+  const [query, setQuery] = createSignal('')
+  const [searchQuery, setSearchQuery] = createSignal('')
+  const [found, setFound] = createSignal<readonly Candidate[]>([])
+  const [nextCursor, setNextCursor] = createSignal<string | null>(null)
+  const [searchLoading, setSearchLoading] = createSignal(false)
+  const [searchError, setSearchError] = createSignal('')
+  let debounceTimer: ReturnType<typeof setTimeout> | undefined
+  let searchSeq = 0
+  onCleanup(() => {
+    if (debounceTimer) clearTimeout(debounceTimer)
+    searchSeq += 1
+  })
+
+  const onQueryInput = (value: string) => {
+    setQuery(value)
+    if (debounceTimer) clearTimeout(debounceTimer)
+    debounceTimer = setTimeout(() => setSearchQuery(value.trim()), SEARCH_DEBOUNCE_MS)
+  }
+
+  async function runSearch(spaceRef: string, q: string, cursor: string | null) {
+    const seq = ++searchSeq
+    setSearchLoading(true)
+    setSearchError('')
+    try {
+      const page = await searchDirectoryPeople(q, {
+        limit: SEARCH_PAGE_SIZE,
+        cursor,
+        excludeMemberOf: spaceRef,
+      })
+      if (seq !== searchSeq) return
+      const next = page.people.map(candidateFromPerson)
+      setFound((prev) => (cursor ? [...prev, ...next] : next))
+      setNextCursor(page.nextCursor)
+    } catch (err) {
+      if (seq !== searchSeq) return
+      if (!cursor) {
+        setFound([])
+        setNextCursor(null)
+      }
+      setSearchError(
+        translateApiError(err, i18n.tr, {
+          no: 'Personsøket mislyktes. Prøv igjen om litt.',
+          en: 'The people search failed. Try again shortly.',
+        }),
+      )
+    } finally {
+      if (seq === searchSeq) setSearchLoading(false)
+    }
+  }
+
+  // A new first page whenever the picker opens or the debounced text changes.
+  createEffect(
+    () => ({ isOpen: open(), q: searchQuery(), enabled: searching(), ref: props.spaceRef }),
+    ({ isOpen, q, enabled, ref }) => {
+      if (!isOpen || !enabled) {
+        searchSeq += 1
+        setSearchLoading(false)
+        return
+      }
+      void runSearch(ref, q, null)
+    },
   )
 
   // Control's roster is the source for "already here", not our own optimism:
@@ -82,9 +167,16 @@ export function SpaceMemberControls(props: SpaceMemberControlsProps) {
   const alreadyHere = createMemo(
     () => new Set(props.roster().filter((m) => m.subject_type === 'user').map((m) => m.subject_id)),
   )
-  const addable = createMemo(() =>
-    (candidates.error ? [] : candidates() ?? []).filter((member) => !alreadyHere().has(member.userId)),
+  const addable = createMemo<readonly Candidate[]>(() =>
+    (searching()
+      ? found()
+      : (candidates.error ? [] : candidates() ?? []).map(
+          (member): Candidate => ({ userId: member.userId, name: member.name ?? '', email: member.email }),
+        )
+    ).filter((member) => !alreadyHere().has(member.userId)),
   )
+  const listLoading = () => (searching() ? searchLoading() && found().length === 0 : candidates.loading)
+  const listError = () => (searching() ? searchError() !== '' : Boolean(candidates.error))
 
   async function run(
     id: string,
@@ -146,28 +238,52 @@ export function SpaceMemberControls(props: SpaceMemberControlsProps) {
 
       <Show when={open()}>
         <div class="verevon-space-member-picker">
-          <Show when={candidates.loading}>
+          <Show when={searching()}>
+            <label class="verevon-space-member-picker__role">
+              <span>{i18n.tr('Søk etter personer', 'Search for people')}</span>
+              <input
+                type="search"
+                class="verevon-space-agent__control"
+                value={query()}
+                maxlength={SEARCH_MAX_CHARS}
+                autocomplete="off"
+                placeholder={i18n.tr('Navn eller e-post', 'Name or email')}
+                onInput={(event) => onQueryInput(event.currentTarget.value)}
+              />
+            </label>
+          </Show>
+
+          <Show when={listLoading()}>
             <p class="verevon-space-inline-status" role="status">
-              {i18n.tr('Henter personer …', 'Loading people…')}
+              {searching() ? i18n.tr('Søker …', 'Searching…') : i18n.tr('Henter personer …', 'Loading people…')}
             </p>
           </Show>
 
-          {/* An unreadable org roster is not an empty organization. */}
-          <Show when={candidates.error}>
+          {/* An unreadable org roster or a failed search is not an empty organization. */}
+          <Show when={listError()}>
             <p class="verevon-space-projection-error" role="alert">
-              {i18n.tr(
-                'Vi fikk ikke hentet hvem som er i organisasjonen.',
-                'We could not load who is in the organization.',
-              )}
+              {searching()
+                ? searchError()
+                : i18n.tr(
+                    'Vi fikk ikke hentet hvem som er i organisasjonen.',
+                    'We could not load who is in the organization.',
+                  )}
             </p>
           </Show>
 
-          <Show when={!candidates.loading && !candidates.error && addable().length === 0}>
+          <Show when={!listLoading() && !listError() && !(searching() && searchLoading()) && addable().length === 0}>
             <p class="verevon-space-member-picker__empty">
-              {i18n.tr(
-                'Alle i organisasjonen er allerede med i dette rommet.',
-                'Everyone in the organization is already in this room.',
-              )}
+              {searching()
+                ? searchQuery()
+                  ? i18n.tr('Ingen personer passer søket.', 'No people match that search.')
+                  : i18n.tr(
+                      'Ingen flere personer å legge til i dette rommet.',
+                      'No more people to add to this room.',
+                    )
+                : i18n.tr(
+                    'Alle i organisasjonen er allerede med i dette rommet.',
+                    'Everyone in the organization is already in this room.',
+                  )}
             </p>
           </Show>
 
@@ -230,6 +346,22 @@ export function SpaceMemberControls(props: SpaceMemberControlsProps) {
               )}
             </For>
           </ul>
+
+          <Show when={searching() && nextCursor()}>
+            {(cursor) => (
+              <button
+                type="button"
+                class="verevon-space-agent__control"
+                disabled={searchLoading()}
+                onClick={() => void runSearch(props.spaceRef, searchQuery(), cursor())}
+              >
+                <Show when={searchLoading()} fallback={i18n.tr('Vis flere', 'Show more')}>
+                  <Loader2 size={14} aria-hidden="true" />
+                  {i18n.tr('Henter …', 'Loading…')}
+                </Show>
+              </button>
+            )}
+          </Show>
         </div>
       </Show>
 

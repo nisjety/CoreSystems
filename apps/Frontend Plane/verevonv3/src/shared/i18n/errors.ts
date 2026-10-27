@@ -242,6 +242,7 @@ const ERROR_COPY: Record<string, ErrorCopy> = {
 
   // WS04 membership and room administration
   invalid_request: { no: 'Forespørselen er ikke gyldig. Ingenting er endret.', en: 'The request is not valid. Nothing was changed.' },
+  directory_unavailable: { no: 'Personsøket er utilgjengelig akkurat nå. Prøv igjen om litt.', en: 'People search is unavailable right now. Try again shortly.' },
   feature_disabled: { no: 'Denne funksjonen er ikke slått på for deg ennå.', en: 'This feature is not turned on for you yet.' },
   idempotency_key_reused: { no: 'Denne forespørselen er allerede brukt til noe annet. Last inn på nytt og prøv igjen.', en: 'This request was already used for something else. Reload and try again.' },
   member_not_found: { no: 'Personen er ikke medlem av rommet lenger. Last inn på nytt.', en: 'That person is no longer a member of the room. Reload.' },

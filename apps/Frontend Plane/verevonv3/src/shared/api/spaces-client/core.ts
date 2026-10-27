@@ -48,6 +48,8 @@ export type SpaceContext = {
     connectivity_banner?: boolean
     /** WS04-S2: the owner or manager may edit the room's name and topic. */
     room_details?: boolean
+    /** WS04-S3: the member picker searches the people directory instead of listing the org. */
+    people_search?: boolean
   }
   /** Server-stated bounds (WS01-S5). Absent on an older gateway: use the documented defaults. */
   limits?: {
