@@ -1061,6 +1061,22 @@ mod agent_route_tests {
             assert_eq!((budget.max_rounds, budget.max_subagents), (4, 0));
         }
     }
+
+    /// The pure builder sends no level, on any route or plan mode: `resolved_run_agent_request`
+    /// sets it for a fresh run, so this request is the one it was before the level existed.
+    #[test]
+    fn the_pure_builder_sends_no_level() {
+        let pinned = AgentRoute::for_turn(&normalized(Some("chatgpt-codex"), Some("conn_1")));
+        for route in [AgentRoute::default(), pinned] {
+            for plan_mode in [false, true] {
+                assert_eq!(
+                    build(&route, plan_mode).reasoning_effort,
+                    0,
+                    "plan_mode {plan_mode}"
+                );
+            }
+        }
+    }
 }
 
 pub async fn invoke_stream_sse(
@@ -1945,6 +1961,12 @@ pub async fn invoke_stream_sse(
                 },
             ),
             do_attachments,
+            // The run's effort level (WS11-S8): the turn's clamped profile, through the same
+            // derivation the chat turn uses. 0 with MODEL_GATEWAY_EFFORT_LADDER off.
+            crate::thinking::run_level(
+                req.effort.as_deref().unwrap_or_default(),
+                crate::thinking::ladder_enabled(),
+            ),
         );
     }
 
@@ -10108,6 +10130,9 @@ fn spawn_run_dispatch(
     // The thread's grant as Session Core holds it (build plan WS04 S4), read once for this
     // run start; `None` with the durable grant switch off, and the in-memory store decides.
     durable_grant: Option<&crate::session_flow::ThreadGrant>,
+    // The run's effort level (WS11-S8), from `thinking::run_level` on the turn's clamped
+    // profile; 0 with the ladder off, and for every continuation.
+    run_effort: i32,
 ) -> Result<tokio::task::JoinHandle<Result<RunAgentResponse, tonic::Status>>, tonic::Status> {
     let mut execution_client = state.execution_client.clone();
     // The graded authority execution-core enforces PER CALL.
@@ -10191,6 +10216,7 @@ fn spawn_run_dispatch(
         resume,
         run_context,
         attachments,
+        run_effort,
     );
     let run_agent_req = authenticated_run_agent_request(
         run_agent_req,
@@ -10278,7 +10304,8 @@ fn dispatch_autonomy_rung(
 }
 
 /// [`build_run_agent_request`] with the rung resolved by [`dispatch_autonomy_rung`]:
-/// the one place a dispatch's request is made, so the tests see what really leaves.
+/// the one place a dispatch's request is made, so the tests see what really leaves. It is
+/// also where a fresh run's effort level is set, from `run_effort`.
 #[allow(clippy::too_many_arguments)] // cohesive: the immutable request fields
 fn resolved_run_agent_request(
     run: &crate::session_flow::SessionRun,
@@ -10299,9 +10326,13 @@ fn resolved_run_agent_request(
     resume: Option<mp_contracts::model_plane::v1::AgentResume>,
     run_context: Option<mp_contracts::model_plane::v1::RunContext>,
     attachments: Vec<mp_contracts::model_plane::v1::RunAttachment>,
+    run_effort: i32,
 ) -> RunAgentRequest {
     let autonomy_rung = dispatch_autonomy_rung(plan_mode, resume.is_some(), granted);
-    build_run_agent_request(
+    // A continuation segment carries only what its own request sends, and it sends no level:
+    // only a fresh run carries the turn's.
+    let fresh = resume.is_none();
+    let request = build_run_agent_request(
         run,
         org_id,
         user_id,
@@ -10320,7 +10351,11 @@ fn resolved_run_agent_request(
         resume,
         run_context,
         attachments,
-    )
+    );
+    RunAgentRequest {
+        reasoning_effort: if fresh { run_effort } else { 0 },
+        ..request
+    }
 }
 
 /// The unauthenticated `RunAgentRequest` for one prepared run. Pure, so what
@@ -10419,9 +10454,9 @@ fn build_run_agent_request(
         // (`do_run_attachments`); empty with `CHAT_DO_ATTACHMENTS_ENABLED` off, for a
         // turn without attachments and for a continuation.
         attachments,
-        // The run's effort level (WS11-S8). Unspecified until the gateway half sets it,
-        // which keeps the request bytes as they were; execution-core uses it only with
-        // EXECUTION_CORE_RUN_EFFORT on.
+        // The run's effort level (WS11-S8). Unspecified here: `resolved_run_agent_request` sets
+        // it for a fresh run, so this builder's bytes stay as they were. execution-core uses it
+        // only with EXECUTION_CORE_RUN_EFFORT on.
         reasoning_effort: mp_contracts::model_plane::v1::ReasoningEffort::Unspecified as i32,
     }
 }
@@ -10833,6 +10868,9 @@ fn agentic_run_stream(
     // The validated attachments of a Do turn (build plan WS08-S6): files for the sandbox and
     // images for every round. Empty with `CHAT_DO_ATTACHMENTS_ENABLED` off and for a continuation.
     attachments: Vec<mp_contracts::model_plane::v1::RunAttachment>,
+    // The run's effort level (WS11-S8), from `thinking::run_level` at the launch; 0 for a
+    // continuation and with the ladder off.
+    run_effort: i32,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     tokio::spawn(async move {
@@ -10962,6 +11000,7 @@ fn agentic_run_stream(
                 start,
             },
             durable_grant.as_ref(),
+            run_effort,
         ) {
             Ok(dispatch) => dispatch,
             Err(error) => {
@@ -16667,6 +16706,8 @@ pub(crate) async fn continue_run(
             None,
             // And re-requests its attachments rather than carrying them (v1).
             Vec::new(),
+            // A continuation carries no effort level (WS11-S8).
+            0,
         )
     };
     if !resume_enabled {
@@ -16950,7 +16991,51 @@ mod continue_run_tests {
             Some(resume),
             None,
             Vec::new(),
+            0,
         )
+    }
+
+    /// One dispatch's request with the given resume and turn level, through the same
+    /// [`resolved_run_agent_request`] a dispatch uses.
+    fn request_at_level(
+        resume: Option<mp_contracts::model_plane::v1::AgentResume>,
+        run_effort: i32,
+    ) -> RunAgentRequest {
+        resolved_run_agent_request(
+            &continue_run_record(),
+            "org-1",
+            "user-1",
+            "gpt-5.6-terra",
+            "research the Q3 numbers",
+            &[],
+            false,
+            0,
+            "ask",
+            false,
+            None,
+            "",
+            None,
+            &AgentRoute::default(),
+            crate::run_budget::RunBudget::default(),
+            resume,
+            None,
+            Vec::new(),
+            run_effort,
+        )
+    }
+
+    /// A fresh run carries the level its turn asked for.
+    #[test]
+    fn a_fresh_do_run_carries_the_turn_level() {
+        assert_eq!(request_at_level(None, 4).reasoning_effort, 4);
+    }
+
+    /// A continuation segment carries only what its own request sends, and it sends no level,
+    /// whatever its turn asked for.
+    #[test]
+    fn a_continuation_carries_no_level() {
+        let resume = continue_resume("appr_1", "claim-1", "segment");
+        assert_eq!(request_at_level(Some(resume), 4).reasoning_effort, 0);
     }
 
     fn continue_run_record() -> crate::session_flow::SessionRun {
@@ -18507,6 +18592,7 @@ mod continue_run_tests {
             ApprovalSpend::SpentByGateway,
             None,
             Vec::new(),
+            0,
         );
         let frames = frames_of_stream(stream).await;
         let names: Vec<&str> = frames.iter().map(|(name, _)| name.as_str()).collect();
@@ -19819,6 +19905,7 @@ mod continue_run_tests {
             ApprovalSpend::NotSpent,
             None,
             Vec::new(),
+            0,
         );
         let frames = frames_of_stream(stream).await;
         let names: Vec<&str> = frames.iter().map(|(name, _)| name.as_str()).collect();

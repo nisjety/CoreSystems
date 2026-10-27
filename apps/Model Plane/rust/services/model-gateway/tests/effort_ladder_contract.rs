@@ -191,6 +191,45 @@ fn normal_and_zdr_paths_derive_the_same_level() {
     assert!(read("src/http_routes.rs").contains("reasoning_effort: settings.thinking.effort_wire(),"));
 }
 
+/// A Do or Plan run's level is the chat turn's derivation applied to the same clamped
+/// profile: the launch reads the field the org cap has already clamped, through
+/// `thinking::run_level`, and sse.rs names no profile of its own.
+#[test]
+fn do_run_level_uses_the_one_derivation() {
+    let sse = read("src/sse.rs");
+    let clamp = sse
+        .find("admitted.clamp_effort(&mut req.effort")
+        .expect("the org cap clamps the request's effort");
+    let launch = sse
+        .find("return agentic_run_stream(")
+        .expect("the agentic run is launched from the invoke handler");
+    assert!(
+        clamp < launch,
+        "the run must read the clamped effort, not the one the client sent"
+    );
+    let call = &sse[launch..];
+    let call = &call[..call.find("\n        );\n").expect("the launch call ends")];
+    let call: String = call.split_whitespace().collect();
+    assert!(
+        call.contains(
+            "crate::thinking::run_level(req.effort.as_deref().unwrap_or_default(),crate::thinking::ladder_enabled(),)"
+        ),
+        "the launch carries the level from `thinking::run_level`"
+    );
+    // A call is `effort_level(` standing alone, not the tail of a longer name: sse.rs has a
+    // test called `the_effort_level()`, and that is not a derivation.
+    let called = sse.match_indices("effort_level(").any(|(at, _)| {
+        !sse[..at]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_')
+    });
+    assert!(
+        !sse.contains("\"deep\" =>") && !called,
+        "sse.rs names no profile: the mapping lives in `thinking` alone"
+    );
+}
+
 /// A derived request that clears the budget must clear the level too, or a
 /// repair round inherits the author's reasoning.
 #[test]

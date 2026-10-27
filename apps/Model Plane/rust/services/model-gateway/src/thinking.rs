@@ -149,6 +149,21 @@ pub fn effort_level(profile: &str) -> ReasoningEffort {
     }
 }
 
+/// The effort level a fresh Do or Plan run carries on its rounds, or 0 for none.
+///
+/// On, this is the profile's own level from [`effort_level`], the same derivation
+/// [`plan`] gives the chat turn, so a run and a turn cannot disagree about what `deep`
+/// means. Off, the profile is not consulted at all: the request stays what it was, and
+/// the unknown-profile counter moves only on the ladder path, as it does for the turn.
+#[must_use]
+pub fn run_level(profile: &str, ladder_on: bool) -> i32 {
+    if ladder_on {
+        effort_level(profile) as i32
+    } else {
+        0
+    }
+}
+
 /// Completion tokens a level may spend on reasoning. Mirrors inference-core's
 /// `effort::allowance`, which is what its adapters add to the ceiling.
 #[must_use]
@@ -303,6 +318,36 @@ mod tests {
     fn unknown_effort_is_standard() {
         for profile in ["wat", "NORMAL", "ultra", "deep!"] {
             assert_eq!(effort_level(profile), ReasoningEffort::Unspecified, "{profile}");
+        }
+    }
+
+    /// With the ladder on, a run carries the level its profile names, the number the chat
+    /// turn sends for the same profile: `deep` is High (4) on the wire.
+    #[test]
+    fn deep_is_high_with_the_ladder_on() {
+        assert_eq!(run_level("deep", true), ReasoningEffort::High as i32);
+        assert_eq!(run_level("deep", true), 4);
+        assert_eq!(run_level(" EXTENDED ", true), 4);
+        assert_eq!(
+            run_level("deep", true),
+            plan("deep", 4096, true).effort_wire()
+        );
+    }
+
+    /// With the ladder off no profile reaches the wire as a level, whatever it names.
+    #[test]
+    fn anything_is_unspecified_with_the_ladder_off() {
+        for profile in ["deep", "quick", "max", "standard", "wat", ""] {
+            assert_eq!(run_level(profile, false), 0, "{profile:?}");
+        }
+    }
+
+    /// `standard`, unset and blank name no level even with the ladder on, so a default turn
+    /// keeps its request free of reasoning.
+    #[test]
+    fn standard_and_unset_are_unspecified() {
+        for profile in ["standard", "", "   "] {
+            assert_eq!(run_level(profile, true), 0, "{profile:?}");
         }
     }
 
