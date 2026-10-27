@@ -1186,7 +1186,13 @@ mod tests {
                 "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
             };
             if !resources_on_root {
-                page.set("Resources", resources.clone());
+                // A page names the image only when it paints it. The classifier reads the
+                // resources, so a text page that named the image would look like a scan.
+                let mut own = resources.clone();
+                if !spec.image {
+                    own.remove(b"XObject");
+                }
+                page.set("Resources", own);
             }
             kids.push(doc.add_object(page).into());
         }
