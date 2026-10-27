@@ -760,6 +760,19 @@ fn apply_thinking(body: &mut serde_json::Value, req: &InferRequest, ladder: bool
         // No other wire class is declared for the Anthropic family.
         _ => return,
     }
+    // Logged only once a level has reached the body. A budget the no-room guard
+    // drops, or a wire this adapter does not render, sends none, so it logs none.
+    // Ids and closed tokens only, never the prompt.
+    info!(
+        request_id = %req.request_id,
+        model = %req.model,
+        wire = ?resolved.wire,
+        requested = resolved.requested.as_str(),
+        applied = resolved.applied.as_str(),
+        clamped = resolved.clamped(),
+        max_tokens,
+        "effort_resolved"
+    );
     body["max_tokens"] = serde_json::json!(max_tokens);
 }
 
@@ -3390,6 +3403,189 @@ mod claude_5_5_wire_tests {
             };
             let sent = body(&req);
             assert_eq!(sent["system"][0]["cache_control"]["type"], "ephemeral", "{model}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod effort_log_tests {
+    use std::sync::{Arc, Mutex};
+
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::{Event, Metadata, Subscriber};
+
+    use super::{
+        apply_thinking, build_request_body_with_flags, claude_5_5_default_effort, CLAUDE_HAIKU_5_5,
+        CLAUDE_OPUS_5_5, CLAUDE_SONNET_5_5,
+    };
+    use crate::provider::effort::Level;
+    use crate::provider::{ChatMessage, InferRequest};
+
+    /// The level and fields of one logged event, with string values unquoted.
+    type Logged = (tracing::Level, Vec<(String, String)>);
+
+    #[derive(Default)]
+    struct FieldCollector(Vec<(String, String)>);
+
+    impl Visit for FieldCollector {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            let value = format!("{value:?}");
+            let name = field.name().to_owned();
+            self.0.push((name, value.trim_matches('"').to_owned()));
+        }
+    }
+
+    struct Recorder(Arc<Mutex<Vec<Logged>>>);
+
+    impl Subscriber for Recorder {
+        fn enabled(&self, _: &Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+        fn record(&self, _: &Id, _: &Record<'_>) {}
+        fn record_follows_from(&self, _: &Id, _: &Id) {}
+        fn event(&self, event: &Event<'_>) {
+            let mut fields = FieldCollector::default();
+            event.record(&mut fields);
+            let level = *event.metadata().level();
+            self.0.lock().unwrap().push((level, fields.0));
+        }
+        fn enter(&self, _: &Id) {}
+        fn exit(&self, _: &Id) {}
+    }
+
+    /// Runs `build` under a fresh subscriber and returns what it built, with the
+    /// events it logged. Callsite interest is cached process-wide, so a first
+    /// registration that overlaps another test's subscriber can leave a stale
+    /// "never" behind and drop an event. Each attempt installs its own subscriber,
+    /// which rebuilds that cache, and the first attempt that logged anything wins.
+    fn run_logged(build: impl Fn() -> serde_json::Value) -> (serde_json::Value, Vec<Logged>) {
+        let mut last = None;
+        for _ in 0..5 {
+            let sink = Arc::new(Mutex::new(Vec::new()));
+            let body = tracing::subscriber::with_default(Recorder(sink.clone()), || build());
+            let events = sink.lock().unwrap().clone();
+            if !events.is_empty() {
+                return (body, events);
+            }
+            last = Some((body, events));
+        }
+        last.expect("the loop runs at least once")
+    }
+
+    fn field<'a>(event: &'a Logged, name: &str) -> &'a str {
+        event
+            .1
+            .iter()
+            .find(|(key, _)| key.as_str() == name)
+            .map(|(_, value)| value.as_str())
+            .unwrap_or_else(|| panic!("no `{name}` field in {:?}", event.1))
+    }
+
+    /// The events that are the `effort_resolved` line.
+    fn effort_lines(events: &[Logged]) -> Vec<&Logged> {
+        events
+            .iter()
+            .filter(|event| field(event, "message") == "effort_resolved")
+            .collect()
+    }
+
+    #[test]
+    fn anthropic_ladder_logs_effort_resolved_once_per_body() {
+        const MARKER: &str = "SECRETMARKER";
+        let req = InferRequest {
+            request_id: "req-effort-once".to_owned(),
+            model: "claude-sonnet-4-5".to_owned(),
+            max_tokens: 4096,
+            reasoning_effort: Some(Level::High),
+            messages: vec![ChatMessage {
+                compaction_summary: String::new(),
+                role: "user".to_owned(),
+                content: MARKER.to_owned(),
+                name: String::new(),
+            }],
+            ..Default::default()
+        };
+        let (_, events) = run_logged(|| {
+            let mut body = serde_json::json!({ "model": req.model, "max_tokens": req.max_tokens });
+            apply_thinking(&mut body, &req, true);
+            body
+        });
+        let lines = effort_lines(&events);
+        assert_eq!(lines.len(), 1, "one line per body: {events:?}");
+        let line = lines[0];
+        assert_eq!(line.0, tracing::Level::INFO);
+        assert_eq!(field(line, "request_id"), "req-effort-once");
+        assert_eq!(field(line, "model"), "claude-sonnet-4-5");
+        assert_eq!(field(line, "wire"), "AnthropicBudget");
+        assert_eq!(field(line, "requested"), "high");
+        assert_eq!(field(line, "applied"), "high");
+        assert_eq!(field(line, "clamped"), "false");
+        // The caller's 4096 plus the High allowance of 4096.
+        assert_eq!(field(line, "max_tokens"), "8192");
+        // Seven fields and the message, and no content.
+        assert_eq!(line.1.len(), 8, "{:?}", line.1);
+        let leaked = line.1.iter().any(|(_, value)| value.contains(MARKER));
+        assert!(!leaked, "{:?}", line.1);
+    }
+
+    #[test]
+    fn a_dropped_budget_logs_no_effort_resolved() {
+        // At max_tokens 0 the raised ceiling is the High allowance, 4096, which is
+        // the budget itself, so the no-room guard drops the thinking block.
+        let req = InferRequest {
+            model: "claude-sonnet-4-5".to_owned(),
+            max_tokens: 0,
+            reasoning_effort: Some(Level::High),
+            ..Default::default()
+        };
+        let (body, events) = run_logged(|| {
+            let mut body = serde_json::json!({ "model": req.model, "max_tokens": req.max_tokens });
+            apply_thinking(&mut body, &req, true);
+            body
+        });
+        assert!(body.get("thinking").is_none(), "{body}");
+        assert_eq!(body["max_tokens"], 0, "a dropped budget raises nothing");
+        // The guard's own warning shows the subscriber was listening, so the
+        // missing level line is a real absence.
+        let warned = events
+            .iter()
+            .any(|event| field(event, "message").contains("leaves no room"));
+        assert!(warned, "{events:?}");
+        assert!(effort_lines(&events).is_empty(), "{events:?}");
+    }
+
+    #[test]
+    fn a_claude_5_5_request_logs_its_default_level() {
+        const MARKER: &str = "SECRETMARKER";
+        for model in [CLAUDE_OPUS_5_5, CLAUDE_SONNET_5_5, CLAUDE_HAIKU_5_5] {
+            // No level and no legacy budget, so the model's documented default runs.
+            let req = InferRequest {
+                request_id: "req-5-5-default".to_owned(),
+                model: model.to_owned(),
+                max_tokens: 4096,
+                messages: vec![ChatMessage {
+                    compaction_summary: String::new(),
+                    role: "user".to_owned(),
+                    content: MARKER.to_owned(),
+                    name: String::new(),
+                }],
+                ..Default::default()
+            };
+            let default = claude_5_5_default_effort(model).expect("a 5.5 model has a default");
+            let (_, events) = run_logged(|| build_request_body_with_flags(&req, false, false));
+            let lines = effort_lines(&events);
+            assert_eq!(lines.len(), 1, "{model}: {events:?}");
+            let line = lines[0];
+            assert_eq!(field(line, "wire"), "AnthropicAdaptive", "{model}");
+            assert_eq!(field(line, "requested"), default.as_str(), "{model}");
+            assert_eq!(field(line, "applied"), default.as_str(), "{model}");
+            assert_eq!(field(line, "clamped"), "false", "{model}");
+            let leaked = line.1.iter().any(|(_, value)| value.contains(MARKER));
+            assert!(!leaked, "{model}");
         }
     }
 }
